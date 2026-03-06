@@ -1274,13 +1274,13 @@ go version
 # Expected: go version go1.23.4 linux/amd64
 ```
 
-### 10.2 Clone Galactic-Agent Repository
+### 10.2 Clone Galactic Repository
 
 ```bash
 # Clone into your galantic-vpc directory (keeps everything together for git)
 cd ~/datum/galantic-vpc
-git clone https://github.com/datum-cloud/galactic-agent.git
-cd galactic-agent
+git clone https://github.com/datum-cloud/galactic.git
+cd galactic
 ```
 
 ### 10.3 Build the Agent
@@ -1288,11 +1288,11 @@ cd galactic-agent
 ```bash
 # Download dependencies and build
 go mod download
-go build -o galactic-agent .
+go build -o galactic ./cmd/galactic
 
 # Verify binary was created
-ls -la galactic-agent
-# Expected: -rwxr-xr-x 1 sonic sonic 20196174 Jan 14 14:05 galactic-agent
+ls -la galactic
+# Expected: -rwxr-xr-x 1 sonic sonic 20196174 Jan 14 14:05 galactic
 ```
 
 ### 10.4 Install MQTT Broker (Mosquitto)
@@ -1357,7 +1357,7 @@ sudo mkdir -p /var/run/galactic
 sudo chmod 777 /var/run/galactic
 
 # Run the agent (requires sudo for NET_ADMIN capability)
-sudo ./galactic-agent --config config.yaml
+sudo ./galactic agent --config config.yaml
 ```
 
 **Expected Output:**
@@ -1638,7 +1638,7 @@ To connect your local WSL lab to Datum's production infrastructure, update the a
 ### 11.1 Update Agent Configuration for Datum Cloud
 
 ```bash
-cd ~/datum/galantic-vpc/galactic-agent
+cd ~/datum/galantic-vpc/galactic
 
 # Create production config
 cat > config-datum.yaml << 'EOF'
@@ -1671,7 +1671,7 @@ EOF
 ```bash
 # Stop local agent if running (Ctrl+C)
 # Run with Datum config
-sudo ./galactic-agent --config config-datum.yaml
+sudo ./galactic agent --config config-datum.yaml
 ```
 
 ### 11.4 End-to-End Architecture with Datum Cloud

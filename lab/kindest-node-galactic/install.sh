@@ -7,10 +7,7 @@ CILIUM_VERSION="v0.18.8"
 CERTMANAGER_VERSION="v1.19.1"
 MULTUS_VERSION="v4.2.3"
 CNI_PLUGIN_VERSION="v1.8.0"
-GALACTIC_OPERATOR_VERSION="v0.0.5"
-GALACTIC_ROUTER_VERSION="v0.0.5"
-GALACTIC_AGENT_VERSION="v0.0.5"
-GALACTIC_CNI_VERSION="v0.0.5"
+GALACTIC_VERSION="v0.0.5"
 
 ARCH=amd64
 if [ "$(uname -m)" = "aarch64" ]; then ARCH=arm64; fi
@@ -37,15 +34,15 @@ if hostname |grep -q control-plane; then # control-plane
   kubectl -n galactic-mqtt rollout status deployment galactic-mqtt
 
   # Galactic Operator
-  curl -L "https://raw.githubusercontent.com/datum-cloud/galactic-operator/refs/heads/main/dist/install.yaml" |sed -e "s/galactic-operator:latest/galactic-operator:${GALACTIC_OPERATOR_VERSION}/g" |kubectl apply -f -
-  kubectl -n galactic-operator-system rollout status deployment galactic-operator-controller-manager
+  curl -L "https://raw.githubusercontent.com/datum-cloud/galactic/refs/heads/main/dist/install.yaml" |sed -e "s/galactic:latest/galactic:${GALACTIC_VERSION}/g" |kubectl apply -f -
+  kubectl -n galactic-system rollout status deployment galactic-controller-manager
 
   # Galactic Router
-  cat /galactic/router.k8s.yml |sed -e "s/galactic-router:latest/galactic-router:${GALACTIC_ROUTER_VERSION}/g" |kubectl apply -f -
+  cat /galactic/router.k8s.yml |sed -e "s/galactic-router:latest/galactic-router:${GALACTIC_VERSION}/g" |kubectl apply -f -
   kubectl -n galactic-router rollout status deployment galactic-router
 
   # Galactic Agent
-  cat /galactic/agent.k8s.yml |sed -e "s/galactic-agent:latest/galactic-agent:${GALACTIC_AGENT_VERSION}/g" |kubectl apply -f -
+  cat /galactic/agent.k8s.yml |sed -e "s/galactic:latest/galactic:${GALACTIC_VERSION}/g" |kubectl apply -f -
   kubectl -n galactic-agent rollout status daemonset galactic-agent
 else # worker
   until journalctl -q -u kubelet -g "Successfully registered node"; do
@@ -74,6 +71,6 @@ else # worker
   # CNI Plugins
   curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGIN_VERSION}/cni-plugins-linux-${ARCH}-${CNI_PLUGIN_VERSION}.tgz" |tar xvfz - -C /opt/cni/bin
 
-  # Galactic CNI
-  curl -Lo /opt/cni/bin/galactic "https://github.com/datum-cloud/galactic-cni/releases/download/${GALACTIC_CNI_VERSION}/galactic_${ARCH}" && chmod +x /opt/cni/bin/galactic
+  # Galactic CNI (now bundled in the unified galactic binary)
+  curl -Lo /opt/cni/bin/galactic "https://github.com/datum-cloud/galactic/releases/download/${GALACTIC_VERSION}/galactic_linux_${ARCH}" && chmod +x /opt/cni/bin/galactic
 fi

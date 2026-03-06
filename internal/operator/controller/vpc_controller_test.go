@@ -12,8 +12,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 	"go.datum.net/galactic/internal/operator/identifier"
+	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 )
 
 var _ = Describe("VPC Controller", func() {

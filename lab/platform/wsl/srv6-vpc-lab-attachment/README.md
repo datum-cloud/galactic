@@ -173,9 +173,9 @@ your containerlab nodes to Datum's SRv6 underlay.
 ### Setup Steps
 
 ```bash
-# 1. Clone the galactic-lab repository
-git clone https://github.com/datum-cloud/galactic-lab.git
-cd galactic-lab
+# 1. Clone the galactic repository
+git clone https://github.com/datum-cloud/galactic.git
+cd galactic
 
 # 2. Install Galactic CRDs and operator on k3s
 kubectl apply -f deploy/crds/

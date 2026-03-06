@@ -59,11 +59,12 @@ spec:
           type: RuntimeDefault
       containers:
       - command:
-        - /manager
+        - /galactic
+        - operator
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: controller:latest
+        image: ghcr.io/datum-cloud/galactic:latest
         name: manager
         ports: []
         securityContext:

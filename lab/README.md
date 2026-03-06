@@ -99,8 +99,8 @@ Run the lab inside WSL2 on Windows using Docker Engine installed in WSL.
 
 2. **Clone the repo**
    ```bash
-   git clone https://github.com/datum-cloud/galactic-lab.git
-   cd galactic-lab
+   git clone https://github.com/datum-cloud/galactic.git
+   cd galactic/lab
    ```
 
 3. **Install Netlab and dependencies (inside WSL)**

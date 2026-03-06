@@ -34,8 +34,8 @@
 # 3. Installs Ubuntu 22.04 in WSL
 # 4. Installs Docker Engine inside WSL (NOT Docker Desktop)
 # 5. Installs Containerlab and Netlab
-# 6. Installs Go 1.23+ for galactic-agent
-# 7. Clones and builds galactic-agent
+# 6. Installs Go 1.23+ for galactic
+# 7. Clones and builds galactic
 # 8. Installs Mosquitto MQTT broker
 # 9. Copies topology files to WSL
 # 10. Starts the lab topology
@@ -466,25 +466,25 @@ def clone_galactic_agent():
     print_header("Setting Up Galactic Agent")
     
     # Check if already cloned
-    print_step(1, "Checking existing galactic-agent...")
-    result = run_wsl("ls ~/datum/galantic-vpc/galactic-agent/main.go", distro=WSL_DISTRO)
+    print_step(1, "Checking existing galactic...")
+    result = run_wsl("ls ~/datum/galantic-vpc/galactic/cmd/galactic/main.go", distro=WSL_DISTRO)
     if result.returncode == 0:
-        print_success("galactic-agent already exists")
+        print_success("galactic already exists")
     else:
-        # Clone galactic-agent
-        print_step(2, "Cloning galactic-agent...")
-        clone_cmd = "cd ~/datum/galantic-vpc && git clone https://github.com/datum-cloud/galactic-agent.git"
+        # Clone galactic
+        print_step(2, "Cloning galactic...")
+        clone_cmd = "cd ~/datum/galantic-vpc && git clone https://github.com/datum-cloud/galactic.git"
         run_wsl(clone_cmd, distro=WSL_DISTRO)
     
-    # Build galactic-agent
-    print_step(3, "Building galactic-agent...")
-    build_cmd = "cd ~/datum/galantic-vpc/galactic-agent && /usr/local/go/bin/go mod download && /usr/local/go/bin/go build -o galactic-agent ."
+    # Build galactic
+    print_step(3, "Building galactic...")
+    build_cmd = "cd ~/datum/galantic-vpc/galactic && /usr/local/go/bin/go mod download && /usr/local/go/bin/go build -o galactic ./cmd/galactic"
     result = run_wsl(build_cmd, distro=WSL_DISTRO)
-    
+
     if result.returncode == 0:
-        print_success("galactic-agent built successfully")
+        print_success("galactic built successfully")
     else:
-        print_warning("galactic-agent build may have issues, check manually")
+        print_warning("galactic build may have issues, check manually")
     
     return True
 
@@ -506,9 +506,9 @@ def print_final_instructions():
 3. Start the lab topology:
    {Colors.CYAN}sudo netlab up{Colors.ENDC}
 
-4. In another terminal, start the galactic-agent:
-   {Colors.CYAN}cd ~/datum/galantic-vpc/galactic-agent
-   sudo ./galactic-agent -config ../galactic-agent-config.yaml{Colors.ENDC}
+4. In another terminal, start the galactic agent:
+   {Colors.CYAN}cd ~/datum/galantic-vpc/galactic
+   sudo ./galactic agent --config ../galactic-agent-config.yaml{Colors.ENDC}
 
 5. Test MQTT route injection:
    {Colors.CYAN}cd ~/datum/galantic-vpc

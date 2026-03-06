@@ -16,10 +16,10 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 
+	"go.datum.net/galactic/internal/cni/debug"
 	"go.datum.net/galactic/internal/cni/registration"
 	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
-	"go.datum.net/galactic/internal/cni/debug"
 	"go.datum.net/galactic/pkg/common/cni"
 	"go.datum.net/galactic/pkg/common/util"
 	"go.datum.net/galactic/pkg/common/vrf"

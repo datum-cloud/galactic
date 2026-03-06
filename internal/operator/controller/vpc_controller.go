@@ -9,8 +9,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 	"go.datum.net/galactic/internal/operator/identifier"
+	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 )
 
 const MaxIdentifierAttemptsVPC = 100

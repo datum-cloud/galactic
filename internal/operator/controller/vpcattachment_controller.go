@@ -15,8 +15,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 
 	"go.datum.net/galactic/internal/operator/cniconfig"
 	"go.datum.net/galactic/internal/operator/identifier"

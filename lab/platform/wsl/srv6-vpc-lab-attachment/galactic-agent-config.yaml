@@ -169,7 +169,7 @@ mqtt_topic_send: "galactic/register"
 # The galactic-agent uses Protocol Buffers for MQTT messages. Here are the
 # actual message definitions from the Datum galactic-agent source code:
 #
-# Source: https://github.com/datum-cloud/galactic-agent/blob/main/api/remote/remote.proto
+# Source: https://github.com/datum-cloud/galactic/blob/main/internal/api/remote/remote.proto
 #
 # message Envelope {
 #   oneof kind {

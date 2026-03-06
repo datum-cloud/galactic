@@ -25,7 +25,8 @@ spec:
                 operator: DoesNotExist
       containers:
         - name: galactic-agent
-          image: ghcr.io/datum-cloud/galactic-agent:latest
+          image: ghcr.io/datum-cloud/galactic:latest
+          command: ["/galactic", "agent"]
           imagePullPolicy: Always
           resources:
             limits:

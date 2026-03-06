@@ -9,8 +9,8 @@ import (
 
 	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 
-	"go.datum.net/galactic/pkg/common/cni"
 	"go.datum.net/galactic/internal/operator/cniconfig"
+	"go.datum.net/galactic/pkg/common/cni"
 )
 
 func TestCNIConfigForVPCAttachment(t *testing.T) {

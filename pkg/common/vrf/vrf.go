@@ -7,9 +7,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/vishvananda/netlink"
 	"go.datum.net/galactic/pkg/common/sysctl"
 	"go.datum.net/galactic/pkg/common/util"
-	"github.com/vishvananda/netlink"
 )
 
 const MinVRFId = uint32(1)

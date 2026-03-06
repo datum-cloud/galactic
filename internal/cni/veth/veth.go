@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	"github.com/coreos/go-iptables/iptables"
+	"github.com/vishvananda/netlink"
 	"go.datum.net/galactic/pkg/common/sysctl"
 	"go.datum.net/galactic/pkg/common/util"
-	"github.com/vishvananda/netlink"
 )
 
 func updateForwardRule(interfaceName string, action string) error {

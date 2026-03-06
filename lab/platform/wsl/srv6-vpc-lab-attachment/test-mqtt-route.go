@@ -97,7 +97,7 @@ func generateSRv6Endpoint(vpcHex string, vpcAttachmentHex string) string {
 	for len(vpcAttachmentHex) < 4 {
 		vpcAttachmentHex = "0" + vpcAttachmentHex
 	}
-	
+
 	// Build IPv6: fc00:0000:0000:0000:VVVV:VVVV:VVVV:AAAA
 	// VPC goes in bytes 8-13, VPCAttachment in bytes 14-15
 	return fmt.Sprintf("fc00::%s:%s:%s:%s",
@@ -122,29 +122,29 @@ func createVRF(vpcHex, attachmentHex string, tableID int) (string, error) {
 	// For simplicity, we use the hex values directly (agent converts hex to base62)
 	// But the lookup uses: first 9 chars of vpc + first 3 chars of attachment + "V"
 	vrfName := fmt.Sprintf("G%09s%03sV", vpcHex[len(vpcHex)-9:], attachmentHex[len(attachmentHex)-3:])
-	
+
 	fmt.Printf("\n🔧 Creating VRF: %s (table %d)\n", vrfName, tableID)
-	
+
 	// Check if VRF already exists
 	checkCmd := exec.Command("ip", "link", "show", vrfName)
 	if err := checkCmd.Run(); err == nil {
 		fmt.Printf("   ✅ VRF %s already exists\n", vrfName)
 		return vrfName, nil
 	}
-	
+
 	// Create VRF interface
 	// sudo ip link add <name> type vrf table <id>
 	createCmd := exec.Command("sudo", "ip", "link", "add", vrfName, "type", "vrf", "table", fmt.Sprintf("%d", tableID))
 	if output, err := createCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("failed to create VRF: %v, output: %s", err, output)
 	}
-	
+
 	// Bring VRF interface up
 	upCmd := exec.Command("sudo", "ip", "link", "set", vrfName, "up")
 	if output, err := upCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("failed to bring up VRF: %v, output: %s", err, output)
 	}
-	
+
 	fmt.Printf("   ✅ VRF %s created successfully\n", vrfName)
 	return vrfName, nil
 }
@@ -185,9 +185,9 @@ func main() {
 	//   VPCAttachment ID = "0001" (hex) for AMS, "0002" for IAD
 	// ==========================================================================
 
-	vpcID := "000000000001"  // Test VPC ID (48 bits hex)
-	amsAttachment := "0001"  // AMS VPCAttachment ID
-	iadAttachment := "0002"  // IAD VPCAttachment ID
+	vpcID := "000000000001" // Test VPC ID (48 bits hex)
+	amsAttachment := "0001" // AMS VPCAttachment ID
+	iadAttachment := "0002" // IAD VPCAttachment ID
 
 	amsEndpoint := generateSRv6Endpoint(vpcID, amsAttachment)
 	iadEndpoint := generateSRv6Endpoint(vpcID, iadAttachment)
@@ -206,19 +206,19 @@ func main() {
 	fmt.Println("\n" + strings.Repeat("=", 70))
 	fmt.Println("🏗️  STEP 0: Creating VRF interfaces (Private Cloud setup)")
 	fmt.Println(strings.Repeat("=", 70))
-	
+
 	amsVRF, err := createVRF(vpcID, amsAttachment, 100)
 	if err != nil {
 		fmt.Printf("   ⚠️  Warning: %v\n", err)
 		fmt.Println("   Run with sudo or create VRF manually:")
 		fmt.Printf("   sudo ip link add G%09s%03sV type vrf table 100\n", vpcID[len(vpcID)-9:], amsAttachment[len(amsAttachment)-3:])
 	}
-	
+
 	iadVRF, err := createVRF(vpcID, iadAttachment, 101)
 	if err != nil {
 		fmt.Printf("   ⚠️  Warning: %v\n", err)
 	}
-	
+
 	_ = amsVRF
 	_ = iadVRF
 
@@ -226,10 +226,10 @@ func main() {
 	// TEST 1: Add route to AMS (192.168.2.0/24)
 	// ==========================================================================
 	route1 := encodeRoute(
-		"192.168.2.0/24",       // network
-		amsEndpoint,            // srv6_endpoint (AMS with proper encoding)
-		[]string{amsEndpoint},  // srv6_segments
-		0,                      // status: ADD
+		"192.168.2.0/24",      // network
+		amsEndpoint,           // srv6_endpoint (AMS with proper encoding)
+		[]string{amsEndpoint}, // srv6_segments
+		0,                     // status: ADD
 	)
 	envelope1 := encodeEnvelope(route1)
 
@@ -248,10 +248,10 @@ func main() {
 	// TEST 2: Add route to IAD (192.168.3.0/24)
 	// ==========================================================================
 	route2 := encodeRoute(
-		"192.168.3.0/24",       // network
-		iadEndpoint,            // srv6_endpoint (IAD with proper encoding)
-		[]string{iadEndpoint},  // srv6_segments
-		0,                      // status: ADD
+		"192.168.3.0/24",      // network
+		iadEndpoint,           // srv6_endpoint (IAD with proper encoding)
+		[]string{iadEndpoint}, // srv6_segments
+		0,                     // status: ADD
 	)
 	envelope2 := encodeEnvelope(route2)
 
@@ -290,7 +290,7 @@ func main() {
 func publishToMQTT(topic string, data []byte, filename string) {
 	// Write binary to /tmp with world-writable permissions
 	tmpFile := "/tmp/" + filename
-	
+
 	// Write binary data directly to file (0777 for any user to read/write)
 	err := os.WriteFile(tmpFile, data, 0777)
 	if err != nil {
