@@ -23,7 +23,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.1.6
           args: --timeout=5m
@@ -62,13 +62,13 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Install envtest
-        run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          setup-envtest use 1.31.0 --bin-dir ./bin/k8s
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
       - name: Run operator tests
         run: |
-          export KUBEBUILDER_ASSETS=$(setup-envtest use 1.31.0 --bin-dir ./bin/k8s -p path)
+          KUBEBUILDER_ASSETS=$(setup-envtest use 1.31.0 -p path)
+          export KUBEBUILDER_ASSETS
+          echo "KUBEBUILDER_ASSETS=$KUBEBUILDER_ASSETS"
           go test -v -race -coverprofile=coverage-operator.out ./internal/operator/...
 
       - name: Upload coverage
