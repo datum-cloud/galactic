@@ -1,0 +1,247 @@
+# =============================================================================
+# DATUM GALACTIC VPC - NETLAB TOPOLOGY WITH SRv6
+# =============================================================================
+# Author: Sajjad Ahmed
+# Company: Multi Naturals Inc.
+# Created: January 2026
+# License: MIT
+# Datum Source : https://www.datum.net/docs/galactic-vpc/#galactic-agent
+# =============================================================================
+#
+# OVERVIEW:
+# This topology simulates Datum's Galactic VPC architecture using FRRouting
+# containers on WSL. It demonstrates SRv6 (Segment Routing over IPv6) with
+# ISIS as the underlying IGP for segment advertisement.
+#
+# ARCHITECTURE:
+# - 3 POPs (Points of Presence): SJC (San Jose), IAD (N. Virginia), AMS (Amsterdam)
+# - Full mesh connectivity via VPC backbone (10.1.1.0/24)
+# - SRv6 underlay for traffic encapsulation and steering
+# - ISIS Level-2 for topology discovery and route distribution
+# - BGP for external route advertisement (redistributes ISIS routes)
+#
+# SRv6 ADDRESSING:
+# - Locator Pool: fc00::/48 (global pool for all nodes)
+# - SJC Locator: fc00:0:1::/48 (unique to SJC node)
+# - IAD Locator: fc00:0:2::/48 (unique to IAD node)
+# - AMS Locator: fc00:0:3::/48 (unique to AMS node)
+#
+# VPC NETWORK (from K8s VPC/VPCAttachment manifests):
+# - IPv4: 10.1.1.0/24
+# - IPv6: 2001:10:1:1::/64
+#
+# SERVICE PREFIXES (advertised by each POP):
+# - SJC: 192.168.1.0/24, 2001:1::/64
+# - AMS: 192.168.2.0/24, 2001:2::/64
+#
+# HOW SRv6 WORKS IN THIS TOPOLOGY:
+# 1. Each node has a unique SRv6 locator (fc00:0:X::/48)
+# 2. ISIS advertises these locators to all neighbors
+# 3. Traffic destined for remote prefixes is encapsulated with SRv6 header
+# 4. The SRv6 SID (Segment ID) identifies the destination node
+# 5. Intermediate nodes forward based on IPv6 destination (the SID)
+# 6. Destination node decapsulates and delivers to final destination
+#
+# WHY ISIS + BGP:
+# - ISIS: Fast convergence, native IPv6 support, SRv6 TLV extensions
+# - BGP: External route advertisement, policy control, VPN services
+# - ISIS-BGP sync ensures consistent routing between protocols
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# TOPOLOGY NAME AND MODULES
+# -----------------------------------------------------------------------------
+# name: Unique identifier for this lab (used by containerlab)
+# module: List of routing protocols/features to enable
+#   - isis: IS-IS routing protocol for underlay
+#   - srv6: Segment Routing over IPv6 for traffic engineering
+#   - bgp: Border Gateway Protocol for external routes and policy
+# -----------------------------------------------------------------------------
+name: galactic_vpc
+module: [ isis, srv6, bgp ]
+
+# -----------------------------------------------------------------------------
+# GLOBAL DEFAULTS
+# -----------------------------------------------------------------------------
+# device: Network OS to use (frr = FRRouting, open-source routing suite)
+# provider: Lab provider (clab = containerlab for Docker-based labs)
+# isis.area: IS-IS area address (49.0001 = private area in AFI 49)
+# -----------------------------------------------------------------------------
+defaults:
+  device: frr
+  provider: clab
+  isis.area: "49.0001"
+
+# -----------------------------------------------------------------------------
+# SRv6 CONFIGURATION
+# -----------------------------------------------------------------------------
+# locator_pool: Base IPv6 prefix for SRv6 locators
+# igp: Which IGP advertises SRv6 segments (isis recommended for SRv6)
+# bgp: Enable/disable BGP for SRv6 (false = ISIS-only SRv6 advertisement)
+#
+# NOTE: FRR in netlab doesn't support BGP+SRv6 together, so we use ISIS
+# for SRv6 segment advertisement. BGP is used separately for route policy.
+# -----------------------------------------------------------------------------
+srv6:
+  locator_pool: "fc00::/48"
+  igp: [ isis ]
+  bgp: false
+
+# -----------------------------------------------------------------------------
+# BGP CONFIGURATION
+# -----------------------------------------------------------------------------
+# as: Autonomous System number (65000 = private AS range)
+# This enables BGP for route redistribution and external connectivity.
+# BGP will learn routes from ISIS and can advertise them externally.
+# -----------------------------------------------------------------------------
+bgp:
+  as: 65000
+
+# -----------------------------------------------------------------------------
+# NODES: SIMULATED DATUM POPS (POINTS OF PRESENCE)
+# -----------------------------------------------------------------------------
+# Each node represents a Datum POP in a different geographic region.
+# In production, these would be physical/cloud servers in data centers.
+# Here, they are FRR containers running in Docker via containerlab.
+#
+# Node attributes:
+#   id: Unique numeric ID (used for IP address generation)
+#   loopback: Router ID addresses (used for BGP/ISIS router-id)
+#   srv6.locator: Unique SRv6 prefix for this node's segments
+#   bgp.as: BGP AS number (same for iBGP within the VPC)
+# -----------------------------------------------------------------------------
+nodes:
+  # ---------------------------------------------------------------------------
+  # SJC - San Jose, California (US West Coast)
+  # ---------------------------------------------------------------------------
+  # This POP serves the US West region.
+  # It advertises service prefix 192.168.1.0/24 to other POPs.
+  # Kubernetes equivalent: Pod with nodeSelector topology.kubernetes.io/region: sjc
+  # ---------------------------------------------------------------------------
+  sjc:
+    id: 1
+    # Loopback addresses - used as router-id and for management
+    loopback:
+      ipv4: 10.255.0.1/32      # IPv4 router-id
+      ipv6: 'fc00:ffff::1/128' # IPv6 router-id
+    # SRv6 locator - unique /48 prefix for this node's SRv6 SIDs
+    # All SRv6 functions on this node will be within fc00:0:1::/48
+    srv6:
+      locator: "fc00:0:1::/48"
+    # BGP configuration - iBGP with other POPs
+    bgp:
+      as: 65000
+
+  # ---------------------------------------------------------------------------
+  # IAD - Northern Virginia (US East Coast)
+  # ---------------------------------------------------------------------------
+  # This POP serves the US East region.
+  # It acts as a transit node between SJC and AMS.
+  # No local service prefixes - only VPC backbone connectivity.
+  # Kubernetes equivalent: Pod with nodeSelector topology.kubernetes.io/region: iad
+  # ---------------------------------------------------------------------------
+  iad:
+    id: 2
+    loopback:
+      ipv4: 10.255.0.2/32
+      ipv6: 'fc00:ffff::2/128'
+    srv6:
+      locator: "fc00:0:2::/48"
+    bgp:
+      as: 65000
+
+  # ---------------------------------------------------------------------------
+  # AMS - Amsterdam, Netherlands (Europe)
+  # ---------------------------------------------------------------------------
+  # This POP serves the European region.
+  # It advertises service prefix 192.168.2.0/24 to other POPs.
+  # Kubernetes equivalent: Pod with nodeSelector topology.kubernetes.io/region: ams
+  # ---------------------------------------------------------------------------
+  ams:
+    id: 3
+    loopback:
+      ipv4: 10.255.0.3/32
+      ipv6: 'fc00:ffff::3/128'
+    srv6:
+      locator: "fc00:0:3::/48"
+    bgp:
+      as: 65000
+
+# -----------------------------------------------------------------------------
+# LINKS: NETWORK CONNECTIONS BETWEEN NODES
+# -----------------------------------------------------------------------------
+# Links define the physical/logical connections between POPs.
+# Each link can have:
+#   - Node interfaces with IP addresses
+#   - Protocol configuration (isis, bgp, etc.)
+#   - Link properties (mtu, bandwidth, etc.)
+#
+# Link types:
+#   - Multi-node link: Connects multiple nodes (like a switch/LAN)
+#   - Stub link: Single node connection (for advertising prefixes)
+# -----------------------------------------------------------------------------
+links:
+  # ---------------------------------------------------------------------------
+  # VPC BACKBONE - Full Mesh Between All POPs
+  # ---------------------------------------------------------------------------
+  # This is the primary interconnect between all POPs.
+  # All three nodes connect to this shared network segment.
+  # In production, this would be Datum's global backbone network.
+  #
+  # Addresses (from K8s VPCAttachment specs):
+  #   SJC: 10.1.1.1/24, 2001:10:1:1::1/64
+  #   IAD: 10.1.1.2/24, 2001:10:1:1::2/64
+  #   AMS: 10.1.1.3/24, 2001:10:1:1::3/64
+  #
+  # isis: {} - Enable ISIS on this link (empty dict = use defaults)
+  # mtu: 1600 - Larger MTU for SRv6 encapsulation overhead (40 bytes)
+  # ---------------------------------------------------------------------------
+  - sjc: { ipv4: 10.1.1.1/24, ipv6: '2001:10:1:1::1/64' }
+    iad: { ipv4: 10.1.1.2/24, ipv6: '2001:10:1:1::2/64' }
+    ams: { ipv4: 10.1.1.3/24, ipv6: '2001:10:1:1::3/64' }
+    isis: {}
+    mtu: 1600
+
+  # ---------------------------------------------------------------------------
+  # SJC SERVICE PREFIX - Local Network for SJC Region
+  # ---------------------------------------------------------------------------
+  # This stub link represents the local network behind SJC.
+  # In production, this would be customer workloads in the SJC region.
+  # ISIS advertises this prefix to all other POPs.
+  #
+  # type: stub - Single-node link (no neighbor on the other end)
+  # This creates a "dummy" interface on the node for route advertisement.
+  # ---------------------------------------------------------------------------
+  - sjc: { ipv4: 192.168.1.1/24, ipv6: '2001:1::1/64' }
+    type: stub
+    isis: {}
+
+  # ---------------------------------------------------------------------------
+  # AMS SERVICE PREFIX - Local Network for AMS Region
+  # ---------------------------------------------------------------------------
+  # This stub link represents the local network behind AMS.
+  # In production, this would be customer workloads in the AMS region.
+  # ---------------------------------------------------------------------------
+  - ams: { ipv4: 192.168.2.1/24, ipv6: '2001:2::1/64' }
+    type: stub
+    isis: {}
+
+# =============================================================================
+# END OF TOPOLOGY
+# =============================================================================
+#
+# TO RUN THIS TOPOLOGY:
+# 1. netlab create topology.yaml  # Generate containerlab config
+# 2. netlab up                    # Start the lab
+# 3. docker exec -it clab-galactic_vpc-sjc vtysh  # Connect to SJC
+#
+# VERIFICATION COMMANDS:
+# - show isis neighbor           # Check ISIS adjacencies
+# - show bgp summary             # Check BGP sessions
+# - show segment-routing srv6 locator  # Check SRv6 locators
+# - show segment-routing srv6 sid      # Check SRv6 SIDs
+# - show ip route                # Check IPv4 routing table
+# - show ipv6 route              # Check IPv6 routing table
+#
+# =============================================================================

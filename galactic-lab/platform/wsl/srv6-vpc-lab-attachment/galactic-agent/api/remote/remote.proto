@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package remote.v1;
+option go_package = "github.com/datum-cloud/galactic-agent/api/remote;remote";
+
+message Envelope {
+  oneof kind {
+    Register   register   = 1;
+    Deregister deregister = 2;
+    Route      route      = 3;
+  }
+}
+
+message Register {
+  string network = 1;
+  string srv6_endpoint = 2;
+}
+
+message Deregister {
+  string network = 1;
+  string srv6_endpoint = 2;
+}
+
+message Route {
+  enum Status {
+    ADD = 0;
+    DELETE = 1;
+  }
+
+  string network = 1;
+  string srv6_endpoint = 2;
+  repeated string srv6_segments = 3;
+  Status status = 4;
+}

@@ -1,0 +1,19 @@
+# Galactic Agent Configuration for WSL Lab
+# Author: Sajjad Ahmed, Multi Naturals Inc.
+
+# SRv6 network prefix - must match your topology
+srv6_net: "fc00::/48"
+
+# Unix socket for CNI communication
+socket_path: "/var/run/galactic/agent.sock"
+
+# MQTT Configuration
+# For local testing without Datum cloud, use a local MQTT broker
+# For Datum cloud integration, use: tcp://mqtt.datum.net:1883
+mqtt_url: "tcp://localhost:1883"
+mqtt_clientid: "galactic-agent-wsl"
+mqtt_username: ""
+mqtt_password: ""
+mqtt_qos: 1
+mqtt_topic_receive: "galactic/routes/wsl"
+mqtt_topic_send: "galactic/register"

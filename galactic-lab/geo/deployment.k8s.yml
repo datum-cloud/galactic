@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: tor
+  name: tor
+  namespace: test-geo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tor
+  template:
+    metadata:
+      annotations:
+        k8s.v1alpha.galactic.datumapis.com/vpc-attachment: tor
+      labels:
+        app.kubernetes.io/name: tor
+    spec:
+      containers:
+      - command:
+        - /bin/ash
+        - -c
+        - 'trap : TERM INT; sleep infinity & wait'
+        image: alpine
+        name: main-container
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      initContainers:
+      - command:
+        - /bin/sh
+        - -c
+        - apk add --no-cache iproute2 && ip link add name test0 type dummy && ip link
+          set dev test0 up && ip addr add 192.168.1.1/24 dev test0 && ip addr add
+          2001:1::1/64 dev test0
+        image: alpine
+        name: setup-network
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      nodeSelector:
+        topology.kubernetes.io/region: tor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: sjc
+  name: sjc
+  namespace: test-geo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sjc
+  template:
+    metadata:
+      annotations:
+        k8s.v1alpha.galactic.datumapis.com/vpc-attachment: sjc
+      labels:
+        app.kubernetes.io/name: sjc
+    spec:
+      containers:
+      - command:
+        - /bin/ash
+        - -c
+        - 'trap : TERM INT; sleep infinity & wait'
+        image: alpine
+        name: main-container
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      nodeSelector:
+        topology.kubernetes.io/region: sjc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: sin
+  name: sin
+  namespace: test-geo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sin
+  template:
+    metadata:
+      annotations:
+        k8s.v1alpha.galactic.datumapis.com/vpc-attachment: sin
+      labels:
+        app.kubernetes.io/name: sin
+    spec:
+      containers:
+      - command:
+        - /bin/ash
+        - -c
+        - 'trap : TERM INT; sleep infinity & wait'
+        image: alpine
+        name: main-container
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      initContainers:
+      - command:
+        - /bin/sh
+        - -c
+        - apk add --no-cache iproute2 && ip link add name test0 type dummy && ip link
+          set dev test0 up && ip addr add 192.168.2.1/24 dev test0 && ip addr add
+          2001:2::1/64 dev test0
+        image: alpine
+        name: setup-network
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      nodeSelector:
+        topology.kubernetes.io/region: sin

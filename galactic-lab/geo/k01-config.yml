@@ -1,0 +1,21 @@
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: iad
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: sjc
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: tor
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: fra
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: sin
+networking:
+  disableDefaultCNI: true

@@ -1,0 +1,10 @@
+clab_files/
+clab-geo/
+group_vars/
+host_vars/
+ansible.cfg
+clab.yml
+hosts.yml
+netlab.lock
+netlab.snapshot.pickle
+netlab.snapshot.yml

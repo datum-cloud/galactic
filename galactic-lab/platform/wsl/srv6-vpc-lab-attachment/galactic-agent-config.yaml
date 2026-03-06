@@ -1,0 +1,343 @@
+# =============================================================================
+# Galactic Agent Configuration for WSL Lab
+# =============================================================================
+# Author: Sajjad Ahmed
+# Company: Multi Naturals Inc.
+# Created: January 2026
+# License: MIT
+# Datum Source: https://www.datum.net/docs/galactic-vpc/#galactic-agent
+# =============================================================================
+#
+# WHY THIS FILE IS NEEDED:
+# ------------------------
+# The galactic-agent is a lightweight Go binary that runs on each Kubernetes
+# node (or WSL host) and is responsible for:
+#
+#   1. ROUTE PROGRAMMING: Programs SRv6 routes into the Linux kernel's
+#      routing table, enabling traffic to be encapsulated and forwarded
+#      to remote POPs (Points of Presence) in the Datum Galactic VPC.
+#
+#   2. MQTT COMMUNICATION: Connects to an MQTT broker (local or Datum cloud)
+#      to receive route updates from the Galactic control plane. Routes are
+#      sent as Protocol Buffer (protobuf) encoded messages.
+#
+#   3. CNI INTEGRATION: Provides a Unix socket endpoint for Kubernetes CNI
+#      plugins to communicate with, enabling pod networking integration.
+#
+#   4. SRv6 ENCAPSULATION: Configures the node to encapsulate traffic destined
+#      for remote VPC prefixes using SRv6 (Segment Routing over IPv6).
+#
+# WITHOUT THIS CONFIGURATION:
+# ---------------------------
+# - The agent won't know which SRv6 prefix to use for encapsulation
+# - The agent can't connect to the MQTT broker for route updates
+# - Kubernetes pods won't be able to communicate across POPs
+# - SRv6 tunnels won't be established between nodes
+#
+# CONFIGURATION FLOW:
+# -------------------
+#   ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+#   │  Datum Cloud    │     │   MQTT Broker   │     │ Galactic Agent  │
+#   │  Control Plane  │────►│  (Local/Cloud)  │────►│   (This Node)   │
+#   └─────────────────┘     └─────────────────┘     └────────┬────────┘
+#                                                            │
+#                                                            ▼
+#                                                   ┌─────────────────┐
+#                                                   │  Linux Kernel   │
+#                                                   │  (WSL2 Kernel)  │
+#                                                   │  Routing Table  │
+#                                                   │  (SRv6 Routes)  │
+#                                                   └─────────────────┘
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# SRV6 NETWORK PREFIX
+# -----------------------------------------------------------------------------
+# This is the SRv6 locator prefix used by your Galactic VPC topology.
+# All SRv6 SIDs (Segment IDs) will be derived from this prefix.
+#
+# In our WSL lab topology:
+#   - fc00:0:1::/48 → SJC (San Jose)
+#   - fc00:0:2::/48 → IAD (Northern Virginia)
+#   - fc00:0:3::/48 → AMS (Amsterdam)
+#
+# The agent uses this to identify which routes belong to the Galactic VPC
+# and should be programmed with SRv6 encapsulation.
+# -----------------------------------------------------------------------------
+srv6_net: "fc00::/48"
+
+# -----------------------------------------------------------------------------
+# UNIX SOCKET PATH
+# -----------------------------------------------------------------------------
+# Path to the Unix domain socket for CNI (Container Network Interface)
+# communication. Kubernetes CNI plugins use this socket to:
+#   - Request IP addresses for new pods
+#   - Configure pod network namespaces
+#   - Set up routes for pod-to-pod communication
+#
+# The directory must exist and be writable by the agent.
+# Create it with: sudo mkdir -p /var/run/galactic
+# -----------------------------------------------------------------------------
+socket_path: "/var/run/galactic/agent.sock"
+
+# -----------------------------------------------------------------------------
+# MQTT BROKER CONFIGURATION
+# -----------------------------------------------------------------------------
+# MQTT (Message Queuing Telemetry Transport) is used for lightweight,
+# publish-subscribe messaging between the Galactic control plane and agents.
+#
+# Why MQTT?
+#   - Low bandwidth overhead (important for edge/IoT scenarios)
+#   - Supports QoS levels for reliable delivery
+#   - Works well over unreliable networks
+#   - Protobuf encoding for efficient binary messages
+#
+# LOCAL TESTING:
+#   Install Mosquitto: sudo apt install mosquitto mosquitto-clients
+#   Use: tcp://localhost:1883
+#
+# DATUM CLOUD PRODUCTION:
+#   Use: tcp://mqtt.datum.net:1883
+#   Requires valid credentials from Datum Cloud console
+# -----------------------------------------------------------------------------
+
+# MQTT broker URL - protocol://host:port
+# Supported protocols: tcp://, ssl://, ws://, wss://
+mqtt_url: "tcp://localhost:1883"
+
+# Unique client ID for this agent instance
+# Must be unique across all agents connecting to the same broker
+# Recommended format: galactic-agent-<hostname> or galactic-agent-<node-id>
+mqtt_clientid: "galactic-agent-wsl"
+
+# Authentication credentials (leave empty for local testing without auth)
+# For Datum Cloud: Get credentials from https://console.datum.net
+mqtt_username: ""
+mqtt_password: ""
+
+# Quality of Service level for MQTT messages:
+#   0 = At most once (fire and forget, may lose messages)
+#   1 = At least once (guaranteed delivery, may duplicate) [RECOMMENDED]
+#   2 = Exactly once (guaranteed single delivery, highest overhead)
+mqtt_qos: 1
+
+# Topic for receiving route updates from the control plane
+# The agent subscribes to this topic and processes incoming route messages
+# Message format: Protobuf-encoded RouteUpdate (see api/remote/remote.proto)
+mqtt_topic_receive: "galactic/routes/wsl"
+
+# Topic for sending registration and status messages to the control plane
+# The agent publishes to this topic when it starts and periodically for health
+# Message format: Protobuf-encoded RegisterRequest (see api/remote/remote.proto)
+mqtt_topic_send: "galactic/register"
+
+# =============================================================================
+# TESTING THIS CONFIGURATION
+# =============================================================================
+#
+# PREREQUISITE: Create the lo-galactic interface (required by agent)
+# ----------------------------------------------------------------
+# The agent uses a dummy loopback interface named "lo-galactic" for SRv6
+# encapsulation. Without this interface, you'll get "Link not found" errors.
+#
+#    sudo ip link add lo-galactic type dummy
+#    sudo ip link set lo-galactic up
+#    ip link show lo-galactic  # Verify it exists
+#
+# STEPS:
+# ------
+# 1. Start local MQTT broker:
+#    sudo systemctl start mosquitto
+#
+# 2. Subscribe to agent's send topic (in another terminal):
+#    mosquitto_sub -h localhost -t "galactic/register" -v
+#
+# 3. Run the agent:
+#    cd ~/datum/galantic-vpc/galactic-agent
+#    sudo ./galactic-agent --config ../galactic-agent-config.yaml
+#
+# 4. You should see registration messages in the subscriber terminal
+#
+# 5. Test sending a route update (will fail parsing - that's expected):
+#    mosquitto_pub -h localhost -t "galactic/routes/wsl" -m "test"
+#
+# =============================================================================
+# PROTOBUF MESSAGE FORMAT (from galactic-agent/api/remote/remote.proto)
+# =============================================================================
+#
+# The galactic-agent uses Protocol Buffers for MQTT messages. Here are the
+# actual message definitions from the Datum galactic-agent source code:
+#
+# Source: https://github.com/datum-cloud/galactic-agent/blob/main/api/remote/remote.proto
+#
+# message Envelope {
+#   oneof kind {
+#     Register   register   = 1;    // Agent registration
+#     Deregister deregister = 2;    // Agent deregistration
+#     Route      route      = 3;    // Route update
+#   }
+# }
+#
+# message Register {
+#   string network = 1;             // e.g., "192.168.1.0/24"
+#   string srv6_endpoint = 2;       // e.g., "fc00:0:1::"
+# }
+#
+# message Deregister {
+#   string network = 1;
+#   string srv6_endpoint = 2;
+# }
+#
+# message Route {
+#   enum Status {
+#     ADD = 0;                      // Add route to kernel
+#     DELETE = 1;                   // Remove route from kernel
+#   }
+#   string network = 1;             // Destination prefix, e.g., "192.168.2.0/24"
+#   string srv6_endpoint = 2;       // SRv6 locator, e.g., "fc00:0:3::"
+#   repeated string srv6_segments = 3;  // Segment list for SRH
+#   Status status = 4;              // ADD or DELETE
+# }
+#
+# EXAMPLE: What Datum Cloud sends to add a route to AMS
+# -----------------------------------------------------
+# {
+#   "route": {
+#     "network": "192.168.2.0/24",
+#     "srv6_endpoint": "fc00:0:3::",
+#     "srv6_segments": ["fc00:0:3::"],
+#     "status": "ADD"
+#   }
+# }
+#
+# This tells the agent:
+#   - Destination: 192.168.2.0/24 (AMS service prefix)
+#   - Encapsulate with SRv6 to: fc00:0:3:: (AMS SRv6 locator)
+#   - Segment list: [fc00:0:3::] (direct path, no intermediate hops)
+#   - Action: ADD (program into kernel routing table)
+#
+# The agent then executes (equivalent to):
+#   ip -6 route add 192.168.2.0/24 encap seg6 mode encap \
+#      segs fc00:0:3:: dev eth1
+#
+# =============================================================================
+# TEST SCRIPT: Inject Real Protobuf Messages into MQTT
+# =============================================================================
+#
+# We provide a Go script (test-mqtt-route.go) that creates properly encoded
+# protobuf messages and publishes them to MQTT. This simulates what Datum
+# Cloud would send to your agent.
+#
+# USAGE:
+#   cd ~/datum/galantic-vpc
+#   go run test-mqtt-route.go
+#
+# The script will:
+#   1. Encode a Route message in protobuf binary format
+#   2. Wrap it in an Envelope (field 3 = Route)
+#   3. Publish to MQTT topic: galactic/routes/wsl
+#   4. The agent receives it and programs the route into the kernel
+#
+# MANUAL TESTING (without Go script):
+# -----------------------------------
+# You can also create the binary manually and publish with mosquitto_pub:
+#
+#   # Create protobuf binary for: Add route 192.168.2.0/24 via fc00:0:3::
+#   printf '\x1a\x30\x0a\x0e192.168.2.0/24\x12\x0bfc00:0:3::\x1a\x0bfc00:0:3::\x20\x00' > /tmp/route.bin
+#
+#   # Publish to MQTT
+#   mosquitto_pub -h localhost -t "galactic/routes/wsl" -f /tmp/route.bin
+#
+#   # Check if route was added
+#   ip -6 route show | grep 192.168.2
+#
+#
+# =============================================================================
+# TESTING AGENT → WSL2 KERNEL COMMUNICATION
+# =============================================================================
+#
+# The galactic-agent programs routes into the WSL2 Linux kernel. Here's how
+# to verify the agent is successfully communicating with the kernel:
+#
+# TEST 1: Check if agent can see kernel routes (before running agent)
+# --------------------------------------------------------------------
+#    ip -6 route show | grep fc00
+#    # Should show existing SRv6 routes from FRR containers
+#
+# TEST 2: Monitor kernel route changes in real-time
+# --------------------------------------------------------------------
+#    # Terminal 1: Watch for route changes
+#    ip -6 monitor route
+#
+#    # Terminal 2: Run the agent
+#    sudo ./galactic-agent --config ../galactic-agent-config.yaml
+#
+#    # You should see route additions in Terminal 1 when agent programs routes
+#
+# TEST 3: Verify SRv6 encapsulation is working (POP to POP)
+# --------------------------------------------------------------------
+#    # From WSL host, ping an SRv6 destination through the tunnel
+#    ping6 -c 3 fc00:0:3::1
+#
+#    # If working, packets are encapsulated and sent to AMS POP
+#
+# TEST 4: Check kernel routing table for SRv6 entries
+# --------------------------------------------------------------------
+#    ip -6 route show table all | grep -E "encap seg6|fc00"
+#
+#    # Expected output shows SRv6 encapsulation rules:
+#    # fc00:0:2::/48 encap seg6 mode encap segs 1 [ fc00:0:2:: ] dev eth1
+#    # fc00:0:3::/48 encap seg6 mode encap segs 1 [ fc00:0:3:: ] dev eth1
+#
+# TEST 5: Verify POP-to-POP connectivity through FRR containers
+# --------------------------------------------------------------------
+#    # Enter SJC container
+#    docker exec -it clab-galactic_vpc-sjc vtysh
+#
+#    # Check ISIS neighbors (should see IAD and AMS)
+#    show isis neighbor
+#
+#    # Check SRv6 locators
+#    show segment-routing srv6 locator
+#
+#    # Ping AMS from SJC (uses SRv6 tunnel)
+#    ping fc00:0:3::1
+#
+# TEST 6: Trace the packet path
+# --------------------------------------------------------------------
+#    # From SJC container, traceroute to AMS
+#    docker exec -it clab-galactic_vpc-sjc traceroute6 fc00:0:3::1
+#
+#    # Should show the SRv6 path through the topology
+#
+# TEST 7: Verify MQTT → Agent → Kernel flow
+# --------------------------------------------------------------------
+#    # Terminal 1: Watch kernel routes
+#    watch -n 1 'ip -6 route show | grep fc00'
+#
+#    # Terminal 2: Run agent with debug logging
+#    sudo ./galactic-agent --config ../galactic-agent-config.yaml -v
+#
+#    # Terminal 3: Send a test message (agent will log parse error)
+#    mosquitto_pub -h localhost -t "galactic/routes/wsl" -m "test"
+#
+#    # The agent logs will show it received the message and attempted
+#    # to parse it (fails because it's not protobuf encoded)
+#
+# =============================================================================
+# EXPECTED KERNEL ROUTE OUTPUT (when topology is running)
+# =============================================================================
+#
+#    $ ip -6 route show | grep fc00
+#    fc00:0:1::/48 dev eth1 proto kernel metric 256 pref medium
+#    fc00:0:2::/48 via 2001:10:1:1::2 dev eth1 metric 20 pref medium
+#    fc00:0:3::/48 via 2001:10:1:1::3 dev eth1 metric 20 pref medium
+#
+#    $ brctl show galactic_v_1
+#    bridge name     bridge id               STP enabled     interfaces
+#    galactic_v_1    8000.523d321b1e67       no              bni0n1i1
+#                                                            bni0n2i1
+#                                                            bni0n3i1
+#
+# =============================================================================

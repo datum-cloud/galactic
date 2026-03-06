@@ -1,0 +1,44 @@
+# =============================================================================
+# Galactic Agent DaemonSet for Kubernetes
+# =============================================================================
+# Author: Sajjad Ahmed
+# Company: Multi Naturals Inc.
+# Created: January 2026
+# Datum Source: https://www.datum.net/docs/galactic-vpc/#galactic-agent
+# =============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-agent
+  namespace: galactic-operator-system
+spec:
+  selector:
+    matchLabels:
+      name: galactic-agent
+  template:
+    metadata:
+      labels:
+        name: galactic-agent
+    spec:
+      hostNetwork: true
+      containers:
+      - name: agent
+        image: ghcr.io/datum-cloud/galactic-operator:v0.0.5
+        command: ["/manager"]
+        args: ["agent"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: certs
+          mountPath: /tmp/k8s-webhook-server/serving-certs
+          readOnly: true
+        - name: cnibin
+          mountPath: /host/opt/cni/bin
+      volumes:
+      - name: certs
+        secret:
+          # Use the secret already created by cert-manager
+          secretName: webhook-server-cert
+      - name: cnibin
+        hostPath:
+          path: /opt/cni/bin

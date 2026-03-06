@@ -1,0 +1,13 @@
+{
+	"name": "galactic-lab",
+    "build": {
+        "dockerfile": "../Dockerfile"
+	},
+    "remoteUser": "vscode",
+	"features": {
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {
+			"version": "latest",
+			"enableNonRootDocker": "true"
+		}
+	}
+}

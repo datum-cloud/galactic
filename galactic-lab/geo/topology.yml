@@ -1,0 +1,319 @@
+---
+provider: clab
+
+plugin: [ bgp.policy, kind ]
+
+defaults:
+  device: frr
+  const:
+    MAX_NODE_ID_LENGTH: 32
+
+addressing:
+  core_p2p:
+    ipv4:
+    ipv6: True
+  edge_p2p:
+    ipv4:
+    ipv6: 2001:0100:eeee::/48
+    prefix6: 127
+  loopback_core:
+    ipv4:
+    ipv6: 2001:0100:ffff::/48
+    prefix6: 128
+  loopback_as65201:
+    ipv4:
+    ipv6: 2001:0201:ffff::/48
+    prefix6: 128
+  loopback_as65202:
+    ipv4:
+    ipv6: 2001:0202:ffff::/48
+    prefix6: 128
+  loopback_as65203:
+    ipv4:
+    ipv6: 2001:0203:ffff::/48
+    prefix6: 128
+  loopback_as65204:
+    ipv4:
+    ipv6: 2001:0204:ffff::/48
+    prefix6: 128
+  loopback_as65205:
+    ipv4:
+    ipv6: 2001:0205:ffff::/48
+    prefix6: 128
+  cust_p2p_as65201:
+    ipv4:
+    ipv6: 2001:0201:cccc::/48
+    prefix6: 127
+  cust_p2p_as65202:
+    ipv4:
+    ipv6: 2001:0202:cccc::/48
+    prefix6: 127
+  cust_p2p_as65203:
+    ipv4:
+    ipv6: 2001:0203:cccc::/48
+    prefix6: 127
+  cust_p2p_as65204:
+    ipv4:
+    ipv6: 2001:0204:cccc::/48
+    prefix6: 127
+  cust_p2p_as65205:
+    ipv4:
+    ipv6: 2001:0205:cccc::/48
+    prefix6: 127
+
+groups:
+  core:
+    members: [ iad-c, sjc-c, tor-c, fra-c, sin-c ]
+    module: [ isis, bgp ]
+    bgp:
+      as: 65100
+    loopback:
+      pool: loopback_core
+  edge:
+    members: [ iad-e, sjc-e, tor-e, fra-e, sin-e ]
+    module: [ bgp, routing ]
+    bgp:
+      import: [ static ]
+  control-plane:
+    members: [ k01-control-plane ]
+    module: []
+  workers:
+    members: [ k01-worker, k01-worker2, k01-worker3, k01-worker4, k01-worker5 ]
+    module: [ routing ]
+
+nodes:
+  # "Internet Core" (IS-IS + iBGP in AS 65100)
+  iad-c:
+  sjc-c:
+  tor-c:
+  fra-c:
+  sin-c:
+
+  # "Onramp Edge" nodes (eBGP only, each in separate AS - simulating different ISPs)
+  iad-e:
+    loopback:
+      pool: loopback_as65201
+    bgp:
+      as: 65201
+      aggregate:
+        - ipv6: 2001:0201::/32
+          summary_only: True
+    routing:
+      static:
+        - ipv6: 2001:db8:ff01::/48
+          nexthop.node: k01-worker
+  sjc-e:
+    loopback:
+      pool: loopback_as65202
+    bgp:
+      as: 65202
+      aggregate:
+        - ipv6: 2001:0202::/32
+          summary_only: True
+    routing:
+      static:
+        - ipv6: 2001:db8:ff02::/48
+          nexthop.node: k01-worker2
+  tor-e:
+    loopback:
+      pool: loopback_as65203
+    bgp:
+      as: 65203
+      aggregate:
+        - ipv6: 2001:0203::/32
+          summary_only: True
+    routing:
+      static:
+        - ipv6: 2001:db8:ff03::/48
+          nexthop.node: k01-worker3
+  fra-e:
+    loopback:
+      pool: loopback_as65204
+    bgp:
+      as: 65204
+      aggregate:
+        - ipv6: 2001:0204::/32
+          summary_only: True
+    routing:
+      static:
+        - ipv6: 2001:db8:ff04::/48
+          nexthop.node: k01-worker4
+  sin-e:
+    loopback:
+      pool: loopback_as65205
+    bgp:
+      as: 65205
+      aggregate:
+        - ipv6: 2001:0205::/32
+          summary_only: True
+    routing:
+      static:
+        - ipv6: 2001:db8:ff05::/48
+          nexthop.node: k01-worker5
+
+  k01:
+    device: kind
+    kind:
+      workers: 5
+    clab:
+      image: kindest/node:galactic
+      startup-config: "k01-config.yml"
+  k01-control-plane:
+    device: kind-node
+    clab:
+      exec:
+        - "sysctl -w fs.inotify.max_user_instances=256"
+        - "/galactic/install.sh"
+  k01-worker:
+    device: kind-node
+    clab:
+      exec:
+        - "sysctl -w fs.inotify.max_user_instances=256"
+        - "ip link add lo-galactic type dummy"
+        - "ip link set lo-galactic up"
+        - "ip -6 addr add 2001:db8:ff01:100:ffff:ffff:ffff:ffff/128 dev lo-galactic"
+        - "/galactic/install.sh"
+    routing:
+      static:
+        - ipv6: 2001:db8:ff00::/40
+          nexthop.node: iad-e
+  k01-worker2:
+    device: kind-node
+    clab:
+      exec:
+        - "sysctl -w fs.inotify.max_user_instances=256"
+        - "ip link add lo-galactic type dummy"
+        - "ip link set lo-galactic up"
+        - "ip -6 addr add 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128 dev lo-galactic"
+        - "/galactic/install.sh"
+    routing:
+      static:
+        - ipv6: 2001:db8:ff00::/40
+          nexthop.node: sjc-e
+  k01-worker3:
+    device: kind-node
+    clab:
+      exec:
+        - "sysctl -w fs.inotify.max_user_instances=256"
+        - "ip link add lo-galactic type dummy"
+        - "ip link set lo-galactic up"
+        - "ip -6 addr add 2001:db8:ff03:100:ffff:ffff:ffff:ffff/128 dev lo-galactic"
+        - "/galactic/install.sh"
+    routing:
+      static:
+        - ipv6: 2001:db8:ff00::/40
+          nexthop.node: tor-e
+  k01-worker4:
+    device: kind-node
+    clab:
+      exec:
+        - "sysctl -w fs.inotify.max_user_instances=256"
+        - "ip link add lo-galactic type dummy"
+        - "ip link set lo-galactic up"
+        - "ip -6 addr add 2001:db8:ff04:100:ffff:ffff:ffff:ffff/128 dev lo-galactic"
+        - "/galactic/install.sh"
+    routing:
+      static:
+        - ipv6: 2001:db8:ff00::/40
+          nexthop.node: fra-e
+  k01-worker5:
+    device: kind-node
+    clab:
+      exec:
+        - "sysctl -w fs.inotify.max_user_instances=256"
+        - "ip link add lo-galactic type dummy"
+        - "ip link set lo-galactic up"
+        - "ip -6 addr add 2001:db8:ff05:100:ffff:ffff:ffff:ffff/128 dev lo-galactic"
+        - "/galactic/install.sh"
+    routing:
+      static:
+        - ipv6: 2001:db8:ff00::/40
+          nexthop.node: sin-e
+
+links:
+  - iad-c:
+    sjc-c:
+    isis:
+      metric: 25
+    tc:
+      delay: 25ms
+    pool: core_p2p
+  - iad-c:
+    tor-c:
+    isis:
+      metric: 10
+    tc:
+      delay: 10ms
+    pool: core_p2p
+  - iad-c:
+    fra-c:
+    isis:
+      metric: 40
+    tc:
+      delay: 40ms
+    pool: core_p2p
+  - sjc-c:
+    tor-c:
+    isis:
+      metric: 30
+    tc:
+      delay: 30ms
+    pool: core_p2p
+  - sjc-c:
+    sin-c:
+    isis:
+      metric: 85
+    tc:
+      delay: 85ms
+    pool: core_p2p
+  - tor-c:
+    fra-c:
+    isis:
+      metric: 50
+    tc:
+      delay: 50ms
+    pool: core_p2p
+  - fra-c:
+    sin-c:
+    isis:
+      metric: 75
+    tc:
+      delay: 75ms
+    pool: core_p2p
+
+  - iad-e:
+    iad-c:
+    bgp:
+    pool: edge_p2p
+  - sjc-e:
+    sjc-c:
+    bgp:
+    pool: edge_p2p
+  - tor-e:
+    tor-c:
+    bgp:
+    pool: edge_p2p
+  - fra-e:
+    fra-c:
+    bgp:
+    pool: edge_p2p
+  - sin-e:
+    sin-c:
+    bgp:
+    pool: edge_p2p
+
+  - k01-worker:
+    iad-e:
+    pool: cust_p2p_as65201
+  - k01-worker2:
+    sjc-e:
+    pool: cust_p2p_as65202
+  - k01-worker3:
+    tor-e:
+    pool: cust_p2p_as65203
+  - k01-worker4:
+    fra-e:
+    pool: cust_p2p_as65204
+  - k01-worker5:
+    sin-e:
+    pool: cust_p2p_as65205
