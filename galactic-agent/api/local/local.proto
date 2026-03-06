@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package local.v1;
+option go_package = "github.com/datum-cloud/galactic-agent/api/local;local";
+
+service Local {
+  rpc Register(RegisterRequest) returns (RegisterReply);
+  rpc Deregister(DeregisterRequest) returns (DeregisterReply);
+}
+
+message RegisterRequest {
+  string vpc = 1;
+  string vpcattachment = 2;
+  repeated string networks = 3;
+}
+
+message RegisterReply {
+  bool confirmed = 1;
+}
+
+message DeregisterRequest {
+  string vpc = 1;
+  string vpcattachment = 2;
+  repeated string networks = 3;
+}
+
+message DeregisterReply {
+  bool confirmed = 1;
+}
