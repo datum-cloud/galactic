@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: galactic-router
+  labels:
+    app.kubernetes.io/instance: galactic-router
+    app.kubernetes.io/name: galactic-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: galactic-router
+      app.kubernetes.io/name: galactic-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: galactic-router
+        app.kubernetes.io/name: galactic-router
+    spec:
+      containers:
+        - name: galactic-router
+          image: ghcr.io/datum-cloud/galactic-router:latest
+          imagePullPolicy: Always
+          resources:
+            limits:
+              cpu: 1
+              memory: 1Gi

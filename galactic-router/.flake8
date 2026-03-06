@@ -1,0 +1,19 @@
+[flake8]
+show-source = True
+require-plugins =
+    wemake-python-styleguide,
+exclude =
+    .git,
+    .venv,
+    __pycache__,
+    galactic_router/proto,
+    alembic/versions,
+extend-ignore =
+    # LocalFolderImportViolation
+    WPS300,
+    # TooComplexFormattedStringViolation
+    WPS237,
+    # AwaitInLoopViolation
+    WPS476,
+    # InitModuleHasLogicViolation
+    WPS412,
