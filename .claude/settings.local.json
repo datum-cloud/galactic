@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git commit:*)",
+      "Bash(git mv:*)",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(if grep -r \"github\\\\.com/datum-cloud/galactic\" --include=\"*.go\" --include=\"*.proto\" /Users/scotwells/repos/datum-cloud/galactic)",
+      "Bash(then echo \"WARNING: Found old import paths above\")",
+      "Bash(else echo \"✓ No old import paths found\")",
+      "Bash(fi)",
+      "Bash(go build:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go list:*)",
+      "Bash(go vet:*)",
+      "Bash(go tool compile:*)",
+      "Bash(gofmt:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
