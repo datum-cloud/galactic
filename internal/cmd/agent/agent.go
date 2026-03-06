@@ -66,15 +66,15 @@ It communicates with the CNI plugin via a local gRPC socket and with the router 
 	cmd.Flags().String("mqtt-topic-send", "galactic/default/send", "MQTT topic for sending messages")
 
 	// Bind flags to viper
-	viper.BindPFlag("srv6_net", cmd.Flags().Lookup("srv6-net"))
-	viper.BindPFlag("socket_path", cmd.Flags().Lookup("socket-path"))
-	viper.BindPFlag("mqtt_url", cmd.Flags().Lookup("mqtt-url"))
-	viper.BindPFlag("mqtt_clientid", cmd.Flags().Lookup("mqtt-clientid"))
-	viper.BindPFlag("mqtt_username", cmd.Flags().Lookup("mqtt-username"))
-	viper.BindPFlag("mqtt_password", cmd.Flags().Lookup("mqtt-password"))
-	viper.BindPFlag("mqtt_qos", cmd.Flags().Lookup("mqtt-qos"))
-	viper.BindPFlag("mqtt_topic_receive", cmd.Flags().Lookup("mqtt-topic-receive"))
-	viper.BindPFlag("mqtt_topic_send", cmd.Flags().Lookup("mqtt-topic-send"))
+	_ = viper.BindPFlag("srv6_net", cmd.Flags().Lookup("srv6-net"))
+	_ = viper.BindPFlag("socket_path", cmd.Flags().Lookup("socket-path"))
+	_ = viper.BindPFlag("mqtt_url", cmd.Flags().Lookup("mqtt-url"))
+	_ = viper.BindPFlag("mqtt_clientid", cmd.Flags().Lookup("mqtt-clientid"))
+	_ = viper.BindPFlag("mqtt_username", cmd.Flags().Lookup("mqtt-username"))
+	_ = viper.BindPFlag("mqtt_password", cmd.Flags().Lookup("mqtt-password"))
+	_ = viper.BindPFlag("mqtt_qos", cmd.Flags().Lookup("mqtt-qos"))
+	_ = viper.BindPFlag("mqtt_topic_receive", cmd.Flags().Lookup("mqtt-topic-receive"))
+	_ = viper.BindPFlag("mqtt_topic_send", cmd.Flags().Lookup("mqtt-topic-send"))
 
 	return cmd
 }

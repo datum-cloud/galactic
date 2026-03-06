@@ -31,7 +31,7 @@ func Add(vpc, vpcAttachment string) error {
 		LinkAttrs: netlink.LinkAttrs{
 			Name: name,
 		},
-		Table: uint32(vrfId),
+		Table: vrfId,
 	}
 
 	if err := netlink.LinkAdd(vrf); err != nil {
