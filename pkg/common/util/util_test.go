@@ -8,9 +8,14 @@ import (
 	"go.datum.net/galactic/pkg/common/util"
 )
 
+const (
+	testVPC           = "0000000jU" // 1234 dec
+	testVPCAttachment = "00G"       // 42 dec
+)
+
 func TestGenerateInterfaceNameVRF(t *testing.T) {
-	vpc := "0000000jU"     // 1234 dec
-	vpcattachment := "00G" // 42 dec
+	vpc := testVPC
+	vpcattachment := testVPCAttachment
 	expected := "G0000000jU00GV"
 	got := util.GenerateInterfaceNameVRF(vpc, vpcattachment)
 	if got != expected {
@@ -19,8 +24,8 @@ func TestGenerateInterfaceNameVRF(t *testing.T) {
 }
 
 func TestGenerateInterfaceNameHost(t *testing.T) {
-	vpc := "0000000jU"     // 1234 dec
-	vpcattachment := "00G" // 42 dec
+	vpc := testVPC
+	vpcattachment := testVPCAttachment
 	expected := "G0000000jU00GH"
 	got := util.GenerateInterfaceNameHost(vpc, vpcattachment)
 	if got != expected {
@@ -29,8 +34,8 @@ func TestGenerateInterfaceNameHost(t *testing.T) {
 }
 
 func TestGenerateInterfaceNameGuest(t *testing.T) {
-	vpc := "0000000jU"     // 1234 dec
-	vpcattachment := "00G" // 42 dec
+	vpc := testVPC
+	vpcattachment := testVPCAttachment
 	expected := "G0000000jU00GG"
 	got := util.GenerateInterfaceNameGuest(vpc, vpcattachment)
 	if got != expected {

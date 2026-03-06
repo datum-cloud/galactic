@@ -40,7 +40,7 @@ linters:
       - third_party$
       - builtin$
       - examples$
-      - lab$
+      - ^lab/
 formatters:
   enable:
     - gofmt
