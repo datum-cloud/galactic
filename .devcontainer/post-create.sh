@@ -64,6 +64,10 @@ make manifests generate
 echo "Configuring git safe directory..."
 git config --global --add safe.directory /workspaces/galactic
 
+# Install Claude Code CLI
+echo "Installing Claude Code..."
+npm install -g @anthropic-ai/claude-code
+
 # Verify installations
 echo ""
 echo "Verifying installations..."
