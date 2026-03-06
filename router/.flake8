@@ -17,3 +17,5 @@ extend-ignore =
     WPS476,
     # InitModuleHasLogicViolation
     WPS412,
+    # SimplifiableMatchStatementViolation (match for clarity)
+    WPS365,
