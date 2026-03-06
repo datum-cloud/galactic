@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- galactic_v1alpha_vpc.yaml
+- galactic_v1alpha_vpcattachment.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

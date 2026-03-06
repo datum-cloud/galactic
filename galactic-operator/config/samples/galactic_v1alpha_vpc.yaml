@@ -1,0 +1,11 @@
+apiVersion: galactic.datumapis.com/v1alpha
+kind: VPC
+metadata:
+  labels:
+    app.kubernetes.io/name: galactic-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: vpc-sample
+spec:
+  networks:
+    - 10.0.0.0/24
+    - 2001:1::/64

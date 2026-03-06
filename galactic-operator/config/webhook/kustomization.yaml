@@ -1,0 +1,37 @@
+resources:
+- manifests.yaml
+- service.yaml
+
+configurations:
+- kustomizeconfig.yaml
+
+patches:
+- patch: |-
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: MutatingWebhookConfiguration
+    metadata:
+      name: mutating-webhook-configuration
+    webhooks:
+    - name: mpod-v1.kb.io
+      matchConditions:
+        - name: vpc-attachment-annotation-exists
+          expression: >
+            object != null &&
+            has(object.metadata) &&
+            has(object.metadata.annotations) &&
+            "k8s.v1alpha.galactic.datumapis.com/vpc-attachment" in object.metadata.annotations
+
+- patch: |-
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingWebhookConfiguration
+    metadata:
+      name: validating-webhook-configuration
+    webhooks:
+    - name: vpod-v1.kb.io
+      matchConditions:
+        - name: vpc-attachment-annotation-exists
+          expression: >
+            object != null &&
+            has(object.metadata) &&
+            has(object.metadata.annotations) &&
+            "k8s.v1alpha.galactic.datumapis.com/vpc-attachment" in object.metadata.annotations

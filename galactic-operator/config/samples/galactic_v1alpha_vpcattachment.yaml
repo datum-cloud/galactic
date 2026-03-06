@@ -1,0 +1,27 @@
+apiVersion: galactic.datumapis.com/v1alpha
+kind: VPCAttachment
+metadata:
+  labels:
+    app.kubernetes.io/name: galactic-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: vpcattachment-sample
+spec:
+  vpc:
+    apiVersion: galactic.datumapis.com/v1alpha
+    kind: VPC
+    name: vpc-sample
+    namespace: default
+  interface:
+    name: galactic0
+    addresses:
+      - 10.1.1.1/24
+      - 2001:10:1:1::1/64
+  routes:
+    - destination: 192.168.1.0/24
+      via: 10.1.1.1
+    - destination: 2001:1::/64
+      via: 2001:10:1:1::1
+    - destination: 192.168.2.0/24
+      via: 10.1.1.2
+    - destination: 2001:2::/64
+      via: 2001:10:1:1::2

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-sample
+  annotations:
+    k8s.v1alpha.galactic.datumapis.com/vpc-attachment: vpcattachment-sample
+spec:
+  containers:
+  - name: pod-sample
+    command: ["/bin/ash", "-c", "trap : TERM INT; sleep infinity & wait"]
+    image: alpine

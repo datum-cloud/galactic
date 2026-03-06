@@ -1,0 +1,47 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - galactic.datumapis.com
+  resources:
+  - vpcattachments
+  - vpcs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - galactic.datumapis.com
+  resources:
+  - vpcattachments/finalizers
+  - vpcs/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - galactic.datumapis.com
+  resources:
+  - vpcattachments/status
+  - vpcs/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - k8s.cni.cncf.io
+  resources:
+  - network-attachment-definitions
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
