@@ -1,0 +1,59 @@
+name: build
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: golangci/golangci-lint-action@v8
+
+  build:
+    name: build
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    env:
+      DEBUG_VERSION: ${{ github.ref_name }}
+      DEBUG_REF: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: test
+        run: |
+          docker run -v ${{ github.workspace }}:/src -w /src \
+                     --platform linux/${{ matrix.arch }} \
+                     golang \
+                     go test -v ./...
+      - name: build
+        run: |
+          docker run -v ${{ github.workspace }}:/src -w /src \
+                     --platform linux/${{ matrix.arch }} \
+                     -e CGO_ENABLED=0 \
+                     golang \
+                     go build \
+                       -ldflags "-X 'github.com/datum-cloud/galactic-cni/debug.DebugVersion=${DEBUG_VERSION}' -X 'github.com/datum-cloud/galactic-cni/debug.DebugRef=${DEBUG_REF}'" \
+                       -o galactic-${{ matrix.arch }} ./main.go
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: galactic-${{ matrix.arch }}
+          path: galactic-${{ matrix.arch }}
