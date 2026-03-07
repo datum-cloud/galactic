@@ -1,4 +1,21 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(git commit:*)",
+      "Bash(git mv:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(go build:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go list:*)",
+      "Bash(go vet:*)",
+      "Bash(gofmt:*)",
+      "WebSearch"
+    ]
+  },
   "extraKnownMarketplaces": {
     "datum-claude-code-plugins": {
       "source": {
