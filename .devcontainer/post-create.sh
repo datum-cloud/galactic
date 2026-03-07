@@ -66,7 +66,7 @@ git config --global --add safe.directory /workspaces/galactic
 
 # Install Claude Code CLI
 echo "Installing Claude Code..."
-npm install -g @anthropic-ai/claude-code
+curl -fsSL https://claude.ai/install.sh | bash
 
 # Verify installations
 echo ""
