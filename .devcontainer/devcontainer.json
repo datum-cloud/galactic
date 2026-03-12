@@ -1,0 +1,140 @@
+{
+	"name": "galactic",
+	"image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+	"features": {
+		"ghcr.io/devcontainers/features/go:1": {
+			"version": "1.24.2"
+		},
+		"ghcr.io/devcontainers/features/python:1": {
+			"version": "3.13",
+			"installTools": true
+		},
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {
+			"version": "latest",
+			"enableNonRootDocker": "true",
+			"moby": "true"
+		},
+		"ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+			"version": "latest",
+			"helm": "none",
+			"minikube": "none"
+		},
+		"ghcr.io/devcontainers/features/common-utils:2": {
+			"installZsh": true,
+			"installOhMyZsh": true,
+			"upgradePackages": true,
+			"username": "vscode",
+			"userUid": "1000",
+			"userGid": "1000"
+		},
+		"ghcr.io/devcontainers/features/git:1": {
+			"version": "latest"
+		},
+		"ghcr.io/devcontainers/features/node:1": {
+			"version": "lts"
+		}
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go",
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-kubernetes-tools.vscode-kubernetes-tools",
+				"redhat.vscode-yaml",
+				"ms-azuretools.vscode-docker",
+				"eamodio.gitlens",
+				"davidanson.vscode-markdownlint",
+				"tamasfe.even-better-toml"
+			],
+			"settings": {
+				"go.toolsManagement.autoUpdate": true,
+				"go.useLanguageServer": true,
+				"go.lintTool": "golangci-lint",
+				"go.lintFlags": [
+					"--fast"
+				],
+				"go.formatTool": "gofmt",
+				"go.testEnvVars": {
+					"GOOS": "linux"
+				},
+				"go.buildFlags": [],
+				"go.testFlags": [
+					"-v"
+				],
+				"[go]": {
+					"editor.formatOnSave": true,
+					"editor.codeActionsOnSave": {
+						"source.organizeImports": "explicit"
+					}
+				},
+				"gopls": {
+					"formatting.gofumpt": true,
+					"ui.semanticTokens": true,
+					"ui.codelenses": {
+						"gc_details": false,
+						"regenerate_cgo": false,
+						"generate": true,
+						"test": true,
+						"tidy": true,
+						"upgrade_dependency": true,
+						"vendor": true
+					}
+				},
+				"python.defaultInterpreterPath": "/usr/local/bin/python3",
+				"python.linting.enabled": true,
+				"python.linting.flake8Enabled": true,
+				"python.linting.flake8Path": "/usr/local/bin/flake8",
+				"python.formatting.provider": "none",
+				"[python]": {
+					"editor.formatOnSave": true,
+					"editor.defaultFormatter": "ms-python.python",
+					"editor.codeActionsOnSave": {
+						"source.organizeImports": "explicit"
+					}
+				},
+				"files.watcherExclude": {
+					"**/bin/**": true,
+					"**/dist/**": true,
+					"**/.git/objects/**": true,
+					"**/.git/subtree-cache/**": true,
+					"**/node_modules/**": true
+				},
+				"files.exclude": {
+					"**/.git": false
+				},
+				"terminal.integrated.defaultProfile.linux": "bash"
+			}
+		}
+	},
+	"forwardPorts": [8080, 8081, 9443],
+	"portsAttributes": {
+		"8080": {
+			"label": "Metrics",
+			"onAutoForward": "notify"
+		},
+		"8081": {
+			"label": "Health",
+			"onAutoForward": "notify"
+		},
+		"9443": {
+			"label": "Webhook",
+			"onAutoForward": "notify"
+		}
+	},
+	"remoteUser": "vscode",
+	"containerEnv": {
+		"GOOS": "linux",
+		"CGO_ENABLED": "1"
+	},
+	"mounts": [
+		"source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
+		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+	],
+	"postCreateCommand": "bash .devcontainer/post-create.sh",
+	"runArgs": [
+		"--privileged",
+		"--cap-add=NET_ADMIN",
+		"--cap-add=SYS_ADMIN"
+	]
+}

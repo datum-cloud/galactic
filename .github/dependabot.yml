@@ -1,0 +1,34 @@
+version: 2
+updates:
+  # Go modules
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      all-others:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Python (router)
+  - package-ecosystem: pip
+    directory: /router
+    schedule:
+      interval: weekly
+
+  # Docker
+  - package-ecosystem: docker
+    directory: /build
+    schedule:
+      interval: weekly
