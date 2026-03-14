@@ -39,6 +39,7 @@ spec:
             capabilities:
               add:
                 - NET_ADMIN
+      serviceAccountName: galactic-agent
       hostNetwork: true
       volumes:
         - name: galactic-run

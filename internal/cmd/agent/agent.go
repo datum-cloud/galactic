@@ -18,8 +18,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
-
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -27,8 +28,11 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"go.datum.net/galactic/internal/agent/srv6"
+	"go.datum.net/galactic/internal/agent/underlay"
 	"go.datum.net/galactic/pkg/common/util"
 	"go.datum.net/galactic/pkg/proto/local"
 	"go.datum.net/galactic/pkg/proto/remote"
@@ -210,6 +214,29 @@ func runAgent() error {
 	g.Go(func() error {
 		return r.Run(ctx)
 	})
+
+	// Start underlay route controller if NODE_NAME is set (running in-cluster)
+	if nodeName := os.Getenv("NODE_NAME"); nodeName != "" {
+		cfg, err := rest.InClusterConfig()
+		if err != nil {
+			log.Printf("underlay: no in-cluster config, skipping: %v", err)
+		} else {
+			k8sClient, err := kubernetes.NewForConfig(cfg)
+			if err != nil {
+				return fmt.Errorf("create k8s client: %w", err)
+			}
+			ctrl := underlay.NewController(underlay.Config{
+				GoBGPAddr: "127.0.0.1:50051",
+				LocalNode: nodeName,
+				SRv6Net:   viper.GetString("srv6_net"),
+				BGPPort:   1790,
+				BGPAS:     65000,
+			}, k8sClient)
+			g.Go(func() error {
+				return ctrl.Run(ctx)
+			})
+		}
+	}
 
 	if err := g.Wait(); err != nil {
 		log.Printf("Error: %v", err)
