@@ -24,6 +24,7 @@ import (
 
 	"go.datum.net/galactic/internal/cmd/agent"
 	"go.datum.net/galactic/internal/cmd/cni"
+	"go.datum.net/galactic/internal/cmd/cniinstall"
 	"go.datum.net/galactic/internal/cmd/operator"
 	"go.datum.net/galactic/internal/cmd/version"
 )
@@ -56,6 +57,7 @@ This unified binary supports multiple modes of operation:
 	rootCmd.AddCommand(operator.NewCommand())
 	rootCmd.AddCommand(agent.NewCommand())
 	rootCmd.AddCommand(cni.NewCommand())
+	rootCmd.AddCommand(cniinstall.NewCommand())
 	rootCmd.AddCommand(version.NewCommand())
 
 	if err := rootCmd.Execute(); err != nil {

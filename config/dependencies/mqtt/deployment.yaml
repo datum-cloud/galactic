@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: galactic-mqtt
+  namespace: galactic-mqtt
+  labels:
+    app: galactic-mqtt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: galactic-mqtt
+  template:
+    metadata:
+      labels:
+        app: galactic-mqtt
+    spec:
+      containers:
+        - name: galactic-mqtt
+          image: eclipse-mosquitto:latest
+          ports:
+            - containerPort: 1883
+              name: mqtt
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /mosquitto/config/mosquitto.conf
+              subPath: mosquitto.conf
+      volumes:
+        - name: config
+          configMap:
+            name: galactic-mqtt-config

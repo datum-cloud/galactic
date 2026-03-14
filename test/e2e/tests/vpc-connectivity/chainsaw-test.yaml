@@ -1,0 +1,85 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vpc-connectivity
+spec:
+  description: Verify cross-region pod-to-pod connectivity over VPC overlay
+  steps:
+    - name: setup-test-namespace
+      try:
+        - apply:
+            file: namespace.yaml
+    - name: apply-vpc-and-workloads
+      try:
+        - apply:
+            file: vpc.yaml
+        - apply:
+            file: workloads.yaml
+    - name: wait-for-pods
+      try:
+        - assert:
+            file: assert-pods-ready.yaml
+    - name: wait-for-vpc-ready
+      try:
+        - assert:
+            file: assert-vpc-ready.yaml
+    - name: ping-region1-to-region2-ipv4
+      try:
+        - script:
+            timeout: 2m
+            content: |
+              POD=$(kubectl get pod -n test-e2e-connectivity -l app=region1 -o jsonpath='{.items[0].metadata.name}')
+              kubectl exec -n test-e2e-connectivity "$POD" -- ping -c 3 -W 5 10.1.1.2
+            check:
+              ($error): ~
+    - name: ping-region1-to-region3-ipv4
+      try:
+        - script:
+            timeout: 2m
+            content: |
+              POD=$(kubectl get pod -n test-e2e-connectivity -l app=region1 -o jsonpath='{.items[0].metadata.name}')
+              kubectl exec -n test-e2e-connectivity "$POD" -- ping -c 3 -W 5 10.1.1.3
+            check:
+              ($error): ~
+    - name: ping-region2-to-region1-ipv4
+      try:
+        - script:
+            timeout: 2m
+            content: |
+              POD=$(kubectl get pod -n test-e2e-connectivity -l app=region2 -o jsonpath='{.items[0].metadata.name}')
+              kubectl exec -n test-e2e-connectivity "$POD" -- ping -c 3 -W 5 10.1.1.1
+            check:
+              ($error): ~
+    - name: ping-region2-to-region3-ipv4
+      try:
+        - script:
+            timeout: 2m
+            content: |
+              POD=$(kubectl get pod -n test-e2e-connectivity -l app=region2 -o jsonpath='{.items[0].metadata.name}')
+              kubectl exec -n test-e2e-connectivity "$POD" -- ping -c 3 -W 5 10.1.1.3
+            check:
+              ($error): ~
+    - name: ping-region1-to-region2-ipv6
+      try:
+        - script:
+            timeout: 2m
+            content: |
+              POD=$(kubectl get pod -n test-e2e-connectivity -l app=region1 -o jsonpath='{.items[0].metadata.name}')
+              kubectl exec -n test-e2e-connectivity "$POD" -- ping6 -c 3 -W 5 2001:10:1:1::2
+            check:
+              ($error): ~
+    - name: ping-region1-to-region3-ipv6
+      try:
+        - script:
+            timeout: 2m
+            content: |
+              POD=$(kubectl get pod -n test-e2e-connectivity -l app=region1 -o jsonpath='{.items[0].metadata.name}')
+              kubectl exec -n test-e2e-connectivity "$POD" -- ping6 -c 3 -W 5 2001:10:1:1::3
+            check:
+              ($error): ~
+      finally:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Namespace
+              name: test-e2e-connectivity

@@ -2,6 +2,9 @@
 	"name": "galactic",
 	"image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
 	"features": {
+		"ghcr.io/devcontainers/features/nix:1": {
+			"version": "latest"
+		},
 		"ghcr.io/devcontainers/features/go:1": {
 			"version": "1.24.2"
 		},

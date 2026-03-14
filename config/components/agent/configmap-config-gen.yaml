@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: galactic-agent-config-gen-script
+  namespace: galactic-agent
+data:
+  config-gen.py: |
+    import os
+    import json
+
+    CONFIGS = {
+        "galactic-e2e-worker": {
+            "srv6_net": "2001:db8:ff01::/48",
+            "mqtt_url": "tcp://localhost:31883",
+            "mqtt_clientid": "galactic-e2e-worker",
+            "mqtt_username": "galactic-e2e-worker",
+            "mqtt_topic_receive": "galactic/galactic-e2e-worker/receive",
+            "mqtt_topic_send": "galactic/galactic-e2e-worker/send"
+        },
+        "galactic-e2e-worker2": {
+            "srv6_net": "2001:db8:ff02::/48",
+            "mqtt_url": "tcp://localhost:31883",
+            "mqtt_clientid": "galactic-e2e-worker2",
+            "mqtt_username": "galactic-e2e-worker2",
+            "mqtt_topic_receive": "galactic/galactic-e2e-worker2/receive",
+            "mqtt_topic_send": "galactic/galactic-e2e-worker2/send"
+        },
+        "galactic-e2e-worker3": {
+            "srv6_net": "2001:db8:ff03::/48",
+            "mqtt_url": "tcp://localhost:31883",
+            "mqtt_clientid": "galactic-e2e-worker3",
+            "mqtt_username": "galactic-e2e-worker3",
+            "mqtt_topic_receive": "galactic/galactic-e2e-worker3/receive",
+            "mqtt_topic_send": "galactic/galactic-e2e-worker3/send"
+        }
+    }
+
+    node_name = os.getenv("NODE_NAME")
+    if not node_name:
+        raise ValueError("NODE_NAME environment variable not set")
+
+    if node_name not in CONFIGS:
+        raise ValueError(f"Unknown worker: {node_name}. Valid workers: {', '.join(CONFIGS.keys())}")
+
+    with open("/config/galactic-agent.json", "w") as f:
+        f.write(json.dumps(CONFIGS[node_name], indent=2))

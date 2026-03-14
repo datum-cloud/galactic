@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: galactic-router
+resources:
+  - ../../../router/config/base
+  - namespace.yaml
+images:
+  - name: ghcr.io/datum-cloud/galactic-router
+    newName: ghcr.io/datum-cloud/galactic-router
+    newTag: e2e-local
+patches:
+  - path: env-patch.yaml
+    target:
+      kind: Deployment
+      name: galactic-router

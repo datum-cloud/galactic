@@ -1,0 +1,10 @@
+apiVersion: chainsaw.kyverno.io/v1alpha2
+kind: Configuration
+metadata:
+  name: galactic-e2e
+spec:
+  timeouts:
+    apply: 2m
+    assert: 5m
+    delete: 2m
+    exec: 2m

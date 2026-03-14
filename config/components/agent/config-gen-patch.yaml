@@ -1,0 +1,56 @@
+# JSON 6902 patch to add config-gen init container, script + config volumes,
+# config arg to main container, and fix imagePullPolicy for local image loading.
+- op: replace
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: IfNotPresent
+- op: add
+  path: /spec/template/spec/containers/0/securityContext/runAsUser
+  value: 0
+- op: add
+  path: /spec/template/spec/containers/0/securityContext/runAsGroup
+  value: 0
+- op: add
+  path: /spec/template/spec/containers/0/args
+  value:
+    - "--config=/config/galactic-agent.json"
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: config
+    mountPath: /config
+- op: add
+  path: /spec/template/spec/containers/0/env
+  value:
+    - name: NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+- op: add
+  path: /spec/template/spec/initContainers
+  value:
+    - name: config-gen
+      image: python:3.12-alpine
+      command:
+        - python3
+        - /scripts/config-gen.py
+      env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+      volumeMounts:
+        - name: script
+          mountPath: /scripts
+        - name: config
+          mountPath: /config
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: script
+    configMap:
+      name: galactic-agent-config-gen-script
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: config
+    emptyDir: {}

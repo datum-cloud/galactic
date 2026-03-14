@@ -1,0 +1,25 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vpc-lifecycle
+spec:
+  description: Verify VPC and VPCAttachments reach ready state
+  steps:
+    - name: create-namespace
+      try:
+        - apply:
+            file: namespace.yaml
+    - name: create-vpc-resources
+      try:
+        - apply:
+            file: vpc.yaml
+    - name: assert-vpc-ready
+      try:
+        - assert:
+            file: assert-vpc-ready.yaml
+      finally:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Namespace
+              name: test-e2e-lifecycle

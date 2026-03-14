@@ -60,6 +60,7 @@ type VPCAttachmentStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 
 // VPCAttachment is the Schema for the vpcattachments API
 type VPCAttachment struct {

@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: test-e2e-connectivity
+  labels:
+    app: region1
+status:
+  phase: Running
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: test-e2e-connectivity
+  labels:
+    app: region2
+status:
+  phase: Running
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: test-e2e-connectivity
+  labels:
+    app: region3
+status:
+  phase: Running

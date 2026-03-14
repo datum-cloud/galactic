@@ -21,6 +21,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -44,6 +45,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(galacticv1alpha.AddToScheme(scheme))
+	utilruntime.Must(nadv1.SchemeBuilder.AddToScheme(scheme))
 }
 
 type operatorFlags struct {
@@ -52,6 +54,7 @@ type operatorFlags struct {
 	probeAddr            string
 	secureMetrics        bool
 	enableHTTP2          bool
+	webhookCertPath      string
 	tlsOpts              []func(*tls.Config)
 }
 
@@ -79,6 +82,8 @@ via mutation webhooks.`,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	cmd.Flags().BoolVar(&flags.enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	cmd.Flags().StringVar(&flags.webhookCertPath, "webhook-cert-path", "/tmp/k8s-webhook-server/serving-certs",
+		"The path to the directory containing the webhook server TLS certificate and key.")
 
 	return cmd
 }
@@ -105,7 +110,8 @@ func runOperator(flags *operatorFlags) error {
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{
-		TLSOpts: flags.tlsOpts,
+		TLSOpts:  flags.tlsOpts,
+		CertDir:  flags.webhookCertPath,
 	})
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: galactic-mqtt-config
+  namespace: galactic-mqtt
+  labels:
+    app: galactic-mqtt
+data:
+  mosquitto.conf: |
+    listener 1883
+    allow_anonymous true
+    persistence false

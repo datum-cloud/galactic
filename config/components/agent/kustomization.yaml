@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: galactic-agent
+resources:
+  - ../../agent
+  - namespace.yaml
+  - configmap-config-gen.yaml
+images:
+  - name: ghcr.io/datum-cloud/galactic
+    newName: ghcr.io/datum-cloud/galactic
+    newTag: e2e-local
+patches:
+  - path: config-gen-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-agent

@@ -26,6 +26,7 @@ type VPCStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 
 // VPC is the Schema for the vpcs API
 type VPC struct {

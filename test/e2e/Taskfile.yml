@@ -1,0 +1,227 @@
+version: '3'
+
+vars:
+  E2E_CLUSTER_NAME: galactic-e2e
+  KIND_CONFIG: "{{.TASKFILE_DIR}}/kind-config.yaml"
+  KIND_IMAGE: kindest/node:v1.34.0
+  KUBECONFIG: "{{.TASKFILE_DIR}}/.kubeconfig"
+  REPO_ROOT: "{{.TASKFILE_DIR}}/../.."
+  E2E_IMG: ghcr.io/datum-cloud/galactic:e2e-local
+  ROUTER_IMG: ghcr.io/datum-cloud/galactic-router:e2e-local
+
+env:
+  CLUSTER_NAME: galactic-e2e
+
+includes:
+  infra:
+    taskfile: ./test-infra/Taskfile.yml
+    optional: true
+    vars:
+      CLUSTER_NAME: galactic-e2e
+      KUBECONFIG: "{{.TASKFILE_DIR}}/.kubeconfig"
+
+tasks:
+  default:
+    desc: Run the full E2E suite (setup, deploy, test, teardown)
+    cmds:
+      - task: cluster-create
+      - task: images-load
+      - task: deploy
+      - task: test
+      - task: cluster-delete
+
+  cluster-create:
+    desc: Create the kind cluster for E2E tests
+    cmds:
+      # Increase inotify limits for Multus and other file-watching components
+      - sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288 || true
+      - kind create cluster
+          --name {{.CLUSTER_NAME}}
+          --config {{.KIND_CONFIG}}
+          --image {{.KIND_IMAGE}}
+          --kubeconfig {{.KUBECONFIG}}
+          --wait 120s
+      # In Docker-outside-of-Docker devcontainers the API server port binding maps
+      # to the host machine, not the devcontainer. Patch the kubeconfig server URL
+      # to use the control-plane container's IP on the kind Docker bridge network.
+      - |
+        CP_IP=$(docker inspect {{.CLUSTER_NAME}}-control-plane \
+          --format '{{`{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}`}}' 2>/dev/null | head -1)
+        if [ -n "$CP_IP" ]; then
+          KUBECONFIG={{.KUBECONFIG}} kubectl config set-cluster kind-{{.CLUSTER_NAME}} \
+            --server=https://${CP_IP}:6443
+        fi
+      # Connect the devcontainer to the kind network so it can reach cluster IPs
+      - |
+        CONTAINER_ID=$(cat /proc/self/cgroup 2>/dev/null | grep -o 'docker/[a-f0-9]*' | head -1 | cut -d/ -f2 || hostname)
+        docker network connect kind "${CONTAINER_ID}" 2>/dev/null || true
+    status:
+      - kind get clusters | grep -q {{.CLUSTER_NAME}}
+
+  cluster-delete:
+    desc: Delete the E2E kind cluster
+    cmds:
+      - kind delete cluster --name {{.CLUSTER_NAME}}
+
+  images-build:
+    desc: Build galactic and router images with the e2e-local tag
+    dir: "{{.TASKFILE_DIR}}/../.."
+    cmds:
+      - docker build -t {{.E2E_IMG}} -f build/Dockerfile .
+      - docker build -t {{.ROUTER_IMG}} -f router/Dockerfile router/
+
+  images-load:
+    desc: Load locally-built images into the kind cluster
+    cmds:
+      - kind load docker-image {{.E2E_IMG}} --name {{.CLUSTER_NAME}}
+      - kind load docker-image {{.ROUTER_IMG}} --name {{.CLUSTER_NAME}}
+      - kind load docker-image gobgpd:e2e-local --name {{.CLUSTER_NAME}}
+
+  deploy:
+    desc: Deploy all system components in order
+    cmds:
+      - task: deploy-crds
+      - task: deploy-cilium
+      - task: deploy-flux
+      - task: deploy-cert-manager
+      - task: deploy-multus
+      - task: deploy-mqtt
+      - task: deploy-node-setup
+      - task: deploy-bgp
+      - task: deploy-cni-installer
+      - task: deploy-operator
+      - task: deploy-router
+      - task: deploy-agent
+
+  # --- Dependencies (third-party) ---
+  # flux-system and cert-manager use test-infra Taskfile tasks directly.
+  # Cilium, Multus, and MQTT have galactic-specific config and use local kustomize.
+
+  deploy-crds:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/crd
+      - KUBECONFIG={{.KUBECONFIG}} kubectl wait
+          --for=condition=Established
+          crd/vpcs.galactic.datumapis.com
+          crd/vpcattachments.galactic.datumapis.com
+          --timeout=60s
+
+  deploy-flux:
+    desc: Install FluxCD via test-infra submodule
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.TASKFILE_DIR}}/test-infra/components/flux
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n flux-system wait
+          --for=condition=Available
+          deployment/helm-controller
+          deployment/source-controller
+          deployment/kustomize-controller
+          --timeout=300s
+
+  deploy-cert-manager:
+    desc: Install cert-manager via test-infra submodule
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.TASKFILE_DIR}}/test-infra/components/cert-manager
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n cert-manager wait
+          --for=condition=Ready
+          helmrelease/cert-manager
+          --timeout=300s
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n cert-manager wait
+          --for=condition=Available
+          deployment/cert-manager
+          deployment/cert-manager-webhook
+          --timeout=120s
+
+  deploy-cilium:
+    desc: Install Cilium via Helm (bootstrapping, before Flux)
+    cmds:
+      - helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+      - helm repo update cilium
+      - KUBECONFIG={{.KUBECONFIG}} helm upgrade --install cilium cilium/cilium
+          --version 1.17.3
+          --namespace kube-system
+          --set cni.exclusive=false
+          --set ipam.mode=kubernetes
+          --set kubeProxyReplacement=false
+          --set ipv6.enabled=true
+          --wait
+          --timeout 3m
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n kube-system wait
+          --for=condition=Ready
+          pod -l app.kubernetes.io/name=cilium-agent
+          --timeout=180s
+
+  deploy-multus:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/dependencies/multus
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n kube-system wait
+          --for=condition=Ready
+          pod -l app=multus
+          --timeout=120s
+
+  deploy-mqtt:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/dependencies/mqtt
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-mqtt wait
+          --for=condition=Available
+          deployment/galactic-mqtt
+          --timeout=60s
+
+  # --- Components (galactic system) ---
+
+  deploy-operator:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/operator
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-operator-system wait
+          --for=condition=Available
+          deployment/galactic-operator-controller-manager
+          --timeout=120s
+
+  deploy-node-setup:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/node-setup
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-agent wait
+          --for=condition=Ready
+          pod -l app.kubernetes.io/name=galactic-node-setup
+          --timeout=60s
+
+  deploy-bgp:
+    desc: Deploy GoBGP BGP daemon for SRv6 underlay routing
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/bgp
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-bgp wait
+          --for=condition=Ready
+          pod -l app.kubernetes.io/name=bgp
+          --timeout=120s
+
+  deploy-cni-installer:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/cni-installer
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-agent wait
+          --for=condition=Ready
+          pod -l app.kubernetes.io/name=galactic-cni-installer
+          --timeout=60s
+
+  deploy-router:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/router
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-router wait
+          --for=condition=Available
+          deployment/galactic-router
+          --timeout=60s
+
+  deploy-agent:
+    cmds:
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/agent
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-agent wait
+          --for=condition=Ready
+          pod -l app.kubernetes.io/name=galactic-agent
+          --timeout=120s
+
+  test:
+    desc: Run the Chainsaw E2E test suite
+    env:
+      KUBECONFIG: "{{.KUBECONFIG}}"
+    cmds:
+      - chainsaw test
+          --test-dir {{.TASKFILE_DIR}}/tests
+          --config {{.TASKFILE_DIR}}/chainsaw-config.yaml

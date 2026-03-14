@@ -1,0 +1,51 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: system-readiness
+spec:
+  description: Verify all Galactic system components are healthy
+  steps:
+    - name: operator-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: galactic-operator-controller-manager
+                namespace: galactic-operator-system
+              status:
+                (conditions[?type=='Available'].status | [0]): "True"
+    - name: router-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: galactic-router
+                namespace: galactic-router
+              status:
+                (conditions[?type=='Available'].status | [0]): "True"
+    - name: agent-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: galactic-agent
+                namespace: galactic-agent
+              status:
+                (numberReady == desiredNumberScheduled): true
+    - name: mqtt-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: galactic-mqtt
+                namespace: galactic-mqtt
+              status:
+                (conditions[?type=='Available'].status | [0]): "True"

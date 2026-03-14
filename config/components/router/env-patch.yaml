@@ -1,0 +1,14 @@
+- op: replace
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: IfNotPresent
+- op: add
+  path: /spec/template/spec/containers/0/env
+  value:
+    - name: MQTT_URL
+      value: "tcp://mqtt.galactic-mqtt:1883"
+    - name: MQTT_CLIENTID
+      value: "galactic-router"
+    - name: MQTT_USERNAME
+      value: "galactic-router"
+    - name: MQTT_TOPIC_BASE
+      value: "galactic"

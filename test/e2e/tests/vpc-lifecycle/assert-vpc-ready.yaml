@@ -1,0 +1,31 @@
+apiVersion: galactic.datumapis.com/v1alpha
+kind: VPC
+metadata:
+  name: main
+  namespace: test-e2e-lifecycle
+status:
+  ready: true
+---
+apiVersion: galactic.datumapis.com/v1alpha
+kind: VPCAttachment
+metadata:
+  name: region1
+  namespace: test-e2e-lifecycle
+status:
+  ready: true
+---
+apiVersion: galactic.datumapis.com/v1alpha
+kind: VPCAttachment
+metadata:
+  name: region2
+  namespace: test-e2e-lifecycle
+status:
+  ready: true
+---
+apiVersion: galactic.datumapis.com/v1alpha
+kind: VPCAttachment
+metadata:
+  name: region3
+  namespace: test-e2e-lifecycle
+status:
+  ready: true

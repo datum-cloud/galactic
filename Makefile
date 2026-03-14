@@ -14,6 +14,10 @@ endif
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
 
+# DOCKER_API_VERSION pins the Docker client API version to maintain compatibility
+# when the Docker CLI version exceeds what the daemon supports (e.g. in devcontainers).
+export DOCKER_API_VERSION ?= 1.43
+
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
@@ -61,34 +65,28 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	GOOS=linux KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= galactic-test-e2e
+##@ E2E Testing
 
-.PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+E2E_CLUSTER ?= galactic-e2e
+
+.PHONY: build-e2e-images
+build-e2e-images: ## Build galactic and router images with e2e-local tag
+	# --output type=docker forces a single-platform Docker-format image (not OCI manifest list)
+	# so that 'kind load docker-image' can unpack it correctly in the cluster nodes.
+	$(CONTAINER_TOOL) build --output type=docker -t ghcr.io/datum-cloud/galactic:e2e-local -f build/Dockerfile .
+	$(CONTAINER_TOOL) build --output type=docker -t ghcr.io/datum-cloud/galactic-router:e2e-local -f router/Dockerfile router/
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+test-e2e: build-e2e-images ## Run the full E2E suite (create cluster, deploy, test, teardown)
+	cd test/e2e && task default
+
+.PHONY: setup-test-e2e
+setup-test-e2e: build-e2e-images ## Set up the E2E cluster and deploy components (no test)
+	cd test/e2e && task cluster-create images-load deploy
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+cleanup-test-e2e: ## Tear down the E2E cluster
+	cd test/e2e && task cluster-delete
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -195,10 +193,12 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+CHAINSAW ?= $(LOCALBIN)/chainsaw
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
+CHAINSAW_VERSION ?= v0.2.12
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
@@ -232,6 +232,12 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: chainsaw
+chainsaw: $(CHAINSAW) ## Install chainsaw
+$(CHAINSAW): $(LOCALBIN)
+	test -s $(LOCALBIN)/chainsaw || \
+	GOBIN=$(LOCALBIN) go install github.com/kyverno/chainsaw@$(CHAINSAW_VERSION)
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

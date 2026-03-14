@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-cni-installer
+  namespace: galactic-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-cni-installer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-cni-installer
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      initContainers:
+        - name: install-standard-cni-plugins
+          # Install the host-device and static CNI plugins (from the standard
+          # containernetworking plugins release) into the host CNI bin directory.
+          # The galactic CNI plugin delegates to host-device for interface attachment
+          # inside pod netns and uses the static IPAM plugin to assign IP addresses.
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              # Skip if already installed
+              if [ -f /opt/cni/bin/host-device ] && [ -f /opt/cni/bin/static ]; then
+                echo "host-device and static already installed, skipping"
+                exit 0
+              fi
+              ARCH=$(uname -m)
+              case "$ARCH" in
+                x86_64)  ARCH_TAG=amd64 ;;
+                aarch64) ARCH_TAG=arm64 ;;
+                *)       echo "unsupported arch: $ARCH"; exit 1 ;;
+              esac
+              VERSION=v1.6.0
+              URL="https://github.com/containernetworking/plugins/releases/download/${VERSION}/cni-plugins-linux-${ARCH_TAG}-${VERSION}.tgz"
+              echo "Downloading CNI plugins from $URL"
+              wget -qO /tmp/cni-plugins.tgz "$URL"
+              tar -xzf /tmp/cni-plugins.tgz -C /opt/cni/bin ./host-device ./static
+              chmod 755 /opt/cni/bin/host-device /opt/cni/bin/static
+              echo "Installed host-device and static CNI plugins"
+          volumeMounts:
+            - name: cni-bin
+              mountPath: /opt/cni/bin
+        - name: install-cni
+          image: ghcr.io/datum-cloud/galactic:e2e-local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - /galactic
+            - cni-install
+            - --dest=/opt/cni/bin/galactic
+          volumeMounts:
+            - name: cni-bin
+              mountPath: /opt/cni/bin
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          command: ["/pause"]
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: cni-bin
+          hostPath:
+            path: /opt/cni/bin
+            type: DirectoryOrCreate
