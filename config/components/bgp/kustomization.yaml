@@ -4,3 +4,5 @@ resources:
   - namespace.yaml
   - gobgp-config.yaml
   - daemonset.yaml
+  - bgppeeringpolicy.yaml
+  - ../../crd/bgp

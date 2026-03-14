@@ -1,0 +1,11 @@
+apiVersion: bgp.galactic.datumapis.com/v1alpha1
+kind: BGPConfiguration
+metadata:
+  name: default
+spec:
+  asNumber: 65000
+  listenPort: 1790
+  routerIDSource: NodeIP
+  addressFamilies:
+    - afi: IPv6
+      safi: Unicast

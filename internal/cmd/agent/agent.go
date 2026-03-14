@@ -31,8 +31,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"go.datum.net/galactic/internal/agent/bgp"
+	"go.datum.net/galactic/internal/agent/nodepeer"
+	"go.datum.net/galactic/internal/agent/nodeutil"
 	"go.datum.net/galactic/internal/agent/srv6"
-	"go.datum.net/galactic/internal/agent/underlay"
 	"go.datum.net/galactic/pkg/common/util"
 	"go.datum.net/galactic/pkg/proto/local"
 	"go.datum.net/galactic/pkg/proto/remote"
@@ -215,25 +217,45 @@ func runAgent() error {
 		return r.Run(ctx)
 	})
 
-	// Start underlay route controller if NODE_NAME is set (running in-cluster)
+	// Start BGP CRD controller and node auto-peer operator if NODE_NAME is set (running in-cluster).
 	if nodeName := os.Getenv("NODE_NAME"); nodeName != "" {
-		cfg, err := rest.InClusterConfig()
+		restCfg, err := rest.InClusterConfig()
 		if err != nil {
-			log.Printf("underlay: no in-cluster config, skipping: %v", err)
+			log.Printf("bgp: no in-cluster config, skipping: %v", err)
 		} else {
-			k8sClient, err := kubernetes.NewForConfig(cfg)
+			k8sClient, err := kubernetes.NewForConfig(restCfg)
 			if err != nil {
 				return fmt.Errorf("create k8s client: %w", err)
 			}
-			ctrl := underlay.NewController(underlay.Config{
-				GoBGPAddr: "127.0.0.1:50051",
-				LocalNode: nodeName,
-				SRv6Net:   viper.GetString("srv6_net"),
-				BGPPort:   1790,
-				BGPAS:     65000,
-			}, k8sClient)
+
+			// Resolve local node's IPv6 address for use by the node auto-peer operator.
+			localIPv6, err := nodeutil.LocalNodeIPv6(ctx, k8sClient, nodeName)
+			if err != nil {
+				log.Printf("bgp: could not resolve local IPv6 (node auto-peer will set empty localAddress): %v", err)
+			}
+
+			localIPv6Str := ""
+			if localIPv6 != nil {
+				localIPv6Str = localIPv6.String()
+			}
+
+			// Start the BGP CRD controller (connects to GoBGP, reconciles BGPConfiguration + BGPPeer).
 			g.Go(func() error {
-				return ctrl.Run(ctx)
+				return bgp.Run(ctx, bgp.ControllerOptions{
+					NodeName: nodeName,
+					SRv6Net:  viper.GetString("srv6_net"),
+				})
+			})
+
+			// Start the node auto-peer operator (watches Nodes, produces BGPPeer resources).
+			// It shares the same manager setup via a separate goroutine, but needs its own
+			// manager since it depends on the BGP scheme. We run it as a lightweight wrapper
+			// that delegates to the nodepeer package.
+			g.Go(func() error {
+				return nodepeer.Run(ctx, nodepeer.Options{
+					NodeName:      nodeName,
+					LocalNodeIPv6: localIPv6Str,
+				})
 			})
 		}
 	}

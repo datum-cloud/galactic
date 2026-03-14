@@ -1,0 +1,9 @@
+apiVersion: bgp.galactic.datumapis.com/v1alpha1
+kind: BGPPeeringPolicy
+metadata:
+  name: intra-cluster-mesh
+spec:
+  selector:
+    matchLabels:
+      bgp.galactic.datumapis.com/type: node
+  mode: mesh

@@ -187,7 +187,20 @@ tasks:
   deploy-bgp:
     desc: Deploy GoBGP BGP daemon for SRv6 underlay routing
     cmds:
+      # Apply infrastructure resources (CRDs, daemonset, configmap) first.
       - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/bgp
+      # Wait for BGP CRDs to be established before creating instances.
+      - KUBECONFIG={{.KUBECONFIG}} kubectl wait
+          --for=condition=Established
+          crd/bgpconfigurations.bgp.galactic.datumapis.com
+          crd/bgpsessions.bgp.galactic.datumapis.com
+          crd/bgpendpoints.bgp.galactic.datumapis.com
+          crd/bgppeeringpolicies.bgp.galactic.datumapis.com
+          --timeout=60s
+      # Apply CRD instances after the types are registered.
+      - KUBECONFIG={{.KUBECONFIG}} kubectl apply
+          -f {{.REPO_ROOT}}/config/components/bgp/bgpconfiguration.yaml
+          -f {{.REPO_ROOT}}/config/components/bgp/bgppeeringpolicy.yaml
       - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-bgp wait
           --for=condition=Ready
           pod -l app.kubernetes.io/name=bgp
