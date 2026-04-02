@@ -1,0 +1,51 @@
+@startuml v2_bgp_topology
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_TOP_DOWN()
+
+title Galactic VPC v2 - BGP Topology
+
+System_Boundary(region_a, "Region A (us-east-1)") {
+    System_Boundary(rr_cluster_a, "Route Reflector Cluster") {
+        Container(rr_a0, "RR-0", "GoBGP", "Primary")
+        Container(rr_a1, "RR-1", "GoBGP", "Secondary")
+        Container(rr_a2, "RR-2", "GoBGP", "Tertiary")
+    }
+
+    Container(agent_a1, "Agent Node-1", "GoBGP", "BGP Client")
+    Container(agent_a2, "Agent Node-2", "GoBGP", "BGP Client")
+    Container(agent_a3, "Agent Node-3", "GoBGP", "BGP Client")
+}
+
+System_Boundary(region_b, "Region B (us-west-2)") {
+    System_Boundary(rr_cluster_b, "Route Reflector Cluster") {
+        Container(rr_b0, "RR-0", "GoBGP", "Primary")
+        Container(rr_b1, "RR-1", "GoBGP", "Secondary")
+    }
+
+    Container(agent_b1, "Agent Node-1", "GoBGP", "BGP Client")
+    Container(agent_b2, "Agent Node-2", "GoBGP", "BGP Client")
+}
+
+' RR full mesh within cluster A
+Rel_R(rr_a0, rr_a1, "iBGP")
+Rel_R(rr_a1, rr_a2, "iBGP")
+Rel_D(rr_a0, rr_a2, "iBGP")
+
+' RR mesh within cluster B
+Rel_R(rr_b0, rr_b1, "iBGP")
+
+' Agents to RRs (Region A)
+Rel_U(agent_a1, rr_a0, "iBGP")
+Rel_U(agent_a2, rr_a1, "iBGP")
+Rel_U(agent_a3, rr_a2, "iBGP")
+
+' Agents to RRs (Region B)
+Rel_U(agent_b1, rr_b0, "iBGP")
+Rel_U(agent_b2, rr_b1, "iBGP")
+
+' Inter-region peering
+Rel_R(rr_a0, rr_b0, "Inter-region iBGP", "VPNv6")
+
+@enduml

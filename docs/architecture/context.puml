@@ -1,0 +1,23 @@
+@startuml C4_Context
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC - System Context
+
+Person(admin, "Platform Admin", "Manages VPC and network configurations")
+Person(developer, "Developer", "Deploys workloads with VPC attachments")
+
+System(galactic, "Galactic VPC Platform", "Multi-cloud VPC connectivity using SRv6 segment routing")
+
+System_Ext(k8s, "Kubernetes Clusters", "Multiple clusters across regions/clouds")
+System_Ext(mqtt, "MQTT Broker", "Message broker for control plane")
+System_Ext(underlay, "IPv6 Underlay Network", "Physical/virtual network infrastructure")
+
+Rel(admin, galactic, "Configures VPCs", "kubectl/API")
+Rel(developer, galactic, "Attaches pods to VPCs", "Annotations")
+Rel(galactic, k8s, "Deploys to", "Kubernetes API")
+Rel(galactic, mqtt, "Coordinates routes via", "MQTT")
+Rel(galactic, underlay, "Encapsulates traffic over", "SRv6")
+
+@enduml

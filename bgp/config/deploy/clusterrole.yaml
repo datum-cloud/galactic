@@ -1,0 +1,64 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bgp-operator
+rules:
+  # Node access: resolve IPv6 addresses for route watcher and config reconciler.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # BGPConfiguration: read global BGP config, update status.
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpconfigurations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpconfigurations/status"]
+    verbs: ["get", "update", "patch"]
+  # BGPEndpoint: read endpoints to resolve session peers.
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpendpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpendpoints/status"]
+    verbs: ["get", "update", "patch"]
+  # BGPSession: full management — operator creates/updates/deletes sessions.
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpsessions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpsessions/status"]
+    verbs: ["get", "update", "patch"]
+  # BGPPeeringPolicy: read policies, update status.
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgppeeringpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgppeeringpolicies/status"]
+    verbs: ["get", "update", "patch"]
+  # BGPAdvertisement: full management.
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpadvertisements"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpadvertisements/status"]
+    verbs: ["get", "update", "patch"]
+  # BGPRoutePolicy: full management.
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgproutepolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgproutepolicies/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bgp-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bgp-operator
+subjects:
+  - kind: ServiceAccount
+    name: bgp-operator
+    namespace: bgp-system

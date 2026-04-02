@@ -1,0 +1,44 @@
+@startuml v2_data_plane
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC v2 - Adaptive Data Plane Selection
+
+rectangle "Node Capabilities Detection" as detect #LightGray {
+    rectangle "Check BlueField DPU" as check_dpu
+    rectangle "Check XDP Support" as check_xdp
+    rectangle "Fallback to Kernel" as check_kernel
+}
+
+rectangle "Data Plane Options" as options {
+    rectangle "BlueField-3 DPU" as dpu #LightGreen {
+        rectangle "ConnectX-7 ASIC" as cx7
+        rectangle "SRv6 Push/Remove\nin hardware" as dpu_srv6
+        rectangle "Line rate\n0% CPU" as dpu_perf
+    }
+
+    rectangle "eBPF/XDP" as xdp #LightBlue {
+        rectangle "XDP program\nat driver level" as xdp_prog
+        rectangle "SRv6 encap/decap\nin eBPF" as xdp_srv6
+        rectangle "10-26 Mpps\nper core" as xdp_perf
+    }
+
+    rectangle "Linux Kernel" as kernel #LightYellow {
+        rectangle "VRF + seg6 module" as kernel_vrf
+        rectangle "Standard netfilter\npath" as kernel_path
+        rectangle "1-5 Mpps\n(baseline)" as kernel_perf
+    }
+}
+
+rectangle "Selection Logic" as logic #White {
+    rectangle "if DPU.SRv6Full:\n  return DPUDataPlane\nelif XDP.Supported:\n  return XDPDataPlane\nelse:\n  return KernelDataPlane" as code
+}
+
+check_dpu -[hidden]D-> check_xdp
+check_xdp -[hidden]D-> check_kernel
+
+detect -R-> logic
+logic -R-> options
+
+@enduml

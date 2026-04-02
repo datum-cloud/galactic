@@ -8,32 +8,27 @@ kind: ClusterRole
 metadata:
   name: galactic-agent
 rules:
+  # Nodes: nodepeer operator watches nodes; agent annotates its own node.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
+    verbs: ["get", "list", "watch", "patch"]
+  # BGPConfiguration: nodepeer reads AS number from the global config.
+  - apiGroups: ["bgp.miloapis.com"]
     resources: ["bgpconfigurations"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
-    resources: ["bgpconfigurations/status"]
-    verbs: ["get", "update", "patch"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
+  # BGPEndpoint: nodepeer creates/updates/deletes endpoints for each node.
+  - apiGroups: ["bgp.miloapis.com"]
     resources: ["bgpendpoints"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
+  - apiGroups: ["bgp.miloapis.com"]
     resources: ["bgpendpoints/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
-    resources: ["bgpsessions"]
+  # BGPAdvertisement: nodepeer creates SRv6 prefix advertisements per node.
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpadvertisements"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
-    resources: ["bgpsessions/status"]
-    verbs: ["get", "update", "patch"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
-    resources: ["bgppeeringpolicies"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["bgp.galactic.datumapis.com"]
-    resources: ["bgppeeringpolicies/status"]
+  - apiGroups: ["bgp.miloapis.com"]
+    resources: ["bgpadvertisements/status"]
     verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

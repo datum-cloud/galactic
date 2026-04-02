@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gobgp-config
+  namespace: bgp-system
+data:
+  gobgp.conf: |
+    [global.config]
+      as = 65000
+      router-id = "NODE_IP_PLACEHOLDER"
+      local-address-list = ["NODE_IP_PLACEHOLDER"]
+      port = 1790

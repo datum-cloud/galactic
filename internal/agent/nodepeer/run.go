@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	bgpv1alpha1 "go.datum.net/galactic/pkg/apis/bgp/v1alpha1"
+	bgpv1alpha1 "go.miloapis.com/bgp/api/v1alpha1"
 )
 
 // Options holds runtime configuration for the node auto-peer operator.

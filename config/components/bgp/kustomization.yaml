@@ -1,8 +1,36 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+
+# Use the bgp module's deploy manifests as the base.
+# This brings in CRDs, RBAC, the ConfigMap, and the DaemonSet.
 resources:
-  - namespace.yaml
-  - gobgp-config.yaml
-  - daemonset.yaml
-  - bgppeeringpolicy.yaml
-  - ../../crd/bgp
+  - ../../../bgp/config/deploy
+
+# Patch images to the galactic e2e tags.
+images:
+  - name: ghcr.io/datum-cloud/bgp
+    newName: ghcr.io/datum-cloud/bgp
+    newTag: e2e-local
+  - name: gobgpd
+    newName: gobgpd
+    newTag: e2e-local
+
+# Galactic-specific env var patches for the BGP operator container.
+patches:
+  - target:
+      kind: DaemonSet
+      name: bgp
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: LOCAL_ENDPOINT
+            value: "node-$(NODE_NAME)"
+          - name: SRV6_NET
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.annotations['galactic.datumapis.com/srv6-net']

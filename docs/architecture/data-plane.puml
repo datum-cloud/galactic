@@ -1,0 +1,34 @@
+@startuml C4_DataPlane
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC - Data Plane Components
+
+System_Boundary(node, "Kubernetes Node") {
+    Container_Boundary(pod, "Pod with VPC Attachment") {
+        Component(container, "Container", "Application", "User workload")
+        Component(guest_iface, "Guest Interface", "veth (G___G)", "Pod-side network interface")
+    }
+
+    Container_Boundary(host_ns, "Host Network Namespace") {
+        Component(host_iface, "Host Interface", "veth (G___H)", "Host-side of veth pair")
+        Component(vrf, "VRF", "Routing Table N", "Per-attachment isolation")
+        Component(ingress_route, "Ingress Route", "SEG6LOCAL End.DT46", "Decap SRv6 to VRF")
+        Component(egress_route, "Egress Routes", "SEG6 Encap", "Encap to remote SRv6 endpoints")
+        Component(lo_galactic, "lo-galactic", "Loopback", "SRv6 tunnel output device")
+    }
+}
+
+System_Ext(remote, "Remote Node", "Other cluster node with VPC attachment")
+
+Rel_D(container, guest_iface, "Sends/receives traffic")
+Rel_D(guest_iface, host_iface, "veth pair")
+Rel_D(host_iface, vrf, "Attached to")
+Rel_R(vrf, egress_route, "Lookups for remote networks")
+Rel_D(egress_route, lo_galactic, "Encapsulates via")
+Rel_D(lo_galactic, remote, "SRv6 tunnel", "IPv6 + SRH")
+Rel_U(remote, ingress_route, "Incoming SRv6 packets")
+Rel_U(ingress_route, vrf, "Decap and route to")
+
+@enduml

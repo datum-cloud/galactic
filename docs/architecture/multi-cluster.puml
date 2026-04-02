@@ -1,0 +1,41 @@
+@startuml C4_MultiCluster
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC - Multi-Cluster Deployment
+
+System_Boundary(cluster_a, "Kubernetes Cluster A (Region 1)") {
+    Container(op_a, "galactic-operator", "Go", "CRD management")
+    Container(agent_a1, "galactic-agent", "Go", "Node 1")
+    Container(agent_a2, "galactic-agent", "Go", "Node 2")
+}
+
+System_Boundary(cluster_b, "Kubernetes Cluster B (Region 2)") {
+    Container(op_b, "galactic-operator", "Go", "CRD management")
+    Container(agent_b1, "galactic-agent", "Go", "Node 1")
+    Container(agent_b2, "galactic-agent", "Go", "Node 2")
+}
+
+System_Boundary(control, "Galactic Control Plane") {
+    ContainerQueue(mqtt, "MQTT Broker", "MQTT", "Message transport")
+    Container(router, "galactic-router", "Python", "Route computation")
+    ContainerDb(db, "Registration DB", "SQLite/PostgreSQL", "Network registrations")
+}
+
+System_Ext(underlay, "IPv6 Underlay Network", "Cross-region connectivity")
+
+Rel(agent_a1, mqtt, "Register/Deregister", "MQTT")
+Rel(agent_a2, mqtt, "Register/Deregister", "MQTT")
+Rel(agent_b1, mqtt, "Register/Deregister", "MQTT")
+Rel(agent_b2, mqtt, "Register/Deregister", "MQTT")
+
+Rel(router, mqtt, "Subscribe/Publish", "MQTT")
+Rel(router, db, "Store/Query", "SQL")
+
+Rel_D(agent_a1, underlay, "SRv6 tunnel")
+Rel_D(agent_a2, underlay, "SRv6 tunnel")
+Rel_D(agent_b1, underlay, "SRv6 tunnel")
+Rel_D(agent_b2, underlay, "SRv6 tunnel")
+
+@enduml

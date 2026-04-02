@@ -1,0 +1,35 @@
+@startuml v2_containers
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC v2 - Container Diagram
+
+Person(developer, "Developer", "Deploys workloads")
+
+System_Boundary(cluster, "Kubernetes Cluster") {
+    Container(operator, "galactic-operator", "Go", "Reconciles VPC/VPCAttachment CRDs\nAssigns VPC IDs and Route Targets")
+
+    Container(agent, "galactic-agent", "Go + GoBGP", "BGP speaker on each node\nPrograms SRv6 data plane\nManages VRF routing tables")
+
+    Container(cni, "galactic-cni", "Go", "CNI plugin binary\nCreates veth pairs and VRFs\nRegisters endpoints with agent")
+
+    ContainerDb(etcd, "etcd", "Kubernetes", "Stores VPC/VPCAttachment resources")
+}
+
+System_Boundary(control, "BGP Control Plane") {
+    Container(rr, "route-reflector", "GoBGP", "Distributes VPNv6 routes\n3 replicas per region\nPeers with all agents")
+}
+
+System_Ext(underlay, "IPv6 Underlay", "SRv6 transport")
+
+Rel(developer, operator, "Creates VPC resources", "kubectl")
+Rel(operator, etcd, "Watches/Updates", "Kubernetes API")
+Rel(operator, agent, "Notifies via CRD status", "Watch")
+
+Rel(cni, agent, "Registers endpoints", "gRPC")
+Rel(agent, rr, "Advertises/receives routes", "BGP VPNv6")
+
+Rel(agent, underlay, "Encapsulates traffic", "SRv6")
+
+@enduml

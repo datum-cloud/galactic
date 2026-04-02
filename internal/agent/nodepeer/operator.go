@@ -18,8 +18,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	bgpv1alpha1 "go.datum.net/galactic/pkg/apis/bgp/v1alpha1"
 	"go.datum.net/galactic/internal/agent/nodeutil"
+	bgpv1alpha1 "go.miloapis.com/bgp/api/v1alpha1"
+)
+
+const (
+	// srv6NetAnnotation is the Node annotation key that holds the node's SRv6 /48 prefix.
+	// The node auto-peer operator reads this annotation to create BGPAdvertisement resources.
+	srv6NetAnnotation = "galactic.datumapis.com/srv6-net"
 )
 
 // Operator reconciles corev1.Node objects into BGPEndpoint resources.
@@ -71,8 +77,8 @@ func (o *Operator) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 		ObjectMeta: metav1.ObjectMeta{
 			Name: endpointName,
 			Labels: map[string]string{
-				"bgp.galactic.datumapis.com/type": "node",
-				"bgp.galactic.datumapis.com/node": node.Name,
+				"bgp.miloapis.com/type": "node",
+				"bgp.miloapis.com/node": node.Name,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -89,7 +95,7 @@ func (o *Operator) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 		},
 	}
 
-	// Create or update.
+	// Create or update the BGPEndpoint.
 	var existing bgpv1alpha1.BGPEndpoint
 	err = o.Get(ctx, types.NamespacedName{Name: endpointName}, &existing)
 	if err != nil {
@@ -101,13 +107,13 @@ func (o *Operator) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 			return ctrl.Result{}, fmt.Errorf("create BGPEndpoint %s: %w", endpointName, err)
 		}
 		log.Printf("nodepeer: created BGPEndpoint %s (address=%s)", endpointName, nodeIP)
-		return ctrl.Result{}, nil
-	}
-
-	// Update if spec differs.
-	if existing.Spec.Address != desired.Spec.Address ||
+		// Re-read to get the assigned UID for owner references on the advertisement.
+		if err := o.Get(ctx, types.NamespacedName{Name: endpointName}, &existing); err != nil {
+			return ctrl.Result{}, fmt.Errorf("get BGPEndpoint after create %s: %w", endpointName, err)
+		}
+	} else if existing.Spec.Address != desired.Spec.Address ||
 		existing.Spec.ASNumber != desired.Spec.ASNumber {
-
+		// Update if spec differs.
 		patch := client.MergeFrom(existing.DeepCopy())
 		existing.Spec = desired.Spec
 		if err := o.Patch(ctx, &existing, patch); err != nil {
@@ -116,7 +122,57 @@ func (o *Operator) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 		log.Printf("nodepeer: updated BGPEndpoint %s (address=%s)", endpointName, nodeIP)
 	}
 
+	// If the node has an SRv6 net annotation, create/update a BGPAdvertisement
+	// to inject that prefix into GoBGP. Owner reference on BGPEndpoint ensures GC.
+	if srv6Net, ok := node.Annotations[srv6NetAnnotation]; ok && srv6Net != "" {
+		if err := o.ensureSRv6Advertisement(ctx, &existing, node.Name, srv6Net); err != nil {
+			log.Printf("nodepeer: ensure SRv6 advertisement for %s: %v", node.Name, err)
+			// Non-fatal: BGPEndpoint is still healthy; advertisement will reconcile on next event.
+		}
+	}
+
 	return ctrl.Result{}, nil
+}
+
+// ensureSRv6Advertisement creates or updates the BGPAdvertisement for a node's SRv6 prefix.
+// The advertisement is named "node-{nodeName}-srv6" and is owned by the BGPEndpoint.
+func (o *Operator) ensureSRv6Advertisement(ctx context.Context, endpoint *bgpv1alpha1.BGPEndpoint, nodeName, srv6Net string) error {
+	advertName := "node-" + nodeName + "-srv6"
+
+	desired := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: advertName,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(endpoint, bgpv1alpha1.GroupVersion.WithKind("BGPEndpoint")),
+			},
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			Prefixes: []string{srv6Net},
+		},
+	}
+
+	var existing bgpv1alpha1.BGPAdvertisement
+	if err := o.Get(ctx, types.NamespacedName{Name: advertName}, &existing); err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("get BGPAdvertisement %s: %w", advertName, err)
+		}
+		if createErr := o.Create(ctx, desired); createErr != nil && !errors.IsAlreadyExists(createErr) {
+			return fmt.Errorf("create BGPAdvertisement %s: %w", advertName, createErr)
+		}
+		log.Printf("nodepeer: created BGPAdvertisement %s (prefix=%s)", advertName, srv6Net)
+		return nil
+	}
+
+	// Update if the prefix list differs.
+	if len(existing.Spec.Prefixes) != 1 || existing.Spec.Prefixes[0] != srv6Net {
+		patch := client.MergeFrom(existing.DeepCopy())
+		existing.Spec.Prefixes = []string{srv6Net}
+		if err := o.Patch(ctx, &existing, patch); err != nil {
+			return fmt.Errorf("patch BGPAdvertisement %s: %w", advertName, err)
+		}
+		log.Printf("nodepeer: updated BGPAdvertisement %s (prefix=%s)", advertName, srv6Net)
+	}
+	return nil
 }
 
 // deleteEndpoint removes the BGPEndpoint for a given node name if it exists.

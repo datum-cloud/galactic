@@ -1,0 +1,32 @@
+@startuml C4_Containers
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC - Container Diagram
+
+Person(developer, "Developer", "Deploys workloads")
+
+System_Boundary(galactic, "Galactic VPC Platform") {
+    Container(operator, "galactic-operator", "Go/Kubernetes", "Manages VPC/VPCAttachment CRDs, mutates pods")
+    Container(agent, "galactic-agent", "Go", "Configures SRv6 routes, bridges local/remote")
+    Container(cni, "galactic-cni", "Go", "CNI plugin for VRF and veth setup")
+    Container(router, "galactic-router", "Python", "Centralized route computation engine")
+    Container(common, "galactic-common", "Go", "Shared utilities: SRv6 encoding, VRF, sysctl")
+}
+
+System_Ext(k8s, "Kubernetes API", "Cluster control plane")
+System_Ext(mqtt, "MQTT Broker", "Message transport")
+System_Ext(kernel, "Linux Kernel", "VRF, netlink, seg6")
+
+Rel(developer, k8s, "Creates VPC resources", "kubectl")
+Rel(operator, k8s, "Watches/reconciles CRDs", "controller-runtime")
+Rel(cni, agent, "Registers networks", "gRPC unix socket")
+Rel(agent, mqtt, "Publishes registrations", "MQTT")
+Rel(agent, kernel, "Programs SRv6 routes", "netlink")
+Rel(router, mqtt, "Subscribes/publishes routes", "MQTT")
+Rel(cni, kernel, "Creates VRF/veth", "netlink")
+Rel(cni, common, "Uses")
+Rel(agent, common, "Uses")
+
+@enduml

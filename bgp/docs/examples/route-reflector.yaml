@@ -1,0 +1,101 @@
+# Route reflector iBGP topology.
+#
+# One node is designated as the route reflector. All other nodes (clients) peer
+# only with the reflector. The reflector redistributes routes between clients.
+# This reduces sessions from O(N^2) to O(N), making it suitable for larger clusters.
+#
+# The reflectorSelector must match exactly one BGPEndpoint. If it matches zero or
+# more than one, BGPPeeringPolicy sets an InvalidConfig condition and creates no sessions.
+#
+# Apply: kubectl apply -f route-reflector.yaml
+
+---
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPConfiguration
+metadata:
+  name: default
+spec:
+  asNumber: 65001
+  listenPort: 1790
+  routerIDSource: NodeIP
+
+---
+# Route reflector node. Must be highly available in production.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPEndpoint
+metadata:
+  name: node-rr-01
+  labels:
+    bgp.miloapis.com/role: route-reflector
+    bgp.miloapis.com/cluster: cluster-a
+spec:
+  address: "2001:db8:1::10"
+  asNumber: 65001
+
+---
+# Client nodes.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPEndpoint
+metadata:
+  name: node-worker-01
+  labels:
+    bgp.miloapis.com/role: node
+    bgp.miloapis.com/cluster: cluster-a
+spec:
+  address: "2001:db8:1::1"
+  asNumber: 65001
+
+---
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPEndpoint
+metadata:
+  name: node-worker-02
+  labels:
+    bgp.miloapis.com/role: node
+    bgp.miloapis.com/cluster: cluster-a
+spec:
+  address: "2001:db8:1::2"
+  asNumber: 65001
+
+---
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPEndpoint
+metadata:
+  name: node-worker-03
+  labels:
+    bgp.miloapis.com/role: node
+    bgp.miloapis.com/cluster: cluster-a
+spec:
+  address: "2001:db8:1::3"
+  asNumber: 65001
+
+---
+# BGPPeeringPolicy in route-reflector mode.
+# selector matches ALL endpoints in the cluster (reflector + clients).
+# reflectorSelector must match exactly one endpoint — the reflector.
+# The policy creates sessions: rr-01 <-> worker-01, rr-01 <-> worker-02, rr-01 <-> worker-03.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPPeeringPolicy
+metadata:
+  name: cluster-a-rr
+spec:
+  selector:
+    matchLabels:
+      bgp.miloapis.com/cluster: cluster-a
+  mode: route-reflector
+  routeReflectorConfig:
+    reflectorSelector:
+      matchLabels:
+        bgp.miloapis.com/role: route-reflector
+        bgp.miloapis.com/cluster: cluster-a
+    clusterID: "1.0.0.1"
+  sessionTemplate:
+    holdTime: 90
+    keepaliveTime: 30
+
+---
+# Verify:
+#   kubectl get bgppp cluster-a-rr -o jsonpath='{.status}'
+#   kubectl get bgpsess
+#
+# Expect 3 sessions, all with node-rr-01 as local or remote endpoint.

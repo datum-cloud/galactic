@@ -1,0 +1,28 @@
+@startuml v2_context
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC v2 - System Context
+
+Person(admin, "Platform Admin", "Manages VPCs and BGP policies")
+Person(developer, "Developer", "Deploys workloads with VPC attachments")
+Person(netops, "Network Operator", "Monitors BGP sessions and routing")
+
+System(galactic, "Galactic VPC Platform", "Multi-tenant VPC networking using SRv6 and BGP VPNv6")
+
+System_Ext(k8s, "Kubernetes Clusters", "Host workloads across multiple regions")
+System_Ext(bgp_rr, "BGP Route Reflectors", "Distribute VPNv6 routes between agents")
+System_Ext(underlay, "IPv6 Underlay Network", "Physical/virtual network for SRv6 transport")
+System_Ext(monitoring, "Observability Stack", "Metrics, logs, and traces")
+
+Rel(admin, galactic, "Configures VPCs", "kubectl/API")
+Rel(developer, galactic, "Attaches pods to VPCs", "Annotations")
+Rel(netops, galactic, "Monitors BGP state", "gobgp CLI/metrics")
+
+Rel(galactic, k8s, "Deploys to", "Kubernetes API")
+Rel(galactic, bgp_rr, "Advertises/receives routes", "BGP VPNv6")
+Rel(galactic, underlay, "Encapsulates traffic", "SRv6")
+Rel(galactic, monitoring, "Exports telemetry", "OTLP/Prometheus")
+
+@enduml

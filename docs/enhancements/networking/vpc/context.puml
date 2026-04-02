@@ -1,0 +1,41 @@
+@startuml context
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Datum Cloud Platform - VPC Service Context
+
+Person(platformAdmin, "Platform Admin", "Manages VPC networks\nand connectivity")
+Person(developer, "Developer", "Deploys workloads\ninto VPC networks")
+
+System(vpc, "VPC", "Multi-tenant network isolation.\nManages virtual networks, attachments,\nrouting, and security policy.")
+
+System(workloads, "Workloads", "Compute instances that\nattach to VPC networks")
+System(functions, "Functions", "Serverless compute with\nprivate VPC access")
+System(gateway, "Gateway", "HTTP ingress and egress\nthrough VPC networks")
+System(connectors, "Connectors", "Bridges external networks\ninto VPCs")
+System(serviceConnect, "Service Connect", "Private service-to-service\nconnectivity over\nVPC transport")
+
+' Row 1: Actors side by side
+Lay_R(platformAdmin, developer)
+
+' Row 2: VPC centered below actors
+Lay_D(platformAdmin, vpc)
+
+' Row 3: Products in a row below VPC
+Lay_R(workloads, functions)
+Lay_R(functions, gateway)
+Lay_R(gateway, connectors)
+Lay_R(connectors, serviceConnect)
+Lay_D(vpc, gateway)
+
+Rel_D(platformAdmin, vpc, "Creates and\nconfigures VPCs", "Portal / CLI / API")
+Rel_D(developer, vpc, "Attaches workloads\nto VPCs", "Annotations / API")
+
+Rel_D(vpc, workloads, "Attaches instances", "VPCAttachment")
+Rel_D(vpc, functions, "Accesses resources", "Service Connect")
+Rel_D(vpc, gateway, "Routes traffic", "Gateway API")
+Rel_D(vpc, connectors, "Tunnels networks", "MASQUE")
+Rel_D(vpc, serviceConnect, "Routes private\ntraffic", "ServicePublication")
+
+@enduml

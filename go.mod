@@ -4,6 +4,10 @@ go 1.24.0
 
 toolchain go1.24.2
 
+require go.miloapis.com/bgp v0.0.0
+
+replace go.miloapis.com/bgp => ./bgp
+
 require (
 	github.com/containernetworking/cni v1.3.0
 	github.com/coreos/go-iptables v0.8.0

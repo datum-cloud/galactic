@@ -8,6 +8,7 @@ vars:
   REPO_ROOT: "{{.TASKFILE_DIR}}/../.."
   E2E_IMG: ghcr.io/datum-cloud/galactic:e2e-local
   ROUTER_IMG: ghcr.io/datum-cloud/galactic-router:e2e-local
+  BGP_IMG: ghcr.io/datum-cloud/bgp:e2e-local
 
 env:
   CLUSTER_NAME: galactic-e2e
@@ -64,17 +65,19 @@ tasks:
       - kind delete cluster --name {{.CLUSTER_NAME}}
 
   images-build:
-    desc: Build galactic and router images with the e2e-local tag
+    desc: Build galactic, router, and bgp images with the e2e-local tag
     dir: "{{.TASKFILE_DIR}}/../.."
     cmds:
       - docker build -t {{.E2E_IMG}} -f build/Dockerfile .
       - docker build -t {{.ROUTER_IMG}} -f router/Dockerfile router/
+      - docker build -t {{.BGP_IMG}} -f bgp/build/Dockerfile bgp/
 
   images-load:
     desc: Load locally-built images into the kind cluster
     cmds:
       - kind load docker-image {{.E2E_IMG}} --name {{.CLUSTER_NAME}}
       - kind load docker-image {{.ROUTER_IMG}} --name {{.CLUSTER_NAME}}
+      - kind load docker-image {{.BGP_IMG}} --name {{.CLUSTER_NAME}}
       - kind load docker-image gobgpd:e2e-local --name {{.CLUSTER_NAME}}
 
   deploy:
@@ -185,23 +188,23 @@ tasks:
           --timeout=60s
 
   deploy-bgp:
-    desc: Deploy GoBGP BGP daemon for SRv6 underlay routing
+    desc: Deploy BGP operator DaemonSet (bgp + gobgpd sidecar) for SRv6 underlay routing
     cmds:
-      # Apply infrastructure resources (CRDs, daemonset, configmap) first.
+      # Apply infrastructure resources (CRDs, RBAC, ConfigMap, DaemonSet) first.
       - KUBECONFIG={{.KUBECONFIG}} kubectl apply -k {{.REPO_ROOT}}/config/components/bgp
       # Wait for BGP CRDs to be established before creating instances.
       - KUBECONFIG={{.KUBECONFIG}} kubectl wait
           --for=condition=Established
-          crd/bgpconfigurations.bgp.galactic.datumapis.com
-          crd/bgpsessions.bgp.galactic.datumapis.com
-          crd/bgpendpoints.bgp.galactic.datumapis.com
-          crd/bgppeeringpolicies.bgp.galactic.datumapis.com
+          crd/bgpconfigurations.bgp.miloapis.com
+          crd/bgpsessions.bgp.miloapis.com
+          crd/bgpendpoints.bgp.miloapis.com
+          crd/bgppeeringpolicies.bgp.miloapis.com
           --timeout=60s
       # Apply CRD instances after the types are registered.
       - KUBECONFIG={{.KUBECONFIG}} kubectl apply
           -f {{.REPO_ROOT}}/config/components/bgp/bgpconfiguration.yaml
           -f {{.REPO_ROOT}}/config/components/bgp/bgppeeringpolicy.yaml
-      - KUBECONFIG={{.KUBECONFIG}} kubectl -n galactic-bgp wait
+      - KUBECONFIG={{.KUBECONFIG}} kubectl -n bgp-system wait
           --for=condition=Ready
           pod -l app.kubernetes.io/name=bgp
           --timeout=120s

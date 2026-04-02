@@ -1,4 +1,4 @@
-apiVersion: bgp.galactic.datumapis.com/v1alpha1
+apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPConfiguration
 metadata:
   name: default

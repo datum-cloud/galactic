@@ -1,0 +1,28 @@
+@startuml C4_ControlPlane
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Dynamic.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC - Control Plane Message Flow
+
+participant "Pod Webhook" as webhook
+participant "galactic-cni" as cni
+participant "galactic-agent" as agent
+participant "MQTT Broker" as mqtt
+participant "galactic-router" as router
+participant "Other Agents" as others
+
+webhook -> cni : 1. CNI ADD (with VPC/Attachment IDs)
+cni -> cni : 2. Create VRF + veth pair
+cni -> agent : 3. gRPC Register(vpc, attachment, networks)
+agent -> agent : 4. Generate SRv6 endpoint
+agent -> agent : 5. Add ingress SEG6LOCAL route
+agent -> mqtt : 6. Publish Register{network, srv6_endpoint}
+mqtt -> router : 7. Deliver to router
+router -> router : 8. Store registration in DB
+router -> router : 9. Compute routes for VPC peers
+router -> mqtt : 10. Publish Route{network, segments, ADD}
+mqtt -> others : 11. Deliver to other agents
+others -> others : 12. Add egress SEG6 routes to VRF
+
+@enduml

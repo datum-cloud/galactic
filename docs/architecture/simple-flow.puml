@@ -1,0 +1,25 @@
+@startuml C4_SimpleFlow
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_TOP_DOWN()
+
+title How Galactic Works - Simple Overview
+
+Person(app_a, "Your Application", "Wants to talk to your database")
+
+System_Boundary(galactic, "Galactic VPC") {
+    Container(vpc_layer, "VPC Layer", "SRv6", "Wraps traffic in an SRv6 envelope\nwith your VPC ID for isolation")
+}
+
+System_Ext(network, "Physical Network", "Shared infrastructure\n(traffic isolated by VPC envelope)")
+
+System_Boundary(remote, "Remote Cluster/Region") {
+    Container(db, "Your Database", "PostgreSQL", "Receives traffic in\nthe same VPC")
+}
+
+Rel_D(app_a, vpc_layer, "Sends packet", "10.0.2.5")
+Rel_D(vpc_layer, network, "SRv6 encapsulated", "VPC ID + segment list")
+Rel_D(network, db, "Decapsulated and delivered", "Original packet")
+
+@enduml

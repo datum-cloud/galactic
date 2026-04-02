@@ -1,0 +1,48 @@
+@startuml v2_multi_region
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC v2 - Multi-Region Deployment
+
+System_Boundary(region_a, "Region A (us-east-1)") {
+    System_Boundary(cluster_a1, "Cluster A1") {
+        Container(op_a1, "operator", "Go", "CRD mgmt")
+        Container(agent_a1, "agents", "Go+BGP", "Nodes 1-50")
+    }
+    System_Boundary(cluster_a2, "Cluster A2") {
+        Container(op_a2, "operator", "Go", "CRD mgmt")
+        Container(agent_a2, "agents", "Go+BGP", "Nodes 1-50")
+    }
+    Container(rr_a, "Route Reflectors", "GoBGP", "3 replicas")
+    Container(gw_a, "Regional Gateway", "VPP", "SRv6 + WireGuard")
+}
+
+System_Boundary(region_b, "Region B (eu-west-1)") {
+    System_Boundary(cluster_b1, "Cluster B1") {
+        Container(op_b1, "operator", "Go", "CRD mgmt")
+        Container(agent_b1, "agents", "Go+BGP", "Nodes 1-100")
+    }
+    Container(rr_b, "Route Reflectors", "GoBGP", "3 replicas")
+    Container(gw_b, "Regional Gateway", "VPP", "SRv6 + WireGuard")
+}
+
+System_Ext(wan, "WAN / Internet", "Inter-region connectivity")
+
+' Intra-region BGP
+Rel(agent_a1, rr_a, "iBGP", "VPNv6")
+Rel(agent_a2, rr_a, "iBGP", "VPNv6")
+Rel(agent_b1, rr_b, "iBGP", "VPNv6")
+
+' Inter-region BGP
+Rel(rr_a, rr_b, "iBGP", "VPNv6 (summarized)")
+
+' Gateway connections
+Rel(rr_a, gw_a, "Next-hop for remote", "BGP")
+Rel(rr_b, gw_b, "Next-hop for remote", "BGP")
+
+' WAN tunnel
+Rel(gw_a, wan, "SRv6-in-WireGuard")
+Rel(wan, gw_b, "SRv6-in-WireGuard")
+
+@enduml

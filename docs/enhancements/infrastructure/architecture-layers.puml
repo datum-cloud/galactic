@@ -1,0 +1,31 @@
+@startuml architecture-layers
+top to bottom direction
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Helvetica"
+skinparam defaultFontSize 13
+skinparam shadowing false
+
+skinparam rectangle {
+  RoundCorner 8
+  BorderColor #0C1D31
+  FontColor #0C1D31
+}
+
+!$BG = "#D5E5F5"
+!$BG_EXT = "#E0E8EC"
+!$GRAY = "#4D6356"
+
+rectangle "**Fleet Networking**\n<size:11><color:$GRAY>IPAM  ·  BGP routing  ·  peering policy</color></size>" as net $BG
+rectangle "**Fleet Operations**\n<size:11><color:$GRAY>fleet agent  ·  provider adapters</color></size>" as ops $BG
+rectangle "**Asset Inventory**\n<size:11><color:$GRAY>Region  ·  Site  ·  Node  ·  Cluster  ·  NetworkDevice  ·  Link</color></size>" as inv $BG
+
+rectangle "**Galactic VPC**\n<size:11><color:$GRAY>multi-tenant SRv6</color></size>" as vpc $BG_EXT
+rectangle "**Cluster Providers**\n<size:11><color:$GRAY>Sidero Omni  ·  Cluster API</color></size>" as prov $BG_EXT
+
+ops -up-> inv
+net -up-> ops
+
+prov -right-> ops : <size:10> cluster lifecycle
+vpc -right-> net : <size:10> uses routing fabric
+
+@enduml

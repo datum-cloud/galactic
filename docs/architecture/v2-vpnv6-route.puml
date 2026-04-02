@@ -1,0 +1,53 @@
+@startuml v2_vpnv6_route
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LEFT_RIGHT()
+
+title Galactic VPC v2 - VPNv6 Route Structure
+
+rectangle "VPNv6 Route Advertisement" as route {
+    rectangle "Route Distinguisher (8 bytes)" as rd #LightBlue {
+        rectangle "Type: 0x0001\n(Admin + Number)" as rd_type
+        rectangle "Admin: 65000\n(Galactic ASN)" as rd_admin
+        rectangle "Number: VPC ID hash\n(32-bit truncation)" as rd_number
+    }
+
+    rectangle "IPv6 Prefix" as prefix #LightGreen {
+        rectangle "Tenant Network\ne.g., fd00:acme::/64" as tenant_net
+    }
+
+    rectangle "Path Attributes" as attrs #LightYellow {
+        rectangle "Next Hop\nfc00::agent-srv6-sid" as nexthop
+
+        rectangle "Extended Communities" as extcomm {
+            rectangle "Route Target\n65000:vpc-id-hash" as rt
+        }
+
+        rectangle "Tunnel Encap (Type 23)" as tunnel {
+            rectangle "Type: SRv6 (15)" as tunnel_type
+            rectangle "SID: fc00::a1b2:..." as tunnel_sid
+            rectangle "Behavior: End.DT46" as tunnel_behavior
+        }
+    }
+}
+
+note bottom of rd
+  Ensures prefix uniqueness
+  Same 10.0.0.0/8 in different
+  VPCs are distinct routes
+end note
+
+note bottom of rt
+  Controls import/export
+  Agents only accept routes
+  matching their VPC's RT
+end note
+
+note bottom of tunnel
+  Tells remote agents how
+  to encapsulate traffic
+  to reach this prefix
+end note
+
+@enduml

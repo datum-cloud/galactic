@@ -28,10 +28,11 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"go.datum.net/galactic/internal/agent/bgp"
 	"go.datum.net/galactic/internal/agent/nodepeer"
 	"go.datum.net/galactic/internal/agent/nodeutil"
 	"go.datum.net/galactic/internal/agent/srv6"
@@ -228,6 +229,21 @@ func runAgent() error {
 				return fmt.Errorf("create k8s client: %w", err)
 			}
 
+			// Annotate this node with its SRv6 prefix so the nodepeer operator can
+			// create BGPAdvertisement resources for it. This replaces the hardcoded
+			// advertiseSRv6Prefix call that was removed in Phase 2.
+			srv6Net := viper.GetString("srv6_net")
+			if srv6Net != "" && srv6Net != "fc00::/56" {
+				annotationPatch := []byte(`{"metadata":{"annotations":{"galactic.datumapis.com/srv6-net":"` + srv6Net + `"}}}`)
+				if _, patchErr := k8sClient.CoreV1().Nodes().Patch(
+					ctx, nodeName, types.MergePatchType, annotationPatch, metav1.PatchOptions{},
+				); patchErr != nil {
+					log.Printf("bgp: annotate node %s with srv6-net: %v", nodeName, patchErr)
+				} else {
+					log.Printf("bgp: annotated node %s with srv6-net=%s", nodeName, srv6Net)
+				}
+			}
+
 			// Resolve local node's IPv6 address for use by the node auto-peer operator.
 			localIPv6, err := nodeutil.LocalNodeIPv6(ctx, k8sClient, nodeName)
 			if err != nil {
@@ -239,18 +255,9 @@ func runAgent() error {
 				localIPv6Str = localIPv6.String()
 			}
 
-			// Start the BGP CRD controller (connects to GoBGP, reconciles BGPConfiguration + BGPPeer).
-			g.Go(func() error {
-				return bgp.Run(ctx, bgp.ControllerOptions{
-					NodeName: nodeName,
-					SRv6Net:  viper.GetString("srv6_net"),
-				})
-			})
-
-			// Start the node auto-peer operator (watches Nodes, produces BGPPeer resources).
-			// It shares the same manager setup via a separate goroutine, but needs its own
-			// manager since it depends on the BGP scheme. We run it as a lightweight wrapper
-			// that delegates to the nodepeer package.
+			// Start the node auto-peer operator (watches Nodes, produces BGPEndpoint and
+			// BGPAdvertisement resources). The BGP controller itself now runs in a separate
+			// bgp-operator DaemonSet pod alongside the GoBGP sidecar.
 			g.Go(func() error {
 				return nodepeer.Run(ctx, nodepeer.Options{
 					NodeName:      nodeName,

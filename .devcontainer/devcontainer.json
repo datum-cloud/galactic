@@ -48,7 +48,8 @@
 				"ms-azuretools.vscode-docker",
 				"eamodio.gitlens",
 				"davidanson.vscode-markdownlint",
-				"tamasfe.even-better-toml"
+				"tamasfe.even-better-toml",
+				"bierner.markdown-preview-github-styles"
 			],
 			"settings": {
 				"go.toolsManagement.autoUpdate": true,
@@ -128,7 +129,8 @@
 	"remoteUser": "vscode",
 	"containerEnv": {
 		"GOOS": "linux",
-		"CGO_ENABLED": "1"
+		"CGO_ENABLED": "1",
+		"PATH": "/home/vscode/.nix-profile/bin:${containerEnv:PATH}"
 	},
 	"mounts": [
 		"source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",

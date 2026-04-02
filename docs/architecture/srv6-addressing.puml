@@ -1,0 +1,42 @@
+@startuml SRv6_Addressing
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LEFT_RIGHT()
+
+title Galactic VPC - SRv6 Endpoint Addressing Scheme
+
+rectangle "IPv6 Address (128 bits)" as addr {
+    rectangle "SRv6 Network Prefix\n(64 bits)\nConfigurable, e.g. fc00::/64" as prefix #LightBlue
+    rectangle "VPC Identifier\n(48 bits)\n281 trillion tenants" as vpc #LightGreen
+    rectangle "Attachment ID\n(16 bits)\n65K per VPC" as attach #LightYellow
+}
+
+note bottom of prefix
+  Configured per deployment
+  Identifies the Galactic network
+end note
+
+note bottom of vpc
+  Randomly assigned by operator
+  Hex format: 12 characters
+  Example: a1b2c3d4e5f6
+end note
+
+note bottom of attach
+  Randomly assigned by operator
+  Hex format: 4 characters
+  Example: 1234
+end note
+
+rectangle "Example Endpoint" as example #LightGray {
+    rectangle "fc00::a1b2:c3d4:e5f6:1234" as full_addr
+}
+
+note bottom of example
+  VPC ID extractable: (addr >> 16) & 0xFFFFFFFFFFFF
+  Attachment ID extractable: addr & 0xFFFF
+  Self-describing packets - no external lookup needed
+end note
+
+@enduml

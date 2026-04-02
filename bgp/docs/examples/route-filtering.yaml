@@ -1,0 +1,57 @@
+# Route filtering: suppress more-specific prefixes.
+#
+# When a node advertises both an aggregate prefix and more-specific prefixes,
+# BGPRoutePolicy can suppress the specifics to prevent route leakage and
+# reduce RIB size on peers.
+#
+# This example:
+# - Accepts the /40 aggregate: 2001:db8:ff00::/40
+# - Rejects all more-specific prefixes within that /40 (mask lengths /41 through /48)
+# - Accepts everything else
+#
+# Statements are evaluated in order; first match wins.
+#
+# Apply: kubectl apply -f route-filtering.yaml
+
+---
+# Export policy applied to all peers.
+# Rejects /41–/48 prefixes within 2001:db8:ff00::/40.
+# The aggregate (/40 itself) falls through to the Accept statement.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPRoutePolicy
+metadata:
+  name: suppress-specifics
+spec:
+  type: Export
+  statements:
+    - prefixSet:
+        - cidr: "2001:db8:ff00::/40"
+          maskLengthMin: 41
+          maskLengthMax: 48
+      action: Reject
+    - action: Accept
+
+---
+# Import policy: reject routes from untrusted peers with a specific community.
+# Applied only to border peers (via peerSelector).
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPRoutePolicy
+metadata:
+  name: import-filter-border
+spec:
+  type: Import
+  peerSelector:
+    matchLabels:
+      bgp.miloapis.com/role: border
+  statements:
+    - prefixSet:
+        - cidr: "::/0"
+          maskLengthMin: 49
+          maskLengthMax: 128
+      action: Reject
+    - action: Accept
+
+---
+# Verify:
+#   kubectl get bgprp
+#   kubectl get bgprp suppress-specifics -o jsonpath='{.status}'

@@ -1,0 +1,67 @@
+# eBGP peering between two endpoints in different AS numbers.
+#
+# Use this pattern when peering between clusters (each with its own AS) or
+# when peering with an upstream border router.
+#
+# In this example:
+# - cluster-a has AS 65001, edge node at 2001:db8:1::1
+# - border-01 is an upstream router at AS 64512, address 2001:db8:0::1
+# - The session uses multi-hop eBGP (TTL=2) because the peers are not on the same L2 segment.
+#
+# Apply: kubectl apply -f ebgp-peering.yaml
+
+---
+# BGPEndpoint for the local cluster edge node.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPEndpoint
+metadata:
+  name: cluster-a-edge
+  labels:
+    bgp.miloapis.com/role: edge
+    bgp.miloapis.com/cluster: cluster-a
+spec:
+  address: "2001:db8:1::1"
+  asNumber: 65001
+
+---
+# BGPEndpoint for the remote border router.
+# This endpoint is created by whatever system manages border router inventory.
+# It may also be created manually by a network operator.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPEndpoint
+metadata:
+  name: border-01
+  labels:
+    bgp.miloapis.com/role: border
+spec:
+  address: "2001:db8:0::1"
+  asNumber: 64512
+
+---
+# BGPSession: manually created eBGP session between the edge and the border.
+# ebgpConfig.multiHop.ttl=2 allows one intermediate hop between them.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPSession
+metadata:
+  name: cluster-a-edge-to-border-01
+spec:
+  localEndpoint: cluster-a-edge
+  remoteEndpoint: border-01
+  holdTime: 90
+  keepaliveTime: 30
+  ebgpConfig:
+    multiHop:
+      ttl: 2
+
+---
+# Alternative: GTSM (TTL Security) for directly connected eBGP peers.
+# Uncomment and use instead of multiHop when peers are on the same L2 segment.
+#
+# ebgpConfig:
+#   ttlSecurity:
+#     ttl: 255
+
+---
+# Verify the session:
+#   kubectl get bgpsess cluster-a-edge-to-border-01
+#   kubectl get bgpsess cluster-a-edge-to-border-01 -o jsonpath='{.status.sessionState}'

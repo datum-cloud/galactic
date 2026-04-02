@@ -1,0 +1,50 @@
+# Prefix advertisement with BGP communities.
+#
+# This example shows how to advertise IPv6 prefixes into BGP with community
+# attributes attached. Communities allow downstream routers to apply traffic
+# engineering policies based on route attributes.
+#
+# The BGPAdvertisement reconciler calls GoBGP's AddPath API to inject the
+# prefixes into the local RIB. GoBGP then advertises them to established peers.
+#
+# Apply: kubectl apply -f prefix-advertisement.yaml
+
+---
+# Advertise the cluster's aggregate prefix to all peers.
+# Community 65001:100 is used by convention to mark cluster-originated routes.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPAdvertisement
+metadata:
+  name: cluster-a-aggregate
+spec:
+  prefixes:
+    - "2001:db8:ff00::/40"
+  communities:
+    - "65001:100"
+  localPref: 100
+
+---
+# Advertise a service prefix only to border peers.
+# peerSelector restricts advertisement to peers labelled as border routers.
+# Peers without the label receive the route only if another advertisement
+# without a peerSelector also covers the prefix.
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPAdvertisement
+metadata:
+  name: cluster-a-service-prefix-to-border
+spec:
+  prefixes:
+    - "2001:db8:ff10::/44"
+  communities:
+    - "65001:200"
+  peerSelector:
+    matchLabels:
+      bgp.miloapis.com/role: border
+
+---
+# Verify:
+#   kubectl get bgpadvert
+#   kubectl get bgpadvert cluster-a-aggregate -o jsonpath='{.status}'
+#
+# Check received prefixes on sessions from the receiving node:
+#   kubectl get bgpsess -o wide

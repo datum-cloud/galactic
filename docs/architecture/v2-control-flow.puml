@@ -1,0 +1,47 @@
+@startuml v2_control_flow
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Dynamic.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic VPC v2 - Control Plane Flow (Pod Startup)
+
+participant "kubelet" as kubelet
+participant "galactic-cni" as cni
+participant "galactic-agent" as agent
+participant "Route Reflector" as rr
+participant "Remote Agents" as remote
+
+kubelet -> cni : 1. CNI ADD (pod, VPC annotation)
+cni -> cni : 2. Create VRF + veth pair
+cni -> agent : 3. gRPC Register(vpc, networks)
+agent -> agent : 4. Generate SRv6 SID
+agent -> agent : 5. Install ingress route (End.DT46)
+agent -> rr : 6. BGP UPDATE (VPNv6 route)
+rr -> rr : 7. Store in RIB
+rr -> remote : 8. Reflect to VPC peers
+remote -> remote : 9. Install egress routes (seg6 encap)
+cni -> kubelet : 10. Return success
+
+note right of agent
+  SRv6 SID computed from:
+  - Locator prefix
+  - Region ID
+  - VPC ID
+  - Endpoint ID
+end note
+
+note right of rr
+  Route contains:
+  - RD: 65000:vpc-hash
+  - RT: 65000:vpc-hash
+  - Next-hop: agent SRv6 SID
+  - Tunnel encap: End.DT46
+end note
+
+note right of remote
+  Only agents with matching
+  RT import policy receive
+  the route update
+end note
+
+@enduml
