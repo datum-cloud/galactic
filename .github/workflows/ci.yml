@@ -46,7 +46,7 @@ jobs:
             ./pkg/common/util/...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: coverage.out
           fail_ci_if_error: false
@@ -75,7 +75,7 @@ jobs:
           go test -v -race -coverprofile=coverage-operator.out ./internal/operator/...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: coverage-operator.out
           fail_ci_if_error: false
