@@ -1,3 +1,7 @@
+# Copyright 2025 Datum Cloud, Inc.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Add created field to registration table
 
 Revision ID: 042d8775f6e0
