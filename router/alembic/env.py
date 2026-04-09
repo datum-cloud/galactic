@@ -1,3 +1,7 @@
+# Copyright 2025 Datum Cloud, Inc.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 from os import getenv
 from alembic import context
 from sqlmodel import SQLModel, create_engine
