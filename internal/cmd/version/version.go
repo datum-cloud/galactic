@@ -25,11 +25,12 @@ import (
 
 var (
 	// Version information - set via ldflags during build
-	Version   = "dev"
-	GitCommit = "unknown"
-	BuildDate = "unknown"
-	GoVersion = runtime.Version()
-	Platform  = fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
+	Version      = "dev"
+	GitCommit    = "unknown"
+	GitTreeState = "unknown"
+	BuildDate    = "unknown"
+	GoVersion    = runtime.Version()
+	Platform     = fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 )
 
 func NewCommand() *cobra.Command {
@@ -40,6 +41,7 @@ func NewCommand() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("Galactic Version: %s\n", Version)
 			fmt.Printf("Git Commit: %s\n", GitCommit)
+			fmt.Printf("Git Tree State: %s\n", GitTreeState)
 			fmt.Printf("Build Date: %s\n", BuildDate)
 			fmt.Printf("Go Version: %s\n", GoVersion)
 			fmt.Printf("Platform: %s\n", Platform)
