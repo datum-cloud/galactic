@@ -2,6 +2,7 @@
 ## github.com/beorn7/perks/quantile
 
 * Name: github.com/beorn7/perks/quantile
+* Version: v1.0.1
 * License: MIT
 
 ```
@@ -31,6 +32,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## github.com/cespare/xxhash/v2
 
 * Name: github.com/cespare/xxhash/v2
+* Version: v2.3.0
 * License: MIT
 
 ```
@@ -62,6 +64,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## github.com/containernetworking/cni/pkg
 
 * Name: github.com/containernetworking/cni/pkg
+* Version: v1.3.0
 * License: Apache-2.0
 
 ```
@@ -273,6 +276,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## github.com/coreos/go-iptables/iptables
 
 * Name: github.com/coreos/go-iptables/iptables
+* Version: v0.8.0
 * License: Apache-2.0
 
 ```
@@ -473,6 +477,7 @@ third-party archives.
 ## github.com/davecgh/go-spew/spew
 
 * Name: github.com/davecgh/go-spew/spew
+* Version: v1.1.1
 * License: ISC
 
 ```
@@ -497,6 +502,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ## github.com/eclipse/paho.mqtt.golang
 
 * Name: github.com/eclipse/paho.mqtt.golang
+* Version: v1.5.0
 * License: EPL-2.0
 
 ```
@@ -800,6 +806,7 @@ version(s), and exceptions or additional permissions here}."
 ## github.com/emicklei/go-restful/v3
 
 * Name: github.com/emicklei/go-restful/v3
+* Version: v3.11.0
 * License: MIT
 
 ```
@@ -830,6 +837,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## github.com/evanphx/json-patch/v5
 
 * Name: github.com/evanphx/json-patch/v5
+* Version: v5.9.11
 * License: BSD-3-Clause
 
 ```
@@ -864,6 +872,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/fsnotify/fsnotify
 
 * Name: github.com/fsnotify/fsnotify
+* Version: v1.8.0
 * License: BSD-3-Clause
 
 ```
@@ -898,6 +907,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/fxamacker/cbor/v2
 
 * Name: github.com/fxamacker/cbor/v2
+* Version: v2.7.0
 * License: MIT
 
 ```
@@ -927,6 +937,7 @@ SOFTWARE.
 ## github.com/go-logr/logr
 
 * Name: github.com/go-logr/logr
+* Version: v1.4.3
 * License: Apache-2.0
 
 ```
@@ -1137,6 +1148,7 @@ SOFTWARE.
 ## github.com/go-logr/zapr
 
 * Name: github.com/go-logr/zapr
+* Version: v1.3.0
 * License: Apache-2.0
 
 ```
@@ -1347,6 +1359,7 @@ SOFTWARE.
 ## github.com/go-openapi/jsonpointer
 
 * Name: github.com/go-openapi/jsonpointer
+* Version: v0.21.0
 * License: Apache-2.0
 
 ```
@@ -1558,6 +1571,7 @@ SOFTWARE.
 ## github.com/go-openapi/jsonreference
 
 * Name: github.com/go-openapi/jsonreference
+* Version: v0.20.2
 * License: Apache-2.0
 
 ```
@@ -1769,6 +1783,7 @@ SOFTWARE.
 ## github.com/go-openapi/swag
 
 * Name: github.com/go-openapi/swag
+* Version: v0.23.0
 * License: Apache-2.0
 
 ```
@@ -1980,6 +1995,7 @@ SOFTWARE.
 ## github.com/go-viper/mapstructure/v2
 
 * Name: github.com/go-viper/mapstructure/v2
+* Version: v2.2.1
 * License: MIT
 
 ```
@@ -2010,6 +2026,7 @@ THE SOFTWARE.
 ## github.com/gogo/protobuf
 
 * Name: github.com/gogo/protobuf
+* Version: v1.3.2
 * License: BSD-3-Clause
 
 ```
@@ -2054,6 +2071,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/google/btree
 
 * Name: github.com/google/btree
+* Version: v1.1.3
 * License: Apache-2.0
 
 ```
@@ -2265,6 +2283,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/google/gnostic-models
 
 * Name: github.com/google/gnostic-models
+* Version: v0.6.9
 * License: Apache-2.0
 
 ```
@@ -2477,6 +2496,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/google/go-cmp/cmp
 
 * Name: github.com/google/go-cmp/cmp
+* Version: v0.7.0
 * License: BSD-3-Clause
 
 ```
@@ -2513,6 +2533,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/google/uuid
 
 * Name: github.com/google/uuid
+* Version: v1.6.0
 * License: BSD-3-Clause
 
 ```
@@ -2549,6 +2570,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/gorilla/websocket
 
 * Name: github.com/gorilla/websocket
+* Version: v1.5.4-0.20250319132907-e064f32e3674
 * License: BSD-2-Clause
 
 ```
@@ -2580,6 +2602,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/josharian/intern
 
 * Name: github.com/josharian/intern
+* Version: v1.0.0
 * License: MIT
 
 ```
@@ -2610,6 +2633,7 @@ SOFTWARE.
 ## github.com/json-iterator/go
 
 * Name: github.com/json-iterator/go
+* Version: v1.1.12
 * License: MIT
 
 ```
@@ -2640,6 +2664,7 @@ SOFTWARE.
 ## github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io
 
 * Name: github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io
+* Version: v1.7.7
 * License: Apache-2.0
 
 ```
@@ -2850,6 +2875,7 @@ SOFTWARE.
 ## github.com/kenshaw/baseconv
 
 * Name: github.com/kenshaw/baseconv
+* Version: v0.1.1
 * License: MIT
 
 ```
@@ -2880,6 +2906,7 @@ SOFTWARE.
 ## github.com/lorenzosaino/go-sysctl
 
 * Name: github.com/lorenzosaino/go-sysctl
+* Version: v0.3.1
 * License: BSD-3-Clause
 
 ```
@@ -2918,6 +2945,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/mailru/easyjson
 
 * Name: github.com/mailru/easyjson
+* Version: v0.7.7
 * License: MIT
 
 ```
@@ -2934,6 +2962,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## github.com/modern-go/concurrent
 
 * Name: github.com/modern-go/concurrent
+* Version: v0.0.0-20180306012644-bacd9c7ef1dd
 * License: Apache-2.0
 
 ```
@@ -3144,6 +3173,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## github.com/modern-go/reflect2
 
 * Name: github.com/modern-go/reflect2
+* Version: v1.0.2
 * License: Apache-2.0
 
 ```
@@ -3354,6 +3384,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## github.com/munnerz/goautoneg
 
 * Name: github.com/munnerz/goautoneg
+* Version: v0.0.0-20191010083416-a7dc8b61c822
 * License: BSD-3-Clause
 
 ```
@@ -3394,6 +3425,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/pelletier/go-toml/v2
 
 * Name: github.com/pelletier/go-toml/v2
+* Version: v2.2.3
 * License: MIT
 
 ```
@@ -3425,6 +3457,7 @@ SOFTWARE.
 ## github.com/pkg/errors
 
 * Name: github.com/pkg/errors
+* Version: v0.9.1
 * License: BSD-2-Clause
 
 ```
@@ -3457,6 +3490,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil
 
 * Name: github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil
+* Version: v1.22.0
 * License: BSD-3-Clause
 
 ```
@@ -3493,6 +3527,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/prometheus/client_golang/prometheus
 
 * Name: github.com/prometheus/client_golang/prometheus
+* Version: v1.22.0
 * License: Apache-2.0
 
 ```
@@ -3703,6 +3738,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/prometheus/client_model/go
 
 * Name: github.com/prometheus/client_model/go
+* Version: v0.6.1
 * License: Apache-2.0
 
 ```
@@ -3913,6 +3949,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/prometheus/common
 
 * Name: github.com/prometheus/common
+* Version: v0.62.0
 * License: Apache-2.0
 
 ```
@@ -4123,6 +4160,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/prometheus/procfs
 
 * Name: github.com/prometheus/procfs
+* Version: v0.15.1
 * License: Apache-2.0
 
 ```
@@ -4333,6 +4371,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/sagikazarmark/locafero
 
 * Name: github.com/sagikazarmark/locafero
+* Version: v0.7.0
 * License: MIT
 
 ```
@@ -4361,6 +4400,7 @@ THE SOFTWARE.
 ## github.com/sourcegraph/conc
 
 * Name: github.com/sourcegraph/conc
+* Version: v0.3.0
 * License: MIT
 
 ```
@@ -4391,6 +4431,7 @@ SOFTWARE.
 ## github.com/spf13/afero
 
 * Name: github.com/spf13/afero
+* Version: v1.12.0
 * License: Apache-2.0
 
 ```
@@ -4574,6 +4615,7 @@ SOFTWARE.
 ## github.com/spf13/cast
 
 * Name: github.com/spf13/cast
+* Version: v1.7.1
 * License: MIT
 
 ```
@@ -4603,6 +4645,7 @@ SOFTWARE.
 ## github.com/spf13/cobra
 
 * Name: github.com/spf13/cobra
+* Version: v1.9.1
 * License: Apache-2.0
 
 ```
@@ -4786,6 +4829,7 @@ SOFTWARE.
 ## github.com/spf13/pflag
 
 * Name: github.com/spf13/pflag
+* Version: v1.0.6
 * License: BSD-3-Clause
 
 ```
@@ -4823,6 +4867,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## github.com/spf13/viper
 
 * Name: github.com/spf13/viper
+* Version: v1.20.1
 * License: MIT
 
 ```
@@ -4852,6 +4897,7 @@ SOFTWARE.
 ## github.com/subosito/gotenv
 
 * Name: github.com/subosito/gotenv
+* Version: v1.6.0
 * License: MIT
 
 ```
@@ -4882,6 +4928,7 @@ THE SOFTWARE.
 ## github.com/vishvananda/netlink
 
 * Name: github.com/vishvananda/netlink
+* Version: v1.3.2-0.20250622222046-78aca1ace529
 * License: Apache-2.0
 
 ```
@@ -5083,6 +5130,7 @@ THE SOFTWARE.
 ## github.com/vishvananda/netns
 
 * Name: github.com/vishvananda/netns
+* Version: v0.0.5
 * License: Apache-2.0
 
 ```
@@ -5284,6 +5332,7 @@ THE SOFTWARE.
 ## github.com/x448/float16
 
 * Name: github.com/x448/float16
+* Version: v0.8.4
 * License: MIT
 
 ```
@@ -5315,6 +5364,7 @@ SOFTWARE.
 ## go.uber.org/multierr
 
 * Name: go.uber.org/multierr
+* Version: v1.11.0
 * License: MIT
 
 ```
@@ -5343,6 +5393,7 @@ THE SOFTWARE.
 ## go.uber.org/zap
 
 * Name: go.uber.org/zap
+* Version: v1.27.0
 * License: MIT
 
 ```
@@ -5371,6 +5422,7 @@ THE SOFTWARE.
 ## golang.org/x/net
 
 * Name: golang.org/x/net
+* Version: v0.40.0
 * License: BSD-3-Clause
 
 ```
@@ -5407,6 +5459,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## golang.org/x/oauth2
 
 * Name: golang.org/x/oauth2
+* Version: v0.30.0
 * License: BSD-3-Clause
 
 ```
@@ -5443,6 +5496,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## golang.org/x/sync
 
 * Name: golang.org/x/sync
+* Version: v0.14.0
 * License: BSD-3-Clause
 
 ```
@@ -5479,6 +5533,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## golang.org/x/sys/unix
 
 * Name: golang.org/x/sys/unix
+* Version: v0.33.0
 * License: BSD-3-Clause
 
 ```
@@ -5515,6 +5570,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## golang.org/x/term
 
 * Name: golang.org/x/term
+* Version: v0.32.0
 * License: BSD-3-Clause
 
 ```
@@ -5551,6 +5607,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## golang.org/x/text
 
 * Name: golang.org/x/text
+* Version: v0.25.0
 * License: BSD-3-Clause
 
 ```
@@ -5587,6 +5644,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## golang.org/x/time/rate
 
 * Name: golang.org/x/time/rate
+* Version: v0.9.0
 * License: BSD-3-Clause
 
 ```
@@ -5623,6 +5681,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## gomodules.xyz/jsonpatch/v2
 
 * Name: gomodules.xyz/jsonpatch/v2
+* Version: v2.4.0
 * License: Apache-2.0
 
 ```
@@ -5834,6 +5893,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## google.golang.org/genproto/googleapis/rpc/status
 
 * Name: google.golang.org/genproto/googleapis/rpc/status
+* Version: v0.0.0-20250528174236-200df99c418a
 * License: Apache-2.0
 
 ```
@@ -6045,6 +6105,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## google.golang.org/grpc
 
 * Name: google.golang.org/grpc
+* Version: v1.74.2
 * License: Apache-2.0
 
 ```
@@ -6256,6 +6317,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## google.golang.org/protobuf
 
 * Name: google.golang.org/protobuf
+* Version: v1.36.6
 * License: BSD-3-Clause
 
 ```
@@ -6292,6 +6354,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## gopkg.in/evanphx/json-patch.v4
 
 * Name: gopkg.in/evanphx/json-patch.v4
+* Version: v4.12.0
 * License: BSD-3-Clause
 
 ```
@@ -6326,6 +6389,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## gopkg.in/inf.v0
 
 * Name: gopkg.in/inf.v0
+* Version: v0.9.1
 * License: BSD-3-Clause
 
 ```
@@ -6363,6 +6427,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## gopkg.in/yaml.v3
 
 * Name: gopkg.in/yaml.v3
+* Version: v3.0.1
 * License: MIT
 
 ```
@@ -6422,6 +6487,7 @@ limitations under the License.
 ## k8s.io/api
 
 * Name: k8s.io/api
+* Version: v0.33.0
 * License: Apache-2.0
 
 ```
@@ -6633,6 +6699,7 @@ limitations under the License.
 ## k8s.io/apiextensions-apiserver/pkg/apis/apiextensions
 
 * Name: k8s.io/apiextensions-apiserver/pkg/apis/apiextensions
+* Version: v0.33.0
 * License: Apache-2.0
 
 ```
@@ -6844,6 +6911,7 @@ limitations under the License.
 ## k8s.io/apimachinery/pkg
 
 * Name: k8s.io/apimachinery/pkg
+* Version: v0.33.0
 * License: Apache-2.0
 
 ```
@@ -7055,6 +7123,7 @@ limitations under the License.
 ## k8s.io/apimachinery/third_party/forked/golang
 
 * Name: k8s.io/apimachinery/third_party/forked/golang
+* Version: v0.33.0
 * License: BSD-3-Clause
 
 ```
@@ -7091,6 +7160,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## k8s.io/client-go
 
 * Name: k8s.io/client-go
+* Version: v0.33.0
 * License: Apache-2.0
 
 ```
@@ -7302,6 +7372,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## k8s.io/klog/v2
 
 * Name: k8s.io/klog/v2
+* Version: v2.130.1
 * License: Apache-2.0
 
 ```
@@ -7502,6 +7573,7 @@ third-party archives.
 ## k8s.io/kube-openapi/pkg
 
 * Name: k8s.io/kube-openapi/pkg
+* Version: v0.0.0-20250318190949-c8a335a9a2ff
 * License: Apache-2.0
 
 ```
@@ -7713,6 +7785,7 @@ third-party archives.
 ## k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json
 
 * Name: k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json
+* Version: v0.0.0-20250318190949-c8a335a9a2ff
 * License: BSD-3-Clause
 
 ```
@@ -7749,6 +7822,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## k8s.io/kube-openapi/pkg/validation/spec
 
 * Name: k8s.io/kube-openapi/pkg/validation/spec
+* Version: v0.0.0-20250318190949-c8a335a9a2ff
 * License: Apache-2.0
 
 ```
@@ -7960,6 +8034,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## k8s.io/utils
 
 * Name: k8s.io/utils
+* Version: v0.0.0-20241104100929-3ea5e8cea738
 * License: Apache-2.0
 
 ```
@@ -8171,6 +8246,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## k8s.io/utils/internal/third_party/forked/golang
 
 * Name: k8s.io/utils/internal/third_party/forked/golang
+* Version: v0.0.0-20241104100929-3ea5e8cea738
 * License: BSD-3-Clause
 
 ```
@@ -8207,6 +8283,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## sigs.k8s.io/controller-runtime
 
 * Name: sigs.k8s.io/controller-runtime
+* Version: v0.21.0
 * License: Apache-2.0
 
 ```
@@ -8417,6 +8494,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## sigs.k8s.io/json
 
 * Name: sigs.k8s.io/json
+* Version: v0.0.0-20241010143419-9aa6b5e7a4b3
 * License: Apache-2.0
 
 ```
@@ -8664,6 +8742,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## sigs.k8s.io/randfill
 
 * Name: sigs.k8s.io/randfill
+* Version: v1.0.0
 * License: Apache-2.0
 
 ```
@@ -8875,6 +8954,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## sigs.k8s.io/structured-merge-diff/v4
 
 * Name: sigs.k8s.io/structured-merge-diff/v4
+* Version: v4.6.0
 * License: Apache-2.0
 
 ```
@@ -9085,6 +9165,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## sigs.k8s.io/yaml
 
 * Name: sigs.k8s.io/yaml
+* Version: v1.4.0
 * License: Apache-2.0
 
 ```
@@ -9400,6 +9481,7 @@ Apache license:
 ## sigs.k8s.io/yaml/goyaml.v2
 
 * Name: sigs.k8s.io/yaml/goyaml.v2
+* Version: v1.4.0
 * License: Apache-2.0
 
 ```
