@@ -60,7 +60,9 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_TREE_STATE=clean
+            BUILD_DATE=${{ github.event.repository.updated_at }}
 
       - name: Generate install manifest
         run: |
