@@ -34,8 +34,8 @@ if hostname |grep -q control-plane; then # control-plane
   kubectl -n galactic-mqtt rollout status deployment galactic-mqtt
 
   # Galactic Operator
-  curl -L "https://raw.githubusercontent.com/datum-cloud/galactic/refs/heads/main/dist/install.yaml" |sed -e "s/galactic:latest/galactic:${GALACTIC_VERSION}/g" |kubectl apply -f -
-  kubectl -n galactic-system rollout status deployment galactic-controller-manager
+  curl -L "https://raw.githubusercontent.com/datum-cloud/galactic-operator/refs/heads/main/dist/install.yaml" |sed -e "s/galactic:latest/galactic:${GALACTIC_VERSION}/g" |kubectl apply -f -
+  kubectl -n galactic-operator-system rollout status deployment galactic-operator-controller-manager
 
   # Galactic Router
   cat /galactic/router.k8s.yml |sed -e "s/galactic-router:latest/galactic-router:${GALACTIC_VERSION}/g" |kubectl apply -f -
@@ -72,5 +72,5 @@ else # worker
   curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGIN_VERSION}/cni-plugins-linux-${ARCH}-${CNI_PLUGIN_VERSION}.tgz" |tar xvfz - -C /opt/cni/bin
 
   # Galactic CNI (now bundled in the unified galactic binary)
-  curl -Lo /opt/cni/bin/galactic "https://github.com/datum-cloud/galactic/releases/download/${GALACTIC_VERSION}/galactic_linux_${ARCH}" && chmod +x /opt/cni/bin/galactic
+  curl -Lo /opt/cni/bin/galactic "https://github.com/datum-cloud/galactic-cni/releases/download/${GALACTIC_VERSION}/galactic_${ARCH}" && chmod +x /opt/cni/bin/galactic
 fi
