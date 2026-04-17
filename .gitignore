@@ -1,50 +1,250 @@
-# Binaries for programs and plugins
+# ============================================================
+# Go
+# ============================================================
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-/galactic
-bin/
-dist/
-
-# Test binary, built with `go test -c`
 *.test
-
-# Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 cover.out
+coverage.html
+/bin/
+/dist/
+/galactic
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
+# Go workspace
 go.work
+go.work.sum
 
-# IDEs
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+# Go build cache (local overrides only)
+.cache/
+
+# ============================================================
+# Kubernetes / controller-runtime / kubebuilder
+# ============================================================
+testbin/
+/config/manager/kustomization.yaml.tmp
+build/Dockerfile.cross
+
+# Local kubeconfigs and cluster state — never commit credentials
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+.kube/
+
+# kind cluster artifacts
+kind-*.yaml
+kind-config-local.yaml
+
+# Helm temporary artifacts
+*.tgz
+charts/*.tgz
+
+# Kustomize build output
+kustomize-output/
+
+# Skaffold local overrides
+skaffold.local.yaml
+
+# ============================================================
+# AI coding agents
+# ============================================================
 
 # Claude Code
 .claude/settings.local.json
+.claude/__pycache__/
 
-# OS
-.DS_Store
+# Codex / OpenAI
+.codex/
+.openai/
 
-# Python
+# Cursor
+.cursor/
+.cursorignore
+.cursorules
+
+# Aider
+.aider/
+.aider.tags.cache.v*/
+.aider.chat.history.md
+.aider.input.history
+.aiderignore
+
+# GitHub Copilot
+.github/copilot-settings.json
+
+# Codeium / Windsurf
+.windsurf/
+.codeium/
+
+# JetBrains AI / Qodo
+.qodo/
+
+# Continue
+.continue/
+
+# Devin
+.devin/
+
+# Generic agent scratch directories
+.agent/
+.agents/
+scratch/
+
+# ============================================================
+# Python (router service)
+# ============================================================
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
 .Python
 *.egg-info/
+*.egg
 .eggs/
+dist/
+build/
+pip-wheel-metadata/
+.installed.cfg
 
-# kubebuilder
-testbin/
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
 
-# Temporary kustomize files
-config/manager/kustomization.yaml.tmp
-build/Dockerfile.cross
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+
+# ============================================================
+# IDEs and editors
+# ============================================================
+
+# JetBrains (GoLand, PyCharm, IntelliJ, …)
+.idea/
+*.iml
+*.iws
+out/
+.idea_modules/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+.netrwhist
+Session.vim
+.nvim/
+
+# Emacs
+\#*\#
+.\#*
+*.elc
+auto-save-list
+tramp
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================
+# OS artifacts
+# ============================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Linux
+.fuse_hidden*
+.nfs*
+
+# ============================================================
+# Secrets and credentials — never commit these
+# ============================================================
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets/
+.secrets/
+.env.*
+!.env.example
+!.env.sample
+
+# ============================================================
+# Lab and local dev overrides
+# ============================================================
+lab/basic/clab_files/
+lab/basic/clab-basic/
+lab/basic/group_vars/
+lab/basic/host_vars/
+lab/basic/ansible.cfg
+lab/basic/clab.yml
+lab/basic/hosts.yml
+lab/basic/netlab.lock
+lab/basic/netlab.snapshot.pickle
+lab/basic/netlab.snapshot.yml
+
+lab/geo/clab_files/
+lab/geo/clab-*/
+lab/geo/group_vars/
+lab/geo/host_vars/
+lab/geo/ansible.cfg
+lab/geo/clab.yml
+lab/geo/hosts.yml
+lab/geo/netlab.lock
+lab/geo/netlab.snapshot.pickle
+lab/geo/netlab.snapshot.yml
+
+lab/platform/wsl/srv6-vpc-lab-attachment/clab_files/
+lab/platform/wsl/srv6-vpc-lab-attachment/clab-*/
+
+# ============================================================
+# Miscellaneous
+# ============================================================
+
+# Compiled protobuf outputs (if generated locally, not committed)
+# Uncomment if you generate proto outside of the repo:
+# *.pb.go
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+.tmp/
+tmp/
+
+# Profiling
+*.prof
+*.pprof
+cpu.prof
+mem.prof
+
+# golangci-lint cache
+.golangci-lint-cache/
+
+# Local files
+.local
