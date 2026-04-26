@@ -15,7 +15,7 @@ require (
 	github.com/onsi/gomega v1.37.0
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
-	github.com/vishvananda/netlink v1.3.2-0.20250622222046-78aca1ace529
+	github.com/vishvananda/netlink v1.3.2-0.20260404173425-c822ed716ea1
 	golang.org/x/sync v0.14.0
 	golang.org/x/sys v0.33.0
 	google.golang.org/grpc v1.74.2
