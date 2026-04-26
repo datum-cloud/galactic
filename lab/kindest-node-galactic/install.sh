@@ -34,8 +34,8 @@ if hostname |grep -q control-plane; then # control-plane
   kubectl -n galactic-mqtt rollout status deployment galactic-mqtt
 
   # Galactic Operator
-  curl -L "https://raw.githubusercontent.com/datum-cloud/galactic-operator/refs/heads/main/dist/install.yaml" |sed -e "s/galactic:latest/galactic:${GALACTIC_VERSION}/g" |kubectl apply -f -
-  kubectl -n galactic-operator-system rollout status deployment galactic-operator-controller-manager
+  kubectl apply -f /galactic/operator.k8s.yml
+  kubectl -n galactic-system rollout status deployment galactic-controller-manager
 
   # Galactic Router
   cat /galactic/router.k8s.yml |sed -e "s/galactic-router:latest/galactic-router:${GALACTIC_VERSION}/g" |kubectl apply -f -
