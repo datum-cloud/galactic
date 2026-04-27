@@ -1,4 +1,4 @@
-FROM kindest/node:v1.34.0
+FROM kindest/node:v1.35.1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
