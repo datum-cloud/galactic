@@ -1,5 +1,5 @@
 # Build the unified galactic binary
-FROM --platform=$BUILDPLATFORM golang:1.24 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
