@@ -1,14 +1,18 @@
-FROM python:3
+FROM python:3.13-slim
 
-RUN mkdir /workspace
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /workspace
 
-COPY galactic_router galactic_router
-COPY alembic alembic
-COPY features features
-COPY .flake8 .flake8
-COPY pyproject.toml .
+COPY README.md pyproject.toml ./
+COPY .flake8 ./.flake8
+COPY alembic ./alembic
+COPY features ./features
+COPY galactic_router ./galactic_router
 
-RUN pip install -e .[test]
+RUN python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir -e .[test,lint]
+
 RUN flake8 -v .
 RUN behave
