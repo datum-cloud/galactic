@@ -13,7 +13,7 @@ require (
 	github.com/lorenzosaino/go-sysctl v0.3.1
 	github.com/onsi/ginkgo/v2 v2.28.2
 	github.com/onsi/gomega v1.39.1
-	github.com/spf13/cobra v1.9.1
+	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260404173425-c822ed716ea1
 	golang.org/x/sync v0.19.0
