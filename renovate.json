@@ -38,7 +38,13 @@
       "description": "Automerge patch/minor for non-k8s Go deps",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["patch", "minor"],
-      "matchPackagePatterns": ["^(?!sigs\\.k8s\\.io|k8s\\.io).*"],
+      "excludePackageNames": [
+        "sigs.k8s.io/controller-runtime",
+        "k8s.io/client-go",
+        "k8s.io/api",
+        "k8s.io/apimachinery",
+        "k8s.io/apiextensions-apiserver"
+      ],
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true
