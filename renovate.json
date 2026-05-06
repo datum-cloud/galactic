@@ -1,6 +1,60 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
-  ]
+    "config:base",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "schedule": ["before 6am on Monday"],
+  "timezone": "EST",
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group all Go dependencies",
+      "matchManagers": ["gomod"],
+      "groupName": "Go dependencies",
+      "groupSlug": "go-deps"
+    },
+    {
+      "description": "k8s core — grouped, slower cadence",
+      "matchPackageNames": [
+        "sigs.k8s.io/controller-runtime",
+        "k8s.io/client-go",
+        "k8s.io/api",
+        "k8s.io/apimachinery",
+        "k8s.io/apiextensions-apiserver"
+      ],
+      "groupName": "k8s core libraries",
+      "groupSlug": "k8s-core",
+      "schedule": ["before 6am on the first day of the month"]
+    },
+    {
+      "description": "GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "groupSlug": "gha"
+    },
+    {
+      "description": "Automerge patch/minor for non-k8s Go deps",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "matchPackagePatterns": ["^(?!sigs\\.k8s\\.io|k8s\\.io).*"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Never automerge majors",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major-update"]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2
 }
