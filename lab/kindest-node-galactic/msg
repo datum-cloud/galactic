@@ -1,0 +1,44 @@
+    feat: Replace MQTT control plane with embedded BGP
+
+    Galactic's distribution path moves from the Python galactic-router
+    service over MQTT to standard MP-BGP L3VPN with SRv6 service SIDs.
+    Each agent now embeds a GoBGP speaker peering iBGP with one or more
+    cluster route reflectors; the router service and its broker are
+    removed entirely.
+
+    Design rationale and decision log: PLAN-bgp-cutover.md.
+    Component-level reference for the resulting system: AS-BUILT.md.
+
+    Major changes:
+
+    - VPC identifiers narrow from 48 to 32 bits so the BGP route
+      distinguisher (RFC 4364 type 2) and route target extended community
+      (RFC 5668) carry the full ID without truncation. Attachment IDs
+      remain 16 bits.
+    - The operator gains --pop-locator and --asn flags; reconciler writes
+      serviceSID, routeTarget, and routeDistinguisher into
+      VPCAttachment.status alongside the identifier.
+    - VPCAttachmentSpec.Routes and the derived NAD terminations are
+      removed; pod prefixes are the only thing advertised. Anything
+      reachable beyond the pod is learned via BGP.
+    - New agent packages: bgp (GoBGP wrapper, originate/withdraw/watch,
+      tunnel-encap and prefix-sid encodings with a startup-time
+      round-trip guard), cache (joined VPC + VPCAttachment informer),
+      program (kernel egress with explicit hex/base62 boundary),
+      reconciler (central event loop with pending/active/ingress/
+      programmedKernel/receivedRoutes state), health (/healthz +
+      /metrics), metrics (Prometheus gauges).
+    - Deleted: pkg/proto/remote, internal/agent/srv6/{srv6.go,
+      routeegress, neighborproxy}, internal/cni/route, the entire
+      router/ Python service, the lab MQTT/router manifests, and the
+      paho.mqtt.golang dependency.
+    - Cluster-wide configuration (POP-locator, ASN, BGP encoding) flows
+      to agents via the operator ConfigMap so wire format and authority
+      cannot diverge per-node.
+
+    Tests, lint, and code generation are clean. Reconciler ordering and
+    teardown paths have unit coverage; the prefix-sid wire format has a
+    round-trip regression guard against the pinned GoBGP version.
+
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+

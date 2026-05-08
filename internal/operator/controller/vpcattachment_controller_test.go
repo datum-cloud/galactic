@@ -20,8 +20,29 @@ import (
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 
+	"go.datum.net/galactic/internal/operator/bgpattrs"
 	"go.datum.net/galactic/internal/operator/identifier"
+	"go.datum.net/galactic/internal/operator/srv6sid"
 )
+
+// Test fixtures for the cluster-wide SRv6/BGP config. These are arbitrary
+// for the test; the values just need to be consistent across runs.
+const (
+	testPOPLocator = "fc00::/56"
+	testASN        = uint32(65000)
+)
+
+func newSIDEncoder() *srv6sid.Encoder {
+	enc, err := srv6sid.NewEncoder(testPOPLocator)
+	Expect(err).NotTo(HaveOccurred())
+	return enc
+}
+
+func newBGPFormatter() *bgpattrs.Formatter {
+	f, err := bgpattrs.NewFormatter(testASN)
+	Expect(err).NotTo(HaveOccurred())
+	return f
+}
 
 var _ = Describe("VPCAttachment Controller", func() {
 	Context("When reconciling a resource", func() {
@@ -94,12 +115,6 @@ var _ = Describe("VPCAttachment Controller", func() {
 							"2001:10:1:1::1/64",
 						},
 					},
-					Routes: []galacticv1alpha.VPCAttachmentRoute{
-						{Destination: "192.168.1.0/24", Via: "10.1.1.1"},
-						{Destination: "2001:1::/64", Via: "2001:10:1:1::1"},
-						{Destination: "192.168.2.0/24", Via: "10.1.1.2"},
-						{Destination: "2001:2::/64", Via: "2001:10:1:1::2"},
-					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -122,9 +137,11 @@ var _ = Describe("VPCAttachment Controller", func() {
 				}
 
 				vpcAttachmentControllerReconciler := &VPCAttachmentReconciler{
-					Client:     k8sClient,
-					Scheme:     k8sClient.Scheme(),
-					Identifier: identifier.NewFromSeed(424242),
+					Client:       k8sClient,
+					Scheme:       k8sClient.Scheme(),
+					Identifier:   identifier.NewFromSeed(424242),
+					SIDEncoder:   newSIDEncoder(),
+					BGPFormatter: newBGPFormatter(),
 				}
 				_, err := vpcAttachmentControllerReconciler.Reconcile(ctx, reconcile.Request{
 					NamespacedName: vpcAttachmentTypeNamespacedName,
@@ -139,6 +156,13 @@ var _ = Describe("VPCAttachment Controller", func() {
 				} else {
 					Expect(resource.Status.Ready).To(BeTrue())
 					Expect(resource.Status.Identifier).To(Equal("e513"))
+					// VPC's seeded identifier under MaxVPC=0xFFFFFFFF
+					// is "02d1d335" (47305525 decimal). The expected
+					// SID/RT/RD are derived from that and from the test
+					// POP-locator/ASN constants above.
+					Expect(resource.Status.ServiceSID).To(Equal("fc00::2d1:d335:e513:0"))
+					Expect(resource.Status.RouteTarget).To(Equal("65000:47305525"))
+					Expect(resource.Status.RouteDistinguisher).To(Equal("65000:47305525"))
 
 					nadResource := &nadv1.NetworkAttachmentDefinition{}
 					err = k8sClient.Get(ctx, vpcAttachmentTypeNamespacedName, nadResource)

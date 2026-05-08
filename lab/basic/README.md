@@ -9,6 +9,28 @@ The topology consists of:
 - **5 edge routers (e1-e5)**: Provide connectivity to the core via BGP, simulating ISP infrastructure
 - **5 Kubernetes worker nodes**: Each worker connects to one edge router to access the network
 
+### Galactic control plane
+
+Each Galactic agent runs an embedded GoBGP speaker that peers iBGP with a
+route reflector (the lab provisions one as a `Deployment`). When a pod is
+attached to a VPC:
+
+- The CNI plugin creates the local kernel objects and registers the
+  attachment with the agent over a Unix socket.
+- The agent reads the attachment's status from the Kubernetes API
+  (service SID, route distinguisher, route target — all derived from the
+  operator's `--pop-locator` and `--asn`) and originates a VPN BGP UPDATE
+  per pod IP, with the SRv6 service SID carried in a Tunnel
+  Encapsulation attribute (or PA_PREFIX_SID, depending on the cluster
+  encoding selection).
+- The route reflector reflects the UPDATE to every other agent. Each
+  receiver matches the route target against its locally-known
+  VPCAttachments and installs the kernel egress route into the matching
+  VRF, with the remote service SID as the SRv6 segment list.
+
+There is no central router service; pod reachability is computed
+hop-by-hop through standard MP-BGP.
+
 
 ## Deploy
 

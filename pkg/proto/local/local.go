@@ -17,19 +17,19 @@ import (
 type Local struct {
 	UnimplementedLocalServer
 	SocketPath        string
-	RegisterHandler   func(string, string, []string) error
-	DeregisterHandler func(string, string, []string) error
+	RegisterHandler   func(vpcHex, attachHex string) error
+	DeregisterHandler func(vpcHex, attachHex string) error
 }
 
 func (l *Local) Register(ctx context.Context, req *RegisterRequest) (*RegisterReply, error) {
-	if err := l.RegisterHandler(req.GetVpc(), req.GetVpcattachment(), req.GetNetworks()); err != nil {
+	if err := l.RegisterHandler(req.GetVpc(), req.GetVpcattachment()); err != nil {
 		return nil, err
 	}
 	return &RegisterReply{Confirmed: true}, nil
 }
 
 func (l *Local) Deregister(ctx context.Context, req *DeregisterRequest) (*DeregisterReply, error) {
-	if err := l.DeregisterHandler(req.GetVpc(), req.GetVpcattachment(), req.GetNetworks()); err != nil {
+	if err := l.DeregisterHandler(req.GetVpc(), req.GetVpcattachment()); err != nil {
 		return nil, err
 	}
 	return &DeregisterReply{Confirmed: true}, nil

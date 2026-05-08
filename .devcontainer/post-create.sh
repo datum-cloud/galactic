@@ -49,12 +49,6 @@ sudo apt-get install -y \
 	gcc \
 	build-essential
 
-# Set up Python environment for galactic-router
-echo "Setting up Python environment for galactic-router..."
-cd /workspaces/galactic/router
-pip install --upgrade pip setuptools wheel
-pip install -e .[test]
-
 # Generate Kubernetes manifests and code
 echo "Generating Kubernetes manifests and DeepCopy methods..."
 cd /workspaces/galactic
@@ -72,7 +66,6 @@ curl -fsSL https://claude.ai/install.sh | bash
 echo ""
 echo "Verifying installations..."
 echo "Go version: $(go version)"
-echo "Python version: $(python3 --version)"
 echo "kubectl version: $(kubectl version --client --short 2>/dev/null || echo 'kubectl installed')"
 echo "kind version: $(kind version)"
 echo "kustomize version: $(kustomize version --short 2>/dev/null || echo 'kustomize installed')"
@@ -91,5 +84,4 @@ echo "  - Run tests: make test"
 echo "  - Run E2E tests: make test-e2e"
 echo "  - Run the operator: make run-operator"
 echo "  - Run the agent: make run-agent"
-echo "  - Develop the router: cd router && behave"
 echo ""

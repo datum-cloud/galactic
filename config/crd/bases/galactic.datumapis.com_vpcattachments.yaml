@@ -57,22 +57,6 @@ spec:
                 - addresses
                 - name
                 type: object
-              routes:
-                description: Routes defines additional routing entries for the VPCAttachment.
-                items:
-                  description: VPCAttachmentRoute defines a routing entry for the
-                    VPCAttachment.
-                  properties:
-                    destination:
-                      description: IPv4 or IPv6 destination network in CIDR notation.
-                      type: string
-                    via:
-                      description: Via is the next hop address.
-                      type: string
-                  required:
-                  - destination
-                  type: object
-                type: array
               vpc:
                 description: VPC this attachment belongs to.
                 properties:
@@ -124,12 +108,37 @@ spec:
             description: status defines the observed state of VPCAttachment
             properties:
               identifier:
-                description: A unique identifier assigned to this VPCAttachment
+                description: |-
+                  A unique 16-bit hex identifier (4 lowercase hex characters) assigned
+                  to this VPCAttachment, scoped to its parent VPC.
                 type: string
               ready:
                 default: false
                 description: Indicates whether the VPCAttachment is ready for use
                 type: boolean
+              routeDistinguisher:
+                description: |-
+                  The BGP route distinguisher for this VPCAttachment's parent VPC,
+                  formatted as <asn>:<vpc-id-32>. Encoded on the wire as RD type 2
+                  (4-byte ASN administrator + 4-byte assigned). Same value across all
+                  attachments in the VPC.
+                type: string
+              routeTarget:
+                description: |-
+                  The BGP route target for this VPCAttachment's parent VPC, formatted
+                  as <asn>:<vpc-id-32>. Encoded on the wire as a transitive 4-octet
+                  AS-specific extended community (RFC 5668, type 0x0202). All
+                  VPCAttachments belonging to the same VPC share the same route
+                  target.
+                type: string
+              serviceSID:
+                description: |-
+                  The full IPv6 SRv6 service SID for this VPCAttachment, computed as
+                  <pop-locator>:<vpc-id-32>:<attachment-id-16>:<zero-16>. Agents
+                  install END.DT46 decap for this SID locally and advertise it as the
+                  SRv6 service SID for VPN BGP UPDATEs originating pods on this
+                  attachment.
+                type: string
             required:
             - ready
             type: object

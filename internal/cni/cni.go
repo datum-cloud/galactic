@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 
@@ -22,7 +21,6 @@ import (
 
 	"go.datum.net/galactic/internal/cni/debug"
 	"go.datum.net/galactic/internal/cni/registration"
-	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/pkg/common/cni"
 	"go.datum.net/galactic/pkg/common/util"
@@ -31,11 +29,10 @@ import (
 
 type PluginConf struct {
 	types.PluginConf
-	VPC           string            `json:"vpc"`
-	VPCAttachment string            `json:"vpcattachment"`
-	MTU           int               `json:"mtu,omitempty"`
-	Terminations  []cni.Termination `json:"terminations,omitempty"`
-	IPAM          cni.IPAM          `json:"ipam,omitempty"`
+	VPC           string   `json:"vpc"`
+	VPCAttachment string   `json:"vpcattachment"`
+	MTU           int      `json:"mtu,omitempty"`
+	IPAM          cni.IPAM `json:"ipam,omitempty"`
 }
 
 func NewCommand() *cobra.Command {
@@ -63,33 +60,6 @@ func parseConf(data []byte) (*PluginConf, error) {
 	return conf, nil
 }
 
-func getNetworks(pluginConf *PluginConf) ([]string, error) {
-	addresses := pluginConf.IPAM.Addresses
-	terminations := pluginConf.Terminations
-
-	networks := make([]string, 0, len(addresses)+len(terminations))
-
-	for _, a := range addresses {
-		ip, _, err := net.ParseCIDR(a.Address)
-		if err != nil {
-			return nil, err
-		}
-		if ip.To4() != nil {
-			networks = append(networks, fmt.Sprintf("%s/32", ip.String()))
-		} else {
-			networks = append(networks, fmt.Sprintf("%s/128", ip.String()))
-		}
-	}
-
-	for _, t := range terminations {
-		if t.Via != "" {
-			networks = append(networks, t.Network)
-		}
-	}
-
-	return networks, nil
-}
-
 func cmdAdd(args *skel.CmdArgs) error {
 	pluginConf, _ := parseConf(args.StdinData)
 	if err := vrf.Add(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
@@ -97,12 +67,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
 		return err
-	}
-	dev := util.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
-	for _, termination := range pluginConf.Terminations {
-		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
-			return err
-		}
 	}
 	if err := hostDevice("ADD", args, pluginConf); err != nil {
 		return err
@@ -115,12 +79,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	networks, err := getNetworks(pluginConf)
-	if err != nil {
-		return err
-	}
-	err = registration.Register(vpcHex, vpcAttachmentHex, networks)
-	if err != nil {
+	if err := registration.Register(vpcHex, vpcAttachmentHex); err != nil {
 		return err
 	}
 	result := &type100.Result{}
@@ -137,22 +96,11 @@ func cmdDel(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	networks, err := getNetworks(pluginConf)
-	if err != nil {
+	if err := registration.Deregister(vpcHex, vpcAttachmentHex); err != nil {
 		return err
 	}
-	err = registration.Deregister(vpcHex, vpcAttachmentHex, networks)
-	if err != nil {
-		return err
-	}
-	dev := util.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
 	if err := hostDevice("DEL", args, pluginConf); err != nil {
 		return err
-	}
-	for _, termination := range pluginConf.Terminations {
-		if err := route.Delete(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
-			return err
-		}
 	}
 	if err := veth.Delete(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
 		return err

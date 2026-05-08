@@ -28,7 +28,10 @@ func connect() (local.LocalClient, *grpc.ClientConn, error) {
 	return local.NewLocalClient(conn), conn, nil
 }
 
-func Register(vpc, vpcAttachment string, networks []string) error {
+// Register tells the local agent that this node now hosts a pod for
+// the given (vpcHex, attachHex). The agent reads pod IPs from the
+// VPCAttachment informer cache; the CNI plugin no longer pushes them.
+func Register(vpc, vpcAttachment string) error {
 	client, conn, err := connect()
 	if err != nil {
 		return err
@@ -36,21 +39,17 @@ func Register(vpc, vpcAttachment string, networks []string) error {
 	defer conn.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel() //nolint:errcheck
+	defer cancel()
 
 	req := &local.RegisterRequest{
 		Vpc:           vpc,
 		Vpcattachment: vpcAttachment,
-		Networks:      networks,
 	}
 	_, err = client.Register(ctx, req)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
-func Deregister(vpc, vpcAttachment string, networks []string) error {
+func Deregister(vpc, vpcAttachment string) error {
 	client, conn, err := connect()
 	if err != nil {
 		return err
@@ -58,16 +57,12 @@ func Deregister(vpc, vpcAttachment string, networks []string) error {
 	defer conn.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel() //nolint:errcheck
+	defer cancel()
 
 	req := &local.DeregisterRequest{
 		Vpc:           vpc,
 		Vpcattachment: vpcAttachment,
-		Networks:      networks,
 	}
 	_, err = client.Deregister(ctx, req)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }

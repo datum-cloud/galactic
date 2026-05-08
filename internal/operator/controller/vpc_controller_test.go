@@ -21,10 +21,13 @@ import (
 )
 
 var _ = Describe("VPC Controller", func() {
+	// Seeded sequence under MaxVPC = 0xFFFFFFFF and seed 424242. If the
+	// identifier package's RNG seeding or modulus changes, regenerate
+	// these by inspecting identifier.NewFromSeed(424242).ForVPC().
 	result_identifiers := []string{
-		"f5b6726c782b",
-		"f68a7a2a17d9",
-		"ecfd7bca4d29",
+		"02d1d335",
+		"7cae026b",
+		"3c0566eb",
 	}
 
 	Context("When reconciling a resource", func() {

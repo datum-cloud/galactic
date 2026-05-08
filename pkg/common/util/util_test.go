@@ -5,6 +5,7 @@
 package util_test
 
 import (
+	"fmt"
 	"net"
 	"reflect"
 	"testing"
@@ -13,37 +14,51 @@ import (
 )
 
 const (
-	testVPC           = "0000000jU" // 1234 dec
-	testVPCAttachment = "00G"       // 42 dec
+	// Un-padded base62 form, as HexToBase62 actually returns it. The
+	// InterfaceName template zero-pads to its declared widths (6 for VPC,
+	// 3 for attachment).
+	testVPC           = "jU" // 1234 dec, hex 000004d2 -> base62 jU
+	testVPCAttachment = "G"  // 42 dec, hex 002a -> base62 G
 )
 
 func TestGenerateInterfaceNameVRF(t *testing.T) {
-	vpc := testVPC
-	vpcattachment := testVPCAttachment
-	expected := "G0000000jU00GV"
-	got := util.GenerateInterfaceNameVRF(vpc, vpcattachment)
+	expected := "G0000jU00GV"
+	got := util.GenerateInterfaceNameVRF(testVPC, testVPCAttachment)
 	if got != expected {
-		t.Errorf("GenerateInterfaceNameVRF(%s, %s) = %s, want %s", vpc, vpcattachment, got, expected)
+		t.Errorf("GenerateInterfaceNameVRF(%s, %s) = %s, want %s", testVPC, testVPCAttachment, got, expected)
+	}
+	if len(got) != 11 {
+		t.Errorf("interface name %q length = %d, want 11 (1+6+3+1)", got, len(got))
 	}
 }
 
 func TestGenerateInterfaceNameHost(t *testing.T) {
-	vpc := testVPC
-	vpcattachment := testVPCAttachment
-	expected := "G0000000jU00GH"
-	got := util.GenerateInterfaceNameHost(vpc, vpcattachment)
+	expected := "G0000jU00GH"
+	got := util.GenerateInterfaceNameHost(testVPC, testVPCAttachment)
 	if got != expected {
-		t.Errorf("GenerateInterfaceNameHost(%s, %s) = %s, want %s", vpc, vpcattachment, got, expected)
+		t.Errorf("GenerateInterfaceNameHost(%s, %s) = %s, want %s", testVPC, testVPCAttachment, got, expected)
 	}
 }
 
 func TestGenerateInterfaceNameGuest(t *testing.T) {
-	vpc := testVPC
-	vpcattachment := testVPCAttachment
-	expected := "G0000000jU00GG"
-	got := util.GenerateInterfaceNameGuest(vpc, vpcattachment)
+	expected := "G0000jU00GG"
+	got := util.GenerateInterfaceNameGuest(testVPC, testVPCAttachment)
 	if got != expected {
-		t.Errorf("GenerateInterfaceNameGuest(%s, %s) = %s, want %s", vpc, vpcattachment, got, expected)
+		t.Errorf("GenerateInterfaceNameGuest(%s, %s) = %s, want %s", testVPC, testVPCAttachment, got, expected)
+	}
+}
+
+// TestInterfaceNameMaxWidth is the regression guard for the kernel
+// interface-name limit (IFNAMSIZ = 16 including NUL, so 15 chars max).
+func TestInterfaceNameMaxWidth(t *testing.T) {
+	// Worst case: maximum-width VPC and attachment ids.
+	maxVPC := "ZZZZZZ" // 6 chars
+	maxAttach := "ZZZ" // 3 chars
+	for _, suffix := range []string{"V", "H", "G"} {
+		got := fmt.Sprintf(util.InterfaceNameTemplate, maxVPC, maxAttach, suffix)
+		if len(got) > 15 {
+			t.Errorf("worst-case interface name %q length = %d, exceeds 15-char kernel limit", got, len(got))
+		}
 	}
 }
 
@@ -125,11 +140,54 @@ func TestParseSegments(t *testing.T) {
 }
 
 func TestDecodeSRv6Endpoint(t *testing.T) {
-	srv6Endpoint := "2607:ed40:ff00::0000:0000:04d2:002a"
-	vpc := "0000000004d2"
-	vpcAttachment := "002a"
-	gotVpc, gotVpcAttachment, _ := util.DecodeSRv6Endpoint(net.ParseIP(srv6Endpoint))
-	if gotVpc != vpc || gotVpcAttachment != vpcAttachment {
-		t.Errorf("DecodeSRv6Endpoint(%s) = %s, %s, want %s, %s", srv6Endpoint, gotVpc, gotVpcAttachment, vpc, vpcAttachment)
+	// Layout in the lower 64 bits: <vpc-32>:<attach-16>:<zero-16>.
+	// vpc=0x000004d2, attach=0x002a, with a 56-bit locator
+	// 2607:ed40:ff00::/56:
+	//   bytes 8..15 = 0x00 0x00 0x04 0xd2 0x00 0x2a 0x00 0x00
+	srv6Endpoint := "2607:ed40:ff00:0:0:4d2:2a:0"
+	wantVPC := "000004d2"
+	wantAttach := "002a"
+	gotVPC, gotAttach, err := util.DecodeSRv6Endpoint(net.ParseIP(srv6Endpoint))
+	if err != nil {
+		t.Fatalf("DecodeSRv6Endpoint(%s) error = %v", srv6Endpoint, err)
+	}
+	if gotVPC != wantVPC || gotAttach != wantAttach {
+		t.Errorf("DecodeSRv6Endpoint(%s) = (%s, %s), want (%s, %s)",
+			srv6Endpoint, gotVPC, gotAttach, wantVPC, wantAttach)
+	}
+}
+
+func TestEncodeDecodeSRv6EndpointRoundTrip(t *testing.T) {
+	tests := []struct {
+		name      string
+		locator   string
+		vpc       string
+		attach    string
+		wantError bool
+	}{
+		{"Min", "fc00::/56", "00000001", "0001", false},
+		{"Max", "fc00::/56", "fffffffe", "fffe", false},
+		{"Mid", "2607:ed40:ff00::/56", "000004d2", "002a", false},
+		{"VPCTooWide", "fc00::/56", "100000000", "0001", true}, // 33-bit VPC rejected
+		{"AttachTooWide", "fc00::/56", "00000001", "10000", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sid, err := util.EncodeSRv6Endpoint(tt.locator, tt.vpc, tt.attach)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("Encode error = %v, wantError = %v", err, tt.wantError)
+			}
+			if tt.wantError {
+				return
+			}
+			gotVPC, gotAttach, err := util.DecodeSRv6Endpoint(net.ParseIP(sid))
+			if err != nil {
+				t.Fatalf("Decode error = %v", err)
+			}
+			if gotVPC != tt.vpc || gotAttach != tt.attach {
+				t.Errorf("round-trip mismatch: encoded %q -> sid %q -> (%q, %q)",
+					fmt.Sprintf("%s/%s", tt.vpc, tt.attach), sid, gotVPC, gotAttach)
+			}
+		})
 	}
 }

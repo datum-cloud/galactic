@@ -49,6 +49,13 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
+.PHONY: proto
+proto: protoc protoc-gen-go protoc-gen-go-grpc ## Regenerate gRPC code from .proto files.
+	@PATH=$(LOCALBIN):$$PATH $(PROTOC) \
+		--go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		pkg/proto/local/local.proto
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
@@ -200,6 +207,9 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 GO_LICENSES ?= $(LOCALBIN)/go-licenses
+PROTOC ?= $(LOCALBIN)/protoc
+PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
+PROTOC_GEN_GO_GRPC ?= $(LOCALBIN)/protoc-gen-go-grpc
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -210,6 +220,9 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.1.6
 GO_LICENSES_VERSION ?= v1.6.0
+PROTOC_VERSION ?= 29.3
+PROTOC_GEN_GO_VERSION ?= v1.36.11
+PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.1
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -243,6 +256,32 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 go-licenses: $(GO_LICENSES) ## Download go-licenses locally if necessary.
 $(GO_LICENSES): $(LOCALBIN)
 	$(call go-install-tool,$(GO_LICENSES),github.com/google/go-licenses,$(GO_LICENSES_VERSION))
+
+.PHONY: protoc-gen-go
+protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.
+$(PROTOC_GEN_GO): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION))
+
+.PHONY: protoc-gen-go-grpc
+protoc-gen-go-grpc: $(PROTOC_GEN_GO_GRPC) ## Download protoc-gen-go-grpc locally if necessary.
+$(PROTOC_GEN_GO_GRPC): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO_GRPC),google.golang.org/grpc/cmd/protoc-gen-go-grpc,$(PROTOC_GEN_GO_GRPC_VERSION))
+
+.PHONY: protoc
+protoc: $(PROTOC) ## Download protoc binary release locally if necessary.
+$(PROTOC): $(LOCALBIN)
+	@[ -f "$(PROTOC)" ] || { \
+		set -e; \
+		ARCH=x86_64; \
+		case "$$(uname -m)" in aarch64|arm64) ARCH=aarch_64;; esac; \
+		TMP=$$(mktemp -d); \
+		echo "Downloading protoc $(PROTOC_VERSION)..."; \
+		curl -fsSL -o $$TMP/protoc.zip \
+			"https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-linux-$$ARCH.zip"; \
+		unzip -q $$TMP/protoc.zip -d $$TMP/protoc; \
+		install -m0755 $$TMP/protoc/bin/protoc $(PROTOC); \
+		rm -rf $$TMP; \
+	}
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

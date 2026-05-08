@@ -20,10 +20,6 @@ type VPCAttachmentSpec struct {
 	// Interface defines the network interface configuration.
 	// +required
 	Interface VPCAttachmentInterface `json:"interface"`
-
-	// Routes defines additional routing entries for the VPCAttachment.
-	// +optional
-	Routes []VPCAttachmentRoute `json:"routes,omitempty"`
 }
 
 // VPCAttachmentInterface defines the network interface details.
@@ -39,17 +35,6 @@ type VPCAttachmentInterface struct {
 	Addresses []string `json:"addresses"`
 }
 
-// VPCAttachmentRoute defines a routing entry for the VPCAttachment.
-type VPCAttachmentRoute struct {
-	// IPv4 or IPv6 destination network in CIDR notation.
-	// +required
-	Destination string `json:"destination"`
-
-	// Via is the next hop address.
-	// +optional
-	Via string `json:"via"`
-}
-
 // VPCAttachmentStatus defines the observed state of VPCAttachment.
 type VPCAttachmentStatus struct {
 	// Indicates whether the VPCAttachment is ready for use
@@ -57,9 +42,33 @@ type VPCAttachmentStatus struct {
 	// +default:value=false
 	Ready bool `json:"ready,omitempty"`
 
-	// A unique identifier assigned to this VPCAttachment
+	// A unique 16-bit hex identifier (4 lowercase hex characters) assigned
+	// to this VPCAttachment, scoped to its parent VPC.
 	// +optional
 	Identifier string `json:"identifier,omitempty"`
+
+	// The full IPv6 SRv6 service SID for this VPCAttachment, computed as
+	// <pop-locator>:<vpc-id-32>:<attachment-id-16>:<zero-16>. Agents
+	// install END.DT46 decap for this SID locally and advertise it as the
+	// SRv6 service SID for VPN BGP UPDATEs originating pods on this
+	// attachment.
+	// +optional
+	ServiceSID string `json:"serviceSID,omitempty"`
+
+	// The BGP route target for this VPCAttachment's parent VPC, formatted
+	// as <asn>:<vpc-id-32>. Encoded on the wire as a transitive 4-octet
+	// AS-specific extended community (RFC 5668, type 0x0202). All
+	// VPCAttachments belonging to the same VPC share the same route
+	// target.
+	// +optional
+	RouteTarget string `json:"routeTarget,omitempty"`
+
+	// The BGP route distinguisher for this VPCAttachment's parent VPC,
+	// formatted as <asn>:<vpc-id-32>. Encoded on the wire as RD type 2
+	// (4-byte ASN administrator + 4-byte assigned). Same value across all
+	// attachments in the VPC.
+	// +optional
+	RouteDistinguisher string `json:"routeDistinguisher,omitempty"`
 }
 
 // +kubebuilder:object:root=true

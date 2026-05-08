@@ -13,52 +13,20 @@ metadata:
   labels:
     app.kubernetes.io/name: galactic-agent
 data:
+  # Per-node config generator. Each worker advertises a distinct
+  # node-locator (its own SRv6 next-hop) but shares the cluster
+  # POP-locator and ASN with every other node.
   config-gen.py: |
     import os
     import json
 
 
     CONFIGS = {
-        "k01-worker": {
-            "srv6_net": "2001:db8:ff01::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker",
-            "mqtt_username": "k01-worker",
-            "mqtt_topic_receive": "galactic/k01-worker/receive",
-            "mqtt_topic_send": "galactic/k01-worker/send"
-        },
-        "k01-worker2": {
-            "srv6_net": "2001:db8:ff02::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker2",
-            "mqtt_username": "k01-worker2",
-            "mqtt_topic_receive": "galactic/k01-worker2/receive",
-            "mqtt_topic_send": "galactic/k01-worker2/send"
-        },
-        "k01-worker3": {
-            "srv6_net": "2001:db8:ff03::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker3",
-            "mqtt_username": "k01-worker3",
-            "mqtt_topic_receive": "galactic/k01-worker3/receive",
-            "mqtt_topic_send": "galactic/k01-worker3/send"
-        },
-        "k01-worker4": {
-            "srv6_net": "2001:db8:ff04::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker4",
-            "mqtt_username": "k01-worker4",
-            "mqtt_topic_receive": "galactic/k01-worker4/receive",
-            "mqtt_topic_send": "galactic/k01-worker4/send"
-        },
-        "k01-worker5": {
-            "srv6_net": "2001:db8:ff05::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker5",
-            "mqtt_username": "k01-worker5",
-            "mqtt_topic_receive": "galactic/k01-worker5/receive",
-            "mqtt_topic_send": "galactic/k01-worker5/send"
-        }
+        "k01-worker":  {"node_locator": "2001:db8:ff01::1"},
+        "k01-worker2": {"node_locator": "2001:db8:ff02::1"},
+        "k01-worker3": {"node_locator": "2001:db8:ff03::1"},
+        "k01-worker4": {"node_locator": "2001:db8:ff04::1"},
+        "k01-worker5": {"node_locator": "2001:db8:ff05::1"},
     }
 
 
@@ -69,9 +37,21 @@ data:
     if node_name not in CONFIGS:
         raise ValueError(f"Unknown worker: {node_name}. Valid workers: {', '.join(CONFIGS.keys())}")
 
+    cfg = {
+        # Cluster-wide values (must match operator's --pop-locator and --asn).
+        "srv6_net": "2001:db8:ff00::/56",
+        "bgp_asn": 65000,
+        "bgp_srv6_encoding": "tunnel-encap",
+        # RR is the lab's GoBGP RR running on the control-plane host network.
+        "bgp_rr_peer": ["10.0.0.254"],
+        # Per-node values.
+        "node_locator": CONFIGS[node_name]["node_locator"],
+        "bgp_router_id": CONFIGS[node_name]["node_locator"].split("::")[0] + ".1",
+    }
+
     print("Generating config")
     with open("/config/galactic-agent.json", "w") as f:
-        f.write(json.dumps(CONFIGS[node_name], indent=2))
+        f.write(json.dumps(cfg, indent=2))
 
 ---
 apiVersion: apps/v1
@@ -126,6 +106,26 @@ spec:
           imagePullPolicy: Always
           args:
             - "--config=/config/galactic-agent.json"
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              # /healthz fails if BGP can't establish; /metrics being
+              # served means the process is up. Liveness checks the
+              # latter so a misconfigured RR doesn't crash-loop the
+              # pod — readiness keeps it out of service routing.
+              path: /metrics
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 30
           volumeMounts:
             - name: galactic-run
               mountPath: /var/run/galactic
@@ -135,6 +135,7 @@ spec:
             capabilities:
               add:
                 - NET_ADMIN
+                - NET_RAW
       hostNetwork: true
       volumes:
         - name: galactic-run

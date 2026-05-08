@@ -4,20 +4,13 @@
 
 package cni
 
-type Termination struct {
-	Network string `json:"network"`
-	Via     string `json:"via,omitempty"`
-}
-
+// IPAM is the static IPAM block embedded in the galactic plugin's CNI
+// config. With BGP-driven dynamic routing, only Addresses are needed —
+// the Routes field that previously pushed user-supplied prefixes into
+// the kernel via IPAM has been removed.
 type IPAM struct {
 	Type      string    `json:"type"`
-	Routes    []Route   `json:"routes,omitempty"`
 	Addresses []Address `json:"addresses,omitempty"`
-}
-
-type Route struct {
-	Dst string `json:"dst"`
-	GW  string `json:"gw,omitempty"`
 }
 
 type Address struct {

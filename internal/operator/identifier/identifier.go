@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const MaxVPC uint64 = 0xFFFFFFFFFFFF
+const MaxVPC uint64 = 0xFFFFFFFF
 const MaxVPCAttachment uint64 = 0xFFFF
 
 type Identifier struct {

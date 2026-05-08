@@ -25,7 +25,6 @@ type RegisterRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Vpc           string                 `protobuf:"bytes,1,opt,name=vpc,proto3" json:"vpc,omitempty"`
 	Vpcattachment string                 `protobuf:"bytes,2,opt,name=vpcattachment,proto3" json:"vpcattachment,omitempty"`
-	Networks      []string               `protobuf:"bytes,3,rep,name=networks,proto3" json:"networks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -72,13 +71,6 @@ func (x *RegisterRequest) GetVpcattachment() string {
 		return x.Vpcattachment
 	}
 	return ""
-}
-
-func (x *RegisterRequest) GetNetworks() []string {
-	if x != nil {
-		return x.Networks
-	}
-	return nil
 }
 
 type RegisterReply struct {
@@ -129,7 +121,6 @@ type DeregisterRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Vpc           string                 `protobuf:"bytes,1,opt,name=vpc,proto3" json:"vpc,omitempty"`
 	Vpcattachment string                 `protobuf:"bytes,2,opt,name=vpcattachment,proto3" json:"vpcattachment,omitempty"`
-	Networks      []string               `protobuf:"bytes,3,rep,name=networks,proto3" json:"networks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -176,13 +167,6 @@ func (x *DeregisterRequest) GetVpcattachment() string {
 		return x.Vpcattachment
 	}
 	return ""
-}
-
-func (x *DeregisterRequest) GetNetworks() []string {
-	if x != nil {
-		return x.Networks
-	}
-	return nil
 }
 
 type DeregisterReply struct {
@@ -233,17 +217,15 @@ var File_pkg_proto_local_local_proto protoreflect.FileDescriptor
 
 const file_pkg_proto_local_local_proto_rawDesc = "" +
 	"\n" +
-	"\x1bpkg/proto/local/local.proto\x12\blocal.v1\"e\n" +
+	"\x1bpkg/proto/local/local.proto\x12\blocal.v1\"I\n" +
 	"\x0fRegisterRequest\x12\x10\n" +
 	"\x03vpc\x18\x01 \x01(\tR\x03vpc\x12$\n" +
-	"\rvpcattachment\x18\x02 \x01(\tR\rvpcattachment\x12\x1a\n" +
-	"\bnetworks\x18\x03 \x03(\tR\bnetworks\"-\n" +
+	"\rvpcattachment\x18\x02 \x01(\tR\rvpcattachment\"-\n" +
 	"\rRegisterReply\x12\x1c\n" +
-	"\tconfirmed\x18\x01 \x01(\bR\tconfirmed\"g\n" +
+	"\tconfirmed\x18\x01 \x01(\bR\tconfirmed\"K\n" +
 	"\x11DeregisterRequest\x12\x10\n" +
 	"\x03vpc\x18\x01 \x01(\tR\x03vpc\x12$\n" +
-	"\rvpcattachment\x18\x02 \x01(\tR\rvpcattachment\x12\x1a\n" +
-	"\bnetworks\x18\x03 \x03(\tR\bnetworks\"/\n" +
+	"\rvpcattachment\x18\x02 \x01(\tR\rvpcattachment\"/\n" +
 	"\x0fDeregisterReply\x12\x1c\n" +
 	"\tconfirmed\x18\x01 \x01(\bR\tconfirmed2\x8d\x01\n" +
 	"\x05Local\x12>\n" +

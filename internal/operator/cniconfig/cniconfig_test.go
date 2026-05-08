@@ -23,24 +23,14 @@ func TestCNIConfigForVPCAttachment(t *testing.T) {
 		Plugins: []interface{}{
 			cniconfig.PluginConfGalactic{
 				Type:          "galactic",
-				VPC:           "1hVwxnaA7",
+				VPC:           "4GFfc3",
 				VPCAttachment: "h31",
 				MTU:           1300,
-				Terminations: []cni.Termination{
-					{Network: "10.1.1.0/24"},
-					{Network: "2001:10:1:1::/64"},
-					{Network: "192.168.1.0/24", Via: "10.1.1.1"},
-					{Network: "2001:1::/64", Via: "2001:10:1:1::1"},
-				},
 				IPAM: cni.IPAM{
 					Type: "static",
 					Addresses: []cni.Address{
 						{Address: "10.1.1.1/24"},
 						{Address: "2001:10:1:1::1/64"},
-					},
-					Routes: []cni.Route{
-						{Dst: "192.168.2.0/24", GW: "10.1.1.2"},
-						{Dst: "2001:2::/64", GW: "2001:10:1:1::2"},
 					},
 				},
 			},
@@ -60,7 +50,7 @@ func TestCNIConfigForVPCAttachment(t *testing.T) {
 		},
 		Status: galacticv1alpha.VPCStatus{
 			Ready:      true,
-			Identifier: "ffffffffffff",
+			Identifier: "ffffffff", // 32-bit hex, max value
 		},
 	}
 	vpcAttachment := galacticv1alpha.VPCAttachment{
@@ -81,12 +71,6 @@ func TestCNIConfigForVPCAttachment(t *testing.T) {
 					"10.1.1.1/24",
 					"2001:10:1:1::1/64",
 				},
-			},
-			Routes: []galacticv1alpha.VPCAttachmentRoute{
-				{Destination: "192.168.1.0/24", Via: "10.1.1.1"},
-				{Destination: "2001:1::/64", Via: "2001:10:1:1::1"},
-				{Destination: "192.168.2.0/24", Via: "10.1.1.2"},
-				{Destination: "2001:2::/64", Via: "2001:10:1:1::2"},
 			},
 		},
 		Status: galacticv1alpha.VPCAttachmentStatus{

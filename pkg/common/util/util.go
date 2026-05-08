@@ -15,7 +15,11 @@ import (
 	"github.com/kenshaw/baseconv"
 )
 
-const InterfaceNameTemplate = "G%09s%03s%s"
+// InterfaceNameTemplate generates kernel interface names. VPC base62
+// width is 6 chars (32-bit id, ⌈32/log2(62)⌉); attachment base62 width
+// is 3 chars (16-bit id). Total length: 1 + 6 + 3 + 1 = 11 chars, well
+// within the 15-char Linux interface name limit.
+const InterfaceNameTemplate = "G%06s%03s%s"
 
 func GenerateInterfaceNameVRF(vpc, vpcAttachment string) string {
 	return fmt.Sprintf(InterfaceNameTemplate, vpc, vpcAttachment, "V")
@@ -61,6 +65,10 @@ func IsHost(ipNet *net.IPNet) bool {
 	return ones == bits
 }
 
+// DecodeSRv6Endpoint extracts the (vpc, attachment) pair from an SRv6
+// service SID. The SID layout in the lower 64 bits is
+// <vpc-32>:<attach-16>:<zero-16>, so VPC is bits 32..64 and attachment
+// is bits 16..32 (zero-indexed from LSB).
 func DecodeSRv6Endpoint(endpoint net.IP) (string, string, error) {
 	if endpoint.To4() != nil {
 		return "", "", fmt.Errorf("provided endpoint is not an IPv6 address: %s", endpoint)
@@ -68,17 +76,23 @@ func DecodeSRv6Endpoint(endpoint net.IP) (string, string, error) {
 
 	endpointNum := new(big.Int).SetBytes(endpoint)
 	vpcNum := new(big.Int).And(
-		new(big.Int).Rsh(endpointNum, 16), // drop the vpcattachment bits
-		big.NewInt(0xFFFFFFFFFFFF),        // mask the vpc bits
+		new(big.Int).Rsh(endpointNum, 32), // drop the attachment + zero-pad bits
+		big.NewInt(0xFFFFFFFF),            // mask the 32-bit vpc
 	)
 	vpcAttachmentNum := new(big.Int).And(
-		endpointNum,
-		big.NewInt(0xFFFF), // mask the vpcattachment bits
+		new(big.Int).Rsh(endpointNum, 16), // drop the zero-pad bits
+		big.NewInt(0xFFFF),
 	)
 
-	return fmt.Sprintf("%012x", vpcNum), fmt.Sprintf("%04x", vpcAttachmentNum), nil
+	return fmt.Sprintf("%08x", vpcNum), fmt.Sprintf("%04x", vpcAttachmentNum), nil
 }
 
+// EncodeSRv6Endpoint constructs an SRv6 service SID from the locator
+// prefix, a 32-bit VPC id (8-char hex), and a 16-bit attachment id
+// (4-char hex). The SID layout in the lower 64 bits is
+// <vpc-32>:<attach-16>:<zero-16>. The 16-bit zero pad makes the SID
+// /112-aligned for END.DT* behavior matching, and leaves room for a
+// future per-attachment "function variant" byte without re-laying-out.
 func EncodeSRv6Endpoint(srv6_net, vpc, vpcAttachment string) (string, error) {
 	ip, ipnet, err := net.ParseCIDR(srv6_net)
 	if err != nil {
@@ -92,7 +106,7 @@ func EncodeSRv6Endpoint(srv6_net, vpc, vpcAttachment string) (string, error) {
 		return "", fmt.Errorf("srv6_net must be at least 64 bits long")
 	}
 
-	vpcInt, err := strconv.ParseUint(vpc, 16, 64)
+	vpcInt, err := strconv.ParseUint(vpc, 16, 32)
 	if err != nil {
 		return "", fmt.Errorf("invalid vpc %q: %w", vpc, err)
 	}
@@ -101,7 +115,7 @@ func EncodeSRv6Endpoint(srv6_net, vpc, vpcAttachment string) (string, error) {
 		return "", fmt.Errorf("invalid vpcAttachment %q: %w", vpcAttachment, err)
 	}
 
-	binary.BigEndian.PutUint64(ip[8:16], (vpcInt<<16)|vpcAttachmentInt)
+	binary.BigEndian.PutUint64(ip[8:16], (vpcInt<<32)|(vpcAttachmentInt<<16))
 	return ip.String(), nil
 }
 

@@ -19,11 +19,11 @@ func TestForVPC(t *testing.T) {
 		wantError      bool
 	}{
 		{"InvalidSpecialMin", 0, "", true},
-		{"InvalidSpecialMax", 0xFFFFFFFFFFFF, "", true},
-		{"ValidMin", 1, "000000000001", false},
-		{"ValidMax", 0xFFFFFFFFFFFF - 1, "fffffffffffe", false},
-		{"Valid", 12345, "000000003039", false},
-		{"InvalidMax", 0xFFFFFFFFFFFF + 1, "", true},
+		{"InvalidSpecialMax", 0xFFFFFFFF, "", true},
+		{"ValidMin", 1, "00000001", false},
+		{"ValidMax", 0xFFFFFFFF - 1, "fffffffe", false},
+		{"Valid", 12345, "00003039", false},
+		{"InvalidMax", 0xFFFFFFFF + 1, "", true},
 	}
 
 	for _, tt := range tests {
@@ -36,6 +36,21 @@ func TestForVPC(t *testing.T) {
 				t.Errorf("NewFromInteger() got = %v, want = %v", got, tt.wantIdentifier)
 			}
 		})
+	}
+}
+
+// TestForVPCWidth is the regression guard for the 32-bit VPC ID width
+// decision. If a future change widens or narrows the VPC ID, this test
+// fires loudly rather than silently breaking BGP RD/RT formatting and
+// the SRv6 SID layout.
+func TestForVPCWidth(t *testing.T) {
+	id := identifier.NewFromSeed(1)
+	got, err := id.ForVPC()
+	if err != nil {
+		t.Fatalf("ForVPC() error = %v", err)
+	}
+	if len(got) != 8 {
+		t.Errorf("ForVPC() returned %q (len %d), want 8-char hex", got, len(got))
 	}
 }
 

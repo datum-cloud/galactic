@@ -22,16 +22,20 @@ import (
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 
+	"go.datum.net/galactic/internal/operator/bgpattrs"
 	"go.datum.net/galactic/internal/operator/cniconfig"
 	"go.datum.net/galactic/internal/operator/identifier"
+	"go.datum.net/galactic/internal/operator/srv6sid"
 )
 
 const MaxIdentifierAttemptsVPCAttachment = 100
 
 type VPCAttachmentReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	Identifier *identifier.Identifier
+	Scheme       *runtime.Scheme
+	Identifier   *identifier.Identifier
+	SIDEncoder   *srv6sid.Encoder
+	BGPFormatter *bgpattrs.Formatter
 }
 
 // +kubebuilder:rbac:groups=galactic.datumapis.com,resources=vpcattachments,verbs=get;list;watch;create;update;patch;delete
@@ -56,7 +60,10 @@ func (r *VPCAttachmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
-	// We only assign an identifier once
+	// Identifier assignment is one-shot. Once status.Identifier is set
+	// it is never reassigned — the VRF and SRv6 SID derived from it are
+	// part of the attachment's stable identity for its entire lifetime.
+	statusDirty := false
 	if vpcAttachment.Status.Identifier == "" {
 		var existingVpcAttachments galacticv1alpha.VPCAttachmentList
 		if err := r.List(ctx, &existingVpcAttachments, &client.ListOptions{}); err != nil {
@@ -73,9 +80,42 @@ func (r *VPCAttachmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			vpcAttachment.Status.Identifier, _ = r.Identifier.ForVPCAttachment()
 		}
+		statusDirty = true
+	}
 
+	// Service SID, route target, and route distinguisher are computed
+	// from the (vpc-id, attachment-id) pair plus the operator's
+	// POP-locator + ASN. They are deterministic — set them whenever
+	// they're missing, but never recompute if they're already present.
+	// Recomputation would cause a silent mismatch with whatever the
+	// agents have already advertised over BGP.
+	if vpcAttachment.Status.ServiceSID == "" {
+		sid, err := r.SIDEncoder.ForAttachment(vpc.Status.Identifier, vpcAttachment.Status.Identifier)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("compute service SID: %w", err)
+		}
+		vpcAttachment.Status.ServiceSID = sid
+		statusDirty = true
+	}
+	if vpcAttachment.Status.RouteTarget == "" {
+		rt, err := r.BGPFormatter.RT(vpc.Status.Identifier)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("compute route target: %w", err)
+		}
+		vpcAttachment.Status.RouteTarget = rt
+		statusDirty = true
+	}
+	if vpcAttachment.Status.RouteDistinguisher == "" {
+		rd, err := r.BGPFormatter.RD(vpc.Status.Identifier)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("compute route distinguisher: %w", err)
+		}
+		vpcAttachment.Status.RouteDistinguisher = rd
+		statusDirty = true
+	}
+
+	if statusDirty {
 		vpcAttachment.Status.Ready = true
-
 		if err := r.Status().Update(ctx, &vpcAttachment); err != nil {
 			return ctrl.Result{}, err
 		}

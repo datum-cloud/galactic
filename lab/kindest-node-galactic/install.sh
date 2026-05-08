@@ -29,17 +29,16 @@ if hostname |grep -q control-plane; then # control-plane
   kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml
   kubectl -n kube-system rollout status daemonset kube-multus-ds
 
-  # MQTT
-  kubectl apply -f /galactic/mqtt.k8s.yml
-  kubectl -n galactic-mqtt rollout status deployment galactic-mqtt
+  # GoBGP route reflector. Galactic does not ship an RR by design
+  # (BYO per the cutover plan), but the lab needs one to bring an
+  # end-to-end environment up. Operators replace this with their own
+  # iBGP fabric in production.
+  kubectl apply -f /galactic/gobgp-rr.k8s.yml
+  kubectl -n galactic-rr rollout status deployment galactic-rr
 
   # Galactic Operator
   kubectl apply -f /galactic/operator.k8s.yml
   kubectl -n galactic-system rollout status deployment galactic-controller-manager
-
-  # Galactic Router
-  cat /galactic/router.k8s.yml |sed -e "s/galactic-router:latest/galactic-router:${GALACTIC_VERSION}/g" |kubectl apply -f -
-  kubectl -n galactic-router rollout status deployment galactic-router
 
   # Galactic Agent
   cat /galactic/agent.k8s.yml |sed -e "s/galactic:latest/galactic:${GALACTIC_VERSION}/g" |kubectl apply -f -

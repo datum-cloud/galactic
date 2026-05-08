@@ -23,7 +23,9 @@ type VPCStatus struct {
 	// +default:value=false
 	Ready bool `json:"ready,omitempty"`
 
-	// A unique identifier assigned to this VPC
+	// A unique 32-bit hex identifier assigned to this VPC. 8 lowercase
+	// hex characters. Used to derive the BGP route distinguisher, route
+	// target, and SRv6 service SID for every VPCAttachment in this VPC.
 	// +optional
 	Identifier string `json:"identifier,omitempty"`
 }

@@ -6,6 +6,7 @@ package operator
 
 import (
 	"crypto/tls"
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -18,8 +19,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	"go.datum.net/galactic/internal/operator/bgpattrs"
 	"go.datum.net/galactic/internal/operator/controller"
 	"go.datum.net/galactic/internal/operator/identifier"
+	"go.datum.net/galactic/internal/operator/srv6sid"
 	webhookv1 "go.datum.net/galactic/internal/operator/webhook/v1"
 	galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
 )
@@ -41,6 +44,8 @@ type operatorFlags struct {
 	secureMetrics        bool
 	enableHTTP2          bool
 	tlsOpts              []func(*tls.Config)
+	popLocator           string
+	asn                  uint32
 }
 
 func NewCommand() *cobra.Command {
@@ -67,6 +72,13 @@ via mutation webhooks.`,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	cmd.Flags().BoolVar(&flags.enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	cmd.Flags().StringVar(&flags.popLocator, "pop-locator", "",
+		"IPv6 prefix used as the SRv6 service-SID locator (e.g. fc00::/56). "+
+			"Required. Same value the agents use for ingress decap. Drives the "+
+			"ServiceSID written to vpcattachment.status.")
+	cmd.Flags().Uint32Var(&flags.asn, "asn", 0,
+		"Cluster ASN. Required. Used to format the BGP route distinguisher and "+
+			"route target written to vpcattachment.status.")
 
 	return cmd
 }
@@ -122,6 +134,21 @@ func runOperator(flags *operatorFlags) error {
 	// Create identifier generator for VPC and VPCAttachment
 	identifierGen := identifier.New()
 
+	// Validate and bind cluster-wide BGP/SRv6 config.
+	if flags.popLocator == "" {
+		return fmt.Errorf("--pop-locator is required")
+	}
+	sidEncoder, err := srv6sid.NewEncoder(flags.popLocator)
+	if err != nil {
+		setupLog.Error(err, "invalid --pop-locator")
+		return err
+	}
+	bgpFormatter, err := bgpattrs.NewFormatter(flags.asn)
+	if err != nil {
+		setupLog.Error(err, "invalid --asn")
+		return err
+	}
+
 	// Register VPC controller
 	if err = (&controller.VPCReconciler{
 		Client:     mgr.GetClient(),
@@ -134,9 +161,11 @@ func runOperator(flags *operatorFlags) error {
 
 	// Register VPCAttachment controller
 	if err = (&controller.VPCAttachmentReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Identifier: identifierGen,
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Identifier:   identifierGen,
+		SIDEncoder:   sidEncoder,
+		BGPFormatter: bgpFormatter,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VPCAttachment")
 		return err

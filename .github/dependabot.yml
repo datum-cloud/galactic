@@ -21,12 +21,6 @@ updates:
     schedule:
       interval: weekly
 
-  # Python (router)
-  - package-ecosystem: pip
-    directory: /router
-    schedule:
-      interval: weekly
-
   # Docker
   - package-ecosystem: docker
     directory: /build

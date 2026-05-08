@@ -14,6 +14,15 @@ The topology consists of:
 - **5 edge routers (e1-e5)**: Provide connectivity to the core via BGP, simulating ISP infrastructure
 - **5 Kubernetes worker nodes**: Each worker connects to one edge router to access the network
 
+### Galactic control plane
+
+Each Galactic agent runs an embedded GoBGP speaker that peers iBGP with
+a route reflector. Pod reachability is distributed cluster-wide as VPN
+routes whose RT/RD identify the VPC and whose SRv6 service SID drives
+END.DT46 decap on the receiving node. The lab measures real-world
+latency between regions; SRv6 encapsulation overhead is consistent with
+the underlay path computed by the IS-IS core.
+
 
 ## Deploy
 
