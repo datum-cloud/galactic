@@ -1,0 +1,82 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iad-overlay
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iad-overlay-config
+  namespace: iad-overlay
+data:
+  gobgp.conf: |
+    [global.config]
+      as = 65000
+      router-id = "10.255.255.2"
+      port = -1
+      local-address-list = ["fc00:0:2::1"]
+
+    [[neighbors]]
+      [neighbors.config]
+        neighbor-address = "fc00:0:4::1"
+        peer-as = 65000
+        description = "infra-control-plane"
+      [neighbors.transport.config]
+        local-address = "fc00:0:2::1"
+      [[neighbors.afi-safis]]
+        [neighbors.afi-safis.config]
+          afi-safi-name = "l3vpn-ipv4-unicast"
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: iad-overlay
+  namespace: iad-overlay
+  labels:
+    app.kubernetes.io/name: iad-overlay
+    app.kubernetes.io/instance: iad-overlay
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iad-overlay
+      app.kubernetes.io/instance: iad-overlay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iad-overlay
+        app.kubernetes.io/instance: iad-overlay
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      hostNetwork: true
+      containers:
+        - name: gobgp
+          image: gobgp:v4.5.0
+          imagePullPolicy: Never
+          command:
+            - gobgpd
+            - -f
+            - /etc/gobgp/gobgp.conf
+            - --api-hosts
+            - :50051
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          volumeMounts:
+            - name: gobgp-config
+              mountPath: /etc/gobgp
+              readOnly: true
+      volumes:
+        - name: gobgp-config
+          configMap:
+            name: iad-overlay-config

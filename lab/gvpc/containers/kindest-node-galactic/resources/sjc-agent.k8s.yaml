@@ -19,45 +19,13 @@ data:
 
 
     CONFIGS = {
-        "k01-worker": {
-            "srv6_net": "2001:db8:ff01::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker",
-            "mqtt_username": "k01-worker",
-            "mqtt_topic_receive": "galactic/k01-worker/receive",
-            "mqtt_topic_send": "galactic/k01-worker/send"
-        },
-        "k01-worker2": {
+        "sjc-worker": {
             "srv6_net": "2001:db8:ff02::/48",
             "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker2",
-            "mqtt_username": "k01-worker2",
-            "mqtt_topic_receive": "galactic/k01-worker2/receive",
-            "mqtt_topic_send": "galactic/k01-worker2/send"
-        },
-        "k01-worker3": {
-            "srv6_net": "2001:db8:ff03::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker3",
-            "mqtt_username": "k01-worker3",
-            "mqtt_topic_receive": "galactic/k01-worker3/receive",
-            "mqtt_topic_send": "galactic/k01-worker3/send"
-        },
-        "k01-worker4": {
-            "srv6_net": "2001:db8:ff04::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker4",
-            "mqtt_username": "k01-worker4",
-            "mqtt_topic_receive": "galactic/k01-worker4/receive",
-            "mqtt_topic_send": "galactic/k01-worker4/send"
-        },
-        "k01-worker5": {
-            "srv6_net": "2001:db8:ff05::/48",
-            "mqtt_url": "tcp://localhost:31883",
-            "mqtt_clientid": "k01-worker5",
-            "mqtt_username": "k01-worker5",
-            "mqtt_topic_receive": "galactic/k01-worker5/receive",
-            "mqtt_topic_send": "galactic/k01-worker5/send"
+            "mqtt_clientid": "sjc-worker",
+            "mqtt_username": "sjc-worker",
+            "mqtt_topic_receive": "galactic/sjc-worker/receive",
+            "mqtt_topic_send": "galactic/sjc-worker/send"
         }
     }
 

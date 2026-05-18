@@ -10,4 +10,3 @@ RUN apt-get update \
 WORKDIR /galactic
 
 COPY --chmod=0755 scripts/ ./scripts/
-COPY resources/ ./resources/

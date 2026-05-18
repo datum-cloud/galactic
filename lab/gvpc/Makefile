@@ -1,0 +1,46 @@
+LAB_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+LAB := $(shell awk '/^name:/ {print $$2; exit}' *.clab.yaml)
+TOPO := $(wildcard *.clab.yaml)
+
+.PHONY: help build up down reload inspect graph host-setup underlay overlay clean
+
+.DEFAULT_GOAL := help
+
+help: ## Show available targets
+	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}' \
+		| sort
+
+build: ## Build container images (Kind node and GoBGP PE)
+	docker build -t kindest/node:galactic $(LAB_DIR)containers/kindest-node-galactic
+	docker build -t gobgp:v4.5.0 $(LAB_DIR)containers/gobgp
+
+up: build host-setup ## Build the Kind node image and deploy the lab
+	sudo containerlab deploy -t $(TOPO)
+
+down: ## Destroy the lab and clean generated state
+	sudo containerlab destroy -t $(TOPO) --cleanup
+
+reload: down up ## Full rebuild and redeploy
+
+inspect: ## Inspect deployed nodes and management addresses
+	sudo containerlab inspect -t $(TOPO)
+
+graph: ## Generate a draw.io diagram for the current topology
+	sudo containerlab graph -t $(TOPO) --drawio --drawio-dir .
+
+host-setup: ## Apply host sysctls for this dual-stack lab
+	sudo ./scripts/host-setup.sh --no-persist
+
+underlay: ## Apply FRR DaemonSets to all clusters
+	./scripts/install-frr.sh
+
+overlay: ## Load GoBGP image into clusters and apply DaemonSets to iad and sjc
+	kind load docker-image gobgp:v4.5.0 --name iad
+	kind load docker-image gobgp:v4.5.0 --name sjc
+	./scripts/install-gobgp.sh
+
+clean: down ## Destroy the lab, remove ContainerLab state, and delete container images
+	docker rmi kindest/node:galactic || true
+	docker rmi gobgp:v4.5.0 || true
+	rm -rf clab-$(LAB)
