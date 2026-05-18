@@ -1,0 +1,147 @@
+name: network
+
+mgmt:
+  network: mgmt
+  ipv4-subnet: 172.20.20.0/24
+
+topology:
+  defaults:
+    kind: linux
+    binds:
+      - group_files/common/vtysh.conf:/etc/frr/vtysh.conf:ro
+      - group_files/common/startup-lib.sh:/opt/lab/startup-lib.sh:ro
+      - group_files/common/hosts:/etc/hosts:ro
+
+  kinds:
+    linux:
+      image: frrouting/frr:latest
+
+  nodes:
+    pe1:
+      group: pe
+      labels:
+        graph-group: pe
+        graph-level: 1
+        graph-icon: router
+      image: gobgp-pe:latest
+      entrypoint: /node_files/startup.sh
+      env:
+        LOCAL_LOOPBACK: "fc00:0:2::1"
+        LOCAL_SID: "fc00:0:2:e000::"
+        REMOTE_SID: "fc00:0:3:e000::"
+        LOCAL_VPN_IP: 10.0.0.1/32
+        REMOTE_VPN_PREFIX: 10.0.0.2/32
+        RR_LOOPBACK: "fc00:0:4::1"
+      binds:
+        - group_files/pe/daemons:/etc/frr/daemons:ro
+        - node_files/pe1/startup.sh:/node_files/startup.sh:ro
+        - node_files/pe1/frr.conf:/etc/frr/frr.conf:ro
+        - node_files/pe1/gobgp.conf:/etc/gobgp/gobgp.conf:ro
+
+    pe2:
+      group: pe
+      labels:
+        graph-group: pe
+        graph-level: 1
+        graph-icon: router
+      image: gobgp-pe:latest
+      entrypoint: /node_files/startup.sh
+      env:
+        LOCAL_LOOPBACK: "fc00:0:3::1"
+        LOCAL_SID: "fc00:0:3:e000::"
+        REMOTE_SID: "fc00:0:2:e000::"
+        LOCAL_VPN_IP: 10.0.0.2/32
+        REMOTE_VPN_PREFIX: 10.0.0.1/32
+        RR_LOOPBACK: "fc00:0:4::1"
+      binds:
+        - group_files/pe/daemons:/etc/frr/daemons:ro
+        - node_files/pe2/startup.sh:/node_files/startup.sh:ro
+        - node_files/pe2/frr.conf:/etc/frr/frr.conf:ro
+        - node_files/pe2/gobgp.conf:/etc/gobgp/gobgp.conf:ro
+
+    tr1:
+      group: transit
+      labels:
+        graph-group: transit
+        graph-level: 2
+        graph-icon: router
+      entrypoint: /node_files/startup.sh
+      binds:
+        - group_files/transit/daemons:/etc/frr/daemons:ro
+        - node_files/tr1/startup.sh:/node_files/startup.sh:ro
+        - node_files/tr1/frr.conf:/etc/frr/frr.conf:ro
+
+    tr2:
+      group: transit
+      labels:
+        graph-group: transit
+        graph-level: 2
+        graph-icon: router
+      entrypoint: /node_files/startup.sh
+      binds:
+        - group_files/transit/daemons:/etc/frr/daemons:ro
+        - node_files/tr2/startup.sh:/node_files/startup.sh:ro
+        - node_files/tr2/frr.conf:/etc/frr/frr.conf:ro
+
+    tr3:
+      group: transit
+      labels:
+        graph-group: transit
+        graph-level: 2
+        graph-icon: router
+      entrypoint: /node_files/startup.sh
+      binds:
+        - group_files/transit/daemons:/etc/frr/daemons:ro
+        - node_files/tr3/startup.sh:/node_files/startup.sh:ro
+        - node_files/tr3/frr.conf:/etc/frr/frr.conf:ro
+
+    tr4:
+      group: transit
+      labels:
+        graph-group: transit
+        graph-level: 2
+        graph-icon: router
+      entrypoint: /node_files/startup.sh
+      binds:
+        - group_files/transit/daemons:/etc/frr/daemons:ro
+        - node_files/tr4/startup.sh:/node_files/startup.sh:ro
+        - node_files/tr4/frr.conf:/etc/frr/frr.conf:ro
+
+    rr1:
+      group: control
+      labels:
+        graph-group: control
+        graph-level: 3
+        graph-icon: router
+      entrypoint: /node_files/startup.sh
+      binds:
+        - group_files/control/daemons:/etc/frr/daemons:ro
+        - node_files/rr1/startup.sh:/node_files/startup.sh:ro
+        - node_files/rr1/frr.conf:/etc/frr/frr.conf:ro
+
+    rr2:
+      group: control
+      labels:
+        graph-group: control
+        graph-level: 3
+        graph-icon: router
+      entrypoint: /node_files/startup.sh
+      binds:
+        - group_files/control/daemons:/etc/frr/daemons:ro
+        - node_files/rr2/startup.sh:/node_files/startup.sh:ro
+        - node_files/rr2/frr.conf:/etc/frr/frr.conf:ro
+
+  links:
+    # PE uplinks
+    - endpoints: ["pe1:eth1", "tr1:eth1"]
+    - endpoints: ["pe2:eth1", "tr2:eth1"]
+    # TR full mesh (iBGP within AS 65100)
+    - endpoints: ["tr1:eth2", "tr2:eth2"]
+    - endpoints: ["tr1:eth3", "tr3:eth1"]
+    - endpoints: ["tr1:eth4", "tr4:eth1"]
+    - endpoints: ["tr2:eth3", "tr3:eth2"]
+    - endpoints: ["tr2:eth4", "tr4:eth2"]
+    - endpoints: ["tr3:eth3", "tr4:eth3"]
+    # RR downlinks
+    - endpoints: ["rr1:eth1", "tr3:eth4"]
+    - endpoints: ["rr2:eth1", "tr4:eth4"]
