@@ -11,9 +11,8 @@ help: ## Show available targets
 		| awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}' \
 		| sort
 
-build: ## Build container images (Kind node and GoBGP PE)
+build: ## Build container images (Kind node)
 	docker build -t kindest/node:galactic $(LAB_DIR)containers/kindest-node-galactic
-	docker build -t gobgp:v4.5.0 $(LAB_DIR)containers/gobgp
 
 up: build host-setup ## Build the Kind node image and deploy the lab
 	sudo containerlab deploy -t $(TOPO)
@@ -35,12 +34,13 @@ host-setup: ## Apply host sysctls for this dual-stack lab
 underlay: ## Apply FRR DaemonSets to all clusters
 	./scripts/install-underlay.sh
 
-overlay: ## Load GoBGP image into clusters and apply DaemonSets to iad and sjc
-	kind load docker-image gobgp:v4.5.0 --name iad
-	kind load docker-image gobgp:v4.5.0 --name sjc
+overlay: ## Pull GoBGP image, load into clusters, and apply DaemonSets to iad and sjc
+	docker pull osrg/gobgp:latest
+	kind load docker-image osrg/gobgp:latest --name iad
+	kind load docker-image osrg/gobgp:latest --name sjc
 	./scripts/install-overlay.sh
 
 clean: down ## Destroy the lab, remove ContainerLab state, and delete container images
 	docker rmi kindest/node:galactic || true
-	docker rmi gobgp:v4.5.0 || true
+	docker rmi osrg/gobgp:latest || true
 	rm -rf clab-$(LAB)

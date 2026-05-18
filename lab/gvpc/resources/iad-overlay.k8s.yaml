@@ -59,7 +59,7 @@ spec:
       hostNetwork: true
       containers:
         - name: gobgp
-          image: gobgp:v4.5.0
+          image: osrg/gobgp:latest
           imagePullPolicy: Never
           command:
             - gobgpd
