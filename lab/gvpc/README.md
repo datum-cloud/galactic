@@ -135,8 +135,8 @@ gvpc/
 │   └── transit/ daemons
 └── scripts/
     ├── host-setup.sh
-    ├── install-frr.sh
-    └── install-gobgp.sh
+    ├── install-underlay.sh
+    └── install-overlay.sh
 ```
 
 ## Prerequisites

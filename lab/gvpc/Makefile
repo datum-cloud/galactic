@@ -33,12 +33,12 @@ host-setup: ## Apply host sysctls for this dual-stack lab
 	sudo ./scripts/host-setup.sh --no-persist
 
 underlay: ## Apply FRR DaemonSets to all clusters
-	./scripts/install-frr.sh
+	./scripts/install-underlay.sh
 
 overlay: ## Load GoBGP image into clusters and apply DaemonSets to iad and sjc
 	kind load docker-image gobgp:v4.5.0 --name iad
 	kind load docker-image gobgp:v4.5.0 --name sjc
-	./scripts/install-gobgp.sh
+	./scripts/install-overlay.sh
 
 clean: down ## Destroy the lab, remove ContainerLab state, and delete container images
 	docker rmi kindest/node:galactic || true
