@@ -1,0 +1,10 @@
+127.0.0.1 localhost
+::1 localhost ip6-localhost ip6-loopback
+
+fc00:0:1::1 tr1
+fc00:0:5::1 tr2
+fc00:0:6::1 tr3
+fc00:0:7::1 tr4
+2001:db8:0:1::2 iad-worker
+2001:db8:0:2::2 sjc-worker
+2001:db8:0:5::2 infra-worker

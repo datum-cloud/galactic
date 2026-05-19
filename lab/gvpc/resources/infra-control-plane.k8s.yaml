@@ -1,0 +1,165 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra-control-plane
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infra-control-plane-config
+  namespace: infra-control-plane
+data:
+  daemons: |
+    zebra=yes
+    bgpd=yes
+    ospfd=no
+    ospf6d=no
+    ripd=no
+    ripngd=no
+    isisd=no
+    pimd=no
+    ldpd=no
+    nhrpd=no
+    eigrpd=no
+    babeld=no
+    sharpd=no
+    pbrd=no
+    bfdd=no
+    fabricd=no
+    vrrpd=no
+    pathd=no
+
+    vtysh_enable=yes
+    zebra_options="  -A 127.0.0.1 -s 90000000"
+    bgpd_options="  -A 127.0.0.1"
+  frr.conf: |
+    frr version 9.1
+    frr defaults traditional
+    hostname infra-control-plane
+    log syslog informational
+
+    interface lo
+     ipv6 address fc00:0:4::1/128
+    !
+    interface eth1
+     description tr3-facing
+    !
+
+    router bgp 65000
+     bgp router-id 10.255.255.1
+     no bgp default ipv4-unicast
+     no bgp ebgp-requires-policy
+     bgp log-neighbor-changes
+     neighbor eth1 interface remote-as 65100
+     neighbor fc00:0:2::1 remote-as 65000
+     neighbor fc00:0:2::1 update-source lo
+     neighbor fc00:0:2::1 passive
+     neighbor fc00:0:3::1 remote-as 65000
+     neighbor fc00:0:3::1 update-source lo
+     neighbor fc00:0:3::1 passive
+     !
+     address-family ipv6 unicast
+      neighbor eth1 activate
+      neighbor eth1 allowas-in 1
+      network fc00:0:4::1/128
+     exit-address-family
+     !
+     address-family ipv4 vpn
+      neighbor fc00:0:2::1 activate
+      neighbor fc00:0:2::1 route-reflector-client
+      neighbor fc00:0:3::1 activate
+      neighbor fc00:0:3::1 route-reflector-client
+     exit-address-family
+    !
+
+    ipv6 forwarding
+  vtysh.conf: |
+    service integrated-vtysh-config
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: infra-control-plane
+  namespace: infra-control-plane
+  labels:
+    app.kubernetes.io/name: infra-control-plane
+    app.kubernetes.io/instance: infra-control-plane
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: infra-control-plane
+      app.kubernetes.io/instance: infra-control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: infra-control-plane
+        app.kubernetes.io/instance: infra-control-plane
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      hostNetwork: true
+      initContainers:
+        - name: frr-init
+          image: frrouting/frr:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /tmp/frr-config/* /etc/frr/
+              install -d -o frr -g frr -m 775 /run/frr
+              install -d -o frr -g frr -m 775 /var/log/frr
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: frr-config-source
+              mountPath: /tmp/frr-config
+              readOnly: true
+            - name: frr-etc
+              mountPath: /etc/frr
+            - name: frr-run
+              mountPath: /run/frr
+            - name: frr-log
+              mountPath: /var/log/frr
+      containers:
+        - name: frr
+          image: frrouting/frr:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              /usr/lib/frr/frrinit.sh start
+              exec tail -f /dev/null
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_ADMIN
+          volumeMounts:
+            - name: frr-etc
+              mountPath: /etc/frr
+            - name: frr-run
+              mountPath: /run/frr
+            - name: frr-log
+              mountPath: /var/log/frr
+      volumes:
+        - name: frr-config-source
+          configMap:
+            name: infra-control-plane-config
+        - name: frr-etc
+          emptyDir: {}
+        - name: frr-run
+          emptyDir:
+            medium: Memory
+        - name: frr-log
+          emptyDir: {}
