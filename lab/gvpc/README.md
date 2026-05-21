@@ -132,6 +132,8 @@ gvpc/
 │   └── tr4/     frr.conf  startup.sh
 ├── group_files/
 │   ├── common/  hosts  vtysh.conf  startup-lib.sh
+│   ├── control/ daemons
+│   ├── pe/      daemons
 │   └── transit/ daemons
 └── scripts/
     ├── host-setup.sh
@@ -166,7 +168,7 @@ task overlay  # apply GoBGP DaemonSets to iad and sjc clusters
 | `graph`          | Generate a draw.io diagram for the topology               |
 | `host-setup`     | Apply required host sysctls (IPv6 forwarding etc.)        |
 | `underlay`       | Apply FRR DaemonSets to all three clusters                |
-| `overlay`        | Apply GoBGP DaemonSets to iad and sjc clusters            |
+| `overlay`        | Pull GoBGP image, load into clusters, apply DaemonSets    |
 | `clean`          | Destroy lab, remove state, and delete the Kind node image |
 
 ## Verification

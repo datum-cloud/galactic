@@ -7,9 +7,6 @@ echo "Starting post-create setup for Galactic containerlab environment..."
 echo "Installing Debian packages..."
 sudo apt update
 sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y
-sudo apt install -y \
-	golang-go
-
 # Install Claude
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs

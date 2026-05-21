@@ -1,4 +1,5 @@
-FROM kindest/node:v1.35.0
+ARG KINDEST_VER=v1.35.1
+FROM kindest/node:${KINDEST_VER}
 
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
@@ -10,7 +11,6 @@ RUN apt-get update \
 WORKDIR /galactic
 
 COPY --chmod=0755 scripts/ ./scripts/
-COPY resources/ ./resources/
 
 # Wrap kubectl to work around OrbStack DooD: kind runs `kubectl apply` for the
 # StorageClass step immediately after kubeadm init, but the apiserver briefly

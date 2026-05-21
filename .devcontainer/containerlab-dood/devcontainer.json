@@ -13,6 +13,11 @@
     ],
     "workspaceFolder": "${localWorkspaceFolder}",
     "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+    "features": {
+        "ghcr.io/devcontainers/features/go:1": {
+            "version": "1.24.5"
+        }
+    },
     "customizations": {
         "vscode": {
             "extensions": [
