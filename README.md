@@ -29,7 +29,7 @@ Two ContainerLab environments are available under [`lab/`](./lab/):
 - **[`lab/network/`](./lab/network/)** — Standalone SRv6 underlay lab (FRR + GoBGP, no Kubernetes). Good starting point for understanding the routing layer.
 - **[`lab/gvpc/`](./lab/gvpc/)** — Three Kind clusters wired over an SRv6 transit mesh. The full GVPC multi-cluster environment.
 
-See the [DevContainer](./.devcontainer/) for development environment setup.
+See the [galactic DevContainer](./.devcontainer/galactic/) for development environment setup. On ARM64 / OrbStack, use the [containerlab DevContainer](./.devcontainer/containerlab-dood/) to run ContainerLab via Docker-out-of-Docker.
 
 ## Development
 

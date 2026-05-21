@@ -33,8 +33,13 @@ go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
 # Install network tools
 echo "Installing network tools..."
-sudo apt-get update
-sudo apt-get install -y \
+sudo apt update
+sudo apt install -y software-properties-common
+sudo add-apt-repository -y ppa:apt-fast/stable
+sudo apt update
+sudo DEBIAN_FRONTEND=noninteractive apt install -y apt-fast
+sudo apt-fast upgrade -y
+sudo apt-fast install -y \
 	iproute2 \
 	iptables \
 	tcpdump \
@@ -56,7 +61,7 @@ make manifests generate
 
 # Set up git safe directory
 echo "Configuring git safe directory..."
-git config --global --add safe.directory /workspaces/galactic
+git config --add safe.directory /workspaces/galactic
 
 # Install Claude Code CLI
 echo "Installing Claude Code..."
