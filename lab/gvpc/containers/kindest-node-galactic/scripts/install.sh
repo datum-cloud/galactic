@@ -18,7 +18,7 @@ if hostname |grep -q control-plane; then # control-plane
 
   # Cilium
   curl -L https://github.com/cilium/cilium-cli/releases/download/${CILIUM_VERSION}/cilium-linux-${ARCH}.tar.gz |tar xvfz - -C /usr/local/bin && chmod +x /usr/local/bin/cilium
-  cilium install --set cni.exclusive=false && cilium status --wait
+  cilium install --set cni.exclusive=false --set kubeProxyReplacement=true && cilium status --wait
 
   if ! hostname |grep -q infra; then
     # Cert Manager
