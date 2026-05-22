@@ -24,9 +24,6 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Generate manifests
-        run: make manifests generate
-
       - name: Log in to Container Registry
         uses: docker/login-action@v4
         with:
