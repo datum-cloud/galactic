@@ -115,11 +115,6 @@ jobs:
       - name: Install CRDs
         run: make install
 
-      - name: Deploy agent
-        run: |
-          make deploy IMG=galactic:e2e
-          kubectl -n galactic-operator-system wait --for=condition=available deployment/galactic-operator-controller-manager --timeout=120s
-
       - name: Verify CRDs
         run: |
           kubectl get crd network-attachment-definitions.k8s.cni.cncf.io
