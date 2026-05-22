@@ -2,65 +2,54 @@
 
 ## Purpose & Architecture
 
-Galactic is a Kubernetes network operator that gives pods declarative multi-cloud VPC connectivity using SRv6 and kernel VRF isolation. Users create two CRDs (`VPC`, `VPCAttachment`) and annotate pods; Galactic handles all routing. The control plane is a Go operator (`internal/operator/controller/`) that assigns identifiers and generates Multus `NetworkAttachmentDefinition` resources. A DaemonSet agent (`internal/agent/srv6/`) manages kernel SRv6 routes and VRFs per node. The CNI plugin (`internal/cni/`) runs in-process with the agent, registering container endpoints via gRPC. BGP is used as the control plane for distributing SRv6 routes between agents.
+Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a DaemonSet agent (`internal/agent/srv6/`) that manages kernel SRv6 routes and VRFs per node, and a CNI plugin (`internal/cni/`) that registers container endpoints with the agent via gRPC. VPC and VPCAttachment CRD management lives in a separate operator project; Galactic receives pre-populated identifiers through the CNI config and acts on them. BGP is used as the control plane for distributing SRv6 routes between agents.
 
-**Data flow:** VPC/VPCAttachment CRDs → operator assigns 48-bit/16-bit hex IDs → NetworkAttachmentDefinition written → pod annotation triggers webhook (adds Multus annotation) → CNI runs → gRPC registers endpoint with agent → agent manages SRv6 ingress routes locally → BGP distributes SRv6 routes between agents.
+**Data flow:** CNI invoked with pre-populated VPC/VPCAttachment identifiers → gRPC registers endpoint with agent → agent manages SRv6 ingress routes locally → BGP distributes SRv6 routes between agents.
 
 **Non-obvious decisions:**
-- VPC identifiers are 48-bit hex; VPCAttachment identifiers are 16-bit hex. These are embedded into IPv6 SRv6 endpoint addresses for deterministic route lookups.
+- VPC identifiers are 48-bit hex; VPCAttachment identifiers are 16-bit hex. These are embedded into IPv6 SRv6 endpoint addresses for deterministic route lookups. Both are supplied by an external operator via the CNI config.
 - Identifiers are also Base62-encoded for interface naming (VRF: `vrfX-Y`, veth host side: `galX-Y`) to keep kernel interface name length within limits.
-- The binary auto-detects CNI mode via the `CNI_COMMAND` env var; otherwise runs as a Cobra CLI with `operator`, `agent`, `cni`, `version` subcommands.
+- The binary auto-detects CNI mode via the `CNI_COMMAND` env var; otherwise runs as a Cobra CLI with `agent`, `cni`, and `version` subcommands.
 
 ## Tech Stack
 
-- **Go 1.24** (toolchain 1.24.2) — operator, agent, CNI plugin
-- **controller-runtime v0.21 / k8s v1.33** — operator framework
-- **Multus CNI** — multi-network for pods; Galactic generates NADs automatically
+- **Go 1.24** (toolchain 1.24.2) — agent and CNI plugin
+- **Multus CNI** — multi-network for pods; NAD generation is handled by the external operator
 - **gRPC + protobuf** — CNI-to-agent local communication (`pkg/proto/local/`)
 - **SRv6 + netlink** — kernel-level routing; `github.com/vishvananda/netlink`
-- **BGP** — control plane for SRv6 route distribution between agents
-- **Ginkgo/Gomega** — Go BDD-style tests
-- **controller-gen v0.18 / kustomize v5.6** — code + manifest generation (managed by Makefile, vendored to `bin/`)
+- **BGP** — control plane for SRv6 route distribution between agents (in progress)
 
 ## Development Workflow
 
 ```
 make build          # produces bin/galactic
-make test           # gen + fmt + vet + unit tests with coverage
+make test           # fmt + vet + unit tests with coverage
 make lint           # golangci-lint; lint-fix applies safe auto-fixes
-make run-operator   # run operator against current kubeconfig
 make run-agent      # run agent (requires root / CAP_NET_ADMIN)
-make test-e2e       # requires Kind; setup-test-e2e creates the cluster
-make manifests      # regenerate CRDs + RBAC from Go types (run after API changes)
-make generate       # regenerate DeepCopy methods (run after API type changes)
 ```
 
 **Before every PR:** `make lint test`.
 
-**Envtest binaries** are downloaded to `bin/` by `make setup-envtest`. CI pins Kubernetes 1.31 for controller tests.
-
 ## Code Standards
 
-See [CONVENTIONS.md](CONVENTIONS.md) for the full, prescriptive coding standards covering Go naming, error handling, testing patterns, API type conventions, code generation, linting, and commit messages.
+See [CONVENTIONS.md](CONVENTIONS.md) for the full, prescriptive coding standards covering Go naming, error handling, testing patterns, linting, and commit messages.
 
 Summary:
-- Go: `gofmt`/`goimports` enforced; golangci-lint with `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused` (see `.golangci.yml`). `lll` excluded from `api/` and `internal/`.
-- Generated files (`zz_generated.deepcopy.go`, CRD YAMLs) are committed; regenerate with `make generate manifests` after type changes. Never hand-edit them.
-- Kubebuilder marker annotations (`+kubebuilder:rbac`, `+kubebuilder:object:root`, etc.) drive code + manifest generation — keep them accurate.
+- Go: `gofmt`/`goimports` enforced; golangci-lint with `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused` (see `.golangci.yml`). `lll` excluded from `internal/`.
+- Generated protobuf files (`*.pb.go`, `*_grpc.pb.go`) are committed; never hand-edit them.
 
 ## Current State
 
-- **Known debt:** e2e tests only run on `main`/release branches (not PRs), so regressions in cluster behavior can merge undetected. Unit coverage exists for `identifier`, `cniconfig`, and `pkg/common/util`; controller reconciler logic has envtest coverage but agent/CNI paths do not.
+- **Known debt:** Agent and CNI kernel-path code (`internal/agent/srv6/`, `internal/cni/`) has no unit coverage; these paths are best covered by integration or e2e tests. Only `pkg/common/util` has unit test coverage.
 - **In flux:** The SRv6 route management (`internal/agent/srv6/`) and VRF utilities (`pkg/common/vrf/`) are the least tested and most likely to change as multi-cloud routing matures. BGP integration is in progress.
 
 ## New Developer Entry Points
 
-1. Run `make build` to verify toolchain; run `make test` to confirm envtest and unit tests pass.
-2. Read `pkg/apis/v1alpha/vpc_types.go` and `vpcattachment_types.go` — the CRD types are the core abstraction.
-3. Trace `internal/operator/controller/vpcattachment_controller.go` — it wires operator reconciliation to Multus NAD generation.
-4. Read `internal/cni/cni.go` (cmdAdd/cmdDel) to understand the container attach path.
-5. `config/samples/` has working VPC, VPCAttachment, and annotated Pod examples.
+1. Run `make build` to verify toolchain; run `make test` to confirm unit tests pass.
+2. Read `internal/cni/cni.go` (cmdAdd/cmdDel) to understand the container attach path.
+3. Read `internal/agent/srv6/srv6.go` to understand the agent entry point and how it manages SRv6 routes and VRFs.
+4. Read `pkg/proto/local/local.go` to understand the gRPC interface between the CNI and the agent.
+5. Explore `pkg/common/` for shared utilities (VRF management, sysctl helpers, CNI types).
 
 **Likely trip-ups:**
 - `make run-agent` requires elevated privileges (netlink, VRF, SRv6 operations need `CAP_NET_ADMIN`).
-- After modifying API types, you must run both `make generate` and `make manifests` or CRD YAML and DeepCopy will be out of sync.

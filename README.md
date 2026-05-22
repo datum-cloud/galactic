@@ -10,29 +10,9 @@ Modern organizations run workloads everywhere: AWS, Azure, GCP, on-premises, and
 
 ## Our Approach
 
-Galactic extends Kubernetes with two simple resources—VPCs and VPCAttachments—that let you define multi-cloud network topology declaratively:
+Galactic provides the SRv6 data plane that makes multi-cloud VPC connectivity work at the kernel level. It runs as a DaemonSet agent on every node, managing SRv6 routes and VRF isolation, and as a CNI plugin that attaches pods to the correct virtual network. VPC and VPCAttachment definitions are managed by a companion operator; Galactic acts on the identifiers that operator assigns.
 
-```yaml
-apiVersion: networking.datum.net/v1alpha1
-kind: VPC
-metadata:
-  name: production
-spec:
-  ipv4CIDRBlocks:
-    - 10.100.0.0/16
-```
-
-Any pod can join the VPC with a single annotation:
-
-```yaml
-metadata:
-  annotations:
-    networking.datum.net/vpc-attachment: us-west
-```
-
-That's it. Your pod now has an interface connected to the VPC, able to communicate with any other attached workload—regardless of which cloud or region it's running in.
-
-Under the hood, Galactic uses Segment Routing over IPv6 (SRv6) for efficient, deterministic routing and Virtual Routing and Forwarding (VRF) for true network isolation at the kernel level.
+Under the hood, Galactic uses Segment Routing over IPv6 (SRv6) for efficient, deterministic routing and Virtual Routing and Forwarding (VRF) for true network isolation at the kernel level. BGP is used to distribute SRv6 routes between agents across nodes and clusters.
 
 ## Why Galactic
 

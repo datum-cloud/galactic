@@ -24,9 +24,6 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Generate manifests
-        run: make manifests generate
-
       - name: Log in to Container Registry
         uses: docker/login-action@v4
         with:
@@ -64,13 +61,7 @@ jobs:
             GIT_TREE_STATE=clean
             BUILD_DATE=${{ github.event.repository.updated_at }}
 
-      - name: Generate install manifest
-        run: |
-          make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
-          files: |
-            dist/install.yaml

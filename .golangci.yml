@@ -7,7 +7,6 @@ linters:
     - copyloopvar
     - dupl
     - errcheck
-    - ginkgolinter
     - goconst
     - gocyclo
     - govet
@@ -29,9 +28,6 @@ linters:
   exclusions:
     generated: lax
     rules:
-      - linters:
-          - lll
-        path: api/*
       - linters:
           - dupl
           - lll
