@@ -6,4 +6,4 @@
 until curl -sk https://127.0.0.1:6443/healthz >/dev/null 2>&1; do
   sleep 1
 done
-exec /usr/bin/kubectl "$@" --server=https://127.0.0.1:6443
+exec /usr/bin/kubectl --server=https://127.0.0.1:6443 "$@"
