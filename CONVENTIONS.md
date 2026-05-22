@@ -10,13 +10,11 @@ This document defines the coding standards, naming rules, error handling pattern
 
 - Module: `go.datum.net/galactic`
 - `cmd/galactic/main.go` — binary entry point; all Cobra subcommands registered here
-- `pkg/apis/v1alpha/` — public CRD types; only add types here that are part of the Kubernetes API surface
-- `pkg/common/` — utilities shared between operator, agent, and CNI
+- `pkg/common/` — utilities shared between agent and CNI
 - `pkg/proto/local/` — gRPC / protobuf generated files plus hand-written convenience wrapper for CNI-to-agent communication
-- `internal/operator/` — operator reconcilers, identifier logic, CNI config generation, webhooks
 - `internal/agent/srv6/` — kernel SRv6 route and VRF management
 - `internal/cni/` — CNI plugin (cmdAdd / cmdDel implementation)
-- `internal/cmd/` — one sub-package per Cobra subcommand (`agent`, `cni`, `operator`, `version`)
+- `internal/cmd/` — one sub-package per Cobra subcommand (`agent`, `cni`, `version`)
 
 Place new code in `internal/` unless it must be imported by an external caller. Prefer creating a focused sub-package over adding to an existing large one.
 
@@ -28,19 +26,16 @@ Use three groups, separated by blank lines:
 2. Third-party and Kubernetes packages
 3. Internal packages (`go.datum.net/galactic/...`)
 
-`goimports` enforces this automatically. Alias imports use the last meaningful path segment as the short name (`ctrl`, `metav1`, `corev1`, `nadv1`, `galacticv1alpha`).
+`goimports` enforces this automatically. Alias imports use the last meaningful path segment as the short name (`nadv1`, `localgrpc`).
 
 ```go
 import (
     "context"
     "fmt"
 
-    ctrl "sigs.k8s.io/controller-runtime"
-    "sigs.k8s.io/controller-runtime/pkg/client"
-    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-    galacticv1alpha "go.datum.net/galactic/pkg/apis/v1alpha"
+    "google.golang.org/grpc"
 
-    "go.datum.net/galactic/internal/operator/identifier"
+    "go.datum.net/galactic/pkg/proto/local"
 )
 ```
 
@@ -48,13 +43,13 @@ import (
 
 | Element | Convention | Example |
 |---------|-----------|---------|
-| Package | lowercase, single word, matches directory | `package controller` |
-| Exported type | `CapWords` | `VPCAttachmentReconciler` |
+| Package | lowercase, single word, matches directory | `package srv6` |
+| Exported type | `CapWords` | `RouteIngress` |
 | Exported function / method | `CamelCase` | `RouteIngressAdd` |
-| Unexported function / method | `camelCase` | `vpcAttachmentsToIdentifiers` |
-| Exported constant | `CamelCase`, descriptive | `MaxVPC`, `MaxIdentifierAttemptsVPCAttachment` |
-| Test package | `<name>_test` | `package identifier_test` |
-| K8s API import aliases | domain-prefixed group-version | `galacticv1alpha`, `nadv1`, `metav1` |
+| Unexported function / method | `camelCase` | `buildSRv6Encap` |
+| Exported constant | `CamelCase`, descriptive | `MaxVPC`, `MaxVPCAttachment` |
+| Test package | `<name>_test` | `package util_test` |
+| K8s API import aliases | domain-prefixed group-version | `nadv1`, `metav1` |
 
 Do not use `_` in Go identifiers except in test package names.
 
@@ -62,17 +57,10 @@ Do not use `_` in Go identifiers except in test package names.
 
 - Wrap errors with context using `fmt.Errorf("what failed: %w", err)`. The context string must complete the sentence "could not `<what>`".
 - Collect multiple independent errors with `errors.Join(errs...)` and return the joined error.
-- In controllers, return `ctrl.Result{}, client.IgnoreNotFound(err)` on the initial resource fetch (expected not-found on deletion).
-- Return `ctrl.Result{RequeueAfter: duration}, nil` when waiting for a dependency (e.g., VPC not yet ready). Do not return an error for expected transient states.
 - Never swallow errors silently. If an error truly cannot be actionable, log it before discarding.
 - Do not add error handling for scenarios that the code guarantees cannot happen.
 
 ```go
-// correct
-if err := r.Get(ctx, req.NamespacedName, &vpc); err != nil {
-    return ctrl.Result{}, client.IgnoreNotFound(err)
-}
-
 // correct — multiple independent operations
 var errs []error
 if err := neighborproxy.Add(...); err != nil {
@@ -93,52 +81,16 @@ const MaxVPC uint64 = 0xFFFFFFFFFFFF
 const MaxVPCAttachment uint64 = 0xFFFF
 ```
 
-### Reconciler structure
-
-- Reconciler struct embeds `client.Client` and `Scheme *runtime.Scheme`; add service dependencies as named pointer fields.
-- All state assignments must be idempotent — guard with conditions before mutating:
-  ```go
-  if vpcAttachment.Status.Identifier == "" {
-      // assign once
-  }
-  ```
-- Use `controllerutil.CreateOrUpdate` for Kubernetes resources the reconciler manages.
-- Always call `controllerutil.SetControllerReference` to wire ownership for garbage collection.
-- Named the controller in `SetupWithManager` using `.Named("lowercase-kind")`.
-
-### Kubebuilder markers (API types)
-
-Every field in an API type must have either `// +required` or `// +optional`. Required fields must not carry `omitempty`. Optional fields must carry `omitempty`. Embedded structs (`TypeMeta`, `ObjectMeta`) carry both `omitempty` and `omitzero`.
-
-```go
-// +required
-Spec VPCSpec `json:"spec"`
-
-// +optional
-Status VPCStatus `json:"status,omitempty,omitzero"`
-```
-
-RBAC markers live on the `Reconcile` method of each controller, not on the struct.
-
 ### Code generation
 
-Generated files (`zz_generated.deepcopy.go`, CRD YAML in `config/crd/bases/`, protobuf `*.pb.go`) must never be hand-edited. After any change to API types:
-
-```
-make generate   # regenerates DeepCopy methods
-make manifests  # regenerates CRD YAML and RBAC
-```
-
-Both commands must be run together. Generated files are committed to version control.
-
-The boilerplate license header (`hack/boilerplate.go.txt`) is injected automatically by controller-gen.
+Generated protobuf files (`*.pb.go`, `*_grpc.pb.go` in `pkg/proto/local/`) must never be hand-edited. Regenerate them using the `protoc` toolchain when `.proto` files change. Generated files are committed to version control.
 
 ### Linting
 
-Run `make lint` before every PR. All linters listed in `.golangci.yml` must pass. Suppressions require a comment explaining why. Notable active linters: `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused`, `ginkgolinter`.
+Run `make lint` before every PR. All linters listed in `.golangci.yml` must pass. Suppressions require a comment explaining why. Notable active linters: `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused`.
 
 Exclusions by path:
-- `lll` is excluded from `api/*` and `internal/*`
+- `lll` is excluded from `internal/*`
 - `dupl` is excluded from `internal/*`
 - The `lab/` directory is entirely excluded
 
@@ -162,7 +114,7 @@ tests := []struct {
 }
 for _, tt := range tests {
     t.Run(tt.name, func(t *testing.T) {
-        got, err := id.FromValue(tt.value, identifier.MaxVPC)
+        got, err := id.FromValue(tt.value, MaxVPC)
         if (err != nil) != tt.wantError {
             t.Errorf("FromValue() error = %v, wantError = %v", err, tt.wantError)
         }
@@ -177,24 +129,9 @@ for _, tt := range tests {
 - Name test cases using `UpperCamelCase` (e.g., `"ValidMin"`, `"InvalidSpecialMax"`).
 - Use `wantError bool` to test error presence; do not test error message strings unless the message is part of the contract.
 
-### Go — controller / integration tests (Ginkgo + Gomega)
-
-- Dot-import both `ginkgo/v2` and `gomega` in controller test files.
-- Each controller has its own `_test.go` file and shares a `suite_test.go` in the same package.
-- Suite bootstrap in `suite_test.go`: one `TestXxx(t *testing.T)` function that calls `RegisterFailHandler(Fail)` then `RunSpecs(t, "Suite Name")`.
-- envtest provides a real Kubernetes API server. CRDs are loaded from `config/crd/bases`. Run `make setup-envtest` before running tests.
-- Annotate test steps with `By("description")` to produce readable output on failure.
-- Lifecycle: `BeforeEach` for setup, `AfterEach` for cleanup; always clean up created objects.
-- Assert status fields are falsy/empty immediately after creation before reconciliation:
-  ```go
-  Expect(resource.Status.Ready).To(BeFalse())
-  Expect(resource.Status.Identifier).To(BeEmpty())
-  ```
-
 ### What not to test
 
-- Do not mock the Kubernetes API server in controller tests — use envtest.
-- Do not write tests for generated code (`zz_generated.deepcopy.go`, `*.pb.go`).
+- Do not write tests for generated code (`*.pb.go`, `*_grpc.pb.go`).
 - Agent and CNI kernel-path code (`internal/agent/srv6/`, `internal/cni/`) currently has no unit coverage; new code in those paths should prefer integration/e2e over fragile mock-heavy unit tests.
 
 ---
@@ -207,12 +144,10 @@ for _, tt := range tests {
 
 ---
 
-## Kubernetes manifests (Kustomize)
+## Kubernetes manifests
 
-- `config/` uses Kustomize. `config/default/` is the base overlay for production deployment.
-- CRD manifests in `config/crd/bases/` are generated — never edit by hand.
-- RBAC roles are generated from kubebuilder markers — never edit `config/rbac/role.yaml` by hand.
-- `config/samples/` contains working examples of VPC, VPCAttachment, and annotated Pod; keep samples up to date with API changes.
+- `config/` contains deployment manifests for the agent DaemonSet and CNI plugin. `config/default/` is the base overlay for production deployment.
+- Edit manifest files directly; there is no code-generation step for manifests in this repo.
 
 ---
 
@@ -221,7 +156,7 @@ for _, tt := range tests {
 Use imperative mood, sentence case, present tense. First line ≤ 72 characters. Reference issues where applicable.
 
 ```
-Add SRv6 egress route cleanup on VPCAttachment deletion
+Add SRv6 egress route cleanup on endpoint removal
 
 Fixes #42
 ```
@@ -236,4 +171,4 @@ Before opening a pull request, run all of the following and ensure they pass:
 make lint test
 ```
 
-e2e tests (`make test-e2e`) run only on `main` and release branches, not on PRs. Do not rely on them to catch regressions — write unit or integration tests instead.
+Agent and CNI kernel-path code is not covered by unit tests. New code in those paths should prefer integration or e2e tests over mock-heavy unit tests.
