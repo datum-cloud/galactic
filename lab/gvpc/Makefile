@@ -12,7 +12,7 @@ help: ## Show available targets
 		| sort
 
 build: ## Build container images (Kind node)
-	docker build -t kindest/node:galactic $(LAB_DIR)containers/kindest-node-galactic
+	docker build --network=host -t kindest/node:galactic $(LAB_DIR)containers/kindest-node-galactic
 
 up: build host-setup ## Build the Kind node image and deploy the lab
 	sudo containerlab deploy -t $(TOPO)

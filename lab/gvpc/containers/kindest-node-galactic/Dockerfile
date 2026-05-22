@@ -1,4 +1,4 @@
-FROM kindest/node:v1.35.1
+FROM kindest/node:v1.35.0
 
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 

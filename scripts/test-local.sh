@@ -46,18 +46,6 @@ case "$TEST_TYPE" in
       '
     ;;
 
-  router)
-    echo "Running router BDD tests..."
-    docker run --rm \
-      -v "$REPO_ROOT":/workspace \
-      -w /workspace/router \
-      python:3.13 \
-      sh -c '
-        pip install -e .[test] -q
-        behave
-      '
-    ;;
-
   build)
     echo "Building galactic binary..."
     docker run --rm \
@@ -72,16 +60,14 @@ case "$TEST_TYPE" in
   all)
     echo "Running all tests..."
     "$0" unit
-    "$0" router
     "$0" operator
     ;;
 
   *)
-    echo "Usage: $0 {unit|operator|router|build|all}"
+    echo "Usage: $0 {unit|operator|build|all}"
     echo ""
     echo "  unit     - Run unit tests (fast, no K8s)"
     echo "  operator - Run operator tests with envtest"
-    echo "  router   - Run Python router BDD tests"
     echo "  build    - Build the galactic binary"
     echo "  all      - Run all tests"
     exit 1

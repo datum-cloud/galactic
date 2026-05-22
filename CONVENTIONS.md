@@ -1,6 +1,6 @@
 # Coding Conventions
 
-This document defines the coding standards, naming rules, error handling patterns, testing conventions, and idioms enforced across this codebase. All contributors must follow these rules. Automated checks (golangci-lint, flake8) enforce many of them; the rest are enforced in code review.
+This document defines the coding standards, naming rules, error handling patterns, testing conventions, and idioms enforced across this codebase. All contributors must follow these rules. Automated checks (golangci-lint) enforce many of them; the rest are enforced in code review.
 
 ---
 
@@ -12,7 +12,7 @@ This document defines the coding standards, naming rules, error handling pattern
 - `cmd/galactic/main.go` — binary entry point; all Cobra subcommands registered here
 - `pkg/apis/v1alpha/` — public CRD types; only add types here that are part of the Kubernetes API surface
 - `pkg/common/` — utilities shared between operator, agent, and CNI
-- `pkg/proto/local/` / `pkg/proto/remote/` — gRPC / protobuf generated files plus hand-written convenience wrappers
+- `pkg/proto/local/` — gRPC / protobuf generated files plus hand-written convenience wrapper for CNI-to-agent communication
 - `internal/operator/` — operator reconcilers, identifier logic, CNI config generation, webhooks
 - `internal/agent/srv6/` — kernel SRv6 route and VRF management
 - `internal/cni/` — CNI plugin (cmdAdd / cmdDel implementation)
@@ -144,75 +144,6 @@ Exclusions by path:
 
 ---
 
-## Python (router service)
-
-### Python version
-
-Requires Python ≥ 3.13. Do not use compatibility shims for older versions.
-
-### Naming
-
-| Element | Convention |
-|---------|-----------|
-| Module / file | `snake_case` |
-| Function / method | `snake_case` |
-| Variable | `snake_case` |
-| Class | `CapWords` |
-| Constant (module level) | `UPPER_SNAKE_CASE` |
-
-### Formatting and style
-
-- 4-space indent; no tabs.
-- `flake8` with `wemake-python-styleguide` enforces all style rules. Run from `router/`: `flake8 .`
-- Suppress only specific codes with inline `# noqa: WPSxxx` comments at the end of the offending line. Do not use bare `# noqa`.
-- Common suppressions used in this codebase:
-  - `# noqa: WPS211,WPS216` — many arguments in CLI entry-point functions
-  - `# noqa: WPS457` — `while True:` event loops
-  - `# noqa: WPS432` — magic hex bit-mask constants
-  - `# noqa: WPS214,WPS338` — classes with many methods / method overrides
-
-### Type annotations
-
-Use type hints on all function signatures. Use `->` return type annotations. Use `pydantic` / `sqlmodel` type-annotated models instead of plain dicts for structured data.
-
-```python
-async def handle_register(self, event: RegisterEvent) -> bool:
-```
-
-### Async patterns
-
-- Service classes implement an async `run()` coroutine.
-- Concurrent service startup uses `asyncio.TaskGroup`:
-  ```python
-  async with asyncio.TaskGroup() as tg:
-      for service in services:
-          tg.create_task(service)
-  ```
-- Top-level entry via `aiorun.run(...)` with `stop_on_unhandled_errors=True`.
-- Event dispatch via `bubus` `EventBus`; handlers receive typed event objects (`RegisterEvent`, `DeregisterEvent`, `RouteEvent`).
-
-### Static methods for pure functions
-
-Elevate pure functions that do not access `self` to `@staticmethod`:
-
-```python
-def extract_vpc_from_srv6_endpoint(endpoint: str) -> tuple[str, str]:
-    ...
-```
-
-### Database
-
-- Use `sqlmodel` with SQLAlchemy for ORM.
-- Use `Session` as a context manager: `with Session(engine) as session:`.
-- All schema changes go through Alembic migrations in `router/alembic/versions/`. Never modify tables outside of migrations.
-- Migrations are not auto-applied at startup by default; run `alembic upgrade head` before deploying a new router version.
-
-### Logging
-
-Use the standard `logging` module. Obtain a logger per module: `logger = logging.getLogger("ModuleName")`. Use `logger.info`, `logger.warning`, `logger.error`. Prefer structured f-strings in log messages.
-
----
-
 ## Testing
 
 ### Go — unit tests
@@ -260,14 +191,6 @@ for _, tt := range tests {
   Expect(resource.Status.Identifier).To(BeEmpty())
   ```
 
-### Python — BDD tests (behave)
-
-- Feature files live in `router/features/` using Gherkin syntax (`Feature:`, `Scenario:`, `Given`/`When`/`Then`).
-- Step definitions live in `router/features/steps/`.
-- Step functions are async: `async def step_xxx(context, ...)`.
-- Use `deepdiff.DeepDiff` with `ignore_order=True` for comparing unordered collections of route events.
-- Run: `behave` from `router/`.
-
 ### What not to test
 
 - Do not mock the Kubernetes API server in controller tests — use envtest.
@@ -278,9 +201,9 @@ for _, tt := range tests {
 
 ## Protobuf / gRPC
 
-- `.proto` files live in `pkg/proto/local/` (CNI-to-agent local gRPC) and `pkg/proto/remote/` (agent-to-router MQTT).
+- `.proto` files live in `pkg/proto/local/` (CNI-to-agent local gRPC).
 - Generated `*.pb.go` / `*_grpc.pb.go` files must never be hand-edited.
-- Each proto package has a hand-written convenience wrapper (`local.go`, `remote.go`) that exposes a cleaner Go API over the generated types. Add helpers there rather than importing generated types directly in application code.
+- Each proto package has a hand-written convenience wrapper (`local.go`) that exposes a cleaner Go API over the generated types. Add helpers there rather than importing generated types directly in application code.
 
 ---
 
@@ -310,11 +233,7 @@ Fixes #42
 Before opening a pull request, run all of the following and ensure they pass:
 
 ```sh
-# Go
 make lint test
-
-# Python (if router changed)
-cd router && flake8 . && behave
 ```
 
 e2e tests (`make test-e2e`) run only on `main` and release branches, not on PRs. Do not rely on them to catch regressions — write unit or integration tests instead.

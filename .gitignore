@@ -54,7 +54,6 @@ skaffold.local.yaml
 
 # Claude Code
 .claude/settings.local.json
-.claude/__pycache__/
 
 # Codex / OpenAI
 .codex/
@@ -92,43 +91,6 @@ skaffold.local.yaml
 .agent/
 .agents/
 scratch/
-
-# ============================================================
-# Python (router service)
-# ============================================================
-__pycache__/
-*.py[cod]
-*$py.class
-*.pyo
-.Python
-*.egg-info/
-*.egg
-.eggs/
-dist/
-build/
-pip-wheel-metadata/
-.installed.cfg
-
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-.env
-.python-version
-
-# Testing / coverage
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-
-# Type checking
-.mypy_cache/
-.pytype/
-.pyre/
-.ruff_cache/
 
 # ============================================================
 # IDEs and editors
@@ -233,30 +195,8 @@ topology-data.json
 # ============================================================
 # Lab and local dev overrides
 # ============================================================
-lab/basic/clab_files/
-lab/basic/clab-basic/
-lab/basic/group_vars/
-lab/basic/host_vars/
-lab/basic/ansible.cfg
-lab/basic/clab.yml
-lab/basic/hosts.yml
-lab/basic/netlab.lock
-lab/basic/netlab.snapshot.pickle
-lab/basic/netlab.snapshot.yml
-
-lab/geo/clab_files/
-lab/geo/clab-*/
-lab/geo/group_vars/
-lab/geo/host_vars/
-lab/geo/ansible.cfg
-lab/geo/clab.yml
-lab/geo/hosts.yml
-lab/geo/netlab.lock
-lab/geo/netlab.snapshot.pickle
-lab/geo/netlab.snapshot.yml
-
-lab/platform/wsl/srv6-vpc-lab-attachment/clab_files/
-lab/platform/wsl/srv6-vpc-lab-attachment/clab-*/
+lab/gvpc/clab-*/
+lab/network/clab-*/
 
 # ============================================================
 # Miscellaneous

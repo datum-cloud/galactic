@@ -31,7 +31,7 @@ topology:
       extras:
         k8s_kind:
           deploy:
-            wait: 60s
+            wait: 300s
             kubeconfig: iad.kubeconfig
 
     iad-control-plane:
@@ -86,7 +86,7 @@ topology:
       extras:
         k8s_kind:
           deploy:
-            wait: 60s
+            wait: 300s
             kubeconfig: sjc.kubeconfig
 
     sjc-control-plane:
@@ -141,7 +141,7 @@ topology:
       extras:
         k8s_kind:
           deploy:
-            wait: 60s
+            wait: 300s
             kubeconfig: infra.kubeconfig
 
     infra-control-plane:
