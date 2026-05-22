@@ -6,7 +6,6 @@ This devcontainer provides a complete development environment for the Galactic m
 
 ### Languages & Runtimes
 - **Go 1.24.2** - For operator, agent, and CNI development
-- **Python 3.13** - For the galactic-router
 
 ### Kubernetes Tools
 - **kubectl** - Kubernetes CLI
@@ -45,8 +44,6 @@ This devcontainer provides a complete development environment for the Galactic m
 
 The devcontainer includes the following extensions:
 - **Go** - Official Go extension
-- **Python** - Official Python extension
-- **Pylance** - Python language server
 - **Kubernetes** - Kubernetes resource management
 - **YAML** - YAML language support
 - **Docker** - Docker container management
@@ -62,12 +59,6 @@ The devcontainer includes the following extensions:
 - golangci-lint integration
 - gopls with semantic tokens and useful code lenses
 - Test environment set to `GOOS=linux`
-
-### Python Settings
-- Auto-format on save
-- Organize imports on save
-- flake8 linting enabled
-- Python 3.13 interpreter
 
 ### Forwarded Ports
 - **8080** - Metrics endpoint
@@ -94,8 +85,7 @@ The `post-create.sh` script automatically:
 2. Installs Kubernetes tools (controller-gen, kustomize, setup-envtest, kind)
 3. Installs Protocol Buffer compiler and Go plugins
 4. Installs network diagnostic tools
-5. Sets up the Python environment for galactic-router
-6. Generates Kubernetes manifests and DeepCopy methods
+5. Generates Kubernetes manifests and DeepCopy methods
 7. Configures git safe directory
 
 ## Getting Started
@@ -117,10 +107,6 @@ make run-operator
 
 # Run the agent locally
 make run-agent
-
-# Develop the Python router
-cd router
-behave
 
 # Lint Go code
 make lint
@@ -145,13 +131,6 @@ make test-e2e
 make setup-test-e2e
 go test ./test/e2e/ -v -ginkgo.v
 make cleanup-test-e2e
-```
-
-### Python Tests
-```bash
-cd router
-behave           # Run BDD tests
-flake8           # Lint Python code
 ```
 
 ## Network Development
@@ -214,9 +193,3 @@ go mod download
 go mod tidy
 ```
 
-### Python packages not installing
-```bash
-cd router
-pip install --upgrade pip
-pip install -e .[test]
-```

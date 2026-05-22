@@ -48,16 +48,14 @@ kindest-node-galactic/
 ├── Dockerfile
 ├── resources/          # Kubernetes manifests applied at cluster boot
 │   ├── agent.k8s.yaml
-│   ├── mqtt.k8s.yaml
-│   ├── operator.k8s.yaml
-│   └── router.k8s.yaml
+│   └── operator.k8s.yaml
 └── scripts/
     └── install.sh      # Installs Cilium, cert-manager, Multus, and Galactic
 ```
 
 `install.sh` is invoked once per node after the cluster comes up. On the control-plane
 node it applies each Kubernetes manifest in order (Cilium → cert-manager → Multus →
-MQTT → Galactic operator → router → agent). On worker nodes it loads kernel modules,
+Galactic operator → agent). On worker nodes it loads kernel modules,
 sets SRv6 sysctls, and drops in the CNI binaries.
 
 ### Prerequisites

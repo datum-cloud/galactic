@@ -7,7 +7,6 @@ toolchain go1.24.2
 require (
 	github.com/containernetworking/cni v1.3.0
 	github.com/coreos/go-iptables v0.8.0
-	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.7
 	github.com/kenshaw/baseconv v0.1.1
 	github.com/lorenzosaino/go-sysctl v0.3.1
@@ -16,7 +15,6 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260404173425-c822ed716ea1
-	golang.org/x/sync v0.19.0
 	golang.org/x/sys v0.40.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -50,7 +48,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -72,7 +69,6 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
@@ -81,10 +77,12 @@ require (
 	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/term v0.39.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
 	golang.org/x/tools v0.41.0 // indirect
+	golang.org/x/tools/go/expect v0.1.1-deprecated // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
