@@ -10,6 +10,7 @@ Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a
 - VPC identifiers are 48-bit hex; VPCAttachment identifiers are 16-bit hex. These are embedded into IPv6 SRv6 endpoint addresses for deterministic route lookups. Both are supplied by an external operator via the CNI config.
 - Identifiers are also Base62-encoded for interface naming (VRF: `vrfX-Y`, veth host side: `galX-Y`) to keep kernel interface name length within limits.
 - The binary auto-detects CNI mode via the `CNI_COMMAND` env var; otherwise runs as a Cobra CLI with `agent`, `cni`, and `version` subcommands.
+- The Kubernetes operator, VPC/VPCAttachment CRDs, and webhook code have been removed from this repository. They live in a separate companion operator project.
 
 ## Tech Stack
 
@@ -43,6 +44,15 @@ Summary:
 - **Known debt:** Agent and CNI kernel-path code (`internal/agent/srv6/`, `internal/cni/`) has no unit coverage; these paths are best covered by integration or e2e tests. Only `pkg/common/util` has unit test coverage.
 - **In flux:** The SRv6 route management (`internal/agent/srv6/`) and VRF utilities (`pkg/common/vrf/`) are the least tested and most likely to change as multi-cloud routing matures. BGP integration is in progress.
 
+## Lab Environments
+
+Two ContainerLab-based environments live under `lab/`:
+
+- **`lab/network/`** — Standalone SRv6 underlay lab. Eight FRR + GoBGP nodes across PE, transit, and route-reflector roles. Use to develop and test BGP/SRv6 routing behaviour independently of Kubernetes.
+- **`lab/gvpc/`** — Three Kind clusters (iad, sjc, infra) wired over an SRv6 transit mesh. FRR runs as a hostNetwork DaemonSet on each cluster's worker for the eBGP underlay; GoBGP on iad and sjc workers handles L3VPN type-5 routes over iBGP to the infra route reflector.
+
+See `lab/README.md` for quick-start commands and prerequisites for each environment.
+
 ## New Developer Entry Points
 
 1. Run `make build` to verify toolchain; run `make test` to confirm unit tests pass.
@@ -53,3 +63,4 @@ Summary:
 
 **Likely trip-ups:**
 - `make run-agent` requires elevated privileges (netlink, VRF, SRv6 operations need `CAP_NET_ADMIN`).
+- There is no operator or webhook in this repository; those components are in a separate project.
