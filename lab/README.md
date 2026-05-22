@@ -4,9 +4,8 @@ Local development and integration-testing environments for [Galactic VPC](https:
 
 ```
 lab/
-├── network/                        # ContainerLab SRv6 underlay network
-└── containers/
-    └── kindest-node-galactic/      # Custom Kind node image with Galactic pre-installed
+├── network/    # ContainerLab SRv6 underlay network (standalone)
+└── gvpc/       # ContainerLab GVPC multi-cluster lab (3 Kind clusters over SRv6 mesh)
 ```
 
 ---
@@ -38,74 +37,29 @@ make down      # tear down
 
 ---
 
-## `containers/kindest-node-galactic/` — Custom Kind Node Image
+## `gvpc/` — GVPC Multi-Cluster Lab
 
-A `kindest/node` image extended with the tooling and Kubernetes manifests needed to
-run a full Galactic stack inside a [Kind](https://kind.sigs.k8s.io/) cluster.
+Three Kind clusters (iad, sjc, infra) connected over an IPv6 SRv6 transit mesh. Each
+cluster runs FRR as a node routing daemon (hostNetwork DaemonSet) to peer with the
+transit layer via BGP unnumbered. GoBGP runs alongside FRR on the iad and sjc workers
+to exchange L3VPN type-5 routes with the infra route reflector over iBGP.
 
-```
-kindest-node-galactic/
-├── Dockerfile
-├── resources/          # Kubernetes manifests applied at cluster boot
-│   ├── agent.k8s.yaml
-│   └── operator.k8s.yaml
-└── scripts/
-    └── install.sh      # Installs Cilium, cert-manager, Multus, and Galactic
-```
-
-`install.sh` is invoked once per node after the cluster comes up. On the control-plane
-node it applies each Kubernetes manifest in order (Cilium → cert-manager → Multus →
-Galactic operator → agent). On worker nodes it loads kernel modules,
-sets SRv6 sysctls, and drops in the CNI binaries.
+See [`gvpc/README.md`](gvpc/README.md) for topology details, addressing, and
+verification commands.
 
 ### Prerequisites
 
+- ContainerLab ≥ 0.54
 - Docker
-- [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)
-- Linux kernel with `vrf` module and SRv6 support (or a VM with those features)
+- `kind` CLI
+- Host kernel with SRv6 support
 
-### Build
-
-```bash
-cd containers/kindest-node-galactic
-docker build -t kindest/node:galactic .
-```
-
-### Use with Kind
-
-Reference the custom image in your Kind cluster config:
-
-```yaml
-# kind-config.yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-  - role: control-plane
-    image: kindest/node:galactic
-  - role: worker
-    image: kindest/node:galactic
-  - role: worker
-    image: kindest/node:galactic
-```
+### Quick start
 
 ```bash
-kind create cluster --config kind-config.yaml
+cd gvpc
+make up        # build Kind node image, apply host sysctls, deploy lab
+make underlay  # apply FRR DaemonSets to all three clusters
+make overlay   # apply GoBGP DaemonSets to iad and sjc clusters
+make down      # tear down
 ```
-
-After the cluster is up, run `install.sh` on each node:
-
-```bash
-for node in $(kind get nodes); do
-  docker exec "$node" /galactic/scripts/install.sh
-done
-```
-
-### Component versions (pinned in `scripts/install.sh`)
-
-| Component    | Version  |
-|--------------|----------|
-| Cilium CLI   | v0.18.8  |
-| cert-manager | v1.19.1  |
-| Multus CNI   | v4.2.3   |
-| CNI plugins  | v1.8.0   |
-| Galactic     | v0.0.5   |

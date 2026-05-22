@@ -24,7 +24,12 @@ Under the hood, Galactic uses Segment Routing over IPv6 (SRv6) for efficient, de
 
 ## Getting Started
 
-See the [`lab/`](./lab/) directory for example topologies and the [DevContainer](./.devcontainer/) for development environment setup.
+Two ContainerLab environments are available under [`lab/`](./lab/):
+
+- **[`lab/network/`](./lab/network/)** — Standalone SRv6 underlay lab (FRR + GoBGP, no Kubernetes). Good starting point for understanding the routing layer.
+- **[`lab/gvpc/`](./lab/gvpc/)** — Three Kind clusters wired over an SRv6 transit mesh. The full GVPC multi-cluster environment.
+
+See the [DevContainer](./.devcontainer/) for development environment setup.
 
 ## License
 

@@ -5,7 +5,7 @@ This devcontainer provides a complete development environment for the Galactic m
 ## Features
 
 ### Languages & Runtimes
-- **Go 1.24.2** - For operator, agent, and CNI development
+- **Go 1.24.2** - For agent and CNI development
 
 ### Kubernetes Tools
 - **kubectl** - Kubernetes CLI
@@ -82,11 +82,10 @@ These are required for:
 
 The `post-create.sh` script automatically:
 1. Installs Go development tools (gopls, delve, golangci-lint)
-2. Installs Kubernetes tools (controller-gen, kustomize, setup-envtest, kind)
+2. Installs Kubernetes tools (kustomize, kind)
 3. Installs Protocol Buffer compiler and Go plugins
 4. Installs network diagnostic tools
-5. Generates Kubernetes manifests and DeepCopy methods
-7. Configures git safe directory
+5. Configures git safe directory
 
 ## Getting Started
 
@@ -98,12 +97,6 @@ make build
 
 # Run unit tests
 make test
-
-# Run E2E tests (creates a Kind cluster)
-make test-e2e
-
-# Run the operator locally
-make run-operator
 
 # Run the agent locally
 make run-agent
