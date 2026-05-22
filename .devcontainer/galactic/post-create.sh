@@ -3,6 +3,14 @@ set -euo pipefail
 
 echo "Starting post-create setup for Galactic development environment..."
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Copy host gitconfig so VS Code can write its credential helper without hitting
+# EBUSY (which occurs when the target path itself has an active bind mount).
+if [[ -f /home/vscode/.gitconfig.host ]]; then
+    cp /home/vscode/.gitconfig.host /home/vscode/.gitconfig
+fi
+
 # Set up Go tools
 echo "Installing Go development tools..."
 go install golang.org/x/tools/gopls@latest
@@ -16,29 +24,32 @@ make controller-gen kustomize setup-envtest
 
 # Install kind for local Kubernetes testing
 echo "Installing Kind..."
-GO111MODULE=on go install sigs.k8s.io/kind@latest
+go install sigs.k8s.io/kind@latest
 
 # Install protoc (Protocol Buffer compiler)
 echo "Installing protoc..."
 PROTOC_VERSION="25.1"
-curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
-sudo unzip -o protoc-${PROTOC_VERSION}-linux-x86_64.zip -d /usr/local bin/protoc
-sudo unzip -o protoc-${PROTOC_VERSION}-linux-x86_64.zip -d /usr/local 'include/*'
-rm -f protoc-${PROTOC_VERSION}-linux-x86_64.zip
+PROTOC_ARCH=$(uname -m)
+# protoc releases use aarch_64 (with underscore) for ARM64, unlike most other tools
+case "$PROTOC_ARCH" in aarch64) PROTOC_ARCH="aarch_64" ;; esac
+PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+curl -fsSLO "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"
+sudo unzip -o "${PROTOC_ZIP}" -d /usr/local bin/protoc
+sudo unzip -o "${PROTOC_ZIP}" -d /usr/local 'include/*'
+rm -f "${PROTOC_ZIP}"
 
 # Install protoc-gen-go for Go protobuf generation
 echo "Installing protoc-gen-go..."
 go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
-# Install network tools
-echo "Installing network tools..."
-sudo apt update
-sudo apt install -y software-properties-common
+# Upgrade/install packages
+echo "Upgrading/installing Ubuntu packages..."
+sudo apt-get update -q
+sudo apt-get install -y -q software-properties-common
 sudo add-apt-repository -y ppa:apt-fast/stable
-sudo apt update
-sudo DEBIAN_FRONTEND=noninteractive apt install -y apt-fast
-sudo apt-fast upgrade -y
+sudo apt-get update -q
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q apt-fast
 sudo apt-fast install -y \
 	iproute2 \
 	iptables \
@@ -58,10 +69,6 @@ sudo apt-fast install -y \
 echo "Generating Kubernetes manifests and DeepCopy methods..."
 cd /workspaces/galactic
 make manifests generate
-
-# Set up git safe directory
-echo "Configuring git safe directory..."
-git config --add safe.directory /workspaces/galactic
 
 # Install Claude Code CLI
 echo "Installing Claude Code..."

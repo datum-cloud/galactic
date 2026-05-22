@@ -1,6 +1,6 @@
 {
 	"name": "galactic",
-	"image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+	"image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
 	"features": {
 		"ghcr.io/devcontainers/features/go:1": {
 			"version": "1.24.2"
@@ -111,16 +111,19 @@
 	"portsAttributes": {
 		"8080": {
 			"label": "Metrics",
-			"onAutoForward": "notify"
+			"onAutoForward": "silent"
 		},
 		"8081": {
 			"label": "Health",
-			"onAutoForward": "notify"
+			"onAutoForward": "silent"
 		},
 		"9443": {
 			"label": "Webhook",
-			"onAutoForward": "notify"
+			"onAutoForward": "silent"
 		}
+	},
+	"otherPortsAttributes": {
+		"onAutoForward": "ignore"
 	},
 	"remoteUser": "vscode",
 	"containerEnv": {
@@ -129,7 +132,7 @@
 	},
 	"mounts": [
 		"source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
-		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+		"source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig.host,type=bind,consistency=cached,readonly"
 	],
 	"postCreateCommand": "bash .devcontainer/galactic/post-create.sh",
 	"runArgs": [
