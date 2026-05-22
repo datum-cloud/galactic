@@ -144,13 +144,6 @@ for _, tt := range tests {
 
 ---
 
-## Kubernetes manifests
-
-- `config/` contains deployment manifests for the agent DaemonSet and CNI plugin. `config/default/` is the base overlay for production deployment.
-- Edit manifest files directly; there is no code-generation step for manifests in this repo.
-
----
-
 ## Commit messages
 
 Use imperative mood, sentence case, present tense. First line ≤ 72 characters. Reference issues where applicable.

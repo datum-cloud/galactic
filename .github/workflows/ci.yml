@@ -78,7 +78,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: build/Dockerfile
+          file: containers/galactic/Dockerfile
           push: false
           tags: ghcr.io/datum-cloud/galactic:${{ github.sha }}
           cache-from: type=gha

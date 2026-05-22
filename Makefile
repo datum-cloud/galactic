@@ -104,7 +104,7 @@ run-agent: fmt vet ## Run agent from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the unified binary.
-	$(CONTAINER_TOOL) build -t ${IMG} -f build/Dockerfile .
+	$(CONTAINER_TOOL) build -t ${IMG} -f containers/galactic/Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the unified binary.
@@ -117,26 +117,12 @@ PLATFORMS ?= linux/amd64,linux/arm64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the unified binary for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' build/Dockerfile > build/Dockerfile.cross
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' containers/galactic/Dockerfile > containers/galactic/Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name galactic-builder
 	$(CONTAINER_TOOL) buildx use galactic-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f build/Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f containers/galactic/Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm galactic-builder
-	rm build/Dockerfile.cross
-
-##@ Deployment
-
-ifndef ignore-not-found
-  ignore-not-found = false
-endif
-
-.PHONY: install
-install: kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
-
-.PHONY: uninstall
-uninstall: kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+	rm containers/galactic/Dockerfile.cross
 
 ##@ Cleanup
 
