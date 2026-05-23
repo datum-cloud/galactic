@@ -1,0 +1,57 @@
+version: '3'
+
+vars:
+  LAB:
+    sh: awk '/^name:/ {print $2; exit}' *.clab.yaml
+  TOPO:
+    sh: echo *.clab.yaml
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the custom GoBGP + FRR image
+    cmds:
+      - docker build -t gobgp-pe:latest containers/gobgp-pe
+
+  up:
+    desc: Build the image and deploy the lab
+    deps: [build, host-setup]
+    cmds:
+      - sudo containerlab deploy -t {{.TOPO}}
+
+  down:
+    desc: Destroy the lab and clean generated state
+    cmds:
+      - sudo containerlab destroy -t {{.TOPO}} --cleanup
+
+  reload:
+    desc: Full rebuild and redeploy
+    cmds:
+      - task: down
+      - task: up
+
+  inspect:
+    desc: Inspect deployed nodes and management addresses
+    cmds:
+      - sudo containerlab inspect -t {{.TOPO}}
+
+  graph:
+    desc: Generate a draw.io diagram for the current topology
+    cmds:
+      - sudo containerlab graph -t {{.TOPO}} --drawio --drawio-dir .
+
+  host-setup:
+    desc: Apply host sysctls for this dual-stack lab
+    cmds:
+      - sudo ./scripts/host-setup.sh --no-persist
+
+  clean:
+    desc: Destroy the lab, remove ContainerLab state, and delete the gobgp-pe image
+    cmds:
+      - task: down
+      - docker rmi gobgp-pe:latest || true
+      - rm -rf clab-{{.LAB}}

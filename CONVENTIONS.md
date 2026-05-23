@@ -87,7 +87,7 @@ Generated protobuf files (`*.pb.go`, `*_grpc.pb.go` in `pkg/proto/local/`) must 
 
 ### Linting
 
-Run `make lint` before every PR. All linters listed in `.golangci.yml` must pass. Suppressions require a comment explaining why. Notable active linters: `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused`.
+Run `task lint` before every PR. All linters listed in `.golangci.yml` must pass. Suppressions require a comment explaining why. Notable active linters: `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused`.
 
 Exclusions by path:
 - `lll` is excluded from `internal/*`
@@ -161,7 +161,7 @@ Fixes #42
 Before opening a pull request, run all of the following and ensure they pass:
 
 ```sh
-make lint test
+task lint test
 ```
 
 Agent and CNI kernel-path code is not covered by unit tests. New code in those paths should prefer integration or e2e tests over mock-heavy unit tests.

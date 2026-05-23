@@ -31,6 +31,38 @@ Two ContainerLab environments are available under [`lab/`](./lab/):
 
 See the [DevContainer](./.devcontainer/) for development environment setup.
 
+## Development
+
+This project uses [Task](https://taskfile.dev) as its build tool. All build, test, lint, and lab operations are defined in `Taskfile.yaml` files at the repo root and under each `lab/` subdirectory.
+
+### Install Task
+
+```bash
+# macOS
+brew install go-task
+
+# Linux (official installer)
+sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
+
+# Go toolchain
+go install github.com/go-task/task/v3/cmd/task@latest
+```
+
+See [taskfile.dev/installation](https://taskfile.dev/installation/) for the full list of options.
+
+### Usage
+
+```bash
+task          # list available tasks
+task build    # build the galactic binary
+task test     # run tests (fmt + vet + unit)
+task lint     # run golangci-lint
+task lint-fix # auto-fix lint issues
+task clean    # remove build artifacts
+```
+
+Lab environments have their own `Taskfile.yaml`; run `task` from the relevant directory (`lab/network/` or `lab/gvpc/`) to see available tasks.
+
 ## License
 
 See [LICENSE](./LICENSE) for details.

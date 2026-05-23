@@ -113,7 +113,7 @@ Worker SRv6 node SIDs (on `lo-galactic`):
 ```
 gvpc/
 ├── gvpc.clab.yaml
-├── Makefile
+├── Taskfile.yaml
 ├── containers/
 │   └── kindest-node-galactic/   # Custom Kind node image (Cilium, Multus, cert-manager)
 ├── resources/
@@ -149,14 +149,14 @@ gvpc/
 ## Quick start
 
 ```bash
-make up       # build Kind node image, apply host sysctls, deploy lab
-make underlay # apply FRR DaemonSets to all three clusters
-make overlay  # apply GoBGP DaemonSets to iad and sjc clusters
+task up       # build Kind node image, apply host sysctls, deploy lab
+task underlay # apply FRR DaemonSets to all three clusters
+task overlay  # apply GoBGP DaemonSets to iad and sjc clusters
 ```
 
-## Make targets
+## Tasks
 
-| Target           | Description                                               |
+| Task             | Description                                               |
 |------------------|-----------------------------------------------------------|
 | `build`          | Build the custom `kindest/node:galactic` image            |
 | `up`             | Build, apply host sysctls, and deploy the lab             |

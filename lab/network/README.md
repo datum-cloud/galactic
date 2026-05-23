@@ -82,34 +82,35 @@ uSID block: `fc00::/32` — 32-bit block | 16-bit node | 16-bit function
 │   └── gobgp-pe/  Dockerfile
 ├── scripts/
 │   └── host-setup.sh
-└── Makefile
+└── Taskfile.yaml
 ```
 
 ## Prerequisites
 
 - ContainerLab ≥ 0.54
 - Docker with access to `frrouting/frr:latest`
-- Custom `gobgp-pe:latest` image (built locally via `make build`)
+- Custom `gobgp-pe:latest` image (built locally via `task build`)
 - Host kernel ≥ 5.18 for SRv6 `encap.red` support
-- `make` and standard Linux utilities
+- `task` and standard Linux utilities
 
 ## Quick start
 
 ```bash
-make build     # build gobgp-pe:latest from containers/gobgp-pe/Dockerfile
-make up        # apply host sysctls and deploy lab
-make inspect   # show node management addresses
+task build     # build gobgp-pe:latest from containers/gobgp-pe/Dockerfile
+task up        # apply host sysctls and deploy lab
+task inspect   # show node management addresses
 ```
 
-## Make targets
+## Tasks
 
-| Target               | Description                                         |
+| Task                 | Description                                         |
 |----------------------|-----------------------------------------------------|
 | `build`              | Build the custom `gobgp-pe:latest` image            |
 | `up`                 | Apply host sysctls then deploy the lab              |
 | `down`               | Destroy the lab and remove state                    |
 | `reload`             | Full rebuild — destroy then redeploy                |
 | `inspect`            | Show running nodes and management addresses         |
+| `graph`              | Generate a draw.io diagram for the current topology |
 | `host-setup`         | Apply required host sysctls (IPv6 forwarding etc.)  |
 | `clean`              | Destroy the lab, remove state, and delete the image |
 
