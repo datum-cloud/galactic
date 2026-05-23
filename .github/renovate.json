@@ -1,40 +1,34 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:base",
+    "config:recommended",
     ":dependencyDashboard",
     ":semanticCommits"
   ],
   "schedule": ["before 6am on Monday"],
-  "timezone": "EST",
+  "timezone": "America/New_York",
   "labels": ["dependencies"],
   "packageRules": [
     {
-      "description": "Disable Go version upgrades in go.mod (go directive and toolchain directive)",
-      "matchManagers": ["gomod"],
-      "matchDepNames": ["go"],
+      "description": "Block all Go toolchain version upgrades (go.mod go/toolchain directives and setup-go go-version inputs)",
+      "matchDatasources": ["golang-version"],
       "enabled": false
     },
     {
-      "description": "Disable golang Docker image version upgrades",
+      "description": "Block golang Docker base image upgrades to keep Go major/minor pinned",
       "matchManagers": ["dockerfile"],
       "matchDepNames": ["golang"],
       "enabled": false
     },
     {
-      "description": "Disable go-version upgrades in GitHub Actions (actions/setup-go)",
-      "matchManagers": ["github-actions"],
-      "matchPackageNames": ["actions/go-versions"],
-      "enabled": false
-    },
-    {
-      "description": "Group all Go dependencies",
+      "description": "Group all Go module dependency updates into one PR",
       "matchManagers": ["gomod"],
       "groupName": "Go dependencies",
       "groupSlug": "go-deps"
     },
     {
-      "description": "k8s core — grouped, slower cadence",
+      "description": "k8s core libraries — separate group, monthly cadence",
+      "matchManagers": ["gomod"],
       "matchPackageNames": [
         "sigs.k8s.io/controller-runtime",
         "k8s.io/client-go",
@@ -47,13 +41,19 @@
       "schedule": ["before 6am on the first day of the month"]
     },
     {
-      "description": "GitHub Actions",
+      "description": "Group all GitHub Actions updates into one PR",
       "matchManagers": ["github-actions"],
       "groupName": "GitHub Actions",
       "groupSlug": "gha"
     },
     {
-      "description": "Automerge patch/minor for non-k8s Go deps",
+      "description": "Group all Docker image updates into one PR",
+      "matchManagers": ["dockerfile"],
+      "groupName": "Docker images",
+      "groupSlug": "docker-images"
+    },
+    {
+      "description": "Automerge patch/minor Go dependency updates, excluding k8s core",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["patch", "minor"],
       "excludePackageNames": [
@@ -68,7 +68,7 @@
       "platformAutomerge": true
     },
     {
-      "description": "Never automerge majors",
+      "description": "Never automerge major updates",
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "labels": ["dependencies", "major-update"]
