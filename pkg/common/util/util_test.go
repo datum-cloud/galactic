@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	testVPC           = "0000000jU" // 1234 dec
-	testVPCAttachment = "00G"       // 42 dec
+	testVPC           = "0000000jU"      // 1234 dec
+	testVPCAttachment = "00G"            // 42 dec
+	testIPv6Segment   = "2607:ed40:ff00::1"
 )
 
 func TestGenerateInterfaceNameVRF(t *testing.T) {
@@ -55,7 +56,7 @@ func TestParseIP(t *testing.T) {
 		wantError bool
 	}{
 		{"ValidIPv4", "192.168.0.1", net.ParseIP("192.168.0.1"), false},
-		{"ValidIPv6", "2607:ed40:ff00::1", net.ParseIP("2607:ed40:ff00::1"), false},
+		{"ValidIPv6", testIPv6Segment, net.ParseIP(testIPv6Segment), false},
 		{"InvalidIP", "not_an_ip", nil, true},
 	}
 
@@ -81,25 +82,25 @@ func TestParseSegments(t *testing.T) {
 	}{
 		{
 			"ValidSingleSegment",
-			[]string{"2607:ed40:ff00::1"},
-			[]net.IP{net.ParseIP("2607:ed40:ff00::1")},
+			[]string{testIPv6Segment},
+			[]net.IP{net.ParseIP(testIPv6Segment)},
 			false,
 		},
 		{
 			"ValidMultipleSegments",
-			[]string{"2607:ed40:ff00::1", "2607:ed40:ff01::1"},
-			[]net.IP{net.ParseIP("2607:ed40:ff01::1"), net.ParseIP("2607:ed40:ff00::1")},
+			[]string{testIPv6Segment, "2607:ed40:ff01::1"},
+			[]net.IP{net.ParseIP("2607:ed40:ff01::1"), net.ParseIP(testIPv6Segment)},
 			false,
 		},
 		{
 			"InvalidSegment",
-			[]string{"2607:ed40:ff00::1", "invalid_ip"},
+			[]string{testIPv6Segment, "invalid_ip"},
 			nil,
 			true,
 		},
 		{
 			"InvalidIPv4Segment",
-			[]string{"2607:ed40:ff00::1", "192.168.0.1"},
+			[]string{testIPv6Segment, "192.168.0.1"},
 			nil,
 			true,
 		},
