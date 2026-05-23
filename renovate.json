@@ -79,6 +79,9 @@
     "labels": ["security"],
     "schedule": ["at any time"]
   },
+  "constraints": {
+    "go": "1.24"
+  },
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2
 }
