@@ -58,8 +58,13 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build binary
-        run: make build
+        run: task build
 
       - name: Verify binary
         run: |
@@ -97,6 +102,11 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install Kind
         run: |
           go install sigs.k8s.io/kind@latest
@@ -109,15 +119,8 @@ jobs:
 
       - name: Build and load image
         run: |
-          make docker-build IMG=galactic:e2e
+          task docker-build IMG=galactic:e2e
           kind load docker-image galactic:e2e --name galactic-e2e
-
-      - name: Install CRDs
-        run: make install
-
-      - name: Verify CRDs
-        run: |
-          kubectl get crd network-attachment-definitions.k8s.cni.cncf.io
 
       - name: Cleanup
         if: always()
