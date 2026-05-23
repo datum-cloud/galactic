@@ -10,6 +10,24 @@
   "labels": ["dependencies"],
   "packageRules": [
     {
+      "description": "Disable Go version upgrades in go.mod (go directive and toolchain directive)",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "enabled": false
+    },
+    {
+      "description": "Disable golang Docker image version upgrades",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["golang"],
+      "enabled": false
+    },
+    {
+      "description": "Disable go-version upgrades in GitHub Actions (actions/setup-go)",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/go-versions"],
+      "enabled": false
+    },
+    {
       "description": "Group all Go dependencies",
       "matchManagers": ["gomod"],
       "groupName": "Go dependencies",
