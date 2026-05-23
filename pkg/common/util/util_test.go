@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	testVPC           = "0000000jU"      // 1234 dec
-	testVPCAttachment = "00G"            // 42 dec
+	testVPC           = "0000000jU" // 1234 dec
+	testVPCAttachment = "00G"       // 42 dec
 	testIPv6Segment   = "2607:ed40:ff00::1"
 )
 
