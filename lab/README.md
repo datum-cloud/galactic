@@ -29,10 +29,10 @@ verification commands.
 
 ```bash
 cd network
-make build     # build the gobgp-pe container image
-make up        # apply host sysctls and deploy the lab
-make inspect   # show node addresses
-make down      # tear down
+task build     # build the gobgp-pe container image
+task up        # apply host sysctls and deploy the lab
+task inspect   # show node addresses
+task down      # tear down
 ```
 
 ---
@@ -58,8 +58,8 @@ verification commands.
 
 ```bash
 cd gvpc
-make up        # build Kind node image, apply host sysctls, deploy lab
-make underlay  # apply FRR DaemonSets to all three clusters
-make overlay   # apply GoBGP DaemonSets to iad and sjc clusters
-make down      # tear down
+task up        # build Kind node image, apply host sysctls, deploy lab
+task underlay  # apply FRR DaemonSets to all three clusters
+task overlay   # apply GoBGP DaemonSets to iad and sjc clusters
+task down      # tear down
 ```

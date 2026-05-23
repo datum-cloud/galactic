@@ -1,0 +1,130 @@
+version: '3'
+
+vars:
+  IMG: '{{.IMG | default "ghcr.io/datum-cloud/galactic:latest"}}'
+  CONTAINER_TOOL: '{{.CONTAINER_TOOL | default "docker"}}'
+  LOCALBIN:
+    sh: echo "$(pwd)/bin"
+  GOBIN:
+    sh: |
+      gobin=$(go env GOBIN)
+      [ -n "$gobin" ] && echo "$gobin" || echo "$(go env GOPATH)/bin"
+  GOLANGCI_LINT: '{{.LOCALBIN}}/golangci-lint'
+  GO_LICENSES: '{{.LOCALBIN}}/go-licenses'
+  GOLANGCI_LINT_VERSION: v2.1.6
+  GO_LICENSES_VERSION: v1.6.0
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  ##
+  ## Development
+  ##
+
+  fmt:
+    desc: Run go fmt against code
+    run: once
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet against code
+    run: once
+    cmds:
+      - GOOS=linux go vet ./...
+
+  test:
+    desc: Run tests
+    deps: [fmt, vet]
+    cmds:
+      - GOOS=linux go test $(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+  lint:
+    desc: Run golangci-lint linter
+    deps: [golangci-lint]
+    cmds:
+      - '{{.GOLANGCI_LINT}} run'
+
+  lint-fix:
+    desc: Run golangci-lint linter and perform fixes
+    deps: [golangci-lint]
+    cmds:
+      - '{{.GOLANGCI_LINT}} run --fix'
+
+  notice:
+    desc: Generate NOTICE file with third-party dependency license information
+    deps: [go-licenses]
+    cmds:
+      - '{{.GO_LICENSES}} report ./... --ignore go.datum.net/galactic --template scripts/licenses/notice.tmpl > NOTICE'
+
+  ##
+  ## Build
+  ##
+
+  build:
+    desc: Build galactic binary
+    deps: [fmt, vet]
+    cmds:
+      - go build -o bin/galactic cmd/galactic/main.go
+
+  run-agent:
+    desc: Run agent from your host
+    deps: [fmt, vet]
+    cmds:
+      - go run ./cmd/galactic/main.go agent
+
+  docker-build:
+    desc: Build docker image with the unified binary
+    cmds:
+      - '{{.CONTAINER_TOOL}} build -t {{.IMG}} -f containers/galactic/Dockerfile .'
+
+  ##
+  ## Cleanup
+  ##
+
+  clean:
+    desc: Remove build artifacts and temporary files
+    cmds:
+      - rm -rf bin/
+      - rm -rf dist/
+      - rm -f cover.out
+
+  ##
+  ## Dependencies
+  ##
+
+  golangci-lint:
+    desc: Download golangci-lint locally if necessary
+    run: once
+    cmds:
+      - task: install-tool
+        vars:
+          TARGET: '{{.GOLANGCI_LINT}}'
+          PACKAGE: github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+          VERSION: '{{.GOLANGCI_LINT_VERSION}}'
+
+  go-licenses:
+    internal: true
+    run: once
+    cmds:
+      - task: install-tool
+        vars:
+          TARGET: '{{.GO_LICENSES}}'
+          PACKAGE: github.com/google/go-licenses
+          VERSION: '{{.GO_LICENSES_VERSION}}'
+
+  install-tool:
+    internal: true
+    cmds:
+      - mkdir -p {{.LOCALBIN}}
+      - |
+        if [ ! -f "{{.TARGET}}-{{.VERSION}}" ]; then
+          echo "Downloading {{.PACKAGE}}@{{.VERSION}}"
+          rm -f "{{.TARGET}}" || true
+          GOBIN={{.LOCALBIN}} go install {{.PACKAGE}}@{{.VERSION}}
+          mv "{{.TARGET}}" "{{.TARGET}}-{{.VERSION}}"
+        fi
+        ln -sf "{{.TARGET}}-{{.VERSION}}" "{{.TARGET}}"

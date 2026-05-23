@@ -23,13 +23,13 @@ Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a
 ## Development Workflow
 
 ```
-make build          # produces bin/galactic
-make test           # fmt + vet + unit tests with coverage
-make lint           # golangci-lint; lint-fix applies safe auto-fixes
-make run-agent      # run agent (requires root / CAP_NET_ADMIN)
+task build          # produces bin/galactic
+task test           # fmt + vet + unit tests with coverage
+task lint           # golangci-lint; lint-fix applies safe auto-fixes
+task run-agent      # run agent (requires root / CAP_NET_ADMIN)
 ```
 
-**Before every PR:** `make lint test`.
+**Before every PR:** `task lint test`.
 
 ## Code Standards
 
@@ -55,12 +55,12 @@ See `lab/README.md` for quick-start commands and prerequisites for each environm
 
 ## New Developer Entry Points
 
-1. Run `make build` to verify toolchain; run `make test` to confirm unit tests pass.
+1. Run `task build` to verify toolchain; run `task test` to confirm unit tests pass.
 2. Read `internal/cni/cni.go` (cmdAdd/cmdDel) to understand the container attach path.
 3. Read `internal/agent/srv6/srv6.go` to understand the agent entry point and how it manages SRv6 routes and VRFs.
 4. Read `pkg/proto/local/local.go` to understand the gRPC interface between the CNI and the agent.
 5. Explore `pkg/common/` for shared utilities (VRF management, sysctl helpers, CNI types).
 
 **Likely trip-ups:**
-- `make run-agent` requires elevated privileges (netlink, VRF, SRv6 operations need `CAP_NET_ADMIN`).
+- `task run-agent` requires elevated privileges (netlink, VRF, SRv6 operations need `CAP_NET_ADMIN`).
 - There is no operator or webhook in this repository; those components are in a separate project.

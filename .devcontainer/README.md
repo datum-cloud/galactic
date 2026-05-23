@@ -35,7 +35,7 @@ This devcontainer provides a complete development environment for the Galactic m
 - **protoc 25.1** - Protocol Buffer compiler
 - **protoc-gen-go** - Go code generation for protobuf
 - **protoc-gen-go-grpc** - gRPC code generation for Go
-- **make** - Build automation
+- **task** - Build automation
 - **gcc/build-essential** - C compiler for CGO dependencies
 - **jq** - JSON processor
 - **git** - Version control
@@ -93,37 +93,38 @@ After the container starts and post-create completes:
 
 ```bash
 # Build the galactic binary
-make build
+task build
 
 # Run unit tests
-make test
+task test
 
 # Run the agent locally
-make run-agent
+task run-agent
 
 # Lint Go code
-make lint
+task lint
 
 # Format Go code
-make fmt
+task fmt
 ```
 
 ## Testing
 
 ### Unit Tests
 ```bash
-make test
+task test
 ```
 
 ### E2E Tests
 ```bash
-# Automatically creates/tears down Kind cluster
-make test-e2e
+# Create a Kind cluster
+kind create cluster --name galactic-e2e
 
-# Or manually manage the cluster
-make setup-test-e2e
+# Run e2e tests
 go test ./test/e2e/ -v -ginkgo.v
-make cleanup-test-e2e
+
+# Tear down
+kind delete cluster --name galactic-e2e
 ```
 
 ## Network Development
@@ -153,7 +154,7 @@ Build and test containers inside the devcontainer:
 
 ```bash
 # Build the galactic image
-make docker-build
+task docker-build
 
 # Create a Kind cluster
 kind create cluster --name galactic-dev

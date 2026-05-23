@@ -1,0 +1,71 @@
+version: '3'
+
+vars:
+  LAB:
+    sh: awk '/^name:/ {print $2; exit}' *.clab.yaml
+  TOPO:
+    sh: echo *.clab.yaml
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build container images (Kind node)
+    cmds:
+      - docker build --network=host -t kindest/node:galactic containers/kindest-node-galactic
+
+  up:
+    desc: Build the Kind node image and deploy the lab
+    deps: [build, host-setup]
+    cmds:
+      - sudo containerlab deploy -t {{.TOPO}}
+
+  down:
+    desc: Destroy the lab and clean generated state
+    cmds:
+      - sudo containerlab destroy -t {{.TOPO}} --cleanup
+
+  reload:
+    desc: Full rebuild and redeploy
+    cmds:
+      - task: down
+      - task: up
+
+  inspect:
+    desc: Inspect deployed nodes and management addresses
+    cmds:
+      - sudo containerlab inspect -t {{.TOPO}}
+
+  graph:
+    desc: Generate a draw.io diagram for the current topology
+    cmds:
+      - sudo containerlab graph -t {{.TOPO}} --drawio --drawio-dir .
+
+  host-setup:
+    desc: Apply host sysctls for this dual-stack lab
+    cmds:
+      - sudo ./scripts/host-setup.sh --no-persist
+
+  underlay:
+    desc: Apply FRR DaemonSets to all clusters
+    cmds:
+      - ./scripts/install-underlay.sh
+
+  overlay:
+    desc: Pull GoBGP image, load into clusters, and apply DaemonSets to iad and sjc
+    cmds:
+      - docker pull osrg/gobgp:latest
+      - kind load docker-image osrg/gobgp:latest --name iad
+      - kind load docker-image osrg/gobgp:latest --name sjc
+      - ./scripts/install-overlay.sh
+
+  clean:
+    desc: Destroy the lab, remove ContainerLab state, and delete container images
+    cmds:
+      - task: down
+      - docker rmi kindest/node:galactic || true
+      - docker rmi osrg/gobgp:latest || true
+      - rm -rf clab-{{.LAB}}
