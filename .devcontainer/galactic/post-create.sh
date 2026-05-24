@@ -11,16 +11,35 @@ if [[ -f /home/vscode/.gitconfig.host ]]; then
     cp /home/vscode/.gitconfig.host /home/vscode/.gitconfig
 fi
 
+# Upgrade/install packages
+echo "Upgrading/installing Ubuntu packages..."
+curl -1sLf 'https://dl.cloudsmith.io/public/task/task/setup.deb.sh' | sudo -E bash
+sudo apt-get update -q
+sudo apt-get install -y -q software-properties-common
+sudo add-apt-repository -y ppa:apt-fast/stable
+sudo apt-get update -q
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q apt-fast
+sudo apt-fast install -y \
+	bridge-utils \
+	build-essential \
+	conntrack \
+	dnsutils \
+	ethtool \
+	gcc \
+	iproute2 \
+	iptables \
+	iputils-ping \
+	jq \
+	make \
+	net-tools \
+	task \
+	tcpdump
+
 # Set up Go tools
 echo "Installing Go development tools..."
 go install golang.org/x/tools/gopls@latest
 go install github.com/go-delve/delve/cmd/dlv@latest
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
-
-# Install controller-gen, kustomize, and other Kubernetes tools
-echo "Installing Kubernetes development tools..."
-cd /workspaces/galactic
-task controller-gen kustomize setup-envtest
 
 # Install kind for local Kubernetes testing
 echo "Installing Kind..."
@@ -43,34 +62,6 @@ echo "Installing protoc-gen-go..."
 go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
-# Upgrade/install packages
-echo "Upgrading/installing Ubuntu packages..."
-sudo apt-get update -q
-sudo apt-get install -y -q software-properties-common
-sudo add-apt-repository -y ppa:apt-fast/stable
-sudo apt-get update -q
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q apt-fast
-sudo apt-fast install -y \
-	iproute2 \
-	iptables \
-	tcpdump \
-	iputils-ping \
-	net-tools \
-	dnsutils \
-	bridge-utils \
-	ethtool \
-	conntrack \
-	jq \
-	make \
-	task \
-	gcc \
-	build-essential
-
-# Generate Kubernetes manifests and code
-echo "Generating Kubernetes manifests and DeepCopy methods..."
-cd /workspaces/galactic
-task manifests generate
-
 # Install Claude Code CLI
 echo "Installing Claude Code..."
 curl -fsSL https://claude.ai/install.sh | bash
@@ -79,9 +70,8 @@ curl -fsSL https://claude.ai/install.sh | bash
 echo ""
 echo "Verifying installations..."
 echo "Go version: $(go version)"
-echo "kubectl version: $(kubectl version --client --short 2>/dev/null || echo 'kubectl installed')"
+echo "kubectl version: $(kubectl version --client 2>/dev/null || echo 'kubectl installed')"
 echo "kind version: $(kind version)"
-echo "kustomize version: $(kustomize version --short 2>/dev/null || echo 'kustomize installed')"
 echo "protoc version: $(protoc --version)"
 echo "Docker version: $(docker --version)"
 echo "golangci-lint version: $(golangci-lint version 2>/dev/null || echo 'golangci-lint installed')"
@@ -94,7 +84,5 @@ echo ""
 echo "You can now:"
 echo "  - Build the galactic binary: task build"
 echo "  - Run tests: task test"
-echo "  - Run E2E tests: task test-e2e"
-echo "  - Run the operator: task run-operator"
 echo "  - Run the agent: task run-agent"
 echo ""

@@ -12,8 +12,10 @@ esac
 
 # Upgrade/install packages
 echo "Upgrading/installing Debian packages..."
+curl -1sLf 'https://dl.cloudsmith.io/public/task/task/setup.deb.sh' | sudo -E bash
 sudo apt update
 sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y
+sudo apt install -y task
 
 # Install Claude Code
 echo "Installing Claude Code..."
