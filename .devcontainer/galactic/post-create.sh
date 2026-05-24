@@ -20,7 +20,7 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
 # Install controller-gen, kustomize, and other Kubernetes tools
 echo "Installing Kubernetes development tools..."
 cd /workspaces/galactic
-make controller-gen kustomize setup-envtest
+task controller-gen kustomize setup-envtest
 
 # Install kind for local Kubernetes testing
 echo "Installing Kind..."
@@ -62,13 +62,14 @@ sudo apt-fast install -y \
 	conntrack \
 	jq \
 	make \
+	task \
 	gcc \
 	build-essential
 
 # Generate Kubernetes manifests and code
 echo "Generating Kubernetes manifests and DeepCopy methods..."
 cd /workspaces/galactic
-make manifests generate
+task manifests generate
 
 # Install Claude Code CLI
 echo "Installing Claude Code..."
@@ -91,9 +92,9 @@ echo ""
 echo "Post-create setup completed successfully!"
 echo ""
 echo "You can now:"
-echo "  - Build the galactic binary: make build"
-echo "  - Run tests: make test"
-echo "  - Run E2E tests: make test-e2e"
-echo "  - Run the operator: make run-operator"
-echo "  - Run the agent: make run-agent"
+echo "  - Build the galactic binary: task build"
+echo "  - Run tests: task test"
+echo "  - Run E2E tests: task test-e2e"
+echo "  - Run the operator: task run-operator"
+echo "  - Run the agent: task run-agent"
 echo ""
