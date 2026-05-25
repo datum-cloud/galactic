@@ -39,15 +39,17 @@ sudo apt-fast install -y \
 echo "Installing Go development tools..."
 go install golang.org/x/tools/gopls@latest
 go install github.com/go-delve/delve/cmd/dlv@latest
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
 # Install kind for local Kubernetes testing
 echo "Installing Kind..."
 go install sigs.k8s.io/kind@latest
 
 # Install protoc (Protocol Buffer compiler)
+# Version must match what CI uses (arduino/setup-protoc@v3 version: '29.3')
+# and what is recorded in the generated .pb.go file headers.
 echo "Installing protoc..."
-PROTOC_VERSION="25.1"
+PROTOC_VERSION="29.3"
 PROTOC_ARCH=$(uname -m)
 # protoc releases use aarch_64 (with underscore) for ARM64, unlike most other tools
 case "$PROTOC_ARCH" in aarch64) PROTOC_ARCH="aarch_64" ;; esac
@@ -57,14 +59,23 @@ sudo unzip -o "${PROTOC_ZIP}" -d /usr/local bin/protoc
 sudo unzip -o "${PROTOC_ZIP}" -d /usr/local 'include/*'
 rm -f "${PROTOC_ZIP}"
 
-# Install protoc-gen-go for Go protobuf generation
+# Install protoc-gen-go plugins — versions must match PROTOC_GEN_GO_VERSION and
+# PROTOC_GEN_GO_GRPC_VERSION in Taskfile.yaml and the headers of the generated files.
 echo "Installing protoc-gen-go..."
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
+
+# Install pre-commit for git hook enforcement
+echo "Installing pre-commit..."
+pip install pre-commit
 
 # Install Claude Code CLI
 echo "Installing Claude Code..."
 curl -fsSL https://claude.ai/install.sh | bash
+
+# Install git hooks
+echo "Installing git hooks..."
+task hooks
 
 # Verify installations
 echo ""
@@ -77,6 +88,7 @@ echo "Docker version: $(docker --version)"
 echo "golangci-lint version: $(golangci-lint version 2>/dev/null || echo 'golangci-lint installed')"
 echo "delve version: $(dlv version)"
 echo "gopls version: $(gopls version)"
+echo "pre-commit version: $(pre-commit --version)"
 
 echo ""
 echo "Post-create setup completed successfully!"

@@ -32,12 +32,20 @@ sudo chmod +x /usr/local/bin/kubectl
 echo "Installing Kind..."
 go install sigs.k8s.io/kind@latest
 
+# Install pre-commit for git hook enforcement
+echo "Installing pre-commit..."
+pip install pre-commit
+
 # Install crane for pulling container images (Docker binaries in this environment
 # panic on TLS 1.3 to Docker Hub due to an msft-golang/OpenSSL bug on ARM64)
 echo "Installing crane..."
 CRANE_VERSION=$(curl -fsSL https://api.github.com/repos/google/go-containerregistry/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
 curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${ARCH}.tar.gz" \
     | sudo tar xz -C /usr/local/bin crane
+
+# Install git hooks
+echo "Installing git hooks..."
+task hooks
 
 # Verify installations
 echo ""
@@ -46,6 +54,7 @@ echo "Go version: $(go version)"
 echo "kubectl version: $(kubectl version --client 2>/dev/null || echo 'kubectl not installed')"
 echo "kind version: $(kind version)"
 echo "Docker version: $(docker --version)"
+echo "pre-commit version: $(pre-commit --version)"
 
 echo ""
 echo "Post-create setup completed successfully!"

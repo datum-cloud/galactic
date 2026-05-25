@@ -1,0 +1,19 @@
+extends: default
+
+rules:
+  document-start: disable  # Taskfiles, clab topologies, and GH Actions don't use ---
+  line-length:
+    max: 120
+    level: warning
+  truthy:
+    # 'on' is valid as a GitHub Actions trigger key
+    allowed-values: ['true', 'false']
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+
+ignore: |
+  bin/
+  dist/
+  vendor/
+  lab/*/clab-*/

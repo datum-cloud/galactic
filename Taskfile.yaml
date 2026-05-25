@@ -11,8 +11,12 @@ vars:
       [ -n "$gobin" ] && echo "$gobin" || echo "$(go env GOPATH)/bin"
   GOLANGCI_LINT: '{{.LOCALBIN}}/golangci-lint'
   GO_LICENSES: '{{.LOCALBIN}}/go-licenses'
-  GOLANGCI_LINT_VERSION: v2.1.6
+  PROTOC_GEN_GO: '{{.LOCALBIN}}/protoc-gen-go'
+  PROTOC_GEN_GO_GRPC: '{{.LOCALBIN}}/protoc-gen-go-grpc'
+  GOLANGCI_LINT_VERSION: v2.12.2
   GO_LICENSES_VERSION: v1.6.0
+  PROTOC_GEN_GO_VERSION: v1.36.11
+  PROTOC_GEN_GO_GRPC_VERSION: v1.6.1
 
 tasks:
   default:
@@ -54,6 +58,12 @@ tasks:
     cmds:
       - '{{.GOLANGCI_LINT}} run --fix'
 
+  hooks:
+    desc: Install git pre-commit hooks (requires pre-commit; pip install pre-commit)
+    deps: [golangci-lint]
+    cmds:
+      - pre-commit install
+
   notice:
     desc: Generate NOTICE file with third-party dependency license information
     deps: [go-licenses]
@@ -63,6 +73,16 @@ tasks:
   ##
   ## Build
   ##
+
+  proto:
+    desc: Regenerate protobuf and gRPC Go code from .proto files (requires protoc v29.3 in PATH; see https://github.com/protocolbuffers/protobuf/releases)
+    deps: [protoc-gen-go, protoc-gen-go-grpc]
+    cmds:
+      - |
+        PATH={{.LOCALBIN}}:$PATH protoc \
+          --go_out=. --go_opt=paths=source_relative \
+          --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+          pkg/proto/local/local.proto
 
   build:
     desc: Build galactic binary
@@ -115,6 +135,26 @@ tasks:
           TARGET: '{{.GO_LICENSES}}'
           PACKAGE: github.com/google/go-licenses
           VERSION: '{{.GO_LICENSES_VERSION}}'
+
+  protoc-gen-go:
+    internal: true
+    run: once
+    cmds:
+      - task: install-tool
+        vars:
+          TARGET: '{{.PROTOC_GEN_GO}}'
+          PACKAGE: google.golang.org/protobuf/cmd/protoc-gen-go
+          VERSION: '{{.PROTOC_GEN_GO_VERSION}}'
+
+  protoc-gen-go-grpc:
+    internal: true
+    run: once
+    cmds:
+      - task: install-tool
+        vars:
+          TARGET: '{{.PROTOC_GEN_GO_GRPC}}'
+          PACKAGE: google.golang.org/grpc/cmd/protoc-gen-go-grpc
+          VERSION: '{{.PROTOC_GEN_GO_GRPC_VERSION}}'
 
   install-tool:
     internal: true
