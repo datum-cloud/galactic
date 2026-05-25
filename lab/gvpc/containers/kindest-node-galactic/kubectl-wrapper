@@ -1,0 +1,9 @@
+#!/bin/bash
+# In OrbStack DooD, the kubelet briefly restarts the apiserver static pod after
+# kubeadm init exits, creating a window where nothing listens on 6443. Kind
+# runs the StorageClass step immediately after kubeadm and hits this window.
+# Poll /healthz until the apiserver is actually accepting connections first.
+until curl -sk https://127.0.0.1:6443/healthz >/dev/null 2>&1; do
+  sleep 1
+done
+exec /usr/bin/kubectl --server=https://127.0.0.1:6443 "$@"

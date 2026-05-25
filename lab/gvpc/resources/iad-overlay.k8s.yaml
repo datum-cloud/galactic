@@ -27,7 +27,7 @@ data:
         local-address = "fc00:0:2::1"
       [[neighbors.afi-safis]]
         [neighbors.afi-safis.config]
-          afi-safi-name = "l3vpn-ipv4-unicast"
+          afi-safi-name = "l3vpn-ipv6-unicast"
 
 ---
 apiVersion: apps/v1

@@ -47,6 +47,8 @@ data:
      description tr3-facing
     !
 
+    ipv6 route 2001:db8:ff03::/48 Null0
+    !
     router bgp 65000
      bgp router-id 10.255.255.1
      no bgp default ipv4-unicast
@@ -63,10 +65,11 @@ data:
      address-family ipv6 unicast
       neighbor eth1 activate
       neighbor eth1 allowas-in 1
+      network 2001:db8:ff03::/48
       network fc00:0:4::1/128
      exit-address-family
      !
-     address-family ipv4 vpn
+     address-family ipv6 vpn
       neighbor fc00:0:2::1 activate
       neighbor fc00:0:2::1 route-reflector-client
       neighbor fc00:0:3::1 activate

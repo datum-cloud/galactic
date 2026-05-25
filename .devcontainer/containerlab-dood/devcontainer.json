@@ -1,0 +1,36 @@
+{
+    "name": "containerlab-dood",
+    "image": "ghcr.io/srl-labs/containerlab/devcontainer-dood-slim:0.75.0",
+    "runArgs": [
+        "--network=host",
+        "--pid=host",
+        "--privileged"
+    ],
+    "mounts": [
+        "type=bind,src=/run/docker/netns,dst=/run/docker/netns",
+        "type=bind,src=/var/lib/docker,dst=/var/lib/docker",
+        "type=bind,src=/lib/modules,dst=/lib/modules",
+        "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached,readonly"
+    ],
+    "workspaceFolder": "${localWorkspaceFolder}",
+    "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+    "features": {
+        "ghcr.io/devcontainers/features/go:1": {
+            "version": "1.24.5"
+        },
+        "ghcr.io/devcontainers/features/node:2": {
+            "version": "lts"
+        }
+    },
+    "otherPortsAttributes": {
+        "onAutoForward": "ignore"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "anthropic.claude-code"
+            ]
+        }
+    },
+    "postCreateCommand": "bash .devcontainer/containerlab-dood/post-create.sh"
+}

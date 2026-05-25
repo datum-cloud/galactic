@@ -4,8 +4,8 @@ Local development and integration-testing environments for [Galactic VPC](https:
 
 ```
 lab/
-├── network/    # ContainerLab SRv6 underlay network (standalone)
-└── gvpc/       # ContainerLab GVPC multi-cluster lab (3 Kind clusters over SRv6 mesh)
+├── network/   # ContainerLab SRv6 underlay — standalone BGP/SRv6 network with FRR + GoBGP
+└── gvpc/      # ContainerLab multi-cluster lab — three Kind clusters over an SRv6 transit mesh
 ```
 
 ---
@@ -37,12 +37,13 @@ task down      # tear down
 
 ---
 
-## `gvpc/` — GVPC Multi-Cluster Lab
+## `gvpc/` — Multi-Cluster GVPC Lab
 
-Three Kind clusters (iad, sjc, infra) connected over an IPv6 SRv6 transit mesh. Each
-cluster runs FRR as a node routing daemon (hostNetwork DaemonSet) to peer with the
-transit layer via BGP unnumbered. GoBGP runs alongside FRR on the iad and sjc workers
-to exchange L3VPN type-5 routes with the infra route reflector over iBGP.
+A ContainerLab topology that connects three Kind clusters (`iad`, `sjc`, `infra`) over
+an IPv6 SRv6 transit mesh. FRR runs as a node routing daemon on each cluster worker for
+the eBGP underlay; GoBGP runs on `iad` and `sjc` workers to exchange L3VPN type-5 routes
+with the `infra` route reflector over iBGP. Cilium, cert-manager, and Multus are
+pre-installed on each cluster.
 
 See [`gvpc/README.md`](gvpc/README.md) for topology details, addressing, and
 verification commands.
@@ -60,6 +61,6 @@ verification commands.
 cd gvpc
 task up        # build Kind node image, apply host sysctls, deploy lab
 task underlay  # apply FRR DaemonSets to all three clusters
-task overlay   # apply GoBGP DaemonSets to iad and sjc clusters
+task overlay   # pull GoBGP image, load into clusters, apply DaemonSets
 task down      # tear down
 ```
