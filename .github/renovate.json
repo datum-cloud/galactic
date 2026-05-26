@@ -10,14 +10,16 @@
   "labels": ["dependencies"],
   "packageRules": [
     {
-      "description": "Block all Go toolchain version upgrades (go.mod go/toolchain directives and setup-go go-version inputs)",
+      "description": "Block Go toolchain major/minor upgrades; allow patch-only updates",
       "matchDatasources": ["golang-version"],
+      "matchUpdateTypes": ["major", "minor"],
       "enabled": false
     },
     {
-      "description": "Block golang Docker base image upgrades to keep Go major/minor pinned",
+      "description": "Block golang Docker base image major/minor upgrades; allow patch-only updates",
       "matchManagers": ["dockerfile"],
       "matchDepNames": ["golang"],
+      "matchUpdateTypes": ["major", "minor"],
       "enabled": false
     },
     {
