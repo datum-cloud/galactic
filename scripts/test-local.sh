@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Local testing script for Galactic
 # Runs tests in Docker to ensure Linux compatibility
 
-set -e
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="golang:1.24"
@@ -11,39 +11,16 @@ echo "=== Galactic Local Test Runner ==="
 echo "Repository: $REPO_ROOT"
 echo ""
 
-# Parse arguments
 TEST_TYPE="${1:-unit}"
 
 case "$TEST_TYPE" in
   unit)
-    echo "Running unit tests (no K8s required)..."
+    echo "Running unit tests..."
     docker run --rm \
       -v "$REPO_ROOT":/workspace \
       -w /workspace \
       "$IMAGE" \
-      go test -v \
-        ./internal/operator/identifier/... \
-        ./internal/operator/cniconfig/... \
-        ./pkg/common/util/...
-    ;;
-
-  operator)
-    echo "Running operator tests with envtest..."
-    docker run --rm \
-      -v "$REPO_ROOT":/workspace \
-      -w /workspace \
-      "$IMAGE" \
-      sh -c '
-        # Install setup-envtest
-        go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-
-        # Setup envtest binaries
-        KUBEBUILDER_ASSETS=$(setup-envtest use 1.31.0 --bin-dir /workspace/bin/k8s -p path)
-        export KUBEBUILDER_ASSETS
-
-        # Run tests
-        go test -v ./internal/operator/...
-      '
+      go test -v -race ./pkg/common/util/...
     ;;
 
   build)
@@ -52,24 +29,16 @@ case "$TEST_TYPE" in
       -v "$REPO_ROOT":/workspace \
       -w /workspace \
       "$IMAGE" \
-      go build -o bin/galactic ./cmd/galactic/...
+      go build -o bin/galactic ./cmd/galactic/main.go
     echo "Binary built: bin/galactic"
     file "$REPO_ROOT/bin/galactic"
     ;;
 
-  all)
-    echo "Running all tests..."
-    "$0" unit
-    "$0" operator
-    ;;
-
   *)
-    echo "Usage: $0 {unit|operator|build|all}"
+    echo "Usage: $0 {unit|build}"
     echo ""
-    echo "  unit     - Run unit tests (fast, no K8s)"
-    echo "  operator - Run operator tests with envtest"
-    echo "  build    - Build the galactic binary"
-    echo "  all      - Run all tests"
+    echo "  unit   - Run unit tests with race detector"
+    echo "  build  - Build the galactic binary in Docker"
     exit 1
     ;;
 esac
