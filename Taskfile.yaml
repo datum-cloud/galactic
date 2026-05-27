@@ -106,6 +106,7 @@ tasks:
     cmds:
       - rm -rf bin/
       - rm -rf dist/
+      - rm -rf .venv/
       - rm -f cover.out
 
   ##
