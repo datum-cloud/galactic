@@ -1,8 +1,0 @@
-extends: default
-
-rules:
-  # GitHub Actions workflows don't start with ---
-  document-start: disable
-  # 'on:' is a valid GitHub Actions trigger key, not a truthy value
-  truthy:
-    check-keys: false
