@@ -54,12 +54,18 @@ See [taskfile.dev/installation](https://taskfile.dev/installation/) for the full
 
 ```bash
 task          # list available tasks
-task build    # build the galactic binary
-task test     # run tests (fmt + vet + unit)
-task lint     # run golangci-lint
-task lint-fix # auto-fix lint issues
-task clean    # remove build artifacts
 ```
+
+#### Testing
+
+```bash
+task test            # run unit tests then e2e tests (requires Docker + Kind)
+task ci:unittest     # unit tests only — race detector, coverage output
+task ci:e2etest      # full e2e lifecycle — spins up a Kind cluster, builds and
+                     # loads the image, then tears the cluster down on exit
+```
+
+`task ci:unittest` is the fast path for development; it runs the same command as the CI `test-unit` job. `task ci:e2etest` requires Docker and Kind and mirrors the CI `test-e2e` job exactly, including automatic cluster cleanup via a `trap` on exit.
 
 Lab environments have their own `Taskfile.yaml`; run `task` from the relevant directory (`lab/network/` or `lab/gvpc/`) to see available tasks.
 
