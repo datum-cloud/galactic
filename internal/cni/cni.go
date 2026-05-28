@@ -20,8 +20,9 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 
-	"go.datum.net/galactic/internal/cni/debug"
-	"go.datum.net/galactic/internal/cni/registration"
+	"go.datum.net/galactic/internal/agent/srv6"
+	galversion "go.datum.net/galactic/internal/cmd/version"
+	"go.datum.net/galactic/internal/cni/bgp"
 	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/pkg/common/cni"
@@ -36,6 +37,8 @@ type PluginConf struct {
 	MTU           int               `json:"mtu,omitempty"`
 	Terminations  []cni.Termination `json:"terminations,omitempty"`
 	IPAM          cni.IPAM          `json:"ipam,omitempty"`
+	GoBGP         cni.GoBGPConfig   `json:"gobgp,omitempty"`
+	SRv6Locator   string            `json:"srv6_locator"`
 }
 
 func NewCommand() *cobra.Command {
@@ -49,7 +52,7 @@ func NewCommand() *cobra.Command {
 					Del: cmdDel,
 				},
 				version.All,
-				fmt.Sprintf("CNI galactic plugin %s", debug.Version()),
+				fmt.Sprintf("CNI galactic plugin %s", galversion.Version),
 			)
 		},
 	}
@@ -119,8 +122,21 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	err = registration.Register(vpcHex, vpcAttachmentHex, networks)
+	err = bgp.AddPaths(&bgp.PathConfig{
+		GoBGPAddress:     pluginConf.GoBGP.AddressOrDefault(),
+		SRv6Locator:      pluginConf.SRv6Locator,
+		VPCHex:           vpcHex,
+		VPCAttachmentHex: vpcAttachmentHex,
+		Networks:         networks,
+	})
 	if err != nil {
+		return err
+	}
+	srv6Endpoint, err := util.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
+	if err != nil {
+		return err
+	}
+	if err := srv6.RouteIngressAdd(srv6Endpoint); err != nil {
 		return err
 	}
 	result := &type100.Result{}
@@ -141,8 +157,21 @@ func cmdDel(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	err = registration.Deregister(vpcHex, vpcAttachmentHex, networks)
+	err = bgp.DeletePaths(&bgp.PathConfig{
+		GoBGPAddress:     pluginConf.GoBGP.AddressOrDefault(),
+		SRv6Locator:      pluginConf.SRv6Locator,
+		VPCHex:           vpcHex,
+		VPCAttachmentHex: vpcAttachmentHex,
+		Networks:         networks,
+	})
 	if err != nil {
+		return err
+	}
+	srv6Endpoint, err := util.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
+	if err != nil {
+		return err
+	}
+	if err := srv6.RouteIngressDel(srv6Endpoint); err != nil {
 		return err
 	}
 	dev := util.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
@@ -154,7 +183,7 @@ func cmdDel(args *skel.CmdArgs) error {
 			return err
 		}
 	}
-	if err := veth.Delete(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
+	if err := veth.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
 		return err
 	}
 	if err := vrf.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
