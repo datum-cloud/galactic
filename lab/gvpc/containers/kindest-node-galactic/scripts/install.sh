@@ -61,6 +61,10 @@ else # worker
   # CNI Plugins
   curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGIN_VERSION}/cni-plugins-linux-${ARCH}-${CNI_PLUGIN_VERSION}.tgz" |tar xvfz - -C /opt/cni/bin
 
+  # Galactic CNI plugin and agent
+  install -m 0755 /galactic/bin/galactic /opt/cni/bin/galactic
+  install -m 0755 /galactic/bin/galactic /usr/local/bin/galactic
+
   # Bring up the transit-facing data-plane interface
   ip link set dev eth1 up
   sysctl -w net.ipv6.conf.eth1.disable_ipv6=0

@@ -15,8 +15,7 @@ func NewCommand() *cobra.Command {
 		Use:   "cni",
 		Short: "Run as a CNI plugin",
 		Long: `The CNI plugin is invoked by the container runtime to set up network interfaces
-for pods. It configures VRF, veth pairs, routes, and communicates with the agent
-via gRPC to register network attachments.
+for pods. It configures VRF, veth pairs, SRv6 ingress routes, and BGP paths.
 
 This command is typically invoked automatically by the container runtime when the
 CNI_COMMAND environment variable is set. The main binary auto-detects CNI mode

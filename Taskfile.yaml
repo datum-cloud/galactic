@@ -70,16 +70,24 @@ tasks:
     cmds:
       - go build -o bin/galactic cmd/galactic/main.go
 
-  run-agent:
-    desc: Run agent from your host
-    deps: [fmt, vet]
-    cmds:
-      - go run ./cmd/galactic/main.go agent
-
   docker-build:
     desc: Build docker image with the unified binary
+    vars:
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+      GIT_COMMIT:
+        sh: git rev-parse --short HEAD
+      GIT_TREE_STATE:
+        sh: git diff --quiet && echo "clean" || echo "dirty"
+      BUILD_DATE:
+        sh: date -u +%Y-%m-%dT%H:%M:%SZ
     cmds:
-      - '{{.CONTAINER_TOOL}} build -t {{.IMG}} -f containers/galactic/Dockerfile .'
+      - '{{.CONTAINER_TOOL}} build -t {{.IMG}} -f containers/galactic/Dockerfile
+          --build-arg VERSION={{.VERSION}}
+          --build-arg GIT_COMMIT={{.GIT_COMMIT}}
+          --build-arg GIT_TREE_STATE={{.GIT_TREE_STATE}}
+          --build-arg BUILD_DATE={{.BUILD_DATE}}
+          .'
 
   ##
   ## Cleanup

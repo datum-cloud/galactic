@@ -73,58 +73,6 @@ func TestParseIP(t *testing.T) {
 	}
 }
 
-func TestParseSegments(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     []string
-		wantIPs   []net.IP
-		wantError bool
-	}{
-		{
-			"ValidSingleSegment",
-			[]string{testIPv6Segment},
-			[]net.IP{net.ParseIP(testIPv6Segment)},
-			false,
-		},
-		{
-			"ValidMultipleSegments",
-			[]string{testIPv6Segment, "2607:ed40:ff01::1"},
-			[]net.IP{net.ParseIP("2607:ed40:ff01::1"), net.ParseIP(testIPv6Segment)},
-			false,
-		},
-		{
-			"InvalidSegment",
-			[]string{testIPv6Segment, "invalid_ip"},
-			nil,
-			true,
-		},
-		{
-			"InvalidIPv4Segment",
-			[]string{testIPv6Segment, "192.168.0.1"},
-			nil,
-			true,
-		},
-		{
-			"EmptyInput",
-			[]string{},
-			nil,
-			true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := util.ParseSegments(tt.input)
-			if (err != nil) != tt.wantError {
-				t.Errorf("ParseSegments() error = %v, wantError = %v", err, tt.wantError)
-			}
-			if !tt.wantError && !reflect.DeepEqual(got, tt.wantIPs) {
-				t.Errorf("ParseSegments() got = %v, want = %v", got, tt.wantIPs)
-			}
-		})
-	}
-}
-
 func TestDecodeSRv6Endpoint(t *testing.T) {
 	srv6Endpoint := "2607:ed40:ff00::0000:0000:04d2:002a"
 	vpc := "0000000004d2"

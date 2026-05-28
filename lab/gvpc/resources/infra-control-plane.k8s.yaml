@@ -69,6 +69,13 @@ data:
       network fc00:0:4::1/128
      exit-address-family
      !
+     address-family ipv4 vpn
+      neighbor fc00:0:2::1 activate
+      neighbor fc00:0:2::1 route-reflector-client
+      neighbor fc00:0:3::1 activate
+      neighbor fc00:0:3::1 route-reflector-client
+     exit-address-family
+     !
      address-family ipv6 vpn
       neighbor fc00:0:2::1 activate
       neighbor fc00:0:2::1 route-reflector-client

@@ -88,7 +88,7 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	return netlink.LinkSetMaster(hostLink, vrfLink)
 }
 
-func Delete(vpc, vpcAttachment string, mtu int) error {
+func Delete(vpc, vpcAttachment string) error {
 	hostName := util.GenerateInterfaceNameHost(vpc, vpcAttachment)
 
 	if err := updateForwardRule(hostName, "delete"); err != nil {

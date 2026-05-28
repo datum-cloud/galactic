@@ -15,7 +15,7 @@ tasks:
   build:
     desc: Build container images (Kind node)
     cmds:
-      - docker build --network=host -t kindest/node:galactic containers/kindest-node-galactic
+      - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
   up:
     desc: Build the Kind node image and deploy the lab

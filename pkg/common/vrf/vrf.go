@@ -16,18 +16,18 @@ import (
 	"go.datum.net/galactic/pkg/common/util"
 )
 
-const MinVRFId = uint32(1)
-const MaxVRFId = uint32(math.MaxUint32 - 1)
+const minVRFId = uint32(1)
+const maxVRFId = uint32(math.MaxUint32 - 1)
 
 func Add(vpc, vpcAttachment string) error {
 	name := util.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
-	vrfId, err := FindNextAvailableVRFId()
+	vrfId, err := findNextAvailableVRFId()
 	if err != nil {
 		return err
 	}
 
-	if err := Flush(vrfId); err != nil {
+	if err := flush(vrfId); err != nil {
 		return err
 	}
 
@@ -52,12 +52,12 @@ func Add(vpc, vpcAttachment string) error {
 func Delete(vpc, vpcAttachment string) error {
 	name := util.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
-	vrfId, err := GetVRFIdForInterface(name)
+	vrfId, err := getVRFIdForInterface(name)
 	if err != nil {
 		return err
 	}
 
-	if err := Flush(vrfId); err != nil {
+	if err := flush(vrfId); err != nil {
 		return err
 	}
 
@@ -69,7 +69,11 @@ func Delete(vpc, vpcAttachment string) error {
 	return netlink.LinkDel(link)
 }
 
-func Flush(vrfId uint32) error {
+func GetVRFIdForVPC(vpc, vpcAttachment string) (uint32, error) {
+	return getVRFIdForInterface(util.GenerateInterfaceNameVRF(vpc, vpcAttachment))
+}
+
+func flush(vrfId uint32) error {
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		routes, err := netlink.RouteListFiltered(
 			family,
@@ -88,7 +92,7 @@ func Flush(vrfId uint32) error {
 	return nil
 }
 
-func ListVRFLinks() ([]*netlink.Vrf, error) {
+func listVRFLinks() ([]*netlink.Vrf, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
 		return nil, err
@@ -103,8 +107,8 @@ func ListVRFLinks() ([]*netlink.Vrf, error) {
 	return vrfLinks, nil
 }
 
-func FindNextAvailableVRFId() (uint32, error) {
-	vrfs, err := ListVRFLinks()
+func findNextAvailableVRFId() (uint32, error) {
+	vrfs, err := listVRFLinks()
 	if err != nil {
 		return 0, err
 	}
@@ -114,7 +118,7 @@ func FindNextAvailableVRFId() (uint32, error) {
 		used = append(used, vrf.Table)
 	}
 
-	for vrfId := MinVRFId; vrfId <= MaxVRFId; vrfId++ {
+	for vrfId := minVRFId; vrfId <= maxVRFId; vrfId++ {
 		if !slices.Contains(used, vrfId) {
 			return vrfId, nil
 		}
@@ -123,8 +127,8 @@ func FindNextAvailableVRFId() (uint32, error) {
 	return 0, fmt.Errorf("could not find any available VRF id")
 }
 
-func GetVRFIdForInterface(name string) (uint32, error) {
-	vrfs, err := ListVRFLinks()
+func getVRFIdForInterface(name string) (uint32, error) {
+	vrfs, err := listVRFLinks()
 	if err != nil {
 		return 0, err
 	}
@@ -135,8 +139,4 @@ func GetVRFIdForInterface(name string) (uint32, error) {
 		}
 	}
 	return 0, fmt.Errorf("could not find VRF ID for interface: %s", name)
-}
-
-func GetVRFIdForVPC(vpc, vpcAttachment string) (uint32, error) {
-	return GetVRFIdForInterface(util.GenerateInterfaceNameVRF(vpc, vpcAttachment))
 }
