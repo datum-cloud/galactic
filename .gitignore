@@ -222,5 +222,8 @@ mem.prof
 # golangci-lint cache
 .golangci-lint-cache/
 
+# Python virtual environment (created by scripts/ci.sh setup)
+.venv/
+
 # Local files
 .local

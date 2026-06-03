@@ -11,7 +11,7 @@ vars:
       [ -n "$gobin" ] && echo "$gobin" || echo "$(go env GOPATH)/bin"
   GOLANGCI_LINT: '{{.LOCALBIN}}/golangci-lint'
   GO_LICENSES: '{{.LOCALBIN}}/go-licenses'
-  GOLANGCI_LINT_VERSION: v2.1.6
+  GOLANGCI_LINT_VERSION: v2.12.2
   GO_LICENSES_VERSION: v1.6.0
 
 tasks:
@@ -37,10 +37,10 @@ tasks:
       - GOOS=linux go vet ./...
 
   test:
-    desc: Run tests
-    deps: [fmt, vet]
+    desc: Run unit and e2e tests
     cmds:
-      - GOOS=linux go test $(go list ./... | grep -v /e2e) -coverprofile cover.out
+      - task: ci:unittest
+      - task: ci:e2etest
 
   lint:
     desc: Run golangci-lint linter
@@ -69,6 +69,8 @@ tasks:
     deps: [fmt, vet]
     cmds:
       - go build -o bin/galactic cmd/galactic/main.go
+      - file bin/galactic
+      - ./bin/galactic version
 
   docker-build:
     desc: Build docker image with the unified binary
@@ -90,6 +92,20 @@ tasks:
           .'
 
   ##
+  ## CI
+  ##
+
+  ci:unittest:
+    desc: Run unit tests with race detection and coverage output (mirrors CI)
+    cmds:
+      - bash scripts/ci.sh unittest
+
+  ci:e2etest:
+    desc: Run full e2e lifecycle — install Kind, create cluster, build+load image, cleanup
+    cmds:
+      - bash scripts/ci.sh e2etest
+
+  ##
   ## Cleanup
   ##
 
@@ -98,6 +114,7 @@ tasks:
     cmds:
       - rm -rf bin/
       - rm -rf dist/
+      - rm -rf .venv/
       - rm -f cover.out
 
   ##
