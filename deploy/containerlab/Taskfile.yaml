@@ -36,10 +36,10 @@ tasks:
       - docker image inspect {{.COSMOS_IMAGE}} > /dev/null 2>&1
     cmds:
       - |
-        if [ ! -d "build/cosmos-src" ]; then
-          git clone --depth=1 https://github.com/milo-os/cosmos build/cosmos-src
+        if [ ! -d "build/cosmos" ]; then
+          git clone --depth=1 https://github.com/milo-os/cosmos build/cosmos
         fi
-        docker build -t {{.COSMOS_IMAGE}} -f build/cosmos-src/build/Dockerfile build/cosmos-src
+        docker build -t {{.COSMOS_IMAGE}} -f build/cosmos/build/Dockerfile build/cosmos
 
   "build:gobgp":
     desc: Build the GoBGP container using the pre-built v{{.GOBGP_VERSION}} release binary
@@ -170,4 +170,4 @@ tasks:
       - docker rmi {{.GOBGP_IMAGE}} || true
       - docker rmi {{.FRR_IMAGE}} || true
       - docker rmi {{.COSMOS_IMAGE}} || true
-      - rm -rf clab-{{.LAB}}
+      - rm -rf clab-{{.LAB}} build/
