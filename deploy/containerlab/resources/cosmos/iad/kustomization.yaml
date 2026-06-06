@@ -1,0 +1,4 @@
+resources:
+  - bgpprovider.yaml
+  - bgpinstance.yaml
+  - bgpsession.yaml

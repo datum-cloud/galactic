@@ -1,0 +1,6 @@
+namePrefix: infra-
+namespace: infra-underlay
+resources:
+  - ../base
+  - namespace.yaml
+  - configmap.yaml

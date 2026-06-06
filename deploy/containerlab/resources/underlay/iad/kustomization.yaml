@@ -1,0 +1,6 @@
+namePrefix: iad-
+namespace: iad-underlay
+resources:
+  - ../base
+  - namespace.yaml
+  - configmap.yaml

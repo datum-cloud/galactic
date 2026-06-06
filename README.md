@@ -24,10 +24,9 @@ Under the hood, Galactic uses Segment Routing over IPv6 (SRv6) for efficient, de
 
 ## Getting Started
 
-Two ContainerLab environments are available under [`lab/`](./lab/):
+A ContainerLab environment is available under [`deploy/containerlab/`](./deploy/containerlab/):
 
-- **[`lab/network/`](./lab/network/)** — Standalone SRv6 underlay lab (FRR + GoBGP, no Kubernetes). Good starting point for understanding the routing layer.
-- **[`lab/gvpc/`](./lab/gvpc/)** — Three Kind clusters wired over an SRv6 transit mesh. The full GVPC multi-cluster environment.
+- **[`deploy/containerlab/`](./deploy/containerlab/)** — Three Kind clusters wired over an SRv6 transit mesh. The full GVPC multi-cluster environment with FRR underlay and GoBGP L3VPN overlay.
 
 See the [galactic DevContainer](./.devcontainer/galactic/) for development environment setup. On ARM64 / OrbStack, use the [containerlab DevContainer](./.devcontainer/containerlab-dood/) to run ContainerLab via Docker-out-of-Docker.
 
@@ -67,7 +66,7 @@ task ci:e2etest      # full e2e lifecycle — spins up a Kind cluster, builds an
 
 `task ci:unittest` is the fast path for development; it runs the same command as the CI `test-unit` job. `task ci:e2etest` requires Docker and Kind and mirrors the CI `test-e2e` job exactly, including automatic cluster cleanup via a `trap` on exit.
 
-Lab environments have their own `Taskfile.yaml`; run `task` from the relevant directory (`lab/network/` or `lab/gvpc/`) to see available tasks.
+The lab environment has its own `Taskfile.yaml`; run `task` from `deploy/containerlab/` to see available tasks.
 
 ## License
 
