@@ -1,0 +1,173 @@
+version: '3'
+
+vars:
+  LAB:
+    sh: awk '/^name:/ {print $2; exit}' *.clab.yaml
+  TOPO:
+    sh: echo *.clab.yaml
+  COSMOS_IMAGE: ghcr.io/milo-os/cosmos:latest
+  GOBGP_VERSION: "3.37.0"
+  GOBGP_IMAGE: gobgp:{{.GOBGP_VERSION}}
+  FRR_VERSION: "10.6.1"
+  FRR_IMAGE: frr:{{.FRR_VERSION}}
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build all container images
+    cmds:
+      - task: "build:node"
+      - task: "build:cosmos"
+      - task: "build:gobgp"
+      - task: "build:frr"
+
+  "build:node":
+    desc: Build the Kind node image with the galactic CNI plugin
+    cmds:
+      - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
+
+  "build:cosmos":
+    desc: Build the cosmos BGP operator image from source
+    status:
+      - docker image inspect {{.COSMOS_IMAGE}} > /dev/null 2>&1
+    cmds:
+      - |
+        if [ ! -d "build/cosmos" ]; then
+          git clone --depth=1 https://github.com/milo-os/cosmos build/cosmos
+        fi
+        docker build -t {{.COSMOS_IMAGE}} -f build/cosmos/build/Dockerfile build/cosmos
+
+  "build:gobgp":
+    desc: Build the GoBGP container using the pre-built v{{.GOBGP_VERSION}} release binary
+    status:
+      - docker image inspect {{.GOBGP_IMAGE}} > /dev/null 2>&1
+    cmds:
+      - docker build --build-arg GOBGP_VERSION={{.GOBGP_VERSION}} -t {{.GOBGP_IMAGE}} containers/gobgp/
+
+  "build:frr":
+    desc: Build the FRR container from Alpine edge (v{{.FRR_VERSION}})
+    status:
+      - docker image inspect {{.FRR_IMAGE}} > /dev/null 2>&1
+    cmds:
+      - docker build --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FRR_IMAGE}} containers/frr/
+
+  deploy:
+    desc: Build images and deploy the full lab end-to-end
+    deps: [build, host-setup]
+    cmds:
+      - task: "deploy:topology"
+      - task: "deploy:images"
+      - task: "deploy:underlay"
+      - task: "deploy:overlay"
+
+  "deploy:topology":
+    desc: Deploy the ContainerLab topology (transit routers + Kind clusters)
+    cmds:
+      - sudo containerlab deploy -t {{.TOPO}}
+
+  "deploy:images":
+    desc: Load all container images into the Kind clusters and wait for cosmos
+    cmds:
+      - kind load docker-image {{.COSMOS_IMAGE}} --name iad
+      - kind load docker-image {{.COSMOS_IMAGE}} --name sjc
+      - kind load docker-image {{.GOBGP_IMAGE}} --name iad
+      - kind load docker-image {{.GOBGP_IMAGE}} --name sjc
+      - kind load docker-image {{.FRR_IMAGE}} --name iad
+      - kind load docker-image {{.FRR_IMAGE}} --name sjc
+      - kind load docker-image {{.FRR_IMAGE}} --name infra
+      - docker exec iad-control-plane kubectl -n bgp-system rollout status daemonset bgp --timeout=120s
+      - docker exec sjc-control-plane kubectl -n bgp-system rollout status daemonset bgp --timeout=120s
+
+  destroy:
+    desc: Destroy the lab
+    cmds:
+      - sudo containerlab destroy -t {{.TOPO}} --cleanup
+
+  reload:
+    desc: Full rebuild and redeploy
+    cmds:
+      - task: destroy
+      - task: deploy
+
+  inspect:
+    desc: Inspect deployed nodes and management addresses
+    cmds:
+      - sudo containerlab inspect -t {{.TOPO}}
+
+  graph:
+    desc: Generate a draw.io diagram for the current topology
+    cmds:
+      - sudo containerlab graph -t {{.TOPO}} --drawio --drawio-dir .
+
+  host-setup:
+    desc: Apply host sysctls for this dual-stack lab
+    cmds:
+      - sudo ./scripts/host-setup.sh --no-persist
+
+  "deploy:underlay":
+    desc: Install the FRR underlay DaemonSets
+    cmds:
+      - ./scripts/install-underlay.sh
+
+  "deploy:overlay":
+    desc: Install the GoBGP overlay DaemonSets and cosmos BGP resources
+    cmds:
+      - ./scripts/install-overlay.sh
+
+  test:
+    desc: Run all verification checks
+    cmds:
+      - task: "test:bgp-transit"
+      - task: "test:bgp-underlay"
+      - task: "test:srv6"
+      - task: "test:l3vpn"
+
+  "test:bgp-transit":
+    desc: Verify transit router BGP sessions (iBGP full mesh)
+    cmds:
+      - |
+        for r in tr1 tr2 tr3 tr4; do
+          echo "--- $r ---"
+          docker exec clab-gvpc-$r vtysh -c "show bgp ipv6 unicast summary"
+        done
+
+  "test:bgp-underlay":
+    desc: Verify underlay BGP sessions on iad and sjc workers
+    cmds:
+      - |
+        docker exec iad-control-plane \
+          kubectl exec -n iad-underlay ds/iad-underlay \
+          -- vtysh -c "show bgp ipv6 unicast summary"
+      - |
+        docker exec sjc-control-plane \
+          kubectl exec -n sjc-underlay ds/sjc-underlay \
+          -- vtysh -c "show bgp ipv6 unicast summary"
+
+  "test:srv6":
+    desc: Verify SRv6 forwarding prefixes on tr1
+    cmds:
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
+
+  "test:l3vpn":
+    desc: Verify GoBGP L3VPN neighbors and RIB on iad and sjc
+    cmds:
+      - docker exec iad-control-plane kubectl exec -n iad-overlay ds/iad-overlay -- gobgp neighbor
+      - docker exec sjc-control-plane kubectl exec -n sjc-overlay ds/sjc-overlay -- gobgp neighbor
+      - docker exec iad-control-plane kubectl exec -n iad-overlay ds/iad-overlay -- gobgp global rib -a vpnv6
+      - docker exec sjc-control-plane kubectl exec -n sjc-overlay ds/sjc-overlay -- gobgp global rib -a vpnv6
+
+  clean:
+    desc: Destroy the lab and delete artifacts
+    cmds:
+      - task: destroy
+      - docker rmi kindest/node:galactic || true
+      - docker rmi {{.GOBGP_IMAGE}} || true
+      - docker rmi {{.FRR_IMAGE}} || true
+      - docker rmi {{.COSMOS_IMAGE}} || true
+      - rm -rf clab-{{.LAB}} build/

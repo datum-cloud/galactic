@@ -1,0 +1,6 @@
+namePrefix: sjc-
+namespace: sjc-underlay
+resources:
+  - ../base
+  - namespace.yaml
+  - configmap.yaml

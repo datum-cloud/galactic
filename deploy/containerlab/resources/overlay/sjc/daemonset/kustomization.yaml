@@ -1,0 +1,5 @@
+namePrefix: sjc-
+namespace: sjc-overlay
+resources:
+  - ../../base
+  - namespace.yaml

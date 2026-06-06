@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: underlay
+  namespace: underlay
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: underlay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: underlay
+    spec:
+      hostNetwork: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      initContainers:
+        - name: frr-init
+          image: frr:10.6.1
+          imagePullPolicy: Never
+          command:
+            - sh
+            - -c
+            - |
+              cp /tmp/frr-config/* /etc/frr/
+              install -d -o frr -g frr -m 775 /run/frr
+              install -d -o frr -g frr -m 775 /var/log/frr
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: frr-config-source
+              mountPath: /tmp/frr-config
+              readOnly: true
+            - name: frr-etc
+              mountPath: /etc/frr
+            - name: frr-run
+              mountPath: /run/frr
+            - name: frr-log
+              mountPath: /var/log/frr
+      containers:
+        - name: frr
+          image: frr:10.6.1
+          imagePullPolicy: Never
+          command:
+            - sh
+            - -c
+            - |
+              /usr/lib/frr/frrinit.sh start
+              exec tail -f /dev/null
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_ADMIN
+          volumeMounts:
+            - name: frr-etc
+              mountPath: /etc/frr
+            - name: frr-run
+              mountPath: /run/frr
+            - name: frr-log
+              mountPath: /var/log/frr
+      volumes:
+        - name: frr-config-source
+          configMap:
+            name: underlay-config
+        - name: frr-etc
+          emptyDir: {}
+        - name: frr-run
+          emptyDir:
+            medium: Memory
+        - name: frr-log
+          emptyDir: {}

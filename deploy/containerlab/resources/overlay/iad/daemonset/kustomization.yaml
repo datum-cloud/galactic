@@ -1,0 +1,5 @@
+namePrefix: iad-
+namespace: iad-overlay
+resources:
+  - ../../base
+  - namespace.yaml

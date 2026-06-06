@@ -1,0 +1,17 @@
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPInstance
+metadata:
+  name: overlay
+spec:
+  providerSelector:
+    matchLabels:
+      bgp.datum.net/plane: overlay
+      bgp.miloapis.com/daemon: gobgp
+  asNumber: 65000
+  routerIDSource: Manual
+  routerID: "10.255.255.2"
+  addressFamilies:
+    - afi: IPv4
+      safi: VPNUnicast
+    - afi: IPv6
+      safi: VPNUnicast
