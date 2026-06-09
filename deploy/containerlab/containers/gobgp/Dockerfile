@@ -9,5 +9,5 @@ RUN apk add --no-cache wget ca-certificates && \
 FROM alpine:3.20
 COPY --from=fetch /usr/local/bin/gobgpd /usr/local/bin/gobgpd
 COPY --from=fetch /usr/local/bin/gobgp /usr/local/bin/gobgp
-EXPOSE 50051 179
+EXPOSE 50051
 ENTRYPOINT ["gobgpd"]
