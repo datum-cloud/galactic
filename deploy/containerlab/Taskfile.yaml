@@ -6,7 +6,7 @@ vars:
   TOPO:
     sh: echo *.clab.yaml
   COSMOS_IMAGE: ghcr.io/milo-os/cosmos:latest
-  GOBGP_VERSION: "3.37.0"
+  GOBGP_VERSION: "4.5.0"
   GOBGP_IMAGE: gobgp:{{.GOBGP_VERSION}}
   FRR_VERSION: "10.6.1"
   FRR_IMAGE: frr:{{.FRR_VERSION}}

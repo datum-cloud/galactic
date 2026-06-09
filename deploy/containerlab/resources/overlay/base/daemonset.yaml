@@ -22,14 +22,7 @@ spec:
                     operator: DoesNotExist
       containers:
         - name: gobgp
-          image: gobgp:3.37.0
+          image: gobgp:4.5.0
           imagePullPolicy: Never
-          command:
-            - gobgpd
-            - --api-hosts
-            - :50051
-          securityContext:
-            capabilities:
-              add:
-                - NET_ADMIN
-                - NET_RAW
+          command: ["gobgpd"]
+          args: ["--api-hosts", ":50051", "--log-level", "debug"]
