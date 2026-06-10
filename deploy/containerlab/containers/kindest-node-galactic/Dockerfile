@@ -1,4 +1,4 @@
-ARG KINDEST_VER=v1.35.1
+ARG KINDEST_VER=v1.36.1
 
 FROM golang:1.24 AS builder
 WORKDIR /src
