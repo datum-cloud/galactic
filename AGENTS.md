@@ -14,7 +14,7 @@ Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a
 
 ## Tech Stack
 
-- **Go 1.24** (toolchain 1.24.2) — agent and CNI plugin
+- **Go 1.26** — agent and CNI plugin
 - **Multus CNI** — multi-network for pods; NAD generation is handled by the external operator
 - **gRPC + protobuf** — CNI-to-agent local communication (`pkg/proto/local/`)
 - **SRv6 + netlink** — kernel-level routing; `github.com/vishvananda/netlink`
