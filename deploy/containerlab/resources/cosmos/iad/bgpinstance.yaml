@@ -11,7 +11,5 @@ spec:
   routerIDSource: Manual
   routerID: "10.255.255.2"
   addressFamilies:
-    - afi: IPv4
-      safi: VPNUnicast
-    - afi: IPv6
-      safi: VPNUnicast
+    - afi: L2VPN
+      safi: EVPN

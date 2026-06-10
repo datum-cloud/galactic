@@ -11,10 +11,9 @@ import (
 	"net"
 	"time"
 
-	gobgpapi "github.com/osrg/gobgp/v3/api"
+	gobgpapi "github.com/osrg/gobgp/v4/api"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/types/known/anypb"
 
 	"go.datum.net/galactic/pkg/common/util"
 	"go.datum.net/galactic/pkg/common/vrf"
@@ -33,7 +32,7 @@ type PathConfig struct {
 
 // AddPaths injects L3VPN BGP paths into the local GoBGP instance for each network in cfg.
 func AddPaths(cfg *PathConfig) error {
-	return withClient(cfg.GoBGPAddress, func(client gobgpapi.GobgpApiClient) error {
+	return withClient(cfg.GoBGPAddress, func(client gobgpapi.GoBgpServiceClient) error {
 		paths, err := buildPaths(cfg, client)
 		if err != nil {
 			return err
@@ -51,7 +50,7 @@ func AddPaths(cfg *PathConfig) error {
 
 // DeletePaths withdraws L3VPN BGP paths from the local GoBGP instance for each network in cfg.
 func DeletePaths(cfg *PathConfig) error {
-	return withClient(cfg.GoBGPAddress, func(client gobgpapi.GobgpApiClient) error {
+	return withClient(cfg.GoBGPAddress, func(client gobgpapi.GoBgpServiceClient) error {
 		paths, err := buildPaths(cfg, client)
 		if err != nil {
 			return err
@@ -67,16 +66,16 @@ func DeletePaths(cfg *PathConfig) error {
 	})
 }
 
-func withClient(address string, fn func(gobgpapi.GobgpApiClient) error) error {
+func withClient(address string, fn func(gobgpapi.GoBgpServiceClient) error) error {
 	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("connecting to gobgp at %s: %w", address, err)
 	}
 	defer conn.Close() //nolint:errcheck
-	return fn(gobgpapi.NewGobgpApiClient(conn))
+	return fn(gobgpapi.NewGoBgpServiceClient(conn))
 }
 
-func buildPaths(cfg *PathConfig, client gobgpapi.GobgpApiClient) ([]*gobgpapi.Path, error) {
+func buildPaths(cfg *PathConfig, client gobgpapi.GoBgpServiceClient) ([]*gobgpapi.Path, error) {
 	nexthop, err := util.EncodeSRv6Endpoint(cfg.SRv6Locator, cfg.VPCHex, cfg.VPCAttachmentHex)
 	if err != nil {
 		return nil, fmt.Errorf("encoding SRv6 endpoint: %w", err)
@@ -106,44 +105,39 @@ func buildPaths(cfg *PathConfig, client gobgpapi.GobgpApiClient) ([]*gobgpapi.Pa
 	}
 
 	// RD: Type 1 (IP:2-byte) — router-id:vrfID, unique per node per VRF.
-	rd, err := anypb.New(&gobgpapi.RouteDistinguisherIPAddress{
-		Admin:    routerID,
-		Assigned: vrfID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling RD: %w", err)
+	rd := &gobgpapi.RouteDistinguisher{
+		Rd: &gobgpapi.RouteDistinguisher_IpAddress{
+			IpAddress: &gobgpapi.RouteDistinguisherIPAddress{
+				Admin:    routerID,
+				Assigned: vrfID,
+			},
+		},
 	}
 
 	// RT: Type 0 (2-byte-AS:4-byte-AN) — localASN:fnv32a(vpcHex).
 	// All nodes in the same VPC share this RT so they import each other's paths.
-	rtAny, err := anypb.New(&gobgpapi.TwoOctetAsSpecificExtended{
-		IsTransitive: true,
-		SubType:      0x02, // Route Target sub-type
-		Asn:          localASN,
-		LocalAdmin:   vpcRouteTarget(cfg.VPCHex),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling RT: %w", err)
+	extComm := &gobgpapi.ExtendedCommunitiesAttribute{
+		Communities: []*gobgpapi.ExtendedCommunity{
+			{
+				Extcom: &gobgpapi.ExtendedCommunity_TwoOctetAsSpecific{
+					TwoOctetAsSpecific: &gobgpapi.TwoOctetAsSpecificExtended{
+						IsTransitive: true,
+						SubType:      0x02, // Route Target sub-type
+						Asn:          localASN,
+						LocalAdmin:   vpcRouteTarget(cfg.VPCHex),
+					},
+				},
+			},
+		},
 	}
 
-	originAny, err := anypb.New(&gobgpapi.OriginAttribute{Origin: 0}) // IGP
-	if err != nil {
-		return nil, fmt.Errorf("marshaling origin attribute: %w", err)
-	}
-	localPrefAny, err := anypb.New(&gobgpapi.LocalPrefAttribute{LocalPref: 100})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling local-pref attribute: %w", err)
-	}
-	extCommAny, err := anypb.New(&gobgpapi.ExtendedCommunitiesAttribute{
-		Communities: []*anypb.Any{rtAny},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling extended communities: %w", err)
-	}
+	attrOrigin := &gobgpapi.Attribute{Attr: &gobgpapi.Attribute_Origin{Origin: &gobgpapi.OriginAttribute{Origin: 0}}} // IGP
+	attrLocalPref := &gobgpapi.Attribute{Attr: &gobgpapi.Attribute_LocalPref{LocalPref: &gobgpapi.LocalPrefAttribute{LocalPref: 100}}}
+	attrExtComm := &gobgpapi.Attribute{Attr: &gobgpapi.Attribute_ExtendedCommunities{ExtendedCommunities: extComm}}
 
 	paths := make([]*gobgpapi.Path, 0, len(cfg.Networks))
 	for _, network := range cfg.Networks {
-		path, err := buildPath(network, rd, nexthop, originAny, localPrefAny, extCommAny)
+		path, err := buildPath(network, rd, nexthop, attrOrigin, attrLocalPref, attrExtComm)
 		if err != nil {
 			return nil, fmt.Errorf("building path for %s: %w", network, err)
 		}
@@ -152,7 +146,7 @@ func buildPaths(cfg *PathConfig, client gobgpapi.GobgpApiClient) ([]*gobgpapi.Pa
 	return paths, nil
 }
 
-func buildPath(network string, rd *anypb.Any, nexthop string, originAny, localPrefAny, extCommAny *anypb.Any) (*gobgpapi.Path, error) {
+func buildPath(network string, rd *gobgpapi.RouteDistinguisher, nexthop string, attrOrigin, attrLocalPref, attrExtComm *gobgpapi.Attribute) (*gobgpapi.Path, error) {
 	ip, ipnet, err := net.ParseCIDR(network)
 	if err != nil {
 		return nil, fmt.Errorf("parsing CIDR: %w", err)
@@ -168,29 +162,31 @@ func buildPath(network string, rd *anypb.Any, nexthop string, originAny, localPr
 
 	// LabeledVPNIPAddressPrefix covers both AFI=1 and AFI=2 with SAFI=128.
 	// MPLS label is always 0 — the SRv6 SID carries all forwarding state.
-	nlri, err := anypb.New(&gobgpapi.LabeledVPNIPAddressPrefix{
-		Labels:    []uint32{0},
-		Rd:        rd,
-		PrefixLen: uint32(prefixLen),
-		Prefix:    ipnet.IP.String(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling NLRI: %w", err)
+	vpnNLRI := &gobgpapi.NLRI{
+		Nlri: &gobgpapi.NLRI_LabeledVpnIpPrefix{
+			LabeledVpnIpPrefix: &gobgpapi.LabeledVPNIPAddressPrefix{
+				Labels:    []uint32{0},
+				Rd:        rd,
+				PrefixLen: uint32(prefixLen),
+				Prefix:    ipnet.IP.String(),
+			},
+		},
 	}
 
-	mpReachAny, err := anypb.New(&gobgpapi.MpReachNLRIAttribute{
-		Family:   family,
-		NextHops: []string{nexthop},
-		Nlris:    []*anypb.Any{nlri},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling MP_REACH_NLRI: %w", err)
+	attrMpReach := &gobgpapi.Attribute{
+		Attr: &gobgpapi.Attribute_MpReach{
+			MpReach: &gobgpapi.MpReachNLRIAttribute{
+				Family:   family,
+				NextHops: []string{nexthop},
+				Nlris:    []*gobgpapi.NLRI{vpnNLRI},
+			},
+		},
 	}
 
 	return &gobgpapi.Path{
 		Family: family,
-		Nlri:   nlri,
-		Pattrs: []*anypb.Any{originAny, localPrefAny, extCommAny, mpReachAny},
+		Nlri:   vpnNLRI,
+		Pattrs: []*gobgpapi.Attribute{attrOrigin, attrLocalPref, attrExtComm, attrMpReach},
 	}, nil
 }
 

@@ -14,10 +14,8 @@ spec:
       instanceRef: overlay
       routeReflectorClient: false
   addressFamilies:
-    - afi: IPv4
-      safi: VPNUnicast
-    - afi: IPv6
-      safi: VPNUnicast
+    - afi: L2VPN
+      safi: EVPN
   timers:
     holdTime: 90
     keepalive: 30
