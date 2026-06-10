@@ -8,6 +8,7 @@ require (
 	github.com/kenshaw/baseconv v0.1.1
 	github.com/lorenzosaino/go-sysctl v0.3.1
 	github.com/osrg/gobgp/v3 v3.37.0
+	github.com/osrg/gobgp/v4 v4.6.0
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.2-0.20260505210927-99e979749d3e
 	golang.org/x/sys v0.42.0
@@ -16,7 +17,7 @@ require (
 )
 
 require (
-	github.com/BurntSushi/toml v1.3.2 // indirect
+	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/onsi/ginkgo/v2 v2.28.2 // indirect
 	github.com/onsi/gomega v1.39.1 // indirect
