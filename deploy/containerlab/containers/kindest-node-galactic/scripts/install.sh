@@ -4,7 +4,6 @@ set -xe
 SRV6_PREFIX="2001:db8:ff00::/40"
 
 CILIUM_VERSION="v0.18.8"
-CERTMANAGER_VERSION="v1.19.1"
 MULTUS_VERSION="v4.2.3"
 CNI_PLUGIN_VERSION="v1.8.0"
 
@@ -20,23 +19,12 @@ if hostname |grep -q control-plane; then # control-plane
   curl -L https://github.com/cilium/cilium-cli/releases/download/${CILIUM_VERSION}/cilium-linux-${ARCH}.tar.gz |tar xvfz - -C /usr/local/bin && chmod +x /usr/local/bin/cilium
   cilium install --set cni.exclusive=false --set kubeProxyReplacement=true && cilium status --wait
 
-  if ! hostname |grep -q infra; then
-    # Cert Manager
-    kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/${CERTMANAGER_VERSION}/cert-manager.yaml
-    kubectl -n cert-manager rollout status deployment cert-manager
+  # Multus
+  kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml
+  kubectl -n kube-system rollout status daemonset kube-multus-ds
 
-    # Multus
-    kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml
-    kubectl -n kube-system rollout status daemonset kube-multus-ds
-
-    # Cosmos BGP operator (image loaded into Kind by task up after deploy)
-    kubectl apply -k https://github.com/milo-os/cosmos//config/crd
-    kubectl apply -k https://github.com/milo-os/cosmos//config/deploy
-
-    # Cosmos BGP resources (BGPProvider, BGPInstance, BGPSession)
-    cluster=$(hostname | sed 's/-control-plane//')
-    kubectl apply -k /galactic/resources/cosmos/${cluster}/
-  fi
+  # Cosmos BGP CRDs (operator not deployed; resources applied by install-overlay.sh)
+  kubectl apply -k https://github.com/milo-os/cosmos//config/crd
 
 else # worker
   until journalctl -q -u kubelet -g "Successfully registered node"; do

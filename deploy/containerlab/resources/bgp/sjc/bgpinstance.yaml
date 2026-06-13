@@ -1,0 +1,14 @@
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPInstance
+metadata:
+  name: overlay
+spec:
+  providerSelector:
+    matchLabels:
+      galactic.io/plane: overlay
+  asNumber: 65000
+  routerIDSource: Manual
+  routerID: "10.255.255.3"
+  addressFamilies:
+    - afi: L2VPN
+      safi: EVPN

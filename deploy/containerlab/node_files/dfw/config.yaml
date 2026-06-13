@@ -4,6 +4,6 @@ nodes:
   - role: control-plane
   - role: worker
     labels:
-      topology.kubernetes.io/region: infra
+      topology.kubernetes.io/region: dfw
 networking:
   disableDefaultCNI: true

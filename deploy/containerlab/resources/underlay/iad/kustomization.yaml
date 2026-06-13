@@ -1,5 +1,5 @@
 namePrefix: iad-
-namespace: iad-underlay
+namespace: galactic-system
 resources:
   - ../base
   - namespace.yaml

@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-agent
+  namespace: galactic-system
+  labels:
+    app: galactic-agent
+spec:
+  selector:
+    matchLabels:
+      app: galactic-agent
+  template:
+    metadata:
+      labels:
+        app: galactic-agent
+    spec:
+      serviceAccountName: galactic-agent
+      hostNetwork: false
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: galactic-agent
+          image: ghcr.io/datum-cloud/galactic:latest
+          command: ["/galactic-agent"]
+          args:
+            - --frr-config-path=/etc/frr/frr.conf
+            - --gobgp-endpoint=localhost:50051
+            - --metrics-addr=:8082
+            - --health-addr=:8083
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 8082
+              protocol: TCP
+            - name: healthz
+              containerPort: 8083
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: healthz
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: frr-config
+              mountPath: /etc/frr
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: frr-config
+          hostPath:
+            path: /etc/frr
+            type: DirectoryOrCreate

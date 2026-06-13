@@ -1,4 +1,4 @@
-namePrefix: sjc-
+namePrefix: dfw-
 namespace: galactic-system
 resources:
   - ../../base

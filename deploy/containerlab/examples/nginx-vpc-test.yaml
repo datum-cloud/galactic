@@ -1,0 +1,91 @@
+# Deploy an nginx pod attached to a VPC named "test".
+#
+# Apply order matters: VPC → VPCAttachment → NetworkAttachmentDefinition → Deployment.
+#
+# The "vpc" and "vpcattachment" fields in the NAD are Base62-encoded identifiers.
+# When the cosmos VPC operator is running it generates and writes these automatically.
+# Here they are set statically: vpc "2" (hex 000000000002) and vpcattachment "1".
+#
+# Prerequisites:
+#   - Multus CNI installed on the cluster
+#   - Galactic CNI plugin installed on nodes
+#   - VPC/VPCAttachment CRDs installed (vpc.miloapis.com)
+---
+apiVersion: vpc.miloapis.com/v1alpha1
+kind: VPC
+metadata:
+  name: test
+  namespace: default
+spec:
+  networks:
+    - "10.2.0.0/16"
+---
+apiVersion: vpc.miloapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: nginx-test
+  namespace: default
+spec:
+  vpc:
+    name: test
+  interface:
+    name: galactic0
+    addresses:
+      - "10.2.0.10/16"
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: galactic-test
+  namespace: default
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "galactic-test",
+      "type": "galactic",
+      "vpc": "2",
+      "vpcattachment": "1",
+      "srv6_locator": "2001:db8:ff01::/48",
+      "gobgp": {
+        "address": "127.0.0.1:50051"
+      },
+      "ipam": {
+        "type": "static",
+        "addresses": [
+          { "address": "10.2.0.10/16" }
+        ]
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-test
+  namespace: default
+  labels:
+    app: nginx-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-test
+  template:
+    metadata:
+      labels:
+        app: nginx-test
+      annotations:
+        k8s.v1.cni.cncf.io/networks: galactic-test
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:stable
+          ports:
+            - containerPort: 80
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi

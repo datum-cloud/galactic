@@ -14,6 +14,6 @@ apply() {
 
 apply iad-control-plane   iad
 apply sjc-control-plane   sjc
-apply infra-control-plane infra
+apply dfw-control-plane dfw
 
 echo "Done."

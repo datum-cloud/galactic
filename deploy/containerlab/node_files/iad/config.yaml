@@ -4,6 +4,6 @@ nodes:
   - role: control-plane
   - role: worker
     labels:
-      topology.kubernetes.io/region: us-east-1
+      topology.kubernetes.io/region: iad
 networking:
   disableDefaultCNI: true
