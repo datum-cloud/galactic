@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: underlay-config
-  namespace: underlay
+  namespace: galactic-system
 data:
   daemons: |
     zebra=yes

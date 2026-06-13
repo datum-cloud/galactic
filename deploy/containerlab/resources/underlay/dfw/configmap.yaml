@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: underlay-config
-  namespace: underlay
+  namespace: galactic-system
 data:
   daemons: |
     zebra=yes
@@ -30,43 +30,31 @@ data:
   frr.conf: |
     frr version 9.1
     frr defaults traditional
-    hostname infra-underlay
+    hostname dfw-underlay
     log syslog informational
 
     interface lo
-     ipv6 address fc00:0:4::1/128
+     ! /48 assigns the full SRv6 SID block to this node; eBGP advertises the /48 as the SID range.
+     ipv6 address fc00:0:2::1/48
     !
     interface eth1
-     description tr3-facing
+     description tr1-facing
     !
 
-    ipv6 route 2001:db8:ff03::/48 Null0
+    ipv6 route 2001:db8:ff01::/48 Null0
     !
     router bgp 65000
-     bgp router-id 10.255.255.1
+     bgp router-id 10.255.255.2
      no bgp default ipv4-unicast
      no bgp ebgp-requires-policy
      bgp log-neighbor-changes
      neighbor eth1 interface remote-as 65100
-     neighbor fc00:0:2::1 remote-as 65000
-     neighbor fc00:0:2::1 update-source lo
-     neighbor fc00:0:2::1 passive
-     neighbor fc00:0:3::1 remote-as 65000
-     neighbor fc00:0:3::1 update-source lo
-     neighbor fc00:0:3::1 passive
      !
      address-family ipv6 unicast
       neighbor eth1 activate
       neighbor eth1 allowas-in 1
-      network 2001:db8:ff03::/48
-      network fc00:0:4::1/128
-     exit-address-family
-     !
-     address-family l2vpn evpn
-      neighbor fc00:0:2::1 activate
-      neighbor fc00:0:2::1 route-reflector-client
-      neighbor fc00:0:3::1 activate
-      neighbor fc00:0:3::1 route-reflector-client
+      network 2001:db8:ff01::/48
+      network fc00:0:2::/48
      exit-address-family
     !
 

@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: underlay
-  namespace: underlay
+  namespace: galactic-system
 spec:
   selector:
     matchLabels:

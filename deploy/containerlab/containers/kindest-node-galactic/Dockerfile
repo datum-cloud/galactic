@@ -2,9 +2,8 @@ ARG KINDEST_VER=v1.36.1
 
 FROM golang:1.26 AS builder
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
 COPY . .
+RUN go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -o bin/galactic cmd/galactic/main.go
 
 FROM kindest/node:${KINDEST_VER}

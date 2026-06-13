@@ -1,15 +1,15 @@
 apiVersion: bgp.miloapis.com/v1alpha1
-kind: BGPInstance
+kind: BGPPeer
 metadata:
-  name: overlay
+  name: overlay-to-dfw
 spec:
+  instanceRef: overlay
   providerSelector:
     matchLabels:
-      bgp.datum.net/plane: overlay
-      bgp.miloapis.com/daemon: gobgp
+      galactic.io/plane: overlay
+  address: "fc00:0:4::1"
   asNumber: 65000
-  routerIDSource: Manual
-  routerID: "10.255.255.2"
+  remotePort: 1179
   addressFamilies:
     - afi: L2VPN
       safi: EVPN

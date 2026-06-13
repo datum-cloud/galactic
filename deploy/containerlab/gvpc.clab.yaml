@@ -20,9 +20,9 @@ topology:
       image: kindest/node:galactic
 
   nodes:
-    iad:
+    dfw:
       kind: k8s-kind
-      startup-config: node_files/iad/config.yaml
+      startup-config: node_files/dfw/config.yaml
       labels:
         graph-group: kind-cluster
         graph-level: 1
@@ -33,12 +33,12 @@ topology:
         k8s_kind:
           deploy:
             wait: 0s
-            kubeconfig: iad.kubeconfig
+            kubeconfig: dfw.kubeconfig
 
-    iad-control-plane:
+    dfw-control-plane:
       kind: ext-container
       labels:
-        cluster: iad
+        cluster: dfw
         graph-group: kind-control-plane
         graph-level: 1
         graph-icon: server
@@ -53,10 +53,10 @@ topology:
       exec:
         - /galactic/scripts/install.sh
 
-    iad-worker:
+    dfw-worker:
       kind: ext-container
       labels:
-        cluster: iad
+        cluster: dfw
         graph-group: kind-worker
         graph-level: 1
         graph-icon: server
@@ -130,9 +130,9 @@ topology:
         - ip -6 addr add 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128 dev lo-galactic
         - /galactic/scripts/install.sh
 
-    infra:
+    iad:
       kind: k8s-kind
-      startup-config: node_files/infra/config.yaml
+      startup-config: node_files/iad/config.yaml
       labels:
         graph-group: kind-cluster
         graph-level: 1
@@ -143,12 +143,12 @@ topology:
         k8s_kind:
           deploy:
             wait: 0s
-            kubeconfig: infra.kubeconfig
+            kubeconfig: iad.kubeconfig
 
-    infra-control-plane:
+    iad-control-plane:
       kind: ext-container
       labels:
-        cluster: infra
+        cluster: iad
         graph-group: kind-control-plane
         graph-level: 1
         graph-icon: server
@@ -163,10 +163,10 @@ topology:
       exec:
         - /galactic/scripts/install.sh
 
-    infra-worker:
+    iad-worker:
       kind: ext-container
       labels:
-        cluster: infra
+        cluster: iad
         graph-group: kind-worker
         graph-level: 1
         graph-icon: server
@@ -235,9 +235,9 @@ topology:
 
   links:
     # Cluster worker uplinks
-    - endpoints: ["iad-worker:eth1", "tr1:eth1"]
+    - endpoints: ["dfw-worker:eth1", "tr1:eth1"]
     - endpoints: ["sjc-worker:eth1", "tr2:eth1"]
-    - endpoints: ["infra-worker:eth1", "tr3:eth5"]
+    - endpoints: ["iad-worker:eth1", "tr3:eth5"]
 
     # TR full mesh (iBGP within AS 65100)
     - endpoints: ["tr1:eth2", "tr2:eth2"]

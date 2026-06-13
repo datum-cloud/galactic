@@ -5,11 +5,9 @@ vars:
     sh: awk '/^name:/ {print $2; exit}' *.clab.yaml
   TOPO:
     sh: echo *.clab.yaml
-  COSMOS_IMAGE: ghcr.io/milo-os/cosmos:latest
-  GOBGP_VERSION: "4.5.0"
-  GOBGP_IMAGE: gobgp:{{.GOBGP_VERSION}}
   FRR_VERSION: "10.6.1"
   FRR_IMAGE: frr:{{.FRR_VERSION}}
+  COSMOS_IMAGE: cosmos:latest
 
 tasks:
   default:
@@ -20,33 +18,24 @@ tasks:
   build:
     desc: Build all container images
     cmds:
+      - task: "clone:cosmos"
       - task: "build:node"
-      - task: "build:cosmos"
-      - task: "build:gobgp"
       - task: "build:frr"
+      - task: "build:galactic-agent"
+      - task: "build:cosmos"
+
+  "clone:cosmos":
+    desc: Clone the cosmos source tree needed for go mod replace and image build
+    status:
+      - test -d build/cosmos
+    cmds:
+      - git clone --depth=1 https://github.com/milo-os/cosmos build/cosmos
 
   "build:node":
     desc: Build the Kind node image with the galactic CNI plugin
+    deps: ["clone:cosmos"]
     cmds:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
-
-  "build:cosmos":
-    desc: Build the cosmos BGP operator image from source
-    status:
-      - docker image inspect {{.COSMOS_IMAGE}} > /dev/null 2>&1
-    cmds:
-      - |
-        if [ ! -d "build/cosmos" ]; then
-          git clone --depth=1 https://github.com/milo-os/cosmos build/cosmos
-        fi
-        docker build -t {{.COSMOS_IMAGE}} -f build/cosmos/build/Dockerfile build/cosmos
-
-  "build:gobgp":
-    desc: Build the GoBGP container using the pre-built v{{.GOBGP_VERSION}} release binary
-    status:
-      - docker image inspect {{.GOBGP_IMAGE}} > /dev/null 2>&1
-    cmds:
-      - docker build --build-arg GOBGP_VERSION={{.GOBGP_VERSION}} -t {{.GOBGP_IMAGE}} containers/gobgp/
 
   "build:frr":
     desc: Build the FRR container from Alpine edge (v{{.FRR_VERSION}})
@@ -54,6 +43,17 @@ tasks:
       - docker image inspect {{.FRR_IMAGE}} > /dev/null 2>&1
     cmds:
       - docker build --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FRR_IMAGE}} containers/frr/
+
+  "build:galactic-agent":
+    desc: Build the galactic-agent container image
+    cmds:
+      - docker build --network=host -t galactic-agent:latest -f containers/galactic-agent/Dockerfile ../..
+
+  "build:cosmos":
+    desc: Build the cosmos operator container image from the local clone
+    deps: ["clone:cosmos"]
+    cmds:
+      - docker build --network=host -t {{.COSMOS_IMAGE}} -f build/cosmos/build/Dockerfile build/cosmos
 
   deploy:
     desc: Build images and deploy the full lab end-to-end
@@ -69,18 +69,35 @@ tasks:
     cmds:
       - sudo containerlab deploy -t {{.TOPO}}
 
-  "deploy:images":
-    desc: Load all container images into the Kind clusters and wait for cosmos
+  "load-image":
+    internal: true
+    desc: Load a docker image into a kind node via ctr (workaround for containerd v2 incompatibility)
+    requires:
+      vars: [IMAGE, NODE]
     cmds:
-      - kind load docker-image {{.COSMOS_IMAGE}} --name iad
-      - kind load docker-image {{.COSMOS_IMAGE}} --name sjc
-      - kind load docker-image {{.GOBGP_IMAGE}} --name iad
-      - kind load docker-image {{.GOBGP_IMAGE}} --name sjc
-      - kind load docker-image {{.FRR_IMAGE}} --name iad
-      - kind load docker-image {{.FRR_IMAGE}} --name sjc
-      - kind load docker-image {{.FRR_IMAGE}} --name infra
-      - docker exec iad-control-plane kubectl -n bgp-system rollout status daemonset bgp --timeout=120s
-      - docker exec sjc-control-plane kubectl -n bgp-system rollout status daemonset bgp --timeout=120s
+      - docker save {{.IMAGE}} | docker exec -i {{.NODE}} ctr --namespace k8s.io images import -
+
+  "deploy:images":
+    desc: Load all container images into the Kind clusters
+    cmds:
+      - task: load-image
+        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker}
+      - task: load-image
+        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: sjc-worker}
+      - task: load-image
+        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: dfw-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-agent:latest, NODE: iad-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-agent:latest, NODE: sjc-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-agent:latest, NODE: dfw-worker}
+      - task: load-image
+        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: iad-worker}
+      - task: load-image
+        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: sjc-worker}
+      - task: load-image
+        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: dfw-worker}
 
   destroy:
     desc: Destroy the lab
@@ -114,7 +131,7 @@ tasks:
       - ./scripts/install-underlay.sh
 
   "deploy:overlay":
-    desc: Install the GoBGP overlay DaemonSets and cosmos BGP resources
+    desc: Install the galactic-agent overlay DaemonSets and cosmos operator
     cmds:
       - ./scripts/install-overlay.sh
 
@@ -124,7 +141,7 @@ tasks:
       - task: "test:bgp-transit"
       - task: "test:bgp-underlay"
       - task: "test:srv6"
-      - task: "test:l3vpn"
+      - task: "test:evpn"
 
   "test:bgp-transit":
     desc: Verify transit router BGP sessions (iBGP full mesh)
@@ -140,11 +157,11 @@ tasks:
     cmds:
       - |
         docker exec iad-control-plane \
-          kubectl exec -n iad-underlay ds/iad-underlay \
+          kubectl exec -n galactic-system ds/iad-underlay \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec sjc-control-plane \
-          kubectl exec -n sjc-underlay ds/sjc-underlay \
+          kubectl exec -n galactic-system ds/sjc-underlay \
           -- vtysh -c "show bgp ipv6 unicast summary"
 
   "test:srv6":
@@ -154,20 +171,19 @@ tasks:
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 
-  "test:l3vpn":
-    desc: Verify GoBGP L3VPN neighbors and RIB on iad and sjc
+  "test:evpn":
+    desc: Verify GoBGP EVPN neighbors and RIB on iad, sjc, and dfw via cosmos BGPProvider status
     cmds:
-      - docker exec iad-control-plane kubectl exec -n iad-overlay ds/iad-overlay -- gobgp neighbor
-      - docker exec sjc-control-plane kubectl exec -n sjc-overlay ds/sjc-overlay -- gobgp neighbor
-      - docker exec iad-control-plane kubectl exec -n iad-overlay ds/iad-overlay -- gobgp global rib -a vpnv6
-      - docker exec sjc-control-plane kubectl exec -n sjc-overlay ds/sjc-overlay -- gobgp global rib -a vpnv6
+      - docker exec iad-control-plane kubectl get bgpproviders -A
+      - docker exec sjc-control-plane kubectl get bgpproviders -A
+      - docker exec dfw-control-plane kubectl get bgpproviders -A
 
   clean:
     desc: Destroy the lab and delete artifacts
     cmds:
       - task: destroy
       - docker rmi kindest/node:galactic || true
-      - docker rmi {{.GOBGP_IMAGE}} || true
-      - docker rmi {{.FRR_IMAGE}} || true
+      - docker rmi galactic-agent:latest || true
       - docker rmi {{.COSMOS_IMAGE}} || true
+      - docker rmi {{.FRR_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/

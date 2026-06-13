@@ -1,5 +1,5 @@
-namePrefix: infra-
-namespace: infra-underlay
+namePrefix: dfw-
+namespace: galactic-system
 resources:
   - ../base
   - namespace.yaml
