@@ -12,6 +12,8 @@ import (
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
 )
 
+const defaultLogLevel = "panic"
+
 // Config holds configuration for the embedded GoBGP server.
 type Config struct {
 	// APIPort is the port the GoBGP gRPC API listens on. Cosmos dials this port.
@@ -33,7 +35,7 @@ func New(cfg Config) *Server {
 		cfg.APIPort = 50051
 	}
 	if cfg.LogLevel == "" {
-		cfg.LogLevel = "panic"
+		cfg.LogLevel = defaultLogLevel
 	}
 	return &Server{cfg: cfg}
 }
@@ -70,7 +72,7 @@ func (s *Server) WaitReady(ctx context.Context) error {
 	for {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil
 		}
 		select {

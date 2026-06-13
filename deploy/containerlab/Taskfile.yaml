@@ -71,7 +71,7 @@ tasks:
 
   "load-image":
     internal: true
-    desc: Load a docker image into a single kind node via ctr (workaround for kind load incompatibility with containerd v2)
+    desc: Load a docker image into a kind node via ctr (workaround for containerd v2 incompatibility)
     requires:
       vars: [IMAGE, NODE]
     cmds:

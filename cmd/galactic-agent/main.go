@@ -33,10 +33,14 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.MetricsAddr, "metrics-addr", ":8082", "Address to serve Prometheus metrics on")
 	cmd.Flags().StringVar(&opts.HealthAddr, "health-addr", ":8083", "Address to serve health/readiness probes on")
 	cmd.Flags().StringVar(&opts.NodeName, "node-name", "", "Override node name (default: NODE_NAME env var)")
-	cmd.Flags().BoolVar(&opts.GoBGPEnabled, "gobgp-enabled", false, "Enable embedded GoBGP and publish BGPProvider")
-	cmd.Flags().IntVar(&opts.GoBGPAPIPort, "gobgp-api-port", 50051, "Port for the embedded GoBGP gRPC API (cosmos dials this)")
-	cmd.Flags().StringVar(&opts.GoBGPLogLevel, "gobgp-log-level", "panic", "GoBGP internal log level (debug, info, warn, error, panic)")
-	cmd.Flags().IntVar(&opts.GRPCHealthPort, "grpc-health-port", 8084, "Port for the gRPC health service (used by Kubernetes readiness probes)")
+	cmd.Flags().BoolVar(&opts.GoBGPEnabled, "gobgp-enabled", false,
+		"Enable embedded GoBGP and publish BGPProvider")
+	cmd.Flags().IntVar(&opts.GoBGPAPIPort, "gobgp-api-port", 50051,
+		"Port for the embedded GoBGP gRPC API (cosmos dials this)")
+	cmd.Flags().StringVar(&opts.GoBGPLogLevel, "gobgp-log-level", "panic",
+		"GoBGP internal log level (debug, info, warn, error, panic)")
+	cmd.Flags().IntVar(&opts.GRPCHealthPort, "grpc-health-port", 8084,
+		"Port for the gRPC health service (used by Kubernetes readiness probes)")
 
 	return cmd
 }

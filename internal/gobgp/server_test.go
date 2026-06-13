@@ -9,8 +9,8 @@ func TestNew_Defaults(t *testing.T) {
 	if s.cfg.APIPort != 50051 {
 		t.Errorf("default APIPort = %d, want 50051", s.cfg.APIPort)
 	}
-	if s.cfg.LogLevel != "panic" {
-		t.Errorf("default LogLevel = %q, want panic", s.cfg.LogLevel)
+	if s.cfg.LogLevel != defaultLogLevel {
+		t.Errorf("default LogLevel = %q, want %q", s.cfg.LogLevel, defaultLogLevel)
 	}
 }
 
@@ -24,18 +24,16 @@ func TestAddr(t *testing.T) {
 func TestParseLogLevel(t *testing.T) {
 	cases := []struct {
 		input string
-		want  string
 	}{
-		{"debug", "DEBUG"},
-		{"info", "INFO"},
-		{"warn", "WARN"},
-		{"error", "ERROR"},
-		{"panic", "ERROR+4"},
-		{"", "ERROR+4"},
-		{"unknown", "ERROR+4"},
+		{"debug"},
+		{"info"},
+		{"warn"},
+		{"error"},
+		{defaultLogLevel},
+		{""},
+		{"unknown"},
 	}
 	for _, tc := range cases {
-		got := parseLogLevel(tc.input)
-		_ = got // just ensure it doesn't panic
+		_ = parseLogLevel(tc.input)
 	}
 }

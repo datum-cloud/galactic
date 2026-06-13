@@ -155,7 +155,7 @@ func Run(ctx context.Context, opts Options) error {
 			if err != nil {
 				return err
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			hc := grpc_health_v1.NewHealthClient(conn)
 			probeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
