@@ -53,6 +53,9 @@ case "$COMMAND" in
 
     echo "--- Loading image into cluster"
     kind load docker-image "$IMG" --name "$CLUSTER_NAME"
+
+    echo "--- Running e2e tests"
+    IMG="$IMG" go test -v -timeout 10m ./tests/e2e/...
     ;;
 
   *)

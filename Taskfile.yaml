@@ -68,9 +68,9 @@ tasks:
     desc: Build galactic binary
     deps: [fmt, vet]
     cmds:
-      - go build -o bin/galactic cmd/galactic/main.go
-      - file bin/galactic
-      - ./bin/galactic version
+      - go build -o bin/galactic-cni cmd/galactic/main.go
+      - file bin/galactic-cni
+      - ./bin/galactic-cni version
 
   docker-build:
     desc: Build docker image with the unified binary
