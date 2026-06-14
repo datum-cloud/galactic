@@ -37,4 +37,10 @@ deploy_cosmos dfw-control-plane
 deploy_cosmos sjc-control-plane
 deploy_cosmos iad-control-plane
 
+# iad hosts the overlay-rr BGPInstance (route reflector), which requires infra role.
+echo "Patching cosmos clusterRole to infra on iad-control-plane..."
+docker exec iad-control-plane kubectl patch configmap cosmos-config \
+  -n cosmos-system --type=merge -p '{"data":{"clusterRole":"infra"}}'
+docker exec iad-control-plane kubectl rollout restart daemonset bgp -n bgp-system
+
 echo "Done."

@@ -5,5 +5,18 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
+      galactic.io/role: pop
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: iad
+      galactic.io/role: route-reflector
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: galactic.io/role
+              value: route-reflector
+              effect: NoSchedule
 networking:
   disableDefaultCNI: true

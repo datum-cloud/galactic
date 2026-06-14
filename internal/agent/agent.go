@@ -44,6 +44,7 @@ type Options struct {
 	MetricsAddr    string
 	HealthAddr     string
 	NodeName       string
+	Plane          string
 	GoBGPEnabled   bool
 	GoBGPAPIPort   int
 	GoBGPLogLevel  string
@@ -129,7 +130,7 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("create bootstrap client: %w", err)
 		}
 		if opts.NodeName != "" {
-			if err := bootstrap.EnsureGoBGPProvider(ctx, directClient, opts.NodeName, gobgpSrv.Addr()); err != nil {
+			if err := bootstrap.EnsureGoBGPProvider(ctx, directClient, opts.NodeName, opts.Plane, gobgpSrv.Addr()); err != nil {
 				return fmt.Errorf("bootstrap gobgp provider: %w", err)
 			}
 		}
@@ -139,7 +140,7 @@ func Run(ctx context.Context, opts Options) error {
 			deleteCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if opts.NodeName != "" {
-				if err := bootstrap.DeleteGoBGPProvider(deleteCtx, directClient, opts.NodeName); err != nil {
+				if err := bootstrap.DeleteGoBGPProvider(deleteCtx, directClient, opts.NodeName, opts.Plane); err != nil {
 					slog.Error("failed to delete BGPProvider on shutdown", "err", err)
 				}
 			}

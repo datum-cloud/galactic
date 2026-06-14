@@ -1,3 +1,4 @@
 resources:
   - daemonset
+  - rr
   - nad.yaml

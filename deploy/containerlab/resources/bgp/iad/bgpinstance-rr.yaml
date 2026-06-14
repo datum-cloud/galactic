@@ -1,15 +1,17 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPInstance
 metadata:
-  name: overlay
+  name: overlay-rr
 spec:
   providerSelector:
     matchLabels:
-      galactic.io/plane: overlay
+      galactic.io/plane: overlay-rr
   asNumber: 65000
-  listenPort: 1790
   routerIDSource: Manual
-  routerID: "10.255.255.1"
+  routerID: "10.255.255.4"
   addressFamilies:
     - afi: L2VPN
       safi: EVPN
+  listenPort: 1179
+  routeReflector:
+    clusterID: "10.255.255.4"

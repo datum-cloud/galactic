@@ -16,25 +16,8 @@ topology:
   kinds:
     linux:
       image: frrouting/frr:latest
-    k8s-kind:
-      image: kindest/node:galactic
 
   nodes:
-    dfw:
-      kind: k8s-kind
-      startup-config: node_files/dfw/config.yaml
-      labels:
-        graph-group: kind-cluster
-        graph-level: 1
-        graph-icon: server
-        reload: disabled
-      mgmt-ipv4: 172.20.20.101
-      extras:
-        k8s_kind:
-          deploy:
-            wait: 0s
-            kubeconfig: dfw.kubeconfig
-
     dfw-control-plane:
       kind: ext-container
       labels:
@@ -74,21 +57,6 @@ topology:
         - ip link set lo-galactic up
         - ip -6 addr add 2001:db8:ff01:100:ffff:ffff:ffff:ffff/128 dev lo-galactic
         - /galactic/scripts/install.sh
-
-    sjc:
-      kind: k8s-kind
-      startup-config: node_files/sjc/config.yaml
-      labels:
-        graph-group: kind-cluster
-        graph-level: 1
-        graph-icon: server
-        reload: disabled
-      mgmt-ipv4: 172.20.20.121
-      extras:
-        k8s_kind:
-          deploy:
-            wait: 0s
-            kubeconfig: sjc.kubeconfig
 
     sjc-control-plane:
       kind: ext-container
@@ -130,21 +98,6 @@ topology:
         - ip -6 addr add 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128 dev lo-galactic
         - /galactic/scripts/install.sh
 
-    iad:
-      kind: k8s-kind
-      startup-config: node_files/iad/config.yaml
-      labels:
-        graph-group: kind-cluster
-        graph-level: 1
-        graph-icon: server
-        reload: disabled
-      mgmt-ipv4: 172.20.20.111
-      extras:
-        k8s_kind:
-          deploy:
-            wait: 0s
-            kubeconfig: iad.kubeconfig
-
     iad-control-plane:
       kind: ext-container
       labels:
@@ -183,6 +136,25 @@ topology:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
         - ip -6 addr add 2001:db8:ff03:100:ffff:ffff:ffff:ffff/128 dev lo-galactic
+        - /galactic/scripts/install.sh
+
+    iad-worker2:
+      kind: ext-container
+      labels:
+        cluster: iad
+        graph-group: kind-worker
+        graph-level: 1
+        graph-icon: server
+        platform: kind
+        reload: disabled
+        worker-index: "2"
+      mgmt-ipv4: 172.20.20.114
+      sysctls:
+        fs.inotify.max_user_instances: "256"
+        net.ipv4.conf.all.arp_announce: "2"
+        net.ipv4.ip_forward: "1"
+        net.ipv6.conf.all.forwarding: "1"
+      exec:
         - /galactic/scripts/install.sh
 
     tr1:
@@ -238,6 +210,7 @@ topology:
     - endpoints: ["dfw-worker:eth1", "tr1:eth1"]
     - endpoints: ["sjc-worker:eth1", "tr2:eth1"]
     - endpoints: ["iad-worker:eth1", "tr3:eth5"]
+    - endpoints: ["iad-worker2:eth1", "tr3:eth4"]
 
     # TR full mesh (iBGP within AS 65100)
     - endpoints: ["tr1:eth2", "tr2:eth2"]

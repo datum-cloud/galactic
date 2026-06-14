@@ -59,15 +59,32 @@ tasks:
     desc: Build images and deploy the full lab end-to-end
     deps: [build, host-setup]
     cmds:
+      - task: "deploy:clusters"
       - task: "deploy:topology"
+      - task: "deploy:rename-rr"
       - task: "deploy:images"
       - task: "deploy:underlay"
       - task: "deploy:overlay"
 
+  "deploy:clusters":
+    desc: Create Kind clusters (sequential to avoid kubeadm contention during parallel clab deploy)
+    cmds:
+      - kind create cluster --name dfw --config node_files/dfw/config.yaml --image kindest/node:galactic
+      - kind create cluster --name sjc --config node_files/sjc/config.yaml --image kindest/node:galactic
+      - kind create cluster --name iad --config node_files/iad/config.yaml --image kindest/node:galactic
+      - kind export kubeconfig --name dfw --kubeconfig dfw.kubeconfig
+      - kind export kubeconfig --name sjc --kubeconfig sjc.kubeconfig
+      - kind export kubeconfig --name iad --kubeconfig iad.kubeconfig
+
   "deploy:topology":
-    desc: Deploy the ContainerLab topology (transit routers + Kind clusters)
+    desc: Deploy the ContainerLab topology (transit routers + ext-container wiring)
     cmds:
       - sudo containerlab deploy -t {{.TOPO}}
+
+  "deploy:rename-rr":
+    desc: Rename iad-worker2 to iad-worker-rr (kind does not support custom worker node names)
+    cmds:
+      - docker rename iad-worker2 iad-worker-rr
 
   "load-image":
     internal: true
@@ -83,17 +100,23 @@ tasks:
       - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker}
       - task: load-image
+        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker-rr}
+      - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: sjc-worker}
       - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: dfw-worker}
       - task: load-image
         vars: {IMAGE: galactic-agent:latest, NODE: iad-worker}
       - task: load-image
+        vars: {IMAGE: galactic-agent:latest, NODE: iad-worker-rr}
+      - task: load-image
         vars: {IMAGE: galactic-agent:latest, NODE: sjc-worker}
       - task: load-image
         vars: {IMAGE: galactic-agent:latest, NODE: dfw-worker}
       - task: load-image
         vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: iad-worker}
+      - task: load-image
+        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: iad-worker-rr}
       - task: load-image
         vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: sjc-worker}
       - task: load-image
@@ -103,6 +126,9 @@ tasks:
     desc: Destroy the lab
     cmds:
       - sudo containerlab destroy -t {{.TOPO}} --cleanup
+      - kind delete cluster --name dfw || true
+      - kind delete cluster --name sjc || true
+      - kind delete cluster --name iad || true
 
   reload:
     desc: Full rebuild and redeploy
