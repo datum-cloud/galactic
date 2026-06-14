@@ -1,0 +1,10 @@
+formatter:
+  type: basic
+  indent: 2
+  line_ending: lf
+  trim_trailing_whitespace: true
+  eof_newline: true
+include:
+  - "**/*.yaml"
+exclude:
+  - "bin/**"

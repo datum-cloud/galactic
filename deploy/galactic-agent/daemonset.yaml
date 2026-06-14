@@ -21,12 +21,13 @@ spec:
       containers:
         - name: galactic-agent
           image: ghcr.io/datum-cloud/galactic:latest
-          command: ["/galactic-agent"]
           args:
-            - --frr-config-path=/etc/frr/frr.conf
-            - --gobgp-endpoint=localhost:50051
+            - --gobgp-enabled=true
+            - --gobgp-api-port=50051
+            - --gobgp-log-level=panic
             - --metrics-addr=:8082
             - --health-addr=:8083
+            - --grpc-health-port=8084
           env:
             - name: NODE_NAME
               valueFrom:
@@ -38,6 +39,9 @@ spec:
               protocol: TCP
             - name: healthz
               containerPort: 8083
+              protocol: TCP
+            - name: grpc-health
+              containerPort: 8084
               protocol: TCP
           livenessProbe:
             httpGet:
@@ -55,17 +59,9 @@ spec:
             capabilities:
               add: ["NET_ADMIN"]
             allowPrivilegeEscalation: false
-          volumeMounts:
-            - name: frr-config
-              mountPath: /etc/frr
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
             limits:
               memory: 256Mi
-      volumes:
-        - name: frr-config
-          hostPath:
-            path: /etc/frr
-            type: DirectoryOrCreate

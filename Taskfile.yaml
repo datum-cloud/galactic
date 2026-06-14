@@ -10,8 +10,10 @@ vars:
       gobin=$(go env GOBIN)
       [ -n "$gobin" ] && echo "$gobin" || echo "$(go env GOPATH)/bin"
   GOLANGCI_LINT: '{{.LOCALBIN}}/golangci-lint'
+  YAMLFMT: '{{.LOCALBIN}}/yamlfmt'
   GO_LICENSES: '{{.LOCALBIN}}/go-licenses'
   GOLANGCI_LINT_VERSION: v2.12.2
+  YAMLFMT_VERSION: v0.21.0
   GO_LICENSES_VERSION: v1.6.0
 
 tasks:
@@ -25,37 +27,47 @@ tasks:
   ##
 
   fmt:
-    desc: Run go fmt against code
+    desc: Format code
     run: once
     cmds:
       - go fmt ./...
 
   vet:
-    desc: Run go vet against code
+    desc: Vet code
     run: once
     cmds:
       - GOOS=linux go vet ./...
 
-  test:
-    desc: Run unit and e2e tests
+  ci:
+    desc: Run the full CI pipeline (lint, build, test:unit, test:e2e)
     cmds:
-      - task: ci:unittest
-      - task: ci:e2etest
+      - task: lint
+      - task: build
+      - task: test:unit
+      - task: test:e2e
+
+  test:
+    desc: Run all tests
+    cmds:
+      - task: test:unit
+      - task: test:e2e
 
   lint:
-    desc: Run golangci-lint linter
-    deps: [golangci-lint]
+    desc: Lint
+    deps: [golangci-lint, yamlfmt, yaml-ext]
     cmds:
       - '{{.GOLANGCI_LINT}} run'
+      - '{{.YAMLFMT}} -lint'
 
   lint-fix:
-    desc: Run golangci-lint linter and perform fixes
-    deps: [golangci-lint]
+    desc: Lint and apply fixes
+    deps: [golangci-lint, yamlfmt]
     cmds:
       - '{{.GOLANGCI_LINT}} run --fix'
+      - '{{.YAMLFMT}}'
 
   notice:
-    desc: Generate NOTICE file with third-party dependency license information
+    desc: Regenerate NOTICE file
     deps: [go-licenses]
     cmds:
       - '{{.GO_LICENSES}} report ./... --ignore go.datum.net/galactic --template scripts/licenses/notice.tmpl > NOTICE'
@@ -65,7 +77,7 @@ tasks:
   ##
 
   build:
-    desc: Build galactic binary
+    desc: Build binary
     deps: [fmt, vet]
     cmds:
       - go build -o bin/galactic cmd/galactic/main.go
@@ -73,7 +85,7 @@ tasks:
       - ./bin/galactic version
 
   docker-build:
-    desc: Build docker image with the unified binary
+    desc: Build container image
     vars:
       VERSION:
         sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
@@ -95,13 +107,13 @@ tasks:
   ## CI
   ##
 
-  ci:unittest:
-    desc: Run unit tests with race detection and coverage output (mirrors CI)
+  test:unit:
+    desc: Unit tests with race detection and coverage
     cmds:
       - bash scripts/ci.sh unittest
 
-  ci:e2etest:
-    desc: Run full e2e lifecycle — install Kind, create cluster, build+load image, cleanup
+  test:e2e:
+    desc: E2E tests (Kind cluster, build+load image, lifecycle)
     cmds:
       - bash scripts/ci.sh e2etest
 
@@ -110,11 +122,10 @@ tasks:
   ##
 
   clean:
-    desc: Remove build artifacts and temporary files
+    desc: Remove build artifacts
     cmds:
       - rm -rf bin/
       - rm -rf dist/
-      - rm -rf .venv/
       - rm -f cover.out
 
   ##
@@ -122,7 +133,7 @@ tasks:
   ##
 
   golangci-lint:
-    desc: Download golangci-lint locally if necessary
+    desc: Download golangci-lint if needed
     run: once
     cmds:
       - task: install-tool
@@ -130,6 +141,27 @@ tasks:
           TARGET: '{{.GOLANGCI_LINT}}'
           PACKAGE: github.com/golangci/golangci-lint/v2/cmd/golangci-lint
           VERSION: '{{.GOLANGCI_LINT_VERSION}}'
+
+  yamlfmt:
+    desc: Download yamlfmt if needed
+    run: once
+    cmds:
+      - task: install-tool
+        vars:
+          TARGET: '{{.YAMLFMT}}'
+          PACKAGE: github.com/google/yamlfmt/cmd/yamlfmt
+          VERSION: '{{.YAMLFMT_VERSION}}'
+
+  yaml-ext:
+    desc: Enforce .yaml extension (no .yml)
+    run: once
+    cmds:
+      - |
+        if find . -name "*.yml" -not -path "./.git/*" | grep -q .; then
+          find . -name "*.yml" -not -path "./.git/*"
+          echo "ERROR: .yml files found; rename to .yaml"
+          exit 1
+        fi
 
   go-licenses:
     internal: true
