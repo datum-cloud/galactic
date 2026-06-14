@@ -5,11 +5,13 @@ metadata:
 spec:
   providerSelector:
     matchLabels:
-      bgp.datum.net/plane: overlay
-      bgp.miloapis.com/daemon: gobgp
+      galactic.io/plane: overlay
   asNumber: 65000
   routerIDSource: Manual
-  routerID: "10.255.255.3"
+  routerID: "10.255.255.1"
   addressFamilies:
     - afi: L2VPN
       safi: EVPN
+  listenPort: 1179
+  routeReflector:
+    clusterID: "10.255.255.1"

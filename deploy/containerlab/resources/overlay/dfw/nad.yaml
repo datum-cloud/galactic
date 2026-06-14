@@ -11,7 +11,7 @@ spec:
       "type": "galactic",
       "vpc": "1",
       "vpcattachment": "1",
-      "srv6_locator": "2001:db8:ff03::/48",
+      "srv6_locator": "2001:db8:ff01::/48",
       "gobgp": {
         "address": "127.0.0.1:50051"
       }

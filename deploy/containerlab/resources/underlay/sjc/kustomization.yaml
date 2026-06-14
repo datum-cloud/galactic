@@ -1,5 +1,5 @@
 namePrefix: sjc-
-namespace: sjc-underlay
+namespace: galactic-system
 resources:
   - ../base
   - namespace.yaml
