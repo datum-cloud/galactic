@@ -152,8 +152,9 @@ func TestKernelCapabilities(t *testing.T) {
 			// seg6_local may be a loadable module or compiled into the kernel.
 			// When built-in, lsmod and /sys/module won't show it, but the
 			// seg6_enabled sysctl is present on any kernel with SEG6 support.
-			name:    "seg6_local_module",
-			command: "modprobe seg6_local 2>/dev/null || lsmod | grep -q seg6 || test -d /sys/module/seg6_local || test -f /proc/sys/net/ipv6/conf/all/seg6_enabled",
+			name: "seg6_local_module",
+			command: "modprobe seg6_local 2>/dev/null || lsmod | grep -q seg6 ||" +
+				" test -d /sys/module/seg6_local || test -f /proc/sys/net/ipv6/conf/all/seg6_enabled",
 		},
 	}
 
