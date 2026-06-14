@@ -10,9 +10,9 @@ func TestProviderName(t *testing.T) {
 		plane string
 		want  string
 	}{
-		{"worker-1", "overlay", "galactic-gobgp-worker-1"},
+		{"worker-1", defaultPlane, "galactic-gobgp-worker-1"},
 		{"worker-1", "", "galactic-gobgp-worker-1"},
-		{"node-abc", "overlay", "galactic-gobgp-node-abc"},
+		{"node-abc", defaultPlane, "galactic-gobgp-node-abc"},
 		{"iad-rr-worker", "overlay-rr", "galactic-gobgp-iad-rr-worker-overlay-rr"},
 	}
 	for _, tc := range cases {

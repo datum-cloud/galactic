@@ -18,14 +18,15 @@ const (
 	labelPlane     = "galactic.io/plane"
 	labelDaemon    = "galactic.io/daemon"
 
-	managedByValue = "galactic-agent"
+	managedByValue  = "galactic-agent"
+	defaultPlane    = "overlay"
 )
 
 // providerName returns the BGPProvider resource name for this node and plane.
 // The default "overlay" plane uses the short form for compatibility with existing
 // deployments; additional planes append a suffix.
 func providerName(nodeName, plane string) string {
-	if plane == "" || plane == "overlay" {
+	if plane == "" || plane == defaultPlane {
 		return fmt.Sprintf("galactic-gobgp-%s", nodeName)
 	}
 	return fmt.Sprintf("galactic-gobgp-%s-%s", nodeName, plane)
@@ -35,7 +36,7 @@ func providerName(nodeName, plane string) string {
 // Idempotent — safe to call on every startup.
 func EnsureGoBGPProvider(ctx context.Context, c client.Client, nodeName, plane, endpoint string) error {
 	if plane == "" {
-		plane = "overlay"
+		plane = defaultPlane
 	}
 
 	obj := &providersv1alpha1.BGPProvider{}
