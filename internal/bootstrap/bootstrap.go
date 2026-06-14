@@ -18,8 +18,8 @@ const (
 	labelPlane     = "galactic.io/plane"
 	labelDaemon    = "galactic.io/daemon"
 
-	managedByValue  = "galactic-agent"
-	defaultPlane    = "overlay"
+	managedByValue = "galactic-agent"
+	defaultPlane   = "overlay"
 )
 
 // providerName returns the BGPProvider resource name for this node and plane.
