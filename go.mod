@@ -7,12 +7,12 @@ require (
 	github.com/coreos/go-iptables v0.8.0
 	github.com/kenshaw/baseconv v0.1.1
 	github.com/lorenzosaino/go-sysctl v0.3.1
-	github.com/osrg/gobgp/v4 v4.5.0
+	github.com/osrg/gobgp/v4 v4.6.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/cobra v1.10.2
-	github.com/vishvananda/netlink v1.3.2-0.20260505210927-99e979749d3e
-	go.miloapis.com/cosmos v0.0.0-20260609211521-d6cebe28f2aa
-	golang.org/x/sys v0.42.0
+	github.com/vishvananda/netlink v1.3.2-0.20260610182031-c05a276ed0e0
+	go.miloapis.com/cosmos v0.0.0-20260613151556-25ccb5c88f4d
+	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.81.1
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.0
