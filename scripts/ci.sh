@@ -1,36 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-setup_venv() {
-  if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
-  fi
-  .venv/bin/pip install --quiet yamllint
-}
-
 COMMAND="${1:-}"
 
 case "$COMMAND" in
-  setup)
-    setup_venv
-    ;;
-
   unittest)
-    echo "--- Setting up Python venv"
-    setup_venv
-
-    if [ -z "${SKIP_YAMLLINT:-}" ]; then
-      echo "--- Checking for .yml files (only .yaml is allowed)"
-      if find . -name "*.yml" -not -path "./.git/*" | grep -q .; then
-        find . -name "*.yml" -not -path "./.git/*"
-        echo "ERROR: .yml files found; rename to .yaml"
-        exit 1
-      fi
-
-      echo "--- Running yamllint"
-      .venv/bin/yamllint .
-    fi
-
     echo "--- Running Go unit tests"
     go test -v -race -coverprofile=coverage.out ./pkg/common/util/...
     ;;
@@ -59,7 +33,7 @@ case "$COMMAND" in
     ;;
 
   *)
-    echo "Usage: $0 {setup|unittest|e2etest}"
+    echo "Usage: $0 {unittest|e2etest}"
     exit 1
     ;;
 esac

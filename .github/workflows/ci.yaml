@@ -45,7 +45,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run unit tests
-        run: task ci:unittest
+        run: task test:unit
 
       - name: Upload coverage
         uses: codecov/codecov-action@v7
@@ -90,4 +90,4 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run E2E tests
-        run: task ci:e2etest
+        run: task test:e2e

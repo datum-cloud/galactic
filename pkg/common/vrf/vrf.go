@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 
 	"golang.org/x/sys/unix"
 
@@ -19,7 +20,14 @@ import (
 const minVRFId = uint32(1)
 const maxVRFId = uint32(math.MaxUint32 - 1)
 
+// vrfMu serializes VRF creation to prevent two concurrent CNI ADD calls from
+// scanning the same free table ID and both attempting to create a VRF with it.
+var vrfMu sync.Mutex
+
 func Add(vpc, vpcAttachment string) error {
+	vrfMu.Lock()
+	defer vrfMu.Unlock()
+
 	name := util.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
 	vrfId, err := findNextAvailableVRFId()

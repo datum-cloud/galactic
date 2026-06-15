@@ -59,12 +59,12 @@ task          # list available tasks
 
 ```bash
 task test            # run unit tests then e2e tests (requires Docker + Kind)
-task ci:unittest     # unit tests only — race detector, coverage output
-task ci:e2etest      # full e2e lifecycle — spins up a Kind cluster, builds and
+task test:unit       # unit tests only — race detector, coverage output
+task test:e2e        # full e2e lifecycle — spins up a Kind cluster, builds and
                      # loads the image, then tears the cluster down on exit
 ```
 
-`task ci:unittest` is the fast path for development; it runs the same command as the CI `test-unit` job. `task ci:e2etest` requires Docker and Kind and mirrors the CI `test-e2e` job exactly, including automatic cluster cleanup via a `trap` on exit.
+`task test:unit` is the fast path for development; it runs the same command as the CI `test-unit` job. `task test:e2e` requires Docker and Kind and mirrors the CI `test-e2e` job exactly, including automatic cluster cleanup via a `trap` on exit.
 
 The lab environment has its own `Taskfile.yaml`; run `task` from `deploy/containerlab/` to see available tasks.
 

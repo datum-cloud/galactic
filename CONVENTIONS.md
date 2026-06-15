@@ -12,9 +12,12 @@ This document defines the coding standards, naming rules, error handling pattern
 - `cmd/galactic/main.go` — binary entry point; all Cobra subcommands registered here
 - `pkg/common/` — utilities shared between agent and CNI
 - `pkg/proto/local/` — gRPC / protobuf generated files plus hand-written convenience wrapper for CNI-to-agent communication
-- `internal/agent/srv6/` — kernel SRv6 route and VRF management
+- `internal/agent/` — agent entry point and gRPC server; `srv6/` subdirectory owns kernel SRv6 route and VRF management
 - `internal/cni/` — CNI plugin (cmdAdd / cmdDel implementation)
-- `internal/cmd/` — one sub-package per Cobra subcommand (`agent`, `cni`, `version`)
+- `internal/cmd/` — one sub-package per Cobra subcommand (`cni`, `version`)
+- `internal/gobgp/` — embedded GoBGP server lifecycle
+- `internal/bootstrap/` — agent startup sequencing (BGPProvider resource management)
+- `internal/metrics/` — Prometheus metrics registration
 
 Place new code in `internal/` unless it must be imported by an external caller. Prefer creating a focused sub-package over adding to an existing large one.
 
@@ -87,11 +90,10 @@ Generated protobuf files (`*.pb.go`, `*_grpc.pb.go` in `pkg/proto/local/`) must 
 
 ### Linting
 
-Run `task lint` before every PR. All linters listed in `.golangci.yml` must pass. Suppressions require a comment explaining why. Notable active linters: `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused`.
+Run `task lint` before every PR. All linters listed in `.golangci.yaml` must pass. Suppressions require a comment explaining why. Active linters: `copyloopvar`, `dupl`, `errcheck`, `goconst`, `gocyclo`, `govet`, `ineffassign`, `lll`, `misspell`, `nakedret`, `prealloc`, `revive`, `staticcheck`, `unconvert`, `unparam`, `unused`.
 
 Exclusions by path:
-- `lll` is excluded from `internal/*`
-- `dupl` is excluded from `internal/*`
+- `lll` and `dupl` are excluded from `internal/*`
 - The `lab/` directory is entirely excluded
 
 ---
@@ -144,14 +146,22 @@ for _, tt := range tests {
 
 ---
 
+## YAML files
+
+Always use the `.yaml` extension, never `.yml`. This applies to all YAML files in the repository: Taskfiles, ContainerLab topologies, Kubernetes manifests, CI workflows, and configuration files.
+
+---
+
 ## Commit messages
 
-Use imperative mood, sentence case, present tense. First line ≤ 72 characters. Reference issues where applicable.
+Use Conventional Commits format: `<type>(<scope>): <description>`. First line ≤ 72 characters. Reference issues where applicable.
+
+Common types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`.
 
 ```
-Add SRv6 egress route cleanup on endpoint removal
-
-Fixes #42
+feat(agent): embed GoBGP and manage lifecycle via bootstrap
+fix(lint): resolve CI lint and yamllint failures
+chore(deps): update github actions
 ```
 
 ---

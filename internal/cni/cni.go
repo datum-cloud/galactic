@@ -122,8 +122,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
+	bgpClient, bgpConn, err := bgp.NewClient(pluginConf.GoBGP.AddressOrDefault())
+	if err != nil {
+		return err
+	}
+	defer bgpConn.Close() //nolint:errcheck
 	err = bgp.AddPaths(&bgp.PathConfig{
-		GoBGPAddress:     pluginConf.GoBGP.AddressOrDefault(),
+		Client:           bgpClient,
 		SRv6Locator:      pluginConf.SRv6Locator,
 		VPCHex:           vpcHex,
 		VPCAttachmentHex: vpcAttachmentHex,
@@ -157,8 +162,13 @@ func cmdDel(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
+	bgpClient, bgpConn, err := bgp.NewClient(pluginConf.GoBGP.AddressOrDefault())
+	if err != nil {
+		return err
+	}
+	defer bgpConn.Close() //nolint:errcheck
 	err = bgp.DeletePaths(&bgp.PathConfig{
-		GoBGPAddress:     pluginConf.GoBGP.AddressOrDefault(),
+		Client:           bgpClient,
 		SRv6Locator:      pluginConf.SRv6Locator,
 		VPCHex:           vpcHex,
 		VPCAttachmentHex: vpcAttachmentHex,

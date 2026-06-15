@@ -23,59 +23,56 @@ const rpcTimeout = 5 * time.Second
 
 // PathConfig bundles the parameters needed to add or delete L3VPN BGP paths.
 type PathConfig struct {
-	GoBGPAddress     string   // e.g. "127.0.0.1:50051"
-	SRv6Locator      string   // node's SRv6 network CIDR, e.g. "fc00::/56"
-	VPCHex           string   // 12-char hex, 48-bit VPC ID
-	VPCAttachmentHex string   // 4-char hex, 16-bit attachment ID
-	Networks         []string // CIDRs to advertise
+	Client           gobgpapi.GoBgpServiceClient // caller owns the connection
+	SRv6Locator      string                      // node's SRv6 network CIDR, e.g. "fc00::/56"
+	VPCHex           string                      // 12-char hex, 48-bit VPC ID
+	VPCAttachmentHex string                      // 4-char hex, 16-bit attachment ID
+	Networks         []string                    // CIDRs to advertise
+}
+
+// NewClient dials the GoBGP gRPC API at address and returns a client. The
+// caller is responsible for closing the underlying connection.
+func NewClient(address string) (gobgpapi.GoBgpServiceClient, *grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("connecting to gobgp at %s: %w", address, err)
+	}
+	return gobgpapi.NewGoBgpServiceClient(conn), conn, nil
 }
 
 // AddPaths injects L3VPN BGP paths into the local GoBGP instance for each network in cfg.
 func AddPaths(cfg *PathConfig) error {
-	return withClient(cfg.GoBGPAddress, func(client gobgpapi.GoBgpServiceClient) error {
-		paths, err := buildPaths(cfg, client)
-		if err != nil {
-			return err
+	paths, err := buildPaths(cfg)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel() //nolint:errcheck
+	for _, path := range paths {
+		if _, err := cfg.Client.AddPath(ctx, &gobgpapi.AddPathRequest{Path: path}); err != nil {
+			return fmt.Errorf("adding path: %w", err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
-		defer cancel() //nolint:errcheck
-		for _, path := range paths {
-			if _, err := client.AddPath(ctx, &gobgpapi.AddPathRequest{Path: path}); err != nil {
-				return fmt.Errorf("adding path: %w", err)
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // DeletePaths withdraws L3VPN BGP paths from the local GoBGP instance for each network in cfg.
 func DeletePaths(cfg *PathConfig) error {
-	return withClient(cfg.GoBGPAddress, func(client gobgpapi.GoBgpServiceClient) error {
-		paths, err := buildPaths(cfg, client)
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
-		defer cancel() //nolint:errcheck
-		for _, path := range paths {
-			if _, err := client.DeletePath(ctx, &gobgpapi.DeletePathRequest{Path: path}); err != nil {
-				return fmt.Errorf("deleting path: %w", err)
-			}
-		}
-		return nil
-	})
-}
-
-func withClient(address string, fn func(gobgpapi.GoBgpServiceClient) error) error {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	paths, err := buildPaths(cfg)
 	if err != nil {
-		return fmt.Errorf("connecting to gobgp at %s: %w", address, err)
+		return err
 	}
-	defer conn.Close() //nolint:errcheck
-	return fn(gobgpapi.NewGoBgpServiceClient(conn))
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel() //nolint:errcheck
+	for _, path := range paths {
+		if _, err := cfg.Client.DeletePath(ctx, &gobgpapi.DeletePathRequest{Path: path}); err != nil {
+			return fmt.Errorf("deleting path: %w", err)
+		}
+	}
+	return nil
 }
 
-func buildPaths(cfg *PathConfig, client gobgpapi.GoBgpServiceClient) ([]*gobgpapi.Path, error) {
+func buildPaths(cfg *PathConfig) ([]*gobgpapi.Path, error) {
 	nexthop, err := util.EncodeSRv6Endpoint(cfg.SRv6Locator, cfg.VPCHex, cfg.VPCAttachmentHex)
 	if err != nil {
 		return nil, fmt.Errorf("encoding SRv6 endpoint: %w", err)
@@ -83,7 +80,7 @@ func buildPaths(cfg *PathConfig, client gobgpapi.GoBgpServiceClient) ([]*gobgpap
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel() //nolint:errcheck
-	bgpResp, err := client.GetBgp(ctx, &gobgpapi.GetBgpRequest{})
+	bgpResp, err := cfg.Client.GetBgp(ctx, &gobgpapi.GetBgpRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("getting BGP global config: %w", err)
 	}
