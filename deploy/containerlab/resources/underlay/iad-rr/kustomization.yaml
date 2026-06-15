@@ -1,4 +1,4 @@
-namePrefix: iad-
+namePrefix: iad-rr-
 namespace: galactic-system
 resources:
   - ../base

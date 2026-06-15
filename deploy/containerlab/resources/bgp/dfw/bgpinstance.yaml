@@ -7,6 +7,7 @@ spec:
     matchLabels:
       galactic.io/plane: overlay
   asNumber: 65000
+  listenPort: 1790
   routerIDSource: Manual
   routerID: "10.255.255.2"
   addressFamilies:

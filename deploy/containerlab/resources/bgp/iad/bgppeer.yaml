@@ -1,33 +1,15 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: overlay-to-iad
+  name: overlay-to-rr
 spec:
   instanceRef: overlay
   providerSelector:
     matchLabels:
       galactic.io/plane: overlay
-  address: "fc00:0:2::1"
+  address: "fc00:0:8::1"
   asNumber: 65000
-  passive: true
-  routeReflectorClient: true
-  addressFamilies:
-    - afi: L2VPN
-      safi: EVPN
----
-apiVersion: bgp.miloapis.com/v1alpha1
-kind: BGPPeer
-metadata:
-  name: overlay-to-sjc
-spec:
-  instanceRef: overlay
-  providerSelector:
-    matchLabels:
-      galactic.io/plane: overlay
-  address: "fc00:0:3::1"
-  asNumber: 65000
-  passive: true
-  routeReflectorClient: true
+  remotePort: 1179
   addressFamilies:
     - afi: L2VPN
       safi: EVPN

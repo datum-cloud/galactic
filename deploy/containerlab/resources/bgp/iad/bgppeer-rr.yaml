@@ -1,0 +1,50 @@
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: overlay-rr-to-dfw
+spec:
+  instanceRef: overlay-rr
+  providerSelector:
+    matchLabels:
+      galactic.io/plane: overlay-rr
+  address: "fc00:0:2::1"
+  asNumber: 65000
+  passive: true
+  routeReflectorClient: true
+  addressFamilies:
+    - afi: L2VPN
+      safi: EVPN
+---
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: overlay-rr-to-sjc
+spec:
+  instanceRef: overlay-rr
+  providerSelector:
+    matchLabels:
+      galactic.io/plane: overlay-rr
+  address: "fc00:0:3::1"
+  asNumber: 65000
+  passive: true
+  routeReflectorClient: true
+  addressFamilies:
+    - afi: L2VPN
+      safi: EVPN
+---
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: overlay-rr-to-iad
+spec:
+  instanceRef: overlay-rr
+  providerSelector:
+    matchLabels:
+      galactic.io/plane: overlay-rr
+  address: "fc00:0:4::1"
+  asNumber: 65000
+  passive: true
+  routeReflectorClient: true
+  addressFamilies:
+    - afi: L2VPN
+      safi: EVPN

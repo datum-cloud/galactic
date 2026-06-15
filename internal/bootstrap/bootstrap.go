@@ -19,18 +19,28 @@ const (
 	labelDaemon    = "galactic.io/daemon"
 
 	managedByValue = "galactic-agent"
+	defaultPlane   = "overlay"
 )
 
-// providerName returns the BGPProvider resource name for this node.
-func providerName(nodeName string) string {
-	return fmt.Sprintf("galactic-gobgp-%s", nodeName)
+// providerName returns the BGPProvider resource name for this node and plane.
+// The default "overlay" plane uses the short form for compatibility with existing
+// deployments; additional planes append a suffix.
+func providerName(nodeName, plane string) string {
+	if plane == "" || plane == defaultPlane {
+		return fmt.Sprintf("galactic-gobgp-%s", nodeName)
+	}
+	return fmt.Sprintf("galactic-gobgp-%s-%s", nodeName, plane)
 }
 
 // EnsureGoBGPProvider creates or updates the BGPProvider resource for this node.
 // Idempotent — safe to call on every startup.
-func EnsureGoBGPProvider(ctx context.Context, c client.Client, nodeName, endpoint string) error {
+func EnsureGoBGPProvider(ctx context.Context, c client.Client, nodeName, plane, endpoint string) error {
+	if plane == "" {
+		plane = defaultPlane
+	}
+
 	obj := &providersv1alpha1.BGPProvider{}
-	obj.Name = providerName(nodeName)
+	obj.Name = providerName(nodeName, plane)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, c, obj, func() error {
 		if obj.Labels == nil {
@@ -38,7 +48,7 @@ func EnsureGoBGPProvider(ctx context.Context, c client.Client, nodeName, endpoin
 		}
 		obj.Labels[labelNode] = nodeName
 		obj.Labels[labelManagedBy] = managedByValue
-		obj.Labels[labelPlane] = "overlay"
+		obj.Labels[labelPlane] = plane
 		obj.Labels[labelDaemon] = "gobgp"
 		obj.Spec = providersv1alpha1.BGPProviderSpec{
 			Type: "GoBGP",
@@ -54,12 +64,12 @@ func EnsureGoBGPProvider(ctx context.Context, c client.Client, nodeName, endpoin
 	return nil
 }
 
-// DeleteGoBGPProvider removes the BGPProvider resource for this node.
+// DeleteGoBGPProvider removes the BGPProvider resource for this node and plane.
 // Idempotent — safe to call even if the resource does not exist.
-func DeleteGoBGPProvider(ctx context.Context, c client.Client, nodeName string) error {
+func DeleteGoBGPProvider(ctx context.Context, c client.Client, nodeName, plane string) error {
 	obj := &providersv1alpha1.BGPProvider{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: providerName(nodeName),
+			Name: providerName(nodeName, plane),
 		},
 	}
 	if err := c.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {

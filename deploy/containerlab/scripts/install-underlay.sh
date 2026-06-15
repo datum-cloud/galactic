@@ -13,7 +13,8 @@ apply() {
 }
 
 apply iad-control-plane   iad
+apply iad-control-plane   iad-rr
 apply sjc-control-plane   sjc
-apply dfw-control-plane dfw
+apply dfw-control-plane   dfw
 
 echo "Done."

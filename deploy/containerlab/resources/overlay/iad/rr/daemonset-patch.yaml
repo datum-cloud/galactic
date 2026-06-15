@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: overlay
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: overlay-rr
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: overlay-rr
+    spec:
+      tolerations:
+        - key: galactic.io/role
+          value: route-reflector
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: galactic.io/role
+                    operator: In
+                    values:
+                      - route-reflector
+      containers:
+        - name: galactic-agent
+          args:
+            - --gobgp-enabled=true
+            - --gobgp-api-port=50052
+            - --gobgp-log-level=debug
+            - --metrics-addr=:9085
+            - --health-addr=:9086
+            - --grpc-health-port=9087
+            - --plane=overlay-rr
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9086
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9086
