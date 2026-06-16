@@ -15,6 +15,9 @@ case "$COMMAND" in
 
     trap 'kind delete cluster --name "$CLUSTER_NAME"' EXIT
 
+    echo "--- Loading kernel modules required by galactic"
+    sudo modprobe vrf
+
     echo "--- Installing kind"
     go install sigs.k8s.io/kind@latest
 
