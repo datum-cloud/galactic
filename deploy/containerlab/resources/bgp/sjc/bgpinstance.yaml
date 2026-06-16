@@ -8,8 +8,7 @@ spec:
       galactic.io/plane: overlay
   asNumber: 65000
   listenPort: 1790
-  routerIDSource: Manual
-  routerID: "10.255.255.3"
+  routerIDSource: Auto
   addressFamilies:
     - afi: L2VPN
       safi: EVPN
