@@ -16,6 +16,8 @@ case "$COMMAND" in
     trap 'kind delete cluster --name "$CLUSTER_NAME"' EXIT
 
     echo "--- Loading kernel modules required by galactic"
+    sudo apt-get update -qq
+    sudo apt-get install -y --no-install-recommends linux-modules-extra-azure
     sudo modprobe vrf
 
     echo "--- Installing kind"
