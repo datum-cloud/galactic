@@ -31,13 +31,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"go.datum.net/galactic/internal/agent/srv6"
-	galversion "go.datum.net/galactic/internal/cmd/version"
 	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
-	"go.datum.net/galactic/pkg/common/cni"
-	"go.datum.net/galactic/pkg/common/util"
-	"go.datum.net/galactic/pkg/common/vrf"
+	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/srv6"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 const cniTimeout = 10 * time.Second
@@ -55,12 +54,12 @@ func init() {
 // PluginConf is the CNI plugin configuration passed via stdin on each invocation.
 type PluginConf struct {
 	types.PluginConf
-	VPC           string            `json:"vpc"`
-	VPCAttachment string            `json:"vpcattachment"`
-	MTU           int               `json:"mtu,omitempty"`
-	Terminations  []cni.Termination `json:"terminations,omitempty"`
-	IPAM          cni.IPAM          `json:"ipam,omitempty"`
-	SRv6Locator   string            `json:"srv6_locator"`
+	VPC           string        `json:"vpc"`
+	VPCAttachment string        `json:"vpcattachment"`
+	MTU           int           `json:"mtu,omitempty"`
+	Terminations  []Termination `json:"terminations,omitempty"`
+	IPAM          IPAM          `json:"ipam,omitempty"`
+	SRv6Locator   string        `json:"srv6_locator"`
 }
 
 func RunPlugin() {
@@ -70,7 +69,7 @@ func RunPlugin() {
 			Del: cmdDel,
 		},
 		version.All,
-		fmt.Sprintf("CNI galactic plugin %s", galversion.Version),
+		fmt.Sprintf("CNI galactic plugin %s", metadata.Version),
 	)
 }
 
@@ -217,7 +216,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
 		return fmt.Errorf("add veth: %w", err)
 	}
-	dev := util.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
+	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
 	for _, termination := range pluginConf.Terminations {
 		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
 			return fmt.Errorf("add route %s: %w", termination.Network, err)
@@ -227,11 +226,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("host-device ADD: %w", err)
 	}
 
-	vpcHex, err := util.Base62ToHex(pluginConf.VPC)
+	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 	if err != nil {
 		return fmt.Errorf("decode VPC: %w", err)
 	}
-	vpcAttachmentHex, err := util.Base62ToHex(pluginConf.VPCAttachment)
+	vpcAttachmentHex, err := intf.Base62ToHex(pluginConf.VPCAttachment)
 	if err != nil {
 		return fmt.Errorf("decode VPCAttachment: %w", err)
 	}
@@ -277,7 +276,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("apply BGPVRFInstance: %w", err)
 	}
 
-	srv6Endpoint, err := util.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
+	srv6Endpoint, err := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
 	if err != nil {
 		return fmt.Errorf("encode SRv6 endpoint: %w", err)
 	}
@@ -295,15 +294,15 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	vpcHex, err := util.Base62ToHex(pluginConf.VPC)
+	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 	if err != nil {
 		return fmt.Errorf("decode VPC: %w", err)
 	}
-	vpcAttachmentHex, err := util.Base62ToHex(pluginConf.VPCAttachment)
+	vpcAttachmentHex, err := intf.Base62ToHex(pluginConf.VPCAttachment)
 	if err != nil {
 		return fmt.Errorf("decode VPCAttachment: %w", err)
 	}
-	srv6Endpoint, err := util.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
+	srv6Endpoint, err := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
 	if err != nil {
 		return fmt.Errorf("encode SRv6 endpoint: %w", err)
 	}
@@ -330,7 +329,7 @@ func cmdDel(args *skel.CmdArgs) error {
 		return fmt.Errorf("delete BGPVRFInstance: %w", err)
 	}
 
-	dev := util.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
+	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
 	if err := hostDevice("DEL", args, pluginConf); err != nil {
 		return fmt.Errorf("host-device DEL: %w", err)
 	}
@@ -352,8 +351,8 @@ func cmdDel(args *skel.CmdArgs) error {
 
 type HostDevicePluginConf struct {
 	types.PluginConf
-	Device string   `json:"device"`
-	IPAM   cni.IPAM `json:"ipam,omitempty"`
+	Device string `json:"device"`
+	IPAM   IPAM   `json:"ipam,omitempty"`
 }
 
 func hostDeviceExecutable() string {
@@ -369,7 +368,7 @@ func hostDevice(command string, skelArgs *skel.CmdArgs, pluginConf *PluginConf) 
 			Name:       pluginConf.Name,
 			Type:       "host-device",
 		},
-		Device: util.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment),
+		Device: intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment),
 		IPAM:   pluginConf.IPAM,
 	})
 	if err != nil {

@@ -9,8 +9,8 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
-	"go.datum.net/galactic/pkg/common/sysctl"
-	"go.datum.net/galactic/pkg/common/util"
+	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
 func updateForwardRule(interfaceName string, action string) error {
@@ -41,9 +41,9 @@ func updateForwardRule(interfaceName string, action string) error {
 }
 
 func Add(vpc, vpcAttachment string, mtu int) error {
-	vrfName := util.GenerateInterfaceNameVRF(vpc, vpcAttachment)
-	hostName := util.GenerateInterfaceNameHost(vpc, vpcAttachment)
-	guestName := util.GenerateInterfaceNameGuest(vpc, vpcAttachment)
+	vrfName := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	guestName := intf.GenerateInterfaceNameGuest(vpc, vpcAttachment)
 
 	veth := &netlink.Veth{
 		LinkAttrs: netlink.LinkAttrs{
@@ -89,7 +89,7 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 }
 
 func Delete(vpc, vpcAttachment string) error {
-	hostName := util.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 
 	if err := updateForwardRule(hostName, "delete"); err != nil {
 		return err

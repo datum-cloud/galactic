@@ -5,14 +5,14 @@
 package route
 
 import (
+	"fmt"
 	"net"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/vishvananda/netlink"
 
-	gutil "go.datum.net/galactic/pkg/common/util"
-	"go.datum.net/galactic/pkg/common/vrf"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 func assembleRoute(vrfId uint32, prefix, nextHop, dev string) (*netlink.Route, error) {
@@ -22,9 +22,9 @@ func assembleRoute(vrfId uint32, prefix, nextHop, dev string) (*netlink.Route, e
 	}
 
 	if nextHop != "" {
-		routeGw, err := gutil.ParseIP(nextHop)
-		if err != nil {
-			return nil, err
+		routeGw := net.ParseIP(nextHop)
+		if routeGw == nil {
+			return nil, fmt.Errorf("cannot parse gateway IP: %s", nextHop)
 		}
 		return &netlink.Route{
 			Dst:   routeDst,
@@ -46,7 +46,7 @@ func assembleRoute(vrfId uint32, prefix, nextHop, dev string) (*netlink.Route, e
 }
 
 func Add(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
-	vrfId, err := vrf.GetVRFIdForVPC(vpc, vpcAttachment)
+	vrfId, err := vrf.TableID(vpc, vpcAttachment)
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func Add(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
 }
 
 func Delete(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
-	vrfId, err := vrf.GetVRFIdForVPC(vpc, vpcAttachment)
+	vrfId, err := vrf.TableID(vpc, vpcAttachment)
 	if err != nil {
 		return err
 	}

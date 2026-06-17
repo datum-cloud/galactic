@@ -6,7 +6,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for a full architecture reference includi
 
 ## Purpose & Architecture
 
-Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a DaemonSet agent (`internal/agent/srv6/`) that manages kernel SRv6 routes and VRFs per node, and a CNI plugin (`internal/cni/`) that registers container endpoints with the agent via gRPC. VPC and VPCAttachment CRD management lives in a separate operator project; Galactic receives pre-populated identifiers through the CNI config and acts on them. BGP is used as the control plane for distributing SRv6 routes between agents.
+Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a DaemonSet agent (`internal/agent/`) that manages kernel SRv6 routes and VRFs per node, and a CNI plugin (`internal/cni/`) that wires containers into VPC networks. VPC and VPCAttachment CRD management lives in a separate operator project; Galactic receives pre-populated identifiers through the CNI config and acts on them. BGP is used as the control plane for distributing SRv6 routes between agents.
 
 **Data flow:** CNI invoked with pre-populated VPC/VPCAttachment identifiers → gRPC registers endpoint with agent → agent manages SRv6 ingress routes locally → BGP distributes SRv6 routes between agents.
 
@@ -20,7 +20,7 @@ Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a
 
 - **Go 1.26** — agent and CNI plugin
 - **Multus CNI** — multi-network for pods; NAD generation is handled by the external operator
-- **gRPC + protobuf** — CNI-to-agent local communication (`pkg/proto/local/`)
+- **gRPC + protobuf** — CNI-to-agent local communication
 - **SRv6 + netlink** — kernel-level routing; `github.com/vishvananda/netlink`
 - **BGP** — control plane for SRv6 route distribution between agents (in progress)
 
@@ -54,6 +54,6 @@ Summary:
 
 1. Run `task build` to verify toolchain; run `task test` to confirm unit tests pass.
 2. Read `internal/cni/cni.go` (cmdAdd/cmdDel) to understand the container attach path.
-3. Read `internal/agent/srv6/srv6.go` to understand the agent entry point and how it manages SRv6 routes and VRFs.
-4. Read `pkg/proto/local/local.go` to understand the gRPC interface between the CNI and the agent.
-5. Explore `pkg/common/` for shared utilities (VRF management, sysctl helpers, CNI types).
+3. Read `internal/plumbing/intf/intf.go` to understand SRv6 endpoint encoding, interface naming, and base62↔hex conversion.
+4. Read `internal/plumbing/srv6/srv6.go` to understand kernel SRv6 ingress route management.
+5. Explore `internal/plumbing/` for shared kernel and network primitives (VRF, sysctl, interface naming, SRv6).
