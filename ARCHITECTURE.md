@@ -2,8 +2,8 @@
 
 > Galactic is the SRv6 data plane for multi-cloud VPC networking, deployed as two
 > binaries on each Kubernetes node: a CNI plugin that attaches containers to VPC
-> networks, and an agent that manages kernel SRv6 routes and distributes L3VPN BGP
-> paths via an embedded GoBGP server.
+> networks, and an agent that manages kernel SRv6 routes and distributes EVPN
+> (L2VPN/EVPN AFI/SAFI) paths via an embedded GoBGP server.
 
 _Last updated: 2026-06-14_
 
@@ -13,7 +13,7 @@ _Last updated: 2026-06-14_
 
 Galactic implements VPC isolation and cross-cluster reachability using Linux SRv6.
 When a pod is attached to a VPC, the CNI plugin creates the required kernel state
-(VRF, veth pair, SRv6 ingress route) and injects L3VPN BGP paths into the
+(VRF, veth pair, SRv6 ingress route) and injects EVPN paths into the
 node-local GoBGP daemon. GoBGP distributes those paths to a BGP route reflector,
 enabling pods on different nodes or clusters to reach each other via
 SRv6-encapsulated traffic.
@@ -92,7 +92,7 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the agent startup sequenc
 
 - **Identifiers in the SID.** VPC (48-bit) and VPCAttachment (16-bit) identifiers are packed into the low 64 bits of the SRv6 SID, making forwarding state fully self-describing without a lookup table.
 - **Base62 interface names.** Kernel interface names are Base62-encoded to stay within the 15-character limit (`vrfX-Y`, `galX-Y`). The hex form is used for BGP and SRv6; base62 for kernel interfaces.
-- **GoBGP embedded, not sidecar.** GoBGP runs in-process so the agent owns its lifecycle and can gate readiness on BGP availability. Peer and policy config is applied by the cosmos operator via `BGPProvider` / `BGPInstance` / `BGPPeer` CRDs.
+- **GoBGP embedded, not sidecar.** GoBGP runs in-process so the agent owns its lifecycle and can gate readiness on BGP availability. Peer and policy config is applied by the cosmos operator via `BGPProvider` / `BGPInstance` / `BGPPeer` CRDs. The provider advertises `L2VPN/EVPN` (AFI=25, SAFI=70) as its sole address family capability.
 - **CNI binary auto-detects mode.** The `galactic-cni` binary runs as both the CNI plugin (when `CNI_COMMAND` is set) and a CLI tool. This avoids shipping two separate binaries on the node.
 
 ---
