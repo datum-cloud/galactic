@@ -22,37 +22,29 @@ spec:
         - name: galactic-agent
           image: ghcr.io/datum-cloud/galactic:latest
           args:
-            - --gobgp-enabled=true
-            - --gobgp-api-port=50051
-            - --gobgp-log-level=panic
-            - --metrics-addr=:8082
-            - --health-addr=:8083
-            - --grpc-health-port=8084
+            - --port=33438
+            - --health-port=5000
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
           ports:
-            - name: metrics
-              containerPort: 8082
+            - name: grpc
+              containerPort: 33438
               protocol: TCP
-            - name: healthz
-              containerPort: 8083
-              protocol: TCP
-            - name: grpc-health
-              containerPort: 8084
+            - name: health
+              containerPort: 5000
               protocol: TCP
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: healthz
+            grpc:
+              port: 5000
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: healthz
+            grpc:
+              port: 5000
+              service: readyz
             initialDelaySeconds: 5
             periodSeconds: 10
           securityContext:

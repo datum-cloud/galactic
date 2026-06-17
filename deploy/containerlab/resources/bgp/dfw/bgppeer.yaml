@@ -6,7 +6,7 @@ spec:
   instanceRef: overlay
   providerSelector:
     matchLabels:
-      galactic.io/plane: overlay
+      galactic.io/role: overlay
   address: "fc00:0:8::1"
   asNumber: 65000
   remotePort: 1179

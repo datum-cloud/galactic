@@ -164,8 +164,8 @@ github.com/vishvananda/netns v0.0.5 h1:DfiHV+j8bA32MFM7bfEunvT8IAqQ/NzSJHtcmW5zd
 github.com/vishvananda/netns v0.0.5/go.mod h1:SpkAiCQRtJ6TvvxPnOSyH3BMl6unz3xZlaprSwhNNJM=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
-go.miloapis.com/cosmos v0.0.0-20260615212649-d08f7867c312 h1:bIGAtAgfMg8vUni2Te5m4qT2be4mxz9Gr3OJGJK+k7M=
-go.miloapis.com/cosmos v0.0.0-20260615212649-d08f7867c312/go.mod h1:c99/Iy0c7lwmI46d4brOQyRc1JKjzkl9xRIcU3hnHo4=
+go.miloapis.com/cosmos v0.0.0-20260616211804-7c3afe69d1e7 h1:4OVGp1zHzreRr9fJe5jBsMFGWDLPqdjBKMfk3q5ysEI=
+go.miloapis.com/cosmos v0.0.0-20260616211804-7c3afe69d1e7/go.mod h1:xOxb+AOoMVLwPePxvRNAQub9OCbF9zibIURgGowdY5U=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/otel v1.43.0 h1:mYIM03dnh5zfN7HautFE4ieIig9amkNANT+xcVxAj9I=

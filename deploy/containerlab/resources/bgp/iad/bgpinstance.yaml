@@ -5,7 +5,7 @@ metadata:
 spec:
   providerSelector:
     matchLabels:
-      galactic.io/plane: overlay
+      galactic.io/role: overlay
   asNumber: 65000
   listenPort: 1790
   routerIDSource: Auto
