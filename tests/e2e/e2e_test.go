@@ -50,41 +50,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestGalacticBinaryVersion runs the galactic binary with the "version"
-// subcommand inside a pod and verifies the output contains the expected fields.
-func TestGalacticBinaryVersion(t *testing.T) {
-	name := "e2e-version-check"
-	t.Cleanup(func() { deletePod(t, name) })
-	deletePod(t, name) // remove any leftover from a prior run
-
-	_, err := kubectl(
-		"run", name,
-		"--image="+image(),
-		"--image-pull-policy=Never",
-		"--restart=Never",
-		"--command", "--",
-		"/galactic-cni", "version",
-	)
-	if err != nil {
-		t.Fatalf("kubectl run failed: %v", err)
-	}
-
-	if err := waitForPodPhase(t, name, "Succeeded", podReadyTimeout); err != nil {
-		t.Fatalf("pod did not succeed: %v", err)
-	}
-
-	logs, err := kubectl("logs", name)
-	if err != nil {
-		t.Fatalf("kubectl logs failed: %v", err)
-	}
-
-	for _, field := range []string{"Galactic Version:", "Git Commit:", "Go Version:", "Platform:"} {
-		if !strings.Contains(logs, field) {
-			t.Errorf("expected %q in version output, got:\n%s", field, logs)
-		}
-	}
-}
-
 // TestCNIPluginVersionReport invokes the binary with CNI_COMMAND=VERSION, which
 // causes it to report the CNI spec versions it supports. The response must be
 // valid JSON containing a "cniVersion" key.

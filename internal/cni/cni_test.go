@@ -69,7 +69,7 @@ func TestParseConf(t *testing.T) {
 	}{
 		{
 			name:    "valid config",
-			input:   `{"cniVersion":"1.0.0","name":"test","type":"galactic","vpc":"abc","vpcattachment":"def","srv6_locator":"2001:db8::/48"}`,
+			input:   `{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"abc","vpcattachment":"def","srv6_locator":"2001:db8::/48"}`,
 			wantVPC: "abc",
 		},
 		{

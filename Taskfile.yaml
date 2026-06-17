@@ -80,9 +80,8 @@ tasks:
     desc: Build binary
     deps: [fmt, vet]
     cmds:
-      - go build -o bin/galactic-cni cmd/galactic/main.go
+      - go build -o bin/galactic-cni cmd/galactic-cni/main.go
       - file bin/galactic-cni
-      - ./bin/galactic-cni version
 
   docker-build:
     desc: Build container image

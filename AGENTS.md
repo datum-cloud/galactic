@@ -13,7 +13,7 @@ Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of a
 **Non-obvious decisions:**
 - VPC identifiers are 48-bit hex; VPCAttachment identifiers are 16-bit hex. These are embedded into IPv6 SRv6 endpoint addresses for deterministic route lookups. Both are supplied by an external operator via the CNI config.
 - Identifiers are also Base62-encoded for interface naming (VRF: `vrfX-Y`, veth host side: `galX-Y`) to keep kernel interface name length within limits.
-- The binary auto-detects CNI mode via the `CNI_COMMAND` env var; otherwise runs as a Cobra CLI with `agent`, `cni`, and `version` subcommands.
+- `galactic-cni` is a pure CNI plugin; `main()` calls `cni.RunPlugin()` directly with no CLI layer. `galactic-agent` uses flag parsing for its configuration flags.
 - The Kubernetes operator, VPC/VPCAttachment CRDs, and webhook code have been removed from this repository. They live in a separate companion operator project.
 
 ## Tech Stack
