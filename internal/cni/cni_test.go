@@ -33,7 +33,7 @@ func providerForNode(name, node string, extraLabels map[string]string) *provider
 	lbls := map[string]string{
 		labelNode:                node,
 		labelDaemon:              daemonGoBGP,
-		"galactic.io/plane":      "overlay",
+		"galactic.io/role":       "overlay",
 		"galactic.io/managed-by": "galactic-agent",
 	}
 	maps.Copy(lbls, extraLabels)

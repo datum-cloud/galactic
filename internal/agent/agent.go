@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,16 +19,12 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	providerv1alpha1 "go.miloapis.com/cosmos/api/proto/bgp/provider/v1alpha1"
 	providersv1alpha1 "go.miloapis.com/cosmos/api/providers/v1alpha1"
 
 	"go.datum.net/galactic/internal/bootstrap"
 	"go.datum.net/galactic/internal/gobgp"
-	"go.datum.net/galactic/internal/metrics"
 )
 
 var scheme = runtime.NewScheme()
@@ -42,13 +36,10 @@ func init() {
 
 // Options holds agent configuration.
 type Options struct {
-	MetricsAddr    string
-	HealthAddr     string
-	NodeName       string
-	Plane          string
-	GoBGPEnabled   bool
-	GoBGPLogLevel  string
-	GRPCHealthPort int
+	NodeName   string
+	Role       string
+	HealthPort int
+	Port       int
 }
 
 // Run starts galactic-agent and blocks until ctx is cancelled or a signal arrives.
@@ -60,11 +51,8 @@ func Run(ctx context.Context, opts Options) error {
 		opts.NodeName = os.Getenv("NODE_NAME")
 	}
 
-	metrics.MustRegister()
-	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
-
-	if !opts.GoBGPEnabled {
-		slog.Warn("no providers enabled; agent is running but will not configure any BGP daemons")
+	if opts.Role != "overlay" && opts.Role != "overlay-rr" {
+		return fmt.Errorf("invalid --role %q: must be overlay or overlay-rr", opts.Role)
 	}
 
 	restCfg, err := ctrl.GetConfig()
@@ -72,106 +60,78 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("get k8s config: %w", err)
 	}
 
-	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-		Scheme:                 scheme,
-		HealthProbeBindAddress: opts.HealthAddr,
-		Metrics:                metricsserver.Options{BindAddress: opts.MetricsAddr},
-	})
-	if err != nil {
-		return fmt.Errorf("new manager: %w", err)
-	}
-
-	// gRPC server — serves both the health check and the BGPProviderService for cosmos.
+	// Health gRPC server: Kubernetes probes connect here directly.
+	// "" (liveness) is SERVING immediately; "readyz" becomes SERVING once GoBGP is ready.
 	healthSrv := health.NewServer()
-	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	healthSrv.SetServingStatus("readyz", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
-	grpcSrv := grpc.NewServer()
-	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
+	healthGRPCSrv := grpc.NewServer()
+	grpc_health_v1.RegisterHealthServer(healthGRPCSrv, healthSrv)
 
-	grpcAddr := fmt.Sprintf("localhost:%d", opts.GRPCHealthPort)
-	grpcLis, err := net.Listen("tcp", grpcAddr)
+	healthLis, err := net.Listen("tcp", fmt.Sprintf(":%d", opts.HealthPort))
 	if err != nil {
-		return fmt.Errorf("listen grpc port %d: %w", opts.GRPCHealthPort, err)
+		return fmt.Errorf("listen health port %d: %w", opts.HealthPort, err)
 	}
 
 	go func() {
-		if err := grpcSrv.Serve(grpcLis); err != nil {
-			slog.Error("grpc server stopped", "err", err)
+		if err := healthGRPCSrv.Serve(healthLis); err != nil {
+			slog.Error("health grpc server stopped", "err", err)
 		}
 	}()
-	defer grpcSrv.GracefulStop()
+	defer healthGRPCSrv.GracefulStop()
 
-	if opts.GoBGPEnabled {
-		gobgpSrv := gobgp.New(gobgp.Config{
-			LogLevel: opts.GoBGPLogLevel,
-		})
+	// Provider gRPC server: BGPProviderService only (cosmos connects here).
+	providerSrv := grpc.NewServer()
 
-		// Register BGPProviderService so cosmos can configure GoBGP via gRPC.
-		providerv1alpha1.RegisterBGPProviderServiceServer(grpcSrv, gobgp.NewProviderServer(gobgpSrv))
+	providerAddr := fmt.Sprintf("localhost:%d", opts.Port)
+	providerLis, err := net.Listen("tcp", providerAddr)
+	if err != nil {
+		return fmt.Errorf("listen provider port %d: %w", opts.Port, err)
+	}
 
-		go func() {
-			if err := gobgpSrv.Start(ctx); err != nil {
-				slog.Error("gobgp server stopped", "err", err)
-			}
-		}()
-
-		// Wait for GoBGP to initialize, then mark health SERVING.
-		go func() {
-			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			if err := gobgpSrv.WaitReady(waitCtx); err != nil {
-				slog.Error("gobgp did not become ready", "err", err)
-				return
-			}
-			healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-			slog.Info("gobgp ready", "provider-addr", grpcAddr)
-		}()
-
-		// Bootstrap BGPProvider before starting the manager.
-		directClient, err := client.New(restCfg, client.Options{Scheme: scheme})
-		if err != nil {
-			return fmt.Errorf("create bootstrap client: %w", err)
+	go func() {
+		if err := providerSrv.Serve(providerLis); err != nil {
+			slog.Error("provider grpc server stopped", "err", err)
 		}
-		if opts.NodeName != "" {
-			if err := bootstrap.EnsureGoBGPProvider(ctx, directClient, opts.NodeName, opts.Plane, grpcAddr); err != nil {
-				return fmt.Errorf("bootstrap gobgp provider: %w", err)
-			}
+	}()
+	defer providerSrv.GracefulStop()
+
+	gobgpSrv := gobgp.New(gobgp.Config{})
+
+	// Register BGPProviderService so cosmos can configure GoBGP via gRPC.
+	providerv1alpha1.RegisterBGPProviderServiceServer(providerSrv, gobgp.NewProviderServer(gobgpSrv))
+
+	go func() {
+		if err := gobgpSrv.Start(ctx); err != nil {
+			slog.Error("gobgp server stopped", "err", err)
 		}
+	}()
 
-		defer healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	// Wait for GoBGP to initialize, then mark readyz SERVING.
+	go func() {
+		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := gobgpSrv.WaitReady(waitCtx); err != nil {
+			slog.Error("gobgp did not become ready", "err", err)
+			return
+		}
+		healthSrv.SetServingStatus("readyz", grpc_health_v1.HealthCheckResponse_SERVING)
+		slog.Info("gobgp ready", "provider-addr", providerAddr)
+	}()
 
-		// Readyz check: probe the gRPC health service we expose.
-		if err := mgr.AddReadyzCheck("gobgp", func(_ *http.Request) error {
-			conn, err := grpc.NewClient(
-				fmt.Sprintf("localhost:%d", opts.GRPCHealthPort),
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-			)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = conn.Close() }()
-			hc := grpc_health_v1.NewHealthClient(conn)
-			probeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			resp, err := hc.Check(probeCtx, &grpc_health_v1.HealthCheckRequest{})
-			if err != nil {
-				return err
-			}
-			if resp.Status != grpc_health_v1.HealthCheckResponse_SERVING {
-				return fmt.Errorf("gobgp not serving: %s", resp.Status)
-			}
-			return nil
-		}); err != nil {
-			return fmt.Errorf("add gobgp readyz check: %w", err)
+	directClient, err := client.New(restCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("create bootstrap client: %w", err)
+	}
+	if opts.NodeName != "" {
+		if err := bootstrap.EnsureGoBGPProvider(ctx, directClient, opts.NodeName, opts.Role, providerAddr); err != nil {
+			return fmt.Errorf("bootstrap gobgp provider: %w", err)
 		}
 	}
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		return fmt.Errorf("add healthz check: %w", err)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		return fmt.Errorf("add readyz check: %w", err)
-	}
+	defer healthSrv.SetServingStatus("readyz", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
-	return mgr.Start(ctx)
+	<-ctx.Done()
+	return nil
 }
