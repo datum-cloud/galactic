@@ -37,12 +37,10 @@ func newRootCommand() *cobra.Command {
 		"BGP plane label published on the BGPProvider (e.g. overlay, overlay-rr)")
 	cmd.Flags().BoolVar(&opts.GoBGPEnabled, "gobgp-enabled", false,
 		"Enable embedded GoBGP and publish BGPProvider")
-	cmd.Flags().IntVar(&opts.GoBGPAPIPort, "gobgp-api-port", 50051,
-		"Port for the embedded GoBGP gRPC API (cosmos dials this)")
 	cmd.Flags().StringVar(&opts.GoBGPLogLevel, "gobgp-log-level", "panic",
 		"GoBGP internal log level (debug, info, warn, error, panic)")
 	cmd.Flags().IntVar(&opts.GRPCHealthPort, "grpc-health-port", 8084,
-		"Port for the gRPC health service (used by Kubernetes readiness probes)")
+		"Port for the gRPC server (Kubernetes probes and cosmos BGPProviderService)")
 
 	return cmd
 }

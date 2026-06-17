@@ -27,7 +27,6 @@ spec:
           imagePullPolicy: Never
           args:
             - --gobgp-enabled=true
-            - --gobgp-api-port=50051
             - --gobgp-log-level=debug
             - --metrics-addr=:8082
             - --health-addr=:8083

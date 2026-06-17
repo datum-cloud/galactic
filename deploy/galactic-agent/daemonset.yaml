@@ -23,7 +23,6 @@ spec:
           image: ghcr.io/datum-cloud/galactic:latest
           args:
             - --gobgp-enabled=true
-            - --gobgp-api-port=50051
             - --gobgp-log-level=panic
             - --metrics-addr=:8082
             - --health-addr=:8083

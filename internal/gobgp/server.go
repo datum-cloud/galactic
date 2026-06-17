@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
-	"time"
+	"sync/atomic"
 
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
 )
@@ -16,8 +15,6 @@ const defaultLogLevel = "panic"
 
 // Config holds configuration for the embedded GoBGP server.
 type Config struct {
-	// APIPort is the port the GoBGP gRPC API listens on. Cosmos dials this port.
-	APIPort int
 	// LogLevel controls GoBGP's internal log verbosity.
 	// Valid values: debug, info, warn, error, panic. Defaults to panic.
 	LogLevel string
@@ -25,61 +22,67 @@ type Config struct {
 
 // Server wraps an embedded GoBGP BgpServer.
 type Server struct {
-	cfg Config
-	bgp *gobgpserver.BgpServer
+	cfg   Config
+	bgp   atomic.Pointer[gobgpserver.BgpServer]
+	ready chan struct{}
 }
 
 // New creates a Server with the given config. Call Start to run it.
 func New(cfg Config) *Server {
-	if cfg.APIPort == 0 {
-		cfg.APIPort = 50051
-	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = defaultLogLevel
 	}
-	return &Server{cfg: cfg}
-}
-
-// Addr returns the gRPC API address the server listens on.
-func (s *Server) Addr() string {
-	return fmt.Sprintf("localhost:%d", s.cfg.APIPort)
+	return &Server{
+		cfg:   cfg,
+		ready: make(chan struct{}),
+	}
 }
 
 // Start runs the embedded GoBGP server until ctx is cancelled.
 // It blocks until the server has stopped.
 func (s *Server) Start(ctx context.Context) error {
+	b := s.newBgpServer()
+	s.bgp.Store(b)
+	close(s.ready)
+
+	go b.Serve()
+
+	<-ctx.Done()
+	if current := s.bgp.Load(); current != nil {
+		current.Stop()
+	}
+	return nil
+}
+
+// Reconfigure replaces the running BgpServer with a fresh instance.
+// StopBgp in GoBGP v4 terminates the Serve loop, making the server permanently
+// dead. Call this instead of StopBgp+StartBgp when reconfiguration is needed.
+// The caller must call StartBgp on the returned server.
+func (s *Server) Reconfigure() (*gobgpserver.BgpServer, error) {
+	if old := s.bgp.Load(); old != nil {
+		old.Stop()
+	}
+	b := s.newBgpServer()
+	s.bgp.Store(b)
+	go b.Serve()
+	return b, nil
+}
+
+func (s *Server) newBgpServer() *gobgpserver.BgpServer {
 	level := parseLogLevel(s.cfg.LogLevel)
 	levelVar := &slog.LevelVar{}
 	levelVar.Set(level)
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: levelVar}))
-
-	s.bgp = gobgpserver.NewBgpServer(
-		gobgpserver.GrpcListenAddress(s.Addr()),
-		gobgpserver.LoggerOption(logger, levelVar),
-	)
-
-	go s.bgp.Serve()
-
-	<-ctx.Done()
-	s.bgp.Stop()
-	return nil
+	return gobgpserver.NewBgpServer(gobgpserver.LoggerOption(logger, levelVar))
 }
 
-// WaitReady blocks until the GoBGP gRPC API port accepts TCP connections or
-// ctx is cancelled. Returns an error if ctx is cancelled before the port is ready.
+// WaitReady blocks until the GoBGP server is initialized or ctx is cancelled.
 func (s *Server) WaitReady(ctx context.Context) error {
-	addr := s.Addr()
-	for {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("gobgp not ready at %s: %w", addr, ctx.Err())
-		case <-time.After(50 * time.Millisecond):
-		}
+	select {
+	case <-s.ready:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("gobgp not ready: %w", ctx.Err())
 	}
 }
 

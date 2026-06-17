@@ -21,12 +21,9 @@ deploy_cosmos() {
   echo "Deploying cosmos operator to ${node}..."
   # Copy the entire config/ directory so that the kustomization's ../crd reference resolves
   docker cp "${COSMOS_DIR}/config" "${node}:/galactic/resources/cosmos-config/"
-  # Use locally built image; patch imagePullPolicy to Never
-  docker exec "${node}" kubectl apply -k /galactic/resources/cosmos-config/deploy/
-  docker exec "${node}" kubectl patch daemonset bgp \
-    -n bgp-system \
-    --type='json' \
-    -p='[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"cosmos:latest"},{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]'
+  # Copy the local overlay (image + imagePullPolicy overrides for Kind)
+  docker cp "${RESOURCES_DIR}/cosmos" "${node}:/galactic/resources/cosmos-overlay/"
+  docker exec "${node}" kubectl apply -k /galactic/resources/cosmos-overlay/
 }
 
 apply_overlay dfw-control-plane dfw
@@ -36,11 +33,5 @@ apply_overlay iad-control-plane iad
 deploy_cosmos dfw-control-plane
 deploy_cosmos sjc-control-plane
 deploy_cosmos iad-control-plane
-
-# iad hosts the overlay-rr BGPInstance (route reflector), which requires infra role.
-echo "Patching cosmos clusterRole to infra on iad-control-plane..."
-docker exec iad-control-plane kubectl patch configmap cosmos-config \
-  -n cosmos-system --type=merge -p '{"data":{"clusterRole":"infra"}}'
-docker exec iad-control-plane kubectl rollout restart daemonset bgp -n bgp-system
 
 echo "Done."

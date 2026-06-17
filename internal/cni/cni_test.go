@@ -40,8 +40,8 @@ func providerForNode(name, node string, extraLabels map[string]string) *provider
 	return &providersv1alpha1.BGPProvider{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: lbls},
 		Spec: providersv1alpha1.BGPProviderSpec{
-			Type:  "GoBGP",
-			GoBGP: &providersv1alpha1.GoBGPProviderConfig{Endpoint: "localhost:50051"},
+			Type:     "GoBGP",
+			Endpoint: "localhost:50051",
 		},
 	}
 }

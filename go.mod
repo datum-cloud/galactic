@@ -11,10 +11,9 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.2-0.20260610182031-c05a276ed0e0
-	go.miloapis.com/cosmos v0.0.0-20260615212649-d08f7867c312
+	go.miloapis.com/cosmos v0.0.0-20260616211804-7c3afe69d1e7
 	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.81.1
-	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.0
 	sigs.k8s.io/controller-runtime v0.24.1
@@ -89,6 +88,7 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	honnef.co/go/tools v0.3.2 // indirect
+	k8s.io/api v0.36.0 // indirect
 	k8s.io/apiextensions-apiserver v0.36.0 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260317180543-43fb72c5454a // indirect

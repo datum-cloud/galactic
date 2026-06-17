@@ -51,10 +51,8 @@ func EnsureGoBGPProvider(ctx context.Context, c client.Client, nodeName, plane, 
 		obj.Labels[labelPlane] = plane
 		obj.Labels[labelDaemon] = "gobgp"
 		obj.Spec = providersv1alpha1.BGPProviderSpec{
-			Type: "GoBGP",
-			GoBGP: &providersv1alpha1.GoBGPProviderConfig{
-				Endpoint: endpoint,
-			},
+			Type:     "GoBGP",
+			Endpoint: endpoint,
 		}
 		return nil
 	})

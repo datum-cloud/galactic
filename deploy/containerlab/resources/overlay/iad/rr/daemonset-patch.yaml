@@ -28,7 +28,6 @@ spec:
         - name: galactic-agent
           args:
             - --gobgp-enabled=true
-            - --gobgp-api-port=50052
             - --gobgp-log-level=debug
             - --metrics-addr=:9085
             - --health-addr=:9086

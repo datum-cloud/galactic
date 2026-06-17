@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	providerv1alpha1 "go.miloapis.com/cosmos/api/proto/bgp/provider/v1alpha1"
 	providersv1alpha1 "go.miloapis.com/cosmos/api/providers/v1alpha1"
 
 	"go.datum.net/galactic/internal/bootstrap"
@@ -46,7 +47,6 @@ type Options struct {
 	NodeName       string
 	Plane          string
 	GoBGPEnabled   bool
-	GoBGPAPIPort   int
 	GoBGPLogLevel  string
 	GRPCHealthPort int
 }
@@ -81,30 +81,33 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("new manager: %w", err)
 	}
 
-	// gRPC health server — always started; reports NOT_SERVING until GoBGP is ready.
+	// gRPC server — serves both the health check and the BGPProviderService for cosmos.
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
 	grpcSrv := grpc.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 
-	grpcLis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", opts.GRPCHealthPort))
+	grpcAddr := fmt.Sprintf("localhost:%d", opts.GRPCHealthPort)
+	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
-		return fmt.Errorf("listen grpc health port %d: %w", opts.GRPCHealthPort, err)
+		return fmt.Errorf("listen grpc port %d: %w", opts.GRPCHealthPort, err)
 	}
 
 	go func() {
 		if err := grpcSrv.Serve(grpcLis); err != nil {
-			slog.Error("grpc health server stopped", "err", err)
+			slog.Error("grpc server stopped", "err", err)
 		}
 	}()
 	defer grpcSrv.GracefulStop()
 
 	if opts.GoBGPEnabled {
 		gobgpSrv := gobgp.New(gobgp.Config{
-			APIPort:  opts.GoBGPAPIPort,
 			LogLevel: opts.GoBGPLogLevel,
 		})
+
+		// Register BGPProviderService so cosmos can configure GoBGP via gRPC.
+		providerv1alpha1.RegisterBGPProviderServiceServer(grpcSrv, gobgp.NewProviderServer(gobgpSrv))
 
 		go func() {
 			if err := gobgpSrv.Start(ctx); err != nil {
@@ -112,7 +115,7 @@ func Run(ctx context.Context, opts Options) error {
 			}
 		}()
 
-		// Wait for GoBGP gRPC API to accept connections, then mark health SERVING.
+		// Wait for GoBGP to initialize, then mark health SERVING.
 		go func() {
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
@@ -121,7 +124,7 @@ func Run(ctx context.Context, opts Options) error {
 				return
 			}
 			healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-			slog.Info("gobgp ready", "addr", gobgpSrv.Addr())
+			slog.Info("gobgp ready", "provider-addr", grpcAddr)
 		}()
 
 		// Bootstrap BGPProvider before starting the manager.
@@ -130,22 +133,12 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("create bootstrap client: %w", err)
 		}
 		if opts.NodeName != "" {
-			if err := bootstrap.EnsureGoBGPProvider(ctx, directClient, opts.NodeName, opts.Plane, gobgpSrv.Addr()); err != nil {
+			if err := bootstrap.EnsureGoBGPProvider(ctx, directClient, opts.NodeName, opts.Plane, grpcAddr); err != nil {
 				return fmt.Errorf("bootstrap gobgp provider: %w", err)
 			}
 		}
 
-		// Delete BGPProvider on clean shutdown using a fresh context.
-		defer func() {
-			deleteCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if opts.NodeName != "" {
-				if err := bootstrap.DeleteGoBGPProvider(deleteCtx, directClient, opts.NodeName, opts.Plane); err != nil {
-					slog.Error("failed to delete BGPProvider on shutdown", "err", err)
-				}
-			}
-			healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-		}()
+		defer healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
 		// Readyz check: probe the gRPC health service we expose.
 		if err := mgr.AddReadyzCheck("gobgp", func(_ *http.Request) error {
