@@ -19,6 +19,8 @@ import (
 const (
 	safiUnicast       = "unicast"
 	globalPolicyTable = "global"
+	afiL2VPN          = "L2VPN"
+	safiEVPN          = "EVPN"
 )
 
 // ProviderServer implements providerv1alpha1.BGPProviderServiceServer, translating
@@ -55,8 +57,7 @@ func (p *ProviderServer) Capabilities(_ context.Context, _ *providerv1alpha1.Cap
 	return &providerv1alpha1.CapabilitiesResponse{
 		Capabilities: &providerv1alpha1.CapabilitySet{
 			AddressFamilies: []*providerv1alpha1.AddressFamily{
-				{Afi: "IPv4", Safi: "Unicast"},
-				{Afi: "IPv6", Safi: "Unicast"},
+				{Afi: afiL2VPN, Safi: safiEVPN},
 			},
 			RouteReflection: false,
 			Bfd:             false,
