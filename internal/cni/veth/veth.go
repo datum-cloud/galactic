@@ -9,8 +9,8 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
-	"go.datum.net/galactic/internal/plumbing/sysctl"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
 func updateForwardRule(interfaceName string, action string) error {

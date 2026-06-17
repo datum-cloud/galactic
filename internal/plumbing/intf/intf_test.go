@@ -20,6 +20,10 @@ const (
 	// Formatted for interface name generation (padded by the template).
 	testVPC           = "0000000jU" // base62 of 1234, right-padded to 9 chars
 	testVPCAttachment = "00G"       // base62 of 42, right-padded to 3 chars
+
+	testLocator    = "2607:ed40:ff00::/64"
+	testSIDEncoded = "2607:ed40:ff00::4d2:2a"
+	testMaxVPCAtt  = "ffff"
 )
 
 func TestGenerateInterfaceNameVRF(t *testing.T) {
@@ -98,7 +102,7 @@ func TestBase62ToHex(t *testing.T) {
 }
 
 func TestHexBase62RoundTrip(t *testing.T) {
-	hexInputs := []string{"4d2", "2a", "0", "ffffffffffff", "ffff"}
+	hexInputs := []string{"4d2", "2a", "0", "ffffffffffff", testMaxVPCAtt}
 	for _, hex := range hexInputs {
 		b62, err := intf.HexToBase62(hex)
 		if err != nil {
@@ -127,17 +131,17 @@ func TestEncodeSRv6Endpoint(t *testing.T) {
 	}{
 		{
 			name:          "Valid64BitMask",
-			srv6Net:       "2607:ed40:ff00::/64",
+			srv6Net:       testLocator,
 			vpc:           testVPCHex,
 			vpcAttachment: testVPCAttachmentHex,
-			want:          "2607:ed40:ff00::4d2:2a",
+			want:          testSIDEncoded,
 		},
 		{
 			name:          "Valid48BitMask",
 			srv6Net:       "2607:ed40:ff00::/48",
 			vpc:           testVPCHex,
 			vpcAttachment: testVPCAttachmentHex,
-			want:          "2607:ed40:ff00::4d2:2a",
+			want:          testSIDEncoded,
 		},
 		{
 			name:          "ZeroIDs",
@@ -181,7 +185,7 @@ func TestDecodeSRv6Endpoint(t *testing.T) {
 	}{
 		{
 			name:              "Valid",
-			endpoint:          "2607:ed40:ff00::4d2:2a",
+			endpoint:          testSIDEncoded,
 			wantVPC:           testVPCHex,
 			wantVPCAttachment: testVPCAttachmentHex,
 		},
@@ -193,9 +197,9 @@ func TestDecodeSRv6Endpoint(t *testing.T) {
 		},
 		{
 			name:              "MaxVPCAttachment",
-			endpoint:          "2607:ed40:ff00::ffff",
+			endpoint:          "2607:ed40:ff00::" + testMaxVPCAtt,
 			wantVPC:           "000000000000",
-			wantVPCAttachment: "ffff",
+			wantVPCAttachment: testMaxVPCAtt,
 		},
 		{
 			name:      "IPv4Rejected",
@@ -219,16 +223,15 @@ func TestDecodeSRv6Endpoint(t *testing.T) {
 }
 
 func TestEncodeDecodeSRv6RoundTrip(t *testing.T) {
-	locator := "2607:ed40:ff00::/64"
 	cases := []struct{ vpc, att string }{
 		{testVPCHex, testVPCAttachmentHex},
 		{"000000000000", "0000"},
-		{"ffffffffffff", "ffff"},
+		{"ffffffffffff", testMaxVPCAtt},
 		{"000000000001", "0001"},
 	}
 
 	for _, c := range cases {
-		encoded, err := intf.EncodeSRv6Endpoint(locator, c.vpc, c.att)
+		encoded, err := intf.EncodeSRv6Endpoint(testLocator, c.vpc, c.att)
 		if err != nil {
 			t.Errorf("EncodeSRv6Endpoint(%s, %s) unexpected error: %v", c.vpc, c.att, err)
 			continue

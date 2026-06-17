@@ -15,10 +15,12 @@ case "$COMMAND" in
 
     trap 'kind delete cluster --name "$CLUSTER_NAME"' EXIT
 
-    echo "--- Loading kernel modules required by galactic"
-    sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends linux-modules-extra-azure
-    sudo modprobe vrf
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+      echo "--- Loading kernel modules required by galactic"
+      sudo apt-get update -qq
+      sudo apt-get install -y --no-install-recommends linux-modules-extra-azure
+      sudo modprobe vrf
+    fi
 
     echo "--- Installing kind"
     go install sigs.k8s.io/kind@latest

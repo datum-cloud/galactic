@@ -26,7 +26,7 @@ func newRootCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:          "galactic-agent",
-		Short:        "BGP Provider implementat for Cosmos",
+		Short:        "BGP Provider implementation for Cosmos",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return agent.Run(cmd.Context(), *opts)

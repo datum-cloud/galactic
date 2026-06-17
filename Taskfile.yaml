@@ -171,8 +171,8 @@ tasks:
     run: once
     cmds:
       - |
-        if find . -name "*.yml" -not -path "./.git/*" | grep -q .; then
-          find . -name "*.yml" -not -path "./.git/*"
+        if find . -name "*.yml" -not -path "./.git/*" -not -path "./deploy/containerlab/clab-gvpc/*" | grep -q .; then
+          find . -name "*.yml" -not -path "./.git/*" -not -path "./deploy/containerlab/clab-gvpc/*"
           echo "ERROR: .yml files found; rename to .yaml"
           exit 1
         fi

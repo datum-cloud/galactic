@@ -31,9 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -54,12 +54,12 @@ func init() {
 // PluginConf is the CNI plugin configuration passed via stdin on each invocation.
 type PluginConf struct {
 	types.PluginConf
-	VPC           string            `json:"vpc"`
-	VPCAttachment string            `json:"vpcattachment"`
-	MTU           int               `json:"mtu,omitempty"`
+	VPC           string        `json:"vpc"`
+	VPCAttachment string        `json:"vpcattachment"`
+	MTU           int           `json:"mtu,omitempty"`
 	Terminations  []Termination `json:"terminations,omitempty"`
 	IPAM          IPAM          `json:"ipam,omitempty"`
-	SRv6Locator   string            `json:"srv6_locator"`
+	SRv6Locator   string        `json:"srv6_locator"`
 }
 
 func RunPlugin() {
@@ -351,8 +351,8 @@ func cmdDel(args *skel.CmdArgs) error {
 
 type HostDevicePluginConf struct {
 	types.PluginConf
-	Device string   `json:"device"`
-	IPAM   IPAM `json:"ipam,omitempty"`
+	Device string `json:"device"`
+	IPAM   IPAM   `json:"ipam,omitempty"`
 }
 
 func hostDeviceExecutable() string {
