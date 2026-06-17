@@ -44,19 +44,17 @@ galactic/
 │   └── galactic-agent/  # Agent binary
 ├── internal/
 │   ├── agent/           # Agent run loop; wires GoBGP, health, metrics, bootstrap
-│   │   └── srv6/        # Kernel SRv6 ingress route add/del (END.DT46)
 │   ├── bootstrap/       # BGPProvider CR lifecycle (create on start, delete on stop)
 │   ├── cni/             # CNI cmdAdd / cmdDel
-│   │   ├── bgp/         # L3VPN path injection into local GoBGP
 │   │   ├── route/       # Host-side static routes via netlink
 │   │   └── veth/        # veth pair management
 │   ├── gobgp/           # Embedded GoBGP server lifecycle
-│   └── metrics/         # Prometheus metrics (galactic_agent_*)
-├── pkg/common/
-│   ├── cni/             # Shared CNI config types
-│   ├── sysctl/          # Interface sysctl helpers
-│   ├── util/            # SRv6 encoding, interface naming, base62↔hex
-│   └── vrf/             # Linux VRF create/delete/lookup
+│   ├── metrics/         # Prometheus metrics (galactic_agent_*)
+│   └── plumbing/        # Low-level kernel and network primitives
+│       ├── intf/        # Interface naming, base62↔hex encoding, SRv6 endpoint encode/decode
+│       ├── srv6/        # SRv6 ingress route add/del (END.DT46)
+│       ├── sysctl/      # Interface sysctl helpers
+│       └── vrf/         # Linux VRF create/delete/lookup
 ├── deploy/
 │   ├── galactic-agent/  # Kustomize: DaemonSet, RBAC, ServiceAccount
 │   └── containerlab/    # ContainerLab lab topology and scripts
@@ -78,15 +76,15 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the agent startup sequenc
 
 | Component | Binary | Role |
 |-----------|--------|------|
-| `internal/agent` | `galactic-agent` | Run loop; wires all agent subsystems |
-| `internal/agent/srv6` | `galactic-agent` | Kernel SRv6 route add/del |
+| `internal/agent` | `galactic-agent` | Run loop; wires GoBGP, health, metrics, bootstrap |
 | `internal/bootstrap` | `galactic-agent` | BGPProvider CR lifecycle |
 | `internal/gobgp` | `galactic-agent` | Embedded GoBGP server |
 | `internal/metrics` | `galactic-agent` | Prometheus metrics |
 | `internal/cni` | `galactic-cni` | CNI cmdAdd / cmdDel |
-| `internal/cni/bgp` | `galactic-cni` | L3VPN path injection into GoBGP |
-| `pkg/common/vrf` | both | Linux VRF management |
-| `pkg/common/util` | both | SRv6 encoding, interface naming |
+| `internal/plumbing/intf` | both | Interface naming, base62↔hex encoding, SRv6 endpoint encode/decode |
+| `internal/plumbing/srv6` | both | SRv6 ingress route add/del (END.DT46) |
+| `internal/plumbing/vrf` | both | Linux VRF create/delete/lookup |
+| `internal/plumbing/sysctl` | both | Interface sysctl helpers |
 
 ---
 
@@ -102,4 +100,4 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the agent startup sequenc
 ## Known Constraints
 
 - **GoBGP RIB is ephemeral.** All BGP state is in-process memory. On restart, sessions and paths must be re-established. The cosmos operator is responsible for re-applying config.
-- **No kernel-path unit tests.** `internal/cni`, `internal/agent/srv6`, and `pkg/common/vrf` require `CAP_NET_ADMIN` and a real kernel. Coverage comes from the e2e suite (`task ci:e2etest`), which only runs on `main` and release tags.
+- **No kernel-path unit tests.** `internal/cni`, `internal/plumbing/srv6`, and `internal/plumbing/vrf` require `CAP_NET_ADMIN` and a real kernel. `internal/plumbing/intf` is fully unit-testable (pure functions only). Coverage comes from the e2e suite (`task ci:e2etest`), which only runs on `main` and release tags.

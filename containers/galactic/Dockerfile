@@ -27,10 +27,10 @@ COPY internal/ internal/
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
-      -X go.datum.net/galactic/internal/cmd/version.Version=${VERSION} \
-      -X go.datum.net/galactic/internal/cmd/version.GitCommit=${GIT_COMMIT} \
-      -X go.datum.net/galactic/internal/cmd/version.GitTreeState=${GIT_TREE_STATE} \
-      -X go.datum.net/galactic/internal/cmd/version.BuildDate=${BUILD_DATE}" \
+      -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
+      -X go.datum.net/galactic/internal/metadata.GitCommit=${GIT_COMMIT} \
+      -X go.datum.net/galactic/internal/metadata.GitTreeState=${GIT_TREE_STATE} \
+      -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE}" \
     -o galactic-cni cmd/galactic-cni/main.go
 
 # Use distroless as minimal base image to package the binary

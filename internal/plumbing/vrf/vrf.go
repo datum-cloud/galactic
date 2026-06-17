@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Package vrf manages Linux VRF interfaces for Galactic VPC network isolation.
+// Each VPC attachment gets its own VRF with a unique routing table ID.
+// Requires CAP_NET_ADMIN.
 package vrf
 
 import (
@@ -13,8 +16,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vishvananda/netlink"
-	"go.datum.net/galactic/pkg/common/sysctl"
-	"go.datum.net/galactic/pkg/common/util"
+	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
 const minVRFId = uint32(1)
@@ -24,11 +27,14 @@ const maxVRFId = uint32(math.MaxUint32 - 1)
 // scanning the same free table ID and both attempting to create a VRF with it.
 var vrfMu sync.Mutex
 
+// Add creates a Linux VRF interface for the given base62-encoded VPC and
+// VPCAttachment, allocating the next available routing table ID and applying
+// the required sysctl settings. Concurrent calls are serialized internally.
 func Add(vpc, vpcAttachment string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
 
-	name := util.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
 	vrfId, err := findNextAvailableVRFId()
 	if err != nil {
@@ -57,8 +63,10 @@ func Add(vpc, vpcAttachment string) error {
 	return netlink.LinkSetUp(vrf)
 }
 
+// Delete flushes all routes from the VRF routing table and removes the VRF
+// interface for the given base62-encoded VPC and VPCAttachment.
 func Delete(vpc, vpcAttachment string) error {
-	name := util.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
 	vrfId, err := getVRFIdForInterface(name)
 	if err != nil {
@@ -77,8 +85,10 @@ func Delete(vpc, vpcAttachment string) error {
 	return netlink.LinkDel(link)
 }
 
-func GetVRFIdForVPC(vpc, vpcAttachment string) (uint32, error) {
-	return getVRFIdForInterface(util.GenerateInterfaceNameVRF(vpc, vpcAttachment))
+// TableID returns the Linux routing table ID for the VRF associated with the
+// given base62-encoded VPC and VPCAttachment.
+func TableID(vpc, vpcAttachment string) (uint32, error) {
+	return getVRFIdForInterface(intf.GenerateInterfaceNameVRF(vpc, vpcAttachment))
 }
 
 func flush(vrfId uint32) error {

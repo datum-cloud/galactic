@@ -11,9 +11,8 @@ This document defines the coding standards, naming rules, error handling pattern
 - Module: `go.datum.net/galactic`
 - `cmd/galactic-cni/main.go` — CNI plugin entry point; calls `cni.RunPlugin()` directly
 - `cmd/galactic-agent/main.go` — agent entry point; parses flags and calls `agent.Run()`
-- `pkg/common/` — utilities shared between agent and CNI
-- `pkg/proto/local/` — gRPC / protobuf generated files plus hand-written convenience wrapper for CNI-to-agent communication
-- `internal/agent/` — agent entry point and gRPC server; `srv6/` subdirectory owns kernel SRv6 route and VRF management
+- `internal/plumbing/` — low-level kernel and network primitives shared between agent and CNI (`intf`, `srv6`, `sysctl`, `vrf`)
+- `internal/agent/` — agent entry point and gRPC server
 - `internal/cni/` — CNI plugin (cmdAdd / cmdDel implementation)
 - `internal/cmd/version/` — ldflags variables (Version, GitCommit, etc.) set at build time
 - `internal/gobgp/` — embedded GoBGP server lifecycle
@@ -39,7 +38,7 @@ import (
 
     "google.golang.org/grpc"
 
-    "go.datum.net/galactic/pkg/proto/local"
+    "go.datum.net/galactic/internal/plumbing/intf"
 )
 ```
 
@@ -87,7 +86,7 @@ const MaxVPCAttachment uint64 = 0xFFFF
 
 ### Code generation
 
-Generated protobuf files (`*.pb.go`, `*_grpc.pb.go` in `pkg/proto/local/`) must never be hand-edited. Regenerate them using the `protoc` toolchain when `.proto` files change. Generated files are committed to version control.
+Generated protobuf files (`*.pb.go`, `*_grpc.pb.go`) must never be hand-edited. Regenerate them using the `protoc` toolchain when `.proto` files change. Generated files are committed to version control.
 
 ### Linting
 
@@ -135,15 +134,14 @@ for _, tt := range tests {
 ### What not to test
 
 - Do not write tests for generated code (`*.pb.go`, `*_grpc.pb.go`).
-- Agent and CNI kernel-path code (`internal/agent/srv6/`, `internal/cni/`) currently has no unit coverage; new code in those paths should prefer integration/e2e over fragile mock-heavy unit tests.
+- Agent and CNI kernel-path code (`internal/plumbing/srv6/`, `internal/cni/`) currently has no unit coverage; new code in those paths should prefer integration/e2e over fragile mock-heavy unit tests.
 
 ---
 
 ## Protobuf / gRPC
 
-- `.proto` files live in `pkg/proto/local/` (CNI-to-agent local gRPC).
 - Generated `*.pb.go` / `*_grpc.pb.go` files must never be hand-edited.
-- Each proto package has a hand-written convenience wrapper (`local.go`) that exposes a cleaner Go API over the generated types. Add helpers there rather than importing generated types directly in application code.
+- Each proto package has a hand-written convenience wrapper that exposes a cleaner Go API over the generated types. Add helpers there rather than importing generated types directly in application code.
 
 ---
 

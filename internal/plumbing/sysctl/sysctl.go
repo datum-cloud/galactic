@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Package sysctl applies kernel sysctl settings required for VRF-based
+// container networking. Requires CAP_NET_ADMIN.
 package sysctl
 
 import (
@@ -10,7 +12,7 @@ import (
 	gosysctl "github.com/lorenzosaino/go-sysctl"
 )
 
-var INTERFACE_SETTINGS = []struct {
+var interfaceSettings = []struct {
 	format string
 	value  string
 }{
@@ -21,8 +23,10 @@ var INTERFACE_SETTINGS = []struct {
 	{"net.ipv6.conf.%s.proxy_ndp", "1"},
 }
 
+// ConfigureInterfaceSysctls applies forwarding, rp_filter, and proxy ARP/NDP
+// sysctl settings to iface, which are required for correct VRF packet handling.
 func ConfigureInterfaceSysctls(iface string) error {
-	for _, entry := range INTERFACE_SETTINGS {
+	for _, entry := range interfaceSettings {
 		key := fmt.Sprintf(entry.format, iface)
 		if err := gosysctl.Set(key, entry.value); err != nil {
 			return err

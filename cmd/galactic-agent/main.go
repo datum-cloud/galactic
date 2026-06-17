@@ -1,4 +1,7 @@
-// Command galactic-agent is the node-local execution agent for Galactic.
+// Copyright 2025 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package main
 
 import (
@@ -23,7 +26,7 @@ func newRootCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:          "galactic-agent",
-		Short:        "Node-local execution agent for Galactic VPC networking",
+		Short:        "BGP Provider implementat for Cosmos",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return agent.Run(cmd.Context(), *opts)
