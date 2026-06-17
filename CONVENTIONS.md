@@ -9,12 +9,13 @@ This document defines the coding standards, naming rules, error handling pattern
 ### Module and package layout
 
 - Module: `go.datum.net/galactic`
-- `cmd/galactic/main.go` — binary entry point; all Cobra subcommands registered here
+- `cmd/galactic-cni/main.go` — CNI plugin entry point; calls `cni.RunPlugin()` directly
+- `cmd/galactic-agent/main.go` — agent entry point; parses flags and calls `agent.Run()`
 - `pkg/common/` — utilities shared between agent and CNI
 - `pkg/proto/local/` — gRPC / protobuf generated files plus hand-written convenience wrapper for CNI-to-agent communication
 - `internal/agent/` — agent entry point and gRPC server; `srv6/` subdirectory owns kernel SRv6 route and VRF management
 - `internal/cni/` — CNI plugin (cmdAdd / cmdDel implementation)
-- `internal/cmd/` — one sub-package per Cobra subcommand (`cni`, `version`)
+- `internal/cmd/version/` — ldflags variables (Version, GitCommit, etc.) set at build time
 - `internal/gobgp/` — embedded GoBGP server lifecycle
 - `internal/bootstrap/` — agent startup sequencing (BGPProvider resource management)
 - `internal/metrics/` — Prometheus metrics registration

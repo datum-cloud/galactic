@@ -43,7 +43,7 @@ spec:
     {
       "cniVersion": "0.3.1",
       "name": "galactic-test",
-      "type": "galactic",
+      "type": "galactic-cni",
       "vpc": "2",
       "vpcattachment": "1",
       "srv6_locator": "2001:db8:ff01::/48",

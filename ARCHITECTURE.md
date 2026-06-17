@@ -40,7 +40,7 @@ enabling automatic cross-node path import without explicit RT configuration.
 ```
 galactic/
 ├── cmd/
-│   ├── galactic/        # CNI binary
+│   ├── galactic-cni/    # CNI binary
 │   └── galactic-agent/  # Agent binary
 ├── internal/
 │   ├── agent/           # Agent run loop; wires GoBGP, health, metrics, bootstrap
@@ -83,8 +83,8 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the agent startup sequenc
 | `internal/bootstrap` | `galactic-agent` | BGPProvider CR lifecycle |
 | `internal/gobgp` | `galactic-agent` | Embedded GoBGP server |
 | `internal/metrics` | `galactic-agent` | Prometheus metrics |
-| `internal/cni` | `galactic` | CNI cmdAdd / cmdDel |
-| `internal/cni/bgp` | `galactic` | L3VPN path injection into GoBGP |
+| `internal/cni` | `galactic-cni` | CNI cmdAdd / cmdDel |
+| `internal/cni/bgp` | `galactic-cni` | L3VPN path injection into GoBGP |
 | `pkg/common/vrf` | both | Linux VRF management |
 | `pkg/common/util` | both | SRv6 encoding, interface naming |
 
@@ -95,7 +95,7 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the agent startup sequenc
 - **Identifiers in the SID.** VPC (48-bit) and VPCAttachment (16-bit) identifiers are packed into the low 64 bits of the SRv6 SID, making forwarding state fully self-describing without a lookup table.
 - **Base62 interface names.** Kernel interface names are Base62-encoded to stay within the 15-character limit (`vrfX-Y`, `galX-Y`). The hex form is used for BGP and SRv6; base62 for kernel interfaces.
 - **GoBGP embedded, not sidecar.** GoBGP runs in-process so the agent owns its lifecycle and can gate readiness on BGP availability. Peer and policy config is applied by the cosmos operator via `BGPProvider` / `BGPInstance` / `BGPPeer` CRDs.
-- **CNI binary auto-detects mode.** The `galactic` binary runs as both the CNI plugin (when `CNI_COMMAND` is set) and a CLI tool. This avoids shipping two separate binaries on the node.
+- **CNI binary auto-detects mode.** The `galactic-cni` binary runs as both the CNI plugin (when `CNI_COMMAND` is set) and a CLI tool. This avoids shipping two separate binaries on the node.
 
 ---
 

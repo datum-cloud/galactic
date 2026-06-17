@@ -31,7 +31,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/cmd/version.GitCommit=${GIT_COMMIT} \
       -X go.datum.net/galactic/internal/cmd/version.GitTreeState=${GIT_TREE_STATE} \
       -X go.datum.net/galactic/internal/cmd/version.BuildDate=${BUILD_DATE}" \
-    -o galactic-cni cmd/galactic/main.go
+    -o galactic-cni cmd/galactic-cni/main.go
 
 # Use distroless as minimal base image to package the binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details

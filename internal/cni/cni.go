@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/containernetworking/cni/pkg/invoke"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -65,21 +63,15 @@ type PluginConf struct {
 	SRv6Locator   string            `json:"srv6_locator"`
 }
 
-func NewCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "galactic",
-		Short: "Galactic CNI plugin",
-		Run: func(cmd *cobra.Command, args []string) {
-			skel.PluginMainFuncs(
-				skel.CNIFuncs{
-					Add: cmdAdd,
-					Del: cmdDel,
-				},
-				version.All,
-				fmt.Sprintf("CNI galactic plugin %s", galversion.Version),
-			)
+func RunPlugin() {
+	skel.PluginMainFuncs(
+		skel.CNIFuncs{
+			Add: cmdAdd,
+			Del: cmdDel,
 		},
-	}
+		version.All,
+		fmt.Sprintf("CNI galactic plugin %s", galversion.Version),
+	)
 }
 
 func parseConf(data []byte) (*PluginConf, error) {
