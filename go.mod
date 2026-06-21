@@ -8,11 +8,11 @@ require (
 	github.com/kenshaw/baseconv v0.1.1
 	github.com/lorenzosaino/go-sysctl v0.3.1
 	github.com/osrg/gobgp/v4 v4.6.0
-	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.2-0.20260610182031-c05a276ed0e0
-	go.miloapis.com/cosmos v0.0.0-20260617164602-80a1b50c2bc0
+	go.miloapis.com/cosmos v0.0.0-20260622130348-beb8879dd060
 	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.81.1
+	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.0
 	sigs.k8s.io/controller-runtime v0.24.1
@@ -38,7 +38,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/k-sone/critbitgo v1.4.0 // indirect
@@ -86,7 +85,6 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	honnef.co/go/tools v0.3.2 // indirect
-	k8s.io/api v0.36.0 // indirect
 	k8s.io/apiextensions-apiserver v0.36.0 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260317180543-43fb72c5454a // indirect

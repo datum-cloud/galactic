@@ -1,22 +1,36 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: galactic-agent
+  name: galactic-router
   namespace: galactic-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: galactic-agent
+  name: galactic-router
 rules:
-  - apiGroups: ["providers.bgp.miloapis.com"]
+  - apiGroups: ["bgp.miloapis.com"]
     resources:
-      - bgpproviders
-    verbs: ["get", "create", "update", "patch", "delete"]
-  - apiGroups: ["providers.bgp.miloapis.com"]
+      - bgprouters
+      - bgppeers
+      - bgpadvertisements
+      - bgppolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bgp.miloapis.com"]
     resources:
-      - bgpproviders/status
+      - bgprouters/status
+      - bgppeers/status
+      - bgpadvertisements/status
+      - bgppolicies/status
     verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources:
+      - secrets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -27,12 +41,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: galactic-agent
+  name: galactic-router
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: galactic-agent
+  name: galactic-router
 subjects:
   - kind: ServiceAccount
-    name: galactic-agent
+    name: galactic-router
     namespace: galactic-system

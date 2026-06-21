@@ -1,4 +1,9 @@
-// Package gobgp manages the lifecycle of an embedded GoBGP server.
+// Copyright 2025 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Package gobgp manages the lifecycle of an embedded GoBGP server and
+// implements runtime.RouterRuntime using that server.
 package gobgp
 
 import (
@@ -27,8 +32,8 @@ type Server struct {
 	ready chan struct{}
 }
 
-// New creates a Server with the given config. Call Start to run it.
-func New(cfg Config) *Server {
+// newServer creates a Server with the given config. Call Start to run it.
+func newServer(cfg Config) *Server {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = defaultLogLevel
 	}

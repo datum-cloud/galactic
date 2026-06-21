@@ -8,11 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/invoke"
@@ -21,9 +19,7 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
-	providersv1alpha1 "go.miloapis.com/cosmos/api/providers/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -41,14 +37,11 @@ import (
 
 const cniTimeout = 10 * time.Second
 
-const labelNode = "bgp.miloapis.com/node"
-
 var cniScheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(cniScheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(cniScheme))
-	utilruntime.Must(providersv1alpha1.AddToScheme(cniScheme))
 }
 
 // PluginConf is the CNI plugin configuration passed via stdin on each invocation.
@@ -58,8 +51,9 @@ type PluginConf struct {
 	VPCAttachment string        `json:"vpcattachment"`
 	MTU           int           `json:"mtu,omitempty"`
 	Terminations  []Termination `json:"terminations,omitempty"`
-	IPAM          IPAM          `json:"ipam,omitempty"`
+	IPAM          IPAM          `json:"ipam"`
 	SRv6Locator   string        `json:"srv6_locator"`
+	Namespace     string        `json:"namespace,omitempty"`
 }
 
 func RunPlugin() {
@@ -81,24 +75,11 @@ func parseConf(data []byte) (*PluginConf, error) {
 	return conf, nil
 }
 
-// bgpVRFInstanceName returns the deterministic cluster-scoped name for a
-// BGPVRFInstance. Each VPCAttachment is unique per interface across the
-// cluster, so the (vpc, vpcAttachment) pair is a reliable 1:1 key.
-func bgpVRFInstanceName(vpc, vpcAttachment string) string {
+// bgpAdvertisementName returns the deterministic name for a BGPAdvertisement.
+// Each VPCAttachment is unique per interface across the cluster, so the
+// (vpc, vpcAttachment) pair is a reliable 1:1 key.
+func bgpAdvertisementName(vpc, vpcAttachment string) string {
 	return fmt.Sprintf("%s-%s", vpc, vpcAttachment)
-}
-
-// routeDistinguisher returns the RD in "ASN:NN" (Type 0) format using the
-// low 32 bits of the VPC identifier as the NN field. Type 0 has a 4-byte NN
-// field, so the full uint32 range is safe on the wire. The RD is VPC-scoped
-// rather than node-scoped; EVPN Type 5 next-hop differentiates routes from
-// different nodes, so per-node uniqueness is not required.
-func routeDistinguisher(asNumber int64, vpcHex string) (string, error) {
-	v, err := strconv.ParseUint(vpcHex, 16, 64)
-	if err != nil {
-		return "", fmt.Errorf("parse VPC hex %q: %w", vpcHex, err)
-	}
-	return fmt.Sprintf("%d:%d", asNumber, uint32(v)), nil
 }
 
 // routeTarget returns the RT in "ASN:NN" format using the low 32 bits of the
@@ -112,78 +93,40 @@ func routeTarget(asNumber int64, vpcHex string) (string, error) {
 	return fmt.Sprintf("%d:%d", asNumber, uint32(v)), nil
 }
 
-// bgpConfig holds the BGP values the CNI needs to populate a BGPVRFInstance.
+// bgpConfig holds the BGP values the CNI needs to populate a BGPAdvertisement.
 type bgpConfig struct {
-	asNumber         int64
-	instanceName     string
-	providerSelector metav1.LabelSelector
+	asNumber   uint32
+	routerName string
 }
 
-// lookupBGPConfig finds the BGPProvider(s) on this node and the unique
-// BGPInstance whose providerSelector matches one of them. It errors if the
-// match is ambiguous (multiple instances) so BGP config is always deterministic.
-func lookupBGPConfig(ctx context.Context, k8s client.Client, nodeName string) (bgpConfig, error) {
-	providerList := &providersv1alpha1.BGPProviderList{}
-	if err := k8s.List(ctx, providerList, client.MatchingLabels{
-		labelNode: nodeName,
-	}); err != nil {
-		return bgpConfig{}, fmt.Errorf("list BGPProviders for node %s: %w", nodeName, err)
-	}
-	if len(providerList.Items) == 0 {
-		return bgpConfig{}, fmt.Errorf("no BGPProvider found for node %s", nodeName)
+// lookupBGPRouter finds the BGPRouter targeting this node in the given namespace.
+// Returns an error if none is found or if multiple are found (ambiguous).
+func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace string) (bgpConfig, error) {
+	routerList := &bgpv1alpha1.BGPRouterList{}
+	if err := k8s.List(ctx, routerList, client.InNamespace(namespace)); err != nil {
+		return bgpConfig{}, fmt.Errorf("list BGPRouters in namespace %s: %w", namespace, err)
 	}
 
-	instanceList := &bgpv1alpha1.BGPInstanceList{}
-	if err := k8s.List(ctx, instanceList); err != nil {
-		return bgpConfig{}, fmt.Errorf("list BGPInstances: %w", err)
-	}
-
-	// Collect all BGPInstances whose providerSelector matches any provider on
-	// this node. The selector encodes daemon type; we just narrow to this node.
-	var matches []*bgpv1alpha1.BGPInstance
-	for i := range instanceList.Items {
-		sel, err := metav1.LabelSelectorAsSelector(&instanceList.Items[i].Spec.ProviderSelector)
-		if err != nil {
-			return bgpConfig{}, fmt.Errorf("BGPInstance %s has invalid providerSelector: %w", instanceList.Items[i].Name, err)
-		}
-		for j := range providerList.Items {
-			if sel.Matches(labels.Set(providerList.Items[j].Labels)) {
-				matches = append(matches, &instanceList.Items[i])
-				break // count this instance once even if it matches multiple providers
-			}
+	var matches []bgpv1alpha1.BGPRouter
+	for _, r := range routerList.Items {
+		if r.Spec.TargetRef.Name == nodeName {
+			matches = append(matches, r)
 		}
 	}
 
 	switch len(matches) {
 	case 0:
-		return bgpConfig{}, fmt.Errorf("no BGPInstance found selecting a provider on node %s", nodeName)
+		return bgpConfig{}, fmt.Errorf("no BGPRouter found for node %s in namespace %s", nodeName, namespace)
 	case 1:
 		// expected
 	default:
-		names := make([]string, len(matches))
-		for i, m := range matches {
-			names[i] = m.Name
-		}
-		return bgpConfig{}, fmt.Errorf("ambiguous BGP config: %d BGPInstances select providers on node %s: [%s]",
-			len(matches), nodeName, strings.Join(names, ", "))
+		return bgpConfig{}, fmt.Errorf("ambiguous BGP config: %d BGPRouters target node %s in namespace %s",
+			len(matches), nodeName, namespace)
 	}
-	instance := matches[0]
-
-	// Build a provider selector that is the BGPInstance's selector narrowed to
-	// this specific node. The instance selector already encodes daemon type and
-	// other constraints; adding the node label makes it target exactly one node.
-	matchLabels := map[string]string{
-		labelNode: nodeName,
-	}
-	maps.Copy(matchLabels, instance.Spec.ProviderSelector.MatchLabels)
 
 	return bgpConfig{
-		asNumber:     instance.Spec.ASNumber,
-		instanceName: instance.Name,
-		providerSelector: metav1.LabelSelector{
-			MatchLabels:      matchLabels,
-			MatchExpressions: instance.Spec.ProviderSelector.MatchExpressions,
-		},
+		asNumber:   matches[0].Spec.LocalASN,
+		routerName: matches[0].Name,
 	}, nil
 }
 
@@ -208,6 +151,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
 		return fmt.Errorf("NODE_NAME environment variable is not set")
+	}
+
+	namespace := pluginConf.Namespace
+	if namespace == "" {
+		namespace = "default"
 	}
 
 	if err := vrf.Add(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
@@ -242,44 +190,40 @@ func cmdAdd(args *skel.CmdArgs) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
 
-	bgp, err := lookupBGPConfig(ctx, k8s, nodeName)
+	bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
 	if err != nil {
 		return err
 	}
 
-	rdValue, err := routeDistinguisher(bgp.asNumber, vpcHex)
-	if err != nil {
-		return fmt.Errorf("compute route distinguisher: %w", err)
-	}
-	rtValue, err := routeTarget(bgp.asNumber, vpcHex)
+	rtValue, err := routeTarget(int64(bgp.asNumber), vpcHex)
 	if err != nil {
 		return fmt.Errorf("compute route target: %w", err)
-	}
-	rt := bgpv1alpha1.RouteTarget{Value: rtValue}
-
-	inst := &bgpv1alpha1.BGPVRFInstance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment),
-		},
-	}
-	_, err = controllerutil.CreateOrUpdate(ctx, k8s, inst, func() error {
-		inst.Spec = bgpv1alpha1.BGPVRFInstanceSpec{
-			InstanceRef:        bgp.instanceName,
-			ProviderSelector:   bgp.providerSelector,
-			RouteDistinguisher: rdValue,
-			ImportRouteTargets: []bgpv1alpha1.RouteTarget{rt},
-			ExportRouteTargets: []bgpv1alpha1.RouteTarget{rt},
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("apply BGPVRFInstance: %w", err)
 	}
 
 	srv6Endpoint, err := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
 	if err != nil {
 		return fmt.Errorf("encode SRv6 endpoint: %w", err)
 	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
+			Namespace: namespace,
+		},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
+		adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: bgp.routerName},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []string{srv6Endpoint + "/128"},
+			Communities:   []string{"rt:" + rtValue},
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("apply BGPAdvertisement: %w", err)
+	}
+
 	if err := srv6.RouteIngressAdd(srv6Endpoint); err != nil {
 		return fmt.Errorf("add SRv6 ingress route: %w", err)
 	}
@@ -292,6 +236,11 @@ func cmdDel(args *skel.CmdArgs) error {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
 		return err
+	}
+
+	namespace := pluginConf.Namespace
+	if namespace == "" {
+		namespace = "default"
 	}
 
 	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
@@ -320,13 +269,14 @@ func cmdDel(args *skel.CmdArgs) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
 
-	inst := &bgpv1alpha1.BGPVRFInstance{
+	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment),
+			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
+			Namespace: namespace,
 		},
 	}
-	if err := k8s.Delete(ctx, inst); client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("delete BGPVRFInstance: %w", err)
+	if err := k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("delete BGPAdvertisement: %w", err)
 	}
 
 	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
@@ -352,7 +302,7 @@ func cmdDel(args *skel.CmdArgs) error {
 type HostDevicePluginConf struct {
 	types.PluginConf
 	Device string `json:"device"`
-	IPAM   IPAM   `json:"ipam,omitempty"`
+	IPAM   IPAM   `json:"ipam"`
 }
 
 func hostDeviceExecutable() string {

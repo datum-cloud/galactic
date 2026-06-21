@@ -21,7 +21,7 @@ tasks:
       - task: "clone:cosmos"
       - task: "build:node"
       - task: "build:frr"
-      - task: "build:galactic-agent"
+      - task: "build:galactic-router"
       - task: "build:cosmos"
 
   "clone:cosmos":
@@ -44,10 +44,10 @@ tasks:
     cmds:
       - docker build --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FRR_IMAGE}} containers/frr/
 
-  "build:galactic-agent":
-    desc: Build the galactic-agent container image
+  "build:galactic-router":
+    desc: Build the galactic-router container image
     cmds:
-      - docker build --network=host -t galactic-agent:latest -f containers/galactic-agent/Dockerfile ../..
+      - docker build --network=host -t galactic-router:latest -f containers/galactic/Dockerfile ../..
 
   "build:cosmos":
     desc: Build the cosmos operator container image from the local clone
@@ -106,13 +106,13 @@ tasks:
       - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: dfw-worker}
       - task: load-image
-        vars: {IMAGE: galactic-agent:latest, NODE: iad-worker}
+        vars: {IMAGE: galactic-router:latest, NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: galactic-agent:latest, NODE: iad-worker-rr}
+        vars: {IMAGE: galactic-router:latest, NODE: iad-worker-rr}
       - task: load-image
-        vars: {IMAGE: galactic-agent:latest, NODE: sjc-worker}
+        vars: {IMAGE: galactic-router:latest, NODE: sjc-worker}
       - task: load-image
-        vars: {IMAGE: galactic-agent:latest, NODE: dfw-worker}
+        vars: {IMAGE: galactic-router:latest, NODE: dfw-worker}
       - task: load-image
         vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: iad-worker}
       - task: load-image
@@ -157,7 +157,7 @@ tasks:
       - ./scripts/install-underlay.sh
 
   "deploy:overlay":
-    desc: Install the galactic-agent overlay DaemonSets and cosmos operator
+    desc: Install the galactic-router overlay DaemonSets and cosmos operator
     cmds:
       - ./scripts/install-overlay.sh
 
@@ -198,18 +198,18 @@ tasks:
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 
   "test:evpn":
-    desc: Verify GoBGP EVPN neighbors and RIB on iad, sjc, and dfw via cosmos BGPProvider status
+    desc: Verify EVPN BGP routes on iad, sjc, and dfw via cosmos BGPRouter status
     cmds:
-      - docker exec iad-control-plane kubectl get bgpproviders -A
-      - docker exec sjc-control-plane kubectl get bgpproviders -A
-      - docker exec dfw-control-plane kubectl get bgpproviders -A
+      - docker exec iad-control-plane kubectl get bgprouters -A
+      - docker exec sjc-control-plane kubectl get bgprouters -A
+      - docker exec dfw-control-plane kubectl get bgprouters -A
 
   clean:
     desc: Destroy the lab and delete artifacts
     cmds:
       - task: destroy
       - docker rmi kindest/node:galactic || true
-      - docker rmi galactic-agent:latest || true
+      - docker rmi galactic-router:latest || true
       - docker rmi {{.COSMOS_IMAGE}} || true
       - docker rmi {{.FRR_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/

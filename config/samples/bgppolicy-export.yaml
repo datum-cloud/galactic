@@ -1,0 +1,18 @@
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPPolicy
+metadata:
+  name: tenant-export
+  namespace: default
+spec:
+  routerRef:
+    name: tenant-node1
+  direction: export
+  terms:
+    - sequence: 10
+      match:
+        any: true
+      action: permit
+      set:
+        communities:
+          add:
+            - "65000:100"

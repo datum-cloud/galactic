@@ -1,37 +1,33 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: galactic-agent
+  name: galactic-router
 rules:
-  # BGP CRDs from go.miloapis.com/cosmos
   - apiGroups: ["bgp.miloapis.com"]
     resources:
-      - bgpinstances
+      - bgprouters
       - bgppeers
       - bgpadvertisements
-      - bgproutepolicies
+      - bgppolicies
     verbs: ["get", "list", "watch"]
   - apiGroups: ["bgp.miloapis.com"]
     resources:
-      - bgpinstances/status
+      - bgprouters/status
       - bgppeers/status
       - bgpadvertisements/status
-      - bgproutepolicies/status
+      - bgppolicies/status
     verbs: ["get", "update", "patch"]
-  # Provider CRDs from go.miloapis.com/cosmos
-  - apiGroups: ["providers.bgp.miloapis.com"]
+  - apiGroups: [""]
     resources:
-      - bgpproviders
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: ["providers.bgp.miloapis.com"]
+      - secrets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
     resources:
-      - bgpproviders/status
-    verbs: ["get", "update", "patch"]
-  # Leader election
+      - nodes
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Events
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
@@ -39,12 +35,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: galactic-agent
+  name: galactic-router
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: galactic-agent
+  name: galactic-router
 subjects:
   - kind: ServiceAccount
-    name: galactic-agent
+    name: galactic-router
     namespace: galactic-system
