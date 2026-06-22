@@ -7,7 +7,6 @@ vars:
     sh: echo *.clab.yaml
   FRR_VERSION: "10.6.1"
   FRR_IMAGE: frr:{{.FRR_VERSION}}
-  COSMOS_IMAGE: cosmos:latest
 
 tasks:
   default:
@@ -18,22 +17,12 @@ tasks:
   build:
     desc: Build all container images
     cmds:
-      - task: "clone:cosmos"
       - task: "build:node"
       - task: "build:frr"
       - task: "build:galactic-router"
-      - task: "build:cosmos"
-
-  "clone:cosmos":
-    desc: Clone the cosmos source tree needed for go mod replace and image build
-    status:
-      - test -d build/cosmos
-    cmds:
-      - git clone --depth=1 https://github.com/milo-os/cosmos build/cosmos
 
   "build:node":
     desc: Build the Kind node image with the galactic CNI plugin
-    deps: ["clone:cosmos"]
     cmds:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
@@ -47,13 +36,7 @@ tasks:
   "build:galactic-router":
     desc: Build the galactic-router container image
     cmds:
-      - docker build --network=host -t galactic-router:latest -f containers/galactic/Dockerfile ../..
-
-  "build:cosmos":
-    desc: Build the cosmos operator container image from the local clone
-    deps: ["clone:cosmos"]
-    cmds:
-      - docker build --network=host -t {{.COSMOS_IMAGE}} -f build/cosmos/build/Dockerfile build/cosmos
+      - docker build --network=host -t galactic-router:latest -f containers/galactic-router/Dockerfile ../..
 
   deploy:
     desc: Build images and deploy the full lab end-to-end
@@ -113,14 +96,6 @@ tasks:
         vars: {IMAGE: galactic-router:latest, NODE: sjc-worker}
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: dfw-worker}
-      - task: load-image
-        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: iad-worker}
-      - task: load-image
-        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: iad-worker-rr}
-      - task: load-image
-        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: sjc-worker}
-      - task: load-image
-        vars: {IMAGE: "{{.COSMOS_IMAGE}}", NODE: dfw-worker}
 
   destroy:
     desc: Destroy the lab
@@ -157,7 +132,7 @@ tasks:
       - ./scripts/install-underlay.sh
 
   "deploy:overlay":
-    desc: Install the galactic-router overlay DaemonSets and cosmos operator
+    desc: Install the galactic-router overlay DaemonSets
     cmds:
       - ./scripts/install-overlay.sh
 
@@ -179,8 +154,12 @@ tasks:
         done
 
   "test:bgp-underlay":
-    desc: Verify underlay BGP sessions on iad and sjc workers
+    desc: Verify underlay BGP sessions on dfw, iad, and sjc workers
     cmds:
+      - |
+        docker exec dfw-control-plane \
+          kubectl exec -n galactic-system ds/dfw-underlay \
+          -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec iad-control-plane \
           kubectl exec -n galactic-system ds/iad-underlay \
@@ -198,7 +177,7 @@ tasks:
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 
   "test:evpn":
-    desc: Verify EVPN BGP routes on iad, sjc, and dfw via cosmos BGPRouter status
+    desc: Verify EVPN BGP routes on iad, sjc, and dfw via BGPRouter status
     cmds:
       - docker exec iad-control-plane kubectl get bgprouters -A
       - docker exec sjc-control-plane kubectl get bgprouters -A
@@ -210,6 +189,5 @@ tasks:
       - task: destroy
       - docker rmi kindest/node:galactic || true
       - docker rmi galactic-router:latest || true
-      - docker rmi {{.COSMOS_IMAGE}} || true
       - docker rmi {{.FRR_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/

@@ -1,4 +1,4 @@
-# Build both galactic binaries (CNI plugin and router)
+# Build galactic-router binary
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -19,15 +19,6 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# Build CNI plugin
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
-    -ldflags "-s -w \
-      -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
-      -X go.datum.net/galactic/internal/metadata.GitCommit=${GIT_COMMIT} \
-      -X go.datum.net/galactic/internal/metadata.GitTreeState=${GIT_TREE_STATE} \
-      -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE}" \
-    -o galactic-cni cmd/galactic-cni/main.go
-
 # Build router
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
@@ -37,14 +28,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE}" \
     -o galactic-router cmd/galactic-router/main.go
 
-# Use distroless as minimal base image to package both binaries
+# Use distroless as minimal base image to package the router binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/galactic-cni .
 COPY --from=builder /workspace/galactic-router .
 USER 65532:65532
 
-# Default entrypoint is the CNI plugin (invoked by CNI runtime).
-# The router runs as a separate DaemonSet with its own entrypoint.
-ENTRYPOINT ["/galactic-cni"]
+ENTRYPOINT ["/galactic-router"]

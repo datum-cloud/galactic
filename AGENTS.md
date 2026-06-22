@@ -50,8 +50,8 @@ Summary:
 
 ## Deployments
 
-- **`deploy/galactic-router/`** — Kustomize manifests for the router DaemonSet, RBAC, and ServiceAccount. Apply with `kubectl apply -k deploy/galactic-router/`.
-- **`deploy/containerlab/`** — ContainerLab topology (`gvpc.clab.yaml`) for three Kind clusters (iad, sjc, infra) wired over an IPv6 SRv6 transit mesh. FRR runs as a hostNetwork DaemonSet on each worker for eBGP underlay; `galactic-router` (tenant role) handles EVPN path distribution over iBGP. See `deploy/containerlab/README.md` and `deploy/containerlab/Taskfile.yaml` for bring-up commands.
+- **`deploy/galactic-router/`** — Production manifests for the router DaemonSet, RBAC, and ServiceAccount. Apply with `kubectl apply -f deploy/galactic-router/`.
+- **`deploy/containerlab/`** — ContainerLab topology (`gvpc.clab.yaml`) for three Kind clusters (dfw, iad, sjc) wired over an IPv6 SRv6 transit mesh. FRR runs as a hostNetwork DaemonSet on each worker for eBGP underlay; `galactic-router` (tenant role) handles EVPN path distribution over iBGP. See `deploy/containerlab/README.md` and `deploy/containerlab/Taskfile.yaml` for bring-up commands.
 
 ## New Developer Entry Points
 

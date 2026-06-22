@@ -12,7 +12,7 @@ spec:
       "vpc": "1",
       "vpcattachment": "1",
       "srv6_locator": "2001:db8:ff01::/48",
-      "gobgp": {
+      "galacticRouter": {
         "address": "127.0.0.1:50051"
       }
     }
