@@ -10,7 +10,7 @@ require (
 	github.com/osrg/gobgp/v4 v4.6.0
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.2-0.20260610182031-c05a276ed0e0
-	go.miloapis.com/cosmos v0.0.0-20260616211804-7c3afe69d1e7
+	go.miloapis.com/cosmos v0.0.0-20260617164602-80a1b50c2bc0
 	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.81.1
 	k8s.io/apimachinery v0.36.1
