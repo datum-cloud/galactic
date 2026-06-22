@@ -1,0 +1,16 @@
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPRouter
+metadata:
+  name: dfw-overlay
+  namespace: galactic-system
+spec:
+  targetRef:
+    kind: Node
+    name: dfw-worker
+  roles:
+    - tenant
+  localASN: 65000
+  routerID: "10.0.1.1"
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn

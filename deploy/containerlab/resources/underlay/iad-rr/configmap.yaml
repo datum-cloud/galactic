@@ -34,7 +34,7 @@ data:
     log syslog informational
 
     interface lo
-     ! /48 provides a reachable address for GoBGP peers to connect to on port 1179.
+     ! /48 provides a reachable address for galactic-router peers to connect to on port 1179.
      ipv6 address fc00:0:8::1/48
     !
     interface eth1
