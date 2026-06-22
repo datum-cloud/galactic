@@ -296,16 +296,10 @@ func (r *BGPRouterReconciler) updatePeerStatuses(ctx context.Context, router *bg
 			continue
 		}
 		peerCopy := peer.DeepCopy()
-		setPeerSessionState(peerCopy, ps.SessionState)
+		setPeerReadyCondition(peerCopy, ps.SessionState, "Idle")
 		if ps.LastEstablishedTime != nil {
 			peerCopy.Status.LastEstablishedTime = ps.LastEstablishedTime
 		}
-		setPeerCondition(peerCopy, metav1.Condition{
-			Type:    ConditionReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  "Configured",
-			Message: "Peer is configured",
-		})
 		if updateErr := r.Status().Update(ctx, peerCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPPeer status", "peer", peer.Name)
 		}

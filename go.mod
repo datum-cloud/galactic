@@ -9,7 +9,7 @@ require (
 	github.com/lorenzosaino/go-sysctl v0.3.1
 	github.com/osrg/gobgp/v4 v4.6.0
 	github.com/vishvananda/netlink v1.3.2-0.20260610182031-c05a276ed0e0
-	go.miloapis.com/cosmos v0.0.0-20260622175146-31f1830eb2e7
+	go.miloapis.com/cosmos v0.0.0-20260622211233-0e38bdf25eac
 	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.81.1
 	k8s.io/api v0.36.0

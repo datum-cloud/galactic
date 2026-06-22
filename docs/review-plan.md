@@ -77,6 +77,8 @@ The helper variables `fsmConditions` and `fsmStateToCondition` are also dead cod
 
 **Verification:** `go vet ./internal/controller/` should show no unused imports.
 
+**Status: DONE** — removed in cosmos API v3 migration; `setPeerReadyCondition` now sets a single `Ready` condition using `bgpv1alpha1.ConditionTypeReady`.
+
 ### 3.3 Fix `ConditionSessionOpenCfm` typo
 
 **File:** `internal/controller/status.go`
@@ -84,6 +86,8 @@ The helper variables `fsmConditions` and `fsmStateToCondition` are also dead cod
 **Problem:** The constant is named `ConditionSessionOpenCfm` (truncated "Confirm") instead of `ConditionSessionOpenConfirm`. This is inconsistent with all other constant naming patterns and with the cosmos type `BGPPeerStateOpenConfirm`.
 
 **Action:** Rename to `ConditionSessionOpenConfirm`. (This is only relevant if the FSM conditions are retained per recommendation 3.2 — if they are deleted, this is subsumed.)
+
+**Status: DONE** — subsumed by 3.2; FSM conditions removed entirely.
 
 ---
 
