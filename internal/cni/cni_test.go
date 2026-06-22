@@ -25,7 +25,7 @@ func fakeClient(objs ...client.Object) client.Client {
 }
 
 // routerForNode builds a BGPRouter with spec.targetRef.name set to nodeName.
-func routerForNode(name, nodeName, namespace string, asn uint32) *bgpv1alpha1.BGPRouter {
+func routerForNode(name, nodeName, namespace string, asn int64) *bgpv1alpha1.BGPRouter {
 	return &bgpv1alpha1.BGPRouter{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,

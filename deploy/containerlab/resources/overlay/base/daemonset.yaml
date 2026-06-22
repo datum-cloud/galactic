@@ -14,6 +14,10 @@ spec:
     spec:
       serviceAccountName: galactic-router
       hostNetwork: true
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoSchedule
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -34,6 +38,8 @@ spec:
                   fieldPath: spec.nodeName
             - name: ROUTER_ROLE
               value: tenant
+            - name: BGP_LISTEN_PORT
+              value: "-1"
           securityContext:
             capabilities:
               add:

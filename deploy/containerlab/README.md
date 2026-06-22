@@ -100,20 +100,20 @@ Worker SRv6 node SIDs (on `lo-galactic`):
 | iad-worker    | 2001:db8:ff03:100:ffff:ffff:ffff:ffff/128  |
 | sjc-worker    | 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128  |
 
-### Management network (172.20.20.0/24)
+### Management network (fc00:10::/64)
 
-| Node                  | Address       |
-|-----------------------|---------------|
-| dfw                   | 172.20.20.101 |
-| dfw-control-plane     | 172.20.20.102 |
-| dfw-worker            | 172.20.20.103 |
-| iad                   | 172.20.20.111 |
-| iad-control-plane     | 172.20.20.112 |
-| iad-worker            | 172.20.20.113 |
-| iad-worker-rr         | 172.20.20.114 |
-| sjc                   | 172.20.20.121 |
-| sjc-control-plane     | 172.20.20.122 |
-| sjc-worker            | 172.20.20.123 |
+| Node                  | Address          |
+|-----------------------|------------------|
+| dfw                   | fc00:10::101     |
+| dfw-control-plane     | fc00:10::102     |
+| dfw-worker            | fc00:10::103     |
+| iad                   | fc00:10::111     |
+| iad-control-plane     | fc00:10::112     |
+| iad-worker            | fc00:10::113     |
+| iad-worker-rr         | fc00:10::114     |
+| sjc                   | fc00:10::121     |
+| sjc-control-plane     | fc00:10::122     |
+| sjc-worker            | fc00:10::123     |
 
 ## Lab layout
 

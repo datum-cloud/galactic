@@ -14,9 +14,13 @@ nodes:
       - |
         kind: JoinConfiguration
         nodeRegistration:
+          name: iad-worker-rr
           taints:
             - key: galactic.io/role
               value: route-reflector
               effect: NoSchedule
 networking:
+  ipFamily: ipv6
   disableDefaultCNI: true
+  podSubnet: fd00:100::/48
+  serviceSubnet: fd00:200::/108

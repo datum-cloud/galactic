@@ -3,7 +3,9 @@
 # kubeadm init exits, creating a window where nothing listens on 6443. Kind
 # runs the StorageClass step immediately after kubeadm and hits this window.
 # Poll /healthz until the apiserver is actually accepting connections first.
-until curl -sk https://127.0.0.1:6443/healthz >/dev/null 2>&1; do
+# Read the server address from admin.conf so this works with IPv6 clusters.
+SERVER=$(grep 'server:' /etc/kubernetes/admin.conf | awk '{print $2}')
+until curl -sk "${SERVER%/}/healthz" >/dev/null 2>&1; do
   sleep 1
 done
-exec /usr/bin/kubectl --server=https://127.0.0.1:6443 "$@"
+exec /usr/bin/kubectl --server="${SERVER%/}" "$@"

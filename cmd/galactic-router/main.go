@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"google.golang.org/grpc"
@@ -40,10 +41,19 @@ func main() {
 		log.Fatal("ROUTER_ROLE environment variable is required")
 	}
 
+	bgpListenPort := int32(179)
+	if v := os.Getenv("BGP_LISTEN_PORT"); v != "" {
+		p, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || p < -1 || p > 65535 {
+			log.Fatalf("BGP_LISTEN_PORT must be -1 or a valid port number, got %q", v)
+		}
+		bgpListenPort = int32(p)
+	}
+
 	var factory galacticruntime.RuntimeFactory
 	switch routerRole {
 	case "tenant":
-		factory = gobgp.NewRuntimeFactory()
+		factory = gobgp.NewRuntimeFactory(bgpListenPort)
 	case "fabric":
 		factory = frr.NewRuntimeFactory()
 	default:

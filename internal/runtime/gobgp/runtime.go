@@ -21,11 +21,12 @@ import (
 
 // GoBGPRuntime implements runtime.RouterRuntime using an embedded GoBGP process.
 type GoBGPRuntime struct {
-	key    types.NamespacedName
-	server *Server
-	mu     sync.Mutex
+	key        types.NamespacedName
+	server     *Server
+	listenPort int32
+	mu         sync.Mutex
 
-	lastASN      uint32
+	lastASN      int64
 	lastRouterID string
 	// establishedAt tracks when each peer last reached the Established state.
 	establishedAt map[string]time.Time
@@ -37,11 +38,14 @@ type GoBGPRuntime struct {
 }
 
 // NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
-func NewRuntimeFactory() runtime.RuntimeFactory {
+// listenPort controls the TCP port GoBGP binds for incoming BGP connections.
+// Pass -1 to disable inbound connections (outbound-only mode).
+func NewRuntimeFactory(listenPort int32) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		return &GoBGPRuntime{
 			key:             key,
 			server:          newServer(Config{}),
+			listenPort:      listenPort,
 			establishedAt:   make(map[string]time.Time),
 			appliedPolicies: make(map[string]model.BGPPolicyDirection),
 		}, nil
@@ -88,9 +92,9 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 	needsStart := err != nil || resp == nil || resp.Global == nil || resp.Global.Asn == 0
 	if needsStart {
 		global := &api.Global{
-			Asn:        desired.LocalASN,
+			Asn:        uint32(desired.LocalASN),
 			RouterId:   desired.RouterID,
-			ListenPort: -1,
+			ListenPort: r.listenPort,
 		}
 		for _, af := range desired.AddressFamilies {
 			global.Families = append(global.Families, familyToGlobalInt(af))
@@ -140,13 +144,11 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		}
 	}
 
-	// Apply advertisements. EVPN path construction is not yet implemented;
-	// EVPN advertisements always fail and the controller sets Accepted=False.
+	// Apply EVPN advertisements.
 	for _, adv := range desired.Advertisements {
 		if adv.AddressFamily.AFI == afiL2VPN {
-			if err := buildEVPNPath(adv, false); err != nil {
-				// Return the error so the caller can set Accepted=False.
-				return err
+			if err := buildEVPNPaths(b, adv, desired.RouterID, false); err != nil {
+				return fmt.Errorf("advertise EVPN paths for %s: %w", adv.Name, err)
 			}
 		}
 	}
@@ -198,6 +200,10 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 		}
 		if p.State != nil {
 			ps.SessionState = fsmStateToModel(p.State.SessionState)
+		}
+		// Default to Idle if State is nil (e.g., incomplete peer config).
+		if ps.SessionState == "" {
+			ps.SessionState = model.BGPPeerStateIdle
 		}
 		if ps.SessionState == model.BGPPeerStateEstablished {
 			if t, ok := r.establishedAt[p.Conf.NeighborAddress]; ok {

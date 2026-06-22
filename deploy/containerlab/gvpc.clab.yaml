@@ -3,7 +3,7 @@ name: gvpc
 
 mgmt:
   network: mgmt
-  ipv4-subnet: 172.20.20.0/24
+  ipv6-subnet: fc00:10::/64
 
 topology:
   defaults:
@@ -27,7 +27,7 @@ topology:
         graph-icon: server
         platform: kind
         reload: disabled
-      mgmt-ipv4: 172.20.20.102
+      mgmt-ipv6: fc00:10::102
       sysctls:
         fs.inotify.max_user_instances: "256"
         net.ipv4.conf.all.arp_announce: "2"
@@ -46,7 +46,7 @@ topology:
         platform: kind
         reload: disabled
         worker-index: "1"
-      mgmt-ipv4: 172.20.20.103
+      mgmt-ipv6: fc00:10::103
       sysctls:
         fs.inotify.max_user_instances: "256"
         net.ipv4.conf.all.arp_announce: "2"
@@ -67,7 +67,7 @@ topology:
         graph-icon: server
         platform: kind
         reload: disabled
-      mgmt-ipv4: 172.20.20.122
+      mgmt-ipv6: fc00:10::122
       sysctls:
         fs.inotify.max_user_instances: "256"
         net.ipv4.conf.all.arp_announce: "2"
@@ -86,7 +86,7 @@ topology:
         platform: kind
         reload: disabled
         worker-index: "1"
-      mgmt-ipv4: 172.20.20.123
+      mgmt-ipv6: fc00:10::123
       sysctls:
         fs.inotify.max_user_instances: "256"
         net.ipv4.conf.all.arp_announce: "2"
@@ -107,7 +107,7 @@ topology:
         graph-icon: server
         platform: kind
         reload: disabled
-      mgmt-ipv4: 172.20.20.112
+      mgmt-ipv6: fc00:10::112
       sysctls:
         fs.inotify.max_user_instances: "256"
         net.ipv4.conf.all.arp_announce: "2"
@@ -126,7 +126,7 @@ topology:
         platform: kind
         reload: disabled
         worker-index: "1"
-      mgmt-ipv4: 172.20.20.113
+      mgmt-ipv6: fc00:10::113
       sysctls:
         fs.inotify.max_user_instances: "256"
         net.ipv4.conf.all.arp_announce: "2"
@@ -148,7 +148,7 @@ topology:
         platform: kind
         reload: disabled
         worker-index: "2"
-      mgmt-ipv4: 172.20.20.114
+      mgmt-ipv6: fc00:10::114
       sysctls:
         fs.inotify.max_user_instances: "256"
         net.ipv4.conf.all.arp_announce: "2"

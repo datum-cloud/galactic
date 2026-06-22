@@ -4,6 +4,9 @@ nodes:
   - role: control-plane
   - role: worker
     labels:
-      topology.kubernetes.io/region: us-west-1
+      topology.kubernetes.io/region: sjc
 networking:
+  ipFamily: ipv6
   disableDefaultCNI: true
+  podSubnet: fd00:100::/48
+  serviceSubnet: fd00:200::/108

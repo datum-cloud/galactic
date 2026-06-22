@@ -10,11 +10,6 @@ apply_overlay() {
   echo "Applying overlay/${site} to ${node}..."
   docker cp "${RESOURCES_DIR}/overlay" "${node}:/galactic/resources/"
   docker exec "${node}" kubectl apply -k /galactic/resources/overlay/${site}/
-  # Patch CRD maximum boundaries: kubebuilder v0.18.0 generates
-  # maximum: 4294967295 for uint32 ASN fields, but JSON Schema
-  # maximum is limited to int32 (2147483647). Without this patch
-  # the API server rejects all BGPRouter/BGPPeer resources.
-  bash "${RESOURCES_DIR}/bgp/patches/fix-asn-maximum.sh" "${node}"
   echo "Applying bgp/${site} to ${node}..."
   docker cp "${RESOURCES_DIR}/bgp/${site}" "${node}:/galactic/resources/bgp-${site}/"
   docker exec "${node}" kubectl apply -f /galactic/resources/bgp-${site}/
