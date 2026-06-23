@@ -20,7 +20,7 @@ import (
 type sortableRouter struct {
 	Namespace       string
 	Name            string
-	LocalASN        uint32
+	LocalASN        int64
 	RouterID        string
 	AddressFamilies []model.AddressFamily
 	Peers           []sortablePeer
@@ -30,7 +30,7 @@ type sortableRouter struct {
 
 type sortablePeer struct {
 	Name            string
-	PeerASN         uint32
+	PeerASN         int64
 	Address         string
 	AddressFamilies []model.AddressFamily
 	HoldTime        int64

@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -21,12 +20,9 @@ type BGPPeerReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// Reconcile enqueues the BGPRouter(s) that own the changed BGPPeer.
-// The actual peer state is applied by BGPRouterReconciler.
+// Reconcile is intentionally empty. BGPPeer changes trigger BGPRouter
+// reconciles via the BGPRouterReconciler's BGPPeer watch.
 func (r *BGPPeerReconciler) Reconcile(_ context.Context, _ ctrl.Request) (ctrl.Result, error) {
-	// BGPPeer changes are handled by enqueuing the owning router(s) in
-	// SetupWithManager via EnqueueRequestsFromMapFunc. This reconciler is
-	// intentionally empty — the work is done by BGPRouterReconciler.
 	return ctrl.Result{}, nil
 }
 
@@ -34,11 +30,6 @@ func (r *BGPPeerReconciler) Reconcile(_ context.Context, _ ctrl.Request) (ctrl.R
 func (r *BGPPeerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.BGPPeer{}).
-		Watches(&bgpv1alpha1.BGPPeer{}, handler.EnqueueRequestsFromMapFunc(
-			func(ctx context.Context, obj client.Object) []reconcile.Request {
-				return peerToRouterRequests(ctx, r.Client, obj)
-			},
-		)).
 		Named("bgppeer").
 		Complete(r)
 }

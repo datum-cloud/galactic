@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -31,11 +30,6 @@ func (r *BGPPolicyReconciler) Reconcile(_ context.Context, _ ctrl.Request) (ctrl
 func (r *BGPPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.BGPPolicy{}).
-		Watches(&bgpv1alpha1.BGPPolicy{}, handler.EnqueueRequestsFromMapFunc(
-			func(ctx context.Context, obj client.Object) []reconcile.Request {
-				return policyToRouterRequests(ctx, r.Client, obj)
-			},
-		)).
 		Named("bgppolicy").
 		Complete(r)
 }

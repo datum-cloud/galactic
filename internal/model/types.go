@@ -40,7 +40,7 @@ const (
 type DesiredRouter struct {
 	Namespace       string
 	Name            string
-	LocalASN        uint32
+	LocalASN        int64
 	RouterID        string
 	AddressFamilies []AddressFamily
 	Peers           []DesiredPeer
@@ -51,7 +51,7 @@ type DesiredRouter struct {
 // DesiredPeer describes a single BGP session to configure.
 type DesiredPeer struct {
 	Name            string
-	PeerASN         uint32
+	PeerASN         int64
 	Address         string
 	AddressFamilies []AddressFamily
 	HoldTime        time.Duration

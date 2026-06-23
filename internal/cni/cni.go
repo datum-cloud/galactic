@@ -125,7 +125,7 @@ func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace
 	}
 
 	return bgpConfig{
-		asNumber:   matches[0].Spec.LocalASN,
+		asNumber:   uint32(matches[0].Spec.LocalASN),
 		routerName: matches[0].Name,
 	}, nil
 }
