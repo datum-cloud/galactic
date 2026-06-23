@@ -62,8 +62,7 @@ The devcontainer includes the following extensions:
 
 ### Forwarded Ports
 - **8080** - Metrics endpoint
-- **8081** - Health check endpoint
-- **9443** - Webhook server
+- **5000** - gRPC health endpoint (liveness/readiness probes)
 
 ## Capabilities
 

@@ -96,7 +96,7 @@ tasks:
         -X go.datum.net/galactic/internal/metadata.BuildDate={{.BUILD_DATE}}
     cmds:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-cni cmd/galactic-cni/main.go
-      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-agent cmd/galactic-agent/main.go
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-router cmd/galactic-router/main.go
 
   docker-build:
     desc: Build container image
