@@ -9,9 +9,9 @@ require (
 	github.com/lorenzosaino/go-sysctl v0.3.1
 	github.com/osrg/gobgp/v4 v4.6.0
 	github.com/vishvananda/netlink v1.3.2-0.20260610182031-c05a276ed0e0
-	go.miloapis.com/cosmos v0.0.0-20260622175146-31f1830eb2e7
+	go.miloapis.com/cosmos v0.0.0-20260623153148-6678708e0513
 	golang.org/x/sys v0.46.0
-	google.golang.org/grpc v1.81.1
+	google.golang.org/grpc v1.79.3
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.0
@@ -79,7 +79,7 @@ require (
 	golang.org/x/tools v0.41.0 // indirect
 	golang.org/x/tools/go/expect v0.1.1-deprecated // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect

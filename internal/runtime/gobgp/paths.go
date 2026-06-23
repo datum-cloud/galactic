@@ -9,8 +9,8 @@ import (
 	"net/netip"
 	"time"
 
-	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
 
 	"go.datum.net/galactic/internal/model"

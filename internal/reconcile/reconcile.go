@@ -113,11 +113,19 @@ func (r *Reconciler) BuildDesiredRouter(ctx context.Context, router *bgpv1alpha1
 		if err := validateAFI(adv.Spec.AddressFamily); err != nil {
 			return nil, fmt.Errorf("BGPAdvertisement %s/%s invalid address family: %w", namespace, adv.Name, err)
 		}
+		prefixes := make([]string, len(adv.Spec.Prefixes))
+		for i, p := range adv.Spec.Prefixes {
+			prefixes[i] = p.CIDR
+		}
+		communities := make([]string, len(adv.Spec.Communities))
+		for i, c := range adv.Spec.Communities {
+			communities[i] = string(c)
+		}
 		desired.Advertisements = append(desired.Advertisements, model.DesiredAdvertisement{
 			Name:            adv.Name,
 			AddressFamily:   adv.Spec.AddressFamily,
-			Prefixes:        adv.Spec.Prefixes,
-			Communities:     adv.Spec.Communities,
+			Prefixes:        prefixes,
+			Communities:     communities,
 			LocalPreference: adv.Spec.LocalPreference,
 			NextHop:         nextHop,
 		})
