@@ -2,7 +2,7 @@
 
 Three Kind clusters (dfw, iad, sjc) connected over an IPv6 SRv6 transit mesh. Each cluster
 runs FRR as a node routing daemon (hostNetwork DaemonSet) to peer with the transit layer via
-BGP unnumbered. galactic-router runs alongside FRR on the workers to distribute EVPN routes
+eBGP over numbered IPv6 links. galactic-router runs alongside FRR on the workers to distribute EVPN routes
 over iBGP to the route reflector on iad-rr.
 
 ## Topology
@@ -36,10 +36,10 @@ over iBGP to the route reflector on iad-rr.
 ### BGP design
 
 ```
-AS 65000 (dfw-underlay / FRR)          ──eBGP unnumbered──  tr1 (AS 65100)
-AS 65000 (iad-underlay / FRR)          ──eBGP unnumbered──  tr3:eth5 (AS 65100)
-AS 65000 (iad-rr-underlay / FRR)       ──eBGP unnumbered──  tr3:eth4 (AS 65100)
-AS 65000 (sjc-underlay / FRR)          ──eBGP unnumbered──  tr2 (AS 65100)
+AS 65000 (dfw-underlay / FRR)          ──eBGP──  tr1 (AS 65100)
+AS 65000 (iad-underlay / FRR)          ──eBGP──  tr3:eth5 (AS 65100)
+AS 65000 (iad-rr-underlay / FRR)       ──eBGP──  tr3:eth4 (AS 65100)
+AS 65000 (sjc-underlay / FRR)          ──eBGP──  tr2 (AS 65100)
 
 AS 65000 (dfw-overlay / galactic-router)  ──iBGP──  iad-rr (AS 65000 RR)
 AS 65000 (iad-overlay / galactic-router)  ──iBGP──  iad-rr (AS 65000 RR)
@@ -48,7 +48,7 @@ AS 65000 (sjc-overlay / galactic-router)  ──iBGP──  iad-rr (AS 65000 RR)
 
 - All clusters use a single AS (65000) for both the FRR underlay and the galactic-router overlay.
 - The transit mesh carries IPv6 unicast (SRv6 locator prefixes and loopbacks) via iBGP within AS 65100.
-- FRR PE nodes originate their SRv6 forwarding prefix (`2001:db8:ffXX::/48`) and SRv6 SID block (`fc00:0:X::/48`) toward the transit layer via eBGP unnumbered.
+- FRR PE nodes originate their SRv6 forwarding prefix (`2001:db8:ffXX::/48`) and SRv6 SID block (`fc00:0:X::/48`) toward the transit layer via eBGP over numbered IPv6 links.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - galactic-router instances on dfw/iad/sjc workers peer with iad-worker-rr over iBGP (AS 65000) for `l2vpn-evpn` routes. GoBGP runs with outbound-only mode (`listenPort=-1`); all BGP sessions are initiated outbound.
 
@@ -74,14 +74,14 @@ AS 65000 (sjc-overlay / galactic-router)  ──iBGP──  iad-rr (AS 65000 RR)
 | tr2–tr4 | 2001:db8:0:24::/64  |
 | tr3–tr4 | 2001:db8:0:34::/64  |
 
-### Worker–TR links (BGP unnumbered, link-local only)
+### Worker–TR links (numbered, eBGP)
 
-| Link                   | TR interface |
-|------------------------|--------------|
-| dfw-worker – tr1       | eth1         |
-| sjc-worker – tr2       | eth1         |
-| iad-worker – tr3       | eth5         |
-| iad-worker-rr – tr3    | eth4         |
+| Link                   | Subnet              | TR address     | Worker address   |
+|------------------------|---------------------|----------------|------------------|
+| dfw-worker – tr1       | 2001:db8:1:10::/64  | 2001:db8:1:10::1 | 2001:db8:1:10::2 |
+| sjc-worker – tr2       | 2001:db8:1:20::/64  | 2001:db8:1:20::1 | 2001:db8:1:20::2 |
+| iad-worker – tr3       | 2001:db8:1:30::/64  | 2001:db8:1:30::1 | 2001:db8:1:30::2 |
+| iad-worker-rr – tr3    | 2001:db8:1:31::/64  | 2001:db8:1:31::1 | 2001:db8:1:31::2 |
 
 ### Cluster SRv6 addressing
 
@@ -237,8 +237,7 @@ docker exec sjc-control-plane kubectl get bgprouters -A
 - All three Kind clusters use `disableDefaultCNI: true`. Cilium is installed by the
   `kindest/node:galactic` bootstrap script. cert-manager and Multus are only installed
   on iad and sjc.
-- Worker–TR links use BGP unnumbered (IPv6 link-local only). No numbered addresses are
-  configured on worker data-plane interfaces.
+- Worker–TR links use numbered IPv6 subnets (/64) with eBGP peering.
 - Cilium's iptables rules block BGP by default; the bootstrap script inserts
   `ip6tables -I INPUT` rules for TCP/179 before Cilium starts on each worker.
 - iad-worker-rr peers with tr3 as AS 65000, the same AS used by all three clusters.

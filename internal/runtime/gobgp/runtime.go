@@ -21,10 +21,11 @@ import (
 
 // GoBGPRuntime implements runtime.RouterRuntime using an embedded GoBGP process.
 type GoBGPRuntime struct {
-	key        types.NamespacedName
-	server     *Server
-	listenPort int32
-	mu         sync.Mutex
+	key          types.NamespacedName
+	server       *Server
+	listenPort   int32
+	localAddress string
+	mu           sync.Mutex
 
 	lastASN      int64
 	lastRouterID string
@@ -40,12 +41,15 @@ type GoBGPRuntime struct {
 // NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
 // listenPort controls the TCP port GoBGP binds for incoming BGP connections.
 // Pass -1 to disable inbound connections (outbound-only mode).
-func NewRuntimeFactory(listenPort int32) runtime.RuntimeFactory {
+// localAddress, if non-empty, is bound as the source address for outgoing BGP
+// TCP connections (sets Transport.LocalAddress on every peer).
+func NewRuntimeFactory(listenPort int32, localAddress string) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		return &GoBGPRuntime{
 			key:             key,
 			server:          newServer(Config{}),
 			listenPort:      listenPort,
+			localAddress:    localAddress,
 			establishedAt:   make(map[string]time.Time),
 			appliedPolicies: make(map[string]model.BGPPolicyDirection),
 		}, nil
@@ -124,7 +128,7 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 
 	// Add or update desired peers.
 	for _, p := range desired.Peers {
-		peer := peerFromDesired(p)
+		peer := peerFromDesired(p, r.localAddress)
 		addErr := b.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
 		if addErr != nil {
 			if strings.Contains(addErr.Error(), "can't overwrite") {
