@@ -5,7 +5,7 @@
 > networks, and a router that reconciles Cosmos BGP CRDs and drives an embedded
 > GoBGP server to distribute EVPN (L2VPN/EVPN AFI/SAFI) paths between nodes.
 
-_Last updated: 2026-06-19_
+_Last updated: 2026-06-23_
 
 ---
 
@@ -53,7 +53,7 @@ galactic/
 │   │   └── frr/             # FRR RouterRuntime stub (fabric role, Phase 2)
 │   ├── model/               # DesiredRouter and family; re-exports cosmos enums
 │   ├── hash/                # SHA-256 change detection over DesiredRouter
-│   ├── metrics/             # Prometheus metrics (galactic_router_*)
+│   ├── metadata/            # Build-time version info (Version, GitCommit, etc.)
 │   ├── cni/                 # CNI cmdAdd / cmdDel
 │   │   ├── route/           # Host-side static routes via netlink
 │   │   └── veth/            # veth pair management
@@ -89,48 +89,12 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the router startup sequen
 | `internal/runtime/frr` | `galactic-router` | FRR stub (fabric role, Phase 2) |
 | `internal/model` | `galactic-router` | Internal BGP model types |
 | `internal/hash` | `galactic-router` | Change detection |
-| `internal/metrics` | `galactic-router` | Prometheus metrics |
+| `internal/metadata` | both | Build-time version info stamped via `-ldflags` |
 | `internal/cni` | `galactic-cni` | CNI cmdAdd / cmdDel |
 | `internal/plumbing/intf` | both | Interface naming, base62↔hex encoding, SRv6 endpoint encode/decode |
 | `internal/plumbing/srv6` | both | SRv6 ingress route add/del (END.DT46) |
 | `internal/plumbing/vrf` | both | Linux VRF create/delete/lookup |
 | `internal/plumbing/sysctl` | both | Interface sysctl helpers |
-
----
-
-## Key Design Decisions
-
-- **Identifiers in the SID.** VPC (48-bit) and VPCAttachment (16-bit) identifiers are packed into the low 64 bits of the SRv6 SID, making forwarding state fully self-describing without a lookup table.
-- **Base62 interface names.** Kernel interface names are Base62-encoded to stay within the 15-character limit (`vrfX-Y`, `galX-Y`). The hex form is used for BGP and SRv6; base62 for kernel interfaces.
-- **GoBGP embedded, lazy-started.** GoBGP runs in-process and starts only when the first `BGPRouter` is reconciled (`listenPort=-1`, outbound-only). ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
-- **CRD-driven config, no sidecar gRPC.** `galactic-router` watches cosmos BGP CRDs directly via controller-runtime. The CNI writes a `BGPAdvertisement` CRD; the router reconciler picks it up. No in-node gRPC calls.
-- **Hash-based no-op suppression.** SHA-256 over the sorted `DesiredRouter` prevents redundant GoBGP Apply calls on every CRD event touch.
-- **RuntimeFactory pattern.** `ROUTER_ROLE=tenant` selects GoBGP; `ROUTER_ROLE=fabric` selects FRR (Phase 2 stub). The binary is selected at startup; no controller changes are needed for Phase 2.
-- **gRPC health on :5000.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on port 5000. No HTTP health endpoint.
-
----
-
-## Known Constraints
-
-- **GoBGP RIB is ephemeral.** All BGP state is in-process memory. On restart, sessions and paths must be re-established from CRD state; controller-runtime's reconcile loop handles this automatically.
-- **EVPN Type 5 deferred.** `BGPAdvertisement` does not carry a Route Distinguisher field in the current cosmos API. `galactic-router` returns `ErrMissingRouteDistinguisher` for l2vpn/evpn advertisements and sets `Accepted=False` on the CRD.
-- **No kernel-path unit tests.** `internal/cni`, `internal/plumbing/srv6`, and `internal/plumbing/vrf` require `CAP_NET_ADMIN` and a real kernel. `internal/plumbing/intf` is fully unit-testable (pure functions only). Coverage comes from the e2e suite (`task test:e2e`).
-
----
-
-# Architecture Revision — 2026-06-23
-
-> Sections that have changed since the previous revision are documented below.
-> Unchanged sections are omitted — refer to the prior revision above.
-
----
-
-## Repository Layout (corrected)
-
-Two corrections from the prior revision:
-
-- `internal/metrics/` was listed but does not exist. controller-runtime exposes default Prometheus metrics on `:8080`; no separate galactic metrics package has been written.
-- Interface names follow the format `G{9-char-vpc-base62}{3-char-att-base62}{suffix}` (suffix: `V` = VRF, `H` = host veth, `G` = guest veth), fitting in the 14-char kernel limit. The prior description of `vrfX-Y` / `galX-Y` reflected an earlier design and is incorrect.
 
 ---
 
@@ -222,6 +186,18 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 
 ---
 
+## Key Design Decisions
+
+- **Identifiers in the SID.** VPC (48-bit) and VPCAttachment (16-bit) identifiers are packed into the low 64 bits of the SRv6 SID, making forwarding state fully self-describing without a lookup table.
+- **Base62 interface names.** Kernel interface names use the format `G{9-char-vpc-base62}{3-char-att-base62}{suffix}` (suffix: `V` = VRF, `H` = host veth, `G` = guest veth), fitting in the 14-character kernel limit. The hex form is used for BGP and SRv6; base62 for kernel interfaces.
+- **GoBGP embedded, lazy-started.** GoBGP runs in-process and starts only when the first `BGPRouter` is reconciled (`listenPort=-1`, outbound-only). ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
+- **CRD-driven config, no sidecar gRPC.** `galactic-router` watches cosmos BGP CRDs directly via controller-runtime. The CNI writes a `BGPAdvertisement` CRD; the router reconciler picks it up. No in-node gRPC calls.
+- **Hash-based no-op suppression.** SHA-256 over the sorted `DesiredRouter` prevents redundant GoBGP Apply calls on every CRD event.
+- **RuntimeFactory pattern.** `ROUTER_ROLE=tenant` selects GoBGP; `ROUTER_ROLE=fabric` selects FRR (Phase 2 stub). The binary is selected at startup; no controller changes are needed for Phase 2.
+- **gRPC health on :5000.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on port 5000. No HTTP health endpoint.
+
+---
+
 ## Testing
 
 | Layer      | Command          | Framework           | Scope                                                                |
@@ -248,6 +224,14 @@ Runs on every PR and push to `main`. Two tiers:
 Triggered by `v*` tags. Builds and pushes `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` for `linux/amd64` and `linux/arm64`. Uses GHA layer cache. Creates a GitHub Release with generated release notes.
 
 **Container image:** `containers/galactic/Dockerfile` — multi-stage distroless build. Both `galactic-cni` and `galactic-router` binaries are in the same image (ENTRYPOINT defaults to `galactic-cni`; DaemonSet overrides to `galactic-router`). Build args: `VERSION`, `GIT_COMMIT`, `GIT_TREE_STATE`, `BUILD_DATE` — stamped into binary via `-ldflags`.
+
+---
+
+## Known Constraints
+
+- **GoBGP RIB is ephemeral.** All BGP state is in-process memory. On restart, sessions and paths must be re-established from CRD state; controller-runtime's reconcile loop handles this automatically.
+- **EVPN Type 5 deferred.** `BGPAdvertisement` does not carry a Route Distinguisher field in the current cosmos API. `galactic-router` returns `ErrMissingRouteDistinguisher` for l2vpn/evpn advertisements and sets `Accepted=False` on the CRD.
+- **No kernel-path unit tests.** `internal/cni`, `internal/plumbing/srv6`, and `internal/plumbing/vrf` require `CAP_NET_ADMIN` and a real kernel. `internal/plumbing/intf` is fully unit-testable (pure functions only). Coverage comes from the e2e suite (`task test:e2e`).
 
 ---
 
