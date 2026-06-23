@@ -115,3 +115,168 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the router startup sequen
 - **GoBGP RIB is ephemeral.** All BGP state is in-process memory. On restart, sessions and paths must be re-established from CRD state; controller-runtime's reconcile loop handles this automatically.
 - **EVPN Type 5 deferred.** `BGPAdvertisement` does not carry a Route Distinguisher field in the current cosmos API. `galactic-router` returns `ErrMissingRouteDistinguisher` for l2vpn/evpn advertisements and sets `Accepted=False` on the CRD.
 - **No kernel-path unit tests.** `internal/cni`, `internal/plumbing/srv6`, and `internal/plumbing/vrf` require `CAP_NET_ADMIN` and a real kernel. `internal/plumbing/intf` is fully unit-testable (pure functions only). Coverage comes from the e2e suite (`task test:e2e`).
+
+---
+
+# Architecture Revision — 2026-06-23
+
+> Sections that have changed since the previous revision are documented below.
+> Unchanged sections are omitted — refer to the prior revision above.
+
+---
+
+## Repository Layout (corrected)
+
+Two corrections from the prior revision:
+
+- `internal/metrics/` was listed but does not exist. controller-runtime exposes default Prometheus metrics on `:8080`; no separate galactic metrics package has been written.
+- Interface names follow the format `G{9-char-vpc-base62}{3-char-att-base62}{suffix}` (suffix: `V` = VRF, `H` = host veth, `G` = guest veth), fitting in the 14-char kernel limit. The prior description of `vrfX-Y` / `galX-Y` reflected an earlier design and is incorrect.
+
+---
+
+## Entry Points
+
+### `cmd/galactic-cni/main.go` — CNI plugin
+
+Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads config from stdin (CNI spec). Requires `NODE_NAME` env var at runtime. See [docs/cni-sequence.md](docs/cni-sequence.md) for the full ADD/DEL sequence.
+
+### `cmd/galactic-router/main.go` — Router daemon
+
+1. Read `NODE_NAME`, `ROUTER_ROLE`, optionally `BGP_LISTEN_PORT` and `BGP_LOCAL_ADDRESS`
+2. Select `RuntimeFactory`: `tenant` → GoBGP, `fabric` → FRR stub
+3. Build controller-runtime manager (Prometheus on `:8080`, no HTTP health)
+4. Start gRPC health server on `:5000`
+5. Register field indexes (BGPPeer→router, BGPRouter→node, BGPPeer→secret)
+6. Register six controllers: BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, Secret, Node
+7. `mgr.Start(ctx)` — blocks until signal
+
+---
+
+## Configuration
+
+### galactic-router environment variables
+
+| Variable           | Required | Default | Description                                                             |
+|--------------------|----------|---------|-------------------------------------------------------------------------|
+| `NODE_NAME`        | Yes      | —       | Kubernetes node name; filters which BGPRouter CRDs this instance owns   |
+| `ROUTER_ROLE`      | Yes      | —       | `tenant` (GoBGP) or `fabric` (FRR stub, not yet implemented)            |
+| `BGP_LISTEN_PORT`  | No       | `179`   | BGP TCP listen port; `-1` disables inbound connections (outbound-only)  |
+| `BGP_LOCAL_ADDRESS`| No       | —       | Source address for outgoing BGP TCP connections (numbered underlay use) |
+
+### galactic-cni CNI config fields (`PluginConf`)
+
+| Field           | Type     | Description                                                             |
+|-----------------|----------|-------------------------------------------------------------------------|
+| `vpc`           | string   | Base62-encoded 48-bit VPC identifier                                    |
+| `vpcattachment` | string   | Base62-encoded 16-bit VPCAttachment identifier                          |
+| `srv6_locator`  | string   | IPv6 CIDR (≤/64) used as SRv6 locator prefix                           |
+| `namespace`     | string   | Kubernetes namespace for BGP CRDs; defaults to `default`               |
+| `mtu`           | int      | MTU for the veth pair; 0 uses kernel default                            |
+| `terminations`  | array    | Static routes to install on the host-side veth (`network`, `via`)      |
+| `ipam`          | object   | Passed through to the IPAM plugin                                       |
+
+### galactic-cni environment variables
+
+| Variable    | Required | Description                                                |
+|-------------|----------|------------------------------------------------------------|
+| `NODE_NAME` | Yes      | Kubernetes node name; used to look up the owning BGPRouter |
+
+---
+
+## Module / Package Reference
+
+| Package                       | Binary          | Responsibility                                                                                      | Owns state |
+|-------------------------------|-----------------|-----------------------------------------------------------------------------------------------------|------------|
+| `internal/controller`         | galactic-router | controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, Node, Secret); field index registration; CRD status helpers | No         |
+| `internal/reconcile`          | galactic-router | Translates BGPRouter + related CRDs into `model.DesiredRouter`; enforces node/role filtering, timer validation, AFI validation | No         |
+| `internal/runtime`            | galactic-router | `RouterRuntime` interface; `RuntimeManager` (keyed map of live runtimes, double-checked lock create) | Yes (runtime map) |
+| `internal/runtime/gobgp`      | galactic-router | Embeds GoBGP v4; lazy-starts on first Apply; handles peer add/update/delete, EVPN paths, policies; tracks established timestamps | Yes (per-router) |
+| `internal/runtime/frr`        | galactic-router | FRR stub — returns `errNotImplemented` for every method                                             | No         |
+| `internal/model`              | both            | `DesiredRouter`, `DesiredPeer`, `DesiredAdvertisement`, `DesiredPolicy`, `RuntimeStatus`; re-exports cosmos enums | No         |
+| `internal/hash`               | galactic-router | SHA-256 fingerprint of `DesiredRouter` for no-op suppression                                        | No         |
+| `internal/metadata`           | both            | Build-time vars (`Version`, `GitCommit`, `GitTreeState`, `BuildDate`) stamped via `-ldflags`         | No         |
+| `internal/cni`                | galactic-cni    | `cmdAdd` / `cmdDel`; CNI PluginConf parsing; BGPAdvertisement lifecycle; delegates kernel work to plumbing | No         |
+| `internal/cni/route`          | galactic-cni    | Host-side static route add/delete via netlink                                                        | No         |
+| `internal/cni/veth`           | galactic-cni    | veth pair create/delete                                                                               | No         |
+| `internal/plumbing/intf`      | both            | Deterministic interface naming (`G{vpc9}{att3}V/H/G`); base62↔hex encoding; `EncodeSRv6Endpoint` / `DecodeSRv6Endpoint` | No |
+| `internal/plumbing/srv6`      | galactic-cni    | SRv6 END.DT46 ingress route add/delete via netlink                                                   | No         |
+| `internal/plumbing/vrf`       | galactic-cni    | Linux VRF create/delete/lookup via netlink                                                           | No         |
+| `internal/plumbing/sysctl`    | galactic-cni    | Per-interface sysctl helpers                                                                          | No         |
+
+---
+
+## External Dependencies
+
+| Dependency                              | Version  | Purpose                                                  |
+|-----------------------------------------|----------|----------------------------------------------------------|
+| `github.com/osrg/gobgp/v4`             | v4.6.0   | Embedded BGP server (tenant role)                        |
+| `go.miloapis.com/cosmos`               | pinned   | Cosmos BGP CRD API types (BGPRouter, BGPPeer, etc.)      |
+| `sigs.k8s.io/controller-runtime`       | v0.24.1  | Reconciler framework, manager, field indexes             |
+| `github.com/containernetworking/cni`   | v1.3.0   | CNI plugin spec, skel, invoke                            |
+| `github.com/vishvananda/netlink`        | pinned   | Linux netlink: VRF, veth, SRv6 routes                   |
+| `github.com/kenshaw/baseconv`           | v0.1.1   | Base62↔hex conversion for interface names               |
+| `github.com/lorenzosaino/go-sysctl`    | v0.3.1   | Interface sysctl helpers                                 |
+| `github.com/coreos/go-iptables`         | v0.8.0   | iptables manipulation (CNI path)                         |
+| `google.golang.org/grpc`               | v1.81.1  | gRPC health server on :5000                              |
+| `k8s.io/api`, `k8s.io/client-go`       | v0.36.x  | Kubernetes client, Node/Secret API types                 |
+
+---
+
+## Testing
+
+| Layer      | Command          | Framework           | Scope                                                                |
+|------------|------------------|---------------------|----------------------------------------------------------------------|
+| Unit       | `task test:unit` | `go test -race`     | `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
+| E2E        | `task test:e2e`  | Kind + `go test`    | Full BGPRouter lifecycle in a Kind cluster; builds and loads image    |
+| CI full    | `task ci`        | all of the above    | lint → build → test:unit → test:e2e                                  |
+
+Kernel-path packages (`internal/cni`, `internal/plumbing/srv6`, `internal/plumbing/vrf`) have no unit tests — they require `CAP_NET_ADMIN`. New code in those paths should use e2e tests. `internal/plumbing/intf` is pure-function and fully unit-testable.
+
+---
+
+## CI/CD
+
+**Pipeline:** `.github/workflows/ci.yaml`
+
+Runs on every PR and push to `main`. Two tiers:
+
+- **Tier 1 (parallel):** `lint` (golangci-lint v2.12.2 + yamlfmt), `test-unit` (race detector + codecov upload), `build`
+- **Tier 2 (sequential):** `test-e2e` — blocked on all Tier 1 jobs passing
+
+**Release pipeline:** `.github/workflows/release.yaml`
+
+Triggered by `v*` tags. Builds and pushes `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` for `linux/amd64` and `linux/arm64`. Uses GHA layer cache. Creates a GitHub Release with generated release notes.
+
+**Container image:** `containers/galactic/Dockerfile` — multi-stage distroless build. Both `galactic-cni` and `galactic-router` binaries are in the same image (ENTRYPOINT defaults to `galactic-cni`; DaemonSet overrides to `galactic-router`). Build args: `VERSION`, `GIT_COMMIT`, `GIT_TREE_STATE`, `BUILD_DATE` — stamped into binary via `-ldflags`.
+
+---
+
+## For Claude
+
+**Where to start for each concern:**
+
+| Concern                                    | Start here                                                   |
+|--------------------------------------------|--------------------------------------------------------------|
+| CNI attach/detach flow                     | `internal/cni/cni.go:cmdAdd` / `cmdDel`                     |
+| CRD → BGP translation                      | `internal/reconcile/reconcile.go:BuildDesiredRouter`         |
+| BGP runtime application (GoBGP)            | `internal/runtime/gobgp/runtime.go:Apply`                   |
+| BGP peer / advertisement / policy CRUD     | `internal/runtime/gobgp/peers.go`, `paths.go`, `policies.go`|
+| Controller watch graph                     | `internal/controller/bgprouter_controller.go:SetupWithManager` |
+| CRD status update logic                    | `internal/controller/status.go`, `bgprouter_controller.go:updateRouterStatus` |
+| Interface naming / SRv6 SID encoding       | `internal/plumbing/intf/intf.go`                             |
+| Hash-based no-op suppression               | `internal/hash/hash.go`; annotation `galactic.datum.net/config-hash` on BGPRouter |
+| GoBGP server lifecycle (start/reconfigure) | `internal/runtime/gobgp/server.go`                          |
+
+**Stable vs. frequently changed:**
+- Stable: `internal/plumbing/` (pure kernel primitives), `internal/model/types.go`, `internal/runtime/runtime.go` (interface)
+- Active: `internal/controller/` (status conditions, watch graph), `internal/runtime/gobgp/` (EVPN path construction), `internal/reconcile/` (validation rules)
+- Stub / incomplete: `internal/runtime/frr/` (returns `errNotImplemented` everywhere)
+
+**Non-obvious patterns:**
+- `BGPPeer` and `BGPPolicy` reconcilers do not call Apply themselves — they enqueue their owning `BGPRouter`, which is the only reconciler that calls `RuntimeManager.Apply`. This means touching any associated resource triggers a full router reconcile.
+- `SecretReconciler.Reconcile()` is a no-op body — it exists only to register the watch; the real work is done by `secretToRouterRequests` mapping changes to BGPRouter reconcile requests.
+- Same for `NodeReconciler` — the reconcile body is empty; the watch mapper `nodeToRouterRequests` does the work.
+- `peerStatusRequeue = 30s` periodic requeue keeps BGPPeer session state current because BGP FSM transitions are not Kubernetes events.
+- `annotationConfigHash` is persisted on the BGPRouter object (not just in memory) so no-op detection survives pod restarts without re-applying GoBGP config.
+- GoBGP `Reconfigure()` calls `old.Stop()` then creates a fresh `BgpServer` — it does NOT call the BGP-level `StopBgp`/`StartBgp` on the old server, avoiding the v4 "Serve loop permanently dead" problem.
+- Both binaries are in the same container image. The DaemonSet for `galactic-router` overrides the entrypoint in its spec; `galactic-cni` uses the default entrypoint and is installed by a CNI installer init container pattern.

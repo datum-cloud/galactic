@@ -152,6 +152,24 @@ Always use the `.yaml` extension, never `.yml`. This applies to all YAML files i
 
 ---
 
+## Markdown
+
+Align all table columns so that the `|` delimiters are vertically flush. Pad cells with spaces to match the widest value in each column. Apply this to every table in `.md` files, including CLAUDE.md, CONVENTIONS.md, ARCHITECTURE.md, and inline doc comments.
+
+```markdown
+// unaligned — not allowed
+| Element | Convention | Example |
+|---------|-----------|---------|
+| Package | lowercase  | `package srv6` |
+
+// aligned — required
+| Element | Convention | Example        |
+|---------|------------|----------------|
+| Package | lowercase  | `package srv6` |
+```
+
+---
+
 ## Commit messages
 
 Use Conventional Commits format: `<type>(<scope>): <description>`. First line ≤ 72 characters. Reference issues where applicable.
