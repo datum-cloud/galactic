@@ -2,7 +2,7 @@
 
 ## Overview
 
-Review of the rewrite replacing `galactic-agent` with `galactic-router`. The changes remove ~1527 lines (agent, bootstrap, gobgp provider/server) and add ~860 lines (router, controllers, reconcile, runtime, model, hash, metrics). The code has significant issues that must be resolved before it can be committed.
+Review of the rewrite replacing `galactic-agent` with `galactic-router`. The changes remove ~1755 lines (agent, bootstrap, gobgp provider/server) and add ~3643 lines (router, controllers, reconcile, runtime, model, hash, frr). All original issues have been resolved; new test files have been added on this branch.
 
 ---
 
@@ -21,7 +21,7 @@ replace go.miloapis.com/cosmos => ../cosmos
 
 **Verification:** Run `go build ./...` and confirm zero errors.
 
-**Status: DONE** — also fixed missing `labels` import in `bgprouter_controller.go`.
+**Status: DONE** — cosmos reference resolved (`go.miloapis.com/cosmos v0.0.0-20260622211233-0e38bdf25eac`). Also fixed missing `labels` import in `bgprouter_controller.go`.
 
 ---
 
@@ -43,7 +43,7 @@ replace go.miloapis.com/cosmos => ../cosmos
 
 ## Phase 3: Remove Dead Code (P1)
 
-### 3.1 Delete `internal/metrics/metrics.go`
+~~### 3.1 Delete `internal/metrics/metrics.go`~~
 
 **File:** `internal/metrics/metrics.go`
 
@@ -53,7 +53,9 @@ replace go.miloapis.com/cosmos => ../cosmos
 
 **Verification:** `go build ./...` should still succeed.
 
-### 3.2 Delete unused condition constants from `status.go`
+**Status: DONE** — `internal/metrics/` directory no longer exists.
+
+~~### 3.2 Delete unused condition constants from `status.go`~~
 
 **File:** `internal/controller/status.go`
 
@@ -77,9 +79,9 @@ The helper variables `fsmConditions` and `fsmStateToCondition` are also dead cod
 
 **Verification:** `go vet ./internal/controller/` should show no unused imports.
 
-**Status: DONE** — removed in cosmos API v3 migration; `setPeerReadyCondition` now sets a single `Ready` condition using `bgpv1alpha1.ConditionTypeReady`.
+**Status: DONE** — removed in cosmos API v3 migration; `setPeerReadyCondition` now sets a single `Ready` condition using `bgpv1alpha1.ConditionTypeReady`. The status.go file now only defines the used condition constants and `Reason*` strings.
 
-### 3.3 Fix `ConditionSessionOpenCfm` typo
+~~### 3.3 Fix `ConditionSessionOpenCfm` typo~~
 
 **File:** `internal/controller/status.go`
 
@@ -93,7 +95,7 @@ The helper variables `fsmConditions` and `fsmStateToCondition` are also dead cod
 
 ## Phase 4: Fix EVPN Stub (P1)
 
-### 4.1 Replace `buildEVPNPath` stub with proper error or implementation
+~~### 4.1 Replace `buildEVPNPath` stub with proper error or implementation~~
 
 **File:** `internal/runtime/gobgp/paths.go`
 
@@ -105,11 +107,13 @@ The helper variables `fsmConditions` and `fsmStateToCondition` are also dead cod
 
 **Verification:** After short-term fix, `go test ./internal/runtime/gobgp/` should pass. After long-term fix, EVPN advertisements should appear in GoBGP state.
 
+**Status: DONE** — full EVPN Type 5 IP Prefix path construction implemented in `buildEVPNPaths` (commit `243f37e`). Builds Type 1 RD from router-ID, parses route target communities, constructs MpReachNLRI with EVPN NLRI, and applies via `AddPath`/`DeletePath`.
+
 ---
 
 ## Phase 5: Improve Controller Efficiency (P2)
 
-### 5.1 Add field index for BGPRouter targetRef.name
+~~### 5.1 Add field index for BGPRouter targetRef.name~~
 
 **Files:** `internal/controller/indexer.go`, `internal/controller/node_controller.go`
 
@@ -122,7 +126,9 @@ The helper variables `fsmConditions` and `fsmStateToCondition` are also dead cod
 
 **Verification:** Node controller should use indexed lookup instead of full list.
 
-### 5.2 Deduplicate peer/policy router-mapping logic
+**Status: DONE** — `indexer.go` defines `BGPRouterByTargetName` and registers it in `RegisterIndexes`. `node_controller.go` uses `client.MatchingFields{BGPRouterByTargetName: node.Name}` (line 58).
+
+~~### 5.2 Deduplicate peer/policy router-mapping logic~~
 
 **Files:** `internal/controller/bgppeer_controller.go`, `internal/controller/bgppolicy_controller.go`
 
@@ -138,11 +144,13 @@ Both controllers should call this helper instead of duplicating the logic.
 
 **Verification:** Both controllers should behave identically after the refactor. `go vet` should show no issues.
 
+**Status: DONE** — `internal/controller/routing.go` contains `enqueueRoutersForTarget` with a `resource` parameter for log context. Both `bgppeer_controller.go` (line 43) and `bgppolicy_controller.go` (line 44) call it.
+
 ---
 
 ## Phase 6: Fix Error Messages (P2)
 
-### 6.1 Return error from `resolveNodeIPv6` when nextHop is empty + EVPN ads present
+~~### 6.1 Return error from `resolveNodeIPv6` when nextHop is empty + EVPN ads present~~
 
 **File:** `internal/reconcile/reconcile.go`
 
@@ -152,11 +160,13 @@ Both controllers should call this helper instead of duplicating the logic.
 
 **Verification:** A node without IPv6 should get a clear error in the BGPRouter status, not a misleading "MissingRouteDistinguisher".
 
+**Status: DONE** — `BuildDesiredRouter` checks `nextHop == ""` with EVPN advertisements and returns `"node %s has no IPv6 InternalIP; EVPN advertisements require it"` (lines 91–94).
+
 ---
 
 ## Phase 7: Minor Cleanup (P3)
 
-### 7.1 Fix bgppolicy controller name
+~~### 7.1 Fix bgppolicy controller name~~
 
 **File:** `internal/controller/bgppolicy_controller.go`
 
@@ -164,7 +174,9 @@ Both controllers should call this helper instead of duplicating the logic.
 
 **Action:** Change to `Named("bgppolicy")`.
 
-### 7.2 Add TODO on FRR stub
+**Status: DONE** — `Named("bgppolicy")` (line 33).
+
+~~### 7.2 Add TODO on FRR stub~~
 
 **File:** `internal/runtime/frr/frr.go`
 
@@ -176,7 +188,9 @@ Both controllers should call this helper instead of duplicating the logic.
 // with ROUTER_ROLE=fabric will fail on the first reconcile.
 ```
 
-### 7.3 Store hash in BGPRouter status for restart resilience
+**Status: DONE** — package comment added (lines 5–7).
+
+~~### 7.3 Store hash in BGPRouter status for restart resilience~~
 
 **File:** `internal/controller/bgprouter_controller.go`
 
@@ -186,17 +200,75 @@ Both controllers should call this helper instead of duplicating the logic.
 
 **Verification:** Restart the router pod — the hash should be restored from status and no-op reconciles should be skipped.
 
+**Status: DONE** — hash persisted as annotation `galactic.datum.net/config-hash` (line 31). Reconciler compares new hash against annotation before applying (line 125).
+
+---
+
+## Phase 8: New Tests (P1) — Review Required
+
+Three new test files were added on this branch but are not yet committed. They should be reviewed and committed.
+
+### 8.1 `internal/controller/controller_test.go` (1015 lines)
+
+**Contents:**
+- `fakeCache` / `fakeManager` — minimal controller-runtime interfaces for testing
+- `TestRegisterIndexes` — verifies all 5 indexes register without error
+- `TestRegisterIndexes_indexFunctions` — verifies each index function returns correct values (BGPPeer by secret, BGPPeer by router, BGPPolicy by router, BGPAdv by router, BGPRouter by target)
+- `TestEnqueueRoutersForTarget_*` — 5 tests covering routerRef, routerSelector, both nil, no match, routerRef overrides selector
+- `TestNodeToRouterRequests_*` — 4 tests covering no match, single router, multiple routers, cross-namespace scoping, invalid object, list error
+- `TestSetRouterPhase_*` — 3 tests for Ready/Failed/Pending phases
+- `TestSetPeerReadyCondition` — 8 test cases covering all FSM states (Established, OpenConfirm, OpenSent, Active, Connect, Idle with reasons, unknown)
+- `TestSetAdvertisementCondition_*` — 2 tests for True/False conditions
+- `TestSetPolicyCondition_*` — 2 tests for True/False conditions
+
+**Review notes:**
+- Test coverage is comprehensive. The `fakeCache`/`fakeManager` stubs are minimal but sufficient for the tested functions.
+- The `fakeCache.IndexField` implementation keys by `fmt.Sprintf("%T/%s", obj, field)` to avoid collisions between types that share field names (e.g., BGPPeer, BGPPolicy, BGPAdvertisement all use `.spec.routerRef.name`).
+
+### 8.2 `internal/runtime/frr/frr_test.go` (60 lines)
+
+**Contents:**
+- `TestApplyReturnsErrNotImplemented`
+- `TestStatusReturnsEmptyAndErrNotImplemented`
+- `TestStopReturnsNil`
+- `TestNewRuntimeFactory`
+
+**Review notes:**
+- Small, focused tests for the FRR stub. Appropriate for a stub implementation.
+
+### 8.3 `internal/reconcile/reconcile_test.go` (1163 lines)
+
+**Contents:**
+- Test helpers: `testScheme`, `fakeClient`, `testRouter`, `testNode`, `testPeer`, `testPeerSelector`, `testPolicy`, `testPolicySelector`, `testAdv`, `testAuthSecret`
+- `TestBuildDesiredRouter` — 7 test cases including happy path, wrong node, wrong role, multi-role error, missing node, missing auth secret
+- `TestBuildDesiredRouter_EVPNNoIPv6` — verifies error when EVPN ads present but node has no IPv6
+- `TestBuildDesiredRouter_EVPNWithIPv6` — verifies successful build with IPv6
+- `TestBuildDesiredRouter_AuthSecret` — verifies auth secret password resolution
+- `TestGatherPeers` — 9 test cases: routerRef, routerSelector, matchExpressions, non-matching, invalid AFI, timers, auth secret, missing auth, invalid keepalive
+- `TestGatherPolicies` — 6 test cases: routerRef, routerSelector, non-matching, invalid term config, term sorting, set actions
+- `TestValidateAFI` — 6 test cases for valid/invalid AFI/SAFI combos
+- `TestValidateAFIsAll` — 4 test cases
+- `TestValidateTimers` — 7 test cases for holdTime/keepalive validation
+- `TestResolveNodeIPv6` — 8 test cases covering IPv6 selection, IPv4 fallback, no addresses, node not found, multiple IPv6, IPv4 skip, external skip, invalid IP
+- `TestPeerTargetsRouter` — 5 test cases
+- `TestPolicyTargetsRouter` — 5 test cases
+
+**Review notes:**
+- Excellent coverage of the reconcile logic. The test helpers are well-structured and reusable.
+- `TestBuildDesiredRouter_EVPNNoIPv6` directly validates the fix from Phase 6.1.
+- `TestResolveNodeIPv6` is thorough — covers edge cases like multiple IPv6, external addresses, and invalid IPs.
+
 ---
 
 ## Verification Checklist
 
-After all phases are complete:
+After all phases are complete and new tests are committed:
 
-- [ ] `go build ./...` — zero errors
-- [ ] `go test ./internal/cni/` — all tests pass
-- [ ] `go test ./internal/reconcile/` — all tests pass
-- [ ] `go test ./internal/controller/` — all tests pass
-- [ ] `go test ./internal/hash/` — all tests pass
-- [ ] `go vet ./...` — zero warnings
-- [ ] `task lint` — passes
-- [ ] `go fmt ./...` — no unformatted files
+- [x] `go build ./...` — zero errors
+- [x] `go test ./internal/cni/` — all tests pass
+- [x] `go test ./internal/reconcile/` — all tests pass
+- [x] `go test ./internal/controller/` — all tests pass
+- [x] `go test ./internal/hash/` — all tests pass
+- [x] `go vet ./...` — zero warnings
+- [x] `task lint` — passes
+- [x] `go fmt ./...` — no unformatted files

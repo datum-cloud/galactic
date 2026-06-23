@@ -23,6 +23,15 @@ const (
 	ConditionPolicyApplied = "PolicyApplied"
 )
 
+// BGP session state reason strings used in condition Reason fields.
+const (
+	ReasonEstablished = "Established"
+	ReasonOpenConfirm = "OpenConfirm"
+	ReasonOpenSent    = "OpenSent"
+	ReasonActive      = "Active"
+	ReasonConnect     = "Connect"
+)
+
 // setRouterPhase sets the BGPRouter phase in status.
 func setRouterPhase(router *bgpv1alpha1.BGPRouter, phase bgpv1alpha1.BGPRouterPhase) {
 	router.Status.Phase = phase
@@ -52,23 +61,23 @@ func setPeerReadyCondition(peer *bgpv1alpha1.BGPPeer, state bgpv1alpha1.BGPPeerS
 	switch state {
 	case bgpv1alpha1.BGPPeerStateEstablished:
 		cond.Status = metav1.ConditionTrue
-		cond.Reason = "Established"
+		cond.Reason = ReasonEstablished
 		cond.Message = "BGP session is Established; address families negotiated."
 	case bgpv1alpha1.BGPPeerStateOpenConfirm:
 		cond.Status = metav1.ConditionFalse
-		cond.Reason = "OpenConfirm"
+		cond.Reason = ReasonOpenConfirm
 		cond.Message = "BGP session in OpenConfirm state, awaiting KEEPALIVE."
 	case bgpv1alpha1.BGPPeerStateOpenSent:
 		cond.Status = metav1.ConditionFalse
-		cond.Reason = "OpenSent"
+		cond.Reason = ReasonOpenSent
 		cond.Message = "BGP OPEN message sent, awaiting peer OPEN."
 	case bgpv1alpha1.BGPPeerStateActive:
 		cond.Status = metav1.ConditionFalse
-		cond.Reason = "Active"
+		cond.Reason = ReasonActive
 		cond.Message = "BGP session Active, attempting to establish TCP connection."
 	case bgpv1alpha1.BGPPeerStateConnect:
 		cond.Status = metav1.ConditionFalse
-		cond.Reason = "Connect"
+		cond.Reason = ReasonConnect
 		cond.Message = "BGP session in Connect state, waiting for TCP connection."
 	case bgpv1alpha1.BGPPeerStateIdle:
 		cond.Status = metav1.ConditionFalse
