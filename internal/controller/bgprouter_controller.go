@@ -7,15 +7,19 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"go.datum.net/galactic/internal/model"
 	"go.datum.net/galactic/internal/reconcile"
@@ -25,6 +29,11 @@ import (
 // annotationConfigHash is the annotation key used to persist the last-applied
 // config hash across pod restarts, enabling no-op detection on reconcile.
 const annotationConfigHash = "galactic.datum.net/config-hash"
+
+// peerStatusRequeue is the interval at which the router reconciler re-checks
+// GoBGP session state. BGP FSM transitions are not Kubernetes events, so a
+// periodic requeue is required to keep BGPPeer status current.
+const peerStatusRequeue = 30 * time.Second
 
 // BGPRouterReconciler reconciles BGPRouter resources.
 type BGPRouterReconciler struct {
@@ -99,14 +108,30 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("hash desired router: %w", hashErr)
 	}
 
-	if router.Annotations[annotationConfigHash] == newHash {
-		// State unchanged: update ObservedGeneration only.
+	// Fetch runtime status early so peer status updates happen on every
+	// reconcile, even when the config hash is unchanged.  Without this,
+	// BGP session state transitions (Idle → Established, etc.) would never
+	// be reflected in BGPPeer CR status because the no-op path returned
+	// before updatePeerStatuses was called.
+	runtimeStatus, statusErr := r.RuntimeManager.Status(ctx, req.NamespacedName)
+	if statusErr != nil {
+		logger.Error(statusErr, "get runtime status")
+	}
+
+	// Only skip Apply if the runtime is healthy AND the config is unchanged.
+	// If the runtime is unhealthy (e.g. after a controller restart where GoBGP
+	// was not yet running), we must re-apply to restart GoBGP even if the desired
+	// config hash matches the annotation.
+	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy {
+		// True no-op: runtime is healthy with the current config.
 		routerCopy := router.DeepCopy()
 		routerCopy.Status.ObservedGeneration = router.Generation
+		r.updateRouterStatus(routerCopy, runtimeStatus)
 		if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
 			logger.Error(updateErr, "update observedGeneration (no-op reconcile)")
 		}
-		return ctrl.Result{}, nil
+		r.updatePeerStatuses(ctx, router, runtimeStatus)
+		return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
 	}
 
 	// Apply to runtime.
@@ -122,18 +147,22 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
 			logger.Error(updateErr, "update status after apply error")
 		}
+		// Still update peer statuses with whatever state we have.
+		r.updatePeerStatuses(ctx, router, runtimeStatus)
 		return ctrl.Result{}, applyErr
 	}
 
-	// Get runtime status.
-	runtimeStatus, statusErr := r.RuntimeManager.Status(ctx, req.NamespacedName)
-	if statusErr != nil {
-		logger.Error(statusErr, "get runtime status")
+	// Fetch fresh status after apply so BGPRouter and BGPPeer statuses reflect
+	// the post-apply GoBGP state (peers now configured, possibly transitioning).
+	postApplyStatus, postStatusErr := r.RuntimeManager.Status(ctx, req.NamespacedName)
+	if postStatusErr != nil {
+		logger.Error(postStatusErr, "get post-apply runtime status")
+		postApplyStatus = runtimeStatus
 	}
 
 	// Update BGPRouter status.
 	routerCopy := router.DeepCopy()
-	r.updateRouterStatus(routerCopy, runtimeStatus)
+	r.updateRouterStatus(routerCopy, postApplyStatus)
 	if updateErr := r.Status().Update(ctx, routerCopy); updateErr != nil {
 		logger.Error(updateErr, "update BGPRouter status")
 	}
@@ -149,15 +178,15 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Update per-peer BGPPeer statuses.
-	r.updatePeerStatuses(ctx, router, runtimeStatus)
+	r.updatePeerStatuses(ctx, router, postApplyStatus)
 
 	// Update per-advertisement BGPAdvertisement statuses.
-	r.updateAdvertisementStatuses(ctx, router, runtimeStatus)
+	r.updateAdvertisementStatuses(ctx, router, postApplyStatus)
 
 	// Update per-policy BGPPolicy statuses.
 	r.updatePolicyStatuses(ctx, router)
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
 }
 
 // updateRouterStatus updates the BGPRouter status from runtime status.
@@ -255,6 +284,15 @@ func (r *BGPRouterReconciler) updatePeerStatuses(ctx context.Context, router *bg
 	for _, peer := range targetPeers {
 		ps, ok := stateByAddr[peer.Spec.Address]
 		if !ok {
+			logger.V(1).Info("peer not found in runtime status, skipping status update",
+				"peer", peer.Name, "address", peer.Spec.Address,
+				"knownAddresses", func() []string {
+					addrs := make([]string, 0, len(stateByAddr))
+					for a := range stateByAddr {
+						addrs = append(addrs, a)
+					}
+					return addrs
+				}())
 			continue
 		}
 		peerCopy := peer.DeepCopy()
@@ -354,6 +392,21 @@ func (r *BGPRouterReconciler) updatePolicyStatuses(ctx context.Context, router *
 func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.BGPRouter{}).
+		Watches(&bgpv1alpha1.BGPPeer{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return peerToRouterRequests(ctx, r.Client, obj)
+			}),
+		).
+		Watches(&bgpv1alpha1.BGPPolicy{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return policyToRouterRequests(ctx, r.Client, obj)
+			}),
+		).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return secretToRouterRequests(ctx, r.Client, obj)
+			}),
+		).
 		Named("bgprouter").
 		Complete(r)
 }

@@ -61,7 +61,7 @@ func peerFromDesired(p model.DesiredPeer) *api.Peer {
 	peer := &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: p.Address,
-			PeerAsn:         p.PeerASN,
+			PeerAsn:         uint32(p.PeerASN),
 		},
 	}
 
@@ -84,8 +84,10 @@ func peerFromDesired(p model.DesiredPeer) *api.Peer {
 		peer.Conf.AuthPassword = p.AuthPassword
 	}
 
-	// Outbound-only: use active transport (connect out, don't accept).
+	// Connect on the overlay BGP port (1790). Port 179 is occupied by the
+	// underlay FRR bgpd on every node, so GoBGP uses a non-conflicting port.
 	peer.Transport = &api.Transport{
+		RemotePort:  1790,
 		PassiveMode: false,
 	}
 
