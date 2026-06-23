@@ -16,3 +16,8 @@ spec:
                     operator: In
                     values:
                       - pop
+      containers:
+        - name: galactic-router
+          env:
+            - name: BGP_LOCAL_ADDRESS
+              value: "fc00:0:4::1"
