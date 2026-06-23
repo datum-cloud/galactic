@@ -6,20 +6,16 @@ package cni
 
 import (
 	"context"
-	"maps"
 	"strings"
 	"testing"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
-	providersv1alpha1 "go.miloapis.com/cosmos/api/providers/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
-	labelDaemon    = "galactic.io/daemon"
-	daemonGoBGP    = "gobgp"
 	testVPCHex1234 = "0000000004d2" // decimal 1234
 	testRD65000_1  = "65000:1"      // RD/RT for ASN 65000, NN 1
 )
@@ -28,32 +24,24 @@ func fakeClient(objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().WithScheme(cniScheme).WithObjects(objs...).Build()
 }
 
-// providerForNode builds a BGPProvider with the label set galactic-agent applies.
-func providerForNode(name, node string, extraLabels map[string]string) *providersv1alpha1.BGPProvider {
-	lbls := map[string]string{
-		labelNode:                node,
-		labelDaemon:              daemonGoBGP,
-		"galactic.io/role":       "overlay",
-		"galactic.io/managed-by": "galactic-agent",
-	}
-	maps.Copy(lbls, extraLabels)
-	return &providersv1alpha1.BGPProvider{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: lbls},
-		Spec: providersv1alpha1.BGPProviderSpec{
-			Type:     "GoBGP",
-			Endpoint: "localhost:50051",
+// routerForNode builds a BGPRouter with spec.targetRef.name set to nodeName.
+func routerForNode(name, nodeName, namespace string, asn uint32) *bgpv1alpha1.BGPRouter {
+	return &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
 		},
-	}
-}
-
-// manualInstance builds a BGPInstance with the given providerSelector labels.
-func manualInstance(name string, asn int64, selectorLabels map[string]string) *bgpv1alpha1.BGPInstance {
-	return &bgpv1alpha1.BGPInstance{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: bgpv1alpha1.BGPInstanceSpec{
-			ProviderSelector: metav1.LabelSelector{MatchLabels: selectorLabels},
-			ASNumber:         asn,
-			AddressFamilies:  []bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef: bgpv1alpha1.TargetRef{
+				Kind: "Node",
+				Name: nodeName,
+			},
+			LocalASN: asn,
+			RouterID: "10.0.0.1",
+			Roles:    []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+			AddressFamilies: []bgpv1alpha1.AddressFamily{
+				{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			},
 		},
 	}
 }
@@ -106,89 +94,18 @@ func TestParseConf(t *testing.T) {
 	}
 }
 
-// ---- bgpVRFInstanceName --------------------------------------------------
+// ---- bgpAdvertisementName ------------------------------------------------
 
-func TestBGPVRFInstanceName(t *testing.T) {
+func TestBGPAdvertisementName(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
 		{"abc", "def", "abc-def"},
 		{"0000000jU", "00G", "0000000jU-00G"},
 	}
 	for _, tt := range tests {
-		got := bgpVRFInstanceName(tt.vpc, tt.attachment)
+		got := bgpAdvertisementName(tt.vpc, tt.attachment)
 		if got != tt.want {
-			t.Errorf("bgpVRFInstanceName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
+			t.Errorf("bgpAdvertisementName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
 		}
-	}
-}
-
-// ---- routeDistinguisher --------------------------------------------------
-
-func TestRouteDistinguisher(t *testing.T) {
-	tests := []struct {
-		name     string
-		asNumber int64
-		vpcHex   string
-		want     string
-		wantErr  bool
-	}{
-		{
-			name:     "small VPC value",
-			asNumber: 65000,
-			vpcHex:   "000000000064", // 100 decimal
-			want:     "65000:100",
-		},
-		{
-			name:     "VPC value 1",
-			asNumber: 65000,
-			vpcHex:   "000000000001",
-			want:     testRD65000_1,
-		},
-		{
-			name:     "exceeds Type 1 limit — valid for Type 0",
-			asNumber: 65000,
-			vpcHex:   "000000010000", // 65536 — would overflow Type 1 NN, safe in Type 0
-			want:     "65000:65536",
-		},
-		{
-			name:     "low 32 bits all set",
-			asNumber: 65000,
-			vpcHex:   "0000ffffffff", // low32 = 4294967295
-			want:     "65000:4294967295",
-		},
-		{
-			name:     "upper 16 bits of 48-bit VPC are stripped",
-			asNumber: 65000,
-			vpcHex:   "000100000001", // 0x000100000001; low32 = 1
-			want:     testRD65000_1,
-		},
-		{
-			name:     "four-byte ASN",
-			asNumber: 4200000000,
-			vpcHex:   testVPCHex1234,
-			want:     "4200000000:1234",
-		},
-		{
-			name:    "invalid hex string",
-			vpcHex:  "zzzzzz",
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := routeDistinguisher(tt.asNumber, tt.vpcHex)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (result: %q)", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("routeDistinguisher(%d, %q) = %q, want %q", tt.asNumber, tt.vpcHex, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -252,15 +169,16 @@ func TestRouteTarget(t *testing.T) {
 	}
 }
 
-// ---- lookupBGPConfig -----------------------------------------------------
+// ---- lookupBGPRouter -----------------------------------------------------
 
-func TestLookupBGPConfig(t *testing.T) {
+func TestLookupBGPRouter(t *testing.T) {
 	ctx := context.Background()
-	const nodeName = "node1"
+	const (
+		nodeName  = "node1"
+		namespace = "default"
+	)
 
-	gobgpProvider := providerForNode("galactic-gobgp-node1", nodeName, nil)
-	gobgpSelector := map[string]string{labelDaemon: daemonGoBGP}
-	matchingInstance := manualInstance("overlay-instance", 65000, gobgpSelector)
+	matchingRouter := routerForNode("overlay-router", nodeName, namespace, 65000)
 
 	tests := []struct {
 		name    string
@@ -269,92 +187,50 @@ func TestLookupBGPConfig(t *testing.T) {
 		check   func(t *testing.T, cfg bgpConfig)
 	}{
 		{
-			name:    "no providers for node",
+			name:    "no router for node",
 			objects: nil,
-			wantErr: "no BGPProvider found",
+			wantErr: "no BGPRouter found",
 		},
 		{
-			name:    "provider present but no matching instance",
-			objects: []client.Object{gobgpProvider},
-			wantErr: "no BGPInstance found",
-		},
-		{
-			name:    "single matching instance returns correct config",
-			objects: []client.Object{gobgpProvider, matchingInstance},
+			name:    "single matching router returns correct config",
+			objects: []client.Object{matchingRouter},
 			check: func(t *testing.T, cfg bgpConfig) {
 				t.Helper()
 				if cfg.asNumber != 65000 {
 					t.Errorf("asNumber = %d, want 65000", cfg.asNumber)
 				}
-				if cfg.instanceName != "overlay-instance" {
-					t.Errorf("instanceName = %q, want %q", cfg.instanceName, "overlay-instance")
+				if cfg.routerName != "overlay-router" {
+					t.Errorf("routerName = %q, want %q", cfg.routerName, "overlay-router")
 				}
 			},
 		},
 		{
-			name:    "providerSelector merges node label with instance's selector labels",
-			objects: []client.Object{gobgpProvider, matchingInstance},
-			check: func(t *testing.T, cfg bgpConfig) {
-				t.Helper()
-				ml := cfg.providerSelector.MatchLabels
-				if ml[labelNode] != nodeName {
-					t.Errorf("MatchLabels[node] = %q, want %q", ml[labelNode], nodeName)
-				}
-				if ml[labelDaemon] != "gobgp" {
-					t.Errorf("MatchLabels[daemon] = %q, want %q", ml[labelDaemon], "gobgp")
-				}
-			},
-		},
-		{
-			name: "non-matching instance selector is ignored",
+			name: "router in different namespace is ignored",
 			objects: []client.Object{
-				gobgpProvider,
-				matchingInstance,
-				manualInstance("frr-instance", 65001, map[string]string{labelDaemon: "frr"}),
+				routerForNode("other-ns-router", nodeName, "other-ns", 65001),
+			},
+			wantErr: "no BGPRouter found",
+		},
+		{
+			name: "non-matching node router is ignored",
+			objects: []client.Object{
+				routerForNode("other-node-router", "node2", namespace, 65001),
+				matchingRouter,
 			},
 			check: func(t *testing.T, cfg bgpConfig) {
 				t.Helper()
-				if cfg.instanceName != "overlay-instance" {
-					t.Errorf("instanceName = %q, want %q", cfg.instanceName, "overlay-instance")
+				if cfg.routerName != "overlay-router" {
+					t.Errorf("routerName = %q, want %q", cfg.routerName, "overlay-router")
 				}
 			},
 		},
 		{
-			name: "ambiguous: two instances both select the provider",
+			name: "ambiguous: two routers target same node",
 			objects: []client.Object{
-				gobgpProvider,
-				manualInstance("instance-a", 65000, gobgpSelector),
-				manualInstance("instance-b", 65001, gobgpSelector),
+				routerForNode("router-a", nodeName, namespace, 65000),
+				routerForNode("router-b", nodeName, namespace, 65001),
 			},
 			wantErr: "ambiguous",
-		},
-		{
-			name: "ambiguous error lists instance names",
-			objects: []client.Object{
-				gobgpProvider,
-				manualInstance("alpha", 65000, gobgpSelector),
-				manualInstance("beta", 65001, gobgpSelector),
-			},
-			wantErr: "alpha",
-		},
-		{
-			name: "invalid providerSelector on instance surfaces error",
-			objects: []client.Object{
-				gobgpProvider,
-				&bgpv1alpha1.BGPInstance{
-					ObjectMeta: metav1.ObjectMeta{Name: "bad-instance"},
-					Spec: bgpv1alpha1.BGPInstanceSpec{
-						ASNumber: 65000,
-						ProviderSelector: metav1.LabelSelector{
-							MatchExpressions: []metav1.LabelSelectorRequirement{
-								{Key: "foo", Operator: "BadOperator", Values: []string{"bar"}},
-							},
-						},
-						AddressFamilies: []bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
-					},
-				},
-			},
-			wantErr: "invalid providerSelector",
 		},
 	}
 
@@ -362,7 +238,7 @@ func TestLookupBGPConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			k8s := fakeClient(tt.objects...)
 
-			cfg, err := lookupBGPConfig(ctx, k8s, nodeName)
+			cfg, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
