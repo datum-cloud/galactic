@@ -6,6 +6,7 @@ package cni
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
@@ -23,16 +24,24 @@ func fakeClient(objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().WithScheme(cniScheme).WithObjects(objs...).Build()
 }
 
-// routerForNode builds a BGPRouter targeting the given node.
-func routerForNode(name, node string, asn uint32, roles []bgpv1alpha1.RouterRole, afs []bgpv1alpha1.AddressFamily) *bgpv1alpha1.BGPRouter {
+// routerForNode builds a BGPRouter with spec.targetRef.name set to nodeName.
+func routerForNode(name, nodeName, namespace string, asn uint32) *bgpv1alpha1.BGPRouter {
 	return &bgpv1alpha1.BGPRouter{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "galactic-system"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
 		Spec: bgpv1alpha1.BGPRouterSpec{
-			TargetRef:       bgpv1alpha1.TargetRef{Kind: "Node", Name: node},
-			Roles:           roles,
-			LocalASN:        asn,
-			RouterID:        "10.0.0.1",
-			AddressFamilies: afs,
+			TargetRef: bgpv1alpha1.TargetRef{
+				Kind: "Node",
+				Name: nodeName,
+			},
+			LocalASN: asn,
+			RouterID: "10.0.0.1",
+			Roles:    []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+			AddressFamilies: []bgpv1alpha1.AddressFamily{
+				{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			},
 		},
 	}
 }
@@ -70,7 +79,7 @@ func TestParseConf(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 				}
-				if !contains(err.Error(), tt.wantErr) {
+				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
 				}
 				return
@@ -85,89 +94,18 @@ func TestParseConf(t *testing.T) {
 	}
 }
 
-// ---- bgpVRFInstanceName --------------------------------------------------
+// ---- bgpAdvertisementName ------------------------------------------------
 
-func TestBGPVRFInstanceName(t *testing.T) {
+func TestBGPAdvertisementName(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
 		{"abc", "def", "abc-def"},
 		{"0000000jU", "00G", "0000000jU-00G"},
 	}
 	for _, tt := range tests {
-		got := bgpVRFInstanceName(tt.vpc, tt.attachment)
+		got := bgpAdvertisementName(tt.vpc, tt.attachment)
 		if got != tt.want {
-			t.Errorf("bgpVRFInstanceName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
+			t.Errorf("bgpAdvertisementName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
 		}
-	}
-}
-
-// ---- routeDistinguisher --------------------------------------------------
-
-func TestRouteDistinguisher(t *testing.T) {
-	tests := []struct {
-		name     string
-		asNumber int64
-		vpcHex   string
-		want     string
-		wantErr  bool
-	}{
-		{
-			name:     "small VPC value",
-			asNumber: 65000,
-			vpcHex:   "000000000064", // 100 decimal
-			want:     "65000:100",
-		},
-		{
-			name:     "VPC value 1",
-			asNumber: 65000,
-			vpcHex:   "000000000001",
-			want:     testRD65000_1,
-		},
-		{
-			name:     "exceeds Type 1 limit — valid for Type 0",
-			asNumber: 65000,
-			vpcHex:   "000000010000", // 65536 — would overflow Type 1 NN, safe in Type 0
-			want:     "65000:65536",
-		},
-		{
-			name:     "low 32 bits all set",
-			asNumber: 65000,
-			vpcHex:   "0000ffffffff", // low32 = 4294967295
-			want:     "65000:4294967295",
-		},
-		{
-			name:     "upper 16 bits of 48-bit VPC are stripped",
-			asNumber: 65000,
-			vpcHex:   "000100000001", // 0x000100000001; low32 = 1
-			want:     testRD65000_1,
-		},
-		{
-			name:     "four-byte ASN",
-			asNumber: 4200000000,
-			vpcHex:   testVPCHex1234,
-			want:     "4200000000:1234",
-		},
-		{
-			name:    "invalid hex string",
-			vpcHex:  "zzzzzz",
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := routeDistinguisher(tt.asNumber, tt.vpcHex)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (result: %q)", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("routeDistinguisher(%d, %q) = %q, want %q", tt.asNumber, tt.vpcHex, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -231,16 +169,16 @@ func TestRouteTarget(t *testing.T) {
 	}
 }
 
-// ---- lookupBGPConfig -----------------------------------------------------
+// ---- lookupBGPRouter -----------------------------------------------------
 
-func TestLookupBGPConfig(t *testing.T) {
+func TestLookupBGPRouter(t *testing.T) {
 	ctx := context.Background()
-	const nodeName = "node1"
-
-	tenantRouter := routerForNode("galactic-tenant-node1", nodeName, 65000,
-		[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-		[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+	const (
+		nodeName  = "node1"
+		namespace = "default"
 	)
+
+	matchingRouter := routerForNode("overlay-router", nodeName, namespace, 65000)
 
 	tests := []struct {
 		name    string
@@ -249,60 +187,50 @@ func TestLookupBGPConfig(t *testing.T) {
 		check   func(t *testing.T, cfg bgpConfig)
 	}{
 		{
-			name:    "no routers for node",
+			name:    "no router for node",
 			objects: nil,
 			wantErr: "no BGPRouter found",
 		},
 		{
-			name: "router targets a different node",
-			objects: []client.Object{
-				routerForNode("other-router", "other-node", 65000,
-					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
-				),
-			},
-			wantErr: "no BGPRouter found",
-		},
-		{
-			name:    "single router returns correct config",
-			objects: []client.Object{tenantRouter},
+			name:    "single matching router returns correct config",
+			objects: []client.Object{matchingRouter},
 			check: func(t *testing.T, cfg bgpConfig) {
 				t.Helper()
 				if cfg.asNumber != 65000 {
 					t.Errorf("asNumber = %d, want 65000", cfg.asNumber)
 				}
-				if cfg.routerSelector[labelNode] != nodeName {
-					t.Errorf("routerSelector[node] = %q, want %q", cfg.routerSelector[labelNode], nodeName)
+				if cfg.routerName != "overlay-router" {
+					t.Errorf("routerName = %q, want %q", cfg.routerName, "overlay-router")
+				}
+			},
+		},
+		{
+			name: "router in different namespace is ignored",
+			objects: []client.Object{
+				routerForNode("other-ns-router", nodeName, "other-ns", 65001),
+			},
+			wantErr: "no BGPRouter found",
+		},
+		{
+			name: "non-matching node router is ignored",
+			objects: []client.Object{
+				routerForNode("other-node-router", "node2", namespace, 65001),
+				matchingRouter,
+			},
+			check: func(t *testing.T, cfg bgpConfig) {
+				t.Helper()
+				if cfg.routerName != "overlay-router" {
+					t.Errorf("routerName = %q, want %q", cfg.routerName, "overlay-router")
 				}
 			},
 		},
 		{
 			name: "ambiguous: two routers target same node",
 			objects: []client.Object{
-				routerForNode("router-a", nodeName, 65000,
-					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
-				),
-				routerForNode("router-b", nodeName, 65001,
-					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
-				),
+				routerForNode("router-a", nodeName, namespace, 65000),
+				routerForNode("router-b", nodeName, namespace, 65001),
 			},
 			wantErr: "ambiguous",
-		},
-		{
-			name: "ambiguous error lists router names",
-			objects: []client.Object{
-				routerForNode("alpha", nodeName, 65000,
-					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
-				),
-				routerForNode("beta", nodeName, 65001,
-					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
-				),
-			},
-			wantErr: "alpha",
 		},
 	}
 
@@ -310,12 +238,12 @@ func TestLookupBGPConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			k8s := fakeClient(tt.objects...)
 
-			cfg, err := lookupBGPConfig(ctx, k8s, nodeName)
+			cfg, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 				}
-				if !contains(err.Error(), tt.wantErr) {
+				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
 				}
 				return
@@ -328,18 +256,4 @@ func TestLookupBGPConfig(t *testing.T) {
 			}
 		})
 	}
-}
-
-// contains is a helper to avoid importing strings in test file scope.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchIn(s, substr)
-}
-
-func searchIn(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

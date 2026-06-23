@@ -1,55 +1,56 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: galactic-agent
+  name: galactic-router
   namespace: galactic-system
   labels:
-    app: galactic-agent
+    app.kubernetes.io/name: galactic-router
 spec:
   selector:
     matchLabels:
-      app: galactic-agent
+      app.kubernetes.io/name: galactic-router
   template:
     metadata:
       labels:
-        app: galactic-agent
+        app.kubernetes.io/name: galactic-router
     spec:
-      serviceAccountName: galactic-agent
-      hostNetwork: false
+      serviceAccountName: galactic-router
+      hostNetwork: true
       tolerations:
         - operator: Exists
       containers:
-        - name: galactic-agent
+        - name: galactic-router
           image: ghcr.io/datum-cloud/galactic:latest
-          args:
-            - --port=33438
-            - --health-port=5000
+          command:
+            - /galactic-router
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: ROUTER_ROLE
+              value: tenant
           ports:
-            - name: grpc
-              containerPort: 33438
+            - name: metrics
+              containerPort: 8080
               protocol: TCP
-            - name: health
+            - name: grpc-health
               containerPort: 5000
               protocol: TCP
           livenessProbe:
             grpc:
               port: 5000
-            initialDelaySeconds: 10
-            periodSeconds: 30
+            initialDelaySeconds: 15
+            periodSeconds: 20
           readinessProbe:
             grpc:
               port: 5000
-              service: readyz
             initialDelaySeconds: 5
             periodSeconds: 10
           securityContext:
             capabilities:
-              add: ["NET_ADMIN"]
+              add:
+                - NET_ADMIN
             allowPrivilegeEscalation: false
           resources:
             requests:

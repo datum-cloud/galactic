@@ -107,18 +107,14 @@
 			}
 		}
 	},
-	"forwardPorts": [8080, 8081, 9443],
+	"forwardPorts": [8080, 5000],
 	"portsAttributes": {
 		"8080": {
 			"label": "Metrics",
 			"onAutoForward": "silent"
 		},
-		"8081": {
-			"label": "Health",
-			"onAutoForward": "silent"
-		},
-		"9443": {
-			"label": "Webhook",
+		"5000": {
+			"label": "gRPC Health",
 			"onAutoForward": "silent"
 		}
 	},
