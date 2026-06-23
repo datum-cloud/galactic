@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,9 +20,7 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
-	providersv1alpha1 "go.miloapis.com/cosmos/api/providers/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -48,7 +45,6 @@ var cniScheme = runtime.NewScheme()
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(cniScheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(cniScheme))
-	utilruntime.Must(providersv1alpha1.AddToScheme(cniScheme))
 }
 
 // PluginConf is the CNI plugin configuration passed via stdin on each invocation.
@@ -75,7 +71,7 @@ func RunPlugin() {
 
 func parseConf(data []byte) (*PluginConf, error) {
 	conf := &PluginConf{}
-	if err := json.Unmarshal(data, &conf); err != nil {
+	if err := json.Unmarshal(data, conf); err != nil {
 		return nil, fmt.Errorf("parse CNI config: %w", err)
 	}
 	return conf, nil
@@ -114,49 +110,31 @@ func routeTarget(asNumber int64, vpcHex string) (string, error) {
 
 // bgpConfig holds the BGP values the CNI needs to populate a BGPVRFInstance.
 type bgpConfig struct {
-	asNumber         int64
-	instanceName     string
-	providerSelector metav1.LabelSelector
+	asNumber       int64
+	routerSelector map[string]string
 }
 
-// lookupBGPConfig finds the BGPProvider(s) on this node and the unique
-// BGPInstance whose providerSelector matches one of them. It errors if the
-// match is ambiguous (multiple instances) so BGP config is always deterministic.
+// lookupBGPConfig finds the BGPRouter on this node and returns its AS number
+// and a label selector that the BGPVRFInstance uses to bind to it.
 func lookupBGPConfig(ctx context.Context, k8s client.Client, nodeName string) (bgpConfig, error) {
-	providerList := &providersv1alpha1.BGPProviderList{}
-	if err := k8s.List(ctx, providerList, client.MatchingLabels{
-		labelNode: nodeName,
-	}); err != nil {
-		return bgpConfig{}, fmt.Errorf("list BGPProviders for node %s: %w", nodeName, err)
-	}
-	if len(providerList.Items) == 0 {
-		return bgpConfig{}, fmt.Errorf("no BGPProvider found for node %s", nodeName)
+	routerList := &bgpv1alpha1.BGPRouterList{}
+	// BGPRouter is Namespaced; list across all namespaces.
+	if err := k8s.List(ctx, routerList); err != nil {
+		return bgpConfig{}, fmt.Errorf("list BGPRouters: %w", err)
 	}
 
-	instanceList := &bgpv1alpha1.BGPInstanceList{}
-	if err := k8s.List(ctx, instanceList); err != nil {
-		return bgpConfig{}, fmt.Errorf("list BGPInstances: %w", err)
-	}
-
-	// Collect all BGPInstances whose providerSelector matches any provider on
-	// this node. The selector encodes daemon type; we just narrow to this node.
-	var matches []*bgpv1alpha1.BGPInstance
-	for i := range instanceList.Items {
-		sel, err := metav1.LabelSelectorAsSelector(&instanceList.Items[i].Spec.ProviderSelector)
-		if err != nil {
-			return bgpConfig{}, fmt.Errorf("BGPInstance %s has invalid providerSelector: %w", instanceList.Items[i].Name, err)
-		}
-		for j := range providerList.Items {
-			if sel.Matches(labels.Set(providerList.Items[j].Labels)) {
-				matches = append(matches, &instanceList.Items[i])
-				break // count this instance once even if it matches multiple providers
-			}
+	// Collect BGPRouters whose TargetRef matches this node.
+	var matches []*bgpv1alpha1.BGPRouter
+	for i := range routerList.Items {
+		r := &routerList.Items[i]
+		if r.Spec.TargetRef.Kind == "Node" && r.Spec.TargetRef.Name == nodeName {
+			matches = append(matches, r)
 		}
 	}
 
 	switch len(matches) {
 	case 0:
-		return bgpConfig{}, fmt.Errorf("no BGPInstance found selecting a provider on node %s", nodeName)
+		return bgpConfig{}, fmt.Errorf("no BGPRouter found for node %s", nodeName)
 	case 1:
 		// expected
 	default:
@@ -164,26 +142,14 @@ func lookupBGPConfig(ctx context.Context, k8s client.Client, nodeName string) (b
 		for i, m := range matches {
 			names[i] = m.Name
 		}
-		return bgpConfig{}, fmt.Errorf("ambiguous BGP config: %d BGPInstances select providers on node %s: [%s]",
+		return bgpConfig{}, fmt.Errorf("ambiguous BGP config: %d BGPRouters target node %s: [%s]",
 			len(matches), nodeName, strings.Join(names, ", "))
 	}
-	instance := matches[0]
-
-	// Build a provider selector that is the BGPInstance's selector narrowed to
-	// this specific node. The instance selector already encodes daemon type and
-	// other constraints; adding the node label makes it target exactly one node.
-	matchLabels := map[string]string{
-		labelNode: nodeName,
-	}
-	maps.Copy(matchLabels, instance.Spec.ProviderSelector.MatchLabels)
+	router := matches[0]
 
 	return bgpConfig{
-		asNumber:     instance.Spec.ASNumber,
-		instanceName: instance.Name,
-		providerSelector: metav1.LabelSelector{
-			MatchLabels:      matchLabels,
-			MatchExpressions: instance.Spec.ProviderSelector.MatchExpressions,
-		},
+		asNumber:       int64(router.Spec.LocalASN),
+		routerSelector: map[string]string{labelNode: nodeName},
 	}, nil
 }
 
@@ -264,8 +230,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, k8s, inst, func() error {
 		inst.Spec = bgpv1alpha1.BGPVRFInstanceSpec{
-			InstanceRef:        bgp.instanceName,
-			ProviderSelector:   bgp.providerSelector,
+			RouterTarget: bgpv1alpha1.RouterTarget{
+				RouterSelector: &bgpv1alpha1.RouterSelector{
+					MatchLabels: bgp.routerSelector,
+				},
+			},
 			RouteDistinguisher: rdValue,
 			ImportRouteTargets: []bgpv1alpha1.RouteTarget{rt},
 			ExportRouteTargets: []bgpv1alpha1.RouteTarget{rt},

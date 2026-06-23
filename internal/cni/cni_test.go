@@ -6,20 +6,15 @@ package cni
 
 import (
 	"context"
-	"maps"
-	"strings"
 	"testing"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
-	providersv1alpha1 "go.miloapis.com/cosmos/api/providers/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
-	labelDaemon    = "galactic.io/daemon"
-	daemonGoBGP    = "gobgp"
 	testVPCHex1234 = "0000000004d2" // decimal 1234
 	testRD65000_1  = "65000:1"      // RD/RT for ASN 65000, NN 1
 )
@@ -28,32 +23,16 @@ func fakeClient(objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().WithScheme(cniScheme).WithObjects(objs...).Build()
 }
 
-// providerForNode builds a BGPProvider with the label set galactic-agent applies.
-func providerForNode(name, node string, extraLabels map[string]string) *providersv1alpha1.BGPProvider {
-	lbls := map[string]string{
-		labelNode:                node,
-		labelDaemon:              daemonGoBGP,
-		"galactic.io/role":       "overlay",
-		"galactic.io/managed-by": "galactic-agent",
-	}
-	maps.Copy(lbls, extraLabels)
-	return &providersv1alpha1.BGPProvider{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: lbls},
-		Spec: providersv1alpha1.BGPProviderSpec{
-			Type:     "GoBGP",
-			Endpoint: "localhost:50051",
-		},
-	}
-}
-
-// manualInstance builds a BGPInstance with the given providerSelector labels.
-func manualInstance(name string, asn int64, selectorLabels map[string]string) *bgpv1alpha1.BGPInstance {
-	return &bgpv1alpha1.BGPInstance{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: bgpv1alpha1.BGPInstanceSpec{
-			ProviderSelector: metav1.LabelSelector{MatchLabels: selectorLabels},
-			ASNumber:         asn,
-			AddressFamilies:  []bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+// routerForNode builds a BGPRouter targeting the given node.
+func routerForNode(name, node string, asn uint32, roles []bgpv1alpha1.RouterRole, afs []bgpv1alpha1.AddressFamily) *bgpv1alpha1.BGPRouter {
+	return &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "galactic-system"},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef:       bgpv1alpha1.TargetRef{Kind: "Node", Name: node},
+			Roles:           roles,
+			LocalASN:        asn,
+			RouterID:        "10.0.0.1",
+			AddressFamilies: afs,
 		},
 	}
 }
@@ -91,7 +70,7 @@ func TestParseConf(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
+				if !contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
 				}
 				return
@@ -258,9 +237,10 @@ func TestLookupBGPConfig(t *testing.T) {
 	ctx := context.Background()
 	const nodeName = "node1"
 
-	gobgpProvider := providerForNode("galactic-gobgp-node1", nodeName, nil)
-	gobgpSelector := map[string]string{labelDaemon: daemonGoBGP}
-	matchingInstance := manualInstance("overlay-instance", 65000, gobgpSelector)
+	tenantRouter := routerForNode("galactic-tenant-node1", nodeName, 65000,
+		[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+		[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+	)
 
 	tests := []struct {
 		name    string
@@ -269,92 +249,60 @@ func TestLookupBGPConfig(t *testing.T) {
 		check   func(t *testing.T, cfg bgpConfig)
 	}{
 		{
-			name:    "no providers for node",
+			name:    "no routers for node",
 			objects: nil,
-			wantErr: "no BGPProvider found",
+			wantErr: "no BGPRouter found",
 		},
 		{
-			name:    "provider present but no matching instance",
-			objects: []client.Object{gobgpProvider},
-			wantErr: "no BGPInstance found",
+			name: "router targets a different node",
+			objects: []client.Object{
+				routerForNode("other-router", "other-node", 65000,
+					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+				),
+			},
+			wantErr: "no BGPRouter found",
 		},
 		{
-			name:    "single matching instance returns correct config",
-			objects: []client.Object{gobgpProvider, matchingInstance},
+			name:    "single router returns correct config",
+			objects: []client.Object{tenantRouter},
 			check: func(t *testing.T, cfg bgpConfig) {
 				t.Helper()
 				if cfg.asNumber != 65000 {
 					t.Errorf("asNumber = %d, want 65000", cfg.asNumber)
 				}
-				if cfg.instanceName != "overlay-instance" {
-					t.Errorf("instanceName = %q, want %q", cfg.instanceName, "overlay-instance")
+				if cfg.routerSelector[labelNode] != nodeName {
+					t.Errorf("routerSelector[node] = %q, want %q", cfg.routerSelector[labelNode], nodeName)
 				}
 			},
 		},
 		{
-			name:    "providerSelector merges node label with instance's selector labels",
-			objects: []client.Object{gobgpProvider, matchingInstance},
-			check: func(t *testing.T, cfg bgpConfig) {
-				t.Helper()
-				ml := cfg.providerSelector.MatchLabels
-				if ml[labelNode] != nodeName {
-					t.Errorf("MatchLabels[node] = %q, want %q", ml[labelNode], nodeName)
-				}
-				if ml[labelDaemon] != "gobgp" {
-					t.Errorf("MatchLabels[daemon] = %q, want %q", ml[labelDaemon], "gobgp")
-				}
-			},
-		},
-		{
-			name: "non-matching instance selector is ignored",
+			name: "ambiguous: two routers target same node",
 			objects: []client.Object{
-				gobgpProvider,
-				matchingInstance,
-				manualInstance("frr-instance", 65001, map[string]string{labelDaemon: "frr"}),
-			},
-			check: func(t *testing.T, cfg bgpConfig) {
-				t.Helper()
-				if cfg.instanceName != "overlay-instance" {
-					t.Errorf("instanceName = %q, want %q", cfg.instanceName, "overlay-instance")
-				}
-			},
-		},
-		{
-			name: "ambiguous: two instances both select the provider",
-			objects: []client.Object{
-				gobgpProvider,
-				manualInstance("instance-a", 65000, gobgpSelector),
-				manualInstance("instance-b", 65001, gobgpSelector),
+				routerForNode("router-a", nodeName, 65000,
+					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+				),
+				routerForNode("router-b", nodeName, 65001,
+					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+				),
 			},
 			wantErr: "ambiguous",
 		},
 		{
-			name: "ambiguous error lists instance names",
+			name: "ambiguous error lists router names",
 			objects: []client.Object{
-				gobgpProvider,
-				manualInstance("alpha", 65000, gobgpSelector),
-				manualInstance("beta", 65001, gobgpSelector),
+				routerForNode("alpha", nodeName, 65000,
+					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+				),
+				routerForNode("beta", nodeName, 65001,
+					[]bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+					[]bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
+				),
 			},
 			wantErr: "alpha",
-		},
-		{
-			name: "invalid providerSelector on instance surfaces error",
-			objects: []client.Object{
-				gobgpProvider,
-				&bgpv1alpha1.BGPInstance{
-					ObjectMeta: metav1.ObjectMeta{Name: "bad-instance"},
-					Spec: bgpv1alpha1.BGPInstanceSpec{
-						ASNumber: 65000,
-						ProviderSelector: metav1.LabelSelector{
-							MatchExpressions: []metav1.LabelSelectorRequirement{
-								{Key: "foo", Operator: "BadOperator", Values: []string{"bar"}},
-							},
-						},
-						AddressFamilies: []bgpv1alpha1.AddressFamily{{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}},
-					},
-				},
-			},
-			wantErr: "invalid providerSelector",
 		},
 	}
 
@@ -367,7 +315,7 @@ func TestLookupBGPConfig(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
+				if !contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
 				}
 				return
@@ -380,4 +328,18 @@ func TestLookupBGPConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// contains is a helper to avoid importing strings in test file scope.
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchIn(s, substr)
+}
+
+func searchIn(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
