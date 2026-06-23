@@ -30,7 +30,7 @@ case "$COMMAND" in
     kubectl cluster-info
 
     echo "--- Building image: $IMG"
-    docker build --build-context cosmos=../cosmos -t "$IMG" -f containers/galactic/Dockerfile .
+    docker build -t "$IMG" -f containers/galactic/Dockerfile .
 
     echo "--- Loading image into cluster"
     kind load docker-image "$IMG" --name "$CLUSTER_NAME"

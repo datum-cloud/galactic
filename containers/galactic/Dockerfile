@@ -8,8 +8,6 @@ ARG GIT_TREE_STATE=unknown
 ARG BUILD_DATE=unknown
 
 WORKDIR /workspace
-# cosmos is a local replace dependency; copy it to the path expected by go.mod (../cosmos = /cosmos)
-COPY --from=cosmos . /cosmos/
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
