@@ -1,13 +1,13 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: dfw-overlay-to-rr
+  name: iad-rr-overlay-to-iad
   namespace: galactic-system
 spec:
   routerRef:
-    name: dfw-overlay
+    name: iad-rr-overlay
   peerASN: 65000
-  address: "fc00:0:8::1"
+  address: "fc00:0:4::1"
   addressFamilies:
     - afi: l2vpn
       safi: evpn

@@ -57,7 +57,8 @@ func familyFromModel(af model.AddressFamily) *api.Family {
 }
 
 // peerFromDesired converts a DesiredPeer to a GoBGP api.Peer.
-func peerFromDesired(p model.DesiredPeer) *api.Peer {
+// localAddress, if non-empty, is set as the TCP source address for the session.
+func peerFromDesired(p model.DesiredPeer, localAddress string) *api.Peer {
 	peer := &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: p.Address,
@@ -86,9 +87,12 @@ func peerFromDesired(p model.DesiredPeer) *api.Peer {
 
 	// Connect on the overlay BGP port (1790). Port 179 is occupied by the
 	// underlay FRR bgpd on every node, so GoBGP uses a non-conflicting port.
+	// LocalAddress pins the TCP source to the node's SRv6 loopback so the
+	// return path from the RR uses a routed prefix instead of the link address.
 	peer.Transport = &api.Transport{
-		RemotePort:  1790,
-		PassiveMode: false,
+		RemotePort:   1790,
+		PassiveMode:  false,
+		LocalAddress: localAddress,
 	}
 
 	return peer

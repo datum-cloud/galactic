@@ -12,6 +12,9 @@ spec:
         app.kubernetes.io/name: overlay-rr
     spec:
       tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoSchedule
         - key: galactic.io/role
           value: route-reflector
           effect: NoSchedule
@@ -25,15 +28,15 @@ spec:
                     values:
                       - route-reflector
       containers:
-        - name: galactic-agent
-          args:
-            - --port=33440
-            - --health-port=5000
-            - --role=overlay-rr
+        - name: galactic-router
+          env:
+            - name: ROUTER_ROLE
+              value: tenant
+            - name: BGP_LISTEN_PORT
+              value: "1790"
           livenessProbe:
             grpc:
               port: 5000
           readinessProbe:
             grpc:
               port: 5000
-              service: readyz

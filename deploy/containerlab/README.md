@@ -1,52 +1,56 @@
 # Galactic VPC Lab Deployment
 
-Three Kind clusters connected over an IPv6 SRv6 transit mesh. Each cluster runs FRR
-as a node routing daemon (hostNetwork DaemonSet) to peer with the transit layer via
-BGP unnumbered. GoBGP runs alongside FRR on the iad and sjc workers to exchange
-L3VPN type-5 routes with the infra route reflector over iBGP.
+Three Kind clusters (dfw, iad, sjc) connected over an IPv6 SRv6 transit mesh. Each cluster
+runs FRR as a node routing daemon (hostNetwork DaemonSet) to peer with the transit layer via
+eBGP over numbered IPv6 links. galactic-router runs alongside FRR on the workers to distribute EVPN routes
+over iBGP to the route reflector on iad-rr.
 
 ## Topology
 
 ```
-  iad-worker ──eth1── tr1 ──────────── tr2 ──eth1── sjc-worker
+  dfw-worker ──eth1── tr1 ──────────── tr2 ──eth1── sjc-worker
                        │  ╲          ╱  │
                        │   tr3 ── tr4   │
                        │  ╱          ╲  │
                       (mesh)        (mesh)
-                                    tr3 ──eth5── infra-worker
+                                    tr3 ──eth5── iad-worker
+                                    tr3 ──eth4── iad-worker-rr
 ```
 
 ### Node roles
 
 | Node                  | Kind          | Role                                              |
 |-----------------------|---------------|---------------------------------------------------|
+| `dfw`                 | k8s-kind      | Kind cluster definition (dfw region)              |
+| `dfw-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus, cert-mgr |
+| `dfw-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE     |
 | `iad`                 | k8s-kind      | Kind cluster definition (iad region)              |
 | `iad-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus, cert-mgr |
-| `iad-worker`          | ext-container | Kind worker; runs FRR PE + GoBGP PE               |
+| `iad-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE     |
+| `iad-worker-rr`       | ext-container | Kind worker; runs FRR PE + galactic-router RR     |
 | `sjc`                 | k8s-kind      | Kind cluster definition (sjc region)              |
 | `sjc-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus, cert-mgr |
-| `sjc-worker`          | ext-container | Kind worker; runs FRR PE + GoBGP PE               |
-| `infra`               | k8s-kind      | Kind cluster definition (infra)                   |
-| `infra-control-plane` | ext-container | Kind control-plane; runs Cilium                   |
-| `infra-worker`        | ext-container | Kind worker; runs FRR route reflector             |
+| `sjc-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE     |
 | `tr1`–`tr4`           | linux (FRR)   | iBGP full mesh, AS 65100                          |
 
 ### BGP design
 
 ```
-AS 65000 (iad-underlay / FRR)         ──eBGP unnumbered──  tr1 (AS 65100)
-AS 65000 (sjc-underlay / FRR)         ──eBGP unnumbered──  tr2 (AS 65100)
-AS 65000 (infra-control-plane / FRR)  ──eBGP unnumbered──  tr3 (AS 65100)
+AS 65000 (dfw-underlay / FRR)          ──eBGP──  tr1 (AS 65100)
+AS 65000 (iad-underlay / FRR)          ──eBGP──  tr3:eth5 (AS 65100)
+AS 65000 (iad-rr-underlay / FRR)       ──eBGP──  tr3:eth4 (AS 65100)
+AS 65000 (sjc-underlay / FRR)          ──eBGP──  tr2 (AS 65100)
 
-AS 65000 (iad-overlay / GoBGP)  ──iBGP──  infra-control-plane (AS 65000 RR)
-AS 65000 (sjc-overlay / GoBGP)  ──iBGP──  infra-control-plane (AS 65000 RR)
+AS 65000 (dfw-overlay / galactic-router)  ──iBGP──  iad-rr (AS 65000 RR)
+AS 65000 (iad-overlay / galactic-router)  ──iBGP──  iad-rr (AS 65000 RR)
+AS 65000 (sjc-overlay / galactic-router)  ──iBGP──  iad-rr (AS 65000 RR)
 ```
 
-- All clusters use a single AS (65000) for both the FRR underlay and the GoBGP overlay.
+- All clusters use a single AS (65000) for both the FRR underlay and the galactic-router overlay.
 - The transit mesh carries IPv6 unicast (SRv6 locator prefixes and loopbacks) via iBGP within AS 65100.
-- FRR PE nodes originate their SRv6 forwarding prefix (`2001:db8:ffXX::/48`) and SRv6 SID block (`fc00:0:X::/48`) toward the transit layer via eBGP unnumbered.
+- FRR PE nodes originate their SRv6 forwarding prefix (`2001:db8:ffXX::/48`) and SRv6 SID block (`fc00:0:X::/48`) toward the transit layer via eBGP over numbered IPv6 links.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
-- GoBGP instances on iad/sjc workers peer with infra-control-plane over iBGP (AS 65000) for `l3vpn-ipv4-unicast` (type-5 VPN routes). GoBGP runs with `port = -1`; FRR owns TCP/179.
+- galactic-router instances on dfw/iad/sjc workers peer with iad-worker-rr over iBGP (AS 65000) for `l2vpn-evpn` routes. GoBGP runs with outbound-only mode (`listenPort=-1`); all BGP sessions are initiated outbound.
 
 ## Addressing
 
@@ -70,40 +74,43 @@ AS 65000 (sjc-overlay / GoBGP)  ──iBGP──  infra-control-plane (AS 65000 
 | tr2–tr4 | 2001:db8:0:24::/64  |
 | tr3–tr4 | 2001:db8:0:34::/64  |
 
-### Worker–TR links (BGP unnumbered, link-local only)
+### Worker–TR links (numbered, eBGP)
 
-| Link               | TR interface |
-|--------------------|--------------|
-| iad-worker – tr1   | eth1         |
-| sjc-worker – tr2   | eth1         |
-| infra-worker – tr3 | eth5         |
+| Link                   | Subnet              | TR address     | Worker address   |
+|------------------------|---------------------|----------------|------------------|
+| dfw-worker – tr1       | 2001:db8:1:10::/64  | 2001:db8:1:10::1 | 2001:db8:1:10::2 |
+| sjc-worker – tr2       | 2001:db8:1:20::/64  | 2001:db8:1:20::1 | 2001:db8:1:20::2 |
+| iad-worker – tr3       | 2001:db8:1:30::/64  | 2001:db8:1:30::1 | 2001:db8:1:30::2 |
+| iad-worker-rr – tr3    | 2001:db8:1:31::/64  | 2001:db8:1:31::1 | 2001:db8:1:31::2 |
 
 ### Cluster SRv6 addressing
 
-| Cluster | FRR loopback / SID block | SRv6 forwarding prefix | GoBGP local-address |
-|---------|--------------------------|------------------------|---------------------|
-| iad     | fc00:0:2::1/48           | 2001:db8:ff01::/48     | fc00:0:2::1         |
-| sjc     | fc00:0:3::1/48           | 2001:db8:ff02::/48     | fc00:0:3::1         |
-| infra   | fc00:0:4::1/128          | —                      | —                   |
+| Cluster   | FRR loopback / SID block | SRv6 forwarding prefix | galactic-router address |
+|-----------|--------------------------|------------------------|-------------------------|
+| dfw       | fc00:0:2::1/48           | 2001:db8:ff01::/48     | fc00:0:2::1             |
+| iad       | fc00:0:4::1/48           | 2001:db8:ff03::/48     | fc00:0:4::1             |
+| iad-rr    | fc00:0:8::1/48           | —                      | fc00:0:8::1             |
+| sjc       | fc00:0:3::1/48           | 2001:db8:ff02::/48     | fc00:0:3::1             |
 
 Worker SRv6 node SIDs (on `lo-galactic`):
 
-| Node         | Address                                    |
-|--------------|--------------------------------------------|
-| iad-worker   | 2001:db8:ff01:100:ffff:ffff:ffff:ffff/128  |
-| sjc-worker   | 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128  |
-| infra-worker | 2001:db8:ff03:100:ffff:ffff:ffff:ffff/128  |
+| Node          | Address                                    |
+|---------------|--------------------------------------------|
+| dfw-worker    | 2001:db8:ff01:100:ffff:ffff:ffff:ffff/128  |
+| iad-worker    | 2001:db8:ff03:100:ffff:ffff:ffff:ffff/128  |
+| sjc-worker    | 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128  |
 
 ### Management network (172.20.20.0/24)
 
 | Node                  | Address       |
 |-----------------------|---------------|
-| iad                   | 172.20.20.101 |
-| iad-control-plane     | 172.20.20.102 |
-| iad-worker            | 172.20.20.103 |
-| infra                 | 172.20.20.111 |
-| infra-control-plane   | 172.20.20.112 |
-| infra-worker          | 172.20.20.113 |
+| dfw                   | 172.20.20.101 |
+| dfw-control-plane     | 172.20.20.102 |
+| dfw-worker            | 172.20.20.103 |
+| iad                   | 172.20.20.111 |
+| iad-control-plane     | 172.20.20.112 |
+| iad-worker            | 172.20.20.113 |
+| iad-worker-rr         | 172.20.20.114 |
 | sjc                   | 172.20.20.121 |
 | sjc-control-plane     | 172.20.20.122 |
 | sjc-worker            | 172.20.20.123 |
@@ -116,16 +123,16 @@ deploy/containerlab/
 ├── Taskfile.yaml
 ├── containers/
 │   ├── kindest-node-galactic/   # Custom Kind node image (Cilium, Multus, cert-manager, galactic)
-│   ├── gobgp/                   # GoBGP container built from upstream release binary
+│   ├── galactic-router/         # galactic-router container built from Go source
 │   └── frr/                     # FRR container built from Alpine edge
 ├── resources/
-│   ├── underlay/                # FRR DaemonSet kustomize overlays (iad, sjc, infra)
-│   ├── overlay/                 # GoBGP DaemonSet kustomize overlays (iad, sjc)
-│   └── cosmos/                  # Cosmos BGP CRs (BGPInstance, BGPSession, BGPProvider)
+│   ├── underlay/                # FRR DaemonSet kustomize overlays (dfw, iad, iad-rr, sjc)
+│   ├── overlay/                 # galactic-router DaemonSet kustomize overlays (dfw, iad, sjc)
+│   └── bgp/                     # BGP CRs (BGPRouter, BGPPeer, BGPAdvertisement)
 ├── node_files/
+│   ├── dfw/     config.yaml
 │   ├── iad/     config.yaml
 │   ├── sjc/     config.yaml
-│   ├── infra/   config.yaml
 │   ├── tr1/     frr.conf  startup.sh
 │   ├── tr2/     frr.conf  startup.sh
 │   ├── tr3/     frr.conf  startup.sh
@@ -141,7 +148,7 @@ deploy/containerlab/
 
 ## Prerequisites
 
-- ContainerLab ≥ 0.54
+- ContainerLab >= 0.54
 - Docker
 - `kind` CLI
 - Host kernel with SRv6 support
@@ -165,16 +172,15 @@ task deploy
 
 | Task               | Description                                                    |
 |--------------------|----------------------------------------------------------------|
-| `build`            | Build all container images (node, cosmos, gobgp, frr)         |
+| `build`            | Build all container images (node, galactic-router, frr) |
 | `build:node`       | Build the custom `kindest/node:galactic` image                 |
-| `build:cosmos`     | Build the Cosmos BGP operator image from source                |
-| `build:gobgp`      | Build the GoBGP container from upstream release binary         |
+| `build:galactic-router` | Build the galactic-router container from Go source        |
 | `build:frr`        | Build the FRR container from Alpine edge                       |
 | `deploy`           | Build images, apply host sysctls, and deploy the lab           |
 | `deploy:topology`  | Deploy the ContainerLab topology (transit routers + clusters)  |
-| `deploy:images`    | Load images into Kind clusters and wait for cosmos rollout     |
-| `deploy:underlay`  | Apply FRR DaemonSets to all three clusters                     |
-| `deploy:overlay`   | Apply GoBGP DaemonSets and Cosmos BGP CRs to iad and sjc      |
+| `deploy:images`    | Load container images into Kind clusters                       |
+| `deploy:underlay`  | Apply FRR DaemonSets to all clusters                           |
+| `deploy:overlay`   | Apply galactic-router DaemonSets and BGP CRs                   |
 | `destroy`          | Destroy the lab and remove all Kind clusters                   |
 | `reload`           | Full rebuild — destroy then redeploy                           |
 | `inspect`          | Show running nodes and management addresses                    |
@@ -194,35 +200,36 @@ docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast summary"
 # Worker SRv6 prefixes should be present on all TR nodes
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 ```
 
 ### FRR DaemonSets (eBGP underlay)
 
 ```bash
 # Check pods are running
-docker exec iad-control-plane kubectl get pods -n iad-underlay
-docker exec sjc-control-plane kubectl get pods -n sjc-underlay
-docker exec infra-control-plane kubectl get pods -n infra-underlay
+docker exec dfw-control-plane kubectl get pods -n galactic-system
+docker exec iad-control-plane kubectl get pods -n galactic-system
+docker exec sjc-control-plane kubectl get pods -n galactic-system
 
 # Run vtysh inside a pod
-docker exec iad-control-plane kubectl exec -n iad-underlay ds/iad-underlay \
+docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-underlay \
+  -- vtysh -c "show bgp ipv6 unicast summary"
+docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-rr-underlay \
   -- vtysh -c "show bgp ipv6 unicast summary"
 ```
 
-### GoBGP DaemonSets (L3VPN overlay)
+### galactic-router DaemonSets (EVPN overlay)
 
 ```bash
 # Check pods are running
-docker exec iad-control-plane kubectl get pods -n iad-overlay
-docker exec sjc-control-plane kubectl get pods -n sjc-overlay
+docker exec dfw-control-plane kubectl get pods -n galactic-system
+docker exec iad-control-plane kubectl get pods -n galactic-system
+docker exec sjc-control-plane kubectl get pods -n galactic-system
 
-# Check iBGP session to infra-control-plane
-docker exec iad-control-plane kubectl exec -n iad-overlay ds/iad-overlay -- gobgp neighbor
-docker exec sjc-control-plane kubectl exec -n sjc-overlay ds/sjc-overlay -- gobgp neighbor
-
-# Inspect VPN RIB
-docker exec iad-control-plane kubectl exec -n iad-overlay ds/iad-overlay -- gobgp global rib -a vpnv6
-docker exec sjc-control-plane kubectl exec -n sjc-overlay ds/sjc-overlay -- gobgp global rib -a vpnv6
+# Check EVPN routes via BGPRouter status
+docker exec dfw-control-plane kubectl get bgprouters -A
+docker exec iad-control-plane kubectl get bgprouters -A
+docker exec sjc-control-plane kubectl get bgprouters -A
 ```
 
 ## Notes
@@ -230,8 +237,7 @@ docker exec sjc-control-plane kubectl exec -n sjc-overlay ds/sjc-overlay -- gobg
 - All three Kind clusters use `disableDefaultCNI: true`. Cilium is installed by the
   `kindest/node:galactic` bootstrap script. cert-manager and Multus are only installed
   on iad and sjc.
-- Worker–TR links use BGP unnumbered (IPv6 link-local only). No numbered addresses are
-  configured on worker data-plane interfaces.
+- Worker–TR links use numbered IPv6 subnets (/64) with eBGP peering.
 - Cilium's iptables rules block BGP by default; the bootstrap script inserts
   `ip6tables -I INPUT` rules for TCP/179 before Cilium starts on each worker.
-- infra-control-plane peers with tr3 as AS 65000, the same AS used by all three clusters.
+- iad-worker-rr peers with tr3 as AS 65000, the same AS used by all three clusters.

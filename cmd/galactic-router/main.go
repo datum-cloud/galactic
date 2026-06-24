@@ -50,10 +50,12 @@ func main() {
 		bgpListenPort = int32(p)
 	}
 
+	bgpLocalAddr := os.Getenv("BGP_LOCAL_ADDRESS")
+
 	var factory galacticruntime.RuntimeFactory
 	switch routerRole {
 	case "tenant":
-		factory = gobgp.NewRuntimeFactory(bgpListenPort)
+		factory = gobgp.NewRuntimeFactory(bgpListenPort, bgpLocalAddr)
 	case "fabric":
 		factory = frr.NewRuntimeFactory()
 	default:

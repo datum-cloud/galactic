@@ -24,7 +24,7 @@ if hostname |grep -q control-plane; then # control-plane
   kubectl -n kube-system rollout status daemonset kube-multus-ds
 
   # Cosmos BGP CRDs (operator not deployed; resources applied by install-overlay.sh)
-  kubectl apply -k https://github.com/milo-os/cosmos//config/crd
+  kubectl apply -k https://github.com/milo-os/cosmos/config/crd
 
 else # worker
   until journalctl -q -u kubelet -g "Successfully registered node"; do

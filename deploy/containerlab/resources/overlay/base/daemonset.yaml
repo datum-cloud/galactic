@@ -12,8 +12,12 @@ spec:
       labels:
         app.kubernetes.io/name: overlay
     spec:
-      serviceAccountName: galactic-agent
+      serviceAccountName: galactic-router
       hostNetwork: true
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoSchedule
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -22,22 +26,31 @@ spec:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
       containers:
-        - name: galactic-agent
-          image: galactic-agent:latest
+        - name: galactic-router
+          image: galactic-router:latest
           imagePullPolicy: Never
-          args:
-            - --port=33438
-            - --health-port=5000
-            - --role=overlay
+          command:
+            - /galactic-router
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: ROUTER_ROLE
+              value: tenant
+            - name: BGP_LISTEN_PORT
+              value: "-1"
           securityContext:
             capabilities:
               add:
                 - NET_ADMIN
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc-health
+              containerPort: 5000
+              protocol: TCP
           livenessProbe:
             grpc:
               port: 5000
@@ -46,6 +59,5 @@ spec:
           readinessProbe:
             grpc:
               port: 5000
-              service: readyz
             initialDelaySeconds: 5
             periodSeconds: 10
