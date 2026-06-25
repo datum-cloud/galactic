@@ -9,10 +9,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
@@ -47,6 +49,9 @@ const (
 	resourceBGPVRFInstances   = "bgpvrfinstances"
 	resourceSecrets           = "secrets"
 	resourceNodes             = "nodes"
+
+	defaultGrpcPort   = 50051
+	grpcServerEnabled = "true"
 )
 
 func main() {
@@ -70,10 +75,14 @@ func main() {
 
 	bgpLocalAddr := os.Getenv("BGP_LOCAL_ADDRESS")
 
+	// GALACTIC_ENABLE_GOBGP_GRPC_SERVER controls whether the embedded GoBGP
+	// gRPC API server is enabled. Defaults to false.
+	grpcListenAddress := parseGrpcListenAddress()
+
 	var factory galacticruntime.RuntimeFactory
 	switch routerRole {
 	case "tenant":
-		factory = gobgp.NewRuntimeFactory(bgpListenPort, bgpLocalAddr)
+		factory = gobgp.NewRuntimeFactory(bgpListenPort, bgpLocalAddr, grpcListenAddress)
 	case "fabric":
 		factory = frr.NewRuntimeFactory()
 	default:
@@ -254,4 +263,30 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		logger.Error(nil, "missing watch RBAC for "+r.resource,
 			"verb", "watch", "detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
 	}
+}
+
+// parseGrpcPort reads GALACTIC_GOBGP_GRPC_SERVER_PORT and returns the port
+// to use for the GoBGP gRPC API. Returns defaultGrpcPort when the env var is
+// unset or invalid.
+func parseGrpcPort() int {
+	v := os.Getenv("GALACTIC_GOBGP_GRPC_PORT")
+	if v == "" {
+		return defaultGrpcPort
+	}
+	port, err := strconv.Atoi(v)
+	if err != nil || port < 1 || port > 65535 {
+		return defaultGrpcPort
+	}
+	return port
+}
+
+// parseGrpcListenAddress reads GALACTIC_ENABLE_GOBGP_GRPC_SERVER and returns
+// the gRPC listen address to use. Returns ":<port>" when the env var is
+// "true" (case-insensitive), otherwise returns an empty string to disable
+// the GoBGP gRPC API server.
+func parseGrpcListenAddress() string {
+	if strings.ToLower(os.Getenv("GALACTIC_ENABLE_GOBGP_GRPC_SERVER")) == grpcServerEnabled {
+		return fmt.Sprintf(":%d", parseGrpcPort())
+	}
+	return ""
 }
