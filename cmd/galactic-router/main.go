@@ -19,8 +19,7 @@ import (
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -35,6 +34,19 @@ import (
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/frr"
 	"go.datum.net/galactic/internal/runtime/gobgp"
+)
+
+const (
+	bgpAPIGroup   = "bgp.miloapis.com"
+	bgpAPIVersion = "v1alpha1"
+
+	resourceBGPRouters        = "bgprouters"
+	resourceBGPPeers          = "bgppeers"
+	resourceBGPAdvertisements = "bgpadvertisements"
+	resourceBGPPolicies       = "bgppolicies"
+	resourceBGPVRFInstances   = "bgpvrfinstances"
+	resourceSecrets           = "secrets"
+	resourceNodes             = "nodes"
 )
 
 func main() {
@@ -188,10 +200,11 @@ func main() {
 	}
 }
 
-// checkWatchPermissions issues a list request for each resource type the
-// manager watches. If any return a Forbidden error the informer cache will
-// never sync and all reconcilers will be silently blocked; this logs a
-// clear, actionable message at startup so the problem is immediately obvious.
+// checkWatchPermissions issues a SelfSubjectAccessReview for each resource
+// type the manager watches, checking the watch verb. If any review denies
+// the request the informer cache will never sync and all reconcilers will
+// be silently blocked; this logs a clear, actionable message at startup so
+// the problem is immediately obvious.
 func checkWatchPermissions(mgr ctrl.Manager) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {
@@ -204,22 +217,41 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 
 	logger := ctrl.Log.WithName("rbac-preflight")
 
-	watched := []client.ObjectList{
-		&bgpv1alpha1.BGPRouterList{},
-		&bgpv1alpha1.BGPPeerList{},
-		&bgpv1alpha1.BGPAdvertisementList{},
-		&bgpv1alpha1.BGPPolicyList{},
-		&bgpv1alpha1.BGPVRFInstanceList{},
-		&corev1.SecretList{},
-		&corev1.NodeList{},
+	resources := []struct {
+		group     string
+		version   string
+		resource  string
+		namespace string
+	}{
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPRouters},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPPeers},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPAdvertisements},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPPolicies},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPVRFInstances},
+		{version: "v1", resource: resourceSecrets},
+		{version: "v1", resource: resourceNodes},
 	}
 
-	for _, objList := range watched {
-		if err := c.List(ctx, objList, client.Limit(1)); err != nil {
-			if apierrors.IsForbidden(err) {
-				logger.Error(err, "missing list+watch RBAC",
-					"detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
-			}
+	for _, r := range resources {
+		review := &authorizationv1.SelfSubjectAccessReview{
+			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+				ResourceAttributes: &authorizationv1.ResourceAttributes{
+					Namespace: r.namespace,
+					Verb:      "watch",
+					Group:     r.group,
+					Version:   r.version,
+					Resource:  r.resource,
+				},
+			},
 		}
+		if err := c.Create(ctx, review); err != nil {
+			logger.Error(err, "RBAC pre-flight: failed to submit access review for "+r.resource, "verb", "watch")
+			continue
+		}
+		if review.Status.Allowed {
+			continue
+		}
+		logger.Error(nil, "missing watch RBAC for "+r.resource,
+			"verb", "watch", "detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
 	}
 }
