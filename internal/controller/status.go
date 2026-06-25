@@ -94,3 +94,9 @@ func setPolicyCondition(policy *bgpv1alpha1.BGPPolicy, condition metav1.Conditio
 	condition.ObservedGeneration = policy.Generation
 	meta.SetStatusCondition(&policy.Status.Conditions, condition)
 }
+
+// setVRFInstanceCondition sets or updates a condition on BGPVRFInstance.
+func setVRFInstanceCondition(vrf *bgpv1alpha1.BGPVRFInstance, condition metav1.Condition) {
+	condition.ObservedGeneration = vrf.Generation
+	meta.SetStatusCondition(&vrf.Status.Conditions, condition)
+}

@@ -75,6 +75,13 @@ func parseConf(data []byte) (*PluginConf, error) {
 	return conf, nil
 }
 
+// bgpVRFInstanceName returns the deterministic name for a BGPVRFInstance.
+// Each VPCAttachment is unique per interface across the cluster, so the
+// (vpc, vpcAttachment) pair is a reliable 1:1 key.
+func bgpVRFInstanceName(vpc, vpcAttachment string) string {
+	return fmt.Sprintf("%s-%s", vpc, vpcAttachment)
+}
+
 // bgpAdvertisementName returns the deterministic name for a BGPAdvertisement.
 // Each VPCAttachment is unique per interface across the cluster, so the
 // (vpc, vpcAttachment) pair is a reliable 1:1 key.
@@ -93,7 +100,7 @@ func routeTarget(asNumber int64, vpcHex string) (string, error) {
 	return fmt.Sprintf("%d:%d", asNumber, uint32(v)), nil
 }
 
-// bgpConfig holds the BGP values the CNI needs to populate a BGPAdvertisement.
+// bgpConfig holds the BGP values the CNI needs to populate BGP CRDs.
 type bgpConfig struct {
 	asNumber   uint32
 	routerName string
@@ -205,6 +212,32 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("encode SRv6 endpoint: %w", err)
 	}
 
+	// Create the BGPVRFInstance to configure the VRF with its route distinguisher
+	// and import/export route targets. This must be created before advertisements
+	// so the BGP runtime has the VRF context when originating EVPN paths.
+	vrfName := bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment)
+	vrfInst := &bgpv1alpha1.BGPVRFInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vrfName,
+			Namespace: namespace,
+		},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
+		vrfInst.Spec = bgpv1alpha1.BGPVRFInstanceSpec{
+			RouterTarget: bgpv1alpha1.RouterTarget{
+				RouterRef: &bgpv1alpha1.RouterRef{Name: bgp.routerName},
+			},
+			RouteDistinguisher: rtValue,
+			ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: "rt:" + rtValue}},
+			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: "rt:" + rtValue}},
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("apply BGPVRFInstance: %w", err)
+	}
+
+	// Create the BGPAdvertisement to originate the SRv6 endpoint prefix.
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
@@ -269,6 +302,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
 
+	// Delete the BGPAdvertisement first to withdraw prefixes, then the VRF instance.
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
@@ -277,6 +311,16 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 	if err := k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
 		return fmt.Errorf("delete BGPAdvertisement: %w", err)
+	}
+
+	vrfInst := &bgpv1alpha1.BGPVRFInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment),
+			Namespace: namespace,
+		},
+	}
+	if err := k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("delete BGPVRFInstance: %w", err)
 	}
 
 	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)

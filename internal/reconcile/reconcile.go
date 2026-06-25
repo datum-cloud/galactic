@@ -81,6 +81,33 @@ func (r *Reconciler) BuildDesiredRouter(ctx context.Context, router *bgpv1alpha1
 		return nil, fmt.Errorf("list BGPAdvertisements for router %s/%s: %w", namespace, router.Name, err)
 	}
 
+	// Gather VRF instance.
+	var vrfInst *model.DesiredVRFInstance
+	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := r.client.List(ctx, vrfList,
+		client.InNamespace(namespace),
+		client.MatchingFields{".spec.routerRef.name": router.Name},
+	); err != nil {
+		return nil, fmt.Errorf("list BGPVRFInstances for router %s/%s: %w", namespace, router.Name, err)
+	}
+	if len(vrfList.Items) > 0 {
+		v := vrfList.Items[0]
+		importRTs := make([]string, len(v.Spec.ImportRouteTargets))
+		for i, rt := range v.Spec.ImportRouteTargets {
+			importRTs[i] = rt.Value
+		}
+		exportRTs := make([]string, len(v.Spec.ExportRouteTargets))
+		for i, rt := range v.Spec.ExportRouteTargets {
+			exportRTs[i] = rt.Value
+		}
+		vrfInst = &model.DesiredVRFInstance{
+			Name:               v.Name,
+			RouteDistinguisher: v.Spec.RouteDistinguisher,
+			ImportRouteTargets: importRTs,
+			ExportRouteTargets: exportRTs,
+		}
+	}
+
 	// Resolve NextHop from Node.
 	nextHop, err := r.resolveNodeIPv6(ctx, router.Spec.TargetRef.Name)
 	if err != nil {
@@ -105,6 +132,7 @@ func (r *Reconciler) BuildDesiredRouter(ctx context.Context, router *bgpv1alpha1
 		RouterID:        router.Spec.RouterID,
 		AddressFamilies: router.Spec.AddressFamilies,
 		Peers:           peers,
+		VRFInstance:     vrfInst,
 		Policies:        policies,
 	}
 

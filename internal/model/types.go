@@ -36,7 +36,7 @@ const (
 )
 
 // DesiredRouter is the full desired state of a BGP router instance, assembled
-// from one BGPRouter and all of its associated peers, advertisements, and policies.
+// from one BGPRouter and all of its associated peers, VRF instances, advertisements, and policies.
 type DesiredRouter struct {
 	Namespace       string
 	Name            string
@@ -44,6 +44,7 @@ type DesiredRouter struct {
 	RouterID        string
 	AddressFamilies []AddressFamily
 	Peers           []DesiredPeer
+	VRFInstance     *DesiredVRFInstance
 	Advertisements  []DesiredAdvertisement
 	Policies        []DesiredPolicy
 }
@@ -57,6 +58,14 @@ type DesiredPeer struct {
 	HoldTime        time.Duration
 	KeepaliveTime   time.Duration
 	AuthPassword    string
+}
+
+// DesiredVRFInstance describes an L2VPN EVPN VRF to configure on the BGP router.
+type DesiredVRFInstance struct {
+	Name               string
+	RouteDistinguisher string
+	ImportRouteTargets []string
+	ExportRouteTargets []string
 }
 
 // DesiredAdvertisement describes a set of prefixes to originate.

@@ -138,6 +138,14 @@ func main() {
 		log.Fatalf("setup BGPAdvertisement controller: %v", err)
 	}
 
+	// Register BGPVRFInstance controller.
+	if err := (&controller.BGPVRFInstanceReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		log.Fatalf("setup BGPVRFInstance controller: %v", err)
+	}
+
 	// Register BGPPolicy controller.
 	if err := (&controller.BGPPolicyReconciler{
 		Client: mgr.GetClient(),
