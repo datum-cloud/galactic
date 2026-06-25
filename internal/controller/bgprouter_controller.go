@@ -186,6 +186,9 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Update per-policy BGPPolicy statuses.
 	r.updatePolicyStatuses(ctx, router)
 
+	// Update per-VRF-instance BGPVRFInstance statuses.
+	r.updateVRFInstanceStatuses(ctx, router)
+
 	return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
 }
 
@@ -318,7 +321,7 @@ func (r *BGPRouterReconciler) updateAdvertisementStatuses(ctx context.Context, r
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := r.List(ctx, advList,
 		client.InNamespace(router.Namespace),
-		client.MatchingFields{".spec.routerRef.name": router.Name},
+		client.MatchingFields{BGPPeerByRouterName: router.Name},
 	); err != nil {
 		logger.Error(err, "list BGPAdvertisements for status update")
 		return
@@ -355,7 +358,7 @@ func (r *BGPRouterReconciler) updatePolicyStatuses(ctx context.Context, router *
 	policyList := &bgpv1alpha1.BGPPolicyList{}
 	if err := r.List(ctx, policyList,
 		client.InNamespace(router.Namespace),
-		client.MatchingFields{".spec.routerRef.name": router.Name},
+		client.MatchingFields{BGPPeerByRouterName: router.Name},
 	); err != nil {
 		logger.Error(err, "list BGPRoutePolicies for status update")
 		return
@@ -378,6 +381,33 @@ func (r *BGPRouterReconciler) updatePolicyStatuses(ctx context.Context, router *
 		})
 		if updateErr := r.Status().Update(ctx, policyCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPPolicy status", "policy", policy.Name)
+		}
+	}
+}
+
+// updateVRFInstanceStatuses updates BGPVRFInstance status.
+func (r *BGPRouterReconciler) updateVRFInstanceStatuses(ctx context.Context, router *bgpv1alpha1.BGPRouter) {
+	logger := log.FromContext(ctx)
+
+	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := r.List(ctx, vrfList,
+		client.InNamespace(router.Namespace),
+		client.MatchingFields{BGPPeerByRouterName: router.Name},
+	); err != nil {
+		logger.Error(err, "list BGPVRFInstances for status update")
+		return
+	}
+	for i := range vrfList.Items {
+		vrf := &vrfList.Items[i]
+		vrfCopy := vrf.DeepCopy()
+		setVRFInstanceCondition(vrfCopy, metav1.Condition{
+			Type:    ConditionReady,
+			Status:  metav1.ConditionTrue,
+			Reason:  "Accepted",
+			Message: "VRF instance accepted",
+		})
+		if updateErr := r.Status().Update(ctx, vrfCopy); updateErr != nil {
+			logger.Error(updateErr, "update BGPVRFInstance status", "vrf", vrf.Name)
 		}
 	}
 }

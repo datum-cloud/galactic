@@ -27,6 +27,9 @@ const (
 	// BGPAdvByRouterName indexes BGPAdvertisements by their routerRef.name.
 	BGPAdvByRouterName = ".spec.routerRef.name"
 
+	// BGPVRFInstanceByRouterName indexes BGPVRFInstances by their routerRef.name.
+	BGPVRFInstanceByRouterName = ".spec.routerRef.name"
+
 	// BGPRouterByTargetName indexes BGPRouters by their targetRef.name (the Node name).
 	BGPRouterByTargetName = ".spec.targetRef.name"
 )
@@ -87,6 +90,20 @@ func RegisterIndexes(ctx context.Context, mgr ctrl.Manager) error {
 		return []string{adv.Spec.RouterRef.Name}
 	}); err != nil {
 		return fmt.Errorf("index BGPAdvertisement by routerRef.name: %w", err)
+	}
+
+	// BGPVRFInstance: index by routerRef.name.
+	if err := cache.IndexField(ctx, &bgpv1alpha1.BGPVRFInstance{}, BGPVRFInstanceByRouterName, func(obj client.Object) []string {
+		vrf, ok := obj.(*bgpv1alpha1.BGPVRFInstance)
+		if !ok {
+			return nil
+		}
+		if vrf.Spec.RouterRef == nil {
+			return nil
+		}
+		return []string{vrf.Spec.RouterRef.Name}
+	}); err != nil {
+		return fmt.Errorf("index BGPVRFInstance by routerRef.name: %w", err)
 	}
 
 	// BGPRouter: index by targetRef.name (the Node name).

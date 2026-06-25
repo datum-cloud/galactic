@@ -16,6 +16,8 @@ import (
 )
 
 const (
+	testVPC        = "abc"
+	testAttachment = "def"
 	testVPCHex1234 = "0000000004d2" // decimal 1234
 	testRD65000_1  = "65000:1"      // RD/RT for ASN 65000, NN 1
 )
@@ -57,8 +59,8 @@ func TestParseConf(t *testing.T) {
 	}{
 		{
 			name:    "valid config",
-			input:   `{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"abc","vpcattachment":"def","srv6_locator":"2001:db8::/48"}`,
-			wantVPC: "abc",
+			input:   `{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"` + testVPC + `","vpcattachment":"` + testAttachment + `","srv6_locator":"2001:db8::/48"}`,
+			wantVPC: testVPC,
 		},
 		{
 			name:    "invalid JSON",
@@ -94,11 +96,26 @@ func TestParseConf(t *testing.T) {
 	}
 }
 
+// ---- bgpVRFInstanceName --------------------------------------------------
+
+func TestBGPVRFInstanceName(t *testing.T) {
+	tests := []struct{ vpc, attachment, want string }{
+		{testVPC, testAttachment, testVPC + "-" + testAttachment},
+		{"0000000jU", "00G", "0000000jU-00G"},
+	}
+	for _, tt := range tests {
+		got := bgpVRFInstanceName(tt.vpc, tt.attachment)
+		if got != tt.want {
+			t.Errorf("bgpVRFInstanceName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
+		}
+	}
+}
+
 // ---- bgpAdvertisementName ------------------------------------------------
 
 func TestBGPAdvertisementName(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
-		{"abc", "def", "abc-def"},
+		{testVPC, testAttachment, testVPC + "-" + testAttachment},
 		{"0000000jU", "00G", "0000000jU-00G"},
 	}
 	for _, tt := range tests {

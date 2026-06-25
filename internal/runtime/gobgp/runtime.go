@@ -12,6 +12,9 @@ import (
 	"time"
 
 	api "github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -34,6 +37,9 @@ type GoBGPRuntime struct {
 	// appliedPolicies tracks the direction of each applied policy by name so
 	// stale policies can be removed when they disappear from desired state.
 	appliedPolicies map[string]model.BGPPolicyDirection
+	// appliedVRFs tracks the names of VRFs that have been applied to GoBGP so
+	// stale VRFs can be removed when they disappear from desired state.
+	appliedVRFs map[string]struct{}
 	// serverCtxCancel cancels the goroutine running server.Start.
 	serverCtxCancel context.CancelFunc
 }
@@ -52,6 +58,7 @@ func NewRuntimeFactory(listenPort int32, localAddress string) runtime.RuntimeFac
 			localAddress:    localAddress,
 			establishedAt:   make(map[string]time.Time),
 			appliedPolicies: make(map[string]model.BGPPolicyDirection),
+			appliedVRFs:     make(map[string]struct{}),
 		}, nil
 	}
 }
@@ -61,9 +68,36 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Start GoBGP if not running. The check and store are both inside the
-	// mutex to prevent two concurrent Apply calls from both seeing b==nil
-	// and launching two Serve() loops.
+	b, err := r.startGoBGP(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := r.applyGlobal(ctx, b, desired); err != nil {
+		return err
+	}
+
+	if err := r.applyPeers(ctx, b, desired.Peers); err != nil {
+		return err
+	}
+
+	if err := r.applyVRF(ctx, b, desired.VRFInstance); err != nil {
+		return err
+	}
+
+	if err := r.applyEVPN(b, desired.Advertisements, desired.RouterID); err != nil {
+		return err
+	}
+
+	if err := r.applyPolicies(ctx, b, desired.Policies); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// startGoBGP boots the GoBGP server if it isn't already running.
+func (r *GoBGPRuntime) startGoBGP(ctx context.Context) (*gobgpserver.BgpServer, error) {
 	b := r.server.bgp.Load()
 	if b == nil {
 		srvCtx, cancel := context.WithCancel(context.Background())
@@ -75,12 +109,17 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
 		defer waitCancel()
 		if err := r.server.WaitReady(waitCtx); err != nil {
-			return fmt.Errorf("gobgp not ready: %w", err)
+			return nil, fmt.Errorf("gobgp not ready: %w", err)
 		}
 		b = r.server.bgp.Load()
 	}
 
-	// Reconfigure if global parameters changed.
+	return b, nil
+}
+
+// applyGlobal starts or reconfigures the BGP global instance and persists
+// the last-seen ASN/RouterID so future changes can be detected.
+func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer, desired model.DesiredRouter) error {
 	asnChanged := r.lastASN != 0 && r.lastASN != desired.LocalASN
 	idChanged := r.lastRouterID != "" && r.lastRouterID != desired.RouterID
 	if asnChanged || idChanged {
@@ -91,7 +130,6 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		}
 	}
 
-	// Apply global BGP config if not already started or after reconfigure.
 	resp, err := b.GetBgp(ctx, &api.GetBgpRequest{})
 	needsStart := err != nil || resp == nil || resp.Global == nil || resp.Global.Asn == 0
 	if needsStart {
@@ -109,14 +147,16 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 	}
 	r.lastASN = desired.LocalASN
 	r.lastRouterID = desired.RouterID
+	return nil
+}
 
-	// Apply peers: build desired set, add/update, then remove stale ones.
-	desiredPeers := make(map[string]model.DesiredPeer, len(desired.Peers))
-	for _, p := range desired.Peers {
+// applyPeers adds, updates, and removes BGP peers to match desired state.
+func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer, peers []model.DesiredPeer) error {
+	desiredPeers := make(map[string]model.DesiredPeer, len(peers))
+	for _, p := range peers {
 		desiredPeers[p.Address] = p
 	}
 
-	// Collect current peers.
 	currentPeers := make(map[string]bool)
 	if listErr := b.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) {
 		if p.Conf != nil {
@@ -126,8 +166,7 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return fmt.Errorf("list peers: %w", listErr)
 	}
 
-	// Add or update desired peers.
-	for _, p := range desired.Peers {
+	for _, p := range peers {
 		peer := peerFromDesired(p, r.localAddress)
 		addErr := b.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
 		if addErr != nil {
@@ -141,25 +180,50 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		}
 	}
 
-	// Delete peers no longer in desired state.
 	for addr := range currentPeers {
 		if _, ok := desiredPeers[addr]; !ok {
 			_ = b.DeletePeer(ctx, &api.DeletePeerRequest{Address: addr})
 		}
 	}
+	return nil
+}
 
-	// Apply EVPN advertisements.
-	for _, adv := range desired.Advertisements {
+// applyVRF configures the desired VRF instance and removes stale ones.
+func (r *GoBGPRuntime) applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance) error {
+	if vrf != nil {
+		if err := applyVRF(ctx, b, vrf); err != nil {
+			return fmt.Errorf("apply VRF %s: %w", vrf.Name, err)
+		}
+		r.appliedVRFs[vrf.Name] = struct{}{}
+	} else {
+		delete(r.appliedVRFs, "")
+	}
+
+	for name := range r.appliedVRFs {
+		if vrf == nil || vrf.Name != name {
+			deleteVRF(ctx, b, name)
+			delete(r.appliedVRFs, name)
+		}
+	}
+	return nil
+}
+
+// applyEVPN advertises EVPN paths for all relevant advertisements.
+func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredAdvertisement, routerID string) error {
+	for _, adv := range advs {
 		if adv.AddressFamily.AFI == afiL2VPN {
-			if err := buildEVPNPaths(b, adv, desired.RouterID, false); err != nil {
+			if err := buildEVPNPaths(b, adv, routerID, false); err != nil {
 				return fmt.Errorf("advertise EVPN paths for %s: %w", adv.Name, err)
 			}
 		}
 	}
+	return nil
+}
 
-	// Apply policies: add/update desired, remove stale.
-	desiredPolicies := make(map[string]model.BGPPolicyDirection, len(desired.Policies))
-	for _, policy := range desired.Policies {
+// applyPolicies adds, updates, and removes BGP policies to match desired state.
+func (r *GoBGPRuntime) applyPolicies(ctx context.Context, b *gobgpserver.BgpServer, policies []model.DesiredPolicy) error {
+	desiredPolicies := make(map[string]model.BGPPolicyDirection, len(policies))
+	for _, policy := range policies {
 		desiredPolicies[policy.Name] = policy.Direction
 		if err := applyPolicy(ctx, b, policy); err != nil {
 			return fmt.Errorf("apply policy %q: %w", policy.Name, err)
@@ -171,7 +235,6 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		}
 	}
 	r.appliedPolicies = desiredPolicies
-
 	return nil
 }
 
@@ -259,4 +322,60 @@ func fsmStateToModel(state api.PeerState_SessionState) model.BGPPeerState {
 	default:
 		return model.BGPPeerStateIdle
 	}
+}
+
+// applyVRF configures a VRF in GoBGP via AddVrf.
+func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance) error {
+	// Parse the route distinguisher.
+	rd, err := bgp.ParseRouteDistinguisher(vrf.RouteDistinguisher)
+	if err != nil {
+		return fmt.Errorf("parse route distinguisher %q: %w", vrf.RouteDistinguisher, err)
+	}
+	apiRD, err := apiutil.MarshalRD(rd)
+	if err != nil {
+		return fmt.Errorf("marshal route distinguisher %q: %w", vrf.RouteDistinguisher, err)
+	}
+
+	// Parse import route targets.
+	importRTs, err := parseRouteTargetsToAPI(vrf.ImportRouteTargets)
+	if err != nil {
+		return fmt.Errorf("parse import route targets: %w", err)
+	}
+
+	// Parse export route targets.
+	exportRTs, err := parseRouteTargetsToAPI(vrf.ExportRouteTargets)
+	if err != nil {
+		return fmt.Errorf("parse export route targets: %w", err)
+	}
+
+	return b.AddVrf(ctx, &api.AddVrfRequest{
+		Vrf: &api.Vrf{
+			Name:     vrf.Name,
+			Rd:       apiRD,
+			ImportRt: importRTs,
+			ExportRt: exportRTs,
+		},
+	})
+}
+
+// deleteVRF removes a VRF from GoBGP.
+func deleteVRF(ctx context.Context, b *gobgpserver.BgpServer, name string) {
+	_ = b.DeleteVrf(ctx, &api.DeleteVrfRequest{Name: name})
+}
+
+// parseRouteTargetsToAPI parses route target strings into GoBGP API RouteTarget objects.
+func parseRouteTargetsToAPI(targets []string) ([]*api.RouteTarget, error) {
+	apiRTs := make([]*api.RouteTarget, 0, len(targets))
+	for _, t := range targets {
+		rt, err := bgp.ParseRouteTarget(t)
+		if err != nil {
+			return nil, fmt.Errorf("invalid route target %q: %w", t, err)
+		}
+		apiRT, err := apiutil.MarshalRT(rt)
+		if err != nil {
+			return nil, fmt.Errorf("marshal route target %q: %w", t, err)
+		}
+		apiRTs = append(apiRTs, apiRT)
+	}
+	return apiRTs, nil
 }
