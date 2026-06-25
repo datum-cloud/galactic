@@ -58,8 +58,18 @@ else # worker
   curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGIN_VERSION}/cni-plugins-linux-${ARCH}-${CNI_PLUGIN_VERSION}.tgz" |tar xvfz - -C /opt/cni/bin
 
   # Galactic CNI plugin and agent
-  install -m 0755 /galactic/bin/galactic-cni /opt/cni/bin/galactic-cni
+  # Install the binary under a .bin suffix and front it with a wrapper that
+  # exports NODE_NAME from the container hostname. CNI binaries are exec'd
+  # directly by the kubelet and do not inherit NODE_NAME from the pod downward
+  # API; in Kind the container hostname equals the Kubernetes node name.
+  install -m 0755 /galactic/bin/galactic-cni /opt/cni/bin/galactic-cni.bin
   install -m 0755 /galactic/bin/galactic-cni /usr/local/bin/galactic-cni
+  cat > /opt/cni/bin/galactic-cni <<'EOF'
+#!/bin/sh
+export NODE_NAME=$(hostname)
+exec /opt/cni/bin/galactic-cni.bin "$@"
+EOF
+  chmod 0755 /opt/cni/bin/galactic-cni
 
   # Bring up the transit-facing data-plane interface
   ip link set dev eth1 up

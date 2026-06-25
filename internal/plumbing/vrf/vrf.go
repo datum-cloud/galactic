@@ -30,11 +30,17 @@ var vrfMu sync.Mutex
 // Add creates a Linux VRF interface for the given base62-encoded VPC and
 // VPCAttachment, allocating the next available routing table ID and applying
 // the required sysctl settings. Concurrent calls are serialized internally.
+// If a VRF with the same name already exists (e.g. left behind by a previous
+// failed cmdAdd with no corresponding cmdDel), Add returns nil.
 func Add(vpc, vpcAttachment string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
 
 	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+
+	if _, err := netlink.LinkByName(name); err == nil {
+		return nil
+	}
 
 	vrfId, err := findNextAvailableVRFId()
 	if err != nil {
