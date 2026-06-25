@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: vpc
+  labels:
+    app: nginx
+    site: sjc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        site: sjc
+      annotations:
+        k8s.v1.cni.cncf.io/networks: testvpc
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: multitool
+          image: wbitt/network-multitool
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http

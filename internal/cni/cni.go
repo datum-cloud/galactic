@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/vishvananda/netlink"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,15 +30,41 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"go.datum.net/galactic/internal/cni/ipam"
 	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/intf"
-	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 const cniTimeout = 10 * time.Second
+
+const (
+	// annotationAllocatedSubnet is the BGPAdvertisement annotation key prefix
+	// holding the allocated pod subnet CIDR for a container ID. The full key
+	// appends a truncated container ID; see subnetAnnotationKey.
+	annotationAllocatedSubnet = "galactic.datum.net/allocated-subnet"
+
+	// annotationContainerIDLen is the number of characters used from a
+	// container ID in annotation keys. Kubernetes limits the name part of an
+	// annotation key to 63 bytes; "allocated-subnet." is 17 bytes, leaving 46
+	// bytes for the container ID prefix.
+	annotationContainerIDLen = 46
+
+	// defaultNamespace is used when the CNI config does not specify a namespace.
+	defaultNamespace = "default"
+)
+
+// subnetAnnotationKey returns the annotation key for storing the allocated
+// subnet for the given container ID.
+func subnetAnnotationKey(containerID string) string {
+	id := containerID
+	if len(id) > annotationContainerIDLen {
+		id = id[:annotationContainerIDLen]
+	}
+	return fmt.Sprintf("%s.%s", annotationAllocatedSubnet, id)
+}
 
 var cniScheme = runtime.NewScheme()
 
@@ -90,7 +119,7 @@ func bgpAdvertisementName(vpc, vpcAttachment string) string {
 }
 
 // routeTarget returns the RT in "ASN:NN" format using the low 32 bits of the
-// VPC identifier. All nodes in the same VPC produce the same value, enabling
+// VPC identifier. All nodes in the same VRF produce the same value, enabling
 // VPC-scoped route import/export. vpcHex is the 48-bit hex VPC identifier.
 func routeTarget(asNumber int64, vpcHex string) (string, error) {
 	v, err := strconv.ParseUint(vpcHex, 16, 64)
@@ -162,7 +191,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	namespace := pluginConf.Namespace
 	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 
 	if err := vrf.Add(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
@@ -177,17 +206,31 @@ func cmdAdd(args *skel.CmdArgs) error {
 			return fmt.Errorf("add route %s: %w", termination.Network, err)
 		}
 	}
-	if err := hostDevice("ADD", args, pluginConf); err != nil {
-		return fmt.Errorf("host-device ADD: %w", err)
+	// Only call host-device ADD if the guest interface is still in the host
+	// namespace. If a prior attempt already moved it to the container netns but
+	// failed at a later step, we must not try to move it again.
+	guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
+	if _, linkErr := netlink.LinkByName(guestName); linkErr == nil {
+		if err := hostDevice("ADD", args, pluginConf); err != nil {
+			return fmt.Errorf("host-device ADD: %w", err)
+		}
+	}
+
+	// Configure IP address on the guest interface inside the container netns.
+	// After hostDevice("ADD"), the guest interface is named args.IfName inside
+	// the container (host-device renames it), not the original guestName.
+	var ipamResult *ipamResult
+	if pluginConf.IPAM.Type != "" {
+		result, err := configureIPAM(args, pluginConf, args.IfName)
+		if err != nil {
+			return fmt.Errorf("configure IPAM: %w", err)
+		}
+		ipamResult = result
 	}
 
 	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 	if err != nil {
 		return fmt.Errorf("decode VPC: %w", err)
-	}
-	vpcAttachmentHex, err := intf.Base62ToHex(pluginConf.VPCAttachment)
-	if err != nil {
-		return fmt.Errorf("decode VPCAttachment: %w", err)
 	}
 
 	k8s, err := newK8sClient()
@@ -207,11 +250,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("compute route target: %w", err)
 	}
 
-	srv6Endpoint, err := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
-	if err != nil {
-		return fmt.Errorf("encode SRv6 endpoint: %w", err)
-	}
-
 	// Create the BGPVRFInstance to configure the VRF with its route distinguisher
 	// and import/export route targets. This must be created before advertisements
 	// so the BGP runtime has the VRF context when originating EVPN paths.
@@ -228,8 +266,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 				RouterRef: &bgpv1alpha1.RouterRef{Name: bgp.routerName},
 			},
 			RouteDistinguisher: rtValue,
-			ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: "rt:" + rtValue}},
-			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: "rt:" + rtValue}},
+			ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
+			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
 		}
 		return nil
 	})
@@ -237,19 +275,31 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("apply BGPVRFInstance: %w", err)
 	}
 
-	// Create the BGPAdvertisement to originate the SRv6 endpoint prefix.
+	// Create the BGPAdvertisement to originate the pod's subnet prefix.
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
 			Namespace: namespace,
 		},
 	}
+	podSubnet := ""
+	if ipamResult != nil {
+		podSubnet = ipamResult.subnet.String()
+	}
 	_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
 		adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: bgp.routerName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(srv6Endpoint + "/128")},
-			Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community("rt:" + rtValue)},
+			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
+			Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
+		}
+		// Store the allocated subnet keyed by container ID in annotations
+		// so cmdDel can look it up for deallocation.
+		if ipamResult != nil {
+			if adv.Annotations == nil {
+				adv.Annotations = make(map[string]string)
+			}
+			adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
 		}
 		return nil
 	})
@@ -257,11 +307,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("apply BGPAdvertisement: %w", err)
 	}
 
-	if err := srv6.RouteIngressAdd(srv6Endpoint); err != nil {
-		return fmt.Errorf("add SRv6 ingress route: %w", err)
-	}
-
-	result := &type100.Result{}
+	result := buildResult(pluginConf, ipamResult)
 	return types.PrintResult(result, pluginConf.CNIVersion)
 }
 
@@ -271,29 +317,18 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
+	// Deallocate IPAM subnet before any other cleanup.
+	if pluginConf.IPAM.Type != "" {
+		deallocateIPAM(args, pluginConf)
+	}
+
 	namespace := pluginConf.Namespace
 	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 
-	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
-	if err != nil {
-		return fmt.Errorf("decode VPC: %w", err)
-	}
-	vpcAttachmentHex, err := intf.Base62ToHex(pluginConf.VPCAttachment)
-	if err != nil {
-		return fmt.Errorf("decode VPCAttachment: %w", err)
-	}
-	srv6Endpoint, err := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttachmentHex)
-	if err != nil {
-		return fmt.Errorf("encode SRv6 endpoint: %w", err)
-	}
-	if err := srv6.RouteIngressDel(srv6Endpoint); err != nil {
-		return fmt.Errorf("delete SRv6 ingress route: %w", err)
-	}
-
-	// Signal BGP route withdrawal immediately after stopping kernel ingress so
-	// remote peers are notified as soon as possible. cosmos reconciles async.
+	// Signal BGP route withdrawal immediately to notify remote peers.
+	// cosmos reconciles async.
 	// IgnoreNotFound handles concurrent DEL races.
 	k8s, err := newK8sClient()
 	if err != nil {
@@ -308,6 +343,9 @@ func cmdDel(args *skel.CmdArgs) error {
 			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
 			Namespace: namespace,
 		},
+	}
+	if err := k8s.Get(ctx, client.ObjectKeyFromObject(adv), adv); client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("get BGPAdvertisement: %w", err)
 	}
 	if err := k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
 		return fmt.Errorf("delete BGPAdvertisement: %w", err)
@@ -343,10 +381,195 @@ func cmdDel(args *skel.CmdArgs) error {
 	return types.PrintResult(result, pluginConf.CNIVersion)
 }
 
+// ipamResult holds the IPAM allocation details for building the CNI result.
+type ipamResult struct {
+	subnet  *net.IPNet
+	gateway net.IP
+	routes  []*net.IPNet
+}
+
+// buildResult constructs the CNI result, including IPAM data if configured.
+func buildResult(pluginConf *PluginConf, ipRes *ipamResult) *type100.Result {
+	result := &type100.Result{
+		CNIVersion: pluginConf.CNIVersion,
+	}
+	if ipRes != nil {
+		result.IPs = []*type100.IPConfig{
+			{
+				Address: *ipRes.subnet,
+				Gateway: ipRes.gateway,
+			},
+		}
+		if len(ipRes.routes) > 0 {
+			result.Routes = make([]*types.Route, 0, len(ipRes.routes))
+			for _, dst := range ipRes.routes {
+				result.Routes = append(result.Routes, &types.Route{
+					Dst: *dst,
+				})
+			}
+		}
+	}
+	return result
+}
+
+// configureIPAM allocates a subnet and configures the guest interface inside the
+// container network namespace.
+func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string) (*ipamResult, error) {
+	var pool *ipam.PoolAllocator
+	var subnet *net.IPNet
+	var err error
+
+	switch pluginConf.IPAM.Type {
+	case "static":
+		alloc := ipam.NewStaticAllocator()
+		allocIP, err := alloc.Allocate(args.ContainerID, pluginConf.IPAM.StaticIP)
+		if err != nil {
+			return nil, fmt.Errorf("allocate static IP: %w", err)
+		}
+		subnet = &net.IPNet{
+			IP:   allocIP,
+			Mask: net.CIDRMask(64, 128),
+		}
+	case "pool", "":
+		pool, err = ipam.NewPoolAllocator(pluginConf.IPAM.Pool, pluginConf.IPAM.Gateway, pluginConf.IPAM.SubnetLen)
+		if err != nil {
+			return nil, fmt.Errorf("create pool allocator: %w", err)
+		}
+		subnet, err = pool.Allocate(args.ContainerID)
+		if err != nil {
+			return nil, fmt.Errorf("allocate from pool: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unknown IPAM type: %s", pluginConf.IPAM.Type)
+	}
+
+	var gateway net.IP
+	if pool != nil {
+		gateway = pool.Gateway()
+	}
+
+	var routes []*net.IPNet
+	if gateway != nil {
+		defaultRoute := &net.IPNet{
+			IP:   net.IPv6zero,
+			Mask: net.CIDRMask(0, 128),
+		}
+		routes = append(routes, defaultRoute)
+	}
+
+	if err := configureInterfaceInNetns(args.Netns, guestName, subnet, gateway); err != nil {
+		return nil, err
+	}
+
+	return &ipamResult{
+		subnet:  subnet,
+		gateway: gateway,
+		routes:  routes,
+	}, nil
+}
+
+// configureInterfaceInNetns applies an IP address and routes to the guest
+// interface inside the container network namespace.
+func configureInterfaceInNetns(netnsPath, ifName string, ipNet *net.IPNet, gateway net.IP) error {
+	containerNS, err := ns.GetNS(netnsPath)
+	if err != nil {
+		return fmt.Errorf("get container netns %q: %w", netnsPath, err)
+	}
+	defer containerNS.Close() //nolint:errcheck // netns close on teardown
+
+	return containerNS.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return fmt.Errorf("create netlink handle: %w", err)
+		}
+		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+
+		link, err := handle.LinkByName(ifName)
+		if err != nil {
+			return fmt.Errorf("find guest interface %q: %w", ifName, err)
+		}
+
+		if err := handle.AddrAdd(link, &netlink.Addr{IPNet: ipNet}); err != nil {
+			return fmt.Errorf("add IP %s to %q: %w", ipNet, ifName, err)
+		}
+
+		if err := handle.LinkSetUp(link); err != nil {
+			return fmt.Errorf("set interface %q up: %w", ifName, err)
+		}
+
+		// Install default route via gateway.
+		if gateway != nil {
+			defaultRoute := &netlink.Route{
+				Dst:       nil, // default route
+				Gw:        gateway,
+				LinkIndex: link.Attrs().Index,
+			}
+			if err := handle.RouteAdd(defaultRoute); err != nil {
+				return fmt.Errorf("add default route via %s: %w", gateway, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// deallocateIPAM releases the IPAM allocation for the given container.
+// Reads the allocated subnet from the BGPAdvertisement CRD annotation, then
+// deallocates it from the in-memory pool.
+func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf) {
+	// Look up the allocated subnet from the BGPAdvertisement annotation.
+	subnetCIDR := getAllocatedSubnetFromCRD(args.ContainerID, pluginConf)
+	if subnetCIDR == "" {
+		// No allocation found — either allocation was never completed,
+		// or the advertisement was already deleted. Nothing to clean up.
+		return
+	}
+
+	switch pluginConf.IPAM.Type {
+	case "pool", "":
+		pa, err := ipam.NewPoolAllocator(pluginConf.IPAM.Pool, pluginConf.IPAM.Gateway, pluginConf.IPAM.SubnetLen)
+		if err != nil {
+			// Pool creation failed — allocation was never completed, nothing to clean up.
+			return
+		}
+		pa.Deallocate(subnetCIDR)
+	case "static":
+		// Static allocations don't need deallocation.
+	}
+}
+
+// getAllocatedSubnetFromCRD reads the allocated subnet for the given container
+// from the BGPAdvertisement CRD annotation. Returns empty string if not found.
+func getAllocatedSubnetFromCRD(containerID string, pluginConf *PluginConf) string {
+	namespace := pluginConf.Namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+
+	k8s, err := newK8sClient()
+	if err != nil {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
+	defer cancel()
+
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
+			Namespace: namespace,
+		},
+	}
+	if err := k8s.Get(ctx, client.ObjectKeyFromObject(adv), adv); err != nil {
+		return ""
+	}
+
+	return adv.Annotations[subnetAnnotationKey(containerID)]
+}
+
 type HostDevicePluginConf struct {
 	types.PluginConf
 	Device string `json:"device"`
-	IPAM   IPAM   `json:"ipam"`
 }
 
 func hostDeviceExecutable() string {
@@ -363,7 +586,6 @@ func hostDevice(command string, skelArgs *skel.CmdArgs, pluginConf *PluginConf) 
 			Type:       "host-device",
 		},
 		Device: intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment),
-		IPAM:   pluginConf.IPAM,
 	})
 	if err != nil {
 		return err

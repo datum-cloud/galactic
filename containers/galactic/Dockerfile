@@ -28,11 +28,17 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE}" \
     -o galactic-cni cmd/galactic-cni/main.go
 
+# Create the IPAM state directory in the builder (where /bin/sh exists)
+# so it can be copied into the final distroless image.
+RUN mkdir -p /var/run/galactic-cni && chmod 777 /var/run/galactic-cni
+
 # Use distroless as minimal base image to package the binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
+
 COPY --from=builder /workspace/galactic-cni .
+COPY --from=builder /var/run/galactic-cni /var/run/galactic-cni
 USER 65532:65532
 
 # Default entrypoint is the CNI plugin (invoked by CNI runtime).

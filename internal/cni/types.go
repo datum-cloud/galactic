@@ -10,7 +10,11 @@ type Termination struct {
 }
 
 type IPAM struct {
-	Type      string    `json:"type"`
+	Type      string    `json:"type"`                 // "pool" (default) or "static"
+	Pool      string    `json:"pool,omitempty"`       // IPv6 CIDR pool, e.g. "fd00:10:ff01::/48"
+	Gateway   string    `json:"gateway,omitempty"`    // IPv6 gateway address
+	SubnetLen int       `json:"subnet_len,omitempty"` // prefix length per allocation (default 80)
+	StaticIP  string    `json:"static_ip,omitempty"`  // used when type="static"
 	Routes    []Route   `json:"routes,omitempty"`
 	Addresses []Address `json:"addresses,omitempty"`
 }

@@ -50,7 +50,7 @@ tasks:
       - task: "deploy:overlay"
 
   "deploy:clusters":
-    desc: Create Kind clusters (sequential to avoid kubeadm contention during parallel clab deploy)
+    desc: Create Kind clusters
     cmds:
       - kind create cluster --name dfw --config node_files/dfw/config.yaml --image kindest/node:galactic
       - kind create cluster --name sjc --config node_files/sjc/config.yaml --image kindest/node:galactic
@@ -65,7 +65,7 @@ tasks:
       - sudo containerlab deploy -t {{.TOPO}}
 
   "deploy:rename-rr":
-    desc: Rename iad-worker2 to iad-worker-rr (kind does not support custom worker node names)
+    desc: Rename iad-worker2 to iad-worker-rr
     cmds:
       - docker rename iad-worker2 iad-worker-rr
 
@@ -135,6 +135,11 @@ tasks:
     desc: Install the galactic-router overlay DaemonSets
     cmds:
       - ./scripts/install-overlay.sh
+
+  "deploy:testvpc":
+    desc: Deploy test VPC across all clusters
+    cmds:
+      - ./scripts/install-testvpc.sh
 
   test:
     desc: Run all verification checks

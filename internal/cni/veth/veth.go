@@ -45,6 +45,12 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	guestName := intf.GenerateInterfaceNameGuest(vpc, vpcAttachment)
 
+	// If the host veth already exists (e.g. left behind by a failed cmdAdd
+	// with no corresponding cmdDel), skip creation and reuse it.
+	if _, err := netlink.LinkByName(hostName); err == nil {
+		return nil
+	}
+
 	veth := &netlink.Veth{
 		LinkAttrs: netlink.LinkAttrs{
 			Name: hostName,
