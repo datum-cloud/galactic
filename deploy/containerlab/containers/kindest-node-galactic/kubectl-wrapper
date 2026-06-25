@@ -6,4 +6,8 @@
 until curl -sk https://127.0.0.1:6443/healthz >/dev/null 2>&1; do
   sleep 1
 done
-exec /usr/bin/kubectl --server=https://127.0.0.1:6443 "$@"
+
+# For IPv6-only clusters the API server cert SAN doesn't include 127.0.0.1.
+# kind's kubeconfig points to 127.0.0.1:6443 so we need to skip TLS verify
+# for all calls within the node (dev environment, API server is localhost).
+exec /usr/bin/kubectl --insecure-skip-tls-verify "$@"

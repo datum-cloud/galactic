@@ -143,7 +143,7 @@ func (r *Reconciler) BuildDesiredRouter(ctx context.Context, router *bgpv1alpha1
 		}
 		prefixes := make([]string, len(adv.Spec.Prefixes))
 		for i, p := range adv.Spec.Prefixes {
-			prefixes[i] = p.CIDR
+			prefixes[i] = string(p)
 		}
 		communities := make([]string, len(adv.Spec.Communities))
 		for i, c := range adv.Spec.Communities {
@@ -154,7 +154,7 @@ func (r *Reconciler) BuildDesiredRouter(ctx context.Context, router *bgpv1alpha1
 			AddressFamily:   adv.Spec.AddressFamily,
 			Prefixes:        prefixes,
 			Communities:     communities,
-			LocalPreference: adv.Spec.LocalPreference,
+			LocalPreference: int32PtrToUint32Ptr(adv.Spec.LocalPreference),
 			NextHop:         nextHop,
 		})
 	}
@@ -249,7 +249,7 @@ func (r *Reconciler) gatherPolicies(ctx context.Context, router *bgpv1alpha1.BGP
 					ds.CommunitiesAdd = term.Set.Communities.Add
 					ds.CommunitiesRemove = term.Set.Communities.Remove
 				}
-				ds.LocalPreference = term.Set.LocalPreference
+				ds.LocalPreference = int32PtrToUint32Ptr(term.Set.LocalPreference)
 				dt.Set = ds
 			}
 			terms[i] = dt
@@ -346,6 +346,16 @@ func validateAFIsAll(afs []bgpv1alpha1.AddressFamily) error {
 		}
 	}
 	return nil
+}
+
+// int32PtrToUint32Ptr converts *int32 to *uint32 for LOCAL_PREF, which the
+// cosmos API expresses as int32 but GoBGP and BGP RFC 4271 use uint32.
+func int32PtrToUint32Ptr(v *int32) *uint32 {
+	if v == nil {
+		return nil
+	}
+	u := uint32(*v)
+	return &u
 }
 
 // validateTimers checks that KeepaliveTime <= HoldTime/3 when HoldTime > 0.

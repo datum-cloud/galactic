@@ -42,6 +42,9 @@ data:
      ipv6 address 2001:db8:1:31::2/64
     !
 
+    route-map SET_SRC permit 10
+     set src fc00:0:8::1
+    !
     router bgp 65000
      bgp router-id 10.255.255.4
      no bgp default ipv4-unicast
@@ -52,6 +55,7 @@ data:
      address-family ipv6 unicast
       neighbor 2001:db8:1:31::1 activate
       neighbor 2001:db8:1:31::1 allowas-in 1
+      neighbor 2001:db8:1:31::1 route-map SET_SRC in
       network fc00:0:8::/48
      exit-address-family
     !

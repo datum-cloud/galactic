@@ -8,19 +8,25 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"os"
 	"strconv"
+	"time"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"go.datum.net/galactic/internal/controller"
@@ -62,6 +68,8 @@ func main() {
 		log.Fatalf("ROUTER_ROLE must be 'tenant' or 'fabric', got %q", routerRole)
 	}
 
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
@@ -97,6 +105,11 @@ func main() {
 		<-ctx.Done()
 		grpcSrv.GracefulStop()
 	}()
+
+	// Pre-flight RBAC check: verify list+watch permission for every type the
+	// manager will watch. A missing permission silently blocks cache sync and
+	// prevents all reconcilers from starting.
+	checkWatchPermissions(mgr)
 
 	// Register field indexes.
 	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
@@ -172,5 +185,41 @@ func main() {
 
 	if err := mgr.Start(ctx); err != nil {
 		log.Fatalf("manager exited: %v", err)
+	}
+}
+
+// checkWatchPermissions issues a list request for each resource type the
+// manager watches. If any return a Forbidden error the informer cache will
+// never sync and all reconcilers will be silently blocked; this logs a
+// clear, actionable message at startup so the problem is immediately obvious.
+func checkWatchPermissions(mgr ctrl.Manager) {
+	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		ctrl.Log.Error(err, "RBAC pre-flight: cannot create client, skipping check")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	logger := ctrl.Log.WithName("rbac-preflight")
+
+	watched := []client.ObjectList{
+		&bgpv1alpha1.BGPRouterList{},
+		&bgpv1alpha1.BGPPeerList{},
+		&bgpv1alpha1.BGPAdvertisementList{},
+		&bgpv1alpha1.BGPPolicyList{},
+		&bgpv1alpha1.BGPVRFInstanceList{},
+		&corev1.SecretList{},
+		&corev1.NodeList{},
+	}
+
+	for _, objList := range watched {
+		if err := c.List(ctx, objList, client.Limit(1)); err != nil {
+			if apierrors.IsForbidden(err) {
+				logger.Error(err, "missing list+watch RBAC",
+					"detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
+			}
+		}
 	}
 }
