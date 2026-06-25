@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -321,7 +322,7 @@ func (r *BGPRouterReconciler) updateAdvertisementStatuses(ctx context.Context, r
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := r.List(ctx, advList,
 		client.InNamespace(router.Namespace),
-		client.MatchingFields{BGPPeerByRouterName: router.Name},
+		client.MatchingFields{BGPAdvByRouterName: router.Name},
 	); err != nil {
 		logger.Error(err, "list BGPAdvertisements for status update")
 		return
@@ -358,7 +359,7 @@ func (r *BGPRouterReconciler) updatePolicyStatuses(ctx context.Context, router *
 	policyList := &bgpv1alpha1.BGPPolicyList{}
 	if err := r.List(ctx, policyList,
 		client.InNamespace(router.Namespace),
-		client.MatchingFields{BGPPeerByRouterName: router.Name},
+		client.MatchingFields{BGPPolicyByRouterName: router.Name},
 	); err != nil {
 		logger.Error(err, "list BGPRoutePolicies for status update")
 		return
@@ -429,6 +430,20 @@ func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return secretToRouterRequests(ctx, r.Client, obj)
+			}),
+		).
+		Watches(&bgpv1alpha1.BGPAdvertisement{}, handler.EnqueueRequestsFromMapFunc(
+			func(_ context.Context, obj client.Object) []ctrlreconcile.Request {
+				adv, ok := obj.(*bgpv1alpha1.BGPAdvertisement)
+				if !ok {
+					return nil
+				}
+				return []ctrlreconcile.Request{{
+					NamespacedName: types.NamespacedName{
+						Namespace: adv.Namespace,
+						Name:      adv.Spec.RouterRef.Name,
+					},
+				}}
 			}),
 		).
 		Named("bgprouter").

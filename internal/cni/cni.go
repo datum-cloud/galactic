@@ -248,7 +248,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: bgp.routerName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-			Prefixes:      []bgpv1alpha1.AdvertisedPrefix{{CIDR: srv6Endpoint + "/128"}},
+			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(srv6Endpoint + "/128")},
 			Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community("rt:" + rtValue)},
 		}
 		return nil

@@ -8,19 +8,24 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"os"
 	"strconv"
+	"time"
 
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"go.datum.net/galactic/internal/controller"
@@ -29,6 +34,19 @@ import (
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/frr"
 	"go.datum.net/galactic/internal/runtime/gobgp"
+)
+
+const (
+	bgpAPIGroup   = "bgp.miloapis.com"
+	bgpAPIVersion = "v1alpha1"
+
+	resourceBGPRouters        = "bgprouters"
+	resourceBGPPeers          = "bgppeers"
+	resourceBGPAdvertisements = "bgpadvertisements"
+	resourceBGPPolicies       = "bgppolicies"
+	resourceBGPVRFInstances   = "bgpvrfinstances"
+	resourceSecrets           = "secrets"
+	resourceNodes             = "nodes"
 )
 
 func main() {
@@ -61,6 +79,8 @@ func main() {
 	default:
 		log.Fatalf("ROUTER_ROLE must be 'tenant' or 'fabric', got %q", routerRole)
 	}
+
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -97,6 +117,11 @@ func main() {
 		<-ctx.Done()
 		grpcSrv.GracefulStop()
 	}()
+
+	// Pre-flight RBAC check: verify list+watch permission for every type the
+	// manager will watch. A missing permission silently blocks cache sync and
+	// prevents all reconcilers from starting.
+	checkWatchPermissions(mgr)
 
 	// Register field indexes.
 	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
@@ -172,5 +197,61 @@ func main() {
 
 	if err := mgr.Start(ctx); err != nil {
 		log.Fatalf("manager exited: %v", err)
+	}
+}
+
+// checkWatchPermissions issues a SelfSubjectAccessReview for each resource
+// type the manager watches, checking the watch verb. If any review denies
+// the request the informer cache will never sync and all reconcilers will
+// be silently blocked; this logs a clear, actionable message at startup so
+// the problem is immediately obvious.
+func checkWatchPermissions(mgr ctrl.Manager) {
+	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		ctrl.Log.Error(err, "RBAC pre-flight: cannot create client, skipping check")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	logger := ctrl.Log.WithName("rbac-preflight")
+
+	resources := []struct {
+		group     string
+		version   string
+		resource  string
+		namespace string
+	}{
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPRouters},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPPeers},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPAdvertisements},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPPolicies},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPVRFInstances},
+		{version: "v1", resource: resourceSecrets},
+		{version: "v1", resource: resourceNodes},
+	}
+
+	for _, r := range resources {
+		review := &authorizationv1.SelfSubjectAccessReview{
+			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+				ResourceAttributes: &authorizationv1.ResourceAttributes{
+					Namespace: r.namespace,
+					Verb:      "watch",
+					Group:     r.group,
+					Version:   r.version,
+					Resource:  r.resource,
+				},
+			},
+		}
+		if err := c.Create(ctx, review); err != nil {
+			logger.Error(err, "RBAC pre-flight: failed to submit access review for "+r.resource, "verb", "watch")
+			continue
+		}
+		if review.Status.Allowed {
+			continue
+		}
+		logger.Error(nil, "missing watch RBAC for "+r.resource,
+			"verb", "watch", "detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
 	}
 }

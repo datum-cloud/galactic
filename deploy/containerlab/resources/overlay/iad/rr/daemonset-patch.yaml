@@ -30,6 +30,8 @@ spec:
       containers:
         - name: galactic-router
           env:
+            - name: BGP_LOCAL_ADDRESS
+              value: "fc00:0:8::1"
             - name: ROUTER_ROLE
               value: tenant
             - name: BGP_LISTEN_PORT
