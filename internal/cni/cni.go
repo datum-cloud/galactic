@@ -284,36 +284,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("read guest interface: %w", err)
 	}
 
-	// Add the gateway address to the host-side veth as a /128 host route, then
-	// explicitly install the pod subnet route into the VRF table.
-	//
-	// Using /128 (not the pod subnet mask) prevents the kernel from auto-creating
-	// a subnet-router anycast entry for the pod subnet prefix in the VRF local
-	// table. When the pod address equals the subnet network address (e.g. the pod
-	// holds fd00:10:ffXX::/80 and the gateway is fd00:10:ffXX::1/80), that
-	// anycast absorbs seg6local-decapped inner packets before they reach the pod.
-	//
-	// The explicit subnet route replaces the one the kernel would have created
-	// automatically from the /80 assignment, ensuring return-path routing after
-	// SRv6 decapsulation still works.
-	if ipamResult != nil && ipamResult.gateway != nil {
-		gwNet := &net.IPNet{IP: ipamResult.gateway, Mask: net.CIDRMask(128, 128)}
-		if addErr := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet}); addErr != nil {
-			if !errors.Is(addErr, syscall.EEXIST) {
-				return fmt.Errorf("add gateway address to host veth %q: %w", hostName, addErr)
-			}
-		}
-		tableID, tableErr := vrf.TableID(pluginConf.VPC, pluginConf.VPCAttachment)
-		if tableErr != nil {
-			return fmt.Errorf("get VRF table ID for pod subnet route: %w", tableErr)
-		}
-		if addErr := netlink.RouteReplace(&netlink.Route{
-			Dst:       ipamResult.subnet,
-			LinkIndex: hostLink.Attrs().Index,
-			Table:     int(tableID),
-		}); addErr != nil {
-			return fmt.Errorf("add pod subnet route to VRF table: %w", addErr)
-		}
+	if err := configureHostVethGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
+		return err
 	}
 
 	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
@@ -324,16 +296,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return fmt.Errorf("decode VPCAttachment: %w", err)
 	}
-	var srv6SIDStr string
-	if pluginConf.SRv6Locator != "" {
-		sid, err := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttHex)
-		if err != nil {
-			return fmt.Errorf("encode SRv6 endpoint: %w", err)
-		}
-		if err := srv6.RouteIngressAdd(sid); err != nil {
-			return fmt.Errorf("add SRv6 ingress route: %w", err)
-		}
-		srv6SIDStr = sid
+	srv6SIDStr, err := setupSRv6Ingress(pluginConf.SRv6Locator, vpcHex, vpcAttHex)
+	if err != nil {
+		return err
 	}
 
 	// Build and print the CNI result before Kubernetes operations so that the
@@ -345,6 +310,24 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("print CNI result: %w", err)
 	}
 
+	err = applyBGPObjects(nodeName, namespace, args.ContainerID, pluginConf, vpcHex, ipamResult, srv6SIDStr)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// applyBGPObjects creates or updates the BGPVRFInstance and BGPAdvertisement
+// CRDs for the given VPC attachment. It is called after the CNI result is
+// printed so that K8s unavailability does not suppress the result.
+func applyBGPObjects(
+	nodeName, namespace, containerID string,
+	pluginConf *PluginConf,
+	vpcHex string,
+	ipamResult *ipamResult,
+	srv6SIDStr string,
+) error {
 	k8s, err := newK8sClient()
 	if err != nil {
 		return err
@@ -411,7 +394,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			}
 			// Store the allocated subnet keyed by container ID so cmdDel can look it up.
 			if ipamResult != nil {
-				adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
+				adv.Annotations[subnetAnnotationKey(containerID)] = podSubnet
 			}
 			// Store the End.DT46 SID so galactic-router uses it as the EVPN GWIPAddress.
 			if srv6SIDStr != "" {
@@ -801,6 +784,59 @@ func getAllocatedSubnetFromCRD(containerID string, pluginConf *PluginConf) strin
 	}
 
 	return adv.Annotations[subnetAnnotationKey(containerID)]
+}
+
+// configureHostVethGateway assigns the gateway address as a /128 host address on
+// the host-side veth and installs an explicit pod-subnet route into the VRF table.
+//
+// Using /128 (not the pod subnet mask) prevents the kernel from auto-creating a
+// subnet-router anycast entry in the VRF local table. When the pod address equals
+// the subnet network address the anycast absorbs seg6local-decapped inner packets
+// before they reach the pod veth. The explicit subnet route replaces the one the
+// kernel would have created from the wider mask.
+func configureHostVethGateway(vpc, vpcAttachment string, res *ipamResult) error {
+	if res == nil || res.gateway == nil {
+		return nil
+	}
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	hostLink, err := netlink.LinkByName(hostName)
+	if err != nil {
+		return fmt.Errorf("get host veth %q: %w", hostName, err)
+	}
+	gwNet := &net.IPNet{IP: res.gateway, Mask: net.CIDRMask(128, 128)}
+	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet}); err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			return fmt.Errorf("add gateway address to host veth %q: %w", hostName, err)
+		}
+	}
+	tableID, err := vrf.TableID(vpc, vpcAttachment)
+	if err != nil {
+		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
+	}
+	if err := netlink.RouteReplace(&netlink.Route{
+		Dst:       res.subnet,
+		LinkIndex: hostLink.Attrs().Index,
+		Table:     int(tableID),
+	}); err != nil {
+		return fmt.Errorf("add pod subnet route to VRF table: %w", err)
+	}
+	return nil
+}
+
+// setupSRv6Ingress installs the End.DT46 SRv6 ingress decap route for the given
+// locator and returns the SID string. Returns empty string when locator is empty.
+func setupSRv6Ingress(locator, vpcHex, vpcAttHex string) (string, error) {
+	if locator == "" {
+		return "", nil
+	}
+	sid, err := intf.EncodeSRv6Endpoint(locator, vpcHex, vpcAttHex)
+	if err != nil {
+		return "", fmt.Errorf("encode SRv6 endpoint: %w", err)
+	}
+	if err := srv6.RouteIngressAdd(sid); err != nil {
+		return "", fmt.Errorf("add SRv6 ingress route: %w", err)
+	}
+	return sid, nil
 }
 
 type HostDevicePluginConf struct {
