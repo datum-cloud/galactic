@@ -24,11 +24,11 @@ spec:
           command:
             - /galactic-router
           env:
-            - name: NODE_NAME
+            - name: GALACTIC_ROUTER_NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: ROUTER_ROLE
+            - name: GALACTIC_ROUTER_ROUTER_ROLE
               value: tenant
           ports:
             - name: metrics

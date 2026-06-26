@@ -6,7 +6,7 @@ sequenceDiagram
     participant GoBGP
     participant Kubernetes
 
-    Router->>Router: validate NODE_NAME and ROUTER_ROLE env vars
+    Router->>Router: validate GALACTIC_ROUTER_NODE_NAME and GALACTIC_ROUTER_ROUTER_ROLE env vars
     Router->>Router: start gRPC health server (:5000, SERVING immediately)
     Router->>Kubernetes: register field indexes (BGPPeer, BGPAdvertisement, BGPPolicy, Secret)
     Router->>Kubernetes: start controller-runtime manager (metrics :8080, watch BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/Secret/Node)

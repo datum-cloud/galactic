@@ -6,7 +6,7 @@ COMMAND="${1:-}"
 case "$COMMAND" in
   unittest)
     echo "--- Running Go unit tests"
-    go test -v -race -coverprofile=coverage.out ./internal/...
+    go test -v -race -coverprofile=coverage.out ./cmd/... ./internal/...
     ;;
 
   e2etest)

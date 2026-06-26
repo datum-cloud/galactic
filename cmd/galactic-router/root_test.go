@@ -55,9 +55,9 @@ func TestRequiredFlags(t *testing.T) {
 }
 
 func TestEnvVarDefaults(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "false")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "false")
 
 	v := cmdWithViper(t)
 	if err := validateConfig(v); err != nil {
@@ -66,19 +66,19 @@ func TestEnvVarDefaults(t *testing.T) {
 }
 
 func TestGRPCPortEnvVar(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_GOBGP_GRPC_PORT", "9999")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "9999")
 
 	v := cmdWithViper(t)
 	if err := validateConfig(v); err != nil {
-		t.Errorf("validateConfig with GALACTIC_GOBGP_GRPC_PORT=9999: %v", err)
+		t.Errorf("validateConfig with GALACTIC_ROUTER_GOBGP_GRPC_PORT=9999: %v", err)
 	}
 }
 
 func TestFlagOverridesEnv(t *testing.T) {
-	t.Setenv("GALACTIC_GOBGP_GRPC_PORT", "9999")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "9999")
 
 	v := cmdWithViper(t)
 	// Simulate a flag override by setting the viper key directly (v.Set
@@ -90,10 +90,10 @@ func TestFlagOverridesEnv(t *testing.T) {
 }
 
 func TestEnvVarOnly(t *testing.T) {
-	t.Setenv("NODE_NAME", "env-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_GOBGP_GRPC_PORT", "7777")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "env-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "7777")
 
 	v := cmdWithViper(t)
 	if v.GetString("galactic_router.node_name") != "env-node" {
@@ -105,8 +105,8 @@ func TestEnvVarOnly(t *testing.T) {
 }
 
 func TestInvalidRouterRole(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "invalid")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "invalid")
 
 	v := cmdWithViper(t)
 	err := validateConfig(v)
@@ -116,10 +116,10 @@ func TestInvalidRouterRole(t *testing.T) {
 }
 
 func TestGRPCPortOverflow(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_GOBGP_GRPC_PORT", "70000")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "70000")
 
 	v := cmdWithViper(t)
 	err := validateConfig(v)
@@ -129,10 +129,10 @@ func TestGRPCPortOverflow(t *testing.T) {
 }
 
 func TestGRPCPortZero(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_GOBGP_GRPC_PORT", "0")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "0")
 
 	v := cmdWithViper(t)
 	err := validateConfig(v)
@@ -142,25 +142,25 @@ func TestGRPCPortZero(t *testing.T) {
 }
 
 func TestBGPListenPortMinusOne(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("BGP_LISTEN_PORT", "-1")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_BGP_LISTEN_PORT", "-1")
 
 	v := cmdWithViper(t)
 	if err := validateConfig(v); err != nil {
-		t.Errorf("validateConfig with BGP_LISTEN_PORT=-1: %v", err)
+		t.Errorf("validateConfig with GALACTIC_ROUTER_BGP_LISTEN_PORT=-1: %v", err)
 	}
 }
 
 func TestBGPListenPortOverflow(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("BGP_LISTEN_PORT", "70000")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_BGP_LISTEN_PORT", "70000")
 
 	v := cmdWithViper(t)
 	err := validateConfig(v)
 	if err == nil {
-		t.Error("validateConfig with BGP_LISTEN_PORT=70000 returned nil error")
+		t.Error("validateConfig with GALACTIC_ROUTER_BGP_LISTEN_PORT=70000 returned nil error")
 	}
 }
 
@@ -173,8 +173,8 @@ func TestNodeNameRequired(t *testing.T) {
 }
 
 func TestRouterRoleRequired(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	// ROUTER_ROLE unset
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	// GALACTIC_ROUTER_ROUTER_ROLE unset
 
 	v := cmdWithViper(t)
 	err := validateConfig(v)
@@ -186,9 +186,9 @@ func TestRouterRoleRequired(t *testing.T) {
 func TestValidRoles(t *testing.T) {
 	for _, role := range []string{"tenant", "fabric"} {
 		t.Run(role, func(t *testing.T) {
-			t.Setenv("NODE_NAME", "test-node")
-			t.Setenv("ROUTER_ROLE", role)
-			t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "false")
+			t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+			t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", role)
+			t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "false")
 
 			v := cmdWithViper(t)
 			// Verify the role is read correctly.
@@ -204,9 +204,9 @@ func TestValidRoles(t *testing.T) {
 }
 
 func TestMetricsPortOverride(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("METRICS_PORT", "9090")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_METRICS_PORT", "9090")
 
 	v := cmdWithViper(t)
 	if v.GetInt("galactic_router.metrics_port") != 9090 {
@@ -215,9 +215,9 @@ func TestMetricsPortOverride(t *testing.T) {
 }
 
 func TestGRPCHealthPortOverride(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GRPC_HEALTH_PORT", "9091")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GRPC_HEALTH_PORT", "9091")
 
 	v := cmdWithViper(t)
 	if v.GetInt("galactic_router.grpc_health_port") != 9091 {
@@ -226,10 +226,10 @@ func TestGRPCHealthPortOverride(t *testing.T) {
 }
 
 func TestGRPCServerEnabled(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_GOBGP_GRPC_PORT", "50051")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "50051")
 
 	v := cmdWithViper(t)
 	if !v.GetBool("galactic_router.gobgp_grpc_server_enabled") {
@@ -241,10 +241,10 @@ func TestGRPCServerEnabled(t *testing.T) {
 }
 
 func TestGRPCServerDisabled(t *testing.T) {
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED", "false")
-	t.Setenv("GALACTIC_GOBGP_GRPC_PORT", "9999")
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "false")
+	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "9999")
 
 	v := cmdWithViper(t)
 	if v.GetBool("galactic_router.gobgp_grpc_server_enabled") {
@@ -260,14 +260,14 @@ func TestVersionFlag(t *testing.T) {
 
 func TestDefaults(t *testing.T) {
 	// Clear all relevant env vars.
-	_ = os.Unsetenv("NODE_NAME")
-	_ = os.Unsetenv("ROUTER_ROLE")
-	_ = os.Unsetenv("BGP_LISTEN_PORT")
-	_ = os.Unsetenv("BGP_LOCAL_ADDRESS")
-	_ = os.Unsetenv("GALACTIC_GOBGP_GRPC_SERVER_ENABLED")
-	_ = os.Unsetenv("GALACTIC_GOBGP_GRPC_PORT")
-	_ = os.Unsetenv("METRICS_PORT")
-	_ = os.Unsetenv("GRPC_HEALTH_PORT")
+	_ = os.Unsetenv("GALACTIC_ROUTER_NODE_NAME")
+	_ = os.Unsetenv("GALACTIC_ROUTER_ROUTER_ROLE")
+	_ = os.Unsetenv("GALACTIC_ROUTER_BGP_LISTEN_PORT")
+	_ = os.Unsetenv("GALACTIC_ROUTER_BGP_LOCAL_ADDRESS")
+	_ = os.Unsetenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED")
+	_ = os.Unsetenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT")
+	_ = os.Unsetenv("GALACTIC_ROUTER_METRICS_PORT")
+	_ = os.Unsetenv("GALACTIC_ROUTER_GRPC_HEALTH_PORT")
 
 	v := cmdWithViper(t)
 

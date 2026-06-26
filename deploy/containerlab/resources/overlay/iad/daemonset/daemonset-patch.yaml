@@ -19,5 +19,5 @@ spec:
       containers:
         - name: galactic-router
           env:
-            - name: BGP_LOCAL_ADDRESS
+            - name: GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
               value: "fc00:0:4::1"

@@ -63,11 +63,13 @@ EOF
     docker exec "${worker}" mkdir -p /etc/galactic
     echo "${kubeconfig}" | docker exec -i "${worker}" tee /etc/galactic/kubeconfig > /dev/null
 
-    # Update the wrapper to export KUBECONFIG so the CNI binary can reach the
-    # API server. Rewrite the wrapper in-place.
+    # Update the wrapper to export KUBECONFIG and NODE_NAME so the CNI binary
+    # can reach the API server and resolve the node name. Rewrite the wrapper
+    # in-place.
     docker exec "${worker}" sh -c 'cat > /opt/cni/bin/galactic-cni <<'"'"'EOF'"'"'
 #!/bin/sh
 export NODE_NAME=$(hostname)
+export GALACTIC_CNI_NODE_NAME=$(hostname)
 export KUBECONFIG=/etc/galactic/kubeconfig
 exec /opt/cni/bin/galactic-cni.bin "$@"
 EOF
