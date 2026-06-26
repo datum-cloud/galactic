@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/invoke"
@@ -36,6 +37,7 @@ import (
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -59,6 +61,13 @@ const (
 	// holding the allocated pod subnet CIDR for a container ID. The full key
 	// appends a truncated container ID; see subnetAnnotationKey.
 	annotationAllocatedSubnet = "galactic.datum.net/allocated-subnet"
+
+	// annotationSRv6SID is the BGPAdvertisement annotation key holding the
+	// End.DT46 SRv6 SID for this VPC attachment. Galactic-router reads this
+	// annotation to set the EVPN GWIPAddress to the actual SRv6 SID rather
+	// than the BGP peering loopback, so remote nodes install correct seg6
+	// encap routes.
+	annotationSRv6SID = "galactic.datum.net/srv6-sid"
 
 	// annotationContainerIDLen is the number of characters used from a
 	// container ID in annotation keys. Kubernetes limits the name part of an
@@ -275,9 +284,56 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("read guest interface: %w", err)
 	}
 
+	// Add the gateway address to the host-side veth as a /128 host route, then
+	// explicitly install the pod subnet route into the VRF table.
+	//
+	// Using /128 (not the pod subnet mask) prevents the kernel from auto-creating
+	// a subnet-router anycast entry for the pod subnet prefix in the VRF local
+	// table. When the pod address equals the subnet network address (e.g. the pod
+	// holds fd00:10:ffXX::/80 and the gateway is fd00:10:ffXX::1/80), that
+	// anycast absorbs seg6local-decapped inner packets before they reach the pod.
+	//
+	// The explicit subnet route replaces the one the kernel would have created
+	// automatically from the /80 assignment, ensuring return-path routing after
+	// SRv6 decapsulation still works.
+	if ipamResult != nil && ipamResult.gateway != nil {
+		gwNet := &net.IPNet{IP: ipamResult.gateway, Mask: net.CIDRMask(128, 128)}
+		if addErr := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet}); addErr != nil {
+			if !errors.Is(addErr, syscall.EEXIST) {
+				return fmt.Errorf("add gateway address to host veth %q: %w", hostName, addErr)
+			}
+		}
+		tableID, tableErr := vrf.TableID(pluginConf.VPC, pluginConf.VPCAttachment)
+		if tableErr != nil {
+			return fmt.Errorf("get VRF table ID for pod subnet route: %w", tableErr)
+		}
+		if addErr := netlink.RouteReplace(&netlink.Route{
+			Dst:       ipamResult.subnet,
+			LinkIndex: hostLink.Attrs().Index,
+			Table:     int(tableID),
+		}); addErr != nil {
+			return fmt.Errorf("add pod subnet route to VRF table: %w", addErr)
+		}
+	}
+
 	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 	if err != nil {
 		return fmt.Errorf("decode VPC: %w", err)
+	}
+	vpcAttHex, err := intf.Base62ToHex(pluginConf.VPCAttachment)
+	if err != nil {
+		return fmt.Errorf("decode VPCAttachment: %w", err)
+	}
+	var srv6SIDStr string
+	if pluginConf.SRv6Locator != "" {
+		sid, err := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttHex)
+		if err != nil {
+			return fmt.Errorf("encode SRv6 endpoint: %w", err)
+		}
+		if err := srv6.RouteIngressAdd(sid); err != nil {
+			return fmt.Errorf("add SRv6 ingress route: %w", err)
+		}
+		srv6SIDStr = sid
 	}
 
 	// Build and print the CNI result before Kubernetes operations so that the
@@ -349,13 +405,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
 			Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
 		}
-		// Store the allocated subnet keyed by container ID in annotations
-		// so cmdDel can look it up for deallocation.
-		if ipamResult != nil {
+		if ipamResult != nil || srv6SIDStr != "" {
 			if adv.Annotations == nil {
 				adv.Annotations = make(map[string]string)
 			}
-			adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
+			// Store the allocated subnet keyed by container ID so cmdDel can look it up.
+			if ipamResult != nil {
+				adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
+			}
+			// Store the End.DT46 SID so galactic-router uses it as the EVPN GWIPAddress.
+			if srv6SIDStr != "" {
+				adv.Annotations[annotationSRv6SID] = srv6SIDStr
+			}
 		}
 		return nil
 	})
@@ -426,6 +487,15 @@ func cmdDel(args *skel.CmdArgs) error {
 			termination.Network, termination.Via, dev,
 		); err != nil {
 			return fmt.Errorf("delete route %s: %w", termination.Network, err)
+		}
+	}
+	if pluginConf.SRv6Locator != "" {
+		if vpcHex, hexErr := intf.Base62ToHex(pluginConf.VPC); hexErr == nil {
+			if vpcAttHex, attErr := intf.Base62ToHex(pluginConf.VPCAttachment); attErr == nil {
+				if sid, sidErr := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttHex); sidErr == nil {
+					_ = srv6.RouteIngressDel(sid) // best-effort; veth deletion follows
+				}
+			}
 		}
 	}
 	if err := veth.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {

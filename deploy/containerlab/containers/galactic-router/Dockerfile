@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitCommit=${GIT_COMMIT} \
       -X go.datum.net/galactic/internal/metadata.GitTreeState=${GIT_TREE_STATE} \
       -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE}" \
-    -o galactic-router ./cmd/galactic-router/
+    -o galactic-router ./cmd/galactic-router
 
 # Use distroless as minimal base image to package the router binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details

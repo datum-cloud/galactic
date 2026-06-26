@@ -75,9 +75,13 @@ type DesiredAdvertisement struct {
 	Prefixes        []string
 	Communities     []string
 	LocalPreference *uint32
-	// NextHop is the BGP next-hop for EVPN advertisements (node's primary IPv6 addr).
-	// Required when AddressFamily is l2vpn/evpn; rejection occurs in GoBGP backend if empty.
+	// NextHop is the BGP next-hop address placed in MpReachNLRI (node's transit-reachable
+	// IPv6 address). Required when AddressFamily is l2vpn/evpn.
 	NextHop string
+	// SRv6SID, when set, is placed in the EVPN Type 5 GWIPAddress field instead of NextHop.
+	// Must be the End.DT46 SID for this VPC attachment so that receiving nodes install
+	// a seg6 encap route targeting the correct SRv6 decap instruction.
+	SRv6SID string
 }
 
 // DesiredPolicy describes a routing policy in one direction.

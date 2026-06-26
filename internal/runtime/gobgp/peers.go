@@ -58,7 +58,8 @@ func familyFromModel(af model.AddressFamily) *api.Family {
 
 // peerFromDesired converts a DesiredPeer to a GoBGP api.Peer.
 // localAddress, if non-empty, is set as the TCP source address for the session.
-func peerFromDesired(p model.DesiredPeer, localAddress string) *api.Peer {
+// routeReflectorMode, when true, marks this peer as an iBGP route-reflector client.
+func peerFromDesired(p model.DesiredPeer, localAddress string, routeReflectorMode bool) *api.Peer {
 	peer := &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: p.Address,
@@ -93,6 +94,12 @@ func peerFromDesired(p model.DesiredPeer, localAddress string) *api.Peer {
 		RemotePort:   1790,
 		PassiveMode:  false,
 		LocalAddress: localAddress,
+	}
+
+	if routeReflectorMode {
+		peer.RouteReflector = &api.RouteReflector{
+			RouteReflectorClient: true,
+		}
 	}
 
 	return peer

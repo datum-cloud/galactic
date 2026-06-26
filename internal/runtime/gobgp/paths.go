@@ -21,12 +21,23 @@ import (
 //
 // routerID is the BGP router-ID (IPv4 dotted-decimal) and is used to derive the
 // per-router route distinguisher (Type 1 IP-address: routerID:0). adv.NextHop
-// must be the node's primary IPv6 address; it becomes both the MpReachNLRI
-// next-hop and the EVPNIPPrefixRoute GW address.
+// is the transit-reachable BGP peering address placed in MpReachNLRI. adv.SRv6SID,
+// when set, is the End.DT46 SID placed in the EVPN GWIPAddress field — this is
+// the SRv6 segment that remote nodes install in their seg6 encap kernel routes.
+// When adv.SRv6SID is empty the next-hop is used for both (non-SRv6 fallback).
 func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, routerID string, withdraw bool) error {
 	nextHop, err := netip.ParseAddr(adv.NextHop)
 	if err != nil {
 		return fmt.Errorf("invalid EVPN next-hop %q: %w", adv.NextHop, err)
+	}
+
+	gwIP := nextHop
+	if adv.SRv6SID != "" {
+		sid, err := netip.ParseAddr(adv.SRv6SID)
+		if err != nil {
+			return fmt.Errorf("invalid SRv6 SID %q: %w", adv.SRv6SID, err)
+		}
+		gwIP = sid
 	}
 
 	// Type 1 (IP-address:local-admin) RD, unique per router.
@@ -49,13 +60,15 @@ func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, ro
 
 		// EVPN Type 5 IP Prefix route. ESI all-zeros (Type 0 = not multihomed),
 		// ETag 0, label 0 (SRv6 — MPLS label unused).
+		// gwIP is the End.DT46 SRv6 SID when adv.SRv6SID is set; otherwise falls
+		// back to nextHop. Remote nodes use this as the seg6 encap segment.
 		nlri, err := bgp.NewEVPNIPPrefixRoute(
 			rd,
 			bgp.EthernetSegmentIdentifier{},
 			0,
 			uint8(prefix.Bits()),
 			prefix.Addr(),
-			nextHop,
+			gwIP,
 			0,
 		)
 		if err != nil {

@@ -48,6 +48,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           securityContext:
+            runAsUser: 0
             capabilities:
               add:
                 - NET_ADMIN
