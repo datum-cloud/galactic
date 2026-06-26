@@ -88,14 +88,19 @@ tasks:
         sh: git diff --quiet && echo "clean" || echo "dirty"
       BUILD_DATE:
         sh: date -u +%Y-%m-%dT%H:%M:%SZ
+      SPDX_LICENSE: AGPL-3.0-or-later
+      GIT_URL: https://github.com/datum-cloud/galactic
       LDFLAGS: >-
         -s -w
         -X go.datum.net/galactic/internal/metadata.Version={{.VERSION}}
         -X go.datum.net/galactic/internal/metadata.GitCommit={{.GIT_COMMIT}}
         -X go.datum.net/galactic/internal/metadata.GitTreeState={{.GIT_TREE_STATE}}
         -X go.datum.net/galactic/internal/metadata.BuildDate={{.BUILD_DATE}}
+        -X go.datum.net/galactic/internal/metadata.SPDXLicense={{.SPDX_LICENSE}}
+        -X go.datum.net/galactic/internal/metadata.GitURL={{.GIT_URL}}
     cmds:
-      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-cni cmd/galactic-cni/main.go
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-cni ./cmd/galactic-cni
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-router ./cmd/galactic-router
 
   docker-build:
     desc: Build container image
@@ -108,12 +113,16 @@ tasks:
         sh: git diff --quiet && echo "clean" || echo "dirty"
       BUILD_DATE:
         sh: date -u +%Y-%m-%dT%H:%M:%SZ
+      SPDX_LICENSE: AGPL-3.0-or-later
+      GIT_URL: https://github.com/datum-cloud/galactic
     cmds:
       - '{{.CONTAINER_TOOL}} build -t {{.IMG}} -f containers/galactic/Dockerfile
           --build-arg VERSION={{.VERSION}}
           --build-arg GIT_COMMIT={{.GIT_COMMIT}}
           --build-arg GIT_TREE_STATE={{.GIT_TREE_STATE}}
           --build-arg BUILD_DATE={{.BUILD_DATE}}
+          --build-arg SPDX_LICENSE={{.SPDX_LICENSE}}
+          --build-arg GIT_URL={{.GIT_URL}}
           .'
 
   ##

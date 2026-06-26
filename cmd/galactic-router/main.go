@@ -9,33 +9,12 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
-	"net"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
-	"google.golang.org/grpc"
-	grpchealth "google.golang.org/grpc/health"
-	"google.golang.org/grpc/health/grpc_health_v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	"go.datum.net/galactic/internal/controller"
-	"go.datum.net/galactic/internal/hash"
-	"go.datum.net/galactic/internal/reconcile"
-	galacticruntime "go.datum.net/galactic/internal/runtime"
-	"go.datum.net/galactic/internal/runtime/frr"
-	"go.datum.net/galactic/internal/runtime/gobgp"
 )
 
 const (
@@ -50,162 +29,13 @@ const (
 	resourceSecrets           = "secrets"
 	resourceNodes             = "nodes"
 
-	defaultGrpcPort   = 50051
-	grpcServerEnabled = "true"
+	defaultGrpcPort = 50051
 )
 
 func main() {
-	nodeName := os.Getenv("NODE_NAME")
-	routerRole := os.Getenv("ROUTER_ROLE")
-	if nodeName == "" {
-		log.Fatal("NODE_NAME environment variable is required")
-	}
-	if routerRole == "" {
-		log.Fatal("ROUTER_ROLE environment variable is required")
-	}
-
-	bgpListenPort := int32(179)
-	if v := os.Getenv("BGP_LISTEN_PORT"); v != "" {
-		p, err := strconv.ParseInt(v, 10, 32)
-		if err != nil || p < -1 || p > 65535 {
-			log.Fatalf("BGP_LISTEN_PORT must be -1 or a valid port number, got %q", v)
-		}
-		bgpListenPort = int32(p)
-	}
-
-	bgpLocalAddr := os.Getenv("BGP_LOCAL_ADDRESS")
-
-	// GALACTIC_ENABLE_GOBGP_GRPC_SERVER controls whether the embedded GoBGP
-	// gRPC API server is enabled. Defaults to false.
-	grpcListenAddress := parseGrpcListenAddress()
-
-	var factory galacticruntime.RuntimeFactory
-	switch routerRole {
-	case "tenant":
-		factory = gobgp.NewRuntimeFactory(bgpListenPort, bgpLocalAddr, grpcListenAddress)
-	case "fabric":
-		factory = frr.NewRuntimeFactory()
-	default:
-		log.Fatalf("ROUTER_ROLE must be 'tenant' or 'fabric', got %q", routerRole)
-	}
-
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
-
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		HealthProbeBindAddress: "0",
-		Metrics: metricsserver.Options{
-			BindAddress: ":8080",
-		},
-	})
-	if err != nil {
-		log.Fatalf("create manager: %v", err)
-	}
-
-	ctx := ctrl.SetupSignalHandler()
-
-	// Start gRPC health server on :5000.
-	lis, err := net.Listen("tcp", ":5000")
-	if err != nil {
-		log.Fatalf("listen on :5000: %v", err)
-	}
-	grpcSrv := grpc.NewServer()
-	healthSrv := grpchealth.NewServer()
-	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
-	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-	go func() {
-		if serveErr := grpcSrv.Serve(lis); serveErr != nil {
-			log.Printf("gRPC health server: %v", serveErr)
-		}
-	}()
-	go func() {
-		<-ctx.Done()
-		grpcSrv.GracefulStop()
-	}()
-
-	// Pre-flight RBAC check: verify list+watch permission for every type the
-	// manager will watch. A missing permission silently blocks cache sync and
-	// prevents all reconcilers from starting.
-	checkWatchPermissions(mgr)
-
-	// Register field indexes.
-	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
-		log.Fatalf("register field indexes: %v", err)
-	}
-
-	// Create runtime manager.
-	runtimeMgr := galacticruntime.NewRuntimeManager(factory)
-
-	// Create reconciler.
-	rec := reconcile.New(mgr.GetClient(), nodeName, routerRole)
-
-	// Register BGPRouter controller (main reconcile loop).
-	if err := (&controller.BGPRouterReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		Reconciler:     rec,
-		RuntimeManager: runtimeMgr,
-		Hasher:         hash.DesiredRouter,
-		NodeName:       nodeName,
-		RouterRole:     routerRole,
-	}).SetupWithManager(mgr); err != nil {
-		log.Fatalf("setup BGPRouter controller: %v", err)
-	}
-
-	// Register BGPPeer controller (enqueues owning router).
-	if err := (&controller.BGPPeerReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Fatalf("setup BGPPeer controller: %v", err)
-	}
-
-	// Register BGPAdvertisement controller.
-	if err := (&controller.BGPAdvertisementReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Fatalf("setup BGPAdvertisement controller: %v", err)
-	}
-
-	// Register BGPVRFInstance controller.
-	if err := (&controller.BGPVRFInstanceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Fatalf("setup BGPVRFInstance controller: %v", err)
-	}
-
-	// Register BGPPolicy controller.
-	if err := (&controller.BGPPolicyReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Fatalf("setup BGPPolicy controller: %v", err)
-	}
-
-	// Register Secret controller.
-	if err := (&controller.SecretReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Fatalf("setup Secret controller: %v", err)
-	}
-
-	// Register Node controller.
-	if err := (&controller.NodeReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		log.Fatalf("setup Node controller: %v", err)
-	}
-
-	if err := mgr.Start(ctx); err != nil {
-		log.Fatalf("manager exited: %v", err)
+	cmd := newRootCommand()
+	if err := cmd.Execute(); err != nil {
+		os.Exit(1)
 	}
 }
 
@@ -263,30 +93,4 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		logger.Error(nil, "missing watch RBAC for "+r.resource,
 			"verb", "watch", "detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
 	}
-}
-
-// parseGrpcPort reads GALACTIC_GOBGP_GRPC_SERVER_PORT and returns the port
-// to use for the GoBGP gRPC API. Returns defaultGrpcPort when the env var is
-// unset or invalid.
-func parseGrpcPort() int {
-	v := os.Getenv("GALACTIC_GOBGP_GRPC_PORT")
-	if v == "" {
-		return defaultGrpcPort
-	}
-	port, err := strconv.Atoi(v)
-	if err != nil || port < 1 || port > 65535 {
-		return defaultGrpcPort
-	}
-	return port
-}
-
-// parseGrpcListenAddress reads GALACTIC_ENABLE_GOBGP_GRPC_SERVER and returns
-// the gRPC listen address to use. Returns ":<port>" when the env var is
-// "true" (case-insensitive), otherwise returns an empty string to disable
-// the GoBGP gRPC API server.
-func parseGrpcListenAddress() string {
-	if strings.ToLower(os.Getenv("GALACTIC_ENABLE_GOBGP_GRPC_SERVER")) == grpcServerEnabled {
-		return fmt.Sprintf(":%d", parseGrpcPort())
-	}
-	return ""
 }
