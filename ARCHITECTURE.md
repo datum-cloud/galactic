@@ -102,11 +102,11 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the router startup sequen
 
 ### `cmd/galactic-cni/main.go` — CNI plugin
 
-Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads config from stdin (CNI spec). Requires `NODE_NAME` env var at runtime. See [docs/cni-sequence.md](docs/cni-sequence.md) for the full ADD/DEL sequence.
+Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads config from stdin (CNI spec). Requires `GALACTIC_CNI_NODE_NAME` env var at runtime. See [docs/cni-sequence.md](docs/cni-sequence.md) for the full ADD/DEL sequence.
 
 ### `cmd/galactic-router/main.go` — Router daemon
 
-1. Read `NODE_NAME`, `ROUTER_ROLE`, optionally `BGP_LISTEN_PORT` and `BGP_LOCAL_ADDRESS`
+1. Read `GALACTIC_ROUTER_NODE_NAME`, `GALACTIC_ROUTER_ROUTER_ROLE`, optionally `GALACTIC_ROUTER_BGP_LISTEN_PORT` and `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`
 2. Select `RuntimeFactory`: `tenant` → GoBGP, `fabric` → FRR stub
 3. Build controller-runtime manager (Prometheus on `:8080`, no HTTP health)
 4. Start gRPC health server on `:5000`
@@ -120,12 +120,12 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 
 ### galactic-router environment variables
 
-| Variable           | Required | Default | Description                                                             |
-|--------------------|----------|---------|-------------------------------------------------------------------------|
-| `NODE_NAME`        | Yes      | —       | Kubernetes node name; filters which BGPRouter CRDs this instance owns   |
-| `ROUTER_ROLE`      | Yes      | —       | `tenant` (GoBGP) or `fabric` (FRR stub, not yet implemented)            |
-| `BGP_LISTEN_PORT`  | No       | `179`   | BGP TCP listen port; `-1` disables inbound connections (outbound-only)  |
-| `BGP_LOCAL_ADDRESS`| No       | —       | Source address for outgoing BGP TCP connections (numbered underlay use) |
+| Variable                        | Required | Default | Description                                                             |
+|---------------------------------|----------|---------|-------------------------------------------------------------------------|
+| `GALACTIC_ROUTER_NODE_NAME`     | Yes      | —       | Kubernetes node name; filters which BGPRouter CRDs this instance owns   |
+| `GALACTIC_ROUTER_ROUTER_ROLE`   | Yes      | —       | `tenant` (GoBGP) or `fabric` (FRR stub, not yet implemented)            |
+| `GALACTIC_ROUTER_BGP_LISTEN_PORT` | No     | `179`   | BGP TCP listen port; `-1` disables inbound connections (outbound-only)  |
+| `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | No   | —       | Source address for outgoing BGP TCP connections (numbered underlay use) |
 
 ### galactic-cni CNI config fields (`PluginConf`)
 
@@ -141,9 +141,9 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 
 ### galactic-cni environment variables
 
-| Variable    | Required | Description                                                |
-|-------------|----------|------------------------------------------------------------|
-| `NODE_NAME` | Yes      | Kubernetes node name; used to look up the owning BGPRouter |
+| Variable                  | Required | Description                                                |
+|---------------------------|----------|------------------------------------------------------------|
+| `GALACTIC_CNI_NODE_NAME`  | Yes      | Kubernetes node name; used to look up the owning BGPRouter |
 
 ---
 
@@ -193,7 +193,7 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 - **GoBGP embedded, lazy-started.** GoBGP runs in-process and starts only when the first `BGPRouter` is reconciled (`listenPort=-1`, outbound-only). ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
 - **CRD-driven config, no sidecar gRPC.** `galactic-router` watches cosmos BGP CRDs directly via controller-runtime. The CNI writes a `BGPAdvertisement` CRD; the router reconciler picks it up. No in-node gRPC calls.
 - **Hash-based no-op suppression.** SHA-256 over the sorted `DesiredRouter` prevents redundant GoBGP Apply calls on every CRD event.
-- **RuntimeFactory pattern.** `ROUTER_ROLE=tenant` selects GoBGP; `ROUTER_ROLE=fabric` selects FRR (Phase 2 stub). The binary is selected at startup; no controller changes are needed for Phase 2.
+- **RuntimeFactory pattern.** `GALACTIC_ROUTER_ROUTER_ROLE=tenant` selects GoBGP; `GALACTIC_ROUTER_ROUTER_ROLE=fabric` selects FRR (Phase 2 stub). The binary is selected at startup; no controller changes are needed for Phase 2.
 - **gRPC health on :5000.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on port 5000. No HTTP health endpoint.
 
 ---

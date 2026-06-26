@@ -10,7 +10,7 @@ This document defines the coding standards, naming rules, error handling pattern
 
 - Module: `go.datum.net/galactic`
 - `cmd/galactic-cni/main.go` — CNI plugin entry point; calls `cni.RunPlugin()` directly
-- `cmd/galactic-router/main.go` — router entry point; reads `NODE_NAME` and `ROUTER_ROLE` env vars, starts controller-runtime manager
+- `cmd/galactic-router/main.go` — router entry point; reads `GALACTIC_ROUTER_NODE_NAME` and `GALACTIC_ROUTER_ROUTER_ROLE` env vars, starts controller-runtime manager
 - `internal/plumbing/` — low-level kernel and network primitives shared between router and CNI (`intf`, `srv6`, `sysctl`, `vrf`)
 - `internal/controller/` — controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, Secret, Node); also contains field index registration (`indexer.go`) and CRD status helpers (`status.go`)
 - `internal/reconcile/` — CRD → DesiredRouter translation

@@ -16,7 +16,7 @@ sequenceDiagram
         note over Multus,Router: cmdAdd — Container Attach
         Multus->>CNI: ADD (VPC, VPCAttachment, SRv6Locator, namespace, IPAM, terminations)
         CNI->>CNI: parseConf()
-        CNI->>CNI: validate NODE_NAME env var
+        CNI->>CNI: validate GALACTIC_CNI_NODE_NAME env var
         CNI->>VRF: Add(VPC, VPCAttachment)
         CNI->>Veth: Add(VPC, VPCAttachment, MTU)
         loop for each termination

@@ -186,6 +186,31 @@ func TestRouteTarget(t *testing.T) {
 	}
 }
 
+// ---- SetEnableLocalIPAM --------------------------------------------------
+
+func TestSetEnableLocalIPAM(t *testing.T) {
+	// Save and restore original state.
+	original := enableLocalIPAM
+	defer func() { enableLocalIPAM = original }()
+
+	// Default should be false.
+	if enableLocalIPAM {
+		t.Error("enableLocalIPAM default = true, want false")
+	}
+
+	// Setting to true should work.
+	SetEnableLocalIPAM(true)
+	if !enableLocalIPAM {
+		t.Error("enableLocalIPAM after SetEnableLocalIPAM(true) = false, want true")
+	}
+
+	// Setting back to false should work.
+	SetEnableLocalIPAM(false)
+	if enableLocalIPAM {
+		t.Error("enableLocalIPAM after SetEnableLocalIPAM(false) = true, want false")
+	}
+}
+
 // ---- lookupBGPRouter -----------------------------------------------------
 
 func TestLookupBGPRouter(t *testing.T) {

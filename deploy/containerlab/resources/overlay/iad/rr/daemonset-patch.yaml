@@ -30,11 +30,11 @@ spec:
       containers:
         - name: galactic-router
           env:
-            - name: BGP_LOCAL_ADDRESS
+            - name: GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
               value: "fc00:0:8::1"
-            - name: ROUTER_ROLE
+            - name: GALACTIC_ROUTER_ROUTER_ROLE
               value: tenant
-            - name: BGP_LISTEN_PORT
+            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
               value: "1790"
           livenessProbe:
             grpc:

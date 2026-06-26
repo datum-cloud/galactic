@@ -53,25 +53,25 @@ func newViper() *viper.Viper {
 
 	v.AutomaticEnv()
 
-	// Explicit bindings — env var names do not follow a uniform
-	// GALACTIC_ROUTER_* prefix pattern, so AutomaticEnv alone would not
-	// resolve them correctly.
+	// Explicit bindings — AutomaticEnv uses the snake_case key derived from
+	// the viper key path (e.g. galactic_router.node_name ->
+	// GALACTIC_ROUTER_NODE_NAME), but some keys need explicit mapping.
 	//nolint:errcheck // keys are controlled, BindEnv cannot fail here
-	v.BindEnv("galactic_router.node_name", "NODE_NAME")
+	v.BindEnv("galactic_router.node_name", "GALACTIC_ROUTER_NODE_NAME")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.router_role", "ROUTER_ROLE")
+	v.BindEnv("galactic_router.router_role", "GALACTIC_ROUTER_ROUTER_ROLE")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.bgp_listen_port", "BGP_LISTEN_PORT")
+	v.BindEnv("galactic_router.bgp_listen_port", "GALACTIC_ROUTER_BGP_LISTEN_PORT")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.bgp_local_address", "BGP_LOCAL_ADDRESS")
+	v.BindEnv("galactic_router.bgp_local_address", "GALACTIC_ROUTER_BGP_LOCAL_ADDRESS")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.gobgp_grpc_server_enabled", "GALACTIC_GOBGP_GRPC_SERVER_ENABLED")
+	v.BindEnv("galactic_router.gobgp_grpc_server_enabled", "GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.gobgp_grpc_port", "GALACTIC_GOBGP_GRPC_PORT")
+	v.BindEnv("galactic_router.gobgp_grpc_port", "GALACTIC_ROUTER_GOBGP_GRPC_PORT")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.metrics_port", "METRICS_PORT")
+	v.BindEnv("galactic_router.metrics_port", "GALACTIC_ROUTER_METRICS_PORT")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.grpc_health_port", "GRPC_HEALTH_PORT")
+	v.BindEnv("galactic_router.grpc_health_port", "GALACTIC_ROUTER_GRPC_HEALTH_PORT")
 
 	return v
 }
@@ -126,19 +126,19 @@ func validateConfig(v *viper.Viper) error {
 		return fmt.Errorf("--router-role is required")
 	}
 	if routerRole != roleTenant && routerRole != roleFabric {
-		return fmt.Errorf("ROUTER_ROLE must be 'tenant' or 'fabric', got %q", routerRole)
+		return fmt.Errorf("GALACTIC_ROUTER_ROUTER_ROLE must be 'tenant' or 'fabric', got %q", routerRole)
 	}
 	if bgpListenPort < -1 || bgpListenPort > 65535 {
-		return fmt.Errorf("BGP_LISTEN_PORT must be -1 or a valid port number, got %d", bgpListenPort)
+		return fmt.Errorf("GALACTIC_ROUTER_BGP_LISTEN_PORT must be -1 or a valid port number, got %d", bgpListenPort)
 	}
 	if grpcPort < 1 || grpcPort > 65535 {
-		return fmt.Errorf("GALACTIC_GOBGP_GRPC_PORT must be a valid port number (1-65535), got %d", grpcPort)
+		return fmt.Errorf("GALACTIC_ROUTER_GOBGP_GRPC_PORT must be a valid port number (1-65535), got %d", grpcPort)
 	}
 	if metricsPort < 1 || metricsPort > 65535 {
-		return fmt.Errorf("METRICS_PORT must be a valid port number (1-65535), got %d", metricsPort)
+		return fmt.Errorf("GALACTIC_ROUTER_METRICS_PORT must be a valid port number (1-65535), got %d", metricsPort)
 	}
 	if grpcHealthPort < 1 || grpcHealthPort > 65535 {
-		return fmt.Errorf("GRPC_HEALTH_PORT must be a valid port number (1-65535), got %d", grpcHealthPort)
+		return fmt.Errorf("GALACTIC_ROUTER_GRPC_HEALTH_PORT must be a valid port number (1-65535), got %d", grpcHealthPort)
 	}
 	return nil
 }
