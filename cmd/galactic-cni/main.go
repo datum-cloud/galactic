@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/containernetworking/cni/pkg/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -79,6 +80,12 @@ func newRootCommand() *cobra.Command {
 			if ok, _ := cmd.Flags().GetBool("version"); ok {
 				fmt.Printf("galactic-cni version %s\n", metadata.Version)
 				return nil
+			}
+			// Handle CNI_COMMAND=VERSION before config validation -- the CNI
+			// runtime invokes the plugin with this env var to query supported
+			// spec versions; --node-name is not required for this call.
+			if os.Getenv("CNI_COMMAND") == "VERSION" {
+				return version.All.Encode(os.Stdout)
 			}
 			if err := validateConfig(v); err != nil {
 				return err
