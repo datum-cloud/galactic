@@ -56,14 +56,35 @@ the standard CNI `PluginConf` with Galactic-specific fields.
 |---|---|---|---|---|
 | `vpc` | `"vpc"` | **Yes** | `string` | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets. |
 | `vpcattachment` | `"vpcattachment"` | **Yes** | `string` | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming. |
+| `interface_type` | `"interface_type"` | No | `string` | Interface mode: `"veth"` (default, for containers) or `"tap"` (for VMs such as Kata, Firecracker, QEMU). |
 | `srv6_locator` | `"srv6_locator"` | **Yes** | `string` | IPv6 prefix (e.g. `2001:db8:ff01::/48`). VPC and VPCAttachment identifiers are encoded into the low 64 bits to produce SRv6 endpoints for BGP advertisements. |
-| `mtu` | `"mtu"` | No | `int` | MTU for the host-side veth pair. Passed to `veth.Add()`. |
+| `mtu` | `"mtu"` | No | `int` | MTU for the host-side interface. For `veth` mode this applies to both veth endpoints; for `tap` mode it applies to the tap interface. |
 | `terminations` | `"terminations"` | No | `[]Termination` | Array of static routes to add on the host side (see Termination sub-fields below). |
 | `namespace` | `"namespace"` | No | `string` | Kubernetes namespace used to look up the `BGPRouter` CRD. Defaults to `"default"` if omitted. |
-| `ipam` | `"ipam"` | No* | `IPAM` | IP address management configuration (see IPAM sub-fields below). *Required unless `--enable-local-ipam` is set. |
+| `ipam` | `"ipam"` | No* | `IPAM` | IP address management configuration (see IPAM sub-fields below). *Required unless `--enable-local-ipam` is set or `interface_type` is `"tap"`. |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
 supported via the embedded `types.PluginConf`.
+
+### Interface Types
+
+#### `veth` (default)
+
+Creates a veth pair: one endpoint stays in the host namespace (named
+`H<base62vpc><base62att>`) and the other is moved into the container via the
+host-device CNI plugin (named per the `CNI_IFNAME` env var, typically `eth0`).
+The guest interface receives an IP address from IPAM and a default route via
+the pool gateway.
+
+#### `tap`
+
+Creates a tap interface in the host namespace (named
+`H<base62vpc><base62att>`) and enslaves it to the VRF. No interface is moved
+into the container — the tap fd is managed directly by the guest VM hypervisor.
+IPAM is not used in tap mode; the VM configures its own networking.
+
+> **Note:** Tap mode is intended for VM-based workloads (Kata, Firecracker,
+> QEMU) where the hypervisor opens the tap fd and handles guest networking.
 
 ### IPAM Fields
 
@@ -182,3 +203,23 @@ built-in pool.
 
 The first termination installs a specific next-hop route; the second installs
 a link-local route via the host-side device.
+
+### Tap interface configuration (VM workloads)
+
+```json
+{
+  "cniVersion": "0.3.1",
+  "name": "galactic-tap",
+  "type": "galactic-cni",
+  "vpc": "1",
+  "vpcattachment": "1",
+  "interface_type": "tap",
+  "srv6_locator": "2001:db8:ff01::/48",
+  "mtu": 9000
+}
+```
+
+Tap mode creates a tap interface in the host namespace, enslaves it to the
+VRF, and applies forwarding sysctls. No IPAM is configured — the guest VM
+manages its own IP addresses. The tap fd is opened by the VM hypervisor
+(Kata, Firecracker, QEMU) at runtime.

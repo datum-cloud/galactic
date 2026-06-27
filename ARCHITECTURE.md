@@ -133,11 +133,12 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 |-----------------|----------|-------------------------------------------------------------------------|
 | `vpc`           | string   | Base62-encoded 48-bit VPC identifier                                    |
 | `vpcattachment` | string   | Base62-encoded 16-bit VPCAttachment identifier                          |
+| `interface_type`| string   | `veth` (default) or `tap`; tap mode omits IPAM and guest-side config   |
 | `srv6_locator`  | string   | IPv6 CIDR (≤/64) used as SRv6 locator prefix                           |
 | `namespace`     | string   | Kubernetes namespace for BGP CRDs; defaults to `default`               |
 | `mtu`           | int      | MTU for the veth pair; 0 uses kernel default                            |
 | `terminations`  | array    | Static routes to install on the host-side veth (`network`, `via`)      |
-| `ipam`          | object   | Passed through to the IPAM plugin                                       |
+| `ipam`          | object   | Passed through to the IPAM plugin (ignored in tap mode)                |
 
 ### galactic-cni environment variables
 

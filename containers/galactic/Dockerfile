@@ -50,24 +50,25 @@ COPY --from=builder /workspace/galactic-cni /galactic-cni
 COPY --from=builder /workspace/host-device /host-device
 COPY --from=builder /var/run/galactic-cni /var/run/galactic-cni
 
-# Final image: busybox (provides sh, nsenter, ip for e2e tests)
-FROM docker.io/library/busybox:stable
+# Final image: alpine (provides full iproute2, sh, nsenter for e2e tests)
+# Alpine is used instead of busybox because BusyBox's ip utility lacks
+# support for netns, "ip link add type vrf", and other subcommands the
+# CNI plugin exercises at runtime.
+FROM docker.io/library/alpine:latest
 
 # Copy binaries from the production (distroless) image
 COPY --from=production /galactic-cni /galactic-cni
 COPY --from=production /host-device /host-device
 COPY --from=production /var/run/galactic-cni /var/run/galactic-cni
 
-# busybox dispatches commands based on symlink name; create symlinks so
-# standard tools (sh, nsenter, ip) are found on PATH.
-# Also create /var/run/netns with world-writable perms so the CNI plugin
-# (which creates network namespaces at runtime) can write there regardless
-# of the user the container runs as.
-RUN mkdir -p /usr/local/bin /var/run/netns && \
+# Install iproute2 (provides full-featured ip, nsenter) and create the
+# netns directory with world-writable perms so the CNI plugin can create
+# network namespaces regardless of the container user.
+RUN apk add --no-cache iproute2 && \
+    mkdir -p /usr/local/bin /var/run/netns && \
     chmod 1777 /var/run/netns && \
-    ln -sf /bin/busybox /usr/local/bin/nsenter && \
-    ln -sf /bin/busybox /usr/local/bin/sh && \
-    ln -sf /bin/busybox /usr/local/bin/ip
+    ln -sf /usr/sbin/ip /usr/local/bin/ip && \
+    ln -sf /usr/sbin/nsenter /usr/local/bin/nsenter
 
 # Run as root so nsenter (setns) and netlink operations work in e2e tests.
 # In production the CNI is invoked by the Kubelet as root anyway.

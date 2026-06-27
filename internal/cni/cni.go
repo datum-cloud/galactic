@@ -33,6 +33,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/ipam"
 	"go.datum.net/galactic/internal/cni/route"
+	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/intf"
@@ -91,6 +92,16 @@ func SetEnableLocalIPAM(v bool) {
 	enableLocalIPAM = v
 }
 
+const (
+	// interfaceTypeVeth is the default interface type: veth pair for containers.
+	interfaceTypeVeth = "veth"
+	// interfaceTypeTap is the tap interface type: L2 fd for VMs (Kata, Firecracker).
+	interfaceTypeTap = "tap"
+
+	// cniVersion100 is the CNI spec version this plugin reports.
+	cniVersion100 = "1.0.0"
+)
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(cniScheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(cniScheme))
@@ -102,6 +113,7 @@ type PluginConf struct {
 	VPC           string        `json:"vpc"`
 	VPCAttachment string        `json:"vpcattachment"`
 	MTU           int           `json:"mtu,omitempty"`
+	InterfaceType string        `json:"interface_type,omitempty"` // interfaceTypeVeth or interfaceTypeTap
 	Terminations  []Termination `json:"terminations,omitempty"`
 	IPAM          IPAM          `json:"ipam"`
 	SRv6Locator   string        `json:"srv6_locator"`
@@ -123,6 +135,17 @@ func parseConf(data []byte) (*PluginConf, error) {
 	conf := &PluginConf{}
 	if err := json.Unmarshal(data, &conf); err != nil {
 		return nil, fmt.Errorf("parse CNI config: %w", err)
+	}
+	if conf.InterfaceType == "" {
+		conf.InterfaceType = interfaceTypeVeth
+	}
+	switch conf.InterfaceType {
+	case interfaceTypeVeth, interfaceTypeTap:
+	default:
+		return nil, fmt.Errorf(
+			"invalid interface_type %q: must be %q or %q",
+			conf.InterfaceType, interfaceTypeVeth, interfaceTypeTap,
+		)
 	}
 	return conf, nil
 }
@@ -207,6 +230,14 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	// Roll back on any failure to avoid orphaned resources.
+	// cmdDel is best-effort — errors are logged, not returned.
+	defer func() {
+		if err != nil {
+			_ = cmdDel(args)
+		}
+	}()
+
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
 		return errors.New("NODE_NAME environment variable is not set")
@@ -220,16 +251,23 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err := vrf.Add(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
 		return fmt.Errorf("add VRF: %w", err)
 	}
-	if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
-		return fmt.Errorf("add veth: %w", err)
+
+	// Create the appropriate interface type (veth or tap).
+	switch pluginConf.InterfaceType {
+	case interfaceTypeVeth:
+		if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
+			return fmt.Errorf("add veth: %w", err)
+		}
+	case interfaceTypeTap:
+		if err := tap.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
+			return fmt.Errorf("add tap: %w", err)
+		}
 	}
 
-	// Read host veth attributes immediately after creation; they do not change
-	// when the guest end is moved into the container netns.
 	hostName := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
 	hostLink, err := netlink.LinkByName(hostName)
 	if err != nil {
-		return fmt.Errorf("get host veth %q: %w", hostName, err)
+		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
 	hostMac := hostLink.Attrs().HardwareAddr.String()
 	hostMTU := hostLink.Attrs().MTU
@@ -240,53 +278,28 @@ func cmdAdd(args *skel.CmdArgs) error {
 			return fmt.Errorf("add route %s: %w", termination.Network, err)
 		}
 	}
-	// Only call host-device ADD if the guest interface is still in the host
-	// namespace. If a prior attempt already moved it to the container netns but
-	// failed at a later step, we must not try to move it again.
-	guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
-	if _, linkErr := netlink.LinkByName(guestName); linkErr == nil {
-		// Clean up any stale interface in the container netns left by a
-		// previous run. The host-device plugin renames the moved interface
-		// to args.IfName, so a prior run may have left that name behind.
-		if err := cleanupContainerNetns(args.Netns, args.IfName); err != nil {
-			return fmt.Errorf("cleanup container netns: %w", err)
-		}
-		if err := hostDevice("ADD", args, pluginConf); err != nil {
-			return fmt.Errorf("host-device ADD: %w", err)
-		}
-	}
 
-	// Configure IP address on the guest interface inside the container netns.
-	// After hostDevice("ADD"), the guest interface is named args.IfName inside
-	// the container (host-device renames it), not the original guestName.
+	// Host-device delegation and IPAM are veth-only.
+	// In tap mode the guest VM manages its own networking.
 	var ipamResult *ipamResult
-	if pluginConf.IPAM.Type != "" || enableLocalIPAM {
-		result, err := configureIPAM(args, pluginConf, args.IfName)
+	switch pluginConf.InterfaceType {
+	case interfaceTypeVeth:
+		ipamResult, err = buildVethResult(args, pluginConf, hostName, args.IfName, hostMac, hostMTU)
 		if err != nil {
-			return fmt.Errorf("configure IPAM: %w", err)
+			return err
 		}
-		ipamResult = result
-	}
-
-	// Read guest veth attributes inside the container netns.
-	// Always read regardless of IPAM config — the CNI result requires them.
-	guestMac, guestMTU, err := readGuestInterface(args.Netns, args.IfName)
-	if err != nil {
-		return fmt.Errorf("read guest interface: %w", err)
+	case interfaceTypeTap:
+		result := buildTapResult(pluginConf, hostName, hostMac, hostMTU)
+		if err := types.PrintResult(result, cniVersion100); err != nil {
+			return fmt.Errorf("print CNI result: %w", err)
+		}
+		// Tap mode: no IPAM, no BGP — the guest VM manages its own networking.
+		return nil
 	}
 
 	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 	if err != nil {
 		return fmt.Errorf("decode VPC: %w", err)
-	}
-
-	// Build and print the CNI result before Kubernetes operations so that the
-	// result is available on stdout even when K8s is unreachable. The CNI
-	// framework will append an error JSON after the result if the plugin
-	// returns an error; the test's JSON parser picks up the first JSON object.
-	result := buildResult(pluginConf, ipamResult, hostName, args.IfName, hostMac, guestMac, hostMTU, guestMTU, args.Netns)
-	if err := types.PrintResult(result, "1.0.0"); err != nil {
-		return fmt.Errorf("print CNI result: %w", err)
 	}
 
 	k8s, err := newK8sClient()
@@ -372,8 +385,8 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	// Deallocate IPAM subnet before any other cleanup.
-	if pluginConf.IPAM.Type != "" || enableLocalIPAM {
+	// Deallocate IPAM subnet before any other cleanup (veth-only).
+	if pluginConf.InterfaceType == interfaceTypeVeth && (pluginConf.IPAM.Type != "" || enableLocalIPAM) {
 		deallocateIPAM(args, pluginConf)
 	}
 
@@ -417,8 +430,11 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
-	if err := hostDevice("DEL", args, pluginConf); err != nil {
-		return fmt.Errorf("host-device DEL: %w", err)
+	// host-device DEL is veth-only; tap has no guest interface to remove.
+	if pluginConf.InterfaceType == interfaceTypeVeth {
+		if err := hostDevice("DEL", args, pluginConf); err != nil {
+			return fmt.Errorf("host-device DEL: %w", err)
+		}
 	}
 	for _, termination := range pluginConf.Terminations {
 		if err := route.Delete(
@@ -428,15 +444,24 @@ func cmdDel(args *skel.CmdArgs) error {
 			return fmt.Errorf("delete route %s: %w", termination.Network, err)
 		}
 	}
-	if err := veth.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
-		return fmt.Errorf("delete veth: %w", err)
+
+	switch pluginConf.InterfaceType {
+	case interfaceTypeVeth:
+		if err := veth.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
+			return fmt.Errorf("delete veth: %w", err)
+		}
+	case interfaceTypeTap:
+		if err := tap.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
+			return fmt.Errorf("delete tap: %w", err)
+		}
 	}
+
 	if err := vrf.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
 		return fmt.Errorf("delete VRF: %w", err)
 	}
 
 	result := &type100.Result{}
-	return types.PrintResult(result, "1.0.0")
+	return types.PrintResult(result, cniVersion100)
 }
 
 // ipamResult holds the IPAM allocation details for building the CNI result.
@@ -489,6 +514,74 @@ func buildResult(
 		}
 	}
 	return result
+}
+
+// buildVethResult handles veth-specific result building: host-device
+// delegation, IPAM, guest interface reading, and result printing.
+// Returns the IPAM result for BGP advertisement, or nil if no IPAM.
+func buildVethResult(
+	args *skel.CmdArgs,
+	pluginConf *PluginConf,
+	hostName, guestName string,
+	hostMac string,
+	hostMTU int,
+) (*ipamResult, error) {
+	// Only call host-device ADD if the guest interface is still in the host
+	// namespace. If a prior attempt already moved it to the container netns but
+	// failed at a later step, we must not try to move it again.
+	if _, linkErr := netlink.LinkByName(guestName); linkErr == nil {
+		// Clean up any stale interface in the container netns left by a
+		// previous run. The host-device plugin renames the moved interface
+		// to args.IfName, so a prior run may have left that name behind.
+		if err := cleanupContainerNetns(args.Netns, args.IfName); err != nil {
+			return nil, fmt.Errorf("cleanup container netns: %w", err)
+		}
+		if err := hostDevice("ADD", args, pluginConf); err != nil {
+			return nil, fmt.Errorf("host-device ADD: %w", err)
+		}
+	}
+
+	// Configure IP address on the guest interface inside the container netns.
+	var ipamResult *ipamResult
+	if pluginConf.IPAM.Type != "" || enableLocalIPAM {
+		result, err := configureIPAM(args, pluginConf, args.IfName)
+		if err != nil {
+			return nil, fmt.Errorf("configure IPAM: %w", err)
+		}
+		ipamResult = result
+	}
+
+	// Read guest veth attributes inside the container netns.
+	guestMac, guestMTU, err := readGuestInterface(args.Netns, args.IfName)
+	if err != nil {
+		return nil, fmt.Errorf("read guest interface: %w", err)
+	}
+	result := buildResult(pluginConf, ipamResult, hostName, args.IfName, hostMac, guestMac, hostMTU, guestMTU, args.Netns)
+	if err := types.PrintResult(result, cniVersion100); err != nil {
+		return nil, fmt.Errorf("print CNI result: %w", err)
+	}
+
+	return ipamResult, nil
+}
+
+// buildTapResult constructs the CNI result for tap mode: a single host
+// interface with no IPAM or guest endpoint.
+func buildTapResult(
+	pluginConf *PluginConf,
+	hostName, hostMac string,
+	hostMTU int,
+) *type100.Result {
+	return &type100.Result{
+		CNIVersion: pluginConf.CNIVersion,
+		Interfaces: []*type100.Interface{
+			{
+				Name:    hostName,
+				Mac:     hostMac,
+				Mtu:     hostMTU,
+				Sandbox: "",
+			},
+		},
+	}
 }
 
 // configureIPAM allocates a subnet and configures the guest interface inside the
