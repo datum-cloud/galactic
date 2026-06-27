@@ -6,9 +6,11 @@ package cni
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 
+	"github.com/containernetworking/cni/pkg/types"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -298,4 +300,131 @@ func TestLookupBGPRouter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- buildResult ---------------------------------------------------------
+
+func TestBuildResult(t *testing.T) {
+	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
+	gateway := net.ParseIP("fd00:10:ff01::1")
+	route := mustParseCIDR(t, "::/0")
+	netns := "/proc/1234/ns/net"
+
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: "1.0.0"},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+
+	tests := []struct {
+		name       string
+		ipRes      *ipamResult
+		wantInts   int
+		wantIPs    int
+		wantRoutes int
+		wantIFace  int // 0 means no Interface field expected
+	}{
+		{
+			name:       "with IPAM config",
+			ipRes:      &ipamResult{subnet: subnet, gateway: gateway, routes: []*net.IPNet{route}},
+			wantInts:   2,
+			wantIPs:    1,
+			wantRoutes: 1,
+			wantIFace:  1,
+		},
+		{
+			name:       "without IPAM config",
+			ipRes:      nil,
+			wantInts:   2,
+			wantIPs:    0,
+			wantRoutes: 0,
+			wantIFace:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildResult(
+				conf, tt.ipRes,
+				"G09-vpc03-vpcAttH", "eth0",
+				"aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:11",
+				1500, 1500,
+				netns,
+			)
+
+			if result.CNIVersion != "1.0.0" {
+				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, "1.0.0")
+			}
+
+			if len(result.Interfaces) != tt.wantInts {
+				t.Errorf("Interfaces count = %d, want %d", len(result.Interfaces), tt.wantInts)
+				return
+			}
+
+			// Host interface (index 0)
+			if result.Interfaces[0].Name != "G09-vpc03-vpcAttH" {
+				t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, "G09-vpc03-vpcAttH")
+			}
+			if result.Interfaces[0].Mac != "aa:bb:cc:dd:ee:ff" {
+				t.Errorf("Interfaces[0].Mac = %q, want %q", result.Interfaces[0].Mac, "aa:bb:cc:dd:ee:ff")
+			}
+			if result.Interfaces[0].Mtu != 1500 {
+				t.Errorf("Interfaces[0].Mtu = %d, want 1500", result.Interfaces[0].Mtu)
+			}
+			if result.Interfaces[0].Sandbox != "" {
+				t.Errorf("Interfaces[0].Sandbox = %q, want empty", result.Interfaces[0].Sandbox)
+			}
+
+			// Guest interface (index 1)
+			if result.Interfaces[1].Name != "eth0" {
+				t.Errorf("Interfaces[1].Name = %q, want %q", result.Interfaces[1].Name, "eth0")
+			}
+			if result.Interfaces[1].Mac != "aa:bb:cc:dd:ee:11" {
+				t.Errorf("Interfaces[1].Mac = %q, want %q", result.Interfaces[1].Mac, "aa:bb:cc:dd:ee:11")
+			}
+			if result.Interfaces[1].Mtu != 1500 {
+				t.Errorf("Interfaces[1].Mtu = %d, want 1500", result.Interfaces[1].Mtu)
+			}
+			if result.Interfaces[1].Sandbox != netns {
+				t.Errorf("Interfaces[1].Sandbox = %q, want %q", result.Interfaces[1].Sandbox, netns)
+			}
+
+			if len(result.IPs) != tt.wantIPs {
+				t.Errorf("IPs count = %d, want %d", len(result.IPs), tt.wantIPs)
+				return
+			}
+
+			if tt.wantIPs > 0 {
+				if result.IPs[0].Address.String() != subnet.String() {
+					t.Errorf("IPs[0].Address = %q, want %q", result.IPs[0].Address, subnet)
+				}
+				if !result.IPs[0].Gateway.Equal(gateway) {
+					t.Errorf("IPs[0].Gateway = %v, want %v", result.IPs[0].Gateway, gateway)
+				}
+				if tt.wantIFace == 0 {
+					if result.IPs[0].Interface != nil {
+						t.Errorf("IPs[0].Interface = %v, want nil", *result.IPs[0].Interface)
+					}
+				} else {
+					if result.IPs[0].Interface == nil {
+						t.Errorf("IPs[0].Interface = nil, want %d", tt.wantIFace)
+					} else if *result.IPs[0].Interface != tt.wantIFace {
+						t.Errorf("IPs[0].Interface = %d, want %d", *result.IPs[0].Interface, tt.wantIFace)
+					}
+				}
+				if len(result.Routes) != tt.wantRoutes {
+					t.Errorf("Routes count = %d, want %d", len(result.Routes), tt.wantRoutes)
+				}
+			}
+		})
+	}
+}
+
+func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
+	t.Helper()
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		t.Fatalf("parse CIDR %q: %v", cidr, err)
+	}
+	return ipnet
 }

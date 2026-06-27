@@ -101,6 +101,7 @@ tasks:
     cmds:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-cni ./cmd/galactic-cni
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-router ./cmd/galactic-router
+      - GOBIN={{.LOCALBIN}} go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1
 
   docker-build:
     desc: Build container image

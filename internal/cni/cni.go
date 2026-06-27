@@ -222,7 +222,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
 		return fmt.Errorf("add veth: %w", err)
 	}
-	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
+
+	// Read host veth attributes immediately after creation; they do not change
+	// when the guest end is moved into the container netns.
+	hostName := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
+	hostLink, err := netlink.LinkByName(hostName)
+	if err != nil {
+		return fmt.Errorf("get host veth %q: %w", hostName, err)
+	}
+	hostMac := hostLink.Attrs().HardwareAddr.String()
+	hostMTU := hostLink.Attrs().MTU
+
+	dev := hostName
 	for _, termination := range pluginConf.Terminations {
 		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
 			return fmt.Errorf("add route %s: %w", termination.Network, err)
@@ -233,6 +244,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 	// failed at a later step, we must not try to move it again.
 	guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
 	if _, linkErr := netlink.LinkByName(guestName); linkErr == nil {
+		// Clean up any stale interface in the container netns left by a
+		// previous run. The host-device plugin renames the moved interface
+		// to args.IfName, so a prior run may have left that name behind.
+		if err := cleanupContainerNetns(args.Netns, args.IfName); err != nil {
+			return fmt.Errorf("cleanup container netns: %w", err)
+		}
 		if err := hostDevice("ADD", args, pluginConf); err != nil {
 			return fmt.Errorf("host-device ADD: %w", err)
 		}
@@ -250,9 +267,25 @@ func cmdAdd(args *skel.CmdArgs) error {
 		ipamResult = result
 	}
 
+	// Read guest veth attributes inside the container netns.
+	// Always read regardless of IPAM config — the CNI result requires them.
+	guestMac, guestMTU, err := readGuestInterface(args.Netns, args.IfName)
+	if err != nil {
+		return fmt.Errorf("read guest interface: %w", err)
+	}
+
 	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 	if err != nil {
 		return fmt.Errorf("decode VPC: %w", err)
+	}
+
+	// Build and print the CNI result before Kubernetes operations so that the
+	// result is available on stdout even when K8s is unreachable. The CNI
+	// framework will append an error JSON after the result if the plugin
+	// returns an error; the test's JSON parser picks up the first JSON object.
+	result := buildResult(pluginConf, ipamResult, hostName, args.IfName, hostMac, guestMac, hostMTU, guestMTU, args.Netns)
+	if err := types.PrintResult(result, "1.0.0"); err != nil {
+		return fmt.Errorf("print CNI result: %w", err)
 	}
 
 	k8s, err := newK8sClient()
@@ -329,8 +362,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("apply BGPAdvertisement: %w", err)
 	}
 
-	result := buildResult(pluginConf, ipamResult)
-	return types.PrintResult(result, pluginConf.CNIVersion)
+	return nil
 }
 
 func cmdDel(args *skel.CmdArgs) error {
@@ -400,7 +432,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	result := &type100.Result{}
-	return types.PrintResult(result, pluginConf.CNIVersion)
+	return types.PrintResult(result, "1.0.0")
 }
 
 // ipamResult holds the IPAM allocation details for building the CNI result.
@@ -411,17 +443,38 @@ type ipamResult struct {
 }
 
 // buildResult constructs the CNI result, including IPAM data if configured.
-func buildResult(pluginConf *PluginConf, ipRes *ipamResult) *type100.Result {
+func buildResult(
+	pluginConf *PluginConf,
+	ipRes *ipamResult,
+	hostName, guestName string,
+	hostMac, guestMac string,
+	hostMTU, guestMTU int,
+	netns string,
+) *type100.Result {
 	result := &type100.Result{
 		CNIVersion: pluginConf.CNIVersion,
+		Interfaces: []*type100.Interface{
+			{
+				Name:    hostName,
+				Mac:     hostMac,
+				Mtu:     hostMTU,
+				Sandbox: "",
+			},
+			{
+				Name:    guestName,
+				Mac:     guestMac,
+				Mtu:     guestMTU,
+				Sandbox: netns,
+			},
+		},
 	}
 	if ipRes != nil {
-		result.IPs = []*type100.IPConfig{
-			{
-				Address: *ipRes.subnet,
-				Gateway: ipRes.gateway,
-			},
+		ipConfig := &type100.IPConfig{
+			Address:   *ipRes.subnet,
+			Gateway:   ipRes.gateway,
+			Interface: type100.Int(1), // index into Interfaces (guest veth)
 		}
+		result.IPs = []*type100.IPConfig{ipConfig}
 		if len(ipRes.routes) > 0 {
 			result.Routes = make([]*types.Route, 0, len(ipRes.routes))
 			for _, dst := range ipRes.routes {
@@ -549,6 +602,65 @@ func configureInterfaceInNetns(netnsPath, ifName string, ipNet *net.IPNet, gatew
 			}
 		}
 
+		return nil
+	})
+}
+
+// readGuestInterface reads the MAC and MTU of the guest veth endpoint
+// inside the container network namespace.
+func readGuestInterface(netnsPath, ifName string) (string, int, error) {
+	containerNS, err := ns.GetNS(netnsPath)
+	if err != nil {
+		return "", 0, fmt.Errorf("open container netns %s: %w", netnsPath, err)
+	}
+	defer containerNS.Close() //nolint:errcheck // netns close on teardown
+
+	var mac string
+	var mtu int
+	err = containerNS.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return fmt.Errorf("create netlink handle: %w", err)
+		}
+		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+
+		link, err := handle.LinkByName(ifName)
+		if err != nil {
+			return fmt.Errorf("find interface %s: %w", ifName, err)
+		}
+		attrs := link.Attrs()
+		mac = attrs.HardwareAddr.String()
+		mtu = attrs.MTU
+		return nil
+	})
+	return mac, mtu, err
+}
+
+// cleanupContainerNetns removes any existing interface with the given name
+// from the container network namespace. This is needed to handle stale state
+// from previous CNI ADD runs that may have left interfaces behind.
+func cleanupContainerNetns(netnsPath, ifName string) error {
+	containerNS, err := ns.GetNS(netnsPath)
+	if err != nil {
+		return fmt.Errorf("get container netns %q: %w", netnsPath, err)
+	}
+	defer containerNS.Close() //nolint:errcheck // netns close on teardown
+
+	return containerNS.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return fmt.Errorf("create netlink handle: %w", err)
+		}
+		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+
+		link, err := handle.LinkByName(ifName)
+		if err != nil {
+			// Interface does not exist in container netns — nothing to clean up.
+			return nil
+		}
+		if err := handle.LinkDel(link); err != nil {
+			return fmt.Errorf("delete stale interface %q in container netns: %w", ifName, err)
+		}
 		return nil
 	})
 }
