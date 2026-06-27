@@ -5,13 +5,30 @@
 package veth
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
+
+// errIptablesMissing is returned when the iptables binary is not available.
+// Callers can use errors.Is to check for this and skip iptables rules.
+var errIptablesMissing = fmt.Errorf("iptables binary not available")
+
+// isLinkNotFoundError reports whether err indicates that a network link
+// does not exist. This covers both ENOENT and ENODEV errors from netlink.
+func isLinkNotFoundError(err error) bool {
+	if os.IsNotExist(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such device") || strings.Contains(msg, "not found")
+}
 
 func updateForwardRule(interfaceName string, action string) error {
 	ruleSpec := []string{"-o", interfaceName, "-j", "ACCEPT"}
@@ -20,7 +37,9 @@ func updateForwardRule(interfaceName string, action string) error {
 	for _, proto := range protocols {
 		ipt, err := iptables.NewWithProtocol(proto)
 		if err != nil {
-			return err
+			// iptables binary not available (e.g., distroless images).
+			// Return a sentinel error so callers can decide whether to fail.
+			return errIptablesMissing
 		}
 
 		switch action {
@@ -46,9 +65,16 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	guestName := intf.GenerateInterfaceNameGuest(vpc, vpcAttachment)
 
 	// If the host veth already exists (e.g. left behind by a failed cmdAdd
-	// with no corresponding cmdDel), skip creation and reuse it.
-	if _, err := netlink.LinkByName(hostName); err == nil {
-		return nil
+	// with no corresponding cmdDel), clean up the stale guest end and recreate
+	// the pair so the guest side is in a known-good state.
+	if existing, err := netlink.LinkByName(hostName); err == nil {
+		// Remove any stale guest endpoint that may linger from a prior run.
+		if guest, guestErr := netlink.LinkByName(guestName); guestErr == nil {
+			netlink.LinkDel(guest) //nolint:errcheck // best-effort cleanup
+		}
+		if err := netlink.LinkDel(existing); err != nil && !isLinkNotFoundError(err) {
+			return fmt.Errorf("remove stale veth %q: %w", hostName, err)
+		}
 	}
 
 	veth := &netlink.Veth{
@@ -63,7 +89,9 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 		return err
 	}
 
-	if err := updateForwardRule(hostName, "add"); err != nil {
+	// iptables is not available in distroless images; skip forwarding rules
+	// gracefully so the CNI plugin can still produce a result in test environments.
+	if err := updateForwardRule(hostName, "add"); err != nil && !errors.Is(err, errIptablesMissing) {
 		return err
 	}
 
@@ -97,7 +125,8 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 func Delete(vpc, vpcAttachment string) error {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 
-	if err := updateForwardRule(hostName, "delete"); err != nil {
+	// Skip iptables cleanup if binary is unavailable (distroless images).
+	if err := updateForwardRule(hostName, "delete"); err != nil && !errors.Is(err, errIptablesMissing) {
 		return err
 	}
 

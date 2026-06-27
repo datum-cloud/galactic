@@ -30,7 +30,10 @@ sequenceDiagram
         CNI->>CNI: EncodeSRv6Endpoint(SRv6Locator, vpcHex, vpcAttachmentHex) → srv6Endpoint
         CNI->>K8s: CreateOrUpdate BGPAdvertisement (routerRef, l2vpn/evpn, srv6Endpoint/128, rt:value)
         CNI->>Kernel: RouteIngressAdd(srv6Endpoint)
-        CNI->>Multus: PrintResult
+        CNI->>CNI: Read host veth MAC/MTU (netlink.LinkByName)
+        CNI->>CNI: Read guest veth MAC/MTU (netlink in container netns)
+        CNI->>CNI: buildResult(Interfaces=[host veth, guest veth], IPConfig.Interface=1)
+        CNI->>Multus: PrintResult (CNI v1.0.0 with interfaces array)
         K8s-->>Router: BGPAdvertisement created/updated
         note over Router: reconciles advertisement into GoBGP (async)
     end

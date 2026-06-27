@@ -145,6 +145,37 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 |---------------------------|----------|------------------------------------------------------------|
 | `GALACTIC_CNI_NODE_NAME`  | Yes      | Kubernetes node name; used to look up the owning BGPRouter |
 
+### galactic-cni ADD result
+
+On a successful ADD, the plugin returns a CNI spec v1.0.0 result with the following structure:
+
+```json
+{
+  "cniVersion": "1.0.0",
+  "interfaces": [
+    { "name": "G<09-vpc><03-att>H", "mac": "aa:bb:cc:dd:ee:ff", "mtu": 1500, "sandbox": "" },
+    { "name": "eth0", "mac": "aa:bb:cc:dd:ee:11", "mtu": 1500, "sandbox": "/proc/<pid>/ns/net" }
+  ],
+  "ips": [
+    { "address": "fd00:10:ff01::1234/80", "gateway": "fd00:10:ff01::1", "interface": 1 }
+  ],
+  "routes": [
+    { "dst": "::/0" }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `interfaces[0]` | Host-side veth endpoint (`G{vpc}{att}H`); sandbox is empty (host network namespace) |
+| `interfaces[1]` | Guest-side veth endpoint (`args.IfName`, typically `eth0`); sandbox is the container netns path |
+| `ips[0].interface` | Index `1` into `interfaces` — the guest veth carries the pod IP |
+| `routes` | Default route via IPAM gateway (when IPAM is configured) |
+
+The VRF dummy interface (`G{vpc}{att}V`) is **not** reported — it is pre-existing infrastructure created by the `vrf.Add()` plumbing function, not by the CNI attachment itself.
+
+On DEL, the result contains only `cniVersion` (empty result is correct since the guest interface no longer exists at DEL time).
+
 ---
 
 ## Module / Package Reference
@@ -202,7 +233,7 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 
 | Layer      | Command          | Framework           | Scope                                                                |
 |------------|------------------|---------------------|----------------------------------------------------------------------|
-| Unit       | `task test:unit` | `go test -race`     | `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
+| Unit       | `task test:unit` | `go test -race`     | `internal/cni` (`buildResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`), `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
 | E2E        | `task test:e2e`  | Kind + `go test`    | Full BGPRouter lifecycle in a Kind cluster; builds and loads image    |
 | CI full    | `task ci`        | all of the above    | lint → build → test:unit → test:e2e                                  |
 
