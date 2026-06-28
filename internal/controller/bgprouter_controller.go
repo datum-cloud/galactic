@@ -234,7 +234,10 @@ func (r *BGPRouterReconciler) updateRouterStatus(router *bgpv1alpha1.BGPRouter, 
 // updatePeerStatuses updates BGPPeer status only for peers that target this router.
 // It uses the routerRef name index for direct references and evaluates routerSelector
 // for selector-based bindings.
-func (r *BGPRouterReconciler) updatePeerStatuses(ctx context.Context, router *bgpv1alpha1.BGPRouter, rs model.RuntimeStatus) {
+func (r *BGPRouterReconciler) updatePeerStatuses(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter,
+	rs model.RuntimeStatus,
+) {
 	logger := log.FromContext(ctx)
 
 	// Build a lookup map by peer address.
@@ -311,7 +314,10 @@ func (r *BGPRouterReconciler) updatePeerStatuses(ctx context.Context, router *bg
 }
 
 // updateAdvertisementStatuses updates BGPAdvertisement status.
-func (r *BGPRouterReconciler) updateAdvertisementStatuses(ctx context.Context, router *bgpv1alpha1.BGPRouter, rs model.RuntimeStatus) {
+func (r *BGPRouterReconciler) updateAdvertisementStatuses(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter,
+	rs model.RuntimeStatus,
+) {
 	logger := log.FromContext(ctx)
 
 	advByName := make(map[string]model.AdvertisementStatus, len(rs.Advertisements))

@@ -7,6 +7,7 @@ package cni
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -114,7 +115,7 @@ func RunPlugin() {
 			Del: cmdDel,
 		},
 		version.All,
-		fmt.Sprintf("CNI galactic plugin %s", metadata.Version),
+		"CNI galactic plugin "+metadata.Version,
 	)
 }
 
@@ -208,7 +209,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
-		return fmt.Errorf("NODE_NAME environment variable is not set")
+		return errors.New("NODE_NAME environment variable is not set")
 	}
 
 	namespace := pluginConf.Namespace
@@ -420,7 +421,10 @@ func cmdDel(args *skel.CmdArgs) error {
 		return fmt.Errorf("host-device DEL: %w", err)
 	}
 	for _, termination := range pluginConf.Terminations {
-		if err := route.Delete(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
+		if err := route.Delete(
+			pluginConf.VPC, pluginConf.VPCAttachment,
+			termination.Network, termination.Via, dev,
+		); err != nil {
 			return fmt.Errorf("delete route %s: %w", termination.Network, err)
 		}
 	}
@@ -765,7 +769,10 @@ func hostDevice(command string, skelArgs *skel.CmdArgs, pluginConf *PluginConf) 
 		IfName:        skelArgs.IfName,
 		Path:          skelArgs.Path,
 	}
-	if _, err := invokeExec.ExecPlugin(context.Background(), hostDeviceExecutable(), conf, invokeArgs.AsEnv()); err != nil {
+	if _, err := invokeExec.ExecPlugin(
+		context.Background(), hostDeviceExecutable(), conf,
+		invokeArgs.AsEnv(),
+	); err != nil {
 		return err
 	}
 	return nil

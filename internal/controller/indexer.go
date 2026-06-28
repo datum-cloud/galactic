@@ -93,16 +93,19 @@ func RegisterIndexes(ctx context.Context, mgr ctrl.Manager) error {
 	}
 
 	// BGPVRFInstance: index by routerRef.name.
-	if err := cache.IndexField(ctx, &bgpv1alpha1.BGPVRFInstance{}, BGPVRFInstanceByRouterName, func(obj client.Object) []string {
-		vrf, ok := obj.(*bgpv1alpha1.BGPVRFInstance)
-		if !ok {
-			return nil
-		}
-		if vrf.Spec.RouterRef == nil {
-			return nil
-		}
-		return []string{vrf.Spec.RouterRef.Name}
-	}); err != nil {
+	if err := cache.IndexField(
+		ctx, &bgpv1alpha1.BGPVRFInstance{},
+		BGPVRFInstanceByRouterName,
+		func(obj client.Object) []string {
+			vrf, ok := obj.(*bgpv1alpha1.BGPVRFInstance)
+			if !ok {
+				return nil
+			}
+			if vrf.Spec.RouterRef == nil {
+				return nil
+			}
+			return []string{vrf.Spec.RouterRef.Name}
+		}); err != nil {
 		return fmt.Errorf("index BGPVRFInstance by routerRef.name: %w", err)
 	}
 

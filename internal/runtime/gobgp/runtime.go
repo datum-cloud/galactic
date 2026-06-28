@@ -221,7 +221,10 @@ func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredA
 }
 
 // applyPolicies adds, updates, and removes BGP policies to match desired state.
-func (r *GoBGPRuntime) applyPolicies(ctx context.Context, b *gobgpserver.BgpServer, policies []model.DesiredPolicy) error {
+func (r *GoBGPRuntime) applyPolicies(
+	ctx context.Context, b *gobgpserver.BgpServer,
+	policies []model.DesiredPolicy,
+) error {
 	desiredPolicies := make(map[string]model.BGPPolicyDirection, len(policies))
 	for _, policy := range policies {
 		desiredPolicies[policy.Name] = policy.Direction

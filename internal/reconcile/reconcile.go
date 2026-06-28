@@ -42,7 +42,9 @@ func New(c client.Client, nodeName, routerRole string) *Reconciler {
 // BuildDesiredRouter assembles the full DesiredRouter from Cosmos CRDs for
 // the given BGPRouter. It returns (nil, nil) if the router should be silently
 // skipped (wrong node or wrong role). It returns (nil, err) on error.
-func (r *Reconciler) BuildDesiredRouter(ctx context.Context, router *bgpv1alpha1.BGPRouter) (*model.DesiredRouter, error) {
+func (r *Reconciler) BuildDesiredRouter(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter,
+) (*model.DesiredRouter, error) {
 	// Node check: skip routers that don't target this node.
 	if router.Spec.TargetRef.Name != r.nodeName {
 		return nil, nil

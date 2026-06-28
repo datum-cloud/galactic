@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,11 +13,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
-
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -120,10 +120,10 @@ func validateConfig(v *viper.Viper) error {
 	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
 
 	if nodeName == "" {
-		return fmt.Errorf("--node-name is required")
+		return errors.New("--node-name is required")
 	}
 	if routerRole == "" {
-		return fmt.Errorf("--router-role is required")
+		return errors.New("--router-role is required")
 	}
 	if routerRole != roleTenant && routerRole != roleFabric {
 		return fmt.Errorf("GALACTIC_ROUTER_ROUTER_ROLE must be 'tenant' or 'fabric', got %q", routerRole)
@@ -187,15 +187,15 @@ func runCmd(v *viper.Viper) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("create manager: %v", err)
+		return fmt.Errorf("create manager: %w", err)
 	}
 
 	ctx := ctrl.SetupSignalHandler()
 
 	// Start gRPC health server.
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcHealthPort))
+	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", fmt.Sprintf(":%d", grpcHealthPort))
 	if err != nil {
-		return fmt.Errorf("listen on gRPC health port %d: %v", grpcHealthPort, err)
+		return fmt.Errorf("listen on gRPC health port %d: %w", grpcHealthPort, err)
 	}
 	grpcSrv := grpc.NewServer()
 	healthSrv := grpchealth.NewServer()
@@ -216,7 +216,7 @@ func runCmd(v *viper.Viper) error {
 
 	// Register field indexes.
 	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
-		return fmt.Errorf("register field indexes: %v", err)
+		return fmt.Errorf("register field indexes: %w", err)
 	}
 
 	// Create runtime manager.
@@ -235,7 +235,7 @@ func runCmd(v *viper.Viper) error {
 		NodeName:       nodeName,
 		RouterRole:     routerRole,
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup BGPRouter controller: %v", err)
+		return fmt.Errorf("setup BGPRouter controller: %w", err)
 	}
 
 	// Register BGPPeer controller.
@@ -243,7 +243,7 @@ func runCmd(v *viper.Viper) error {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup BGPPeer controller: %v", err)
+		return fmt.Errorf("setup BGPPeer controller: %w", err)
 	}
 
 	// Register BGPAdvertisement controller.
@@ -251,7 +251,7 @@ func runCmd(v *viper.Viper) error {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup BGPAdvertisement controller: %v", err)
+		return fmt.Errorf("setup BGPAdvertisement controller: %w", err)
 	}
 
 	// Register BGPVRFInstance controller.
@@ -259,7 +259,7 @@ func runCmd(v *viper.Viper) error {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup BGPVRFInstance controller: %v", err)
+		return fmt.Errorf("setup BGPVRFInstance controller: %w", err)
 	}
 
 	// Register BGPPolicy controller.
@@ -267,7 +267,7 @@ func runCmd(v *viper.Viper) error {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup BGPPolicy controller: %v", err)
+		return fmt.Errorf("setup BGPPolicy controller: %w", err)
 	}
 
 	// Register Secret controller.
@@ -275,7 +275,7 @@ func runCmd(v *viper.Viper) error {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup Secret controller: %v", err)
+		return fmt.Errorf("setup Secret controller: %w", err)
 	}
 
 	// Register Node controller.
@@ -283,11 +283,11 @@ func runCmd(v *viper.Viper) error {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup Node controller: %v", err)
+		return fmt.Errorf("setup Node controller: %w", err)
 	}
 
 	if err := mgr.Start(ctx); err != nil {
-		return fmt.Errorf("manager exited: %v", err)
+		return fmt.Errorf("manager exited: %w", err)
 	}
 
 	return nil
@@ -302,7 +302,7 @@ func newRootCommand() *cobra.Command {
 		Use:   appName,
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
 				return nil

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 )
 
 var (
@@ -40,6 +41,16 @@ var (
 
 // BuildInfo returns a multi-line string with all build metadata fields.
 func BuildInfo(appName string) string {
-	return fmt.Sprintf("Name:       %s\nVersion:    %s\nCommit:     %s\nTree:       %s\nBuild Date: %s\nLicense:    %s\nURL:        %s\nGo:         %s\nPlatform:   %s\nPath:       %s",
-		appName, Version, GitCommit, GitTreeState, BuildDate, SPDXLicense, GitURL, GoVersion, Platform, Executable)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Name:       %s\n", appName)
+	fmt.Fprintf(&b, "Version:    %s\n", Version)
+	fmt.Fprintf(&b, "Commit:     %s\n", GitCommit)
+	fmt.Fprintf(&b, "Tree:       %s\n", GitTreeState)
+	fmt.Fprintf(&b, "Build Date: %s\n", BuildDate)
+	fmt.Fprintf(&b, "License:    %s\n", SPDXLicense)
+	fmt.Fprintf(&b, "URL:        %s\n", GitURL)
+	fmt.Fprintf(&b, "Go:         %s\n", GoVersion)
+	fmt.Fprintf(&b, "Platform:   %s\n", Platform)
+	fmt.Fprintf(&b, "Path:       %s", Executable)
+	return b.String()
 }

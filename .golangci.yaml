@@ -1,19 +1,23 @@
 version: "2"
 run:
   allow-parallel-runners: true
+
 linters:
-  default: none
   enable:
     - copyloopvar
-    - dupl
     - errcheck
+    - errname
+    - errorlint
     - goconst
     - gocyclo
     - govet
     - ineffassign
+    - intrange
     - lll
     - misspell
     - nakedret
+    - noctx
+    - perfsprint
     - prealloc
     - revive
     - staticcheck
@@ -21,29 +25,34 @@ linters:
     - unparam
     - unused
   settings:
+    gocyclo:
+      min-complexity: 30
+    govet:
+      enable:
+        - printf
+    nakedret:
+      max-func-lines: 30
     revive:
       rules:
         - name: comment-spacings
         - name: import-shadowing
-  exclusions:
-    generated: lax
-    rules:
-      - linters:
-          - dupl
-          - lll
-        path: internal/*
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
-      - ^lab/
+    staticcheck:
+      checks:
+        - all
+        - "-ST1000"  # don't flag missing doc comments (already covered by conventions)
+
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0
+
 formatters:
   enable:
+    - gci
     - gofmt
     - goimports
-  exclusions:
-    generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+  settings:
+    gci:
+      sections:
+        - standard
+        - prefix(go.datum.net)
+        - default

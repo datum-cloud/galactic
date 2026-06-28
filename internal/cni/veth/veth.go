@@ -12,13 +12,14 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
+
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
 // errIptablesMissing is returned when the iptables binary is not available.
 // Callers can use errors.Is to check for this and skip iptables rules.
-var errIptablesMissing = fmt.Errorf("iptables binary not available")
+var errIptablesMissing = errors.New("iptables binary not available")
 
 // isLinkNotFoundError reports whether err indicates that a network link
 // does not exist. This covers both ENOENT and ENODEV errors from netlink.

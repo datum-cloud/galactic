@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -58,7 +59,7 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) {
 // validateConfig checks that the configuration values are valid.
 func validateConfig(v *viper.Viper) error {
 	if v.GetString("galactic_cni.node_name") == "" {
-		return fmt.Errorf("--node-name is required (or set GALACTIC_CNI_NODE_NAME)")
+		return errors.New("--node-name is required (or set GALACTIC_CNI_NODE_NAME)")
 	}
 	return nil
 }
@@ -72,7 +73,7 @@ func newRootCommand() *cobra.Command {
 		Use:   appName,
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
 				return nil

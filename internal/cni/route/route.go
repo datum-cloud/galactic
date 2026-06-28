@@ -8,14 +8,13 @@ import (
 	"fmt"
 	"net"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-func assembleRoute(vrfId uint32, prefix, nextHop, dev string) (*netlink.Route, error) {
+func assembleRoute(vrfID uint32, prefix, nextHop, dev string) (*netlink.Route, error) {
 	_, routeDst, err := net.ParseCIDR(prefix)
 	if err != nil {
 		return nil, err
@@ -29,7 +28,7 @@ func assembleRoute(vrfId uint32, prefix, nextHop, dev string) (*netlink.Route, e
 		return &netlink.Route{
 			Dst:   routeDst,
 			Gw:    routeGw,
-			Table: int(vrfId),
+			Table: int(vrfID),
 		}, nil
 	}
 
@@ -39,18 +38,18 @@ func assembleRoute(vrfId uint32, prefix, nextHop, dev string) (*netlink.Route, e
 	}
 	return &netlink.Route{
 		Dst:       routeDst,
-		Table:     int(vrfId),
+		Table:     int(vrfID),
 		LinkIndex: link.Attrs().Index,
 		Scope:     unix.RT_SCOPE_LINK,
 	}, nil
 }
 
 func Add(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
-	vrfId, err := vrf.TableID(vpc, vpcAttachment)
+	vrfID, err := vrf.TableID(vpc, vpcAttachment)
 	if err != nil {
 		return err
 	}
-	route, err := assembleRoute(vrfId, prefix, nextHop, dev)
+	route, err := assembleRoute(vrfID, prefix, nextHop, dev)
 	if err != nil {
 		return err
 	}
@@ -58,11 +57,11 @@ func Add(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
 }
 
 func Delete(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
-	vrfId, err := vrf.TableID(vpc, vpcAttachment)
+	vrfID, err := vrf.TableID(vpc, vpcAttachment)
 	if err != nil {
 		return err
 	}
-	route, err := assembleRoute(vrfId, prefix, nextHop, dev)
+	route, err := assembleRoute(vrfID, prefix, nextHop, dev)
 	if err != nil {
 		return err
 	}

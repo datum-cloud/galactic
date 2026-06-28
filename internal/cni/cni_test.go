@@ -6,6 +6,7 @@ package cni
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -60,8 +61,13 @@ func TestParseConf(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "valid config",
-			input:   `{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"` + testVPC + `","vpcattachment":"` + testAttachment + `","srv6_locator":"2001:db8::/48"}`,
+			name: "valid config",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":"2001:db8::/48"}`,
+				testVPC, testAttachment,
+			),
 			wantVPC: testVPC,
 		},
 		{
