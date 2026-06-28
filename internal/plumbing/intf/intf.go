@@ -8,6 +8,7 @@ package intf
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -62,7 +63,7 @@ func EncodeSRv6Endpoint(srv6Net, vpc, vpcAttachment string) (string, error) {
 	}
 	maskLen, _ := ipnet.Mask.Size()
 	if maskLen > 64 {
-		return "", fmt.Errorf("srv6Net must be at least 64 bits long")
+		return "", errors.New("srv6Net must be at least 64 bits long")
 	}
 
 	vpcInt, err := strconv.ParseUint(vpc, 16, 64)

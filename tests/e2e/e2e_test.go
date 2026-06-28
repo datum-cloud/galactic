@@ -12,6 +12,7 @@
 package e2e_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -43,7 +44,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "SKIP: kubectl not found in PATH")
 		os.Exit(0)
 	}
-	if out, err := kubectl("cluster-info"); err != nil {
+	if out, err := kubectl(context.Background(), "cluster-info"); err != nil {
 		fmt.Fprintf(os.Stderr, "SKIP: cluster not reachable: %v\n%s\n", err, out)
 		os.Exit(0)
 	}
@@ -59,6 +60,7 @@ func TestCNIPluginVersionReport(t *testing.T) {
 	deletePod(t, name)
 
 	_, err := kubectl(
+		context.Background(),
 		"run", name,
 		"--image="+image(),
 		"--image-pull-policy=Never",
@@ -75,7 +77,7 @@ func TestCNIPluginVersionReport(t *testing.T) {
 		t.Fatalf("pod did not succeed: %v", err)
 	}
 
-	logs, err := kubectl("logs", name)
+	logs, err := kubectl(context.Background(), "logs", name)
 	if err != nil {
 		t.Fatalf("kubectl logs failed: %v", err)
 	}
@@ -130,6 +132,7 @@ func TestKernelCapabilities(t *testing.T) {
 			deletePod(t, name)
 
 			_, err := kubectl(
+				t.Context(),
 				"run", name,
 				"--image=busybox:stable",
 				"--image-pull-policy=IfNotPresent",
@@ -144,7 +147,7 @@ func TestKernelCapabilities(t *testing.T) {
 
 			if err := waitForPodPhase(t, name, "Succeeded", podReadyTimeout); err != nil {
 				// Fetch logs to aid debugging before failing.
-				if logs, logErr := kubectl("logs", name); logErr == nil && logs != "" {
+				if logs, logErr := kubectl(t.Context(), "logs", name); logErr == nil && logs != "" {
 					t.Logf("pod logs:\n%s", logs)
 				}
 				t.Fatalf("kernel capability check %q failed: %v", tt.name, err)
@@ -154,8 +157,8 @@ func TestKernelCapabilities(t *testing.T) {
 }
 
 // kubectl runs kubectl with the given arguments and returns combined output.
-func kubectl(args ...string) (string, error) {
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
+func kubectl(ctx context.Context, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, "kubectl", args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -165,7 +168,7 @@ func waitForPodPhase(t *testing.T, name, wantPhase string, timeout time.Duration
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		out, err := kubectl("get", "pod", name, "-o", "jsonpath={.status.phase}")
+		out, err := kubectl(t.Context(), "get", "pod", name, "-o", "jsonpath={.status.phase}")
 		if err == nil && out == wantPhase {
 			return nil
 		}
@@ -174,12 +177,12 @@ func waitForPodPhase(t *testing.T, name, wantPhase string, timeout time.Duration
 		}
 		time.Sleep(podPollInterval)
 	}
-	out, _ := kubectl("get", "pod", name, "-o", "jsonpath={.status.phase}")
+	out, _ := kubectl(t.Context(), "get", "pod", name, "-o", "jsonpath={.status.phase}")
 	return fmt.Errorf("timed out after %v waiting for phase %q; last phase: %q", timeout, wantPhase, out)
 }
 
 // deletePod removes a pod by name, ignoring not-found errors.
 func deletePod(t *testing.T, name string) {
 	t.Helper()
-	kubectl("delete", "pod", name, "--ignore-not-found", "--wait=false") //nolint:errcheck
+	kubectl(t.Context(), "delete", "pod", name, "--ignore-not-found", "--wait=false") //nolint:errcheck
 }

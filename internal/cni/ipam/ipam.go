@@ -89,13 +89,13 @@ func NewPoolAllocator(poolCIDR, gateway string, subnetLen int) (*PoolAllocator, 
 // Allocate assigns the next available IPv6 subnet from the pool for the
 // given container ID. Returns the allocated subnet CIDR or an error if the
 // pool is exhausted. Thread-safe.
-func (a *PoolAllocator) Allocate(containerID string) (*net.IPNet, error) {
+func (a *PoolAllocator) Allocate(_ string) (*net.IPNet, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	// Collect currently allocated subnets for fast lookup.
 	used := make(map[string]struct{})
-	a.allocations.Range(func(key, value any) bool {
+	a.allocations.Range(func(key, _ any) bool {
 		used[key.(string)] = struct{}{}
 		return true
 	})
@@ -153,7 +153,7 @@ func NewStaticAllocator() *StaticAllocator {
 
 // Allocate validates the given IPv6 address and returns it.
 // The address must be a well-formed IPv6 address.
-func (a *StaticAllocator) Allocate(containerID, addr string) (net.IP, error) {
+func (a *StaticAllocator) Allocate(_ string, addr string) (net.IP, error) {
 	ip := net.ParseIP(addr)
 	if ip == nil {
 		return nil, fmt.Errorf("invalid IPv6 address: %s", addr)
