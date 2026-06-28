@@ -9,6 +9,10 @@ apply_overlay() {
   local site="$2"
   echo "Applying overlay/${site} to ${node}..."
   docker cp "${RESOURCES_DIR}/overlay" "${node}:/galactic/resources/"
+  # Apply the VPC NAD so pods can attach to the galactic network.
+  # Must be in the vpc namespace (overlay kustomization targets galactic-system).
+  docker exec "${node}" sh -c 'kubectl create namespace vpc --dry-run=client -o yaml | kubectl apply -f -'
+  docker exec "${node}" kubectl apply -f /galactic/resources/overlay/${site}/nad.yaml
   docker exec "${node}" kubectl apply -k /galactic/resources/overlay/${site}/
   echo "Applying bgp/${site} to ${node}..."
   docker cp "${RESOURCES_DIR}/bgp/${site}" "${node}:/galactic/resources/bgp-${site}/"
