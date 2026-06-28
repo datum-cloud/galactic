@@ -32,8 +32,6 @@ func isLinkNotFoundError(err error) bool {
 }
 
 func updateForwardRule(interfaceName string, action string) error {
-	ruleSpec := []string{"-o", interfaceName, "-j", "ACCEPT"}
-
 	protocols := []iptables.Protocol{iptables.ProtocolIPv4, iptables.ProtocolIPv6}
 	for _, proto := range protocols {
 		ipt, err := iptables.NewWithProtocol(proto)
@@ -43,17 +41,24 @@ func updateForwardRule(interfaceName string, action string) error {
 			return errIptablesMissing
 		}
 
-		switch action {
-		case "add":
-			if err := ipt.Insert("filter", "FORWARD", 1, ruleSpec...); err != nil {
-				return err
+		rules := [][]string{
+			{"-o", interfaceName, "-j", "ACCEPT"}, // egress
+			{"-i", interfaceName, "-j", "ACCEPT"}, // ingress
+		}
+
+		for _, ruleSpec := range rules {
+			switch action {
+			case "add":
+				if err := ipt.Insert("filter", "FORWARD", 1, ruleSpec...); err != nil {
+					return err
+				}
+			case "delete":
+				if err := ipt.Delete("filter", "FORWARD", ruleSpec...); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("invalid action: '%s' (must be 'add' or 'delete')", action)
 			}
-		case "delete":
-			if err := ipt.Delete("filter", "FORWARD", ruleSpec...); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("invalid action: '%s' (must be 'add' or 'delete')", action)
 		}
 	}
 

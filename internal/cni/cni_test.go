@@ -55,10 +55,11 @@ func routerForNode(name, nodeName, namespace string, asn int64) *bgpv1alpha1.BGP
 
 func TestParseConf(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
-		wantVPC string
-		wantErr string
+		name       string
+		input      string
+		wantVPC    string
+		wantIfType string
+		wantErr    string
 	}{
 		{
 			name: "valid config",
@@ -68,7 +69,8 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"%s","srv6_locator":"2001:db8::/48"}`,
 				testVPC, testAttachment,
 			),
-			wantVPC: testVPC,
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
 		},
 		{
 			name:    "invalid JSON",
@@ -79,6 +81,49 @@ func TestParseConf(t *testing.T) {
 			name:    "empty input",
 			input:   "",
 			wantErr: "parse CNI config",
+		},
+		{
+			name: "interface_type=veth",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","interface_type":"veth"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			name: "interface_type=tap",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","interface_type":"tap"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeTap,
+		},
+		{
+			name: "interface_type empty defaults to veth",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","interface_type":""}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			name: "interface_type=unknown",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","interface_type":"unknown"}`,
+				testVPC, testAttachment,
+			),
+			wantErr: `invalid interface_type "unknown": must be "veth" or "tap"`,
 		},
 	}
 
@@ -99,6 +144,9 @@ func TestParseConf(t *testing.T) {
 			}
 			if conf.VPC != tt.wantVPC {
 				t.Errorf("VPC = %q, want %q", conf.VPC, tt.wantVPC)
+			}
+			if conf.InterfaceType != tt.wantIfType {
+				t.Errorf("InterfaceType = %q, want %q", conf.InterfaceType, tt.wantIfType)
 			}
 		})
 	}
@@ -317,7 +365,7 @@ func TestBuildResult(t *testing.T) {
 	netns := "/proc/1234/ns/net"
 
 	conf := &PluginConf{
-		PluginConf:    types.PluginConf{CNIVersion: "1.0.0"},
+		PluginConf:    types.PluginConf{CNIVersion: cniVersion100},
 		VPC:           testVPC,
 		VPCAttachment: testAttachment,
 	}
@@ -358,8 +406,8 @@ func TestBuildResult(t *testing.T) {
 				netns,
 			)
 
-			if result.CNIVersion != "1.0.0" {
-				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, "1.0.0")
+			if result.CNIVersion != cniVersion100 {
+				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, cniVersion100)
 			}
 
 			if len(result.Interfaces) != tt.wantInts {
@@ -423,6 +471,43 @@ func TestBuildResult(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---- buildTapResult ------------------------------------------------------
+
+func TestBuildTapResult(t *testing.T) {
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: cniVersion100},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+
+	result := buildTapResult(conf, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
+
+	if result.CNIVersion != cniVersion100 {
+		t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, cniVersion100)
+	}
+
+	if len(result.Interfaces) != 1 {
+		t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
+	}
+
+	if result.Interfaces[0].Name != "H0abc123" {
+		t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, "H0abc123")
+	}
+	if result.Interfaces[0].Mac != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("Interfaces[0].Mac = %q, want %q", result.Interfaces[0].Mac, "aa:bb:cc:dd:ee:ff")
+	}
+	if result.Interfaces[0].Mtu != 1500 {
+		t.Errorf("Interfaces[0].Mtu = %d, want 1500", result.Interfaces[0].Mtu)
+	}
+	if result.Interfaces[0].Sandbox != "" {
+		t.Errorf("Interfaces[0].Sandbox = %q, want empty", result.Interfaces[0].Sandbox)
+	}
+
+	if len(result.IPs) != 0 {
+		t.Errorf("IPs count = %d, want 0", len(result.IPs))
 	}
 }
 
