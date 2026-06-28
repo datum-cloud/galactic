@@ -25,17 +25,22 @@ import (
 
 // Reconciler assembles DesiredRouter values from Cosmos CRDs.
 type Reconciler struct {
-	client     client.Client
-	nodeName   string
-	routerRole string
+	client       client.Client
+	nodeName     string
+	routerRole   string
+	localAddress string
 }
 
-// New returns a Reconciler for the given node and router role.
-func New(c client.Client, nodeName, routerRole string) *Reconciler {
+// New returns a Reconciler for the given node, router role, and local BGP address.
+// localAddress, when non-empty, is used as the EVPN next-hop instead of the
+// node's first IPv6 InternalIP — required when the node InternalIP is not
+// reachable via the SRv6 transit mesh (e.g. Kind/ContainerLab Docker bridge).
+func New(c client.Client, nodeName, routerRole, localAddress string) *Reconciler {
 	return &Reconciler{
-		client:     c,
-		nodeName:   nodeName,
-		routerRole: routerRole,
+		client:       c,
+		nodeName:     nodeName,
+		routerRole:   routerRole,
+		localAddress: localAddress,
 	}
 }
 
@@ -110,13 +115,22 @@ func (r *Reconciler) BuildDesiredRouter(
 		}
 	}
 
-	// Resolve NextHop from Node.
-	nextHop, err := r.resolveNodeIPv6(ctx, router.Spec.TargetRef.Name)
-	if err != nil {
-		return nil, fmt.Errorf("resolve node IPv6 address for %s: %w", router.Spec.TargetRef.Name, err)
+	// Resolve the EVPN next-hop. When localAddress is set (e.g. from
+	// BGP_LOCAL_ADDRESS), use it directly — it is the transit-reachable
+	// address. Fall back to the node's first IPv6 InternalIP only when
+	// localAddress is not configured.
+	var nextHop string
+	if r.localAddress != "" {
+		nextHop = r.localAddress
+	} else {
+		var err error
+		nextHop, err = r.resolveNodeIPv6(ctx, router.Spec.TargetRef.Name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve node IPv6 address for %s: %w", router.Spec.TargetRef.Name, err)
+		}
 	}
 
-	// Require a node IPv6 address when any advertisement uses the EVPN address family.
+	// Require a next-hop when any advertisement uses the EVPN address family.
 	if nextHop == "" {
 		for _, adv := range advList.Items {
 			if adv.Spec.AddressFamily.AFI == bgpv1alpha1.AFIL2VPN {
@@ -158,6 +172,7 @@ func (r *Reconciler) BuildDesiredRouter(
 			Communities:     communities,
 			LocalPreference: int32PtrToUint32Ptr(adv.Spec.LocalPreference),
 			NextHop:         nextHop,
+			SRv6SID:         adv.Annotations["galactic.datum.net/srv6-sid"],
 		})
 	}
 
