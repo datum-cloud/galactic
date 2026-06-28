@@ -21,12 +21,25 @@ go.work.sum
 # Go build cache (local overrides only)
 .cache/
 
+# ko local build output (modern Go/K8s build tool)
+ko-local/
+*.img
+
 # ============================================================
 # Kubernetes / controller-runtime / kubebuilder
 # ============================================================
 testbin/
 /config/manager/kustomization.yaml.tmp
-build/Dockerfile.cross
+
+# controller-runtime / kubebuilder standard entries
+.dockerenv
+
+# kubectl credential cache
+*.crcache
+
+# Kustomize build output and overlay directories
+kustomize-output/
+kustomize-overlay/
 
 # Local kubeconfigs and cluster state — never commit credentials
 kubeconfig
@@ -52,8 +65,8 @@ skaffold.local.yaml
 # AI coding agents
 # ============================================================
 
-# Claude Code
-.claude/settings.local.json
+# Qwen Code — project memory, conversation history, agent state
+.qwen/
 
 # Codex / OpenAI
 .codex/
@@ -70,9 +83,11 @@ skaffold.local.yaml
 .aider.chat.history.md
 .aider.input.history
 .aiderignore
+.aider.*
 
 # GitHub Copilot
 .github/copilot-settings.json
+.github/copilot-instructions.md
 
 # Codeium / Windsurf
 .windsurf/
@@ -87,10 +102,10 @@ skaffold.local.yaml
 # Devin
 .devin/
 
-# Generic agent scratch directories
+# Generic agent scratch directories (scoped, not root-level)
 .agent/
 .agents/
-scratch/
+.claude/scratch/
 
 # ============================================================
 # IDEs and editors
@@ -156,6 +171,7 @@ desktop.ini
 *.cer
 secrets/
 .secrets/
+.env
 .env.*
 !.env.example
 !.env.sample
@@ -181,7 +197,6 @@ topology-data.json
 
 # Local image tarballs (e.g. `docker save image > image.tar`)
 *.tar
-*.tar.gz
 *.oci
 
 # ============================================================
@@ -190,11 +205,14 @@ topology-data.json
 *.pcap
 *.pcapng
 *.capture
+# Ignore project logs but preserve testdata logs for test suites
 *.log
+!testdata/**/*.log
 
 # ============================================================
 # Lab and local dev overrides
 # ============================================================
+# Build artifacts — local build output and CI build directories
 build/
 
 # ============================================================
