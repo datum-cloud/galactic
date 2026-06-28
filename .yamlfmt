@@ -4,7 +4,11 @@ formatter:
   line_ending: lf
   trim_trailing_whitespace: true
   eof_newline: true
+  keep_line_progressions: true
+  indent_anchors: true
+  formatter_version: "2"
 include:
   - "**/*.yaml"
 exclude:
-  - "bin/**"
+  - ".git/**"
+  - "vendor/**"
