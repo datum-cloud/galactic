@@ -42,6 +42,10 @@ type GoBGPRuntime struct {
 	appliedVRFs map[string]struct{}
 	// serverCtxCancel cancels the goroutine running server.Start.
 	serverCtxCancel context.CancelFunc
+	// srvCtx is the context passed to server.Start; monitor goroutines use it.
+	srvCtx context.Context
+	// monitorOnce ensures the EVPN RIB watcher goroutine is started at most once.
+	monitorOnce sync.Once
 }
 
 // NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
@@ -85,6 +89,8 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return err
 	}
 
+	r.startRIBMonitor(b, desired.VRFInstance)
+
 	if err := r.applyEVPN(b, desired.Advertisements, desired.RouterID); err != nil {
 		return err
 	}
@@ -102,6 +108,7 @@ func (r *GoBGPRuntime) startGoBGP(ctx context.Context) (*gobgpserver.BgpServer, 
 	if b == nil {
 		srvCtx, cancel := context.WithCancel(context.Background())
 		r.serverCtxCancel = cancel
+		r.srvCtx = srvCtx
 		go func() {
 			_ = r.server.Start(srvCtx)
 		}()
@@ -167,7 +174,7 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 	}
 
 	for _, p := range peers {
-		peer := peerFromDesired(p, r.localAddress)
+		peer := peerFromDesired(p, r.localAddress, r.listenPort > 0)
 		addErr := b.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
 		if addErr != nil {
 			if strings.Contains(addErr.Error(), "can't overwrite") {

@@ -223,7 +223,7 @@ func runCmd(v *viper.Viper) error {
 	runtimeMgr := galacticruntime.NewRuntimeManager(factory)
 
 	// Create reconciler.
-	rec := reconcile.New(mgr.GetClient(), nodeName, routerRole)
+	rec := reconcile.New(mgr.GetClient(), nodeName, routerRole, bgpLocalAddr)
 
 	// Register BGPRouter controller.
 	if err := (&controller.BGPRouterReconciler{
