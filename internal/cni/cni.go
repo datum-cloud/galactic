@@ -293,7 +293,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 	var ipamResult *ipamResult
 	switch pluginConf.InterfaceType {
 	case interfaceTypeVeth:
-		ipamResult, err = buildVethResult(args, pluginConf, hostName, args.IfName, hostMac, hostMTU)
+		guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
+		ipamResult, err = buildVethResult(args, pluginConf, hostName, guestName, hostMac, hostMTU)
 		if err != nil {
 			return err
 		}
