@@ -34,3 +34,21 @@ func ConfigureInterfaceSysctls(iface string) error {
 	}
 	return nil
 }
+
+// ConfigureTapSysctls applies sysctls appropriate for a tap interface
+// connected to a VM. Unlike ConfigureInterfaceSysctls, it skips
+// proxy_arp and proxy_ndp since the VM handles its own address resolution.
+// Silently skips sysctls that don't exist (e.g., in container environments
+// where dynamically created interfaces may not have all sysctl entries).
+func ConfigureTapSysctls(iface string) error {
+	settings := map[string]string{
+		fmt.Sprintf("net.ipv4.conf.%s.rp_filter", iface):  "0",
+		fmt.Sprintf("net.ipv6.conf.%s.rp_filter", iface):  "0",
+		fmt.Sprintf("net.ipv4.conf.%s.forwarding", iface): "1",
+		fmt.Sprintf("net.ipv6.conf.%s.forwarding", iface): "1",
+	}
+	for key, val := range settings {
+		_ = gosysctl.Set(key, val) // silently skip missing entries
+	}
+	return nil
+}

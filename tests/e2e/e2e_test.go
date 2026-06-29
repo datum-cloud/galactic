@@ -73,7 +73,7 @@ func TestCNIPluginVersionReport(t *testing.T) {
 		t.Fatalf("kubectl run failed: %v", err)
 	}
 
-	if err := waitForPodPhase(t, name, "Succeeded", podReadyTimeout); err != nil {
+	if err := waitForPodPhase(t, name, "Succeeded"); err != nil {
 		t.Fatalf("pod did not succeed: %v", err)
 	}
 
@@ -134,8 +134,8 @@ func TestKernelCapabilities(t *testing.T) {
 			_, err := kubectl(
 				t.Context(),
 				"run", name,
-				"--image=busybox:stable",
-				"--image-pull-policy=IfNotPresent",
+				"--image="+image(),
+				"--image-pull-policy=Never",
 				"--restart=Never",
 				"--privileged",
 				"--command", "--",
@@ -145,7 +145,7 @@ func TestKernelCapabilities(t *testing.T) {
 				t.Fatalf("kubectl run failed: %v", err)
 			}
 
-			if err := waitForPodPhase(t, name, "Succeeded", podReadyTimeout); err != nil {
+			if err := waitForPodPhase(t, name, "Succeeded"); err != nil {
 				// Fetch logs to aid debugging before failing.
 				if logs, logErr := kubectl(t.Context(), "logs", name); logErr == nil && logs != "" {
 					t.Logf("pod logs:\n%s", logs)
@@ -156,6 +156,133 @@ func TestKernelCapabilities(t *testing.T) {
 	}
 }
 
+// TestCNITapInterface exercises the galactic CNI plugin in tap interface mode.
+// It creates a pod that invokes the CNI plugin with CNI_COMMAND=ADD and a tap
+// config, then validates the CNI result JSON: a single host interface with an
+// empty sandbox and no IP addresses.
+//
+// This test requires a cluster node with VRF/tap kernel support (the same
+// prerequisites checked by TestKernelCapabilities). It will fail rather than
+// skip if those features are missing, so a clean run of TestKernelCapabilities
+// is a prerequisite.
+func TestCNITapInterface(t *testing.T) {
+	name := "e2e-cni-tap"
+	t.Cleanup(func() { deletePod(t, name) })
+	deletePod(t, name)
+
+	// Start a shell so we can later exec the CNI plugin with stdin.
+	// The galactic-cni entrypoint is overridden to "sh" so the pod stays
+	// running and we can pipe the CNI config via kubectl exec -i.
+	_, err := kubectl(
+		t.Context(),
+		"run", name,
+		"--image="+image(),
+		"--image-pull-policy=Never",
+		"--restart=Never",
+		"--privileged",
+		"--command", "--",
+		"sleep", "infinity",
+	)
+	if err != nil {
+		t.Fatalf("kubectl run failed: %v", err)
+	}
+
+	if err := waitForPodPhase(t, name, "Running"); err != nil {
+		t.Fatalf("pod did not reach Running phase: %v", err)
+	}
+
+	// Write the CNI config to a file inside the pod, then run the plugin
+	// with the config piped via stdin.  The plugin reads config from stdin
+	// (the CNI protocol) and CNI_NETNS from the environment.
+	cniConf := `{
+  "cniVersion": "1.0.0",
+  "name": "galactic",
+  "type": "galactic-cni",
+  "vpc": "1",
+  "vpcattachment": "1",
+  "interface_type": "tap",
+  "srv6_locator": "2001:db8:ff01::/48"
+}`
+	// Step 1: write the CNI config and a wrapper script into the pod.
+	script := `#!/bin/sh
+ip netns add e2e-tap-ns
+CNI_NETNS=/var/run/netns/e2e-tap-ns \
+CNI_COMMAND=ADD \
+CNI_CONTAINERID=e2e-tap-001 \
+CNI_IFNAME=eth0 \
+CNI_PATH=/opt/cni/bin \
+NODE_NAME=` + nodeName() + ` \
+	/galactic-cni < /tmp/cni.json
+`
+	_, err = kubectl(t.Context(), "exec", name, "--",
+		"sh", "-c",
+		"echo '"+cniConf+"' > /tmp/cni.json && "+
+			"echo '"+script+"' > /tmp/run-cni.sh && "+
+			"chmod +x /tmp/run-cni.sh",
+	)
+	if err != nil {
+		t.Fatalf("write cni config and script: %v", err)
+	}
+
+	// Step 2: run the wrapper script.
+	out, err := kubectl(t.Context(), "exec", name, "-i", "--", "/tmp/run-cni.sh")
+	if err != nil {
+		// Debug: check what interfaces and sysctl paths exist
+		debugCmd := "ip link show 2>&1 && echo '---' && " +
+			"ls /proc/sys/net/ipv6/conf/ 2>&1 && echo '---' && " +
+			"ls /proc/sys/net/ipv4/conf/ 2>&1"
+		if debug, dErr := kubectl(t.Context(), "exec", name, "--", "sh", "-c", debugCmd); dErr == nil {
+			t.Logf("debug output:\n%s", debug)
+		}
+		t.Logf("exec output: %s", out)
+		t.Fatalf("CNI ADD failed: %v", err)
+	}
+
+	// The CNI result is JSON; find the first '{'.
+	jsonStart := strings.Index(out, "{")
+	if jsonStart == -1 {
+		t.Fatalf("no JSON found in CNI ADD output:\n%s", out)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &result); err != nil {
+		t.Fatalf("CNI ADD output is not valid JSON: %v\noutput:\n%s", err, out)
+	}
+
+	// Tap mode produces exactly 1 interface (the host tap) with an empty sandbox.
+	ifaces, ok := result["interfaces"].([]any)
+	if !ok {
+		t.Fatalf("CNI result missing or invalid \"interfaces\" field; got: %v", result)
+	}
+	if len(ifaces) != 1 {
+		t.Errorf("interfaces count = %d, want 1", len(ifaces))
+	}
+
+	iface, ok := ifaces[0].(map[string]any)
+	if !ok {
+		t.Fatalf("interfaces[0] is not an object; got: %T", ifaces[0])
+	}
+	if sandbox, _ := iface["sandbox"].(string); sandbox != "" {
+		t.Errorf("interfaces[0].sandbox = %q, want empty (tap has no guest endpoint)", sandbox)
+	}
+
+	// Tap mode does not configure guest IPs.
+	if ips, ok := result["ips"]; ok && ips != nil {
+		ipsArr, ok := ips.([]any)
+		if ok && len(ipsArr) > 0 {
+			t.Errorf("CNI result has %d IP(s), want 0 for tap mode", len(ipsArr))
+		}
+	}
+}
+
+// nodeName returns the name of the node this pod runs on, or falls back to
+// "kind-worker" for single-node Kind clusters.
+func nodeName() string {
+	if v := os.Getenv("NODE_NAME"); v != "" {
+		return v
+	}
+	return "kind-worker"
+}
+
 // kubectl runs kubectl with the given arguments and returns combined output.
 func kubectl(ctx context.Context, args ...string) (string, error) {
 	out, err := exec.CommandContext(ctx, "kubectl", args...).CombinedOutput()
@@ -164,9 +291,9 @@ func kubectl(ctx context.Context, args ...string) (string, error) {
 
 // waitForPodPhase polls until the named pod reaches wantPhase or the timeout
 // expires. It returns an error describing the last observed phase on timeout.
-func waitForPodPhase(t *testing.T, name, wantPhase string, timeout time.Duration) error {
+func waitForPodPhase(t *testing.T, name, wantPhase string) error {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(podReadyTimeout)
 	for time.Now().Before(deadline) {
 		out, err := kubectl(t.Context(), "get", "pod", name, "-o", "jsonpath={.status.phase}")
 		if err == nil && out == wantPhase {
@@ -178,7 +305,7 @@ func waitForPodPhase(t *testing.T, name, wantPhase string, timeout time.Duration
 		time.Sleep(podPollInterval)
 	}
 	out, _ := kubectl(t.Context(), "get", "pod", name, "-o", "jsonpath={.status.phase}")
-	return fmt.Errorf("timed out after %v waiting for phase %q; last phase: %q", timeout, wantPhase, out)
+	return fmt.Errorf("timed out after %v waiting for phase %q; last phase: %q", podReadyTimeout, wantPhase, out)
 }
 
 // deletePod removes a pod by name, ignoring not-found errors.
