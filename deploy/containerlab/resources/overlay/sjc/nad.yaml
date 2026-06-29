@@ -1,18 +1,22 @@
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
-  name: galactic
-  namespace: default
+  name: testvpc
+  namespace: vpc
 spec:
   config: |
     {
       "cniVersion": "0.3.1",
-      "name": "galactic",
+      "name": "testvpc",
       "type": "galactic-cni",
-      "vpc": "1",
-      "vpcattachment": "1",
+      "vpc": "10",
+      "vpcattachment": "10",
+      "namespace": "galactic-system",
       "srv6_locator": "2001:db8:ff02::/48",
-      "galacticRouter": {
-        "address": "127.0.0.1:50051"
+      "ipam": {
+        "type": "pool",
+        "pool": "fd00:10:ff02::/48",
+        "gateway": "fd00:10:ff02::1",
+        "subnet_len": 80
       }
     }

@@ -82,11 +82,10 @@ apply_testvpc() {
   local site="$2"
   echo "Applying testvpc/${site} to ${node}..."
   docker cp "${RESOURCES_DIR}/testvpc/${site}" "${node}:/galactic/resources/testvpc-${site}"
-  # Apply NAD first so the network is available when the pod starts, then the
-  # Deployment. BGPVRFInstance and BGPAdvertisement are created by the CNI on
-  # pod attach — do not pre-apply them here.
-  docker exec "${node}" sh -c 'kubectl create namespace vpc --dry-run=client -o yaml | kubectl apply -f -'
-  docker exec "${node}" kubectl apply -f /galactic/resources/testvpc-${site}/nad.yaml
+  # Apply the test Deployment. The NAD is applied by install-overlay.sh since
+  # it is part of the galactic overlay infrastructure. BGPVRFInstance and
+  # BGPAdvertisement are created by the CNI on pod attach — do not pre-apply
+  # them here.
   docker exec "${node}" kubectl apply -f /galactic/resources/testvpc-${site}/nginx.yaml
 }
 
