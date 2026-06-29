@@ -18,8 +18,11 @@ import (
 // gateway so the encapsulated outer packet can be L2-resolved on egress.
 func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 	routes, err := netlink.RouteGet(gateway)
-	if err != nil || len(routes) == 0 {
+	if err != nil {
 		return fmt.Errorf("no route to gateway %s: %w", gateway, err)
+	}
+	if len(routes) == 0 {
+		return fmt.Errorf("no route to gateway %s", gateway)
 	}
 	encap := &netlink.SEG6Encap{
 		Mode:     nl.SEG6_IPTUN_MODE_ENCAP,

@@ -13,6 +13,8 @@ coverage.html
 /bin/
 /dist/
 /galactic
+/galactic-router
+/galactic-cni
 
 # Go workspace
 go.work
@@ -106,6 +108,7 @@ skaffold.local.yaml
 .agent/
 .agents/
 .claude/scratch/
+.claude/settings.local.json
 
 # ============================================================
 # IDEs and editors
