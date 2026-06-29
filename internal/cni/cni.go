@@ -306,6 +306,15 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return nil
 	}
 
+	return publishBGPState(args, pluginConf, nodeName, namespace, ipamResult)
+}
+
+// publishBGPState configures the host veth gateway, sets up the SRv6 ingress
+// route, and creates the BGPVRFInstance and BGPAdvertisement CRDs. This is
+// veth-only; tap mode returns before reaching this path.
+func publishBGPState(
+	args *skel.CmdArgs, pluginConf *PluginConf, nodeName, namespace string, ipamResult *ipamResult,
+) error {
 	if err := configureHostVethGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
 		return err
 	}
