@@ -180,6 +180,8 @@ func probeRouteWrite(tableID uint32) error {
 	if err := netlink.RouteReplace(probe); err != nil {
 		return fmt.Errorf("route write probe (missing root or CAP_NET_ADMIN?): %w", err)
 	}
-	_ = netlink.RouteDel(probe)
+	if err := netlink.RouteDel(probe); err != nil {
+		slog.Warn("probeRouteWrite: failed to remove probe route", "dst", probe.Dst, "err", err)
+	}
 	return nil
 }

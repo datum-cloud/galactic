@@ -3,7 +3,7 @@
 	"image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
 	"features": {
 		"ghcr.io/devcontainers/features/go:1": {
-			"version": "1.24.2"
+			"version": "1.26.0"
 		},
 		"ghcr.io/devcontainers/features/python:1": {
 			"version": "3.13",
@@ -54,7 +54,7 @@
 				"go.lintFlags": [
 					"--fast"
 				],
-				"go.formatTool": "gofmt",
+				"go.formatTool": "gopls",
 				"go.testEnvVars": {
 					"GOOS": "linux"
 				},
@@ -69,7 +69,7 @@
 					}
 				},
 				"gopls": {
-					"formatting.gofumpt": true,
+					"formatting.gofumpt": false,
 					"ui.semanticTokens": true,
 					"ui.codelenses": {
 						"gc_details": false,
