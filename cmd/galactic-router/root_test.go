@@ -32,12 +32,6 @@ func TestFlagDefaults(t *testing.T) {
 	if v.GetInt("galactic_router.bgp_listen_port") != 179 {
 		t.Errorf("bgp_listen_port default = %d, want 179", v.GetInt("galactic_router.bgp_listen_port"))
 	}
-	if v.GetInt("galactic_router.gobgp_grpc_port") != defaultGrpcPort {
-		t.Errorf("gobgp_grpc_port default = %d, want %d", v.GetInt("galactic_router.gobgp_grpc_port"), defaultGrpcPort)
-	}
-	if v.GetBool("galactic_router.gobgp_grpc_server_enabled") != false {
-		t.Errorf("gobgp_grpc_server_enabled default = %v, want false", v.GetBool("galactic_router.gobgp_grpc_server_enabled"))
-	}
 	if v.GetInt("galactic_router.metrics_port") != 8080 {
 		t.Errorf("metrics_port default = %d, want 8080", v.GetInt("galactic_router.metrics_port"))
 	}
@@ -57,50 +51,10 @@ func TestRequiredFlags(t *testing.T) {
 func TestEnvVarDefaults(t *testing.T) {
 	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
 	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "false")
 
 	v := cmdWithViper(t)
 	if err := validateConfig(v); err != nil {
 		t.Errorf("validateConfig with valid env vars: %v", err)
-	}
-}
-
-func TestGRPCPortEnvVar(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "9999")
-
-	v := cmdWithViper(t)
-	if err := validateConfig(v); err != nil {
-		t.Errorf("validateConfig with GALACTIC_ROUTER_GOBGP_GRPC_PORT=9999: %v", err)
-	}
-}
-
-func TestFlagOverridesEnv(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "9999")
-
-	v := cmdWithViper(t)
-	// Simulate a flag override by setting the viper key directly (v.Set
-	// has higher precedence than env vars in viper).
-	v.Set("galactic_router.gobgp_grpc_port", 12345)
-	if got := v.GetInt("galactic_router.gobgp_grpc_port"); got != 12345 {
-		t.Errorf("flag override: got %d, want 12345", got)
-	}
-}
-
-func TestEnvVarOnly(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "env-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "7777")
-
-	v := cmdWithViper(t)
-	if v.GetString("galactic_router.node_name") != "env-node" {
-		t.Errorf("node_name from env = %q, want %q", v.GetString("galactic_router.node_name"), "env-node")
-	}
-	if v.GetInt("galactic_router.gobgp_grpc_port") != 7777 {
-		t.Errorf("gobgp_grpc_port from env = %d, want 7777", v.GetInt("galactic_router.gobgp_grpc_port"))
 	}
 }
 
@@ -112,32 +66,6 @@ func TestInvalidRouterRole(t *testing.T) {
 	err := validateConfig(v)
 	if err == nil {
 		t.Error("validateConfig with invalid router role returned nil error")
-	}
-}
-
-func TestGRPCPortOverflow(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "70000")
-
-	v := cmdWithViper(t)
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with port 70000 returned nil error")
-	}
-}
-
-func TestGRPCPortZero(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "0")
-
-	v := cmdWithViper(t)
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with port 0 returned nil error")
 	}
 }
 
@@ -188,7 +116,6 @@ func TestValidRoles(t *testing.T) {
 		t.Run(role, func(t *testing.T) {
 			t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
 			t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", role)
-			t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "false")
 
 			v := cmdWithViper(t)
 			// Verify the role is read correctly.
@@ -225,33 +152,6 @@ func TestGRPCHealthPortOverride(t *testing.T) {
 	}
 }
 
-func TestGRPCServerEnabled(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "true")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "50051")
-
-	v := cmdWithViper(t)
-	if !v.GetBool("galactic_router.gobgp_grpc_server_enabled") {
-		t.Error("gobgp_grpc_server_enabled should be true")
-	}
-	if v.GetInt("galactic_router.gobgp_grpc_port") != 50051 {
-		t.Errorf("gobgp_grpc_port = %d, want 50051", v.GetInt("galactic_router.gobgp_grpc_port"))
-	}
-}
-
-func TestGRPCServerDisabled(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_ROLE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED", "false")
-	t.Setenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT", "9999")
-
-	v := cmdWithViper(t)
-	if v.GetBool("galactic_router.gobgp_grpc_server_enabled") {
-		t.Error("gobgp_grpc_server_enabled should be false")
-	}
-}
-
 func TestVersionFlag(t *testing.T) {
 	if metadata.Version == "" {
 		t.Error("metadata.Version should not be empty")
@@ -264,8 +164,6 @@ func TestDefaults(t *testing.T) {
 	_ = os.Unsetenv("GALACTIC_ROUTER_ROUTER_ROLE")
 	_ = os.Unsetenv("GALACTIC_ROUTER_BGP_LISTEN_PORT")
 	_ = os.Unsetenv("GALACTIC_ROUTER_BGP_LOCAL_ADDRESS")
-	_ = os.Unsetenv("GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED")
-	_ = os.Unsetenv("GALACTIC_ROUTER_GOBGP_GRPC_PORT")
 	_ = os.Unsetenv("GALACTIC_ROUTER_METRICS_PORT")
 	_ = os.Unsetenv("GALACTIC_ROUTER_GRPC_HEALTH_PORT")
 
@@ -273,12 +171,6 @@ func TestDefaults(t *testing.T) {
 
 	if v.GetInt("galactic_router.bgp_listen_port") != 179 {
 		t.Errorf("bgp_listen_port = %d, want 179", v.GetInt("galactic_router.bgp_listen_port"))
-	}
-	if v.GetInt("galactic_router.gobgp_grpc_port") != defaultGrpcPort {
-		t.Errorf("gobgp_grpc_port = %d, want %d", v.GetInt("galactic_router.gobgp_grpc_port"), defaultGrpcPort)
-	}
-	if v.GetBool("galactic_router.gobgp_grpc_server_enabled") != false {
-		t.Error("gobgp_grpc_server_enabled default should be false")
 	}
 	if v.GetInt("galactic_router.metrics_port") != 8080 {
 		t.Errorf("metrics_port = %d, want 8080", v.GetInt("galactic_router.metrics_port"))

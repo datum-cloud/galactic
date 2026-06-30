@@ -47,8 +47,6 @@ const (
 func newViper() *viper.Viper {
 	v := viper.New()
 	v.SetDefault("galactic_router.bgp_listen_port", 179)
-	v.SetDefault("galactic_router.gobgp_grpc_port", defaultGrpcPort)
-	v.SetDefault("galactic_router.gobgp_grpc_server_enabled", false)
 	v.SetDefault("galactic_router.metrics_port", 8080)
 	v.SetDefault("galactic_router.grpc_health_port", 5000)
 	v.SetDefault("galactic_router.gc_namespace", "default")
@@ -67,10 +65,6 @@ func newViper() *viper.Viper {
 	v.BindEnv("galactic_router.bgp_listen_port", "GALACTIC_ROUTER_BGP_LISTEN_PORT")
 	//nolint:errcheck
 	v.BindEnv("galactic_router.bgp_local_address", "GALACTIC_ROUTER_BGP_LOCAL_ADDRESS")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.gobgp_grpc_server_enabled", "GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.gobgp_grpc_port", "GALACTIC_ROUTER_GOBGP_GRPC_PORT")
 	//nolint:errcheck
 	v.BindEnv("galactic_router.metrics_port", "GALACTIC_ROUTER_METRICS_PORT")
 	//nolint:errcheck
@@ -99,12 +93,6 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) { //nolint:lll // cobra flag 
 	cmd.Flags().StringP("bgp-local-address", "",
 		v.GetString("galactic_router.bgp_local_address"),
 		"Source address for outgoing BGP TCP connections")
-	cmd.Flags().BoolP("gobgp-grpc-server-enabled", "",
-		v.GetBool("galactic_router.gobgp_grpc_server_enabled"),
-		"Enable the embedded GoBGP gRPC API server")
-	cmd.Flags().IntP("gobgp-grpc-port", "",
-		v.GetInt("galactic_router.gobgp_grpc_port"),
-		"Port for the GoBGP gRPC API server")
 	cmd.Flags().IntP("metrics-port", "",
 		v.GetInt("galactic_router.metrics_port"),
 		"Port for the controller-runtime metrics server")
@@ -128,7 +116,6 @@ func validateConfig(v *viper.Viper) error {
 	nodeName := v.GetString("galactic_router.node_name")
 	routerRole := v.GetString("galactic_router.router_role")
 	bgpListenPort := v.GetInt("galactic_router.bgp_listen_port")
-	grpcPort := v.GetInt("galactic_router.gobgp_grpc_port")
 	metricsPort := v.GetInt("galactic_router.metrics_port")
 	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
 
@@ -143,9 +130,6 @@ func validateConfig(v *viper.Viper) error {
 	}
 	if bgpListenPort < -1 || bgpListenPort > 65535 {
 		return fmt.Errorf("GALACTIC_ROUTER_BGP_LISTEN_PORT must be -1 or a valid port number, got %d", bgpListenPort)
-	}
-	if grpcPort < 1 || grpcPort > 65535 {
-		return fmt.Errorf("GALACTIC_ROUTER_GOBGP_GRPC_PORT must be a valid port number (1-65535), got %d", grpcPort)
 	}
 	if metricsPort < 1 || metricsPort > 65535 {
 		return fmt.Errorf("GALACTIC_ROUTER_METRICS_PORT must be a valid port number (1-65535), got %d", metricsPort)
@@ -167,21 +151,13 @@ func runCmd(v *viper.Viper) error {
 	routerRole := v.GetString("galactic_router.router_role")
 	bgpListenPort := v.GetInt("galactic_router.bgp_listen_port")
 	bgpLocalAddr := v.GetString("galactic_router.bgp_local_address")
-	grpcEnabled := v.GetBool("galactic_router.gobgp_grpc_server_enabled")
-	grpcPort := v.GetInt("galactic_router.gobgp_grpc_port")
 	metricsPort := v.GetInt("galactic_router.metrics_port")
 	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
-
-	// Construct gRPC listen address.
-	var grpcListenAddress string
-	if grpcEnabled {
-		grpcListenAddress = fmt.Sprintf(":%d", grpcPort)
-	}
 
 	var factory galacticruntime.RuntimeFactory
 	switch routerRole {
 	case "tenant":
-		factory = gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr, grpcListenAddress)
+		factory = gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr)
 	case roleFabric:
 		factory = frr.NewRuntimeFactory()
 	}

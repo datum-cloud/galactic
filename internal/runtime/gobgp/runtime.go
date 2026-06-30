@@ -53,11 +53,11 @@ type GoBGPRuntime struct {
 // Pass -1 to disable inbound connections (outbound-only mode).
 // localAddress, if non-empty, is bound as the source address for outgoing BGP
 // TCP connections (sets Transport.LocalAddress on every peer).
-func NewRuntimeFactory(listenPort int32, localAddress string, grpcListenAddress string) runtime.RuntimeFactory {
+func NewRuntimeFactory(listenPort int32, localAddress string) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		return &GoBGPRuntime{
 			key:             key,
-			server:          newServer(Config{GRPCListenAddress: grpcListenAddress}),
+			server:          newServer(Config{}),
 			listenPort:      listenPort,
 			localAddress:    localAddress,
 			establishedAt:   make(map[string]time.Time),
