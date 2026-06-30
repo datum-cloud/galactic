@@ -17,6 +17,7 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"go.datum.net/galactic/internal/plumbing/intf"
@@ -118,7 +119,10 @@ func probeAPIServer() error {
 		return nil
 	}
 	kubeconfig.Timeout = 2 * time.Second
-	httpClient := &http.Client{Timeout: 2 * time.Second}
+	httpClient, err := rest.HTTPClientFor(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("build http client: %w", err)
+	}
 	req, err := http.NewRequestWithContext(
 		context.Background(),
 		http.MethodGet,
