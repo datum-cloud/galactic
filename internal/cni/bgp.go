@@ -8,13 +8,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/vishvananda/netlink"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,6 +27,71 @@ import (
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
+
+// maxRetries is the maximum number of retry attempts for transient k8s API
+// errors during the BGP state publish phase.  The total number of attempts
+// is maxRetries+1 (initial + retries).
+const maxRetries = 2
+
+// isTransientError reports whether err is a transient failure that may
+// resolve itself on retry (API server unavailable, timeout, network blip).
+// Returns false for validation errors, not-found, and other permanent
+// failures that should not be retried.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Context-level failures (deadline exceeded, cancelled) are transient
+	// because they usually indicate the API server was slow/unavailable.
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	// Unwrap to handle wrapped errors (e.g. from controllerutil.CreateOrUpdate).
+	unwrapped := errors.Unwrap(err)
+	if unwrapped != nil {
+		if errors.Is(unwrapped, context.DeadlineExceeded) || errors.Is(unwrapped, context.Canceled) {
+			return true
+		}
+	}
+	// Kubernetes API errors: 503 Service Unavailable, 500 Internal Server
+	// Error, 504 Server Timeout, and 429 Too Many Requests.
+	if apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsInternalError(err) ||
+		apierrors.IsServerTimeout(err) ||
+		apierrors.IsTooManyRequests(err) {
+		return true
+	}
+	// Network-level transient errors (connection refused/reset, unreachable).
+	if netErr, ok := unwrapped.(interface{ Temporary() bool }); ok && netErr.Temporary() {
+		return true
+	}
+	return false
+}
+
+// retryK8sOps runs fn with up to maxRetries+1 attempts, retrying on transient
+// k8s API errors with exponential backoff.  The context passed to fn has a
+// timeout derived from timeout (respecting the original ctx deadline when set).
+// Non-transient errors are returned immediately without retry.
+func retryK8sOps(timeout time.Duration, fn func(ctx context.Context) error) error {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
+			time.Sleep(backoff)
+			slog.Warn("Retrying k8s operations", "attempt", attempt+1, "backoff", backoff)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		lastErr = fn(ctx)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if !isTransientError(lastErr) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
 
 // bgpConfig holds the BGP values the CNI needs to populate BGP CRDs.
 type bgpConfig struct {
@@ -103,10 +171,16 @@ func newK8sClient() (client.Client, error) {
 // publishBGPState configures the host veth gateway, sets up the SRv6 ingress
 // route, and creates the BGPVRFInstance and BGPAdvertisement CRDs. This is
 // veth-only; tap mode returns before reaching this path.
+//
+// K8s API operations are retried with exponential backoff on transient errors
+// (503, timeout, network blip). Non-k8s operations (kernel networking) run
+// once before the retry loop. Non-transient errors (validation, not-found)
+// fail immediately without retry.
 func publishBGPState(
 	args *skel.CmdArgs, pluginConf *PluginConf, nodeName, namespace string, ipamResult *ipamResult,
 	tracker *resourceTracker,
 ) error {
+	// ---- non-k8s operations (run once) ----
 	if err := configureHostVethGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
 		return err
 	}
@@ -132,84 +206,85 @@ func publishBGPState(
 		return err
 	}
 	tracker.k8s = k8s
-	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
-	defer cancel()
 
-	bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
-	if err != nil {
-		return err
-	}
+	// ---- k8s operations (retry on transient errors) ----
+	return retryK8sOps(cniTimeout, func(ctx context.Context) error {
+		bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
+		if err != nil {
+			return err
+		}
 
-	rtValue, err := routeTarget(int64(bgp.asNumber), vpcHex)
-	if err != nil {
-		return fmt.Errorf("compute route target: %w", err)
-	}
+		rtValue, err := routeTarget(int64(bgp.asNumber), vpcHex)
+		if err != nil {
+			return fmt.Errorf("compute route target: %w", err)
+		}
 
-	// Create the BGPVRFInstance to configure the VRF with its route distinguisher
-	// and import/export route targets. This must be created before advertisements
-	// so the BGP runtime has the VRF context when originating EVPN paths.
-	vrfName := bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment)
-	vrfInst := &bgpv1alpha1.BGPVRFInstance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      vrfName,
-			Namespace: namespace,
-		},
-	}
-	_, err = controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
-		vrfInst.Spec = bgpv1alpha1.BGPVRFInstanceSpec{
-			RouterTarget: bgpv1alpha1.RouterTarget{
-				RouterRef: &bgpv1alpha1.RouterRef{Name: bgp.routerName},
+		// Create the BGPVRFInstance to configure the VRF with its route distinguisher
+		// and import/export route targets. This must be created before advertisements
+		// so the BGP runtime has the VRF context when originating EVPN paths.
+		vrfName := bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment)
+		vrfInst := &bgpv1alpha1.BGPVRFInstance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      vrfName,
+				Namespace: namespace,
 			},
-			RouteDistinguisher: rtValue,
-			ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
-			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
 		}
+		_, err = controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
+			vrfInst.Spec = bgpv1alpha1.BGPVRFInstanceSpec{
+				RouterTarget: bgpv1alpha1.RouterTarget{
+					RouterRef: &bgpv1alpha1.RouterRef{Name: bgp.routerName},
+				},
+				RouteDistinguisher: rtValue,
+				ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
+				ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("apply BGPVRFInstance: %w", err)
+		}
+		tracker.vrfInstanceCreated = true
+
+		// Create the BGPAdvertisement to originate the pod's subnet prefix.
+		adv := &bgpv1alpha1.BGPAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
+				Namespace: namespace,
+			},
+		}
+		podSubnet := ""
+		if ipamResult != nil {
+			podSubnet = ipamResult.subnet.String()
+		}
+		_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
+			adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{
+				RouterRef:     bgpv1alpha1.RouterRef{Name: bgp.routerName},
+				AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+				Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
+				Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
+			}
+			if ipamResult != nil || srv6SIDStr != "" {
+				if adv.Annotations == nil {
+					adv.Annotations = make(map[string]string)
+				}
+				// Store the allocated subnet keyed by container ID so cmdDel can look it up.
+				if ipamResult != nil {
+					adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
+				}
+				// Store the End.DT46 SID so galactic-router uses it as the EVPN GWIPAddress.
+				if srv6SIDStr != "" {
+					adv.Annotations[annotationSRv6SID] = srv6SIDStr
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("apply BGPAdvertisement: %w", err)
+		}
+		tracker.advCreated = true
+
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("apply BGPVRFInstance: %w", err)
-	}
-	tracker.vrfInstanceCreated = true
-
-	// Create the BGPAdvertisement to originate the pod's subnet prefix.
-	adv := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
-			Namespace: namespace,
-		},
-	}
-	podSubnet := ""
-	if ipamResult != nil {
-		podSubnet = ipamResult.subnet.String()
-	}
-	_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
-		adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{
-			RouterRef:     bgpv1alpha1.RouterRef{Name: bgp.routerName},
-			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
-			Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
-		}
-		if ipamResult != nil || srv6SIDStr != "" {
-			if adv.Annotations == nil {
-				adv.Annotations = make(map[string]string)
-			}
-			// Store the allocated subnet keyed by container ID so cmdDel can look it up.
-			if ipamResult != nil {
-				adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
-			}
-			// Store the End.DT46 SID so galactic-router uses it as the EVPN GWIPAddress.
-			if srv6SIDStr != "" {
-				adv.Annotations[annotationSRv6SID] = srv6SIDStr
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("apply BGPAdvertisement: %w", err)
-	}
-	tracker.advCreated = true
-
-	return nil
 }
 
 // configureHostVethGateway assigns the gateway address as a /128 host address on
