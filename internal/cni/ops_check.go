@@ -181,7 +181,11 @@ func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Terminatio
 	}
 	defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
 
-	routes, err := handle.RouteList(nil, netlink.FAMILY_V6)
+	routes, err := handle.RouteListFiltered(
+		netlink.FAMILY_V6,
+		&netlink.Route{Table: int(tableID)},
+		netlink.RT_FILTER_TABLE,
+	)
 	if err != nil {
 		return fmt.Errorf("list routes: %w", err)
 	}
@@ -194,8 +198,7 @@ func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Terminatio
 		}
 		found := false
 		for _, r := range routes {
-			if r.Table == int(tableID) &&
-				r.Dst != nil &&
+			if r.Dst != nil &&
 				r.Dst.String() == term.Network &&
 				r.Gw != nil &&
 				r.Gw.Equal(viaIP) &&
