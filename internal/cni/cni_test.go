@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	testVPC         = "abc"
-	testAttachment  = "def"
-	testVPCHex1234  = "0000000004d2" // decimal 1234
-	testRD65000_1   = "65000:1"      // RD/RT for ASN 65000, NN 1
-	testContainerID = "test-container"
+	testVPC           = "abc"
+	testAttachment    = "def"
+	testVPCHex1234    = "0000000004d2" // decimal 1234
+	testRD65000_1     = "65000:1"      // RD/RT for ASN 65000, NN 1
+	testContainerID   = "test-container"
+	testInvalidBase62 = "abc-def" // shared invalid base62 string for tests
 )
 
 func fakeClient(objs ...client.Object) client.Client {
@@ -127,6 +128,82 @@ func TestParseConf(t *testing.T) {
 			),
 			wantErr: `invalid interface_type "unknown": must be "veth" or "tap"`,
 		},
+		{
+			name: "missing vpc",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpcattachment":"%s"}`,
+				testAttachment,
+			),
+			wantErr: "vpc is required and must be a non-empty base62 string",
+		},
+		{
+			name: "empty vpc",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"",`+
+					`"vpcattachment":"%s"}`,
+				testAttachment,
+			),
+			wantErr: "vpc is required and must be a non-empty base62 string",
+		},
+		{
+			name: "vpc with invalid char hyphen",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s"}`,
+				testInvalidBase62, testAttachment,
+			),
+			wantErr: fmt.Sprintf("invalid base62 value for field 'vpc': %q", testInvalidBase62),
+		},
+		{
+			name: "vpc with invalid char underscore",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"abc_def",`+
+					`"vpcattachment":"%s"}`,
+				testAttachment,
+			),
+			wantErr: `invalid base62 value for field 'vpc': "abc_def"`,
+		},
+		{
+			name: "missing vpcattachment",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s"}`,
+				testVPC,
+			),
+			wantErr: "vpcattachment is required and must be a non-empty base62 string",
+		},
+		{
+			name: "empty vpcattachment",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":""}`,
+				testVPC,
+			),
+			wantErr: "vpcattachment is required and must be a non-empty base62 string",
+		},
+		{
+			name: "vpcattachment with invalid char space",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"def ghi"}`,
+				testVPC,
+			),
+			wantErr: `invalid base62 value for field 'vpcattachment': "def ghi"`,
+		},
+		{
+			name: "valid vpc and vpcattachment with mixed case base62",
+			input: `{"cniVersion":"1.0.0","name":"test",` +
+				`"type":"galactic-cni","vpc":"Abc123XYZ",` +
+				`"vpcattachment":"DeF456"}`,
+			wantVPC:    "Abc123XYZ",
+			wantIfType: interfaceTypeVeth,
+		},
 	}
 
 	for _, tt := range tests {
@@ -149,6 +226,67 @@ func TestParseConf(t *testing.T) {
 			}
 			if conf.InterfaceType != tt.wantIfType {
 				t.Errorf("InterfaceType = %q, want %q", conf.InterfaceType, tt.wantIfType)
+			}
+		})
+	}
+}
+
+// ---- isValidBase62 -------------------------------------------------------
+
+func TestIsValidBase62(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"digits only", "1234567890", true},
+		{"lowercase only", "abcdefghij", true},
+		{"uppercase only", "ABCDEFGHIJ", true},
+		{"mixed case", "aBcDeFgHiJ", true},
+		{"mixed digits and letters", "abc123XYZ", true},
+		{"hyphen", testInvalidBase62, false},
+		{"underscore", "abc_def", false},
+		{"space", "abc def", false},
+		{"dot", "abc.def", false},
+		{"slash", "abc/def", false},
+		{"plus", "abc+def", false},
+		{"equals", "abc=def", false},
+		{"single digit", "0", true},
+		{"single lowercase", "a", true},
+		{"single uppercase", "Z", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidBase62(tt.input)
+			if got != tt.want {
+				t.Errorf("isValidBase62(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeForError(t *testing.T) {
+	printable := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()"
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"normal string", testInvalidBase62, testInvalidBase62},
+		{"empty", "", ""},
+		{"newline", "abc\ndef", sanitizeForErrorBinary},
+		{"null byte", "abc\x00def", sanitizeForErrorBinary},
+		{"del char", "abc\x7fdef", sanitizeForErrorBinary},
+		{"printable range", printable, printable},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeForError(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeForError(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -656,9 +794,9 @@ func TestCmdCheckMissingVPC(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for missing VPC, got nil")
 	}
-	// parseConf allows empty VPC; the error comes from intf generation.
-	if !strings.Contains(err.Error(), "CHECK failed") {
-		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
+	// parseConf now rejects empty VPC before CHECK runs.
+	if !strings.Contains(err.Error(), "vpc is required") {
+		t.Fatalf("error %q does not contain 'vpc is required'", err.Error())
 	}
 }
 
@@ -850,8 +988,9 @@ func TestCmdStatusMissingVPC(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for missing VPC, got nil")
 	}
-	if !strings.Contains(err.Error(), "STATUS failed") {
-		t.Fatalf("error %q does not contain 'STATUS failed'", err.Error())
+	// parseConf now rejects empty VPC before STATUS runs.
+	if !strings.Contains(err.Error(), "vpc is required") {
+		t.Fatalf("error %q does not contain 'vpc is required'", err.Error())
 	}
 }
 
@@ -870,7 +1009,8 @@ func TestCmdStatusMissingVPCAttachment(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for missing VPCAttachment, got nil")
 	}
-	if !strings.Contains(err.Error(), "STATUS failed") {
-		t.Fatalf("error %q does not contain 'STATUS failed'", err.Error())
+	// parseConf now rejects empty VPCAttachment before STATUS runs.
+	if !strings.Contains(err.Error(), "vpcattachment is required") {
+		t.Fatalf("error %q does not contain 'vpcattachment is required'", err.Error())
 	}
 }
