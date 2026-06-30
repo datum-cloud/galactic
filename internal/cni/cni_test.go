@@ -715,3 +715,102 @@ func TestResourceTrackerFieldsSet(t *testing.T) {
 		t.Error("advCreated should be false by default")
 	}
 }
+
+// ---- cmdStatus ---------------------------------------------------------
+
+func TestCmdStatusInvalidConfig(t *testing.T) {
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte("not valid json"),
+	}
+
+	err := cmdStatus(args)
+	if err == nil {
+		t.Fatalf("expected error for invalid JSON, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse CNI config") {
+		t.Fatalf("error %q does not contain 'parse CNI config'", err.Error())
+	}
+}
+
+func TestCmdStatusInvalidInterfaceType(t *testing.T) {
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s","interface_type":"bogus"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdStatus(args)
+	if err == nil {
+		t.Fatalf("expected error for invalid interface_type, got nil")
+	}
+	if !strings.Contains(err.Error(), `invalid interface_type "bogus"`) {
+		t.Fatalf("error %q does not contain expected message", err.Error())
+	}
+}
+
+func TestCmdStatusValidConfigMissingResources(t *testing.T) {
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdStatus(args)
+	if err == nil {
+		t.Fatalf("expected error for missing resources, got nil")
+	}
+	if !strings.Contains(err.Error(), "STATUS failed") {
+		t.Fatalf("error %q does not contain 'STATUS failed'", err.Error())
+	}
+}
+
+func TestCmdStatusMissingVPC(t *testing.T) {
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpcattachment":"%s"}`,
+		testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdStatus(args)
+	if err == nil {
+		t.Fatalf("expected error for missing VPC, got nil")
+	}
+	if !strings.Contains(err.Error(), "STATUS failed") {
+		t.Fatalf("error %q does not contain 'STATUS failed'", err.Error())
+	}
+}
+
+func TestCmdStatusMissingVPCAttachment(t *testing.T) {
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s"}`,
+		testVPC,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdStatus(args)
+	if err == nil {
+		t.Fatalf("expected error for missing VPCAttachment, got nil")
+	}
+	if !strings.Contains(err.Error(), "STATUS failed") {
+		t.Fatalf("error %q does not contain 'STATUS failed'", err.Error())
+	}
+}
