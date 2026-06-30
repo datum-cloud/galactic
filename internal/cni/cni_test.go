@@ -209,6 +209,90 @@ func TestParseConf(t *testing.T) {
 			wantVPC:    "Abc123XYZ",
 			wantIfType: interfaceTypeVeth,
 		},
+		{
+			name: "valid srv6_locator with /48 prefix",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":"2001:db8::/48"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			name: "valid srv6_locator with /64 prefix",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":"fd00:1:2::/64"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			name: "valid srv6_locator empty is allowed",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":""}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			name: "srv6_locator missing is allowed",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			name: "srv6_locator invalid mask /65 too long",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":"fd00:1:2::/65"}`,
+				testVPC, testAttachment,
+			),
+			wantErr: srv6LocatorErrMsg,
+		},
+		{
+			name: "srv6_locator invalid IPv4 address",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":"192.168.1.0/24"}`,
+				testVPC, testAttachment,
+			),
+			wantErr: srv6LocatorErrMsg,
+		},
+		{
+			name: "srv6_locator not a valid CIDR",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":"not-a-cidr"}`,
+				testVPC, testAttachment,
+			),
+			wantErr: srv6LocatorErrMsg,
+		},
+		{
+			name: "srv6_locator plain IPv6 without mask",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","srv6_locator":"2001:db8::1"}`,
+				testVPC, testAttachment,
+			),
+			wantErr: srv6LocatorErrMsg,
+		},
 	}
 
 	for _, tt := range tests {
@@ -267,6 +351,40 @@ func TestIsValidBase62(t *testing.T) {
 			got := isValidBase62(tt.input)
 			if got != tt.want {
 				t.Errorf("isValidBase62(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---- isValidSRv6Locator --------------------------------------------------
+
+func TestIsValidSRv6Locator(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty allowed", "", true},
+		{"valid /48", "2001:db8::/48", true},
+		{"valid /64", "fd00:1:2::/64", true},
+		{"valid /0", "::/0", true},
+		{"valid /63", "fd00::/63", true},
+		{"invalid /65 too long", "fd00::/65", false},
+		{"invalid /128", "fd00::1/128", false},
+		{"invalid IPv4", "192.168.1.0/24", false},
+		{"invalid IPv4 with IPv6-looking mask", "10.0.0.0/8", false},
+		{"not a CIDR", "not-a-cidr", false},
+		{"plain IPv6 no mask", "2001:db8::1", false},
+		{"plain IPv4 no mask", "192.168.1.1", false},
+		{"valid with host bits set", "2001:db8:1234::/48", true},
+		{"all zeros valid", "::/0", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidSRv6Locator(tt.input)
+			if got != tt.want {
+				t.Errorf("isValidSRv6Locator(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}

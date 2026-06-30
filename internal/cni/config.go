@@ -8,9 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 )
 
 const sanitizeForErrorBinary = "<binary>"
+
+// srv6LocatorErrMsg is the error message prefix for invalid SRv6 locator values.
+const srv6LocatorErrMsg = "invalid srv6_locator"
 
 // isValidBase62 reports whether s contains only valid base62 characters
 // ([0-9a-zA-Z]) and is non-empty. VPC and VPCAttachment identifiers are
@@ -27,6 +31,25 @@ func isValidBase62(s string) bool {
 		}
 	}
 	return true
+}
+
+// isValidSRv6Locator reports whether s is a valid IPv6 CIDR prefix suitable
+// for SRv6 SID encoding. The locator must be non-empty, parseable as an IPv6
+// prefix with a mask length of 64 or less (leaving at least 64 bits of
+// address space for embedding VPC/VPCAttachment identifiers).
+func isValidSRv6Locator(s string) bool {
+	if s == "" {
+		return true // empty locator is valid — setupSRv6Ingress is a no-op
+	}
+	_, ipnet, err := net.ParseCIDR(s)
+	if err != nil {
+		return false
+	}
+	if ipnet.IP.To4() != nil {
+		return false // must be IPv6
+	}
+	maskLen, _ := ipnet.Mask.Size()
+	return maskLen <= 64
 }
 
 // parseConf unmarshals the CNI configuration from stdin data and validates
@@ -52,6 +75,13 @@ func parseConf(data []byte) (*PluginConf, error) {
 			return nil, errors.New("vpcattachment is required and must be a non-empty base62 string")
 		}
 		return nil, fmt.Errorf("invalid base62 value for field 'vpcattachment': %q", sanitizeForError(conf.VPCAttachment))
+	}
+	if !isValidSRv6Locator(conf.SRv6Locator) {
+		return nil, fmt.Errorf(
+			"%s %q: must be a valid "+
+				"IPv6 CIDR prefix with mask length <= 64",
+			srv6LocatorErrMsg, sanitizeForError(conf.SRv6Locator),
+		)
 	}
 	if conf.InterfaceType == "" {
 		conf.InterfaceType = interfaceTypeVeth
