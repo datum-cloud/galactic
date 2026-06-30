@@ -661,3 +661,57 @@ func TestCmdCheckMissingVPC(t *testing.T) {
 		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
 	}
 }
+
+// ---- resourceTracker ------------------------------------------------------
+
+func TestResourceTrackerCleanupZeroValue(t *testing.T) {
+	// cleanup with a zero-value tracker must not panic — it's called in a
+	// defer and the caller may have failed before setting any fields.
+	tracker := &resourceTracker{}
+	ctx := context.Background()
+	tracker.cleanup(ctx) // should not panic
+}
+
+func TestResourceTrackerCleanupPartialState(t *testing.T) {
+	// A tracker that only has VPC info (failed before any resource creation)
+	// should not panic during cleanup.
+	tracker := &resourceTracker{
+		vpc:           testVPC,
+		vpcAttachment: testAttachment,
+		ifaceType:     interfaceTypeVeth,
+		namespace:     "default",
+	}
+	ctx := context.Background()
+	tracker.cleanup(ctx) // should not panic; vrf.Delete will fail but is logged
+}
+
+func TestResourceTrackerFieldsSet(t *testing.T) {
+	tracker := &resourceTracker{
+		vpc:           testVPC,
+		vpcAttachment: testAttachment,
+		ifaceType:     interfaceTypeTap,
+		namespace:     "test-ns",
+	}
+
+	if tracker.vpc != testVPC {
+		t.Errorf("vpc = %q, want %q", tracker.vpc, testVPC)
+	}
+	if tracker.vpcAttachment != testAttachment {
+		t.Errorf("vpcAttachment = %q, want %q", tracker.vpcAttachment, testAttachment)
+	}
+	if tracker.ifaceType != interfaceTypeTap {
+		t.Errorf("ifaceType = %q, want %q", tracker.ifaceType, interfaceTypeTap)
+	}
+	if tracker.namespace != "test-ns" {
+		t.Errorf("namespace = %q, want %q", tracker.namespace, "test-ns")
+	}
+	if tracker.vrfCreated {
+		t.Error("vrfCreated should be false by default")
+	}
+	if tracker.srv6SID != "" {
+		t.Errorf("srv6SID should be empty by default, got %q", tracker.srv6SID)
+	}
+	if tracker.advCreated {
+		t.Error("advCreated should be false by default")
+	}
+}
