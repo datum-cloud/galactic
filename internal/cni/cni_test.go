@@ -6,15 +6,19 @@ package cni
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -1012,5 +1016,162 @@ func TestCmdStatusMissingVPCAttachment(t *testing.T) {
 	// parseConf now rejects empty VPCAttachment before STATUS runs.
 	if !strings.Contains(err.Error(), "vpcattachment is required") {
 		t.Fatalf("error %q does not contain 'vpcattachment is required'", err.Error())
+	}
+}
+
+// ---- isTransientError ----------------------------------------------------
+
+func TestIsTransientError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantTrans bool
+	}{
+		{
+			name:      "nil error is not transient",
+			err:       nil,
+			wantTrans: false,
+		},
+		{
+			name:      "context deadline exceeded is transient",
+			err:       context.DeadlineExceeded,
+			wantTrans: true,
+		},
+		{
+			name:      "context canceled is transient",
+			err:       context.Canceled,
+			wantTrans: true,
+		},
+		{
+			name:      "wrapped context deadline exceeded is transient",
+			err:       fmt.Errorf("k8s: %w", context.DeadlineExceeded),
+			wantTrans: true,
+		},
+		{
+			name:      "wrapped context canceled is transient",
+			err:       fmt.Errorf("k8s: %w", context.Canceled),
+			wantTrans: true,
+		},
+		{
+			name:      "generic error is not transient",
+			err:       errors.New("some error"),
+			wantTrans: false,
+		},
+		{
+			name:      "validation error is not transient",
+			err:       apierrors.NewBadRequest("bad request"),
+			wantTrans: false,
+		},
+		{
+			name: "not found error is not transient",
+			err: apierrors.NewNotFound(
+				schema.GroupResource{Group: "bgp.miloapis.com", Resource: "bgpadvertisements"}, "test"),
+			wantTrans: false,
+		},
+		{
+			name: "503 service unavailable is transient",
+			err:  apierrors.NewServiceUnavailable("service unavailable"),
+			// apierrors.IsServiceUnavailable catches 503.
+			wantTrans: true,
+		},
+		{
+			name: "429 too many requests is transient",
+			err:  apierrors.NewTooManyRequests("too many requests", 0),
+			// apierrors.IsTooManyRequests catches 429.
+			wantTrans: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isTransientError(tt.err)
+			if got != tt.wantTrans {
+				t.Errorf("isTransientError(%v) = %v, want %v", tt.err, got, tt.wantTrans)
+			}
+		})
+	}
+}
+
+// ---- retryK8sOps ---------------------------------------------------------
+
+func TestRetryK8sOpsSucceedsImmediately(t *testing.T) {
+	calls := 0
+	err := retryK8sOps(100*time.Millisecond, func(ctx context.Context) error {
+		calls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call, got %d", calls)
+	}
+}
+
+func TestRetryK8sOpsRetriesOnTransientError(t *testing.T) {
+	calls := 0
+	err := retryK8sOps(2*time.Second, func(ctx context.Context) error {
+		calls++
+		if calls < 3 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 calls (initial + 2 retries), got %d", calls)
+	}
+}
+
+func TestRetryK8sOpsFailsAfterMaxRetries(t *testing.T) {
+	calls := 0
+	err := retryK8sOps(2*time.Second, func(ctx context.Context) error {
+		calls++
+		return context.DeadlineExceeded
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if calls != maxRetries+1 {
+		t.Errorf("expected %d calls (initial + maxRetries), got %d", maxRetries+1, calls)
+	}
+}
+
+func TestRetryK8sOpsNoRetryOnNonTransientError(t *testing.T) {
+	calls := 0
+	permanentErr := errors.New("validation failed")
+	err := retryK8sOps(2*time.Second, func(ctx context.Context) error {
+		calls++
+		return permanentErr
+	})
+	if !errors.Is(err, permanentErr) {
+		t.Fatalf("expected %v, got %v", permanentErr, err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call (no retry), got %d", calls)
+	}
+}
+
+func TestRetryK8sOpsExhaustsDeadline(t *testing.T) {
+	// When the timeout is very short, retries still happen but the fn
+	// completes instantly — so we exhaust maxRetries and get the last
+	// transient error back (not a context timeout, since fn is fast).
+	calls := 0
+	err := retryK8sOps(1*time.Millisecond, func(ctx context.Context) error {
+		calls++
+		return apierrors.NewServiceUnavailable("unavailable")
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	// Should have made maxRetries+1 attempts (initial + 2 retries).
+	if calls != maxRetries+1 {
+		t.Errorf("expected %d calls, got %d", maxRetries+1, calls)
+	}
+	// Final error is the last transient error returned by fn.
+	if !strings.Contains(err.Error(), "unavailable") {
+		t.Errorf("expected 'unavailable' in error, got %v", err)
 	}
 }
