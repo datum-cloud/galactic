@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -416,9 +417,21 @@ func publishBGPState(
 }
 
 func cmdDel(args *skel.CmdArgs) error {
-	pluginConf, err := parseConf(args.StdinData)
-	if err != nil {
-		return err
+	// DEL is idempotent per the CNI spec: always return success.
+	// Missing resources are not errors. We collect all cleanup errors,
+	// log them, and return nil so the CNI runtime does not retry.
+	var errs []error
+
+	// Parse config — if we can't parse it we still return success but
+	// won't be able to clean up any resources.
+	pluginConf, parseErr := parseConf(args.StdinData)
+	if parseErr != nil {
+		slog.Error("DEL: failed to parse CNI config, skipping cleanup", "err", parseErr,
+			"containerID", args.ContainerID)
+		// Cannot determine what to clean up without a valid config.
+		result := &type100.Result{}
+		_ = types.PrintResult(result, cniVersion100)
+		return nil
 	}
 
 	// Deallocate IPAM subnet before any other cleanup (veth-only).
@@ -431,53 +444,67 @@ func cmdDel(args *skel.CmdArgs) error {
 		namespace = defaultNamespace
 	}
 
-	// Signal BGP route withdrawal immediately to notify remote peers.
-	// cosmos reconciles async.
-	// IgnoreNotFound handles concurrent DEL races.
-	k8s, err := newK8sClient()
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
-	defer cancel()
-
-	// Delete the BGPAdvertisement first to withdraw prefixes, then the VRF instance.
-	adv := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
-			Namespace: namespace,
-		},
-	}
-	if err := k8s.Get(ctx, client.ObjectKeyFromObject(adv), adv); client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("get BGPAdvertisement: %w", err)
-	}
-	if err := k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("delete BGPAdvertisement: %w", err)
+	k8s, k8sErr := newK8sClient()
+	if k8sErr != nil {
+		slog.Error("DEL: failed to create k8s client, skipping CRD cleanup", "err", k8sErr,
+			"containerID", args.ContainerID)
+		errs = append(errs, fmt.Errorf("create k8s client: %w", k8sErr))
 	}
 
-	vrfInst := &bgpv1alpha1.BGPVRFInstance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment),
-			Namespace: namespace,
-		},
-	}
-	if err := k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("delete BGPVRFInstance: %w", err)
+	// Best-effort cleanup of all resources.
+	if k8s != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
+		defer cancel()
+
+		// Delete the BGPAdvertisement first to withdraw prefixes, then the VRF instance.
+		adv := &bgpv1alpha1.BGPAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
+				Namespace: namespace,
+			},
+		}
+		if err := k8s.Get(ctx, client.ObjectKeyFromObject(adv), adv); client.IgnoreNotFound(err) != nil {
+			slog.Error("DEL: failed to get BGPAdvertisement", "err", err,
+				"name", adv.Name, "namespace", namespace)
+			errs = append(errs, fmt.Errorf("get BGPAdvertisement %s: %w", adv.Name, err))
+		} else if err := k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
+			slog.Error("DEL: failed to delete BGPAdvertisement", "err", err,
+				"name", adv.Name, "namespace", namespace)
+			errs = append(errs, fmt.Errorf("delete BGPAdvertisement %s: %w", adv.Name, err))
+		}
+
+		vrfInst := &bgpv1alpha1.BGPVRFInstance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment),
+				Namespace: namespace,
+			},
+		}
+		if err := k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
+			slog.Error("DEL: failed to delete BGPVRFInstance", "err", err,
+				"name", vrfInst.Name, "namespace", namespace)
+			errs = append(errs, fmt.Errorf("delete BGPVRFInstance %s: %w", vrfInst.Name, err))
+		}
 	}
 
 	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
+
 	// host-device DEL is veth-only; tap has no guest interface to remove.
 	if pluginConf.InterfaceType == interfaceTypeVeth {
 		if err := hostDevice("DEL", args, pluginConf); err != nil {
-			return fmt.Errorf("host-device DEL: %w", err)
+			slog.Error("DEL: failed to delete host-device", "err", err,
+				"containerID", args.ContainerID)
+			errs = append(errs, fmt.Errorf("host-device DEL: %w", err))
 		}
 	}
+
 	for _, termination := range pluginConf.Terminations {
 		if err := route.Delete(
 			pluginConf.VPC, pluginConf.VPCAttachment,
 			termination.Network, termination.Via, dev,
 		); err != nil {
-			return fmt.Errorf("delete route %s: %w", termination.Network, err)
+			slog.Error("DEL: failed to delete route", "err", err,
+				"network", termination.Network, "via", termination.Via)
+			errs = append(errs, fmt.Errorf("delete route %s: %w", termination.Network, err))
 		}
 	}
 
@@ -487,26 +514,43 @@ func cmdDel(args *skel.CmdArgs) error {
 			if vpcHex, hexErr := intf.Base62ToHex(pluginConf.VPC); hexErr == nil {
 				if vpcAttHex, attErr := intf.Base62ToHex(pluginConf.VPCAttachment); attErr == nil {
 					if sid, sidErr := intf.EncodeSRv6Endpoint(pluginConf.SRv6Locator, vpcHex, vpcAttHex); sidErr == nil {
-						_ = srv6.RouteIngressDel(sid)
+						if err := srv6.RouteIngressDel(sid); err != nil {
+							slog.Error("DEL: failed to delete SRv6 ingress route", "err", err,
+								"sid", sid)
+							errs = append(errs, fmt.Errorf("delete SRv6 ingress route: %w", err))
+						}
 					}
 				}
 			}
 		}
 		if err := veth.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
-			return fmt.Errorf("delete veth: %w", err)
+			slog.Error("DEL: failed to delete veth", "err", err,
+				"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
+			errs = append(errs, fmt.Errorf("delete veth: %w", err))
 		}
 	case interfaceTypeTap:
 		if err := tap.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
-			return fmt.Errorf("delete tap: %w", err)
+			slog.Error("DEL: failed to delete tap", "err", err,
+				"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
+			errs = append(errs, fmt.Errorf("delete tap: %w", err))
 		}
 	}
 
 	if err := vrf.Delete(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
-		return fmt.Errorf("delete VRF: %w", err)
+		slog.Error("DEL: failed to delete VRF", "err", err,
+			"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
+		errs = append(errs, fmt.Errorf("delete VRF: %w", err))
 	}
 
 	result := &type100.Result{}
-	return types.PrintResult(result, cniVersion100)
+	_ = types.PrintResult(result, cniVersion100)
+
+	if len(errs) > 0 {
+		slog.Error("DEL: completed with cleanup errors",
+			"count", len(errs), "containerID", args.ContainerID)
+	}
+
+	return nil
 }
 
 // ipamResult holds the IPAM allocation details for building the CNI result.
