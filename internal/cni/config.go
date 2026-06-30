@@ -52,6 +52,47 @@ func isValidSRv6Locator(s string) bool {
 	return maskLen <= 64
 }
 
+// statusConf holds the minimal CNI config fields needed for STATUS validation.
+// STATUS only checks that the config is parseable and the API server is reachable;
+// it does not validate attachment-specific fields (VPC, VPCAttachment) because
+// STATUS must succeed before any ADD has ever run.
+type statusConf struct {
+	CNIVersion    string `json:"cniVersion"`
+	Type          string `json:"type"`
+	InterfaceType string `json:"interface_type"`
+}
+
+// parseStatusConf validates that the CNI config is parseable and contains the
+// required top-level fields (cniVersion, type). Unlike parseConf, it does not
+// validate VPC or VPCAttachment because STATUS must succeed on a freshly
+// started node before any ADD has run. However, interface_type is validated
+// if present because it is a structural config field, not an attachment
+// identifier.
+func parseStatusConf(data []byte) error {
+	var sc statusConf
+	if err := json.Unmarshal(data, &sc); err != nil {
+		return fmt.Errorf("parse CNI config: %w", err)
+	}
+	if sc.CNIVersion == "" {
+		return errors.New("cniVersion is required")
+	}
+	if sc.Type == "" {
+		return errors.New("type is required")
+	}
+	// Validate interface_type if present.
+	if sc.InterfaceType != "" {
+		switch sc.InterfaceType {
+		case interfaceTypeVeth, interfaceTypeTap:
+		default:
+			return fmt.Errorf(
+				"invalid interface_type %q: must be %q or %q",
+				sc.InterfaceType, interfaceTypeVeth, interfaceTypeTap,
+			)
+		}
+	}
+	return nil
+}
+
 // parseConf unmarshals the CNI configuration from stdin data and validates
 // the interface type and base62-encoded identifier fields. Returns an error
 // if the config is malformed, interface_type is unsupported, or VPC/
