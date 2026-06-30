@@ -645,11 +645,6 @@ func cmdDel(args *skel.CmdArgs) error {
 		return nil
 	}
 
-	// Deallocate IPAM subnet before any other cleanup (veth-only).
-	if pluginConf.InterfaceType == interfaceTypeVeth && (pluginConf.IPAM.Type != "" || enableLocalIPAM) {
-		deallocateIPAM(args, pluginConf)
-	}
-
 	namespace := pluginConf.Namespace
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -657,9 +652,14 @@ func cmdDel(args *skel.CmdArgs) error {
 
 	k8s, k8sErr := newK8sClient()
 	if k8sErr != nil {
-		slog.Error("DEL: failed to create k8s client, skipping CRD cleanup", "err", k8sErr,
+		slog.Error("DEL: failed to create k8s client, skipping IPAM deallocation and CRD cleanup", "err", k8sErr,
 			"containerID", args.ContainerID)
 		errs = append(errs, fmt.Errorf("create k8s client: %w", k8sErr))
+	}
+
+	// Deallocate IPAM subnet before any other cleanup (veth-only).
+	if k8s != nil && pluginConf.InterfaceType == interfaceTypeVeth && (pluginConf.IPAM.Type != "" || enableLocalIPAM) {
+		deallocateIPAM(args, pluginConf, k8s)
 	}
 
 	// Best-effort cleanup of all resources.
@@ -1066,9 +1066,9 @@ func cleanupContainerNetns(netnsPath, ifName string) error {
 // Reads the allocated subnet from the BGPAdvertisement CRD annotation, then
 // deallocates it from the in-memory pool. When enableLocalIPAM is true and
 // no explicit ipam block is configured, uses the default pool CIDR.
-func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf) {
+func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf, k8s client.Client) {
 	// Look up the allocated subnet from the BGPAdvertisement annotation.
-	subnetCIDR := getAllocatedSubnetFromCRD(args.ContainerID, pluginConf)
+	subnetCIDR := getAllocatedSubnetFromCRD(args.ContainerID, pluginConf, k8s)
 	if subnetCIDR == "" {
 		// No allocation found — either allocation was never completed,
 		// or the advertisement was already deleted. Nothing to clean up.
@@ -1099,15 +1099,10 @@ func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf) {
 
 // getAllocatedSubnetFromCRD reads the allocated subnet for the given container
 // from the BGPAdvertisement CRD annotation. Returns empty string if not found.
-func getAllocatedSubnetFromCRD(containerID string, pluginConf *PluginConf) string {
+func getAllocatedSubnetFromCRD(containerID string, pluginConf *PluginConf, k8s client.Client) string {
 	namespace := pluginConf.Namespace
 	if namespace == "" {
 		namespace = defaultNamespace
-	}
-
-	k8s, err := newK8sClient()
-	if err != nil {
-		return ""
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
