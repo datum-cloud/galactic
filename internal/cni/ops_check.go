@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -70,44 +69,27 @@ func cmdCheck(args *skel.CmdArgs) error {
 // cmdStatus implements the CNI spec STATUS operation. It is called by the
 // runtime to determine whether the plugin is ready to service ADD requests.
 // Unlike cmdCheck, no container is attached so there is no Netns to inspect.
-// STATUS validates the plugin's own readiness: config is parseable, managed
-// kernel resources (VRF, host interface) exist, and the API server is
-// reachable for BGPAdvertisement CRD operations.
+// STATUS validates the plugin's own readiness: config is parseable and the
+// API server is reachable for BGPAdvertisement CRD operations. Attachment-
+// specific kernel resources (VRF, host interface) are NOT checked because
+// STATUS must succeed before any ADD has ever run.
 func cmdStatus(args *skel.CmdArgs) error {
-	pluginConf, err := parseConf(args.StdinData)
-	if err != nil {
+	// Validate config is parseable.
+	if _, err := parseConf(args.StdinData); err != nil {
 		return err
 	}
 
-	var errs []error
-
-	// Check node-level state (VRF + host interface).
-	_, statusErrs := checkNodeLevelState(pluginConf.VPC, pluginConf.VPCAttachment)
-	errs = append(errs, statusErrs...)
-
-	// Check API server reachability with a lightweight GET.
-	if err := probeAPIServer(); err != nil {
-		errs = append(errs, fmt.Errorf("api server: %w", err))
-	}
-
-	if len(errs) > 0 {
-		// Code 50 = plugin not available. Per CNI spec v1.1.0 §4.4, STATUS
-		// errors must use a typed error code so runtimes can distinguish
-		// plugin unavailability (retry/reschedule) from generic failures.
-		return types.NewError(50, "STATUS failed", errors.Join(errs...).Error())
-	}
-	return nil
+	// Config is parseable and API server is reachable.
+	return probeAPIServer()
 }
 
 // probeAPIServer performs a lightweight GET against the in-cluster API server
 // to verify reachability. Returns nil when the server responds (any HTTP
 // status code) or when running outside a cluster with no kubeconfig.
 //
-// getKubeconfig is a package-level variable so tests can inject error paths.
-var getKubeconfig = func() (*rest.Config, error) { return ctrl.GetConfig() }
-
-func probeAPIServer() error {
-	kubeconfig, err := getKubeconfig()
+// probeAPIServerFn is a variable so tests can override it.
+var probeAPIServerFn = func() error {
+	kubeconfig, err := ctrl.GetConfig()
 	if err != nil {
 		if errors.Is(err, rest.ErrNotInCluster) {
 			// Not running in-cluster; skip API check.
@@ -136,6 +118,8 @@ func probeAPIServer() error {
 	defer resp.Body.Close() //nolint:errcheck // best-effort probe
 	return nil
 }
+
+var probeAPIServer = probeAPIServerFn
 
 // checkNodeLevelState verifies that node-level networking resources exist:
 // the VRF interface and the host-side endpoint interface. Returns the host
