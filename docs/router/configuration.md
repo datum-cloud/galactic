@@ -11,8 +11,6 @@ or a combination of both. CLI flags take precedence over environment variables.
 | Router role | `GALACTIC_ROUTER_ROUTER_ROLE` | `--router-role` | _(required)_ |
 | BGP listen port | `GALACTIC_ROUTER_BGP_LISTEN_PORT` | `--bgp-listen-port` | `179` |
 | BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | `""` |
-| GoBGP gRPC server | `GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED` | `--gobgp-grpc-server-enabled` | `false` |
-| GoBGP gRPC port | `GALACTIC_ROUTER_GOBGP_GRPC_PORT` | `--gobgp-grpc-port` | `50051` |
 | Metrics port | `GALACTIC_ROUTER_METRICS_PORT` | `--metrics-port` | `8080` |
 | gRPC health port | `GALACTIC_ROUTER_GRPC_HEALTH_PORT` | `--grpc-health-port` | `5000` |
 
@@ -61,23 +59,6 @@ selects the default source address.
 
 **Type:** string
 **Default:** `""` (empty)
-
-### `--gobgp-grpc-server-enabled` / `GALACTIC_ROUTER_GOBGP_GRPC_SERVER_ENABLED`
-
-Enable the embedded GoBGP gRPC API server. When enabled, the gRPC server
-listens on the port specified by `--gobgp-grpc-port`.
-
-**Type:** boolean
-**Default:** `false`
-
-### `--gobgp-grpc-port` / `GALACTIC_ROUTER_GOBGP_GRPC_PORT`
-
-TCP port for the GoBGP gRPC API server. Only used when
-`--gobgp-grpc-server-enabled` is `true`.
-
-**Type:** integer
-**Default:** `50051`
-**Valid values:** `1`–`65535`
 
 ### `--metrics-port` / `GALACTIC_ROUTER_METRICS_PORT`
 
@@ -130,8 +111,6 @@ args:
   - --node-name=$(GALACTIC_ROUTER_NODE_NAME)
   - --router-role=tenant
   - --metrics-port=9090
-  - --gobgp-grpc-server-enabled=true
-  - --gobgp-grpc-port=50051
 env:
   - name: GALACTIC_ROUTER_NODE_NAME
     valueFrom:

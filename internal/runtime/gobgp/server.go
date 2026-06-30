@@ -23,9 +23,6 @@ type Config struct {
 	// LogLevel controls GoBGP's internal log verbosity.
 	// Valid values: debug, info, warn, error, panic. Defaults to panic.
 	LogLevel string
-	// GRPCListenAddress is the TCP address the GoBGP gRPC API listens on.
-	// An empty string (default) disables the gRPC server entirely.
-	GRPCListenAddress string
 }
 
 // Server wraps an embedded GoBGP BgpServer.
@@ -89,9 +86,6 @@ func (s *Server) buildServerOptions() []gobgpserver.ServerOption {
 	levelVar.Set(level)
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: levelVar}))
 	opts := []gobgpserver.ServerOption{gobgpserver.LoggerOption(logger, levelVar)}
-	if s.cfg.GRPCListenAddress != "" {
-		opts = append(opts, gobgpserver.GrpcListenAddress(s.cfg.GRPCListenAddress))
-	}
 	return opts
 }
 

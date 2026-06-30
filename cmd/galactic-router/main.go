@@ -28,8 +28,6 @@ const (
 	resourceBGPVRFInstances   = "bgpvrfinstances"
 	resourceSecrets           = "secrets"
 	resourceNodes             = "nodes"
-
-	defaultGrpcPort = 50051
 )
 
 func main() {
