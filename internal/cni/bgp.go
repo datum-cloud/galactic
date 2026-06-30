@@ -287,6 +287,28 @@ func publishBGPState(
 	})
 }
 
+// routeConflicts reports whether an existing route conflicts with the desired
+// pod-subnet route. A conflict occurs when the destination matches but the
+// gateway or link index differs.
+func routeConflicts(existing, desired *netlink.Route) bool {
+	if existing.Dst == nil || desired.Dst == nil {
+		return false
+	}
+	if existing.Dst.String() != desired.Dst.String() {
+		return false
+	}
+	if (existing.Gw != nil) != (desired.Gw != nil) {
+		return true
+	}
+	if existing.Gw != nil && !existing.Gw.Equal(desired.Gw) {
+		return true
+	}
+	if existing.LinkIndex != 0 && desired.LinkIndex != 0 && existing.LinkIndex != desired.LinkIndex {
+		return true
+	}
+	return false
+}
+
 // configureHostVethGateway assigns the gateway address as a /128 host address on
 // the host-side veth and installs an explicit pod-subnet route into the VRF table.
 //
@@ -314,11 +336,42 @@ func configureHostVethGateway(vpc, vpcAttachment string, res *ipamResult) error 
 	if err != nil {
 		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
 	}
-	if err := netlink.RouteReplace(&netlink.Route{
+	desiredRoute := &netlink.Route{
 		Dst:       res.subnet,
 		LinkIndex: hostLink.Attrs().Index,
 		Table:     int(tableID),
-	}); err != nil {
+	}
+
+	// Check for existing routes with the same destination before installing.
+	existingRoutes, err := netlink.RouteListFiltered(
+		netlink.FAMILY_V6,
+		&netlink.Route{Table: int(tableID)},
+		netlink.RT_FILTER_TABLE,
+	)
+	if err != nil {
+		return fmt.Errorf("list routes in VRF table: %w", err)
+	}
+	for _, r := range existingRoutes {
+		if r.Dst == nil {
+			continue
+		}
+		if r.Dst.String() != desiredRoute.Dst.String() {
+			continue
+		}
+		if routeConflicts(&r, desiredRoute) {
+			return fmt.Errorf(
+				"existing route %v to %s conflicts with desired route %v",
+				r, desiredRoute.Dst, desiredRoute,
+			)
+		}
+		// Route already exists with matching attributes — idempotent, skip.
+		return nil
+	}
+
+	if err := netlink.RouteAdd(desiredRoute); err != nil {
+		if errors.Is(err, syscall.EEXIST) {
+			return nil // already installed by a concurrent caller
+		}
 		return fmt.Errorf("add pod subnet route to VRF table: %w", err)
 	}
 	return nil
