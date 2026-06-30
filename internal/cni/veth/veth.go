@@ -24,11 +24,24 @@ var errIptablesMissing = errors.New("iptables binary not available")
 // isLinkNotFoundError reports whether err indicates that a network link
 // does not exist. This covers both ENOENT and ENODEV errors from netlink.
 func isLinkNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
 	if os.IsNotExist(err) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "no such device") || strings.Contains(msg, "not found")
+}
+
+// isIptablesRuleNotFoundError reports whether err indicates that an iptables
+// rule does not exist. The go-iptables package returns a generic error whose
+// message contains "rule not found" when the target rule is absent.
+func isIptablesRuleNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "rule not found")
 }
 
 func updateForwardRule(interfaceName string, action string) error {
@@ -131,13 +144,21 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 func Delete(vpc, vpcAttachment string) error {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 
-	// Skip iptables cleanup if binary is unavailable (distroless images).
-	if err := updateForwardRule(hostName, "delete"); err != nil && !errors.Is(err, errIptablesMissing) {
-		return err
+	// Skip iptables cleanup if binary is unavailable or the rule is already
+	// gone (distroless images, or Delete already ran).
+	if err := updateForwardRule(hostName, "delete"); err != nil {
+		if errors.Is(err, errIptablesMissing) || isIptablesRuleNotFoundError(err) {
+			// iptables not available or rule already absent — nothing to clean up.
+		} else {
+			return err
+		}
 	}
 
 	hostLink, err := netlink.LinkByName(hostName)
 	if err != nil {
+		if isLinkNotFoundError(err) {
+			return nil // interface already gone — idempotent
+		}
 		return err
 	}
 

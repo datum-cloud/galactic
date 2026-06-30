@@ -112,6 +112,84 @@ const (
 	cniVersion100 = "1.0.0"
 )
 
+// resourceTracker tracks resources created during cmdAdd for selective rollback.
+type resourceTracker struct {
+	vpc, vpcAttachment string
+	ifaceType          string
+	vrfCreated         bool
+	routesCreated      int
+	srv6SID            string
+	vrfInstanceCreated bool
+	advCreated         bool
+	k8s                client.Client
+	namespace          string
+}
+
+// cleanup rolls back all tracked resources in reverse creation order.
+// Errors are logged but never returned — the caller already has a failure.
+func (rt *resourceTracker) cleanup(ctx context.Context) {
+	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
+		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+
+	// 1. Delete BGPAdvertisement (withdraws prefixes)
+	if rt.advCreated && rt.k8s != nil {
+		adv := &bgpv1alpha1.BGPAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      bgpAdvertisementName(rt.vpc, rt.vpcAttachment),
+				Namespace: rt.namespace,
+			},
+		}
+		if err := rt.k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
+			slog.Error("Rollback: failed to delete BGPAdvertisement", "err", err,
+				"name", adv.Name, "namespace", rt.namespace)
+		}
+	}
+
+	// 2. Delete BGPVRFInstance
+	if rt.vrfInstanceCreated && rt.k8s != nil {
+		vrfInst := &bgpv1alpha1.BGPVRFInstance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      bgpVRFInstanceName(rt.vpc, rt.vpcAttachment),
+				Namespace: rt.namespace,
+			},
+		}
+		if err := rt.k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
+			slog.Error("Rollback: failed to delete BGPVRFInstance", "err", err,
+				"name", vrfInst.Name, "namespace", rt.namespace)
+		}
+	}
+
+	// 3. Delete SRv6 ingress route (only if we got a SID)
+	if rt.srv6SID != "" {
+		if err := srv6.RouteIngressDel(rt.srv6SID); err != nil {
+			slog.Error("Rollback: failed to delete SRv6 ingress route", "err", err,
+				"sid", rt.srv6SID)
+		}
+	}
+
+	// 4. Delete host veth (veth mode only)
+	if rt.ifaceType == interfaceTypeVeth {
+		if err := veth.Delete(rt.vpc, rt.vpcAttachment); err != nil {
+			slog.Error("Rollback: failed to delete veth", "err", err,
+				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+		}
+	}
+
+	// 5. Delete tap (tap mode only)
+	if rt.ifaceType == interfaceTypeTap {
+		if err := tap.Delete(rt.vpc, rt.vpcAttachment); err != nil {
+			slog.Error("Rollback: failed to delete tap", "err", err,
+				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+		}
+	}
+
+	// 6. Delete VRF (flushes all routes, removes VRF interface)
+	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
+		slog.Error("Rollback: failed to delete VRF", "err", err,
+			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+	}
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(cniScheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(cniScheme))
@@ -241,14 +319,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	// Roll back on any failure to avoid orphaned resources.
-	// cmdDel is best-effort — errors are logged, not returned.
-	defer func() {
-		if err != nil {
-			_ = cmdDel(args)
-		}
-	}()
-
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
 		return errors.New("NODE_NAME environment variable is not set")
@@ -259,9 +329,29 @@ func cmdAdd(args *skel.CmdArgs) error {
 		namespace = defaultNamespace
 	}
 
+	// Track resources for selective rollback on failure.
+	tracker := &resourceTracker{
+		vpc:           pluginConf.VPC,
+		vpcAttachment: pluginConf.VPCAttachment,
+		ifaceType:     pluginConf.InterfaceType,
+		namespace:     namespace,
+	}
+
+	// Selective rollback: clean up only resources that were created.
+	// We need a context for k8s operations in rollback; the k8s client
+	// will be populated by publishBGPState before it's needed.
+	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), cniTimeout)
+	defer func() {
+		if err != nil {
+			tracker.cleanup(rollbackCtx)
+			rollbackCancel()
+		}
+	}()
+
 	if err := vrf.Add(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
 		return fmt.Errorf("add VRF: %w", err)
 	}
+	tracker.vrfCreated = true
 
 	// Create the appropriate interface type (veth or tap).
 	switch pluginConf.InterfaceType {
@@ -288,6 +378,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
 			return fmt.Errorf("add route %s: %w", termination.Network, err)
 		}
+		tracker.routesCreated++
 	}
 
 	// Host-device delegation and IPAM are veth-only.
@@ -309,7 +400,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return nil
 	}
 
-	return publishBGPState(args, pluginConf, nodeName, namespace, ipamResult)
+	return publishBGPState(args, pluginConf, nodeName, namespace, ipamResult, tracker)
 }
 
 // cmdCheck validates that the container's network state matches what was
@@ -429,6 +520,7 @@ func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Terminatio
 // veth-only; tap mode returns before reaching this path.
 func publishBGPState(
 	args *skel.CmdArgs, pluginConf *PluginConf, nodeName, namespace string, ipamResult *ipamResult,
+	tracker *resourceTracker,
 ) error {
 	if err := configureHostVethGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
 		return err
@@ -446,11 +538,15 @@ func publishBGPState(
 	if err != nil {
 		return err
 	}
+	if srv6SIDStr != "" {
+		tracker.srv6SID = srv6SIDStr
+	}
 
 	k8s, err := newK8sClient()
 	if err != nil {
 		return err
 	}
+	tracker.k8s = k8s
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
 
@@ -488,6 +584,7 @@ func publishBGPState(
 	if err != nil {
 		return fmt.Errorf("apply BGPVRFInstance: %w", err)
 	}
+	tracker.vrfInstanceCreated = true
 
 	// Create the BGPAdvertisement to originate the pod's subnet prefix.
 	adv := &bgpv1alpha1.BGPAdvertisement{
@@ -525,6 +622,7 @@ func publishBGPState(
 	if err != nil {
 		return fmt.Errorf("apply BGPAdvertisement: %w", err)
 	}
+	tracker.advCreated = true
 
 	return nil
 }

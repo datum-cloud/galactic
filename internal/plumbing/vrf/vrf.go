@@ -70,13 +70,14 @@ func Add(vpc, vpcAttachment string) error {
 }
 
 // Delete flushes all routes from the VRF routing table and removes the VRF
-// interface for the given base62-encoded VPC and VPCAttachment.
+// interface for the given base62-encoded VPC and VPCAttachment. Delete is
+// idempotent: if the VRF interface does not exist, it returns nil.
 func Delete(vpc, vpcAttachment string) error {
 	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
 	vrfID, err := getVRFIDForInterface(name)
 	if err != nil {
-		return err
+		return nil // VRF already gone — idempotent
 	}
 
 	if err := flush(vrfID); err != nil {
@@ -85,7 +86,7 @@ func Delete(vpc, vpcAttachment string) error {
 
 	link, err := netlink.LinkByName(name)
 	if err != nil {
-		return err
+		return nil // interface already gone — idempotent
 	}
 
 	return netlink.LinkDel(link)
