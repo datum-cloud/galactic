@@ -37,16 +37,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 
 	var errs []error
 
-	// Check VRF interface exists.
-	if err := vrf.Exists(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
-		errs = append(errs, fmt.Errorf("vrf %s-%s: %w", pluginConf.VPC, pluginConf.VPCAttachment, err))
-	}
-
-	// Check the host-side interface exists.
-	hostName := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
-	if _, err := netlink.LinkByName(hostName); err != nil {
-		errs = append(errs, fmt.Errorf("host interface %q: %w", hostName, err))
-	}
+	// Check node-level state (VRF + host interface).
+	hostName, nodeErrs := checkNodeLevelState(pluginConf.VPC, pluginConf.VPCAttachment)
+	errs = append(errs, nodeErrs...)
 
 	// For veth mode, verify the guest interface is in the container netns.
 	if pluginConf.InterfaceType == interfaceTypeVeth {
@@ -88,16 +81,9 @@ func cmdStatus(args *skel.CmdArgs) error {
 
 	var errs []error
 
-	// Check VRF interface exists.
-	if err := vrf.Exists(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
-		errs = append(errs, fmt.Errorf("vrf %s-%s: %w", pluginConf.VPC, pluginConf.VPCAttachment, err))
-	}
-
-	// Check the host-side interface exists.
-	hostName := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
-	if _, err := netlink.LinkByName(hostName); err != nil {
-		errs = append(errs, fmt.Errorf("host interface %q: %w", hostName, err))
-	}
+	// Check node-level state (VRF + host interface).
+	_, statusErrs := checkNodeLevelState(pluginConf.VPC, pluginConf.VPCAttachment)
+	errs = append(errs, statusErrs...)
 
 	// Check API server reachability with a lightweight GET.
 	if err := probeAPIServer(); err != nil {
@@ -142,6 +128,26 @@ func probeAPIServer() error {
 	}
 	defer resp.Body.Close() //nolint:errcheck // best-effort probe
 	return nil
+}
+
+// checkNodeLevelState verifies that node-level networking resources exist:
+// the VRF interface and the host-side endpoint interface. Returns the host
+// interface name (for callers that need it, e.g. cmdCheck's prevResult
+// validation) and a slice of errors (nil when all checks pass) so callers
+// can accumulate and report all failures at once.
+func checkNodeLevelState(vpc, vpcAttachment string) (string, []error) {
+	var errs []error
+
+	if err := vrf.Exists(vpc, vpcAttachment); err != nil {
+		errs = append(errs, fmt.Errorf("vrf %s-%s: %w", vpc, vpcAttachment, err))
+	}
+
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	if _, err := netlink.LinkByName(hostName); err != nil {
+		errs = append(errs, fmt.Errorf("host interface %q: %w", hostName, err))
+	}
+
+	return hostName, errs
 }
 
 // checkGuestInterface verifies that the named interface exists inside the
