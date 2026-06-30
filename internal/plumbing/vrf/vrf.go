@@ -117,7 +117,8 @@ func flush(vrfID uint32) error {
 	return nil
 }
 
-func listVRFLinks() ([]*netlink.Vrf, error) {
+// ListVRFLinks returns all VRF interfaces currently present on the host.
+func ListVRFLinks() ([]*netlink.Vrf, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
 		return nil, err
@@ -125,11 +126,15 @@ func listVRFLinks() ([]*netlink.Vrf, error) {
 
 	vrfLinks := make([]*netlink.Vrf, 0, len(links))
 	for _, link := range links {
-		if vrf, ok := link.(*netlink.Vrf); ok {
-			vrfLinks = append(vrfLinks, vrf)
+		if v, ok := link.(*netlink.Vrf); ok {
+			vrfLinks = append(vrfLinks, v)
 		}
 	}
 	return vrfLinks, nil
+}
+
+func listVRFLinks() ([]*netlink.Vrf, error) {
+	return ListVRFLinks()
 }
 
 func findNextAvailableVRFID() (uint32, error) {

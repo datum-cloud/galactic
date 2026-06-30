@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -50,6 +51,8 @@ func newViper() *viper.Viper {
 	v.SetDefault("galactic_router.gobgp_grpc_server_enabled", false)
 	v.SetDefault("galactic_router.metrics_port", 8080)
 	v.SetDefault("galactic_router.grpc_health_port", 5000)
+	v.SetDefault("galactic_router.gc_namespace", "default")
+	v.SetDefault("galactic_router.gc_interval", 5*time.Minute)
 
 	v.AutomaticEnv()
 
@@ -72,6 +75,10 @@ func newViper() *viper.Viper {
 	v.BindEnv("galactic_router.metrics_port", "GALACTIC_ROUTER_METRICS_PORT")
 	//nolint:errcheck
 	v.BindEnv("galactic_router.grpc_health_port", "GALACTIC_ROUTER_GRPC_HEALTH_PORT")
+	//nolint:errcheck
+	v.BindEnv("galactic_router.gc_namespace", "GALACTIC_ROUTER_GC_NAMESPACE")
+	//nolint:errcheck
+	v.BindEnv("galactic_router.gc_interval", "GALACTIC_ROUTER_GC_INTERVAL")
 
 	return v
 }
@@ -104,6 +111,12 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) { //nolint:lll // cobra flag 
 	cmd.Flags().IntP("grpc-health-port", "",
 		v.GetInt("galactic_router.grpc_health_port"),
 		"Port for the gRPC health check server")
+	cmd.Flags().StringP("gc-namespace", "",
+		v.GetString("galactic_router.gc_namespace"),
+		"Namespace for GC controller to scan for orphaned BGP CRDs")
+	cmd.Flags().DurationP("gc-interval", "",
+		v.GetDuration("galactic_router.gc_interval"),
+		"GC collection interval")
 
 	if err := v.BindPFlags(cmd.Flags()); err != nil {
 		log.Fatalf("bind flags: %v", err)
@@ -285,6 +298,38 @@ func runCmd(v *viper.Viper) error {
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup Node controller: %w", err)
 	}
+
+	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
+	gcNamespace := v.GetString("galactic_router.gc_namespace")
+	gcInterval := v.GetDuration("galactic_router.gc_interval")
+	gcRec := &controller.GCReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Namespace: gcNamespace,
+		Interval:  gcInterval,
+	}
+	if err := gcRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup GC controller: %w", err)
+	}
+
+	// Start the GC ticker goroutine. It runs until the manager's context
+	// is cancelled.
+	go func() {
+		ticker := time.NewTicker(gcInterval)
+		defer ticker.Stop()
+
+		// Run an initial GC pass immediately.
+		gcRec.RunGC(ctx)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				gcRec.RunGC(ctx)
+			}
+		}
+	}()
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
