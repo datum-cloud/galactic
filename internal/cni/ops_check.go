@@ -102,11 +102,18 @@ func cmdStatus(args *skel.CmdArgs) error {
 // probeAPIServer performs a lightweight GET against the in-cluster API server
 // to verify reachability. Returns nil when the server responds (any HTTP
 // status code) or when running outside a cluster with no kubeconfig.
+//
+// getKubeconfig is a package-level variable so tests can inject error paths.
+var getKubeconfig = func() (*rest.Config, error) { return ctrl.GetConfig() }
+
 func probeAPIServer() error {
-	kubeconfig, err := ctrl.GetConfig()
+	kubeconfig, err := getKubeconfig()
 	if err != nil {
-		// No kubeconfig (running outside a cluster); skip API check.
-		return nil
+		if errors.Is(err, rest.ErrNotInCluster) {
+			// Not running in-cluster; skip API check.
+			return nil
+		}
+		return fmt.Errorf("load kubeconfig: %w", err)
 	}
 	kubeconfig.Timeout = 2 * time.Second
 	httpClient, err := rest.HTTPClientFor(kubeconfig)
