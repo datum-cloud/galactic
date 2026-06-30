@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -1173,5 +1174,45 @@ func TestRetryK8sOpsExhaustsDeadline(t *testing.T) {
 	// Final error is the last transient error returned by fn.
 	if !strings.Contains(err.Error(), "unavailable") {
 		t.Errorf("expected 'unavailable' in error, got %v", err)
+	}
+}
+
+// ---- probeAPIServer ------------------------------------------------------
+
+func TestProbeAPIServerErrNotInCluster(t *testing.T) {
+	// When getKubeconfig returns ErrNotInCluster, probeAPIServer should
+	// return nil (not running in-cluster; skip API check).
+	original := getKubeconfig
+	defer func() { getKubeconfig = original }()
+
+	getKubeconfig = func() (*rest.Config, error) {
+		return nil, rest.ErrNotInCluster
+	}
+
+	if err := probeAPIServer(); err != nil {
+		t.Fatalf("expected nil for ErrNotInCluster, got %v", err)
+	}
+}
+
+func TestProbeAPIServerMalformedKubeconfig(t *testing.T) {
+	// When getKubeconfig returns a non-ErrNotInCluster error (e.g. a
+	// malformed kubeconfig file), probeAPIServer should surface it wrapped.
+	original := getKubeconfig
+	defer func() { getKubeconfig = original }()
+
+	malformedErr := errors.New("invalid kubeconfig: permission denied")
+	getKubeconfig = func() (*rest.Config, error) {
+		return nil, malformedErr
+	}
+
+	err := probeAPIServer()
+	if err == nil {
+		t.Fatal("expected error for malformed kubeconfig, got nil")
+	}
+	if !strings.Contains(err.Error(), "load kubeconfig") {
+		t.Fatalf("error %q does not contain 'load kubeconfig'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error %q does not contain original error", err.Error())
 	}
 }
