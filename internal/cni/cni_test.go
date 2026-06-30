@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -508,6 +509,47 @@ func TestBuildTapResult(t *testing.T) {
 
 	if len(result.IPs) != 0 {
 		t.Errorf("IPs count = %d, want 0", len(result.IPs))
+	}
+}
+
+// ---- cmdDel idempotency --------------------------------------------------
+
+// TestCmdDelIdempotent returns nil even when the CNI config is invalid.
+// Per the CNI spec, DEL is idempotent: missing resources are not errors.
+func TestCmdDelIdempotent(t *testing.T) {
+	args := &skel.CmdArgs{
+		ContainerID: "test-container",
+		StdinData:   []byte("not valid json"),
+	}
+
+	// DEL must return nil regardless of config validity.
+	if err := cmdDel(args); err != nil {
+		t.Fatalf("cmdDel with invalid config returned error = %v, want nil", err)
+	}
+}
+
+// TestCmdDelIdempotentMissingResources returns nil even when the config is
+// valid but all resources are missing (k8s client creation fails in tests).
+func TestCmdDelIdempotentMissingResources(t *testing.T) {
+	// Save and restore the original enableLocalIPAM state.
+	original := enableLocalIPAM
+	defer func() { enableLocalIPAM = original }()
+
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s","interface_type":"veth"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: "test-container",
+		StdinData:   []byte(conf),
+	}
+
+	// DEL must return nil even though k8s client creation will fail
+	// (no in-cluster config in tests) and all kernel resources are missing.
+	if err := cmdDel(args); err != nil {
+		t.Fatalf("cmdDel with missing resources returned error = %v, want nil", err)
 	}
 }
 
