@@ -662,6 +662,66 @@ func TestCmdCheckMissingVPC(t *testing.T) {
 	}
 }
 
+func TestCmdCheckWithPrevResultMissingResources(t *testing.T) {
+	// Build a prevResult matching what buildResult produces for veth mode.
+	prevResult := `{` +
+		`"cniVersion":"1.0.0",` +
+		`"interfaces":[` +
+		`{"name":"galactic-abc-def","mac":"aa:bb:cc:dd:ee:01","mtu":1500,"sandbox":""},` +
+		`{"name":"galactic-def-abc","mac":"aa:bb:cc:dd:ee:02","mtu":1500,"sandbox":"/proc/1/ns/net"}` +
+		`],` +
+		`"ips":[` +
+		`{"version":"6","address":"fd00:10:ff01::1234/80","gateway":"fd00:10:ff01::1","interface":1}` +
+		`]}`
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s",`+
+			`"prevResult":%s}`,
+		testVPC, testAttachment, prevResult,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		Netns:       "/proc/1/ns/net",
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdCheck(args)
+	if err == nil {
+		t.Fatalf("expected CHECK failure for missing resources, got nil")
+	}
+	if !strings.Contains(err.Error(), "CHECK failed") {
+		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
+	}
+	// prevResult parsing should succeed; errors come from missing kernel state.
+	if !strings.Contains(err.Error(), "prevResult validation") {
+		t.Fatalf("error %q does not contain 'prevResult validation'", err.Error())
+	}
+}
+
+func TestCmdCheckWithInvalidPrevResult(t *testing.T) {
+	// prevResult that is structurally valid JSON but not a valid CNI result.
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s",`+
+			`"prevResult":{"not":"a valid cni result"}}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdCheck(args)
+	if err == nil {
+		t.Fatalf("expected CHECK failure for invalid prevResult, got nil")
+	}
+	if !strings.Contains(err.Error(), "prevResult validation") {
+		t.Fatalf("error %q does not contain 'prevResult validation'", err.Error())
+	}
+}
+
 // ---- resourceTracker ------------------------------------------------------
 
 func TestResourceTrackerCleanupZeroValue(t *testing.T) {
