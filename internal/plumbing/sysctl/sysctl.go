@@ -8,9 +8,14 @@ package sysctl
 
 import (
 	"fmt"
+	"log/slog"
 
 	gosysctl "github.com/lorenzosaino/go-sysctl"
 )
+
+// logger is the package-level logger. Defaults to slog.Default().
+// Override for testing.
+var logger *slog.Logger = slog.Default()
 
 var interfaceSettings = []struct {
 	format string
@@ -25,11 +30,13 @@ var interfaceSettings = []struct {
 
 // ConfigureInterfaceSysctls applies forwarding, rp_filter, and proxy ARP/NDP
 // sysctl settings to iface, which are required for correct VRF packet handling.
+// Silently skips sysctls that don't exist (e.g., in container environments
+// where dynamically created interfaces may not have all sysctl entries).
 func ConfigureInterfaceSysctls(iface string) error {
 	for _, entry := range interfaceSettings {
 		key := fmt.Sprintf(entry.format, iface)
 		if err := gosysctl.Set(key, entry.value); err != nil {
-			return err
+			logger.Warn("failed to set sysctl (non-fatal)", "sysctl", key, "err", err)
 		}
 	}
 	return nil
