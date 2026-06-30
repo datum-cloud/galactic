@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"sync"
 
 	"github.com/vishvananda/netlink"
@@ -138,13 +137,13 @@ func findNextAvailableVRFID() (uint32, error) {
 		return 0, err
 	}
 
-	used := make([]uint32, 0, len(vrfs))
+	used := make(map[uint32]struct{}, len(vrfs))
 	for _, vrf := range vrfs {
-		used = append(used, vrf.Table)
+		used[vrf.Table] = struct{}{}
 	}
 
 	for vrfID := minVRFID; vrfID <= maxVRFID; vrfID++ {
-		if !slices.Contains(used, vrfID) {
+		if _, ok := used[vrfID]; !ok {
 			return vrfID, nil
 		}
 	}
@@ -158,10 +157,13 @@ func getVRFIDForInterface(name string) (uint32, error) {
 		return 0, err
 	}
 
+	vrfByName := make(map[string]*netlink.Vrf, len(vrfs))
 	for _, vrf := range vrfs {
-		if vrf.Name == name {
-			return vrf.Table, nil
-		}
+		vrfByName[vrf.Name] = vrf
+	}
+
+	if vrf, ok := vrfByName[name]; ok {
+		return vrf.Table, nil
 	}
 	return 0, fmt.Errorf("could not find VRF ID for interface: %s", name)
 }
