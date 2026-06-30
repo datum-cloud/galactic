@@ -1307,9 +1307,9 @@ func TestRetryK8sOpsExhaustsDeadline(t *testing.T) {
 func TestProbeAPIServerErrNotInCluster(t *testing.T) {
 	// When probeAPIServerFn returns ErrNotInCluster, probeAPIServer should
 	// return nil (not running in-cluster; skip API check).
-	original := probeAPIServerFn
-	probeAPIServerFn = func() error { return nil }
-	defer func() { probeAPIServerFn = original }()
+	original := probeAPIServer
+	probeAPIServer = func() error { return nil }
+	defer func() { probeAPIServer = original }()
 
 	if err := probeAPIServer(); err != nil {
 		t.Fatalf("expected nil for ErrNotInCluster, got %v", err)
@@ -1319,11 +1319,11 @@ func TestProbeAPIServerErrNotInCluster(t *testing.T) {
 func TestProbeAPIServerMalformedKubeconfig(t *testing.T) {
 	// When probeAPIServerFn returns a non-ErrNotInCluster error (e.g. a
 	// malformed kubeconfig file), probeAPIServer should surface it wrapped.
-	original := probeAPIServerFn
-	probeAPIServerFn = func() error {
-		return fmt.Errorf("invalid kubeconfig: permission denied")
+	original := probeAPIServer
+	probeAPIServer = func() error {
+		return errors.New("load kubeconfig: invalid kubeconfig: permission denied")
 	}
-	defer func() { probeAPIServerFn = original }()
+	defer func() { probeAPIServer = original }()
 
 	err := probeAPIServer()
 	if err == nil {

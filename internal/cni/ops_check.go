@@ -74,8 +74,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 // specific kernel resources (VRF, host interface) are NOT checked because
 // STATUS must succeed before any ADD has ever run.
 func cmdStatus(args *skel.CmdArgs) error {
-	// Validate config is parseable.
-	if _, err := parseConf(args.StdinData); err != nil {
+	// Validate config is parseable (minimal check — no VPC/VPCAttachment
+	// validation since STATUS must succeed before any ADD has run).
+	if err := parseStatusConf(args.StdinData); err != nil {
 		return err
 	}
 
