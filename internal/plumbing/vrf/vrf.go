@@ -98,6 +98,16 @@ func TableID(vpc, vpcAttachment string) (uint32, error) {
 	return getVRFIDForInterface(intf.GenerateInterfaceNameVRF(vpc, vpcAttachment))
 }
 
+// Exists reports whether a VRF interface for the given VPC and VPCAttachment
+// exists in the kernel.
+func Exists(vpc, vpcAttachment string) error {
+	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	if _, err := netlink.LinkByName(name); err != nil {
+		return fmt.Errorf("VRF interface %q not found", name)
+	}
+	return nil
+}
+
 func flush(vrfID uint32) error {
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		routes, err := netlink.RouteListFiltered(
