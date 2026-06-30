@@ -87,9 +87,12 @@ func readGuestInterface(netnsPath, ifName string) (string, int, error) {
 	return mac, mtu, err
 }
 
-// cleanupContainerNetns removes any existing interface with the given name
+// cleanupContainerNetns removes any existing veth interface with the given name
 // from the container network namespace. This is needed to handle stale state
 // from previous CNI ADD runs that may have left interfaces behind.
+//
+// Only *netlink.Veth interfaces are deleted; other types produce a clear error
+// to prevent accidental deletion of unrelated interfaces.
 func cleanupContainerNetns(netnsPath, ifName string) error {
 	containerNS, err := ns.GetNS(netnsPath)
 	if err != nil {
@@ -108,6 +111,9 @@ func cleanupContainerNetns(netnsPath, ifName string) error {
 		if err != nil {
 			// Interface does not exist in container netns — nothing to clean up.
 			return nil
+		}
+		if _, ok := link.(*netlink.Veth); !ok {
+			return fmt.Errorf("interface %q is not a veth (type: %T), refusing to delete", ifName, link)
 		}
 		if err := handle.LinkDel(link); err != nil {
 			return fmt.Errorf("delete stale interface %q in container netns: %w", ifName, err)
