@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	testVPC        = "abc"
-	testAttachment = "def"
-	testVPCHex1234 = "0000000004d2" // decimal 1234
-	testRD65000_1  = "65000:1"      // RD/RT for ASN 65000, NN 1
+	testVPC         = "abc"
+	testAttachment  = "def"
+	testVPCHex1234  = "0000000004d2" // decimal 1234
+	testRD65000_1   = "65000:1"      // RD/RT for ASN 65000, NN 1
+	testContainerID = "test-container"
 )
 
 func fakeClient(objs ...client.Object) client.Client {
@@ -518,7 +519,7 @@ func TestBuildTapResult(t *testing.T) {
 // Per the CNI spec, DEL is idempotent: missing resources are not errors.
 func TestCmdDelIdempotent(t *testing.T) {
 	args := &skel.CmdArgs{
-		ContainerID: "test-container",
+		ContainerID: testContainerID,
 		StdinData:   []byte("not valid json"),
 	}
 
@@ -542,7 +543,7 @@ func TestCmdDelIdempotentMissingResources(t *testing.T) {
 		testVPC, testAttachment,
 	)
 	args := &skel.CmdArgs{
-		ContainerID: "test-container",
+		ContainerID: testContainerID,
 		StdinData:   []byte(conf),
 	}
 
@@ -560,4 +561,103 @@ func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
 		t.Fatalf("parse CIDR %q: %v", cidr, err)
 	}
 	return ipnet
+}
+
+// ---- cmdCheck ----------------------------------------------------------
+
+func TestCmdCheckInvalidConfig(t *testing.T) {
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte("not valid json"),
+	}
+
+	err := cmdCheck(args)
+	if err == nil {
+		t.Fatalf("expected error for invalid JSON, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse CNI config") {
+		t.Fatalf("error %q does not contain 'parse CNI config'", err.Error())
+	}
+}
+
+func TestCmdCheckInvalidInterfaceType(t *testing.T) {
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s","interface_type":"bogus"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdCheck(args)
+	if err == nil {
+		t.Fatalf("expected error for invalid interface_type, got nil")
+	}
+	if !strings.Contains(err.Error(), `invalid interface_type "bogus"`) {
+		t.Fatalf("error %q does not contain expected message", err.Error())
+	}
+}
+
+func TestCmdCheckValidConfigMissingResources(t *testing.T) {
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		Netns:       "/proc/1/ns/net",
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdCheck(args)
+	if err == nil {
+		t.Fatalf("expected CHECK failure for missing resources, got nil")
+	}
+	// Should report CHECK failed with VRF not found.
+	if !strings.Contains(err.Error(), "CHECK failed") {
+		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
+	}
+}
+
+func TestCmdCheckTapModeValidConfigMissingResources(t *testing.T) {
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s","interface_type":"tap"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdCheck(args)
+	if err == nil {
+		t.Fatalf("expected CHECK failure for missing resources, got nil")
+	}
+	if !strings.Contains(err.Error(), "CHECK failed") {
+		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
+	}
+}
+
+func TestCmdCheckMissingVPC(t *testing.T) {
+	conf := `{"cniVersion":"1.0.0","name":"test","type":"galactic-cni"}`
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdCheck(args)
+	if err == nil {
+		t.Fatalf("expected error for missing VPC, got nil")
+	}
+	// parseConf allows empty VPC; the error comes from intf generation.
+	if !strings.Contains(err.Error(), "CHECK failed") {
+		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
+	}
 }
