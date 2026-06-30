@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
+	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -103,7 +104,10 @@ func cmdStatus(args *skel.CmdArgs) error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("STATUS failed: %w", errors.Join(errs...))
+		// Code 50 = plugin not available. Per CNI spec v1.1.0 §4.4, STATUS
+		// errors must use a typed error code so runtimes can distinguish
+		// plugin unavailability (retry/reschedule) from generic failures.
+		return types.NewError(50, "STATUS failed", errors.Join(errs...).Error())
 	}
 	return nil
 }
