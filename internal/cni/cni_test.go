@@ -15,6 +15,7 @@ import (
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
+	type100 "github.com/containernetworking/cni/pkg/types/100"
 	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,15 @@ const (
 	testRD65000_1     = "65000:1"      // RD/RT for ASN 65000, NN 1
 	testContainerID   = "test-container"
 	testInvalidBase62 = "abc-def" // shared invalid base62 string for tests
+	testNetns         = "/proc/1/ns/net"
+	testMac           = "aa:bb:cc:dd:ee:ff"
+	testIfName        = "eth0"
+
+	// testPrevResult is a valid CNI v1.0.0 result used in prevResult tests.
+	testPrevResult = `{"cniVersion":"1.0.0",` +
+		`"interfaces":[{"name":"` + testIfName + `","mac":"` + testMac + `",` +
+		`"sandbox":"/proc/1/ns/net"}],` +
+		`"ips":[{"version":"6","address":"fd00:1::1/64"}]}`
 )
 
 func fakeClient(objs ...client.Object) client.Client {
@@ -292,6 +302,18 @@ func TestParseConf(t *testing.T) {
 			),
 			wantErr: srv6LocatorErrMsg,
 		},
+		{
+			name: "prevResult valid JSON result is accepted",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s",`+
+					`"prevResult":%s}`,
+				testVPC, testAttachment, testPrevResult,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
 	}
 
 	for _, tt := range tests {
@@ -409,6 +431,92 @@ func TestSanitizeForError(t *testing.T) {
 			got := sanitizeForError(tt.input)
 			if got != tt.want {
 				t.Errorf("sanitizeForError(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---- validatePrevResult --------------------------------------------------
+
+func TestValidatePrevResult(t *testing.T) {
+	validResult := &type100.Result{
+		CNIVersion: cniVersion100,
+		Interfaces: []*type100.Interface{
+			{Name: testIfName, Mac: testMac, Sandbox: testNetns},
+		},
+		IPs: []*type100.IPConfig{
+			{Address: *mustParseCIDR(t, "fd00:1::1/64")},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		input   types.Result
+		wantErr bool
+	}{
+		{"nil result allowed", nil, false},
+		{"valid CNI result", validResult, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePrevResult(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePrevResultAdd(t *testing.T) {
+	validWithInterface := &type100.Result{
+		CNIVersion: cniVersion100,
+		Interfaces: []*type100.Interface{
+			{Name: testIfName, Mac: testMac, Sandbox: testNetns},
+		},
+		IPs: []*type100.IPConfig{
+			{Address: *mustParseCIDR(t, "fd00:1::1/64")},
+		},
+	}
+	validWithIPsOnly := &type100.Result{
+		CNIVersion: cniVersion100,
+		IPs: []*type100.IPConfig{
+			{Address: *mustParseCIDR(t, "fd00:1::1/64")},
+		},
+	}
+	emptyResult := &type100.Result{
+		CNIVersion: cniVersion100,
+		// No interfaces, no IPs — should fail content validation.
+	}
+
+	tests := []struct {
+		name    string
+		input   types.Result
+		wantErr bool
+	}{
+		{"nil result allowed", nil, false},
+		{"valid result with interface", validWithInterface, false},
+		{"valid result with IPs only", validWithIPsOnly, false},
+		{"empty result (no interfaces or IPs)", emptyResult, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePrevResultAdd(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}
@@ -1334,5 +1442,35 @@ func TestProbeAPIServerMalformedKubeconfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("error %q does not contain original error", err.Error())
+	}
+}
+
+// ---- cmdAdd prevResult validation ----------------------------------------
+
+func TestCmdAddPrevResultValid(t *testing.T) {
+	// prevResult that is a valid CNI result. cmdAdd should pass prevResult
+	// validation and fail later due to missing NODE_NAME env var.
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s",`+
+			`"prevResult":%s}`,
+		testVPC, testAttachment, testPrevResult,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdAdd(args)
+	if err == nil {
+		t.Fatal("expected cmdAdd to fail for missing NODE_NAME, got nil")
+	}
+	// Should fail on NODE_NAME, not prevResult.
+	if strings.Contains(err.Error(), "prevResult validation in ADD") {
+		t.Fatalf("prevResult should not cause error when valid, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NODE_NAME") {
+		t.Fatalf("expected NODE_NAME error, got: %v", err)
 	}
 }
