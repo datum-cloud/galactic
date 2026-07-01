@@ -8,7 +8,8 @@ or a combination of both. CLI flags take precedence over environment variables.
 | Option | Environment Variable | CLI Flag | Default |
 |---|---|---|---|
 | Node name | `GALACTIC_ROUTER_NODE_NAME` | `--node-name` | _(required)_ |
-| Router role | `GALACTIC_ROUTER_ROUTER_ROLE` | `--router-role` | _(required)_ |
+| Router mode | `GALACTIC_ROUTER_ROUTER_MODE` | `--mode` | _(required)_ |
+| Route reflector | _(none)_ | `--reflector` | `false` |
 | BGP listen port | `GALACTIC_ROUTER_BGP_LISTEN_PORT` | `--bgp-listen-port` | `179` |
 | BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | `""` |
 | Metrics port | `GALACTIC_ROUTER_METRICS_PORT` | `--metrics-port` | `8080` |
@@ -20,7 +21,7 @@ The following options are **required**. If unset, `galactic-router` exits with
 an error:
 
 - `--node-name` (`GALACTIC_ROUTER_NODE_NAME`) — Kubernetes node name where the router runs.
-- `--router-role` (`GALACTIC_ROUTER_ROUTER_ROLE`) — Router role: `tenant` or `fabric`.
+- `--mode` (`GALACTIC_ROUTER_ROUTER_MODE`) — Router mode: `transit`, `fabric`, or `tenant`.
 
 ## Option Details
 
@@ -32,16 +33,20 @@ used to scope BGP configuration to the correct node.
 **Type:** string
 **Required:** yes
 
-### `--router-role` / `GALACTIC_ROUTER_ROUTER_ROLE`
+### `--mode` / `GALACTIC_ROUTER_ROUTER_MODE`
 
-The routing role of this instance. Determines which BGP backend is used:
+The operating mode of this instance. Determines which BGP backend is used:
 
-- `tenant` — uses GoBGP for EVPN path distribution (production role).
+- `tenant` — uses GoBGP for EVPN path distribution (production mode).
 - `fabric` — uses the FRR stub backend (not yet implemented).
+- `transit` — reserved for future transit mode (not yet implemented).
 
-**Type:** string
-**Required:** yes
-**Valid values:** `tenant`, `fabric`
+### `--reflector`
+
+Enable route reflector mode. Only valid when `--mode=fabric` or `--mode=tenant`.
+
+**Type:** boolean
+**Default:** `false`
 
 ### `--bgp-listen-port` / `GALACTIC_ROUTER_BGP_LISTEN_PORT`
 
@@ -109,7 +114,7 @@ command:
   - /galactic-router
 args:
   - --node-name=$(GALACTIC_ROUTER_NODE_NAME)
-  - --router-role=tenant
+  - --mode=tenant
   - --metrics-port=9090
 env:
   - name: GALACTIC_ROUTER_NODE_NAME
@@ -128,7 +133,7 @@ env:
     valueFrom:
       fieldRef:
         fieldPath: status.nodeName
-  - name: GALACTIC_ROUTER_ROUTER_ROLE
+  - name: GALACTIC_ROUTER_ROUTER_MODE
     value: tenant
   - name: GALACTIC_ROUTER_METRICS_PORT
     value: "9090"
@@ -136,6 +141,6 @@ command:
   - /galactic-router
 args:
   - --node-name=$(GALACTIC_ROUTER_NODE_NAME)
-  - --router-role=tenant
+  - --mode=tenant
   - --metrics-port=9100   # overrides GALACTIC_ROUTER_METRICS_PORT env var
 ```

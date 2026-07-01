@@ -225,7 +225,7 @@ On DEL, the result contains only `cniVersion` (empty result is correct since the
 - **GoBGP embedded, lazy-started.** GoBGP runs in-process and starts only when the first `BGPRouter` is reconciled (`listenPort=-1`, outbound-only). ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
 - **CRD-driven config, no sidecar gRPC.** `galactic-router` watches cosmos BGP CRDs directly via controller-runtime. The CNI writes a `BGPAdvertisement` CRD; the router reconciler picks it up. No in-node gRPC calls.
 - **Hash-based no-op suppression.** SHA-256 over the sorted `DesiredRouter` prevents redundant GoBGP Apply calls on every CRD event.
-- **RuntimeFactory pattern.** `GALACTIC_ROUTER_ROUTER_ROLE=tenant` selects GoBGP; `GALACTIC_ROUTER_ROUTER_ROLE=fabric` selects FRR (Phase 2 stub). The binary is selected at startup; no controller changes are needed for Phase 2.
+- **RuntimeFactory pattern.** `GALACTIC_ROUTER_ROUTER_MODE=tenant` selects GoBGP; `GALACTIC_ROUTER_ROUTER_MODE=fabric` selects FRR (Phase 2 stub). The binary is selected at startup; no controller changes are needed for Phase 2.
 - **gRPC health on :5000.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on port 5000. No HTTP health endpoint.
 
 ---

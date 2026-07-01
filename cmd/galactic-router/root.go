@@ -60,7 +60,7 @@ func newViper() *viper.Viper {
 	//nolint:errcheck // keys are controlled, BindEnv cannot fail here
 	v.BindEnv("galactic_router.node_name", "GALACTIC_ROUTER_NODE_NAME")
 	//nolint:errcheck
-	v.BindEnv("galactic_router.router_role", "GALACTIC_ROUTER_ROUTER_ROLE")
+	v.BindEnv("galactic_router.router_mode", "GALACTIC_ROUTER_ROUTER_MODE")
 	//nolint:errcheck
 	v.BindEnv("galactic_router.bgp_listen_port", "GALACTIC_ROUTER_BGP_LISTEN_PORT")
 	//nolint:errcheck
@@ -78,33 +78,36 @@ func newViper() *viper.Viper {
 }
 
 const (
-	roleTenant = "tenant"
-	roleFabric = "fabric"
+	modeTransit = "transit"
+	modeFabric  = "fabric"
+	modeTenant  = "tenant"
 )
 
 // bindFlags registers each viper-configured flag on the command so that
 // `viper.BindPFlags` can resolve flag values at runtime.
 func bindFlags(cmd *cobra.Command, v *viper.Viper) { //nolint:lll // cobra flag defs are inherently long
 	cmd.Flags().StringP("node-name", "n", "", "Kubernetes node name (required)")
-	cmd.Flags().StringP("router-role", "r", "",
-		"Router role: 'tenant' or 'fabric' (required)")
+	cmd.Flags().StringP("mode", "m", "",
+		"Operating mode: 'transit', 'fabric', or 'tenant' (required)")
+	cmd.Flags().Bool("reflector", false,
+		"Enable route reflector mode (requires --mode=fabric or --mode=tenant)")
 	cmd.Flags().IntP("bgp-listen-port", "p", v.GetInt("galactic_router.bgp_listen_port"),
-		"TCP port GoBGP binds for inbound BGP")
+		"BGP listen port")
 	cmd.Flags().StringP("bgp-local-address", "",
 		v.GetString("galactic_router.bgp_local_address"),
-		"Source address for outgoing BGP TCP connections")
+		"Source address for outgoing BGP connections")
 	cmd.Flags().IntP("metrics-port", "",
 		v.GetInt("galactic_router.metrics_port"),
-		"Port for the controller-runtime metrics server")
+		"Metrics listen port")
 	cmd.Flags().IntP("grpc-health-port", "",
 		v.GetInt("galactic_router.grpc_health_port"),
-		"Port for the gRPC health check server")
+		"gRPC health check port")
 	cmd.Flags().StringP("gc-namespace", "",
 		v.GetString("galactic_router.gc_namespace"),
-		"Namespace for GC controller to scan for orphaned BGP CRDs")
+		"Namespace for orphaned CRD cleanup")
 	cmd.Flags().DurationP("gc-interval", "",
 		v.GetDuration("galactic_router.gc_interval"),
-		"GC collection interval")
+		"Cleanup interval")
 
 	if err := v.BindPFlags(cmd.Flags()); err != nil {
 		log.Fatalf("bind flags: %v", err)
@@ -114,7 +117,8 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) { //nolint:lll // cobra flag 
 // validateConfig checks that the configuration values are valid.
 func validateConfig(v *viper.Viper) error {
 	nodeName := v.GetString("galactic_router.node_name")
-	routerRole := v.GetString("galactic_router.router_role")
+	mode := v.GetString("galactic_router.router_mode")
+	reflector := v.GetBool("reflector")
 	bgpListenPort := v.GetInt("galactic_router.bgp_listen_port")
 	metricsPort := v.GetInt("galactic_router.metrics_port")
 	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
@@ -122,11 +126,14 @@ func validateConfig(v *viper.Viper) error {
 	if nodeName == "" {
 		return errors.New("--node-name is required")
 	}
-	if routerRole == "" {
-		return errors.New("--router-role is required")
+	if mode == "" {
+		return errors.New("--mode is required (valid values: 'transit', 'fabric', 'tenant')")
 	}
-	if routerRole != roleTenant && routerRole != roleFabric {
-		return fmt.Errorf("GALACTIC_ROUTER_ROUTER_ROLE must be 'tenant' or 'fabric', got %q", routerRole)
+	if mode != modeTransit && mode != modeFabric && mode != modeTenant {
+		return fmt.Errorf("GALACTIC_ROUTER_ROUTER_MODE must be 'transit', 'fabric', or 'tenant', got %q", mode)
+	}
+	if reflector && mode != modeFabric && mode != modeTenant {
+		return errors.New("--reflector is only valid when --mode=fabric or --mode=tenant")
 	}
 	if bgpListenPort < -1 || bgpListenPort > 65535 {
 		return fmt.Errorf("GALACTIC_ROUTER_BGP_LISTEN_PORT must be -1 or a valid port number, got %d", bgpListenPort)
@@ -148,18 +155,20 @@ func runCmd(v *viper.Viper) error {
 	}
 
 	nodeName := v.GetString("galactic_router.node_name")
-	routerRole := v.GetString("galactic_router.router_role")
+	mode := v.GetString("galactic_router.router_mode")
 	bgpListenPort := v.GetInt("galactic_router.bgp_listen_port")
 	bgpLocalAddr := v.GetString("galactic_router.bgp_local_address")
 	metricsPort := v.GetInt("galactic_router.metrics_port")
 	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
 
 	var factory galacticruntime.RuntimeFactory
-	switch routerRole {
-	case "tenant":
+	switch mode {
+	case modeTenant:
 		factory = gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr)
-	case roleFabric:
+	case modeFabric:
 		factory = frr.NewRuntimeFactory()
+	case modeTransit:
+		return errors.New("mode=transit is not yet supported")
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -212,7 +221,7 @@ func runCmd(v *viper.Viper) error {
 	runtimeMgr := galacticruntime.NewRuntimeManager(factory)
 
 	// Create reconciler.
-	rec := reconcile.New(mgr.GetClient(), nodeName, routerRole, bgpLocalAddr)
+	rec := reconcile.New(mgr.GetClient(), nodeName, mode, bgpLocalAddr)
 
 	// Register BGPRouter controller.
 	if err := (&controller.BGPRouterReconciler{
@@ -222,7 +231,7 @@ func runCmd(v *viper.Viper) error {
 		RuntimeManager: runtimeMgr,
 		Hasher:         hash.DesiredRouter,
 		NodeName:       nodeName,
-		RouterRole:     routerRole,
+		RouterMode:     mode,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup BGPRouter controller: %w", err)
 	}
