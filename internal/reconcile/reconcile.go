@@ -27,19 +27,19 @@ import (
 type Reconciler struct {
 	client       client.Client
 	nodeName     string
-	routerRole   string
+	routerMode   string
 	localAddress string
 }
 
-// New returns a Reconciler for the given node, router role, and local BGP address.
+// New returns a Reconciler for the given node, router mode, and local BGP address.
 // localAddress, when non-empty, is used as the EVPN next-hop instead of the
 // node's first IPv6 InternalIP — required when the node InternalIP is not
 // reachable via the SRv6 transit mesh (e.g. Kind/ContainerLab Docker bridge).
-func New(c client.Client, nodeName, routerRole, localAddress string) *Reconciler {
+func New(c client.Client, nodeName, routerMode, localAddress string) *Reconciler {
 	return &Reconciler{
 		client:       c,
 		nodeName:     nodeName,
-		routerRole:   routerRole,
+		routerMode:   routerMode,
 		localAddress: localAddress,
 	}
 }
@@ -56,7 +56,7 @@ func (r *Reconciler) BuildDesiredRouter(
 	}
 
 	// Role check.
-	wantRole := bgpv1alpha1.RouterRole(r.routerRole)
+	wantRole := bgpv1alpha1.RouterRole(r.routerMode)
 	if !slices.Contains(router.Spec.Roles, wantRole) {
 		return nil, nil
 	}

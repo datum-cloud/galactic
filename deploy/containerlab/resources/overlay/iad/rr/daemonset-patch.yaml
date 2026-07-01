@@ -32,7 +32,7 @@ spec:
           env:
             - name: GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
               value: "fc00:0:8::1"
-            - name: GALACTIC_ROUTER_ROUTER_ROLE
+            - name: GALACTIC_ROUTER_ROUTER_MODE
               value: tenant
             - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
               value: "1790"

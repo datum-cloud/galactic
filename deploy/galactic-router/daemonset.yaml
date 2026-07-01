@@ -28,7 +28,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: GALACTIC_ROUTER_ROUTER_ROLE
+            - name: GALACTIC_ROUTER_ROUTER_MODE
               value: tenant
           ports:
             - name: metrics
