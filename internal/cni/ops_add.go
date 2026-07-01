@@ -27,6 +27,16 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	// Validate prevResult structure when present. The preceding plugin in the
+	// CNI chain should have produced a result with at least one interface or IP
+	// assignment. A nil or structurally broken prevResult indicates a mis-
+	// configured chain that galactic-cni should not silently ignore.
+	if pluginConf.PrevResult != nil {
+		if err := validatePrevResultAdd(pluginConf.PrevResult); err != nil {
+			return fmt.Errorf("prevResult validation in ADD: %w", err)
+		}
+	}
+
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
 		return errors.New("NODE_NAME environment variable is not set")

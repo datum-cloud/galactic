@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+
+	"github.com/containernetworking/cni/pkg/types"
+	type100 "github.com/containernetworking/cni/pkg/types/100"
 )
 
 const sanitizeForErrorBinary = "<binary>"
@@ -93,6 +96,54 @@ func parseStatusConf(data []byte) error {
 	return nil
 }
 
+// validatePrevResult checks that the prevResult (from a preceding plugin in
+// the CNI chain) is a valid, parseable CNI result. Returns an error if the
+// result is non-nil but cannot be parsed as a versioned CNI result, ensuring
+// galactic-cni fails fast rather than silently operating on garbage state.
+func validatePrevResult(res types.Result) error {
+	if res == nil {
+		return nil
+	}
+	// Marshal to JSON and re-parse to verify the result is structurally valid.
+	// This catches malformed results that survived CNI framework unmarshaling.
+	jsonBytes, err := json.Marshal(res)
+	if err != nil {
+		return fmt.Errorf("marshal prevResult: %w", err)
+	}
+	if _, err := type100.NewResult(jsonBytes); err != nil {
+		return fmt.Errorf("parse prevResult: %w", err)
+	}
+	return nil
+}
+
+// validatePrevResultAdd performs content-level validation of prevResult during
+// the ADD operation. It ensures the preceding plugin produced a result with at
+// least one interface or IP assignment, which is the minimum expected structure
+// for any meaningful CNI chain. Returns nil when prevResult is nil (no
+// preceding plugin) or structurally valid with expected content.
+func validatePrevResultAdd(res types.Result) error {
+	if res == nil {
+		return nil
+	}
+	jsonBytes, err := json.Marshal(res)
+	if err != nil {
+		return fmt.Errorf("marshal prevResult: %w", err)
+	}
+	result, err := type100.NewResult(jsonBytes)
+	if err != nil {
+		return fmt.Errorf("parse prevResult: %w", err)
+	}
+	versioned, err := type100.GetResult(result)
+	if err != nil {
+		return fmt.Errorf("get prevResult version: %w", err)
+	}
+	// A valid prevResult must declare at least one interface or IP assignment.
+	if len(versioned.Interfaces) == 0 && len(versioned.IPs) == 0 {
+		return errors.New("prevResult declares no interfaces or IP assignments")
+	}
+	return nil
+}
+
 // parseConf unmarshals the CNI configuration from stdin data and validates
 // the interface type and base62-encoded identifier fields. Returns an error
 // if the config is malformed, interface_type is unsupported, or VPC/
@@ -123,6 +174,11 @@ func parseConf(data []byte) (*PluginConf, error) {
 				"IPv6 CIDR prefix with mask length <= 64",
 			srv6LocatorErrMsg, sanitizeForError(conf.SRv6Locator),
 		)
+	}
+	if conf.PrevResult != nil {
+		if err := validatePrevResult(conf.PrevResult); err != nil {
+			return nil, fmt.Errorf("invalid prevResult: %w", err)
+		}
 	}
 	if conf.InterfaceType == "" {
 		conf.InterfaceType = interfaceTypeVeth
