@@ -1,3 +1,5 @@
+namePrefix: iad-
+nameSuffix: -control
 namespace: galactic-system
 resources:
   - ../../base
