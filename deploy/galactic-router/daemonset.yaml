@@ -30,6 +30,8 @@ spec:
                   fieldPath: spec.nodeName
             - name: GALACTIC_ROUTER_ROUTER_MODE
               value: tenant
+            - name: GALACTIC_ROUTER_GC_NAMESPACE
+              value: galactic-system
           ports:
             - name: metrics
               containerPort: 8080

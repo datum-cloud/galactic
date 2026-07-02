@@ -1,0 +1,10 @@
+namespace: galactic-system
+resources:
+  - ../base
+  - namespace.yaml
+  - configmap.yaml
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fabric

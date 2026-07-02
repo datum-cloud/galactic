@@ -1,7 +1,7 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPRouter
 metadata:
-  name: iad-overlay
+  name: iad-tenant
   namespace: galactic-system
 spec:
   targetRef:

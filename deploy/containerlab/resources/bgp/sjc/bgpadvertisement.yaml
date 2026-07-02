@@ -1,11 +1,11 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPAdvertisement
 metadata:
-  name: sjc-overlay-sid
+  name: sjc-tenant-sid
   namespace: galactic-system
 spec:
   routerRef:
-    name: sjc-overlay
+    name: sjc-tenant
   addressFamily:
     afi: l2vpn
     safi: evpn

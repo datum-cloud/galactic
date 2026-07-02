@@ -1,11 +1,11 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPAdvertisement
 metadata:
-  name: dfw-overlay-sid
+  name: dfw-tenant-sid
   namespace: galactic-system
 spec:
   routerRef:
-    name: dfw-overlay
+    name: dfw-tenant
   addressFamily:
     afi: l2vpn
     safi: evpn

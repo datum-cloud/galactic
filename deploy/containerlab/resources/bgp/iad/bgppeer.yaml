@@ -1,11 +1,11 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: iad-overlay-to-rr
+  name: iad-tenant-to-rr
   namespace: galactic-system
 spec:
   routerRef:
-    name: iad-overlay
+    name: iad-tenant
   peerASN: 65000
   address: "fc00:0:8::1"
   addressFamilies:

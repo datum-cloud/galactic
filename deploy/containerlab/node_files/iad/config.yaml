@@ -5,19 +5,19 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.io/role: pop
+      galactic.datum.net/node: edge
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.io/role: route-reflector
+      galactic.datum.net/node: control
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
         nodeRegistration:
-          name: iad-worker-rr
+          name: iad-worker-control
           taints:
-            - key: galactic.io/role
-              value: route-reflector
+            - key: galactic.datum.net/node
+              value: control
               effect: NoSchedule
 networking:
   ipFamily: ipv6
