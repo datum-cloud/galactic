@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tenant
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-router
+          env:
+            - name: GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
+              value: "fc00:0:2::1"

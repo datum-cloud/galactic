@@ -44,10 +44,10 @@ tasks:
     cmds:
       - task: "deploy:clusters"
       - task: "deploy:topology"
-      - task: "deploy:rename-rr"
+      - task: "deploy:rename-control"
       - task: "deploy:images"
-      - task: "deploy:underlay"
-      - task: "deploy:overlay"
+      - task: "deploy:fabric"
+      - task: "deploy:tenant"
 
   "deploy:clusters":
     desc: Create Kind clusters
@@ -64,10 +64,10 @@ tasks:
     cmds:
       - sudo containerlab deploy -t {{.TOPO}}
 
-  "deploy:rename-rr":
-    desc: Rename iad-worker2 to iad-worker-rr
+  "deploy:rename-control":
+    desc: Rename iad-worker2 to iad-worker-control
     cmds:
-      - docker rename iad-worker2 iad-worker-rr
+      - docker rename iad-worker2 iad-worker-control
 
   "load-image":
     internal: true
@@ -83,7 +83,7 @@ tasks:
       - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker-rr}
+        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker-control}
       - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: sjc-worker}
       - task: load-image
@@ -91,7 +91,7 @@ tasks:
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-worker-rr}
+        vars: {IMAGE: galactic-router:latest, NODE: iad-worker-control}
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: sjc-worker}
       - task: load-image
@@ -126,15 +126,15 @@ tasks:
     cmds:
       - sudo ./scripts/host-setup.sh --no-persist
 
-  "deploy:underlay":
-    desc: Install the FRR underlay DaemonSets
+  "deploy:fabric":
+    desc: Install the FRR fabric DaemonSets
     cmds:
-      - ./scripts/install-underlay.sh
+      - ./scripts/install-fabric.sh
 
-  "deploy:overlay":
-    desc: Install the galactic-router overlay DaemonSets
+  "deploy:tenant":
+    desc: Install the galactic-router tenant DaemonSets
     cmds:
-      - ./scripts/install-overlay.sh
+      - ./scripts/install-tenant.sh
 
   "deploy:testvpc":
     desc: Deploy test VPC across all clusters
@@ -145,7 +145,7 @@ tasks:
     desc: Run all verification checks
     cmds:
       - task: "test:bgp-transit"
-      - task: "test:bgp-underlay"
+      - task: "test:bgp-fabric"
       - task: "test:srv6"
       - task: "test:evpn"
 
@@ -158,20 +158,20 @@ tasks:
           docker exec clab-gvpc-$r vtysh -c "show bgp ipv6 unicast summary"
         done
 
-  "test:bgp-underlay":
-    desc: Verify underlay BGP sessions on dfw, iad, and sjc workers
+  "test:bgp-fabric":
+    desc: Verify fabric BGP sessions on dfw, iad, and sjc workers
     cmds:
       - |
         docker exec dfw-control-plane \
-          kubectl exec -n galactic-system ds/dfw-underlay \
+          kubectl exec -n galactic-system ds/dfw-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec iad-control-plane \
-          kubectl exec -n galactic-system ds/iad-underlay \
+          kubectl exec -n galactic-system ds/iad-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec sjc-control-plane \
-          kubectl exec -n galactic-system ds/sjc-underlay \
+          kubectl exec -n galactic-system ds/sjc-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
 
   "test:srv6":

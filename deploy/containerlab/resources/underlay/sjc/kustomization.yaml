@@ -1,6 +1,0 @@
-namePrefix: sjc-
-namespace: galactic-system
-resources:
-  - ../base
-  - namespace.yaml
-  - configmap.yaml

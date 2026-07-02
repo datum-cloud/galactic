@@ -1,6 +1,0 @@
-namePrefix: dfw-
-namespace: galactic-system
-resources:
-  - ../base
-  - namespace.yaml
-  - configmap.yaml

@@ -1,11 +1,11 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: sjc-overlay-to-rr
+  name: sjc-tenant-to-rr
   namespace: galactic-system
 spec:
   routerRef:
-    name: sjc-overlay
+    name: sjc-tenant
   peerASN: 65000
   address: "fc00:0:8::1"
   addressFamilies:

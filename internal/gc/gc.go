@@ -286,11 +286,11 @@ func findContainerID(adv *bgpv1alpha1.BGPAdvertisement) string {
 // parseVRFName extracts the base62-encoded VPC and VPCAttachment from a
 // Galactic VRF interface name. Returns the parsed values and whether the
 // name matched the expected pattern.
+//
+// The interface name template ("G%09s%03sV") zero-pads the base62 components,
+// but BGP CRD names use the raw (unpadded) base62 values. parseVRFName strips
+// leading zeros so the returned values match the CRD naming convention.
 func parseVRFName(name string) (vpc, vpcAttachment string, ok bool) {
-	// Use the intf package's GenerateInterfaceNameVRF to reverse-engineer
-	// the name. Since we can't directly parse, we check if it matches the
-	// pattern and extract the components.
-	//
 	// The template is "G%09s%03sV" — 1 + 9 + 3 + 1 = 14 characters.
 	// But base62 encoding can produce mixed alphanumeric, so we need a
 	// regex approach.
@@ -298,5 +298,7 @@ func parseVRFName(name string) (vpc, vpcAttachment string, ok bool) {
 	if matches == nil {
 		return "", "", false
 	}
-	return matches[1], matches[2], true
+	// Strip leading zeros to reverse the %09s/%03s padding. BGP CRD names
+	// use the raw base62 values (e.g. "10-10" not "000000010-010").
+	return strings.TrimLeft(matches[1], "0"), strings.TrimLeft(matches[2], "0"), true
 }

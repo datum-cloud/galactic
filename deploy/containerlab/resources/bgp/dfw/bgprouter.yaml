@@ -1,7 +1,7 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPRouter
 metadata:
-  name: dfw-overlay
+  name: dfw-tenant
   namespace: galactic-system
 spec:
   targetRef:

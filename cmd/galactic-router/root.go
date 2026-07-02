@@ -49,7 +49,7 @@ func newViper() *viper.Viper {
 	v.SetDefault("galactic_router.bgp_listen_port", 179)
 	v.SetDefault("galactic_router.metrics_port", 8080)
 	v.SetDefault("galactic_router.grpc_health_port", 5000)
-	v.SetDefault("galactic_router.gc_namespace", "default")
+	v.SetDefault("galactic_router.gc_namespace", "galactic-system")
 	v.SetDefault("galactic_router.gc_interval", 5*time.Minute)
 
 	v.AutomaticEnv()
@@ -298,12 +298,16 @@ func runCmd(v *viper.Viper) error {
 	}
 
 	// Start the GC ticker goroutine. It runs until the manager's context
-	// is cancelled.
+	// is cancelled. The initial GC pass waits for informer caches to sync
+	// so it doesn't see an empty BGPAdvertisement list and delete live VRFs.
 	go func() {
 		ticker := time.NewTicker(gcInterval)
 		defer ticker.Stop()
 
-		// Run an initial GC pass immediately.
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
+			log.Printf("GC: cache sync failed, skipping initial pass")
+			return
+		}
 		gcRec.RunGC(ctx)
 
 		for {

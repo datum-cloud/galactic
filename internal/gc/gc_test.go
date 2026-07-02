@@ -104,15 +104,22 @@ func TestParseVRFName(t *testing.T) {
 		{
 			name:       "valid VRF name",
 			vrfName:    testVRFName,
-			wantVPC:    "0000000jU",
-			wantVPCAtt: "00G",
+			wantVPC:    "jU",
+			wantVPCAtt: "G",
 			wantOk:     true,
 		},
 		{
 			name:       "valid VRF name with digits",
 			vrfName:    "G000000123001V",
-			wantVPC:    "000000123",
-			wantVPCAtt: "001",
+			wantVPC:    "123",
+			wantVPCAtt: "1",
+			wantOk:     true,
+		},
+		{
+			name:       "small numeric VPC and attachment (regression — GC naming mismatch)",
+			vrfName:    "G000000010010V",
+			wantVPC:    "10",
+			wantVPCAtt: "10",
 			wantOk:     true,
 		},
 		{

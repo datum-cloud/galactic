@@ -23,7 +23,7 @@ if hostname |grep -q control-plane; then # control-plane
   kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml
   kubectl -n kube-system rollout status daemonset kube-multus-ds
 
-  # Cosmos BGP CRDs (operator not deployed; resources applied by install-overlay.sh)
+  # Cosmos BGP CRDs (operator not deployed; resources applied by install-tenant.sh)
   kubectl apply -k https://github.com/milo-os/cosmos/config/crd
 
 else # worker

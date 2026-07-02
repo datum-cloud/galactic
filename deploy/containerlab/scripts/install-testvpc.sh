@@ -82,8 +82,8 @@ apply_testvpc() {
   local site="$2"
   echo "Applying testvpc/${site} to ${node}..."
   docker cp "${RESOURCES_DIR}/testvpc/${site}" "${node}:/galactic/resources/testvpc-${site}"
-  # Apply the test Deployment. The NAD is applied by install-overlay.sh since
-  # it is part of the galactic overlay infrastructure. BGPVRFInstance and
+  # Apply the test Deployment. The NAD is applied by install-tenant.sh since
+  # it is part of the galactic tenant infrastructure. BGPVRFInstance and
   # BGPAdvertisement are created by the CNI on pod attach — do not pre-apply
   # them here.
   docker exec "${node}" kubectl apply -f /galactic/resources/testvpc-${site}/nginx.yaml
@@ -91,7 +91,7 @@ apply_testvpc() {
 
 setup_cni_kubeconfig dfw-control-plane dfw-worker
 setup_cni_kubeconfig sjc-control-plane sjc-worker
-setup_cni_kubeconfig iad-control-plane iad-worker iad-worker-rr
+setup_cni_kubeconfig iad-control-plane iad-worker iad-worker-control
 
 apply_testvpc dfw-control-plane dfw
 apply_testvpc sjc-control-plane sjc
