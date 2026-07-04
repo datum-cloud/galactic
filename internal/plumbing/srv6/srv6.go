@@ -3,13 +3,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package srv6 manages kernel SRv6 END.DT46 ingress routes for Galactic VPC
-// endpoints. It decodes SRv6 SIDs to extract VPC identity and delegates route
-// installation to the Linux kernel via netlink. Requires CAP_NET_ADMIN.
+// endpoints. It accepts a USID (/128) and VPC identifiers to install the
+// decap route on the correct host interface and VRF routing table.
+// Requires CAP_NET_ADMIN.
 package srv6
 
 import (
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
@@ -18,52 +20,45 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// RouteIngressAdd installs an SRv6 END.DT46 ingress route for the given SRv6
-// SID, decoding the embedded VPC and VPCAttachment to locate the correct host
-// interface and VRF routing table.
-func RouteIngressAdd(ipStr string) error {
-	ip := net.ParseIP(ipStr)
+// parseSID returns the /128 IPNet for the given SID string.
+// It accepts both bare IPv6 addresses and /128 CIDR notation.
+func parseSID(sid string) (*net.IPNet, error) {
+	if strings.Contains(sid, "/") {
+		_, ipnet, err := net.ParseCIDR(sid)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sid %q: %w", sid, err)
+		}
+		return ipnet, nil
+	}
+	ip := net.ParseIP(sid)
 	if ip == nil {
-		return fmt.Errorf("invalid ip: %s", ipStr)
+		return nil, fmt.Errorf("invalid sid %q: not an IP address", sid)
 	}
-	vpc, vpcAttachment, err := intf.DecodeSRv6Endpoint(ip)
+	return netlink.NewIPNet(ip), nil
+}
+
+// RouteIngressAdd installs an SRv6 END.DT46 ingress route for the given USID.
+// The VPC and VPCAttachment identifiers (base62-encoded) are used to resolve
+// the host interface and VRF routing table.
+func RouteIngressAdd(sid, vpc, vpcAttachment string) error {
+	ipnet, err := parseSID(sid)
 	if err != nil {
-		return fmt.Errorf("could not extract SRv6 endpoint: %w", err)
+		return err
 	}
-	vpc, err = intf.HexToBase62(vpc)
-	if err != nil {
-		return fmt.Errorf("invalid vpc: %w", err)
-	}
-	vpcAttachment, err = intf.HexToBase62(vpcAttachment)
-	if err != nil {
-		return fmt.Errorf("invalid vpcattachment: %w", err)
-	}
-	if err := addIngressRoute(netlink.NewIPNet(ip), vpc, vpcAttachment); err != nil {
+	if err := addIngressRoute(ipnet, vpc, vpcAttachment); err != nil {
 		return fmt.Errorf("add ingress route failed: %w", err)
 	}
 	return nil
 }
 
 // RouteIngressDel removes the SRv6 END.DT46 ingress route previously installed
-// by RouteIngressAdd for the given SRv6 SID.
-func RouteIngressDel(ipStr string) error {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return fmt.Errorf("invalid ip: %s", ipStr)
-	}
-	vpc, vpcAttachment, err := intf.DecodeSRv6Endpoint(ip)
+// by RouteIngressAdd for the given USID.
+func RouteIngressDel(sid, vpc, vpcAttachment string) error {
+	ipnet, err := parseSID(sid)
 	if err != nil {
-		return fmt.Errorf("could not extract SRv6 endpoint: %w", err)
+		return err
 	}
-	vpc, err = intf.HexToBase62(vpc)
-	if err != nil {
-		return fmt.Errorf("invalid vpc: %w", err)
-	}
-	vpcAttachment, err = intf.HexToBase62(vpcAttachment)
-	if err != nil {
-		return fmt.Errorf("invalid vpcattachment: %w", err)
-	}
-	if err := deleteIngressRoute(netlink.NewIPNet(ip), vpc, vpcAttachment); err != nil {
+	if err := deleteIngressRoute(ipnet, vpc, vpcAttachment); err != nil {
 		return fmt.Errorf("delete ingress route failed: %w", err)
 	}
 	return nil

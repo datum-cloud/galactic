@@ -55,7 +55,7 @@ topology:
       exec:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
-        - ip -6 addr add 2001:db8:ff01:100:ffff:ffff:ffff:ffff/128 dev lo-galactic
+        - ip -6 route add blackhole 2001:db8:ff00:1010::1/128 metric 2048
         - /galactic/scripts/install.sh
 
     sjc-control-plane:
@@ -95,7 +95,7 @@ topology:
       exec:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
-        - ip -6 addr add 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128 dev lo-galactic
+        - ip -6 route add blackhole 2001:db8:ff00:1010::2/128 metric 2048
         - /galactic/scripts/install.sh
 
     iad-control-plane:
@@ -135,7 +135,7 @@ topology:
       exec:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
-        - ip -6 addr add 2001:db8:ff03:100:ffff:ffff:ffff:ffff/128 dev lo-galactic
+        - ip -6 route add blackhole 2001:db8:ff00:1010::3/128 metric 2048
         - /galactic/scripts/install.sh
 
     iad-worker2:
@@ -157,7 +157,7 @@ topology:
       exec:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
-        - ip -6 addr add 2001:db8:ff03:200:ffff:ffff:ffff:ffff/128 dev lo-galactic
+        - ip -6 route add blackhole 2001:db8:ff00:1010::4/128 metric 2048
         - /galactic/scripts/install.sh
 
     tr1:

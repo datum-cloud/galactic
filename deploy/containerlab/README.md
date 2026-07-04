@@ -85,20 +85,18 @@ AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant 
 
 ### Cluster SRv6 addressing
 
-| Cluster   | FRR loopback / SID block | SRv6 forwarding prefix | galactic-router address |
-|-----------|--------------------------|------------------------|-------------------------|
-| dfw       | fc00:0:2::1/48           | 2001:db8:ff01::/48     | fc00:0:2::1             |
-| iad       | fc00:0:4::1/48           | 2001:db8:ff03::/48     | fc00:0:4::1             |
-| iad-control | fc00:0:8::1/48         | —                      | fc00:0:8::1             |
-| sjc       | fc00:0:3::1/48           | 2001:db8:ff02::/48     | fc00:0:3::1             |
+Each worker has a `lo-galactic` dummy interface with a blackhole route for its
+/128 USID (metric 2048, lower priority than the seg6local route at metric 1024).
+The blackhole prevents the default route from matching the USID while the
+seg6local route handles SRv6 decapsulation. The FRR fabric DaemonSet advertises
+the USID into the transit mesh via a static Null0 route + BGP `network` statement.
 
-Worker SRv6 node SIDs (on `lo-galactic`):
-
-| Node          | Address                                    |
-|---------------|--------------------------------------------|
-| dfw-worker    | 2001:db8:ff01:100:ffff:ffff:ffff:ffff/128  |
-| iad-worker    | 2001:db8:ff03:100:ffff:ffff:ffff:ffff/128  |
-| sjc-worker    | 2001:db8:ff02:100:ffff:ffff:ffff:ffff/128  |
+| Cluster   | FRR loopback       | USID (lo-galactic)         | galactic-router address |
+|-----------|--------------------|----------------------------|-------------------------|
+| dfw       | fc00:0:2::1/48     | 2001:db8:ff00:1010::1/128  | fc00:0:2::1             |
+| iad       | fc00:0:4::1/48     | 2001:db8:ff00:1010::3/128  | fc00:0:4::1             |
+| iad-control | fc00:0:8::1/48   | 2001:db8:ff00:1010::4/128  | fc00:0:8::1             |
+| sjc       | fc00:0:3::1/48     | 2001:db8:ff00:1010::2/128  | fc00:0:3::1             |
 
 ### Management network (172.20.20.0/24)
 

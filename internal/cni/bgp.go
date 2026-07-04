@@ -189,11 +189,8 @@ func publishBGPState(
 	if err != nil {
 		return fmt.Errorf("decode VPC: %w", err)
 	}
-	vpcAttHex, err := intf.Base62ToHex(pluginConf.VPCAttachment)
-	if err != nil {
-		return fmt.Errorf("decode VPCAttachment: %w", err)
-	}
-	srv6SIDStr, err := setupSRv6Ingress(pluginConf.SRv6Locator, vpcHex, vpcAttHex)
+
+	srv6SIDStr, err := setupSRv6Ingress(pluginConf.SRv6SID, pluginConf.VPC, pluginConf.VPCAttachment)
 	if err != nil {
 		return err
 	}
@@ -378,16 +375,12 @@ func configureHostVethGateway(vpc, vpcAttachment string, res *ipamResult) error 
 }
 
 // setupSRv6Ingress installs the End.DT46 SRv6 ingress decap route for the given
-// locator and returns the SID string. Returns empty string when locator is empty.
-func setupSRv6Ingress(locator, vpcHex, vpcAttHex string) (string, error) {
-	if locator == "" {
+// USID and returns the SID string. Returns empty string when SID is not configured.
+func setupSRv6Ingress(sid, vpc, vpcAttachment string) (string, error) {
+	if sid == "" {
 		return "", nil
 	}
-	sid, err := intf.EncodeSRv6Endpoint(locator, vpcHex, vpcAttHex)
-	if err != nil {
-		return "", fmt.Errorf("encode SRv6 endpoint: %w", err)
-	}
-	if err := srv6.RouteIngressAdd(sid); err != nil {
+	if err := srv6.RouteIngressAdd(sid, vpc, vpcAttachment); err != nil {
 		return "", fmt.Errorf("add SRv6 ingress route: %w", err)
 	}
 	return sid, nil

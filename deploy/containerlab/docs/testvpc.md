@@ -8,13 +8,13 @@ to create a VRF, veth pair, SRv6 encapsulation route, and `BGPAdvertisement` CRD
 `galactic-router` controller then advertises the pod's EVPN route to the route reflector,
 distributing reachability across sites.
 
-Each site assigns addresses from a distinct IPv6 pool:
+Each site assigns addresses from a distinct IPv6 pool and uses a unique /128 USID:
 
-| Site | SRv6 locator       | IPAM pool            | Gateway          |
-|------|---------------------|----------------------|------------------|
-| dfw  | `2001:db8:ff01::/48` | `fd00:10:ff01::/48`  | `fd00:10:ff01::1` |
-| sjc  | `2001:db8:ff02::/48` | `fd00:10:ff02::/48`  | `fd00:10:ff02::1` |
-| iad  | `2001:db8:ff03::/48` | `fd00:10:ff03::/48`  | `fd00:10:ff03::1` |
+| Site | USID                       | IPAM pool            | Gateway          |
+|------|-----------------------------|----------------------|------------------|
+| dfw  | `2001:db8:ff00:1010::1/128` | `fd00:10:ff01::/48`  | `fd00:10:ff01::1` |
+| sjc  | `2001:db8:ff00:1010::2/128` | `fd00:10:ff02::/48`  | `fd00:10:ff02::1` |
+| iad  | `2001:db8:ff00:1010::3/128` | `fd00:10:ff03::/48`  | `fd00:10:ff03::1` |
 
 ## Prerequisites
 
@@ -46,7 +46,7 @@ This does the following:
    create `BGPAdvertisement` CRDs on pod attach (requires `deploy:system` for RBAC).
 2. **Patches the CNI wrapper** (`/opt/cni/bin/galactic-cni`) to export `KUBECONFIG` and
    `GALACTIC_CNI_NODE_NAME`.
-3. **Applies the nettools Deployment** to each cluster's `vpc` namespace.
+3. **Applies the testvpc Deployment** to each cluster's `vpc` namespace.
 
 ## Verify Pods Are Running
 
@@ -56,7 +56,7 @@ docker exec iad-control-plane kubectl get pods -n vpc -o wide
 docker exec sjc-control-plane kubectl get pods -n vpc -o wide
 ```
 
-Each should show one `nettools` pod in `Running` state.
+Each should show one `testvpc` pod in `Running` state.
 
 ### Inspect pod VPC interface
 
@@ -158,19 +158,19 @@ docker exec dfw-worker dmesg | grep galactic
    docker exec dfw-control-plane kubectl get bgprouters -A -o yaml | grep -A 5 advertised
    ```
 
-2. Check the SRv6 underlay — transit routers should have all SRv6 locator prefixes:
+2. Check the SRv6 underlay — transit routers should have all USIDs:
 
    ```bash
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::1/128"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::2/128"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::3/128"
    ```
 
 3. Verify the pod's VRF and SRv6 route on the worker:
 
    ```bash
-   docker exec dfw-worker ip -6 route show table vrf-vpc-nettools-*
-   docker exec dfw-worker ip -6 neigh show table vrf-vpc-nettools-*
+   docker exec dfw-worker ip -6 route show table vrf-vpc-testvpc-*
+   docker exec dfw-worker ip -6 neigh show table vrf-vpc-testvpc-*
    ```
 
 ### Regenerate CNI kubeconfigs

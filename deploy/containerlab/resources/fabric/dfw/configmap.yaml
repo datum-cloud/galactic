@@ -34,7 +34,7 @@ data:
     log syslog informational
 
     interface lo
-     ! /48 assigns the full SRv6 SID block to this node; eBGP advertises the /48 as the SID range.
+     ! BGP peering address for this fabric node.
      ipv6 address fc00:0:2::1/48
     !
     interface eth1
@@ -42,7 +42,7 @@ data:
      ipv6 address 2001:db8:1:10::2/64
     !
 
-    ipv6 route 2001:db8:ff01::/48 Null0
+    ipv6 route 2001:db8:ff00:1010::1/128 Null0
     !
     route-map SET_SRC permit 10
      set src fc00:0:2::1
@@ -58,7 +58,7 @@ data:
       neighbor 2001:db8:1:10::1 activate
       neighbor 2001:db8:1:10::1 allowas-in 1
       neighbor 2001:db8:1:10::1 route-map SET_SRC in
-      network 2001:db8:ff01::/48
+      network 2001:db8:ff00:1010::1/128
       network fc00:0:2::/48
      exit-address-family
     !

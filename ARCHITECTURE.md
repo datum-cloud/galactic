@@ -25,11 +25,10 @@ cosmos API group directly — no gRPC sidecar, no provider CRD lifecycle.
 
 ### SRv6 SID encoding
 
-Each container endpoint is assigned a deterministic SRv6 SID:
-
-```
-[SRv6 locator prefix (≤64 bits)] | [VPC ID (48 bits)] | [VPCAttachment ID (16 bits)]
-```
+Each container endpoint is assigned a /128 USID (Unique Local SID, RFC 8986 Section 3.2).
+The companion operator allocates a unique /128 per (VPC, VPCAttachment) pair and injects
+it into the NAD as `srv6_sid`. The CNI installs an END.DT46 decap route for that exact
+/128 and advertises it as the EVPN Type 5 GWIPAddress.
 
 All nodes in the same VPC derive the same BGP Route Target via `fnv32a(vpcHex)`,
 enabling automatic cross-node path import without explicit RT configuration.
@@ -58,7 +57,7 @@ galactic/
 │   │   ├── route/           # Host-side static routes via netlink
 │   │   └── veth/            # veth pair management
 │   └── plumbing/            # Low-level kernel and network primitives
-│       ├── intf/            # Interface naming, base62↔hex encoding, SRv6 endpoint encode/decode
+│       ├── intf/            # Interface naming, base62↔hex encoding
 │       ├── srv6/            # SRv6 ingress route add/del (END.DT46)
 │       ├── sysctl/          # Interface sysctl helpers
 │       └── vrf/             # Linux VRF create/delete/lookup
@@ -91,7 +90,7 @@ See [docs/agent-startup.md](docs/agent-startup.md) for the router startup sequen
 | `internal/hash` | `galactic-router` | Change detection |
 | `internal/metadata` | both | Build-time version info stamped via `-ldflags` |
 | `internal/cni` | `galactic-cni` | CNI cmdAdd / cmdDel |
-| `internal/plumbing/intf` | both | Interface naming, base62↔hex encoding, SRv6 endpoint encode/decode |
+| `internal/plumbing/intf` | both | Interface naming, base62↔hex encoding |
 | `internal/plumbing/srv6` | both | SRv6 ingress route add/del (END.DT46) |
 | `internal/plumbing/vrf` | both | Linux VRF create/delete/lookup |
 | `internal/plumbing/sysctl` | both | Interface sysctl helpers |
@@ -134,7 +133,7 @@ Calls `cni.RunPlugin()` which hands control to `skel.PluginMainFuncs`. Reads con
 | `vpc`           | string   | Base62-encoded 48-bit VPC identifier                                    |
 | `vpcattachment` | string   | Base62-encoded 16-bit VPCAttachment identifier                          |
 | `interface_type`| string   | `veth` (default) or `tap`; tap mode omits IPAM and guest-side config   |
-| `srv6_locator`  | string   | IPv6 CIDR (≤/64) used as SRv6 locator prefix                           |
+| `srv6_sid`      | string   | USID (/128) for this endpoint; bare IPv6 or CIDR form                       |
 | `namespace`     | string   | Kubernetes namespace for BGP CRDs; defaults to `default`               |
 | `mtu`           | int      | MTU for the veth pair; 0 uses kernel default                            |
 | `terminations`  | array    | Static routes to install on the host-side veth (`network`, `via`)      |
@@ -194,7 +193,7 @@ On DEL, the result contains only `cniVersion` (empty result is correct since the
 | `internal/cni`                | galactic-cni    | `cmdAdd` / `cmdDel`; CNI PluginConf parsing; BGPAdvertisement lifecycle; delegates kernel work to plumbing | No         |
 | `internal/cni/route`          | galactic-cni    | Host-side static route add/delete via netlink                                                        | No         |
 | `internal/cni/veth`           | galactic-cni    | veth pair create/delete                                                                               | No         |
-| `internal/plumbing/intf`      | both            | Deterministic interface naming (`G{vpc9}{att3}V/H/G`); base62↔hex encoding; `EncodeSRv6Endpoint` / `DecodeSRv6Endpoint` | No |
+| `internal/plumbing/intf`      | both            | Deterministic interface naming (`G{vpc9}{att3}V/H/G`); base62↔hex encoding | No |
 | `internal/plumbing/srv6`      | galactic-cni    | SRv6 END.DT46 ingress route add/delete via netlink                                                   | No         |
 | `internal/plumbing/vrf`       | galactic-cni    | Linux VRF create/delete/lookup via netlink                                                           | No         |
 | `internal/plumbing/sysctl`    | galactic-cni    | Per-interface sysctl helpers                                                                          | No         |
@@ -220,7 +219,7 @@ On DEL, the result contains only `cniVersion` (empty result is correct since the
 
 ## Key Design Decisions
 
-- **Identifiers in the SID.** VPC (48-bit) and VPCAttachment (16-bit) identifiers are packed into the low 64 bits of the SRv6 SID, making forwarding state fully self-describing without a lookup table.
+- **USID per endpoint.** Each (VPC, VPCAttachment) pair is assigned a unique /128 USID by the companion operator. The CNI installs an END.DT46 decap route for that /128 and advertises it as the EVPN GWIPAddress. VPC identity is not encoded in the SID.
 - **Base62 interface names.** Kernel interface names use the format `G{9-char-vpc-base62}{3-char-att-base62}{suffix}` (suffix: `V` = VRF, `H` = host veth, `G` = guest veth), fitting in the 14-character kernel limit. The hex form is used for BGP and SRv6; base62 for kernel interfaces.
 - **GoBGP embedded, lazy-started.** GoBGP runs in-process and starts only when the first `BGPRouter` is reconciled (`listenPort=-1`, outbound-only). ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
 - **CRD-driven config, no sidecar gRPC.** `galactic-router` watches cosmos BGP CRDs directly via controller-runtime. The CNI writes a `BGPAdvertisement` CRD; the router reconciler picks it up. No in-node gRPC calls.
@@ -279,7 +278,7 @@ Triggered by `v*` tags. Builds and pushes `ghcr.io/datum-cloud/galactic:{version
 | BGP peer / advertisement / policy CRUD     | `internal/runtime/gobgp/peers.go`, `paths.go`, `policies.go`|
 | Controller watch graph                     | `internal/controller/bgprouter_controller.go:SetupWithManager` |
 | CRD status update logic                    | `internal/controller/status.go`, `bgprouter_controller.go:updateRouterStatus` |
-| Interface naming / SRv6 SID encoding       | `internal/plumbing/intf/intf.go`                             |
+| Interface naming / base62 encoding         | `internal/plumbing/intf/intf.go`                             |
 | Hash-based no-op suppression               | `internal/hash/hash.go`; annotation `galactic.datum.net/config-hash` on BGPRouter |
 | GoBGP server lifecycle (start/reconfigure) | `internal/runtime/gobgp/server.go`                          |
 

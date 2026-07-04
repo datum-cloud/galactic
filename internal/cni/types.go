@@ -48,7 +48,7 @@ type PluginConf struct {
 	InterfaceType string        `json:"interface_type,omitempty"` // interfaceTypeVeth or interfaceTypeTap
 	Terminations  []Termination `json:"terminations,omitempty"`
 	IPAM          IPAM          `json:"ipam"`
-	SRv6Locator   string        `json:"srv6_locator"`
+	SRv6SID       string        `json:"srv6_sid"`
 	Namespace     string        `json:"namespace,omitempty"`
 }
 

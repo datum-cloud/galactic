@@ -335,6 +335,7 @@ func fsmStateToModel(state api.PeerState_SessionState) model.BGPPeerState {
 }
 
 // applyVRF configures a VRF in GoBGP via AddVrf.
+// If the VRF already exists, the call is treated as idempotent (no-op).
 func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance) error {
 	// Parse the route distinguisher.
 	rd, err := bgp.ParseRouteDistinguisher(vrf.RouteDistinguisher)
@@ -358,7 +359,7 @@ func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredV
 		return fmt.Errorf("parse export route targets: %w", err)
 	}
 
-	return b.AddVrf(ctx, &api.AddVrfRequest{
+	err = b.AddVrf(ctx, &api.AddVrfRequest{
 		Vrf: &api.Vrf{
 			Name:     vrf.Name,
 			Rd:       apiRD,
@@ -366,6 +367,10 @@ func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredV
 			ExportRt: exportRTs,
 		},
 	})
+	if err != nil && strings.Contains(err.Error(), "already exists") {
+		return nil // idempotent: VRF already configured
+	}
+	return err
 }
 
 // deleteVRF removes a VRF from GoBGP.

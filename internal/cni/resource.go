@@ -86,7 +86,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 
 	// 3. Delete SRv6 ingress route (only if we got a SID)
 	if rt.srv6SID != "" {
-		if err := srv6.RouteIngressDel(rt.srv6SID); err != nil {
+		if err := srv6.RouteIngressDel(rt.srv6SID, rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to delete SRv6 ingress route", "err", err,
 				"sid", rt.srv6SID)
 		}

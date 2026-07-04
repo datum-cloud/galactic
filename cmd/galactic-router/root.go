@@ -73,6 +73,8 @@ func newViper() *viper.Viper {
 	v.BindEnv("galactic_router.gc_namespace", "GALACTIC_ROUTER_GC_NAMESPACE")
 	//nolint:errcheck
 	v.BindEnv("galactic_router.gc_interval", "GALACTIC_ROUTER_GC_INTERVAL")
+	//nolint:errcheck
+	v.BindEnv("reflector", "GALACTIC_ROUTER_REFLECTOR")
 
 	return v
 }
