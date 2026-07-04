@@ -2,19 +2,23 @@
 
 ## Overview
 
-The test VPC deploys a `wbitt/network-multitool` pod on each site's worker node. Multus
-attaches each pod to the `testvpc` NetworkAttachmentDefinition, which invokes `galactic-cni`
-to create a VRF, veth pair, SRv6 encapsulation route, and `BGPAdvertisement` CRD. The
-`galactic-router` controller then advertises the pod's EVPN route to the route reflector,
-distributing reachability across sites.
+The test VPC deploys two `wbitt/network-multitool` pods (`testvpc` and `testvpc-2`) on each
+site's worker node. Each pod is attached to its own NetworkAttachmentDefinition (`testvpc`
+and `testvpc-2`), each with a distinct VPC ID and USID. `galactic-cni` creates a VRF, veth
+pair, SRv6 encapsulation route, and `BGPAdvertisement` CRD per pod. The `galactic-router`
+controller then advertises each pod's EVPN route to the route reflector, distributing
+reachability across sites.
 
-Each site assigns addresses from a distinct IPv6 pool and uses a unique /128 USID:
+Each VPC on each site has its own USID and distinct IPAM pool:
 
-| Site | USID                       | IPAM pool            | Gateway          |
-|------|-----------------------------|----------------------|------------------|
-| dfw  | `2001:db8:ff00:1010::1/128` | `fd00:10:ff01::/48`  | `fd00:10:ff01::1` |
-| sjc  | `2001:db8:ff00:1010::2/128` | `fd00:10:ff02::/48`  | `fd00:10:ff02::1` |
-| iad  | `2001:db8:ff00:1010::3/128` | `fd00:10:ff03::/48`  | `fd00:10:ff03::1` |
+| Pod       | VPC | Site | USID                         | IPAM pool            | Gateway          |
+|-----------|-----|------|------------------------------|----------------------|------------------|
+| testvpc   | 10  | dfw  | `2001:db8:ff00:1010::1/128`  | `fd00:10:ff01::/48`  | `fd00:10:ff01::1` |
+| testvpc-2 | 11  | dfw  | `2001:db8:ff00:1010::b/128`  | `fd00:11:ff01::/48`  | `fd00:11:ff01::1` |
+| testvpc   | 10  | sjc  | `2001:db8:ff00:1010::2/128`  | `fd00:10:ff02::/48`  | `fd00:10:ff02::1` |
+| testvpc-2 | 11  | sjc  | `2001:db8:ff00:1010::c/128`  | `fd00:11:ff02::/48`  | `fd00:11:ff02::1` |
+| testvpc   | 10  | iad  | `2001:db8:ff00:1010::3/128`  | `fd00:10:ff03::/48`  | `fd00:10:ff03::1` |
+| testvpc-2 | 11  | iad  | `2001:db8:ff00:1010::d/128`  | `fd00:11:ff03::/48`  | `fd00:11:ff03::1` |
 
 ## Prerequisites
 
@@ -56,12 +60,12 @@ docker exec iad-control-plane kubectl get pods -n vpc -o wide
 docker exec sjc-control-plane kubectl get pods -n vpc -o wide
 ```
 
-Each should show one `testvpc` pod in `Running` state.
+Each should show two pods (`testvpc` and `testvpc-2`) in `Running` state.
 
 ### Inspect pod VPC interface
 
-The pod receives a second interface (`net1`) from the `testvpc` NAD. Verify it has an IPv6
-address from the site's IPAM pool:
+Each pod receives a second interface (`net1`) from its NAD. Verify both pods have IPv6
+addresses from the site's IPAM pool:
 
 ```bash
 # Get the pod name
@@ -144,7 +148,7 @@ The CNI creates `BGPAdvertisement` CRDs on pod attach. Verify they exist:
 docker exec dfw-control-plane kubectl get bgpadvertisements -n galactic-system
 ```
 
-Each site should have one advertisement per pod. If missing, check CNI logs:
+Each site should have two BGPAdvertisements (one per pod). If missing, check CNI logs:
 
 ```bash
 docker exec dfw-worker dmesg | grep galactic
@@ -164,6 +168,9 @@ docker exec dfw-worker dmesg | grep galactic
    docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::1/128"
    docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::2/128"
    docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::3/128"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::b/128"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::c/128"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::d/128"
    ```
 
 3. Verify the pod's VRF and SRv6 route on the worker:

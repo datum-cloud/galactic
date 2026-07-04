@@ -1,0 +1,22 @@
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: testvpc-2
+  namespace: vpc
+spec:
+  config: |
+    {
+      "cniVersion": "1.0.0",
+      "name": "testvpc-2",
+      "type": "galactic-cni",
+      "vpc": "11",
+      "vpcattachment": "11",
+      "namespace": "galactic-system",
+      "srv6_sid": "2001:db8:ff00:1010::b/128",
+      "ipam": {
+        "type": "pool",
+        "pool": "fd00:11:ff01::/48",
+        "gateway": "fd00:11:ff01::1",
+        "subnet_len": 80
+      }
+    }

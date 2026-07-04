@@ -85,11 +85,11 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return err
 	}
 
-	if err := r.applyVRF(ctx, b, desired.VRFInstance); err != nil {
+	if err := r.applyVRFs(ctx, b, desired.VRFInstances); err != nil {
 		return err
 	}
 
-	r.startRIBMonitor(b, desired.VRFInstance)
+	r.startRIBMonitor(b, desired.VRFInstances)
 
 	if err := r.applyEVPN(b, desired.Advertisements, desired.RouterID); err != nil {
 		return err
@@ -195,19 +195,19 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 	return nil
 }
 
-// applyVRF configures the desired VRF instance and removes stale ones.
-func (r *GoBGPRuntime) applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance) error {
-	if vrf != nil {
-		if err := applyVRF(ctx, b, vrf); err != nil {
+// applyVRFs configures the desired VRF instances and removes stale ones.
+func (r *GoBGPRuntime) applyVRFs(ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance) error {
+	desiredNames := make(map[string]struct{}, len(vrfs))
+	for _, vrf := range vrfs {
+		if err := applyVRF(ctx, b, &vrf); err != nil {
 			return fmt.Errorf("apply VRF %s: %w", vrf.Name, err)
 		}
 		r.appliedVRFs[vrf.Name] = struct{}{}
-	} else {
-		delete(r.appliedVRFs, "")
+		desiredNames[vrf.Name] = struct{}{}
 	}
 
 	for name := range r.appliedVRFs {
-		if vrf == nil || vrf.Name != name {
+		if _, ok := desiredNames[name]; !ok {
 			deleteVRF(ctx, b, name)
 			delete(r.appliedVRFs, name)
 		}

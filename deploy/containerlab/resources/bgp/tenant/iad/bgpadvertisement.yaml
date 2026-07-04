@@ -11,3 +11,4 @@ spec:
     safi: evpn
   prefixes:
     - "2001:db8:ff00:1010::3/128"
+    - "2001:db8:ff00:1010::d/128"
