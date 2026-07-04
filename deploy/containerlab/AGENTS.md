@@ -18,7 +18,8 @@
 
 - **Fabric** — FRR DaemonSets running on each cluster's workers; handle eBGP to the transit mesh. Resources live in `resources/fabric/`.
 - **Tenant** — galactic-router DaemonSets running on each cluster's workers; handle iBGP EVPN route distribution. Resources live in `resources/tenant/`.
-- **iad-control** — The iad region's second worker node; runs the route reflector for all tenant BGP sessions. BGP resources in `resources/bgp/iad-control/`.
+- **Control** — iad-control node resources (FRR fabric + galactic-router route reflector). Resources live in `resources/control/` under `fabric/iad` and `tenant/iad`.
+- **iad-control** — The iad region's second worker node; runs the route reflector for all tenant BGP sessions. Fabric resources in `resources/control/fabric/iad/`, tenant resources in `resources/control/tenant/iad/`, BGP CRDs in `resources/bgp/control/tenant/iad/`.
 
 ## References
 

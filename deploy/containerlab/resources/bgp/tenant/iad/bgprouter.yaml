@@ -1,16 +1,16 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPRouter
 metadata:
-  name: dfw-tenant
+  name: iad-worker-tenant
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
-    name: dfw-worker
+    name: iad-worker
   roles:
     - tenant
   localASN: 65000
-  routerID: "10.0.1.1"
+  routerID: "10.0.2.1"
   addressFamilies:
     - afi: l2vpn
       safi: evpn

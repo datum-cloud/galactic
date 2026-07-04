@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: iad-fabric-control
+  name: fabric
 spec:
   template:
     spec:

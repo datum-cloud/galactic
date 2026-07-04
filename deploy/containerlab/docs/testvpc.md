@@ -42,12 +42,11 @@ task deploy:testvpc
 
 This does the following:
 
-1. **Applies galactic-cni RBAC** — ServiceAccount and ClusterRole in `galactic-system`.
-2. **Writes a kubeconfig** to each worker so `galactic-cni` can reach the API server and
-   create `BGPAdvertisement` CRDs on pod attach.
-3. **Patches the CNI wrapper** (`/opt/cni/bin/galactic-cni`) to export `KUBECONFIG` and
-   `NODE_NAME`.
-4. **Applies the nginx Deployment** to each cluster's `vpc` namespace.
+1. **Writes a kubeconfig** to each worker so `galactic-cni` can reach the API server and
+   create `BGPAdvertisement` CRDs on pod attach (requires `deploy:system` for RBAC).
+2. **Patches the CNI wrapper** (`/opt/cni/bin/galactic-cni`) to export `KUBECONFIG` and
+   `GALACTIC_CNI_NODE_NAME`.
+3. **Applies the nettools Deployment** to each cluster's `vpc` namespace.
 
 ## Verify Pods Are Running
 
@@ -57,7 +56,7 @@ docker exec iad-control-plane kubectl get pods -n vpc -o wide
 docker exec sjc-control-plane kubectl get pods -n vpc -o wide
 ```
 
-Each should show one `nginx` pod in `Running` state.
+Each should show one `nettools` pod in `Running` state.
 
 ### Inspect pod VPC interface
 
@@ -170,8 +169,8 @@ docker exec dfw-worker dmesg | grep galactic
 3. Verify the pod's VRF and SRv6 route on the worker:
 
    ```bash
-   docker exec dfw-worker ip -6 route show table vrf-vpc-nginx-*
-   docker exec dfw-worker ip -6 neigh show table vrf-vpc-nginx-*
+   docker exec dfw-worker ip -6 route show table vrf-vpc-nettools-*
+   docker exec dfw-worker ip -6 neigh show table vrf-vpc-nettools-*
    ```
 
 ### Regenerate CNI kubeconfigs

@@ -23,9 +23,9 @@ docker exec iad-control-plane kubectl get pods -n galactic-system
 docker exec sjc-control-plane kubectl get pods -n galactic-system
 
 # Run vtysh inside a pod
-docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-fabric \
+docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-worker-fabric \
   -- vtysh -c "show bgp ipv6 unicast summary"
-docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-fabric-control \
+docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-control-fabric \
   -- vtysh -c "show bgp ipv6 unicast summary"
 ```
 
