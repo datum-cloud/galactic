@@ -47,6 +47,8 @@ spec:
               value: tenant
             - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
               value: "1790"
+            - name: GALACTIC_ROUTER_REFLECTOR
+              value: "true"
             - name: GALACTIC_ROUTER_GC_NAMESPACE
               value: galactic-system
           securityContext:

@@ -7,6 +7,7 @@ package gobgp
 import (
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
@@ -15,6 +16,15 @@ import (
 
 	"go.datum.net/galactic/internal/model"
 )
+
+// parseSIDAddr parses an SRv6 SID string that may be a bare IPv6 address or a
+// /128 CIDR (e.g. "2001:db8::1/128"). It strips the CIDR suffix before parsing.
+func parseSIDAddr(sid string) (netip.Addr, error) {
+	if idx := strings.Index(sid, "/"); idx != -1 {
+		sid = sid[:idx]
+	}
+	return netip.ParseAddr(sid)
+}
 
 // buildEVPNPaths adds or withdraws EVPN Type 5 IP Prefix paths for each prefix
 // in adv into the local GoBGP RIB.
@@ -33,7 +43,7 @@ func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, ro
 
 	gwIP := nextHop
 	if adv.SRv6SID != "" {
-		sid, err := netip.ParseAddr(adv.SRv6SID)
+		sid, err := parseSIDAddr(adv.SRv6SID)
 		if err != nil {
 			return fmt.Errorf("invalid SRv6 SID %q: %w", adv.SRv6SID, err)
 		}

@@ -16,13 +16,13 @@ import (
 
 const sanitizeForErrorBinary = "<binary>"
 
-// srv6LocatorErrMsg is the error message prefix for invalid SRv6 locator values.
-const srv6LocatorErrMsg = "invalid srv6_locator"
+// srv6SIDErrMsg is the error message prefix for invalid SRv6 SID values.
+const srv6SIDErrMsg = "invalid srv6_sid"
 
 // isValidBase62 reports whether s contains only valid base62 characters
 // ([0-9a-zA-Z]) and is non-empty. VPC and VPCAttachment identifiers are
 // base62-encoded and used throughout the ADD path (interface naming,
-// SRv6 SID encoding). Rejecting them early in parseConf prevents cryptic
+// BGP CRD population). Rejecting them early in parseConf prevents cryptic
 // errors deep in the stack after partial kernel state has been created.
 func isValidBase62(s string) bool {
 	if len(s) == 0 {
@@ -36,23 +36,43 @@ func isValidBase62(s string) bool {
 	return true
 }
 
-// isValidSRv6Locator reports whether s is a valid IPv6 CIDR prefix suitable
-// for SRv6 SID encoding. The locator must be non-empty, parseable as an IPv6
-// prefix with a mask length of 64 or less (leaving at least 64 bits of
-// address space for embedding VPC/VPCAttachment identifiers).
-func isValidSRv6Locator(s string) bool {
+// isValidSRv6SID reports whether s is a valid USID — a /128 IPv6 address
+// suitable for use as an SRv6 endpoint identifier. The SID may be empty
+// (SRv6 ingress setup is skipped) or provided as a bare IPv6 address or
+// a /128 CIDR.
+func isValidSRv6SID(s string) bool {
 	if s == "" {
-		return true // empty locator is valid — setupSRv6Ingress is a no-op
+		return true
 	}
-	_, ipnet, err := net.ParseCIDR(s)
-	if err != nil {
+	// Accept both "addr" and "addr/128" forms.
+	addr := s
+	if idx := stringsIndex(s, "/"); idx >= 0 {
+		prefix := s[idx+1:]
+		if prefix != "128" {
+			return false
+		}
+		addr = s[:idx]
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil || ip.To4() != nil {
 		return false
 	}
-	if ipnet.IP.To4() != nil {
-		return false // must be IPv6
+	return true
+}
+
+// stringsIndex is a minimal strings.Index to avoid importing "strings"
+// alongside "encoding/json" in this file.
+func stringsIndex(s, substr string) int {
+	n := len(s) - len(substr)
+	if n < 0 {
+		return -1
 	}
-	maskLen, _ := ipnet.Mask.Size()
-	return maskLen <= 64
+	for i := 0; i <= n; i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
 }
 
 // statusConf holds the minimal CNI config fields needed for STATUS validation.
@@ -168,11 +188,10 @@ func parseConf(data []byte) (*PluginConf, error) {
 		}
 		return nil, fmt.Errorf("invalid base62 value for field 'vpcattachment': %q", sanitizeForError(conf.VPCAttachment))
 	}
-	if !isValidSRv6Locator(conf.SRv6Locator) {
+	if !isValidSRv6SID(conf.SRv6SID) {
 		return nil, fmt.Errorf(
-			"%s %q: must be a valid "+
-				"IPv6 CIDR prefix with mask length <= 64",
-			srv6LocatorErrMsg, sanitizeForError(conf.SRv6Locator),
+			"%s %q: must be a valid IPv6 address or /128 CIDR",
+			srv6SIDErrMsg, sanitizeForError(conf.SRv6SID),
 		)
 	}
 	if conf.PrevResult != nil {

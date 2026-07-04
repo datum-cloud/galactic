@@ -66,7 +66,7 @@ for site_node in dfw-control-plane:dfw sjc-control-plane:sjc iad-control-plane:i
   IFS=: read -r node site <<< "${site_node}"
   echo "Applying testvpc/${site} to ${node}..."
   docker cp "${RESOURCES_DIR}/testvpc/${site}" "${node}:/galactic/resources/testvpc-${site}/"
-  docker exec "${node}" kubectl apply -f "/galactic/resources/testvpc-${site}/nettools.yaml"
+  docker exec "${node}" kubectl apply -f "/galactic/resources/testvpc-${site}/testvpc.yaml"
 done
 
 setup_cni_kubeconfig dfw-control-plane dfw-worker

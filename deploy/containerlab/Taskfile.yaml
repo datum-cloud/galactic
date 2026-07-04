@@ -144,10 +144,10 @@ tasks:
     cmds:
       - ./scripts/install-tenant.sh
 
-  "deploy:nettools":
+  "deploy:testvpc":
     desc: Deploy test VPC across all clusters
     cmds:
-      - ./scripts/install-nettools.sh
+      - ./scripts/install-testvpc.sh
 
   test:
     desc: Run all verification checks
@@ -183,11 +183,11 @@ tasks:
           -- vtysh -c "show bgp ipv6 unicast summary"
 
   "test:srv6":
-    desc: Verify SRv6 forwarding prefixes on tr1
+    desc: Verify USID prefixes on tr1
     cmds:
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::1/128"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::2/128"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::3/128"
 
   "test:evpn":
     desc: Verify EVPN BGP routes on iad, sjc, and dfw via BGPRouter status

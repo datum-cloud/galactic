@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nettools
+  name: testvpc
   namespace: vpc
   labels:
-    app: nettools
+    app: testvpc
     site: dfw
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nettools
+      app: testvpc
   template:
     metadata:
       labels:
-        app: nettools
+        app: testvpc
         site: dfw
       annotations:
         k8s.v1.cni.cncf.io/networks: testvpc

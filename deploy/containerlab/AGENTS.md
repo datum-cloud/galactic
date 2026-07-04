@@ -9,7 +9,7 @@
 - **galactic-router image**: Uses `galactic-router:latest` with `imagePullPolicy: Never` — stale images persist across rebuilds.
 - **Kind serviceSubnet**: All clusters use `/108` service subnet (non-standard; may cause issues with some services).
 - **BGP listen port**: galactic-router tenant DaemonSets run with `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` (outbound-only, all sessions initiated outbound).
-- **Worker SRv6 loopback**: The `lo-galactic` dummy interface with the SRv6 node SID is created via `exec` commands in the ContainerLab topology (not in the Kind bootstrap script).
+- **Worker SRv6 loopback**: The `lo-galactic` dummy interface is created via `exec` commands in the ContainerLab topology. The USID is **not** configured as an address on this interface — instead a blackhole route (`metric 2048`) prevents the default route from matching the USID. The seg6local route (`metric 1024`) in the main table handles SRv6 decapsulation. If the USID were an interface address, the kernel's local table route (metric 0) would shadow the seg6local route and break decapsulation.
 - **Node labels**: Workers use `galactic.datum.net/node: edge` (not `galactic.io/role: pop`). The control node uses `galactic.datum.net/node: control` with a matching `NoSchedule` taint.
 - **GC namespace**: The tenant DaemonSet sets `GALACTIC_ROUTER_GC_NAMESPACE=galactic-system` for namespace-scoped garbage collection.
 - **FRR config**: Transit router configs omit the `frr version` directive (managed by the FRR image, not the config).

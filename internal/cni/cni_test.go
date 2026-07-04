@@ -83,7 +83,7 @@ func TestParseConf(t *testing.T) {
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":"2001:db8::/48"}`,
+					`"vpcattachment":"%s","srv6_sid":"2001:db8::1/128"}`,
 				testVPC, testAttachment,
 			),
 			wantVPC:    testVPC,
@@ -219,40 +219,40 @@ func TestParseConf(t *testing.T) {
 			wantIfType: interfaceTypeVeth,
 		},
 		{
-			name: "valid srv6_locator with /48 prefix",
+			name: "valid srv6_sid with /128",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":"2001:db8::/48"}`,
+					`"vpcattachment":"%s","srv6_sid":"2001:db8::1/128"}`,
 				testVPC, testAttachment,
 			),
 			wantVPC:    testVPC,
 			wantIfType: interfaceTypeVeth,
 		},
 		{
-			name: "valid srv6_locator with /64 prefix",
+			name: "valid srv6_sid bare IPv6 address",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":"fd00:1:2::/64"}`,
+					`"vpcattachment":"%s","srv6_sid":"2001:db8::1"}`,
 				testVPC, testAttachment,
 			),
 			wantVPC:    testVPC,
 			wantIfType: interfaceTypeVeth,
 		},
 		{
-			name: "valid srv6_locator empty is allowed",
+			name: "srv6_sid empty is allowed",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":""}`,
+					`"vpcattachment":"%s","srv6_sid":""}`,
 				testVPC, testAttachment,
 			),
 			wantVPC:    testVPC,
 			wantIfType: interfaceTypeVeth,
 		},
 		{
-			name: "srv6_locator missing is allowed",
+			name: "srv6_sid missing is allowed",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
@@ -263,44 +263,34 @@ func TestParseConf(t *testing.T) {
 			wantIfType: interfaceTypeVeth,
 		},
 		{
-			name: "srv6_locator invalid mask /65 too long",
+			name: "srv6_sid invalid mask /64 rejected",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":"fd00:1:2::/65"}`,
+					`"vpcattachment":"%s","srv6_sid":"fd00:1:2::/64"}`,
 				testVPC, testAttachment,
 			),
-			wantErr: srv6LocatorErrMsg,
+			wantErr: srv6SIDErrMsg,
 		},
 		{
-			name: "srv6_locator invalid IPv4 address",
+			name: "srv6_sid invalid IPv4 address",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":"192.168.1.0/24"}`,
+					`"vpcattachment":"%s","srv6_sid":"192.168.1.1"}`,
 				testVPC, testAttachment,
 			),
-			wantErr: srv6LocatorErrMsg,
+			wantErr: srv6SIDErrMsg,
 		},
 		{
-			name: "srv6_locator not a valid CIDR",
+			name: "srv6_sid not a valid address",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":"not-a-cidr"}`,
+					`"vpcattachment":"%s","srv6_sid":"not-an-address"}`,
 				testVPC, testAttachment,
 			),
-			wantErr: srv6LocatorErrMsg,
-		},
-		{
-			name: "srv6_locator plain IPv6 without mask",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_locator":"2001:db8::1"}`,
-				testVPC, testAttachment,
-			),
-			wantErr: srv6LocatorErrMsg,
+			wantErr: srv6SIDErrMsg,
 		},
 		{
 			name: "prevResult valid JSON result is accepted",
@@ -377,35 +367,31 @@ func TestIsValidBase62(t *testing.T) {
 	}
 }
 
-// ---- isValidSRv6Locator --------------------------------------------------
+// ---- isValidSRv6SID --------------------------------------------------
 
-func TestIsValidSRv6Locator(t *testing.T) {
+func TestIsValidSRv6SID(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  bool
 	}{
 		{"empty allowed", "", true},
-		{"valid /48", "2001:db8::/48", true},
-		{"valid /64", "fd00:1:2::/64", true},
-		{"valid /0", "::/0", true},
-		{"valid /63", "fd00::/63", true},
-		{"invalid /65 too long", "fd00::/65", false},
-		{"invalid /128", "fd00::1/128", false},
-		{"invalid IPv4", "192.168.1.0/24", false},
-		{"invalid IPv4 with IPv6-looking mask", "10.0.0.0/8", false},
-		{"not a CIDR", "not-a-cidr", false},
-		{"plain IPv6 no mask", "2001:db8::1", false},
-		{"plain IPv4 no mask", "192.168.1.1", false},
-		{"valid with host bits set", "2001:db8:1234::/48", true},
-		{"all zeros valid", "::/0", true},
+		{"valid /128", "2001:db8::1/128", true},
+		{"valid bare IPv6", "2001:db8:10:10::1", true},
+		{"valid all zeros /128", "::/128", true},
+		{"invalid /64", "fd00:1:2::/64", false},
+		{"invalid /48", "2001:db8::/48", false},
+		{"invalid IPv4", "192.168.1.1", false},
+		{"invalid IPv4 CIDR", "192.168.1.0/24", false},
+		{"not an address", "not-an-address", false},
+		{"invalid /0", "::/0", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isValidSRv6Locator(tt.input)
+			got := isValidSRv6SID(tt.input)
 			if got != tt.want {
-				t.Errorf("isValidSRv6Locator(%q) = %v, want %v", tt.input, got, tt.want)
+				t.Errorf("isValidSRv6SID(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}

@@ -8,10 +8,10 @@ Run these checks after `task deploy` to confirm the lab is healthy end-to-end.
 # iBGP full mesh — expect all sessions Established
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast summary"
 
-# Worker SRv6 prefixes should be present on all TR nodes
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
+# Worker USIDs should be present on all TR nodes
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::1/128"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::2/128"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::3/128"
 ```
 
 ## FRR DaemonSets (eBGP fabric)
