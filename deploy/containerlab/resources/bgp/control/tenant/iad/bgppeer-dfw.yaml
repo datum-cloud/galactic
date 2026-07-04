@@ -1,13 +1,13 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: sjc-tenant-to-rr
+  name: iad-control-tenant-to-dfw
   namespace: galactic-system
 spec:
   routerRef:
-    name: sjc-tenant
+    name: iad-control-tenant
   peerASN: 65000
-  address: "fc00:0:8::1"
+  address: "fc00:0:2::1"
   addressFamilies:
     - afi: l2vpn
       safi: evpn

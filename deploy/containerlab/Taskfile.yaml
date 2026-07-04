@@ -46,6 +46,7 @@ tasks:
       - task: "deploy:topology"
       - task: "deploy:rename-control"
       - task: "deploy:images"
+      - task: "deploy:system"
       - task: "deploy:fabric"
       - task: "deploy:tenant"
 
@@ -97,6 +98,13 @@ tasks:
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: dfw-worker}
 
+  "deploy:system":
+    desc: Apply galactic-system namespace to all clusters
+    cmds:
+      - docker cp resources/system iad-control-plane:/galactic/resources/system/ && docker exec iad-control-plane kubectl apply -f /galactic/resources/system/
+      - docker cp resources/system sjc-control-plane:/galactic/resources/system/ && docker exec sjc-control-plane kubectl apply -f /galactic/resources/system/
+      - docker cp resources/system dfw-control-plane:/galactic/resources/system/ && docker exec dfw-control-plane kubectl apply -f /galactic/resources/system/
+
   destroy:
     desc: Destroy the lab
     cmds:
@@ -136,10 +144,10 @@ tasks:
     cmds:
       - ./scripts/install-tenant.sh
 
-  "deploy:testvpc":
+  "deploy:nettools":
     desc: Deploy test VPC across all clusters
     cmds:
-      - ./scripts/install-testvpc.sh
+      - ./scripts/install-nettools.sh
 
   test:
     desc: Run all verification checks
@@ -163,15 +171,15 @@ tasks:
     cmds:
       - |
         docker exec dfw-control-plane \
-          kubectl exec -n galactic-system ds/dfw-fabric \
+          kubectl exec -n galactic-system ds/dfw-worker-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec iad-control-plane \
-          kubectl exec -n galactic-system ds/iad-fabric \
+          kubectl exec -n galactic-system ds/iad-worker-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec sjc-control-plane \
-          kubectl exec -n galactic-system ds/sjc-fabric \
+          kubectl exec -n galactic-system ds/sjc-worker-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
 
   "test:srv6":

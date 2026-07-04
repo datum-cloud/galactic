@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nginx
+  name: nettools
   namespace: vpc
   labels:
-    app: nginx
-    site: iad
+    app: nettools
+    site: dfw
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nginx
+      app: nettools
   template:
     metadata:
       labels:
-        app: nginx
-        site: iad
+        app: nettools
+        site: dfw
       annotations:
         k8s.v1.cni.cncf.io/networks: testvpc
     spec:

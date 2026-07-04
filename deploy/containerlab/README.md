@@ -38,12 +38,12 @@ over iBGP to the route reflector on iad-control.
 ```
 AS 65000 (dfw-fabric / FRR)          ──eBGP──  tr1 (AS 65100)
 AS 65000 (iad-fabric / FRR)          ──eBGP──  tr3:eth5 (AS 65100)
-AS 65000 (iad-fabric-control / FRR)  ──eBGP──  tr3:eth4 (AS 65100)
+AS 65000 (iad-control-fabric / FRR)  ──eBGP──  tr3:eth4 (AS 65100)
 AS 65000 (sjc-fabric / FRR)          ──eBGP──  tr2 (AS 65100)
 
-AS 65000 (dfw-tenant / galactic-router)    ──iBGP──  iad-tenant-control (AS 65000 RR)
-AS 65000 (iad-tenant / galactic-router)    ──iBGP──  iad-tenant-control (AS 65000 RR)
-AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-tenant-control (AS 65000 RR)
+AS 65000 (dfw-tenant / galactic-router)    ──iBGP──  iad-control-tenant (AS 65000 RR)
+AS 65000 (iad-tenant / galactic-router)    ──iBGP──  iad-control-tenant (AS 65000 RR)
+AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant (AS 65000 RR)
 ```
 
 - All clusters use a single AS (65000) for both the FRR fabric and the galactic-router tenant.
@@ -126,9 +126,11 @@ deploy/containerlab/
 │   ├── galactic-router/         # galactic-router container built from Go source
 │   └── frr/                     # FRR container built from Alpine edge
 ├── resources/
-│   ├── fabric/                  # FRR DaemonSet kustomize overlays (dfw, iad, iad-control, sjc)
-│   ├── tenant/                  # galactic-router DaemonSet kustomize overlays (dfw, iad, sjc)
-│   └── bgp/                     # BGP CRs (BGPRouter, BGPPeer, BGPAdvertisement)
+│   ├── system/                  # galactic-system namespace provisioning
+│   ├── fabric/                  # FRR DaemonSet manifests (dfw, iad, sjc)
+│   ├── tenant/                  # galactic-router DaemonSet manifests (dfw, iad, sjc)
+│   ├── control/                 # iad-control node resources (fabric/iad, tenant/iad)
+│   └── bgp/                     # BGP CRs (tenant/$SITE, control/tenant/$SITE)
 ├── node_files/
 │   ├── dfw/     config.yaml
 │   ├── iad/     config.yaml

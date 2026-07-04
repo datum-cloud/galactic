@@ -1,13 +1,13 @@
 apiVersion: bgp.miloapis.com/v1alpha1
 kind: BGPAdvertisement
 metadata:
-  name: sjc-tenant-sid
+  name: dfw-worker-tenant-sid
   namespace: galactic-system
 spec:
   routerRef:
-    name: sjc-tenant
+    name: dfw-worker-tenant
   addressFamily:
     afi: l2vpn
     safi: evpn
   prefixes:
-    - "2001:db8:ff02:100:ffff:ffff:ffff:ffff/128"
+    - "2001:db8:ff01:100:ffff:ffff:ffff:ffff/128"
