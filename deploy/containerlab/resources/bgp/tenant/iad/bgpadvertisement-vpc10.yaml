@@ -1,0 +1,13 @@
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPAdvertisement
+metadata:
+  name: iad-worker-vpc10-sid
+  namespace: galactic-system
+spec:
+  routerRef:
+    name: iad-worker-tenant
+  addressFamily:
+    afi: l2vpn
+    safi: evpn
+  prefixes:
+    - "2001:db8:ff03::1/128"

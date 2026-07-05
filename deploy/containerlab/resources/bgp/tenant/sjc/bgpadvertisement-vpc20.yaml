@@ -1,0 +1,13 @@
+apiVersion: bgp.miloapis.com/v1alpha1
+kind: BGPAdvertisement
+metadata:
+  name: sjc-worker-vpc20-sid
+  namespace: galactic-system
+spec:
+  routerRef:
+    name: sjc-worker-tenant
+  addressFamily:
+    afi: l2vpn
+    safi: evpn
+  prefixes:
+    - "2001:db8:ff02::2/128"

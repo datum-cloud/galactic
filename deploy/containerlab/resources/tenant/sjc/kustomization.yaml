@@ -1,2 +1,10 @@
+namePrefix: sjc-
+namespace: galactic-system
 resources:
-  - daemonset
+  - ../base
+  - namespace.yaml
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: tenant
