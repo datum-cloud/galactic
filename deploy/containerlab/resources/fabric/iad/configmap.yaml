@@ -42,7 +42,7 @@ data:
      ipv6 address 2001:db8:1:30::2/64
     !
 
-    ipv6 route 2001:db8:ff00:1010::3/128 Null0
+    ipv6 route 2001:db8:ff03::/48 Null0
     !
     route-map SET_SRC permit 10
      set src fc00:0:4::1
@@ -58,7 +58,7 @@ data:
       neighbor 2001:db8:1:30::1 activate
       neighbor 2001:db8:1:30::1 allowas-in 1
       neighbor 2001:db8:1:30::1 route-map SET_SRC in
-      network 2001:db8:ff00:1010::3/128
+      network 2001:db8:ff03::/48
       network fc00:0:4::/48
      exit-address-family
     !
