@@ -7,8 +7,10 @@ package gobgp
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	api "github.com/osrg/gobgp/v4/api"
@@ -40,12 +42,24 @@ type GoBGPRuntime struct {
 	// appliedVRFs tracks the names of VRFs that have been applied to GoBGP so
 	// stale VRFs can be removed when they disappear from desired state.
 	appliedVRFs map[string]struct{}
+	// appliedAdvertisements tracks the last-applied DesiredAdvertisement per
+	// name so a changed advertisement's previous EVPN paths can be withdrawn.
+	// This matters because the EVPN Type 5 route's Gateway IP Address (the
+	// SRv6 SID) is part of the NLRI itself, not a mutable path attribute:
+	// re-adding a path with a new SID creates a structurally different route
+	// rather than replacing the old one, so the stale route must be withdrawn
+	// explicitly or it stays advertised indefinitely.
+	appliedAdvertisements map[string]model.DesiredAdvertisement
 	// serverCtxCancel cancels the goroutine running server.Start.
 	serverCtxCancel context.CancelFunc
 	// srvCtx is the context passed to server.Start; monitor goroutines use it.
 	srvCtx context.Context
 	// monitorOnce ensures the EVPN RIB watcher goroutine is started at most once.
 	monitorOnce sync.Once
+	// vrfRouting holds the current import-RT -> VRF table mapping consumed by
+	// the RIB monitor's OnBestPath callback. Rebuilt on every Apply so VRFs
+	// added after the watcher goroutine starts are picked up.
+	vrfRouting atomic.Pointer[vrfRoutingState]
 }
 
 // NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
@@ -56,13 +70,14 @@ type GoBGPRuntime struct {
 func NewRuntimeFactory(listenPort int32, localAddress string) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		return &GoBGPRuntime{
-			key:             key,
-			server:          newServer(Config{}),
-			listenPort:      listenPort,
-			localAddress:    localAddress,
-			establishedAt:   make(map[string]time.Time),
-			appliedPolicies: make(map[string]model.BGPPolicyDirection),
-			appliedVRFs:     make(map[string]struct{}),
+			key:                   key,
+			server:                newServer(Config{}),
+			listenPort:            listenPort,
+			localAddress:          localAddress,
+			establishedAt:         make(map[string]time.Time),
+			appliedPolicies:       make(map[string]model.BGPPolicyDirection),
+			appliedVRFs:           make(map[string]struct{}),
+			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 		}, nil
 	}
 }
@@ -89,7 +104,8 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return err
 	}
 
-	r.startRIBMonitor(b, desired.VRFInstances)
+	r.updateVRFRouting(b, desired.VRFInstances)
+	r.startRIBMonitor(b)
 
 	if err := r.applyEVPN(b, desired.Advertisements, desired.RouterID); err != nil {
 		return err
@@ -215,14 +231,40 @@ func (r *GoBGPRuntime) applyVRFs(ctx context.Context, b *gobgpserver.BgpServer, 
 	return nil
 }
 
-// applyEVPN advertises EVPN paths for all relevant advertisements.
+// applyEVPN advertises EVPN paths for all relevant advertisements, withdrawing
+// each advertisement's previous paths first when its content has changed.
 func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredAdvertisement, routerID string) error {
+	desiredNames := make(map[string]struct{}, len(advs))
 	for _, adv := range advs {
-		if adv.AddressFamily.AFI == afiL2VPN {
-			if err := buildEVPNPaths(b, adv, routerID, false); err != nil {
-				return fmt.Errorf("advertise EVPN paths for %s: %w", adv.Name, err)
+		if adv.AddressFamily.AFI != afiL2VPN {
+			continue
+		}
+		desiredNames[adv.Name] = struct{}{}
+
+		if oldAdv, ok := r.appliedAdvertisements[adv.Name]; ok {
+			if reflect.DeepEqual(oldAdv, adv) {
+				continue
+			}
+			if err := buildEVPNPaths(b, oldAdv, routerID, true); err != nil {
+				return fmt.Errorf("withdraw stale EVPN paths for %s: %w", adv.Name, err)
 			}
 		}
+
+		if err := buildEVPNPaths(b, adv, routerID, false); err != nil {
+			return fmt.Errorf("advertise EVPN paths for %s: %w", adv.Name, err)
+		}
+		r.appliedAdvertisements[adv.Name] = adv
+	}
+
+	// Withdraw advertisements that no longer exist in desired state.
+	for name, oldAdv := range r.appliedAdvertisements {
+		if _, ok := desiredNames[name]; ok {
+			continue
+		}
+		if err := buildEVPNPaths(b, oldAdv, routerID, true); err != nil {
+			return fmt.Errorf("withdraw removed EVPN advertisement %s: %w", name, err)
+		}
+		delete(r.appliedAdvertisements, name)
 	}
 	return nil
 }
