@@ -44,7 +44,7 @@ type DesiredRouter struct {
 	RouterID        string
 	AddressFamilies []AddressFamily
 	Peers           []DesiredPeer
-	VRFInstance     *DesiredVRFInstance
+	VRFInstances    []DesiredVRFInstance
 	Advertisements  []DesiredAdvertisement
 	Policies        []DesiredPolicy
 }

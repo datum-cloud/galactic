@@ -12,6 +12,7 @@ apply_tenant() {
   docker cp "${RESOURCES_DIR}/bgp/tenant" "${node}:/galactic/resources/bgp-tenant/"
   docker exec "${node}" sh -c 'kubectl create namespace vpc --dry-run=client -o yaml | kubectl apply -f -'
   docker exec "${node}" kubectl apply -f /galactic/resources/tenant/${site}/nad.yaml
+  docker exec "${node}" kubectl apply -f /galactic/resources/tenant/${site}/nad-2.yaml
   docker exec "${node}" kubectl apply -k /galactic/resources/tenant/${site}/daemonset/
   docker exec "${node}" kubectl apply -f /galactic/resources/bgp-tenant/${site}/
 }
@@ -23,6 +24,7 @@ apply_tenant sjc-control-plane sjc
 echo "Applying tenant/iad to iad-control-plane..."
 docker exec iad-control-plane sh -c 'kubectl create namespace vpc --dry-run=client -o yaml | kubectl apply -f -'
 docker exec iad-control-plane kubectl apply -f /galactic/resources/tenant/iad/nad.yaml
+docker exec iad-control-plane kubectl apply -f /galactic/resources/tenant/iad/nad-2.yaml
 docker exec iad-control-plane kubectl apply -k /galactic/resources/tenant/iad/daemonset/
 docker exec iad-control-plane kubectl apply -f /galactic/resources/control/tenant/iad/
 docker exec iad-control-plane kubectl apply -f /galactic/resources/bgp-tenant/iad/

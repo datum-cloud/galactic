@@ -119,6 +119,12 @@ tasks:
       - task: destroy
       - task: deploy
 
+  rebuild:
+    desc: Rebuild the full deployment
+    cmds:
+      - task: clean
+      - task: deploy
+
   inspect:
     desc: Inspect deployed nodes and management addresses
     cmds:

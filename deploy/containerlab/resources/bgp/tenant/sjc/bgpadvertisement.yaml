@@ -10,4 +10,5 @@ spec:
     afi: l2vpn
     safi: evpn
   prefixes:
-    - "2001:db8:ff00:1010::2/128"
+    - "2001:db8:ff02::1/128"
+    - "2001:db8:ff02::2/128"

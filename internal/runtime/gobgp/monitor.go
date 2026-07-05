@@ -10,10 +10,10 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"slices"
 	"strings"
 	"time"
 
+	api "github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
@@ -24,88 +24,124 @@ import (
 	vrfpkg "go.datum.net/galactic/internal/plumbing/vrf"
 )
 
+// vrfTable maps an import RT value to the VRF's kernel routing table ID.
+type vrfTable struct {
+	name    string
+	tableID uint32
+}
+
+// vrfRoutingState is the routing lookup consumed by the RIB monitor's
+// OnBestPath callback. It is rebuilt from scratch on every Apply so VRFs
+// that appear after the watcher goroutine has started are still routed.
+type vrfRoutingState struct {
+	rtToVRF  map[string]vrfTable
+	tableIDs map[uint32]struct{}
+}
+
+// updateVRFRouting rebuilds the import-RT -> VRF table mapping from the
+// current desired VRF instances and publishes it for the RIB monitor to
+// consume. Called on every Apply; a VRF whose kernel table isn't resolvable
+// yet (e.g. the CNI hasn't created it) is simply retried on the next Apply.
+//
+// After publishing, it also resyncs against GoBGP's current EVPN RIB
+// (resyncEVPNRoutes) rather than relying solely on the OnBestPath watcher.
+// WatchBestPath's initial dump fires once, when the watcher goroutine
+// starts — if a VRF's kernel table wasn't resolvable yet at that moment, its
+// paths are evaluated against an incomplete map and never retried, since
+// GoBGP only calls OnBestPath again on an actual RIB change. The resync
+// closes that gap by re-walking the live RIB every time the mapping changes.
+func (r *GoBGPRuntime) updateVRFRouting(b *gobgpserver.BgpServer, vrfInsts []model.DesiredVRFInstance) {
+	state := &vrfRoutingState{
+		rtToVRF:  make(map[string]vrfTable),
+		tableIDs: make(map[uint32]struct{}),
+	}
+
+	for _, vrfInst := range vrfInsts {
+		// VRF name is "{vpc}-{vpcAttachment}" in base62 — see bgpVRFInstanceName in cni.go.
+		parts := strings.SplitN(vrfInst.Name, "-", 2)
+		if len(parts) != 2 {
+			slog.Error("updateVRFRouting: VRF name does not contain '-'", "name", vrfInst.Name)
+			continue
+		}
+		vpc, vpcAtt := parts[0], parts[1]
+
+		tableID, err := vrfpkg.TableID(vpc, vpcAtt)
+		if err != nil {
+			slog.Error("updateVRFRouting: failed to get VRF table ID", "vpc", vpc, "vpcAtt", vpcAtt, "err", err)
+			continue
+		}
+		slog.Info("updateVRFRouting: resolved VRF table", "vpc", vpc, "vpcAtt", vpcAtt, "tableID", tableID)
+		state.tableIDs[tableID] = struct{}{}
+
+		for _, rt := range vrfInst.ImportRouteTargets {
+			state.rtToVRF[rt] = vrfTable{name: vrfInst.Name, tableID: tableID}
+		}
+	}
+
+	// Probe route write for each unique table ID.
+	for tableID := range state.tableIDs {
+		if err := probeRouteWrite(tableID); err != nil {
+			slog.Error("updateVRFRouting: route write probe failed; SEG6 encap routes will not be installed",
+				"err", err, "table", tableID,
+				"hint", "set runAsUser: 0 and capabilities.add: [NET_ADMIN] in the container securityContext")
+			return
+		}
+	}
+
+	r.vrfRouting.Store(state)
+	r.resyncEVPNRoutes(b, state)
+}
+
+// resyncEVPNRoutes walks GoBGP's current global EVPN RIB and (re)applies the
+// install/withdraw logic against state for every best path. This catches
+// paths that were already in the RIB before state had the matching VRF
+// entry — see updateVRFRouting for why the OnBestPath watcher alone can miss
+// these.
+func (r *GoBGPRuntime) resyncEVPNRoutes(b *gobgpserver.BgpServer, state *vrfRoutingState) {
+	listErr := b.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
+		Family:    bgp.RF_EVPN,
+	}, func(_ bgp.NLRI, paths []*apiutil.Path) {
+		for _, path := range paths {
+			if !path.Best {
+				continue
+			}
+			r.handleEVPNPath(path, state)
+		}
+	})
+	if listErr != nil {
+		slog.Error("resyncEVPNRoutes: ListPath failed", "err", listErr)
+	}
+}
+
 // startRIBMonitor starts the EVPN best-path watcher goroutine once per
 // GoBGPRuntime lifetime. It installs and removes kernel SEG6 encap routes in
-// the VRF routing table as remote EVPN Type 5 paths are added or withdrawn.
-func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance) {
-	if vrf == nil || r.srvCtx == nil {
-		slog.Info("startRIBMonitor: skipping — vrf or srvCtx is nil", "vrf", vrf, "srvCtx", r.srvCtx)
+// the VRF routing tables as remote EVPN Type 5 paths are added or withdrawn.
+// The set of VRFs it routes to is read live from r.vrfRouting on every event,
+// so it reflects whatever updateVRFRouting last published.
+func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer) {
+	if r.srvCtx == nil {
+		slog.Info("startRIBMonitor: skipping — srvCtx is nil")
 		return
 	}
 	r.monitorOnce.Do(func() {
-		slog.Info("startRIBMonitor: launching watchEVPNRIB goroutine", "vrf", vrf.Name)
-		go r.watchEVPNRIB(r.srvCtx, b, vrf)
+		slog.Info("startRIBMonitor: launching watchEVPNRIB goroutine")
+		go r.watchEVPNRIB(r.srvCtx, b)
 	})
 }
 
-func (r *GoBGPRuntime) watchEVPNRIB(ctx context.Context, b *gobgpserver.BgpServer, vrfInst *model.DesiredVRFInstance) {
-	// VRF name is "{vpc}-{vpcAttachment}" in base62 — see bgpVRFInstanceName in cni.go.
-	parts := strings.SplitN(vrfInst.Name, "-", 2)
-	if len(parts) != 2 {
-		slog.Error("watchEVPNRIB: VRF name does not contain '-'", "name", vrfInst.Name)
-		return
-	}
-	vpc, vpcAtt := parts[0], parts[1]
-
-	tableID, err := vrfpkg.TableID(vpc, vpcAtt)
-	if err != nil {
-		slog.Error("watchEVPNRIB: failed to get VRF table ID", "vpc", vpc, "vpcAtt", vpcAtt, "err", err)
-		return
-	}
-	slog.Info("watchEVPNRIB: resolved VRF table", "vpc", vpc, "vpcAtt", vpcAtt, "tableID", tableID)
-
-	if err := probeRouteWrite(tableID); err != nil {
-		slog.Error("watchEVPNRIB: route write probe failed; SEG6 encap routes will not be installed",
-			"err", err, "hint", "set runAsUser: 0 and capabilities.add: [NET_ADMIN] in the container securityContext")
-		return
-	}
-
-	importRTs := vrfInst.ImportRouteTargets
+func (r *GoBGPRuntime) watchEVPNRIB(ctx context.Context, b *gobgpserver.BgpServer) {
 	localAddr := r.localAddress
-
-	slog.Info("watchEVPNRIB: registering WatchBestPath", "importRTs", importRTs, "localAddr", localAddr)
+	slog.Info("watchEVPNRIB: registering WatchBestPath", "localAddr", localAddr)
 
 	watchErr := b.WatchEvent(ctx, gobgpserver.WatchEventMessageCallbacks{
 		OnBestPath: func(paths []*apiutil.Path, _ time.Time) {
+			state := r.vrfRouting.Load()
+			if state == nil {
+				return
+			}
 			for _, path := range paths {
-				if path.Family != bgp.RF_EVPN {
-					continue
-				}
-				evpnNLRI, ok := path.Nlri.(*bgp.EVPNNLRI)
-				if !ok {
-					continue
-				}
-				ipPrefix, ok := evpnNLRI.RouteTypeData.(*bgp.EVPNIPPrefixRoute)
-				if !ok {
-					continue
-				}
-				// Skip locally-originated paths (our own EVPN advertisements).
-				// Compare the MpReachNLRI next-hop against localAddr rather than
-				// GWIPAddress — after the SRv6SID fix, GWIPAddress is the End.DT46
-				// SID (not the BGP peering loopback), so the old check would miss
-				// locally-originated paths and try to install a seg6 encap route
-				// for our own VPC subnet.
-				if evpnMpReachNexthop(path.Attrs) == localAddr {
-					continue
-				}
-				if !pathMatchesRTs(path.Attrs, importRTs) {
-					continue
-				}
-
-				prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
-				gw := addrToNetIP(ipPrefix.GWIPAddress)
-
-				if path.Withdrawal {
-					slog.Info("watchEVPNRIB: withdrawing route", "prefix", prefix, "table", tableID)
-					if delErr := srv6.RouteEgressDel(prefix, tableID); delErr != nil {
-						slog.Error("watchEVPNRIB: RouteEgressDel failed", "prefix", prefix, "table", tableID, "err", delErr)
-					}
-				} else {
-					slog.Info("watchEVPNRIB: installing route", "prefix", prefix, "gw", gw, "table", tableID)
-					if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
-						slog.Error("watchEVPNRIB: RouteEgressAdd failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
-					}
-				}
+				r.handleEVPNPath(path, state)
 			}
 		},
 	}, gobgpserver.WatchBestPath(true))
@@ -114,21 +150,70 @@ func (r *GoBGPRuntime) watchEVPNRIB(ctx context.Context, b *gobgpserver.BgpServe
 	}
 }
 
-// pathMatchesRTs returns true if any extended community in attrs matches any
-// of the given route target strings (e.g. "65000:62").
-func pathMatchesRTs(attrs []bgp.PathAttributeInterface, importRTs []string) bool {
-	for _, attr := range attrs {
-		ec, ok := attr.(*bgp.PathAttributeExtendedCommunities)
-		if !ok {
-			continue
+// handleEVPNPath installs or withdraws a kernel SEG6 encap route for a single
+// EVPN Type 5 path, if it matches a VRF in state. Shared by the live
+// OnBestPath watcher and the periodic resync against GoBGP's RIB.
+func (r *GoBGPRuntime) handleEVPNPath(path *apiutil.Path, state *vrfRoutingState) {
+	if path.Family != bgp.RF_EVPN {
+		return
+	}
+	evpnNLRI, ok := path.Nlri.(*bgp.EVPNNLRI)
+	if !ok {
+		return
+	}
+	ipPrefix, ok := evpnNLRI.RouteTypeData.(*bgp.EVPNIPPrefixRoute)
+	if !ok {
+		return
+	}
+	// Skip locally-originated paths (our own EVPN advertisements).
+	if evpnMpReachNexthop(path.Attrs) == r.localAddress {
+		return
+	}
+
+	// Find which VRF(s) this path belongs to by matching communities
+	// against the published routing state.
+	match := findMatchingVRF(path.Attrs, state.rtToVRF)
+	if match == nil {
+		return
+	}
+
+	prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
+	gw := addrToNetIP(ipPrefix.GWIPAddress)
+
+	if path.Withdrawal {
+		slog.Info("handleEVPNPath: withdrawing route", "prefix", prefix, "vrf", match.name, "table", match.tableID)
+		if delErr := srv6.RouteEgressDel(prefix, match.tableID); delErr != nil {
+			slog.Error("handleEVPNPath: RouteEgressDel failed", "prefix", prefix, "table", match.tableID, "err", delErr)
 		}
-		for _, community := range ec.Value {
-			if slices.Contains(importRTs, community.String()) {
-				return true
-			}
+	} else {
+		slog.Info("handleEVPNPath: installing route", "prefix", prefix, "gw", gw, "vrf", match.name, "table", match.tableID)
+		if addErr := srv6.RouteEgressAdd(prefix, gw, match.tableID); addErr != nil {
+			slog.Error("handleEVPNPath: RouteEgressAdd failed",
+				"prefix", prefix, "gw", gw, "table", match.tableID, "err", addErr)
 		}
 	}
-	return false
+}
+
+// findMatchingVRF returns the VRF table info for the first matching import RT,
+// or nil if no VRF matches the path's communities.
+func findMatchingVRF(attrs []bgp.PathAttributeInterface, rtToVRF map[string]vrfTable) *vrfTable {
+	ec, ok := func() (*bgp.PathAttributeExtendedCommunities, bool) {
+		for _, attr := range attrs {
+			if e, ok := attr.(*bgp.PathAttributeExtendedCommunities); ok {
+				return e, true
+			}
+		}
+		return nil, false
+	}()
+	if !ok {
+		return nil
+	}
+	for _, community := range ec.Value {
+		if vt, ok := rtToVRF[community.String()]; ok {
+			return &vt
+		}
+	}
+	return nil
 }
 
 // evpnMpReachNexthop returns the MpReachNLRI next-hop address string from path
