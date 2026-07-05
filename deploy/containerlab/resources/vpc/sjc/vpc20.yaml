@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vpc20
+  namespace: vpc
+  labels:
+    app: vpc20
+    site: sjc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc20
+  template:
+    metadata:
+      labels:
+        app: vpc20
+        site: sjc
+      annotations:
+        k8s.v1.cni.cncf.io/networks: vpc20
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: multitool
+          image: wbitt/network-multitool
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http

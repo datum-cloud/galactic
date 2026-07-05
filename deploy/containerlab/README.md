@@ -76,12 +76,12 @@ AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant 
 
 ### Worker–TR links (numbered, eBGP)
 
-| Link                   | Subnet              | TR address     | Worker address   |
-|------------------------|---------------------|----------------|------------------|
-| dfw-worker – tr1       | 2001:db8:1:10::/64  | 2001:db8:1:10::1 | 2001:db8:1:10::2 |
-| sjc-worker – tr2       | 2001:db8:1:20::/64  | 2001:db8:1:20::1 | 2001:db8:1:20::2 |
-| iad-worker – tr3       | 2001:db8:1:30::/64  | 2001:db8:1:30::1 | 2001:db8:1:30::2 |
-| iad-worker-control – tr3 | 2001:db8:1:31::/64  | 2001:db8:1:31::1 | 2001:db8:1:31::2 |
+| Link                     | Subnet             | TR address       | Worker address   |
+|--------------------------|--------------------|------------------|------------------|
+| dfw-worker – tr1         | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 |
+| sjc-worker – tr2         | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 |
+| iad-worker – tr3         | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 |
+| iad-worker-control – tr3 | 2001:db8:1:31::/64 | 2001:db8:1:31::1 | 2001:db8:1:31::2 |
 
 ### Cluster SRv6 addressing
 
@@ -91,12 +91,15 @@ The blackhole prevents the default route from matching the USID while the
 seg6local route handles SRv6 decapsulation. The FRR fabric DaemonSet advertises
 the USID into the transit mesh via a static Null0 route + BGP `network` statement.
 
-| Cluster   | FRR loopback       | USID (lo-galactic)         | galactic-router address |
-|-----------|--------------------|----------------------------|-------------------------|
-| dfw       | fc00:0:2::1/48     | 2001:db8:ff00:1010::1/128  | fc00:0:2::1             |
-| iad       | fc00:0:4::1/48     | 2001:db8:ff00:1010::3/128  | fc00:0:4::1             |
-| iad-control | fc00:0:8::1/48   | 2001:db8:ff00:1010::4/128  | fc00:0:8::1             |
-| sjc       | fc00:0:3::1/48     | 2001:db8:ff00:1010::2/128  | fc00:0:3::1             |
+Test VPCs `vpc10` and `vpc20` (see [docs/vpc.md](docs/vpc.md)) each get their own USID per
+cluster, reusing the same site index and sharing the `galactic-router` loopback:
+
+| Cluster     | FRR loopback   | USID vpc10                                   | USID vpc20                                   | galactic-router address |
+|-------------|----------------|----------------------------------------------|----------------------------------------------|-------------------------|
+| dfw         | fc00:0:2::1/48 | 2001:db8:ff00:1010::1/128                    | 2001:db8:ff00:1020::1/128                    | fc00:0:2::1             |
+| iad         | fc00:0:4::1/48 | 2001:db8:ff00:1010::3/128                    | 2001:db8:ff00:1020::3/128                    | fc00:0:4::1             |
+| iad-control | fc00:0:8::1/48 | 2001:db8:ff00:1010::4/128 (reserved, unused) | 2001:db8:ff00:1020::4/128 (reserved, unused) | fc00:0:8::1             |
+| sjc         | fc00:0:3::1/48 | 2001:db8:ff00:1010::2/128                    | 2001:db8:ff00:1020::2/128                    | fc00:0:3::1             |
 
 ### Management network (172.20.20.0/24)
 
@@ -126,7 +129,8 @@ deploy/containerlab/
 ├── resources/
 │   ├── system/                  # galactic-system namespace provisioning
 │   ├── fabric/                  # FRR DaemonSet manifests (dfw, iad, sjc)
-│   ├── tenant/                  # galactic-router DaemonSet manifests (dfw, iad, sjc)
+│   ├── tenant/                  # galactic-router DaemonSet + vpc10/vpc20 NAD manifests (dfw, iad, sjc)
+│   ├── vpc/                     # vpc10/vpc20 test workload Deployments (dfw, iad, sjc)
 │   ├── control/                 # iad-control node resources (fabric/iad, tenant/iad)
 │   └── bgp/                     # BGP CRs (tenant/$SITE, control/tenant/$SITE)
 ├── node_files/
@@ -142,8 +146,12 @@ deploy/containerlab/
 │   └── transit/ daemons
 └── scripts/
     ├── host-setup.sh
-    ├── install-fabric.sh
-    └── install-tenant.sh
+    ├── lib.sh
+    ├── deploy-system.sh
+    ├── deploy-cni.sh
+    ├── deploy-fabric.sh
+    ├── deploy-tenant.sh
+    └── deploy-vpc.sh
 ```
 
 ## Prerequisites
@@ -170,32 +178,36 @@ task deploy
 
 ## Tasks
 
-| Task                    | Description                                                   |
-|-------------------------|---------------------------------------------------------------|
-| `build`                 | Build all container images (node, galactic-router, frr)       |
-| `build:node`            | Build the custom `kindest/node:galactic` image                |
-| `build:galactic-router` | Build the galactic-router container from Go source            |
-| `build:frr`             | Build the FRR container from Alpine edge                      |
-| `deploy`                | Build images, apply host sysctls, and deploy the lab          |
-| `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters) |
-| `deploy:images`         | Load container images into Kind clusters                      |
-| `deploy:fabric`         | Apply FRR DaemonSets to all clusters                          |
-| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                  |
-| `destroy`               | Destroy the lab and remove all Kind clusters                  |
-| `reload`                | Full rebuild — destroy then redeploy                          |
-| `inspect`               | Show running nodes and management addresses                   |
-| `graph`                 | Generate a draw.io diagram for the topology                   |
-| `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits) |
-| `clean`                 | Destroy lab, delete built images, and remove lab artifacts    |
-| `test`                  | Run all verification checks                                   |
+| Task                    | Description                                                        |
+|-------------------------|--------------------------------------------------------------------|
+| `build`                 | Build all container images (node, galactic-router, frr)            |
+| `build:node`            | Build the custom `kindest/node:galactic` image                     |
+| `build:galactic-router` | Build the galactic-router container from Go source                 |
+| `build:frr`             | Build the FRR container from Alpine edge                           |
+| `deploy`                | Build images, apply host sysctls, and deploy the lab               |
+| `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters)      |
+| `deploy:images`         | Load container images into Kind clusters                           |
+| `deploy:system`         | Apply the galactic-system namespace and shared RBAC                |
+| `deploy:cni`            | Push a galactic-cni kubeconfig to each worker                      |
+| `deploy:fabric`         | Apply FRR DaemonSets to all clusters                               |
+| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                       |
+| `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods) |
+| `destroy`               | Destroy the lab and remove all Kind clusters                       |
+| `reload`                | Full rebuild — destroy then redeploy                               |
+| `inspect`               | Show running nodes and management addresses                        |
+| `graph`                 | Generate a draw.io diagram for the topology                        |
+| `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)      |
+| `clean`                 | Destroy lab, delete built images, and remove lab artifacts         |
+| `test`                  | Run all verification checks                                        |
 
 ## Verification
 
 See [docs/verification.md](docs/verification.md) for transit fabric, FRR, and galactic-router
-health checks. Quick smoke test:
+health checks, and [docs/vpc.md](docs/vpc.md) for deploying the `vpc10`/`vpc20` test
+workloads and verifying cross-site and cross-VPC connectivity. Quick smoke test:
 
 ```bash
-task test  # automated: bgp-transit, bgp-fabric, srv6, evpn
+task test  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 ```
 
 ## Notes

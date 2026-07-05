@@ -25,4 +25,4 @@
 
 Full documentation — topology, addressing, tasks — is in [README.md](README.md).
 Verification commands are in [docs/verification.md](docs/verification.md).
-Deploying test pods and verifying cross-site connectivity is documented in [docs/testvpc.md](docs/testvpc.md).
+Deploying the two test VPCs and verifying cross-site/cross-VPC connectivity is documented in [docs/vpc.md](docs/vpc.md).

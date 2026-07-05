@@ -47,8 +47,10 @@ tasks:
       - task: "deploy:rename-control"
       - task: "deploy:images"
       - task: "deploy:system"
+      - task: "deploy:cni"
       - task: "deploy:fabric"
       - task: "deploy:tenant"
+      - task: "deploy:vpc"
 
   "deploy:clusters":
     desc: Create Kind clusters
@@ -61,7 +63,7 @@ tasks:
       - kind export kubeconfig --name iad --kubeconfig iad.kubeconfig
 
   "deploy:topology":
-    desc: Deploy the ContainerLab topology (transit routers + ext-container wiring)
+    desc: Deploy the ContainerLab topology
     cmds:
       - sudo containerlab deploy -t {{.TOPO}}
 
@@ -99,11 +101,14 @@ tasks:
         vars: {IMAGE: galactic-router:latest, NODE: dfw-worker}
 
   "deploy:system":
-    desc: Apply galactic-system namespace to all clusters
+    desc: Apply the galactic-system namespace and shared RBAC to all clusters
     cmds:
-      - docker cp resources/system iad-control-plane:/galactic/resources/system/ && docker exec iad-control-plane kubectl apply -f /galactic/resources/system/
-      - docker cp resources/system sjc-control-plane:/galactic/resources/system/ && docker exec sjc-control-plane kubectl apply -f /galactic/resources/system/
-      - docker cp resources/system dfw-control-plane:/galactic/resources/system/ && docker exec dfw-control-plane kubectl apply -f /galactic/resources/system/
+      - ./scripts/deploy-system.sh
+
+  "deploy:cni":
+    desc: Push a galactic-cni kubeconfig to each worker
+    cmds:
+      - ./scripts/deploy-cni.sh
 
   destroy:
     desc: Destroy the lab
@@ -138,28 +143,29 @@ tasks:
   host-setup:
     desc: Apply host sysctls for this dual-stack lab
     cmds:
-      - sudo ./scripts/host-setup.sh --no-persist
+      - sudo ./scripts/host-setup.sh
 
   "deploy:fabric":
     desc: Install the FRR fabric DaemonSets
     cmds:
-      - ./scripts/install-fabric.sh
+      - ./scripts/deploy-fabric.sh
 
   "deploy:tenant":
-    desc: Install the galactic-router tenant DaemonSets
+    desc: Install tenant DaemonSets, NAD, and BGP resources
     cmds:
-      - ./scripts/install-tenant.sh
+      - ./scripts/deploy-tenant.sh
 
-  "deploy:testvpc":
-    desc: Deploy test VPC across all clusters
+  "deploy:vpc":
+    desc: Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)
     cmds:
-      - ./scripts/install-testvpc.sh
+      - ./scripts/deploy-vpc.sh
 
   test:
     desc: Run all verification checks
     cmds:
       - task: "test:bgp-transit"
       - task: "test:bgp-fabric"
+      - task: "test:bgp-peers"
       - task: "test:srv6"
       - task: "test:evpn"
 
@@ -188,12 +194,22 @@ tasks:
           kubectl exec -n galactic-system ds/sjc-worker-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
 
+  "test:bgp-peers":
+    desc: Verify tenant BGP peer sessions (galactic-router embedded GoBGP)
+    cmds:
+      - docker exec dfw-control-plane kubectl get bgppeers -n galactic-system
+      - docker exec sjc-control-plane kubectl get bgppeers -n galactic-system
+      - docker exec iad-control-plane kubectl get bgppeers -n galactic-system
+
   "test:srv6":
     desc: Verify USID prefixes on tr1
     cmds:
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::1/128"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::2/128"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::3/128"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::1/128"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::2/128"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::3/128"
 
   "test:evpn":
     desc: Verify EVPN BGP routes on iad, sjc, and dfw via BGPRouter status
@@ -210,3 +226,4 @@ tasks:
       - docker rmi galactic-router:latest || true
       - docker rmi {{.FRR_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/
+      - rm -f dfw.kubeconfig sjc.kubeconfig iad.kubeconfig
