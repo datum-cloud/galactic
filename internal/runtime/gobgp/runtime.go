@@ -7,10 +7,10 @@ package gobgp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	api "github.com/osrg/gobgp/v4/api"
@@ -39,9 +39,19 @@ type GoBGPRuntime struct {
 	// appliedPolicies tracks the direction of each applied policy by name so
 	// stale policies can be removed when they disappear from desired state.
 	appliedPolicies map[string]model.BGPPolicyDirection
-	// appliedVRFs tracks the names of VRFs that have been applied to GoBGP so
-	// stale VRFs can be removed when they disappear from desired state.
-	appliedVRFs map[string]struct{}
+	// appliedVRFs tracks the kernel VRF table ID of each VRF that has been
+	// applied to GoBGP, keyed by VRF name, so stale VRFs can be removed when
+	// they disappear from desired state and so the route-write privilege probe
+	// runs only once per VRF rather than on every reconcile.
+	appliedVRFs map[string]uint32
+	// rtIndexMu guards rtIndex, which is read concurrently by the shared EVPN
+	// RIB watcher goroutine.
+	rtIndexMu sync.RWMutex
+	// rtIndex maps an import route-target string to the kernel VRF table ID
+	// that imports it, letting the single shared watcher dispatch a best-path
+	// event to the right table in O(1) instead of scanning every VRF — a node
+	// can host thousands of VPC attachments, each with its own VRF.
+	rtIndex map[string]uint32
 	// appliedAdvertisements tracks the last-applied DesiredAdvertisement per
 	// name so a changed advertisement's previous EVPN paths can be withdrawn.
 	// This matters because the EVPN Type 5 route's Gateway IP Address (the
@@ -54,12 +64,10 @@ type GoBGPRuntime struct {
 	serverCtxCancel context.CancelFunc
 	// srvCtx is the context passed to server.Start; monitor goroutines use it.
 	srvCtx context.Context
-	// monitorOnce ensures the EVPN RIB watcher goroutine is started at most once.
+	// monitorOnce ensures the single shared EVPN RIB watcher goroutine is
+	// started at most once per runtime lifetime; it dispatches to all VRFs via
+	// rtIndex rather than being scoped to one VRF.
 	monitorOnce sync.Once
-	// vrfRouting holds the current import-RT -> VRF table mapping consumed by
-	// the RIB monitor's OnBestPath callback. Rebuilt on every Apply so VRFs
-	// added after the watcher goroutine starts are picked up.
-	vrfRouting atomic.Pointer[vrfRoutingState]
 }
 
 // NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
@@ -76,7 +84,8 @@ func NewRuntimeFactory(listenPort int32, localAddress string) runtime.RuntimeFac
 			localAddress:          localAddress,
 			establishedAt:         make(map[string]time.Time),
 			appliedPolicies:       make(map[string]model.BGPPolicyDirection),
-			appliedVRFs:           make(map[string]struct{}),
+			appliedVRFs:           make(map[string]uint32),
+			rtIndex:               make(map[string]uint32),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 		}, nil
 	}
@@ -104,7 +113,6 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return err
 	}
 
-	r.updateVRFRouting(b, desired.VRFInstances)
 	r.startRIBMonitor(b)
 
 	if err := r.applyEVPN(b, desired.Advertisements, desired.RouterID); err != nil {
@@ -211,23 +219,64 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 	return nil
 }
 
-// applyVRFs configures the desired VRF instances and removes stale ones.
+// applyVRFs configures every desired VRF instance and removes stale ones. A
+// node can host thousands of VRFs (one per VPC attachment), so this — unlike
+// the single-VRF code it replaces — must handle the full set, not just one.
 func (r *GoBGPRuntime) applyVRFs(ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance) error {
-	desiredNames := make(map[string]struct{}, len(vrfs))
-	for _, vrf := range vrfs {
-		if err := applyVRF(ctx, b, &vrf); err != nil {
-			return fmt.Errorf("apply VRF %s: %w", vrf.Name, err)
-		}
-		r.appliedVRFs[vrf.Name] = struct{}{}
-		desiredNames[vrf.Name] = struct{}{}
+	desired := make(map[string]model.DesiredVRFInstance, len(vrfs))
+	for _, v := range vrfs {
+		desired[v.Name] = v
 	}
-
 	for name := range r.appliedVRFs {
-		if _, ok := desiredNames[name]; !ok {
+		if _, ok := desired[name]; !ok {
 			deleteVRF(ctx, b, name)
 			delete(r.appliedVRFs, name)
 		}
 	}
+
+	rtIndex := make(map[string]uint32, len(vrfs))
+	newlyRegistered := false
+	for _, v := range vrfs {
+		if err := applyVRF(ctx, b, &v); err != nil {
+			return fmt.Errorf("apply VRF %s: %w", v.Name, err)
+		}
+
+		tableID, ok := r.appliedVRFs[v.Name]
+		if !ok {
+			var err error
+			tableID, err = vrfTableID(v.Name)
+			if err != nil {
+				slog.Error("applyVRFs: failed to resolve kernel VRF table; SEG6 encap routes will not be installed",
+					"vrf", v.Name, "err", err)
+				continue
+			}
+			if err := probeRouteWrite(tableID); err != nil {
+				slog.Error("applyVRFs: route write probe failed; SEG6 encap routes will not be installed",
+					"vrf", v.Name, "err", err,
+					"hint", "set runAsUser: 0 and capabilities.add: [NET_ADMIN] in the container securityContext")
+				continue
+			}
+			r.appliedVRFs[v.Name] = tableID
+			newlyRegistered = true
+		}
+		for _, rt := range v.ImportRouteTargets {
+			rtIndex[rt] = tableID
+		}
+	}
+
+	r.rtIndexMu.Lock()
+	r.rtIndex = rtIndex
+	r.rtIndexMu.Unlock()
+
+	// A newly registered VRF's route targets may match paths that were
+	// already best-path in GoBGP's RIB before this VRF existed in rtIndex —
+	// the shared watcher's WatchBestPath(true) only replays the RIB once, at
+	// its own startup, so it would never redeliver those. Backfill from the
+	// current RIB now that rtIndex includes the new VRF.
+	if newlyRegistered {
+		r.backfillEVPNRoutes(b)
+	}
+
 	return nil
 }
 

@@ -88,7 +88,9 @@ func (r *Reconciler) BuildDesiredRouter(
 		return nil, fmt.Errorf("list BGPAdvertisements for router %s/%s: %w", namespace, router.Name, err)
 	}
 
-	// Gather VRF instances.
+	// Gather VRF instances. A node hosts one BGPVRFInstance per VPC attachment,
+	// which can number in the thousands, so every instance targeting this
+	// router must be carried into DesiredRouter — not just the first.
 	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
 	if err := r.client.List(ctx, vrfList,
 		client.InNamespace(namespace),
@@ -96,7 +98,7 @@ func (r *Reconciler) BuildDesiredRouter(
 	); err != nil {
 		return nil, fmt.Errorf("list BGPVRFInstances for router %s/%s: %w", namespace, router.Name, err)
 	}
-	vrfInsts := make([]model.DesiredVRFInstance, len(vrfList.Items))
+	vrfInstances := make([]model.DesiredVRFInstance, len(vrfList.Items))
 	for i, v := range vrfList.Items {
 		importRTs := make([]string, len(v.Spec.ImportRouteTargets))
 		for j, rt := range v.Spec.ImportRouteTargets {
@@ -106,7 +108,7 @@ func (r *Reconciler) BuildDesiredRouter(
 		for j, rt := range v.Spec.ExportRouteTargets {
 			exportRTs[j] = rt.Value
 		}
-		vrfInsts[i] = model.DesiredVRFInstance{
+		vrfInstances[i] = model.DesiredVRFInstance{
 			Name:               v.Name,
 			RouteDistinguisher: v.Spec.RouteDistinguisher,
 			ImportRouteTargets: importRTs,
@@ -147,7 +149,7 @@ func (r *Reconciler) BuildDesiredRouter(
 		RouterID:        router.Spec.RouterID,
 		AddressFamilies: router.Spec.AddressFamilies,
 		Peers:           peers,
-		VRFInstances:    vrfInsts,
+		VRFInstances:    vrfInstances,
 		Policies:        policies,
 	}
 
