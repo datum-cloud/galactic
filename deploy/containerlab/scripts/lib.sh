@@ -23,7 +23,7 @@ apply_k() {
 
 apply_f() {
   local node="$1" path="$2"
-  docker exec "${node}" kubectl apply -f "${path}"
+  docker exec -i "${node}" kubectl apply -f "${path}"
 }
 
 ensure_namespace() {
