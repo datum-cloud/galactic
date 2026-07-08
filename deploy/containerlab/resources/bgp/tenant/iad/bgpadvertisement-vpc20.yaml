@@ -1,4 +1,4 @@
-apiVersion: bgp.miloapis.com/v1alpha1
+apiVersion: network.datumapis.com/v1alpha1
 kind: BGPAdvertisement
 metadata:
   name: iad-worker-vpc20-sid

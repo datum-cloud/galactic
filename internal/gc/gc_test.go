@@ -7,8 +7,9 @@ package gc
 import (
 	"testing"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (

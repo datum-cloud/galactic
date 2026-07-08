@@ -12,11 +12,11 @@ import (
 	"strings"
 
 	"github.com/vishvananda/netlink"
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (

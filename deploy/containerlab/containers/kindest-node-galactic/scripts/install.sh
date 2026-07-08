@@ -4,8 +4,8 @@
 # ptp ship pre-installed in the kindest/node base image, and galactic-cni /
 # host-device are installed by the galactic-cni DaemonSet (see
 # scripts/deploy-cni.sh, task deploy:cni). Cilium and Multus are also
-# installed by deploy-cni.sh; Cosmos CRDs by scripts/deploy-system.sh (task
-# deploy:system). None of it is baked into this image.
+# installed by deploy-cni.sh; BGP and VPC CRDs by scripts/deploy-system.sh
+# (task deploy:system). None of it is baked into this image.
 set -xe
 
 SRV6_PREFIX="2001:db8:ff00::/40"

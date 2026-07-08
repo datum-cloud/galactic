@@ -14,7 +14,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -32,6 +31,7 @@ import (
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/frr"
 	"go.datum.net/galactic/internal/runtime/gobgp"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (

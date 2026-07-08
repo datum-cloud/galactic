@@ -8,7 +8,6 @@ import (
 	"context"
 	"log/slog"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -19,6 +18,7 @@ import (
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 var cniScheme = runtime.NewScheme()

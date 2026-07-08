@@ -3,17 +3,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package model defines the internal desired-state and runtime-status types
-// that decouple the Cosmos CRD API from the BGP runtime backends.
+// that decouple the BGP CRD API from the BGP runtime backends.
 package model
 
 import (
 	"time"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// Re-export cosmos enum types for use throughout galactic-router.
+// Re-export BGP API enum types for use throughout galactic-router.
 type (
 	AddressFamily      = bgpv1alpha1.AddressFamily
 	BGPPolicyDirection = bgpv1alpha1.BGPPolicyDirection
@@ -21,7 +22,7 @@ type (
 	BGPPeerState       = bgpv1alpha1.BGPPeerState
 )
 
-// Re-export cosmos constants.
+// Re-export BGP API constants.
 const (
 	BGPPolicyDirectionImport = bgpv1alpha1.BGPPolicyDirectionImport
 	BGPPolicyDirectionExport = bgpv1alpha1.BGPPolicyDirectionExport

@@ -7,12 +7,13 @@ package controller
 import (
 	"context"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // enqueueRoutersForTarget returns reconcile.Requests for BGPRouters in namespace

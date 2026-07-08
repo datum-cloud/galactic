@@ -9,7 +9,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for a full architecture reference includi
 Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of two binaries deployed on each Kubernetes node:
 
 - **`galactic-cni`** — CNI plugin that wires containers into VPC networks (VRF, veth, SRv6 ingress route) and writes `BGPAdvertisement` CRDs.
-- **`galactic-router`** — controller-runtime reconciler that watches Cosmos BGP CRDs and drives an embedded GoBGP server per node to distribute EVPN paths.
+- **`galactic-router`** — controller-runtime reconciler that watches BGP CRDs and drives an embedded GoBGP server per node to distribute EVPN paths.
 
 VPC and VPCAttachment CRD management lives in a separate companion operator; Galactic receives pre-populated identifiers through the CNI config and acts on them.
 
@@ -19,7 +19,7 @@ VPC and VPCAttachment CRD management lives in a separate companion operator; Gal
 
 - **Go 1.26** — router and CNI plugin
 - **controller-runtime** — BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy reconcilers
-- **Cosmos BGP API** (`go.miloapis.com/cosmos`) — BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy CRDs
+- **BGP API** (`go.datum.net/network`) — BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy CRDs
 - **GoBGP v4** — embedded BGP server (tenant role)
 - **SRv6 + netlink** — kernel-level routing; `github.com/vishvananda/netlink`
 - **Multus CNI** — multi-network for pods; NAD generation handled by the external operator

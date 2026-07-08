@@ -115,7 +115,7 @@ tasks:
         vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
 
   "deploy:system":
-    desc: Install Cosmos CRDs; apply galactic-system namespace and shared RBAC
+    desc: Install BGP and VPC CRDs; apply galactic-system namespace and shared RBAC
     cmds:
       - ./scripts/deploy-system.sh
 

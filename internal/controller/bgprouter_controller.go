@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"time"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,6 +24,7 @@ import (
 	"go.datum.net/galactic/internal/model"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // annotationConfigHash is the annotation key used to persist the last-applied

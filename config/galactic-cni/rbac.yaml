@@ -3,11 +3,11 @@ kind: ClusterRole
 metadata:
   name: galactic-cni
 rules:
-  - apiGroups: ["bgp.miloapis.com"]
+  - apiGroups: ["network.datumapis.com"]
     resources:
       - bgprouters
     verbs: ["get", "list"]
-  - apiGroups: ["bgp.miloapis.com"]
+  - apiGroups: ["network.datumapis.com"]
     resources:
       - bgpadvertisements
       - bgpvrfinstances
