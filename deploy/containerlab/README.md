@@ -123,11 +123,12 @@ deploy/containerlab/
 ├── gvpc.clab.yaml
 ├── Taskfile.yaml
 ├── containers/
-│   ├── kindest-node-galactic/   # Custom Kind node image (Cilium, Multus, cert-manager, galactic)
+│   ├── kindest-node-galactic/   # Custom Kind node image (Cilium, Multus, cert-manager)
 │   ├── galactic-router/         # galactic-router container built from Go source
 │   └── frr/                     # FRR container built from Alpine edge
 ├── resources/
 │   ├── system/                  # galactic-system namespace provisioning
+│   ├── cni/                     # galactic-cni installer DaemonSet + ConfigMap
 │   ├── fabric/                  # FRR DaemonSet manifests (dfw, iad, sjc)
 │   ├── tenant/                  # galactic-router DaemonSet + vpc10/vpc20 NAD manifests (dfw, iad, sjc)
 │   ├── vpc/                     # vpc10/vpc20 test workload Deployments (dfw, iad, sjc)
@@ -178,27 +179,28 @@ task deploy
 
 ## Tasks
 
-| Task                    | Description                                                        |
-|-------------------------|--------------------------------------------------------------------|
-| `build`                 | Build all container images (node, galactic-router, frr)            |
-| `build:node`            | Build the custom `kindest/node:galactic` image                     |
-| `build:galactic-router` | Build the galactic-router container from Go source                 |
-| `build:frr`             | Build the FRR container from Alpine edge                           |
-| `deploy`                | Build images, apply host sysctls, and deploy the lab               |
-| `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters)      |
-| `deploy:images`         | Load container images into Kind clusters                           |
-| `deploy:system`         | Apply the galactic-system namespace and shared RBAC                |
-| `deploy:cni`            | Push a galactic-cni kubeconfig to each worker                      |
-| `deploy:fabric`         | Apply FRR DaemonSets to all clusters                               |
-| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                       |
-| `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods) |
-| `destroy`               | Destroy the lab and remove all Kind clusters                       |
-| `reload`                | Full rebuild — destroy then redeploy                               |
-| `inspect`               | Show running nodes and management addresses                        |
-| `graph`                 | Generate a draw.io diagram for the topology                        |
-| `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)      |
-| `clean`                 | Destroy lab, delete built images, and remove lab artifacts         |
-| `test`                  | Run all verification checks                                        |
+| Task                    | Description                                                           |
+|-------------------------|-----------------------------------------------------------------------|
+| `build`                 | Build all container images (node, galactic-router, galactic-cni, frr) |
+| `build:node`            | Build the custom `kindest/node:galactic` image                        |
+| `build:galactic-router` | Build the galactic-router container from Go source                    |
+| `build:galactic-cni`    | Build the galactic-cni installer image                                |
+| `build:frr`             | Build the FRR container from Alpine edge                              |
+| `deploy`                | Build images, apply host sysctls, and deploy the lab                  |
+| `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters)         |
+| `deploy:images`         | Load container images into Kind clusters                              |
+| `deploy:system`         | Apply the galactic-system namespace and shared RBAC                   |
+| `deploy:cni`            | Install the galactic-cni DaemonSet on each cluster                    |
+| `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                  |
+| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                          |
+| `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)    |
+| `destroy`               | Destroy the lab and remove all Kind clusters                          |
+| `reload`                | Full rebuild — destroy then redeploy                                  |
+| `inspect`               | Show running nodes and management addresses                           |
+| `graph`                 | Generate a draw.io diagram for the topology                           |
+| `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)         |
+| `clean`                 | Destroy lab, delete built images, and remove lab artifacts            |
+| `test`                  | Run all verification checks                                           |
 
 ## Verification
 

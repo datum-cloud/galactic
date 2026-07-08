@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-cni
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: galactic-cni
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-cni
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-cni
+    spec:
+      serviceAccountName: galactic-cni
+      tolerations:
+        - operator: Exists
+      # Only worker nodes run VPC pods; skip the Kind control-plane nodes so
+      # the galactic-cni:latest image only needs loading onto workers.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      initContainers:
+        - name: install-cni
+          image: galactic-cni:latest
+          imagePullPolicy: Never
+          command: ["/bin/sh", "/scripts/install.sh", "install"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: install-script
+              mountPath: /scripts
+            - name: cni-bin-dir
+              mountPath: /host/opt/cni/bin
+            - name: galactic-etc
+              mountPath: /host/etc/galactic
+            - name: galactic-state
+              mountPath: /host/var/run/galactic-cni
+      containers:
+        - name: credential-refresh
+          image: galactic-cni:latest
+          imagePullPolicy: Never
+          command: ["/bin/sh", "/scripts/install.sh", "refresh"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          volumeMounts:
+            - name: install-script
+              mountPath: /scripts
+            - name: galactic-etc
+              mountPath: /host/etc/galactic
+      volumes:
+        - name: install-script
+          configMap:
+            name: galactic-cni-install
+            defaultMode: 0555
+        - name: cni-bin-dir
+          hostPath:
+            path: /opt/cni/bin
+            type: DirectoryOrCreate
+        - name: galactic-etc
+          hostPath:
+            path: /etc/galactic
+            type: DirectoryOrCreate
+        - name: galactic-state
+          hostPath:
+            path: /var/run/galactic-cni
+            type: DirectoryOrCreate

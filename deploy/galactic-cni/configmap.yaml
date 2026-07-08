@@ -1,0 +1,120 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: galactic-cni-install
+  namespace: galactic-system
+data:
+  install.sh: |-
+    #!/bin/sh
+    # Installs the galactic-cni and host-device binaries onto the host CNI
+    # bin dir, and maintains a kubeconfig the binaries use at exec time.
+    # CNI plugins are exec'd by the kubelet directly on the node, outside
+    # this pod's cgroup, so they cannot read this pod's mounted
+    # ServiceAccount token or in-cluster config -- everything they need
+    # (kubeconfig, node name) must be written to files on the host.
+    #
+    # Run as `install.sh install` (initContainer, one-shot) then
+    # `install.sh refresh` (main container, loops forever) -- see
+    # daemonset.yaml.
+    set -eu
+
+    HOST_CNI_BIN_DIR=/opt/cni/bin
+    HOST_ETC_DIR=/etc/galactic
+    CNI_BIN_DIR="/host${HOST_CNI_BIN_DIR}"
+    ETC_DIR="/host${HOST_ETC_DIR}"
+    STATE_DIR=/host/var/run/galactic-cni
+    SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+    REFRESH_INTERVAL=${REFRESH_INTERVAL:-300}
+
+    log() { echo "[galactic-cni-install] $*"; }
+
+    # install_file SRC DEST MODE
+    # Copies SRC to a temp file in DEST's directory and renames it into
+    # place so the kubelet never execs a partially-written binary.
+    install_file() {
+      tmp="${2}.tmp.$$"
+      cp -f "$1" "${tmp}"
+      chmod "$3" "${tmp}"
+      mv -f "${tmp}" "$2"
+    }
+
+    install_binaries() {
+      mkdir -p "${CNI_BIN_DIR}" "${STATE_DIR}"
+      chmod 1777 "${STATE_DIR}"
+      install_file /galactic-cni "${CNI_BIN_DIR}/galactic-cni.bin" 0755
+      install_file /host-device "${CNI_BIN_DIR}/host-device" 0755
+
+      # Wrapper the kubelet execs directly: exports the node name (read
+      # from the downward API, not hostname -- hostname isn't guaranteed
+      # to equal the Kubernetes node name outside of Kind) and points
+      # KUBECONFIG at the file write_kubeconfig maintains below.
+      wrapper="${CNI_BIN_DIR}/galactic-cni.tmp.$$"
+      cat > "${wrapper}" <<EOF
+    #!/bin/sh
+    export GALACTIC_CNI_NODE_NAME="${NODE_NAME}"
+    export KUBECONFIG="${HOST_ETC_DIR}/kubeconfig"
+    exec "${HOST_CNI_BIN_DIR}/galactic-cni.bin" "\$@"
+    EOF
+      chmod 0755 "${wrapper}"
+      mv -f "${wrapper}" "${CNI_BIN_DIR}/galactic-cni"
+    }
+
+    # write_kubeconfig regenerates the host-side kubeconfig from this pod's
+    # mounted ServiceAccount token. The kubelet auto-refreshes that token
+    # in place before it expires, so re-running this on an interval keeps
+    # the host copy valid for the life of the node.
+    write_kubeconfig() {
+      mkdir -p "${ETC_DIR}"
+      install_file "${SA_DIR}/ca.crt" "${ETC_DIR}/ca.crt" 0644
+
+      token=$(cat "${SA_DIR}/token")
+      # Bracket the host if it's an IPv6 literal (e.g. IPv6-only clusters);
+      # IPv4 hosts and DNS names pass through unchanged.
+      api_host="${KUBERNETES_SERVICE_HOST}"
+      case "${api_host}" in
+        *:*) api_host="[${api_host}]" ;;
+      esac
+      tmp="${ETC_DIR}/kubeconfig.tmp.$$"
+      cat > "${tmp}" <<EOF
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - name: galactic
+        cluster:
+          server: https://${api_host}:${KUBERNETES_SERVICE_PORT}
+          certificate-authority: ${HOST_ETC_DIR}/ca.crt
+    contexts:
+      - name: galactic
+        context:
+          cluster: galactic
+          user: galactic-cni
+    current-context: galactic
+    users:
+      - name: galactic-cni
+        user:
+          token: ${token}
+    EOF
+      chmod 0600 "${tmp}"
+      mv -f "${tmp}" "${ETC_DIR}/kubeconfig"
+    }
+
+    case "${1:-}" in
+      install)
+        install_binaries
+        write_kubeconfig
+        log "installed galactic-cni on node ${NODE_NAME}"
+        ;;
+      refresh)
+        # Deliberately never removes the installed binaries: doing so on
+        # pod termination would break CNI ADD for any pod scheduled on
+        # this node during a rolling update of this DaemonSet.
+        while true; do
+          sleep "${REFRESH_INTERVAL}"
+          write_kubeconfig
+        done
+        ;;
+      *)
+        echo "usage: $0 {install|refresh}" >&2
+        exit 1
+        ;;
+    esac
