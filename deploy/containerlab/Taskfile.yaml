@@ -23,7 +23,7 @@ tasks:
       - task: "build:galactic-cni"
 
   "build:node":
-    desc: Build the Kind node image (Cilium, Multus, CNI plugin bins)
+    desc: Build the Kind node image
     cmds:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
@@ -115,12 +115,12 @@ tasks:
         vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
 
   "deploy:system":
-    desc: Apply the galactic-system namespace and shared RBAC to all clusters
+    desc: Install Cosmos CRDs; apply galactic-system namespace and shared RBAC
     cmds:
       - ./scripts/deploy-system.sh
 
   "deploy:cni":
-    desc: Install the galactic-cni DaemonSet on each cluster
+    desc: Install Cilium and Multus, then the galactic-cni DaemonSet
     cmds:
       - ./scripts/deploy-cni.sh
 

@@ -1,0 +1,8 @@
+resources:
+  - base/configmap.yaml
+  - base/daemonset.yaml
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-cni
