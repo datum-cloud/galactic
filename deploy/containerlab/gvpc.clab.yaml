@@ -33,8 +33,6 @@ topology:
         net.ipv4.conf.all.arp_announce: "2"
         net.ipv4.ip_forward: "1"
         net.ipv6.conf.all.forwarding: "1"
-      exec:
-        - /galactic/scripts/install.sh
 
     dfw-worker:
       kind: ext-container
@@ -74,8 +72,6 @@ topology:
         net.ipv4.conf.all.arp_announce: "2"
         net.ipv4.ip_forward: "1"
         net.ipv6.conf.all.forwarding: "1"
-      exec:
-        - /galactic/scripts/install.sh
 
     sjc-worker:
       kind: ext-container
@@ -115,8 +111,6 @@ topology:
         net.ipv4.conf.all.arp_announce: "2"
         net.ipv4.ip_forward: "1"
         net.ipv6.conf.all.forwarding: "1"
-      exec:
-        - /galactic/scripts/install.sh
 
     iad-worker:
       kind: ext-container

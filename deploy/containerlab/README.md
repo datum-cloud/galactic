@@ -19,19 +19,19 @@ over iBGP to the route reflector on iad-control.
 
 ### Node roles
 
-| Node                  | Kind          | Role                                              |
-|-----------------------|---------------|---------------------------------------------------|
-| `dfw`                 | k8s-kind      | Kind cluster definition (dfw region)              |
-| `dfw-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus, cert-mgr |
-| `dfw-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE     |
-| `iad`                 | k8s-kind      | Kind cluster definition (iad region)              |
-| `iad-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus, cert-mgr |
-| `iad-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE     |
-| `iad-worker-control`  | ext-container | Kind worker; runs FRR PE + galactic-router RR     |
-| `sjc`                 | k8s-kind      | Kind cluster definition (sjc region)              |
-| `sjc-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus, cert-mgr |
-| `sjc-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE     |
-| `tr1`–`tr4`           | linux (FRR)   | iBGP full mesh, AS 65100                          |
+| Node                  | Kind          | Role                                          |
+|-----------------------|---------------|-----------------------------------------------|
+| `dfw`                 | k8s-kind      | Kind cluster definition (dfw region)          |
+| `dfw-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
+| `dfw-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
+| `iad`                 | k8s-kind      | Kind cluster definition (iad region)          |
+| `iad-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
+| `iad-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
+| `iad-worker-control`  | ext-container | Kind worker; runs FRR PE + galactic-router RR |
+| `sjc`                 | k8s-kind      | Kind cluster definition (sjc region)          |
+| `sjc-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
+| `sjc-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
+| `tr1`–`tr4`           | linux (FRR)   | iBGP full mesh, AS 65100                      |
 
 ### BGP design
 
@@ -123,7 +123,7 @@ deploy/containerlab/
 ├── gvpc.clab.yaml
 ├── Taskfile.yaml
 ├── containers/
-│   ├── kindest-node-galactic/   # Custom Kind node image (Cilium, Multus, cert-manager)
+│   ├── kindest-node-galactic/   # Custom Kind node image (sysctls)
 │   ├── galactic-router/         # galactic-router container built from Go source
 │   └── frr/                     # FRR container built from Alpine edge
 ├── resources/
@@ -179,28 +179,28 @@ task deploy
 
 ## Tasks
 
-| Task                    | Description                                                           |
-|-------------------------|-----------------------------------------------------------------------|
-| `build`                 | Build all container images (node, galactic-router, galactic-cni, frr) |
-| `build:node`            | Build the custom `kindest/node:galactic` image                        |
-| `build:galactic-router` | Build the galactic-router container from Go source                    |
-| `build:galactic-cni`    | Build the galactic-cni installer image                                |
-| `build:frr`             | Build the FRR container from Alpine edge                              |
-| `deploy`                | Build images, apply host sysctls, and deploy the lab                  |
-| `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters)         |
-| `deploy:images`         | Load container images into Kind clusters                              |
-| `deploy:system`         | Apply the galactic-system namespace and shared RBAC                   |
-| `deploy:cni`            | Install the galactic-cni DaemonSet on each cluster                    |
-| `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                  |
-| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                          |
-| `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)    |
-| `destroy`               | Destroy the lab and remove all Kind clusters                          |
-| `reload`                | Full rebuild — destroy then redeploy                                  |
-| `inspect`               | Show running nodes and management addresses                           |
-| `graph`                 | Generate a draw.io diagram for the topology                           |
-| `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)         |
-| `clean`                 | Destroy lab, delete built images, and remove lab artifacts            |
-| `test`                  | Run all verification checks                                           |
+| Task                    | Description                                                              |
+|-------------------------|--------------------------------------------------------------------------|
+| `build`                 | Build all container images (node, galactic-router, galactic-cni, frr)    |
+| `build:node`            | Build the custom `kindest/node:galactic` image                           |
+| `build:galactic-router` | Build the galactic-router container from Go source                       |
+| `build:galactic-cni`    | Build the galactic-cni installer image                                   |
+| `build:frr`             | Build the FRR container from Alpine edge                                 |
+| `deploy`                | Build images, apply host sysctls, and deploy the lab                     |
+| `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters)            |
+| `deploy:images`         | Load container images into Kind clusters                                 |
+| `deploy:system`         | Install Cosmos CRDs; apply the galactic-system namespace and shared RBAC |
+| `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet               |
+| `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                     |
+| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                             |
+| `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)       |
+| `destroy`               | Destroy the lab and remove all Kind clusters                             |
+| `reload`                | Full rebuild — destroy then redeploy                                     |
+| `inspect`               | Show running nodes and management addresses                              |
+| `graph`                 | Generate a draw.io diagram for the topology                              |
+| `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)            |
+| `clean`                 | Destroy lab, delete built images, and remove lab artifacts               |
+| `test`                  | Run all verification checks                                              |
 
 ## Verification
 
@@ -214,10 +214,11 @@ task test  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 
 ## Notes
 
-- All three Kind clusters use `disableDefaultCNI: true`. Cilium is installed by the
-  `kindest/node:galactic` bootstrap script. cert-manager and Multus are only installed
-  on iad and sjc.
+- All three Kind clusters use `disableDefaultCNI: true`. Cilium and Multus are installed
+  by `scripts/deploy-cni.sh` (task `deploy:cni`); the Cosmos CRDs are installed by
+  `scripts/deploy-system.sh` (task `deploy:system`). Neither is baked into the
+  `kindest/node:galactic` image.
 - Worker–TR links use numbered IPv6 subnets (/64) with eBGP peering.
-- Cilium's iptables rules block BGP by default; the bootstrap script inserts
-  `ip6tables -I INPUT` rules for TCP/179 before Cilium starts on each worker.
+- Cilium's iptables rules block BGP by default; the worker bootstrap script
+  (`install.sh`) inserts `ip6tables -I INPUT` rules for TCP/179 before Cilium starts.
 - iad-worker-control peers with tr3 as AS 65000, the same AS used by all three clusters.

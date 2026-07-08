@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-cni
+spec:
+  template:
+    spec:
+      # Only worker nodes run VPC pods; skip the Kind control-plane nodes so
+      # the galactic-cni:latest image only needs loading onto workers.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      initContainers:
+        - name: install-cni
+          image: galactic-cni:latest
+          imagePullPolicy: Never
+      containers:
+        - name: credential-refresh
+          image: galactic-cni:latest
+          imagePullPolicy: Never
