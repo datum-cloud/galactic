@@ -3,7 +3,7 @@ kind: ClusterRole
 metadata:
   name: galactic-router
 rules:
-  - apiGroups: ["bgp.miloapis.com"]
+  - apiGroups: ["network.datumapis.com"]
     resources:
       - bgprouters
       - bgppeers
@@ -12,12 +12,12 @@ rules:
   # bgpadvertisements/bgpvrfinstances also need delete: the GC reconciler
   # periodically removes orphaned CRDs left behind when CNI DEL never fires
   # (e.g. a force-terminated container).
-  - apiGroups: ["bgp.miloapis.com"]
+  - apiGroups: ["network.datumapis.com"]
     resources:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["bgp.miloapis.com"]
+  - apiGroups: ["network.datumapis.com"]
     resources:
       - bgprouters/status
       - bgppeers/status

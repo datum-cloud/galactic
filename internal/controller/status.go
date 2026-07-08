@@ -5,9 +5,10 @@
 package controller
 
 import (
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // Condition types used across BGP resources.
@@ -37,7 +38,7 @@ func setRouterCondition(router *bgpv1alpha1.BGPRouter, condition metav1.Conditio
 
 // setPeerReadyCondition updates the Ready condition based on the current BGP
 // FSM state, following the same semantics as the reference implementation in
-// the cosmos API (BGPPeerStatus.updatePeerConditions). Ready is True only when
+// the BGP API (BGPPeerStatus.updatePeerConditions). Ready is True only when
 // sessionState == Established; False otherwise with Reason set to the FSM
 // state (for Idle, the idleReason argument is used).
 func setPeerReadyCondition(peer *bgpv1alpha1.BGPPeer, state bgpv1alpha1.BGPPeerState, idleReason string) {

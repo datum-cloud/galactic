@@ -16,7 +16,6 @@ import (
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/vishvananda/netlink"
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -26,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // maxRetries is the maximum number of retry attempts for transient k8s API

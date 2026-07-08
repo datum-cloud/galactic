@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Command galactic-router is the BGP control-plane reconciler for the Galactic
-// data plane. It watches Cosmos BGP CRDs and drives a BGP runtime backend
+// data plane. It watches BGP CRDs and drives a BGP runtime backend
 // (GoBGP for tenant role, FRR stub for fabric role).
 package main
 
@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	bgpAPIGroup   = "bgp.miloapis.com"
+	bgpAPIGroup   = "network.datumapis.com"
 	bgpAPIVersion = "v1alpha1"
 
 	resourceBGPRouters        = "bgprouters"

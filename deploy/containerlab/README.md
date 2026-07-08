@@ -188,7 +188,7 @@ task deploy
 | `deploy`                | Build images, apply host sysctls, and deploy the lab                     |
 | `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters)            |
 | `deploy:images`         | Load container images into Kind clusters                                 |
-| `deploy:system`         | Install Cosmos CRDs; apply the galactic-system namespace and shared RBAC |
+| `deploy:system`         | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
 | `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet               |
 | `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                     |
 | `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                             |
@@ -214,9 +214,9 @@ task test  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 ## Notes
 
 - All three Kind clusters use `disableDefaultCNI: true`. Cilium and Multus are installed
-  by `scripts/deploy-cni.sh` (task `deploy:cni`); the Cosmos CRDs are installed by
-  `scripts/deploy-system.sh` (task `deploy:system`). Neither is baked into the
-  `kindest/node:galactic` image.
+  by `scripts/deploy-cni.sh` (task `deploy:cni`); the BGP (datum-cloud/network) and VPC
+  (Cosmos) CRDs are installed by `scripts/deploy-system.sh` (task `deploy:system`).
+  Neither is baked into the `kindest/node:galactic` image.
 - Worker–TR links use numbered IPv6 subnets (/64) with eBGP peering.
 - Cilium's iptables rules block BGP by default; the worker bootstrap script
   (`install.sh`) inserts `ip6tables -I INPUT` rules for TCP/179 before Cilium starts.

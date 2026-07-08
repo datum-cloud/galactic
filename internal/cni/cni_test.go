@@ -16,12 +16,13 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -1285,7 +1286,7 @@ func TestIsTransientError(t *testing.T) {
 		{
 			name: "not found error is not transient",
 			err: apierrors.NewNotFound(
-				schema.GroupResource{Group: "bgp.miloapis.com", Resource: "bgpadvertisements"}, "test"),
+				schema.GroupResource{Group: "network.datumapis.com", Resource: "bgpadvertisements"}, "test"),
 			wantTrans: false,
 		},
 		{

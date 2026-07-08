@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package reconcile translates Cosmos BGP CRDs into DesiredRouter values
+// Package reconcile translates BGP CRDs into DesiredRouter values
 // that can be applied to a RouterRuntime backend.
 package reconcile
 
@@ -13,7 +13,6 @@ import (
 	"slices"
 	"sort"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -21,9 +20,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/model"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// Reconciler assembles DesiredRouter values from Cosmos CRDs.
+// Reconciler assembles DesiredRouter values from BGP CRDs.
 type Reconciler struct {
 	client       client.Client
 	nodeName     string
@@ -44,7 +44,7 @@ func New(c client.Client, nodeName, routerMode, localAddress string) *Reconciler
 	}
 }
 
-// BuildDesiredRouter assembles the full DesiredRouter from Cosmos CRDs for
+// BuildDesiredRouter assembles the full DesiredRouter from BGP CRDs for
 // the given BGPRouter. It returns (nil, nil) if the router should be silently
 // skipped (wrong node or wrong role). It returns (nil, err) on error.
 func (r *Reconciler) BuildDesiredRouter(
@@ -367,7 +367,7 @@ func validateAFIsAll(afs []bgpv1alpha1.AddressFamily) error {
 }
 
 // int32PtrToUint32Ptr converts *int32 to *uint32 for LOCAL_PREF, which the
-// cosmos API expresses as int32 but GoBGP and BGP RFC 4271 use uint32.
+// BGP API expresses as int32 but GoBGP and BGP RFC 4271 use uint32.
 func int32PtrToUint32Ptr(v *int32) *uint32 {
 	if v == nil {
 		return nil

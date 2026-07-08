@@ -7,10 +7,11 @@ package controller
 import (
 	"context"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // BGPAdvertisementReconciler watches BGPAdvertisement resources and enqueues

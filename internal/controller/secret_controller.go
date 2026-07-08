@@ -7,7 +7,6 @@ package controller
 import (
 	"context"
 
-	bgpv1alpha1 "go.miloapis.com/cosmos/api/bgp/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -15,6 +14,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // SecretReconciler watches Secrets and enqueues BGPRouter(s) that reference
