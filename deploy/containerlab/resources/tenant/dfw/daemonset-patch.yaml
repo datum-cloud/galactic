@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: tenant
+  name: galactic-router
 spec:
   template:
     spec:

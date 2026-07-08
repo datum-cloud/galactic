@@ -1,6 +1,9 @@
 #!/bin/bash
 # deploy-system.sh — Install Cosmos CRDs, then apply the galactic-system
 # namespace and shared RBAC (galactic-cni, galactic-router) to every cluster.
+# The namespace and ServiceAccount/RBAC manifests are applied straight from
+# the repo's config/ — the same ones used in production — so the lab never
+# forks them.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -30,8 +33,12 @@ for site in dfw sjc iad; do
     curl -sL "${COSMOS_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
   done
 
-  copy_to "${node}" system
-  apply_f "${node}" /galactic/resources/system/
+  copy_config "${node}"
+  apply_f "${node}" /galactic/config/galactic-system/namespace.yaml
+  apply_f "${node}" /galactic/config/galactic-cni/serviceaccount.yaml
+  apply_f "${node}" /galactic/config/galactic-cni/rbac.yaml
+  apply_f "${node}" /galactic/config/galactic-router/serviceaccount.yaml
+  apply_f "${node}" /galactic/config/galactic-router/rbac.yaml
 done
 
 echo "Done."

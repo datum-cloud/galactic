@@ -7,4 +7,4 @@ patches:
   - path: daemonset-patch.yaml
     target:
       kind: DaemonSet
-      name: tenant
+      name: galactic-router

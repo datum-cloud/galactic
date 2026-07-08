@@ -11,12 +11,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-# The configmap/daemonset base lives in deploy/galactic-cni/ (shared with
+# The configmap/daemonset base lives in config/galactic-cni/ (shared with
 # production); resources/cni/kustomization.yaml patches in the lab-only
 # image and node affinity. It's copied into resources/cni/base/ on the node
 # at deploy time (kustomize requires resources in or below the overlay
 # root) rather than duplicated in the repo.
-GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../galactic-cni" && pwd)
+GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-cni" && pwd)
 
 CILIUM_VERSION="v0.18.8"
 MULTUS_VERSION="v4.2.3"
