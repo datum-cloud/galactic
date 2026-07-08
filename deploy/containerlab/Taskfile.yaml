@@ -20,9 +20,10 @@ tasks:
       - task: "build:node"
       - task: "build:frr"
       - task: "build:galactic-router"
+      - task: "build:galactic-cni"
 
   "build:node":
-    desc: Build the Kind node image with the galactic CNI plugin
+    desc: Build the Kind node image (Cilium, Multus, CNI plugin bins)
     cmds:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
@@ -37,6 +38,11 @@ tasks:
     desc: Build the galactic-router container image
     cmds:
       - docker build --network=host -t galactic-router:latest -f containers/galactic-router/Dockerfile ../..
+
+  "build:galactic-cni":
+    desc: Build the galactic-cni installer image
+    cmds:
+      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic/Dockerfile ../..
 
   deploy:
     desc: Build images and deploy the full lab end-to-end
@@ -99,6 +105,14 @@ tasks:
         vars: {IMAGE: galactic-router:latest, NODE: sjc-worker}
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: dfw-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker-control}
+      - task: load-image
+        vars: {IMAGE: galactic-cni:latest, NODE: sjc-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
 
   "deploy:system":
     desc: Apply the galactic-system namespace and shared RBAC to all clusters
@@ -106,7 +120,7 @@ tasks:
       - ./scripts/deploy-system.sh
 
   "deploy:cni":
-    desc: Push a galactic-cni kubeconfig to each worker
+    desc: Install the galactic-cni DaemonSet on each cluster
     cmds:
       - ./scripts/deploy-cni.sh
 
@@ -224,6 +238,7 @@ tasks:
       - task: destroy
       - docker rmi kindest/node:galactic || true
       - docker rmi galactic-router:latest || true
+      - docker rmi galactic-cni:latest || true
       - docker rmi {{.FRR_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/
       - rm -f dfw.kubeconfig sjc.kubeconfig iad.kubeconfig

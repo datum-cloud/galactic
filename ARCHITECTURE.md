@@ -62,7 +62,8 @@ galactic/
 │       ├── sysctl/          # Interface sysctl helpers
 │       └── vrf/             # Linux VRF create/delete/lookup
 ├── deploy/
-│   ├── galactic-router/     # Kustomize: DaemonSet, RBAC, ServiceAccount
+│   ├── galactic-router/     # DaemonSet, RBAC, ServiceAccount
+│   ├── galactic-cni/        # DaemonSet installing galactic-cni onto /opt/cni/bin via hostPath
 │   └── containerlab/        # ContainerLab lab topology and scripts
 └── containers/
     └── galactic/            # Production Dockerfile

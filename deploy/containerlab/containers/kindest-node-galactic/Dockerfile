@@ -1,11 +1,5 @@
 ARG KINDEST_VER=v1.36.1
 
-FROM golang:1.26 AS builder
-WORKDIR /src
-COPY . .
-RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux go build -o bin/galactic-cni cmd/galactic-cni/main.go
-
 FROM kindest/node:${KINDEST_VER}
 
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
@@ -18,7 +12,6 @@ RUN apt-get update \
 
 WORKDIR /galactic
 
-COPY --from=builder /src/bin/galactic-cni ./bin/galactic-cni
 COPY deploy/containerlab/resources/ ./resources/
 COPY --chmod=0755 deploy/containerlab/containers/kindest-node-galactic/scripts/ ./scripts/
 
