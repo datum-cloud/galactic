@@ -49,7 +49,9 @@ Summary:
 
 ## Deployments
 
-- **`deploy/galactic-router/`** — Production manifests for the router DaemonSet, RBAC, and ServiceAccount. Apply with `kubectl apply -f deploy/galactic-router/`.
+- **`config/galactic-system/`** — Creates the `galactic-system` namespace both components deploy into. Apply first: `kubectl apply -f config/galactic-system/`. Neither component's manifests create it, and nothing else in this repo does either — apply it before `config/galactic-router/` or `config/galactic-cni/` or their ServiceAccount/DaemonSet creation will fail with `namespaces "galactic-system" not found`.
+- **`config/galactic-router/`** — Production manifests for the router DaemonSet, RBAC, and ServiceAccount. Apply with `kubectl apply -f config/galactic-router/`.
+- **`config/galactic-cni/`** — Production manifests for the CNI installer DaemonSet, ConfigMap, RBAC, and ServiceAccount. Apply with `kubectl apply -f config/galactic-cni/`.
 - **`deploy/containerlab/`** — ContainerLab topology (`gvpc.clab.yaml`) for three Kind clusters (dfw, iad, sjc) wired over an IPv6 SRv6 transit mesh. FRR runs as a hostNetwork DaemonSet on each worker for eBGP underlay; `galactic-router` (tenant role) handles EVPN path distribution over iBGP. See `deploy/containerlab/README.md` and `deploy/containerlab/Taskfile.yaml` for bring-up commands.
 
 ## New Developer Entry Points

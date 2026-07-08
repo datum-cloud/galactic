@@ -1,2 +1,7 @@
 resources:
-  - daemonset.yaml
+  - base/daemonset.yaml
+patches:
+  - path: router-lab-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-router

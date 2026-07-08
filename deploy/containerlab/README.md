@@ -127,7 +127,6 @@ deploy/containerlab/
 │   ├── galactic-router/         # galactic-router container built from Go source
 │   └── frr/                     # FRR container built from Alpine edge
 ├── resources/
-│   ├── system/                  # galactic-system namespace provisioning
 │   ├── cni/                     # galactic-cni installer DaemonSet + ConfigMap
 │   ├── fabric/                  # FRR DaemonSet manifests (dfw, iad, sjc)
 │   ├── tenant/                  # galactic-router DaemonSet + vpc10/vpc20 NAD manifests (dfw, iad, sjc)

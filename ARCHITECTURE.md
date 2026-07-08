@@ -61,9 +61,11 @@ galactic/
 │       ├── srv6/            # SRv6 ingress route add/del (END.DT46)
 │       ├── sysctl/          # Interface sysctl helpers
 │       └── vrf/             # Linux VRF create/delete/lookup
-├── deploy/
+├── config/
+│   ├── galactic-system/     # galactic-system namespace (shared by both components)
 │   ├── galactic-router/     # DaemonSet, RBAC, ServiceAccount
-│   ├── galactic-cni/        # DaemonSet installing galactic-cni onto /opt/cni/bin via hostPath
+│   └── galactic-cni/        # DaemonSet installing galactic-cni onto /opt/cni/bin via hostPath
+├── deploy/
 │   └── containerlab/        # ContainerLab lab topology and scripts
 └── containers/
     └── galactic/            # Production Dockerfile
