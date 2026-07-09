@@ -5,7 +5,6 @@ metadata:
   namespace: vpc
   labels:
     app: vpc20
-    site: dfw
 spec:
   replicas: 1
   selector:
@@ -15,7 +14,6 @@ spec:
     metadata:
       labels:
         app: vpc20
-        site: dfw
       annotations:
         k8s.v1.cni.cncf.io/networks: vpc20
     spec:
@@ -27,9 +25,7 @@ spec:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
       containers:
-        - name: multitool
-          image: wbitt/network-multitool
+        - name: netshoot
+          image: nicolaka/netshoot
           imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 80
-              name: http
+          command: ["sleep", "infinity"]

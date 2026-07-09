@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: site-label-patch
+  labels:
+    site: iad
+spec:
+  template:
+    metadata:
+      labels:
+        site: iad

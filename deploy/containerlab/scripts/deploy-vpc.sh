@@ -9,12 +9,10 @@ source "${SCRIPT_DIR}/lib.sh"
 
 for site in dfw sjc iad; do
   node=$(control_plane "${site}")
-  echo "Copying vpc/${site} to ${node}..."
-  copy_to "${node}" "vpc/${site}" "/galactic/resources/vpc-${site}/"
-  for vpc in vpc10 vpc20; do
-    echo "Applying ${vpc}/${site} to ${node}..."
-    apply_f "${node}" "/galactic/resources/vpc-${site}/${vpc}.yaml"
-  done
+  echo "Copying vpc to ${node}..."
+  copy_to "${node}" vpc
+  echo "Applying vpc/${site} to ${node}..."
+  apply_k "${node}" "/galactic/resources/vpc/${site}/"
 done
 
 echo "Done."

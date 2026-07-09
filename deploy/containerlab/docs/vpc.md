@@ -3,7 +3,7 @@
 ## Overview
 
 The lab deploys two isolated test VPCs — `vpc10` and `vpc20` — each with a
-`wbitt/network-multitool` pod on every site's worker node. That's 2 VPCs × 3
+`nicolaka/netshoot` pod on every site's worker node. That's 2 VPCs × 3
 sites = 6 pods total. Multus attaches each pod to its VPC's
 NetworkAttachmentDefinition (`vpc10` or `vpc20`), which invokes `galactic-cni`
 to create a VRF, veth pair, SRv6 encapsulation route, and `BGPAdvertisement`
