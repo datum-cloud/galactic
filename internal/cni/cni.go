@@ -41,6 +41,16 @@ const (
 	// encap routes.
 	annotationSRv6SID = "galactic.datum.net/srv6-sid"
 
+	// annotationNetNS is the BGPAdvertisement annotation key prefix holding
+	// the CNI-provided network namespace path for a container ID. The GC
+	// controller checks whether this exact path still exists to decide if
+	// the container is still live — it cannot reconstruct the path from the
+	// container ID alone, since netns bind-mounts are named by the
+	// runtime's own convention (e.g. containerd's "cni-<uuid>"), which is
+	// unrelated to the container ID. The full key appends a truncated
+	// container ID; see netnsAnnotationKey.
+	annotationNetNS = "galactic.datum.net/netns"
+
 	// annotationContainerIDLen is the number of characters used from a
 	// container ID in annotation keys. Kubernetes limits the name part of an
 	// annotation key to 63 bytes; "allocated-subnet." is 17 bytes, leaving 46

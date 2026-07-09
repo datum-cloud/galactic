@@ -19,16 +19,16 @@ const (
 	testEth0         = "eth0"
 )
 
-func TestFindContainerID(t *testing.T) {
+func TestCollectNetNSPaths(t *testing.T) {
 	tests := []struct {
-		name   string
-		adv    *bgpv1alpha1.BGPAdvertisement
-		wantID string
+		name string
+		adv  *bgpv1alpha1.BGPAdvertisement
+		want map[string]string
 	}{
 		{
-			name:   "nil annotations",
-			adv:    &bgpv1alpha1.BGPAdvertisement{},
-			wantID: "",
+			name: "nil annotations",
+			adv:  &bgpv1alpha1.BGPAdvertisement{},
+			want: map[string]string{},
 		},
 		{
 			name: "empty annotations",
@@ -37,10 +37,10 @@ func TestFindContainerID(t *testing.T) {
 					Annotations: map[string]string{},
 				},
 			},
-			wantID: "",
+			want: map[string]string{},
 		},
 		{
-			name: "no allocated-subnet annotation",
+			name: "no netns annotation",
 			adv: &bgpv1alpha1.BGPAdvertisement{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -48,47 +48,47 @@ func TestFindContainerID(t *testing.T) {
 					},
 				},
 			},
-			wantID: "",
+			want: map[string]string{},
 		},
 		{
-			name: "single allocated-subnet annotation",
+			name: "single netns annotation",
 			adv: &bgpv1alpha1.BGPAdvertisement{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"galactic.datum.net/allocated-subnet.abc123def456": "fd00:10:ff01::1234/80",
+						"galactic.datum.net/netns.abc123def456": "/var/run/netns/cni-1234",
 					},
 				},
 			},
-			wantID: "abc123def456",
+			want: map[string]string{"abc123def456": "/var/run/netns/cni-1234"},
 		},
 		{
-			name: "multiple annotations returns one",
+			name: "multiple annotations returns all",
 			adv: &bgpv1alpha1.BGPAdvertisement{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"galactic.datum.net/allocated-subnet.aaa111bbb222": "fd00:10:ff01::1234/80",
-						"galactic.datum.net/allocated-subnet.ccc333ddd444": "fd00:10:ff01::5678/80",
-						"galactic.datum.net/srv6-sid":                      "2001:db8::1234:5678",
+						"galactic.datum.net/netns.aaa111bbb222": "/var/run/netns/cni-aaa",
+						"galactic.datum.net/netns.ccc333ddd444": "/var/run/netns/cni-ccc",
+						"galactic.datum.net/srv6-sid":           "2001:db8::1234:5678",
 					},
 				},
 			},
-			wantID: "", // non-deterministic — map iteration order varies
+			want: map[string]string{
+				"aaa111bbb222": "/var/run/netns/cni-aaa",
+				"ccc333ddd444": "/var/run/netns/cni-ccc",
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := findContainerID(tt.adv)
-			if tt.name == "multiple annotations returns one" {
-				// Multiple allocated-subnet annotations — map iteration
-				// order is non-deterministic. Accept any matching prefix.
-				if got != "" && got != "aaa111bbb222" && got != "ccc333ddd444" {
-					t.Errorf("findContainerID() = %q, want one of the allocated-subnet container IDs", got)
-				}
-				return
+			got := collectNetNSPaths(tt.adv)
+			if len(got) != len(tt.want) {
+				t.Fatalf("collectNetNSPaths() = %v, want %v", got, tt.want)
 			}
-			if got != tt.wantID {
-				t.Errorf("findContainerID() = %q, want %q", got, tt.wantID)
+			for id, path := range tt.want {
+				if got[id] != path {
+					t.Errorf("collectNetNSPaths()[%q] = %q, want %q", id, got[id], path)
+				}
 			}
 		})
 	}

@@ -24,6 +24,7 @@ type GCReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
 	Namespace string
+	NodeName  string
 	Interval  time.Duration
 }
 
@@ -36,7 +37,7 @@ func (r *GCReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Resu
 	}
 
 	k8s := r.Client
-	result := gc.RunGC(ctx, k8s, r.Namespace)
+	result := gc.RunGC(ctx, k8s, r.Namespace, r.NodeName)
 
 	if result.Errors > 0 {
 		slog.Info("GC: completed with errors",
@@ -65,7 +66,7 @@ func (r *GCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // RunGC runs a single garbage collection pass in the given context.
 // This is the public API for triggering GC from outside the reconciler.
 func (r *GCReconciler) RunGC(ctx context.Context) gc.CleanupResult {
-	return gc.RunGC(ctx, r.Client, r.Namespace)
+	return gc.RunGC(ctx, r.Client, r.Namespace, r.NodeName)
 }
 
 // GCRequest returns a reconcile.Request that triggers the GC reconciler.

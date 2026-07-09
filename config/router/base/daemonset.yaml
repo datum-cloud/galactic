@@ -61,3 +61,17 @@ spec:
               memory: 64Mi
             limits:
               memory: 256Mi
+          volumeMounts:
+            # GC (internal/gc) checks whether a container's netns bind-mount
+            # still exists on the host to decide whether shared BGP CRDs/VRFs
+            # are orphaned. Without this mount the container has no
+            # visibility into /var/run/netns at all, so that check always
+            # (and incorrectly) reports every namespace as gone.
+            - name: netns
+              mountPath: /var/run/netns
+              readOnly: true
+      volumes:
+        - name: netns
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate
