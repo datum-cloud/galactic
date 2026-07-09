@@ -1,6 +1,8 @@
 namespace: vpc
 resources:
   - ../base
+  - nad-vpc10.yaml
+  - nad-vpc20.yaml
 patches:
   - path: site-label-patch.yaml
     target:

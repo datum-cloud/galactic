@@ -55,9 +55,9 @@ workloads on their own — e.g. after the lab was restarted, per
 task deploy:vpc
 ```
 
-This applies the `vpc10` and `vpc20` Deployments to each cluster's `vpc` namespace.
-It relies on `deploy:cni` (kubeconfig on each worker) and `deploy:tenant` (NADs, BGP
-CRs) having already run — both are part of `task deploy`.
+This applies the `vpc10`/`vpc20` NADs and Deployments to each cluster's `vpc`
+namespace. It relies on `deploy:cni` (kubeconfig on each worker) and
+`deploy:tenant` (BGP CRs) having already run — both are part of `task deploy`.
 
 ## Verify Pods Are Running
 

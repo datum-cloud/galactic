@@ -15,12 +15,17 @@ spec:
     spec:
       # Route-reflector role: opt-in only, requires nodes explicitly labeled
       # for it, so it never double-schedules with the per-worker tenant
-      # DaemonSet (see ../tenant/daemonset-patch.yaml).
+      # DaemonSet (see ../tenant/daemonset-patch.yaml). Also excludes
+      # Kubernetes control-plane nodes outright — the base DaemonSet's
+      # blanket toleration would otherwise let it land there if one ever
+      # carried the galactic.datum.net/node=control label.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
                   - key: galactic.datum.net/node
                     operator: In
                     values:

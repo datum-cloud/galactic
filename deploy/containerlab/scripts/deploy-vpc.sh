@@ -1,7 +1,7 @@
 #!/bin/bash
-# deploy-vpc.sh — Deploy vpc10 and vpc20 test workloads to every cluster
-# (one pod per VPC per site, 6 pods total) for cross-site and cross-VPC
-# connectivity verification.
+# deploy-vpc.sh — Deploy vpc10/vpc20 NADs and test workloads to every
+# cluster (one pod per VPC per site, 6 pods total) for cross-site and
+# cross-VPC connectivity verification.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -12,6 +12,7 @@ for site in dfw sjc iad; do
   echo "Copying vpc to ${node}..."
   copy_to "${node}" vpc
   echo "Applying vpc/${site} to ${node}..."
+  ensure_namespace "${node}" vpc
   apply_k "${node}" "/galactic/resources/vpc/${site}/"
 done
 
