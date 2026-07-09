@@ -1,0 +1,10 @@
+resources:
+  - ../base
+# Only resource pulled in here is the DaemonSet from ../base, so this can't
+# accidentally rename the shared RBAC/ServiceAccount in ../.. .
+nameSuffix: -control
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-router

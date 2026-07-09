@@ -7,13 +7,15 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-# The router DaemonSet base lives in config/galactic-router/ (shared with
-# production); resources/tenant/base/kustomization.yaml patches in the
-# lab-only image, tolerations, and node affinity. It's copied into
-# resources/tenant/base/base/ on the node at deploy time (kustomize
-# requires resources in or below the overlay root) rather than duplicated
-# in the repo.
-GALACTIC_ROUTER_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router" && pwd)
+# The router DaemonSet base lives in config/router/base/ (shared with
+# production; config/router/ also holds the production tenant/ and
+# tenant-control/ overlays and the shared RBAC/ServiceAccount, none of
+# which the lab needs here). resources/tenant/base/kustomization.yaml
+# patches in the lab-only image, tolerations, and node affinity. It's
+# copied into resources/tenant/base/base/ on the node at deploy time
+# (kustomize requires resources in or below the overlay root) rather than
+# duplicated in the repo.
+GALACTIC_ROUTER_DIR=$(cd "${SCRIPT_DIR}/../../../config/router/base" && pwd)
 
 # apply_tenant creates the vpc namespace and applies the site's NADs (one
 # per VPC) and tenant DaemonSet overlay. Shared by all three sites; iad

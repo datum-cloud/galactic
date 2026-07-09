@@ -50,10 +50,16 @@ Summary:
 
 ## Deployments
 
-- **`config/galactic-system/`** — Creates the `galactic-system` namespace both components deploy into. Apply first: `kubectl apply -f config/galactic-system/`. Neither component's manifests create it, and nothing else in this repo does either — apply it before `config/galactic-router/` or `config/galactic-cni/` or their ServiceAccount/DaemonSet creation will fail with `namespaces "galactic-system" not found`.
-- **`config/galactic-router/`** — Production manifests for the router DaemonSet, RBAC, and ServiceAccount. Apply with `kubectl apply -f config/galactic-router/`.
-- **`config/galactic-cni/`** — Production manifests for the CNI installer DaemonSet, ConfigMap, RBAC, and ServiceAccount. Apply with `kubectl apply -f config/galactic-cni/`.
-- **`deploy/containerlab/`** — ContainerLab topology (`gvpc.clab.yaml`) for three Kind clusters (dfw, iad, sjc) wired over an IPv6 SRv6 transit mesh. FRR runs as a hostNetwork DaemonSet on each worker for eBGP underlay; `galactic-router` (tenant role) handles EVPN path distribution over iBGP. See `deploy/containerlab/README.md` and `deploy/containerlab/Taskfile.yaml` for bring-up commands.
+`config/` is Kustomize-composed: `kubectl apply -k config/` deploys everything (namespace, both DaemonSets' RBAC/ServiceAccounts, and all three DaemonSets) in one command — `kubectl` sorts by kind before applying, so the namespace and RBAC/ServiceAccounts always land before anything namespace-scoped needs them. Each component also has its own `kustomization.yaml` and can be applied independently:
+
+- **`config/system/`** — Creates the `galactic-system` namespace both components deploy into. Apply with `kubectl apply -k config/system/`.
+- **`config/cni/`** — Production manifests for the CNI installer DaemonSet, ConfigMap, RBAC, and ServiceAccount. Apply with `kubectl apply -k config/cni/`.
+- **`config/router/`** — Shared RBAC/ServiceAccount plus two DaemonSet roles, both running `GALACTIC_ROUTER_ROUTER_MODE=tenant`:
+  - **`config/router/tenant/`** — the per-node role (`galactic-router`); runs on every node except Kubernetes control-plane nodes and nodes labeled for the route-reflector role below.
+  - **`config/router/tenant-control/`** — the BGP route-reflector role (`galactic-router-control`, `GALACTIC_ROUTER_REFLECTOR=true`); opt-in only, requires nodes labeled `galactic.datum.net/node: control` (stays at zero replicas otherwise). `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` must be set per cluster — see the comments in `daemonset-patch.yaml`.
+  - **`config/router/base/`** — the DaemonSet spec shared by both roles; not applied directly.
+  - Apply the whole router component (both roles) with `kubectl apply -k config/router/`, or a single role with e.g. `kubectl apply -k config/router/tenant/`.
+- **`deploy/containerlab/`** — ContainerLab topology (`gvpc.clab.yaml`) for three Kind clusters (dfw, iad, sjc) wired over an IPv6 SRv6 transit mesh. FRR runs as a hostNetwork DaemonSet on each worker for eBGP underlay; `galactic-router` (tenant role) handles EVPN path distribution over iBGP, and the iad route reflector builds on `config/router/tenant-control/`. See `deploy/containerlab/README.md` and `deploy/containerlab/Taskfile.yaml` for bring-up commands.
 
 ## New Developer Entry Points
 

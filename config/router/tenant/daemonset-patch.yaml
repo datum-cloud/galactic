@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-router
+  labels:
+    app.kubernetes.io/name: galactic-router-tenant
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-router-tenant
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-router-tenant
+    spec:
+      # Tenant pods run on every worker; skip Kubernetes control-plane nodes
+      # (no VPC pods to serve there, same as galactic-cni) and skip nodes
+      # labeled for the tenant-control (route-reflector) role so the two
+      # roles never double-schedule onto the same node.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datum.net/node
+                    operator: NotIn
+                    values:
+                      - control
