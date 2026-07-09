@@ -1,23 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vpc20
+  name: vpc10
   namespace: vpc
   labels:
-    app: vpc20
-    site: iad
+    app: vpc10
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vpc20
+      app: vpc10
   template:
     metadata:
       labels:
-        app: vpc20
-        site: iad
+        app: vpc10
       annotations:
-        k8s.v1.cni.cncf.io/networks: vpc20
+        k8s.v1.cni.cncf.io/networks: vpc10
     spec:
       affinity:
         nodeAffinity:
@@ -27,9 +25,7 @@ spec:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
       containers:
-        - name: multitool
-          image: wbitt/network-multitool
+        - name: netshoot
+          image: nicolaka/netshoot
           imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 80
-              name: http
+          command: ["sleep", "infinity"]

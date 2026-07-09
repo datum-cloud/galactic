@@ -16,9 +16,11 @@ NETWORK_SHA=$(awk '/go\.datum\.net\/network/ {print $2}' "${SCRIPT_DIR}/../../..
 NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
 
 # VPC/VPCAttachment CRDs still come from Cosmos — they're owned by the
-# separate companion VPC operator, not part of this migration.
-COSMOS_SHA=$(awk '/go\.miloapis\.com\/cosmos/ {print $2}' "${SCRIPT_DIR}/../../../go.mod" | sed 's/.*-//')
-COSMOS_CRD_URL="https://raw.githubusercontent.com/milo-os/cosmos/${COSMOS_SHA}/config/crd"
+# separate companion VPC operator, not part of this migration. Cosmos was
+# never a Go dependency of Galactic for these types (no Go structs are
+# imported — see CLAUDE.md), so there's no go.mod line to pin a SHA from;
+# track Cosmos's main branch instead.
+COSMOS_CRD_URL="https://raw.githubusercontent.com/milo-os/cosmos/main/config/crd"
 
 network_crds=(
   network.datumapis.com_bgpadvertisements.yaml

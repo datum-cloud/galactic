@@ -1,0 +1,7 @@
+namespace: vpc
+resources:
+  - ../base
+patches:
+  - path: site-label-patch.yaml
+    target:
+      kind: Deployment
