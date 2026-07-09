@@ -18,14 +18,13 @@ copy_to() {
 }
 
 # copy_config NODE
-# Copies the repo's production config/ (galactic-system, galactic-router,
-# galactic-cni manifests) onto NODE at /galactic/config/, alongside
-# /galactic/resources/. deploy-system.sh applies the namespace/RBAC/
-# ServiceAccount manifests straight from here instead of maintaining lab
-# copies. DaemonSet bases are handled separately (see deploy-cni.sh and
-# deploy-tenant.sh): they're copied into a base/ subdirectory nested under
-# the consuming kustomization's own root, since kubectl apply -k refuses to
-# load resource files from outside that root.
+# Copies the repo's production config/ (system, router, cni manifests) onto
+# NODE at /galactic/config/, alongside /galactic/resources/. deploy-system.sh
+# applies the namespace/RBAC/ServiceAccount manifests straight from here
+# instead of maintaining lab copies. DaemonSet bases are handled separately
+# (see deploy-cni.sh and deploy-tenant.sh): they're copied into a base/
+# subdirectory nested under the consuming kustomization's own root, since
+# kubectl apply -k refuses to load resource files from outside that root.
 copy_config() {
   local node="$1"
   docker cp "${CONFIG_DIR}" "${node}:/galactic/config"

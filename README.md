@@ -32,13 +32,13 @@ See the [galactic DevContainer](./.devcontainer/galactic/) for development envir
 
 ### Production Deployment
 
-Manifests for a real cluster live under [`config/`](./config/): apply [`config/galactic-system/`](./config/galactic-system/) first to create the shared namespace, then [`config/galactic-router/`](./config/galactic-router/) and [`config/galactic-cni/`](./config/galactic-cni/) for the two DaemonSets.
+Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace, the `galactic-cni` DaemonSet, and both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datum.net/node: control`):
 
 ```bash
-kubectl apply -f config/galactic-system/
-kubectl apply -f config/galactic-router/
-kubectl apply -f config/galactic-cni/
+kubectl apply -k config/
 ```
+
+Each component can also be applied on its own, e.g. `kubectl apply -k config/router` for just the router (both roles) or `kubectl apply -k config/router/tenant` for just the per-node role.
 
 There is currently no published image for these manifests to pull — the shared
 Dockerfile and release workflow that used to build `ghcr.io/datum-cloud/galactic:latest`

@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-router
+  labels:
+    app.kubernetes.io/name: galactic-router-control
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-router-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-router-control
+    spec:
+      # Route-reflector role: opt-in only, requires nodes explicitly labeled
+      # for it, so it never double-schedules with the per-worker tenant
+      # DaemonSet (see ../tenant/daemonset-patch.yaml).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: galactic.datum.net/node
+                    operator: In
+                    values:
+                      - control
+      containers:
+        - name: galactic-router
+          env:
+            - name: GALACTIC_ROUTER_REFLECTOR
+              value: "true"
+              # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS must be set per cluster —
+              # it's the stable peering address other tenant routers reflect
+              # through, and there's no sane generic default.
+              #
+              # GALACTIC_ROUTER_BGP_LISTEN_PORT may also need overriding away
+              # from the default (179) if this pod shares a host network
+              # namespace with another BGP speaker, e.g. an underlay/fabric
+              # daemon.

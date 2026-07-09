@@ -46,11 +46,11 @@ for site in dfw sjc iad; do
   done
 
   copy_config "${node}"
-  apply_f "${node}" /galactic/config/galactic-system/namespace.yaml
-  apply_f "${node}" /galactic/config/galactic-cni/serviceaccount.yaml
-  apply_f "${node}" /galactic/config/galactic-cni/rbac.yaml
-  apply_f "${node}" /galactic/config/galactic-router/serviceaccount.yaml
-  apply_f "${node}" /galactic/config/galactic-router/rbac.yaml
+  apply_f "${node}" /galactic/config/system/namespace.yaml
+  apply_f "${node}" /galactic/config/cni/serviceaccount.yaml
+  apply_f "${node}" /galactic/config/cni/rbac.yaml
+  apply_f "${node}" /galactic/config/router/serviceaccount.yaml
+  apply_f "${node}" /galactic/config/router/rbac.yaml
 done
 
 echo "Done."

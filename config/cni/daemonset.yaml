@@ -17,6 +17,15 @@ spec:
       serviceAccountName: galactic-cni
       tolerations:
         - operator: Exists
+      # Only worker nodes run VPC pods; galactic-cni has nothing to do on
+      # control-plane nodes.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
       initContainers:
         - name: install-cni
           image: ghcr.io/datum-cloud/galactic:latest

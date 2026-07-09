@@ -1,0 +1,4 @@
+resources:
+  - system
+  - cni
+  - router

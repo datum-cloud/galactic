@@ -70,10 +70,15 @@ galactic/
 │       ├── srv6/            # SRv6 ingress route add/del (END.DT46)
 │       ├── sysctl/          # Interface sysctl helpers
 │       └── vrf/             # Linux VRF create/delete/lookup
-├── config/
-│   ├── galactic-system/     # galactic-system namespace (shared by both components)
-│   ├── galactic-router/     # DaemonSet, RBAC, ServiceAccount
-│   └── galactic-cni/        # DaemonSet installing galactic-cni onto /opt/cni/bin via hostPath
+├── config/                  # Kustomize-composed; `kubectl apply -k config/` deploys everything
+│   ├── system/              # galactic-system namespace (shared by both components)
+│   ├── router/              # Shared RBAC/ServiceAccount, plus:
+│   │   ├── base/            #   common DaemonSet spec
+│   │   ├── tenant/          #   per-node role: base + node affinity excluding control-plane
+│   │   │                    #     and tenant-control nodes
+│   │   └── tenant-control/  #   route-reflector role: base + GALACTIC_ROUTER_REFLECTOR=true,
+│   │                        #     opt-in via the galactic.datum.net/node=control node label
+│   └── cni/                 # DaemonSet installing galactic-cni onto /opt/cni/bin via hostPath
 ├── deploy/
 │   └── containerlab/        # ContainerLab lab topology and scripts
 └── containers/
@@ -326,7 +331,7 @@ Runs on every PR and push to `main`. Two tiers:
 - **Tier 1 (parallel):** `lint` (golangci-lint v2.12.2 + yamlfmt), `test-unit` (race detector + codecov upload), `build`
 - **Tier 2 (sequential):** `test-e2e` — blocked on all Tier 1 jobs passing
 
-**Release pipeline:** none currently. `.github/workflows/release.yaml` (previously built and pushed `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}`) was removed along with `containers/galactic/Dockerfile` after the image was found to advertise `galactic-router` (via `config/galactic-router/daemonset.yaml`'s `command: [/galactic-router]`) without ever building it. There is currently no path to a published production image for either binary — see Known Constraints below.
+**Release pipeline:** none currently. `.github/workflows/release.yaml` (previously built and pushed `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}`) was removed along with `containers/galactic/Dockerfile` after the image was found to advertise `galactic-router` (via `config/router/base/daemonset.yaml`'s `command: [/galactic-router]`) without ever building it. There is currently no path to a published production image for either binary — see Known Constraints below.
 
 **Container image:** `containers/galactic-cni/Dockerfile` — multi-stage build (golang builder → distroless → final Alpine stage for `iproute2`/`nsenter`); builds only `galactic-cni` plus the delegated `host-device` CNI plugin binary, `ENTRYPOINT ["/galactic-cni"]`. This is used exclusively by `task test:e2e` (`scripts/ci.sh e2etest` builds it, tags `galactic-cni:e2e` by default, and `kind load`s it into the ephemeral e2e cluster) — it is not part of any release/publish path.
 
@@ -334,7 +339,7 @@ Runs on every PR and push to `main`. Two tiers:
 
 ## Known Constraints
 
-- **No production release image build path exists.** `containers/galactic/Dockerfile`, `task docker-build`, and `.github/workflows/release.yaml` were all removed after the image was found to advertise `galactic-router` (via `config/galactic-router/daemonset.yaml`'s `command: [/galactic-router]`) without ever building it. `config/galactic-router/daemonset.yaml` and `config/galactic-cni/daemonset.yaml` both still reference `ghcr.io/datum-cloud/galactic:latest`, which nothing in the repo publishes anymore. `containers/galactic-cni/Dockerfile` exists but is scoped to e2e testing only (`task test:e2e`), builds only `galactic-cni`, and is never pushed anywhere.
+- **No production release image build path exists.** `containers/galactic/Dockerfile`, `task docker-build`, and `.github/workflows/release.yaml` were all removed after the image was found to advertise `galactic-router` (via `config/router/base/daemonset.yaml`'s `command: [/galactic-router]`) without ever building it. `config/router/base/daemonset.yaml` and `config/cni/daemonset.yaml` both still reference `ghcr.io/datum-cloud/galactic:latest`, which nothing in the repo publishes anymore. `containers/galactic-cni/Dockerfile` exists but is scoped to e2e testing only (`task test:e2e`), builds only `galactic-cni`, and is never pushed anywhere.
 - **GoBGP RIB is ephemeral.** All BGP state is in-process memory. On restart, sessions and paths must be re-established from CRD state; controller-runtime's reconcile loop handles this automatically.
 - **EVPN Type 5 is implemented, not deferred.** `internal/runtime/gobgp/paths.go`'s `buildEVPNPaths` builds real `EVPNIPPrefixRoute` NLRIs, deriving the Route Distinguisher from `routerID + ":0"` (not from the CRD). The `BGPVRFInstance` CRD carries its own explicit `RouteDistinguisher` and import/export Route Targets (see Key Design Decisions above), applied via `internal/runtime/gobgp/runtime.go`'s `applyVRFs`. There is no `ErrMissingRouteDistinguisher` or similar rejection path in the current code.
 - **`cmdDel` does not tear down shared kernel/CRD state.** By design (see Key Design Decisions above) — cleanup of VRF, veth/tap, routes, SRv6 ingress, and BGP CRDs is deferred to `galactic-router`'s asynchronous GC controller, not performed synchronously in `cmdDel`.
