@@ -28,7 +28,6 @@ data:
     zebra_options="  -A 127.0.0.1 -s 90000000"
     bgpd_options="  -A 127.0.0.1"
   frr.conf: |
-    frr version 9.1
     frr defaults traditional
     hostname iad-control-fabric
     log syslog informational

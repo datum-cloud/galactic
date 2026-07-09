@@ -21,17 +21,17 @@ over iBGP to the route reflector on iad-control.
 
 | Node                  | Kind          | Role                                          |
 |-----------------------|---------------|-----------------------------------------------|
-| `dfw`                 | k8s-kind      | Kind cluster definition (dfw region)          |
 | `dfw-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
 | `dfw-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
-| `iad`                 | k8s-kind      | Kind cluster definition (iad region)          |
 | `iad-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
 | `iad-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
-| `iad-worker-control`  | ext-container | Kind worker; runs FRR PE + galactic-router RR |
-| `sjc`                 | k8s-kind      | Kind cluster definition (sjc region)          |
+| `iad-worker2` (renamed `iad-worker-control` post-deploy) | ext-container | Kind worker; runs FRR PE + galactic-router RR |
 | `sjc-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
 | `sjc-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
 | `tr1`–`tr4`           | linux (FRR)   | iBGP full mesh, AS 65100                      |
+
+`dfw`, `iad`, and `sjc` are the three Kind cluster names — not separate ContainerLab
+topology nodes. Each cluster's `control-plane`/`worker` nodes above are its members.
 
 ### BGP design
 
@@ -91,30 +91,27 @@ The blackhole prevents the default route from matching the USID while the
 seg6local route handles SRv6 decapsulation. The FRR fabric DaemonSet advertises
 the USID into the transit mesh via a static Null0 route + BGP `network` statement.
 
-Test VPCs `vpc10` and `vpc20` (see [docs/vpc.md](docs/vpc.md)) each get their own USID per
-cluster, reusing the same site index and sharing the `galactic-router` loopback:
+Each site advertises one aggregate `/48` SRv6 locator block into the fabric; test VPCs
+`vpc10` and `vpc20` (see [docs/vpc.md](docs/vpc.md)) get sequential host addresses
+within their site's block rather than a separate per-VPC prefix:
 
-| Cluster     | FRR loopback   | USID vpc10                                   | USID vpc20                                   | galactic-router address |
-|-------------|----------------|----------------------------------------------|----------------------------------------------|-------------------------|
-| dfw         | fc00:0:2::1/48 | 2001:db8:ff00:1010::1/128                    | 2001:db8:ff00:1020::1/128                    | fc00:0:2::1             |
-| iad         | fc00:0:4::1/48 | 2001:db8:ff00:1010::3/128                    | 2001:db8:ff00:1020::3/128                    | fc00:0:4::1             |
-| iad-control | fc00:0:8::1/48 | 2001:db8:ff00:1010::4/128 (reserved, unused) | 2001:db8:ff00:1020::4/128 (reserved, unused) | fc00:0:8::1             |
-| sjc         | fc00:0:3::1/48 | 2001:db8:ff00:1010::2/128                    | 2001:db8:ff00:1020::2/128                    | fc00:0:3::1             |
+| Cluster     | FRR loopback   | Site aggregate block | USID vpc10             | USID vpc20             | galactic-router address |
+|-------------|----------------|-----------------------|-------------------------|-------------------------|-------------------------|
+| dfw         | fc00:0:2::1/48 | 2001:db8:ff01::/48    | 2001:db8:ff01::1/128    | 2001:db8:ff01::2/128    | fc00:0:2::1             |
+| sjc         | fc00:0:3::1/48 | 2001:db8:ff02::/48    | 2001:db8:ff02::1/128    | 2001:db8:ff02::2/128    | fc00:0:3::1             |
+| iad         | fc00:0:4::1/48 | 2001:db8:ff03::/48    | 2001:db8:ff03::1/128    | 2001:db8:ff03::2/128    | fc00:0:4::1             |
 
-### Management network (172.20.20.0/24)
+### Management network (fc00:10::/64)
 
-| Node                  | Address       |
-|-----------------------|---------------|
-| dfw                   | 172.20.20.101 |
-| dfw-control-plane     | 172.20.20.102 |
-| dfw-worker            | 172.20.20.103 |
-| iad                   | 172.20.20.111 |
-| iad-control-plane     | 172.20.20.112 |
-| iad-worker            | 172.20.20.113 |
-| iad-worker-control    | 172.20.20.114 |
-| sjc                   | 172.20.20.121 |
-| sjc-control-plane     | 172.20.20.122 |
-| sjc-worker            | 172.20.20.123 |
+| Node                                          | Address       |
+|------------------------------------------------|---------------|
+| dfw-control-plane                             | fc00:10::102  |
+| dfw-worker                                    | fc00:10::103  |
+| sjc-control-plane                             | fc00:10::122  |
+| sjc-worker                                    | fc00:10::123  |
+| iad-control-plane                             | fc00:10::112  |
+| iad-worker                                    | fc00:10::113  |
+| iad-worker2 (renamed `iad-worker-control`)    | fc00:10::114  |
 
 ## Lab layout
 
@@ -123,7 +120,7 @@ deploy/containerlab/
 ├── gvpc.clab.yaml
 ├── Taskfile.yaml
 ├── containers/
-│   ├── kindest-node-galactic/   # Custom Kind node image (sysctls)
+│   ├── kindest-node-galactic/   # Custom Kind node image (git/tcpdump, kubectl DooD wrapper)
 │   ├── galactic-router/         # galactic-router container built from Go source
 │   └── frr/                     # FRR container built from Alpine edge
 ├── resources/
@@ -186,7 +183,9 @@ task deploy
 | `build:galactic-cni`    | Build the galactic-cni installer image                                   |
 | `build:frr`             | Build the FRR container from Alpine edge                                 |
 | `deploy`                | Build images, apply host sysctls, and deploy the lab                     |
-| `deploy:topology`       | Deploy the ContainerLab topology (transit routers + clusters)            |
+| `deploy:topology`       | Deploy the ContainerLab topology (transit routers)                       |
+| `deploy:clusters`       | Create the three Kind clusters and export their kubeconfigs              |
+| `deploy:rename-control` | Rename the `iad-worker2` Docker container to `iad-worker-control`        |
 | `deploy:images`         | Load container images into Kind clusters                                 |
 | `deploy:system`         | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
 | `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet               |
@@ -195,6 +194,7 @@ task deploy
 | `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)       |
 | `destroy`               | Destroy the lab and remove all Kind clusters                             |
 | `reload`                | Full rebuild — destroy then redeploy                                     |
+| `rebuild`               | Full rebuild — clean (destroy + delete images/artifacts) then redeploy   |
 | `inspect`               | Show running nodes and management addresses                              |
 | `graph`                 | Generate a draw.io diagram for the topology                              |
 | `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)            |

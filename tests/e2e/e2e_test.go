@@ -5,7 +5,7 @@
 // Package e2e contains end-to-end tests for the galactic binary running inside
 // a Kind cluster. The tests assume:
 //   - A Kind cluster named "galactic-e2e" (or $CLUSTER_NAME) is already running.
-//   - The image "galactic:e2e" (or $IMG) has already been loaded into the cluster.
+//   - The image "galactic-cni:e2e" (or $IMG) has already been loaded into the cluster.
 //   - kubectl is on PATH and its context points at that cluster.
 //
 // These preconditions are set up by the e2etest target in scripts/ci.sh.
@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	defaultImg      = "galactic:e2e"
+	defaultImg      = "galactic-cni:e2e"
 	podReadyTimeout = 60 * time.Second
 	podPollInterval = 2 * time.Second
 )

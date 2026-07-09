@@ -30,9 +30,24 @@ A ContainerLab environment is available under [`deploy/containerlab/`](./deploy/
 
 See the [galactic DevContainer](./.devcontainer/galactic/) for development environment setup. On ARM64 / OrbStack, use the [containerlab DevContainer](./.devcontainer/containerlab-dood/) to run ContainerLab via Docker-out-of-Docker.
 
+### Production Deployment
+
+Manifests for a real cluster live under [`config/`](./config/): apply [`config/galactic-system/`](./config/galactic-system/) first to create the shared namespace, then [`config/galactic-router/`](./config/galactic-router/) and [`config/galactic-cni/`](./config/galactic-cni/) for the two DaemonSets.
+
+```bash
+kubectl apply -f config/galactic-system/
+kubectl apply -f config/galactic-router/
+kubectl apply -f config/galactic-cni/
+```
+
+There is currently no published image for these manifests to pull — the shared
+Dockerfile and release workflow that used to build `ghcr.io/datum-cloud/galactic:latest`
+were removed. Build and push your own image from `cmd/galactic-cni`/`cmd/galactic-router`
+before applying these manifests to a real cluster.
+
 ## Development
 
-This project uses [Task](https://taskfile.dev) as its build tool. All build, test, lint, and lab operations are defined in `Taskfile.yaml` files at the repo root and under each `lab/` subdirectory.
+This project uses [Task](https://taskfile.dev) as its build tool. Build, test, and lint operations are defined in the root `Taskfile.yaml`.
 
 ### Install Task
 
@@ -55,6 +70,18 @@ See [taskfile.dev/installation](https://taskfile.dev/installation/) for the full
 task          # list available tasks
 ```
 
+#### Building
+
+```bash
+task build           # produces bin/galactic-cni and bin/galactic-router
+task lint            # golangci-lint + yamlfmt; lint-fix applies safe auto-fixes
+task ci              # full pipeline: lint → build → test:unit → test:e2e
+```
+
+There is no `task docker-build` — the shared production Dockerfile and release
+workflow were removed (see Production Deployment above). `containers/galactic-cni/Dockerfile`
+exists only to support `task test:e2e` below.
+
 #### Testing
 
 ```bash
@@ -66,7 +93,13 @@ task test:e2e        # full e2e lifecycle — spins up a Kind cluster, builds an
 
 `task test:unit` is the fast path for development; it runs the same command as the CI `test-unit` job. `task test:e2e` requires Docker and Kind and mirrors the CI `test-e2e` job exactly, including automatic cluster cleanup via a `trap` on exit.
 
+Run `task ci` before opening a pull request.
+
 The lab environment has its own `Taskfile.yaml`; run `task` from `deploy/containerlab/` to see available tasks.
+
+## Contributing
+
+See [AGENTS.md](./AGENTS.md) for the contributor guide (development workflow, code standards, architecture pointers) and [docs/agents/ARCHITECTURE.md](./docs/agents/ARCHITECTURE.md) for the full architecture reference.
 
 ## License
 

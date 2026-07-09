@@ -10,13 +10,11 @@ cross-VPC connectivity), see [docs/vpc.md](vpc.md).
 # iBGP full mesh — expect all sessions Established
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast summary"
 
-# Worker USIDs should be present on all TR nodes (vpc10, then vpc20)
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::1/128"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::2/128"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::3/128"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::1/128"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::2/128"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::3/128"
+# Each site's aggregate /48 SRv6 locator block should be present on all TR nodes
+# (covers every VPC's USID on that site, vpc10 and vpc20 alike — see docs/vpc.md)
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 ```
 
 ## FRR DaemonSets (eBGP fabric)
@@ -28,7 +26,11 @@ docker exec iad-control-plane kubectl get pods -n galactic-system
 docker exec sjc-control-plane kubectl get pods -n galactic-system
 
 # Run vtysh inside a pod
-docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-worker-fabric \
+docker exec dfw-control-plane kubectl exec -n galactic-system ds/dfw-fabric \
+  -- vtysh -c "show bgp ipv6 unicast summary"
+docker exec sjc-control-plane kubectl exec -n galactic-system ds/sjc-fabric \
+  -- vtysh -c "show bgp ipv6 unicast summary"
+docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-fabric \
   -- vtysh -c "show bgp ipv6 unicast summary"
 docker exec iad-control-plane kubectl exec -n galactic-system ds/iad-control-fabric \
   -- vtysh -c "show bgp ipv6 unicast summary"

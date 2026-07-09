@@ -9,11 +9,13 @@ or a combination of both. CLI flags take precedence over environment variables.
 |---|---|---|---|
 | Node name | `GALACTIC_ROUTER_NODE_NAME` | `--node-name` | _(required)_ |
 | Router mode | `GALACTIC_ROUTER_ROUTER_MODE` | `--mode` | _(required)_ |
-| Route reflector | _(none)_ | `--reflector` | `false` |
+| Route reflector | `GALACTIC_ROUTER_REFLECTOR` | `--reflector` | `false` |
 | BGP listen port | `GALACTIC_ROUTER_BGP_LISTEN_PORT` | `--bgp-listen-port` | `179` |
 | BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | `""` |
 | Metrics port | `GALACTIC_ROUTER_METRICS_PORT` | `--metrics-port` | `8080` |
 | gRPC health port | `GALACTIC_ROUTER_GRPC_HEALTH_PORT` | `--grpc-health-port` | `5000` |
+| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE` | `--gc-namespace` | `galactic-system` |
+| Orphan-cleanup interval | `GALACTIC_ROUTER_GC_INTERVAL` | `--gc-interval` | `5m` |
 
 ## Required Options
 
@@ -41,7 +43,7 @@ The operating mode of this instance. Determines which BGP backend is used:
 - `fabric` — uses the FRR stub backend (not yet implemented).
 - `transit` — reserved for future transit mode (not yet implemented).
 
-### `--reflector`
+### `--reflector` / `GALACTIC_ROUTER_REFLECTOR`
 
 Enable route reflector mode. Only valid when `--mode=fabric` or `--mode=tenant`.
 
@@ -83,6 +85,24 @@ readiness probes.
 **Default:** `5000`
 **Valid values:** `1`–`65535`
 
+### `--gc-namespace` / `GALACTIC_ROUTER_GC_NAMESPACE`
+
+Namespace the GC controller scans for orphaned `BGPAdvertisement` and
+`BGPVRFInstance` CRDs (and their corresponding stale kernel VRFs) left behind
+when a pod's `cmdDel` never fires or races with a concurrent `cmdAdd`. The
+production DaemonSet sets this explicitly to `galactic-system`.
+
+**Type:** string
+**Default:** `galactic-system`
+
+### `--gc-interval` / `GALACTIC_ROUTER_GC_INTERVAL`
+
+How often the GC controller runs its cleanup pass, after an initial pass once
+the informer caches sync at startup.
+
+**Type:** duration
+**Default:** `5m`
+
 ## Configuration Precedence
 
 Values are resolved in the following order (highest to lowest priority):
@@ -100,9 +120,11 @@ env:
   - name: GALACTIC_ROUTER_NODE_NAME
     valueFrom:
       fieldRef:
-        fieldPath: status.nodeName
-  - name: GALACTIC_ROUTER_ROUTER_ROLE
+        fieldPath: spec.nodeName
+  - name: GALACTIC_ROUTER_ROUTER_MODE
     value: tenant
+  - name: GALACTIC_ROUTER_GC_NAMESPACE
+    value: galactic-system
 ```
 
 All other options use their defaults.
@@ -120,7 +142,7 @@ env:
   - name: GALACTIC_ROUTER_NODE_NAME
     valueFrom:
       fieldRef:
-        fieldPath: status.nodeName
+        fieldPath: spec.nodeName
 ```
 
 ### Mixed configuration
@@ -132,7 +154,7 @@ env:
   - name: GALACTIC_ROUTER_NODE_NAME
     valueFrom:
       fieldRef:
-        fieldPath: status.nodeName
+        fieldPath: spec.nodeName
   - name: GALACTIC_ROUTER_ROUTER_MODE
     value: tenant
   - name: GALACTIC_ROUTER_METRICS_PORT
