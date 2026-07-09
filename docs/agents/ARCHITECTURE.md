@@ -19,7 +19,7 @@ GoBGP server. GoBGP distributes the path to a BGP route reflector, enabling pods
 on different nodes or clusters to reach each other via SRv6-encapsulated traffic.
 
 VPC and VPCAttachment CRDs are owned by a separate companion operator
-(`go.miloapis.com/cosmos`). Galactic receives pre-populated identifiers through the
+(`go.datum.net/cloud`). Galactic receives pre-populated identifiers through the
 CNI config and acts on them. `galactic-router` reconciles BGP CRDs
 (`go.datum.net/network`) directly — no gRPC sidecar, no provider CRD lifecycle.
 
