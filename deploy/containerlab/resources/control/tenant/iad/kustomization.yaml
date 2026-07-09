@@ -1,0 +1,8 @@
+namePrefix: iad-
+resources:
+  - base/tenant-control
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-router-control

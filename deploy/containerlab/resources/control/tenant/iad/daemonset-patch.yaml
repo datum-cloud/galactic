@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-router-control
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-router
+          image: galactic-router:latest
+          imagePullPolicy: Never
+          env:
+            # Stable address the tenant routers in dfw/iad/sjc reflect
+            # through; matches the loopback configured on the iad-control
+            # FRR fabric role (resources/control/fabric/iad/configmap.yaml).
+            - name: GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
+              value: "fc00:0:8::1"
+            # Non-default: this pod shares its host network namespace with
+            # the iad-control-fabric FRR DaemonSet, which listens on the
+            # default BGP port (179) for the underlay eBGP session.
+            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              value: "1790"

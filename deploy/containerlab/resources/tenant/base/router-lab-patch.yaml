@@ -9,19 +9,11 @@ spec:
         - key: node.kubernetes.io/not-ready
           operator: Exists
           effect: NoSchedule
-      # Tenant pods only run on edge workers, not the Kind control-plane
-      # nodes or the iad route-reflector worker.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
-                  - key: galactic.datum.net/node
-                    operator: In
-                    values:
-                      - edge
+      # Node affinity (control-plane + route-reflector-node exclusion) comes
+      # from base/tenant/daemonset-patch.yaml (config/router/tenant/); every
+      # lab worker is labeled either galactic.datum.net/node=edge or =control
+      # (see node_files/*/config.yaml), so excluding =control there has the
+      # same effect as this used to get by requiring =edge here.
       containers:
         - name: galactic-router
           image: galactic-router:latest

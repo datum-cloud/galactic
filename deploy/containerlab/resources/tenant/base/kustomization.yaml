@@ -1,5 +1,5 @@
 resources:
-  - base/daemonset.yaml
+  - base/tenant
 patches:
   - path: router-lab-patch.yaml
     target:
