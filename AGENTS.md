@@ -2,7 +2,7 @@
 
 ## Architecture Reference
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for a full architecture reference including module layout, entry points, data flow, configuration, external dependencies, and known constraints.
+See [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md) for a full architecture reference including module layout, entry points, data flow, configuration, external dependencies, and known constraints.
 
 ## Purpose
 
@@ -18,8 +18,8 @@ VPC and VPCAttachment CRD management lives in a separate companion operator; Gal
 ## Tech Stack
 
 - **Go 1.26** — router and CNI plugin
-- **controller-runtime** — BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy reconcilers
-- **BGP API** (`go.datum.net/network`) — BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy CRDs
+- **controller-runtime** — BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/BGPVRFInstance reconcilers
+- **BGP API** (`go.datum.net/network`) — BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance CRDs
 - **GoBGP v4** — embedded BGP server (tenant role)
 - **SRv6 + netlink** — kernel-level routing; `github.com/vishvananda/netlink`
 - **Multus CNI** — multi-network for pods; NAD generation handled by the external operator
@@ -33,17 +33,18 @@ task test           # runs test:unit then test:e2e
 task test:unit      # unit tests with race detection
 task test:e2e       # Kind cluster lifecycle test
 task lint           # golangci-lint; lint-fix applies safe auto-fixes
-task docker-build   # build container image (IMG= to override tag)
 ```
+
+There is no production release image build in this repo (`task docker-build` and the release workflow were removed after the shared image was found to advertise `galactic-router` without ever building it — see [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md#known-constraints)). `containers/galactic-cni/Dockerfile` exists solely for `task test:e2e`.
 
 **Before every PR:** `task ci` (lint → build → test:unit → test:e2e).
 
 ## Code Standards
 
-See [CONVENTIONS.md](CONVENTIONS.md) for the full, prescriptive coding standards covering Go naming, error handling, testing patterns, linting, commit messages, and markdown table alignment.
+See [docs/agents/CONVENTIONS.md](docs/agents/CONVENTIONS.md) for the full, prescriptive coding standards covering Go naming, error handling, testing patterns, linting, commit messages, and markdown table alignment.
 
 Summary:
-- Go: `gofmt`/`goimports` enforced; golangci-lint with `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `dupl`, `unused` (see `.golangci.yml`). `lll` excluded from `internal/`.
+- Go: `gofmt`/`goimports` enforced; golangci-lint v2 with `errcheck`, `staticcheck`, `govet`, `revive`, `gocyclo`, `goconst`, `unused`, and more (see `.golangci.yaml` for the full list).
 - Generated protobuf files (`*.pb.go`, `*_grpc.pb.go`) are committed; never hand-edit them.
 - Always use `.yaml`, never `.yml`, for YAML files.
 
@@ -58,7 +59,8 @@ Summary:
 
 1. Run `task build` to verify toolchain; run `task test` to confirm unit tests pass.
 2. Read `internal/cni/cni.go` (cmdAdd/cmdDel) to understand the container attach path and how `BGPAdvertisement` CRDs are created.
-3. Read `internal/controller/` for the controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, Node, Secret). Read `internal/reconcile/reconcile.go` to understand how the BGPRouter CRD is translated into a `DesiredRouter` applied to the runtime.
+3. Read `internal/controller/` for the controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, Node, Secret) plus garbage collection (`gc_controller.go`, backed by `internal/gc/`). Read `internal/reconcile/reconcile.go` to understand how the BGPRouter CRD is translated into a `DesiredRouter` applied to the runtime.
 4. Read `internal/runtime/gobgp/runtime.go` to understand how `DesiredRouter` is applied to GoBGP.
 5. Read `internal/plumbing/intf/intf.go` to understand SRv6 endpoint encoding, interface naming, and base62↔hex conversion.
 6. Explore `internal/plumbing/` for shared kernel and network primitives (VRF, sysctl, interface naming, SRv6).
+7. See `docs/cni-sequence.md` and `docs/agent-startup.md` for Mermaid sequence diagrams of the CNI attach path and router startup. `docs/cni/configuration.md` and `docs/router/configuration.md` document CNI config fields and router environment variables.

@@ -11,7 +11,7 @@ case "$COMMAND" in
 
   e2etest)
     CLUSTER_NAME="${CLUSTER_NAME:-galactic-e2e}"
-    IMG="${IMG:-galactic:e2e}"
+    IMG="${IMG:-galactic-cni:e2e}"
 
     trap 'kind delete cluster --name "$CLUSTER_NAME"' EXIT
 
@@ -30,7 +30,7 @@ case "$COMMAND" in
     kubectl cluster-info
 
     echo "--- Building image: $IMG"
-    docker build -t "$IMG" -f containers/galactic/Dockerfile .
+    docker build -t "$IMG" -f containers/galactic-cni/Dockerfile .
 
     echo "--- Loading image into cluster"
     kind load docker-image "$IMG" --name "$CLUSTER_NAME"

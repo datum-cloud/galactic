@@ -53,8 +53,8 @@ topology:
       exec:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
-        - ip -6 route add blackhole 2001:db8:ff00:1010::1/128 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff00:1020::1/128 metric 2048
+        - ip -6 route add blackhole 2001:db8:ff01::1/128 metric 2048
+        - ip -6 route add blackhole 2001:db8:ff01::2/128 metric 2048
         - /galactic/scripts/install.sh
 
     sjc-control-plane:
@@ -92,8 +92,8 @@ topology:
       exec:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
-        - ip -6 route add blackhole 2001:db8:ff00:1010::2/128 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff00:1020::2/128 metric 2048
+        - ip -6 route add blackhole 2001:db8:ff02::1/128 metric 2048
+        - ip -6 route add blackhole 2001:db8:ff02::2/128 metric 2048
         - /galactic/scripts/install.sh
 
     iad-control-plane:
@@ -131,8 +131,8 @@ topology:
       exec:
         - ip link add lo-galactic type dummy
         - ip link set lo-galactic up
-        - ip -6 route add blackhole 2001:db8:ff00:1010::3/128 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff00:1020::3/128 metric 2048
+        - ip -6 route add blackhole 2001:db8:ff03::1/128 metric 2048
+        - ip -6 route add blackhole 2001:db8:ff03::2/128 metric 2048
         - /galactic/scripts/install.sh
 
     iad-worker2:
@@ -152,10 +152,9 @@ topology:
         net.ipv4.ip_forward: "1"
         net.ipv6.conf.all.forwarding: "1"
       exec:
-        - ip link add lo-galactic type dummy
-        - ip link set lo-galactic up
-        - ip -6 route add blackhole 2001:db8:ff00:1010::4/128 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff00:1020::4/128 metric 2048
+        # No lo-galactic/blackhole setup here: iad-worker-control is the route
+        # reflector, not a VPC PE — it never advertises a site SRv6 locator
+        # block and runs no vpc10/vpc20 test pods (see docs/vpc.md).
         - /galactic/scripts/install.sh
 
     tr1:

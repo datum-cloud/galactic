@@ -42,7 +42,7 @@ tasks:
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
     cmds:
-      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic/Dockerfile ../..
+      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
   deploy:
     desc: Build images and deploy the full lab end-to-end
@@ -197,15 +197,19 @@ tasks:
     cmds:
       - |
         docker exec dfw-control-plane \
-          kubectl exec -n galactic-system ds/dfw-worker-fabric \
+          kubectl exec -n galactic-system ds/dfw-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec iad-control-plane \
-          kubectl exec -n galactic-system ds/iad-worker-fabric \
+          kubectl exec -n galactic-system ds/iad-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec sjc-control-plane \
-          kubectl exec -n galactic-system ds/sjc-worker-fabric \
+          kubectl exec -n galactic-system ds/sjc-fabric \
+          -- vtysh -c "show bgp ipv6 unicast summary"
+      - |
+        docker exec iad-control-plane \
+          kubectl exec -n galactic-system ds/iad-control-fabric \
           -- vtysh -c "show bgp ipv6 unicast summary"
 
   "test:bgp-peers":
@@ -216,14 +220,11 @@ tasks:
       - docker exec iad-control-plane kubectl get bgppeers -n galactic-system
 
   "test:srv6":
-    desc: Verify USID prefixes on tr1
+    desc: Verify each site's aggregate SRv6 locator block on tr1
     cmds:
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::1/128"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::2/128"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1010::3/128"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::1/128"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::2/128"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff00:1020::3/128"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 
   "test:evpn":
     desc: Verify EVPN BGP routes on iad, sjc, and dfw via BGPRouter status

@@ -5,7 +5,7 @@ This devcontainer provides a complete development environment for the Galactic m
 ## Features
 
 ### Languages & Runtimes
-- **Go 1.24.2** - For agent and CNI development
+- **Go 1.26.0** - For agent and CNI development
 
 ### Kubernetes Tools
 - **kubectl** - Kubernetes CLI
@@ -152,14 +152,15 @@ ping -c 3 8.8.8.8
 Build and test containers inside the devcontainer:
 
 ```bash
-# Build the galactic image
-task docker-build
+# Build the galactic-cni image (there is no production Dockerfile/release
+# pipeline in this repo; this is the same e2e-test image task test:e2e uses)
+docker build -t galactic-cni:dev -f containers/galactic-cni/Dockerfile .
 
 # Create a Kind cluster
 kind create cluster --name galactic-dev
 
 # Load image into Kind
-kind load docker-image ghcr.io/datum-cloud/galactic:latest --name galactic-dev
+kind load docker-image galactic-cni:dev --name galactic-dev
 ```
 
 ## Troubleshooting
