@@ -19,16 +19,10 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-const (
-	// annotationAllocatedSubnet is the annotation key prefix used by the
-	// CNI plugin to store allocated subnets keyed by container ID.
-	annotationAllocatedSubnet = "galactic.datum.net/allocated-subnet"
-
-	// annotationNetNS is the annotation key prefix used by the CNI plugin
-	// to store the netns path it was invoked with, keyed by container ID.
-	// This is the liveness signal GC uses — see cni.netnsAnnotationKey.
-	annotationNetNS = "galactic.datum.net/netns"
-)
+// annotationNetNS is the annotation key prefix used by the CNI plugin
+// to store the netns path it was invoked with, keyed by container ID.
+// This is the liveness signal GC uses — see cni.netnsAnnotationKey.
+const annotationNetNS = "galactic.datum.net/netns"
 
 // OrphanedCRD represents a BGP CRD that appears to be orphaned because its
 // associated container is no longer present on the node.
@@ -60,7 +54,9 @@ var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})V$`)
 // deny liveness for containers that actually ran here. Callers must use this
 // to skip CRDs belonging to other nodes entirely, rather than risk deleting
 // another node's live resources because they look orphaned from here.
-func routerNamesForNode(ctx context.Context, k8s client.Client, namespace, nodeName string) (map[string]struct{}, error) {
+func routerNamesForNode(
+	ctx context.Context, k8s client.Client, namespace, nodeName string,
+) (map[string]struct{}, error) {
 	routerList := &bgpv1alpha1.BGPRouterList{}
 	if err := k8s.List(ctx, routerList, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPRouters: %w", err)
