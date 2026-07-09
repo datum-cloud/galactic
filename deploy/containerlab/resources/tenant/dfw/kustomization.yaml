@@ -2,7 +2,6 @@ namePrefix: dfw-
 namespace: galactic-system
 resources:
   - ../base
-  - namespace.yaml
 patches:
   - path: daemonset-patch.yaml
     target:

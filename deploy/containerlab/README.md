@@ -126,8 +126,8 @@ deploy/containerlab/
 ├── resources/
 │   ├── cni/                     # galactic-cni installer DaemonSet + ConfigMap
 │   ├── fabric/                  # FRR DaemonSet manifests (dfw, iad, sjc)
-│   ├── tenant/                  # galactic-router DaemonSet + vpc10/vpc20 NAD manifests (dfw, iad, sjc)
-│   ├── vpc/                     # vpc10/vpc20 test workload Deployments (dfw, iad, sjc)
+│   ├── tenant/                  # galactic-router DaemonSet overlays (dfw, iad, sjc)
+│   ├── vpc/                     # vpc10/vpc20 NAD manifests + test workload Deployments (dfw, iad, sjc)
 │   ├── control/                 # iad-control node resources (fabric/iad, tenant/iad)
 │   └── bgp/                     # BGP CRs (tenant/$SITE, control/tenant/$SITE)
 ├── node_files/

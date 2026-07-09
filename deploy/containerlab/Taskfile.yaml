@@ -165,12 +165,12 @@ tasks:
       - ./scripts/deploy-fabric.sh
 
   "deploy:tenant":
-    desc: Install tenant DaemonSets, NAD, and BGP resources
+    desc: Install tenant DaemonSets and BGP resources
     cmds:
       - ./scripts/deploy-tenant.sh
 
   "deploy:vpc":
-    desc: Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)
+    desc: Deploy vpc10/vpc20 NADs and test workloads across all clusters (6 pods)
     cmds:
       - ./scripts/deploy-vpc.sh
 

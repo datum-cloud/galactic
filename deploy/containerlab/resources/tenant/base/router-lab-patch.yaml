@@ -5,23 +5,6 @@ metadata:
 spec:
   template:
     spec:
-      tolerations:
-        - key: node.kubernetes.io/not-ready
-          operator: Exists
-          effect: NoSchedule
-      # Tenant pods only run on edge workers, not the Kind control-plane
-      # nodes or the iad route-reflector worker.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
-                  - key: galactic.datum.net/node
-                    operator: In
-                    values:
-                      - edge
       containers:
         - name: galactic-router
           image: galactic-router:latest

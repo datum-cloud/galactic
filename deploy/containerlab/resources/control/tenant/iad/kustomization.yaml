@@ -1,5 +1,7 @@
+namePrefix: iad-
+namespace: galactic-system
 resources:
-  - tenant
+  - tenant-control
 patches:
   - path: router-lab-patch.yaml
     target:
