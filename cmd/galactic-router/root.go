@@ -293,6 +293,7 @@ func runCmd(v *viper.Viper) error {
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Namespace: gcNamespace,
+		NodeName:  nodeName,
 		Interval:  gcInterval,
 	}
 	if err := gcRec.SetupWithManager(mgr); err != nil {
