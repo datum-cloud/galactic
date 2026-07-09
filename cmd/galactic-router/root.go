@@ -27,6 +27,7 @@ import (
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/hash"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/plumbing/loaddr"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/frr"
@@ -97,7 +98,7 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) { //nolint:lll // cobra flag 
 		"BGP listen port")
 	cmd.Flags().StringP("bgp-local-address", "",
 		v.GetString("galactic_router.bgp_local_address"),
-		"Source address for outgoing BGP connections")
+		"Source address for outgoing BGP connections; auto-detected from lo if unset")
 	cmd.Flags().IntP("metrics-port", "",
 		v.GetInt("galactic_router.metrics_port"),
 		"Metrics listen port")
@@ -149,6 +150,22 @@ func validateConfig(v *viper.Viper) error {
 	return nil
 }
 
+// resolveBGPLocalAddress returns explicit if non-empty. Otherwise it calls
+// detect to read the BGP local address from the host's lo interface,
+// returning an error if detection fails — there is no silent fallback to an
+// unset address.
+func resolveBGPLocalAddress(explicit string, detect func() (string, error)) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	addr, err := detect()
+	if err != nil {
+		return "", fmt.Errorf(
+			"GALACTIC_ROUTER_BGP_LOCAL_ADDRESS not set and no address could be detected on lo: %w", err)
+	}
+	return addr, nil
+}
+
 // runCmd contains the application startup logic. It reads configuration from
 // the provided viper instance and initializes the BGP runtime.
 func runCmd(v *viper.Viper) error {
@@ -159,9 +176,13 @@ func runCmd(v *viper.Viper) error {
 	nodeName := v.GetString("galactic_router.node_name")
 	mode := v.GetString("galactic_router.router_mode")
 	bgpListenPort := v.GetInt("galactic_router.bgp_listen_port")
-	bgpLocalAddr := v.GetString("galactic_router.bgp_local_address")
 	metricsPort := v.GetInt("galactic_router.metrics_port")
 	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
+
+	bgpLocalAddr, err := resolveBGPLocalAddress(v.GetString("galactic_router.bgp_local_address"), loaddr.Detect)
+	if err != nil {
+		return err
+	}
 
 	var factory galacticruntime.RuntimeFactory
 	switch mode {

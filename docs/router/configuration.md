@@ -11,7 +11,7 @@ or a combination of both. CLI flags take precedence over environment variables.
 | Router mode | `GALACTIC_ROUTER_ROUTER_MODE` | `--mode` | _(required)_ |
 | Route reflector | `GALACTIC_ROUTER_REFLECTOR` | `--reflector` | `false` |
 | BGP listen port | `GALACTIC_ROUTER_BGP_LISTEN_PORT` | `--bgp-listen-port` | `179` |
-| BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | `""` |
+| BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | _(auto-detected from `lo`)_ |
 | Metrics port | `GALACTIC_ROUTER_METRICS_PORT` | `--metrics-port` | `8080` |
 | gRPC health port | `GALACTIC_ROUTER_GRPC_HEALTH_PORT` | `--grpc-health-port` | `5000` |
 | Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE` | `--gc-namespace` | `galactic-system` |
@@ -61,11 +61,17 @@ run in outbound-only mode (no inbound BGP listener).
 
 ### `--bgp-local-address` / `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`
 
-Source IP address used for outgoing BGP TCP connections. When empty, the kernel
-selects the default source address.
+Source IP address used for outgoing BGP TCP connections and, when set, the
+EVPN next-hop advertised for this node's paths. When empty, `galactic-router`
+reads the first global-unicast IPv6 address assigned to the host's `lo`
+interface (skipping `::1` and link-local `fe80::/10` addresses) and uses
+that. This requires `hostNetwork: true` and an address already assigned to
+`lo` — typically by an underlay/fabric BGP daemon (e.g. FRR) that runs
+before `galactic-router` starts. Startup fails with an error if no explicit
+value is set and no such address is found on `lo`.
 
 **Type:** string
-**Default:** `""` (empty)
+**Default:** _(auto-detected from `lo`)_
 
 ### `--metrics-port` / `GALACTIC_ROUTER_METRICS_PORT`
 
