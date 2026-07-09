@@ -260,18 +260,21 @@ func publishBGPState(
 				Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
 				Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
 			}
-			if ipamResult != nil || srv6SIDStr != "" {
-				if adv.Annotations == nil {
-					adv.Annotations = make(map[string]string)
-				}
-				// Store the allocated subnet keyed by container ID so cmdDel can look it up.
-				if ipamResult != nil {
-					adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
-				}
-				// Store the End.DT46 SID so galactic-router uses it as the EVPN GWIPAddress.
-				if srv6SIDStr != "" {
-					adv.Annotations[annotationSRv6SID] = srv6SIDStr
-				}
+			if adv.Annotations == nil {
+				adv.Annotations = make(map[string]string)
+			}
+			// Record the netns path this container attached with, so the GC
+			// controller can check whether it still exists rather than
+			// guessing a name from the container ID (see
+			// gc.ContainerNetNSExistsByPath).
+			adv.Annotations[netnsAnnotationKey(args.ContainerID)] = args.Netns
+			// Store the allocated subnet keyed by container ID so cmdDel can look it up.
+			if ipamResult != nil {
+				adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
+			}
+			// Store the End.DT46 SID so galactic-router uses it as the EVPN GWIPAddress.
+			if srv6SIDStr != "" {
+				adv.Annotations[annotationSRv6SID] = srv6SIDStr
 			}
 			return nil
 		})

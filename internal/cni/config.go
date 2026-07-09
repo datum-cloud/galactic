@@ -235,3 +235,13 @@ func subnetAnnotationKey(containerID string) string {
 	}
 	return fmt.Sprintf("%s.%s", annotationAllocatedSubnet, id)
 }
+
+// netnsAnnotationKey returns the annotation key for storing the network
+// namespace path used by the given container ID. Mirrors subnetAnnotationKey.
+func netnsAnnotationKey(containerID string) string {
+	id := containerID
+	if len(id) > annotationContainerIDLen {
+		id = id[:annotationContainerIDLen]
+	}
+	return fmt.Sprintf("%s.%s", annotationNetNS, id)
+}

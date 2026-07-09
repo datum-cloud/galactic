@@ -23,6 +23,11 @@ const (
 	// annotationAllocatedSubnet is the annotation key prefix used by the
 	// CNI plugin to store allocated subnets keyed by container ID.
 	annotationAllocatedSubnet = "galactic.datum.net/allocated-subnet"
+
+	// annotationNetNS is the annotation key prefix used by the CNI plugin
+	// to store the netns path it was invoked with, keyed by container ID.
+	// This is the liveness signal GC uses — see cni.netnsAnnotationKey.
+	annotationNetNS = "galactic.datum.net/netns"
 )
 
 // OrphanedCRD represents a BGP CRD that appears to be orphaned because its
@@ -51,13 +56,15 @@ var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})V$`)
 // exists on this node.
 //
 // A CRD is considered orphaned when:
-//   - It is a BGPAdvertisement with an allocated-subnet annotation whose
-//     container ID prefix does not correspond to a live network namespace
-//     under /var/run/netns.
+//   - It is a BGPAdvertisement with at least one netns annotation, and NONE
+//     of the recorded paths exist under /var/run/netns. A vpc/vpcAttachment
+//     is shared across every pod that has ever attached to it on this node
+//     (pod churn adds a new annotation entry without removing old ones — see
+//     cmdDel in internal/cni/ops_del.go), so the object is only orphaned
+//     once every container that ever referenced it is gone, not just one.
 //   - It is a BGPVRFInstance whose name matches a BGPAdvertisement that
 //     is itself orphaned (same vpc-vpcattachment name).
 func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace string) ([]OrphanedCRD, error) {
-	// Collect all orphaned BGPAdvertisements first.
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := k8s.List(ctx, advList, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPAdvertisements: %w", err)
@@ -67,22 +74,40 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace strin
 	orphanedAdvNames := make(map[string]struct{})
 
 	for _, adv := range advList.Items {
-		containerID := findContainerID(&adv)
-		if containerID == "" {
-			// No container ID annotation — skip (might be legacy or
-			// manually created). We cannot determine if it is orphaned.
+		netnsPaths := collectNetNSPaths(&adv)
+		if len(netnsPaths) == 0 {
+			// No netns annotations — skip (might be legacy or manually
+			// created). We cannot determine if it is orphaned.
 			continue
 		}
 
-		if !ContainerNetNSExists(containerID) {
-			orphaned = append(orphaned, OrphanedCRD{
-				Name:        adv.Name,
-				Namespace:   adv.Namespace,
-				Kind:        "BGPAdvertisement",
-				ContainerID: containerID,
-			})
-			orphanedAdvNames[adv.Name] = struct{}{}
+		liveContainerID := ""
+		for containerID, netnsPathStr := range netnsPaths {
+			if NetNSExists(netnsPathStr) {
+				liveContainerID = containerID
+				break
+			}
 		}
+		if liveContainerID != "" {
+			// At least one container that attached to this
+			// vpc/vpcAttachment is still alive — not orphaned.
+			continue
+		}
+
+		// None of the recorded containers are alive. Report an arbitrary
+		// one purely for logging context.
+		var anyContainerID string
+		for containerID := range netnsPaths {
+			anyContainerID = containerID
+			break
+		}
+		orphaned = append(orphaned, OrphanedCRD{
+			Name:        adv.Name,
+			Namespace:   adv.Namespace,
+			Kind:        "BGPAdvertisement",
+			ContainerID: anyContainerID,
+		})
+		orphanedAdvNames[adv.Name] = struct{}{}
 	}
 
 	// BGPVRFInstance CRDs share the same name as their corresponding
@@ -267,20 +292,24 @@ func RunGC(ctx context.Context, k8s client.Client, namespace string) CleanupResu
 	return result
 }
 
-// findContainerID extracts the container ID prefix from a BGPAdvertisement's
-// allocated-subnet annotations. Returns the first container ID prefix found.
-func findContainerID(adv *bgpv1alpha1.BGPAdvertisement) string {
+// collectNetNSPaths extracts every (containerID, netnsPath) pair recorded on
+// a BGPAdvertisement's netns annotations — one per container that has ever
+// attached to this vpc/vpcAttachment on this node. Pod churn adds a new
+// annotation entry without removing old ones (see cmdDel in
+// internal/cni/ops_del.go), so an object can carry several.
+func collectNetNSPaths(adv *bgpv1alpha1.BGPAdvertisement) map[string]string {
+	paths := make(map[string]string)
 	if adv.Annotations == nil {
-		return ""
+		return paths
 	}
-	prefix := annotationAllocatedSubnet + "."
-	for key := range adv.Annotations {
+	prefix := annotationNetNS + "."
+	for key, value := range adv.Annotations {
 		if strings.HasPrefix(key, prefix) {
-			// The key format is "galactic.datum.net/allocated-subnet.<containerID-prefix>"
-			return key[len(prefix):]
+			// The key format is "galactic.datum.net/netns.<containerID-prefix>"
+			paths[key[len(prefix):]] = value
 		}
 	}
-	return ""
+	return paths
 }
 
 // parseVRFName extracts the base62-encoded VPC and VPCAttachment from a
