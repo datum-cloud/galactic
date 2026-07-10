@@ -55,6 +55,7 @@ type DesiredPeer struct {
 	Name            string
 	PeerASN         int64
 	Address         string
+	RemotePort      int32
 	AddressFamilies []AddressFamily
 	HoldTime        time.Duration
 	KeepaliveTime   time.Duration

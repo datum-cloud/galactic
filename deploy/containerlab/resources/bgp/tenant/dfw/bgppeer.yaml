@@ -8,6 +8,7 @@ spec:
     name: dfw-worker-tenant
   peerASN: 65000
   address: "fc00:0:8::1"
+  remotePort: 1790
   addressFamilies:
     - afi: l2vpn
       safi: evpn

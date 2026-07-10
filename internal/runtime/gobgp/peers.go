@@ -86,12 +86,12 @@ func peerFromDesired(p model.DesiredPeer, localAddress string, routeReflectorMod
 		peer.Conf.AuthPassword = p.AuthPassword
 	}
 
-	// Connect on the overlay BGP port (1790). Port 179 is occupied by the
-	// underlay FRR bgpd on every node, so GoBGP uses a non-conflicting port.
 	// LocalAddress pins the TCP source to the node's SRv6 loopback so the
 	// return path from the RR uses a routed prefix instead of the link address.
+	// RemotePort defaults to 1790 (the overlay BGP port) since port 179 is
+	// occupied by the underlay FRR bgpd on every node.
 	peer.Transport = &api.Transport{
-		RemotePort:   1790,
+		RemotePort:   uint32(p.RemotePort),
 		PassiveMode:  false,
 		LocalAddress: localAddress,
 	}

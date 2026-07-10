@@ -35,12 +35,9 @@ spec:
           env:
             - name: GALACTIC_ROUTER_REFLECTOR
               value: "true"
+            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              value: "1790"
               # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS is auto-detected from the
               # host's lo interface by default (the stable peering address
               # other tenant routers reflect through). Set it explicitly here
               # only if lo doesn't carry the desired address on this cluster.
-              #
-              # GALACTIC_ROUTER_BGP_LISTEN_PORT may also need overriding away
-              # from the default (179) if this pod shares a host network
-              # namespace with another BGP speaker, e.g. an underlay/fabric
-              # daemon.

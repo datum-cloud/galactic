@@ -12,7 +12,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260629151558-4e35dc940f49
-	go.datum.net/network v0.0.0-20260708202618-77cf276d17f1
+	go.datum.net/network v0.0.0-20260710124444-6a3e017eb5c1
 	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.82.0
 	k8s.io/api v0.36.0
