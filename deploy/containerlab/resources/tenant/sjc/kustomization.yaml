@@ -2,8 +2,3 @@ namePrefix: sjc-
 namespace: galactic-system
 resources:
   - ../base
-patches:
-  - path: daemonset-patch.yaml
-    target:
-      kind: DaemonSet
-      name: galactic-router

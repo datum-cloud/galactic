@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -203,4 +204,49 @@ func TestDefaults(t *testing.T) {
 	if v.GetInt("galactic_router.grpc_health_port") != 5000 {
 		t.Errorf("grpc_health_port = %d, want 5000", v.GetInt("galactic_router.grpc_health_port"))
 	}
+}
+
+func TestResolveBGPLocalAddress(t *testing.T) {
+	const testBGPLocalAddr = "fc00:0:2::1"
+
+	t.Run("explicit value wins, detect not called", func(t *testing.T) {
+		called := false
+		detect := func() (string, error) {
+			called = true
+			return "", nil
+		}
+		got, err := resolveBGPLocalAddress(testBGPLocalAddr, detect)
+		if err != nil {
+			t.Fatalf("resolveBGPLocalAddress() error = %v, want nil", err)
+		}
+		if got != testBGPLocalAddr {
+			t.Errorf("resolveBGPLocalAddress() = %q, want %q", got, testBGPLocalAddr)
+		}
+		if called {
+			t.Error("detect was called even though explicit value was set")
+		}
+	})
+
+	t.Run("empty explicit value falls back to detect", func(t *testing.T) {
+		detect := func() (string, error) {
+			return testBGPLocalAddr, nil
+		}
+		got, err := resolveBGPLocalAddress("", detect)
+		if err != nil {
+			t.Fatalf("resolveBGPLocalAddress() error = %v, want nil", err)
+		}
+		if got != testBGPLocalAddr {
+			t.Errorf("resolveBGPLocalAddress() = %q, want %q", got, testBGPLocalAddr)
+		}
+	})
+
+	t.Run("detect failure is fatal", func(t *testing.T) {
+		detect := func() (string, error) {
+			return "", errors.New("no lo address")
+		}
+		_, err := resolveBGPLocalAddress("", detect)
+		if err == nil {
+			t.Fatal("resolveBGPLocalAddress() error = nil, want error")
+		}
+	})
 }

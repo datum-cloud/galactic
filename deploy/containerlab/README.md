@@ -101,6 +101,11 @@ within their site's block rather than a separate per-VPC prefix:
 | sjc         | fc00:0:3::1/48 | 2001:db8:ff02::/48    | 2001:db8:ff02::1/128    | 2001:db8:ff02::2/128    | fc00:0:3::1             |
 | iad         | fc00:0:4::1/48 | 2001:db8:ff03::/48    | 2001:db8:ff03::1/128    | 2001:db8:ff03::2/128    | fc00:0:4::1             |
 
+The `galactic-router address` column is no longer set explicitly in the
+per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
+at startup (see `docs/router/configuration.md`), since it always matches the
+FRR loopback address on the same host.
+
 ### Management network (fc00:10::/64)
 
 | Node                                          | Address       |
