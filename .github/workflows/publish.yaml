@@ -33,6 +33,7 @@ jobs:
     secrets: inherit
 
   publish-kustomize-bundles:
+    needs: [publish-galactic-cni-image, publish-galactic-router-image]
     permissions:
       id-token: write
       contents: read
@@ -41,4 +42,7 @@ jobs:
     with:
       bundle-name: ghcr.io/datum-cloud/galactic-kustomize
       bundle-path: config
+      images: |
+        - { path: config/cni, name: ghcr.io/datum-cloud/galactic-cni, tag: "${{ needs.publish-galactic-cni-image.outputs.tag }}" }
+        - { path: config/router/base, name: ghcr.io/datum-cloud/galactic-router, tag: "${{ needs.publish-galactic-router-image.outputs.tag }}" }
     secrets: inherit
