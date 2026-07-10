@@ -7,5 +7,5 @@ spec:
     spec:
       containers:
         - name: galactic-router
-          image: galactic-router:latest
-          imagePullPolicy: Never
+          image: __GALACTIC_ROUTER_IMAGE__
+          imagePullPolicy: Always

@@ -7,6 +7,18 @@ vars:
     sh: echo *.clab.yaml
   FRR_VERSION: "10.6.1"
   FRR_IMAGE: frr:{{.FRR_VERSION}}
+  # GALACTIC_TAG selects which published ghcr.io/datum-cloud image tag the
+  # lab pulls (galactic-cni/galactic-router are built and pushed by
+  # .github/workflows/publish.yaml, not built locally). v0.0.0-main tracks
+  # the latest push to main; override per-run for a pinned commit, e.g.
+  # `task deploy GALACTIC_TAG=v0.0.0-cc37dbb`.
+  GALACTIC_TAG: v0.0.0-main
+  GALACTIC_CNI_IMAGE: ghcr.io/datum-cloud/galactic-cni:{{.GALACTIC_TAG}}
+  GALACTIC_ROUTER_IMAGE: ghcr.io/datum-cloud/galactic-router:{{.GALACTIC_TAG}}
+
+env:
+  GALACTIC_CNI_IMAGE: "{{.GALACTIC_CNI_IMAGE}}"
+  GALACTIC_ROUTER_IMAGE: "{{.GALACTIC_ROUTER_IMAGE}}"
 
 tasks:
   default:
@@ -15,12 +27,10 @@ tasks:
       - task --list
 
   build:
-    desc: Build all container images
+    desc: Build all locally-built container images (node, frr)
     cmds:
       - task: "build:node"
       - task: "build:frr"
-      - task: "build:galactic-router"
-      - task: "build:galactic-cni"
 
   "build:node":
     desc: Build the Kind node image
@@ -34,18 +44,8 @@ tasks:
     cmds:
       - docker build --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FRR_IMAGE}} containers/frr/
 
-  "build:galactic-router":
-    desc: Build the galactic-router container image
-    cmds:
-      - docker build --network=host -t galactic-router:latest -f containers/galactic-router/Dockerfile ../..
-
-  "build:galactic-cni":
-    desc: Build the galactic-cni installer image
-    cmds:
-      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
-
   deploy:
-    desc: Build images and deploy the full lab end-to-end
+    desc: Build local images, pull published galactic-cni/galactic-router images, and deploy the full lab end-to-end
     deps: [build, host-setup]
     cmds:
       - task: "deploy:clusters"
@@ -87,7 +87,7 @@ tasks:
       - docker save {{.IMAGE}} | docker exec -i {{.NODE}} ctr --namespace k8s.io images import -
 
   "deploy:images":
-    desc: Load all container images into the Kind clusters
+    desc: Load locally-built container images into the Kind clusters
     cmds:
       - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker}
@@ -97,22 +97,6 @@ tasks:
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: sjc-worker}
       - task: load-image
         vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: dfw-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-worker-control}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: sjc-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: dfw-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker-control}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: sjc-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
 
   "deploy:system":
     desc: Install BGP and VPC CRDs; apply galactic-system namespace and shared RBAC
@@ -238,8 +222,6 @@ tasks:
     cmds:
       - task: destroy
       - docker rmi kindest/node:galactic || true
-      - docker rmi galactic-router:latest || true
-      - docker rmi galactic-cni:latest || true
       - docker rmi {{.FRR_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/
       - rm -f dfw.kubeconfig sjc.kubeconfig iad.kubeconfig
