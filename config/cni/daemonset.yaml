@@ -18,7 +18,8 @@ spec:
       tolerations:
         - operator: Exists
       # Only worker nodes run VPC pods; galactic-cni has nothing to do on
-      # control-plane nodes.
+      # control-plane nodes. Opt-in only so new node types (GPU, monitoring,
+      # etc.) don't accidentally pick up the CNI.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -26,6 +27,10 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
+                  - key: galactic.datum.net/node
+                    operator: In
+                    values:
+                      - edge
       initContainers:
         - name: install-cni
           image: ghcr.io/datum-cloud/galactic:latest

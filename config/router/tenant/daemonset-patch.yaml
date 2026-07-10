@@ -13,10 +13,12 @@ spec:
       labels:
         app.kubernetes.io/name: galactic-router-tenant
     spec:
-      # Tenant pods run on every worker; skip Kubernetes control-plane nodes
-      # (no VPC pods to serve there, same as galactic-cni) and skip nodes
-      # labeled for the tenant-control (route-reflector) role so the two
-      # roles never double-schedule onto the same node.
+      # Tenant pods run on worker nodes explicitly labeled for it;
+      # opt-in only so new node types (GPU, monitoring, etc.) don't
+      # accidentally pick up the tenant. Also excludes Kubernetes
+      # control-plane nodes outright — the base DaemonSet's blanket
+      # toleration would otherwise let it land there if one ever
+      # carried the galactic.datum.net/node=edge label.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -25,9 +27,9 @@ spec:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
                   - key: galactic.datum.net/node
-                    operator: NotIn
+                    operator: In
                     values:
-                      - control
+                      - edge
       containers:
         - name: galactic-router
           env:
