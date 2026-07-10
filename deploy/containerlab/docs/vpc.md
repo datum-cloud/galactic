@@ -140,8 +140,8 @@ docker exec dfw-control-plane kubectl exec -n vpc "${DFW_VPC10_POD}" -- ping -6 
 Check that `galactic-cni` can reach the API server:
 
 ```bash
-docker exec dfw-worker cat /etc/galactic/kubeconfig
-docker exec dfw-worker kubectl --kubeconfig /etc/galactic/kubeconfig get ns
+docker exec dfw-worker cat /var/lib/galactic/kubeconfig
+docker exec dfw-worker kubectl --kubeconfig /var/lib/galactic/kubeconfig get ns
 ```
 
 ### BGPAdvertisements not created
