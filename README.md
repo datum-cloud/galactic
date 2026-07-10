@@ -32,7 +32,7 @@ See the [galactic DevContainer](./.devcontainer/galactic/) for development envir
 
 ### Production Deployment
 
-Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace, the `galactic-cni` DaemonSet, and both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datum.net/node: control`):
+Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace, the `galactic-cni` DaemonSet, and both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/node: control`):
 
 ```bash
 kubectl apply -k config/

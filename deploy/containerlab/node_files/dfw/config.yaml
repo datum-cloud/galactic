@@ -5,7 +5,7 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw
-      galactic.datum.net/node: edge
+      galactic.datumapis.com/node: edge
 networking:
   ipFamily: ipv6
   disableDefaultCNI: true

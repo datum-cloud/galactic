@@ -27,7 +27,7 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datum.net/node
+                  - key: galactic.datumapis.com/node
                     operator: In
                     values:
                       - edge

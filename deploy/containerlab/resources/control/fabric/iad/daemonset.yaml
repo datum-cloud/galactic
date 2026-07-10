@@ -17,7 +17,7 @@ spec:
         - key: node.kubernetes.io/not-ready
           operator: Exists
           effect: NoSchedule
-        - key: galactic.datum.net/node
+        - key: galactic.datumapis.com/node
           value: control
           effect: NoSchedule
       affinity:
@@ -27,7 +27,7 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datum.net/node
+                  - key: galactic.datumapis.com/node
                     operator: In
                     values:
                       - control

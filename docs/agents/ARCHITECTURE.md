@@ -82,7 +82,7 @@ galactic/
 │   │   ├── tenant/          #   per-node role: base + node affinity excluding control-plane
 │   │   │                    #     and tenant-control nodes
 │   │   └── tenant-control/  #   route-reflector role: base + GALACTIC_ROUTER_REFLECTOR=true,
-│   │                        #     opt-in via the galactic.datum.net/node=control node label
+│   │                        #     opt-in via the galactic.datumapis.com/node=control node label
 │   └── cni/                 # DaemonSet installing galactic-cni onto /opt/cni/bin via hostPath
 ├── deploy/
 │   └── containerlab/        # ContainerLab lab topology and scripts
