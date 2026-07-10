@@ -18,7 +18,7 @@ spec:
       # accidentally pick up the tenant. Also excludes Kubernetes
       # control-plane nodes outright — the base DaemonSet's blanket
       # toleration would otherwise let it land there if one ever
-      # carried the galactic.datum.net/node=edge label.
+      # carried the galactic.datumapis.com/node=edge label.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -26,7 +26,7 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datum.net/node
+                  - key: galactic.datumapis.com/node
                     operator: In
                     values:
                       - edge

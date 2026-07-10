@@ -5,18 +5,18 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datum.net/node: edge
+      galactic.datumapis.com/node: edge
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datum.net/node: control
+      galactic.datumapis.com/node: control
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
         nodeRegistration:
           name: iad-worker-control
           taints:
-            - key: galactic.datum.net/node
+            - key: galactic.datumapis.com/node
               value: control
               effect: NoSchedule
 networking:
