@@ -19,7 +19,10 @@ data:
     set -eu
 
     HOST_CNI_BIN_DIR=/opt/cni/bin
-    HOST_ETC_DIR=/etc/galactic
+    # /var/lib rather than /etc: on immutable-root distros (e.g. Talos)
+    # only /var (and a handful of explicitly whitelisted /etc, /opt
+    # paths) is writable without a host-level extraMounts entry.
+    HOST_ETC_DIR=/var/lib/galactic
     CNI_BIN_DIR="/host${HOST_CNI_BIN_DIR}"
     ETC_DIR="/host${HOST_ETC_DIR}"
     STATE_DIR=/host/var/run/galactic-cni

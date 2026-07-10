@@ -55,7 +55,7 @@ spec:
             - name: cni-bin-dir
               mountPath: /host/opt/cni/bin
             - name: galactic-etc
-              mountPath: /host/etc/galactic
+              mountPath: /host/var/lib/galactic
             - name: galactic-state
               mountPath: /host/var/run/galactic-cni
       containers:
@@ -75,7 +75,7 @@ spec:
             - name: install-script
               mountPath: /scripts
             - name: galactic-etc
-              mountPath: /host/etc/galactic
+              mountPath: /host/var/lib/galactic
       volumes:
         - name: install-script
           configMap:
@@ -87,7 +87,7 @@ spec:
             type: DirectoryOrCreate
         - name: galactic-etc
           hostPath:
-            path: /etc/galactic
+            path: /var/lib/galactic
             type: DirectoryOrCreate
         - name: galactic-state
           hostPath:
