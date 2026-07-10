@@ -33,7 +33,7 @@ spec:
                       - edge
       initContainers:
         - name: install-cni
-          image: ghcr.io/datum-cloud/galactic:latest
+          image: ghcr.io/datum-cloud/galactic-cni:latest
           command: ["/bin/sh", "/scripts/install.sh", "install"]
           env:
             - name: NODE_NAME
@@ -60,7 +60,7 @@ spec:
               mountPath: /host/var/run/galactic-cni
       containers:
         - name: credential-refresh
-          image: ghcr.io/datum-cloud/galactic:latest
+          image: ghcr.io/datum-cloud/galactic-cni:latest
           command: ["/bin/sh", "/scripts/install.sh", "refresh"]
           securityContext:
             runAsUser: 0

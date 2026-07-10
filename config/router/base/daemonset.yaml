@@ -20,7 +20,7 @@ spec:
         - operator: Exists
       containers:
         - name: galactic-router
-          image: ghcr.io/datum-cloud/galactic:latest
+          image: ghcr.io/datum-cloud/galactic-router:latest
           command:
             - /galactic-router
           env:

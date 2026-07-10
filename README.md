@@ -40,10 +40,10 @@ kubectl apply -k config/
 
 Each component can also be applied on its own, e.g. `kubectl apply -k config/router` for just the router (both roles) or `kubectl apply -k config/router/tenant` for just the per-node role.
 
-There is currently no published image for these manifests to pull — the shared
-Dockerfile and release workflow that used to build `ghcr.io/datum-cloud/galactic:latest`
-were removed. Build and push your own image from `cmd/galactic-cni`/`cmd/galactic-router`
-before applying these manifests to a real cluster.
+`.github/workflows/publish.yaml` publishes `ghcr.io/datum-cloud/galactic-cni:latest` and
+`ghcr.io/datum-cloud/galactic-router:latest` (built from `containers/galactic-cni/Dockerfile`
+and `containers/galactic-router/Dockerfile` respectively) on every push and release, which
+is what these manifests pull.
 
 ## Development
 
