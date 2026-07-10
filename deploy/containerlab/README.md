@@ -215,7 +215,7 @@ task test  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 
 - All three Kind clusters use `disableDefaultCNI: true`. Cilium and Multus are installed
   by `scripts/deploy-cni.sh` (task `deploy:cni`); the BGP (datum-cloud/network) and VPC
-  (Cosmos) CRDs are installed by `scripts/deploy-system.sh` (task `deploy:system`).
+  (datum-cloud/cloud) CRDs are installed by `scripts/deploy-system.sh` (task `deploy:system`).
   Neither is baked into the `kindest/node:galactic` image.
 - Worker–TR links use numbered IPv6 subnets (/64) with eBGP peering.
 - Cilium's iptables rules block BGP by default; the worker bootstrap script
