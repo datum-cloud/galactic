@@ -1,0 +1,42 @@
+name: Publish Docker Image
+
+on:
+  push:
+  release:
+    types: ['published']
+
+jobs:
+  publish-galactic-cni-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    with:
+      image-name: galactic-cni
+      dockerfile-path: containers/galactic-cni/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
+  publish-galactic-router-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    with:
+      image-name: galactic-router
+      dockerfile-path: containers/galactic-router/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
+  publish-kustomize-bundles:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.20.0
+    with:
+      bundle-name: ghcr.io/datum-cloud/galactic-kustomize
+      bundle-path: config
+    secrets: inherit
