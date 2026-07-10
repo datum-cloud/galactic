@@ -11,6 +11,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
+      attestations: write
     uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
     with:
       image-name: galactic-cni
@@ -23,6 +24,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
+      attestations: write
     uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
     with:
       image-name: galactic-router

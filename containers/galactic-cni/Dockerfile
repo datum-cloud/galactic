@@ -33,9 +33,14 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -o galactic-cni cmd/galactic-cni/main.go
 
 # Build the host-device CNI plugin binary, used by galactic-cni to move
-# the veth endpoint into the container network namespace.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} GOBIN=/workspace \
-    go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1
+# the veth endpoint into the container network namespace. GOBIN can't be set
+# for a cross-compiled `go install` (the toolchain rejects it outright when
+# TARGETARCH differs from the builder's native arch, e.g. arm64 on an amd64
+# runner), so let it install to its default (arch-suffixed when
+# cross-compiling) location under GOPATH/bin and copy it out from there.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+      go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1 \
+    && find "$(go env GOPATH)/bin" -name host-device -exec cp {} /workspace/host-device \;
 
 # Create the IPAM state directory in the builder (where /bin/sh exists)
 # so it can be copied into the final distroless image.
