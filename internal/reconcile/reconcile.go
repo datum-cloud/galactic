@@ -205,7 +205,11 @@ func (r *Reconciler) gatherPeers(ctx context.Context, router *bgpv1alpha1.BGPRou
 			Name:            peer.Name,
 			PeerASN:         peer.Spec.PeerASN,
 			Address:         peer.Spec.Address,
+			RemotePort:      1790,
 			AddressFamilies: peer.Spec.AddressFamilies,
+		}
+		if peer.Spec.RemotePort != nil {
+			dp.RemotePort = *peer.Spec.RemotePort
 		}
 		if peer.Spec.HoldTime != nil {
 			dp.HoldTime = peer.Spec.HoldTime.Duration

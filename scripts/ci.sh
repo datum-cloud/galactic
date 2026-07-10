@@ -18,7 +18,10 @@ case "$COMMAND" in
     if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
       echo "--- Loading kernel modules required by galactic"
       sudo apt-get update -qq
-      sudo apt-get install -y --no-install-recommends linux-modules-extra-azure
+      # Pin to the running kernel so modprobe finds the modules. The unversioned
+      # meta-package may pull a newer kernel's modules than the one the runner is
+      # actually executing, which causes modprobe to fail.
+      sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
     fi
     sudo modprobe vrf
 

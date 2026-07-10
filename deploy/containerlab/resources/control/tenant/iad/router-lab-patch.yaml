@@ -9,9 +9,3 @@ spec:
         - name: galactic-router
           image: galactic-router:latest
           imagePullPolicy: Never
-          env:
-            # Shares the iad-worker-control host network namespace with the
-            # FRR fabric daemon on port 179; move off the default so the two
-            # BGP speakers don't collide (see config/router/tenant-control/daemonset-patch.yaml).
-            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
-              value: "1790"

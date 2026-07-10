@@ -28,3 +28,8 @@ spec:
                     operator: NotIn
                     values:
                       - control
+      containers:
+        - name: galactic-router
+          env:
+            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              value: "-1"

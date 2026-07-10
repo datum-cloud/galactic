@@ -9,6 +9,3 @@ spec:
         - name: galactic-router
           image: galactic-router:latest
           imagePullPolicy: Never
-          env:
-            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
-              value: "-1"
