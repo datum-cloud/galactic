@@ -4,9 +4,9 @@
 
 - **YAML extensions**: Always use `.yaml`, never `.yml`.
 - **FRR image pinning**: Taskfile and DaemonSets pin FRR to `10.6.1`. Transit routers in `gvpc.clab.yaml` default to `frrouting/frr:latest` — this is a known mismatch (see review findings).
-- **Image loading**: The Kind node image and FRR are still built locally and loaded with `ctr --namespace k8s.io images import` (not `kind load docker-image`) due to containerd v2 incompatibility.
+- **Image loading**: Uses `ctr --namespace k8s.io images import` (not `kind load docker-image`) due to containerd v2 incompatibility.
 - **iad-worker-control**: Created as `iad-worker2` in the topology, renamed post-deploy via `deploy:rename-control`. The Kind config sets the hostname via `kubeadmConfigPatches`. Runs the galactic-router route reflector (RR) for the iad region.
-- **galactic-cni/galactic-router images**: Pulled from `ghcr.io/datum-cloud/galactic-{cni,router}` (published by `.github/workflows/publish.yaml`), not built locally. The tag comes from the Taskfile's `GALACTIC_TAG` var (default `v0.0.0-main`, the floating tag tracking the latest push to main — override with `task deploy GALACTIC_TAG=v0.0.0-<sha>` to pin a commit). `lib.sh` substitutes `GALACTIC_CNI_IMAGE`/`GALACTIC_ROUTER_IMAGE` into the `__GALACTIC_CNI_IMAGE__`/`__GALACTIC_ROUTER_IMAGE__` placeholders in `resources/cni/daemonset-patch.yaml` and `resources/{tenant/base,control/tenant/iad}/router-lab-patch.yaml` before copying them onto each node; `imagePullPolicy: Always` on both keeps a floating tag from going stale.
+- **galactic-router image**: Uses `galactic-router:latest` with `imagePullPolicy: Never` — stale images persist across rebuilds.
 - **Kind serviceSubnet**: All clusters use `/108` service subnet (non-standard; may cause issues with some services).
 - **BGP listen port**: Tenant worker DaemonSets run with `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` (outbound-only). The RR role listens on `1790` (set in `config/router/tenant-control/daemonset-patch.yaml`).
 - **BGP remote port**: Tenant BGPPeer CRDs in `resources/bgp/tenant/` explicitly set `remotePort: 1790` to connect to the RR. The control/RR-side peers rely on galactic-router's default of `1790`.

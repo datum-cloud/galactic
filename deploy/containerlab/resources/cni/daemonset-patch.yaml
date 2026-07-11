@@ -7,9 +7,9 @@ spec:
     spec:
       initContainers:
         - name: install-cni
-          image: __GALACTIC_CNI_IMAGE__
-          imagePullPolicy: Always
+          image: galactic-cni:latest
+          imagePullPolicy: Never
       containers:
         - name: credential-refresh
-          image: __GALACTIC_CNI_IMAGE__
-          imagePullPolicy: Always
+          image: galactic-cni:latest
+          imagePullPolicy: Never
