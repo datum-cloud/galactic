@@ -4,8 +4,8 @@
 # host-device binaries onto each node's /opt/cni/bin via a hostPath mount
 # and maintains a kubeconfig built from its own ServiceAccount token, so pod
 # attach (CNI ADD/DEL) works without any manual credential setup. Requires
-# deploy:system (galactic-cni RBAC) first; the image itself is pulled from
-# ghcr.io/datum-cloud/galactic-cni (see GALACTIC_CNI_IMAGE in lib.sh).
+# deploy:system (galactic-cni RBAC) and deploy:images (galactic-cni:latest
+# loaded) first.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)

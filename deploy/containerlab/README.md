@@ -126,6 +126,7 @@ deploy/containerlab/
 ├── Taskfile.yaml
 ├── containers/
 │   ├── kindest-node-galactic/   # Custom Kind node image (git/tcpdump, kubectl DooD wrapper)
+│   ├── galactic-router/         # galactic-router container built from Go source
 │   └── frr/                     # FRR container built from Alpine edge
 ├── resources/
 │   ├── cni/                     # galactic-cni installer DaemonSet + ConfigMap
@@ -166,22 +167,14 @@ deploy/containerlab/
 
 ```bash
 cd deploy/containerlab
-task deploy   # build local images, pull galactic-cni/galactic-router, apply host sysctls, deploy lab end-to-end
-```
-
-`galactic-cni` and `galactic-router` are pulled from `ghcr.io/datum-cloud/galactic-{cni,router}`
-(published by `.github/workflows/publish.yaml`), not built locally. The tag defaults to
-`v0.0.0-main` (floating, tracks the latest push to `main`); override it to pin a commit:
-
-```bash
-task deploy GALACTIC_TAG=v0.0.0-<short-sha>
+task deploy   # build all images, apply host sysctls, deploy lab end-to-end
 ```
 
 To tear down and start fresh:
 
 ```bash
 task destroy  # remove all lab containers and Kind clusters
-task clean    # destroy + delete locally-built images and lab artifacts
+task clean    # destroy + delete built images and lab artifacts
 task deploy
 ```
 
@@ -189,18 +182,20 @@ task deploy
 
 | Task                    | Description                                                              |
 |-------------------------|--------------------------------------------------------------------------|
-| `build`                 | Build locally-built container images (node, frr)                        |
+| `build`                 | Build all container images (node, galactic-router, galactic-cni, frr)    |
 | `build:node`            | Build the custom `kindest/node:galactic` image                           |
+| `build:galactic-router` | Build the galactic-router container from Go source                       |
+| `build:galactic-cni`    | Build the galactic-cni installer image                                   |
 | `build:frr`             | Build the FRR container from Alpine edge                                 |
-| `deploy`                | Build local images, apply host sysctls, and deploy the lab               |
+| `deploy`                | Build images, apply host sysctls, and deploy the lab                     |
 | `deploy:topology`       | Deploy the ContainerLab topology (transit routers)                       |
 | `deploy:clusters`       | Create the three Kind clusters and export their kubeconfigs              |
 | `deploy:rename-control` | Rename the `iad-worker2` Docker container to `iad-worker-control`        |
-| `deploy:images`         | Load locally-built container images (node, frr) into Kind clusters       |
+| `deploy:images`         | Load container images into Kind clusters                                 |
 | `deploy:system`         | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
-| `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet (pulled from GHCR) |
+| `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet               |
 | `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                     |
-| `deploy:tenant`         | Apply galactic-router DaemonSets (pulled from GHCR) and BGP CRs          |
+| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                             |
 | `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)       |
 | `destroy`               | Destroy the lab and remove all Kind clusters                             |
 | `reload`                | Full rebuild — destroy then redeploy                                     |
@@ -208,7 +203,7 @@ task deploy
 | `inspect`               | Show running nodes and management addresses                              |
 | `graph`                 | Generate a draw.io diagram for the topology                              |
 | `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)            |
-| `clean`                 | Destroy lab, delete locally-built images, and remove lab artifacts       |
+| `clean`                 | Destroy lab, delete built images, and remove lab artifacts               |
 | `test`                  | Run all verification checks                                              |
 
 ## Verification
