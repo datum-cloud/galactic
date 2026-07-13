@@ -11,6 +11,8 @@ spec:
     - tenant
   localASN: 65000
   routerID: "10.255.255.4"
+  srv6Locator: "2001:db8:ff03::/48"
+  nodeID: 1
   addressFamilies:
     - afi: l2vpn
       safi: evpn

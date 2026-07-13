@@ -20,8 +20,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/model"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
+
+// legacySRv6SIDAnnotation is the pre-VRFID/Function fallback annotation used
+// when a BGPAdvertisement or its BGPRouter has not yet been migrated to the
+// RFC 9800 NEXT-CSID uSID fields (VRFID/Function on the advertisement,
+// SRv6Locator/NodeID on the router). This keeps existing containerlab
+// labs/e2e fixtures working since their BGPRouter definitions may not yet set
+// NodeID.
+const legacySRv6SIDAnnotation = "galactic.datum.net/srv6-sid"
 
 // Reconciler assembles DesiredRouter values from BGP CRDs.
 type Reconciler struct {
@@ -100,20 +109,7 @@ func (r *Reconciler) BuildDesiredRouter(
 	}
 	vrfInstances := make([]model.DesiredVRFInstance, len(vrfList.Items))
 	for i, v := range vrfList.Items {
-		importRTs := make([]string, len(v.Spec.ImportRouteTargets))
-		for j, rt := range v.Spec.ImportRouteTargets {
-			importRTs[j] = rt.Value
-		}
-		exportRTs := make([]string, len(v.Spec.ExportRouteTargets))
-		for j, rt := range v.Spec.ExportRouteTargets {
-			exportRTs[j] = rt.Value
-		}
-		vrfInstances[i] = model.DesiredVRFInstance{
-			Name:               v.Name,
-			RouteDistinguisher: v.Spec.RouteDistinguisher,
-			ImportRouteTargets: importRTs,
-			ExportRouteTargets: exportRTs,
-		}
+		vrfInstances[i] = buildVRFInstance(v)
 	}
 
 	// Resolve the EVPN next-hop. When localAddress is set (e.g. from
@@ -166,6 +162,10 @@ func (r *Reconciler) BuildDesiredRouter(
 		for i, c := range adv.Spec.Communities {
 			communities[i] = string(c)
 		}
+		srv6SID, err := resolveSRv6SID(router, &adv)
+		if err != nil {
+			return nil, fmt.Errorf("BGPAdvertisement %s/%s: %w", namespace, adv.Name, err)
+		}
 		desired.Advertisements = append(desired.Advertisements, model.DesiredAdvertisement{
 			Name:            adv.Name,
 			AddressFamily:   adv.Spec.AddressFamily,
@@ -173,7 +173,7 @@ func (r *Reconciler) BuildDesiredRouter(
 			Communities:     communities,
 			LocalPreference: int32PtrToUint32Ptr(adv.Spec.LocalPreference),
 			NextHop:         nextHop,
-			SRv6SID:         adv.Annotations["galactic.datum.net/srv6-sid"],
+			SRv6SID:         srv6SID,
 		})
 	}
 
@@ -344,6 +344,44 @@ func policyTargetsRouter(policy *bgpv1alpha1.BGPPolicy, router *bgpv1alpha1.BGPR
 		return sel.Matches(labels.Set(router.Labels))
 	}
 	return false
+}
+
+// buildVRFInstance converts a BGPVRFInstance CRD into a DesiredVRFInstance.
+// VRFID carries straight through; the runtime derives the RFC 4364 Type 1
+// route distinguisher ("routerID:vrfID") from it rather than the CRD storing
+// one directly.
+func buildVRFInstance(v bgpv1alpha1.BGPVRFInstance) model.DesiredVRFInstance {
+	importRTs := make([]string, len(v.Spec.ImportRouteTargets))
+	for j, rt := range v.Spec.ImportRouteTargets {
+		importRTs[j] = rt.Value
+	}
+	exportRTs := make([]string, len(v.Spec.ExportRouteTargets))
+	for j, rt := range v.Spec.ExportRouteTargets {
+		exportRTs[j] = rt.Value
+	}
+	return model.DesiredVRFInstance{
+		Name:               v.Name,
+		VRFID:              v.Spec.VRFID,
+		ImportRouteTargets: importRTs,
+		ExportRouteTargets: exportRTs,
+	}
+}
+
+// resolveSRv6SID computes the SRv6 SID to place in the EVPN GWIPAddress field
+// for adv on router. When adv.Spec.VRFID and adv.Spec.Function are both set,
+// and router.Spec.SRv6Locator and router.Spec.NodeID are both configured, the
+// SID is derived via srv6.ComputeSID (RFC 9800 NEXT-CSID uSID compression).
+// Otherwise it falls back to the legacy srv6-sid annotation.
+func resolveSRv6SID(router *bgpv1alpha1.BGPRouter, adv *bgpv1alpha1.BGPAdvertisement) (string, error) {
+	if adv.Spec.VRFID == nil || adv.Spec.Function == nil ||
+		router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {
+		return adv.Annotations[legacySRv6SIDAnnotation], nil
+	}
+	sid, err := srv6.ComputeSID(router.Spec.SRv6Locator, router.Spec.NodeID, *adv.Spec.VRFID, *adv.Spec.Function)
+	if err != nil {
+		return "", fmt.Errorf("compute SRv6 SID: %w", err)
+	}
+	return sid.String(), nil
 }
 
 // validateAFI checks that the AFI/SAFI is one of the supported combinations.

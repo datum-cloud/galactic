@@ -64,8 +64,11 @@ type DesiredPeer struct {
 
 // DesiredVRFInstance describes an L2VPN EVPN VRF to configure on the BGP router.
 type DesiredVRFInstance struct {
-	Name               string
-	RouteDistinguisher string
+	Name string
+	// VRFID is the 16-bit PoP-local VRF identifier (BGPVRFInstanceSpec.VRFID).
+	// The runtime derives the RFC 4364 Type 1 route distinguisher from it as
+	// "routerID:vrfID".
+	VRFID              int32
 	ImportRouteTargets []string
 	ExportRouteTargets []string
 }
