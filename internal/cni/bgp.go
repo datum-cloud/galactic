@@ -97,6 +97,12 @@ func retryK8sOps(timeout time.Duration, fn func(ctx context.Context) error) erro
 type bgpConfig struct {
 	asNumber   uint32
 	routerName string
+	// srv6Locator is the router's SRv6 locator block (BGPRouterSpec.SRv6Locator),
+	// or empty when not configured.
+	srv6Locator string
+	// nodeID is the router's 8-bit PoP-local slot (BGPRouterSpec.NodeID),
+	// or 0 when not configured.
+	nodeID int32
 }
 
 // bgpVRFInstanceName returns the deterministic name for a BGPVRFInstance.
@@ -122,6 +128,46 @@ func routeTarget(asNumber int64, vpcHex string) (string, error) {
 		return "", fmt.Errorf("parse VPC hex %q: %w", vpcHex, err)
 	}
 	return fmt.Sprintf("%d:%d", asNumber, uint32(v)), nil
+}
+
+// vrfIDFromAttachment decodes the base62-encoded VPCAttachment identifier
+// into the numeric 16-bit VRFID required by BGPVRFInstanceSpec.VRFID and
+// BGPAdvertisementSpec.VRFID.
+func vrfIDFromAttachment(vpcAttachment string) (int32, error) {
+	hex, err := intf.Base62ToHex(vpcAttachment)
+	if err != nil {
+		return 0, fmt.Errorf("decode VPCAttachment %q: %w", vpcAttachment, err)
+	}
+	v, err := strconv.ParseUint(hex, 16, 16)
+	if err != nil {
+		return 0, fmt.Errorf("parse VPCAttachment hex %q as VRFID: %w", hex, err)
+	}
+	return int32(v), nil
+}
+
+// resolveSRv6SID determines the SRv6 SID to use for this endpoint's ingress
+// decap route.
+//
+//   - An explicit, non-empty explicitSID (from CNI config's srv6_sid) always
+//     wins and is used verbatim — this is a documented, supported override.
+//   - Otherwise, when the router has both srv6Locator and nodeID configured,
+//     the SID is computed from the locator, nodeID, and vrfID using the
+//     End.DT46 function — the only endpoint behavior CNI's kernel ingress
+//     route ever installs (see setupSRv6Ingress/srv6.RouteIngressAdd).
+//   - Otherwise, an empty string is returned with no error, matching today's
+//     behavior of skipping SRv6 ingress setup entirely.
+func resolveSRv6SID(explicitSID string, bgp bgpConfig, vrfID int32) (string, error) {
+	if explicitSID != "" {
+		return explicitSID, nil
+	}
+	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
+		return "", nil
+	}
+	sid, err := srv6.ComputeSID(bgp.srv6Locator, bgp.nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
+	if err != nil {
+		return "", fmt.Errorf("compute SRv6 SID: %w", err)
+	}
+	return sid.String(), nil
 }
 
 // lookupBGPRouter finds the BGPRouter targeting this node in the given namespace.
@@ -150,9 +196,43 @@ func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace
 	}
 
 	return bgpConfig{
-		asNumber:   uint32(matches[0].Spec.LocalASN),
-		routerName: matches[0].Name,
+		asNumber:    uint32(matches[0].Spec.LocalASN),
+		routerName:  matches[0].Name,
+		srv6Locator: matches[0].Spec.SRv6Locator,
+		nodeID:      matches[0].Spec.NodeID,
 	}, nil
+}
+
+// buildVRFInstanceSpec constructs the BGPVRFInstanceSpec for a VPC attachment.
+// The route distinguisher is no longer stored on the CRD; it's derived
+// downstream from the router's ID and vrfID.
+func buildVRFInstanceSpec(routerName, rtValue string, vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec {
+	return bgpv1alpha1.BGPVRFInstanceSpec{
+		RouterTarget: bgpv1alpha1.RouterTarget{
+			RouterRef: &bgpv1alpha1.RouterRef{Name: routerName},
+		},
+		VRFID:              vrfID,
+		ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
+		ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
+	}
+}
+
+// buildAdvertisementSpec constructs the BGPAdvertisementSpec for a VPC
+// attachment's pod subnet. VRFID and Function record structurally what used
+// to live in the legacy galactic.datum.net/srv6-sid annotation: which VRF
+// this advertisement belongs to, and which SRv6 endpoint behavior the CNI
+// kernel ingress route installs (always End.DT46, regardless of pod-subnet
+// address family — see setupSRv6Ingress/srv6.RouteIngressAdd).
+func buildAdvertisementSpec(routerName, rtValue, podSubnet string, vrfID int32) bgpv1alpha1.BGPAdvertisementSpec {
+	function := bgpv1alpha1.SRv6FunctionEndDT46
+	return bgpv1alpha1.BGPAdvertisementSpec{
+		RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
+		AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+		Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
+		Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
+		VRFID:         &vrfID,
+		Function:      &function,
+	}
 }
 
 // newK8sClient creates a new Kubernetes client using the in-cluster config.
@@ -190,12 +270,9 @@ func publishBGPState(
 		return fmt.Errorf("decode VPC: %w", err)
 	}
 
-	srv6SIDStr, err := setupSRv6Ingress(pluginConf.SRv6SID, pluginConf.VPC, pluginConf.VPCAttachment)
+	vrfID, err := vrfIDFromAttachment(pluginConf.VPCAttachment)
 	if err != nil {
 		return err
-	}
-	if srv6SIDStr != "" {
-		tracker.srv6SID = srv6SIDStr
 	}
 
 	k8s, err := newK8sClient()
@@ -216,8 +293,23 @@ func publishBGPState(
 			return fmt.Errorf("compute route target: %w", err)
 		}
 
-		// Create the BGPVRFInstance to configure the VRF with its route distinguisher
-		// and import/export route targets. This must be created before advertisements
+		// SID resolution needs the router's srv6Locator/nodeID, so it happens
+		// here rather than in the non-k8s section above. RouteIngressAdd is
+		// idempotent, so re-running it on retry is safe.
+		sidStr, err := resolveSRv6SID(pluginConf.SRv6SID, bgp, vrfID)
+		if err != nil {
+			return err
+		}
+		srv6SIDStr, err := setupSRv6Ingress(sidStr, pluginConf.VPC, pluginConf.VPCAttachment)
+		if err != nil {
+			return err
+		}
+		if srv6SIDStr != "" {
+			tracker.srv6SID = srv6SIDStr
+		}
+
+		// Create the BGPVRFInstance to configure the VRF with its VRFID and
+		// import/export route targets. This must be created before advertisements
 		// so the BGP runtime has the VRF context when originating EVPN paths.
 		vrfName := bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment)
 		vrfInst := &bgpv1alpha1.BGPVRFInstance{
@@ -227,14 +319,7 @@ func publishBGPState(
 			},
 		}
 		_, err = controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
-			vrfInst.Spec = bgpv1alpha1.BGPVRFInstanceSpec{
-				RouterTarget: bgpv1alpha1.RouterTarget{
-					RouterRef: &bgpv1alpha1.RouterRef{Name: bgp.routerName},
-				},
-				RouteDistinguisher: rtValue,
-				ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
-				ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: rtValue}},
-			}
+			vrfInst.Spec = buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
 			return nil
 		})
 		if err != nil {
@@ -254,12 +339,7 @@ func publishBGPState(
 			podSubnet = ipamResult.subnet.String()
 		}
 		_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
-			adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{
-				RouterRef:     bgpv1alpha1.RouterRef{Name: bgp.routerName},
-				AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-				Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
-				Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
-			}
+			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, podSubnet, vrfID)
 			if adv.Annotations == nil {
 				adv.Annotations = make(map[string]string)
 			}
@@ -271,10 +351,6 @@ func publishBGPState(
 			// Store the allocated subnet keyed by container ID so cmdDel can look it up.
 			if ipamResult != nil {
 				adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
-			}
-			// Store the End.DT46 SID so galactic-router uses it as the EVPN GWIPAddress.
-			if srv6SIDStr != "" {
-				adv.Annotations[annotationSRv6SID] = srv6SIDStr
 			}
 			return nil
 		})

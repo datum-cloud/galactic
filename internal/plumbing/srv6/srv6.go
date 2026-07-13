@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package srv6 manages kernel SRv6 END.DT46 ingress routes for Galactic VPC
-// endpoints. It accepts a USID (/128) and VPC identifiers to install the
-// decap route on the correct host interface and VRF routing table.
-// Requires CAP_NET_ADMIN.
+// endpoints and computes compressed SRv6 uSIDs (see ComputeSID). Route
+// installation accepts a USID (/128) and VPC identifiers to install the decap
+// route on the correct host interface and VRF routing table, and requires
+// CAP_NET_ADMIN; ComputeSID is pure computation and requires no privilege.
 package srv6
 
 import (

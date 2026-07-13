@@ -34,13 +34,6 @@ const (
 	// appends a truncated container ID; see subnetAnnotationKey.
 	annotationAllocatedSubnet = "galactic.datum.net/allocated-subnet"
 
-	// annotationSRv6SID is the BGPAdvertisement annotation key holding the
-	// End.DT46 SRv6 SID for this VPC attachment. Galactic-router reads this
-	// annotation to set the EVPN GWIPAddress to the actual SRv6 SID rather
-	// than the BGP peering loopback, so remote nodes install correct seg6
-	// encap routes.
-	annotationSRv6SID = "galactic.datum.net/srv6-sid"
-
 	// annotationNetNS is the BGPAdvertisement annotation key prefix holding
 	// the CNI-provided network namespace path for a container ID. The GC
 	// controller checks whether this exact path still exists to decide if

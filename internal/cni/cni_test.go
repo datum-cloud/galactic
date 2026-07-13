@@ -35,6 +35,8 @@ const (
 	testNetns         = "/proc/1/ns/net"
 	testMac           = "aa:bb:cc:dd:ee:ff"
 	testIfName        = "eth0"
+	testRouterName    = "overlay-router"
+	testSID128        = "2001:db8::1/128"
 
 	// testPrevResult is a valid CNI v1.0.0 result used in prevResult tests.
 	testPrevResult = `{"cniVersion":"1.0.0",` +
@@ -377,7 +379,7 @@ func TestIsValidSRv6SID(t *testing.T) {
 		want  bool
 	}{
 		{"empty allowed", "", true},
-		{"valid /128", "2001:db8::1/128", true},
+		{"valid /128", testSID128, true},
 		{"valid bare IPv6", "2001:db8:10:10::1", true},
 		{"valid all zeros /128", "::/128", true},
 		{"invalid /64", "fd00:1:2::/64", false},
@@ -633,7 +635,7 @@ func TestLookupBGPRouter(t *testing.T) {
 		namespace = "default"
 	)
 
-	matchingRouter := routerForNode("overlay-router", nodeName, namespace, 65000)
+	matchingRouter := routerForNode(testRouterName, nodeName, namespace, 65000)
 
 	tests := []struct {
 		name    string
@@ -654,8 +656,34 @@ func TestLookupBGPRouter(t *testing.T) {
 				if cfg.asNumber != 65000 {
 					t.Errorf("asNumber = %d, want 65000", cfg.asNumber)
 				}
-				if cfg.routerName != "overlay-router" {
-					t.Errorf("routerName = %q, want %q", cfg.routerName, "overlay-router")
+				if cfg.routerName != testRouterName {
+					t.Errorf("routerName = %q, want %q", cfg.routerName, testRouterName)
+				}
+				if cfg.srv6Locator != "" {
+					t.Errorf("srv6Locator = %q, want empty (not configured on fixture)", cfg.srv6Locator)
+				}
+				if cfg.nodeID != 0 {
+					t.Errorf("nodeID = %d, want 0 (not configured on fixture)", cfg.nodeID)
+				}
+			},
+		},
+		{
+			name: "router with SRv6Locator and NodeID configured",
+			objects: []client.Object{
+				func() *bgpv1alpha1.BGPRouter {
+					r := routerForNode("srv6-router", nodeName, namespace, 65000)
+					r.Spec.SRv6Locator = "fd00:10::/48"
+					r.Spec.NodeID = 7
+					return r
+				}(),
+			},
+			check: func(t *testing.T, cfg bgpConfig) {
+				t.Helper()
+				if cfg.srv6Locator != "fd00:10::/48" {
+					t.Errorf("srv6Locator = %q, want %q", cfg.srv6Locator, "fd00:10::/48")
+				}
+				if cfg.nodeID != 7 {
+					t.Errorf("nodeID = %d, want 7", cfg.nodeID)
 				}
 			},
 		},
@@ -674,8 +702,8 @@ func TestLookupBGPRouter(t *testing.T) {
 			},
 			check: func(t *testing.T, cfg bgpConfig) {
 				t.Helper()
-				if cfg.routerName != "overlay-router" {
-					t.Errorf("routerName = %q, want %q", cfg.routerName, "overlay-router")
+				if cfg.routerName != testRouterName {
+					t.Errorf("routerName = %q, want %q", cfg.routerName, testRouterName)
 				}
 			},
 		},

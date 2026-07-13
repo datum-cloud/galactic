@@ -109,7 +109,7 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return err
 	}
 
-	if err := r.applyVRFs(ctx, b, desired.VRFInstances); err != nil {
+	if err := r.applyVRFs(ctx, b, desired.VRFInstances, desired.RouterID); err != nil {
 		return err
 	}
 
@@ -222,7 +222,9 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 // applyVRFs configures every desired VRF instance and removes stale ones. A
 // node can host thousands of VRFs (one per VPC attachment), so this — unlike
 // the single-VRF code it replaces — must handle the full set, not just one.
-func (r *GoBGPRuntime) applyVRFs(ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance) error {
+func (r *GoBGPRuntime) applyVRFs(
+	ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance, routerID string,
+) error {
 	desired := make(map[string]model.DesiredVRFInstance, len(vrfs))
 	for _, v := range vrfs {
 		desired[v.Name] = v
@@ -237,7 +239,7 @@ func (r *GoBGPRuntime) applyVRFs(ctx context.Context, b *gobgpserver.BgpServer, 
 	rtIndex := make(map[string]uint32, len(vrfs))
 	newlyRegistered := false
 	for _, v := range vrfs {
-		if err := applyVRF(ctx, b, &v); err != nil {
+		if err := applyVRF(ctx, b, &v, routerID); err != nil {
 			return fmt.Errorf("apply VRF %s: %w", v.Name, err)
 		}
 
@@ -425,17 +427,21 @@ func fsmStateToModel(state api.PeerState_SessionState) model.BGPPeerState {
 	}
 }
 
-// applyVRF configures a VRF in GoBGP via AddVrf.
+// applyVRF configures a VRF in GoBGP via AddVrf. The route distinguisher is
+// derived as the RFC 4364 Type 1 (IP-address:local-admin) format
+// "routerID:vrfID", matching the convention buildEVPNPaths uses for the
+// per-router RD (routerID:0).
 // If the VRF already exists, the call is treated as idempotent (no-op).
-func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance) error {
-	// Parse the route distinguisher.
-	rd, err := bgp.ParseRouteDistinguisher(vrf.RouteDistinguisher)
+func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance, routerID string) error {
+	// Derive and parse the route distinguisher.
+	rdStr := fmt.Sprintf("%s:%d", routerID, vrf.VRFID)
+	rd, err := bgp.ParseRouteDistinguisher(rdStr)
 	if err != nil {
-		return fmt.Errorf("parse route distinguisher %q: %w", vrf.RouteDistinguisher, err)
+		return fmt.Errorf("parse route distinguisher %q: %w", rdStr, err)
 	}
 	apiRD, err := apiutil.MarshalRD(rd)
 	if err != nil {
-		return fmt.Errorf("marshal route distinguisher %q: %w", vrf.RouteDistinguisher, err)
+		return fmt.Errorf("marshal route distinguisher %q: %w", rdStr, err)
 	}
 
 	// Parse import route targets.

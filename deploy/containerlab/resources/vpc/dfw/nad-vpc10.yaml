@@ -12,7 +12,6 @@ spec:
       "vpc": "10",
       "vpcattachment": "10",
       "namespace": "galactic-system",
-      "srv6_sid": "2001:db8:ff01::1/128",
       "ipam": {
         "type": "pool",
         "pool": "fd00:10:ff01::/48",
