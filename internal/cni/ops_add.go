@@ -43,9 +43,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	namespace := pluginConf.Namespace
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
 
 	// Track resources for selective rollback on failure.
 	tracker := &resourceTracker{
@@ -110,12 +107,41 @@ func cmdAdd(args *skel.CmdArgs) error {
 			return err
 		}
 	case interfaceTypeTap:
-		result := buildTapResult(pluginConf, hostName, hostMac, hostMTU)
+		// Allocate IPAM for the tap interface (same as veth).
+		// The VM manages its own guest interface; the CNI only configures the host side.
+		ipamResult, err = allocateIPAM(args, pluginConf)
+		if err != nil {
+			return fmt.Errorf("allocate IPAM: %w", err)
+		}
+
+		// Configure the gateway address on the host tap and install the VRF route.
+		if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
+			return err
+		}
+
+		// Print the CNI result with IP info.
+		result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
 		if err := types.PrintResult(result, cniVersion100); err != nil {
 			return fmt.Errorf("print CNI result: %w", err)
 		}
-		// Tap mode: no IPAM, no BGP — the guest VM manages its own networking.
-		return nil
+
+		// Decode VPC/VRFID for BGP state publish.
+		vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
+		if err != nil {
+			return fmt.Errorf("decode VPC: %w", err)
+		}
+		vrfID, err := vrfIDFromAttachment(pluginConf.VPCAttachment)
+		if err != nil {
+			return fmt.Errorf("decode VPCAttachment: %w", err)
+		}
+
+		// Publish BGP state (SRv6 ingress + BGP CRDs).
+		k8s, err := newK8sClient()
+		if err != nil {
+			return err
+		}
+		tracker.k8s = k8s
+		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, k8s, tracker)
 	}
 
 	return publishBGPState(args, pluginConf, nodeName, namespace, ipamResult, tracker)

@@ -8,7 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +27,11 @@ import (
 
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
+
+func TestMain(m *testing.M) {
+	_ = os.Setenv("GALACTIC_CNI_NODE_NAME", "test-node")
+	os.Exit(m.Run())
+}
 
 const (
 	testVPC           = "abc"
@@ -265,36 +273,7 @@ func TestParseConf(t *testing.T) {
 			wantVPC:    testVPC,
 			wantIfType: interfaceTypeVeth,
 		},
-		{
-			name: "srv6_sid invalid mask /64 rejected",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_sid":"fd00:1:2::/64"}`,
-				testVPC, testAttachment,
-			),
-			wantErr: srv6SIDErrMsg,
-		},
-		{
-			name: "srv6_sid invalid IPv4 address",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_sid":"192.168.1.1"}`,
-				testVPC, testAttachment,
-			),
-			wantErr: srv6SIDErrMsg,
-		},
-		{
-			name: "srv6_sid not a valid address",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_sid":"not-an-address"}`,
-				testVPC, testAttachment,
-			),
-			wantErr: srv6SIDErrMsg,
-		},
+
 		{
 			name: "prevResult valid JSON result is accepted",
 			input: fmt.Sprintf(
@@ -365,36 +344,6 @@ func TestIsValidBase62(t *testing.T) {
 			got := isValidBase62(tt.input)
 			if got != tt.want {
 				t.Errorf("isValidBase62(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-// ---- isValidSRv6SID --------------------------------------------------
-
-func TestIsValidSRv6SID(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{"empty allowed", "", true},
-		{"valid /128", testSID128, true},
-		{"valid bare IPv6", "2001:db8:10:10::1", true},
-		{"valid all zeros /128", "::/128", true},
-		{"invalid /64", "fd00:1:2::/64", false},
-		{"invalid /48", "2001:db8::/48", false},
-		{"invalid IPv4", "192.168.1.1", false},
-		{"invalid IPv4 CIDR", "192.168.1.0/24", false},
-		{"not an address", "not-an-address", false},
-		{"invalid /0", "::/0", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isValidSRv6SID(tt.input)
-			if got != tt.want {
-				t.Errorf("isValidSRv6SID(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -862,37 +811,80 @@ func TestBuildResult(t *testing.T) {
 // ---- buildTapResult ------------------------------------------------------
 
 func TestBuildTapResult(t *testing.T) {
+	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
+	gateway := net.ParseIP("fd00:10:ff01::1")
+	route := mustParseCIDR(t, "::/0")
+
 	conf := &PluginConf{
 		PluginConf:    types.PluginConf{CNIVersion: cniVersion100},
 		VPC:           testVPC,
 		VPCAttachment: testAttachment,
 	}
 
-	result := buildTapResult(conf, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
-
-	if result.CNIVersion != cniVersion100 {
-		t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, cniVersion100)
+	tests := []struct {
+		name       string
+		ipRes      *ipamResult
+		wantIPs    int
+		wantRoutes int
+	}{
+		{
+			name:       "with IPAM config",
+			ipRes:      &ipamResult{subnet: subnet, gateway: gateway, routes: []*net.IPNet{route}},
+			wantIPs:    1,
+			wantRoutes: 1,
+		},
+		{
+			name:       "without IPAM config",
+			ipRes:      nil,
+			wantIPs:    0,
+			wantRoutes: 0,
+		},
 	}
 
-	if len(result.Interfaces) != 1 {
-		t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildTapResult(conf, tt.ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
 
-	if result.Interfaces[0].Name != "H0abc123" {
-		t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, "H0abc123")
-	}
-	if result.Interfaces[0].Mac != "aa:bb:cc:dd:ee:ff" {
-		t.Errorf("Interfaces[0].Mac = %q, want %q", result.Interfaces[0].Mac, "aa:bb:cc:dd:ee:ff")
-	}
-	if result.Interfaces[0].Mtu != 1500 {
-		t.Errorf("Interfaces[0].Mtu = %d, want 1500", result.Interfaces[0].Mtu)
-	}
-	if result.Interfaces[0].Sandbox != "" {
-		t.Errorf("Interfaces[0].Sandbox = %q, want empty", result.Interfaces[0].Sandbox)
-	}
+			if result.CNIVersion != cniVersion100 {
+				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, cniVersion100)
+			}
 
-	if len(result.IPs) != 0 {
-		t.Errorf("IPs count = %d, want 0", len(result.IPs))
+			if len(result.Interfaces) != 1 {
+				t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
+			}
+
+			if result.Interfaces[0].Name != "H0abc123" {
+				t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, "H0abc123")
+			}
+			if result.Interfaces[0].Mac != "aa:bb:cc:dd:ee:ff" {
+				t.Errorf("Interfaces[0].Mac = %q, want %q", result.Interfaces[0].Mac, "aa:bb:cc:dd:ee:ff")
+			}
+			if result.Interfaces[0].Mtu != 1500 {
+				t.Errorf("Interfaces[0].Mtu = %d, want 1500", result.Interfaces[0].Mtu)
+			}
+			if result.Interfaces[0].Sandbox != "" {
+				t.Errorf("Interfaces[0].Sandbox = %q, want empty", result.Interfaces[0].Sandbox)
+			}
+
+			if len(result.IPs) != tt.wantIPs {
+				t.Errorf("IPs count = %d, want %d", len(result.IPs), tt.wantIPs)
+			}
+			if tt.wantIPs > 0 {
+				if result.IPs[0].Address.String() != subnet.String() {
+					t.Errorf("IPs[0].Address = %q, want %q", result.IPs[0].Address, subnet)
+				}
+				if !result.IPs[0].Gateway.Equal(gateway) {
+					t.Errorf("IPs[0].Gateway = %v, want %v", result.IPs[0].Gateway, gateway)
+				}
+				if result.IPs[0].Interface == nil || *result.IPs[0].Interface != 0 {
+					t.Errorf("IPs[0].Interface = %v, want 0", result.IPs[0].Interface)
+				}
+			}
+
+			if len(result.Routes) != tt.wantRoutes {
+				t.Errorf("Routes count = %d, want %d", len(result.Routes), tt.wantRoutes)
+			}
+		})
 	}
 }
 
@@ -1463,7 +1455,10 @@ func TestProbeAPIServerMalformedKubeconfig(t *testing.T) {
 // ---- cmdAdd prevResult validation ----------------------------------------
 
 func TestCmdAddPrevResultValid(t *testing.T) {
+	t.Setenv("GALACTIC_CNI_NODE_NAME", "")
+	t.Setenv("NODE_NAME", "")
 	// prevResult that is a valid CNI result. cmdAdd should pass prevResult
+
 	// validation and fail later due to missing NODE_NAME env var.
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
@@ -1487,5 +1482,119 @@ func TestCmdAddPrevResultValid(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "NODE_NAME") {
 		t.Fatalf("expected NODE_NAME error, got: %v", err)
+	}
+}
+
+// ---- loadHostConf -----------------------------------------------------------
+
+func TestLoadHostConf(t *testing.T) {
+	tmpDir := t.TempDir()
+	conflistPath := filepath.Join(tmpDir, "10-galactic.conflist")
+
+	// 1. Missing file tolerated, defaults to galactic-system namespace.
+	conf, err := loadHostConf(conflistPath)
+	if err != nil {
+		t.Fatalf("unexpected error for missing conflist: %v", err)
+	}
+	if conf.Namespace != DefaultNamespace {
+		t.Errorf("Namespace = %q, want %q", conf.Namespace, DefaultNamespace)
+	}
+
+	// 2. Conflist parses but lacks galactic-cni entry.
+	badContent := `{"cniVersion":"1.0.0","name":"test","plugins":[{"type":"some-other-plugin"}]}`
+	if err := os.WriteFile(conflistPath, []byte(badContent), 0644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+	_, err = loadHostConf(conflistPath)
+	if err == nil {
+		t.Fatal("expected error for missing plugin type, got nil")
+	}
+
+	// 3. Conflist parses correctly.
+	goodContent := `{
+		"cniVersion": "1.0.0",
+		"name": "galactic",
+		"plugins": [
+			{
+				"type": "galactic-cni",
+				"node_name": "test-worker",
+				"kubeconfig": "/etc/custom-kubeconfig",
+				"namespace": "custom-namespace",
+				"log_file": "/var/log/custom.log"
+			}
+		]
+	}`
+	if err := os.WriteFile(conflistPath, []byte(goodContent), 0644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+	conf, err = loadHostConf(conflistPath)
+	if err != nil {
+		t.Fatalf("unexpected error for good conflist: %v", err)
+	}
+	if conf.NodeName != "test-worker" {
+		t.Errorf("NodeName = %q, want %q", conf.NodeName, "test-worker")
+	}
+	if conf.Kubeconfig != "/etc/custom-kubeconfig" {
+		t.Errorf("Kubeconfig = %q, want %q", conf.Kubeconfig, "/etc/custom-kubeconfig")
+	}
+	if conf.Namespace != "custom-namespace" {
+		t.Errorf("Namespace = %q, want %q", conf.Namespace, "custom-namespace")
+	}
+	if conf.LogFile != "/var/log/custom.log" {
+		t.Errorf("LogFile = %q, want %q", conf.LogFile, "/var/log/custom.log")
+	}
+}
+
+// ---- enableLocalIPAM required check -----------------------------------------
+
+func TestEnableLocalIPAMRequired(t *testing.T) {
+	// Set local IPAM enabled
+	t.Setenv("GALACTIC_CNI_ENABLE_LOCAL_IPAM", "true")
+	t.Setenv("GALACTIC_CNI_NODE_NAME", "test-node")
+
+	// Missing IPAM block should cause a hard error.
+	inputNoIPAM := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s"}`,
+		testVPC, testAttachment,
+	)
+	_, err := parseConf([]byte(inputNoIPAM))
+	if err == nil {
+		t.Fatal("expected error for missing ipam block when local IPAM is enabled, got nil")
+	}
+	if !strings.Contains(err.Error(), "no 'ipam' block is present") {
+		t.Fatalf("expected error containing 'no 'ipam' block', got: %v", err)
+	}
+
+	// Present IPAM block should succeed.
+	inputWithIPAM := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s","ipam":{"type":"pool"}}`,
+		testVPC, testAttachment,
+	)
+	conf, err := parseConf([]byte(inputWithIPAM))
+	if err != nil {
+		t.Fatalf("unexpected error with present ipam block: %v", err)
+	}
+	if conf.IPAM == nil {
+		t.Fatal("expected IPAM block to be non-nil")
+	}
+}
+
+// ---- logging setup ----------------------------------------------------------
+
+func TestLoggingSetup(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "sub", "test.log")
+
+	// Setup logging, which should create the directory and open/write to the file.
+	setupLogging(logPath)
+	slog.Info("test log message")
+
+	// Read the log file to verify the message was logged.
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), "test log message") {
+		t.Fatalf("log content does not contain message: %s", string(data))
 	}
 }

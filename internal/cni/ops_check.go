@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -79,6 +80,32 @@ func cmdStatus(args *skel.CmdArgs) error {
 	if err := parseStatusConf(args.StdinData); err != nil {
 		return err
 	}
+
+	// Load host CNI config to resolve Kubeconfig and LogFile
+	hostConf, err := loadHostConf(ConfFile)
+	if err != nil {
+		return fmt.Errorf("load host CNI config: %w", err)
+	}
+
+	// Resolve and propagate Kubeconfig
+	kubeconfig := os.Getenv("GALACTIC_CNI_KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = hostConf.Kubeconfig
+	}
+	if kubeconfig == "" {
+		kubeconfig = DefaultKubeconfig
+	}
+	_ = os.Setenv("KUBECONFIG", kubeconfig)
+
+	// Resolve and setup Logging
+	logFile := os.Getenv("GALACTIC_CNI_LOG_FILE")
+	if logFile == "" {
+		logFile = hostConf.LogFile
+	}
+	if logFile == "" {
+		logFile = DefaultLogFile
+	}
+	setupLogging(logFile)
 
 	// Config is parseable and API server is reachable.
 	return probeAPIServer()

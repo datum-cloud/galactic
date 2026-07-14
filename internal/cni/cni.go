@@ -49,9 +49,6 @@ const (
 	// annotation key to 63 bytes; "allocated-subnet." is 17 bytes, leaving 46
 	// bytes for the container ID prefix.
 	annotationContainerIDLen = 46
-
-	// defaultNamespace is used when the CNI config does not specify a namespace.
-	defaultNamespace = "default"
 )
 
 const (

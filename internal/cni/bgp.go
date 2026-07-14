@@ -148,18 +148,13 @@ func vrfIDFromAttachment(vpcAttachment string) (int32, error) {
 // resolveSRv6SID determines the SRv6 SID to use for this endpoint's ingress
 // decap route.
 //
-//   - An explicit, non-empty explicitSID (from CNI config's srv6_sid) always
-//     wins and is used verbatim — this is a documented, supported override.
-//   - Otherwise, when the router has both srv6Locator and nodeID configured,
+//   - When the router has both srv6Locator and nodeID configured,
 //     the SID is computed from the locator, nodeID, and vrfID using the
 //     End.DT46 function — the only endpoint behavior CNI's kernel ingress
 //     route ever installs (see setupSRv6Ingress/srv6.RouteIngressAdd).
 //   - Otherwise, an empty string is returned with no error, matching today's
 //     behavior of skipping SRv6 ingress setup entirely.
-func resolveSRv6SID(explicitSID string, bgp bgpConfig, vrfID int32) (string, error) {
-	if explicitSID != "" {
-		return explicitSID, nil
-	}
+func resolveSRv6SID(bgp bgpConfig, vrfID int32) (string, error) {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return "", nil
 	}
@@ -248,9 +243,9 @@ func newK8sClient() (client.Client, error) {
 	return c, nil
 }
 
-// publishBGPState configures the host veth gateway, sets up the SRv6 ingress
-// route, and creates the BGPVRFInstance and BGPAdvertisement CRDs. This is
-// veth-only; tap mode returns before reaching this path.
+// publishBGPState configures the host gateway, sets up the SRv6 ingress route,
+// and creates the BGPVRFInstance and BGPAdvertisement CRDs. The host gateway
+// configuration is interface-agnostic (works for both veth and tap).
 //
 // K8s API operations are retried with exponential backoff on transient errors
 // (503, timeout, network blip). Non-k8s operations (kernel networking) run
@@ -261,7 +256,7 @@ func publishBGPState(
 	tracker *resourceTracker,
 ) error {
 	// ---- non-k8s operations (run once) ----
-	if err := configureHostVethGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
+	if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
 		return err
 	}
 
@@ -282,6 +277,17 @@ func publishBGPState(
 	tracker.k8s = k8s
 
 	// ---- k8s operations (retry on transient errors) ----
+	return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, k8s, tracker)
+}
+
+// publishBGPStateK8s creates the BGPVRFInstance and BGPAdvertisement CRDs with
+// retry on transient k8s API errors. The host gateway must be configured before
+// calling this (via configureHostGateway). This is interface-agnostic and can be
+// used by both veth and tap code paths.
+func publishBGPStateK8s(
+	args *skel.CmdArgs, pluginConf *PluginConf, nodeName, namespace string, ipamResult *ipamResult,
+	vpcHex string, vrfID int32, k8s client.Client, tracker *resourceTracker,
+) error {
 	return retryK8sOps(cniTimeout, func(ctx context.Context) error {
 		bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
 		if err != nil {
@@ -296,7 +302,7 @@ func publishBGPState(
 		// SID resolution needs the router's srv6Locator/nodeID, so it happens
 		// here rather than in the non-k8s section above. RouteIngressAdd is
 		// idempotent, so re-running it on retry is safe.
-		sidStr, err := resolveSRv6SID(pluginConf.SRv6SID, bgp, vrfID)
+		sidStr, err := resolveSRv6SID(bgp, vrfID)
 		if err != nil {
 			return err
 		}
@@ -385,27 +391,28 @@ func routeConflicts(existing, desired *netlink.Route) bool {
 	return false
 }
 
-// configureHostVethGateway assigns the gateway address as a /128 host address on
-// the host-side veth and installs an explicit pod-subnet route into the VRF table.
+// configureHostGateway assigns the gateway address as a /128 host address on
+// the host-side interface (veth or tap) and installs an explicit pod-subnet
+// route into the VRF table.
 //
 // Using /128 (not the pod subnet mask) prevents the kernel from auto-creating a
 // subnet-router anycast entry in the VRF local table. When the pod address equals
 // the subnet network address the anycast absorbs seg6local-decapped inner packets
-// before they reach the pod veth. The explicit subnet route replaces the one the
-// kernel would have created from the wider mask.
-func configureHostVethGateway(vpc, vpcAttachment string, res *ipamResult) error {
+// before they reach the guest interface. The explicit subnet route replaces the
+// one the kernel would have created from the wider mask.
+func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
 	if res == nil || res.gateway == nil {
 		return nil
 	}
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	hostLink, err := netlink.LinkByName(hostName)
 	if err != nil {
-		return fmt.Errorf("get host veth %q: %w", hostName, err)
+		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
 	gwNet := &net.IPNet{IP: res.gateway, Mask: net.CIDRMask(128, 128)}
 	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet}); err != nil {
 		if !errors.Is(err, syscall.EEXIST) {
-			return fmt.Errorf("add gateway address to host veth %q: %w", hostName, err)
+			return fmt.Errorf("add gateway address to host interface %q: %w", hostName, err)
 		}
 	}
 	tableID, err := vrf.TableID(vpc, vpcAttachment)

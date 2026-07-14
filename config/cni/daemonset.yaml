@@ -15,6 +15,7 @@ spec:
         app.kubernetes.io/name: galactic-cni
     spec:
       serviceAccountName: galactic-cni
+      hostNetwork: true
       tolerations:
         - operator: Exists
       # Only worker nodes run VPC pods; galactic-cni has nothing to do on
@@ -41,7 +42,7 @@ spec:
           # you override the tag first — see the README's "Production
           # Deployment" section.
           image: ghcr.io/datum-cloud/galactic-cni:latest
-          command: ["/bin/sh", "/scripts/install.sh", "install"]
+          command: ["/galactic-cni", "init"]
           env:
             - name: NODE_NAME
               valueFrom:
@@ -53,24 +54,24 @@ spec:
           resources:
             requests:
               cpu: 10m
-              memory: 32Mi
-            limits:
               memory: 64Mi
+            limits:
+              memory: 128Mi
           volumeMounts:
-            - name: install-script
-              mountPath: /scripts
             - name: cni-bin-dir
               mountPath: /host/opt/cni/bin
+            - name: cni-net-dir
+              mountPath: /host/etc/cni/net.d
             - name: galactic-etc
               mountPath: /host/var/lib/galactic
-            - name: galactic-state
-              mountPath: /host/var/run/galactic-cni
+            - name: galactic-log
+              mountPath: /host/var/log/galactic
       containers:
         - name: credential-refresh
           # See the install-cni initContainer above: ":latest" is a
           # placeholder, not a published tag.
           image: ghcr.io/datum-cloud/galactic-cni:latest
-          command: ["/bin/sh", "/scripts/install.sh", "refresh"]
+          command: ["/galactic-cni", "run"]
           securityContext:
             runAsUser: 0
             allowPrivilegeEscalation: false
@@ -81,24 +82,34 @@ spec:
             limits:
               memory: 32Mi
           volumeMounts:
-            - name: install-script
-              mountPath: /scripts
             - name: galactic-etc
               mountPath: /host/var/lib/galactic
+            - name: galactic-log
+              mountPath: /host/var/log/galactic
+          livenessProbe:
+            grpc:
+              port: 5180
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            grpc:
+              port: 5180
+            initialDelaySeconds: 5
+            periodSeconds: 10
       volumes:
-        - name: install-script
-          configMap:
-            name: galactic-cni-install
-            defaultMode: 0555
         - name: cni-bin-dir
           hostPath:
             path: /opt/cni/bin
+            type: DirectoryOrCreate
+        - name: cni-net-dir
+          hostPath:
+            path: /etc/cni/net.d
             type: DirectoryOrCreate
         - name: galactic-etc
           hostPath:
             path: /var/lib/galactic
             type: DirectoryOrCreate
-        - name: galactic-state
+        - name: galactic-log
           hostPath:
-            path: /var/run/galactic-cni
+            path: /var/log/galactic
             type: DirectoryOrCreate

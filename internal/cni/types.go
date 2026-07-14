@@ -47,9 +47,16 @@ type PluginConf struct {
 	MTU           int           `json:"mtu,omitempty"`
 	InterfaceType string        `json:"interface_type,omitempty"` // interfaceTypeVeth or interfaceTypeTap
 	Terminations  []Termination `json:"terminations,omitempty"`
-	IPAM          IPAM          `json:"ipam"`
-	SRv6SID       string        `json:"srv6_sid"`
+	IPAM          *IPAM         `json:"ipam"`
 	Namespace     string        `json:"namespace,omitempty"`
+}
+
+// HostConf holds node-local settings read from /etc/cni/net.d/10-galactic.conflist.
+type HostConf struct {
+	NodeName   string `json:"node_name"`
+	Kubeconfig string `json:"kubeconfig"`
+	Namespace  string `json:"namespace"`
+	LogFile    string `json:"log_file"`
 }
 
 // ipamResult holds the IPAM allocation details for building the CNI result.

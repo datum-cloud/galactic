@@ -85,7 +85,7 @@ func buildVethResult(
 
 	// Configure IP address on the guest interface inside the container netns.
 	var ipamResult *ipamResult
-	if pluginConf.IPAM.Type != "" || enableLocalIPAM {
+	if (pluginConf.IPAM != nil && pluginConf.IPAM.Type != "") || enableLocalIPAM {
 		result, err := configureIPAM(args, pluginConf, args.IfName)
 		if err != nil {
 			return nil, fmt.Errorf("configure IPAM: %w", err)
@@ -107,13 +107,15 @@ func buildVethResult(
 }
 
 // buildTapResult constructs the CNI result for tap mode: a single host
-// interface with no IPAM or guest endpoint.
+// interface with optional IPAM data. The guest VM manages its own interface;
+// the IP here describes the allocated subnet for BGP advertisement.
 func buildTapResult(
 	pluginConf *PluginConf,
+	ipRes *ipamResult,
 	hostName, hostMac string,
 	hostMTU int,
 ) *type100.Result {
-	return &type100.Result{
+	result := &type100.Result{
 		CNIVersion: pluginConf.CNIVersion,
 		Interfaces: []*type100.Interface{
 			{
@@ -124,4 +126,21 @@ func buildTapResult(
 			},
 		},
 	}
+	if ipRes != nil {
+		ipConfig := &type100.IPConfig{
+			Address:   *ipRes.subnet,
+			Gateway:   ipRes.gateway,
+			Interface: type100.Int(0), // index into Interfaces (host tap)
+		}
+		result.IPs = []*type100.IPConfig{ipConfig}
+		if len(ipRes.routes) > 0 {
+			result.Routes = make([]*types.Route, 0, len(ipRes.routes))
+			for _, dst := range ipRes.routes {
+				result.Routes = append(result.Routes, &types.Route{
+					Dst: *dst,
+				})
+			}
+		}
+	}
+	return result
 }
