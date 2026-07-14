@@ -2,3 +2,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: galactic-system
+  labels:
+    # Both the galactic-cni and galactic-router DaemonSets require
+    # privileged access (hostPath volumes, hostNetwork, NET_ADMIN and
+    # elevated capabilities). Without this, first-time `kubectl apply -k`
+    # against a cluster with the restricted/baseline PodSecurity default
+    # fails admission with no pointer to the fix.
+    pod-security.kubernetes.io/enforce: privileged

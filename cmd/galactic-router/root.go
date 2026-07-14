@@ -112,8 +112,27 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) { //nolint:lll // cobra flag 
 		v.GetDuration("galactic_router.gc_interval"),
 		"Cleanup interval")
 
-	if err := v.BindPFlags(cmd.Flags()); err != nil {
-		log.Fatalf("bind flags: %v", err)
+	// v.BindPFlags binds each flag under its own flag name (e.g.
+	// "grpc-health-port") as the viper key, but validateConfig/runCmd only
+	// ever read the "galactic_router.*"-prefixed keys set up by newViper —
+	// so a blanket BindPFlags leaves every flag here disconnected from the
+	// config it's meant to override. Bind each flag explicitly to the key
+	// it actually needs to reach.
+	flagKeys := map[string]string{
+		"node-name":         "galactic_router.node_name",
+		"mode":              "galactic_router.router_mode",
+		"reflector":         "reflector",
+		"bgp-listen-port":   "galactic_router.bgp_listen_port",
+		"bgp-local-address": "galactic_router.bgp_local_address",
+		"metrics-port":      "galactic_router.metrics_port",
+		"grpc-health-port":  "galactic_router.grpc_health_port",
+		"gc-namespace":      "galactic_router.gc_namespace",
+		"gc-interval":       "galactic_router.gc_interval",
+	}
+	for flagName, key := range flagKeys {
+		if err := v.BindPFlag(key, cmd.Flags().Lookup(flagName)); err != nil {
+			log.Fatalf("bind flag %s: %v", flagName, err)
+		}
 	}
 }
 

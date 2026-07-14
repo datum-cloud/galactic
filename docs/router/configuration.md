@@ -5,6 +5,13 @@ or a combination of both. CLI flags take precedence over environment variables.
 
 ## Quick Reference
 
+Environment variable names are not a naive uppercased guess from the CLI
+flag name — every flag is bound to its own explicit `GALACTIC_ROUTER_*`
+variable (see `newViper()` in `cmd/galactic-router/root.go`), and several
+don't match what `AutomaticEnv` alone would produce from the flag name. The
+most common trip-up: `--mode` is `GALACTIC_ROUTER_ROUTER_MODE`, not
+`GALACTIC_ROUTER_MODE`. Always use the exact name from the table below.
+
 | Option | Environment Variable | CLI Flag | Default |
 |---|---|---|---|
 | Node name | `GALACTIC_ROUTER_NODE_NAME` | `--node-name` | _(required)_ |
@@ -70,6 +77,13 @@ that. This requires `hostNetwork: true` and an address already assigned to
 before `galactic-router` starts. Startup fails with an error if no explicit
 value is set and no such address is found on `lo`.
 
+This detection always runs, even when `--bgp-listen-port`/
+`GALACTIC_ROUTER_BGP_LISTEN_PORT` is `-1` (no inbound listener) —
+`galactic-router` still needs a source address for outbound BGP connections.
+In practice this means every node running `galactic-router` in `tenant` mode
+needs a global-unicast IPv6 address on `lo` before startup, or an explicit
+`GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`.
+
 **Type:** string
 **Default:** _(auto-detected from `lo`)_
 
@@ -90,6 +104,13 @@ readiness probes.
 **Type:** integer
 **Default:** `5000`
 **Valid values:** `1`–`65535`
+
+> **Talos:** `/sbin/dashboard` permanently binds `127.0.0.1:5000` on every
+> Talos node. Since `galactic-router` runs with `hostNetwork: true`, the
+> default `5000` always collides on Talos-based clusters. The shipped
+> `config/router/base/daemonset.yaml` sets this to `5179` for exactly this
+> reason; if you run `galactic-router` outside those manifests on Talos, set
+> it to something other than `5000` yourself.
 
 ### `--gc-namespace` / `GALACTIC_ROUTER_GC_NAMESPACE`
 
