@@ -37,7 +37,7 @@ tasks:
   "build:galactic-router":
     desc: Build the galactic-router container image
     cmds:
-      - docker build --network=host -t galactic-router:latest -f containers/galactic-router/Dockerfile ../..
+      - docker build --network=host -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
 
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
