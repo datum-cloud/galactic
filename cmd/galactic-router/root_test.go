@@ -16,13 +16,15 @@ import (
 	"go.datum.net/galactic/internal/metadata"
 )
 
+const testCmdUse = "test"
+
 // cmdWithViper creates a cobra command with a fresh viper instance and
 // binds all flags. This is used to test flag defaults and cobra integration.
 func cmdWithViper(t *testing.T) *viper.Viper {
 	t.Helper()
 	v := newViper()
 	cmd := &cobra.Command{
-		Use: "test",
+		Use: testCmdUse,
 	}
 	bindFlags(cmd, v)
 	return v
@@ -141,7 +143,7 @@ func TestReflectorInvalidMode(t *testing.T) {
 
 	v := cmdWithViper(t)
 	// Simulate --reflector being set via flag.
-	cmd := &cobra.Command{Use: "test"}
+	cmd := &cobra.Command{Use: testCmdUse}
 	bindFlags(cmd, v)
 	//nolint:errcheck // flag exists, setting it is safe
 	cmd.Flags().Set("reflector", "true")
@@ -175,6 +177,39 @@ func TestGRPCHealthPortOverride(t *testing.T) {
 	v := cmdWithViper(t)
 	if v.GetInt("galactic_router.grpc_health_port") != 9091 {
 		t.Errorf("grpc_health_port = %d, want 9091", v.GetInt("galactic_router.grpc_health_port"))
+	}
+}
+
+func TestModeFlagOverridesEnv(t *testing.T) {
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "fabric")
+
+	v := newViper()
+	cmd := &cobra.Command{Use: testCmdUse}
+	bindFlags(cmd, v)
+	if err := cmd.Flags().Set("mode", "tenant"); err != nil {
+		t.Fatalf("set --mode flag: %v", err)
+	}
+
+	if got := v.GetString("galactic_router.router_mode"); got != "tenant" {
+		t.Errorf("router_mode = %q, want %q (flag should override env var)", got, "tenant")
+	}
+}
+
+func TestGRPCHealthPortFlagOverridesEnv(t *testing.T) {
+	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
+	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "tenant")
+	t.Setenv("GALACTIC_ROUTER_GRPC_HEALTH_PORT", "9091")
+
+	v := newViper()
+	cmd := &cobra.Command{Use: testCmdUse}
+	bindFlags(cmd, v)
+	if err := cmd.Flags().Set("grpc-health-port", "9092"); err != nil {
+		t.Fatalf("set --grpc-health-port flag: %v", err)
+	}
+
+	if got := v.GetInt("galactic_router.grpc_health_port"); got != 9092 {
+		t.Errorf("grpc_health_port = %d, want %d (flag should override env var)", got, 9092)
 	}
 }
 
