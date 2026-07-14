@@ -70,6 +70,13 @@ that. This requires `hostNetwork: true` and an address already assigned to
 before `galactic-router` starts. Startup fails with an error if no explicit
 value is set and no such address is found on `lo`.
 
+This detection always runs, even when `--bgp-listen-port`/
+`GALACTIC_ROUTER_BGP_LISTEN_PORT` is `-1` (no inbound listener) —
+`galactic-router` still needs a source address for outbound BGP connections.
+In practice this means every node running `galactic-router` in `tenant` mode
+needs a global-unicast IPv6 address on `lo` before startup, or an explicit
+`GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`.
+
 **Type:** string
 **Default:** _(auto-detected from `lo`)_
 

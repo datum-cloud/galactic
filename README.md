@@ -32,7 +32,7 @@ See the [galactic DevContainer](./.devcontainer/galactic/) for development envir
 
 ### Production Deployment
 
-Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace, the `galactic-cni` DaemonSet, and both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/node: control`):
+Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace (labeled `pod-security.kubernetes.io/enforce: privileged` — both DaemonSets need it, for hostPath volumes, hostNetwork, and elevated capabilities), the `galactic-cni` DaemonSet, and both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/node: control`):
 
 ```bash
 kubectl apply -k config/
@@ -40,10 +40,20 @@ kubectl apply -k config/
 
 Each component can also be applied on its own, e.g. `kubectl apply -k config/router` for just the router (both roles) or `kubectl apply -k config/router/tenant` for just the per-node role.
 
-`.github/workflows/publish.yaml` publishes `ghcr.io/datum-cloud/galactic-cni:latest` and
-`ghcr.io/datum-cloud/galactic-router:latest` (built from `containers/galactic-cni/Dockerfile`
-and `containers/galactic-router/Dockerfile` respectively) on every push and release, which
-is what these manifests pull.
+#### Prerequisites
+
+- **Container images.** `.github/workflows/publish.yaml` builds `ghcr.io/datum-cloud/galactic-cni` and `ghcr.io/datum-cloud/galactic-router` (from `containers/galactic-cni/Dockerfile` and `containers/galactic-router/Dockerfile` respectively) on every push and release — but it never publishes a `:latest` tag, only date-stamped tags per push/release (e.g. `v0.0.0-main-20260713-170924`) and, for tagged releases, semver tags. The `image:` references committed in `config/cni/daemonset.yaml` and `config/router/base/daemonset.yaml` say `:latest` only as a placeholder that CI substitutes with a real published tag when it builds the `ghcr.io/datum-cloud/galactic-kustomize` OCI Kustomize bundle — that substitution never happens in the git checkout itself. Applying `config/` directly from a clone will therefore fail to pull `:latest`. Before applying, resolve the current tag (check the [package pages](https://github.com/orgs/datum-cloud/packages?repo_name=galactic) or the latest successful run of `publish.yaml` on `main`) and pin it, e.g.:
+
+  ```bash
+  cd config/cni && kustomize edit set image ghcr.io/datum-cloud/galactic-cni=ghcr.io/datum-cloud/galactic-cni:<resolved-tag>
+  cd config/router/base && kustomize edit set image ghcr.io/datum-cloud/galactic-router=ghcr.io/datum-cloud/galactic-router:<resolved-tag>
+  ```
+
+- **Talos: gRPC health port.** `galactic-router` runs `hostNetwork: true` and defaults to gRPC health checks on port `5000`, which collides with Talos's built-in dashboard (`/sbin/dashboard` permanently binds `127.0.0.1:5000` on every Talos node). `config/router/base/daemonset.yaml` already ships with `GALACTIC_ROUTER_GRPC_HEALTH_PORT=5179` (and matching probe/containerPort) to avoid this; if you run `galactic-router` outside these manifests on Talos, set `GALACTIC_ROUTER_GRPC_HEALTH_PORT` to something other than `5000` yourself.
+
+- **`galactic-router` tenant mode: BGP local address.** The node needs a global-unicast IPv6 address assigned to `lo` (typically by an underlay/fabric BGP daemon that starts before `galactic-router`), or you must set `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` explicitly — this is required even when `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` (no inbound listener), since `galactic-router` still needs a source address for outbound BGP connections. Without one of these, startup fails with `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS not set and no address could be detected on lo: no global-unicast IPv6 address found on lo`. See [`docs/router/configuration.md`](./docs/router/configuration.md) for details.
+
+See [`docs/router/configuration.md`](./docs/router/configuration.md) for the full `galactic-router` CLI flag / environment variable reference — note that env var names generally follow `GALACTIC_ROUTER_<FLAG_NAME>` but aren't always the naive uppercased guess (e.g. `--mode` is `GALACTIC_ROUTER_ROUTER_MODE`, not `GALACTIC_ROUTER_MODE`); the reference table has the exact name for every flag.
 
 ## Development
 

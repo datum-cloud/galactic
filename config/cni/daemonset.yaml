@@ -33,6 +33,13 @@ spec:
                       - edge
       initContainers:
         - name: install-cni
+          # ":latest" is a placeholder only: no such tag is ever pushed to
+          # GHCR. CI resolves and stamps a real version tag here when it
+          # publishes the ghcr.io/datum-cloud/galactic-kustomize OCI bundle
+          # (see .github/workflows/publish.yaml); applying this manifest
+          # directly from a git checkout will fail to pull the image unless
+          # you override the tag first — see the README's "Production
+          # Deployment" section.
           image: ghcr.io/datum-cloud/galactic-cni:latest
           command: ["/bin/sh", "/scripts/install.sh", "install"]
           env:
@@ -60,6 +67,8 @@ spec:
               mountPath: /host/var/run/galactic-cni
       containers:
         - name: credential-refresh
+          # See the install-cni initContainer above: ":latest" is a
+          # placeholder, not a published tag.
           image: ghcr.io/datum-cloud/galactic-cni:latest
           command: ["/bin/sh", "/scripts/install.sh", "refresh"]
           securityContext:
