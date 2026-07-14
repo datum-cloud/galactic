@@ -5,8 +5,8 @@ vars:
     sh: awk '/^name:/ {print $2; exit}' *.clab.yaml
   TOPO:
     sh: echo *.clab.yaml
-  FRR_VERSION: "10.6.1"
-  FRR_IMAGE: frr:{{.FRR_VERSION}}
+  FRR_VERSION: "10.2.0"
+  FRR_IMAGE: quay.io/frrouting/frr:{{.FRR_VERSION}}
 
 tasks:
   default:
@@ -28,11 +28,11 @@ tasks:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
   "build:frr":
-    desc: Build the FRR container from Alpine edge (v{{.FRR_VERSION}})
+    desc: Pull the official FRR container from Quay.io (v{{.FRR_VERSION}})
     status:
       - docker image inspect {{.FRR_IMAGE}} > /dev/null 2>&1
     cmds:
-      - docker build --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FRR_IMAGE}} containers/frr/
+      - docker pull {{.FRR_IMAGE}}
 
   "build:galactic-router":
     desc: Build the galactic-router container image

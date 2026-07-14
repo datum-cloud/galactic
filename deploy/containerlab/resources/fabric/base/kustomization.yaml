@@ -1,2 +1,9 @@
 resources:
   - daemonset.yaml
+
+configMapGenerator:
+  - name: fabric-config
+    files:
+      - daemons
+      - vtysh.conf
+

@@ -2,9 +2,15 @@ namePrefix: dfw-
 namespace: galactic-system
 resources:
   - ../base
-  - configmap.yaml
 patches:
   - path: daemonset-patch.yaml
     target:
       kind: DaemonSet
       name: fabric
+
+configMapGenerator:
+  - name: fabric-config
+    behavior: merge
+    files:
+      - frr.conf
+
