@@ -91,6 +91,13 @@ readiness probes.
 **Default:** `5000`
 **Valid values:** `1`–`65535`
 
+> **Talos:** `/sbin/dashboard` permanently binds `127.0.0.1:5000` on every
+> Talos node. Since `galactic-router` runs with `hostNetwork: true`, the
+> default `5000` always collides on Talos-based clusters. The shipped
+> `config/router/base/daemonset.yaml` sets this to `5179` for exactly this
+> reason; if you run `galactic-router` outside those manifests on Talos, set
+> it to something other than `5000` yourself.
+
 ### `--gc-namespace` / `GALACTIC_ROUTER_GC_NAMESPACE`
 
 Namespace the GC controller scans for orphaned `BGPAdvertisement` and
