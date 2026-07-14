@@ -125,9 +125,7 @@ deploy/containerlab/
 ├── gvpc.clab.yaml
 ├── Taskfile.yaml
 ├── containers/
-│   ├── kindest-node-galactic/   # Custom Kind node image (git/tcpdump, kubectl DooD wrapper)
-│   ├── galactic-router/         # galactic-router container built from Go source
-│   └── frr/                     # FRR container built from Alpine edge
+│   └── kindest-node-galactic/   # Custom Kind node image (git/tcpdump, kubectl DooD wrapper)
 ├── resources/
 │   ├── cni/                     # galactic-cni installer DaemonSet + ConfigMap
 │   ├── fabric/                  # FRR DaemonSet manifests (dfw, iad, sjc)
