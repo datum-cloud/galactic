@@ -177,27 +177,12 @@ func TestResolveSRv6SID(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		explicit string
-		bgp      bgpConfig
-		vrfID    int32
-		want     string
-		wantErr  string
+		name    string
+		bgp     bgpConfig
+		vrfID   int32
+		want    string
+		wantErr string
 	}{
-		{
-			name:     "explicit SID always wins verbatim",
-			explicit: testSID128,
-			bgp:      bgpConfig{srv6Locator: locator, nodeID: nodeID},
-			vrfID:    vrfID,
-			want:     testSID128,
-		},
-		{
-			name:     "explicit SID wins even when router has no locator/nodeID",
-			explicit: "2001:db8::2",
-			bgp:      bgpConfig{},
-			vrfID:    vrfID,
-			want:     "2001:db8::2",
-		},
 		{
 			name:  "computed from router locator+nodeID when explicit is empty",
 			bgp:   bgpConfig{srv6Locator: locator, nodeID: nodeID},
@@ -226,7 +211,7 @@ func TestResolveSRv6SID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveSRv6SID(tt.explicit, tt.bgp, tt.vrfID)
+			got, err := resolveSRv6SID(tt.bgp, tt.vrfID)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
@@ -244,6 +229,7 @@ func TestResolveSRv6SID(t *testing.T) {
 			}
 		})
 	}
+
 }
 
 // ---- buildVRFInstanceSpec ---------------------------------------------------

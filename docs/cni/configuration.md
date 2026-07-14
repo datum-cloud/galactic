@@ -1,32 +1,49 @@
 # CNI Configuration
 
 `galactic-cni` is configured through the CNI JSON configuration passed by Multus
-(or any CNI manager). Additionally, the binary requires a node name at runtime
-via an environment variable or CLI flag.
+(or any CNI manager), plus node-local settings resolved at runtime from the
+conflist, environment variables, and (as a last resort) the Kubernetes API.
+
+> Last verified: 2026-07-14 against the current working tree of `internal/cni/config.go`
+> and `internal/installer/installer.go`.
 
 ## Runtime Configuration
 
-The `galactic-cni` binary requires the node name to scope BGP advertisement
-CRD creation. It also supports an optional built-in IPAM mode for deployments
-that do not configure an explicit `ipam` block in the CNI config.
+There is no `--node-name` or `--enable-local-ipam` CLI flag on the `galactic-cni`
+plugin invocation itself. Instead, `parseConf()` (`internal/cni/config.go`) resolves
+node name, kubeconfig, namespace, and log file on every ADD/DEL/CHECK/STATUS call,
+reading (in order) the CNI config JSON, environment variables, and a `HostConf`
+block parsed out of the conflist at `--conf-file` (default
+`/etc/cni/net.d/10-galactic.conflist`). `HostConf` is written by the `galactic-cni init`
+subcommand (`internal/installer.Bootstrap`), which runs as the CNI DaemonSet's init
+container — see [docs/agents/ARCHITECTURE.md](../agents/ARCHITECTURE.md#known-constraints)
+for how the DaemonSet stages it.
 
-| Option | Environment Variable | CLI Flag | Default |
-|---|---|---|---|
-| Node name | `GALACTIC_CNI_NODE_NAME` | `--node-name` | _(required)_ |
-| Enable local IPAM | `GALACTIC_CNI_ENABLE_LOCAL_IPAM` | `--enable-local-ipam` | `false` |
+### `HostConf` fields (written into the conflist by `galactic-cni init`)
 
-### `--node-name` / `GALACTIC_CNI_NODE_NAME`
+| Field        | JSON key      | Description                                                                 |
+|--------------|---------------|-------------------------------------------------------------------------------|
+| `NodeName`   | `node_name`   | The Kubernetes node name the installer bootstrapped on.                        |
+| `Kubeconfig` | `kubeconfig`  | Path to the kubeconfig `Bootstrap`/`Run` maintain (`/var/lib/galactic/kubeconfig` by default). |
+| `Namespace`  | `namespace`   | Kubernetes namespace for BGP CRDs (`galactic-system` by default).              |
+| `LogFile`    | `log_file`    | Path the plugin logs to (`/var/log/galactic/galactic-cni.log` by default).      |
 
-The Kubernetes node name where the container is running. Used to create the
-`BGPAdvertisement` CRD on the correct `BGPRouter`. `NODE_NAME` is also accepted
-as a fallback environment variable; the resolved value is re-exported as
-`NODE_NAME` before the CNI ADD/DEL logic runs, since that's what it reads
-internally.
+### Resolution precedence
 
-**Type:** string
-**Required:** yes
+| Setting              | Precedence (highest first)                                                                                   | Default (if nothing resolves) |
+|----------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------|
+| Node name            | `GALACTIC_CNI_NODE_NAME` env → `NODE_NAME` env → `HostConf.NodeName` → auto-detect via the Kubernetes API (`detectNodeNameFromAPI`: lists Nodes, matches local interface addresses against `status.addresses[].type=InternalIP`) | _(error: "node name is required")_ |
+| Kubeconfig           | `GALACTIC_CNI_KUBECONFIG` env → `HostConf.Kubeconfig`                                                            | `/var/lib/galactic/kubeconfig` |
+| Namespace            | `namespace` field in the CNI config JSON → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace`                   | `galactic-system`               |
+| Log file             | `GALACTIC_CNI_LOG_FILE` env → `HostConf.LogFile`                                                                 | `/var/log/galactic/galactic-cni.log` |
+| Enable local IPAM    | `GALACTIC_CNI_ENABLE_LOCAL_IPAM` env only (no conflist field, no CLI flag)                                        | `false`                          |
 
-### `--enable-local-ipam` / `GALACTIC_CNI_ENABLE_LOCAL_IPAM`
+The resolved node name is re-exported as the `NODE_NAME` process environment variable
+and the resolved kubeconfig as `KUBECONFIG`, since other code in `internal/cni` reads
+those directly. Auto-detection exists to tolerate environments (e.g. Kind-based e2e)
+where the conflist's hostPath mount isn't populated yet.
+
+### `GALACTIC_CNI_ENABLE_LOCAL_IPAM`
 
 When enabled, the plugin performs IP allocation using a built-in IPv6 pool
 allocator even when no explicit `ipam` block is present in the CNI config.
@@ -43,7 +60,7 @@ the following defaults are used:
 | Gateway | First usable address in the pool (`::1`) |
 
 If an explicit `ipam` block is present in the CNI config, it takes precedence
-and this flag has no effect on the allocation behavior.
+and this environment variable has no effect on the allocation behavior.
 
 **Type:** bool
 **Default:** `false`
@@ -59,12 +76,11 @@ the standard CNI `PluginConf` with Galactic-specific fields.
 |---|---|---|---|---|
 | `vpc` | `"vpc"` | **Yes** | `string` | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets. |
 | `vpcattachment` | `"vpcattachment"` | **Yes** | `string` | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming. |
-| `interface_type` | `"interface_type"` | No | `string` | Interface mode: `"veth"` (default, for containers) or `"tap"` (for VMs such as Kata, Firecracker, QEMU). |
-| `srv6_sid` | `"srv6_sid"` | No | `string` | An optional override: a pre-computed USID (a bare `/128` IPv6 address, or an address with an explicit `/128` CIDR suffix) used verbatim as the SRv6 End.DT46 ingress decap SID for this endpoint. When omitted or empty, and the node's `BGPRouter` has both `srv6Locator` and `nodeID` configured, the SID is instead computed from those plus this attachment's VRFID (derived from `vpcattachment`). When omitted and the router lacks `srv6Locator`/`nodeID`, SRv6 ingress setup is skipped entirely. Ignored in `tap` mode (SRv6/BGP setup is skipped for tap interfaces regardless of this field). |
+| `interface_type` | `"interface_type"` | No | `string` | Interface mode: `"veth"` (default, for containers) or `"tap"` (for VMs such as Kata, Firecracker, QEMU). Both modes run IPAM and SRv6/BGP publish; `tap` mode only skips host-device delegation and guest-netns configuration (see the Tap mode section below). |
 | `mtu` | `"mtu"` | No | `int` | MTU for the host-side interface. For `veth` mode this applies to both veth endpoints; for `tap` mode it applies to the tap interface. |
 | `terminations` | `"terminations"` | No | `[]Termination` | Array of static routes to add on the host side (see Termination sub-fields below). |
-| `namespace` | `"namespace"` | No | `string` | Kubernetes namespace used to look up the `BGPRouter` CRD. Defaults to `"default"` if omitted. |
-| `ipam` | `"ipam"` | No* | `IPAM` | IP address management configuration (see IPAM sub-fields below). *Required unless `--enable-local-ipam` is set or `interface_type` is `"tap"`. |
+| `namespace` | `"namespace"` | No | `string` | Kubernetes namespace used to look up the `BGPRouter` CRD. Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` (conflist) → `galactic-system`. See [Runtime Configuration](#runtime-configuration) above. |
+| `ipam` | `"ipam"` | No* | `IPAM` | IP address management configuration (see IPAM sub-fields below). *Required unless `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — applies identically in `veth` and `tap` mode. In `tap` mode `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM` unconditionally (unlike `veth` mode, which checks first), so omitting both `ipam` and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` currently produces a nil-pointer panic in `tap` mode rather than a clean validation error — always set one or the other for tap. |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
 supported via the embedded `types.PluginConf`.
@@ -84,8 +100,16 @@ receives an IP address from IPAM and a default route via the pool gateway.
 Creates a tap interface in the host namespace (same naming pattern as the veth
 host endpoint: `G<vpc9><vpcattachment3>H`) and enslaves it to the VRF. No
 interface is moved into the container — the tap fd is managed directly by the
-guest VM hypervisor. IPAM and SRv6/BGP setup are skipped entirely in tap mode;
-the VM configures its own networking.
+guest VM hypervisor, so `tap` mode skips host-device delegation and guest-netns
+configuration. Unlike an earlier version of this plugin, `tap` mode is **not**
+"no IPAM, no BGP": `cmdAdd` calls `allocateIPAM` to allocate a subnet/gateway,
+`configureHostGateway` to assign the gateway on the host tap and install the pod
+subnet route into the VRF table, includes the resulting `ips`/`routes` in the CNI
+result (interface index `0`, the host tap — there is no guest interface entry),
+and then `publishBGPStateK8s` to create the SRv6 ingress route and
+`BGPVRFInstance`/`BGPAdvertisement` CRDs, exactly as `veth` mode does. The guest
+VM still configures its own IP addresses independently (the CNI-allocated
+subnet/gateway describe only the host-side BGP-advertised state).
 
 > **Note:** Tap mode is intended for VM-based workloads (Kata, Firecracker,
 > QEMU) where the hypervisor opens the tap fd and handles guest networking.
@@ -94,7 +118,7 @@ the VM configures its own networking.
 
 | Field | JSON Key | Required | Type | Description |
 |---|---|---|---|---|
-| `type` | `"type"` | Conditionally required | `string` | `"pool"` or `"static"`. Determines IP allocation strategy. Required whenever an `ipam` block is present; only defaults to `"pool"` when the entire `ipam` block is omitted and `--enable-local-ipam` is set — an `ipam` block with an empty `type` is a hard error. |
+| `type` | `"type"` | Conditionally required | `string` | `"pool"` or `"static"`. Determines IP allocation strategy. Required whenever an `ipam` block is present; only defaults to `"pool"` when the entire `ipam` block is omitted and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — an `ipam` block with an empty `type` is a hard error. |
 | `pool` | `"pool"` | Conditionally required | `string` | IPv6 CIDR pool (e.g. `"fd00:10:ff01::/48"`) from which subnets are allocated. Required when `type` is `"pool"`. |
 | `gateway` | `"gateway"` | No | `string` | IPv6 gateway address. If omitted, uses the first usable address in the pool (host bits = 1). Must be within the pool CIDR. |
 | `subnet_len` | `"subnet_len"` | No | `int` | Prefix length per allocation. Default is `80` (giving 2^48 addresses per pod subnet). Pool prefix must be <= this value. |
@@ -137,15 +161,14 @@ entry. Deleted in `cmdDel` in reverse order.
   "name": "galactic",
   "type": "galactic-cni",
   "vpc": "1",
-  "vpcattachment": "1",
-  "srv6_sid": "2001:db8:ff01::1"
+  "vpcattachment": "1"
 }
 ```
 
-Omits `namespace` (defaults to `"default"`), `ipam`, and `terminations`.
-Without the `--enable-local-ipam` flag, no IP address is assigned to the
-guest interface. With `--enable-local-ipam`, a subnet is allocated from the
-built-in pool.
+Omits `namespace` (defaults to `galactic-system`), `ipam`, and `terminations`.
+Without `GALACTIC_CNI_ENABLE_LOCAL_IPAM` set, no IP address is assigned to the
+guest interface. With `GALACTIC_CNI_ENABLE_LOCAL_IPAM` set, a subnet is allocated
+from the built-in pool.
 
 ### Full pool-based configuration (testvpc)
 
@@ -157,7 +180,6 @@ built-in pool.
   "vpc": "10",
   "vpcattachment": "10",
   "namespace": "galactic-system",
-  "srv6_sid": "2001:db8:ff02::1",
   "ipam": {
     "type": "pool",
     "pool": "fd00:10:ff02::/48",
@@ -176,7 +198,6 @@ built-in pool.
   "type": "galactic-cni",
   "vpc": "1",
   "vpcattachment": "1",
-  "srv6_sid": "2001:db8:ff01::1",
   "ipam": {
     "type": "static",
     "static_ip": "fd00:1::1"
@@ -193,7 +214,6 @@ built-in pool.
   "type": "galactic-cni",
   "vpc": "1",
   "vpcattachment": "1",
-  "srv6_sid": "2001:db8:ff01::1",
   "terminations": [
     { "network": "fd00::/48", "via": "fe80::1" },
     { "network": "fd01::/48" }
@@ -218,13 +238,19 @@ a link-local route via the host-side device.
   "vpc": "1",
   "vpcattachment": "1",
   "interface_type": "tap",
-  "mtu": 9000
+  "mtu": 9000,
+  "ipam": {
+    "type": "pool",
+    "pool": "fd00:10:ff03::/48"
+  }
 }
 ```
 
 Tap mode creates a tap interface in the host namespace, enslaves it to the
-VRF, and applies forwarding sysctls. No IPAM or SRv6/BGP setup is configured —
-the guest VM manages its own IP addresses. The tap fd is opened by the VM
-hypervisor (Kata, Firecracker, QEMU) at runtime. An `srv6_sid` field is
-accepted here but has no effect, since tap-mode `cmdAdd` returns before the
-BGP/SRv6 publish step is ever reached.
+VRF, and applies forwarding sysctls. It then runs IPAM (allocating the subnet
+shown above) and SRv6/BGP publish exactly as `veth` mode does — see the `tap`
+description under Interface Types above. Only host-device delegation and
+guest-netns configuration are skipped; the guest VM still configures its own
+IP addresses independently once the hypervisor (Kata, Firecracker, QEMU) opens
+the tap fd at runtime. The `ipam` block (or `GALACTIC_CNI_ENABLE_LOCAL_IPAM`)
+is required here for the same reason it is in `veth` mode.

@@ -28,8 +28,9 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	// Deallocate the pod's IPAM subnet. This is pod-specific and safe to
-	// release immediately.
-	if pluginConf.InterfaceType == interfaceTypeVeth && (pluginConf.IPAM.Type != "" || enableLocalIPAM) {
+	// release immediately. Applies to both veth and tap modes.
+	hasIPAM := (pluginConf.IPAM != nil && pluginConf.IPAM.Type != "") || enableLocalIPAM
+	if hasIPAM {
 		if k8s, err := newK8sClient(); err == nil {
 			deallocateIPAM(args, pluginConf, k8s)
 		}

@@ -40,6 +40,10 @@ for site in dfw sjc iad; do
   docker exec "${node}" kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
   docker exec "${node}" kubectl -n kube-system rollout status daemonset kube-multus-ds
 
+  # docker cp nests SRC inside an existing DEST dir instead of overwriting
+  # it, so a rerun against an already-provisioned node would silently keep
+  # serving the prior kustomization.yaml/base/ from underneath the new copy.
+  docker exec "${node}" rm -rf /galactic/resources/cni
   copy_to "${node}" cni
   docker cp "${GALACTIC_CNI_DIR}" "${node}:/galactic/resources/cni/base"
 

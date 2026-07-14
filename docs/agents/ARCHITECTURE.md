@@ -5,7 +5,7 @@
 > networks, and a router that reconciles BGP CRDs and drives an embedded
 > GoBGP server to distribute EVPN (L2VPN/EVPN AFI/SAFI) paths between nodes.
 
-_Last updated: 2026-07-08_
+_Last updated: 2026-07-14_
 
 ---
 
@@ -25,15 +25,20 @@ CNI config and acts on them. `galactic-router` reconciles BGP CRDs
 
 ### SRv6 SID encoding
 
-See [docs/srv6-design.md](../srv6-design.md) for the full SRv6 design: SID
-encoding and allocation, base62 interface naming, kernel `seg6local`/`seg6`
-route programming, EVPN Type 5 path construction, and a worked end-to-end
-example over the ContainerLab topology.
+<!-- TODO(docs): docs/srv6-design.md, referenced here for the full SRv6 design
+     (SID encoding/allocation, base62 interface naming, kernel seg6local/seg6
+     route programming, EVPN Type 5 path construction, worked ContainerLab
+     example), does not exist in this repository. Either write it, point this
+     section elsewhere, or remove this note — flagged for a human decision. -->
 
 Each container endpoint is assigned a /128 USID (Unique Local SID, RFC 8986 Section 3.2).
-The companion operator allocates a unique /128 per (VPC, VPCAttachment) pair and injects
-it into the NAD as `srv6_sid`. The CNI installs an END.DT46 decap route for that exact
-/128 and advertises it as the EVPN Type 5 GWIPAddress.
+There is no longer a companion-operator-injected `srv6_sid` NAD/config field: the CNI
+itself computes the SID in `resolveSRv6SID` (`internal/cni/bgp.go`) from the node's
+`BGPRouter.spec.srv6Locator` + `spec.nodeID` plus this attachment's VRFID (`srv6.ComputeSID`,
+`internal/plumbing/srv6/usid.go`), using the End.DT46 function. If the router lacks either
+`srv6Locator` or `nodeID`, SID resolution — and SRv6 ingress setup — is skipped entirely for
+that attachment. The CNI installs an END.DT46 decap route for the computed /128 and
+advertises it as the EVPN Type 5 GWIPAddress.
 
 All nodes in the same VPC derive the same BGP Route Target by truncating the
 48-bit hex VPC identifier to its low 32 bits (`uint32(v)`), formatted as
@@ -70,6 +75,9 @@ galactic/
 │   │   ├── route/           # Host-side static routes via netlink
 │   │   ├── tap/             # Tap interface management (VM workloads)
 │   │   └── veth/            # veth pair management
+│   ├── installer/           # galactic-cni DaemonSet init/run logic: binary
+│   │                        #   staging, conflist templating, kubeconfig
+│   │                        #   refresh, gRPC health server
 │   └── plumbing/            # Low-level kernel and network primitives
 │       ├── intf/            # Interface naming, base62↔hex encoding
 │       ├── srv6/            # SRv6 ingress route add/del (END.DT46)
@@ -83,7 +91,11 @@ galactic/
 │   │   │                    #     and tenant-control nodes
 │   │   └── tenant-control/  #   route-reflector role: base + GALACTIC_ROUTER_REFLECTOR=true,
 │   │                        #     opt-in via the galactic.datumapis.com/node=control node label
-│   └── cni/                 # DaemonSet installing galactic-cni onto /opt/cni/bin via hostPath
+│   └── cni/                 # hostNetwork DaemonSet: `init` container stages
+│                            #   galactic-cni/host-device into /opt/cni/bin
+│                            #   and writes the conflist + kubeconfig; `run`
+│                            #   container refreshes credentials and serves
+│                            #   gRPC health checks
 ├── deploy/
 │   └── containerlab/        # ContainerLab lab topology and scripts
 └── containers/
@@ -97,7 +109,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/cni-sequence.md](../cni-sequence.md) for the full CNI ADD/DEL sequence diagram.
+See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (veth ADD, tap ADD, shared DEL).
 
 See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram.
 
@@ -118,6 +130,7 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 | `internal/cni` | `galactic-cni` | CNI cmdAdd / cmdDel / cmdCheck; BGP CRD publish |
 | `internal/cni/ipam` | `galactic-cni` | Built-in IPv6 pool + static allocators |
 | `internal/cni/tap` | `galactic-cni` | Tap interface create/delete (VM workloads) |
+| `internal/installer` | `galactic-cni` | DaemonSet `init`/`run` logic: binary staging, conflist/kubeconfig templating, credential refresh, gRPC health server |
 | `internal/plumbing/intf` | both | Interface naming, base62↔hex encoding |
 | `internal/plumbing/srv6` | both | SRv6 ingress route add/del (END.DT46) |
 | `internal/plumbing/vrf` | both | Linux VRF create/delete/lookup |
@@ -129,21 +142,36 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 
 ### `cmd/galactic-cni/main.go` — CNI plugin
 
-A cobra/viper command, not a bare `skel.PluginMain` call. `newRootCommand()` builds
-a root command with `--node-name`/`-n` and `--enable-local-ipam` flags (bound to
-`GALACTIC_CNI_NODE_NAME` or `NODE_NAME`, and `GALACTIC_CNI_ENABLE_LOCAL_IPAM`), plus
-`--build-info` and `--version`/`-V` utility flags. On `RunE`:
+A cobra command (no viper — see External Dependencies below) with three roles under
+one binary: the CNI plugin invocation itself (root command, invoked by the container
+runtime per the CNI spec), and two DaemonSet-lifecycle subcommands (`init`, `run`) that
+wrap `internal/installer`.
 
-1. Handle `--build-info`/`--version` and return early if set.
-2. If `CNI_COMMAND=VERSION`, encode supported CNI spec versions and return — this
-   bypasses config validation since `--node-name` isn't needed for a VERSION query.
-3. Validate config (`--node-name` required).
-4. Re-export the resolved node name into `NODE_NAME` (the `internal/cni` package
-   reads `os.Getenv("NODE_NAME")` directly).
-5. Call `cni.SetEnableLocalIPAM(...)`, then `cni.RunPlugin()`, which hands control
-   to `skel.PluginMainFuncs` (ADD/DEL/CHECK read from stdin per the CNI spec).
+`newRootCommand()` builds a root command with a persistent `--conf-file` flag
+(default `cni.DefaultConfFile`, `/etc/cni/net.d/10-galactic.conflist`) plus
+`--build-info` and `--version`/`-V` utility flags. There is no `--node-name` or
+`--enable-local-ipam` flag on this path anymore — those are resolved entirely inside
+`internal/cni` at ADD/DEL/CHECK/STATUS time (see Configuration below). On `RunE`:
 
-See [docs/cni-sequence.md](../cni-sequence.md) for the full ADD/DEL sequence.
+1. `PersistentPreRunE` overrides `cni.ConfFile` from `--conf-file` if set.
+2. Handle `--build-info`/`--version` and return early if set.
+3. If `CNI_COMMAND=VERSION`, encode supported CNI spec versions and return.
+4. Otherwise call `cni.RunPlugin()`, which hands control to `skel.PluginMainFuncs`
+   (ADD/DEL/CHECK/STATUS read from stdin per the CNI spec); `internal/cni/config.go`'s
+   `parseConf()` resolves node name, kubeconfig, namespace, and log file on every
+   invocation (conflist → env vars → API auto-detect, in that precedence).
+
+Two subcommands support the DaemonSet (see Known Constraints below for the manifest):
+
+- `init` — `--node-name`/`-n` flag (or `GALACTIC_CNI_NODE_NAME`/`NODE_NAME` env),
+  calls `installer.Bootstrap(ctx, nodeName)`: stages the `galactic-cni`/`host-device`
+  binaries onto the host, does a one-shot dual-stack node-identity check against the
+  Kubernetes API, and writes `ca.crt`/kubeconfig plus the static conflist.
+- `run` — `--grpc-health-port` flag (default `5180`), calls `installer.Run(ctx,
+  grpcHealthPort)`: serves gRPC health checks and periodically refreshes the
+  kubeconfig token and rotates the CNI log file.
+
+See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full ADD/DEL sequence.
 
 ### `cmd/galactic-router/main.go` / `root.go` — Router daemon
 
@@ -197,22 +225,33 @@ See [docs/router/configuration.md](../router/configuration.md) for the full refe
 |-----------------|----------|-------------------------------------------------------------------------|
 | `vpc`           | string   | Base62-encoded 48-bit VPC identifier                                    |
 | `vpcattachment` | string   | Base62-encoded 16-bit VPCAttachment identifier                          |
-| `interface_type`| string   | `veth` (default) or `tap`; tap mode omits IPAM and guest-side config   |
-| `srv6_sid`      | string   | Optional pre-computed USID (/128) for this endpoint, bare IPv6 or `/128` CIDR; SRv6 ingress setup is skipped when empty or in tap mode |
-| `namespace`     | string   | Kubernetes namespace for BGP CRDs; defaults to `default`               |
-| `mtu`           | int      | MTU for the veth pair; 0 uses kernel default                            |
-| `terminations`  | array    | Static routes to install on the host-side veth (`network`, `via`)      |
-| `ipam`          | object   | Built-in IPv6 pool/static allocator config (Galactic has no external IPAM delegation); ignored in tap mode. See [docs/cni/configuration.md](../cni/configuration.md). |
+| `interface_type`| string   | `veth` (default) or `tap`; tap mode omits guest-side/host-device config but still runs IPAM and SRv6/BGP publish (see the ADD result section below) |
+| `namespace`     | string   | Kubernetes namespace for BGP CRDs; resolution order is this field → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` (from the conflist) → `DefaultNamespace` (`galactic-system`) |
+| `mtu`           | int      | MTU for the host-side interface (veth pair or tap); 0 uses kernel default |
+| `terminations`  | array    | Static routes to install on the host-side interface (`network`, `via`) |
+| `ipam`          | object   | Built-in IPv6 pool/static allocator config (Galactic has no external IPAM delegation); used identically in `veth` and `tap` mode — `tap`'s `cmdAdd` calls `allocateIPAM()` unconditionally, so omitting this without `GALACTIC_CNI_ENABLE_LOCAL_IPAM` set is not safely tolerated in tap mode. See [docs/cni/configuration.md](../cni/configuration.md). |
 
 ### galactic-cni environment variables
 
-| Variable                          | Required | Description                                                       |
-|------------------------------------|----------|--------------------------------------------------------------------|
-| `GALACTIC_CNI_NODE_NAME`          | Yes*     | Kubernetes node name; used to look up the owning BGPRouter         |
-| `NODE_NAME`                        | Yes*     | Accepted fallback for node name; also what `internal/cni` reads directly at runtime (the CLI layer re-exports the resolved value into this var) |
-| `GALACTIC_CNI_ENABLE_LOCAL_IPAM`  | No       | Enables the built-in IPv6 pool allocator when no explicit `ipam` block is configured (default `false`) |
+There is no longer a `--node-name`/`--enable-local-ipam` CLI flag on the plugin
+invocation path (those flags now only exist on the `init`/`run` installer
+subcommands, and only `init`'s `--node-name` overlaps in purpose). `parseConf()`
+(`internal/cni/config.go`) resolves each setting below on every ADD/DEL/CHECK/STATUS
+call, in the listed precedence, and re-exports the result as a process env var for
+the rest of the invocation:
 
-\* One of `GALACTIC_CNI_NODE_NAME`/`NODE_NAME` or `--node-name` is required.
+| Variable                          | Resolution precedence (highest first)                                                                 | Default |
+|------------------------------------|--------------------------------------------------------------------------------------------------------|---------|
+| Node name (`NODE_NAME`)            | `GALACTIC_CNI_NODE_NAME` → `NODE_NAME` → `HostConf.NodeName` (conflist) → `detectNodeNameFromAPI()` (matches local interface addrs against Node `InternalIP`) | _(error if still empty)_ |
+| Kubeconfig (`KUBECONFIG`)          | `GALACTIC_CNI_KUBECONFIG` → `HostConf.Kubeconfig` (conflist)                                            | `/var/lib/galactic/kubeconfig` |
+| Namespace                          | `conf.Namespace` (CNI config JSON) → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` (conflist)         | `galactic-system` |
+| Log file                           | `GALACTIC_CNI_LOG_FILE` → `HostConf.LogFile` (conflist)                                                 | `/var/log/galactic/galactic-cni.log` |
+| `GALACTIC_CNI_ENABLE_LOCAL_IPAM`  | Read directly as an env var in `parseConf()` (no conflist or CLI-flag equivalent)                       | `false` |
+
+`HostConf` (`node_name`, `kubeconfig`, `namespace`, `log_file`) is the JSON shape
+the `init` installer subcommand writes into the `galactic-cni`-typed plugin entry
+of the conflist at `--conf-file` (see `internal/installer/installer.go` and
+Entry Points above).
 
 ### galactic-cni ADD result
 
@@ -244,16 +283,23 @@ On a successful ADD, the plugin returns a CNI spec v1.0.0 result with the follow
 The VRF dummy interface (`G{vpc}{att}V`) is **not** reported — it is pre-existing infrastructure created by the `vrf.Add()` plumbing function, not by the CNI attachment itself.
 
 This is the `veth`-mode result. In `tap` mode the result has a single interface (the
-host-side tap, empty sandbox) with no `ips`/`routes` — no guest endpoint is reported
-since the fd is handed off to the VM hypervisor, not moved into a container netns.
+host-side tap, empty sandbox, index `0`) — there is no guest interface entry since the fd
+is handed off to the VM hypervisor, not moved into a container netns. Tap mode is **not**
+"no IPAM, no BGP": `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM()` to allocate
+a subnet/gateway and `configureHostGateway()` to assign it on the host tap, includes the
+resulting `ips`/`routes` in the tap result (`buildTapResult`, interface index `0`), and then
+calls `publishBGPStateK8s()` to create the SRv6 ingress route and
+`BGPVRFInstance`/`BGPAdvertisement` CRDs — the same BGP publish step veth mode uses. The
+only things tap mode skips are host-device delegation and guest-netns configuration, since
+there is no container network namespace to move an interface into.
 
 The result is printed to Multus **before** SRv6 ingress setup and BGP CRD publish run
-(see [docs/cni-sequence.md](../cni-sequence.md)) — a successful ADD response does not
+(see [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md)) — a successful ADD response does not
 guarantee the BGPAdvertisement/BGPVRFInstance CRDs exist yet.
 
 On DEL, the result contains only `cniVersion` (empty result; DEL only deallocates the
 pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see the
-`cmdDel` note in [docs/cni-sequence.md](../cni-sequence.md) and Known Constraints below).
+`cmdDel` note in [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) and Known Constraints below).
 
 ---
 
@@ -275,6 +321,7 @@ pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see t
 | `internal/cni/route`          | galactic-cni    | Host-side static route add/delete via netlink                                                        | No         |
 | `internal/cni/tap`            | galactic-cni    | Tap interface create/delete for VM workloads (Kata, Firecracker, QEMU)                                | No         |
 | `internal/cni/veth`           | galactic-cni    | veth pair create/delete                                                                               | No         |
+| `internal/installer`          | galactic-cni    | DaemonSet `init`/`run` support: binary staging, node-identity check, conflist/kubeconfig templating, credential refresh ticker, log rotation, gRPC health server | No |
 | `internal/plumbing/intf`      | both            | Deterministic interface naming (`G{vpc9}{att3}V/H/G`); base62↔hex encoding | No |
 | `internal/plumbing/srv6`      | galactic-cni    | SRv6 END.DT46 ingress route add/delete via netlink                                                   | No         |
 | `internal/plumbing/vrf`       | galactic-cni    | Linux VRF create/delete/lookup via netlink                                                           | No         |
@@ -290,7 +337,7 @@ pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see t
 | `go.datum.net/network`                  | bumped frequently | BGP CRD API types (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance) |
 | `sigs.k8s.io/controller-runtime`       | v0.24.1  | Reconciler framework, manager, field indexes             |
 | `github.com/spf13/cobra`               | v1.10.2  | CLI command/flag handling for both binaries              |
-| `github.com/spf13/viper`               | v1.21.0  | Config resolution (flags/env/defaults) for both binaries |
+| `github.com/spf13/viper`               | v1.21.0  | Config resolution (flags/env/defaults) for `galactic-router` only; `galactic-cni` resolves config itself (conflist/env/API auto-detect in `internal/cni/config.go`) and does not import viper |
 | `github.com/containernetworking/cni`   | v1.3.0   | CNI plugin spec, skel, invoke                            |
 | `github.com/containernetworking/plugins` | v1.9.1 | `host-device` plugin, delegated to for moving the guest veth into the pod netns |
 | `github.com/vishvananda/netlink`        | pinned pseudo-version | Linux netlink: VRF, veth, SRv6 routes           |
@@ -304,7 +351,7 @@ pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see t
 
 ## Key Design Decisions
 
-- **USID per endpoint.** Each (VPC, VPCAttachment) pair is assigned a unique /128 USID (via the CNI config's `srv6_sid` field, pre-computed upstream). The CNI installs an END.DT46 decap route for that /128 and stores it as an annotation for `galactic-router` to use as the EVPN GWIPAddress. VPC identity is not encoded in the SID itself — VPC scoping comes from the BGPVRFInstance's route target instead.
+- **USID per endpoint, router-side computation.** Each (VPC, VPCAttachment) pair is assigned a unique /128 USID computed entirely by the CNI (`resolveSRv6SID`/`srv6.ComputeSID`) from the owning `BGPRouter`'s `srv6Locator` + `nodeID` plus this attachment's VRFID — there is no config-supplied SID field. The CNI installs an END.DT46 decap route for that /128. VPC identity is not encoded in the SID itself — VPC scoping comes from the BGPVRFInstance's route target instead.
 - **Base62 interface names.** Kernel interface names use the format `G{9-char-vpc-base62}{3-char-att-base62}{suffix}` (suffix: `V` = VRF, `H` = host veth/tap, `G` = guest veth pre-move), fitting in the 15-character kernel limit. The hex form is used for BGP route targets; base62 for kernel interfaces.
 - **GoBGP embedded, lazy-started.** GoBGP runs in-process (`--mode=tenant` only) and starts only when the first `BGPRouter` is reconciled for that router; `Apply` re-runs on every subsequent reconcile too (subject to hash-based no-op suppression), re-applying peers/VRFs/EVPN/policies each time. `listenPort` defaults to `179`; `-1` (outbound-only) is an operator choice for specific deployments, not the codebase default. ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
 - **Overlay BGP port.** galactic-router peers connect outbound on port `1790` by default (configurable per-peer via `BGPPeer.spec.remotePort`). Port `179` is occupied by the underlay FRR `bgpd` on every node, so the overlay uses a non-conflicting port. The `BGPPeer` CRD defaults `remotePort` to `179` (the IANA BGP port); galactic-router overrides this to `1790` when the field is unset, so existing CRDs without an explicit value continue to work. Set `remotePort: 179` explicitly when peering with external BGP speakers that listen on the standard port.
@@ -321,7 +368,7 @@ pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see t
 
 | Layer      | Command          | Framework           | Scope                                                                |
 |------------|------------------|---------------------|------------------------------------------------------------------------|
-| Unit       | `task test:unit` | `go test -race`     | `internal/cni` (`cni_test.go`, `bgp_test.go`, `netns_test.go` — `buildResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`), `internal/cni/{ipam,tap,veth}`, `internal/plumbing/srv6`, `internal/gc`, `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
+| Unit       | `task test:unit` | `go test -race`     | `internal/cni` (`cni_test.go`, `bgp_test.go`, `netns_test.go` — `buildResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`), `internal/cni/{ipam,tap,veth}`, `internal/installer` (`installer_test.go` — `Bootstrap`/`Run` with mocked k8s client and netlink/host paths), `internal/plumbing/srv6`, `internal/gc`, `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
 | E2E        | `task test:e2e`  | Kind + `go test`    | Full BGPRouter lifecycle in a Kind cluster; builds and loads image    |
 | CI full    | `task ci`        | all of the above    | lint → build → test:unit → test:e2e                                  |
 
@@ -341,7 +388,7 @@ Runs on every PR and push to `main`. Two tiers:
 **Publish pipeline:** `.github/workflows/publish.yaml`, modeled on the `compute` repo's. Runs on every push and on published releases, via reusable `datum-cloud/actions` workflows: `publish-galactic-cni-image` and `publish-galactic-router-image` each build and push their own image (`ghcr.io/datum-cloud/galactic-cni`, `ghcr.io/datum-cloud/galactic-router`), and `publish-kustomize-bundles` (which `needs` both image jobs) pushes `config/` as an OCI Kustomize bundle (`ghcr.io/datum-cloud/galactic-kustomize`), using the `images` input (`datum-cloud/actions` v1.20.0+) to stamp each job's real published tag into `config/cni` and `config/router/base` respectively — the bundle ships with matching versioned image references, not `:latest`. This replaces the old single-image `.github/workflows/release.yaml` (removed — see history below) with two per-binary images, matching the split `deploy/containerlab/` already used for local dev.
 
 **Container images:**
-- `containers/galactic-cni/Dockerfile` — multi-stage build (golang builder → distroless → final Alpine stage for `iproute2`/`nsenter`); builds `galactic-cni` plus the delegated `host-device` CNI plugin binary, `ENTRYPOINT ["/galactic-cni"]`. Used both by `task test:e2e` (`scripts/ci.sh e2etest` builds it, tags `galactic-cni:e2e`, `kind load`s it into the ephemeral e2e cluster) and by `publish.yaml` (pushed as `ghcr.io/datum-cloud/galactic-cni`). The Alpine/`iproute2` final stage is a superset of what production needs (`install.sh` only needs `/bin/sh`, `cp`, `chmod`, `mv`) but reusing the e2e-tested artifact for publish is preferred over maintaining a second, untested variant.
+- `containers/galactic-cni/Dockerfile` — multi-stage build (golang builder → distroless → final Alpine stage for `iproute2`/`nsenter`); builds `galactic-cni` plus the delegated `host-device` CNI plugin binary, `ENTRYPOINT ["/galactic-cni"]`. Used both by `task test:e2e` (`scripts/ci.sh e2etest` builds it, tags `galactic-cni:e2e`, `kind load`s it into the ephemeral e2e cluster) and by `publish.yaml` (pushed as `ghcr.io/datum-cloud/galactic-cni`). Both the init container (`/galactic-cni init`) and the long-running container (`/galactic-cni run`) run this same image; the DaemonSet no longer shells out to an `install.sh` script, so the Alpine/`iproute2` final stage exists purely for e2e test needs (kernel `ip`/`nsenter` operations exercised via `task test:e2e`) rather than anything the installer subcommands require. Reusing the e2e-tested artifact for publish is preferred over maintaining a second, untested variant.
 - `containers/galactic-router/Dockerfile` — golang builder → `gcr.io/distroless/static:nonroot`, `ENTRYPOINT ["/galactic-router"]`. No shell or CLI tools: `galactic-router` drives VRF/SRv6/route/BGP state entirely through the netlink and GoBGP Go libraries, never shells out. Pushed by `publish.yaml` as `ghcr.io/datum-cloud/galactic-router`.
 
 **History:** the original `.github/workflows/release.yaml` built and pushed a single `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` image from a shared `containers/galactic/Dockerfile`, but that image only ever built `galactic-cni` while `config/router/base/daemonset.yaml` ran `command: [/galactic-router]` against it — the image advertised a binary it never built. Both were removed. `publish.yaml` and the two per-binary Dockerfiles above fix this by building each binary into its own image, so `config/cni/daemonset.yaml` and `config/router/base/daemonset.yaml` now reference `ghcr.io/datum-cloud/galactic-cni:latest` and `ghcr.io/datum-cloud/galactic-router:latest` respectively — matching images, matching binaries.
@@ -355,7 +402,7 @@ Runs on every PR and push to `main`. Two tiers:
 - **`cmdDel` does not tear down shared kernel/CRD state.** By design (see Key Design Decisions above) — cleanup of VRF, veth/tap, routes, SRv6 ingress, and BGP CRDs is deferred to `galactic-router`'s asynchronous GC controller, not performed synchronously in `cmdDel`.
 - **`internal/plumbing/vrf` has no unit tests.** It requires `CAP_NET_ADMIN` and a real kernel. `internal/cni` and `internal/plumbing/srv6` do now have unit coverage for their pure-logic paths. `internal/plumbing/intf` is fully unit-testable (pure functions only). Kernel-path coverage otherwise comes from the e2e suite (`task test:e2e`).
 - **`--mode=transit` is unimplemented.** Accepted by CLI/env validation, but `runCmd` returns an error at startup ("mode=transit is not yet supported").
-- **`galactic-cni`'s install DaemonSet requires two writable host paths.** `config/cni/daemonset.yaml`'s `install.sh` (`config/cni/configmap.yaml`) writes the CNI binaries to `/opt/cni/bin` and a kubeconfig it maintains for kubelet-exec'd CNI invocations to `/var/lib/galactic` (chosen over `/etc/galactic` specifically so it lands under `/var`, the one path immutable-root distros like Talos allow hostPath writes to without a host-level `extraMounts` entry). `/opt/cni/bin` is fixed by the CNI/kubelet plugin-discovery convention and can't be relocated by this DaemonSet alone — on Talos it needs its own `extraMounts` entry in the machine config if it isn't writable by default.
+- **`galactic-cni`'s install DaemonSet is a Go installer, not a shell script.** `config/cni/configmap.yaml`/`install.sh` were deleted; `config/cni/daemonset.yaml` now runs `hostNetwork: true` with an `install-cni` init container (`command: ["/galactic-cni", "init"]`, calling `installer.Bootstrap`) and a `credential-refresh` main container (`command: ["/galactic-cni", "run"]`, calling `installer.Run`), both on the same image (see CI/CD above). `Bootstrap` writes the CNI binaries to `/opt/cni/bin`, the static conflist to `/etc/cni/net.d/10-galactic.conflist`, and `ca.crt`/kubeconfig to `/var/lib/galactic` (chosen over `/etc/galactic` specifically so it lands under `/var`, the one path immutable-root distros like Talos allow hostPath writes to without a host-level `extraMounts` entry); `Run` refreshes the kubeconfig token every 300s and rotates the CNI log once it exceeds 10MB. `/opt/cni/bin` is fixed by the CNI/kubelet plugin-discovery convention and can't be relocated by this DaemonSet alone — on Talos it needs its own `extraMounts` entry in the machine config if it isn't writable by default. The `run` container also serves gRPC health checks on port `5180` (`livenessProbe`/`readinessProbe` in the DaemonSet spec), and `config/cni/rbac.yaml` grants `get` on `nodes` for `Bootstrap`'s node-identity check.
 
 ---
 
@@ -366,7 +413,9 @@ Runs on every PR and push to `main`. Two tiers:
 | Concern                                    | Start here                                                   |
 |--------------------------------------------|--------------------------------------------------------------|
 | CNI attach/detach flow                     | `internal/cni/ops_add.go:cmdAdd`, `internal/cni/ops_del.go:cmdDel` (`internal/cni/cni.go` only holds `RunPlugin`) |
+| CNI runtime config resolution (conflist/env/API auto-detect) | `internal/cni/config.go:parseConf`, `loadHostConf`, `detectNodeNameFromAPI` |
 | BGP CRD publish (VRF + advertisement)      | `internal/cni/bgp.go:publishBGPState`                        |
+| CNI DaemonSet install/refresh              | `internal/installer/installer.go:Bootstrap` (init container), `internal/installer/installer.go:Run` (long-running container) |
 | CRD → BGP translation                      | `internal/reconcile/reconcile.go:BuildDesiredRouter`         |
 | BGP runtime application (GoBGP)            | `internal/runtime/gobgp/runtime.go:Apply`                   |
 | BGP peer / VRF / advertisement / policy CRUD | `internal/runtime/gobgp/peers.go`, `runtime.go` (`applyVRFs`), `paths.go`, `policies.go` |

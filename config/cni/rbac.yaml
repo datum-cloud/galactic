@@ -12,6 +12,11 @@ rules:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["get"]
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

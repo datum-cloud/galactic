@@ -17,18 +17,26 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// configureIPAM allocates a subnet and configures the guest interface inside the
-// container network namespace. When enableLocalIPAM is true and no explicit
-// ipam block is configured, falls back to a built-in pool allocator using
-// default pool CIDR and subnet length.
-func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string) (*ipamResult, error) {
+// allocateIPAM allocates a subnet and gateway for the given container. This is
+// interface-agnostic — it does not touch any kernel state or network namespaces.
+// When enableLocalIPAM is true and no explicit ipam block is configured, falls
+// back to a built-in pool allocator using default pool CIDR and subnet length.
+func allocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf) (*ipamResult, error) {
 	var pool *ipam.PoolAllocator
 	var subnet *net.IPNet
 	var err error
 
+	// pluginConf.IPAM is nil whenever the CNI config omits the "ipam" block
+	// entirely (e.g. tap mode relying solely on --enable-local-ipam); fall
+	// back to a zero-value IPAM so field access below is nil-safe.
+	var ipamConf IPAM
+	if pluginConf.IPAM != nil {
+		ipamConf = *pluginConf.IPAM
+	}
+
 	// When local IPAM is enabled but no explicit ipam type is configured,
 	// use the built-in pool allocator with defaults.
-	poolType := pluginConf.IPAM.Type
+	poolType := ipamConf.Type
 	if poolType == "" && enableLocalIPAM {
 		poolType = ipamTypePool
 	}
@@ -36,7 +44,7 @@ func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string)
 	switch poolType {
 	case "static":
 		alloc := ipam.NewStaticAllocator()
-		allocIP, err := alloc.Allocate(args.ContainerID, pluginConf.IPAM.StaticIP)
+		allocIP, err := alloc.Allocate(args.ContainerID, ipamConf.StaticIP)
 		if err != nil {
 			return nil, fmt.Errorf("allocate static IP: %w", err)
 		}
@@ -45,9 +53,9 @@ func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string)
 			Mask: net.CIDRMask(64, 128),
 		}
 	case ipamTypePool:
-		poolCIDR := pluginConf.IPAM.Pool
-		gateway := pluginConf.IPAM.Gateway
-		subnetLen := pluginConf.IPAM.SubnetLen
+		poolCIDR := ipamConf.Pool
+		gateway := ipamConf.Gateway
+		subnetLen := ipamConf.SubnetLen
 		if poolCIDR == "" && enableLocalIPAM {
 			poolCIDR = localIPAMDefaultPool
 		}
@@ -63,7 +71,7 @@ func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string)
 			return nil, fmt.Errorf("allocate from pool: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("unknown IPAM type: %s", pluginConf.IPAM.Type)
+		return nil, fmt.Errorf("unknown IPAM type: %s", ipamConf.Type)
 	}
 
 	var gateway net.IP
@@ -80,15 +88,29 @@ func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string)
 		routes = append(routes, defaultRoute)
 	}
 
-	if err := configureInterfaceInNetns(args.Netns, guestName, subnet, gateway); err != nil {
-		return nil, err
-	}
-
 	return &ipamResult{
 		subnet:  subnet,
 		gateway: gateway,
 		routes:  routes,
 	}, nil
+}
+
+// configureIPAM allocates a subnet and configures the guest interface inside the
+// container network namespace. This is veth-only; for tap mode, use allocateIPAM
+// directly (the VM manages its own guest interface). When enableLocalIPAM is
+// true and no explicit ipam block is configured, falls back to a built-in pool
+// allocator using default pool CIDR and subnet length.
+func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string) (*ipamResult, error) {
+	ipamResult, err := allocateIPAM(args, pluginConf)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := configureInterfaceInNetns(args.Netns, guestName, ipamResult.subnet, ipamResult.gateway); err != nil {
+		return nil, err
+	}
+
+	return ipamResult, nil
 }
 
 // deallocateIPAM releases the IPAM allocation for the given container.
@@ -104,18 +126,23 @@ func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf, k8s client.Clien
 		return
 	}
 
-	ipamType := pluginConf.IPAM.Type
+	var ipamConf IPAM
+	if pluginConf.IPAM != nil {
+		ipamConf = *pluginConf.IPAM
+	}
+
+	ipamType := ipamConf.Type
 	if ipamType == "" && enableLocalIPAM {
 		ipamType = ipamTypePool
 	}
 
 	switch ipamType {
 	case ipamTypePool:
-		poolCIDR := pluginConf.IPAM.Pool
+		poolCIDR := ipamConf.Pool
 		if poolCIDR == "" && enableLocalIPAM {
 			poolCIDR = localIPAMDefaultPool
 		}
-		pa, err := ipam.NewPoolAllocator(poolCIDR, pluginConf.IPAM.Gateway, pluginConf.IPAM.SubnetLen)
+		pa, err := ipam.NewPoolAllocator(poolCIDR, ipamConf.Gateway, ipamConf.SubnetLen)
 		if err != nil {
 			// Pool creation failed — allocation was never completed, nothing to clean up.
 			return
@@ -130,9 +157,6 @@ func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf, k8s client.Clien
 // from the BGPAdvertisement CRD annotation. Returns empty string if not found.
 func getAllocatedSubnetFromCRD(containerID string, pluginConf *PluginConf, k8s client.Client) string {
 	namespace := pluginConf.Namespace
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
