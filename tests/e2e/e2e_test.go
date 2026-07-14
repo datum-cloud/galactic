@@ -159,7 +159,7 @@ func TestKernelCapabilities(t *testing.T) {
 // TestCNITapInterface exercises the galactic CNI plugin in tap interface mode.
 // It creates a pod that invokes the CNI plugin with CNI_COMMAND=ADD and a tap
 // config, then validates the CNI result JSON: a single host interface with an
-// empty sandbox and no IP addresses.
+// empty sandbox and the host-side gateway/subnet IPAM allocated for it.
 //
 // This test requires a cluster node with VRF/tap kernel support (the same
 // prerequisites checked by TestKernelCapabilities). It will fail rather than
@@ -173,6 +173,12 @@ func TestCNITapInterface(t *testing.T) {
 	// Start a shell so we can later exec the CNI plugin with stdin.
 	// The galactic-cni entrypoint is overridden to "sh" so the pod stays
 	// running and we can pipe the CNI config via kubectl exec -i.
+	// Run as the galactic-cni ServiceAccount so the CNI plugin's in-cluster
+	// client is bound by the galactic-cni ClusterRole (config/cni/rbac.yaml)
+	// when it lists/creates BGPRouter, BGPAdvertisement, and BGPVRFInstance.
+	// hostNetwork is required too: net.vrf.strict_mode (enabled on the Kind
+	// node in scripts/ci.sh) is per-netns, and the SEG6Local VRFTABLE route
+	// this test exercises needs it set in whichever netns the route lands in.
 	_, err := kubectl(
 		t.Context(),
 		"run", name,
@@ -180,6 +186,7 @@ func TestCNITapInterface(t *testing.T) {
 		"--image-pull-policy=Never",
 		"--restart=Never",
 		"--privileged",
+		"--overrides={\"spec\":{\"serviceAccountName\":\"galactic-cni\",\"hostNetwork\":true}}",
 		"--command", "--",
 		"sleep", "infinity",
 	)
@@ -201,9 +208,16 @@ func TestCNITapInterface(t *testing.T) {
   "vpc": "1",
   "vpcattachment": "1",
   "interface_type": "tap",
-  "srv6_locator": "2001:db8:ff01::/48"
+  "srv6_locator": "2001:db8:ff01::/48",
+  "ipam": {
+    "type": "pool"
+  }
 }`
 	// Step 1: write the CNI config and a wrapper script into the pod.
+	// Tap mode now runs IPAM allocation unconditionally (matching veth mode).
+	// GALACTIC_CNI_ENABLE_LOCAL_IPAM fills in default pool/subnet_len when
+	// omitted, but parseConf still requires an explicit "ipam" block to be
+	// present in the config (see docs/cni/configuration.md).
 	script := `#!/bin/sh
 ip netns add e2e-tap-ns
 CNI_NETNS=/var/run/netns/e2e-tap-ns \
@@ -212,6 +226,7 @@ CNI_CONTAINERID=e2e-tap-001 \
 CNI_IFNAME=eth0 \
 CNI_PATH=/opt/cni/bin \
 NODE_NAME=` + nodeName() + ` \
+GALACTIC_CNI_ENABLE_LOCAL_IPAM=true \
 	/galactic-cni < /tmp/cni.json
 `
 	_, err = kubectl(t.Context(), "exec", name, "--",
@@ -265,12 +280,15 @@ NODE_NAME=` + nodeName() + ` \
 		t.Errorf("interfaces[0].sandbox = %q, want empty (tap has no guest endpoint)", sandbox)
 	}
 
-	// Tap mode does not configure guest IPs.
-	if ips, ok := result["ips"]; ok && ips != nil {
-		ipsArr, ok := ips.([]any)
-		if ok && len(ipsArr) > 0 {
-			t.Errorf("CNI result has %d IP(s), want 0 for tap mode", len(ipsArr))
-		}
+	// Tap mode now runs IPAM allocation like veth mode (the guest still
+	// configures its own IP; this is the host-side gateway/subnet recorded
+	// against the host tap interface).
+	ips, ok := result["ips"].([]any)
+	if !ok {
+		t.Fatalf("CNI result missing or invalid \"ips\" field; got: %v", result)
+	}
+	if len(ips) != 1 {
+		t.Errorf("ips count = %d, want 1", len(ips))
 	}
 }
 
