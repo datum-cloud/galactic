@@ -26,8 +26,7 @@ spec:
                     operator: DoesNotExist
       initContainers:
         - name: frr-init
-          image: frr:10.6.1
-          imagePullPolicy: Never
+          image: quay.io/frrouting/frr:10.2.0
           command:
             - sh
             - -c
@@ -51,14 +50,7 @@ spec:
               mountPath: /var/log/frr
       containers:
         - name: frr
-          image: frr:10.6.1
-          imagePullPolicy: Never
-          command:
-            - sh
-            - -c
-            - |
-              /usr/lib/frr/frrinit.sh start
-              exec tail -f /dev/null
+          image: quay.io/frrouting/frr:10.2.0
           securityContext:
             capabilities:
               add:
