@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -63,6 +64,10 @@ func hostDevice(command string, skelArgs *skel.CmdArgs, pluginConf *PluginConf) 
 		IfName:        skelArgs.IfName,
 		Path:          skelArgs.Path,
 	}
+	device := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
+	slog.Debug("host-device: delegating", "command", command, "containerID", skelArgs.ContainerID,
+		"device", device, "ifName", skelArgs.IfName)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result, err := invokeExec.ExecPlugin(ctx, hostDevicePath, conf, invokeArgs.AsEnv())
@@ -73,5 +78,6 @@ func hostDevice(command string, skelArgs *skel.CmdArgs, pluginConf *PluginConf) 
 		return errors.New("host-device plugin returned nil result")
 	}
 	_ = result // Result validated as non-nil; host-device is a delegation helper, not an IPAM provider.
+	slog.Debug("host-device: delegation succeeded", "command", command, "containerID", skelArgs.ContainerID)
 	return nil
 }

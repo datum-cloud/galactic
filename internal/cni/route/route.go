@@ -6,6 +6,7 @@ package route
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/vishvananda/netlink"
@@ -53,7 +54,11 @@ func Add(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
 	if err != nil {
 		return err
 	}
-	return netlink.RouteAdd(route)
+	if err := netlink.RouteAdd(route); err != nil {
+		return err
+	}
+	slog.Debug("route: termination route added", "prefix", prefix, "via", nextHop, "dev", dev, "vrfTable", vrfID)
+	return nil
 }
 
 func Delete(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
@@ -65,5 +70,9 @@ func Delete(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
 	if err != nil {
 		return err
 	}
-	return netlink.RouteDel(route)
+	if err := netlink.RouteDel(route); err != nil {
+		return err
+	}
+	slog.Debug("route: termination route deleted", "prefix", prefix, "via", nextHop, "dev", dev, "vrfTable", vrfID)
+	return nil
 }

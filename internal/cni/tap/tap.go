@@ -10,6 +10,7 @@ package tap
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -74,6 +75,7 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	// Check if tap already exists (crash-recovery or prior partial failure).
 	existingTap, err := netlink.LinkByName(tapName)
 	if err == nil {
+		slog.Warn("tap: found existing tap from a previous ADD attempt, repairing state", "tap", tapName)
 		return repairTap(existingTap, vrfLink, tapName)
 	}
 
@@ -88,6 +90,7 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	if err := netlink.LinkAdd(tap); err != nil {
 		return fmt.Errorf("create tap %q: %w", tapName, err)
 	}
+	slog.Debug("tap: created", "tap", tapName, "mtu", mtu)
 
 	tapLink, err := netlink.LinkByName(tapName)
 	if err != nil {
@@ -102,8 +105,11 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	}
 
 	// Allow forwarded traffic through the tap (bidirectional).
-	if err := updateForwardRule(tapName, "add"); err != nil && !errors.Is(err, errIptablesMissing) {
-		return err
+	if err := updateForwardRule(tapName, "add"); err != nil {
+		if !errors.Is(err, errIptablesMissing) {
+			return err
+		}
+		slog.Warn("tap: iptables binary not available, skipping FORWARD rules", "tap", tapName)
 	}
 
 	// Bring the interface up so the kernel populates sysctl entries.
@@ -116,6 +122,7 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 		return err
 	}
 
+	slog.Debug("tap: enslaved to VRF and up", "tap", tapName, "vrf", vrfName)
 	return nil
 }
 
@@ -131,16 +138,22 @@ func Delete(vpc, vpcAttachment string) error {
 
 	tapLink, err := netlink.LinkByName(tapName)
 	if err != nil {
+		slog.Debug("tap: already gone, nothing to delete", "tap", tapName)
 		return nil // interface already gone — idempotent
 	}
 
-	return netlink.LinkDel(tapLink)
+	if err := netlink.LinkDel(tapLink); err != nil {
+		return err
+	}
+	slog.Debug("tap: deleted", "tap", tapName)
+	return nil
 }
 
 // repairTap verifies and repairs a pre-existing tap interface's state.
 func repairTap(tapLink netlink.Link, vrfLink netlink.Link, tapName string) error {
 	// Verify VRF enslavement.
 	if tapLink.Attrs().MasterIndex != vrfLink.Attrs().Index {
+		slog.Warn("tap: re-enslaving tap to VRF during repair", "tap", tapName)
 		if err := netlink.LinkSetMaster(tapLink, vrfLink); err != nil {
 			return fmt.Errorf("re-enslave tap to VRF: %w", err)
 		}
@@ -153,6 +166,7 @@ func repairTap(tapLink netlink.Link, vrfLink netlink.Link, tapName string) error
 
 	// Bring up if down (ensures sysctl entries are populated).
 	if tapLink.Attrs().Flags&net.FlagUp == 0 {
+		slog.Warn("tap: bringing tap back up during repair", "tap", tapName)
 		if err := netlink.LinkSetUp(tapLink); err != nil {
 			return fmt.Errorf("bring up tap %q: %w", tapName, err)
 		}

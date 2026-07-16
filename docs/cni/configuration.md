@@ -4,15 +4,15 @@
 (or any CNI manager), plus node-local settings resolved at runtime from the
 conflist, environment variables, and (as a last resort) the Kubernetes API.
 
-> Last verified: 2026-07-14 against the current working tree of `internal/cni/config.go`
+> Last verified: 2026-07-16 against the current working tree of `internal/cni/config.go`
 > and `internal/installer/installer.go`.
 
 ## Runtime Configuration
 
 There is no `--node-name` or `--enable-local-ipam` CLI flag on the `galactic-cni`
 plugin invocation itself. Instead, `parseConf()` (`internal/cni/config.go`) resolves
-node name, kubeconfig, namespace, and log file on every ADD/DEL/CHECK/STATUS call,
-reading (in order) the CNI config JSON, environment variables, and a `HostConf`
+node name, kubeconfig, namespace, log file, and log level on every ADD/DEL/CHECK/STATUS
+call, reading (in order) the CNI config JSON, environment variables, and a `HostConf`
 block parsed out of the conflist at `--conf-file` (default
 `/etc/cni/net.d/10-galactic.conflist`). `HostConf` is written by the `galactic-cni init`
 subcommand (`internal/installer.Bootstrap`), which runs as the CNI DaemonSet's init
@@ -21,27 +21,46 @@ for how the DaemonSet stages it.
 
 ### `HostConf` fields (written into the conflist by `galactic-cni init`)
 
-| Field        | JSON key      | Description                                                                 |
-|--------------|---------------|-------------------------------------------------------------------------------|
-| `NodeName`   | `node_name`   | The Kubernetes node name the installer bootstrapped on.                        |
-| `Kubeconfig` | `kubeconfig`  | Path to the kubeconfig `Bootstrap`/`Run` maintain (`/var/lib/galactic/kubeconfig` by default). |
-| `Namespace`  | `namespace`   | Kubernetes namespace for BGP CRDs (`galactic-system` by default).              |
-| `LogFile`    | `log_file`    | Path the plugin logs to (`/var/log/galactic/galactic-cni.log` by default).      |
+| Field        | Description                                                                                                                      |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `NodeName`   | The Kubernetes node name the installer bootstrapped on.                                                                          |
+| `Kubeconfig` | Path to the kubeconfig `Bootstrap`/`Run` maintain (`/var/lib/galactic/kubeconfig` by default).                                   |
+| `Namespace`  | Kubernetes namespace for BGP CRDs (`galactic-system` by default).                                                                |
+| `LogFile`    | Path the plugin logs to (`/var/log/galactic/galactic-cni.log` by default).                                                       |
+| `LogLevel`   | Verbosity of plugin logging: `debug`, `info`, `warn`, or `error` (`info` by default). See [Log verbosity](#log-verbosity) below. |
 
 ### Resolution precedence
 
-| Setting              | Precedence (highest first)                                                                                   | Default (if nothing resolves) |
-|----------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------|
-| Node name            | `GALACTIC_CNI_NODE_NAME` env → `NODE_NAME` env → `HostConf.NodeName` → auto-detect via the Kubernetes API (`detectNodeNameFromAPI`: lists Nodes, matches local interface addresses against `status.addresses[].type=InternalIP`) | _(error: "node name is required")_ |
-| Kubeconfig           | `GALACTIC_CNI_KUBECONFIG` env → `HostConf.Kubeconfig`                                                            | `/var/lib/galactic/kubeconfig` |
-| Namespace            | `namespace` field in the CNI config JSON → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace`                   | `galactic-system`               |
-| Log file             | `GALACTIC_CNI_LOG_FILE` env → `HostConf.LogFile`                                                                 | `/var/log/galactic/galactic-cni.log` |
-| Enable local IPAM    | `GALACTIC_CNI_ENABLE_LOCAL_IPAM` env only (no conflist field, no CLI flag)                                        | `false`                          |
+| Setting           | Precedence (highest first)                                                                                                                                                                                                       | Default (if nothing resolves)        |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Node name         | `GALACTIC_CNI_NODE_NAME` env → `NODE_NAME` env → `HostConf.NodeName` → auto-detect via the Kubernetes API (`detectNodeNameFromAPI`: lists Nodes, matches local interface addresses against `status.addresses[].type=InternalIP`) | _(error: "node name is required")_   |
+| Kubeconfig        | `GALACTIC_CNI_KUBECONFIG` env → `HostConf.Kubeconfig`                                                                                                                                                                            | `/var/lib/galactic/kubeconfig`       |
+| Namespace         | `namespace` field in the CNI config JSON → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace`                                                                                                                                   | `galactic-system`                    |
+| Log file          | `GALACTIC_CNI_LOG_FILE` env → `HostConf.LogFile`                                                                                                                                                                                 | `/var/log/galactic/galactic-cni.log` |
+| Log level         | `GALACTIC_CNI_LOG_LEVEL` env → `HostConf.LogLevel`                                                                                                                                                                               | `info`                               |
+| Enable local IPAM | `GALACTIC_CNI_ENABLE_LOCAL_IPAM` env only (no conflist field, no CLI flag)                                                                                                                                                       | `false`                              |
 
 The resolved node name is re-exported as the `NODE_NAME` process environment variable
 and the resolved kubeconfig as `KUBECONFIG`, since other code in `internal/cni` reads
 those directly. Auto-detection exists to tolerate environments (e.g. Kind-based e2e)
 where the conflist's hostPath mount isn't populated yet.
+
+### Log verbosity
+
+`setupLogging()` (`internal/cni/config.go`) builds a JSON `slog` handler at the
+resolved level. Since each CNI invocation is a fresh, short-lived process, this
+level is re-resolved on every ADD/DEL/CHECK/STATUS call — there's no persistent
+daemon to reconfigure at runtime.
+
+| Level            | What's logged                                                                                                                                                                                                                                                                                          |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `debug`          | Everything: per-resource milestones (VRF/interface/route/IPAM ready, BGP CRDs applied, kernel-level veth/tap/route operations) in addition to `info` and above. Use this when troubleshooting a specific ADD/DEL failure.                                                                              |
+| `info` (default) | One line per operation marking start and outcome (`ADD: starting` / `ADD: BGP state published`, `DEL: starting` / `DEL: skipping shared resource cleanup`, `CHECK: starting` / `CHECK: passed`/`failed`, `STATUS: probing API server reachability` / `STATUS: ready`), plus all `warn`/`error` events. |
+| `warn`           | Recoverable anomalies only: stale-state repairs (leftover veth/tap from a prior failed ADD), iptables-missing fallback, k8s API retries.                                                                                                                                                               |
+| `error`          | Failures only.                                                                                                                                                                                                                                                                                         |
+
+An unrecognized `log_level` value does not fail the CNI operation — it logs a
+warning and falls back to `info`.
 
 ### `GALACTIC_CNI_ENABLE_LOCAL_IPAM`
 
@@ -53,11 +72,11 @@ plugin.
 When local IPAM is active but the config does not specify pool parameters,
 the following defaults are used:
 
-| Parameter | Default |
-|---|---|
-| Pool CIDR | `fd00:10:ff01::/48` |
-| Subnet length | `/80` |
-| Gateway | First usable address in the pool (`::1`) |
+| Parameter     | Default                                  |
+| ------------- | ---------------------------------------- |
+| Pool CIDR     | `fd00:10:ff01::/48`                      |
+| Subnet length | `/80`                                    |
+| Gateway       | First usable address in the pool (`::1`) |
 
 If an explicit `ipam` block is present in the CNI config, it takes precedence
 and this environment variable has no effect on the allocation behavior.
@@ -72,15 +91,15 @@ the standard CNI `PluginConf` with Galactic-specific fields.
 
 ### Top-Level Fields
 
-| Field | JSON Key | Required | Type | Description |
-|---|---|---|---|---|
-| `vpc` | `"vpc"` | **Yes** | `string` | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets. |
-| `vpcattachment` | `"vpcattachment"` | **Yes** | `string` | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming. |
-| `interface_type` | `"interface_type"` | No | `string` | Interface mode: `"veth"` (default, for containers) or `"tap"` (for VMs such as Kata, Firecracker, QEMU). Both modes run IPAM and SRv6/BGP publish; `tap` mode only skips host-device delegation and guest-netns configuration (see the Tap mode section below). |
-| `mtu` | `"mtu"` | No | `int` | MTU for the host-side interface. For `veth` mode this applies to both veth endpoints; for `tap` mode it applies to the tap interface. |
-| `terminations` | `"terminations"` | No | `[]Termination` | Array of static routes to add on the host side (see Termination sub-fields below). |
-| `namespace` | `"namespace"` | No | `string` | Kubernetes namespace used to look up the `BGPRouter` CRD. Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` (conflist) → `galactic-system`. See [Runtime Configuration](#runtime-configuration) above. |
-| `ipam` | `"ipam"` | No* | `IPAM` | IP address management configuration (see IPAM sub-fields below). *Required unless `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — applies identically in `veth` and `tap` mode. In `tap` mode `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM` unconditionally (unlike `veth` mode, which checks first), so omitting both `ipam` and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` currently produces a nil-pointer panic in `tap` mode rather than a clean validation error — always set one or the other for tap. |
+| Field            | Required | Type            | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------- | -------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vpc`            | **Yes**  | `string`        | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets.                                                                                                                                                                                                                                                                                                                                                                                           |
+| `vpcattachment`  | **Yes**  | `string`        | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming.                                                                                                                                                                                                                                                                                                                                                                                              |
+| `interface_type` | No       | `string`        | Interface mode: `"veth"` (default, for containers) or `"tap"` (for VMs such as Kata, Firecracker, QEMU). Both modes run IPAM and SRv6/BGP publish; `tap` mode only skips host-device delegation and guest-netns configuration (see the Tap mode section below).                                                                                                                                                                                                                                           |
+| `mtu`            | No       | `int`           | MTU for the host-side interface. For `veth` mode this applies to both veth endpoints; for `tap` mode it applies to the tap interface.                                                                                                                                                                                                                                                                                                                                                                     |
+| `terminations`   | No       | `[]Termination` | Array of static routes to add on the host side (see Termination sub-fields below).                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `namespace`      | No       | `string`        | Kubernetes namespace used to look up the `BGPRouter` CRD. Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` (conflist) → `galactic-system`. See [Runtime Configuration](#runtime-configuration) above.                                                                                                                                                                                                                                                                   |
+| `ipam`           | No*      | `IPAM`          | IP address management configuration (see IPAM sub-fields below). *Required unless `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — applies identically in `veth` and `tap` mode. In `tap` mode `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM` unconditionally (unlike `veth` mode, which checks first), so omitting both `ipam` and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` currently produces a nil-pointer panic in `tap` mode rather than a clean validation error — always set one or the other for tap. |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
 supported via the embedded `types.PluginConf`.
@@ -116,13 +135,13 @@ subnet/gateway describe only the host-side BGP-advertised state).
 
 ### IPAM Fields
 
-| Field | JSON Key | Required | Type | Description |
-|---|---|---|---|---|
-| `type` | `"type"` | Conditionally required | `string` | `"pool"` or `"static"`. Determines IP allocation strategy. Required whenever an `ipam` block is present; only defaults to `"pool"` when the entire `ipam` block is omitted and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — an `ipam` block with an empty `type` is a hard error. |
-| `pool` | `"pool"` | Conditionally required | `string` | IPv6 CIDR pool (e.g. `"fd00:10:ff01::/48"`) from which subnets are allocated. Required when `type` is `"pool"`. |
-| `gateway` | `"gateway"` | No | `string` | IPv6 gateway address. If omitted, uses the first usable address in the pool (host bits = 1). Must be within the pool CIDR. |
-| `subnet_len` | `"subnet_len"` | No | `int` | Prefix length per allocation. Default is `80` (giving 2^48 addresses per pod subnet). Pool prefix must be <= this value. |
-| `static_ip` | `"static_ip"` | Conditionally required | `string` | A single IPv6 address to assign when `type` is `"static"`. |
+| Field        | Required               | Type     | Description                                                                                                                                                                                                                                                                    |
+| ------------ | ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `type`       | Conditionally required | `string` | `"pool"` or `"static"`. Determines IP allocation strategy. Required whenever an `ipam` block is present; only defaults to `"pool"` when the entire `ipam` block is omitted and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — an `ipam` block with an empty `type` is a hard error. |
+| `pool`       | Conditionally required | `string` | IPv6 CIDR pool (e.g. `"fd00:10:ff01::/48"`) from which subnets are allocated. Required when `type` is `"pool"`.                                                                                                                                                                |
+| `gateway`    | No                     | `string` | IPv6 gateway address. If omitted, uses the first usable address in the pool (host bits = 1). Must be within the pool CIDR.                                                                                                                                                     |
+| `subnet_len` | No                     | `int`    | Prefix length per allocation. Default is `80` (giving 2^48 addresses per pod subnet). Pool prefix must be <= this value.                                                                                                                                                       |
+| `static_ip`  | Conditionally required | `string` | A single IPv6 address to assign when `type` is `"static"`.                                                                                                                                                                                                                     |
 
 #### IPAM `type=pool`
 
@@ -143,10 +162,10 @@ needed.
 
 Each entry in the `terminations` array has the following fields:
 
-| Field | JSON Key | Required | Type | Description |
-|---|---|---|---|---|
-| `network` | `"network"` | **Yes** | `string` | CIDR prefix for a static route (e.g. `"fd00::/48"`). |
-| `via` | `"via"` | No | `string` | Next-hop gateway IP. If omitted, a link-local route is installed via the host-side device. |
+| Field     | Required | Type     | Description                                                                                |
+| --------- | -------- | -------- | ------------------------------------------------------------------------------------------ |
+| `network` | **Yes**  | `string` | CIDR prefix for a static route (e.g. `"fd00::/48"`).                                       |
+| `via`     | No       | `string` | Next-hop gateway IP. If omitted, a link-local route is installed via the host-side device. |
 
 Used in `cmdAdd` to install routes into the VRF table for each termination
 entry. Deleted in `cmdDel` in reverse order.

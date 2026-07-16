@@ -15,6 +15,7 @@ import (
 func cmdDel(args *skel.CmdArgs) error {
 	// DEL is idempotent per the CNI spec: always return success.
 	// Missing resources are not errors.
+	slog.Info("DEL: starting", "containerID", args.ContainerID, "netns", args.Netns)
 
 	// Parse config — if we can't parse it we still return success but
 	// won't be able to clean up any resources.
@@ -26,6 +27,7 @@ func cmdDel(args *skel.CmdArgs) error {
 		_ = types.PrintResult(result, cniVersion100)
 		return nil
 	}
+	vpc, vpcAtt := pluginConf.VPC, pluginConf.VPCAttachment
 
 	// Deallocate the pod's IPAM subnet. This is pod-specific and safe to
 	// release immediately. Applies to both veth and tap modes.
@@ -33,6 +35,9 @@ func cmdDel(args *skel.CmdArgs) error {
 	if hasIPAM {
 		if k8s, err := newK8sClient(); err == nil {
 			deallocateIPAM(args, pluginConf, k8s)
+		} else {
+			slog.Warn("DEL: failed to create k8s client, skipping IPAM deallocation", "err", err,
+				"containerID", args.ContainerID)
 		}
 	}
 
@@ -44,11 +49,8 @@ func cmdDel(args *skel.CmdArgs) error {
 	// The GC runs periodically and removes orphaned resources safely by checking
 	// whether any live container still references them. See gc.CollectOrphanedCRDs
 	// and gc.CollectOrphanedVRFs.
-	vpc, vpcAtt := pluginConf.VPC, pluginConf.VPCAttachment
-	if parseErr == nil {
-		slog.Info("DEL: skipping shared resource cleanup (handled by GC)",
-			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
-	}
+	slog.Info("DEL: skipping shared resource cleanup (handled by GC)",
+		"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
 
 	result := &type100.Result{}
 	_ = types.PrintResult(result, cniVersion100)

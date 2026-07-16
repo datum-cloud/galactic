@@ -51,6 +51,7 @@ type HostConf struct {
 	Kubeconfig string `json:"kubeconfig"`
 	Namespace  string `json:"namespace"`
 	LogFile    string `json:"log_file"`
+	LogLevel   string `json:"log_level,omitempty"`
 }
 
 type conflistEnvelope struct {
@@ -285,7 +286,8 @@ func Bootstrap(ctx context.Context, nodeName string) error {
       "node_name": %q,
       "kubeconfig": "/var/lib/galactic/kubeconfig",
       "namespace": "galactic-system",
-      "log_file": "/var/log/galactic/galactic-cni.log"
+      "log_file": "/var/log/galactic/galactic-cni.log",
+      "log_level": "info"
     }
   ]
 }

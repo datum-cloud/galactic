@@ -117,6 +117,18 @@ func TestBootstrap(t *testing.T) {
 		if conflist.NodeName != "test-node" {
 			t.Errorf("expected node_name test-node, got %s", conflist.NodeName)
 		}
+		if conflist.Kubeconfig != "/var/lib/galactic/kubeconfig" {
+			t.Errorf("expected kubeconfig /var/lib/galactic/kubeconfig, got %s", conflist.Kubeconfig)
+		}
+		if conflist.Namespace != "galactic-system" {
+			t.Errorf("expected namespace galactic-system, got %s", conflist.Namespace)
+		}
+		if conflist.LogFile != "/var/log/galactic/galactic-cni.log" {
+			t.Errorf("expected log_file /var/log/galactic/galactic-cni.log, got %s", conflist.LogFile)
+		}
+		if conflist.LogLevel != "info" {
+			t.Errorf("expected log_level info, got %s", conflist.LogLevel)
+		}
 
 		// Verify kubeconfig written
 		kubeconfig, err := os.ReadFile(filepath.Join(HostEtcDir, "kubeconfig"))

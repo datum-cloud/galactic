@@ -1520,7 +1520,8 @@ func TestLoadHostConf(t *testing.T) {
 				"node_name": "test-worker",
 				"kubeconfig": "/etc/custom-kubeconfig",
 				"namespace": "custom-namespace",
-				"log_file": "/var/log/custom.log"
+				"log_file": "/var/log/custom.log",
+				"log_level": "debug"
 			}
 		]
 	}`
@@ -1542,6 +1543,9 @@ func TestLoadHostConf(t *testing.T) {
 	}
 	if conf.LogFile != "/var/log/custom.log" {
 		t.Errorf("LogFile = %q, want %q", conf.LogFile, "/var/log/custom.log")
+	}
+	if conf.LogLevel != logLevelDebug {
+		t.Errorf("LogLevel = %q, want %q", conf.LogLevel, logLevelDebug)
 	}
 }
 
@@ -1586,7 +1590,7 @@ func TestLoggingSetup(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "sub", "test.log")
 
 	// Setup logging, which should create the directory and open/write to the file.
-	setupLogging(logPath)
+	setupLogging(logPath, DefaultLogLevel)
 	slog.Info("test log message")
 
 	// Read the log file to verify the message was logged.
@@ -1596,5 +1600,74 @@ func TestLoggingSetup(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "test log message") {
 		t.Fatalf("log content does not contain message: %s", string(data))
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    slog.Level
+		wantErr bool
+	}{
+		{"empty defaults to info", "", slog.LevelInfo, false},
+		{"debug", logLevelDebug, slog.LevelDebug, false},
+		{"info", DefaultLogLevel, slog.LevelInfo, false},
+		{"warn", logLevelWarn, slog.LevelWarn, false},
+		{"warning alias", logLevelWarning, slog.LevelWarn, false},
+		{"error", logLevelError, slog.LevelError, false},
+		{"case insensitive", "DEBUG", slog.LevelDebug, false},
+		{"surrounding whitespace", "  warn  ", slog.LevelWarn, false},
+		{"unknown falls back to info with error", "verbose", slog.LevelInfo, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseLogLevel(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseLogLevel(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("parseLogLevel(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoggingSetupRespectsLevel(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	setupLogging(logPath, logLevelWarn)
+	slog.Info("should be suppressed at warn level")
+	slog.Warn("should appear at warn level")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "should be suppressed at warn level") {
+		t.Errorf("expected info message to be filtered out at warn level, got: %s", content)
+	}
+	if !strings.Contains(content, "should appear at warn level") {
+		t.Errorf("expected warn message to be present, got: %s", content)
+	}
+}
+
+func TestLoggingSetupInvalidLevelFallsBackToInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	// An invalid level must not fail the CNI operation; it should fall back
+	// to DefaultLogLevel (info) rather than panic or drop all logging.
+	setupLogging(logPath, "verbose")
+	slog.Info("should appear at fallback info level")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), "should appear at fallback info level") {
+		t.Errorf("expected info message to be present after fallback, got: %s", string(data))
 	}
 }

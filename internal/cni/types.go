@@ -57,6 +57,7 @@ type HostConf struct {
 	Kubeconfig string `json:"kubeconfig"`
 	Namespace  string `json:"namespace"`
 	LogFile    string `json:"log_file"`
+	LogLevel   string `json:"log_level,omitempty"`
 }
 
 // ipamResult holds the IPAM allocation details for building the CNI result.
