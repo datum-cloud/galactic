@@ -246,12 +246,16 @@ the rest of the invocation:
 | Kubeconfig (`KUBECONFIG`)          | `GALACTIC_CNI_KUBECONFIG` → `HostConf.Kubeconfig` (conflist)                                            | `/var/lib/galactic/kubeconfig` |
 | Namespace                          | `conf.Namespace` (CNI config JSON) → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` (conflist)         | `galactic-system` |
 | Log file                           | `GALACTIC_CNI_LOG_FILE` → `HostConf.LogFile` (conflist)                                                 | `/var/log/galactic/galactic-cni.log` |
+| Log level                          | `GALACTIC_CNI_LOG_LEVEL` → `HostConf.LogLevel` (conflist)                                               | `info` |
 | `GALACTIC_CNI_ENABLE_LOCAL_IPAM`  | Read directly as an env var in `parseConf()` (no conflist or CLI-flag equivalent)                       | `false` |
 
-`HostConf` (`node_name`, `kubeconfig`, `namespace`, `log_file`) is the JSON shape
-the `init` installer subcommand writes into the `galactic-cni`-typed plugin entry
+`HostConf` (`node_name`, `kubeconfig`, `namespace`, `log_file`, `log_level`) is the JSON
+shape the `init` installer subcommand writes into the `galactic-cni`-typed plugin entry
 of the conflist at `--conf-file` (see `internal/installer/installer.go` and
-Entry Points above).
+Entry Points above). `log_level` (`debug`/`info`/`warn`/`error`) controls how much detail
+`setupLogging()` emits — `info` (the default) logs one line per operation for
+start/outcome plus all warnings/errors; `debug` adds per-resource milestones. See
+[docs/cni/configuration.md#log-verbosity](../cni/configuration.md#log-verbosity).
 
 ### galactic-cni ADD result
 

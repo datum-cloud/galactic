@@ -7,6 +7,7 @@ package veth
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -87,6 +88,8 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	// with no corresponding cmdDel), clean up the stale guest end and recreate
 	// the pair so the guest side is in a known-good state.
 	if existing, err := netlink.LinkByName(hostName); err == nil {
+		slog.Warn("veth: removing stale host veth left behind by a previous ADD attempt",
+			"host", hostName, "guest", guestName)
 		// Remove any stale guest endpoint that may linger from a prior run.
 		if guest, guestErr := netlink.LinkByName(guestName); guestErr == nil {
 			netlink.LinkDel(guest) //nolint:errcheck // best-effort cleanup
@@ -105,13 +108,17 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	}
 
 	if err := netlink.LinkAdd(veth); err != nil {
-		return err
+		return fmt.Errorf("create veth pair %s/%s: %w", hostName, guestName, err)
 	}
+	slog.Debug("veth: pair created", "host", hostName, "guest", guestName, "mtu", mtu)
 
 	// iptables is not available in distroless images; skip forwarding rules
 	// gracefully so the CNI plugin can still produce a result in test environments.
-	if err := updateForwardRule(hostName, "add"); err != nil && !errors.Is(err, errIptablesMissing) {
-		return err
+	if err := updateForwardRule(hostName, "add"); err != nil {
+		if !errors.Is(err, errIptablesMissing) {
+			return err
+		}
+		slog.Warn("veth: iptables binary not available, skipping FORWARD rules", "host", hostName)
 	}
 
 	if err := sysctl.ConfigureInterfaceSysctls(hostName); err != nil {
@@ -138,7 +145,11 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 		return err
 	}
 
-	return netlink.LinkSetMaster(hostLink, vrfLink)
+	if err := netlink.LinkSetMaster(hostLink, vrfLink); err != nil {
+		return err
+	}
+	slog.Debug("veth: enslaved to VRF and up", "host", hostName, "vrf", vrfName)
+	return nil
 }
 
 func Delete(vpc, vpcAttachment string) error {
@@ -157,10 +168,15 @@ func Delete(vpc, vpcAttachment string) error {
 	hostLink, err := netlink.LinkByName(hostName)
 	if err != nil {
 		if isLinkNotFoundError(err) {
+			slog.Debug("veth: host veth already gone, nothing to delete", "host", hostName)
 			return nil // interface already gone — idempotent
 		}
 		return err
 	}
 
-	return netlink.LinkDel(hostLink)
+	if err := netlink.LinkDel(hostLink); err != nil {
+		return err
+	}
+	slog.Debug("veth: deleted", "host", hostName)
+	return nil
 }

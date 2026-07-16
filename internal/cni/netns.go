@@ -6,6 +6,7 @@ package cni
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/containernetworking/plugins/pkg/ns"
@@ -21,7 +22,7 @@ func configureInterfaceInNetns(netnsPath, ifName string, ipNet *net.IPNet, gatew
 	}
 	defer containerNS.Close() //nolint:errcheck // netns close on teardown
 
-	return containerNS.Do(func(_ ns.NetNS) error {
+	if err := containerNS.Do(func(_ ns.NetNS) error {
 		handle, err := netlink.NewHandle()
 		if err != nil {
 			return fmt.Errorf("create netlink handle: %w", err)
@@ -54,7 +55,13 @@ func configureInterfaceInNetns(netnsPath, ifName string, ipNet *net.IPNet, gatew
 		}
 
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	slog.Debug("netns: guest interface configured", "ifName", ifName, "netns", netnsPath,
+		"address", ipNet, "gateway", gateway)
+	return nil
 }
 
 // readGuestInterface reads the MAC and MTU of the guest veth endpoint
@@ -118,6 +125,8 @@ func cleanupContainerNetns(netnsPath, ifName string) error {
 		if err := handle.LinkDel(link); err != nil {
 			return fmt.Errorf("delete stale interface %q in container netns: %w", ifName, err)
 		}
+		slog.Warn("netns: removed stale interface left behind by a previous ADD attempt",
+			"ifName", ifName, "netns", netnsPath)
 		return nil
 	})
 }

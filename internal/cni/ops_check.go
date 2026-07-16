@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -34,6 +35,8 @@ func cmdCheck(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
+	slog.Info("CHECK: starting", "containerID", args.ContainerID,
+		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment, "interfaceType", pluginConf.InterfaceType)
 
 	var errs []error
 
@@ -62,8 +65,13 @@ func cmdCheck(args *skel.CmdArgs) error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("CHECK failed: %w", errors.Join(errs...))
+		err := fmt.Errorf("CHECK failed: %w", errors.Join(errs...))
+		slog.Error("CHECK: failed", "err", err, "containerID", args.ContainerID,
+			"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
+		return err
 	}
+	slog.Info("CHECK: passed", "containerID", args.ContainerID,
+		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 	return nil
 }
 
@@ -105,10 +113,23 @@ func cmdStatus(args *skel.CmdArgs) error {
 	if logFile == "" {
 		logFile = DefaultLogFile
 	}
-	setupLogging(logFile)
+	logLevel := os.Getenv("GALACTIC_CNI_LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = hostConf.LogLevel
+	}
+	if logLevel == "" {
+		logLevel = DefaultLogLevel
+	}
+	setupLogging(logFile, logLevel)
 
 	// Config is parseable and API server is reachable.
-	return probeAPIServer()
+	slog.Info("STATUS: probing API server reachability")
+	if err := probeAPIServer(); err != nil {
+		slog.Error("STATUS: API server probe failed", "err", err)
+		return err
+	}
+	slog.Info("STATUS: ready")
+	return nil
 }
 
 // probeAPIServer performs a lightweight GET against the in-cluster API server

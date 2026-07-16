@@ -7,6 +7,7 @@ package cni
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -88,6 +89,8 @@ func allocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf) (*ipamResult, erro
 		routes = append(routes, defaultRoute)
 	}
 
+	slog.Debug("IPAM: allocated", "containerID", args.ContainerID, "type", poolType, "subnet", subnet, "gateway", gateway)
+
 	return &ipamResult{
 		subnet:  subnet,
 		gateway: gateway,
@@ -123,6 +126,7 @@ func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf, k8s client.Clien
 	if subnetCIDR == "" {
 		// No allocation found — either allocation was never completed,
 		// or the advertisement was already deleted. Nothing to clean up.
+		slog.Debug("IPAM: no allocation found to deallocate", "containerID", args.ContainerID)
 		return
 	}
 
@@ -145,9 +149,12 @@ func deallocateIPAM(args *skel.CmdArgs, pluginConf *PluginConf, k8s client.Clien
 		pa, err := ipam.NewPoolAllocator(poolCIDR, ipamConf.Gateway, ipamConf.SubnetLen)
 		if err != nil {
 			// Pool creation failed — allocation was never completed, nothing to clean up.
+			slog.Warn("IPAM: failed to build pool allocator for deallocation, skipping", "err", err,
+				"containerID", args.ContainerID, "subnet", subnetCIDR)
 			return
 		}
 		pa.Deallocate(subnetCIDR)
+		slog.Debug("IPAM: deallocated", "containerID", args.ContainerID, "subnet", subnetCIDR)
 	case "static":
 		// Static allocations don't need deallocation.
 	}

@@ -190,6 +190,9 @@ func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace
 			len(matches), nodeName, namespace)
 	}
 
+	slog.Debug("BGP: router matched", "nodeName", nodeName, "router", matches[0].Name,
+		"asNumber", matches[0].Spec.LocalASN, "srv6Locator", matches[0].Spec.SRv6Locator, "nodeID", matches[0].Spec.NodeID)
+
 	return bgpConfig{
 		asNumber:    uint32(matches[0].Spec.LocalASN),
 		routerName:  matches[0].Name,
@@ -312,6 +315,8 @@ func publishBGPStateK8s(
 		}
 		if srv6SIDStr != "" {
 			tracker.srv6SID = srv6SIDStr
+			slog.Debug("BGP: SRv6 ingress route installed", "sid", srv6SIDStr,
+				"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 		}
 
 		// Create the BGPVRFInstance to configure the VRF with its VRFID and
@@ -332,6 +337,8 @@ func publishBGPStateK8s(
 			return fmt.Errorf("apply BGPVRFInstance: %w", err)
 		}
 		tracker.vrfInstanceCreated = true
+		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
+			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName)
 
 		// Create the BGPAdvertisement to originate the pod's subnet prefix.
 		adv := &bgpv1alpha1.BGPAdvertisement{
@@ -364,7 +371,11 @@ func publishBGPStateK8s(
 			return fmt.Errorf("apply BGPAdvertisement: %w", err)
 		}
 		tracker.advCreated = true
+		slog.Debug("BGP: BGPAdvertisement applied", "name", adv.Name, "namespace", namespace,
+			"podSubnet", podSubnet, "containerID", args.ContainerID)
 
+		slog.Info("ADD: BGP state published", "containerID", args.ContainerID,
+			"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 		return nil
 	})
 }

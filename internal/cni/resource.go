@@ -67,6 +67,8 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		if err := rt.k8s.Delete(ctx, adv); client.IgnoreNotFound(err) != nil {
 			slog.Error("Rollback: failed to delete BGPAdvertisement", "err", err,
 				"name", adv.Name, "namespace", rt.namespace)
+		} else {
+			slog.Debug("Rollback: deleted BGPAdvertisement", "name", adv.Name, "namespace", rt.namespace)
 		}
 	}
 
@@ -81,6 +83,8 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		if err := rt.k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
 			slog.Error("Rollback: failed to delete BGPVRFInstance", "err", err,
 				"name", vrfInst.Name, "namespace", rt.namespace)
+		} else {
+			slog.Debug("Rollback: deleted BGPVRFInstance", "name", vrfInst.Name, "namespace", rt.namespace)
 		}
 	}
 
@@ -89,6 +93,8 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		if err := srv6.RouteIngressDel(rt.srv6SID, rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to delete SRv6 ingress route", "err", err,
 				"sid", rt.srv6SID)
+		} else {
+			slog.Debug("Rollback: deleted SRv6 ingress route", "sid", rt.srv6SID)
 		}
 	}
 
@@ -97,6 +103,8 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		if err := veth.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to delete veth", "err", err,
 				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+		} else {
+			slog.Debug("Rollback: deleted veth", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 		}
 	}
 
@@ -105,6 +113,8 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		if err := tap.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to delete tap", "err", err,
 				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+		} else {
+			slog.Debug("Rollback: deleted tap", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 		}
 	}
 
@@ -112,5 +122,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 		slog.Error("Rollback: failed to delete VRF", "err", err,
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+	} else {
+		slog.Debug("Rollback: deleted VRF", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	}
 }

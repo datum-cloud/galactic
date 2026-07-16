@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
@@ -27,6 +28,15 @@ const (
 	DefaultKubeconfig = "/var/lib/galactic/kubeconfig"
 	DefaultNamespace  = "galactic-system"
 	DefaultLogFile    = "/var/log/galactic/galactic-cni.log"
+	DefaultLogLevel   = "info"
+)
+
+// Recognized log_level values, other than DefaultLogLevel itself.
+const (
+	logLevelDebug   = "debug"
+	logLevelWarn    = "warn"
+	logLevelWarning = "warning"
+	logLevelError   = "error"
 )
 
 var ConfFile = DefaultConfFile
@@ -159,11 +169,39 @@ func buildDetectScheme() *runtime.Scheme {
 	return scheme
 }
 
-// setupLogging configures the slog default logger to write to the specified path.
-// If opening the file fails, it logs a warning to os.Stderr and falls back.
-func setupLogging(logPath string) {
+// parseLogLevel maps a config-supplied level name to a slog.Level. Matching is
+// case-insensitive. An empty string resolves to DefaultLogLevel. Unrecognized
+// values return an error alongside the info-level fallback, so callers can
+// warn without failing the CNI operation over a typo'd setting.
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return parseLogLevel(DefaultLogLevel)
+	case logLevelDebug:
+		return slog.LevelDebug, nil
+	case DefaultLogLevel:
+		return slog.LevelInfo, nil
+	case logLevelWarn, logLevelWarning:
+		return slog.LevelWarn, nil
+	case logLevelError:
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("unknown log level %q (want %s, %s, %s, or %s)",
+			s, logLevelDebug, DefaultLogLevel, logLevelWarn, logLevelError)
+	}
+}
+
+// setupLogging configures the slog default logger to write to the specified
+// path at the specified verbosity. If opening the file fails, it logs a
+// warning to os.Stderr and falls back. An unrecognized logLevel also logs a
+// warning and falls back to DefaultLogLevel rather than failing the operation.
+func setupLogging(logPath, logLevel string) {
 	if logPath == "" {
 		logPath = DefaultLogFile
+	}
+	level, err := parseLogLevel(logLevel)
+	if err != nil {
+		slog.Warn("Invalid log level, falling back to default", "value", logLevel, "default", DefaultLogLevel, "err", err)
 	}
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
@@ -176,7 +214,7 @@ func setupLogging(logPath string) {
 		return
 	}
 	// Use JSON handler for structured logging to file.
-	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelInfo})
+	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: level})
 	slog.SetDefault(slog.New(handler))
 }
 
@@ -352,7 +390,14 @@ func parseConf(data []byte) (*PluginConf, error) {
 	if logFile == "" {
 		logFile = DefaultLogFile
 	}
-	setupLogging(logFile)
+	logLevel := os.Getenv("GALACTIC_CNI_LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = hostConf.LogLevel
+	}
+	if logLevel == "" {
+		logLevel = DefaultLogLevel
+	}
+	setupLogging(logFile, logLevel)
 
 	// Resolve local IPAM flag
 	if val := os.Getenv("GALACTIC_CNI_ENABLE_LOCAL_IPAM"); val != "" {
