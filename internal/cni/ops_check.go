@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
+	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -92,7 +93,7 @@ func cmdStatus(args *skel.CmdArgs) error {
 	// Load host CNI config to resolve Kubeconfig and LogFile
 	hostConf, err := loadHostConf(ConfFile)
 	if err != nil {
-		return fmt.Errorf("load host CNI config: %w", err)
+		return &types.Error{Code: 7, Msg: fmt.Sprintf("load host CNI config: %v", err)}
 	}
 
 	// Resolve and propagate Kubeconfig
@@ -108,7 +109,7 @@ func cmdStatus(args *skel.CmdArgs) error {
 	slog.Info("STATUS: probing API server reachability")
 	if err := probeAPIServer(); err != nil {
 		slog.Error("STATUS: API server probe failed", "err", err)
-		return err
+		return &types.Error{Code: 50, Msg: fmt.Sprintf("API server health check failed: %v", err)}
 	}
 	slog.Info("STATUS: ready")
 	return nil

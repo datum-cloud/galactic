@@ -40,6 +40,16 @@ func InitCNIConfig() {
 
 const sanitizeForErrorBinary = "<binary>"
 
+// errInvalidCNIConfig is the message for CNI config parse errors (code 7).
+const errInvalidCNIConfig = "invalid CNI config"
+
+// errVPCRequired and errVPCAttachmentRequired are messages for missing
+// identifier fields (code 7).
+const (
+	errVPCRequired           = "vpc is required and must be a non-empty base62 string"
+	errVPCAttachmentRequired = "vpcattachment is required and must be a non-empty base62 string"
+)
+
 // isValidBase62 reports whether s contains only valid base62 characters
 // ([0-9a-zA-Z]) and is non-empty. VPC and VPCAttachment identifiers are
 // base62-encoded and used throughout the ADD path (interface naming,
@@ -237,23 +247,23 @@ type statusConf struct {
 func parseStatusConf(data []byte) error {
 	var sc statusConf
 	if err := json.Unmarshal(data, &sc); err != nil {
-		return fmt.Errorf("parse CNI config: %w", err)
+		return &types.Error{Code: 7, Msg: errInvalidCNIConfig, Details: err.Error()}
 	}
 	if sc.CNIVersion == "" {
-		return errors.New("cniVersion is required")
+		return &types.Error{Code: 7, Msg: "cniVersion is required"}
 	}
 	if sc.Type == "" {
-		return errors.New("type is required")
+		return &types.Error{Code: 7, Msg: "type is required"}
 	}
 	// Validate interface_type if present.
 	if sc.InterfaceType != "" {
 		switch sc.InterfaceType {
 		case interfaceTypeVeth, interfaceTypeTap:
 		default:
-			return fmt.Errorf(
+			return &types.Error{Code: 7, Msg: fmt.Sprintf(
 				"invalid interface_type %q: must be %q or %q",
 				sc.InterfaceType, interfaceTypeVeth, interfaceTypeTap,
-			)
+			)}
 		}
 	}
 	return nil
@@ -313,19 +323,25 @@ func validatePrevResultAdd(res types.Result) error {
 func parseConf(data []byte) (*PluginConf, error) {
 	conf := &PluginConf{}
 	if err := json.Unmarshal(data, &conf); err != nil {
-		return nil, fmt.Errorf("parse CNI config: %w", err)
+		return nil, &types.Error{Code: 7, Msg: errInvalidCNIConfig, Details: err.Error()}
 	}
 	if !isValidBase62(conf.VPC) {
 		if len(conf.VPC) == 0 {
-			return nil, errors.New("vpc is required and must be a non-empty base62 string")
+			return nil, &types.Error{Code: 7, Msg: errVPCRequired}
 		}
-		return nil, fmt.Errorf("invalid base62 value for field 'vpc': %q", sanitizeForError(conf.VPC))
+		return nil, &types.Error{
+			Code: 7,
+			Msg:  fmt.Sprintf("invalid base62 value for field 'vpc': %q", sanitizeForError(conf.VPC)),
+		}
 	}
 	if !isValidBase62(conf.VPCAttachment) {
 		if len(conf.VPCAttachment) == 0 {
-			return nil, errors.New("vpcattachment is required and must be a non-empty base62 string")
+			return nil, &types.Error{Code: 7, Msg: errVPCAttachmentRequired}
 		}
-		return nil, fmt.Errorf("invalid base62 value for field 'vpcattachment': %q", sanitizeForError(conf.VPCAttachment))
+		return nil, &types.Error{
+			Code: 7,
+			Msg:  fmt.Sprintf("invalid base62 value for field 'vpcattachment': %q", sanitizeForError(conf.VPCAttachment)),
+		}
 	}
 
 	// Load host CNI config
@@ -348,7 +364,7 @@ func parseConf(data []byte) (*PluginConf, error) {
 		nodeName = detected
 	}
 	if nodeName == "" {
-		return nil, errors.New("node name is required (or set GALACTIC_CNI_NODE_NAME)")
+		return nil, &types.Error{Code: 4, Msg: "node name is required (or set GALACTIC_CNI_NODE_NAME)"}
 	}
 	_ = os.Setenv("NODE_NAME", nodeName)
 
@@ -373,12 +389,12 @@ func parseConf(data []byte) (*PluginConf, error) {
 
 	// Enforce required IPAM block if local IPAM is enabled
 	if enableLocalIPAM && conf.IPAM == nil {
-		return nil, errors.New("local IPAM is enabled, but no 'ipam' block is present in the configuration")
+		return nil, &types.Error{Code: 7, Msg: "local IPAM is enabled, but no 'ipam' block is present in the configuration"}
 	}
 
 	if conf.PrevResult != nil {
 		if err := validatePrevResult(conf.PrevResult); err != nil {
-			return nil, fmt.Errorf("invalid prevResult: %w", err)
+			return nil, &types.Error{Code: 6, Msg: fmt.Sprintf("invalid prevResult: %v", err)}
 		}
 	}
 	if conf.InterfaceType == "" {
@@ -387,10 +403,10 @@ func parseConf(data []byte) (*PluginConf, error) {
 	switch conf.InterfaceType {
 	case interfaceTypeVeth, interfaceTypeTap:
 	default:
-		return nil, fmt.Errorf(
+		return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
 			"invalid interface_type %q: must be %q or %q",
 			conf.InterfaceType, interfaceTypeVeth, interfaceTypeTap,
-		)
+		)}
 
 	}
 	return conf, nil
