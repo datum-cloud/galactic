@@ -79,6 +79,23 @@ func routerForNode(name, nodeName, namespace string, asn int64) *bgpv1alpha1.BGP
 	}
 }
 
+// assertCNIError verifies that err is a *types.Error with the expected Code
+// and that its Msg contains wantMsg (substring match). Pass wantMsg == "" to
+// skip the message check.
+func assertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
+	t.Helper()
+	var cniErr *types.Error
+	if !errors.As(err, &cniErr) {
+		t.Fatalf("expected *types.Error, got %T: %v", err, err)
+	}
+	if cniErr.Code != wantCode {
+		t.Fatalf("expected code %d, got %d (Msg: %q)", wantCode, cniErr.Code, cniErr.Msg)
+	}
+	if wantMsg != "" && !strings.Contains(cniErr.Msg, wantMsg) {
+		t.Fatalf("expected Msg to contain %q, got %q", wantMsg, cniErr.Msg)
+	}
+}
+
 // ---- parseConf -----------------------------------------------------------
 
 func TestParseConf(t *testing.T) {
@@ -88,6 +105,7 @@ func TestParseConf(t *testing.T) {
 		wantVPC    string
 		wantIfType string
 		wantErr    string
+		wantCode   uint // CNI error code; 0 means "don't check"
 	}{
 		{
 			name: "valid config",
@@ -101,14 +119,16 @@ func TestParseConf(t *testing.T) {
 			wantIfType: interfaceTypeVeth,
 		},
 		{
-			name:    "invalid JSON",
-			input:   "not json",
-			wantErr: "parse CNI config",
+			name:     "invalid JSON",
+			input:    "not json",
+			wantErr:  "invalid CNI config",
+			wantCode: 7,
 		},
 		{
-			name:    "empty input",
-			input:   "",
-			wantErr: "parse CNI config",
+			name:     "empty input",
+			input:    "",
+			wantErr:  "invalid CNI config",
+			wantCode: 7,
 		},
 		{
 			name: "interface_type=veth",
@@ -151,7 +171,8 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"%s","interface_type":"unknown"}`,
 				testVPC, testAttachment,
 			),
-			wantErr: `invalid interface_type "unknown": must be "veth" or "tap"`,
+			wantErr:  `invalid interface_type "unknown": must be "veth" or "tap"`,
+			wantCode: 7,
 		},
 		{
 			name: "missing vpc",
@@ -160,7 +181,8 @@ func TestParseConf(t *testing.T) {
 					`"type":"galactic-cni","vpcattachment":"%s"}`,
 				testAttachment,
 			),
-			wantErr: "vpc is required and must be a non-empty base62 string",
+			wantErr:  "vpc is required and must be a non-empty base62 string",
+			wantCode: 7,
 		},
 		{
 			name: "empty vpc",
@@ -170,7 +192,8 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"%s"}`,
 				testAttachment,
 			),
-			wantErr: "vpc is required and must be a non-empty base62 string",
+			wantErr:  "vpc is required and must be a non-empty base62 string",
+			wantCode: 7,
 		},
 		{
 			name: "vpc with invalid char hyphen",
@@ -180,7 +203,8 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"%s"}`,
 				testInvalidBase62, testAttachment,
 			),
-			wantErr: fmt.Sprintf("invalid base62 value for field 'vpc': %q", testInvalidBase62),
+			wantErr:  fmt.Sprintf("invalid base62 value for field 'vpc': %q", testInvalidBase62),
+			wantCode: 7,
 		},
 		{
 			name: "vpc with invalid char underscore",
@@ -190,7 +214,8 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"%s"}`,
 				testAttachment,
 			),
-			wantErr: `invalid base62 value for field 'vpc': "abc_def"`,
+			wantErr:  `invalid base62 value for field 'vpc': "abc_def"`,
+			wantCode: 7,
 		},
 		{
 			name: "missing vpcattachment",
@@ -199,7 +224,8 @@ func TestParseConf(t *testing.T) {
 					`"type":"galactic-cni","vpc":"%s"}`,
 				testVPC,
 			),
-			wantErr: "vpcattachment is required and must be a non-empty base62 string",
+			wantErr:  "vpcattachment is required and must be a non-empty base62 string",
+			wantCode: 7,
 		},
 		{
 			name: "empty vpcattachment",
@@ -209,7 +235,8 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":""}`,
 				testVPC,
 			),
-			wantErr: "vpcattachment is required and must be a non-empty base62 string",
+			wantErr:  "vpcattachment is required and must be a non-empty base62 string",
+			wantCode: 7,
 		},
 		{
 			name: "vpcattachment with invalid char space",
@@ -219,7 +246,8 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"def ghi"}`,
 				testVPC,
 			),
-			wantErr: `invalid base62 value for field 'vpcattachment': "def ghi"`,
+			wantErr:  `invalid base62 value for field 'vpcattachment': "def ghi"`,
+			wantCode: 7,
 		},
 		{
 			name: "valid vpc and vpcattachment with mixed case base62",
@@ -297,6 +325,9 @@ func TestParseConf(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
+				}
+				if tt.wantCode > 0 {
+					assertCNIError(t, err, tt.wantCode, tt.wantErr)
 				}
 				return
 			}
@@ -950,8 +981,8 @@ func TestCmdCheckInvalidConfig(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for invalid JSON, got nil")
 	}
-	if !strings.Contains(err.Error(), "parse CNI config") {
-		t.Fatalf("error %q does not contain 'parse CNI config'", err.Error())
+	if !strings.Contains(err.Error(), "invalid CNI config") {
+		t.Fatalf("error %q does not contain 'invalid CNI config'", err.Error())
 	}
 }
 
@@ -1160,12 +1191,7 @@ func TestCmdStatusInvalidConfig(t *testing.T) {
 	}
 
 	err := cmdStatus(args)
-	if err == nil {
-		t.Fatalf("expected error for invalid JSON, got nil")
-	}
-	if !strings.Contains(err.Error(), "parse CNI config") {
-		t.Fatalf("error %q does not contain 'parse CNI config'", err.Error())
-	}
+	assertCNIError(t, err, 7, "invalid CNI config")
 }
 
 func TestCmdStatusInvalidInterfaceType(t *testing.T) {
@@ -1181,12 +1207,7 @@ func TestCmdStatusInvalidInterfaceType(t *testing.T) {
 	}
 
 	err := cmdStatus(args)
-	if err == nil {
-		t.Fatalf("expected error for invalid interface_type, got nil")
-	}
-	if !strings.Contains(err.Error(), `invalid interface_type "bogus"`) {
-		t.Fatalf("error %q does not contain expected message", err.Error())
-	}
+	assertCNIError(t, err, 7, `invalid interface_type "bogus"`)
 }
 
 func TestCmdStatusValidConfigMissingResources(t *testing.T) {
@@ -1258,6 +1279,27 @@ func TestCmdStatusMissingVPCAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil (STATUS does not validate attachment fields), got: %v", err)
 	}
+}
+
+func TestCmdStatusAPIProbeFailure(t *testing.T) {
+	// STATUS should return CNI error code 50 when the API server probe fails.
+	original := probeAPIServer
+	probeAPIServer = func() error { return errors.New("connection refused") }
+	defer func() { probeAPIServer = original }()
+
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		StdinData:   []byte(conf),
+	}
+
+	err := cmdStatus(args)
+	assertCNIError(t, err, 50, "API server health check failed")
 }
 
 // ---- isTransientError ----------------------------------------------------
@@ -1459,7 +1501,7 @@ func TestCmdAddPrevResultValid(t *testing.T) {
 	t.Setenv("NODE_NAME", "")
 	// prevResult that is a valid CNI result. cmdAdd should pass prevResult
 
-	// validation and fail later due to missing NODE_NAME env var.
+	// validation and fail later due to missing node name.
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
 			`"type":"galactic-cni","vpc":"%s",`+
@@ -1473,16 +1515,9 @@ func TestCmdAddPrevResultValid(t *testing.T) {
 	}
 
 	err := cmdAdd(args)
-	if err == nil {
-		t.Fatal("expected cmdAdd to fail for missing NODE_NAME, got nil")
-	}
-	// Should fail on NODE_NAME, not prevResult.
-	if strings.Contains(err.Error(), "prevResult validation in ADD") {
-		t.Fatalf("prevResult should not cause error when valid, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "NODE_NAME") {
-		t.Fatalf("expected NODE_NAME error, got: %v", err)
-	}
+	// Should fail with code 4 (invalid env vars) for missing node name,
+	// not code 6 for prevResult.
+	assertCNIError(t, err, 4, "node name is required")
 }
 
 // ---- loadHostConf -----------------------------------------------------------
