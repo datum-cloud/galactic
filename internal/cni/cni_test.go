@@ -25,11 +25,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"go.datum.net/galactic/internal/config"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 func TestMain(m *testing.M) {
 	_ = os.Setenv("GALACTIC_CNI_NODE_NAME", "test-node")
+	InitCNIConfig()
 	os.Exit(m.Run())
 }
 
@@ -1496,8 +1498,8 @@ func TestLoadHostConf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error for missing conflist: %v", err)
 	}
-	if conf.Namespace != DefaultNamespace {
-		t.Errorf("Namespace = %q, want %q", conf.Namespace, DefaultNamespace)
+	if conf.Namespace != config.DefaultNamespace {
+		t.Errorf("Namespace = %q, want %q", conf.Namespace, config.DefaultNamespace)
 	}
 
 	// 2. Conflist parses but lacks galactic-cni entry.
@@ -1544,8 +1546,8 @@ func TestLoadHostConf(t *testing.T) {
 	if conf.LogFile != "/var/log/custom.log" {
 		t.Errorf("LogFile = %q, want %q", conf.LogFile, "/var/log/custom.log")
 	}
-	if conf.LogLevel != logLevelDebug {
-		t.Errorf("LogLevel = %q, want %q", conf.LogLevel, logLevelDebug)
+	if conf.LogLevel != config.LogLevelDebug {
+		t.Errorf("LogLevel = %q, want %q", conf.LogLevel, config.LogLevelDebug)
 	}
 }
 
@@ -1590,7 +1592,7 @@ func TestLoggingSetup(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "sub", "test.log")
 
 	// Setup logging, which should create the directory and open/write to the file.
-	setupLogging(logPath, DefaultLogLevel)
+	setupLogging(logPath, config.DefaultLogLevel)
 	slog.Info("test log message")
 
 	// Read the log file to verify the message was logged.
@@ -1611,11 +1613,11 @@ func TestParseLogLevel(t *testing.T) {
 		wantErr bool
 	}{
 		{"empty defaults to info", "", slog.LevelInfo, false},
-		{"debug", logLevelDebug, slog.LevelDebug, false},
-		{"info", DefaultLogLevel, slog.LevelInfo, false},
-		{"warn", logLevelWarn, slog.LevelWarn, false},
-		{"warning alias", logLevelWarning, slog.LevelWarn, false},
-		{"error", logLevelError, slog.LevelError, false},
+		{"debug", config.LogLevelDebug, slog.LevelDebug, false},
+		{"info", config.DefaultLogLevel, slog.LevelInfo, false},
+		{"warn", config.LogLevelWarn, slog.LevelWarn, false},
+		{"warning alias", config.LogLevelWarning, slog.LevelWarn, false},
+		{"error", config.LogLevelError, slog.LevelError, false},
 		{"case insensitive", "DEBUG", slog.LevelDebug, false},
 		{"surrounding whitespace", "  warn  ", slog.LevelWarn, false},
 		{"unknown falls back to info with error", "verbose", slog.LevelInfo, true},
@@ -1637,7 +1639,7 @@ func TestLoggingSetupRespectsLevel(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "test.log")
 
-	setupLogging(logPath, logLevelWarn)
+	setupLogging(logPath, config.LogLevelWarn)
 	slog.Info("should be suppressed at warn level")
 	slog.Warn("should appear at warn level")
 
