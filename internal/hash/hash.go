@@ -46,6 +46,7 @@ type sortableAdvertisement struct {
 	LocalPreference *uint32
 	NextHop         string
 	SRv6SID         string
+	VRFID           *int32
 }
 
 type sortablePolicy struct {
@@ -116,6 +117,7 @@ func toSortable(r model.DesiredRouter) sortableRouter {
 			LocalPreference: a.LocalPreference,
 			NextHop:         a.NextHop,
 			SRv6SID:         a.SRv6SID,
+			VRFID:           a.VRFID,
 		}
 	}
 	sort.Slice(advs, func(i, j int) bool { return advs[i].Name < advs[j].Name })

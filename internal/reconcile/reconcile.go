@@ -174,6 +174,7 @@ func (r *Reconciler) BuildDesiredRouter(
 			LocalPreference: int32PtrToUint32Ptr(adv.Spec.LocalPreference),
 			NextHop:         nextHop,
 			SRv6SID:         srv6SID,
+			VRFID:           adv.Spec.VRFID,
 		})
 	}
 
