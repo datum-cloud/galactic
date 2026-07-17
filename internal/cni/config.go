@@ -21,25 +21,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"go.datum.net/galactic/internal/config"
 )
 
-const (
-	DefaultConfFile   = "/etc/cni/net.d/10-galactic.conflist"
-	DefaultKubeconfig = "/var/lib/galactic/kubeconfig"
-	DefaultNamespace  = "galactic-system"
-	DefaultLogFile    = "/var/log/galactic/galactic-cni.log"
-	DefaultLogLevel   = "info"
-)
+var ConfFile = config.DefaultConfFile
 
-// Recognized log_level values, other than DefaultLogLevel itself.
-const (
-	logLevelDebug   = "debug"
-	logLevelWarn    = "warn"
-	logLevelWarning = "warning"
-	logLevelError   = "error"
-)
+// cniViper is the shared Viper instance for env var resolution.
+// Initialized by InitCNIConfig() (called from cmd/galactic-cni/main.go).
+var cniViper *config.CNIViper
 
-var ConfFile = DefaultConfFile
+// InitCNIConfig initializes the shared Viper instance for CNI env var
+// resolution. Callers should invoke this once at process startup before any
+// config lookups.
+func InitCNIConfig() {
+	cniViper = config.NewCNI()
+}
 
 const sanitizeForErrorBinary = "<binary>"
 
@@ -69,17 +66,17 @@ type conflistEnvelope struct {
 
 // loadHostConf loads node-local settings from the CNI conflist.
 // If the file is missing, it returns a zero-value HostConf (tolerating local test runs)
-// but still defaulting Namespace to DefaultNamespace.
+// but still defaulting Namespace to config.DefaultNamespace.
 func loadHostConf(filePath string) (*HostConf, error) {
 	if filePath == "" {
-		filePath = DefaultConfFile
+		filePath = config.DefaultConfFile
 	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Tolerated, return defaulted config.
 			return &HostConf{
-				Namespace: DefaultNamespace,
+				Namespace: config.DefaultNamespace,
 			}, nil
 		}
 		return nil, fmt.Errorf("read conflist file %q: %w", filePath, err)
@@ -103,7 +100,7 @@ func loadHostConf(filePath string) (*HostConf, error) {
 				return nil, fmt.Errorf("parse host CNI config: %w", err)
 			}
 			if conf.Namespace == "" {
-				conf.Namespace = DefaultNamespace
+				conf.Namespace = config.DefaultNamespace
 			}
 			return &conf, nil
 		}
@@ -170,38 +167,40 @@ func buildDetectScheme() *runtime.Scheme {
 }
 
 // parseLogLevel maps a config-supplied level name to a slog.Level. Matching is
-// case-insensitive. An empty string resolves to DefaultLogLevel. Unrecognized
-// values return an error alongside the info-level fallback, so callers can
-// warn without failing the CNI operation over a typo'd setting.
+// case-insensitive. An empty string resolves to config.DefaultLogLevel.
+// Unrecognized values return an error alongside the info-level fallback, so
+// callers can warn without failing the CNI operation over a typo'd setting.
 func parseLogLevel(s string) (slog.Level, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "":
-		return parseLogLevel(DefaultLogLevel)
-	case logLevelDebug:
+		return parseLogLevel(config.DefaultLogLevel)
+	case config.LogLevelDebug:
 		return slog.LevelDebug, nil
-	case DefaultLogLevel:
+	case config.DefaultLogLevel:
 		return slog.LevelInfo, nil
-	case logLevelWarn, logLevelWarning:
+	case config.LogLevelWarn, config.LogLevelWarning:
 		return slog.LevelWarn, nil
-	case logLevelError:
+	case config.LogLevelError:
 		return slog.LevelError, nil
 	default:
 		return slog.LevelInfo, fmt.Errorf("unknown log level %q (want %s, %s, %s, or %s)",
-			s, logLevelDebug, DefaultLogLevel, logLevelWarn, logLevelError)
+			s, config.LogLevelDebug, config.DefaultLogLevel, config.LogLevelWarn, config.LogLevelError)
 	}
 }
 
 // setupLogging configures the slog default logger to write to the specified
 // path at the specified verbosity. If opening the file fails, it logs a
 // warning to os.Stderr and falls back. An unrecognized logLevel also logs a
-// warning and falls back to DefaultLogLevel rather than failing the operation.
+// warning and falls back to config.DefaultLogLevel rather than failing the
+// operation.
 func setupLogging(logPath, logLevel string) {
 	if logPath == "" {
-		logPath = DefaultLogFile
+		logPath = config.DefaultLogFile
 	}
 	level, err := parseLogLevel(logLevel)
 	if err != nil {
-		slog.Warn("Invalid log level, falling back to default", "value", logLevel, "default", DefaultLogLevel, "err", err)
+		slog.Warn("Invalid log level, falling back to default",
+			"value", logLevel, "default", config.DefaultLogLevel, "err", err)
 	}
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
@@ -336,13 +335,7 @@ func parseConf(data []byte) (*PluginConf, error) {
 	}
 
 	// Resolve and propagate NodeName
-	nodeName := os.Getenv("GALACTIC_CNI_NODE_NAME")
-	if nodeName == "" {
-		nodeName = os.Getenv("NODE_NAME")
-	}
-	if nodeName == "" {
-		nodeName = hostConf.NodeName
-	}
+	nodeName := cniViper.NodeName(hostConf.NodeName)
 	if nodeName == "" {
 		// Fallback: auto-detect from the Kubernetes API by matching local
 		// interface addresses against node InternalIPs. This handles cases
@@ -360,49 +353,23 @@ func parseConf(data []byte) (*PluginConf, error) {
 	_ = os.Setenv("NODE_NAME", nodeName)
 
 	// Resolve and propagate Kubeconfig
-	kubeconfig := os.Getenv("GALACTIC_CNI_KUBECONFIG")
-	if kubeconfig == "" {
-		kubeconfig = hostConf.Kubeconfig
-	}
-	if kubeconfig == "" {
-		kubeconfig = DefaultKubeconfig
-	}
+	kubeconfig := cniViper.Kubeconfig(hostConf.Kubeconfig)
 	_ = os.Setenv("KUBECONFIG", kubeconfig)
 
 	// Resolve and propagate Namespace fallback
 	namespace := conf.Namespace
 	if namespace == "" {
-		namespace = os.Getenv("GALACTIC_CNI_NAMESPACE")
-	}
-	if namespace == "" {
-		namespace = hostConf.Namespace
-	}
-	if namespace == "" {
-		namespace = DefaultNamespace
+		namespace = cniViper.Namespace(hostConf.Namespace)
 	}
 	conf.Namespace = namespace
 
 	// Resolve and setup Logging
-	logFile := os.Getenv("GALACTIC_CNI_LOG_FILE")
-	if logFile == "" {
-		logFile = hostConf.LogFile
-	}
-	if logFile == "" {
-		logFile = DefaultLogFile
-	}
-	logLevel := os.Getenv("GALACTIC_CNI_LOG_LEVEL")
-	if logLevel == "" {
-		logLevel = hostConf.LogLevel
-	}
-	if logLevel == "" {
-		logLevel = DefaultLogLevel
-	}
+	logFile := cniViper.LogFile(hostConf.LogFile)
+	logLevel := cniViper.LogLevel(hostConf.LogLevel)
 	setupLogging(logFile, logLevel)
 
 	// Resolve local IPAM flag
-	if val := os.Getenv("GALACTIC_CNI_ENABLE_LOCAL_IPAM"); val != "" {
-		enableLocalIPAM = (val == "true" || val == "1")
-	}
+	enableLocalIPAM = cniViper.EnableLocalIPAM()
 
 	// Enforce required IPAM block if local IPAM is enabled
 	if enableLocalIPAM && conf.IPAM == nil {

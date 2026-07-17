@@ -70,6 +70,7 @@ func newRootCommand() *cobra.Command {
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cni.InitCNIConfig()
 			confFile, _ := cmd.Flags().GetString("conf-file")
 			if confFile != "" {
 				cni.ConfFile = confFile
@@ -95,7 +96,7 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 
-	cmd.PersistentFlags().String("conf-file", cni.DefaultConfFile, "Path to CNI conflist file")
+	cmd.PersistentFlags().String("conf-file", cni.ConfFile, "Path to CNI conflist file")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 

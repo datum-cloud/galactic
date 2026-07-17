@@ -26,13 +26,8 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-)
 
-// Default settings corresponding to CNI defaults
-const (
-	DefaultKubeconfig = "/var/lib/galactic/kubeconfig"
-	DefaultNamespace  = "galactic-system"
-	DefaultLogFile    = "/var/log/galactic/galactic-cni.log"
+	"go.datum.net/galactic/internal/config"
 )
 
 var (
@@ -173,16 +168,22 @@ func init() {
 }
 
 var newK8sClientFn = func() (client.Client, error) {
-	config, err := rest.InClusterConfig()
+	restConfig, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("load in-cluster config: %w", err)
 	}
-	return client.New(config, client.Options{Scheme: scheme})
+	return client.New(restConfig, client.Options{Scheme: scheme})
 }
 
 // addrListFn can be overridden in tests to mock netlink interface addresses.
 var addrListFn = func(family int) ([]netlink.Addr, error) {
 	return netlink.AddrList(nil, family)
+}
+
+// resolveLogLevel reads GALACTIC_CNI_LOG_LEVEL and returns a validated level
+// string. Unrecognized values fall back to config.DefaultLogLevel ("info").
+func resolveLogLevel() string {
+	return config.NormalizeLogLevel(os.Getenv(config.EnvLogLevel))
 }
 
 // Bootstrap runs the CNI installation init container tasks:
@@ -277,6 +278,7 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	}
 
 	// 4. Write static conflist to /host/etc/cni/net.d/10-galactic.conflist
+	logLevel := resolveLogLevel()
 	conflistContent := fmt.Sprintf(`{
   "cniVersion": "1.0.0",
   "name": "galactic",
@@ -284,14 +286,14 @@ func Bootstrap(ctx context.Context, nodeName string) error {
     {
       "type": "galactic-cni",
       "node_name": %q,
-      "kubeconfig": "/var/lib/galactic/kubeconfig",
-      "namespace": "galactic-system",
-      "log_file": "/var/log/galactic/galactic-cni.log",
-      "log_level": "info"
+      "kubeconfig": %q,
+      "namespace": %q,
+      "log_file": %q,
+      "log_level": %q
     }
   ]
 }
-`, nodeName)
+`, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel)
 
 	if err := atomicWriteFile(HostConflist, []byte(conflistContent), 0644); err != nil {
 		return fmt.Errorf("write conflist file: %w", err)
@@ -413,7 +415,7 @@ func Run(ctx context.Context, grpcHealthPort int) error {
 func getLogFileHostPath() string {
 	hostConf, err := loadHostConf(HostConflist)
 	if err != nil || hostConf.LogFile == "" {
-		return filepath.Join("/host", DefaultLogFile)
+		return filepath.Join("/host", config.DefaultLogFile)
 	}
 	return filepath.Join("/host", hostConf.LogFile)
 }

@@ -96,30 +96,12 @@ func cmdStatus(args *skel.CmdArgs) error {
 	}
 
 	// Resolve and propagate Kubeconfig
-	kubeconfig := os.Getenv("GALACTIC_CNI_KUBECONFIG")
-	if kubeconfig == "" {
-		kubeconfig = hostConf.Kubeconfig
-	}
-	if kubeconfig == "" {
-		kubeconfig = DefaultKubeconfig
-	}
+	kubeconfig := cniViper.Kubeconfig(hostConf.Kubeconfig)
 	_ = os.Setenv("KUBECONFIG", kubeconfig)
 
 	// Resolve and setup Logging
-	logFile := os.Getenv("GALACTIC_CNI_LOG_FILE")
-	if logFile == "" {
-		logFile = hostConf.LogFile
-	}
-	if logFile == "" {
-		logFile = DefaultLogFile
-	}
-	logLevel := os.Getenv("GALACTIC_CNI_LOG_LEVEL")
-	if logLevel == "" {
-		logLevel = hostConf.LogLevel
-	}
-	if logLevel == "" {
-		logLevel = DefaultLogLevel
-	}
+	logFile := cniViper.LogFile(hostConf.LogFile)
+	logLevel := cniViper.LogLevel(hostConf.LogLevel)
 	setupLogging(logFile, logLevel)
 
 	// Config is parseable and API server is reachable.

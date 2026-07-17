@@ -22,7 +22,41 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"go.datum.net/galactic/internal/config"
 )
+
+func TestResolveLogLevel(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want string
+	}{
+		{"empty defaults to info", "", config.DefaultLogLevel},
+		{"info", config.DefaultLogLevel, config.DefaultLogLevel},
+		{"debug", config.LogLevelDebug, config.LogLevelDebug},
+		{"warn", config.LogLevelWarn, config.LogLevelWarn},
+		{"warning normalizes to warn", config.LogLevelWarning, config.LogLevelWarn},
+		{"error", config.LogLevelError, config.LogLevelError},
+		{"case insensitive DEBUG", "DEBUG", config.LogLevelDebug},
+		{"case insensitive Warn", "Warn", config.LogLevelWarn},
+		{"whitespace trimmed", "  debug  ", config.LogLevelDebug},
+		{"unrecognized falls back to info", "trace", config.DefaultLogLevel},
+		{"unrecognized falls back to info (empty-looking)", "foo", config.DefaultLogLevel},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("GALACTIC_CNI_LOG_LEVEL", tc.env)
+			}
+			got := resolveLogLevel()
+			if got != tc.want {
+				t.Errorf("resolveLogLevel() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestBootstrap(t *testing.T) {
 	// Set up temporary directories for testing overrides
@@ -126,8 +160,8 @@ func TestBootstrap(t *testing.T) {
 		if conflist.LogFile != "/var/log/galactic/galactic-cni.log" {
 			t.Errorf("expected log_file /var/log/galactic/galactic-cni.log, got %s", conflist.LogFile)
 		}
-		if conflist.LogLevel != "info" {
-			t.Errorf("expected log_level info, got %s", conflist.LogLevel)
+		if conflist.LogLevel != config.DefaultLogLevel {
+			t.Errorf("expected log_level %s, got %s", config.DefaultLogLevel, conflist.LogLevel)
 		}
 
 		// Verify kubeconfig written
@@ -169,6 +203,59 @@ func TestBootstrap(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "node identity check failed") {
 			t.Fatalf("expected node identity check failure, got: %v", err)
+		}
+	})
+
+	t.Run("GALACTIC_CNI_LOG_LEVEL propagates to conflist", func(t *testing.T) {
+		t.Setenv("GALACTIC_CNI_LOG_LEVEL", config.LogLevelDebug)
+
+		addrListFn = func(family int) ([]netlink.Addr, error) {
+			if family == netlink.FAMILY_V4 {
+				return []netlink.Addr{
+					{IPNet: &net.IPNet{IP: net.ParseIP("192.168.1.10"), Mask: net.CIDRMask(24, 32)}},
+				}, nil
+			}
+			return nil, nil
+		}
+
+		err := Bootstrap(context.Background(), "test-node")
+		if err != nil {
+			t.Fatalf("Bootstrap failed unexpectedly: %v", err)
+		}
+
+		conflist, err := loadHostConf(HostConflist)
+		if err != nil {
+			t.Fatalf("failed to read conflist: %v", err)
+		}
+		if conflist.LogLevel != config.LogLevelDebug {
+			t.Errorf("expected log_level %s, got %s", config.LogLevelDebug, conflist.LogLevel)
+		}
+	})
+
+	t.Run("GALACTIC_CNI_LOG_LEVEL warning normalizes to warn", func(t *testing.T) {
+		t.Setenv("GALACTIC_CNI_LOG_LEVEL", config.LogLevelWarning)
+
+		addrListFn = func(family int) ([]netlink.Addr, error) {
+			if family == netlink.FAMILY_V4 {
+				return []netlink.Addr{
+					{IPNet: &net.IPNet{IP: net.ParseIP("192.168.1.10"), Mask: net.CIDRMask(24, 32)}},
+				}, nil
+			}
+			return nil, nil
+		}
+
+		err := Bootstrap(context.Background(), "test-node")
+		if err != nil {
+			t.Fatalf("Bootstrap failed unexpectedly: %v", err)
+		}
+
+		conflist, err := loadHostConf(HostConflist)
+		if err != nil {
+			t.Fatalf("failed to read conflist: %v", err)
+		}
+		if conflist.LogLevel != config.LogLevelWarn {
+			t.Errorf("expected log_level %s (normalized from %s), got %s",
+				config.LogLevelWarn, config.LogLevelWarning, conflist.LogLevel)
 		}
 	})
 }
