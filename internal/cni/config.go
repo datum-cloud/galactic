@@ -27,15 +27,15 @@ import (
 
 var ConfFile = config.DefaultConfFile
 
-// cniViper is the shared Viper instance for env var resolution.
+// cniConfig is the shared config resolver for env var resolution.
 // Initialized by InitCNIConfig() (called from cmd/galactic-cni/main.go).
-var cniViper *config.CNIViper
+var cniConfig *config.CNIConfig
 
-// InitCNIConfig initializes the shared Viper instance for CNI env var
+// InitCNIConfig initializes the shared config resolver for CNI env var
 // resolution. Callers should invoke this once at process startup before any
 // config lookups.
 func InitCNIConfig() {
-	cniViper = config.NewCNI()
+	cniConfig = config.NewCNIConfig()
 }
 
 const sanitizeForErrorBinary = "<binary>"
@@ -350,42 +350,46 @@ func parseConf(data []byte) (*PluginConf, error) {
 		return nil, fmt.Errorf("load host CNI config: %w", err)
 	}
 
-	// Resolve and propagate NodeName
-	nodeName := cniViper.NodeName(hostConf.NodeName)
-	if nodeName == "" {
-		// Fallback: auto-detect from the Kubernetes API by matching local
-		// interface addresses against node InternalIPs. This handles cases
-		// where the conflist file is missing (e.g. hostPath mount issues
-		// in container-based environments like Kind).
+	// Resolve config: env var > conflist > default.
+	cniConfig.Resolve(&config.ConflistValues{
+		NodeName:   hostConf.NodeName,
+		Kubeconfig: hostConf.Kubeconfig,
+		Namespace:  hostConf.Namespace,
+		LogFile:    hostConf.LogFile,
+		LogLevel:   hostConf.LogLevel,
+	})
+
+	// NodeName fallback: auto-detect from the Kubernetes API by matching local
+	// interface addresses against node InternalIPs. This handles cases where
+	// the conflist file is missing (e.g. hostPath mount issues in container-
+	// based environments like Kind).
+	if cniConfig.NodeName == "" {
 		detected, detectErr := detectNodeNameFromAPI()
 		if detectErr != nil {
 			slog.Warn("Node name auto-detection failed", "err", detectErr)
 		}
-		nodeName = detected
+		cniConfig.NodeName = detected
 	}
-	if nodeName == "" {
+	if cniConfig.NodeName == "" {
 		return nil, &types.Error{Code: 4, Msg: "node name is required (or set GALACTIC_CNI_NODE_NAME)"}
 	}
-	_ = os.Setenv("NODE_NAME", nodeName)
+	_ = os.Setenv("NODE_NAME", cniConfig.NodeName)
 
-	// Resolve and propagate Kubeconfig
-	kubeconfig := cniViper.Kubeconfig(hostConf.Kubeconfig)
-	_ = os.Setenv("KUBECONFIG", kubeconfig)
+	// Propagate Kubeconfig
+	_ = os.Setenv("KUBECONFIG", cniConfig.Kubeconfig)
 
 	// Resolve and propagate Namespace fallback
 	namespace := conf.Namespace
 	if namespace == "" {
-		namespace = cniViper.Namespace(hostConf.Namespace)
+		namespace = cniConfig.Namespace
 	}
 	conf.Namespace = namespace
 
-	// Resolve and setup Logging
-	logFile := cniViper.LogFile(hostConf.LogFile)
-	logLevel := cniViper.LogLevel(hostConf.LogLevel)
-	setupLogging(logFile, logLevel)
+	// Setup Logging
+	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
 
 	// Resolve local IPAM flag
-	enableLocalIPAM = cniViper.EnableLocalIPAM()
+	enableLocalIPAM = config.CNIGetEnableLocalIPAM()
 
 	// Enforce required IPAM block if local IPAM is enabled
 	if enableLocalIPAM && conf.IPAM == nil {

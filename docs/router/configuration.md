@@ -3,14 +3,17 @@
 `galactic-router` supports configuration via environment variables, CLI flags,
 or a combination of both. CLI flags take precedence over environment variables.
 
+All configuration is managed centrally by the `internal/config` package. The
+`RouterConfig` struct and its constants (`EnvRouterNodeName`, `ModeTenant`,
+etc.) are the single source of truth.
+
 ## Quick Reference
 
 Environment variable names are not a naive uppercased guess from the CLI
-flag name — every flag is bound to its own explicit `GALACTIC_ROUTER_*`
-variable (see `newViper()` in `cmd/galactic-router/root.go`), and several
-don't match what `AutomaticEnv` alone would produce from the flag name. The
-most common trip-up: `--mode` is `GALACTIC_ROUTER_ROUTER_MODE`, not
-`GALACTIC_ROUTER_MODE`. Always use the exact name from the table below.
+flag name — the mapping is defined in `internal/config` (see `RouterConfig`
+and the `EnvRouter*` constants). The most common trip-up: `--mode` is
+`GALACTIC_ROUTER_ROUTER_MODE`, not `GALACTIC_ROUTER_MODE`. Always use the
+exact name from the table below.
 
 | Option | Environment Variable | CLI Flag | Default |
 |---|---|---|---|

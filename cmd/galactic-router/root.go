@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -24,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/hash"
 	"go.datum.net/galactic/internal/metadata"
@@ -43,132 +43,6 @@ const (
  Find more information at: https://www.datum.net/docs`
 )
 
-// newViper returns a configured viper instance with defaults, env var
-// bindings, and automatic fallback for keys not explicitly bound.
-func newViper() *viper.Viper {
-	v := viper.New()
-	v.SetDefault("galactic_router.bgp_listen_port", 179)
-	v.SetDefault("galactic_router.metrics_port", 8080)
-	v.SetDefault("galactic_router.grpc_health_port", 5000)
-	v.SetDefault("galactic_router.gc_namespace", "galactic-system")
-	v.SetDefault("galactic_router.gc_interval", 5*time.Minute)
-
-	v.AutomaticEnv()
-
-	// Explicit bindings — AutomaticEnv uses the snake_case key derived from
-	// the viper key path (e.g. galactic_router.node_name ->
-	// GALACTIC_ROUTER_NODE_NAME), but some keys need explicit mapping.
-	//nolint:errcheck // keys are controlled, BindEnv cannot fail here
-	v.BindEnv("galactic_router.node_name", "GALACTIC_ROUTER_NODE_NAME")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.router_mode", "GALACTIC_ROUTER_ROUTER_MODE")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.bgp_listen_port", "GALACTIC_ROUTER_BGP_LISTEN_PORT")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.bgp_local_address", "GALACTIC_ROUTER_BGP_LOCAL_ADDRESS")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.metrics_port", "GALACTIC_ROUTER_METRICS_PORT")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.grpc_health_port", "GALACTIC_ROUTER_GRPC_HEALTH_PORT")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.gc_namespace", "GALACTIC_ROUTER_GC_NAMESPACE")
-	//nolint:errcheck
-	v.BindEnv("galactic_router.gc_interval", "GALACTIC_ROUTER_GC_INTERVAL")
-	//nolint:errcheck
-	v.BindEnv("reflector", "GALACTIC_ROUTER_REFLECTOR")
-
-	return v
-}
-
-const (
-	modeTransit = "transit"
-	modeFabric  = "fabric"
-	modeTenant  = "tenant"
-)
-
-// bindFlags registers each viper-configured flag on the command so that
-// `viper.BindPFlags` can resolve flag values at runtime.
-func bindFlags(cmd *cobra.Command, v *viper.Viper) { //nolint:lll // cobra flag defs are inherently long
-	cmd.Flags().StringP("node-name", "n", "", "Kubernetes node name (required)")
-	cmd.Flags().StringP("mode", "m", "",
-		"Operating mode: 'transit', 'fabric', or 'tenant' (required)")
-	cmd.Flags().Bool("reflector", false,
-		"Enable route reflector mode (requires --mode=fabric or --mode=tenant)")
-	cmd.Flags().IntP("bgp-listen-port", "p", v.GetInt("galactic_router.bgp_listen_port"),
-		"BGP listen port")
-	cmd.Flags().StringP("bgp-local-address", "",
-		v.GetString("galactic_router.bgp_local_address"),
-		"Source address for outgoing BGP connections; auto-detected from lo if unset")
-	cmd.Flags().IntP("metrics-port", "",
-		v.GetInt("galactic_router.metrics_port"),
-		"Metrics listen port")
-	cmd.Flags().IntP("grpc-health-port", "",
-		v.GetInt("galactic_router.grpc_health_port"),
-		"gRPC health check port")
-	cmd.Flags().StringP("gc-namespace", "",
-		v.GetString("galactic_router.gc_namespace"),
-		"Namespace for orphaned CRD cleanup")
-	cmd.Flags().DurationP("gc-interval", "",
-		v.GetDuration("galactic_router.gc_interval"),
-		"Cleanup interval")
-
-	// v.BindPFlags binds each flag under its own flag name (e.g.
-	// "grpc-health-port") as the viper key, but validateConfig/runCmd only
-	// ever read the "galactic_router.*"-prefixed keys set up by newViper —
-	// so a blanket BindPFlags leaves every flag here disconnected from the
-	// config it's meant to override. Bind each flag explicitly to the key
-	// it actually needs to reach.
-	flagKeys := map[string]string{
-		"node-name":         "galactic_router.node_name",
-		"mode":              "galactic_router.router_mode",
-		"reflector":         "reflector",
-		"bgp-listen-port":   "galactic_router.bgp_listen_port",
-		"bgp-local-address": "galactic_router.bgp_local_address",
-		"metrics-port":      "galactic_router.metrics_port",
-		"grpc-health-port":  "galactic_router.grpc_health_port",
-		"gc-namespace":      "galactic_router.gc_namespace",
-		"gc-interval":       "galactic_router.gc_interval",
-	}
-	for flagName, key := range flagKeys {
-		if err := v.BindPFlag(key, cmd.Flags().Lookup(flagName)); err != nil {
-			log.Fatalf("bind flag %s: %v", flagName, err)
-		}
-	}
-}
-
-// validateConfig checks that the configuration values are valid.
-func validateConfig(v *viper.Viper) error {
-	nodeName := v.GetString("galactic_router.node_name")
-	mode := v.GetString("galactic_router.router_mode")
-	reflector := v.GetBool("reflector")
-	bgpListenPort := v.GetInt("galactic_router.bgp_listen_port")
-	metricsPort := v.GetInt("galactic_router.metrics_port")
-	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
-
-	if nodeName == "" {
-		return errors.New("--node-name is required")
-	}
-	if mode == "" {
-		return errors.New("--mode is required (valid values: 'transit', 'fabric', 'tenant')")
-	}
-	if mode != modeTransit && mode != modeFabric && mode != modeTenant {
-		return fmt.Errorf("GALACTIC_ROUTER_ROUTER_MODE must be 'transit', 'fabric', or 'tenant', got %q", mode)
-	}
-	if reflector && mode != modeFabric && mode != modeTenant {
-		return errors.New("--reflector is only valid when --mode=fabric or --mode=tenant")
-	}
-	if bgpListenPort < -1 || bgpListenPort > 65535 {
-		return fmt.Errorf("GALACTIC_ROUTER_BGP_LISTEN_PORT must be -1 or a valid port number, got %d", bgpListenPort)
-	}
-	if metricsPort < 1 || metricsPort > 65535 {
-		return fmt.Errorf("GALACTIC_ROUTER_METRICS_PORT must be a valid port number (1-65535), got %d", metricsPort)
-	}
-	if grpcHealthPort < 1 || grpcHealthPort > 65535 {
-		return fmt.Errorf("GALACTIC_ROUTER_GRPC_HEALTH_PORT must be a valid port number (1-65535), got %d", grpcHealthPort)
-	}
-	return nil
-}
-
 // resolveBGPLocalAddress returns explicit if non-empty. Otherwise it calls
 // detect to read the BGP local address from the host's lo interface,
 // returning an error if detection fails — there is no silent fallback to an
@@ -186,30 +60,26 @@ func resolveBGPLocalAddress(explicit string, detect func() (string, error)) (str
 }
 
 // runCmd contains the application startup logic. It reads configuration from
-// the provided viper instance and initializes the BGP runtime.
-func runCmd(v *viper.Viper) error {
-	if err := validateConfig(v); err != nil {
-		return err
-	}
+// the provided config and initializes the BGP runtime.
+func runCmd(cfg *config.RouterConfig) error {
+	nodeName := cfg.NodeName
+	mode := cfg.Mode
+	bgpListenPort := cfg.BGPListenPort
+	metricsPort := cfg.MetricsPort
+	grpcHealthPort := cfg.GRPCHealthPort
 
-	nodeName := v.GetString("galactic_router.node_name")
-	mode := v.GetString("galactic_router.router_mode")
-	bgpListenPort := v.GetInt("galactic_router.bgp_listen_port")
-	metricsPort := v.GetInt("galactic_router.metrics_port")
-	grpcHealthPort := v.GetInt("galactic_router.grpc_health_port")
-
-	bgpLocalAddr, err := resolveBGPLocalAddress(v.GetString("galactic_router.bgp_local_address"), loaddr.Detect)
+	bgpLocalAddr, err := resolveBGPLocalAddress(cfg.BGPLocalAddr, loaddr.Detect)
 	if err != nil {
 		return err
 	}
 
 	var factory galacticruntime.RuntimeFactory
 	switch mode {
-	case modeTenant:
+	case config.ModeTenant:
 		factory = gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr)
-	case modeFabric:
+	case config.ModeFabric:
 		factory = frr.NewRuntimeFactory()
-	case modeTransit:
+	case config.ModeTransit:
 		return errors.New("mode=transit is not yet supported")
 	}
 
@@ -327,14 +197,12 @@ func runCmd(v *viper.Viper) error {
 	}
 
 	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
-	gcNamespace := v.GetString("galactic_router.gc_namespace")
-	gcInterval := v.GetDuration("galactic_router.gc_interval")
 	gcRec := &controller.GCReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
-		Namespace: gcNamespace,
+		Namespace: cfg.GCNamespace,
 		NodeName:  nodeName,
-		Interval:  gcInterval,
+		Interval:  cfg.GCInterval,
 	}
 	if err := gcRec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup GC controller: %w", err)
@@ -344,7 +212,7 @@ func runCmd(v *viper.Viper) error {
 	// is cancelled. The initial GC pass waits for informer caches to sync
 	// so it doesn't see an empty BGPAdvertisement list and delete live VRFs.
 	go func() {
-		ticker := time.NewTicker(gcInterval)
+		ticker := time.NewTicker(cfg.GCInterval)
 		defer ticker.Stop()
 
 		if !mgr.GetCache().WaitForCacheSync(ctx) {
@@ -373,8 +241,6 @@ func runCmd(v *viper.Viper) error {
 // newRootCommand builds the root cobra command with all flags and the
 // application startup logic.
 func newRootCommand() *cobra.Command {
-	v := newViper()
-
 	cmd := &cobra.Command{
 		Use:   appName,
 		Short: strings.Split(appDesc, "\n")[0],
@@ -388,11 +254,38 @@ func newRootCommand() *cobra.Command {
 				fmt.Printf("galactic-router version %s\n", metadata.Version)
 				return nil
 			}
-			return runCmd(v)
+
+			cfg := config.NewRouterConfig()
+			cfg.BindFlags(cmd.Flags())
+			if err := cfg.Validate(); err != nil {
+				return err
+			}
+			return runCmd(cfg)
 		},
 	}
 
-	bindFlags(cmd, v)
+	cmd.Flags().StringP("node-name", "n", "", "Kubernetes node name (required)")
+	cmd.Flags().StringP("mode", "m", "",
+		"Operating mode: '"+config.ModeTransit+"', '"+config.ModeFabric+"', or '"+config.ModeTenant+"' (required)")
+	cmd.Flags().Bool("reflector", false,
+		"Enable route reflector mode (requires --mode="+config.ModeFabric+" or --mode="+config.ModeTenant+")")
+	cmd.Flags().IntP("bgp-listen-port", "p", config.DefaultRouterBGPListenPort,
+		"BGP listen port")
+	cmd.Flags().StringP("bgp-local-address", "",
+		"",
+		"Source address for outgoing BGP connections; auto-detected from lo if unset")
+	cmd.Flags().IntP("metrics-port", "",
+		config.DefaultRouterMetricsPort,
+		"Metrics listen port")
+	cmd.Flags().IntP("grpc-health-port", "",
+		config.DefaultRouterGRPCHealthPort,
+		"gRPC health check port")
+	cmd.Flags().StringP("gc-namespace", "",
+		config.DefaultRouterGCNamespace,
+		"Namespace for orphaned CRD cleanup")
+	cmd.Flags().DurationP("gc-interval", "",
+		config.DefaultRouterGCInterval,
+		"Cleanup interval")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd
