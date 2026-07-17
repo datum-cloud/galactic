@@ -56,9 +56,6 @@ const (
 	interfaceTypeVeth = "veth"
 	// interfaceTypeTap is the tap interface type: L2 fd for VMs (Kata, Firecracker).
 	interfaceTypeTap = "tap"
-
-	// cniVersion100 is the CNI spec version this plugin reports.
-	cniVersion100 = "1.0.0"
 )
 
 // RunPlugin starts the CNI plugin, handling ADD, DEL, CHECK, and STATUS operations.

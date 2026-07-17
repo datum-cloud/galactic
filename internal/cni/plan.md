@@ -45,7 +45,7 @@ Package-level godoc explaining the CNI plugin's purpose: wires containers into V
 - `RunPlugin()` — `skel.PluginMainFuncs` wiring
 - `init()` — scheme registration
 - `SetEnableLocalIPAM()` — CLI flag setter
-- Constants only: `cniTimeout`, `ipamTypePool`, `localIPAMDefaultPool`, `localIPAMDefaultSubnetLen`, `cniVersion100`, `interfaceTypeVeth`, `interfaceTypeTap`, `defaultNamespace`
+- Constants only: `cniTimeout`, `ipamTypePool`, `localIPAMDefaultPool`, `localIPAMDefaultSubnetLen`, `interfaceTypeVeth`, `interfaceTypeTap`, `defaultNamespace`
 
 **Move out:** All function bodies. Only type declarations that are referenced from other files stay (`PluginConf` → `types.go`).
 

@@ -99,7 +99,7 @@ func buildVethResult(
 		return nil, fmt.Errorf("read guest interface: %w", err)
 	}
 	result := buildResult(pluginConf, ipamResult, hostName, args.IfName, hostMac, guestMac, hostMTU, guestMTU, args.Netns)
-	if err := types.PrintResult(result, cniVersion100); err != nil {
+	if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
 		return nil, fmt.Errorf("print CNI result: %w", err)
 	}
 
