@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
@@ -96,14 +97,19 @@ func cmdStatus(args *skel.CmdArgs) error {
 		return &types.Error{Code: 7, Msg: fmt.Sprintf("load host CNI config: %v", err)}
 	}
 
-	// Resolve and propagate Kubeconfig
-	kubeconfig := cniViper.Kubeconfig(hostConf.Kubeconfig)
-	_ = os.Setenv("KUBECONFIG", kubeconfig)
+	// Resolve config: env var > conflist > default.
+	cniConfig.Resolve(&config.ConflistValues{
+		Kubeconfig: hostConf.Kubeconfig,
+		Namespace:  hostConf.Namespace,
+		LogFile:    hostConf.LogFile,
+		LogLevel:   hostConf.LogLevel,
+	})
 
-	// Resolve and setup Logging
-	logFile := cniViper.LogFile(hostConf.LogFile)
-	logLevel := cniViper.LogLevel(hostConf.LogLevel)
-	setupLogging(logFile, logLevel)
+	// Propagate Kubeconfig
+	_ = os.Setenv("KUBECONFIG", cniConfig.Kubeconfig)
+
+	// Setup Logging
+	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
 
 	// Config is parseable and API server is reachable.
 	slog.Info("STATUS: probing API server reachability")

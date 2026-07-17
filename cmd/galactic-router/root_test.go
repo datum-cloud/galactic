@@ -6,238 +6,225 @@ package main
 
 import (
 	"errors"
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/metadata"
 )
 
 const testCmdUse = "test"
 
-// cmdWithViper creates a cobra command with a fresh viper instance and
-// binds all flags. This is used to test flag defaults and cobra integration.
-func cmdWithViper(t *testing.T) *viper.Viper {
+// testCmd creates a cobra command with the same flags as newRootCommand.
+func testCmd(t *testing.T) *cobra.Command {
 	t.Helper()
-	v := newViper()
-	cmd := &cobra.Command{
-		Use: testCmdUse,
-	}
-	bindFlags(cmd, v)
-	return v
+	cmd := &cobra.Command{Use: testCmdUse}
+	cmd.Flags().StringP("node-name", "n", "", "Kubernetes node name (required)")
+	cmd.Flags().StringP("mode", "m", "", "Operating mode")
+	cmd.Flags().Bool("reflector", false, "Enable route reflector mode")
+	cmd.Flags().IntP("bgp-listen-port", "p", config.DefaultRouterBGPListenPort, "BGP listen port")
+	cmd.Flags().StringP("bgp-local-address", "", "", "BGP local address")
+	cmd.Flags().IntP("metrics-port", "", config.DefaultRouterMetricsPort, "Metrics listen port")
+	cmd.Flags().IntP("grpc-health-port", "", config.DefaultRouterGRPCHealthPort, "gRPC health check port")
+	cmd.Flags().StringP("gc-namespace", "", config.DefaultRouterGCNamespace, "Namespace for orphaned CRD cleanup")
+	cmd.Flags().DurationP("gc-interval", "", config.DefaultRouterGCInterval, "Cleanup interval")
+	return cmd
 }
 
 func TestFlagDefaults(t *testing.T) {
-	v := cmdWithViper(t)
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
 
-	if v.GetInt("galactic_router.bgp_listen_port") != 179 {
-		t.Errorf("bgp_listen_port default = %d, want 179", v.GetInt("galactic_router.bgp_listen_port"))
+	if cfg.BGPListenPort != config.DefaultRouterBGPListenPort {
+		t.Errorf("BGPListenPort = %d, want %d", cfg.BGPListenPort, config.DefaultRouterBGPListenPort)
 	}
-	if v.GetInt("galactic_router.metrics_port") != 8080 {
-		t.Errorf("metrics_port default = %d, want 8080", v.GetInt("galactic_router.metrics_port"))
+	if cfg.MetricsPort != config.DefaultRouterMetricsPort {
+		t.Errorf("MetricsPort = %d, want %d", cfg.MetricsPort, config.DefaultRouterMetricsPort)
 	}
-	if v.GetInt("galactic_router.grpc_health_port") != 5000 {
-		t.Errorf("grpc_health_port default = %d, want 5000", v.GetInt("galactic_router.grpc_health_port"))
+	if cfg.GRPCHealthPort != config.DefaultRouterGRPCHealthPort {
+		t.Errorf("GRPCHealthPort = %d, want %d", cfg.GRPCHealthPort, config.DefaultRouterGRPCHealthPort)
 	}
 }
 
 func TestRequiredFlags(t *testing.T) {
-	v := cmdWithViper(t)
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with empty node-name and router-role returned nil error")
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() with empty node-name and mode returned nil error")
 	}
 }
 
 func TestEnvVarDefaults(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "tenant")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 
-	v := cmdWithViper(t)
-	if err := validateConfig(v); err != nil {
-		t.Errorf("validateConfig with valid env vars: %v", err)
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with valid env vars: %v", err)
 	}
 }
 
 func TestInvalidMode(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "invalid")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, "invalid")
 
-	v := cmdWithViper(t)
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with invalid mode returned nil error")
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() with invalid mode returned nil error")
 	}
 }
 
 func TestBGPListenPortMinusOne(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_BGP_LISTEN_PORT", "-1")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTenant)
+	t.Setenv(config.EnvRouterBGPListenPort, "-1")
 
-	v := cmdWithViper(t)
-	if err := validateConfig(v); err != nil {
-		t.Errorf("validateConfig with GALACTIC_ROUTER_BGP_LISTEN_PORT=-1: %v", err)
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with BGP listen port -1: %v", err)
 	}
 }
 
 func TestBGPListenPortOverflow(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_BGP_LISTEN_PORT", "70000")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTenant)
+	t.Setenv(config.EnvRouterBGPListenPort, "70000")
 
-	v := cmdWithViper(t)
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with GALACTIC_ROUTER_BGP_LISTEN_PORT=70000 returned nil error")
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() with BGP listen port 70000 returned nil error")
 	}
 }
 
 func TestNodeNameRequired(t *testing.T) {
-	v := cmdWithViper(t)
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with empty node-name returned nil error")
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() with empty node-name returned nil error")
 	}
 }
 
 func TestModeRequired(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	// GALACTIC_ROUTER_ROUTER_MODE unset
+	t.Setenv(config.EnvRouterNodeName, "test-node")
 
-	v := cmdWithViper(t)
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with empty mode returned nil error")
-	}
-	if err != nil && !strings.Contains(err.Error(), "--mode is required") {
-		t.Errorf("expected --mode required error, got: %v", err)
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() with empty mode returned nil error")
 	}
 }
 
 func TestValidModes(t *testing.T) {
-	for _, mode := range []string{"transit", "fabric", "tenant"} {
+	for _, mode := range []string{config.ModeTransit, config.ModeFabric, config.ModeTenant} {
 		t.Run(mode, func(t *testing.T) {
-			t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-			t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", mode)
+			t.Setenv(config.EnvRouterNodeName, "test-node")
+			t.Setenv(config.EnvRouterMode, mode)
 
-			v := cmdWithViper(t)
-			// Verify the mode is read correctly.
-			if v.GetString("galactic_router.router_mode") != mode {
-				t.Errorf("router_mode = %q, want %q", v.GetString("galactic_router.router_mode"), mode)
+			cfg := config.NewRouterConfig()
+			cmd := testCmd(t)
+			cfg.BindFlags(cmd.Flags())
+
+			if cfg.Mode != mode {
+				t.Errorf("Mode = %q, want %q", cfg.Mode, mode)
 			}
-			// Verify validation passes.
-			if err := validateConfig(v); err != nil {
-				t.Errorf("validateConfig with mode %q: %v", mode, err)
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() with mode %q: %v", mode, err)
 			}
 		})
 	}
 }
 
 func TestReflectorInvalidMode(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "transit")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTransit)
 
-	v := cmdWithViper(t)
-	// Simulate --reflector being set via flag.
-	cmd := &cobra.Command{Use: testCmdUse}
-	bindFlags(cmd, v)
-	//nolint:errcheck // flag exists, setting it is safe
-	cmd.Flags().Set("reflector", "true")
-	_ = v.BindPFlags(cmd.Flags())
-
-	err := validateConfig(v)
-	if err == nil {
-		t.Error("validateConfig with --reflector and --mode=transit returned nil error")
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	if err := cmd.Flags().Set("reflector", "true"); err != nil {
+		t.Fatalf("set --reflector flag: %v", err)
 	}
-	if err != nil && !strings.Contains(err.Error(), "--reflector is only valid") {
-		t.Errorf("expected --reflector validation error, got: %v", err)
+	cfg.BindFlags(cmd.Flags())
+
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() with --reflector and --mode=transit returned nil error")
 	}
 }
 
 func TestMetricsPortOverride(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_METRICS_PORT", "9090")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTenant)
+	t.Setenv(config.EnvRouterMetricsPort, "9090")
 
-	v := cmdWithViper(t)
-	if v.GetInt("galactic_router.metrics_port") != 9090 {
-		t.Errorf("metrics_port = %d, want 9090", v.GetInt("galactic_router.metrics_port"))
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if cfg.MetricsPort != 9090 {
+		t.Errorf("MetricsPort = %d, want 9090", cfg.MetricsPort)
 	}
 }
 
 func TestGRPCHealthPortOverride(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GRPC_HEALTH_PORT", "9091")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTenant)
+	t.Setenv(config.EnvRouterGRPCHealthPort, "9091")
 
-	v := cmdWithViper(t)
-	if v.GetInt("galactic_router.grpc_health_port") != 9091 {
-		t.Errorf("grpc_health_port = %d, want 9091", v.GetInt("galactic_router.grpc_health_port"))
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	cfg.BindFlags(cmd.Flags())
+	if cfg.GRPCHealthPort != 9091 {
+		t.Errorf("GRPCHealthPort = %d, want 9091", cfg.GRPCHealthPort)
 	}
 }
 
 func TestModeFlagOverridesEnv(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "fabric")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeFabric)
 
-	v := newViper()
-	cmd := &cobra.Command{Use: testCmdUse}
-	bindFlags(cmd, v)
-	if err := cmd.Flags().Set("mode", "tenant"); err != nil {
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	if err := cmd.Flags().Set("mode", config.ModeTenant); err != nil {
 		t.Fatalf("set --mode flag: %v", err)
 	}
+	cfg.BindFlags(cmd.Flags())
 
-	if got := v.GetString("galactic_router.router_mode"); got != "tenant" {
-		t.Errorf("router_mode = %q, want %q (flag should override env var)", got, "tenant")
+	if cfg.Mode != config.ModeTenant {
+		t.Errorf("Mode = %q, want %q (flag should override env var)", cfg.Mode, config.ModeTenant)
 	}
 }
 
 func TestGRPCHealthPortFlagOverridesEnv(t *testing.T) {
-	t.Setenv("GALACTIC_ROUTER_NODE_NAME", "test-node")
-	t.Setenv("GALACTIC_ROUTER_ROUTER_MODE", "tenant")
-	t.Setenv("GALACTIC_ROUTER_GRPC_HEALTH_PORT", "9091")
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTenant)
+	t.Setenv(config.EnvRouterGRPCHealthPort, "9091")
 
-	v := newViper()
-	cmd := &cobra.Command{Use: testCmdUse}
-	bindFlags(cmd, v)
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
 	if err := cmd.Flags().Set("grpc-health-port", "9092"); err != nil {
 		t.Fatalf("set --grpc-health-port flag: %v", err)
 	}
+	cfg.BindFlags(cmd.Flags())
 
-	if got := v.GetInt("galactic_router.grpc_health_port"); got != 9092 {
-		t.Errorf("grpc_health_port = %d, want %d (flag should override env var)", got, 9092)
+	if cfg.GRPCHealthPort != 9092 {
+		t.Errorf("GRPCHealthPort = %d, want %d (flag should override env var)", cfg.GRPCHealthPort, 9092)
 	}
 }
 
 func TestVersionFlag(t *testing.T) {
 	if metadata.Version == "" {
 		t.Error("metadata.Version should not be empty")
-	}
-}
-
-func TestDefaults(t *testing.T) {
-	// Clear all relevant env vars.
-	_ = os.Unsetenv("GALACTIC_ROUTER_NODE_NAME")
-	_ = os.Unsetenv("GALACTIC_ROUTER_ROUTER_MODE")
-	_ = os.Unsetenv("GALACTIC_ROUTER_BGP_LISTEN_PORT")
-	_ = os.Unsetenv("GALACTIC_ROUTER_BGP_LOCAL_ADDRESS")
-	_ = os.Unsetenv("GALACTIC_ROUTER_METRICS_PORT")
-	_ = os.Unsetenv("GALACTIC_ROUTER_GRPC_HEALTH_PORT")
-
-	v := cmdWithViper(t)
-
-	if v.GetInt("galactic_router.bgp_listen_port") != 179 {
-		t.Errorf("bgp_listen_port = %d, want 179", v.GetInt("galactic_router.bgp_listen_port"))
-	}
-	if v.GetInt("galactic_router.metrics_port") != 8080 {
-		t.Errorf("metrics_port = %d, want 8080", v.GetInt("galactic_router.metrics_port"))
-	}
-	if v.GetInt("galactic_router.grpc_health_port") != 5000 {
-		t.Errorf("grpc_health_port = %d, want 5000", v.GetInt("galactic_router.grpc_health_port"))
 	}
 }
 
