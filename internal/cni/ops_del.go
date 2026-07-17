@@ -41,6 +41,13 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
+	// Forward DEL to host-device delegated plugin (CNI spec §4).
+	// host-device DEL is idempotent — missing devices are not errors.
+	// Only applies to veth mode; tap mode has no host-device delegation.
+	if pluginConf.InterfaceType == interfaceTypeVeth {
+		_ = hostDevice("DEL", args, pluginConf)
+	}
+
 	// Shared resources (VRF, veth/tap, routes, SRv6 ingress, BGPAdvertisement,
 	// BGPVRFInstance) are keyed by (vpc, vpcAttachment) and may still be in use
 	// by another pod. Deleting them here races with cmdAdd during pod restarts —
