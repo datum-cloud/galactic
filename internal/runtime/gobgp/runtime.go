@@ -430,7 +430,7 @@ func fsmStateToModel(state api.PeerState_SessionState) model.BGPPeerState {
 // applyVRF configures a VRF in GoBGP via AddVrf. The route distinguisher is
 // derived as the RFC 4364 Type 1 (IP-address:local-admin) format
 // "routerID:vrfID", matching the convention buildEVPNPaths uses for the
-// per-router RD (routerID:0).
+// per-VRF RD so that EVPN paths and VRF registration share the same distinguisher.
 // If the VRF already exists, the call is treated as idempotent (no-op).
 func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance, routerID string) error {
 	// Derive and parse the route distinguisher.

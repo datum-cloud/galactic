@@ -17,6 +17,17 @@ import (
 	"go.datum.net/galactic/internal/model"
 )
 
+// deriveRD builds an RFC 4364 Type 1 route distinguisher from the router ID
+// and the advertisement's VRFID. When VRFID is set, the RD is "routerID:vrfID"
+// matching the per-VRF RD used by applyVRF during VRF registration. When VRFID
+// is nil (legacy advertisements without a VRFID), falls back to "routerID:0".
+func deriveRD(routerID string, vrfID *int32) string {
+	if vrfID != nil {
+		return fmt.Sprintf("%s:%d", routerID, *vrfID)
+	}
+	return routerID + ":0"
+}
+
 // parseSIDAddr parses an SRv6 SID string that may be a bare IPv6 address or a
 // /128 CIDR (e.g. "2001:db8::1/128"). It strips the CIDR suffix before parsing.
 func parseSIDAddr(sid string) (netip.Addr, error) {
@@ -30,7 +41,8 @@ func parseSIDAddr(sid string) (netip.Addr, error) {
 // in adv into the local GoBGP RIB.
 //
 // routerID is the BGP router-ID (IPv4 dotted-decimal) and is used to derive the
-// per-router route distinguisher (Type 1 IP-address: routerID:0). adv.NextHop
+// per-VRF route distinguisher (Type 1 IP-address: routerID:vrfID) when adv.VRFID
+// is set, matching the RD used by applyVRF during VRF registration. adv.NextHop
 // is the transit-reachable BGP peering address placed in MpReachNLRI. adv.SRv6SID,
 // when set, is the End.DT46 SID placed in the EVPN GWIPAddress field — this is
 // the SRv6 segment that remote nodes install in their seg6 encap kernel routes.
@@ -50,10 +62,14 @@ func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, ro
 		gwIP = sid
 	}
 
-	// Type 1 (IP-address:local-admin) RD, unique per router.
-	rd, err := bgp.ParseRouteDistinguisher(routerID + ":0")
+	// Type 1 (IP-address:local-admin) RD, unique per VRF.
+	// When adv.VRFID is set, the RD matches the one used by applyVRF during
+	// VRF registration ("routerID:vrfID"), ensuring two VRFs on the same
+	// router never produce colliding NLRIs even for identical prefixes.
+	rdStr := deriveRD(routerID, adv.VRFID)
+	rd, err := bgp.ParseRouteDistinguisher(rdStr)
 	if err != nil {
-		return fmt.Errorf("derive route distinguisher from router-ID %q: %w", routerID, err)
+		return fmt.Errorf("derive route distinguisher %q: %w", rdStr, err)
 	}
 
 	rts, err := parseRouteTargets(adv.Communities)

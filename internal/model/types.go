@@ -87,6 +87,11 @@ type DesiredAdvertisement struct {
 	// Must be the End.DT46 SID for this VPC attachment so that receiving nodes install
 	// a seg6 encap route targeting the correct SRv6 decap instruction.
 	SRv6SID string
+	// VRFID is the 16-bit PoP-local VRF identifier carried from the BGPAdvertisement
+	// spec. The runtime derives the per-VRF route distinguisher as "routerID:vrfID" so
+	// that advertisements from different VRFs on the same router produce distinct NLRIs.
+	// When nil, the legacy "routerID:0" fallback is used.
+	VRFID *int32
 }
 
 // DesiredPolicy describes a routing policy in one direction.
