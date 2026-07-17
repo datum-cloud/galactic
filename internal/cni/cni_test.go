@@ -45,6 +45,7 @@ const (
 	testIfName        = "eth0"
 	testRouterName    = "overlay-router"
 	testSID128        = "2001:db8::1/128"
+	testCNIVersion    = "1.0.0"
 
 	// testPrevResult is a valid CNI v1.0.0 result used in prevResult tests.
 	testPrevResult = `{"cniVersion":"1.0.0",` +
@@ -378,7 +379,7 @@ func TestSanitizeForError(t *testing.T) {
 
 func TestValidatePrevResult(t *testing.T) {
 	validResult := &type100.Result{
-		CNIVersion: cniVersion100,
+		CNIVersion: testCNIVersion,
 		Interfaces: []*type100.Interface{
 			{Name: testIfName, Mac: testMac, Sandbox: testNetns},
 		},
@@ -414,7 +415,7 @@ func TestValidatePrevResult(t *testing.T) {
 
 func TestValidatePrevResultAdd(t *testing.T) {
 	validWithInterface := &type100.Result{
-		CNIVersion: cniVersion100,
+		CNIVersion: testCNIVersion,
 		Interfaces: []*type100.Interface{
 			{Name: testIfName, Mac: testMac, Sandbox: testNetns},
 		},
@@ -423,13 +424,13 @@ func TestValidatePrevResultAdd(t *testing.T) {
 		},
 	}
 	validWithIPsOnly := &type100.Result{
-		CNIVersion: cniVersion100,
+		CNIVersion: testCNIVersion,
 		IPs: []*type100.IPConfig{
 			{Address: *mustParseCIDR(t, "fd00:1::1/64")},
 		},
 	}
 	emptyResult := &type100.Result{
-		CNIVersion: cniVersion100,
+		CNIVersion: testCNIVersion,
 		// No interfaces, no IPs — should fail content validation.
 	}
 
@@ -699,7 +700,7 @@ func TestBuildResult(t *testing.T) {
 	netns := "/proc/1234/ns/net"
 
 	conf := &PluginConf{
-		PluginConf:    types.PluginConf{CNIVersion: cniVersion100},
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
 		VPC:           testVPC,
 		VPCAttachment: testAttachment,
 	}
@@ -740,8 +741,8 @@ func TestBuildResult(t *testing.T) {
 				netns,
 			)
 
-			if result.CNIVersion != cniVersion100 {
-				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, cniVersion100)
+			if result.CNIVersion != testCNIVersion {
+				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, testCNIVersion)
 			}
 
 			if len(result.Interfaces) != tt.wantInts {
@@ -816,7 +817,7 @@ func TestBuildTapResult(t *testing.T) {
 	route := mustParseCIDR(t, "::/0")
 
 	conf := &PluginConf{
-		PluginConf:    types.PluginConf{CNIVersion: cniVersion100},
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
 		VPC:           testVPC,
 		VPCAttachment: testAttachment,
 	}
@@ -845,8 +846,8 @@ func TestBuildTapResult(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := buildTapResult(conf, tt.ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
 
-			if result.CNIVersion != cniVersion100 {
-				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, cniVersion100)
+			if result.CNIVersion != testCNIVersion {
+				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, testCNIVersion)
 			}
 
 			if len(result.Interfaces) != 1 {

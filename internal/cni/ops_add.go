@@ -153,7 +153,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 
 		// Print the CNI result with IP info.
 		result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
-		if err := types.PrintResult(result, cniVersion100); err != nil {
+		if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
 			return fmt.Errorf("print CNI result: %w", err)
 		}
 

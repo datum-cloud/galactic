@@ -24,7 +24,7 @@ func cmdDel(args *skel.CmdArgs) error {
 		slog.Error("DEL: failed to parse CNI config, skipping cleanup", "err", parseErr,
 			"containerID", args.ContainerID)
 		result := &type100.Result{}
-		_ = types.PrintResult(result, cniVersion100)
+		_ = types.PrintResult(result, "1.0.0")
 		return nil
 	}
 	vpc, vpcAtt := pluginConf.VPC, pluginConf.VPCAttachment
@@ -53,7 +53,7 @@ func cmdDel(args *skel.CmdArgs) error {
 		"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
 
 	result := &type100.Result{}
-	_ = types.PrintResult(result, cniVersion100)
+	_ = types.PrintResult(result, pluginConf.CNIVersion)
 
 	return nil
 }
