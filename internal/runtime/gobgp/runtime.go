@@ -392,6 +392,14 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 		return model.RuntimeStatus{Healthy: false}, fmt.Errorf("list peers: %w", listErr)
 	}
 
+	// Collect advertisement statuses from the applied advertisements map.
+	for name, adv := range r.appliedAdvertisements {
+		status.Advertisements = append(status.Advertisements, model.AdvertisementStatus{
+			Name:               name,
+			AdvertisedPrefixes: int32(len(adv.Prefixes)),
+		})
+	}
+
 	return status, nil
 }
 
