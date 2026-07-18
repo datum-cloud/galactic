@@ -28,7 +28,7 @@ ip6tables -I FORWARD 1 -d ${SRV6_PREFIX} -j ACCEPT
 modprobe --quiet --dry-run vrf && modprobe vrf
 sysctl -w net.vrf.strict_mode=1
 
-for iface in eth1 all default lo-galactic; do
+for iface in eth1 all default; do
   sysctl -w net.ipv4.conf.$iface.forwarding=1
   sysctl -w net.ipv4.conf.$iface.rp_filter=0
   sysctl -w net.ipv6.conf.$iface.forwarding=1

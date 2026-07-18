@@ -220,11 +220,11 @@ tasks:
       - docker exec iad-control-plane kubectl get bgppeers -n galactic-system
 
   "test:srv6":
-    desc: Verify each site's aggregate SRv6 locator block on tr1
+    desc: Verify each site's per-node SRv6 locator block on tr1
     cmds:
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
-      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01:100::/56"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02:100::/56"
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03:100::/56"
 
   "test:evpn":
     desc: Verify EVPN BGP routes on iad, sjc, and dfw via BGPRouter status

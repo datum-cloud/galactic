@@ -12,20 +12,22 @@ the route reflector, distributing reachability across sites — but only within
 the same VPC. `vpc10` and `vpc20` use distinct VRFs, route targets, and SRv6
 SIDs, so pods in different VPCs cannot reach each other.
 
-Each site advertises one aggregate `/48` SRv6 locator block into the fabric —
-individual VPC USIDs are just sequential host addresses within it, so adding
-a VPC to a site that's already advertising the block requires zero fabric
-config changes. Each VPC also gets its own IPv6 IPAM pool, unrelated to the
-SID numbering:
+Each site's tenant node advertises its own `/56` SRv6 locator block into the
+fabric — individual VPC USIDs are just host addresses within it, so adding a
+VPC to a node that's already advertising the block requires zero fabric
+config changes. The VRFID embedded in each USID is decoded from the NAD's
+`vpcattachment` value (`vrfIDFromAttachment`, base62 → hex → uint16): `"10"`
+→ `0x3e` (62), `"20"` → `0x7c` (124). Each VPC also gets its own IPv6 IPAM
+pool, unrelated to the SID numbering:
 
-| Site | VPC   | USID                  | IPAM pool           | Gateway           |
-|------|-------|-----------------------|---------------------|-------------------|
-| dfw  | vpc10 | `2001:db8:ff01::1/128` | `fd00:10:ff01::/48` | `fd00:10:ff01::1` |
-| dfw  | vpc20 | `2001:db8:ff01::2/128` | `fd00:20:ff01::/48` | `fd00:20:ff01::1` |
-| sjc  | vpc10 | `2001:db8:ff02::1/128` | `fd00:10:ff02::/48` | `fd00:10:ff02::1` |
-| sjc  | vpc20 | `2001:db8:ff02::2/128` | `fd00:20:ff02::/48` | `fd00:20:ff02::1` |
-| iad  | vpc10 | `2001:db8:ff03::1/128` | `fd00:10:ff03::/48` | `fd00:10:ff03::1` |
-| iad  | vpc20 | `2001:db8:ff03::2/128` | `fd00:20:ff03::/48` | `fd00:20:ff03::1` |
+| Site | VPC   | USID                          | IPAM pool           | Gateway           |
+|------|-------|-------------------------------|---------------------|-------------------|
+| dfw  | vpc10 | `2001:db8:ff01:100:3e00::/128` | `fd00:10:ff01::/48` | `fd00:10:ff01::1` |
+| dfw  | vpc20 | `2001:db8:ff01:100:7c00::/128` | `fd00:20:ff01::/48` | `fd00:20:ff01::1` |
+| sjc  | vpc10 | `2001:db8:ff02:100:3e00::/128` | `fd00:10:ff02::/48` | `fd00:10:ff02::1` |
+| sjc  | vpc20 | `2001:db8:ff02:100:7c00::/128` | `fd00:20:ff02::/48` | `fd00:20:ff02::1` |
+| iad  | vpc10 | `2001:db8:ff03:100:3e00::/128` | `fd00:10:ff03::/48` | `fd00:10:ff03::1` |
+| iad  | vpc20 | `2001:db8:ff03:100:7c00::/128` | `fd00:20:ff03::/48` | `fd00:20:ff03::1` |
 
 ## Prerequisites
 
@@ -167,14 +169,14 @@ docker exec dfw-worker dmesg | grep galactic
    docker exec dfw-control-plane kubectl get bgprouters -A -o yaml | grep -A 5 advertised
    ```
 
-2. Check the SRv6 underlay — transit routers should have each site's aggregate
-   `/48` locator block, which covers every VPC's USID on that site (vpc10 and
+2. Check the SRv6 underlay — transit routers should have each site's per-node
+   `/56` locator block, which covers every VPC's USID on that node (vpc10 and
    vpc20 alike):
 
    ```bash
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01:100::/56"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02:100::/56"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03:100::/56"
    ```
 
 3. Verify the pod's VRF and SRv6 route on the worker. The VRF interface name is
