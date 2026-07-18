@@ -10,11 +10,11 @@ cross-VPC connectivity), see [docs/vpc.md](vpc.md).
 # iBGP full mesh — expect all sessions Established
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast summary"
 
-# Each site's aggregate /48 SRv6 locator block should be present on all TR nodes
-# (covers every VPC's USID on that site, vpc10 and vpc20 alike — see docs/vpc.md)
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
+# Each site's per-node /56 SRv6 locator block should be present on all TR nodes
+# (covers every VPC's USID on that node, vpc10 and vpc20 alike — see docs/vpc.md)
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01:100::/56"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02:100::/56"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03:100::/56"
 ```
 
 ## FRR DaemonSets (eBGP fabric)

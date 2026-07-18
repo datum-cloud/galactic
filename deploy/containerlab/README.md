@@ -48,7 +48,7 @@ AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant 
 
 - All clusters use a single AS (65000) for both the FRR fabric and the galactic-router tenant.
 - The transit mesh carries IPv6 unicast (SRv6 locator prefixes and loopbacks) via iBGP within AS 65100.
-- FRR PE nodes originate their SRv6 forwarding prefix (`2001:db8:ffXX::/48`) and SRv6 SID block (`fc00:0:X::/48`) toward the transit layer via eBGP over numbered IPv6 links.
+- FRR PE nodes originate their per-node SRv6 locator block (`2001:db8:ffXX:100::/56`) and BGP peering loopback (`fc00:0:X::1/128`) toward the transit layer via eBGP over numbered IPv6 links — never the site's full `/48` uSID Block or loopback pool, which would create an anycast ambiguity once a second worker joins a site.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - galactic-router instances on dfw/iad/sjc workers peer with iad-worker-control over iBGP (AS 65000) for `l2vpn-evpn` routes. GoBGP runs with outbound-only mode (`listenPort=-1`); all BGP sessions are initiated outbound.
 
@@ -85,21 +85,26 @@ AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant 
 
 ### Cluster SRv6 addressing
 
-Each worker has a `lo-galactic` dummy interface with a blackhole route for its
-/128 USID (metric 2048, lower priority than the seg6local route at metric 1024).
-The blackhole prevents the default route from matching the USID while the
-seg6local route handles SRv6 decapsulation. The FRR fabric DaemonSet advertises
-the USID into the transit mesh via a static Null0 route + BGP `network` statement.
+Each worker has a standalone blackhole route (no interface needed) covering its
+whole `/56` locator block (metric 2048, lower priority than any pod's seg6local
+route at metric 1024 — IPv6 FIB lookup is longest-prefix-match first, so a real
+`/128` decap route always wins regardless of metric). The blackhole prevents the
+default route from matching any USID this node could compute before or without
+a matching seg6local route installed, for any current or future VPC — not just
+the ones with a pod running today. The FRR fabric DaemonSet advertises the same
+`/56` into the transit mesh via a static Null0 route + BGP `network` statement.
 
-Each site advertises one aggregate `/48` SRv6 locator block into the fabric; test VPCs
+Each site's tenant node advertises its own `/56` SRv6 locator block into the
+fabric — never the site's full `/48` uSID Block, which would create an
+anycast ambiguity the instant a second tenant node joins a site. Test VPCs
 `vpc10` and `vpc20` (see [docs/vpc.md](docs/vpc.md)) get sequential host addresses
-within their site's block rather than a separate per-VPC prefix:
+within their node's block rather than a separate per-VPC prefix:
 
-| Cluster     | FRR loopback   | Site aggregate block | USID vpc10             | USID vpc20             | galactic-router address |
-|-------------|----------------|-----------------------|-------------------------|-------------------------|-------------------------|
-| dfw         | fc00:0:2::1/48 | 2001:db8:ff01::/48    | 2001:db8:ff01::1/128    | 2001:db8:ff01::2/128    | fc00:0:2::1             |
-| sjc         | fc00:0:3::1/48 | 2001:db8:ff02::/48    | 2001:db8:ff02::1/128    | 2001:db8:ff02::2/128    | fc00:0:3::1             |
-| iad         | fc00:0:4::1/48 | 2001:db8:ff03::/48    | 2001:db8:ff03::1/128    | 2001:db8:ff03::2/128    | fc00:0:4::1             |
+| Cluster     | FRR loopback   | Node locator block     | USID vpc10                    | USID vpc20                    | galactic-router address |
+|-------------|----------------|-------------------------|--------------------------------|--------------------------------|-------------------------|
+| dfw         | fc00:0:2::1/128 | 2001:db8:ff01:100::/56 | 2001:db8:ff01:100:3e00::/128  | 2001:db8:ff01:100:7c00::/128  | fc00:0:2::1             |
+| sjc         | fc00:0:3::1/128 | 2001:db8:ff02:100::/56 | 2001:db8:ff02:100:3e00::/128  | 2001:db8:ff02:100:7c00::/128  | fc00:0:3::1             |
+| iad         | fc00:0:4::1/128 | 2001:db8:ff03:100::/56 | 2001:db8:ff03:100:3e00::/128  | 2001:db8:ff03:100:7c00::/128  | fc00:0:4::1             |
 
 The `galactic-router address` column is no longer set explicitly in the
 per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
