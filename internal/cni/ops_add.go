@@ -6,6 +6,7 @@ package cni
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -105,6 +106,13 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	hostMTU := hostLink.Attrs().MTU
 	slog.Debug("ADD: host interface ready", "name", hostName, "mac", hostMac, "mtu", hostMTU)
 
+	// Annotate the NAD with the host interface name (best-effort).
+	if k8sClient, kerr := newK8sClient(); kerr == nil {
+		tracker.k8s = k8sClient
+		podNamespace := parsePodNamespace(args.Args)
+		annotateNAD(rollbackCtx, k8sClient, pluginConf.Name, podNamespace, hostName)
+	}
+
 	dev := hostName
 	for _, termination := range pluginConf.Terminations {
 		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
@@ -167,13 +175,11 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 
 		// Publish BGP state (SRv6 ingress + BGP CRDs).
-		k8s, err := newK8sClient()
-		if err != nil {
-			return err
+		if tracker.k8s == nil {
+			return errors.New("k8s client not set in tracker")
 		}
-		tracker.k8s = k8s
 		slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", interfaceTypeTap)
-		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, k8s, tracker)
+		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
 	}
 
 	slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", pluginConf.InterfaceType)

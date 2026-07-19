@@ -273,14 +273,12 @@ func publishBGPState(
 		return err
 	}
 
-	k8s, err := newK8sClient()
-	if err != nil {
-		return err
+	if tracker.k8s == nil {
+		return errors.New("k8s client not set in tracker")
 	}
-	tracker.k8s = k8s
 
 	// ---- k8s operations (retry on transient errors) ----
-	return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, k8s, tracker)
+	return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
 }
 
 // publishBGPStateK8s creates the BGPVRFInstance and BGPAdvertisement CRDs with
