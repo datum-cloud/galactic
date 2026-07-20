@@ -10,11 +10,12 @@ require (
 	github.com/lorenzosaino/go-sysctl v0.3.1
 	github.com/osrg/gobgp/v4 v4.7.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260629151558-4e35dc940f49
-	go.datum.net/network v0.0.0-20260712201947-fb4e1e9705ba
+	go.datum.net/network v0.0.0-20260719211723-8caa91ab0b37
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.0
@@ -64,7 +65,6 @@ require (
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
