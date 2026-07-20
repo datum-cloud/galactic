@@ -43,10 +43,14 @@ func parsePodNamespace(cniArgs string) string {
 }
 
 // annotateNAD patches the NetworkAttachmentDefinition with the host interface
-// name. This is a best-effort operation — failure is logged but not returned.
-func annotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, hostInterface string) {
+// name. The NAD is expected to already exist (created by the external VPC
+// operator before the CNI is invoked), so a not-found response is a hard
+// failure rather than something to tolerate. A conflict response is the one
+// case treated as non-fatal: it means the annotation was already applied by a
+// previous invocation.
+func annotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, hostInterface string) error {
 	if nadNamespace == "" {
-		return
+		return nil
 	}
 
 	nad := &unstructured.Unstructured{}
@@ -59,14 +63,16 @@ func annotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 
 	err := k8s.Patch(ctx, nad, client.RawPatch(types.JSONPatchType, []byte(patch)))
 	if err != nil {
-		// Tolerate not-found (NAD managed by external operator that may not
-		// have created it yet) and conflict (annotation already exists from
-		// a previous invocation).
-		if !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-			slog.Warn("annotate NAD: patch failed",
-				"name", nadName, "namespace", nadNamespace, "err", err)
+		if apierrors.IsConflict(err) {
+			slog.Debug("annotate NAD: already annotated by a previous invocation",
+				"name", nadName, "namespace", nadNamespace)
+			return nil
 		}
-		return
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("NetworkAttachmentDefinition %s/%s not found: %w", nadNamespace, nadName, err)
+		}
+		return fmt.Errorf("patch NetworkAttachmentDefinition %s/%s: %w", nadNamespace, nadName, err)
 	}
 	slog.Debug("NAD annotated", "name", nadName, "namespace", nadNamespace, "interface", hostInterface)
+	return nil
 }

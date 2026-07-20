@@ -106,11 +106,17 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	hostMTU := hostLink.Attrs().MTU
 	slog.Debug("ADD: host interface ready", "name", hostName, "mac", hostMac, "mtu", hostMTU)
 
-	// Annotate the NAD with the host interface name (best-effort).
-	if k8sClient, kerr := newK8sClient(); kerr == nil {
-		tracker.k8s = k8sClient
-		podNamespace := parsePodNamespace(args.Args)
-		annotateNAD(rollbackCtx, k8sClient, pluginConf.Name, podNamespace, hostName)
+	// Annotate the NAD with the host interface name. The NAD must already
+	// exist (created by the external VPC operator); a missing or otherwise
+	// unpatchable NAD is a hard failure.
+	k8sClient, err := newK8sClient()
+	if err != nil {
+		return fmt.Errorf("create k8s client: %w", err)
+	}
+	tracker.k8s = k8sClient
+	podNamespace := parsePodNamespace(args.Args)
+	if err := annotateNAD(rollbackCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
+		return fmt.Errorf("annotate NAD: %w", err)
 	}
 
 	dev := hostName
