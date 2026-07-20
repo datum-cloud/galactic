@@ -12,6 +12,10 @@ rules:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources:
+      - network-attachment-definitions
+    verbs: ["patch"]
   - apiGroups: [""]
     resources:
       - nodes
