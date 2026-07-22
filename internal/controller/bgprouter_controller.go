@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -240,10 +241,11 @@ func (r *BGPRouterReconciler) updatePeerStatuses(
 ) {
 	logger := log.FromContext(ctx)
 
-	// Build a lookup map by peer address.
+	// Build a lookup map by normalized peer address so IPv6 variants
+	// (e.g. 2607:ed40:01fb::2 vs 2607:ed40:1fb::2) match.
 	stateByAddr := make(map[string]model.PeerStatus, len(rs.Peers))
 	for _, ps := range rs.Peers {
-		stateByAddr[ps.Address] = ps
+		stateByAddr[normalizeIP(ps.Address)] = ps
 	}
 
 	// Find peers that target this router, either via direct reference or selector.
@@ -289,7 +291,7 @@ func (r *BGPRouterReconciler) updatePeerStatuses(
 	}
 
 	for _, peer := range targetPeers {
-		ps, ok := stateByAddr[peer.Spec.Address]
+		ps, ok := stateByAddr[normalizeIP(peer.Spec.Address)]
 		if !ok {
 			logger.V(1).Info("peer not found in runtime status, skipping status update",
 				"peer", peer.Name, "address", peer.Spec.Address,
@@ -454,4 +456,15 @@ func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Named("bgprouter").
 		Complete(r)
+}
+
+// normalizeIP returns the canonical text form of an IP address,
+// ensuring IPv6 addresses with leading zeros (e.g. 2607:ed40:01fb::2)
+// match their GoBGP-normalized form (2607:ed40:1fb::2). Falls back to
+// the original string if parsing fails.
+func normalizeIP(s string) string {
+	if ip := net.ParseIP(s); ip != nil {
+		return ip.String()
+	}
+	return s
 }
