@@ -1,0 +1,658 @@
+// Copyright 2025 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package prog
+
+import (
+	"errors"
+	"net/netip"
+	"os"
+	"testing"
+
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/rlimit"
+
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+)
+
+// drop_reasons map indices. These are not generated from usid.c's
+// `enum drop_reason` (bpf2go's -type flag can't produce a Go type for an
+// enum whose values are only ever used as literal constants, never as a
+// typed variable/field the compiler retains in BTF -- see the comment on
+// the go:generate line in doc.go) so they are hand-kept in sync with
+// usid.c instead. If usid.c's enum drop_reason ever changes, update these
+// too.
+const (
+	dropReasonUnknownFunction = 0
+	dropReasonUnknownArgument = 1
+	dropReasonMalformedInner  = 2
+	dropReasonUnknownInnerVer = 3
+	dropReasonStripFailed     = 4
+	dropReasonFibLookupFailed = 5
+	dropReasonRedirectFailed  = 6
+	dropReasonCount           = 7
+)
+
+const (
+	tcActOK       = 0
+	tcActShot     = 2
+	tcActRedirect = 7
+)
+
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("test requires root (CAP_BPF/CAP_NET_ADMIN) to load BPF programs and maps; re-run via sudo")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("rlimit.RemoveMemlock: %v", err)
+	}
+}
+
+// loadObjects loads a fresh copy of the compiled program and its maps into
+// the kernel, returning a cleanup-registered *UsidObjects.
+func loadObjects(t *testing.T) *UsidObjects {
+	t.Helper()
+
+	var objs UsidObjects
+	if err := LoadUsidObjects(&objs, nil); err != nil {
+		var ve *ebpf.VerifierError
+		if errors.As(err, &ve) {
+			t.Fatalf("load objects: verifier rejected program:\n%+v", ve)
+		}
+		t.Fatalf("load objects: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := objs.Close(); err != nil {
+			t.Errorf("close objects: %v", err)
+		}
+	})
+	return &objs
+}
+
+// testUSID is one synthetic uFMT 48+16 address used across the table
+// below. Building it through uformat.Encode (Milestone 2.1) rather than
+// hand-packing bytes cross-validates that this program's key-composition
+// arithmetic (locator_key/function_key/vrf_key -- see usid.c's map-key
+// comment block) agrees with uformat's Go-side field layout.
+type testUSID struct {
+	block    uint64
+	nodeID   uint16
+	function uint8
+	argument uint16
+}
+
+func (u testUSID) addr(t *testing.T) netip.Addr {
+	t.Helper()
+	addr, err := uformat.Encode(uformat.Fields{
+		Block: u.block, NodeID: u.nodeID, Function: u.function, Argument: u.argument,
+	})
+	if err != nil {
+		t.Fatalf("uformat.Encode(%+v): %v", u, err)
+	}
+	return addr
+}
+
+func (u testUSID) locatorKey(t *testing.T) uint64 {
+	t.Helper()
+	key, err := uformat.LocatorKeyFromAddr(u.addr(t))
+	if err != nil {
+		t.Fatalf("LocatorKeyFromAddr: %v", err)
+	}
+	return uint64(key)
+}
+
+func (u testUSID) functionKey(t *testing.T) uint64 {
+	t.Helper()
+	key, err := uformat.NewFunctionKey(u.block, u.function)
+	if err != nil {
+		t.Fatalf("NewFunctionKey: %v", err)
+	}
+	return uint64(key)
+}
+
+// vrfKey mirrors usid.c's `(block << 12) | argument` composition, via
+// uformat.NewVRFKey (Milestone 3.3) -- cross-validating that this
+// program's vrf_key arithmetic and uformat's Go-side key composition agree,
+// the same way testUSID.addr already does for the address encoding itself.
+func (u testUSID) vrfKey() uint64 {
+	key, err := uformat.NewVRFKey(u.block, u.argument)
+	if err != nil {
+		panic(err) // test-table values are always in-range; a panic here means the table itself is broken
+	}
+	return uint64(key)
+}
+
+const ethHeaderLen = 14
+const ip6HeaderLen = 40
+
+// innerKind selects what buildPacketWithInner appends after the outer
+// IPv6 header, covering every branch of usid.c's step 7 inner-header
+// parse (§4.2): a well-formed IPv6 or IPv4 inner packet, an inner header
+// whose version nibble matches neither (unknownInnerVersion), or one
+// that's present but too short to read even its first byte
+// (malformedInner) -- exercising DROP_REASON_UNKNOWN_INNER_VERSION and
+// DROP_REASON_MALFORMED_INNER respectively, alongside the existing
+// innerNone/innerV6 coverage.
+type innerKind int
+
+const (
+	innerNone innerKind = iota
+	innerV6
+	innerV4
+	innerUnknownVersion
+	innerMalformedTruncated
+)
+
+// buildPacket constructs an Ethernet+IPv6 frame whose destination address
+// is dst. If withInnerV6 is true, a minimal (header-only, no payload)
+// inner IPv6 packet is appended after the outer header, so a program path
+// that reaches step 7 (strip) has something well-formed to decapsulate
+// into. Thin wrapper over buildPacketWithInner for the two cases every
+// existing test needs; new tests exercising the other inner-header
+// branches call buildPacketWithInner directly.
+func buildPacket(t *testing.T, dst, src netip.Addr, withInnerV6 bool) []byte {
+	t.Helper()
+	if withInnerV6 {
+		return buildPacketWithInner(t, dst, src, innerV6)
+	}
+	return buildPacketWithInner(t, dst, src, innerNone)
+}
+
+// buildPacketWithInner is buildPacket's fuller sibling, selecting the
+// inner packet (or lack of one) via kind. See innerKind's doc comment for
+// which usid.c branch each value exercises.
+func buildPacketWithInner(t *testing.T, dst, src netip.Addr, kind innerKind) []byte {
+	t.Helper()
+
+	pkt := make([]byte, 0, ethHeaderLen+ip6HeaderLen+ip6HeaderLen)
+
+	// Ethernet header: arbitrary src/dst MACs, ethertype IPv6.
+	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA) // h_dest
+	pkt = append(pkt, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB) // h_source
+	pkt = append(pkt, 0x86, 0xDD)                         // h_proto = ETH_P_IPV6
+
+	// Outer IPv6 header.
+	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00) // version=6, traffic class/flow label = 0
+	pkt = append(pkt, 0x00, 0x00)             // payload_len (unchecked by usid_ingress)
+	pkt = append(pkt, 41)                     // nexthdr = IPv6-in-IPv6 (unchecked)
+	pkt = append(pkt, 64)                     // hop_limit
+	srcBytes := src.As16()
+	pkt = append(pkt, srcBytes[:]...)
+	dstBytes := dst.As16()
+	pkt = append(pkt, dstBytes[:]...)
+
+	switch kind {
+	case innerNone:
+		// no inner packet at all
+	case innerV6:
+		pkt = append(pkt, 0x60, 0x00, 0x00, 0x00) // inner version=6
+		pkt = append(pkt, 0x00, 0x00)             // payload_len
+		pkt = append(pkt, 59)                     // nexthdr = no next header
+		pkt = append(pkt, 64)                     // hop_limit
+		innerSrc := netip.MustParseAddr("2001:db8::1").As16()
+		pkt = append(pkt, innerSrc[:]...)
+		innerDst := netip.MustParseAddr("2001:db8::2").As16()
+		pkt = append(pkt, innerDst[:]...)
+	case innerV4:
+		// struct usid_iphdr, 20 bytes packed: ver_ihl, tos, tot_len,
+		// id, frag_off, ttl, protocol, check, saddr[4], daddr[4], plus a
+		// payload -- bpf_skb_adjust_room (step 7's strip) needs the
+		// resulting packet to clear a minimum size the kernel enforces
+		// independent of anything usid_ingress itself checks; a
+		// header-only inner packet (as innerV6 above effectively is,
+		// with no payload) is fine at IPv6's larger 40-byte header size,
+		// but a bare 20-byte IPv4 header is not -- confirmed empirically
+		// against a real kernel, not a documented constraint. The
+		// payload length here is arbitrary, chosen only to clear it with
+		// margin; usid_ingress never reads inner payload bytes.
+		const innerV4PayloadLen = 60
+		pkt = append(pkt, 0x45, 0x00) // version=4, ihl=5; tos=0
+		totLen := uint16(20 + innerV4PayloadLen)
+		pkt = append(pkt, byte(totLen>>8), byte(totLen)) // tot_len
+		pkt = append(pkt, 0x00, 0x00)                    // id
+		pkt = append(pkt, 0x00, 0x00)                    // frag_off
+		pkt = append(pkt, 64)                            // ttl
+		pkt = append(pkt, 59)                            // protocol = no next header
+		pkt = append(pkt, 0x00, 0x00)                    // checksum (unchecked by usid_ingress)
+		pkt = append(pkt, 198, 51, 100, 1)               // saddr 198.51.100.1
+		pkt = append(pkt, 198, 51, 100, 2)               // daddr 198.51.100.2
+		pkt = append(pkt, make([]byte, innerV4PayloadLen)...)
+	case innerUnknownVersion:
+		// A version nibble of 5 matches neither the ==6 nor ==4 branch.
+		pkt = append(pkt, 0x50, 0x00, 0x00, 0x00)
+		pkt = append(pkt, 0x00, 0x00)
+		pkt = append(pkt, 59)
+		pkt = append(pkt, 64)
+		innerSrc := netip.MustParseAddr("2001:db8::1").As16()
+		pkt = append(pkt, innerSrc[:]...)
+		innerDst := netip.MustParseAddr("2001:db8::2").As16()
+		pkt = append(pkt, innerDst[:]...)
+	case innerMalformedTruncated:
+		// Present but zero bytes long: usid.c's `(void*)(inner+1) >
+		// data_end` bounds check must reject this before even reading
+		// the version nibble.
+	}
+
+	return pkt
+}
+
+// sumPerCPU reads a per-CPU counter map entry and sums every CPU's slot,
+// regardless of which CPU BPF_PROG_TEST_RUN happened to execute on.
+func sumPerCPU(t *testing.T, m *ebpf.Map, index uint32) uint64 {
+	t.Helper()
+	var perCPU []uint64
+	if err := m.Lookup(index, &perCPU); err != nil {
+		t.Fatalf("lookup drop_reasons[%d]: %v", index, err)
+	}
+	var total uint64
+	for _, v := range perCPU {
+		total += v
+	}
+	return total
+}
+
+// assertOnlyDropReason asserts that exactly one drop_reasons index is
+// non-zero (with the expected count), and every other index remains zero
+// -- proving the drop was attributed to the right cause and no other path
+// was also triggered.
+func assertOnlyDropReason(t *testing.T, m *ebpf.Map, want uint32, wantCount uint64) {
+	t.Helper()
+	for i := range uint32(dropReasonCount) {
+		got := sumPerCPU(t, m, i)
+		switch {
+		case i == want && got != wantCount:
+			t.Errorf("drop_reasons[%d] = %d, want %d", i, got, wantCount)
+		case i != want && got != 0:
+			t.Errorf("drop_reasons[%d] = %d, want 0 (unexpected drop reason triggered)", i, got)
+		}
+	}
+}
+
+var baseUSID = testUSID{block: 0x0102030405AA, nodeID: 0x0010, function: uformat.FunctionEndDT46, argument: 0x123}
+
+// TestUsidIngress_LocatorMissFailsOpen covers design plan §4.2 step 2 /
+// R6: traffic whose destination doesn't match any registered locator_table
+// entry (i.e. not one of this node's uSID Blocks) passes through
+// completely unmodified -- TC_ACT_OK, no drop counted.
+func TestUsidIngress_LocatorMissFailsOpen(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	// Register some other, unrelated /64 -- proves this is a real
+	// per-entry miss, not just "the map happens to be empty".
+	other := testUSID{block: 0xFFEEDDCCBBAA, nodeID: 0x0002, function: uformat.FunctionEndDT46, argument: 0x001}
+	if err := objs.LocatorTable.Put(other.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+
+	dst := baseUSID.addr(t)
+	src := netip.MustParseAddr("2001:db8:ffff::1")
+	pkt := buildPacket(t, dst, src, false)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActOK {
+		t.Errorf("verdict = %d, want TC_ACT_OK (%d)", ret, tcActOK)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet was mutated on a locator_table miss:\n in: % x\nout: % x", pkt, out)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, 0, 0) // no drop reason should have fired at all
+}
+
+// TestUsidIngress_NonIPv6FailsOpen covers R6 for traffic that isn't IPv6
+// at all -- verifies step 1's parse gate, not just step 2's lookup.
+func TestUsidIngress_NonIPv6FailsOpen(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	if err := objs.LocatorTable.Put(baseUSID.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+
+	pkt := buildPacket(t, baseUSID.addr(t), netip.MustParseAddr("2001:db8::1"), false)
+	pkt[12], pkt[13] = 0x08, 0x00 // rewrite ethertype to ETH_P_IP
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActOK {
+		t.Errorf("verdict = %d, want TC_ACT_OK (%d)", ret, tcActOK)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet was mutated on a non-IPv6 frame:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+// TestUsidIngress_UnknownFunctionDropsCounted covers design plan §4.2 step
+// 4: a locator_table hit whose Function has no function_table entry is
+// dropped, not passed through (the packet was already claimed by the
+// locator match), and the drop is attributed to
+// DROP_REASON_UNKNOWN_FUNCTION specifically. This also exercises R2/step 3
+// indirectly: reaching this drop reason (rather than a locator miss)
+// proves Function was correctly read from the unmutated packet.
+func TestUsidIngress_UnknownFunctionDropsCounted(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: 0x3, argument: 0x123}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	// Deliberately do not populate function_table for Function 0x3.
+
+	pkt := buildPacket(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), false)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet was mutated on a function_table miss:\n in: % x\nout: % x", pkt, out)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownFunction, 1)
+}
+
+// TestUsidIngress_UnknownArgumentDropsCounted covers design plan §4.2 step
+// 6 and R4: a locator+function match whose Argument has no vrf_table entry
+// is dropped and counted as DROP_REASON_UNKNOWN_ARGUMENT. Reaching this
+// drop reason (rather than DROP_REASON_UNKNOWN_FUNCTION) proves
+// function_table matched and Argument was correctly read at its fixed
+// offset with no mutation of the packet -- this is this milestone's "no
+// mutation" exit criterion, exercised at the latest point before any
+// mutation (bpf_skb_adjust_room) could occur.
+func TestUsidIngress_UnknownArgumentDropsCounted(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x123}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	// Deliberately do not populate vrf_table for this Argument.
+
+	pkt := buildPacket(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), false)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated on a vrf_table miss (Function/Argument extraction must not mutate, R2):\n in: % x\nout: % x",
+			pkt, out)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownArgument, 1)
+}
+
+// TestUsidIngress_ReservedArgumentZeroAlwaysMisses covers design plan R4 /
+// §5.1 specifically: Argument 0x000 is reserved and must never be
+// registered into vrf_table, so it always misses -- not because of a
+// special-cased runtime check, but simply because nothing ever put an
+// entry there. This test proves that by registering locator_table and
+// function_table (so the packet gets as far as the vrf_table lookup) and
+// confirming Argument 0x000 still drops as DROP_REASON_UNKNOWN_ARGUMENT.
+func TestUsidIngress_ReservedArgumentZeroAlwaysMisses(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x000}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	// vrf_table intentionally has no entry at all for this Block --
+	// not even at key (block<<12 | 0) -- mirroring the real system,
+	// where usidmap.Register (design plan §5.1) refuses to ever accept
+	// argument==0 in the first place.
+
+	pkt := buildPacket(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), false)
+
+	ret, _, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownArgument, 1)
+}
+
+// TestUsidIngress_VRFTableMatchReachesFIBLookup covers design plan §4.2
+// step 6: a full locator+function+vrf_table match. There is no real route
+// in the (arbitrary, almost certainly nonexistent) VRF table id used here,
+// so bpf_fib_lookup() itself fails -- but reaching DROP_REASON_FIB_LOOKUP_
+// FAILED, rather than DROP_REASON_UNKNOWN_ARGUMENT, is only possible if
+// vrf_table's entry was found and its vrf_table_id value was read and
+// passed into bpf_fib_lookup (step 8), which is exactly what "vrf_table
+// match" means. Verifying an actual successful FIB resolution + redirect
+// requires a real kernel route/VRF/interface and belongs at the
+// integration/e2e layer (design plan §7's testing-strategy table), not
+// this BPF_PROG_TEST_RUN-level unit test.
+func TestUsidIngress_VRFTableMatchReachesFIBLookup(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x123}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	const bogusVRFTableID = 0x2A2A2A // astronomically unlikely to exist on the test host
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: bogusVRFTableID}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+
+	pkt := buildPacket(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), true /* inner IPv6 header present */)
+
+	ret, _, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d) (fib_lookup against a nonexistent VRF table must fail, not succeed)",
+			ret, tcActShot)
+	}
+
+	got := sumPerCPU(t, objs.DropReasons, dropReasonFibLookupFailed)
+	if got != 1 {
+		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (vrf_table entry must have been found and used)", got)
+	}
+	if unknownArg := sumPerCPU(t, objs.DropReasons, dropReasonUnknownArgument); unknownArg != 0 {
+		t.Errorf("drop_reasons[unknown_argument] = %d, want 0 -- vrf_table should have matched, not missed", unknownArg)
+	}
+
+	// Confirm the hit counters in vrf_table's own value were updated
+	// (design plan R8: per-Argument hit counters back the migration
+	// gate's "confirmed zero hits" check).
+	var vrfVal UsidVrfValue
+	if err := objs.VrfTable.Lookup(usid.vrfKey(), &vrfVal); err != nil {
+		t.Fatalf("lookup vrf_table entry: %v", err)
+	}
+	if vrfVal.Packets != 1 {
+		t.Errorf("vrf_table packets = %d, want 1", vrfVal.Packets)
+	}
+	if vrfVal.Bytes == 0 {
+		t.Errorf("vrf_table bytes = 0, want > 0 (skb->len at time of match)")
+	}
+	if vrfVal.LastSeenNs == 0 {
+		t.Errorf("vrf_table last_seen_ns = 0, want a real bpf_ktime_get_ns() reading")
+	}
+}
+
+// TestUsidIngress_InnerIPv4ReachesFIBLookup covers step 7's inner-IPv4
+// branch (usid.c's `inner_version == 4` case), which
+// TestUsidIngress_VRFTableMatchReachesFIBLookup above never exercises
+// (its packets are always inner-IPv6) -- proving the v4 header actually
+// parses (family/addr fields populated, h_proto rewritten) and the
+// program reaches the FIB lookup, using the same bogus-VRF-table trick to
+// prove that without needing real routing state.
+func TestUsidIngress_InnerIPv4ReachesFIBLookup(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x124}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	const bogusVRFTableID = 0x2B2B2B
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: bogusVRFTableID}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+
+	pkt := buildPacketWithInner(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), innerV4)
+
+	ret, _, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d) (fib_lookup against a nonexistent VRF table must fail, not succeed)",
+			ret, tcActShot)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, dropReasonFibLookupFailed); got != 1 {
+		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (inner-IPv4 must parse and reach FIB lookup)", got)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, dropReasonUnknownInnerVer); got != 0 {
+		t.Errorf("drop_reasons[unknown_inner_version] = %d, want 0 -- a v4 header must not be misclassified", got)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, dropReasonMalformedInner); got != 0 {
+		t.Errorf("drop_reasons[malformed_inner] = %d, want 0 -- a well-formed v4 header must parse cleanly", got)
+	}
+}
+
+// TestUsidIngress_UnknownInnerVersionDropped covers the inner-header
+// version nibble matching neither 6 nor 4 (usid.c's final `else` branch
+// of step 7's parse) -- a case no other test exercises.
+func TestUsidIngress_UnknownInnerVersionDropped(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x125}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: 0x2C2C2C}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+
+	pkt := buildPacketWithInner(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), innerUnknownVersion)
+
+	ret, _, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownInnerVer, 1)
+}
+
+// TestUsidIngress_MalformedInnerDropped covers an inner packet present in
+// name only (zero bytes after the stripped outer header) -- usid.c's
+// bounds check on `inner+1 > data_end` must reject this before even
+// reading the version nibble, rather than reading past the packet.
+func TestUsidIngress_MalformedInnerDropped(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x126}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: 0x2D2D2D}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+
+	pkt := buildPacketWithInner(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), innerMalformedTruncated)
+
+	ret, _, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, dropReasonMalformedInner, 1)
+}
+
+// TestUsidIngress_VRFTableKeyIncludesBlock covers design plan R8/§4.4's
+// requirement that vrf_table's key is (Block, Argument), not Argument
+// alone: two uSID Blocks sharing the same Argument value (as R8's
+// make-before-break migration deliberately produces -- one live entry
+// under an old Block, one under a new one) must be counted and matched
+// independently. Registering vrf_table only under Block A and sending a
+// packet for the *same* Argument under Block B must still miss, proving
+// the program's vrf_key composition genuinely folds in the matched Block
+// rather than only the Argument bits.
+func TestUsidIngress_VRFTableKeyIncludesBlock(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const sharedArgument = 0x123
+	blockA := testUSID{block: 0x0102030405AA, nodeID: 0x0010, function: uformat.FunctionEndDT46, argument: sharedArgument}
+	blockB := testUSID{block: 0x0A0B0C0D0E0F, nodeID: 0x0011, function: uformat.FunctionEndDT46, argument: sharedArgument}
+
+	for _, u := range []testUSID{blockA, blockB} {
+		if err := objs.LocatorTable.Put(u.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+			t.Fatalf("populate locator_table for block %#x: %v", u.block, err)
+		}
+		if err := objs.FunctionTable.Put(u.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+			t.Fatalf("populate function_table for block %#x: %v", u.block, err)
+		}
+	}
+	// Only Block A gets a vrf_table entry for the shared Argument.
+	if err := objs.VrfTable.Put(blockA.vrfKey(), UsidVrfValue{VrfTableId: 0x2A2A2A}); err != nil {
+		t.Fatalf("populate vrf_table for block A: %v", err)
+	}
+
+	pkt := buildPacket(t, blockB.addr(t), netip.MustParseAddr("2001:db8::1"), false)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d) -- Block B has no vrf_table entry for this Argument", ret, tcActShot)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated on a vrf_table miss:\n in: % x\nout: % x", pkt, out)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownArgument, 1)
+
+	// Block A's entry must be completely untouched by Block B's packet.
+	var vrfVal UsidVrfValue
+	if err := objs.VrfTable.Lookup(blockA.vrfKey(), &vrfVal); err != nil {
+		t.Fatalf("lookup vrf_table entry for block A: %v", err)
+	}
+	if vrfVal.Packets != 0 {
+		t.Errorf("block A's vrf_table packets = %d, want 0 -- Block B's packet must not match Block A's entry",
+			vrfVal.Packets)
+	}
+}

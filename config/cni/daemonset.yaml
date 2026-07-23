@@ -72,8 +72,27 @@ spec:
           # placeholder, not a published tag.
           image: ghcr.io/datum-cloud/galactic-cni:latest
           command: ["/galactic-cni", "run"]
+          # --- PRIVILEGE EXPANSION (Milestone 3.1 of
+          # .local/implementation-plan-ebpf-xdp-usid-datapath.md) ---
+          # This container previously ran with allowPrivilegeEscalation:
+          # false, no added capabilities, and no bpffs mount, because it
+          # only refreshed credentials and served gRPC health. It now also
+          # hosts the eBPF/TC-BPF uSID datapath's load/attach/pin control
+          # daemon (design plan .local/plan-ebpf-xdp-usid-datapath.md §5.4
+          # option (a), §9 "Privileges" -- deliberately not a footnote,
+          # per that section). BPF/NET_ADMIN below and the bpf-fs
+          # volumeMount are required unconditionally by the binary's BPF
+          # loader dependencies even though the datapath itself stays
+          # inert until GALACTIC_CNI_ENABLE_EBPF_DATAPATH=true is set
+          # (default off, design plan §8 Phase 0) -- so this grant takes
+          # effect on every node running this manifest regardless of
+          # whether the flag is ever flipped on.
           securityContext:
             runAsUser: 0
+            capabilities:
+              add:
+                - BPF
+                - NET_ADMIN
             allowPrivilegeEscalation: false
           resources:
             requests:
@@ -86,6 +105,8 @@ spec:
               mountPath: /host/var/lib/galactic
             - name: galactic-log
               mountPath: /host/var/log/galactic
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
           livenessProbe:
             grpc:
               port: 5180
@@ -113,3 +134,31 @@ spec:
           hostPath:
             path: /var/log/galactic
             type: DirectoryOrCreate
+        - name: bpf-fs
+          # The host's bpffs mount (design plan §4.4/§9: "All maps pinned
+          # under /sys/fs/bpf/galactic/"). credential-refresh pins the
+          # eBPF uSID datapath's maps under a galactic/ subdirectory of
+          # this mount so a container restart reuses the maps already
+          # pinned there instead of recreating them empty (pinned-map
+          # continuity). `Directory` (not DirectoryOrCreate): bpffs must
+          # already be mounted at this path by the host/kubelet node setup
+          # for pinning to actually work -- creating a plain directory
+          # here if it were missing would silently produce a regular
+          # filesystem path instead of a real bpf filesystem, and pinning
+          # would then fail at load time with a real, actionable error
+          # instead of appearing to succeed.
+          #
+          # SECURITY NOTE: this mounts the host's entire /sys/fs/bpf, not
+          # just the galactic/ subtree this container actually uses --
+          # a Kubernetes hostPath volume can't mount a subdirectory that
+          # doesn't exist yet (galactic/ is created by this container on
+          # first pin, not present beforehand), so this container has
+          # read/write visibility into every other pinned BPF object any
+          # other process on this host has placed under bpffs, not just
+          # its own. This is an accepted, largely inherent tradeoff of
+          # bpffs pinning on this platform, not an oversight -- call it
+          # out explicitly to a security reviewer rather than let it pass
+          # as a footnote.
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory

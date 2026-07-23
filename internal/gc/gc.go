@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/netip"
+	"os"
 	"regexp"
 	"strings"
 
@@ -15,6 +17,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -37,7 +41,12 @@ type OrphanedCRD struct {
 type CleanupResult struct {
 	OrphanedCRDsRemoved int
 	OrphanedVRFsRemoved int
-	Errors              int
+	// EBPFVRFEntriesRemoved counts stale eBPF uSID datapath vrf_table map
+	// entries removed by SweepEBPFVRFTable -- a distinct kind of resource
+	// from OrphanedVRFsRemoved's kernel VRF *interfaces* above (Milestone
+	// 7.3).
+	EBPFVRFEntriesRemoved int
+	Errors                int
 }
 
 // vrfNameRegex matches the deterministic VRF interface name pattern used by
@@ -57,18 +66,37 @@ var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})V$`)
 func routerNamesForNode(
 	ctx context.Context, k8s client.Client, namespace, nodeName string,
 ) (map[string]struct{}, error) {
+	routers, err := routersForNode(ctx, k8s, namespace, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]struct{}, len(routers))
+	for name := range routers {
+		names[name] = struct{}{}
+	}
+	return names, nil
+}
+
+// routersForNode is routerNamesForNode's fuller sibling: it keeps the full
+// BGPRouter object (keyed by name) rather than just membership, for
+// callers that need more than the name -- SweepEBPFVRFTable (Milestone
+// 7.3) needs each router's Spec.SRv6Locator to derive the eBPF uSID Block
+// its BGPVRFInstances resolve into.
+func routersForNode(
+	ctx context.Context, k8s client.Client, namespace, nodeName string,
+) (map[string]bgpv1alpha1.BGPRouter, error) {
 	routerList := &bgpv1alpha1.BGPRouterList{}
 	if err := k8s.List(ctx, routerList, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPRouters: %w", err)
 	}
 
-	names := make(map[string]struct{})
+	routers := make(map[string]bgpv1alpha1.BGPRouter)
 	for _, r := range routerList.Items {
 		if r.Spec.TargetRef.Name == nodeName {
-			names[r.Name] = struct{}{}
+			routers[r.Name] = r
 		}
 	}
-	return names, nil
+	return routers, nil
 }
 
 // CollectOrphanedCRDs scans BGPAdvertisement and BGPVRFInstance CRDs owned by
@@ -290,6 +318,116 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 		slog.Info("GC: removed orphaned VRF",
 			"name", name, "vpc", vpc, "vpcAttachment", vpcAtt)
 		result.OrphanedVRFsRemoved++
+	}
+
+	return result
+}
+
+// SweepEBPFVRFTable removes eBPF uSID datapath vrf_table map entries whose
+// (Block, Argument) key no longer corresponds to a live BGPVRFInstance CRD
+// owned by nodeName's BGPRouter(s) (design plan §5.3; Milestone 7.3).
+// Unlike RunGC's CRD/kernel-VRF sweep above, this deliberately does NOT run
+// from galactic-router's existing GC controller (internal/controller/
+// gc_controller.go): the pinned vrf_table map only exists inside
+// galactic-cni's "run" container, which has the /sys/fs/bpf hostPath mount
+// and CAP_BPF (Milestone 3.1) that galactic-router's own DaemonSet does
+// not and, for this alone, should not need. internal/installer.Run calls
+// this directly on its own ticker instead -- see that package's doc
+// comment for the full reasoning. The RBAC galactic-cni's ServiceAccount
+// already has (get/list bgprouters; get/list/...  bgpvrfinstances, see
+// config/cni/rbac.yaml) is exactly what this function needs, so no
+// permission change was required to place it there.
+//
+// A pin directory this process can't confirm exists -- either genuinely
+// absent (the "run" container's eBPF datapath hasn't finished loading yet)
+// or inaccessible (e.g. /sys/fs/bpf's own restrictive mode denying a
+// non-root stat, which the production "run" container never hits since it
+// runs as root, design plan §9) -- is treated as "nothing to do this
+// tick," not an error; any stat failure here means there's no pinned
+// datapath this process can reach right now, and it isn't this function's
+// job to diagnose why.
+func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeName, pinDir string) CleanupResult {
+	result := CleanupResult{}
+
+	if _, statErr := os.Stat(pinDir); statErr != nil {
+		return result
+	}
+
+	reg, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		slog.Error("GC: failed to open pinned eBPF vrf_table for sweep", "pinDir", pinDir, "err", err)
+		result.Errors++
+		return result
+	}
+	defer func() { _ = closer.Close() }()
+
+	// Capture the cutoff *before* listing BGPVRFInstance CRDs below --
+	// VRFTable.Generation's own doc comment and doc.go's
+	// "plugin-binary-vs-run-container race" section explain why the
+	// ordering matters: a Register landing between this line and the List
+	// call below must survive this sweep.
+	cutoff := reg.VRF.Generation()
+
+	routers, err := routersForNode(ctx, k8s, namespace, nodeName)
+	if err != nil {
+		slog.Error("GC: failed to list BGPRouters for eBPF vrf_table sweep", "err", err)
+		result.Errors++
+		return result
+	}
+
+	vrfInstList := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(ctx, vrfInstList, client.InNamespace(namespace)); err != nil {
+		slog.Error("GC: failed to list BGPVRFInstances for eBPF vrf_table sweep", "err", err)
+		result.Errors++
+		return result
+	}
+
+	live := make(map[usidmap.VRFKey]struct{}, len(vrfInstList.Items))
+	for _, inst := range vrfInstList.Items {
+		if inst.Spec.RouterRef == nil {
+			continue
+		}
+		router, ok := routers[inst.Spec.RouterRef.Name]
+		if !ok {
+			continue // not one of this node's routers
+		}
+		if router.Spec.SRv6Locator == "" {
+			continue // this router has no eBPF-relevant locator configured
+		}
+		prefix, err := netip.ParsePrefix(router.Spec.SRv6Locator)
+		if err != nil {
+			slog.Warn("GC: skipping BGPVRFInstance with unparseable router locator during eBPF sweep",
+				"vrfInstance", inst.Name, "router", router.Name, "locator", router.Spec.SRv6Locator, "err", err)
+			continue
+		}
+		block, err := uformat.Block(prefix.Addr())
+		if err != nil {
+			slog.Warn("GC: skipping BGPVRFInstance with invalid router locator during eBPF sweep",
+				"vrfInstance", inst.Name, "router", router.Name, "locator", router.Spec.SRv6Locator, "err", err)
+			continue
+		}
+		// inst.Spec.VRFID is the real, allocated Argument value directly
+		// (Milestone 6.1) -- no derivation needed. Guard the int32->uint16
+		// narrowing explicitly rather than trusting an external CRD value
+		// (a boundary this GC sweep does not otherwise validate) to
+		// already be in range.
+		if inst.Spec.VRFID < int32(uformat.ArgumentMin) || inst.Spec.VRFID > int32(uformat.ArgumentMax) {
+			slog.Warn("GC: skipping BGPVRFInstance with out-of-range VRFID during eBPF sweep",
+				"vrfInstance", inst.Name, "vrfID", inst.Spec.VRFID)
+			continue
+		}
+		argument := uint16(inst.Spec.VRFID)
+		live[usidmap.VRFKey{Block: block, Argument: argument}] = struct{}{}
+	}
+
+	removed, err := reg.VRF.Reconcile(live, cutoff)
+	for _, e := range removed {
+		slog.Info("GC: removed stale eBPF vrf_table entry", "block", e.Block, "argument", e.Argument)
+	}
+	result.EBPFVRFEntriesRemoved = len(removed)
+	if err != nil {
+		slog.Error("GC: errors while reconciling eBPF vrf_table", "err", err)
+		result.Errors++
 	}
 
 	return result

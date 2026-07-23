@@ -5,8 +5,10 @@
 package srv6
 
 import (
+	"net/netip"
 	"testing"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -17,96 +19,84 @@ func TestComputeSID(t *testing.T) {
 		name     string
 		locator  string
 		nodeID   int32
-		vrfID    int32
+		argument int32
 		function bgpv1alpha1.SRv6Function
-		want     string
 		wantErr  bool
 	}{
 		{
 			name:     "DT46 at /48 locator",
 			locator:  testUSIDLocator,
 			nodeID:   1,
-			vrfID:    100,
+			argument: 100,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
-			want:     "2001:db8:ff01:100:6400::",
 		},
 		{
-			name:     "DT4 uses distinct function byte from DT46",
+			name:     "max nodeID and argument",
 			locator:  testUSIDLocator,
-			nodeID:   1,
-			vrfID:    100,
-			function: bgpv1alpha1.SRv6FunctionEndDT4,
-			want:     "2001:db8:ff01:100:6404::",
-		},
-		{
-			name:     "DT6 uses distinct function byte from DT4/DT46",
-			locator:  testUSIDLocator,
-			nodeID:   1,
-			vrfID:    100,
-			function: bgpv1alpha1.SRv6FunctionEndDT6,
-			want:     "2001:db8:ff01:100:6406::",
-		},
-		{
-			name:     "max nodeID and vrfID",
-			locator:  testUSIDLocator,
-			nodeID:   254,
-			vrfID:    65535,
+			nodeID:   uformat.NodeIDMax,
+			argument: uformat.ArgumentMax,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
-			want:     "2001:db8:ff01:feff:ff00::",
+		},
+		{
+			name:     "min nodeID and argument",
+			locator:  testUSIDLocator,
+			nodeID:   uformat.NodeIDMin,
+			argument: uformat.ArgumentMin,
+			function: bgpv1alpha1.SRv6FunctionEndDT46,
 		},
 		{
 			name:     "not an IPv6 prefix",
 			locator:  "203.0.113.0/24",
 			nodeID:   1,
-			vrfID:    1,
+			argument: 1,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
 			wantErr:  true,
 		},
 		{
-			name:     "unaligned prefix length",
-			locator:  "2001:db8:ff01::/49",
+			name:     "not a /48 -- too narrow",
+			locator:  "2001:db8:ff01::/56",
 			nodeID:   1,
-			vrfID:    1,
+			argument: 1,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
 			wantErr:  true,
 		},
 		{
-			name:     "no room for suffix",
-			locator:  "2001:db8:ff01::/104",
+			name:     "not a /48 -- too wide",
+			locator:  "2001:db8::/32",
 			nodeID:   1,
-			vrfID:    1,
+			argument: 1,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
 			wantErr:  true,
 		},
 		{
-			name:     "nodeID 0 reserved",
+			name:     "nodeID 0 (below GIB range) reserved",
 			locator:  testUSIDLocator,
 			nodeID:   0,
-			vrfID:    1,
+			argument: 1,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
 			wantErr:  true,
 		},
 		{
-			name:     "nodeID 255 reserved",
+			name:     "nodeID above GIB range reserved",
 			locator:  testUSIDLocator,
-			nodeID:   255,
-			vrfID:    1,
+			nodeID:   uformat.NodeIDMax + 1,
+			argument: 1,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
 			wantErr:  true,
 		},
 		{
-			name:     "vrfID 0 reserved",
-			locator:  testUSIDLocator,
-			nodeID:   1,
-			vrfID:    0,
-			function: bgpv1alpha1.SRv6FunctionEndDT46,
-			wantErr:  true,
-		},
-		{
-			name:     "vrfID out of range",
+			name:     "argument 0 reserved",
 			locator:  testUSIDLocator,
 			nodeID:   1,
-			vrfID:    65536,
+			argument: 0,
+			function: bgpv1alpha1.SRv6FunctionEndDT46,
+			wantErr:  true,
+		},
+		{
+			name:     "argument out of range",
+			locator:  testUSIDLocator,
+			nodeID:   1,
+			argument: uformat.ArgumentMax + 1,
 			function: bgpv1alpha1.SRv6FunctionEndDT46,
 			wantErr:  true,
 		},
@@ -114,15 +104,31 @@ func TestComputeSID(t *testing.T) {
 			name:     "unknown function",
 			locator:  testUSIDLocator,
 			nodeID:   1,
-			vrfID:    1,
+			argument: 1,
 			function: bgpv1alpha1.SRv6Function("End.Bogus"),
+			wantErr:  true,
+		},
+		{
+			name:     "End.DT4 no longer supported",
+			locator:  testUSIDLocator,
+			nodeID:   1,
+			argument: 1,
+			function: bgpv1alpha1.SRv6Function("End.DT4"),
+			wantErr:  true,
+		},
+		{
+			name:     "End.DT6 no longer supported",
+			locator:  testUSIDLocator,
+			nodeID:   1,
+			argument: 1,
+			function: bgpv1alpha1.SRv6Function("End.DT6"),
 			wantErr:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ComputeSID(tt.locator, tt.nodeID, tt.vrfID, tt.function)
+			got, err := ComputeSID(tt.locator, tt.nodeID, tt.argument, tt.function)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("ComputeSID() error = nil, want error")
@@ -132,8 +138,47 @@ func TestComputeSID(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ComputeSID() unexpected error: %v", err)
 			}
-			if got.String() != tt.want {
-				t.Errorf("ComputeSID() = %s, want %s", got.String(), tt.want)
+
+			// Cross-check against uformat's independently-tested encoder
+			// rather than a hand-transcribed literal, so this test verifies
+			// ComputeSID's locator-parsing/validation wrapper agrees with
+			// the field layout uformat already exercises directly.
+			prefix, err := netip.ParsePrefix(tt.locator)
+			if err != nil {
+				t.Fatalf("parse locator %q: %v", tt.locator, err)
+			}
+			block, err := uformat.Block(prefix.Addr())
+			if err != nil {
+				t.Fatalf("uformat.Block() error: %v", err)
+			}
+			want, err := uformat.Encode(uformat.Fields{
+				Block:    block,
+				NodeID:   uint16(tt.nodeID),
+				Function: uformat.FunctionEndDT46,
+				Argument: uint16(tt.argument),
+			})
+			if err != nil {
+				t.Fatalf("uformat.Encode() error: %v", err)
+			}
+			if got != want {
+				t.Errorf("ComputeSID() = %s, want %s", got, want)
+			}
+
+			// Decode confirms every field round-trips at its documented
+			// fixed offset -- catching an offset/shift regression that a
+			// same-package cross-check against Encode alone would not.
+			fields, err := uformat.Decode(got)
+			if err != nil {
+				t.Fatalf("uformat.Decode() error: %v", err)
+			}
+			if fields.NodeID != uint16(tt.nodeID) {
+				t.Errorf("decoded NodeID = %#x, want %#x", fields.NodeID, uint16(tt.nodeID))
+			}
+			if fields.Argument != uint16(tt.argument) {
+				t.Errorf("decoded Argument = %#x, want %#x", fields.Argument, uint16(tt.argument))
+			}
+			if fields.Function != uformat.FunctionEndDT46 {
+				t.Errorf("decoded Function = %#x, want %#x", fields.Function, uint8(uformat.FunctionEndDT46))
 			}
 		})
 	}

@@ -115,19 +115,59 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	}
 
 	prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
-	gw := addrToNetIP(ipPrefix.GWIPAddress)
 
 	if path.Withdrawal {
 		slog.Info(logPrefix+": withdrawing route", "prefix", prefix, "table", tableID)
 		if delErr := srv6.RouteEgressDel(prefix, tableID); delErr != nil {
 			slog.Error(logPrefix+": RouteEgressDel failed", "prefix", prefix, "table", tableID, "err", delErr)
 		}
-	} else {
-		slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID)
-		if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
-			slog.Error(logPrefix+": RouteEgressAdd failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
+		return
+	}
+
+	// Prefer the Prefix-SID attribute over GWIPAddress: RFC 9136 requires
+	// GWIPAddress to share the NLRI prefix's address family, so it can never
+	// carry a 128-bit IPv6 SID for an IPv4 prefix (buildEVPNPaths leaves it
+	// zeroed there instead — see gatewayForPrefix); the Prefix-SID attribute
+	// carries the same SID with no such constraint (see prefixSIDAttr).
+	// Falling back to GWIPAddress keeps this compatible with any peer/path
+	// that only set the legacy field (e.g. an IPv6 prefix from an older
+	// build of this same binary).
+	gw := prefixSIDGateway(path.Attrs)
+	if gw == nil {
+		gw = addrToNetIP(ipPrefix.GWIPAddress)
+	}
+	slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID)
+	if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
+		slog.Error(logPrefix+": RouteEgressAdd failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
+	}
+}
+
+// prefixSIDGateway extracts the SRv6 SID carried in a BGP Prefix-SID path
+// attribute's SRv6 L3 Service TLV / SRv6 Information Sub-TLV (RFC 9252 §2),
+// if present, as a 16-byte net.IP. Returns nil if the attribute or a
+// matching sub-TLV is absent, so callers can fall back to the NLRI's own
+// GWIPAddress field.
+func prefixSIDGateway(attrs []bgp.PathAttributeInterface) net.IP {
+	for _, attr := range attrs {
+		psid, ok := attr.(*bgp.PathAttributePrefixSID)
+		if !ok {
+			continue
+		}
+		for _, tlv := range psid.TLVs {
+			l3, ok := tlv.(*bgp.SRv6ServiceTLV)
+			if !ok || l3.Type != bgp.TLVTypeSRv6L3Service {
+				continue
+			}
+			for _, sub := range l3.SubTLVs {
+				info, ok := sub.(*bgp.SRv6InformationSubTLV)
+				if !ok {
+					continue
+				}
+				return net.IP(info.SID).To16()
+			}
 		}
 	}
+	return nil
 }
 
 // matchTableID looks up the kernel VRF table that imports one of the

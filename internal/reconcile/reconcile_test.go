@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"go.datum.net/galactic/internal/model"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -81,8 +82,8 @@ func TestResolveSRv6SID(t *testing.T) {
 					Function: ptrFunction(bgpv1alpha1.SRv6FunctionEndDT46),
 				},
 			},
-			// locator 2001:db8:ff01::/48 (6 bytes) + NodeID 0x07 + VRFID 0x002a + Function 0x00
-			want: "2001:db8:ff01:700:2a00::",
+			// uFMT 48+16: Block 2001:0db8:ff01 + Node-ID 0x0007 + Function 0xE + Argument 0x02a
+			want: "2001:db8:ff01:7:e02a::",
 		},
 		{
 			name: "falls back to legacy annotation when adv VRFID/Function unset",
@@ -129,7 +130,7 @@ func TestResolveSRv6SID(t *testing.T) {
 			router: &bgpv1alpha1.BGPRouter{
 				Spec: bgpv1alpha1.BGPRouterSpec{
 					SRv6Locator: testLocator,
-					NodeID:      255, // out of ComputeSID's [1,254] range
+					NodeID:      uformat.NodeIDMax + 1, // out of uFMT's [0x0001,0xDFFF] GIB range
 				},
 			},
 			adv: &bgpv1alpha1.BGPAdvertisement{

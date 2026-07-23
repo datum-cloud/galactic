@@ -6,6 +6,7 @@ package gobgp
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"testing"
 
@@ -228,6 +229,64 @@ func TestGatewayForPrefix(t *testing.T) {
 				t.Errorf("gatewayForPrefix(%q, %v) = %v, want %v", tt.prefix, ipv6GW, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPrefixSIDAttrRoundTrip verifies that prefixSIDAttr's encoding of a SID
+// is recovered exactly by prefixSIDGateway's decoding — the pair that lets
+// an IPv4 EVPN Type 5 prefix carry its SRv6 SID at all, since GWIPAddress
+// can't (see TestGatewayForPrefix and TestBuildEVPNPathsIPv4CarriesSID).
+func TestPrefixSIDAttrRoundTrip(t *testing.T) {
+	sid := netip.MustParseAddr(testSID1)
+	attr := prefixSIDAttr(sid)
+
+	got := prefixSIDGateway([]bgp.PathAttributeInterface{attr})
+	if got == nil {
+		t.Fatal("prefixSIDGateway returned nil, want the encoded SID")
+	}
+	if want := net.IP(sid.AsSlice()).To16(); !got.Equal(want) {
+		t.Errorf("prefixSIDGateway round-trip = %v, want %v", got, want)
+	}
+}
+
+// TestPrefixSIDGatewayNoAttribute verifies that prefixSIDGateway returns nil
+// (signaling "fall back to GWIPAddress") when no Prefix-SID attribute is
+// present, e.g. a path from a peer/build that doesn't send one yet.
+func TestPrefixSIDGatewayNoAttribute(t *testing.T) {
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP),
+	}
+	if got := prefixSIDGateway(attrs); got != nil {
+		t.Errorf("prefixSIDGateway = %v, want nil", got)
+	}
+}
+
+// TestBuildEVPNPathsIPv4CarriesSID is the regression test for the vpc20
+// cross-region IPv4 ping bug: an EVPN Type 5 path for an IPv4 prefix cannot
+// carry its SRv6 SID in GWIPAddress (gatewayForPrefix leaves that zeroed,
+// per RFC 9136's family constraint), so before this fix the SID never
+// reached the remote node for IPv4-family routes at all. Confirms the SID
+// still round-trips end-to-end via the Prefix-SID attribute regardless.
+func TestBuildEVPNPathsIPv4CarriesSID(t *testing.T) {
+	sid := netip.MustParseAddr(testSID1)
+	ipv4Prefix := netip.MustParsePrefix("10.128.0.5/32")
+
+	// GWIPAddress itself carries nothing usable for this prefix — this is
+	// the fact that makes the Prefix-SID attribute necessary, not a defect
+	// introduced by this test.
+	if gw := gatewayForPrefix(ipv4Prefix, sid); gw != netip.IPv4Unspecified() {
+		t.Fatalf("gatewayForPrefix(IPv4 prefix) = %v, want the IPv4 zero address", gw)
+	}
+
+	// The Prefix-SID attribute buildEVPNPaths attaches whenever adv.SRv6SID
+	// is set recovers the real SID regardless.
+	attrs := []bgp.PathAttributeInterface{prefixSIDAttr(sid)}
+	got := prefixSIDGateway(attrs)
+	if got == nil {
+		t.Fatal("prefixSIDGateway returned nil for an IPv4-prefix path's Prefix-SID attribute")
+	}
+	if want := net.IP(sid.AsSlice()).To16(); !got.Equal(want) {
+		t.Errorf("prefixSIDGateway(IPv4 prefix path) = %v, want %v", got, want)
 	}
 }
 
