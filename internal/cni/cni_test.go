@@ -922,6 +922,45 @@ func TestBuildTapResult(t *testing.T) {
 	}
 }
 
+// TestBuildTapResultHostNetns verifies that the tap path produces a valid
+// CNI result when args.Netns is the host network namespace. Kraftlet/unikraft
+// workloads pass the host netns because they don't have a Linux network
+// namespace. The main.go entry point detects interface_type=tap and sets
+// CNI_NETNS_OVERRIDE to bypass the CNI library's same-netns rejection check.
+// The tap result must not reference a sandbox.
+func TestBuildTapResultHostNetns(t *testing.T) {
+	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
+	gateway := net.ParseIP("fd00:10:ff01::1")
+	route := mustParseCIDR(t, "::/0")
+
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+	ipRes := &ipamResult{subnet: subnet, gateway: gateway, routes: []*net.IPNet{route}}
+
+	result := buildTapResult(conf, ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
+
+	// Result should be structurally valid for kraftlet (host netns) workloads.
+	if result.CNIVersion != testCNIVersion {
+		t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, testCNIVersion)
+	}
+	if len(result.Interfaces) != 1 {
+		t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
+	}
+	// Host tap interface must not reference a sandbox (kraftlet has no netns).
+	if result.Interfaces[0].Sandbox != "" {
+		t.Errorf("Interfaces[0].Sandbox = %q, want empty (host netns, no sandbox)", result.Interfaces[0].Sandbox)
+	}
+	if len(result.IPs) != 1 {
+		t.Fatalf("IPs count = %d, want 1", len(result.IPs))
+	}
+	if len(result.Routes) != 1 {
+		t.Fatalf("Routes count = %d, want 1", len(result.Routes))
+	}
+}
+
 // ---- cmdDel idempotency --------------------------------------------------
 
 // TestCmdDelIdempotent returns nil even when the CNI config is invalid.

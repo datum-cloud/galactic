@@ -5,8 +5,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -91,6 +93,27 @@ func newRootCommand() *cobra.Command {
 				return version.All.Encode(os.Stdout)
 			}
 
+			// Read stdin once so we can inspect the CNI config before the
+			// library runs its netns validation. We pipe the buffered bytes
+			// back as os.Stdin so the CNI library can still read them.
+			stdinData, _ := io.ReadAll(os.Stdin)
+			r, w, _ := os.Pipe()
+			go func() {
+				_, _ = w.Write(stdinData)
+				_ = w.Close()
+			}()
+			oldStdin := os.Stdin
+			os.Stdin = r
+
+			// Tap mode never enters a network namespace — all operations are
+			// host-side. Set the override so the CNI library skips its same-
+			// netns rejection check, which would otherwise reject kraftlet
+			// workloads that pass the host netns.
+			if isTapMode(stdinData) {
+				_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
+			}
+
+			defer func() { os.Stdin = oldStdin }()
 			cni.RunPlugin()
 			return nil
 		},
@@ -102,6 +125,17 @@ func newRootCommand() *cobra.Command {
 
 	cmd.AddCommand(newInitCommand(), newRunCommand())
 	return cmd
+}
+
+// isTapMode returns true when the CNI config requests tap interface type.
+// Only a minimal JSON parse is needed — full validation happens later in
+// parseConf inside cmdAdd.
+func isTapMode(stdinData []byte) bool {
+	var cfg struct {
+		InterfaceType string `json:"interface_type"`
+	}
+	_ = json.Unmarshal(stdinData, &cfg)
+	return cfg.InterfaceType == "tap"
 }
 
 func main() {
