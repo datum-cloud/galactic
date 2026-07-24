@@ -110,6 +110,7 @@ func cmdStatus(args *skel.CmdArgs) error {
 
 	// Setup Logging
 	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
+	slog.Debug("CNI config received", "stdin", string(args.StdinData))
 
 	// Config is parseable and API server is reachable.
 	slog.Info("STATUS: probing API server reachability")
