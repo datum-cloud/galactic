@@ -4,7 +4,7 @@
 (or any CNI manager), plus node-local settings resolved at runtime from the
 conflist, environment variables, and (as a last resort) the Kubernetes API.
 
-> Last verified: 2026-07-16 against the current working tree of `internal/cni/config.go`
+> Last verified: 2026-07-24 against the current working tree of `internal/cni/config.go`
 > and `internal/installer/installer.go`.
 
 ## Runtime Configuration
@@ -102,7 +102,11 @@ the standard CNI `PluginConf` with Galactic-specific fields.
 | `ipam`           | No*      | `IPAM`          | IP address management configuration (see IPAM sub-fields below). *Required unless `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — applies identically in `veth` and `tap` mode. In `tap` mode `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM` unconditionally (unlike `veth` mode, which checks first), so omitting both `ipam` and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` currently produces a nil-pointer panic in `tap` mode rather than a clean validation error — always set one or the other for tap. |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
-supported via the embedded `types.PluginConf`.
+supported via the embedded `types.PluginConf`. `galactic-cni` declares support
+for the full CNI spec range (`version.All`, from `github.com/containernetworking/cni`
+v1.3.0 in `go.mod`) and returns CNI Result `1.0.0` (`type100`); generated
+configs (the installer's default conflist, Multus `NetworkAttachmentDefinition`
+manifests) use `"cniVersion": "1.0.0"`.
 
 ### Interface Types
 
@@ -176,7 +180,7 @@ entry. Deleted in `cmdDel` in reverse order.
 
 ```json
 {
-  "cniVersion": "0.3.1",
+  "cniVersion": "1.0.0",
   "name": "galactic",
   "type": "galactic-cni",
   "vpc": "1",
@@ -193,7 +197,7 @@ from the built-in pool.
 
 ```json
 {
-  "cniVersion": "0.3.1",
+  "cniVersion": "1.0.0",
   "name": "testvpc",
   "type": "galactic-cni",
   "vpc": "10",
@@ -212,7 +216,7 @@ from the built-in pool.
 
 ```json
 {
-  "cniVersion": "0.3.1",
+  "cniVersion": "1.0.0",
   "name": "galactic",
   "type": "galactic-cni",
   "vpc": "1",
@@ -228,7 +232,7 @@ from the built-in pool.
 
 ```json
 {
-  "cniVersion": "0.3.1",
+  "cniVersion": "1.0.0",
   "name": "galactic",
   "type": "galactic-cni",
   "vpc": "1",
@@ -251,7 +255,7 @@ a link-local route via the host-side device.
 
 ```json
 {
-  "cniVersion": "0.3.1",
+  "cniVersion": "1.0.0",
   "name": "galactic-tap",
   "type": "galactic-cni",
   "vpc": "1",

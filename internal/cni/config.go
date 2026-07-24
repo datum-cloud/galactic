@@ -387,6 +387,7 @@ func parseConf(data []byte) (*PluginConf, error) {
 
 	// Setup Logging
 	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
+	slog.Debug("CNI config received", "stdin", string(data))
 
 	// Resolve local IPAM flag
 	enableLocalIPAM = config.CNIGetEnableLocalIPAM()

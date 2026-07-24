@@ -15,6 +15,7 @@ import (
 
 	"github.com/containernetworking/cni/pkg/version"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"go.datum.net/galactic/internal/cni"
 	"go.datum.net/galactic/internal/installer"
@@ -91,6 +92,18 @@ func newRootCommand() *cobra.Command {
 			// Handle CNI_COMMAND=VERSION before config validation
 			if os.Getenv("CNI_COMMAND") == "VERSION" {
 				return version.All.Encode(os.Stdout)
+			}
+
+			// Real CNI runtimes (containerd, CRI-O) always pipe the network
+			// config JSON on stdin and close it. If stdin is an interactive
+			// terminal instead, no config will ever arrive, and both skel's
+			// blocking stdin read and the io.ReadAll below would hang
+			// forever. Detect that case up front and print version info
+			// rather than hanging.
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				fmt.Printf("galactic-cni version %s\n", metadata.Version)
+				fmt.Printf("CNI protocol versions supported: %s\n", strings.Join(version.All.SupportedVersions(), ", "))
+				return nil
 			}
 
 			// Read stdin once so we can inspect the CNI config before the
