@@ -40,15 +40,23 @@ type Address struct {
 }
 
 // PluginConf is the CNI plugin configuration passed via stdin on each invocation.
+//
+// IPv6Subnet, IPv4Subnet, and AddressFamilies feed the dual-stack IPAM
+// allocators (internal/cni/ipam, IPv4PoolAllocator/DualStackAllocator); as of
+// this change allocateIPAM does not yet consume them, and format/requiredness
+// validation in parseConf lands in a later phase.
 type PluginConf struct {
 	types.PluginConf
-	VPC           string        `json:"vpc"`
-	VPCAttachment string        `json:"vpcattachment"`
-	MTU           int           `json:"mtu,omitempty"`
-	InterfaceType string        `json:"interface_type,omitempty"` // interfaceTypeVeth or interfaceTypeTap
-	Terminations  []Termination `json:"terminations,omitempty"`
-	IPAM          *IPAM         `json:"ipam"`
-	Namespace     string        `json:"namespace,omitempty"`
+	VPC             string        `json:"vpc"`
+	VPCAttachment   string        `json:"vpcattachment"`
+	MTU             int           `json:"mtu,omitempty"`
+	InterfaceType   string        `json:"interface_type,omitempty"` // interfaceTypeVeth or interfaceTypeTap
+	Terminations    []Termination `json:"terminations,omitempty"`
+	IPAM            *IPAM         `json:"ipam"`
+	Namespace       string        `json:"namespace,omitempty"`
+	IPv6Subnet      string        `json:"ipv6_subnet,omitempty"`      // region IPv6 pool CIDR; endpoints alloc /96
+	IPv4Subnet      string        `json:"ipv4_subnet,omitempty"`      // optional site IPv4 pool CIDR; endpoints alloc /32
+	AddressFamilies []string      `json:"address_families,omitempty"` // families to allocate; default ["ipv6"]
 }
 
 // HostConf holds node-local settings read from /etc/cni/net.d/10-galactic.conflist.
