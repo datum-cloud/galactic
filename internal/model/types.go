@@ -66,8 +66,8 @@ type DesiredPeer struct {
 type DesiredVRFInstance struct {
 	Name string
 	// VRFID is the 16-bit PoP-local VRF identifier (BGPVRFInstanceSpec.VRFID).
-	// The runtime derives the RFC 4364 Type 1 route distinguisher from it as
-	// "routerID:vrfID".
+	// The runtime derives the RFC 4364 Type 2 route distinguisher from it as
+	// "localASN:vrfID".
 	VRFID              int32
 	ImportRouteTargets []string
 	ExportRouteTargets []string
@@ -88,9 +88,9 @@ type DesiredAdvertisement struct {
 	// a seg6 encap route targeting the correct SRv6 decap instruction.
 	SRv6SID string
 	// VRFID is the 16-bit PoP-local VRF identifier carried from the BGPAdvertisement
-	// spec. The runtime derives the per-VRF route distinguisher as "routerID:vrfID" so
+	// spec. The runtime derives the per-VRF route distinguisher as "localASN:vrfID" so
 	// that advertisements from different VRFs on the same router produce distinct NLRIs.
-	// When nil, the legacy "routerID:0" fallback is used.
+	// When nil, the legacy "localASN:0" fallback is used.
 	VRFID *int32
 }
 
