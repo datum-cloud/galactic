@@ -10,12 +10,17 @@ import (
 )
 
 const (
-	testPoolCIDR     = "fd00:10:ff01::/48"
+	testPoolCIDR     = "fd00:10:ff01::/64"
 	testPoolGw       = "fd00:10:ff01::1"
-	testSubnetLen    = 80
-	testAllocatedSub = "fd00:10:ff01::/80"
-	// nextSubnet is the second /80 subnet from a /48 pool, used across tests.
-	nextSubnet = "fd00:10:ff01::100:0:0/80"
+	testSubnetLen    = 96
+	testAllocatedSub = "fd00:10:ff01::/96"
+	// nextSubnet is the second /96 subnet from a /64 pool, used across tests.
+	nextSubnet = "fd00:10:ff01::100:0/96"
+
+	// testInvalidCIDR and testInvalidGateway are shared across this
+	// package's test files to avoid duplicate string literals.
+	testInvalidCIDR    = "not-a-cidr"
+	testInvalidGateway = "not-an-ip"
 )
 
 func TestNewPoolAllocator(t *testing.T) {
@@ -29,7 +34,7 @@ func TestNewPoolAllocator(t *testing.T) {
 		wantLen   int
 	}{
 		{
-			name:      "valid /48 pool with gateway and subnet length",
+			name:      "valid /64 pool with gateway and subnet length",
 			poolCIDR:  testPoolCIDR,
 			gateway:   testPoolGw,
 			subnetLen: testSubnetLen,
@@ -56,7 +61,7 @@ func TestNewPoolAllocator(t *testing.T) {
 		},
 		{
 			name:     "rejects invalid CIDR",
-			poolCIDR: "not-a-cidr",
+			poolCIDR: testInvalidCIDR,
 			wantErr:  true,
 		},
 		{
@@ -68,7 +73,7 @@ func TestNewPoolAllocator(t *testing.T) {
 		{
 			name:     "rejects invalid gateway",
 			poolCIDR: testPoolCIDR,
-			gateway:  "not-an-ip",
+			gateway:  testInvalidGateway,
 			wantErr:  true,
 		},
 		{
@@ -297,11 +302,11 @@ func TestIncSubnet(t *testing.T) {
 		subnetLen int
 		output    string
 	}{
-		// /80 subnets from a /48 pool: each step advances by 2^48.
-		{input: "fd00:10:ff01::", subnetLen: 80, output: "fd00:10:ff01::100:0:0"},
-		{input: "fd00:10:ff01:0:1::", subnetLen: 80, output: "fd00:10:ff01:0:1:100::"},
-		{input: "fd00:10:ff01:0:ff::", subnetLen: 80, output: "fd00:10:ff01:0:ff:100::"},
-		{input: "fd00:10:ff00::", subnetLen: 80, output: "fd00:10:ff00::100:0:0"},
+		// /96 subnets from a /64 pool: each step advances by 2^32.
+		{input: "fd00:10:ff01::", subnetLen: 96, output: "fd00:10:ff01::100:0"},
+		{input: "fd00:10:ff01:0:0:1::", subnetLen: 96, output: "fd00:10:ff01::1:100:0"},
+		{input: "fd00:10:ff01:0:0:ff::", subnetLen: 96, output: "fd00:10:ff01::ff:100:0"},
+		{input: "fd00:10:ff00::", subnetLen: 96, output: "fd00:10:ff00::100:0"},
 		// /64 subnets (boundary at byte 8).
 		{input: "fd00:10::", subnetLen: 64, output: "fd00:10:0:0:100::"},
 		// /56 subnets (boundary at byte 7).

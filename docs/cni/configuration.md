@@ -75,7 +75,7 @@ the following defaults are used:
 | Parameter     | Default                                  |
 | ------------- | ---------------------------------------- |
 | Pool CIDR     | `fd00:10:ff01::/48`                      |
-| Subnet length | `/80`                                    |
+| Subnet length | `/96`                                    |
 | Gateway       | First usable address in the pool (`::1`) |
 
 If an explicit `ipam` block is present in the CNI config, it takes precedence
@@ -144,12 +144,12 @@ subnet/gateway describe only the host-side BGP-advertised state).
 | `type`       | Conditionally required | `string` | `"pool"` or `"static"`. Determines IP allocation strategy. Required whenever an `ipam` block is present; only defaults to `"pool"` when the entire `ipam` block is omitted and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — an `ipam` block with an empty `type` is a hard error. |
 | `pool`       | Conditionally required | `string` | IPv6 CIDR pool (e.g. `"fd00:10:ff01::/48"`) from which subnets are allocated. Required when `type` is `"pool"`.                                                                                                                                                                |
 | `gateway`    | No                     | `string` | IPv6 gateway address. If omitted, uses the first usable address in the pool (host bits = 1). Must be within the pool CIDR.                                                                                                                                                     |
-| `subnet_len` | No                     | `int`    | Prefix length per allocation. Default is `80` (giving 2^48 addresses per pod subnet). Pool prefix must be <= this value.                                                                                                                                                       |
+| `subnet_len` | No                     | `int`    | Prefix length per allocation. Default is `96` (giving 2^32 addresses per pod subnet). Pool prefix must be <= this value.                                                                                                                                                       |
 | `static_ip`  | Conditionally required | `string` | A single IPv6 address to assign when `type` is `"static"`.                                                                                                                                                                                                                     |
 
 #### IPAM `type=pool`
 
-Allocates a `/subnet_len` subnet (default `/80`) from the pool CIDR. Thread-safe
+Allocates a `/subnet_len` subnet (default `/96`) from the pool CIDR. Thread-safe
 in-memory allocation. Allocations are ephemeral (lost on process restart);
 deallocation during `cmdDel` looks up the subnet from a `BGPAdvertisement` CRD
 annotation on the host.
@@ -207,7 +207,7 @@ from the built-in pool.
     "type": "pool",
     "pool": "fd00:10:ff02::/48",
     "gateway": "fd00:10:ff02::1",
-    "subnet_len": 80
+    "subnet_len": 96
   }
 }
 ```

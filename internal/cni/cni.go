@@ -21,11 +21,11 @@ const ipamTypePool = "pool"
 const (
 	// localIPAMDefaultPool is the IPv6 CIDR pool used when local IPAM is
 	// enabled but no explicit ipam block is present in the CNI config.
-	localIPAMDefaultPool = "fd00:10:ff01::/48"
+	localIPAMDefaultPool = "fd00:10:ff01::/64"
 
 	// localIPAMDefaultSubnetLen is the default prefix length for local IPAM
-	// allocations (default /80, giving 2^48 addresses per pod subnet).
-	localIPAMDefaultSubnetLen = 80
+	// allocations (default /96, giving 2^32 addresses per pod subnet).
+	localIPAMDefaultSubnetLen = 96
 )
 
 const (
