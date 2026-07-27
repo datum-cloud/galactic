@@ -36,37 +36,37 @@ func newTestBgpServer(t *testing.T) *gobgpserver.BgpServer {
 }
 
 // TestApplyVRFDerivesRouteDistinguisher verifies applyVRF derives the RFC 4364
-// Type 2 route distinguisher as "localASN:vrfID" from the localASN parameter
+// Type 1 route distinguisher as "routerID:vrfID" from the routerID parameter
 // and vrf.VRFID, rather than reading a RouteDistinguisher field off the model
 // (which no longer exists after the BGPVRFInstanceSpec.VRFID API change).
 func TestApplyVRFDerivesRouteDistinguisher(t *testing.T) {
 	tests := []struct {
-		name   string
-		asn    int64
-		vrf    model.DesiredVRFInstance
-		wantRD string
+		name     string
+		routerID string
+		vrf      model.DesiredVRFInstance
+		wantRD   string
 	}{
 		{
-			name: "basic vrfID",
-			asn:  65001,
+			name:     "basic vrfID",
+			routerID: "1.2.3.4",
 			vrf: model.DesiredVRFInstance{
 				Name:               "vrf-a",
 				VRFID:              42,
 				ImportRouteTargets: []string{"65000:100"},
 				ExportRouteTargets: []string{"65000:100"},
 			},
-			wantRD: "65001:42",
+			wantRD: "1.2.3.4:42",
 		},
 		{
-			name: "different asn and vrfID",
-			asn:  65002,
+			name:     "different routerID and vrfID",
+			routerID: "10.0.0.1",
 			vrf: model.DesiredVRFInstance{
 				Name:               "vrf-b",
 				VRFID:              65535,
 				ImportRouteTargets: []string{"65000:200"},
 				ExportRouteTargets: []string{"65000:200"},
 			},
-			wantRD: "65002:65535",
+			wantRD: "10.0.0.1:65535",
 		},
 	}
 
@@ -76,7 +76,7 @@ func TestApplyVRFDerivesRouteDistinguisher(t *testing.T) {
 			ctx := context.Background()
 
 			vrf := tt.vrf
-			if err := applyVRF(ctx, b, &vrf, tt.asn); err != nil {
+			if err := applyVRF(ctx, b, &vrf, tt.routerID); err != nil {
 				t.Fatalf("applyVRF() error = %v", err)
 			}
 

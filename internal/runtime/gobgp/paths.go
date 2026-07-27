@@ -17,19 +17,15 @@ import (
 	"go.datum.net/galactic/internal/model"
 )
 
-// deriveRD builds an RFC 4364 Type 2 route distinguisher from the platform AS
-// number and the advertisement's VRFID. When VRFID is set, the RD is
-// "localASN:vrfID" matching the per-VRF RD used by applyVRF during VRF
-// registration. When VRFID is nil (legacy advertisements without a VRFID),
-// falls back to "localASN:0". Per RFC 7432 §7.9 / RFC 9136 §3.1, RD uniqueness
-// is required only per-PE, not across PEs, so every node in a PoP deriving the
-// same RD for the same VRFID (since localASN is the platform-wide AS number)
-// is RFC-compliant; disambiguation across nodes is handled by Route Targets.
-func deriveRD(localASN int64, vrfID *int32) string {
+// deriveRD builds an RFC 4364 Type 1 route distinguisher from the router ID
+// and the advertisement's VRFID. When VRFID is set, the RD is "routerID:vrfID"
+// matching the per-VRF RD used by applyVRF during VRF registration. When VRFID
+// is nil (legacy advertisements without a VRFID), falls back to "routerID:0".
+func deriveRD(routerID string, vrfID *int32) string {
 	if vrfID != nil {
-		return fmt.Sprintf("%d:%d", localASN, *vrfID)
+		return fmt.Sprintf("%s:%d", routerID, *vrfID)
 	}
-	return fmt.Sprintf("%d:0", localASN)
+	return routerID + ":0"
 }
 
 // parseSIDAddr parses an SRv6 SID string that may be a bare IPv6 address or a
@@ -44,15 +40,14 @@ func parseSIDAddr(sid string) (netip.Addr, error) {
 // buildEVPNPaths adds or withdraws EVPN Type 5 IP Prefix paths for each prefix
 // in adv into the local GoBGP RIB.
 //
-// localASN is the platform's 4-byte BGP AS number and is used to derive the
-// per-VRF route distinguisher (Type 2 ASN:local-admin — "localASN:vrfID") when
-// adv.VRFID is set, matching the RD used by applyVRF during VRF registration.
-// adv.NextHop is the transit-reachable BGP peering address placed in
-// MpReachNLRI. adv.SRv6SID, when set, is the End.DT46 SID placed in the EVPN
-// GWIPAddress field — this is the SRv6 segment that remote nodes install in
-// their seg6 encap kernel routes. When adv.SRv6SID is empty the next-hop is
-// used for both (non-SRv6 fallback).
-func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, localASN int64, withdraw bool) error {
+// routerID is the BGP router-ID (IPv4 dotted-decimal) and is used to derive the
+// per-VRF route distinguisher (Type 1 IP-address: routerID:vrfID) when adv.VRFID
+// is set, matching the RD used by applyVRF during VRF registration. adv.NextHop
+// is the transit-reachable BGP peering address placed in MpReachNLRI. adv.SRv6SID,
+// when set, is the End.DT46 SID placed in the EVPN GWIPAddress field — this is
+// the SRv6 segment that remote nodes install in their seg6 encap kernel routes.
+// When adv.SRv6SID is empty the next-hop is used for both (non-SRv6 fallback).
+func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, routerID string, withdraw bool) error {
 	nextHop, err := netip.ParseAddr(adv.NextHop)
 	if err != nil {
 		return fmt.Errorf("invalid EVPN next-hop %q: %w", adv.NextHop, err)
@@ -67,11 +62,11 @@ func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, lo
 		gwIP = sid
 	}
 
-	// Type 2 (ASN:local-admin) RD, unique per VRF.
+	// Type 1 (IP-address:local-admin) RD, unique per VRF.
 	// When adv.VRFID is set, the RD matches the one used by applyVRF during
-	// VRF registration ("localASN:vrfID"), ensuring two VRFs on the same
+	// VRF registration ("routerID:vrfID"), ensuring two VRFs on the same
 	// router never produce colliding NLRIs even for identical prefixes.
-	rdStr := deriveRD(localASN, adv.VRFID)
+	rdStr := deriveRD(routerID, adv.VRFID)
 	rd, err := bgp.ParseRouteDistinguisher(rdStr)
 	if err != nil {
 		return fmt.Errorf("derive route distinguisher %q: %w", rdStr, err)
