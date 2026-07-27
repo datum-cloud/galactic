@@ -14,19 +14,19 @@ import (
 )
 
 const (
-	testASN1     = int64(65001)
-	testASN2     = int64(65002)
-	testNextHop  = "fc00::1"
-	testPrefix   = "fd00:10:ff01::/80"
-	testSID1     = "2001:db8:ff01::1"
-	testSID2     = "2001:db8:ff01::2"
-	testRT100    = "65000:100"
-	testRT200    = "65000:200"
-	testRT99     = "65000:99"
-	testLegacyRD = "65001:0"
-	testRD100    = "65001:100"
-	testRD200    = "65001:200"
-	testRD99     = "65002:99"
+	testRouterID1 = "1.2.3.4"
+	testRouterID2 = "10.0.0.1"
+	testNextHop   = "fc00::1"
+	testPrefix    = "fd00:10:ff01::/80"
+	testSID1      = "2001:db8:ff01::1"
+	testSID2      = "2001:db8:ff01::2"
+	testRT100     = "65000:100"
+	testRT200     = "65000:200"
+	testRT99      = "65000:99"
+	testLegacyRD  = "1.2.3.4:0"
+	testRD100     = "1.2.3.4:100"
+	testRD200     = "1.2.3.4:200"
+	testRD99      = "10.0.0.1:99"
 )
 
 func ptrInt32Test(v int32) *int32 { return &v }
@@ -34,35 +34,35 @@ func ptrInt32Test(v int32) *int32 { return &v }
 func TestDeriveRD(t *testing.T) {
 	tests := []struct {
 		name  string
-		asn   int64
+		id    string
 		vrfID *int32
 		want  string
 	}{
 		{
 			name:  "with VRFID derives per-VRF RD",
-			asn:   testASN1,
+			id:    testRouterID1,
 			vrfID: ptrInt32Test(42),
-			want:  "65001:42",
+			want:  "1.2.3.4:42",
 		},
 		{
-			name:  "nil VRFID falls back to localASN:0",
-			asn:   testASN1,
+			name:  "nil VRFID falls back to routerID:0",
+			id:    testRouterID1,
 			vrfID: nil,
 			want:  testLegacyRD,
 		},
 		{
 			name:  "max VRFID",
-			asn:   testASN2,
+			id:    testRouterID2,
 			vrfID: ptrInt32Test(65535),
-			want:  "65002:65535",
+			want:  "10.0.0.1:65535",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := deriveRD(tt.asn, tt.vrfID)
+			got := deriveRD(tt.id, tt.vrfID)
 			if got != tt.want {
-				t.Errorf("deriveRD(%d, %v) = %q, want %q", tt.asn, tt.vrfID, got, tt.want)
+				t.Errorf("deriveRD(%q, %v) = %q, want %q", tt.id, tt.vrfID, got, tt.want)
 			}
 		})
 	}
@@ -103,16 +103,16 @@ func TestBuildEVPNPathsPerVRFRD(t *testing.T) {
 	}
 
 	// Both should succeed without error.
-	if err := buildEVPNPaths(b, adv1, testASN1, false); err != nil {
+	if err := buildEVPNPaths(b, adv1, testRouterID1, false); err != nil {
 		t.Fatalf("buildEVPNPaths(adv1) error = %v", err)
 	}
-	if err := buildEVPNPaths(b, adv2, testASN1, false); err != nil {
+	if err := buildEVPNPaths(b, adv2, testRouterID1, false); err != nil {
 		t.Fatalf("buildEVPNPaths(adv2) error = %v", err)
 	}
 
 	// Verify the derived RDs are distinct.
-	rd1 := deriveRD(testASN1, adv1.VRFID)
-	rd2 := deriveRD(testASN1, adv2.VRFID)
+	rd1 := deriveRD(testRouterID1, adv1.VRFID)
+	rd2 := deriveRD(testRouterID1, adv2.VRFID)
 
 	if rd1 == rd2 {
 		t.Fatalf("RD collision: both advertisements derived RD %q — two VRFs with identical prefix would collide", rd1)
@@ -138,7 +138,7 @@ func TestBuildEVPNPathsPerVRFRD(t *testing.T) {
 }
 
 // TestBuildEVPNPathsWithoutVRFID verifies that an advertisement without a
-// VRFID falls back to the legacy "localASN:0" route distinguisher.
+// VRFID falls back to the legacy "routerID:0" route distinguisher.
 func TestBuildEVPNPathsWithoutVRFID(t *testing.T) {
 	b := newTestBgpServer(t)
 
@@ -155,11 +155,11 @@ func TestBuildEVPNPathsWithoutVRFID(t *testing.T) {
 		Communities: []string{testRT100},
 	}
 
-	if err := buildEVPNPaths(b, adv, testASN1, false); err != nil {
+	if err := buildEVPNPaths(b, adv, testRouterID1, false); err != nil {
 		t.Fatalf("buildEVPNPaths(legacy) error = %v", err)
 	}
 
-	rdStr := deriveRD(testASN1, adv.VRFID)
+	rdStr := deriveRD(testRouterID1, adv.VRFID)
 	if rdStr != testLegacyRD {
 		t.Errorf("legacy RD = %q, want %q", rdStr, testLegacyRD)
 	}
@@ -183,10 +183,10 @@ func TestBuildEVPNPathsWithdraw(t *testing.T) {
 		Communities: []string{testRT100},
 	}
 
-	if err := buildEVPNPaths(b, adv, testASN1, false); err != nil {
+	if err := buildEVPNPaths(b, adv, testRouterID1, false); err != nil {
 		t.Fatalf("buildEVPNPaths(add) error = %v", err)
 	}
-	if err := buildEVPNPaths(b, adv, testASN1, true); err != nil {
+	if err := buildEVPNPaths(b, adv, testRouterID1, true); err != nil {
 		t.Fatalf("buildEVPNPaths(withdraw) error = %v", err)
 	}
 }
@@ -207,16 +207,16 @@ func TestBuildEVPNPathsMatchesApplyVRFRD(t *testing.T) {
 	}
 
 	// Apply the VRF.
-	if err := applyVRF(ctx, b, &vrf, testASN2); err != nil {
+	if err := applyVRF(ctx, b, &vrf, testRouterID2); err != nil {
 		t.Fatalf("applyVRF() error = %v", err)
 	}
 
 	// Derive the RD that buildEVPNPaths would use for an advertisement
 	// with the same VRFID.
 	advVRFID := &vrfID
-	advRD := deriveRD(testASN2, advVRFID)
+	advRD := deriveRD(testRouterID2, advVRFID)
 
-	// The applyVRF function derives the RD as "localASN:vrfID".
+	// The applyVRF function derives the RD as "routerID:vrfID".
 	if advRD != testRD99 {
 		t.Errorf("buildEVPNPaths RD = %q, want %q (should match applyVRF derivation)", advRD, testRD99)
 	}

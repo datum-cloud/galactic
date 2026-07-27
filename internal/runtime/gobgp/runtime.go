@@ -109,13 +109,13 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return err
 	}
 
-	if err := r.applyVRFs(ctx, b, desired.VRFInstances, desired.LocalASN); err != nil {
+	if err := r.applyVRFs(ctx, b, desired.VRFInstances, desired.RouterID); err != nil {
 		return err
 	}
 
 	r.startRIBMonitor(b)
 
-	if err := r.applyEVPN(b, desired.Advertisements, desired.LocalASN); err != nil {
+	if err := r.applyEVPN(b, desired.Advertisements, desired.RouterID); err != nil {
 		return err
 	}
 
@@ -223,7 +223,7 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 // node can host thousands of VRFs (one per VPC attachment), so this — unlike
 // the single-VRF code it replaces — must handle the full set, not just one.
 func (r *GoBGPRuntime) applyVRFs(
-	ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance, localASN int64,
+	ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance, routerID string,
 ) error {
 	desired := make(map[string]model.DesiredVRFInstance, len(vrfs))
 	for _, v := range vrfs {
@@ -239,7 +239,7 @@ func (r *GoBGPRuntime) applyVRFs(
 	rtIndex := make(map[string]uint32, len(vrfs))
 	newlyRegistered := false
 	for _, v := range vrfs {
-		if err := applyVRF(ctx, b, &v, localASN); err != nil {
+		if err := applyVRF(ctx, b, &v, routerID); err != nil {
 			return fmt.Errorf("apply VRF %s: %w", v.Name, err)
 		}
 
@@ -284,7 +284,7 @@ func (r *GoBGPRuntime) applyVRFs(
 
 // applyEVPN advertises EVPN paths for all relevant advertisements, withdrawing
 // each advertisement's previous paths first when its content has changed.
-func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredAdvertisement, localASN int64) error {
+func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredAdvertisement, routerID string) error {
 	desiredNames := make(map[string]struct{}, len(advs))
 	for _, adv := range advs {
 		if adv.AddressFamily.AFI != afiL2VPN {
@@ -296,12 +296,12 @@ func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredA
 			if reflect.DeepEqual(oldAdv, adv) {
 				continue
 			}
-			if err := buildEVPNPaths(b, oldAdv, localASN, true); err != nil {
+			if err := buildEVPNPaths(b, oldAdv, routerID, true); err != nil {
 				return fmt.Errorf("withdraw stale EVPN paths for %s: %w", adv.Name, err)
 			}
 		}
 
-		if err := buildEVPNPaths(b, adv, localASN, false); err != nil {
+		if err := buildEVPNPaths(b, adv, routerID, false); err != nil {
 			return fmt.Errorf("advertise EVPN paths for %s: %w", adv.Name, err)
 		}
 		r.appliedAdvertisements[adv.Name] = adv
@@ -312,7 +312,7 @@ func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredA
 		if _, ok := desiredNames[name]; ok {
 			continue
 		}
-		if err := buildEVPNPaths(b, oldAdv, localASN, true); err != nil {
+		if err := buildEVPNPaths(b, oldAdv, routerID, true); err != nil {
 			return fmt.Errorf("withdraw removed EVPN advertisement %s: %w", name, err)
 		}
 		delete(r.appliedAdvertisements, name)
@@ -436,13 +436,13 @@ func fsmStateToModel(state api.PeerState_SessionState) model.BGPPeerState {
 }
 
 // applyVRF configures a VRF in GoBGP via AddVrf. The route distinguisher is
-// derived as the RFC 4364 Type 2 (ASN:local-admin) format "localASN:vrfID",
-// matching the convention buildEVPNPaths uses for the per-VRF RD so that EVPN
-// paths and VRF registration share the same distinguisher.
+// derived as the RFC 4364 Type 1 (IP-address:local-admin) format
+// "routerID:vrfID", matching the convention buildEVPNPaths uses for the
+// per-VRF RD so that EVPN paths and VRF registration share the same distinguisher.
 // If the VRF already exists, the call is treated as idempotent (no-op).
-func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance, localASN int64) error {
+func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance, routerID string) error {
 	// Derive and parse the route distinguisher.
-	rdStr := deriveRD(localASN, &vrf.VRFID)
+	rdStr := fmt.Sprintf("%s:%d", routerID, vrf.VRFID)
 	rd, err := bgp.ParseRouteDistinguisher(rdStr)
 	if err != nil {
 		return fmt.Errorf("parse route distinguisher %q: %w", rdStr, err)
