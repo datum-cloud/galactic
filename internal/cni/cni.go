@@ -50,9 +50,11 @@ const (
 
 	// annotationContainerIDLen is the number of characters used from a
 	// container ID in annotation keys. Kubernetes limits the name part of an
-	// annotation key to 63 bytes; "allocated-subnet." is 17 bytes, leaving 46
-	// bytes for the container ID prefix.
-	annotationContainerIDLen = 46
+	// annotation key to 63 bytes. The longest prefix sharing this constant is
+	// "allocated-subnet-ipv6." (or "-ipv4."), both 22 bytes, leaving 41 bytes
+	// for the container ID suffix — shorter prefixes ("netns.") just leave
+	// more room than they need.
+	annotationContainerIDLen = 41
 )
 
 const (
