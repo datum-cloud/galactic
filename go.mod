@@ -15,7 +15,7 @@ require (
 	github.com/vishvananda/netlink v1.3.2-0.20260629151558-4e35dc940f49
 	go.datum.net/network v0.0.0-20260719211723-8caa91ab0b37
 	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.42.0
+	golang.org/x/term v0.45.0
 	google.golang.org/grpc v1.82.1
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.1
