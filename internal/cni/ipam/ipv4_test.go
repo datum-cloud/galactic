@@ -60,7 +60,7 @@ func TestNewIPv4PoolAllocator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a, err := NewIPv4PoolAllocator(tt.poolCIDR, tt.gateway)
+			a, err := NewIPv4PoolAllocator(tt.poolCIDR, tt.gateway, t.TempDir())
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -82,7 +82,7 @@ func TestNewIPv4PoolAllocator(t *testing.T) {
 }
 
 func TestIPv4PoolAllocatorAllocate(t *testing.T) {
-	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw)
+	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestIPv4PoolAllocatorAllocate(t *testing.T) {
 }
 
 func TestIPv4PoolAllocatorSkipsReservedAddresses(t *testing.T) {
-	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw)
+	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestIPv4PoolAllocatorSkipsReservedAddresses(t *testing.T) {
 }
 
 func TestIPv4PoolAllocatorExhaustion(t *testing.T) {
-	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw)
+	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestIPv4PoolAllocatorExhaustion(t *testing.T) {
 }
 
 func TestIPv4PoolAllocatorDeallocate(t *testing.T) {
-	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw)
+	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestIPv4PoolAllocatorDeallocate(t *testing.T) {
 }
 
 func TestIPv4PoolAllocatorDeallocateUnknown(t *testing.T) {
-	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw)
+	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

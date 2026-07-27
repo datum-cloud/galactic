@@ -45,7 +45,7 @@ func TestNewDualStackAllocator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a, err := NewDualStackAllocator(tt.ipv6Pool, tt.ipv6Gateway, tt.ipv4Pool, tt.ipv4Gateway)
+			a, err := NewDualStackAllocator(tt.ipv6Pool, tt.ipv6Gateway, tt.ipv4Pool, tt.ipv4Gateway, t.TempDir())
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -67,7 +67,7 @@ func TestNewDualStackAllocator(t *testing.T) {
 
 func TestDualStackAllocatorAllocate(t *testing.T) {
 	t.Run("combined ipv6+ipv4 allocation returns both", func(t *testing.T) {
-		a, err := NewDualStackAllocator(testPoolCIDR, testPoolGw, testIPv4PoolCIDR, testIPv4Gw)
+		a, err := NewDualStackAllocator(testPoolCIDR, testPoolGw, testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -98,7 +98,7 @@ func TestDualStackAllocatorAllocate(t *testing.T) {
 	})
 
 	t.Run("ipv4-omitted case returns ipv6 only with nil ipv4 fields", func(t *testing.T) {
-		a, err := NewDualStackAllocator(testPoolCIDR, testPoolGw, "", "")
+		a, err := NewDualStackAllocator(testPoolCIDR, testPoolGw, "", "", t.TempDir())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -123,7 +123,7 @@ func TestDualStackAllocatorAllocate(t *testing.T) {
 		// testIPv4PoolCIDR is a /29 with 4 usable addresses; exhaust it via
 		// the IPv6 pool's much larger address space so the IPv6 side never
 		// errors while the IPv4 side is driven to exhaustion.
-		a, err := NewDualStackAllocator(testPoolCIDR, testPoolGw, testIPv4PoolCIDR, testIPv4Gw)
+		a, err := NewDualStackAllocator(testPoolCIDR, testPoolGw, testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
