@@ -3,10 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package ipam provides IPv6 subnet allocation for the Galactic CNI.
-// Each allocation returns a subnet (default /80) from a larger CIDR pool.
-// Allocations are kept ephemeral in memory; separate CNI plugin processes
-// (each invocation is a separate process) rely on the BGPAdvertisement CRD
-// annotation to look up the allocated subnet during teardown.
+// Each allocation returns a subnet (default /96) from a larger CIDR pool
+// (e.g. a /64 region subnet). Allocations are kept ephemeral in memory;
+// separate CNI plugin processes (each invocation is a separate process) rely
+// on the BGPAdvertisement CRD annotation to look up the allocated subnet
+// during teardown.
 package ipam
 
 import (
@@ -20,15 +21,15 @@ const (
 	ipv6Bits = 128
 
 	// DefaultSubnetLen is the default prefix length returned per allocation.
-	// A /80 gives 2^48 addresses per pod subnet.
-	DefaultSubnetLen = 80
+	// A /96 gives 2^32 addresses per pod subnet.
+	DefaultSubnetLen = 96
 )
 
 // PoolAllocator allocates IPv6 subnets from a CIDR pool, tracking
 // allocations by subnet CIDR string in memory. All bindings are ephemeral.
 type PoolAllocator struct {
-	pool        *net.IPNet // the master pool (e.g. fd00:10:ff01::/48)
-	subnetLen   int        // prefix length per allocation (e.g. 80)
+	pool        *net.IPNet // the master pool (e.g. a /64 region subnet)
+	subnetLen   int        // prefix length per allocation (e.g. 96)
 	gateway     net.IP     // gateway IP address
 	poolIP      net.IP     // immutable copy of pool.IP for boundary checks
 	allocations sync.Map   // allocated subnet CIDR string -> struct{}{}
@@ -37,9 +38,11 @@ type PoolAllocator struct {
 
 // NewPoolAllocator creates a new pool allocator from an IPv6 CIDR pool,
 // an optional gateway address, and a subnet prefix length. The pool must be
-// an IPv6 prefix with a length of subnetLen or fewer bits. If gateway is
-// empty, the first address in the pool (host bits = 1) is used as the
-// gateway. If subnetLen is 0, DefaultSubnetLen (80) is used.
+// an IPv6 prefix with a length of subnetLen or fewer bits (e.g. a /64 region
+// subnet when subnetLen is the default /96, though any pool length <=
+// subnetLen is accepted). If gateway is empty, the first address in the pool
+// (host bits = 1) is used as the gateway. If subnetLen is 0, DefaultSubnetLen
+// (96) is used.
 func NewPoolAllocator(poolCIDR, gateway string, subnetLen int) (*PoolAllocator, error) {
 	_, pool, err := net.ParseCIDR(poolCIDR)
 	if err != nil {
@@ -166,10 +169,18 @@ func (a *StaticAllocator) Allocate(_ string, addr string) (net.IP, error) {
 
 // incSubnet increments an IP by one subnet step and returns it in place.
 // The step size is 2^(128-subnetLen), advancing to the next subnet boundary.
+//
+// Only bytes strictly after the network boundary are zeroed on each call; the
+// boundary byte itself is left untouched so it can keep counting up across
+// repeated calls on the same IP (as Allocate does when walking pool
+// boundaries). Zeroing the boundary byte on every call — as an earlier
+// version of this function did — reset the counter back to its just-computed
+// value each time, so a chained sequence of calls never advanced past the
+// second subnet in the pool.
 func incSubnet(ip net.IP, subnetLen int) net.IP {
-	// Zero out host bits (bytes after the network boundary).
+	// Zero out host bits strictly after the network boundary byte.
 	boundary := subnetLen / 8
-	for i := boundary; i < len(ip); i++ {
+	for i := boundary + 1; i < len(ip); i++ {
 		ip[i] = 0
 	}
 	// Increment the first host byte (just past the network prefix).
