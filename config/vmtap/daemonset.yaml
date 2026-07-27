@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vmtap-cni
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: vmtap-cni
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmtap-cni
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmtap-cni
+    spec:
+      serviceAccountName: vmtap-cni
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      # Placeholder node signal: only nodes actually running kraftlet-managed
+      # Unikraft workloads need this plugin chained into their conflist.
+      # "galactic.datumapis.com/node: kraftlet" is not an established label
+      # anywhere else in this repo — it stands in for whatever pod/node-level
+      # signal gets decided per the open item in
+      # .local/kraftlet-cilium-tap-plan.md section 7 ("Decide the pod-level
+      # signal (annotation vs. RuntimeClass)..."). Update or remove this
+      # affinity block once that decision is made.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - kraftlet
+      initContainers:
+        - name: install-cni-bin
+          # ":latest" is a placeholder only, matching the convention in
+          # config/cni/daemonset.yaml — no such tag is ever pushed to GHCR.
+          image: ghcr.io/datum-cloud/vmtap-cni:latest
+          command: ["cp", "/vmtap-cni", "/host/opt/cni/bin/vmtap-cni"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: cni-bin-dir
+              mountPath: /host/opt/cni/bin
+      containers:
+        # patch-conflist chains vmtap-cni into Cilium's conflist and keeps
+        # re-checking it — see internal/vmtap.RunPatchLoop and the
+        # conflist-chaining open item in
+        # .local/kraftlet-cilium-tap-plan.md section 7. This is a
+        # best-effort convergence loop, not a verified solution: nothing
+        # here guarantees the patch lands before Cilium starts servicing
+        # ADD calls on a freshly booted node.
+        - name: patch-conflist
+          image: ghcr.io/datum-cloud/vmtap-cni:latest
+          command: ["/vmtap-cni", "patch-conflist"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          volumeMounts:
+            - name: cni-net-dir
+              mountPath: /host/etc/cni/net.d
+      volumes:
+        - name: cni-bin-dir
+          hostPath:
+            path: /opt/cni/bin
+            type: DirectoryOrCreate
+        - name: cni-net-dir
+          hostPath:
+            path: /etc/cni/net.d
+            type: DirectoryOrCreate
