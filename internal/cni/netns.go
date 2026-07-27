@@ -13,9 +13,14 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// configureInterfaceInNetns applies an IP address and routes to the guest
-// interface inside the container network namespace.
-func configureInterfaceInNetns(netnsPath, ifName string, ipNet *net.IPNet, gateway net.IP) error {
+// configureInterfaceInNetns applies IP addresses and default routes to the
+// guest interface inside the container network namespace. ipv4Net/ipv4GW are
+// nil for an IPv6-only attachment.
+func configureInterfaceInNetns(
+	netnsPath, ifName string,
+	ipv6Net *net.IPNet, ipv6GW net.IP,
+	ipv4Net *net.IPNet, ipv4GW net.IP,
+) error {
 	containerNS, err := ns.GetNS(netnsPath)
 	if err != nil {
 		return fmt.Errorf("get container netns %q: %w", netnsPath, err)
@@ -34,24 +39,15 @@ func configureInterfaceInNetns(netnsPath, ifName string, ipNet *net.IPNet, gatew
 			return fmt.Errorf("find guest interface %q: %w", ifName, err)
 		}
 
-		if err := handle.AddrAdd(link, &netlink.Addr{IPNet: ipNet}); err != nil {
-			return fmt.Errorf("add IP %s to %q: %w", ipNet, ifName, err)
+		if err := addAddrAndDefaultRoute(handle, link, ifName, ipv6Net, ipv6GW); err != nil {
+			return err
+		}
+		if err := addAddrAndDefaultRoute(handle, link, ifName, ipv4Net, ipv4GW); err != nil {
+			return err
 		}
 
 		if err := handle.LinkSetUp(link); err != nil {
 			return fmt.Errorf("set interface %q up: %w", ifName, err)
-		}
-
-		// Install default route via gateway.
-		if gateway != nil {
-			defaultRoute := &netlink.Route{
-				Dst:       nil, // default route
-				Gw:        gateway,
-				LinkIndex: link.Attrs().Index,
-			}
-			if err := handle.RouteAdd(defaultRoute); err != nil {
-				return fmt.Errorf("add default route via %s: %w", gateway, err)
-			}
 		}
 
 		return nil
@@ -60,7 +56,35 @@ func configureInterfaceInNetns(netnsPath, ifName string, ipNet *net.IPNet, gatew
 	}
 
 	slog.Debug("netns: guest interface configured", "ifName", ifName, "netns", netnsPath,
-		"address", ipNet, "gateway", gateway)
+		"ipv6Address", ipv6Net, "ipv6Gateway", ipv6GW, "ipv4Address", ipv4Net, "ipv4Gateway", ipv4GW)
+	return nil
+}
+
+// addAddrAndDefaultRoute assigns ipNet to link and, if gateway is set,
+// installs a default route via it. No-op when ipNet is nil (family not in
+// use for this attachment).
+func addAddrAndDefaultRoute(
+	handle *netlink.Handle, link netlink.Link, ifName string, ipNet *net.IPNet, gateway net.IP,
+) error {
+	if ipNet == nil {
+		return nil
+	}
+
+	if err := handle.AddrAdd(link, &netlink.Addr{IPNet: ipNet}); err != nil {
+		return fmt.Errorf("add IP %s to %q: %w", ipNet, ifName, err)
+	}
+
+	if gateway == nil {
+		return nil
+	}
+	defaultRoute := &netlink.Route{
+		Dst:       nil, // default route
+		Gw:        gateway,
+		LinkIndex: link.Attrs().Index,
+	}
+	if err := handle.RouteAdd(defaultRoute); err != nil {
+		return fmt.Errorf("add default route via %s: %w", gateway, err)
+	}
 	return nil
 }
 

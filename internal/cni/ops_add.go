@@ -142,7 +142,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 		if ipamResult != nil {
 			slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,
-				"subnet", ipamResult.subnet, "gateway", ipamResult.gateway)
+				"ipv6Subnet", ipamResult.ipv6Subnet, "ipv6Gateway", ipamResult.ipv6Gateway,
+				"ipv4Address", ipamResult.ipv4Address, "ipv4Gateway", ipamResult.ipv4Gateway)
 		}
 	case interfaceTypeTap:
 		// Allocate IPAM for the tap interface (same as veth).
@@ -153,15 +154,16 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 		if ipamResult != nil {
 			slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,
-				"subnet", ipamResult.subnet, "gateway", ipamResult.gateway)
+				"ipv6Subnet", ipamResult.ipv6Subnet, "ipv6Gateway", ipamResult.ipv6Gateway,
+				"ipv4Address", ipamResult.ipv4Address, "ipv4Gateway", ipamResult.ipv4Gateway)
 		}
 
 		// Configure the gateway address on the host tap and install the VRF route.
 		if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
 			return err
 		}
-		if ipamResult != nil && ipamResult.gateway != nil {
-			slog.Debug("ADD: host gateway configured", "name", hostName, "gateway", ipamResult.gateway)
+		if ipamResult != nil && ipamResult.ipv6Gateway != nil {
+			slog.Debug("ADD: host gateway configured", "name", hostName, "gateway", ipamResult.ipv6Gateway)
 		}
 
 		// Print the CNI result with IP info.

@@ -419,12 +419,12 @@ func parseConf(data []byte) (*PluginConf, error) {
 	}
 
 	// Validate dual-stack addressing fields (ipv6_subnet, ipv4_subnet,
-	// address_families). ipv6_subnet and ipv4_subnet are both optional: as of
-	// this change nothing downstream consumes them yet (allocateIPAM is not
-	// wired to read them until a later phase), so making either required now
-	// would reject every existing config, including local-IPAM dev configs and
-	// current e2e configs, none of which set them. When present, both are
-	// validated for CIDR shape so misconfigurations are caught early.
+	// address_families). Both subnet fields stay optional at the parseConf
+	// level: whether one is actually required depends on which IPAM path a
+	// given ADD takes (static, local-IPAM fallback, or pool), which is
+	// resolved in allocateIPAM — see wantsIPAM/allocateIPAM in ipam_ops.go.
+	// When present, both are validated for CIDR shape so misconfigurations
+	// are caught early regardless of which path runs.
 	if conf.IPv6Subnet != "" {
 		ip, mask, err := net.ParseCIDR(conf.IPv6Subnet)
 		if err != nil {
@@ -509,20 +509,31 @@ func sanitizeForError(s string) string {
 	return s
 }
 
-// subnetAnnotationKey returns the annotation key for storing the allocated
-// subnet for the given container ID. Kubernetes limits the name part of an
-// annotation key to 63 bytes; "allocated-subnet." is 17 bytes, leaving 46
-// bytes for the container ID prefix.
-func subnetAnnotationKey(containerID string) string {
+// subnetAnnotationKeyIPv6 returns the annotation key for storing the
+// allocated IPv6 subnet for the given container ID. Kubernetes limits the
+// name part of an annotation key to 63 bytes; "allocated-subnet-ipv6." is 22
+// bytes, leaving 41 bytes for the container ID prefix.
+func subnetAnnotationKeyIPv6(containerID string) string {
 	id := containerID
 	if len(id) > annotationContainerIDLen {
 		id = id[:annotationContainerIDLen]
 	}
-	return fmt.Sprintf("%s.%s", annotationAllocatedSubnet, id)
+	return fmt.Sprintf("%s.%s", annotationAllocatedSubnetIPv6, id)
+}
+
+// subnetAnnotationKeyIPv4 returns the annotation key for storing the
+// allocated IPv4 address for the given container ID. Mirrors
+// subnetAnnotationKeyIPv6.
+func subnetAnnotationKeyIPv4(containerID string) string {
+	id := containerID
+	if len(id) > annotationContainerIDLen {
+		id = id[:annotationContainerIDLen]
+	}
+	return fmt.Sprintf("%s.%s", annotationAllocatedSubnetIPv4, id)
 }
 
 // netnsAnnotationKey returns the annotation key for storing the network
-// namespace path used by the given container ID. Mirrors subnetAnnotationKey.
+// namespace path used by the given container ID. Mirrors subnetAnnotationKeyIPv6.
 func netnsAnnotationKey(containerID string) string {
 	id := containerID
 	if len(id) > annotationContainerIDLen {

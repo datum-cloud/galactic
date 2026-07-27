@@ -216,17 +216,27 @@ func buildVRFInstanceSpec(routerName, rtValue string, vrfID int32) bgpv1alpha1.B
 }
 
 // buildAdvertisementSpec constructs the BGPAdvertisementSpec for a VPC
-// attachment's pod subnet. VRFID and Function record structurally what used
-// to live in the legacy galactic.datum.net/srv6-sid annotation: which VRF
-// this advertisement belongs to, and which SRv6 endpoint behavior the CNI
-// kernel ingress route installs (always End.DT46, regardless of pod-subnet
-// address family — see setupSRv6Ingress/srv6.RouteIngressAdd).
-func buildAdvertisementSpec(routerName, rtValue, podSubnet string, vrfID int32) bgpv1alpha1.BGPAdvertisementSpec {
+// attachment's pod subnet(s) — one IPv6 prefix, plus an IPv4 prefix when the
+// attachment is dual-stack. RFC 9136's Type-5 route is self-describing per
+// NLRI, so a single BGPAdvertisement carrying both families is valid; see
+// galactic-router's buildEVPNPaths for the corresponding per-family gateway
+// handling. VRFID and Function record structurally what used to live in the
+// legacy galactic.datum.net/srv6-sid annotation: which VRF this advertisement
+// belongs to, and which SRv6 endpoint behavior the CNI kernel ingress route
+// installs (always End.DT46, regardless of pod-subnet address family — see
+// setupSRv6Ingress/srv6.RouteIngressAdd).
+func buildAdvertisementSpec(
+	routerName, rtValue string, prefixes []string, vrfID int32,
+) bgpv1alpha1.BGPAdvertisementSpec {
 	function := bgpv1alpha1.SRv6FunctionEndDT46
+	bgpPrefixes := make([]bgpv1alpha1.Prefix, len(prefixes))
+	for i, p := range prefixes {
+		bgpPrefixes[i] = bgpv1alpha1.Prefix(p)
+	}
 	return bgpv1alpha1.BGPAdvertisementSpec{
 		RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
 		AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-		Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(podSubnet)},
+		Prefixes:      bgpPrefixes,
 		Communities:   []bgpv1alpha1.Community{bgpv1alpha1.Community(rtValue)},
 		VRFID:         &vrfID,
 		Function:      &function,
@@ -338,19 +348,29 @@ func publishBGPStateK8s(
 		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
 			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName)
 
-		// Create the BGPAdvertisement to originate the pod's subnet prefix.
+		// Create the BGPAdvertisement to originate the pod's subnet prefix(es).
 		adv := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      bgpAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment),
 				Namespace: namespace,
 			},
 		}
-		podSubnet := ""
+		var prefixes []string
+		var ipv6Subnet, ipv4Addr string
 		if ipamResult != nil {
-			podSubnet = ipamResult.subnet.String()
+			ipv6Subnet = ipamResult.ipv6Subnet.String()
+			prefixes = append(prefixes, ipv6Subnet)
+			if ipamResult.ipv4Address != nil {
+				// The annotation stores the bare address (matching
+				// IPv4PoolAllocator's marker-file naming, so cmdDel's
+				// Deallocate call finds it — see ipam_ops.go); the
+				// advertised prefix needs the explicit /32 CIDR form.
+				ipv4Addr = ipamResult.ipv4Address.String()
+				prefixes = append(prefixes, ipv4Addr+"/32")
+			}
 		}
 		_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
-			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, podSubnet, vrfID)
+			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, prefixes, vrfID)
 			if adv.Annotations == nil {
 				adv.Annotations = make(map[string]string)
 			}
@@ -359,9 +379,14 @@ func publishBGPStateK8s(
 			// guessing a name from the container ID (see
 			// gc.ContainerNetNSExistsByPath).
 			adv.Annotations[netnsAnnotationKey(args.ContainerID)] = args.Netns
-			// Store the allocated subnet keyed by container ID so cmdDel can look it up.
-			if ipamResult != nil {
-				adv.Annotations[subnetAnnotationKey(args.ContainerID)] = podSubnet
+			// Store the allocated addresses keyed by container ID so cmdDel can
+			// look them up, one annotation per family so DEL can deallocate
+			// each independently.
+			if ipv6Subnet != "" {
+				adv.Annotations[subnetAnnotationKeyIPv6(args.ContainerID)] = ipv6Subnet
+			}
+			if ipv4Addr != "" {
+				adv.Annotations[subnetAnnotationKeyIPv4(args.ContainerID)] = ipv4Addr
 			}
 			return nil
 		})
@@ -370,7 +395,7 @@ func publishBGPStateK8s(
 		}
 		tracker.advCreated = true
 		slog.Debug("BGP: BGPAdvertisement applied", "name", adv.Name, "namespace", namespace,
-			"podSubnet", podSubnet, "containerID", args.ContainerID)
+			"prefixes", prefixes, "containerID", args.ContainerID)
 
 		slog.Info("ADD: BGP state published", "containerID", args.ContainerID,
 			"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
@@ -400,17 +425,19 @@ func routeConflicts(existing, desired *netlink.Route) bool {
 	return false
 }
 
-// configureHostGateway assigns the gateway address as a /128 host address on
-// the host-side interface (veth or tap) and installs an explicit pod-subnet
-// route into the VRF table.
+// configureHostGateway assigns each configured family's gateway address as a
+// host address (/128 for IPv6, /32 for IPv4) on the host-side interface (veth
+// or tap) and installs an explicit pod-subnet route for that family into the
+// VRF table. IPv4 is skipped entirely when the attachment is IPv6-only.
 //
-// Using /128 (not the pod subnet mask) prevents the kernel from auto-creating a
-// subnet-router anycast entry in the VRF local table. When the pod address equals
-// the subnet network address the anycast absorbs seg6local-decapped inner packets
-// before they reach the guest interface. The explicit subnet route replaces the
-// one the kernel would have created from the wider mask.
+// Using a full-length host address (not the pod subnet mask) prevents the
+// kernel from auto-creating a subnet-router anycast entry in the VRF local
+// table. When the pod address equals the subnet network address the anycast
+// absorbs seg6local-decapped inner packets before they reach the guest
+// interface. The explicit subnet route replaces the one the kernel would
+// have created from the wider mask.
 func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
-	if res == nil || res.gateway == nil {
+	if res == nil {
 		return nil
 	}
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
@@ -418,26 +445,49 @@ func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
 	if err != nil {
 		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
-	gwNet := &net.IPNet{IP: res.gateway, Mask: net.CIDRMask(128, 128)}
-	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet}); err != nil {
-		if !errors.Is(err, syscall.EEXIST) {
-			return fmt.Errorf("add gateway address to host interface %q: %w", hostName, err)
-		}
-	}
 	tableID, err := vrf.TableID(vpc, vpcAttachment)
 	if err != nil {
 		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
 	}
+
+	if res.ipv6Gateway != nil {
+		gwNet := &net.IPNet{IP: res.ipv6Gateway, Mask: net.CIDRMask(128, 128)}
+		if err := installGatewayRoute(hostLink, gwNet, res.ipv6Subnet, netlink.FAMILY_V6, int(tableID)); err != nil {
+			return err
+		}
+	}
+	if res.ipv4Gateway != nil {
+		gwNet := &net.IPNet{IP: res.ipv4Gateway, Mask: net.CIDRMask(32, 32)}
+		ipv4Subnet := &net.IPNet{IP: res.ipv4Address, Mask: net.CIDRMask(32, 32)}
+		if err := installGatewayRoute(hostLink, gwNet, ipv4Subnet, netlink.FAMILY_V4, int(tableID)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// installGatewayRoute assigns gwNet as a host address on hostLink and
+// installs an explicit route to subnet into the given VRF table, for one
+// address family. Idempotent: existing matching routes/addresses are left
+// alone, and conflicting ones return an error rather than being overwritten.
+func installGatewayRoute(hostLink netlink.Link, gwNet, subnet *net.IPNet, family, tableID int) error {
+	hostName := hostLink.Attrs().Name
+	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet}); err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			return fmt.Errorf("add gateway address %s to host interface %q: %w", gwNet, hostName, err)
+		}
+	}
+
 	desiredRoute := &netlink.Route{
-		Dst:       res.subnet,
+		Dst:       subnet,
 		LinkIndex: hostLink.Attrs().Index,
-		Table:     int(tableID),
+		Table:     tableID,
 	}
 
 	// Check for existing routes with the same destination before installing.
 	existingRoutes, err := netlink.RouteListFiltered(
-		netlink.FAMILY_V6,
-		&netlink.Route{Table: int(tableID)},
+		family,
+		&netlink.Route{Table: tableID},
 		netlink.RT_FILTER_TABLE,
 	)
 	if err != nil {

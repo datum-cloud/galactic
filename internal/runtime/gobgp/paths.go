@@ -37,6 +37,26 @@ func parseSIDAddr(sid string) (netip.Addr, error) {
 	return netip.ParseAddr(sid)
 }
 
+// gatewayForPrefix returns the EVPN Type 5 Gateway IP Address to pair with
+// prefix. RFC 9136 requires the Prefix and Gateway IP Address fields to share
+// an address family, and GoBGP's wire encoding for this NLRI only recognizes
+// an all-IPv4 or an all-IPv6 layout (see EVPNIPPrefixRoute.Len/Serialize) —
+// mixing families produces a route whose declared length doesn't match its
+// serialized bytes. ipv6GW (the SRv6 SID, or the plain next-hop as a
+// fallback) is always an IPv6 address in this architecture, since SRv6 SIDs
+// and the transit next-hop are both IPv6-only, so it can only serve as the
+// gateway for an IPv6 prefix. An IPv4 prefix has no IPv4-shaped equivalent to
+// offer here, so its Gateway is left at the IPv4 zero address — RFC-compliant
+// per draft-ietf-bess-evpn-prefix-advertisement ("the GW IP field SHOULD be
+// zero if it is not used as an Overlay Index") rather than fabricating a
+// value nothing in this design actually produces.
+func gatewayForPrefix(prefix netip.Prefix, ipv6GW netip.Addr) netip.Addr {
+	if prefix.Addr().Is4() {
+		return netip.IPv4Unspecified()
+	}
+	return ipv6GW
+}
+
 // buildEVPNPaths adds or withdraws EVPN Type 5 IP Prefix paths for each prefix
 // in adv into the local GoBGP RIB.
 //
@@ -44,22 +64,23 @@ func parseSIDAddr(sid string) (netip.Addr, error) {
 // per-VRF route distinguisher (Type 1 IP-address: routerID:vrfID) when adv.VRFID
 // is set, matching the RD used by applyVRF during VRF registration. adv.NextHop
 // is the transit-reachable BGP peering address placed in MpReachNLRI. adv.SRv6SID,
-// when set, is the End.DT46 SID placed in the EVPN GWIPAddress field — this is
-// the SRv6 segment that remote nodes install in their seg6 encap kernel routes.
-// When adv.SRv6SID is empty the next-hop is used for both (non-SRv6 fallback).
+// when set, is the End.DT46 SID placed in the EVPN GWIPAddress field for IPv6
+// prefixes — this is the SRv6 segment that remote nodes install in their seg6
+// encap kernel routes. When adv.SRv6SID is empty the next-hop is used instead
+// (non-SRv6 fallback). See gatewayForPrefix for the IPv4-prefix case.
 func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, routerID string, withdraw bool) error {
 	nextHop, err := netip.ParseAddr(adv.NextHop)
 	if err != nil {
 		return fmt.Errorf("invalid EVPN next-hop %q: %w", adv.NextHop, err)
 	}
 
-	gwIP := nextHop
+	ipv6GW := nextHop
 	if adv.SRv6SID != "" {
 		sid, err := parseSIDAddr(adv.SRv6SID)
 		if err != nil {
 			return fmt.Errorf("invalid SRv6 SID %q: %w", adv.SRv6SID, err)
 		}
-		gwIP = sid
+		ipv6GW = sid
 	}
 
 	// Type 1 (IP-address:local-admin) RD, unique per VRF.
@@ -86,8 +107,10 @@ func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, ro
 
 		// EVPN Type 5 IP Prefix route. ESI all-zeros (Type 0 = not multihomed),
 		// ETag 0, label 0 (SRv6 — MPLS label unused).
-		// gwIP is the End.DT46 SRv6 SID when adv.SRv6SID is set; otherwise falls
-		// back to nextHop. Remote nodes use this as the seg6 encap segment.
+		// gwIP is the End.DT46 SRv6 SID (or nextHop fallback) for an IPv6
+		// prefix, matching its family; see gatewayForPrefix for the IPv4 case.
+		// Remote nodes use this as the seg6 encap segment.
+		gwIP := gatewayForPrefix(prefix, ipv6GW)
 		nlri, err := bgp.NewEVPNIPPrefixRoute(
 			rd,
 			bgp.EthernetSegmentIdentifier{},
