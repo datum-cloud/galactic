@@ -12,10 +12,5 @@ spec:
       "vpc": "10",
       "vpcattachment": "10",
       "namespace": "galactic-system",
-      "ipam": {
-        "type": "pool",
-        "pool": "fd00:10:ff01::/48",
-        "gateway": "fd00:10:ff01::1",
-        "subnet_len": 80
-      }
+      "ipv6_subnet": "fd00:10:ff01::/48"
     }
