@@ -6,6 +6,7 @@ package cni
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -39,23 +40,39 @@ func buildResult(
 			},
 		},
 	}
-	if ipRes != nil {
-		ipConfig := &type100.IPConfig{
-			Address:   *ipRes.subnet,
-			Gateway:   ipRes.gateway,
-			Interface: type100.Int(1), // index into Interfaces (guest veth)
-		}
-		result.IPs = []*type100.IPConfig{ipConfig}
-		if len(ipRes.routes) > 0 {
-			result.Routes = make([]*types.Route, 0, len(ipRes.routes))
-			for _, dst := range ipRes.routes {
-				result.Routes = append(result.Routes, &types.Route{
-					Dst: *dst,
-				})
-			}
+	appendIPConfigs(result, ipRes, 1) // index into Interfaces (guest veth)
+	return result
+}
+
+// appendIPConfigs adds one IPConfig per allocated address family in ipRes
+// (IPv6, and IPv4 when present) plus any default routes, all pointing at the
+// given Interfaces index. No-op when ipRes is nil.
+func appendIPConfigs(result *type100.Result, ipRes *ipamResult, ifaceIndex int) {
+	if ipRes == nil {
+		return
+	}
+	if ipRes.ipv6Subnet != nil {
+		result.IPs = append(result.IPs, &type100.IPConfig{
+			Address:   *ipRes.ipv6Subnet,
+			Gateway:   ipRes.ipv6Gateway,
+			Interface: type100.Int(ifaceIndex),
+		})
+	}
+	if ipRes.ipv4Address != nil {
+		result.IPs = append(result.IPs, &type100.IPConfig{
+			Address:   net.IPNet{IP: ipRes.ipv4Address, Mask: net.CIDRMask(32, 32)},
+			Gateway:   ipRes.ipv4Gateway,
+			Interface: type100.Int(ifaceIndex),
+		})
+	}
+	if len(ipRes.routes) > 0 {
+		result.Routes = make([]*types.Route, 0, len(ipRes.routes))
+		for _, dst := range ipRes.routes {
+			result.Routes = append(result.Routes, &types.Route{
+				Dst: *dst,
+			})
 		}
 	}
-	return result
 }
 
 // buildVethResult handles veth-specific result building: host-device
@@ -85,7 +102,7 @@ func buildVethResult(
 
 	// Configure IP address on the guest interface inside the container netns.
 	var ipamResult *ipamResult
-	if (pluginConf.IPAM != nil && pluginConf.IPAM.Type != "") || enableLocalIPAM {
+	if wantsIPAM(pluginConf) {
 		result, err := configureIPAM(args, pluginConf, args.IfName)
 		if err != nil {
 			return nil, fmt.Errorf("configure IPAM: %w", err)
@@ -126,21 +143,6 @@ func buildTapResult(
 			},
 		},
 	}
-	if ipRes != nil {
-		ipConfig := &type100.IPConfig{
-			Address:   *ipRes.subnet,
-			Gateway:   ipRes.gateway,
-			Interface: type100.Int(0), // index into Interfaces (host tap)
-		}
-		result.IPs = []*type100.IPConfig{ipConfig}
-		if len(ipRes.routes) > 0 {
-			result.Routes = make([]*types.Route, 0, len(ipRes.routes))
-			for _, dst := range ipRes.routes {
-				result.Routes = append(result.Routes, &types.Route{
-					Dst: *dst,
-				})
-			}
-		}
-	}
+	appendIPConfigs(result, ipRes, 0) // index into Interfaces (host tap)
 	return result
 }

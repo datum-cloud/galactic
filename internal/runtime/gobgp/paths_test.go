@@ -6,6 +6,7 @@ package gobgp
 
 import (
 	"context"
+	"net/netip"
 	"testing"
 
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
@@ -188,6 +189,108 @@ func TestBuildEVPNPathsWithdraw(t *testing.T) {
 	}
 	if err := buildEVPNPaths(b, adv, testRouterID1, true); err != nil {
 		t.Fatalf("buildEVPNPaths(withdraw) error = %v", err)
+	}
+}
+
+// TestGatewayForPrefix verifies that gatewayForPrefix selects a Gateway IP
+// matching each prefix's own address family: the IPv6 gateway (SRv6 SID or
+// next-hop) for an IPv6 prefix, and the IPv4 zero address for an IPv4
+// prefix — never the IPv6 gateway reused for an IPv4 prefix, which is the
+// bug this fixes (see buildEVPNPaths doc comment).
+func TestGatewayForPrefix(t *testing.T) {
+	ipv6GW := netip.MustParseAddr(testSID1)
+
+	tests := []struct {
+		name   string
+		prefix string
+		want   netip.Addr
+	}{
+		{
+			name:   "IPv6 prefix uses the IPv6 gateway",
+			prefix: testPrefix,
+			want:   ipv6GW,
+		},
+		{
+			name:   "IPv4 prefix uses the IPv4 zero address, not the IPv6 gateway",
+			prefix: "10.128.0.5/32",
+			want:   netip.IPv4Unspecified(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefix, err := netip.ParsePrefix(tt.prefix)
+			if err != nil {
+				t.Fatalf("ParsePrefix(%q): %v", tt.prefix, err)
+			}
+			got := gatewayForPrefix(prefix, ipv6GW)
+			if got != tt.want {
+				t.Errorf("gatewayForPrefix(%q, %v) = %v, want %v", tt.prefix, ipv6GW, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildEVPNPathsMixedFamily verifies that a dual-stack DesiredAdvertisement
+// (one IPv6 prefix, one IPv4 prefix, sharing a single SRv6 SID next-hop)
+// produces two well-formed EVPN Type 5 NLRIs instead of a malformed one.
+// Before the gatewayForPrefix fix, the IPv4 prefix's NLRI paired a 4-byte
+// IPv4 prefix with the shared 16-byte IPv6 gateway: EVPNIPPrefixRoute.Len()
+// (computed from the prefix's family alone) would declare 34 bytes while
+// Serialize() actually emitted more, corrupting the wire encoding. This test
+// re-derives each prefix's NLRI the same way buildEVPNPaths does and checks
+// the serialized length always matches the declared Len().
+func TestBuildEVPNPathsMixedFamily(t *testing.T) {
+	b := newTestBgpServer(t)
+
+	const ipv6Prefix = "fd00:10:ff01::/96"
+	const ipv4Prefix = "10.128.0.5/32"
+
+	adv := model.DesiredAdvertisement{
+		Name: "adv-dual-stack",
+		AddressFamily: model.AddressFamily{
+			AFI:  afiL2VPN,
+			SAFI: safiEVPN,
+		},
+		Prefixes:    []string{ipv6Prefix, ipv4Prefix},
+		NextHop:     testNextHop,
+		SRv6SID:     testSID1,
+		VRFID:       ptrInt32Test(1),
+		Communities: []string{testRT100},
+	}
+
+	if err := buildEVPNPaths(b, adv, testRouterID1, false); err != nil {
+		t.Fatalf("buildEVPNPaths(dual-stack) error = %v", err)
+	}
+
+	rd, err := bgp.ParseRouteDistinguisher(deriveRD(testRouterID1, adv.VRFID))
+	if err != nil {
+		t.Fatalf("ParseRouteDistinguisher: %v", err)
+	}
+	ipv6GW := netip.MustParseAddr(testSID1)
+
+	for _, prefixStr := range adv.Prefixes {
+		prefix, err := netip.ParsePrefix(prefixStr)
+		if err != nil {
+			t.Fatalf("ParsePrefix(%q): %v", prefixStr, err)
+		}
+		gwIP := gatewayForPrefix(prefix, ipv6GW)
+
+		nlri, err := bgp.NewEVPNIPPrefixRoute(
+			rd, bgp.EthernetSegmentIdentifier{}, 0, uint8(prefix.Bits()), prefix.Addr(), gwIP, 0,
+		)
+		if err != nil {
+			t.Fatalf("NewEVPNIPPrefixRoute(%q) error = %v", prefixStr, err)
+		}
+
+		serialized, err := nlri.Serialize()
+		if err != nil {
+			t.Fatalf("Serialize(%q) error = %v", prefixStr, err)
+		}
+		if len(serialized) != nlri.Len() {
+			t.Errorf("prefix %q: serialized NLRI length %d != declared Len() %d — malformed wire encoding",
+				prefixStr, len(serialized), nlri.Len())
+		}
 	}
 }
 

@@ -15,24 +15,28 @@ import (
 
 const cniTimeout = 10 * time.Second
 
-// ipamTypePool is the ipam type for the built-in local IPAM pool allocator.
-const ipamTypePool = "pool"
+// ipamTypeStatic is the ipam type for a single pre-assigned static address.
+// Any other (or empty) IPAM.Type value takes the pool-based dual-stack path
+// — see wantsIPAM/allocateIPAM in ipam_ops.go.
+const ipamTypeStatic = "static"
+
+// localIPAMDefaultPool is the IPv6 CIDR pool used when local IPAM is enabled
+// but IPv6Subnet is unset in the CNI config. Allocations from it use
+// ipam.DefaultSubnetLen (/96).
+const localIPAMDefaultPool = "fd00:10:ff01::/64"
 
 const (
-	// localIPAMDefaultPool is the IPv6 CIDR pool used when local IPAM is
-	// enabled but no explicit ipam block is present in the CNI config.
-	localIPAMDefaultPool = "fd00:10:ff01::/64"
+	// annotationAllocatedSubnetIPv6 is the BGPAdvertisement annotation key
+	// prefix holding the allocated IPv6 pod subnet CIDR (the /96) for a
+	// container ID. The full key appends a truncated container ID; see
+	// subnetAnnotationKeyIPv6.
+	annotationAllocatedSubnetIPv6 = "galactic.datum.net/allocated-subnet-ipv6"
 
-	// localIPAMDefaultSubnetLen is the default prefix length for local IPAM
-	// allocations (default /96, giving 2^32 addresses per pod subnet).
-	localIPAMDefaultSubnetLen = 96
-)
-
-const (
-	// annotationAllocatedSubnet is the BGPAdvertisement annotation key prefix
-	// holding the allocated pod subnet CIDR for a container ID. The full key
-	// appends a truncated container ID; see subnetAnnotationKey.
-	annotationAllocatedSubnet = "galactic.datum.net/allocated-subnet"
+	// annotationAllocatedSubnetIPv4 is the BGPAdvertisement annotation key
+	// prefix holding the allocated IPv4 pod address (the /32) for a
+	// container ID, when the attachment is dual-stack. The full key appends
+	// a truncated container ID; see subnetAnnotationKeyIPv4.
+	annotationAllocatedSubnetIPv4 = "galactic.datum.net/allocated-subnet-ipv4"
 
 	// annotationNetNS is the BGPAdvertisement annotation key prefix holding
 	// the CNI-provided network namespace path for a container ID. The GC

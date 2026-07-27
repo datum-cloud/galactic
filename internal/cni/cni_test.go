@@ -884,7 +884,7 @@ func TestBuildResult(t *testing.T) {
 	}{
 		{
 			name:       "with IPAM config",
-			ipRes:      &ipamResult{subnet: subnet, gateway: gateway, routes: []*net.IPNet{route}},
+			ipRes:      &ipamResult{ipv6Subnet: subnet, ipv6Gateway: gateway, routes: []*net.IPNet{route}},
 			wantInts:   2,
 			wantIPs:    1,
 			wantRoutes: 1,
@@ -978,6 +978,59 @@ func TestBuildResult(t *testing.T) {
 	}
 }
 
+// TestBuildResultDualStack verifies that buildResult emits both an IPv6 and
+// an IPv4 IPConfig, both pointing at the guest interface, plus both default
+// routes, when ipamResult carries an IPv4 allocation.
+func TestBuildResultDualStack(t *testing.T) {
+	ipv6Subnet := mustParseCIDR(t, "fd00:10:ff01::1234/96")
+	ipv6Gateway := net.ParseIP("fd00:10:ff01::1")
+	ipv4Address := net.ParseIP("10.128.0.5")
+	ipv4Gateway := net.ParseIP("10.128.0.1")
+	ipv6Route := mustParseCIDR(t, "::/0")
+	ipv4Route := mustParseCIDR(t, "0.0.0.0/0")
+
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+	ipRes := &ipamResult{
+		ipv6Subnet:  ipv6Subnet,
+		ipv6Gateway: ipv6Gateway,
+		ipv4Address: ipv4Address,
+		ipv4Gateway: ipv4Gateway,
+		routes:      []*net.IPNet{ipv6Route, ipv4Route},
+	}
+
+	result := buildResult(conf, ipRes, "G09-vpc03-vpcAttH", "eth0",
+		"aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:11", 1500, 1500, "/proc/1234/ns/net")
+
+	if len(result.IPs) != 2 {
+		t.Fatalf("IPs count = %d, want 2", len(result.IPs))
+	}
+	if result.IPs[0].Address.String() != ipv6Subnet.String() {
+		t.Errorf("IPs[0].Address = %v, want %v", result.IPs[0].Address, ipv6Subnet)
+	}
+	if !result.IPs[0].Gateway.Equal(ipv6Gateway) {
+		t.Errorf("IPs[0].Gateway = %v, want %v", result.IPs[0].Gateway, ipv6Gateway)
+	}
+	wantIPv4Mask := net.CIDRMask(32, 32).String()
+	if result.IPs[1].Address.IP.String() != ipv4Address.String() || result.IPs[1].Address.Mask.String() != wantIPv4Mask {
+		t.Errorf("IPs[1].Address = %v, want %s/32", result.IPs[1].Address, ipv4Address)
+	}
+	if !result.IPs[1].Gateway.Equal(ipv4Gateway) {
+		t.Errorf("IPs[1].Gateway = %v, want %v", result.IPs[1].Gateway, ipv4Gateway)
+	}
+	for i, r := range result.IPs {
+		if r.Interface == nil || *r.Interface != 1 {
+			t.Errorf("IPs[%d].Interface = %v, want 1 (guest)", i, r.Interface)
+		}
+	}
+	if len(result.Routes) != 2 {
+		t.Errorf("Routes count = %d, want 2", len(result.Routes))
+	}
+}
+
 // ---- buildTapResult ------------------------------------------------------
 
 func TestBuildTapResult(t *testing.T) {
@@ -999,7 +1052,7 @@ func TestBuildTapResult(t *testing.T) {
 	}{
 		{
 			name:       "with IPAM config",
-			ipRes:      &ipamResult{subnet: subnet, gateway: gateway, routes: []*net.IPNet{route}},
+			ipRes:      &ipamResult{ipv6Subnet: subnet, ipv6Gateway: gateway, routes: []*net.IPNet{route}},
 			wantIPs:    1,
 			wantRoutes: 1,
 		},
@@ -1074,7 +1127,7 @@ func TestBuildTapResultHostNetns(t *testing.T) {
 		VPC:           testVPC,
 		VPCAttachment: testAttachment,
 	}
-	ipRes := &ipamResult{subnet: subnet, gateway: gateway, routes: []*net.IPNet{route}}
+	ipRes := &ipamResult{ipv6Subnet: subnet, ipv6Gateway: gateway, routes: []*net.IPNet{route}}
 
 	result := buildTapResult(conf, ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
 

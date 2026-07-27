@@ -18,12 +18,11 @@ type Termination struct {
 }
 
 // IPAM holds IP address management configuration passed in the CNI config.
+// Pool CIDR fields (formerly Pool/Gateway/SubnetLen) have been retired in
+// favor of PluginConf.IPv6Subnet/IPv4Subnet — see allocateIPAM.
 type IPAM struct {
-	Type      string    `json:"type"`                 // "pool" (default) or "static"
-	Pool      string    `json:"pool,omitempty"`       // IPv6 CIDR pool, e.g. "fd00:10:ff01::/48"
-	Gateway   string    `json:"gateway,omitempty"`    // IPv6 gateway address
-	SubnetLen int       `json:"subnet_len,omitempty"` // prefix length per allocation (default 80)
-	StaticIP  string    `json:"static_ip,omitempty"`  // used when type="static"
+	Type      string    `json:"type"`                // "pool" (default) or "static"
+	StaticIP  string    `json:"static_ip,omitempty"` // used when type="static"
 	Routes    []Route   `json:"routes,omitempty"`
 	Addresses []Address `json:"addresses,omitempty"`
 }
@@ -69,10 +68,13 @@ type HostConf struct {
 }
 
 // ipamResult holds the IPAM allocation details for building the CNI result.
+// ipv4Address/ipv4Gateway are nil when the attachment is IPv6-only.
 type ipamResult struct {
-	subnet  *net.IPNet
-	gateway net.IP
-	routes  []*net.IPNet
+	ipv6Subnet  *net.IPNet
+	ipv6Gateway net.IP
+	ipv4Address net.IP
+	ipv4Gateway net.IP
+	routes      []*net.IPNet
 }
 
 // HostDevicePluginConf is the configuration for the host-device CNI plugin

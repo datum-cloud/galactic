@@ -258,7 +258,7 @@ func TestBuildVRFInstanceSpec(t *testing.T) {
 
 func TestBuildAdvertisementSpec(t *testing.T) {
 	const podSubnet = "fd00:10:ff01::1234/80"
-	spec := buildAdvertisementSpec(testRouterName, testRD65000_1, podSubnet, 1234)
+	spec := buildAdvertisementSpec(testRouterName, testRD65000_1, []string{podSubnet}, 1234)
 
 	if spec.RouterRef.Name != testRouterName {
 		t.Errorf("RouterRef.Name = %q, want %q", spec.RouterRef.Name, testRouterName)
@@ -277,5 +277,21 @@ func TestBuildAdvertisementSpec(t *testing.T) {
 	}
 	if spec.Function == nil || *spec.Function != bgpv1alpha1.SRv6FunctionEndDT46 {
 		t.Errorf("Function = %v, want pointer to %q", spec.Function, bgpv1alpha1.SRv6FunctionEndDT46)
+	}
+}
+
+func TestBuildAdvertisementSpecDualStack(t *testing.T) {
+	const ipv6Prefix = "fd00:10:ff01::1234/96"
+	const ipv4Prefix = "10.128.0.5/32"
+	spec := buildAdvertisementSpec(testRouterName, testRD65000_1, []string{ipv6Prefix, ipv4Prefix}, 1234)
+
+	if len(spec.Prefixes) != 2 {
+		t.Fatalf("Prefixes = %+v, want 2 entries", spec.Prefixes)
+	}
+	if string(spec.Prefixes[0]) != ipv6Prefix {
+		t.Errorf("Prefixes[0] = %q, want %q", spec.Prefixes[0], ipv6Prefix)
+	}
+	if string(spec.Prefixes[1]) != ipv4Prefix {
+		t.Errorf("Prefixes[1] = %q, want %q", spec.Prefixes[1], ipv4Prefix)
 	}
 }
