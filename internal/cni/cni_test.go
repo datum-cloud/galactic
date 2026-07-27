@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -103,12 +104,13 @@ func assertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
 
 func TestParseConf(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      string
-		wantVPC    string
-		wantIfType string
-		wantErr    string
-		wantCode   uint // CNI error code; 0 means "don't check"
+		name                string
+		input               string
+		wantVPC             string
+		wantIfType          string
+		wantAddressFamilies []string // nil means "don't check"
+		wantErr             string
+		wantCode            uint // CNI error code; 0 means "don't check"
 	}{
 		{
 			name: "valid config",
@@ -317,6 +319,137 @@ func TestParseConf(t *testing.T) {
 			wantVPC:    testVPC,
 			wantIfType: interfaceTypeVeth,
 		},
+
+		// ---- dual-stack addressing fields (ipv6_subnet, ipv4_subnet, address_families) ----
+
+		{
+			name: "dual-stack fields omitted parses successfully",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:             testVPC,
+			wantIfType:          interfaceTypeVeth,
+			wantAddressFamilies: []string{addressFamilyIPv6},
+		},
+		{
+			name: "valid ipv6_subnet accepted",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","ipv6_subnet":"fd00:10:ff01::/48"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			name: "invalid ipv6_subnet CIDR rejected",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","ipv6_subnet":"not-a-cidr"}`,
+				testVPC, testAttachment,
+			),
+			wantErr:  "invalid CIDR value for field 'ipv6_subnet'",
+			wantCode: 7,
+		},
+		{
+			name: "ipv4 CIDR given where ipv6_subnet expected rejected",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","ipv6_subnet":"10.0.0.0/24"}`,
+				testVPC, testAttachment,
+			),
+			wantErr:  "ipv6_subnet must be an IPv6 CIDR, got IPv4",
+			wantCode: 7,
+		},
+		{
+			name: "ipv6_subnet prefix length over 96 rejected",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","ipv6_subnet":"fd00:10:ff01::/112"}`,
+				testVPC, testAttachment,
+			),
+			wantErr:  "ipv6_subnet prefix length 112 exceeds maximum of 96",
+			wantCode: 7,
+		},
+		{
+			name: "valid ipv4_subnet accepted",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","ipv4_subnet":"10.0.0.0/20"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:    testVPC,
+			wantIfType: interfaceTypeVeth,
+		},
+		{
+			// A standard dotted-decimal CIDR can never carry a mask longer
+			// than /32 (net.ParseCIDR itself rejects e.g. "10.0.0.0/33"), so
+			// this exercises the prefix-length guard via an IPv4-mapped IPv6
+			// literal, which Go parses with a 128-bit mask space.
+			name: "ipv4_subnet prefix length over 32 rejected",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","ipv4_subnet":"::ffff:10.0.0.0/40"}`,
+				testVPC, testAttachment,
+			),
+			wantErr:  "ipv4_subnet prefix length 40 exceeds maximum of 32",
+			wantCode: 7,
+		},
+		{
+			name: "ipv6 CIDR given where ipv4_subnet expected rejected",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","ipv4_subnet":"2001:db8::/64"}`,
+				testVPC, testAttachment,
+			),
+			wantErr:  "ipv4_subnet must be an IPv4 CIDR, got IPv6",
+			wantCode: 7,
+		},
+		{
+			name: "address_families defaults to ipv6 when omitted",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s"}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:             testVPC,
+			wantIfType:          interfaceTypeVeth,
+			wantAddressFamilies: []string{addressFamilyIPv6},
+		},
+		{
+			name: "address_families explicit dual-stack accepted",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","address_families":["ipv6","ipv4"]}`,
+				testVPC, testAttachment,
+			),
+			wantVPC:             testVPC,
+			wantIfType:          interfaceTypeVeth,
+			wantAddressFamilies: []string{addressFamilyIPv6, addressFamilyIPv4},
+		},
+		{
+			name: "invalid address_families entry rejected",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s",`+
+					`"vpcattachment":"%s","address_families":["ipv6","bogus"]}`,
+				testVPC, testAttachment,
+			),
+			wantErr:  `invalid address_families entry "bogus": must be "ipv6" or "ipv4"`,
+			wantCode: 7,
+		},
 	}
 
 	for _, tt := range tests {
@@ -342,6 +475,9 @@ func TestParseConf(t *testing.T) {
 			}
 			if conf.InterfaceType != tt.wantIfType {
 				t.Errorf("InterfaceType = %q, want %q", conf.InterfaceType, tt.wantIfType)
+			}
+			if tt.wantAddressFamilies != nil && !reflect.DeepEqual(conf.AddressFamilies, tt.wantAddressFamilies) {
+				t.Errorf("AddressFamilies = %v, want %v", conf.AddressFamilies, tt.wantAddressFamilies)
 			}
 		})
 	}
