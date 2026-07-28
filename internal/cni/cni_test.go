@@ -49,6 +49,7 @@ const (
 	testRouterName    = "overlay-router"
 	testSID128        = "2001:db8::1/128"
 	testCNIVersion    = "1.0.0"
+	testIPv4Subnet    = "10.128.0.0/20"
 
 	// testPrevResult is a valid CNI v1.0.0 result used in prevResult tests.
 	testPrevResult = `{"cniVersion":"1.0.0",` +
@@ -1028,6 +1029,47 @@ func TestBuildResultDualStack(t *testing.T) {
 	}
 	if len(result.Routes) != 2 {
 		t.Errorf("Routes count = %d, want 2", len(result.Routes))
+	}
+}
+
+// TestBuildResultIPv4Only verifies that buildResult emits a single IPv4
+// IPConfig (no IPv6 entry, no panic) when ipamResult carries an IPv4-only
+// allocation — the NAD config from the reported bug (ipv4_subnet set, no
+// ipv6_subnet).
+func TestBuildResultIPv4Only(t *testing.T) {
+	ipv4Address := net.ParseIP("172.20.1.5")
+	ipv4Gateway := net.ParseIP("172.20.1.1")
+	ipv4Route := mustParseCIDR(t, "0.0.0.0/0")
+
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+	ipRes := &ipamResult{
+		ipv4Address: ipv4Address,
+		ipv4Gateway: ipv4Gateway,
+		routes:      []*net.IPNet{ipv4Route},
+	}
+
+	result := buildResult(conf, ipRes, "G09-vpc03-vpcAttH", "eth0",
+		"aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:11", 1500, 1500, "/proc/1234/ns/net")
+
+	if len(result.IPs) != 1 {
+		t.Fatalf("IPs count = %d, want 1", len(result.IPs))
+	}
+	wantIPv4Mask := net.CIDRMask(32, 32).String()
+	if result.IPs[0].Address.IP.String() != ipv4Address.String() || result.IPs[0].Address.Mask.String() != wantIPv4Mask {
+		t.Errorf("IPs[0].Address = %v, want %s/32", result.IPs[0].Address, ipv4Address)
+	}
+	if !result.IPs[0].Gateway.Equal(ipv4Gateway) {
+		t.Errorf("IPs[0].Gateway = %v, want %v", result.IPs[0].Gateway, ipv4Gateway)
+	}
+	if result.IPs[0].Interface == nil || *result.IPs[0].Interface != 1 {
+		t.Errorf("IPs[0].Interface = %v, want 1 (guest)", result.IPs[0].Interface)
+	}
+	if len(result.Routes) != 1 {
+		t.Errorf("Routes count = %d, want 1", len(result.Routes))
 	}
 }
 

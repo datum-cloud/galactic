@@ -291,6 +291,31 @@ func publishBGPState(
 	return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
 }
 
+// ipamAdvertisementPrefixes derives the BGPAdvertisement prefixes to
+// originate, plus the per-family values to record in the annotations, from
+// ipamResult. ipamResult is nil when the attachment has no IPAM allocation
+// (e.g. a tap workload that manages its own addressing), in which case
+// prefixes is empty. Either family alone yields a single-entry prefixes
+// slice; ipv6Subnet/ipv4Addr are empty when that family wasn't allocated.
+func ipamAdvertisementPrefixes(ipamResult *ipamResult) (prefixes []string, ipv6Subnet, ipv4Addr string) {
+	if ipamResult == nil {
+		return nil, "", ""
+	}
+	if ipamResult.ipv6Subnet != nil {
+		ipv6Subnet = ipamResult.ipv6Subnet.String()
+		prefixes = append(prefixes, ipv6Subnet)
+	}
+	if ipamResult.ipv4Address != nil {
+		// The annotation stores the bare address (matching
+		// IPv4PoolAllocator's marker-file naming, so cmdDel's Deallocate
+		// call finds it — see ipam_ops.go); the advertised prefix needs the
+		// explicit /32 CIDR form.
+		ipv4Addr = ipamResult.ipv4Address.String()
+		prefixes = append(prefixes, ipv4Addr+"/32")
+	}
+	return prefixes, ipv6Subnet, ipv4Addr
+}
+
 // publishBGPStateK8s creates the BGPVRFInstance and BGPAdvertisement CRDs with
 // retry on transient k8s API errors. The host gateway must be configured before
 // calling this (via configureHostGateway). This is interface-agnostic and can be
@@ -355,20 +380,7 @@ func publishBGPStateK8s(
 				Namespace: namespace,
 			},
 		}
-		var prefixes []string
-		var ipv6Subnet, ipv4Addr string
-		if ipamResult != nil {
-			ipv6Subnet = ipamResult.ipv6Subnet.String()
-			prefixes = append(prefixes, ipv6Subnet)
-			if ipamResult.ipv4Address != nil {
-				// The annotation stores the bare address (matching
-				// IPv4PoolAllocator's marker-file naming, so cmdDel's
-				// Deallocate call finds it — see ipam_ops.go); the
-				// advertised prefix needs the explicit /32 CIDR form.
-				ipv4Addr = ipamResult.ipv4Address.String()
-				prefixes = append(prefixes, ipv4Addr+"/32")
-			}
-		}
+		prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
 		_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
 			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, prefixes, vrfID)
 			if adv.Annotations == nil {
