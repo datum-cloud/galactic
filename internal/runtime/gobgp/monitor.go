@@ -175,8 +175,21 @@ func evpnMpReachNexthop(attrs []bgp.PathAttributeInterface) string {
 }
 
 // addrToIPNet converts a netip.Addr and prefix length to a masked *net.IPNet.
+// IPv4 addresses are kept in native 4-byte form: netip.Addr.As16() returns an
+// IPv4-mapped 16-byte address, but pairing that with net.CIDRMask(bits, 128)
+// sets the mask's leading bits — the wrong end for a 4-in-16 address, whose
+// meaningful octets sit in the last 4 bytes — so consumers that reduce the IP
+// to 4 bytes (net.IP.To4(), as net.IPNet.String() and vishvananda/netlink's
+// family detection both do) see the mask's trailing, unset bits and read the
+// prefix length as 0 regardless of bits.
 func addrToIPNet(addr netip.Addr, bits int) *net.IPNet {
 	masked := netip.PrefixFrom(addr, bits).Masked()
+	if masked.Addr().Is4() {
+		a := masked.Addr().As4()
+		ip := make(net.IP, 4)
+		copy(ip, a[:])
+		return &net.IPNet{IP: ip, Mask: net.CIDRMask(masked.Bits(), 32)}
+	}
 	a := masked.Addr().As16()
 	ip := make(net.IP, 16)
 	copy(ip, a[:])

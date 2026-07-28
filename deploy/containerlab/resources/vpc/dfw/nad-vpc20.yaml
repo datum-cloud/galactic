@@ -12,5 +12,7 @@ spec:
       "vpc": "20",
       "vpcattachment": "20",
       "namespace": "galactic-system",
-      "ipv6_subnet": "fd00:20:ff01::/48"
+      "ipv6_subnet": "fd00:20:ff01::/48",
+      "ipv4_subnet": "172.20.1.0/24",
+      "address_families": ["ipv6", "ipv4"]
     }
