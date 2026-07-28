@@ -26,16 +26,17 @@ import (
 var ipv4LockDir = ipam.DefaultIPv4LockDir
 
 // wantsIPAM reports whether the given config should trigger IPAM allocation
-// at all. Three independent signals opt in: an explicit "static" IPAM type,
-// a configured IPv6Subnet (the NAD-driven dual-stack path), or the
-// --enable-local-ipam dev fallback. A config with none of these (e.g. a tap
-// workload that manages its own addressing) allocates nothing, matching
-// today's behavior of skipping IPAM entirely rather than erroring.
+// at all. Four independent signals opt in: an explicit "static" IPAM type, a
+// configured IPv6Subnet or IPv4Subnet (the NAD-driven pool-IPAM path, either
+// family alone or both), or the --enable-local-ipam dev fallback. A config
+// with none of these (e.g. a tap workload that manages its own addressing)
+// allocates nothing, matching today's behavior of skipping IPAM entirely
+// rather than erroring.
 func wantsIPAM(pluginConf *PluginConf) bool {
 	if pluginConf.IPAM != nil && pluginConf.IPAM.Type == ipamTypeStatic {
 		return true
 	}
-	return pluginConf.IPv6Subnet != "" || enableLocalIPAM
+	return pluginConf.IPv6Subnet != "" || pluginConf.IPv4Subnet != "" || enableLocalIPAM
 }
 
 // allocateIPAM allocates addresses for the given container. This is
@@ -72,16 +73,16 @@ func allocateStaticIPAM(args *skel.CmdArgs, ipamConf *IPAM) (*ipamResult, error)
 	return &ipamResult{ipv6Subnet: subnet}, nil
 }
 
-// allocatePoolIPAM allocates a dual-stack (or IPv6-only) pool-based
+// allocatePoolIPAM allocates a dual-stack, IPv6-only, or IPv4-only pool-based
 // endpoint address for the given container, via ipam.DualStackAllocator.
-// IPv6Subnet supplies the region pool CIDR (falling back to
-// localIPAMDefaultPool when enableLocalIPAM and unset); IPv4Subnet, when
-// present, additionally allocates a site-pool IPv4 address.
+// IPv6Subnet and IPv4Subnet each independently supply a pool CIDR for their
+// family; at least one must be set (falling back to localIPAMDefaultPool for
+// IPv6 when enableLocalIPAM and both are unset).
 func allocatePoolIPAM(args *skel.CmdArgs, pluginConf *PluginConf) (*ipamResult, error) {
 	ipv6Pool := pluginConf.IPv6Subnet
-	if ipv6Pool == "" {
+	if ipv6Pool == "" && pluginConf.IPv4Subnet == "" {
 		if !enableLocalIPAM {
-			return nil, errors.New("ipv6_subnet is required (or enable local IPAM)")
+			return nil, errors.New("ipv6_subnet or ipv4_subnet is required (or enable local IPAM)")
 		}
 		ipv6Pool = localIPAMDefaultPool
 	}
@@ -96,7 +97,10 @@ func allocatePoolIPAM(args *skel.CmdArgs, pluginConf *PluginConf) (*ipamResult, 
 		return nil, fmt.Errorf("allocate dual-stack addresses: %w", err)
 	}
 
-	routes := []*net.IPNet{{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}}
+	var routes []*net.IPNet
+	if res.IPv6Subnet != nil {
+		routes = append(routes, &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)})
+	}
 	if res.IPv4Address != nil {
 		routes = append(routes, &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)})
 	}

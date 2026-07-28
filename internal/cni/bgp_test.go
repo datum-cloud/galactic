@@ -254,6 +254,51 @@ func TestBuildVRFInstanceSpec(t *testing.T) {
 	}
 }
 
+// ---- ipamAdvertisementPrefixes ----------------------------------------------
+
+func TestIPAMAdvertisementPrefixesNil(t *testing.T) {
+	prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(nil)
+	if prefixes != nil {
+		t.Errorf("prefixes = %v, want nil", prefixes)
+	}
+	if ipv6Subnet != "" || ipv4Addr != "" {
+		t.Errorf("ipv6Subnet, ipv4Addr = %q, %q, want empty strings", ipv6Subnet, ipv4Addr)
+	}
+}
+
+func TestIPAMAdvertisementPrefixesIPv4Only(t *testing.T) {
+	res := &ipamResult{ipv4Address: net.ParseIP("10.128.0.5")}
+
+	prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(res)
+
+	if ipv6Subnet != "" {
+		t.Errorf("ipv6Subnet = %q, want empty", ipv6Subnet)
+	}
+	if ipv4Addr != "10.128.0.5" {
+		t.Errorf("ipv4Addr = %q, want 10.128.0.5", ipv4Addr)
+	}
+	if len(prefixes) != 1 || prefixes[0] != "10.128.0.5/32" {
+		t.Errorf("prefixes = %v, want exactly [\"10.128.0.5/32\"] (no panic, no empty-prefixes case)", prefixes)
+	}
+}
+
+func TestIPAMAdvertisementPrefixesDualStack(t *testing.T) {
+	ipv6Subnet := mustParseCIDR(t, "fd00:10:ff01::1234/96")
+	res := &ipamResult{ipv6Subnet: ipv6Subnet, ipv4Address: net.ParseIP("10.128.0.5")}
+
+	prefixes, gotIPv6Subnet, gotIPv4Addr := ipamAdvertisementPrefixes(res)
+
+	if gotIPv6Subnet != ipv6Subnet.String() {
+		t.Errorf("ipv6Subnet = %q, want %q", gotIPv6Subnet, ipv6Subnet.String())
+	}
+	if gotIPv4Addr != "10.128.0.5" {
+		t.Errorf("ipv4Addr = %q, want 10.128.0.5", gotIPv4Addr)
+	}
+	if len(prefixes) != 2 || prefixes[0] != ipv6Subnet.String() || prefixes[1] != "10.128.0.5/32" {
+		t.Errorf("prefixes = %v, want [%q, \"10.128.0.5/32\"]", prefixes, ipv6Subnet.String())
+	}
+}
+
 // ---- buildAdvertisementSpec -------------------------------------------------
 
 func TestBuildAdvertisementSpec(t *testing.T) {

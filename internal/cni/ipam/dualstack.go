@@ -6,18 +6,20 @@ package ipam
 
 import "net"
 
-// DualStackAllocator wraps an IPv6 PoolAllocator and an optional IPv4
-// IPv4PoolAllocator, allocating from both in a single call. The IPv4
-// allocator is optional: when the CNI config does not carry an IPv4 pool,
-// DualStackAllocator behaves as IPv6-only.
+// DualStackAllocator wraps an optional IPv6 PoolAllocator and an optional
+// IPv4 IPv4PoolAllocator, allocating from whichever are configured in a
+// single call. Both families are optional: when the CNI config does not
+// carry an IPv6 pool, DualStackAllocator behaves as IPv4-only, and vice
+// versa.
 type DualStackAllocator struct {
 	ipv6 *PoolAllocator
 	ipv4 *IPv4PoolAllocator
 }
 
 // DualStackResult carries the addresses allocated for a single container.
-// IPv4Address and IPv4Gateway are nil when the allocator was constructed
-// without an IPv4 pool.
+// IPv6Subnet/IPv6Gateway are nil when the allocator was constructed without
+// an IPv6 pool; IPv4Address/IPv4Gateway are nil when constructed without an
+// IPv4 pool.
 type DualStackResult struct {
 	IPv6Subnet  *net.IPNet
 	IPv6Gateway net.IP
@@ -25,20 +27,25 @@ type DualStackResult struct {
 	IPv4Gateway net.IP
 }
 
-// NewDualStackAllocator creates a DualStackAllocator. The IPv6 pool is
-// always required. If ipv4Pool is empty, the resulting allocator only
-// allocates IPv6 addresses (IPv4 fields in DualStackResult are left nil) and
-// ipv4LockDir is ignored. ipv4LockDir is passed straight through to
-// NewIPv4PoolAllocator (see DefaultIPv4LockDir for the production path).
+// NewDualStackAllocator creates a DualStackAllocator. If ipv6Pool is empty,
+// the resulting allocator only allocates IPv4 addresses (IPv6 fields in
+// DualStackResult are left nil). If ipv4Pool is empty, the resulting
+// allocator only allocates IPv6 addresses (IPv4 fields in DualStackResult
+// are left nil) and ipv4LockDir is ignored. ipv4LockDir is passed straight
+// through to NewIPv4PoolAllocator (see DefaultIPv4LockDir for the production
+// path).
 func NewDualStackAllocator(
 	ipv6Pool, ipv6Gateway, ipv4Pool, ipv4Gateway, ipv4LockDir string,
 ) (*DualStackAllocator, error) {
-	ipv6, err := NewPoolAllocator(ipv6Pool, ipv6Gateway, DefaultSubnetLen)
-	if err != nil {
-		return nil, err
-	}
+	a := &DualStackAllocator{}
 
-	a := &DualStackAllocator{ipv6: ipv6}
+	if ipv6Pool != "" {
+		ipv6, err := NewPoolAllocator(ipv6Pool, ipv6Gateway, DefaultSubnetLen)
+		if err != nil {
+			return nil, err
+		}
+		a.ipv6 = ipv6
+	}
 
 	if ipv4Pool != "" {
 		ipv4, err := NewIPv4PoolAllocator(ipv4Pool, ipv4Gateway, ipv4LockDir)
@@ -51,18 +58,19 @@ func NewDualStackAllocator(
 	return a, nil
 }
 
-// Allocate allocates an IPv6 subnet and, if an IPv4 pool was configured, an
-// IPv4 address for the given container ID. Thread-safe (delegates to the
-// underlying allocators' own locking).
+// Allocate allocates an IPv6 subnet (if an IPv6 pool was configured) and an
+// IPv4 address (if an IPv4 pool was configured) for the given container ID.
+// Thread-safe (delegates to the underlying allocators' own locking).
 func (a *DualStackAllocator) Allocate(containerID string) (*DualStackResult, error) {
-	ipv6Subnet, err := a.ipv6.Allocate(containerID)
-	if err != nil {
-		return nil, err
-	}
+	result := &DualStackResult{}
 
-	result := &DualStackResult{
-		IPv6Subnet:  ipv6Subnet,
-		IPv6Gateway: a.ipv6.Gateway(),
+	if a.ipv6 != nil {
+		ipv6Subnet, err := a.ipv6.Allocate(containerID)
+		if err != nil {
+			return nil, err
+		}
+		result.IPv6Subnet = ipv6Subnet
+		result.IPv6Gateway = a.ipv6.Gateway()
 	}
 
 	if a.ipv4 != nil {

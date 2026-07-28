@@ -4,8 +4,8 @@
 (or any CNI manager), plus node-local settings resolved at runtime from the
 conflist, environment variables, and (as a last resort) the Kubernetes API.
 
-> Last verified: 2026-07-24 against the current working tree of `internal/cni/config.go`
-> and `internal/installer/installer.go`.
+> Last verified: 2026-07-28 against the current working tree of `internal/cni/config.go`,
+> `internal/cni/ipam_ops.go`, and `internal/installer/installer.go`.
 
 ## Runtime Configuration
 
@@ -99,7 +99,10 @@ the standard CNI `PluginConf` with Galactic-specific fields.
 | `mtu`            | No       | `int`           | MTU for the host-side interface. For `veth` mode this applies to both veth endpoints; for `tap` mode it applies to the tap interface.                                                                                                                                                                                                                                                                                                                                                                     |
 | `terminations`   | No       | `[]Termination` | Array of static routes to add on the host side (see Termination sub-fields below).                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `namespace`      | No       | `string`        | Kubernetes namespace used to look up the `BGPRouter` CRD. Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` (conflist) → `galactic-system`. See [Runtime Configuration](#runtime-configuration) above.                                                                                                                                                                                                                                                                   |
-| `ipam`           | No*      | `IPAM`          | IP address management configuration (see IPAM sub-fields below). *Required unless `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — applies identically in `veth` and `tap` mode. In `tap` mode `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM` unconditionally (unlike `veth` mode, which checks first), so omitting both `ipam` and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` currently produces a nil-pointer panic in `tap` mode rather than a clean validation error — always set one or the other for tap. |
+| `ipam`           | No*      | `IPAM`          | Legacy static-IP / local-IPAM configuration block (see IPAM sub-fields below). Only `type: "static"` still drives its own allocation path; `type: "pool"` is otherwise superseded by `ipv6_subnet`/`ipv4_subnet` below. *Required unless `GALACTIC_CNI_ENABLE_LOCAL_IPAM`, `ipv6_subnet`, or `ipv4_subnet` is set — applies identically in `veth` and `tap` mode. In `tap` mode `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM` unconditionally (unlike `veth` mode, which checks first), so a config satisfying none of those currently produces a nil-pointer panic in `tap` mode rather than a clean validation error — always set one of them for tap. |
+| `ipv6_subnet`    | No*      | `string`        | Region IPv6 pool CIDR for the NAD-driven pool-IPAM path; endpoints allocate a `/96` from it by default. Setting this field or `ipv4_subnet` (or both) opts a config into pool IPAM directly — no `ipam` block needed. See [Pool IPAM via `ipv6_subnet`/`ipv4_subnet`](#pool-ipam-via-ipv6_subnetipv4_subnet) below. |
+| `ipv4_subnet`    | No       | `string`        | Optional site IPv4 pool CIDR; endpoints allocate a `/32` host address from it. May be set alone (IPv4-only), alongside `ipv6_subnet` (dual-stack), or omitted entirely (IPv6-only, given `ipv6_subnet` is set).                                                                                                                                                                                                                                                                                          |
+| `address_families` | No     | `[]string`      | Families to record as in-use: any of `"ipv6"`, `"ipv4"`. Defaults to `["ipv6"]` when omitted. Validated at parse time, but the families actually allocated are driven by which of `ipv6_subnet`/`ipv4_subnet` are set — keep this field consistent with those.                                                                                                                                                                                                                                            |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
 supported via the embedded `types.PluginConf`. `galactic-cni` declares support
@@ -141,26 +144,40 @@ subnet/gateway describe only the host-side BGP-advertised state).
 
 | Field        | Required               | Type     | Description                                                                                                                                                                                                                                                                    |
 | ------------ | ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `type`       | Conditionally required | `string` | `"pool"` or `"static"`. Determines IP allocation strategy. Required whenever an `ipam` block is present; only defaults to `"pool"` when the entire `ipam` block is omitted and `GALACTIC_CNI_ENABLE_LOCAL_IPAM` is set — an `ipam` block with an empty `type` is a hard error. |
-| `pool`       | Conditionally required | `string` | IPv6 CIDR pool (e.g. `"fd00:10:ff01::/48"`) from which subnets are allocated. Required when `type` is `"pool"`.                                                                                                                                                                |
-| `gateway`    | No                     | `string` | IPv6 gateway address. If omitted, uses the first usable address in the pool (host bits = 1). Must be within the pool CIDR.                                                                                                                                                     |
-| `subnet_len` | No                     | `int`    | Prefix length per allocation. Default is `96` (giving 2^32 addresses per pod subnet). Pool prefix must be <= this value.                                                                                                                                                       |
+| `type`       | Conditionally required | `string` | `"pool"` or `"static"`. Required whenever an `ipam` block is present — an `ipam` block with an empty `type` is a hard error. `"static"` drives its own allocation path (below); `"pool"` is otherwise vestigial now that pool allocation is driven by `ipv6_subnet`/`ipv4_subnet` (see below) — its former `pool`/`gateway`/`subnet_len` sub-fields have been retired. |
 | `static_ip`  | Conditionally required | `string` | A single IPv6 address to assign when `type` is `"static"`.                                                                                                                                                                                                                     |
-
-#### IPAM `type=pool`
-
-Allocates a `/subnet_len` subnet (default `/96`) from the pool CIDR. Thread-safe
-in-memory allocation. Allocations are ephemeral (lost on process restart);
-deallocation during `cmdDel` looks up the subnet from a `BGPAdvertisement` CRD
-annotation on the host.
 
 #### IPAM `type=static`
 
 Validates and assigns a single IPv6 address with a `/64` mask. No deallocation
-needed.
+needed, and no IPv4 address is ever allocated alongside it — static IPAM is a
+single fixed address, not a dual-stack pool.
 
-> **Note:** The plugin uses IPv6 only — both the pool allocator and static
-> allocator explicitly reject IPv4 addresses.
+### Pool IPAM via `ipv6_subnet`/`ipv4_subnet`
+
+This is the NAD-driven path most VPC attachments use (`wantsIPAM`/`allocatePoolIPAM`
+in `internal/cni/ipam_ops.go`). Either `ipv6_subnet` or `ipv4_subnet` alone is
+sufficient to opt a config into pool IPAM — an `ipam` block is not required, and
+neither field depends on the other being set:
+
+- **IPv6-only:** set `ipv6_subnet`, omit `ipv4_subnet`. Allocates a `/96` subnet
+  from the region pool; no IPv4 address is allocated.
+- **IPv4-only:** set `ipv4_subnet`, omit `ipv6_subnet`. Allocates a `/32` host
+  address from the site pool; no IPv6 subnet is allocated, and the resulting
+  `BGPAdvertisement` carries only the IPv4 `/32` prefix.
+- **Dual-stack:** set both. Allocates from each pool independently; the
+  `BGPAdvertisement` carries both prefixes and the CNI result carries both
+  `IPConfig`/route entries.
+
+Allocation is in-memory and thread-safe per pool; allocations are ephemeral
+(lost on process restart). `cmdDel` looks up each family's allocated address
+independently from its own `BGPAdvertisement` CRD annotation, so cleanup of
+one family never depends on the other having been allocated.
+
+When neither `ipv6_subnet` nor `ipv4_subnet` is set and `GALACTIC_CNI_ENABLE_LOCAL_IPAM`
+is enabled, allocation falls back to the built-in default IPv6 pool CIDR (see
+[`GALACTIC_CNI_ENABLE_LOCAL_IPAM`](#galactic_cni_enable_local_ipam) above) —
+this fallback is IPv6-only; there is no default IPv4 pool.
 
 ### Termination Fields
 
@@ -193,7 +210,7 @@ Without `GALACTIC_CNI_ENABLE_LOCAL_IPAM` set, no IP address is assigned to the
 guest interface. With `GALACTIC_CNI_ENABLE_LOCAL_IPAM` set, a subnet is allocated
 from the built-in pool.
 
-### Full pool-based configuration (testvpc)
+### Pool IPAM, IPv6-only (testvpc)
 
 ```json
 {
@@ -203,14 +220,51 @@ from the built-in pool.
   "vpc": "10",
   "vpcattachment": "10",
   "namespace": "galactic-system",
-  "ipam": {
-    "type": "pool",
-    "pool": "fd00:10:ff02::/48",
-    "gateway": "fd00:10:ff02::1",
-    "subnet_len": 96
-  }
+  "ipv6_subnet": "fd00:10:ff02::/48",
+  "address_families": ["ipv6"]
 }
 ```
+
+No `ipam` block needed — `ipv6_subnet` alone opts the config into pool IPAM.
+
+### Pool IPAM, dual-stack
+
+```json
+{
+  "cniVersion": "1.0.0",
+  "name": "vpc21",
+  "type": "galactic-cni",
+  "vpc": "21",
+  "vpcattachment": "21",
+  "namespace": "galactic-system",
+  "ipv6_subnet": "fd00:10:ff03::/48",
+  "ipv4_subnet": "172.21.1.0/24",
+  "address_families": ["ipv6", "ipv4"]
+}
+```
+
+Allocates from both pools independently; the `BGPAdvertisement` carries both
+the IPv6 `/96` and IPv4 `/32` prefixes.
+
+### Pool IPAM, IPv4-only
+
+```json
+{
+  "cniVersion": "1.0.0",
+  "name": "vpc20",
+  "type": "galactic-cni",
+  "vpc": "20",
+  "vpcattachment": "20",
+  "interface_type": "tap",
+  "namespace": "galactic-system",
+  "ipv4_subnet": "172.20.1.0/24",
+  "address_families": ["ipv4"]
+}
+```
+
+`ipv4_subnet` alone opts the config into pool IPAM with no IPv6 allocation at
+all — no `ipv6_subnet` is required, and the resulting `BGPAdvertisement`
+carries only the IPv4 `/32` prefix.
 
 ### Static IP configuration
 

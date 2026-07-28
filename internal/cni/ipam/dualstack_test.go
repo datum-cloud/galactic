@@ -15,6 +15,7 @@ func TestNewDualStackAllocator(t *testing.T) {
 		ipv4Gateway string
 		wantErr     bool
 		wantIPv4Nil bool
+		wantIPv6Nil bool
 	}{
 		{
 			name:        "dual-stack pool builds both allocators",
@@ -29,6 +30,13 @@ func TestNewDualStackAllocator(t *testing.T) {
 			ipv6Gateway: testPoolGw,
 			ipv4Pool:    "",
 			wantIPv4Nil: true,
+		},
+		{
+			name:        "empty ipv6 pool leaves ipv6 allocator nil",
+			ipv6Pool:    "",
+			ipv4Pool:    testIPv4PoolCIDR,
+			ipv4Gateway: testIPv4Gw,
+			wantIPv6Nil: true,
 		},
 		{
 			name:     "propagates ipv6 pool error",
@@ -60,6 +68,12 @@ func TestNewDualStackAllocator(t *testing.T) {
 			}
 			if !tt.wantIPv4Nil && a.ipv4 == nil {
 				t.Error("expected non-nil ipv4 allocator")
+			}
+			if tt.wantIPv6Nil && a.ipv6 != nil {
+				t.Error("expected nil ipv6 allocator")
+			}
+			if !tt.wantIPv6Nil && a.ipv6 == nil {
+				t.Error("expected non-nil ipv6 allocator")
 			}
 		})
 	}
@@ -116,6 +130,31 @@ func TestDualStackAllocatorAllocate(t *testing.T) {
 		}
 		if res.IPv4Gateway != nil {
 			t.Errorf("expected nil IPv4Gateway, got %q", res.IPv4Gateway.String())
+		}
+	})
+
+	t.Run("ipv6-omitted case returns ipv4 only with nil ipv6 fields", func(t *testing.T) {
+		a, err := NewDualStackAllocator("", "", testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		res, err := a.Allocate("container-3")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.IPv6Subnet != nil {
+			t.Errorf("expected nil IPv6Subnet, got %q", res.IPv6Subnet.String())
+		}
+		if res.IPv6Gateway != nil {
+			t.Errorf("expected nil IPv6Gateway, got %q", res.IPv6Gateway.String())
+		}
+		if res.IPv4Address == nil {
+			t.Fatal("expected non-nil IPv4Address")
+		}
+		if res.IPv4Gateway == nil {
+			t.Error("expected non-nil IPv4Gateway")
 		}
 	})
 
