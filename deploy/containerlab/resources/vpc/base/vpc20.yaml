@@ -15,7 +15,7 @@ spec:
       labels:
         app: vpc20
       annotations:
-        k8s.v1.cni.cncf.io/networks: vpc20
+        v1.multus-cni.io/default-network: vpc/vpc20
     spec:
       affinity:
         nodeAffinity:

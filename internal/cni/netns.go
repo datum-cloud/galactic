@@ -77,10 +77,16 @@ func addAddrAndDefaultRoute(
 	if gateway == nil {
 		return nil
 	}
+	// onlink: the IPv4 pool allocates a /32 host address (no on-link subnet
+	// route to the gateway), so the kernel refuses this route with
+	// ENETUNREACH unless told to treat the gateway as directly reachable.
+	// IPv6's /96 subnet allocation already covers the gateway, so the flag
+	// is a no-op there — safe to set unconditionally for both families.
 	defaultRoute := &netlink.Route{
 		Dst:       nil, // default route
 		Gw:        gateway,
 		LinkIndex: link.Attrs().Index,
+		Flags:     int(netlink.FLAG_ONLINK),
 	}
 	if err := handle.RouteAdd(defaultRoute); err != nil {
 		return fmt.Errorf("add default route via %s: %w", gateway, err)

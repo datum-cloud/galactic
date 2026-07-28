@@ -23,18 +23,28 @@ import (
 const minVRFID = uint32(1)
 const maxVRFID = uint32(math.MaxUint32 - 1)
 
-// vrfMu serializes VRF creation to prevent two concurrent CNI ADD calls from
-// scanning the same free table ID and both attempting to create a VRF with it.
+// vrfMu serializes VRF creation/deletion within a single process (e.g.
+// concurrent goroutines in galactic-router's GC). It does not, by itself,
+// protect against two separate CNI ADD/DEL invocations racing on the same
+// node — each is its own OS process — so Add and Delete also take the
+// cross-process flock in lock.go.
 var vrfMu sync.Mutex
 
 // Add creates a Linux VRF interface for the given base62-encoded VPC and
 // VPCAttachment, allocating the next available routing table ID and applying
-// the required sysctl settings. Concurrent calls are serialized internally.
-// If a VRF with the same name already exists (e.g. left behind by a previous
-// failed cmdAdd with no corresponding cmdDel), Add returns nil.
+// the required sysctl settings. Concurrent calls, whether from goroutines in
+// this process or from separate CNI plugin processes on the same node, are
+// serialized. If a VRF with the same name already exists (e.g. left behind
+// by a previous failed cmdAdd with no corresponding cmdDel), Add returns nil.
 func Add(vpc, vpcAttachment string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
+
+	lock, err := acquireLock()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.close() }()
 
 	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
@@ -73,6 +83,15 @@ func Add(vpc, vpcAttachment string) error {
 // interface for the given base62-encoded VPC and VPCAttachment. Delete is
 // idempotent: if the VRF interface does not exist, it returns nil.
 func Delete(vpc, vpcAttachment string) error {
+	vrfMu.Lock()
+	defer vrfMu.Unlock()
+
+	lock, err := acquireLock()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.close() }()
+
 	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
 
 	vrfID, err := getVRFIDForInterface(name)
