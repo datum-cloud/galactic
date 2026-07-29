@@ -70,3 +70,6 @@ Summary:
 5. Read `internal/plumbing/intf/intf.go` to understand SRv6 endpoint encoding, interface naming, and base62↔hex conversion.
 6. Explore `internal/plumbing/` for shared kernel and network primitives (VRF, sysctl, interface naming, SRv6).
 7. See `docs/cni-cmd-sequence.md` and `docs/agent-startup.md` for Mermaid sequence diagrams of the CNI attach path and router startup. `docs/cni/configuration.md` and `docs/router/configuration.md` document CNI config fields and router environment variables.
+## GitHub PR / Issue / Comment Conventions
+
+Follow the `datum-platform:pr-conventions` skill for all PRs, issues, and comments — including its concision rules: say it once (don't restate the summary as test-plan checkboxes, or describe the same behaviour in prose and again in a checklist), and cut every word carrying no fact. Compress, never omit — brevity must not drop facts.
