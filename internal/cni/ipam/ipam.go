@@ -32,6 +32,7 @@ type PoolAllocator struct {
 	subnetLen   int        // prefix length per allocation (e.g. 96)
 	gateway     net.IP     // gateway IP address
 	poolIP      net.IP     // immutable copy of pool.IP for boundary checks
+	reserved    string     // subnet CIDR string containing the gateway; never allocated
 	allocations sync.Map   // allocated subnet CIDR string -> struct{}{}
 	mu          sync.Mutex // serializes Allocate calls
 }
@@ -42,7 +43,11 @@ type PoolAllocator struct {
 // subnet when subnetLen is the default /96, though any pool length <=
 // subnetLen is accepted). If gateway is empty, the first address in the pool
 // (host bits = 1) is used as the gateway. If subnetLen is 0, DefaultSubnetLen
-// (96) is used.
+// (96) is used. The subnet containing the gateway is reserved and never
+// handed out by Allocate — otherwise the endpoint owning that subnet could
+// self-assign the gateway's own address to one of its secondary/pod
+// addresses, colliding with the address every other endpoint in the pool
+// routes its default route through.
 func NewPoolAllocator(poolCIDR, gateway string, subnetLen int) (*PoolAllocator, error) {
 	_, pool, err := net.ParseCIDR(poolCIDR)
 	if err != nil {
@@ -86,12 +91,19 @@ func NewPoolAllocator(poolCIDR, gateway string, subnetLen int) (*PoolAllocator, 
 		pa.gateway = gw
 	}
 
+	reservedSubnet := &net.IPNet{
+		IP:   pa.gateway.Mask(net.CIDRMask(subnetLen, ipv6Bits)),
+		Mask: net.CIDRMask(subnetLen, ipv6Bits),
+	}
+	pa.reserved = reservedSubnet.String()
+
 	return pa, nil
 }
 
 // Allocate assigns the next available IPv6 subnet from the pool for the
-// given container ID. Returns the allocated subnet CIDR or an error if the
-// pool is exhausted. Thread-safe.
+// given container ID, skipping the subnet that contains the pool's gateway
+// address. Returns the allocated subnet CIDR or an error if the pool is
+// exhausted. Thread-safe.
 func (a *PoolAllocator) Allocate(_ string) (*net.IPNet, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -115,6 +127,11 @@ func (a *PoolAllocator) Allocate(_ string) (*net.IPNet, error) {
 		}
 		copy(subnet.IP, subnetStart)
 		subnetStr := subnet.String()
+
+		// Skip the subnet reserved for the gateway.
+		if subnetStr == a.reserved {
+			continue
+		}
 
 		// Skip already allocated.
 		if _, ok := used[subnetStr]; ok {
