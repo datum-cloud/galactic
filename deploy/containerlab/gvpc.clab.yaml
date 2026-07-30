@@ -15,7 +15,7 @@ topology:
 
   kinds:
     linux:
-      image: frrouting/frr:latest
+      image: fabric-router:latest
 
   nodes:
     dfw-control-plane:

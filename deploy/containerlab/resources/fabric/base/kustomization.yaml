@@ -1,9 +1,7 @@
 resources:
-  - daemonset.yaml
-
-configMapGenerator:
-  - name: fabric-config
-    files:
-      - daemons
-      - vtysh.conf
-
+  - fabric
+patches:
+  - path: fabric-lab-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fabric-router
