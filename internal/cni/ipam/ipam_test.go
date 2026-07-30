@@ -6,16 +6,23 @@ package ipam
 
 import (
 	"net"
+	"strconv"
 	"testing"
 )
 
 const (
-	testPoolCIDR     = "fd00:10:ff01::/64"
-	testPoolGw       = "fd00:10:ff01::1"
-	testSubnetLen    = 96
-	testAllocatedSub = "fd00:10:ff01::/96"
-	// nextSubnet is the second /96 subnet from a /64 pool, used across tests.
-	nextSubnet = "fd00:10:ff01::100:0/96"
+	testPoolCIDR  = "fd00:10:ff01::/64"
+	testPoolGw    = "fd00:10:ff01::1"
+	testSubnetLen = 96
+	// testReservedSub is the /96 subnet containing testPoolGw. It is never
+	// handed out by Allocate — see TestPoolAllocatorReservesGatewaySubnet.
+	testReservedSub = "fd00:10:ff01::/96"
+	// testAllocatedSub is the first /96 subnet Allocate actually hands out
+	// from testPoolCIDR, once testReservedSub is skipped.
+	testAllocatedSub = "fd00:10:ff01::100:0/96"
+	// nextSubnet is the second /96 subnet Allocate hands out from
+	// testPoolCIDR, used across tests.
+	nextSubnet = "fd00:10:ff01::200:0/96"
 
 	// testInvalidCIDR and testInvalidGateway are shared across this
 	// package's test files to avoid duplicate string literals.
@@ -159,7 +166,7 @@ func TestPoolAllocatorSkipsAllocatedSubnets(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// First container gets the first /80.
+	// First container gets the first allocatable /96 (the gateway's /96 is reserved).
 	subnet1, err := pa.Allocate("container-x")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -168,7 +175,7 @@ func TestPoolAllocatorSkipsAllocatedSubnets(t *testing.T) {
 		t.Errorf("first alloc = %q, want %q", subnet1, testAllocatedSub)
 	}
 
-	// Second container should get the next /80, not the first (already taken).
+	// Second container should get the next /96, not the first (already taken).
 	subnet2, err := pa.Allocate("container-y")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -176,6 +183,35 @@ func TestPoolAllocatorSkipsAllocatedSubnets(t *testing.T) {
 	want2 := nextSubnet
 	if subnet2.String() != want2 {
 		t.Errorf("second alloc = %q, want %q", subnet2, want2)
+	}
+}
+
+func TestPoolAllocatorReservesGatewaySubnet(t *testing.T) {
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The very first /96 in the pool is the gateway's own subnet
+	// (testReservedSub) — the case that matters, since Allocate walks the
+	// pool from its start. Confirm it's skipped in favor of the next /96,
+	// and re-confirm across a further run of allocations: an endpoint that
+	// owned the gateway's /96 could self-assign the gateway's own address
+	// to one of its secondary/pod addresses, colliding with the address
+	// every other endpoint in the pool routes its default route through.
+	const numAllocations = 1000
+	for i := range numAllocations {
+		subnet, err := pa.Allocate(strconv.Itoa(i))
+		if err != nil {
+			t.Fatalf("unexpected error on allocation %d: %v", i, err)
+		}
+		if subnet.String() == testReservedSub {
+			t.Fatalf("Allocate() returned reserved gateway subnet %q on allocation %d", testReservedSub, i)
+		}
+	}
+
+	if pa.IsAllocated(testReservedSub) {
+		t.Error("IsAllocated() = true for the reserved gateway subnet, want false")
 	}
 }
 
