@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-router
+spec:
+  template:
+    spec:
+      # Narrower than config/fabric/'s default (edge or control): this is
+      # the control-node-only fabric pod (iad-worker-control), which needs
+      # its own frr.conf distinct from iad's regular per-worker fabric
+      # (resources/fabric/iad/) — so this overlay sticks to control only, or
+      # the two would double-schedule onto the same node.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - control
+      initContainers:
+        - name: frr-init
+          image: fabric-router:latest
+          imagePullPolicy: Never
+      containers:
+        - name: frr
+          image: fabric-router:latest
+          imagePullPolicy: Never

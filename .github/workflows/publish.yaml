@@ -32,8 +32,21 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  publish-fabric-router-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    with:
+      image-name: fabric-router
+      dockerfile-path: containers/fabric-router/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   publish-kustomize-bundles:
-    needs: [publish-galactic-cni-image, publish-galactic-router-image]
+    needs: [publish-galactic-cni-image, publish-galactic-router-image, publish-fabric-router-image]
     permissions:
       id-token: write
       contents: read
@@ -45,4 +58,5 @@ jobs:
       images: |
         - { path: config/cni, name: ghcr.io/datum-cloud/galactic-cni, tag: "${{ needs.publish-galactic-cni-image.outputs.tag }}" }
         - { path: config/router/base, name: ghcr.io/datum-cloud/galactic-router, tag: "${{ needs.publish-galactic-router-image.outputs.tag }}" }
+        - { path: config/fabric, name: ghcr.io/datum-cloud/fabric-router, tag: "${{ needs.publish-fabric-router-image.outputs.tag }}" }
     secrets: inherit

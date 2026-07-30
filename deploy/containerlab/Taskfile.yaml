@@ -6,7 +6,7 @@ vars:
   TOPO:
     sh: echo *.clab.yaml
   FRR_VERSION: "10.2.0"
-  FRR_IMAGE: quay.io/frrouting/frr:{{.FRR_VERSION}}
+  FABRIC_ROUTER_IMAGE: fabric-router:latest
 
 tasks:
   default:
@@ -16,23 +16,21 @@ tasks:
 
   build:
     desc: Build all container images
-    cmds:
-      - task: "build:node"
-      - task: "build:frr"
-      - task: "build:galactic-router"
-      - task: "build:galactic-cni"
+    deps:
+      - "build:node"
+      - "build:fabric-router"
+      - "build:galactic-router"
+      - "build:galactic-cni"
 
   "build:node":
     desc: Build the Kind node image
     cmds:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
-  "build:frr":
-    desc: Pull the official FRR container from Quay.io (v{{.FRR_VERSION}})
-    status:
-      - docker image inspect {{.FRR_IMAGE}} > /dev/null 2>&1
+  "build:fabric-router":
+    desc: Build the fabric-router image (FRR v{{.FRR_VERSION}} + debug tooling)
     cmds:
-      - docker pull {{.FRR_IMAGE}}
+      - docker build --network=host --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
   "build:galactic-router":
     desc: Build the galactic-router container image
@@ -90,13 +88,13 @@ tasks:
     desc: Load all container images into the Kind clusters
     cmds:
       - task: load-image
-        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker}
+        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: iad-worker-control}
+        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker-control}
       - task: load-image
-        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: sjc-worker}
+        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: sjc-worker}
       - task: load-image
-        vars: {IMAGE: "{{.FRR_IMAGE}}", NODE: dfw-worker}
+        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: dfw-worker}
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: iad-worker}
       - task: load-image
@@ -197,19 +195,19 @@ tasks:
     cmds:
       - |
         docker exec dfw-control-plane \
-          kubectl exec -n galactic-system ds/dfw-fabric \
+          kubectl exec -n galactic-system ds/fabric-router \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec iad-control-plane \
-          kubectl exec -n galactic-system ds/iad-fabric \
+          kubectl exec -n galactic-system ds/fabric-router \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec sjc-control-plane \
-          kubectl exec -n galactic-system ds/sjc-fabric \
+          kubectl exec -n galactic-system ds/fabric-router \
           -- vtysh -c "show bgp ipv6 unicast summary"
       - |
         docker exec iad-control-plane \
-          kubectl exec -n galactic-system ds/iad-control-fabric \
+          kubectl exec -n galactic-system ds/fabric-control \
           -- vtysh -c "show bgp ipv6 unicast summary"
 
   "test:bgp-peers":
@@ -240,6 +238,6 @@ tasks:
       - docker rmi kindest/node:galactic || true
       - docker rmi galactic-router:latest || true
       - docker rmi galactic-cni:latest || true
-      - docker rmi {{.FRR_IMAGE}} || true
+      - docker rmi {{.FABRIC_ROUTER_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/
       - rm -f dfw.kubeconfig sjc.kubeconfig iad.kubeconfig

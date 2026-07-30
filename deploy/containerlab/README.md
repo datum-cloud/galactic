@@ -36,10 +36,10 @@ topology nodes. Each cluster's `control-plane`/`worker` nodes above are its memb
 ### BGP design
 
 ```
-AS 65000 (dfw-fabric / FRR)          ──eBGP──  tr1 (AS 65100)
-AS 65000 (iad-fabric / FRR)          ──eBGP──  tr3:eth5 (AS 65100)
-AS 65000 (iad-control-fabric / FRR)  ──eBGP──  tr3:eth4 (AS 65100)
-AS 65000 (sjc-fabric / FRR)          ──eBGP──  tr2 (AS 65100)
+AS 65000 (dfw fabric-router / FRR)   ──eBGP──  tr1 (AS 65100)
+AS 65000 (iad fabric-router / FRR)   ──eBGP──  tr3:eth5 (AS 65100)
+AS 65000 (iad fabric-control / FRR)  ──eBGP──  tr3:eth4 (AS 65100)
+AS 65000 (sjc fabric-router / FRR)   ──eBGP──  tr2 (AS 65100)
 
 AS 65000 (dfw-tenant / galactic-router)    ──iBGP──  iad-control-tenant (AS 65000 RR)
 AS 65000 (iad-tenant / galactic-router)    ──iBGP──  iad-control-tenant (AS 65000 RR)
