@@ -57,6 +57,19 @@ case "$COMMAND" in
       curl -sL "${NETWORK_CRD_URL}/${crd}" | kubectl apply -f -
     done
 
+    echo "--- Installing VPC CRDs (datum-cloud/cloud)"
+    # Same approach as the BGP CRD install above. galactic-cni creates
+    # VPCAttachment CRs itself (internal/cni/vpcattachment.go); this repo does
+    # not depend on a companion operator to install these CRDs, so the e2e
+    # cluster needs them installed directly.
+    CLOUD_SHA=$(awk '/go\.datum\.net\/cloud / {print $2}' go.mod | sed 's/.*-//')
+    CLOUD_CRD_URL="https://raw.githubusercontent.com/datum-cloud/cloud/${CLOUD_SHA}/config/crd"
+    for crd in \
+      cloud.datumapis.com_vpcs.yaml \
+      cloud.datumapis.com_vpcattachments.yaml; do
+      curl -sL "${CLOUD_CRD_URL}/${crd}" | kubectl apply -f -
+    done
+
     echo "--- Applying galactic-system namespace and CNI RBAC"
     kubectl apply -k config/system
     kubectl apply -f config/cni/serviceaccount.yaml -f config/cni/rbac.yaml
@@ -88,6 +101,23 @@ spec:
   addressFamilies:
     - afi: l2vpn
       safi: evpn
+EOF
+
+    echo "--- Creating VPC fixture for the VPCAttachment e2e test"
+    # galactic-cni's applyVPCAttachment (internal/cni/vpcattachment.go) never
+    # Gets/validates the VPC CR itself -- it only threads pluginConf.VPCName
+    # through as VPCAttachmentSpec.VPC.Name -- so this fixture exists purely
+    # to make the e2e cluster look like a real deployment, not because the
+    # CNI code path depends on it.
+    cat <<EOF | kubectl apply -f -
+apiVersion: cloud.datumapis.com/v1alpha1
+kind: VPC
+metadata:
+  name: e2e-vpc
+  namespace: galactic-system
+spec:
+  networks:
+    - "10.99.0.0/16"
 EOF
 
     echo "--- Building image: $IMG"

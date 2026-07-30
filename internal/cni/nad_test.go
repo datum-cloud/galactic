@@ -26,8 +26,8 @@ func TestParsePodNamespace(t *testing.T) {
 		},
 		{
 			name:     "namespace only",
-			cniArgs:  "K8S_POD_NAMESPACE=default",
-			expected: "default",
+			cniArgs:  "K8S_POD_NAMESPACE=" + testNamespace,
+			expected: testNamespace,
 		},
 		{
 			name:     "full multus args",

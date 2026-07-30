@@ -314,8 +314,8 @@ func TestIPAMAdvertisementPrefixesIPv4Only(t *testing.T) {
 	if ipv4Addr != "10.128.0.5" {
 		t.Errorf("ipv4Addr = %q, want 10.128.0.5", ipv4Addr)
 	}
-	if len(prefixes) != 1 || prefixes[0] != "10.128.0.5/32" {
-		t.Errorf("prefixes = %v, want exactly [\"10.128.0.5/32\"] (no panic, no empty-prefixes case)", prefixes)
+	if len(prefixes) != 1 || prefixes[0] != testIPv4Prefix {
+		t.Errorf("prefixes = %v, want exactly [%q] (no panic, no empty-prefixes case)", prefixes, testIPv4Prefix)
 	}
 }
 

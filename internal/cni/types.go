@@ -46,7 +46,10 @@ type Address struct {
 // validation in parseConf lands in a later phase.
 type PluginConf struct {
 	types.PluginConf
-	VPC             string        `json:"vpc"`
+	VPC string `json:"vpc"`
+	// VPCName is the VPC CR's Kubernetes object name, distinct from the
+	// base62 VPC identifier above — see applyVPCAttachment (vpcattachment.go).
+	VPCName         string        `json:"vpc_name,omitempty"`
 	VPCAttachment   string        `json:"vpcattachment"`
 	MTU             int           `json:"mtu,omitempty"`
 	InterfaceType   string        `json:"interface_type,omitempty"` // interfaceTypeVeth or interfaceTypeTap

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: galactic-webhook
+  namespace: galactic-system
+spec:
+  selector:
+    app.kubernetes.io/name: galactic-webhook
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook

@@ -6,15 +6,22 @@ package gc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
 
 	"github.com/vishvananda/netlink"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -24,13 +31,49 @@ import (
 // This is the liveness signal GC uses — see cni.netnsAnnotationKey.
 const annotationNetNS = "galactic.datum.net/netns"
 
-// OrphanedCRD represents a BGP CRD that appears to be orphaned because its
-// associated container is no longer present on the node.
+// OrphanedCRD.Kind values.
+const (
+	kindBGPAdvertisement            = "BGPAdvertisement"
+	kindBGPVRFInstance              = "BGPVRFInstance"
+	kindVPCAttachment               = "VPCAttachment"
+	kindNetworkAttachmentDefinition = "NetworkAttachmentDefinition"
+)
+
+// labelVPC marks a NetworkAttachmentDefinition as created by galactic-webhook
+// for a specific VPC. Only NADs carrying this label are candidates for the
+// reference-count orphan check below — NADs created any other way (manually,
+// or by an external operator) are never touched by this GC pass. Must match
+// the label galactic-webhook sets when it creates a NAD.
+const labelVPC = "galactic.datumapis.com/vpc"
+
+// networksAnnotation is the Multus annotation a pod uses to reference
+// NetworkAttachmentDefinitions by name (and, optionally, namespace).
+const networksAnnotation = "k8s.v1.cni.cncf.io/networks"
+
+// nadGVK is the GroupVersionKind for NetworkAttachmentDefinition. Duplicated
+// from internal/cni's nadGVK rather than imported — internal/gc and
+// internal/cni are sibling packages with no existing dependency between them.
+var nadGVK = schema.GroupVersionKind{
+	Group:   "k8s.cni.cncf.io",
+	Version: "v1",
+	Kind:    kindNetworkAttachmentDefinition,
+}
+
+// networkSelectionElement mirrors the fields of Multus's NetworkSelectionElement
+// this package needs to read from a pod's networks annotation. Only Name and
+// Namespace are needed to check whether a pod references a given NAD.
+type networkSelectionElement struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// OrphanedCRD represents a CRD (or NAD) that appears to be orphaned because
+// its associated container or pod is no longer present.
 type OrphanedCRD struct {
 	Name        string
 	Namespace   string
-	Kind        string // "BGPAdvertisement" or "BGPVRFInstance"
-	ContainerID string // truncated container ID prefix from annotation
+	Kind        string // kindBGPAdvertisement, kindBGPVRFInstance, kindVPCAttachment, or kindNetworkAttachmentDefinition
+	ContainerID string // truncated container ID prefix from annotation; empty for VPCAttachment/NAD
 }
 
 // CleanupResult tracks the outcome of a GC pass.
@@ -135,7 +178,7 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 		orphaned = append(orphaned, OrphanedCRD{
 			Name:        adv.Name,
 			Namespace:   adv.Namespace,
-			Kind:        "BGPAdvertisement",
+			Kind:        kindBGPAdvertisement,
 			ContainerID: anyContainerID,
 		})
 		orphanedAdvNames[adv.Name] = struct{}{}
@@ -149,10 +192,124 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 		orphaned = append(orphaned, OrphanedCRD{
 			Name:      name,
 			Namespace: namespace,
-			Kind:      "BGPVRFInstance",
+			Kind:      kindBGPVRFInstance,
 		})
 	}
 
+	return orphaned, nil
+}
+
+// podReferencesNAD reports whether any pod in namespace still lists nadName
+// in its Multus k8s.v1.cni.cncf.io/networks annotation. Malformed annotation
+// values are ignored (treated as not-referencing) rather than failing the
+// whole scan — a single bad pod annotation should not block reclaiming an
+// otherwise-orphaned NAD.
+func podReferencesNAD(ctx context.Context, k8s client.Client, namespace, nadName string) (bool, error) {
+	var pods corev1.PodList
+	if err := k8s.List(ctx, &pods, client.InNamespace(namespace)); err != nil {
+		return false, fmt.Errorf("list pods in namespace %s: %w", namespace, err)
+	}
+	for _, pod := range pods.Items {
+		raw, ok := pod.Annotations[networksAnnotation]
+		if !ok || raw == "" {
+			continue
+		}
+		var elements []networkSelectionElement
+		if err := json.Unmarshal([]byte(raw), &elements); err != nil {
+			continue
+		}
+		for _, e := range elements {
+			if e.Name == nadName && (e.Namespace == "" || e.Namespace == namespace) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// CollectOrphanedNADs scans every NetworkAttachmentDefinition labeled with
+// labelVPC (i.e. created by galactic-webhook, never a manually-created or
+// externally-managed NAD) across all namespaces, and returns those no live
+// pod in their own namespace still references via the Multus networks
+// annotation.
+//
+// Unlike BGPAdvertisement/VPCAttachment orphan checks, this is not scoped to
+// a single node: a NAD's liveness depends on whether any pod anywhere still
+// points at it, not on which node ran CNI for it. Every node's GC pass runs
+// this same check redundantly — acceptable (delete is idempotent, a
+// not-found response from another node's earlier pass is not an error) given
+// the alternative would be a separate cluster-scoped controller this plan
+// does not otherwise need.
+func CollectOrphanedNADs(ctx context.Context, k8s client.Client) ([]OrphanedCRD, error) {
+	nadList := &unstructured.UnstructuredList{}
+	nadList.SetGroupVersionKind(nadGVK)
+	if err := k8s.List(ctx, nadList, client.HasLabels{labelVPC}); err != nil {
+		return nil, fmt.Errorf("list NetworkAttachmentDefinitions: %w", err)
+	}
+
+	var orphaned []OrphanedCRD
+	for _, nad := range nadList.Items {
+		referenced, err := podReferencesNAD(ctx, k8s, nad.GetNamespace(), nad.GetName())
+		if err != nil {
+			slog.Error("GC: failed to check pod references for NAD", "err", err,
+				"name", nad.GetName(), "namespace", nad.GetNamespace())
+			continue
+		}
+		if referenced {
+			continue
+		}
+		orphaned = append(orphaned, OrphanedCRD{
+			Name:      nad.GetName(),
+			Namespace: nad.GetNamespace(),
+			Kind:      kindNetworkAttachmentDefinition,
+		})
+	}
+	return orphaned, nil
+}
+
+// CollectOrphanedVPCAttachments scans every VPCAttachment across all
+// namespaces whose Status.Node matches nodeName (this node's own attachments
+// only — the same per-node scoping philosophy routerNamesForNode already
+// applies to BGP CRDs) and returns those whose Status.PodName no longer
+// exists.
+//
+// VPCAttachments with an empty Status.PodName are skipped, not treated as
+// orphaned: galactic-cni populates Status in the same call that creates
+// Spec (see internal/cni's applyVPCAttachment), so an empty PodName here
+// means either a stale read or a partially-failed create that
+// resourceTracker's inline rollback already handles — not something this GC
+// pass can safely judge with the same confidence as the pod-existence check
+// below.
+func CollectOrphanedVPCAttachments(ctx context.Context, k8s client.Client, nodeName string) ([]OrphanedCRD, error) {
+	var attachments cloudv1alpha1.VPCAttachmentList
+	if err := k8s.List(ctx, &attachments); err != nil {
+		return nil, fmt.Errorf("list VPCAttachments: %w", err)
+	}
+
+	var orphaned []OrphanedCRD
+	for _, a := range attachments.Items {
+		if a.Status.Node != nodeName {
+			continue
+		}
+		if a.Status.PodName == "" {
+			continue
+		}
+		var pod corev1.Pod
+		err := k8s.Get(ctx, types.NamespacedName{Name: a.Status.PodName, Namespace: a.Namespace}, &pod)
+		if err == nil {
+			continue // pod still exists — not orphaned
+		}
+		if !apierrors.IsNotFound(err) {
+			slog.Error("GC: failed to check pod existence for VPCAttachment", "err", err,
+				"name", a.Name, "namespace", a.Namespace, "podName", a.Status.PodName)
+			continue
+		}
+		orphaned = append(orphaned, OrphanedCRD{
+			Name:      a.Name,
+			Namespace: a.Namespace,
+			Kind:      kindVPCAttachment,
+		})
+	}
 	return orphaned, nil
 }
 
@@ -163,7 +320,7 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 
 	for _, o := range orphans {
 		switch o.Kind {
-		case "BGPAdvertisement":
+		case kindBGPAdvertisement:
 			adv := &bgpv1alpha1.BGPAdvertisement{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      o.Name,
@@ -180,7 +337,7 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 				"name", o.Name, "namespace", o.Namespace, "containerID", o.ContainerID)
 			result.OrphanedCRDsRemoved++
 
-		case "BGPVRFInstance":
+		case kindBGPVRFInstance:
 			vrfInst := &bgpv1alpha1.BGPVRFInstance{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      o.Name,
@@ -195,6 +352,36 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 			}
 			slog.Info("GC: removed orphaned BGPVRFInstance",
 				"name", o.Name, "namespace", o.Namespace)
+			result.OrphanedCRDsRemoved++
+
+		case kindVPCAttachment:
+			attachment := &cloudv1alpha1.VPCAttachment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      o.Name,
+					Namespace: o.Namespace,
+				},
+			}
+			if err := k8s.Delete(ctx, attachment); err != nil {
+				slog.Error("GC: failed to delete orphaned VPCAttachment",
+					"name", o.Name, "namespace", o.Namespace, "err", err)
+				result.Errors++
+				continue
+			}
+			slog.Info("GC: removed orphaned VPCAttachment", "name", o.Name, "namespace", o.Namespace)
+			result.OrphanedCRDsRemoved++
+
+		case kindNetworkAttachmentDefinition:
+			nad := &unstructured.Unstructured{}
+			nad.SetGroupVersionKind(nadGVK)
+			nad.SetName(o.Name)
+			nad.SetNamespace(o.Namespace)
+			if err := k8s.Delete(ctx, nad); err != nil {
+				slog.Error("GC: failed to delete orphaned NetworkAttachmentDefinition",
+					"name", o.Name, "namespace", o.Namespace, "err", err)
+				result.Errors++
+				continue
+			}
+			slog.Info("GC: removed orphaned NetworkAttachmentDefinition", "name", o.Name, "namespace", o.Namespace)
 			result.OrphanedCRDsRemoved++
 		}
 	}
@@ -314,7 +501,33 @@ func RunGC(ctx context.Context, k8s client.Client, namespace, nodeName string) C
 		result.Errors += crResult.Errors
 	}
 
-	// Phase 2: Remove orphaned VRF interfaces.
+	// Phase 2: Remove orphaned VPCAttachments (this node's own, per Status.Node)
+	// and NetworkAttachmentDefinitions (cluster-wide reference count) — see
+	// CollectOrphanedVPCAttachments/CollectOrphanedNADs for why these use
+	// different scoping than Phase 1's BGP CRDs.
+	vpcAttachmentOrphans, err := CollectOrphanedVPCAttachments(ctx, k8s, nodeName)
+	if err != nil {
+		slog.Error("GC: failed to collect orphaned VPCAttachments", "err", err)
+		result.Errors++
+	} else if len(vpcAttachmentOrphans) > 0 {
+		slog.Info("GC: found orphaned VPCAttachments", "count", len(vpcAttachmentOrphans))
+		vaResult := RemoveOrphanedCRDs(ctx, k8s, vpcAttachmentOrphans)
+		result.OrphanedCRDsRemoved += vaResult.OrphanedCRDsRemoved
+		result.Errors += vaResult.Errors
+	}
+
+	nadOrphans, err := CollectOrphanedNADs(ctx, k8s)
+	if err != nil {
+		slog.Error("GC: failed to collect orphaned NetworkAttachmentDefinitions", "err", err)
+		result.Errors++
+	} else if len(nadOrphans) > 0 {
+		slog.Info("GC: found orphaned NetworkAttachmentDefinitions", "count", len(nadOrphans))
+		nadResult := RemoveOrphanedCRDs(ctx, k8s, nadOrphans)
+		result.OrphanedCRDsRemoved += nadResult.OrphanedCRDsRemoved
+		result.Errors += nadResult.Errors
+	}
+
+	// Phase 3: Remove orphaned VRF interfaces.
 	orphanedVRFs, err := CollectOrphanedVRFs(ctx, k8s, namespace, nodeName)
 	if err != nil {
 		slog.Error("GC: failed to collect orphaned VRFs", "err", err)

@@ -1,0 +1,28 @@
+# Self-signed CA + serving certificate for the webhook's TLS listener,
+# mirroring the minimal cert-manager setup common for controller-runtime
+# webhooks: a self-signed Issuer bootstraps a CA, which then issues the
+# actual serving Certificate. The MutatingWebhookConfiguration's
+# cert-manager.io/inject-ca-from annotation (see
+# mutatingwebhookconfiguration.yaml) has cert-manager auto-populate
+# caBundle from this Certificate — no manual CA distribution needed.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: galactic-webhook-selfsigned
+  namespace: galactic-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: galactic-webhook-serving-cert
+  namespace: galactic-system
+spec:
+  secretName: galactic-webhook-serving-certs
+  issuerRef:
+    name: galactic-webhook-selfsigned
+    kind: Issuer
+  dnsNames:
+    - galactic-webhook.galactic-system.svc
+    - galactic-webhook.galactic-system.svc.cluster.local

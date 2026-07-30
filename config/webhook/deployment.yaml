@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: galactic-webhook
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: galactic-webhook
+spec:
+  # 2+ replicas: failurePolicy: Fail on the MutatingWebhookConfiguration
+  # makes webhook unavailability a pod-admission outage — see this repo's
+  # design plan, Component placement.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-webhook
+    spec:
+      serviceAccountName: galactic-webhook
+      containers:
+        - name: galactic-webhook
+          # ":latest" is a placeholder only: no such tag is ever pushed to
+          # GHCR. CI resolves and stamps a real version tag here when it
+          # publishes the ghcr.io/datum-cloud/galactic-kustomize OCI bundle
+          # (see .github/workflows/publish.yaml); applying this manifest
+          # directly from a git checkout will fail to pull the image unless
+          # you override the tag first — see the README's "Production
+          # Deployment" section.
+          image: ghcr.io/datum-cloud/galactic-webhook:latest
+          command:
+            - /galactic-webhook
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: serving-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+      volumes:
+        - name: serving-certs
+          secret:
+            secretName: galactic-webhook-serving-certs

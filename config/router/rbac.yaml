@@ -33,6 +33,30 @@ rules:
     resources:
       - nodes
     verbs: ["get", "list", "watch"]
+  # pods (cluster-wide, all namespaces): the GC reconciler checks pod
+  # existence to reclaim orphaned VPCAttachments (Status.PodName) and NADs
+  # (referenced via the Multus networks annotation) — see internal/gc's
+  # CollectOrphanedVPCAttachments/CollectOrphanedNADs.
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["get", "list", "watch"]
+  # vpcattachments (cluster-wide): galactic-cni (a different ServiceAccount,
+  # see config/cni/rbac.yaml) creates these and writes their status at ADD
+  # time. galactic-router's GC reconciler only reads and deletes orphaned
+  # ones — no create/update/status verbs needed here.
+  - apiGroups: ["cloud.datumapis.com"]
+    resources:
+      - vpcattachments
+    verbs: ["get", "list", "watch", "delete"]
+  # network-attachment-definitions (cluster-wide): galactic-webhook (a
+  # different ServiceAccount, see config/webhook/rbac.yaml) creates these;
+  # galactic-cni patches the host-interface annotation onto them. GC only
+  # reads and deletes orphaned ones.
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources:
+      - network-attachment-definitions
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

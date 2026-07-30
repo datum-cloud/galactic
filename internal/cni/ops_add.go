@@ -115,6 +115,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	tracker.k8s = k8sClient
 	podNamespace := parsePodNamespace(args.Args)
+	tracker.podNamespace = podNamespace
 	if err := annotateNAD(rollbackCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
 		return fmt.Errorf("annotate NAD: %w", err)
 	}
@@ -133,9 +134,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// Host-device delegation and IPAM are veth-only.
 	// In tap mode the guest VM manages its own networking.
 	var ipamResult *ipamResult
+	var guestName string // empty for tap: the guest VM manages its own interface, there is no galactic-owned guest device
 	switch pluginConf.InterfaceType {
 	case interfaceTypeVeth:
-		guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
+		guestName = intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
 		ipamResult, err = buildVethResult(args, pluginConf, hostName, guestName, hostMac, hostMTU)
 		if err != nil {
 			return err
@@ -146,50 +148,89 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 				"ipv4Address", ipamResult.ipv4Address, "ipv4Gateway", ipamResult.ipv4Gateway)
 		}
 	case interfaceTypeTap:
-		// Allocate IPAM for the tap interface (same as veth).
-		// The VM manages its own guest interface; the CNI only configures the host side.
-		ipamResult, err = allocateIPAM(args, pluginConf)
-		if err != nil {
-			return fmt.Errorf("allocate IPAM: %w", err)
-		}
-		if ipamResult != nil {
-			slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,
-				"ipv6Subnet", ipamResult.ipv6Subnet, "ipv6Gateway", ipamResult.ipv6Gateway,
-				"ipv4Address", ipamResult.ipv4Address, "ipv4Gateway", ipamResult.ipv4Gateway)
-		}
-
-		// Configure the gateway address on the host tap and install the VRF route.
-		if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
-			return err
-		}
-		if ipamResult != nil && ipamResult.ipv6Gateway != nil {
-			slog.Debug("ADD: host gateway configured", "name", hostName, "gateway", ipamResult.ipv6Gateway)
-		}
-
-		// Print the CNI result with IP info.
-		result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
-		if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
-			return fmt.Errorf("print CNI result: %w", err)
-		}
-
-		// Decode VPC/VRFID for BGP state publish.
-		vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
-		if err != nil {
-			return fmt.Errorf("decode VPC: %w", err)
-		}
-		vrfID, err := vrfIDFromAttachment(pluginConf.VPCAttachment)
-		if err != nil {
-			return fmt.Errorf("decode VPCAttachment: %w", err)
-		}
-
-		// Publish BGP state (SRv6 ingress + BGP CRDs).
-		if tracker.k8s == nil {
-			return errors.New("k8s client not set in tracker")
-		}
-		slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", interfaceTypeTap)
-		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
+		return cmdAddTap(args, pluginConf, tracker, nodeName, namespace, podNamespace, hostName, hostMac, hostMTU)
 	}
 
+	err = applyVPCAttachmentRetrying(args, pluginConf, podNamespace, nodeName, hostName, guestName, ipamResult, tracker)
+	if err != nil {
+		return err
+	}
 	slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", pluginConf.InterfaceType)
 	return publishBGPState(args, pluginConf, nodeName, namespace, ipamResult, tracker)
+}
+
+// cmdAddTap finishes cmdAdd's tap-mode path: IPAM allocation, host gateway
+// configuration, the CNI result, and BGP/VPCAttachment state publishing.
+// Split out of cmdAdd to keep its cyclomatic complexity in check — this is
+// pure extraction, not a behavior change.
+func cmdAddTap(
+	args *skel.CmdArgs, pluginConf *PluginConf, tracker *resourceTracker,
+	nodeName, namespace, podNamespace, hostName, hostMac string, hostMTU int,
+) error {
+	// Allocate IPAM for the tap interface (same as veth).
+	// The VM manages its own guest interface; the CNI only configures the host side.
+	ipamResult, err := allocateIPAM(args, pluginConf)
+	if err != nil {
+		return fmt.Errorf("allocate IPAM: %w", err)
+	}
+	if ipamResult != nil {
+		slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,
+			"ipv6Subnet", ipamResult.ipv6Subnet, "ipv6Gateway", ipamResult.ipv6Gateway,
+			"ipv4Address", ipamResult.ipv4Address, "ipv4Gateway", ipamResult.ipv4Gateway)
+	}
+
+	// Configure the gateway address on the host tap and install the VRF route.
+	if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
+		return err
+	}
+	if ipamResult != nil && ipamResult.ipv6Gateway != nil {
+		slog.Debug("ADD: host gateway configured", "name", hostName, "gateway", ipamResult.ipv6Gateway)
+	}
+
+	// Print the CNI result with IP info.
+	result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
+	if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
+		return fmt.Errorf("print CNI result: %w", err)
+	}
+
+	// Decode VPC/VRFID for BGP state publish.
+	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
+	if err != nil {
+		return fmt.Errorf("decode VPC: %w", err)
+	}
+	vrfID, err := vrfIDFromAttachment(pluginConf.VPCAttachment)
+	if err != nil {
+		return fmt.Errorf("decode VPCAttachment: %w", err)
+	}
+
+	// Publish BGP state (SRv6 ingress + BGP CRDs).
+	if tracker.k8s == nil {
+		return errors.New("k8s client not set in tracker")
+	}
+	// guestName is always empty in tap mode: the guest VM manages its own
+	// interface, there is no galactic-owned guest device.
+	if err := applyVPCAttachmentRetrying(
+		args, pluginConf, podNamespace, nodeName, hostName, "", ipamResult, tracker,
+	); err != nil {
+		return err
+	}
+	slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", interfaceTypeTap)
+	return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
+}
+
+// applyVPCAttachmentRetrying wraps applyVPCAttachment in retryK8sOps, shared
+// by both cmdAdd's veth tail and cmdAddTap.
+func applyVPCAttachmentRetrying(
+	args *skel.CmdArgs, pluginConf *PluginConf, podNamespace, nodeName, hostName, guestName string,
+	ipamResult *ipamResult, tracker *resourceTracker,
+) error {
+	err := retryK8sOps(cniTimeout, func(ctx context.Context) error {
+		return applyVPCAttachment(
+			ctx, tracker.k8s, args, pluginConf, podNamespace, nodeName, hostName, guestName, ipamResult, tracker,
+		)
+	})
+	if err != nil {
+		return fmt.Errorf("apply VPCAttachment: %w", err)
+	}
+	return nil
 }

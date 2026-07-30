@@ -292,6 +292,158 @@ GALACTIC_CNI_ENABLE_LOCAL_IPAM=true \
 	}
 }
 
+// TestCNIVPCAttachmentCreation exercises galactic-cni's VPCAttachment CR
+// creation (internal/cni/vpcattachment.go's applyVPCAttachment): a CNI ADD
+// with vpc_name set should create the VPCAttachment CR at the same point the
+// plugin already creates BGPVRFInstance/BGPAdvertisement, with Spec populated
+// from the real IPAM allocation and Status carrying the attach-time facts
+// (node, container ID, pod name, interface names, pod subnet).
+//
+// Runs in tap mode (like TestCNITapInterface) to avoid host-device delegation,
+// and uses a distinct (vpc, vpcattachment) pair so its kernel/CRD state never
+// collides with that test's.
+func TestCNIVPCAttachmentCreation(t *testing.T) {
+	const (
+		podName       = "e2e-cni-vpcattachment"
+		vpc           = "2"
+		vpcAttachment = "1"
+		vpcName       = "e2e-vpc" // fixture created in scripts/ci.sh
+		attachedPod   = "e2e-attached-pod"
+		attachmentCR  = vpc + "-" + vpcAttachment
+	)
+	// VPCAttachmentStatus.ContainerID requires exactly 46 characters (see
+	// internal/cni/vpcattachment.go's containerIDStatusLen) — real container
+	// IDs are 64 hex chars and get truncated to fit, but a shorter input like
+	// a plain test string would fail that length requirement outright, so
+	// this constructs one at the required length instead of guessing.
+	containerID := "e2evpcattach001" + strings.Repeat("0", 46-len("e2evpcattach001"))
+
+	t.Cleanup(func() { deletePod(t, podName) })
+	deletePod(t, podName)
+	t.Cleanup(func() { deleteVPCAttachment(t, attachmentCR) })
+	deleteVPCAttachment(t, attachmentCR)
+
+	_, err := kubectl(
+		t.Context(),
+		"run", podName,
+		"--image="+image(),
+		"--image-pull-policy=Never",
+		"--restart=Never",
+		"--privileged",
+		"--overrides={\"spec\":{\"serviceAccountName\":\"galactic-cni\",\"hostNetwork\":true}}",
+		"--command", "--",
+		"sleep", "infinity",
+	)
+	if err != nil {
+		t.Fatalf("kubectl run failed: %v", err)
+	}
+
+	if err := waitForPodPhase(t, podName, "Running"); err != nil {
+		t.Fatalf("pod did not reach Running phase: %v", err)
+	}
+
+	cniConf := `{
+  "cniVersion": "1.0.0",
+  "name": "galactic-vpcattach",
+  "type": "galactic-cni",
+  "vpc": "` + vpc + `",
+  "vpc_name": "` + vpcName + `",
+  "vpcattachment": "` + vpcAttachment + `",
+  "interface_type": "tap",
+  "ipam": {
+    "type": "pool"
+  }
+}`
+	// CNI_ARGS carries K8S_POD_NAME/K8S_POD_NAMESPACE the way Multus populates
+	// them for a real invocation — applyVPCAttachment needs both (podNamespace
+	// to create the VPCAttachment in, PodName for Status.PodName).
+	script := `#!/bin/sh
+ip netns add e2e-vpcattach-ns
+CNI_NETNS=/var/run/netns/e2e-vpcattach-ns \
+CNI_COMMAND=ADD \
+CNI_CONTAINERID=` + containerID + ` \
+CNI_IFNAME=eth0 \
+CNI_PATH=/opt/cni/bin \
+CNI_ARGS="K8S_POD_NAME=` + attachedPod + `;K8S_POD_NAMESPACE=galactic-system" \
+NODE_NAME=` + nodeName() + ` \
+GALACTIC_CNI_ENABLE_LOCAL_IPAM=true \
+	/galactic-cni < /tmp/cni-vpcattach.json
+`
+	_, err = kubectl(t.Context(), "exec", podName, "--",
+		"sh", "-c",
+		"echo '"+cniConf+"' > /tmp/cni-vpcattach.json && "+
+			"echo '"+script+"' > /tmp/run-cni-vpcattach.sh && "+
+			"chmod +x /tmp/run-cni-vpcattach.sh",
+	)
+	if err != nil {
+		t.Fatalf("write cni config and script: %v", err)
+	}
+
+	if out, err := kubectl(t.Context(), "exec", podName, "-i", "--", "/tmp/run-cni-vpcattach.sh"); err != nil {
+		t.Logf("exec output: %s", out)
+		t.Fatalf("CNI ADD failed: %v", err)
+	}
+
+	raw, err := kubectl(t.Context(), "get", "vpcattachments.cloud.datumapis.com", attachmentCR, "-o", "json")
+	if err != nil {
+		t.Fatalf("get VPCAttachment %q: %v\n%s", attachmentCR, err, raw)
+	}
+
+	var attachment struct {
+		Spec struct {
+			VPC struct {
+				Name string `json:"name"`
+			} `json:"vpc"`
+			Interface struct {
+				Name      string   `json:"name"`
+				Addresses []string `json:"addresses"`
+			} `json:"interface"`
+		} `json:"spec"`
+		Status struct {
+			VPC            string `json:"vpc"`
+			VPCAttachment  string `json:"vpcAttachment"`
+			Node           string `json:"node"`
+			ContainerID    string `json:"containerID"`
+			PodName        string `json:"podName"`
+			HostInterface  string `json:"hostInterface"`
+			VRFInterface   string `json:"vrfInterface"`
+			GuestInterface string `json:"guestInterface"`
+			PodSubnet      string `json:"podSubnet"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(raw), &attachment); err != nil {
+		t.Fatalf("unmarshal VPCAttachment: %v\n%s", err, raw)
+	}
+
+	if attachment.Spec.VPC.Name != vpcName {
+		t.Errorf("Spec.VPC.Name = %q, want %q", attachment.Spec.VPC.Name, vpcName)
+	}
+	if len(attachment.Spec.Interface.Addresses) == 0 {
+		t.Error("Spec.Interface.Addresses is empty, want at least one allocated address")
+	}
+	if attachment.Status.VPC != vpc {
+		t.Errorf("Status.VPC = %q, want %q", attachment.Status.VPC, vpc)
+	}
+	if attachment.Status.VPCAttachment != vpcAttachment {
+		t.Errorf("Status.VPCAttachment = %q, want %q", attachment.Status.VPCAttachment, vpcAttachment)
+	}
+	if attachment.Status.Node != nodeName() {
+		t.Errorf("Status.Node = %q, want %q", attachment.Status.Node, nodeName())
+	}
+	if attachment.Status.ContainerID != containerID {
+		t.Errorf("Status.ContainerID = %q, want %q", attachment.Status.ContainerID, containerID)
+	}
+	if attachment.Status.PodName != attachedPod {
+		t.Errorf("Status.PodName = %q, want %q", attachment.Status.PodName, attachedPod)
+	}
+	if attachment.Status.HostInterface == "" || attachment.Status.VRFInterface == "" {
+		t.Errorf("Status host/vrf interface names unexpectedly empty: %+v", attachment.Status)
+	}
+	if attachment.Status.PodSubnet == "" {
+		t.Error("Status.PodSubnet is empty, want an allocated subnet")
+	}
+}
+
 // nodeName returns the name of the node this pod runs on, or falls back to
 // "kind-worker" for single-node Kind clusters.
 func nodeName() string {
@@ -330,4 +482,12 @@ func waitForPodPhase(t *testing.T, name, wantPhase string) error {
 func deletePod(t *testing.T, name string) {
 	t.Helper()
 	kubectl(t.Context(), "delete", "pod", name, "--ignore-not-found", "--wait=false") //nolint:errcheck
+}
+
+// deleteVPCAttachment removes a VPCAttachment CR by name, ignoring
+// not-found errors. Mirrors deletePod's cleanup pattern.
+func deleteVPCAttachment(t *testing.T, name string) {
+	t.Helper()
+	//nolint:errcheck
+	kubectl(t.Context(), "delete", "vpcattachments.cloud.datumapis.com", name, "--ignore-not-found", "--wait=false")
 }

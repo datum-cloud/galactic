@@ -3,3 +3,4 @@ resources:
   - cni
   - router
   - vmtap
+  - webhook

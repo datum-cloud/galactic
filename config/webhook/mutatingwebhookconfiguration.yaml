@@ -1,0 +1,35 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: galactic-webhook
+  annotations:
+    # Has cert-manager auto-populate every webhook's clientConfig.caBundle
+    # below from this Certificate's CA — see certificate.yaml.
+    cert-manager.io/inject-ca-from: galactic-system/galactic-webhook-serving-cert
+webhooks:
+  - name: vpc-attachment-injector.galactic.datumapis.com
+    clientConfig:
+      service:
+        name: galactic-webhook
+        namespace: galactic-system
+        path: /mutate-v1-pod-vpc-attachment
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        operations: ["CREATE"]
+    failurePolicy: Fail
+    sideEffects: NoneOnDryRun
+    matchPolicy: Equivalent
+    reinvocationPolicy: IfNeeded
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 10
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-node-lease
+            - galactic-system

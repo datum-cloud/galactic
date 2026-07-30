@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -50,6 +51,10 @@ const (
 	testSID128        = "2001:db8::1/128"
 	testCNIVersion    = "1.0.0"
 	testIPv4Subnet    = "10.128.0.0/20"
+	testIPv4Prefix    = "10.128.0.5/32"
+	testNamespace     = "default"
+	testPodName       = "my-pod"
+	testVPCName       = "my-vpc"
 
 	// testPrevResult is a valid CNI v1.0.0 result used in prevResult tests.
 	testPrevResult = `{"cniVersion":"1.0.0",` +
@@ -59,7 +64,15 @@ const (
 )
 
 func fakeClient(objs ...client.Object) client.Client {
-	return fake.NewClientBuilder().WithScheme(cniScheme).WithObjects(objs...).Build()
+	// VPCAttachment declares a status subresource (+kubebuilder:subresource:status);
+	// the fake client requires WithStatusSubresource for Status().Update() calls
+	// against it to work (a fake-client-only requirement — a real API server needs
+	// no equivalent client-side declaration).
+	return fake.NewClientBuilder().
+		WithScheme(cniScheme).
+		WithStatusSubresource(&cloudv1alpha1.VPCAttachment{}).
+		WithObjects(objs...).
+		Build()
 }
 
 // routerForNode builds a BGPRouter with spec.targetRef.name set to nodeName.
@@ -1499,7 +1512,7 @@ func TestResourceTrackerCleanupPartialState(t *testing.T) {
 		vpc:           testVPC,
 		vpcAttachment: testAttachment,
 		ifaceType:     interfaceTypeVeth,
-		namespace:     "default",
+		namespace:     testNamespace,
 	}
 	ctx := context.Background()
 	tracker.cleanup(ctx) // should not panic; vrf.Delete will fail but is logged

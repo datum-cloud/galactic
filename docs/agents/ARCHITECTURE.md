@@ -1,26 +1,38 @@
 # Architecture
 
-> Galactic is the SRv6 data plane for multi-cloud VPC networking, deployed as two
-> binaries on each Kubernetes node: a CNI plugin that attaches containers to VPC
-> networks, and a router that reconciles BGP CRDs and drives an embedded
-> GoBGP server to distribute EVPN (L2VPN/EVPN AFI/SAFI) paths between nodes.
+> Galactic is the SRv6 data plane for multi-cloud VPC networking, deployed as three
+> binaries: a per-node CNI plugin that attaches containers to VPC networks, a
+> per-node router that reconciles BGP CRDs and drives an embedded GoBGP server to
+> distribute EVPN (L2VPN/EVPN AFI/SAFI) paths between nodes, and a cluster-wide
+> mutating admission webhook that provisions VPC attachments for pods on CREATE.
 
-_Last updated: 2026-07-14_
+_Last updated: 2026-07-30_
 
 ---
 
 ## Overview
 
 Galactic implements VPC isolation and cross-cluster reachability using Linux SRv6.
-When a pod is attached to a VPC, the CNI plugin creates the required kernel state
-(VRF, veth pair, SRv6 ingress route) and writes a `BGPAdvertisement` CRD.
-`galactic-router` watches that CRD and injects the EVPN path into the node-local
-GoBGP server. GoBGP distributes the path to a BGP route reflector, enabling pods
-on different nodes or clusters to reach each other via SRv6-encapsulated traffic.
+When a pod carrying the `galactic.datumapis.com/vpc=<vpc-name>` annotation is
+created, `galactic-webhook` allocates a VPCAttachment ID for it, creates a
+`NetworkAttachmentDefinition` (NAD) pointing `galactic-cni` at that VPC +
+VPCAttachment pair, and patches the pod to attach via that NAD (Multus). When
+the pod is scheduled, `galactic-cni` creates the required kernel state (VRF,
+veth pair, SRv6 ingress route), creates the `VPCAttachment` CR itself (Spec and
+Status), and writes a `BGPAdvertisement` CRD. `galactic-router` watches that CRD
+and injects the EVPN path into the node-local GoBGP server. GoBGP distributes
+the path to a BGP route reflector, enabling pods on different nodes or clusters
+to reach each other via SRv6-encapsulated traffic.
 
-VPC and VPCAttachment CRDs are owned by a separate companion operator
-(`go.datum.net/cloud`). Galactic receives pre-populated identifiers through the
-CNI config and acts on them. `galactic-router` reconciles BGP CRDs
+The `VPC` CRD is owned by a separate companion operator (`go.datum.net/cloud`,
+types-only — no controller exists there). `VPCAttachment` and NAD provisioning,
+previously assumed to belong to that companion operator, are now owned by
+Galactic itself: `galactic-webhook` creates the NAD (and allocates the
+VPCAttachment ID baked into it); `galactic-cni` creates the `VPCAttachment` CR
+and writes its status, at the same point it already creates
+`BGPVRFInstance`/`BGPAdvertisement`. See `.local/plan-vpc-nad-webhook-plan.md`
+for the full design rationale, including why the webhook creates only the NAD
+and not the VPCAttachment CR itself. `galactic-router` reconciles BGP CRDs
 (`go.datum.net/network`) directly — no gRPC sidecar, no provider CRD lifecycle.
 
 ### SRv6 SID encoding
@@ -54,8 +66,13 @@ Distinguisher and import/export Route Target.
 galactic/
 ├── cmd/
 │   ├── galactic-cni/        # CNI binary
-│   └── galactic-router/     # Router binary (controller-runtime reconciler)
+│   ├── galactic-router/     # Router binary (controller-runtime reconciler)
+│   └── galactic-webhook/    # Mutating admission webhook binary
 ├── internal/
+│   ├── webhook/             # PodMutator admission.Handler: VPCAttachment ID
+│   │                        #   allocation (via NAD labels) + NAD creation +
+│   │                        #   pod patch. Creates NADs only — see internal/cni's
+│   │                        #   applyVPCAttachment for VPCAttachment CR creation.
 │   ├── controller/          # controller-runtime reconcilers (BGPRouter, BGPPeer,
 │   │                        #   BGPAdvertisement, BGPVRFInstance, BGPPolicy, Secret,
 │   │                        #   Node, GC); field index registration; status helpers
@@ -67,10 +84,12 @@ galactic/
 │   ├── model/               # DesiredRouter and family; re-exports BGP API enums
 │   ├── hash/                # SHA-256 change detection over DesiredRouter
 │   ├── metadata/            # Build-time version info (Version, GitCommit, etc.)
-│   ├── gc/                  # Orphaned BGPAdvertisement/BGPVRFInstance CRD and
-│   │                        #   stale kernel VRF cleanup, driven by the GC controller
+│   ├── gc/                  # Orphaned BGPAdvertisement/BGPVRFInstance/VPCAttachment
+│   │                        #   CRD, orphaned NAD, and stale kernel VRF cleanup,
+│   │                        #   driven by the GC controller
 │   ├── cni/                 # CNI cmdAdd / cmdDel / cmdCheck, PluginConf parsing,
-│   │                        #   BGP CRD publish, built-in IPAM wiring
+│   │                        #   BGP CRD publish, VPCAttachment CR create+status
+│   │                        #   (vpcattachment.go), built-in IPAM wiring
 │   │   ├── ipam/            # Built-in IPv6 pool + static IP allocators
 │   │   ├── route/           # Host-side static routes via netlink
 │   │   ├── tap/             # Tap interface management (VM workloads)
@@ -91,19 +110,26 @@ galactic/
 │   │   │                    #     and tenant-control nodes
 │   │   └── tenant-control/  #   route-reflector role: base + GALACTIC_ROUTER_REFLECTOR=true,
 │   │                        #     opt-in via the galactic.datumapis.com/node=control node label
-│   └── cni/                 # hostNetwork DaemonSet: `init` container stages
-│                            #   galactic-cni/host-device into /opt/cni/bin
-│                            #   and writes the conflist + kubeconfig; `run`
-│                            #   container refreshes credentials and serves
-│                            #   gRPC health checks
+│   ├── cni/                 # hostNetwork DaemonSet: `init` container stages
+│   │                        #   galactic-cni/host-device into /opt/cni/bin
+│   │                        #   and writes the conflist + kubeconfig; `run`
+│   │                        #   container refreshes credentials and serves
+│   │                        #   gRPC health checks
+│   └── webhook/             # HA Deployment (2 replicas) + Service +
+│                            #   MutatingWebhookConfiguration + cert-manager
+│                            #   self-signed Issuer/Certificate for TLS
 ├── deploy/
 │   └── containerlab/        # ContainerLab lab topology and scripts
 └── containers/
     ├── galactic-cni/        # galactic-cni + host-device image (e2e test and production publish)
-    └── galactic-router/     # galactic-router production image
+    ├── galactic-router/     # galactic-router production image
+    └── galactic-webhook/    # galactic-webhook image (not yet wired into task test:e2e or publish.yaml)
 ```
 
-Production images are published by `.github/workflows/publish.yaml` — see CI/CD below.
+Production images for `galactic-cni`/`galactic-router` are published by
+`.github/workflows/publish.yaml` — see CI/CD below. `galactic-webhook`'s
+Dockerfile exists but isn't yet wired into either `task test:e2e` or the
+publish pipeline — see Known Constraints.
 
 ---
 
@@ -112,6 +138,28 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (veth ADD, tap ADD, shared DEL).
 
 See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram.
+
+**Pod → VPC attachment, end to end:**
+
+1. Pod CREATE with `galactic.datumapis.com/vpc=<vpc-name>` reaches
+   `galactic-webhook`. It validates the VPC exists, allocates a free 16-bit
+   VPCAttachment ID (scanning existing NADs labeled for that VPC — not the
+   `VPCAttachment` CRD, which doesn't exist yet at this point), creates a
+   deterministically-named NAD (`<vpc-base62>-<vpcattachment-base62>`) with
+   the CNI conflist embedded, and patches the pod's
+   `k8s.v1.cni.cncf.io/networks` annotation plus a reinvocation-guard
+   annotation.
+2. Once scheduled, Multus resolves the NAD and invokes `galactic-cni`'s ADD
+   with that conflist. `galactic-cni` creates the VRF/veth/SRv6 kernel state,
+   then — at the same point it creates `BGPVRFInstance`/`BGPAdvertisement` —
+   creates the `VPCAttachment` CR (Spec from real IPAM-allocated addresses)
+   and writes its Status (`Node`, `ContainerID`, `PodName`, interface names,
+   `PodSubnet`).
+3. `galactic-router` watches `BGPAdvertisement`/`BGPVRFInstance` and injects
+   the EVPN path into GoBGP, same as before this feature existed.
+4. Cleanup: the GC controller reclaims NADs no live pod still references, and
+   `VPCAttachment` CRs whose `Status.PodName` no longer exists — see
+   `internal/gc`'s `CollectOrphanedNADs`/`CollectOrphanedVPCAttachments`.
 
 ---
 
@@ -127,7 +175,8 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 | `internal/hash` | `galactic-router` | Change detection |
 | `internal/metadata` | both | Build-time version info stamped via `-ldflags` |
 | `internal/gc` | `galactic-router` | Orphaned CRD/VRF cleanup, driven by the GC controller's ticker |
-| `internal/cni` | `galactic-cni` | CNI cmdAdd / cmdDel / cmdCheck; BGP CRD publish |
+| `internal/cni` | `galactic-cni` | CNI cmdAdd / cmdDel / cmdCheck; BGP CRD publish; VPCAttachment CR create+status (`vpcattachment.go`) |
+| `internal/webhook` | `galactic-webhook` | Mutating admission webhook: VPCAttachment ID allocation, NAD creation, pod patch |
 | `internal/cni/ipam` | `galactic-cni` | Built-in IPv6 pool + static allocators |
 | `internal/cni/tap` | `galactic-cni` | Tap interface create/delete (VM workloads) |
 | `internal/installer` | `galactic-cni` | DaemonSet `init`/`run` logic: binary staging, conflist/kubeconfig templating, credential refresh, gRPC health server |
@@ -199,6 +248,47 @@ lives in `root.go`'s `runCmd`:
    that waits for cache sync, then runs on `--gc-interval`, default 5m).
 8. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
+### `cmd/galactic-webhook/main.go` / `root.go` — Mutating admission webhook
+
+`main.go` is a 3-line wrapper around `newRootCommand().Execute()`, mirroring
+`galactic-router`'s split; all startup logic lives in `root.go`'s `runCmd`:
+
+1. Build a controller-runtime manager with `webhook.NewServer(webhook.Options{
+   Port: cfg.Port, CertDir: cfg.CertDir})` (default port `9443`, cert dir
+   `/etc/webhook/certs` — populated by the cert-manager-issued Secret, see
+   `config/webhook/certificate.yaml`).
+2. Register a cache-sync-gated readyz check (`mgr.GetCache().WaitForCacheSync`)
+   — a cold cache means the ID allocator can't see existing NADs and would
+   double-allocate — plus a plain `healthz.Ping` healthz check, both served on
+   `--health-port` (default `8081`).
+3. Construct `internal/webhook.PodMutator{Client: mgr.GetClient(), Decoder:
+   admission.NewDecoder(scheme), NADDefaults: {MTU: cfg.MTU, InterfaceType:
+   cfg.InterfaceType}}` and register it at `/mutate-v1-pod-vpc-attachment`.
+4. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
+
+Env vars: `GALACTIC_WEBHOOK_PORT`, `GALACTIC_WEBHOOK_METRICS_PORT`,
+`GALACTIC_WEBHOOK_HEALTH_PORT`, `GALACTIC_WEBHOOK_CERT_DIR`,
+`GALACTIC_WEBHOOK_MTU`, `GALACTIC_WEBHOOK_INTERFACE_TYPE` (`internal/config/webhook.go`).
+
+`PodMutator.Handle` (`internal/webhook/pod_mutator.go`) is the pure `Pod in →
+Pod/patch out or Deny` logic:
+
+1. Decode the admitted Pod.
+2. Reinvocation guard: if `galactic.datumapis.com/vpc-attachment-ref` is
+   already set, allow unpatched (already processed).
+3. If `galactic.datumapis.com/vpc` is unset, allow unpatched (silent no-op).
+4. If `pod.Spec.HostNetwork`, allow unpatched (VPC attach doesn't apply).
+5. `Get` the named `VPC`; deny if not found or `Status.VPC` is still empty.
+6. On dry-run, allow unpatched — never create real objects.
+7. `createNAD` (`internal/webhook/pod_mutator.go`): allocate a free
+   VPCAttachment ID (`AllocateVPCAttachmentID`, `allocate.go` — scans NADs
+   labeled for this VPC, not the `VPCAttachment` CRD) and create the NAD
+   (`buildNAD`, `nad.go`), retrying up to 5 times on an `AlreadyExists`
+   collision.
+8. Patch the pod: parse-merge `k8s.v1.cni.cncf.io/networks` (preserving any
+   existing entries) and set the reinvocation-guard annotation, then return
+   `admission.PatchResponseFromRaw`.
+
 ---
 
 ## Configuration
@@ -224,6 +314,7 @@ See [docs/router/configuration.md](../router/configuration.md) for the full refe
 | Field           | Type     | Description                                                             |
 |-----------------|----------|-------------------------------------------------------------------------|
 | `vpc`           | string   | Base62-encoded 48-bit VPC identifier                                    |
+| `vpc_name`      | string   | VPC CR's Kubernetes object name (distinct from `vpc` above); optional — when empty, `galactic-cni` skips VPCAttachment CR creation. Set by `galactic-webhook` when it builds the NAD. |
 | `vpcattachment` | string   | Base62-encoded 16-bit VPCAttachment identifier                          |
 | `interface_type`| string   | `veth` (default) or `tap`; tap mode omits guest-side/host-device config but still runs IPAM and SRv6/BGP publish (see the ADD result section below) |
 | `namespace`     | string   | Kubernetes namespace for BGP CRDs; resolution order is this field → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` (from the conflist) → `DefaultNamespace` (`galactic-system`) |
@@ -325,8 +416,9 @@ pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see t
 | `internal/model`              | both            | `DesiredRouter`, `DesiredPeer`, `DesiredAdvertisement`, `DesiredPolicy`, `DesiredVRFInstance`, `RuntimeStatus`; re-exports BGP API enums | No         |
 | `internal/hash`               | galactic-router | SHA-256 fingerprint of `DesiredRouter` for no-op suppression                                        | No         |
 | `internal/metadata`           | both            | Build-time vars (`Version`, `GitCommit`, `GitTreeState`, `BuildDate`) stamped via `-ldflags`         | No         |
-| `internal/gc`                 | galactic-router | Collects orphaned `BGPAdvertisement`/`BGPVRFInstance` CRDs and stale kernel VRFs; invoked by the GC controller's ticker | No |
-| `internal/cni`                | galactic-cni    | `cmdAdd` / `cmdDel` / `cmdCheck`; CNI PluginConf parsing; BGPVRFInstance/BGPAdvertisement lifecycle; delegates kernel work to plumbing | No |
+| `internal/gc`                 | galactic-router | Collects orphaned `BGPAdvertisement`/`BGPVRFInstance`/`VPCAttachment` CRDs, orphaned NADs (reference-counted via the Multus networks annotation), and stale kernel VRFs; invoked by the GC controller's ticker | No |
+| `internal/cni`                | galactic-cni    | `cmdAdd` / `cmdDel` / `cmdCheck`; CNI PluginConf parsing; BGPVRFInstance/BGPAdvertisement lifecycle; VPCAttachment CR create+status (`vpcattachment.go`); delegates kernel work to plumbing | No |
+| `internal/webhook`            | galactic-webhook| `PodMutator` mutating admission handler: VPCAttachment ID allocation (`allocate.go`, scans NAD labels), NAD construction (`nad.go`), pod patch (`pod_mutator.go`) | No |
 | `internal/cni/ipam`           | galactic-cni    | Built-in IPv6 pool allocator (in-memory, ephemeral) and static IP allocator                          | Yes (pool allocations) |
 | `internal/cni/route`          | galactic-cni    | Host-side static route add/delete via netlink                                                        | No         |
 | `internal/cni/tap`            | galactic-cni    | Tap interface create/delete for VM workloads (Kata, Firecracker, QEMU)                                | No         |
@@ -345,9 +437,10 @@ pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see t
 |-----------------------------------------|----------|----------------------------------------------------------|
 | `github.com/osrg/gobgp/v4`             | v4.7.0   | Embedded BGP server (tenant mode)                        |
 | `go.datum.net/network`                  | bumped frequently | BGP CRD API types (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance) |
-| `sigs.k8s.io/controller-runtime`       | v0.24.1  | Reconciler framework, manager, field indexes             |
-| `github.com/spf13/cobra`               | v1.10.2  | CLI command/flag handling for both binaries              |
-| `github.com/spf13/viper`               | v1.21.0  | Config resolution (flags/env/defaults) for `galactic-router` only; `galactic-cni` resolves config itself (conflist/env/API auto-detect in `internal/cni/config.go`) and does not import viper |
+| `go.datum.net/cloud`                    | pinned pseudo-version | `VPC`/`VPCAttachment` API types; types-only, no controller — imported by both `internal/cni` (creates/updates `VPCAttachment`) and `internal/webhook` (reads `VPC`) |
+| `sigs.k8s.io/controller-runtime`       | v0.24.1  | Reconciler framework, manager, field indexes, webhook server/admission |
+| `github.com/spf13/cobra`               | v1.10.2  | CLI command/flag handling for all three binaries         |
+| `github.com/spf13/viper`               | v1.21.0  | Config resolution (flags/env/defaults) for `galactic-router`/`galactic-webhook`; `galactic-cni` resolves config itself (conflist/env/API auto-detect in `internal/cni/config.go`) and does not import viper |
 | `github.com/containernetworking/cni`   | v1.3.0   | CNI plugin spec, skel, invoke                            |
 | `github.com/containernetworking/plugins` | v1.9.1 | `host-device` plugin, delegated to for moving the guest veth into the pod netns |
 | `github.com/vishvananda/netlink`        | pinned pseudo-version | Linux netlink: VRF, veth, SRv6 routes           |
@@ -378,8 +471,8 @@ pod's IPAM bookkeeping and does not attempt to unwind kernel/CRD state — see t
 
 | Layer      | Command          | Framework           | Scope                                                                |
 |------------|------------------|---------------------|------------------------------------------------------------------------|
-| Unit       | `task test:unit` | `go test -race`     | `internal/cni` (`cni_test.go`, `bgp_test.go`, `netns_test.go` — `buildResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`), `internal/cni/{ipam,tap,veth}`, `internal/installer` (`installer_test.go` — `Bootstrap`/`Run` with mocked k8s client and netlink/host paths), `internal/plumbing/srv6`, `internal/gc`, `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
-| E2E        | `task test:e2e`  | Kind + `go test`    | Full BGPRouter lifecycle in a Kind cluster; builds and loads image    |
+| Unit       | `task test:unit` | `go test -race`     | `internal/cni` (`cni_test.go`, `bgp_test.go`, `netns_test.go`, `vpcattachment_test.go` — `buildResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`, `applyVPCAttachment`), `internal/cni/{ipam,tap,veth}`, `internal/installer` (`installer_test.go` — `Bootstrap`/`Run` with mocked k8s client and netlink/host paths), `internal/plumbing/srv6`, `internal/gc` (incl. `orphans_test.go` — NAD reference-counting, VPCAttachment `Status.PodName` checks), `internal/webhook` (`allocate_test.go`, `nad_test.go`, `pod_mutator_test.go` — fake-client `PodMutator.Handle` coverage), `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
+| E2E        | `task test:e2e`  | Kind + `go test`    | Full BGPRouter lifecycle in a Kind cluster; builds and loads image; `TestCNIVPCAttachmentCreation` (`tests/e2e/e2e_test.go`) exercises `applyVPCAttachment` end-to-end against a real `VPCAttachment` CRD (installed from `datum-cloud/cloud`, same pattern as the BGP CRDs) and a VPC fixture (`scripts/ci.sh`). Does **not** yet cover `galactic-webhook` — see Known Constraints. |
 | CI full    | `task ci`        | all of the above    | lint → build → test:unit → test:e2e                                  |
 
 `internal/plumbing/vrf` has no unit tests — it requires `CAP_NET_ADMIN` and a real kernel. `internal/cni` and `internal/plumbing/srv6` now have unit coverage for their pure-logic paths (this used to not be the case). `internal/plumbing/intf` is pure-function and fully unit-testable.
@@ -412,6 +505,9 @@ Runs on every PR and push to `main`. Two tiers:
 - **`cmdDel` does not tear down shared kernel/CRD state.** By design (see Key Design Decisions above) — cleanup of VRF, veth/tap, routes, SRv6 ingress, and BGP CRDs is deferred to `galactic-router`'s asynchronous GC controller, not performed synchronously in `cmdDel`.
 - **`internal/plumbing/vrf` has no unit tests.** It requires `CAP_NET_ADMIN` and a real kernel. `internal/cni` and `internal/plumbing/srv6` do now have unit coverage for their pure-logic paths. `internal/plumbing/intf` is fully unit-testable (pure functions only). Kernel-path coverage otherwise comes from the e2e suite (`task test:e2e`).
 - **`--mode=transit` is unimplemented.** Accepted by CLI/env validation, but `runCmd` returns an error at startup ("mode=transit is not yet supported").
+- **`galactic-webhook` is not yet wired into `task test:e2e` or `publish.yaml`.** `containers/galactic-webhook/Dockerfile` and `config/webhook/` exist and `task build`/`task lint`/`task test:unit` all cover it, but there is no chainsaw e2e coverage exercising a real admission flow (would need cert-manager installed in the Kind cluster) and no CI job publishing its image. Unit tests use `sigs.k8s.io/controller-runtime/pkg/client/fake` throughout — see `internal/webhook/*_test.go`.
+- **`galactic-cni`'s VPCAttachment integration degrades gracefully, not strictly.** `applyVPCAttachment` (`internal/cni/vpcattachment.go`) silently skips VPCAttachment CR creation when `PluginConf.VPCName` is empty (a NAD not built by `galactic-webhook`) or when there's no IPAM allocation to populate the CRD's required `Spec.Interface.Addresses`/`Status.PodSubnet` fields — existing CNI configs/e2e fixtures that predate this feature keep working unchanged.
+- **`VPCAttachmentStatus.ContainerID` requires exactly 46 hex characters; real container IDs are 64.** `truncateContainerID` (`internal/cni/vpcattachment.go`) truncates to fit, mirroring the same accommodation this repo already makes for annotation-key length limits (`annotationContainerIDLen`).
 - **`galactic-cni`'s install DaemonSet is a Go installer, not a shell script.** `config/cni/configmap.yaml`/`install.sh` were deleted; `config/cni/daemonset.yaml` now runs `hostNetwork: true` with an `install-cni` init container (`command: ["/galactic-cni", "init"]`, calling `installer.Bootstrap`) and a `credential-refresh` main container (`command: ["/galactic-cni", "run"]`, calling `installer.Run`), both on the same image (see CI/CD above). `Bootstrap` writes the CNI binaries to `/opt/cni/bin`, the static conflist to `/etc/cni/net.d/10-galactic.conflist`, and `ca.crt`/kubeconfig to `/var/lib/galactic` (chosen over `/etc/galactic` specifically so it lands under `/var`, the one path immutable-root distros like Talos allow hostPath writes to without a host-level `extraMounts` entry); `Run` refreshes the kubeconfig token every 300s and rotates the CNI log once it exceeds 10MB. `/opt/cni/bin` is fixed by the CNI/kubelet plugin-discovery convention and can't be relocated by this DaemonSet alone — on Talos it needs its own `extraMounts` entry in the machine config if it isn't writable by default. The `run` container also serves gRPC health checks on port `5180` (`livenessProbe`/`readinessProbe` in the DaemonSet spec), and `config/cni/rbac.yaml` grants `get` on `nodes` for `Bootstrap`'s node-identity check.
 
 ---
@@ -431,8 +527,11 @@ Runs on every PR and push to `main`. Two tiers:
 | BGP peer / VRF / advertisement / policy CRUD | `internal/runtime/gobgp/peers.go`, `runtime.go` (`applyVRFs`), `paths.go`, `policies.go` |
 | Controller watch graph                     | `internal/controller/bgprouter_controller.go:SetupWithManager` |
 | CRD status update logic                    | `internal/controller/status.go`, `bgprouter_controller.go:updateRouterStatus` |
-| Orphaned CRD/VRF garbage collection         | `internal/controller/gc_controller.go`, `internal/gc/gc.go`   |
+| Orphaned CRD/VRF/VPCAttachment/NAD garbage collection | `internal/controller/gc_controller.go`, `internal/gc/gc.go`, `internal/gc/orphans_test.go` |
 | RBAC pre-flight self-check                 | `cmd/galactic-router/main.go:checkWatchPermissions`           |
+| Pod → VPC attachment webhook handler        | `internal/webhook/pod_mutator.go:PodMutator.Handle`           |
+| VPCAttachment ID allocation                | `internal/webhook/allocate.go:AllocateVPCAttachmentID`        |
+| VPCAttachment CR creation + status (CNI side) | `internal/cni/vpcattachment.go:applyVPCAttachment`          |
 | Interface naming / base62 encoding         | `internal/plumbing/intf/intf.go`                             |
 | Hash-based no-op suppression               | `internal/hash/hash.go`; annotation `galactic.datum.net/config-hash` on BGPRouter |
 | GoBGP server lifecycle (start/reconfigure) | `internal/runtime/gobgp/server.go`                          |

@@ -1,0 +1,32 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-webhook
+rules:
+  # vpcs (cluster-wide): a pod's vpc-attachment annotation names a VPC in
+  # the pod's own namespace, which can be any namespace — see this repo's
+  # design plan, Handler logic step 5.
+  - apiGroups: ["cloud.datumapis.com"]
+    resources:
+      - vpcs
+    verbs: ["get", "list", "watch"]
+  # network-attachment-definitions (cluster-wide): the webhook creates one
+  # NAD per pod attachment and lists existing ones (labelVPC) to allocate
+  # a free VPCAttachment ID — see internal/webhook/allocate.go.
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources:
+      - network-attachment-definitions
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: galactic-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: galactic-webhook
+subjects:
+  - kind: ServiceAccount
+    name: galactic-webhook
+    namespace: galactic-system

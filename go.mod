@@ -6,6 +6,7 @@ require (
 	github.com/containernetworking/cni v1.3.0
 	github.com/containernetworking/plugins v1.9.1
 	github.com/coreos/go-iptables v0.8.0
+	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/kenshaw/baseconv v0.1.1
 	github.com/lorenzosaino/go-sysctl v0.3.1
 	github.com/osrg/gobgp/v4 v4.7.0
@@ -13,7 +14,8 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260629151558-4e35dc940f49
-	go.datum.net/network v0.0.0-20260731111530-4acc89aef817
+	go.datum.net/cloud v0.0.0-20260719203343-b2deee16a43a
+	go.datum.net/network v0.0.0-20260719211723-8caa91ab0b37
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	google.golang.org/grpc v1.83.0
@@ -32,7 +34,6 @@ require (
 	github.com/eapache/channels v1.1.0 // indirect
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
-	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gaissmai/bart v0.26.1 // indirect

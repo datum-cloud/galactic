@@ -16,6 +16,17 @@ rules:
     resources:
       - network-attachment-definitions
     verbs: ["patch"]
+  # vpcattachments: galactic-cni creates the VPCAttachment CR and writes its
+  # status at ADD time (internal/cni's applyVPCAttachment), at the same
+  # point it creates BGPVRFInstance/BGPAdvertisement above.
+  - apiGroups: ["cloud.datumapis.com"]
+    resources:
+      - vpcattachments
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["cloud.datumapis.com"]
+    resources:
+      - vpcattachments/status
+    verbs: ["get", "update", "patch"]
   - apiGroups: [""]
     resources:
       - nodes

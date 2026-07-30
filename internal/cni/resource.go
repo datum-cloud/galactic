@@ -14,6 +14,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/plumbing/srv6"
@@ -35,19 +36,22 @@ func SetEnableLocalIPAM(v bool) {
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(cniScheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(cniScheme))
+	utilruntime.Must(cloudv1alpha1.AddToScheme(cniScheme))
 }
 
 // resourceTracker tracks resources created during cmdAdd for selective rollback.
 type resourceTracker struct {
-	vpc, vpcAttachment string
-	ifaceType          string
-	vrfCreated         bool
-	routesCreated      int
-	srv6SID            string
-	vrfInstanceCreated bool
-	advCreated         bool
-	k8s                client.Client
-	namespace          string
+	vpc, vpcAttachment   string
+	ifaceType            string
+	vrfCreated           bool
+	routesCreated        int
+	srv6SID              string
+	vrfInstanceCreated   bool
+	advCreated           bool
+	vpcAttachmentCreated bool
+	podNamespace         string
+	k8s                  client.Client
+	namespace            string
 }
 
 // cleanup rolls back all tracked resources in reverse creation order.
@@ -56,7 +60,18 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 
-	// 1. Delete BGPAdvertisement (withdraws prefixes)
+	// 1. Delete VPCAttachment (lives in the pod's namespace, not rt.namespace)
+	if rt.vpcAttachmentCreated && rt.k8s != nil {
+		if err := deleteVPCAttachment(ctx, rt.k8s, rt.vpc, rt.vpcAttachment, rt.podNamespace); err != nil {
+			slog.Error("Rollback: failed to delete VPCAttachment", "err", err,
+				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment, "namespace", rt.podNamespace)
+		} else {
+			slog.Debug("Rollback: deleted VPCAttachment", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment,
+				"namespace", rt.podNamespace)
+		}
+	}
+
+	// 2. Delete BGPAdvertisement (withdraws prefixes)
 	if rt.advCreated && rt.k8s != nil {
 		adv := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{
@@ -72,7 +87,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 2. Delete BGPVRFInstance
+	// 3. Delete BGPVRFInstance
 	if rt.vrfInstanceCreated && rt.k8s != nil {
 		vrfInst := &bgpv1alpha1.BGPVRFInstance{
 			ObjectMeta: metav1.ObjectMeta{
@@ -88,7 +103,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 3. Delete SRv6 ingress route (only if we got a SID)
+	// 4. Delete SRv6 ingress route (only if we got a SID)
 	if rt.srv6SID != "" {
 		if err := srv6.RouteIngressDel(rt.srv6SID, rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to delete SRv6 ingress route", "err", err,
@@ -98,7 +113,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 4. Delete host veth (veth mode only)
+	// 5. Delete host veth (veth mode only)
 	if rt.ifaceType == interfaceTypeVeth {
 		if err := veth.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to delete veth", "err", err,
@@ -108,7 +123,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 5. Delete tap (tap mode only)
+	// 6. Delete tap (tap mode only)
 	if rt.ifaceType == interfaceTypeTap {
 		if err := tap.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to delete tap", "err", err,
@@ -118,7 +133,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 6. Delete VRF (flushes all routes, removes VRF interface)
+	// 7. Delete VRF (flushes all routes, removes VRF interface)
 	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 		slog.Error("Rollback: failed to delete VRF", "err", err,
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
