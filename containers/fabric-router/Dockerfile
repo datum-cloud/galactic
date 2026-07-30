@@ -5,13 +5,12 @@
 ARG FRR_VERSION=10.2.0
 FROM quay.io/frrouting/frr:${FRR_VERSION}
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
       tcpdump \
-      mtr-tiny \
-      telnet \
-      dnsutils \
-      curl \
-    && rm -rf /var/lib/apt/lists/*
+      mtr \
+      busybox-extras \
+      bind-tools \
+      curl
 
 # Static FRR config common to every fabric/transit role. Copied to a
 # non-standard path (rather than /etc/frr directly) because /etc/frr is an
