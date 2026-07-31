@@ -167,6 +167,75 @@ func isDefaultRouteDst(dst *net.IPNet) bool {
 	return ones == 0
 }
 
+// flushGuestNetnsConfig removes any IP addresses and default routes
+// configured on ifName inside the container netns, without deleting the
+// link itself. No-op if ifName is not present.
+//
+// DEL normally relies on hostDevice DEL moving the guest veth end back out
+// of the container netns to flush this state as a side effect: the kernel
+// strips a link's addresses/routes when it genuinely crosses a namespace
+// boundary. But that move is a no-op — and so triggers no such flush — when
+// the "container" netns is the same namespace the link already lives in
+// (e.g. a hostNetwork pod with a Multus secondary attachment, where
+// args.Netns resolves to the host's own root netns rather than a distinct
+// per-sandbox namespace). Left unflushed, that state survives indefinitely
+// (there is no ephemeral sandbox netns to tear down and reclaim it), and the
+// next ADD on that same interface fails with "file exists" trying to add a
+// default route that never went away. Calling this unconditionally in DEL,
+// ahead of hostDevice DEL, makes cleanup reliable regardless of whether the
+// move-triggered flush fires.
+func flushGuestNetnsConfig(netnsPath, ifName string) error {
+	containerNS, err := ns.GetNS(netnsPath)
+	if err != nil {
+		return fmt.Errorf("get container netns %q: %w", netnsPath, err)
+	}
+	defer containerNS.Close() //nolint:errcheck // netns close on teardown
+
+	return containerNS.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return fmt.Errorf("create netlink handle: %w", err)
+		}
+		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+
+		link, err := handle.LinkByName(ifName)
+		if err != nil {
+			return nil // interface not present — nothing to flush
+		}
+
+		for _, family := range []int{netlink.FAMILY_V6, netlink.FAMILY_V4} {
+			routes, err := handle.RouteList(link, family)
+			if err != nil {
+				return fmt.Errorf("list routes on %q: %w", ifName, err)
+			}
+			for _, route := range routes {
+				if !isDefaultRouteDst(route.Dst) {
+					continue
+				}
+				if err := handle.RouteDel(&route); err != nil {
+					return fmt.Errorf("delete default route on %q: %w", ifName, err)
+				}
+			}
+
+			addrs, err := handle.AddrList(link, family)
+			if err != nil {
+				return fmt.Errorf("list addresses on %q: %w", ifName, err)
+			}
+			for _, addr := range addrs {
+				if addr.IP.IsLinkLocalUnicast() {
+					continue
+				}
+				if err := handle.AddrDel(link, &addr); err != nil {
+					return fmt.Errorf("delete address %s on %q: %w", addr.IPNet, ifName, err)
+				}
+			}
+		}
+
+		slog.Debug("netns: flushed guest interface addresses/routes", "ifName", ifName, "netns", netnsPath)
+		return nil
+	})
+}
+
 // readGuestInterface reads the MAC and MTU of the guest veth endpoint
 // inside the container network namespace.
 func readGuestInterface(netnsPath, ifName string) (string, int, error) {

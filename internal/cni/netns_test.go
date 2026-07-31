@@ -362,3 +362,106 @@ func TestConfigureInterfaceInNetnsConflictingGatewayErrors(t *testing.T) {
 		t.Fatalf("default route gateway = %v, want unchanged %v", gw, otherGateway)
 	}
 }
+
+// ---- flushGuestNetnsConfig ---------------------------------------------
+
+// TestFlushGuestNetnsConfigRemovesAddressAndRoute verifies that a configured
+// address and default route are both removed, while the link itself
+// survives (unlike cleanupContainerNetns, which deletes the whole
+// interface).
+func TestFlushGuestNetnsConfigRemovesAddressAndRoute(t *testing.T) {
+	netnsPath, cleanup := createTestNetnsWithDummy(t)
+	defer cleanup()
+
+	if err := configureInterfaceInNetns(netnsPath, "test-dummy", testIPNet, testGateway, nil, nil); err != nil {
+		t.Fatalf("configureInterfaceInNetns: %v", err)
+	}
+
+	if err := flushGuestNetnsConfig(netnsPath, "test-dummy"); err != nil {
+		t.Fatalf("flushGuestNetnsConfig: %v", err)
+	}
+
+	if gw := defaultRouteVia(t, netnsPath); gw != nil {
+		t.Fatalf("default route gateway = %v, want nil (flushed)", gw)
+	}
+
+	nsObj, err := ns.GetNS(netnsPath)
+	if err != nil {
+		t.Fatalf("open netns %q: %v", netnsPath, err)
+	}
+	defer nsObj.Close() //nolint:errcheck // best-effort cleanup
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
+
+		link, err := handle.LinkByName("test-dummy")
+		if err != nil {
+			return fmt.Errorf("link should still exist after flush: %w", err)
+		}
+		addrs, err := handle.AddrList(link, netlink.FAMILY_V6)
+		if err != nil {
+			return err
+		}
+		for _, a := range addrs {
+			if a.Equal(netlink.Addr{IPNet: testIPNet}) {
+				return fmt.Errorf("address %s still present after flush", testIPNet)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFlushGuestNetnsConfigNonExistentInterface verifies the flush is a
+// no-op (not an error) when the named interface isn't present — the case
+// where host-device DEL never got as far as moving anything in.
+func TestFlushGuestNetnsConfigNonExistentInterface(t *testing.T) {
+	netnsPath, cleanup := createTestNetnsWithDummy(t)
+	defer cleanup()
+
+	if err := flushGuestNetnsConfig(netnsPath, "does-not-exist"); err != nil {
+		t.Fatalf("expected nil for non-existent interface, got: %v", err)
+	}
+}
+
+// TestFlushGuestNetnsConfigThenRetryAddSucceeds reproduces the production
+// incident: a hostNetwork pod's Multus secondary attachment resolves
+// args.Netns to the same namespace the guest link already lives in, so
+// host-device DEL's cross-namespace move — and the kernel's implicit
+// address/route flush that comes with a *real* namespace change — never
+// happens. Without an explicit flush, the leftover default route wedges the
+// next ADD with "file exists" even though the link's own idempotency check
+// (TestConfigureInterfaceInNetnsAddTwiceIsIdempotent) only covers a
+// same-link retry, not one where cleanup ran in between but the flush
+// silently no-opped.
+func TestFlushGuestNetnsConfigThenRetryAddSucceeds(t *testing.T) {
+	netnsPath, cleanup := createTestNetnsWithDummy(t)
+	defer cleanup()
+
+	if err := configureInterfaceInNetns(netnsPath, "test-dummy", testIPNet, testGateway, nil, nil); err != nil {
+		t.Fatalf("first configureInterfaceInNetns: %v", err)
+	}
+
+	// Simulate DEL for the same-namespace (hostNetwork) case: the
+	// move-based flush hostDevice DEL relies on doesn't fire, so DEL's only
+	// effective cleanup is the explicit flush.
+	if err := flushGuestNetnsConfig(netnsPath, "test-dummy"); err != nil {
+		t.Fatalf("flushGuestNetnsConfig: %v", err)
+	}
+
+	// The retried ADD must now succeed against the same link.
+	if err := configureInterfaceInNetns(netnsPath, "test-dummy", testIPNet, testGateway, nil, nil); err != nil {
+		t.Fatalf("configureInterfaceInNetns after flush: %v", err)
+	}
+
+	gw := defaultRouteVia(t, netnsPath)
+	if gw == nil || !gw.Equal(testGateway) {
+		t.Fatalf("default route gateway = %v, want %v", gw, testGateway)
+	}
+}
