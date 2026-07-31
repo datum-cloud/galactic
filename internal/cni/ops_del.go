@@ -40,11 +40,26 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
-	// Forward DEL to host-device delegated plugin (CNI spec §4).
-	// host-device DEL is idempotent — missing devices are not errors.
-	// Only applies to veth mode; tap mode has no host-device delegation.
+	// Forward DEL to host-device delegated plugin (CNI spec §4). This moves
+	// the guest veth end back out of the container netns, which as a side
+	// effect flushes the addresses/routes galactic-cni's IPAM step installed
+	// on it — the primary mechanism for cleaning those up. Only applies to
+	// veth mode; tap mode has no host-device delegation.
+	//
+	// DEL must always return success per the CNI spec, so an error here
+	// (e.g. the device was never moved into the netns because ADD failed
+	// before reaching that step, or the netns is already gone) is logged
+	// rather than propagated. A logged failure here is the signal to look
+	// for: it means the route/address were NOT flushed via this path and may
+	// still be sitting in the container netns for whatever picks up
+	// args.Netns next — see addAddrIfMissing/addDefaultRouteIfMissing in
+	// netns.go, which is what makes a subsequent ADD retry against that
+	// leftover state safe instead of failing with "file exists".
 	if pluginConf.InterfaceType == interfaceTypeVeth {
-		_ = hostDevice("DEL", args, pluginConf)
+		if err := hostDevice("DEL", args, pluginConf); err != nil {
+			slog.Warn("DEL: host-device DEL failed, guest interface (and any route/address) may still be in the netns",
+				"err", err, "containerID", args.ContainerID, "netns", args.Netns)
+		}
 	}
 
 	// Shared resources (VRF, veth/tap, routes, SRv6 ingress, BGPAdvertisement,
