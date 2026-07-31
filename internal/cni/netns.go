@@ -62,7 +62,11 @@ func configureInterfaceInNetns(
 
 // addAddrAndDefaultRoute assigns ipNet to link and, if gateway is set,
 // installs a default route via it. No-op when ipNet is nil (family not in
-// use for this attachment).
+// use for this attachment). Both the address and the route are added
+// idempotently: a call that finds its target already in place (e.g. a
+// retried CNI ADD against a netns that a previous, non-DEL'd ADD already
+// configured) succeeds without touching kernel state; a call that finds
+// different, conflicting state fails loudly instead of overwriting it.
 func addAddrAndDefaultRoute(
 	handle *netlink.Handle, link netlink.Link, ifName string, ipNet *net.IPNet, gateway net.IP,
 ) error {
@@ -70,13 +74,70 @@ func addAddrAndDefaultRoute(
 		return nil
 	}
 
-	if err := handle.AddrAdd(link, &netlink.Addr{IPNet: ipNet}); err != nil {
-		return fmt.Errorf("add IP %s to %q: %w", ipNet, ifName, err)
+	if err := addAddrIfMissing(handle, link, ifName, ipNet); err != nil {
+		return err
 	}
 
 	if gateway == nil {
 		return nil
 	}
+	return addDefaultRouteIfMissing(handle, link, ifName, gateway)
+}
+
+// addrFamily returns the netlink address family for an IP, so callers can
+// scope AddrList/RouteList lookups to the family being configured.
+func addrFamily(ip net.IP) int {
+	if ip.To4() != nil {
+		return netlink.FAMILY_V4
+	}
+	return netlink.FAMILY_V6
+}
+
+// addAddrIfMissing adds ipNet to link unless an identical address (same IP
+// and prefix length) is already present, in which case it is a no-op. A
+// link can legitimately carry multiple distinct addresses per family, so no
+// existing address is ever treated as a conflict here — only an exact match
+// short-circuits the add.
+func addAddrIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, ipNet *net.IPNet) error {
+	want := netlink.Addr{IPNet: ipNet}
+
+	existing, err := handle.AddrList(link, addrFamily(ipNet.IP))
+	if err != nil {
+		return fmt.Errorf("list addresses on %q: %w", ifName, err)
+	}
+	for _, addr := range existing {
+		if addr.Equal(want) {
+			return nil // already configured by a previous ADD
+		}
+	}
+
+	if err := handle.AddrAdd(link, &want); err != nil {
+		return fmt.Errorf("add IP %s to %q: %w", ipNet, ifName, err)
+	}
+	return nil
+}
+
+// addDefaultRouteIfMissing installs a default route via gateway on link
+// unless a default route via that same gateway already exists, in which
+// case it is a no-op. If a default route via a *different* gateway already
+// exists, that's a real misconfiguration (not something a retried ADD
+// should paper over), so it is returned as an error instead.
+func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, gateway net.IP) error {
+	existing, err := handle.RouteList(link, addrFamily(gateway))
+	if err != nil {
+		return fmt.Errorf("list routes on %q: %w", ifName, err)
+	}
+	for _, r := range existing {
+		if !isDefaultRouteDst(r.Dst) {
+			continue
+		}
+		if r.Gw.Equal(gateway) {
+			return nil // already configured by a previous ADD
+		}
+		return fmt.Errorf("default route on %q already points via %s, refusing to add conflicting route via %s",
+			ifName, r.Gw, gateway)
+	}
+
 	// onlink: the IPv4 pool allocates a /32 host address (no on-link subnet
 	// route to the gateway), so the kernel refuses this route with
 	// ENETUNREACH unless told to treat the gateway as directly reachable.
@@ -92,6 +153,18 @@ func addAddrAndDefaultRoute(
 		return fmt.Errorf("add default route via %s: %w", gateway, err)
 	}
 	return nil
+}
+
+// isDefaultRouteDst reports whether dst represents a default route
+// (0.0.0.0/0 or ::/0). netlink represents this as a nil Dst on routes it
+// creates itself, but routes read back from the kernel may instead carry an
+// explicit zero-length-prefix net.IPNet.
+func isDefaultRouteDst(dst *net.IPNet) bool {
+	if dst == nil {
+		return true
+	}
+	ones, _ := dst.Mask.Size()
+	return ones == 0
 }
 
 // readGuestInterface reads the MAC and MTU of the guest veth endpoint
