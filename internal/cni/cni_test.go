@@ -1233,6 +1233,50 @@ func TestCmdDelIdempotentMissingResources(t *testing.T) {
 	}
 }
 
+// TestCmdDelFlushesGuestNetnsConfig reproduces the production incident: a
+// hostNetwork pod's Multus secondary attachment resolves args.Netns to the
+// same namespace the guest link already lives in, so host-device DEL's
+// move-back-out-of-the-netns — and the kernel's implicit address/route
+// flush that only fires on a *real* namespace change — never happens.
+// cmdDel must flush the guest interface's address/default route itself
+// (flushGuestNetnsConfig), not rely solely on that side effect, or the next
+// ADD against the same interface wedges with "add default route ...: file
+// exists".
+func TestCmdDelFlushesGuestNetnsConfig(t *testing.T) {
+	requireRoot(t)
+
+	netnsPath, cleanup := createTestNetnsWithDummy(t)
+	defer cleanup()
+
+	if err := configureInterfaceInNetns(netnsPath, "test-dummy", testIPNet, testGateway, nil, nil); err != nil {
+		t.Fatalf("configureInterfaceInNetns: %v", err)
+	}
+
+	conf := fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test",`+
+			`"type":"galactic-cni","vpc":"%s",`+
+			`"vpcattachment":"%s","interface_type":"veth"}`,
+		testVPC, testAttachment,
+	)
+	args := &skel.CmdArgs{
+		ContainerID: testContainerID,
+		Netns:       netnsPath,
+		IfName:      "test-dummy",
+		StdinData:   []byte(conf),
+	}
+
+	// host-device DEL will fail (no host-device binary next to the test
+	// binary) — that's expected and non-fatal, matching production when the
+	// move-based side effect doesn't apply anyway.
+	if err := cmdDel(args); err != nil {
+		t.Fatalf("cmdDel returned error = %v, want nil", err)
+	}
+
+	if gw := defaultRouteVia(t, netnsPath); gw != nil {
+		t.Fatalf("default route gateway = %v, want nil (flushed by DEL)", gw)
+	}
+}
+
 func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
 	t.Helper()
 	_, ipnet, err := net.ParseCIDR(cidr)
