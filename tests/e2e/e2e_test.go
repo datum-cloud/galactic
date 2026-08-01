@@ -310,6 +310,7 @@ func TestCNIVPCAttachmentCreation(t *testing.T) {
 		vpcName       = "e2e-vpc" // fixture created in scripts/ci.sh
 		attachedPod   = "e2e-attached-pod"
 		attachmentCR  = vpc + "-" + vpcAttachment
+		nadName       = "galactic-vpcattach" // must match cniConf's "name" field below
 	)
 	// VPCAttachmentStatus.ContainerID requires exactly 46 characters (see
 	// internal/cni/vpcattachment.go's containerIDStatusLen) — real container
@@ -322,6 +323,25 @@ func TestCNIVPCAttachmentCreation(t *testing.T) {
 	deletePod(t, podName)
 	t.Cleanup(func() { deleteVPCAttachment(t, attachmentCR) })
 	deleteVPCAttachment(t, attachmentCR)
+	t.Cleanup(func() { deleteNAD(t, nadName) })
+	deleteNAD(t, nadName)
+
+	// In production galactic-webhook creates this NAD before the pod is ever
+	// scheduled (see internal/webhook/nad.go). This test exercises
+	// galactic-cni's VPCAttachment creation in isolation, so it stands in for
+	// that step directly — galactic-cni's annotateNAD (internal/cni/nad.go)
+	// still expects the NAD to already exist and hard-fails otherwise.
+	nadYAML := `apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: ` + nadName + `
+  namespace: galactic-system
+spec:
+  config: '{}'
+`
+	if out, err := kubectlApply(t.Context(), nadYAML); err != nil {
+		t.Fatalf("create stub NAD: %v\n%s", err, out)
+	}
 
 	_, err := kubectl(
 		t.Context(),
@@ -459,6 +479,14 @@ func kubectl(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// kubectlApply runs `kubectl apply -f -`, piping manifest in via stdin.
+func kubectlApply(ctx context.Context, manifest string) (string, error) {
+	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // waitForPodPhase polls until the named pod reaches wantPhase or the timeout
 // expires. It returns an error describing the last observed phase on timeout.
 func waitForPodPhase(t *testing.T, name, wantPhase string) error {
@@ -490,4 +518,13 @@ func deleteVPCAttachment(t *testing.T, name string) {
 	t.Helper()
 	//nolint:errcheck
 	kubectl(t.Context(), "delete", "vpcattachments.cloud.datumapis.com", name, "--ignore-not-found", "--wait=false")
+}
+
+// deleteNAD removes a NetworkAttachmentDefinition by name, ignoring
+// not-found errors. Mirrors deletePod's cleanup pattern.
+func deleteNAD(t *testing.T, name string) {
+	t.Helper()
+	//nolint:errcheck
+	kubectl(t.Context(), "delete", "network-attachment-definitions.k8s.cni.cncf.io", name,
+		"--ignore-not-found", "--wait=false")
 }

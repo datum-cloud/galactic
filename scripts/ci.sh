@@ -70,6 +70,17 @@ case "$COMMAND" in
       curl -sL "${CLOUD_CRD_URL}/${crd}" | kubectl apply -f -
     done
 
+    echo "--- Installing NetworkAttachmentDefinition CRD (Multus)"
+    # galactic-cni's annotateNAD (internal/cni/nad.go) patches a NAD once a
+    # pod namespace is known -- needed by TestCNIVPCAttachmentCreation, which
+    # (unlike the older tests) sets K8S_POD_NAMESPACE in CNI_ARGS. No Multus
+    # DaemonSet runs in this e2e cluster; only the CRD is needed for the CNI
+    # plugin's own patch call to resolve. Pinned to a specific commit, same
+    # reproducibility rationale as the BGP/VPC CRD installs above.
+    NAD_CRD_SHA="46fcc4112dcb9af0b277dc85fec8178acbddd5ab"
+    curl -sL "https://raw.githubusercontent.com/k8snetworkplumbingwg/network-attachment-definition-client/${NAD_CRD_SHA}/artifacts/networks-crd.yaml" \
+      | kubectl apply -f -
+
     echo "--- Applying galactic-system namespace and CNI RBAC"
     kubectl apply -k config/system
     kubectl apply -f config/cni/serviceaccount.yaml -f config/cni/rbac.yaml
