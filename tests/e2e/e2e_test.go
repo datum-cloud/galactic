@@ -181,6 +181,14 @@ func TestCNITapInterface(t *testing.T) {
 	// hostNetwork is required too: net.vrf.strict_mode (enabled on the Kind
 	// node in scripts/ci.sh) is per-netns, and the SEG6Local VRFTABLE route
 	// this test exercises needs it set in whichever netns the route lands in.
+	// The bpf-fs hostPath volume mirrors config/cni/daemonset.yaml's own
+	// bpf-fs mount: the eBPF uSID datapath's maps can only be pinned under
+	// attach.PinDir if the node's real bpffs (mounted onto the Kind node in
+	// scripts/ci.sh) is visible inside the pod -- a pod's own mount
+	// namespace can't create /sys/fs/bpf itself.
+	overrides := fmt.Sprintf(`{"spec":{"serviceAccountName":"galactic-cni","hostNetwork":true,`+
+		`"volumes":[{"name":"bpf-fs","hostPath":{"path":"/sys/fs/bpf","type":"Directory"}}],`+
+		`"containers":[{"name":%q,"volumeMounts":[{"name":"bpf-fs","mountPath":"/sys/fs/bpf"}]}]}}`, name)
 	_, err := kubectl(
 		t.Context(),
 		"run", name,
@@ -188,7 +196,7 @@ func TestCNITapInterface(t *testing.T) {
 		"--image-pull-policy=Never",
 		"--restart=Never",
 		"--privileged",
-		"--overrides={\"spec\":{\"serviceAccountName\":\"galactic-cni\",\"hostNetwork\":true}}",
+		"--overrides="+overrides,
 		"--command", "--",
 		"sleep", "infinity",
 	)
