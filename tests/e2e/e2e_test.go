@@ -185,23 +185,26 @@ func TestCNITapInterface(t *testing.T) {
 	// bpf-fs mount: the eBPF uSID datapath's maps can only be pinned under
 	// attach.PinDir if the node's real bpffs (mounted onto the Kind node in
 	// scripts/ci.sh) is visible inside the pod -- a pod's own mount
-	// namespace can't create /sys/fs/bpf itself.
+	// namespace can't create /sys/fs/bpf itself. The whole container spec
+	// (image, command, privileged) has to live in --overrides too, not the
+	// usual --image/--command/--privileged flags: kubectl run's overrides
+	// merge replaces the generated "containers" list wholesale rather than
+	// merging into it, so anything set only via those flags would otherwise
+	// be silently dropped the moment "containers" is also set here.
 	overrides := fmt.Sprintf(`{"spec":{"serviceAccountName":"galactic-cni","hostNetwork":true,`+
 		`"volumes":[{"name":"bpf-fs","hostPath":{"path":"/sys/fs/bpf","type":"Directory"}}],`+
-		`"containers":[{"name":%q,"volumeMounts":[{"name":"bpf-fs","mountPath":"/sys/fs/bpf"}]}]}}`, name)
-	_, err := kubectl(
+		`"containers":[{"name":%q,"image":%q,"imagePullPolicy":"Never","command":["sleep","infinity"],`+
+		`"securityContext":{"privileged":true},`+
+		`"volumeMounts":[{"name":"bpf-fs","mountPath":"/sys/fs/bpf"}]}]}}`, name, image())
+	runOut, err := kubectl(
 		t.Context(),
 		"run", name,
 		"--image="+image(),
-		"--image-pull-policy=Never",
 		"--restart=Never",
-		"--privileged",
 		"--overrides="+overrides,
-		"--command", "--",
-		"sleep", "infinity",
 	)
 	if err != nil {
-		t.Fatalf("kubectl run failed: %v", err)
+		t.Fatalf("kubectl run failed: %v\n%s", err, runOut)
 	}
 
 	if err := waitForPodPhase(t, name, "Running"); err != nil {
