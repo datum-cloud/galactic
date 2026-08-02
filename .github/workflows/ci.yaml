@@ -68,6 +68,9 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install eBPF build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+
       - name: Build binary
         run: task build
 
