@@ -24,7 +24,10 @@ const (
 	DropReasonStripFailed     uint32 = 4
 	DropReasonFibLookupFailed uint32 = 5
 	DropReasonRedirectFailed  uint32 = 6
-	DropReasonCount           uint32 = 7
+	DropReasonFibNoNeigh      uint32 = 7
+	DropReasonFibUnreachable  uint32 = 8
+	DropReasonFibFragNeeded   uint32 = 9
+	DropReasonCount           uint32 = 10
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
@@ -39,4 +42,7 @@ var DropReasonNames = map[uint32]string{
 	DropReasonStripFailed:     "strip_failed",
 	DropReasonFibLookupFailed: "fib_lookup_failed",
 	DropReasonRedirectFailed:  "redirect_failed",
+	DropReasonFibNoNeigh:      "fib_no_neigh",
+	DropReasonFibUnreachable:  "fib_unreachable",
+	DropReasonFibFragNeeded:   "fib_frag_needed",
 }

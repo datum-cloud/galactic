@@ -185,6 +185,42 @@ func allocateArgument(
 		routerName, uint16(uformat.ArgumentMin), uint16(uformat.ArgumentMax), len(used))
 }
 
+// checkArgumentCollision detects whether a race condition occurred where
+// another BGPVRFInstance on the same router was assigned the same VRFID
+// concurrently (allocateArgument's list-then-write is not atomic against a
+// second, concurrent CNI ADD racing it). Any other instance found still
+// holding this VRFID is treated as a collision -- deliberately without a
+// tie-breaker: allocateArgument -> create -> checkArgumentCollision runs
+// sequentially within one call, so if A's create happens before B's create,
+// then either B's own check (which always runs after B's own create) sees
+// A's already-committed CRD and B reports a collision, or it doesn't only if
+// A's check already ran (and hence already reported the collision itself)
+// before B created its CRD. At least one side always detects it this way; a
+// tie-breaker that lets exactly one side "win" without that guarantee (as a
+// prior version of this function did) can let both sides pass when the two
+// creates and checks interleave, leaving two BGPVRFInstances -- and,
+// consequently, two vrf_table registrations -- permanently sharing the same
+// VRFID. Both sides erroring out is harmless: the caller's non-transient
+// error triggers the failed-ADD rollback (resourceTracker.cleanup), which
+// deletes each side's own BGPVRFInstance, and the CNI runtime retries ADD.
+func checkArgumentCollision(
+	ctx context.Context, k8s client.Client, namespace, routerName, vrfName string, vrfID int32,
+) error {
+	list := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list BGPVRFInstances to verify argument uniqueness: %w", err)
+	}
+	for _, inst := range list.Items {
+		if inst.Spec.RouterRef == nil || inst.Spec.RouterRef.Name != routerName {
+			continue
+		}
+		if inst.Name != vrfName && inst.Spec.VRFID == vrfID {
+			return fmt.Errorf("argument collision: VRFID %d claimed by both %s and %s, retrying", vrfID, inst.Name, vrfName)
+		}
+	}
+	return nil
+}
+
 // lookupBGPRouter finds the BGPRouter targeting this node in the given namespace.
 // Returns an error if none is found or if multiple are found (ambiguous).
 func lookupBGPRouter(ctx context.Context, k8s client.Client, nodeName, namespace string) (bgpConfig, error) {
@@ -360,6 +396,31 @@ func publishBGPStateK8s(
 			return fmt.Errorf("compute route target: %w", err)
 		}
 
+		// Create the BGPVRFInstance to configure the VRF with its VRFID and
+		// import/export route targets. This must be created before advertisements
+		// so the BGP runtime has the VRF context when originating EVPN paths.
+		vrfName := bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment)
+		vrfInst := &bgpv1alpha1.BGPVRFInstance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      vrfName,
+				Namespace: namespace,
+			},
+		}
+		_, err = controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
+			vrfInst.Spec = buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("apply BGPVRFInstance: %w", err)
+		}
+		tracker.vrfInstanceCreated = true
+		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
+			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName)
+
+		if err := checkArgumentCollision(ctx, k8s, namespace, bgp.routerName, vrfName, vrfID); err != nil {
+			return err
+		}
+
 		// eBPF uSID datapath registration -- the only forwarding path
 		// (the legacy seg6local static-route path was removed once this
 		// datapath covered both veth and tap attachments). registered is
@@ -383,27 +444,6 @@ func publishBGPStateK8s(
 			tracker.ebpfBlock = ebpfBlock
 			tracker.ebpfArgument = uint16(vrfID)
 		}
-
-		// Create the BGPVRFInstance to configure the VRF with its VRFID and
-		// import/export route targets. This must be created before advertisements
-		// so the BGP runtime has the VRF context when originating EVPN paths.
-		vrfName := bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment)
-		vrfInst := &bgpv1alpha1.BGPVRFInstance{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      vrfName,
-				Namespace: namespace,
-			},
-		}
-		_, err = controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
-			vrfInst.Spec = buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("apply BGPVRFInstance: %w", err)
-		}
-		tracker.vrfInstanceCreated = true
-		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
-			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName)
 
 		// Create the BGPAdvertisement to originate the pod's subnet prefix(es).
 		adv := &bgpv1alpha1.BGPAdvertisement{
@@ -742,12 +782,41 @@ func egressKindForInterfaceType(ifaceType string) (uint32, error) {
 // the maps were reachable at Register time. Idempotent: not an error if
 // the entry is already gone (VRFTable.Unregister's own documented
 // behavior).
-func unregisterEBPFDatapath(block uint64, argument uint16, pinDir string) error {
+//
+// expectedVRFTableID must be this attachment's own VRF table id (recomputed
+// by the caller via vrf.TableID, not read back from the tracker, since it's
+// cheap and deterministic to recompute and the whole point here is not to
+// trust stale state). A retried k8s-op attempt (retryK8sOps) can re-run the
+// same publishBGPStateK8s closure without re-registering the eBPF entry
+// (registerEBPFDatapath only runs again if that attempt gets far enough),
+// so by the time a later attempt's checkArgumentCollision failure triggers
+// this rollback, the (block, argument) slot this attachment originally
+// wrote may have since been overwritten by the very other attachment the
+// collision was detected against (vrf_table's key is just (block,
+// argument); Register always overwrites). Unregistering unconditionally in
+// that case would delete a live attachment's forwarding entry instead of
+// this rolled-back one's own -- so this only deletes the entry when it
+// still resolves to expectedVRFTableID, and leaves it alone otherwise.
+func unregisterEBPFDatapath(block uint64, argument uint16, expectedVRFTableID uint32, pinDir string) error {
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
 		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)
 	}
 	defer func() { _ = closer.Close() }()
+
+	entry, ok, err := registry.VRF.Get(block, argument)
+	if err != nil {
+		return fmt.Errorf("read eBPF vrf_table entry before unregister: %w", err)
+	}
+	if !ok {
+		return nil // already gone
+	}
+	if entry.VRFTableID != expectedVRFTableID {
+		slog.Warn("Rollback: eBPF vrf_table entry no longer belongs to this attachment, leaving it in place",
+			"block", block, "argument", argument,
+			"expectedVRFTableID", expectedVRFTableID, "currentVRFTableID", entry.VRFTableID)
+		return nil
+	}
 
 	if err := registry.VRF.Unregister(block, argument); err != nil {
 		return fmt.Errorf("unregister eBPF vrf_table entry: %w", err)

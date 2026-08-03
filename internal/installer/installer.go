@@ -598,7 +598,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			if ebpfState.objs == nil {
 				continue
 			}
-			healthErr := attach.Health(ebpfState.objs, ebpfState.ifaces)
+			h := attach.Handle{Objs: ebpfState.objs}
+			healthErr := h.Healthy()
 			healthy := healthErr == nil
 			if healthy != ebpfLastHealthy {
 				if healthy {

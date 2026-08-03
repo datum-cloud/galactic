@@ -186,6 +186,7 @@ func (t *VRFTable) List() ([]VRFEntry, error) {
 				Argument: uint16(rawKey & (1<<uformat.ArgumentBits - 1)),
 			},
 			VRFTableID: value.VrfTableId,
+			EgressKind: value.EgressKind,
 			Generation: value.Generation,
 			Packets:    value.Packets,
 			Bytes:      value.Bytes,

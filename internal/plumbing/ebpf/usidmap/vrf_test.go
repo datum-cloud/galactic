@@ -201,7 +201,7 @@ func TestVRFTable_List(t *testing.T) {
 	if err := vt.Register(testBlock, 0x001, 10, EgressKindVeth); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if err := vt.Register(testBlock, 0x002, 20, EgressKindVeth); err != nil {
+	if err := vt.Register(testBlock, 0x002, 20, EgressKindTap); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -217,11 +217,11 @@ func TestVRFTable_List(t *testing.T) {
 	for _, e := range entries {
 		byArgument[e.Argument] = e
 	}
-	if e, ok := byArgument[0x001]; !ok || e.VRFTableID != 10 || e.Block != testBlock {
-		t.Errorf("List entry for argument 0x001 = %+v, ok=%v, want Block=%#x VRFTableID=10", e, ok, testBlock)
+	if e, ok := byArgument[0x001]; !ok || e.VRFTableID != 10 || e.Block != testBlock || e.EgressKind != EgressKindVeth {
+		t.Errorf("List entry for argument 0x001 = %+v, ok=%v, want Block=%#x VRFTableID=10 EgressKind=Veth", e, ok, testBlock)
 	}
-	if e, ok := byArgument[0x002]; !ok || e.VRFTableID != 20 || e.Block != testBlock {
-		t.Errorf("List entry for argument 0x002 = %+v, ok=%v, want Block=%#x VRFTableID=20", e, ok, testBlock)
+	if e, ok := byArgument[0x002]; !ok || e.VRFTableID != 20 || e.Block != testBlock || e.EgressKind != EgressKindTap {
+		t.Errorf("List entry for argument 0x002 = %+v, ok=%v, want Block=%#x VRFTableID=20 EgressKind=Tap", e, ok, testBlock)
 	}
 }
 

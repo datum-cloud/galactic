@@ -31,7 +31,10 @@ const (
 	dropReasonStripFailed     = 4
 	dropReasonFibLookupFailed = 5
 	dropReasonRedirectFailed  = 6
-	dropReasonCount           = 7
+	dropReasonFibNoNeigh      = 7
+	dropReasonFibUnreachable  = 8
+	dropReasonFibFragNeeded   = 9
+	dropReasonCount           = 10
 )
 
 const (

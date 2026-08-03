@@ -238,6 +238,62 @@ func TestAllocateArgument(t *testing.T) {
 	})
 }
 
+// ---- checkArgumentCollision -------------------------------------------------
+
+// TestCheckArgumentCollision guards against a regression of the fix where a
+// lexicographic-name tie-break let exactly one of two colliding instances
+// "win" without ever proving the other side's check would run after this
+// one's create -- concurrent create+check interleaving could let both sides
+// pass. Detection must not depend on name ordering: it must fire regardless
+// of whether the other instance's name sorts before or after this one's.
+func TestCheckArgumentCollision(t *testing.T) {
+	const (
+		namespace  = "default"
+		routerName = "router-a"
+		vrfID      = int32(42)
+	)
+
+	t.Run("no collision when no other instance shares the VRFID", func(t *testing.T) {
+		other := vrfInstanceForRouter("other-att", namespace, routerName, vrfID+1)
+		k8s := fakeClient(other)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "this-att", vrfID); err != nil {
+			t.Errorf("checkArgumentCollision() = %v, want nil", err)
+		}
+	})
+
+	t.Run("detects collision when the other name sorts before this one", func(t *testing.T) {
+		colliding := vrfInstanceForRouter("aaa-att", namespace, routerName, vrfID)
+		k8s := fakeClient(colliding)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "zzz-att", vrfID); err == nil {
+			t.Error("checkArgumentCollision() = nil, want a collision error")
+		}
+	})
+
+	t.Run("detects collision when the other name sorts after this one", func(t *testing.T) {
+		colliding := vrfInstanceForRouter("zzz-att", namespace, routerName, vrfID)
+		k8s := fakeClient(colliding)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "aaa-att", vrfID); err == nil {
+			t.Error("checkArgumentCollision() = nil, want a collision error")
+		}
+	})
+
+	t.Run("ignores a same-VRFID instance under a different router", func(t *testing.T) {
+		differentRouter := vrfInstanceForRouter("other-router-att", namespace, "other-router", vrfID)
+		k8s := fakeClient(differentRouter)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "this-att", vrfID); err != nil {
+			t.Errorf("checkArgumentCollision() = %v, want nil", err)
+		}
+	})
+
+	t.Run("ignores this instance's own entry", func(t *testing.T) {
+		self := vrfInstanceForRouter("this-att", namespace, routerName, vrfID)
+		k8s := fakeClient(self)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "this-att", vrfID); err != nil {
+			t.Errorf("checkArgumentCollision() = %v, want nil", err)
+		}
+	})
+}
+
 // ---- egressKindForInterfaceType --------------------------------------------
 
 func TestEgressKindForInterfaceType(t *testing.T) {

@@ -107,7 +107,15 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 	// deleted below, so it must be removed explicitly here and nowhere
 	// else in the normal cmdDel path is expected to (design plan §5.1).
 	if rt.ebpfRegistered {
-		if err := unregisterEBPFDatapath(rt.ebpfBlock, rt.ebpfArgument, attach.PinDir); err != nil {
+		// Recomputed fresh rather than cached at registration time: this is
+		// exactly the value unregisterEBPFDatapath needs to confirm the
+		// vrf_table slot still belongs to this attachment before deleting it
+		// (see its doc comment). The VRF interface itself isn't deleted
+		// until step 6 below, so it's still resolvable here.
+		if vrfTableID, err := vrf.TableID(rt.vpc, rt.vpcAttachment); err != nil {
+			slog.Error("Rollback: failed to resolve VRF table id, skipping eBPF vrf_table unregister", "err", err,
+				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+		} else if err := unregisterEBPFDatapath(rt.ebpfBlock, rt.ebpfArgument, vrfTableID, attach.PinDir); err != nil {
 			slog.Error("Rollback: failed to unregister eBPF vrf_table entry", "err", err,
 				"block", rt.ebpfBlock, "argument", rt.ebpfArgument)
 		} else {

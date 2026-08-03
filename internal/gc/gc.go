@@ -374,6 +374,21 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		result.Errors++
 		return result
 	}
+	if len(routers) == 0 {
+		// A node with any live eBPF-registered attachment at all necessarily
+		// has a BGPRouter targeting it -- registerEBPFDatapath requires one
+		// to run at all (internal/cni/bgp.go). Finding none here is
+		// indistinguishable from a transient listing/cache hiccup or the
+		// router having just been renamed/recreated, so it must not be
+		// treated the same as "genuinely zero live attachments": doing so
+		// would fold every entry into the below-cutoff, absent-from-live
+		// case and wipe the entire vrf_table -- every pod on this node --
+		// on what may just be one bad tick. Skip this sweep instead; the
+		// next tick tries again once router listing is reliable again.
+		slog.Warn("GC: no BGPRouter found for node during eBPF vrf_table sweep, skipping reconcile this tick",
+			"nodeName", nodeName)
+		return result
+	}
 
 	vrfInstList := &bgpv1alpha1.BGPVRFInstanceList{}
 	if err := k8s.List(ctx, vrfInstList, client.InNamespace(namespace)); err != nil {
