@@ -16,6 +16,7 @@ import (
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -438,9 +439,10 @@ func routeConflicts(existing, desired *netlink.Route) bool {
 }
 
 // configureHostGateway assigns each configured family's gateway address as a
-// host address (/128 for IPv6, /32 for IPv4) on the host-side interface (veth
-// or tap) and installs an explicit pod-subnet route for that family into the
-// VRF table. IPv4 is skipped entirely when the attachment is IPv6-only.
+// host address (/128 for IPv6, /32 for IPv4 on veth) on the host-side
+// interface (veth or tap) and installs an explicit pod-subnet route for that
+// family into the VRF table. IPv4 is skipped entirely when the attachment is
+// IPv6-only.
 //
 // Using a full-length host address (not the pod subnet mask) prevents the
 // kernel from auto-creating a subnet-router anycast entry in the VRF local
@@ -448,6 +450,13 @@ func routeConflicts(existing, desired *netlink.Route) bool {
 // absorbs seg6local-decapped inner packets before they reach the guest
 // interface. The explicit subnet route replaces the one the kernel would
 // have created from the wider mask.
+//
+// For tap interfaces, the IPv4 gateway is instead assigned as a /25 so the
+// address reported on the interface reflects a real subnet (VM guests expect
+// this). That reintroduces the wider-mask hazard described above, so the
+// address is added with IFA_F_NOPREFIXROUTE: the kernel skips auto-creating
+// the connected /25 route entirely, leaving the explicit pod-subnet route
+// below as the only thing that governs delivery to this VM's address.
 func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
 	if res == nil {
 		return nil
@@ -464,27 +473,44 @@ func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
 
 	if res.ipv6Gateway != nil {
 		gwNet := &net.IPNet{IP: res.ipv6Gateway, Mask: net.CIDRMask(128, 128)}
-		if err := installGatewayRoute(hostLink, gwNet, res.ipv6Subnet, netlink.FAMILY_V6, int(tableID)); err != nil {
+		if err := installGatewayRoute(hostLink, gwNet, res.ipv6Subnet, netlink.FAMILY_V6, int(tableID), 0); err != nil {
 			return err
 		}
 	}
 	if res.ipv4Gateway != nil {
-		gwNet := &net.IPNet{IP: res.ipv4Gateway, Mask: net.CIDRMask(32, 32)}
+		ipv4Mask, addrFlags := ipv4GatewayAddrParams(hostLink)
+		gwNet := &net.IPNet{IP: res.ipv4Gateway, Mask: ipv4Mask}
 		ipv4Subnet := &net.IPNet{IP: res.ipv4Address, Mask: net.CIDRMask(32, 32)}
-		if err := installGatewayRoute(hostLink, gwNet, ipv4Subnet, netlink.FAMILY_V4, int(tableID)); err != nil {
+		if err := installGatewayRoute(hostLink, gwNet, ipv4Subnet, netlink.FAMILY_V4, int(tableID), addrFlags); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// ipv4GatewayAddrParams returns the IPv4 gateway mask and netlink address
+// flags to use for hostLink. Tap interfaces get a /25 (so the address
+// reported on the interface reflects a real subnet) with
+// IFA_F_NOPREFIXROUTE, which stops the kernel from auto-creating a connected
+// route for the wider mask — see the anycast-avoidance note on
+// configureHostGateway for why that route must not exist. Veth interfaces
+// keep the plain /32 host address with no flags.
+func ipv4GatewayAddrParams(hostLink netlink.Link) (net.IPMask, int) {
+	if _, isTap := hostLink.(*netlink.Tuntap); isTap {
+		return net.CIDRMask(25, 32), unix.IFA_F_NOPREFIXROUTE
+	}
+	return net.CIDRMask(32, 32), 0
+}
+
 // installGatewayRoute assigns gwNet as a host address on hostLink and
 // installs an explicit route to subnet into the given VRF table, for one
 // address family. Idempotent: existing matching routes/addresses are left
 // alone, and conflicting ones return an error rather than being overwritten.
-func installGatewayRoute(hostLink netlink.Link, gwNet, subnet *net.IPNet, family, tableID int) error {
+// addrFlags is passed through to the netlink address (e.g. IFA_F_NOPREFIXROUTE
+// to suppress the kernel's auto-created connected route for a wider mask).
+func installGatewayRoute(hostLink netlink.Link, gwNet, subnet *net.IPNet, family, tableID, addrFlags int) error {
 	hostName := hostLink.Attrs().Name
-	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet}); err != nil {
+	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet, Flags: addrFlags}); err != nil {
 		if !errors.Is(err, syscall.EEXIST) {
 			return fmt.Errorf("add gateway address %s to host interface %q: %w", gwNet, hostName, err)
 		}
