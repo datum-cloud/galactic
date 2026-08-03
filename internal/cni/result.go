@@ -40,14 +40,18 @@ func buildResult(
 			},
 		},
 	}
-	appendIPConfigs(result, ipRes, 1) // index into Interfaces (guest veth)
+	appendIPConfigs(result, ipRes, 1, net.CIDRMask(32, 32)) // index into Interfaces (guest veth)
 	return result
 }
 
 // appendIPConfigs adds one IPConfig per allocated address family in ipRes
 // (IPv6, and IPv4 when present) plus any default routes, all pointing at the
-// given Interfaces index. No-op when ipRes is nil.
-func appendIPConfigs(result *type100.Result, ipRes *ipamResult, ifaceIndex int) {
+// given Interfaces index. ipv4Mask sets the prefix length reported for the
+// IPv4 address — /32 for veth, /25 for tap (matching the host gateway mask
+// installed by ipv4GatewayAddrParams, so downstream consumers such as
+// kraftlet configure the guest with the same real subnet the host side
+// advertises). No-op when ipRes is nil.
+func appendIPConfigs(result *type100.Result, ipRes *ipamResult, ifaceIndex int, ipv4Mask net.IPMask) {
 	if ipRes == nil {
 		return
 	}
@@ -60,7 +64,7 @@ func appendIPConfigs(result *type100.Result, ipRes *ipamResult, ifaceIndex int) 
 	}
 	if ipRes.ipv4Address != nil {
 		result.IPs = append(result.IPs, &type100.IPConfig{
-			Address:   net.IPNet{IP: ipRes.ipv4Address, Mask: net.CIDRMask(32, 32)},
+			Address:   net.IPNet{IP: ipRes.ipv4Address, Mask: ipv4Mask},
 			Gateway:   ipRes.ipv4Gateway,
 			Interface: type100.Int(ifaceIndex),
 		})
@@ -125,7 +129,9 @@ func buildVethResult(
 
 // buildTapResult constructs the CNI result for tap mode: a single host
 // interface with optional IPAM data. The guest VM manages its own interface;
-// the IP here describes the allocated subnet for BGP advertisement.
+// the IP here describes the allocated subnet for BGP advertisement. The IPv4
+// address is reported with a /25 mask, matching the mask
+// ipv4GatewayAddrParams installs on the host side of the tap (see bgp.go).
 func buildTapResult(
 	pluginConf *PluginConf,
 	ipRes *ipamResult,
@@ -143,6 +149,6 @@ func buildTapResult(
 			},
 		},
 	}
-	appendIPConfigs(result, ipRes, 0) // index into Interfaces (host tap)
+	appendIPConfigs(result, ipRes, 0, net.CIDRMask(25, 32)) // index into Interfaces (host tap)
 	return result
 }

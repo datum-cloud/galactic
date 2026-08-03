@@ -1153,6 +1153,43 @@ func TestBuildTapResult(t *testing.T) {
 	}
 }
 
+// TestBuildTapResultIPv4Mask verifies that buildTapResult reports the IPv4
+// address with a /25 mask (matching the host gateway mask
+// ipv4GatewayAddrParams installs on the tap interface), not the /32 used for
+// veth.
+func TestBuildTapResultIPv4Mask(t *testing.T) {
+	ipv4Address := net.ParseIP("172.20.1.5")
+	ipv4Gateway := net.ParseIP("172.20.1.1")
+	ipv4Route := mustParseCIDR(t, "0.0.0.0/0")
+
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+	ipRes := &ipamResult{
+		ipv4Address: ipv4Address,
+		ipv4Gateway: ipv4Gateway,
+		routes:      []*net.IPNet{ipv4Route},
+	}
+
+	result := buildTapResult(conf, ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
+
+	if len(result.IPs) != 1 {
+		t.Fatalf("IPs count = %d, want 1", len(result.IPs))
+	}
+	wantIPv4Mask := net.CIDRMask(25, 32).String()
+	if result.IPs[0].Address.IP.String() != ipv4Address.String() || result.IPs[0].Address.Mask.String() != wantIPv4Mask {
+		t.Errorf("IPs[0].Address = %v, want %s/25", result.IPs[0].Address, ipv4Address)
+	}
+	if !result.IPs[0].Gateway.Equal(ipv4Gateway) {
+		t.Errorf("IPs[0].Gateway = %v, want %v", result.IPs[0].Gateway, ipv4Gateway)
+	}
+	if result.IPs[0].Interface == nil || *result.IPs[0].Interface != 0 {
+		t.Errorf("IPs[0].Interface = %v, want 0 (host tap)", result.IPs[0].Interface)
+	}
+}
+
 // TestBuildTapResultHostNetns verifies that the tap path produces a valid
 // CNI result when args.Netns is the host network namespace. Kraftlet/unikraft
 // workloads pass the host netns because they don't have a Linux network
