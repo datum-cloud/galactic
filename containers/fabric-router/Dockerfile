@@ -2,7 +2,7 @@
 # roles in deploy/containerlab, layered with common network debugging tools
 # so issues can be triaged from inside the container without a separate
 # toolbox image.
-ARG FRR_VERSION=10.2.0
+ARG FRR_VERSION=10.7.0
 FROM quay.io/frrouting/frr:${FRR_VERSION}
 
 RUN apk add --no-cache \
