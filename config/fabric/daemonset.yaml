@@ -9,6 +9,10 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: fabric-router
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -75,12 +79,32 @@ spec:
       containers:
         - name: frr
           image: ghcr.io/datum-cloud/fabric-router:latest
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/lib/frr/frrinit.sh
+                  - stop
           securityContext:
             capabilities:
               add:
                 - NET_ADMIN
                 - NET_RAW
                 - SYS_ADMIN
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pidof zebra bgpd
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
           volumeMounts:
             - name: frr-etc
               mountPath: /etc/frr
