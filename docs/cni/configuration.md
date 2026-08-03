@@ -137,6 +137,16 @@ and then `publishBGPStateK8s` to create the SRv6 ingress route and
 VM still configures its own IP addresses independently (the CNI-allocated
 subnet/gateway describe only the host-side BGP-advertised state).
 
+The IPv4 gateway address on the host tap is a `/25`, not the `/32` used
+everywhere else (veth's host/guest gateways, and the pod's own address in both
+modes). VM guests expect the gateway to look like a real subnet rather than a
+bare host route. Because a wider mask would normally make the kernel
+auto-install a connected route for the whole `/25` in the VRF table — exactly
+the subnet-router-anycast hazard the `/32` choice exists to avoid elsewhere —
+the address is added with `IFA_F_NOPREFIXROUTE`, which suppresses that
+auto-created route. The explicit pod-subnet `/32` route `configureHostGateway`
+installs remains the only route governing delivery to the VM's address.
+
 > **Note:** Tap mode is intended for VM-based workloads (Kata, Firecracker,
 > QEMU) where the hypervisor opens the tap fd and handles guest networking.
 

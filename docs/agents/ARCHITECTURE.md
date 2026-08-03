@@ -297,6 +297,12 @@ calls `publishBGPStateK8s()` to create the SRv6 ingress route and
 only things tap mode skips are host-device delegation and guest-netns configuration, since
 there is no container network namespace to move an interface into.
 
+`configureHostGateway()` assigns the IPv4 gateway as a `/25` on the host tap (vs. `/32`
+everywhere else) so it looks like a real subnet to the VM guest, adding it with
+`IFA_F_NOPREFIXROUTE` to suppress the kernel's auto-created connected route for the wider
+mask — otherwise this would reintroduce the subnet-router-anycast hazard that `/32` avoids
+elsewhere. See [docs/cni/configuration.md](../cni/configuration.md) for details.
+
 The result is printed to Multus **before** SRv6 ingress setup and BGP CRD publish run
 (see [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md)) — a successful ADD response does not
 guarantee the BGPAdvertisement/BGPVRFInstance CRDs exist yet.

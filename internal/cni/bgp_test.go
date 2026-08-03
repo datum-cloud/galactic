@@ -10,11 +10,48 @@ import (
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
+
+// ---- ipv4GatewayAddrParams ------------------------------------------------
+
+func TestIPv4GatewayAddrParams(t *testing.T) {
+	tests := []struct {
+		name      string
+		hostLink  netlink.Link
+		wantMask  net.IPMask
+		wantFlags int
+	}{
+		{
+			name:      "tap gets /25 with NOPREFIXROUTE",
+			hostLink:  &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "tap0"}},
+			wantMask:  net.CIDRMask(25, 32),
+			wantFlags: unix.IFA_F_NOPREFIXROUTE,
+		},
+		{
+			name:      "veth gets /32 with no flags",
+			hostLink:  &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "veth0"}},
+			wantMask:  net.CIDRMask(32, 32),
+			wantFlags: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotMask, gotFlags := ipv4GatewayAddrParams(tt.hostLink)
+			if gotMask.String() != tt.wantMask.String() {
+				t.Errorf("mask = %v, want %v", gotMask, tt.wantMask)
+			}
+			if gotFlags != tt.wantFlags {
+				t.Errorf("flags = %v, want %v", gotFlags, tt.wantFlags)
+			}
+		})
+	}
+}
 
 // ---- routeConflicts ------------------------------------------------------
 
