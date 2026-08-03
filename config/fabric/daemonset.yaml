@@ -9,12 +9,18 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: fabric-router
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
         app.kubernetes.io/name: fabric-router
     spec:
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
       # FRR here establishes the underlay eBGP session to the physical fabric
       # and brings up the node's lo address, both of which galactic-router
       # depends on before it can start — so this must tolerate NotReady the
@@ -75,12 +81,42 @@ spec:
       containers:
         - name: frr
           image: ghcr.io/datum-cloud/fabric-router:latest
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/lib/frr/frrinit.sh
+                  - stop
           securityContext:
             capabilities:
               add:
                 - NET_ADMIN
                 - NET_RAW
                 - SYS_ADMIN
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - vtysh -d zebra -c "show version" && vtysh -d bgpd -c "show version"
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - vtysh -d zebra -c "show version" && vtysh -d bgpd -c "show version"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
           volumeMounts:
             - name: frr-etc
               mountPath: /etc/frr
