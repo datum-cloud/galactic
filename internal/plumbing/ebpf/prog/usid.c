@@ -112,6 +112,12 @@ static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *) BPF_F
 static long (*bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff, __u32 mode,
 				    __u64 flags) = (void *) BPF_FUNC_skb_adjust_room;
 
+// Only used on the IPv4-inner decap path, to retag skb->protocol -- see
+// the long comment at its call site (step 7) for why a helper is needed
+// here at all instead of a plain assignment.
+static long (*bpf_skb_change_proto)(struct __sk_buff *skb, __be16 proto,
+				     __u64 flags) = (void *) BPF_FUNC_skb_change_proto;
+
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 plen,
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 
@@ -427,21 +433,92 @@ int usid_ingress(struct __sk_buff *skb)
 	// The packet is claimed past this point: any failure from here on
 	// is a drop, never a silent pass-through (the vrf_table hit already
 	// committed this packet to the datapath).
+	//
+	// Peek the inner packet's version nibble now, on the still-unmutated
+	// outer header, rather than after stripping (as a prior version of
+	// this function did) -- step 7 below needs to know the AF *before*
+	// it decides how to strip, not after.
 	if ((void *) (ip6 + 1) + 1 > data_end) {
 		count_drop(DROP_REASON_MALFORMED_INNER);
 		return TC_ACT_SHOT;
 	}
 
+	__u8 *inner_peek = (__u8 *) (ip6 + 1);
+	__u8 inner_version = (*inner_peek) >> 4;
+
+	if (inner_version != 4 && inner_version != 6) {
+		count_drop(DROP_REASON_UNKNOWN_INNER_VERSION);
+		return TC_ACT_SHOT;
+	}
+
 	// Step 7: strip the outer IPv6 header, exposing the inner
 	// IPv4/IPv6 packet (dual-stack, per uEnd.DT46 -- R5).
-	if (bpf_skb_adjust_room(skb, -(__s32) sizeof(struct usid_ip6hdr), BPF_ADJ_ROOM_MAC, 0)) {
+	//
+	// An IPv6 inner packet is a plain 40-byte carve: outer and inner
+	// share the same skb->protocol (ETH_P_IPV6), so nothing else is
+	// needed -- this is the path a prior version of this function
+	// always took.
+	//
+	// An IPv4 inner packet needs skb->protocol changed from ETH_P_IPV6
+	// to ETH_P_IP, and there is no direct way to do that: __sk_buff's
+	// protocol field is not in tc_cls_act_is_valid_access's BPF_WRITE
+	// whitelist (mark, tc_index, priority, tc_classid, cb[0..4], tstamp,
+	// queue_mapping -- confirmed against upstream net/core/filter.c;
+	// protocol is deliberately absent, and a direct `skb->protocol = ...`
+	// here is rejected at load with "invalid bpf_context access"). Left
+	// stale at ETH_P_IPV6, step 9's bpf_redirect_peer() hands the skb to
+	// the peer netns via skb_do_redirect()'s BPF_F_PEER branch, which
+	// only does skb->dev = dev and skb_scrub_packet() -- no
+	// eth_type_trans() to re-derive skb->protocol from the Ethernet
+	// header this function rewrites below (also confirmed against
+	// upstream: __netif_receive_skb_core()'s "another_round" re-entry on
+	// the peer device reuses skb->protocol as-is). The peer's IP stack
+	// then dispatches the IPv4 payload to ipv6_rcv(), which drops it on
+	// the version-nibble mismatch -- invisible to every counter in this
+	// file, since the packet has already left via a *successful*
+	// redirect. Confirmed live: an IPv4 uSID packet lands on the peer
+	// device (its RX byte/packet counters advance, and a raw AF_PACKET
+	// capture there shows a well-formed IPv4 frame) while
+	// Ip6InReceives/Ip6InHdrErrors in that netns's /proc/net/snmp6 both
+	// advance by exactly the same count, and the pod never sees it at
+	// the socket layer -- IPv4 InMsgs/InEchos in /proc/net/snmp never
+	// move.
+	//
+	// bpf_skb_change_proto() is the one BPF-legal way to update
+	// skb->protocol, but it is built for in-place v4<->v6 header
+	// translation (NAT64-style, RFC 6145), not encap/decap: called here
+	// while skb->protocol is still ETH_P_IPV6 (i.e. before any stripping
+	// -- exactly the point we're at), it removes
+	// sizeof(usid_ip6hdr)-sizeof(usid_iphdr) (20) bytes from the *front*
+	// of the current L3 header -- the first 20 bytes of our 40-byte
+	// outer header -- shifts everything after (the outer header's last
+	// 20 bytes, then our untouched real inner packet) up by 20 to fill
+	// the gap, and sets skb->protocol = ETH_P_IP. That leaves exactly
+	// sizeof(usid_iphdr) (20) bytes of outer-header leftover sitting in
+	// front of our real inner IPv4 header; the plain carve below removes
+	// exactly that leftover, exposing the real header at offset 0 same
+	// as the IPv6 case. Net bytes removed is sizeof(usid_ip6hdr) (40)
+	// either way -- change_proto's 20 plus this carve's 20 for the v4
+	// case, this carve's 40 alone for the v6 case -- only the
+	// skb->protocol side effect differs.
+	__s32 strip_len = (__s32) sizeof(struct usid_ip6hdr);
+
+	if (inner_version == 4) {
+		if (bpf_skb_change_proto(skb, __builtin_bswap16(USID_ETH_P_IP), 0)) {
+			count_drop(DROP_REASON_STRIP_FAILED);
+			return TC_ACT_SHOT;
+		}
+		strip_len = (__s32) sizeof(struct usid_iphdr);
+	}
+
+	if (bpf_skb_adjust_room(skb, -strip_len, BPF_ADJ_ROOM_MAC, 0)) {
 		count_drop(DROP_REASON_STRIP_FAILED);
 		return TC_ACT_SHOT;
 	}
 
-	// bpf_skb_adjust_room can change the underlying packet buffer: all
-	// previously derived data/data_end pointers are invalidated and
-	// must be re-read.
+	// bpf_skb_change_proto/bpf_skb_adjust_room can both change the
+	// underlying packet buffer: all previously derived data/data_end
+	// pointers are invalidated and must be re-read.
 	data = (void *) (long) skb->data;
 	data_end = (void *) (long) skb->data_end;
 
@@ -453,14 +530,6 @@ int usid_ingress(struct __sk_buff *skb)
 	}
 
 	__u8 *inner = (__u8 *) (new_eth + 1);
-
-	if ((void *) (inner + 1) > data_end) {
-		count_drop(DROP_REASON_MALFORMED_INNER);
-		return TC_ACT_SHOT;
-	}
-
-	__u8 inner_version = (*inner) >> 4;
-
 	struct bpf_fib_lookup fib_params;
 
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -477,7 +546,7 @@ int usid_ingress(struct __sk_buff *skb)
 		__builtin_memcpy(fib_params.ipv6_src, inner6->saddr, sizeof(fib_params.ipv6_src));
 		__builtin_memcpy(fib_params.ipv6_dst, inner6->daddr, sizeof(fib_params.ipv6_dst));
 		new_eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
-	} else if (inner_version == 4) {
+	} else {
 		struct usid_iphdr *inner4 = (void *) inner;
 
 		if ((void *) (inner4 + 1) > data_end) {
@@ -489,9 +558,6 @@ int usid_ingress(struct __sk_buff *skb)
 		__builtin_memcpy(&fib_params.ipv4_src, inner4->saddr, sizeof(fib_params.ipv4_src));
 		__builtin_memcpy(&fib_params.ipv4_dst, inner4->daddr, sizeof(fib_params.ipv4_dst));
 		new_eth->h_proto = __builtin_bswap16(USID_ETH_P_IP);
-	} else {
-		count_drop(DROP_REASON_UNKNOWN_INNER_VERSION);
-		return TC_ACT_SHOT;
 	}
 
 	fib_params.ifindex = skb->ingress_ifindex;

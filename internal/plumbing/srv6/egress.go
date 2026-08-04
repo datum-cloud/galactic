@@ -35,6 +35,13 @@ const seg6IptunModeEncapRed = 3
 // tableID, encapsulating to the given SRv6 SID (gateway). The outgoing
 // interface and L3 next-hop are resolved from the kernel's routing table for
 // gateway so the encapsulated outer packet can be L2-resolved on egress.
+//
+// The SID is always an IPv6 address (RFC 9252), but prefix may be an IPv4
+// VPC subnet (End.DT46) — so the resolved next-hop's family can differ from
+// prefix's. netlink.Route.Gw requires the same family as Dst (the kernel
+// route message carries one address family for the whole route); a
+// different-family next-hop must instead go through RTA_VIA, which
+// netlink.Route exposes as the Via field.
 func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 	routes, err := netlink.RouteGet(gateway)
 	if err != nil {
@@ -47,13 +54,23 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 		Mode:     seg6IptunModeEncapRed,
 		Segments: []net.IP{gateway},
 	}
-	return netlink.RouteReplace(&netlink.Route{
+	route := &netlink.Route{
 		Dst:       prefix,
 		Table:     int(tableID),
 		Encap:     encap,
 		LinkIndex: routes[0].LinkIndex,
-		Gw:        routes[0].Gw,
-	})
+	}
+	gw := routes[0].Gw
+	gwFamily := netlink.FAMILY_V6
+	if gw.To4() != nil {
+		gwFamily = netlink.FAMILY_V4
+	}
+	if (prefix.IP.To4() != nil) == (gwFamily == netlink.FAMILY_V4) {
+		route.Gw = gw
+	} else {
+		route.Via = &netlink.Via{AddrFamily: gwFamily, Addr: gw}
+	}
+	return netlink.RouteReplace(route)
 }
 
 // RouteEgressDel removes the SEG6 encap route for prefix from routing table tableID.
