@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -371,6 +373,43 @@ func ipamAdvertisementPrefixes(ipamResult *ipamResult) (prefixes []string, ipv6S
 	return prefixes, ipv6Subnet, ipv4Addr
 }
 
+// allAdvertisedPrefixes derives the full set of BGP-advertised prefixes for
+// a BGPAdvertisement CRD from every subnet annotation currently present on
+// it, rather than from just the container currently being processed.
+//
+// A single BGPAdvertisement is keyed by (vpc, vpcAttachment) alone
+// (bgpAdvertisementName), so multiple containers attaching under the same
+// VPCAttachment on this node — a second pod, or a second interface with its
+// own vpcattachment reusing this one — all share one CRD. Each one's own
+// CNI ADD must not clobber another still-live container's already-published
+// prefix: annotations is the durable per-container record (subnetAnnotationKeyIPv6/IPv4),
+// so recomputing Spec.Prefixes from all of them on every ADD keeps every
+// live container's prefix present regardless of ADD order. cmdDel
+// deliberately leaves this annotation (and thus this prefix) in place even
+// after that container exits — see ops_del.go's "skipping shared resource
+// cleanup (handled by GC)" — so a stale entry for an exited container can
+// briefly outlive it until gc.CollectOrphanedCRDs removes the whole CRD
+// once every container sharing it is gone; that's a pre-existing tradeoff
+// this function doesn't change.
+func allAdvertisedPrefixes(annotations map[string]string) []string {
+	var prefixes []string
+	for key, value := range annotations {
+		switch {
+		case strings.HasPrefix(key, annotationAllocatedSubnetIPv6+"."):
+			prefixes = append(prefixes, value)
+		case strings.HasPrefix(key, annotationAllocatedSubnetIPv4+"."):
+			// Annotation stores the bare address (see ipamAdvertisementPrefixes);
+			// the advertised prefix needs the explicit /32 CIDR form.
+			prefixes = append(prefixes, value+"/32")
+		}
+	}
+	// Deterministic ordering: map iteration is randomized, and an
+	// unstable Spec.Prefixes order across otherwise-identical ADDs would
+	// look like a spurious spec change to anything diffing this CRD.
+	sort.Strings(prefixes)
+	return prefixes
+}
+
 // publishBGPStateK8s creates the BGPVRFInstance and BGPAdvertisement CRDs with
 // retry on transient k8s API errors. The host gateway must be configured before
 // calling this (via configureHostGateway). This is interface-agnostic and can be
@@ -453,8 +492,8 @@ func publishBGPStateK8s(
 			},
 		}
 		prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
+		var mergedPrefixes []string
 		_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
-			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, prefixes, vrfID)
 			if adv.Annotations == nil {
 				adv.Annotations = make(map[string]string)
 			}
@@ -472,6 +511,13 @@ func publishBGPStateK8s(
 			if ipv4Addr != "" {
 				adv.Annotations[subnetAnnotationKeyIPv4(args.ContainerID)] = ipv4Addr
 			}
+			// Recompute Spec.Prefixes from every container's annotations, not
+			// just this one's own — see allAdvertisedPrefixes. Must run after
+			// this container's own annotations are set above, and be read
+			// back into mergedPrefixes for the log line below since this
+			// closure may run more than once (RetryOnConflict).
+			mergedPrefixes = allAdvertisedPrefixes(adv.Annotations)
+			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, mergedPrefixes, vrfID)
 			return nil
 		})
 		if err != nil {
@@ -479,7 +525,7 @@ func publishBGPStateK8s(
 		}
 		tracker.advCreated = true
 		slog.Debug("BGP: BGPAdvertisement applied", "name", adv.Name, "namespace", namespace,
-			"prefixes", prefixes, "containerID", args.ContainerID)
+			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID)
 
 		slog.Info("ADD: BGP state published", "containerID", args.ContainerID,
 			"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
