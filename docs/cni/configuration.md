@@ -89,9 +89,9 @@ and this environment variable has no effect on the allocation behavior.
 
 ### eBPF uSID datapath
 
-The eBPF/TC-BPF `uFMT 48+16` uSID datapath (`.local/plan-ebpf-xdp-usid-datapath.md`)
-is the only forwarding path for SRv6 uSID traffic — there is no legacy
-static-route fallback and no feature flag to disable it. The DaemonSet's
+The eBPF/TC-BPF `uFMT 48+16` uSID datapath is the only forwarding path for
+SRv6 uSID traffic — there is no legacy static-route fallback and no feature
+flag to disable it. The DaemonSet's
 long-lived `run` container (`internal/installer.Run`, via
 `internal/plumbing/ebpf/attach`) always loads/pins/attaches the compiled
 `usid_ingress` program at startup; a kernel preflight-check failure

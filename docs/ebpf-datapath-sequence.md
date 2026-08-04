@@ -1,8 +1,6 @@
 # eBPF uSID Datapath Sequence Diagrams
 
-Sequence diagrams for the eBPF/TC-BPF `uFMT 48+16` uSID datapath (design plan
-`.local/plan-ebpf-xdp-usid-datapath.md`; implementation plan
-`.local/implementation-plan-ebpf-xdp-usid-datapath.md`), covering the
+Sequence diagrams for the eBPF/TC-BPF `uFMT 48+16` uSID datapath, covering the
 `run` container's startup/load/attach path and the CNI ADD path's map
 registration. This is the only forwarding path — there is no legacy
 static-route fallback and no feature flag to disable it (removed in the
@@ -54,7 +52,7 @@ sequenceDiagram
     Installer->>Installer: loadHostConf(HostConflist) -> namespace, nodeName
 
     Installer->>Installer: serve /metrics (metricsPort), gRPC health (grpcHealthPort)
-    Installer->>Installer: SetServingStatus("", SERVING); SetServingStatus("ebpf-datapath", SERVING)
+    Installer->>Installer: SetServingStatus("", SERVING) -- SetServingStatus("ebpf-datapath", SERVING)
 
     loop every ebpfHealthCheckInterval (10s)
         Installer->>Attach: Health(objs, ifaces)
@@ -75,7 +73,7 @@ sequenceDiagram
         deactivate GC
     end
 
-    Note over Installer: ctx.Done() -> graceful shutdown; deferred datapath.Close() releases this process's map/program fds (pinned maps persist for the next restart)
+    Note over Installer: ctx.Done() -> graceful shutdown -- deferred datapath.Close() releases this process's map/program fds (pinned maps persist for the next restart)
     deactivate Installer
 ```
 
@@ -99,7 +97,7 @@ sequenceDiagram
     BGP->>BGP: lookupBGPRouter() -> srv6Locator, nodeID
     BGP->>BGP: allocateArgument(ctx, k8s, namespace, routerName, vrfInstanceName) -> vrfID (12-bit Argument, local per-node allocation)
     BGP->>BGP: egressKindForInterfaceType(pluginConf.InterfaceType) -> EgressKindVeth | EgressKindTap
-    BGP->>BGP: ComputeSID(srv6Locator, nodeID, vrfID, FunctionEndDT46) (for the router's independent BGP-advertised SID recomputation; the CNI no longer installs a kernel route from it)
+    BGP->>BGP: ComputeSID(srv6Locator, nodeID, vrfID, FunctionEndDT46) (for the router's independent BGP-advertised SID recomputation -- the CNI no longer installs a kernel route from it)
 
     BGP->>BGP: registerEBPFDatapath(bgp, vpc, vpcAttachment, ifaceType, vrfID, attach.PinDir)
     activate BGP
@@ -115,7 +113,7 @@ sequenceDiagram
         BGP->>USIDMap: Function.Register(block, FunctionEndDT46)
         BGP->>USIDMap: VRF.Register(block, vrfID, vrf.TableID(vpc, vpcAttachment), egressKind)
         USIDMap->>PinnedMaps: Put x3
-        BGP->>USIDMap: closer.Close() (this process's own fd only; pinned maps persist)
+        BGP->>USIDMap: closer.Close() (this process's own fd only -- pinned maps persist)
         BGP-->>BGP: registered=true, block, nil
     end
     deactivate BGP

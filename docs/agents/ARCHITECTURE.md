@@ -92,7 +92,7 @@ galactic/
 │       ├── sysctl/          # Interface sysctl helpers
 │       ├── vrf/             # Linux VRF create/delete/lookup
 │       └── ebpf/            # eBPF/TC-BPF uSID datapath -- the only ingress/
-│           │                #   decap path (.local/plan-ebpf-xdp-usid-datapath.md)
+│           │                #   decap path
 │           ├── uformat/     #   Pure-Go uFMT 48+16 bit-layout encode/decode
 │           ├── prog/        #   usid.c (TC-BPF program) + bpf2go-generated
 │           │                #   Go bindings/compiled object (go:embed)
