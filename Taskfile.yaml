@@ -37,7 +37,7 @@ tasks:
       - GOOS=linux go vet ./...
 
   ci:
-    desc: Run the full CI pipeline (lint, build, test:unit, test:e2e)
+    desc: Run the full CI pipeline
     cmds:
       - task: lint
       - task: build
@@ -77,6 +77,29 @@ tasks:
   build:
     desc: Build binaries
     deps: [fmt, vet]
+    cmds:
+      - task: build:ebpf
+      - task: build:binaries
+
+  build:ebpf:
+    desc: >-
+      Regenerate the eBPF uSID datapath
+    run: once
+    cmds:
+      - |
+        if ! command -v clang >/dev/null 2>&1; then
+          echo "ERROR: clang is required to build the eBPF uSID datapath" >&2
+          echo "(internal/plumbing/ebpf/prog/usid.c, via bpf2go)." >&2
+          echo "Install it, e.g.:" >&2
+          echo "  Fedora/RHEL: sudo dnf install clang llvm" >&2
+          echo "  Debian/Ubuntu: sudo apt install clang llvm" >&2
+          echo "then re-run 'task build:ebpf' (or 'task build')." >&2
+          exit 1
+        fi
+      - go generate ./internal/plumbing/ebpf/prog/...
+
+  build:binaries:
+    internal: true
     vars:
       VERSION:
         sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"

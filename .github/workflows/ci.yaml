@@ -53,6 +53,47 @@ jobs:
           files: coverage.out
           fail_ci_if_error: false
 
+  # test-unit above runs as the unprivileged runner user, so every test
+  # gated on requireRoot(t) (BPF_PROG_TEST_RUN cases in
+  # internal/plumbing/ebpf/prog/usid_test.go, plus the real-kernel BPF map
+  # load/attach/GC-sweep tests across internal/plumbing/ebpf/attach,
+  # internal/plumbing/ebpf/usidmap, internal/gc, internal/cni, and
+  # internal/installer) skips instead of running -- the only unit-level
+  # exercise of usid.c's 623 lines is otherwise the containerlab fabric.
+  # GitHub-hosted runners grant passwordless sudo, so re-running the exact
+  # same suite as root here closes that gap by actually loading the BPF
+  # program into the runner's kernel and driving it through
+  # BPF_PROG_TEST_RUN instead of skipping.
+  test-unit-root:
+    name: Unit Tests (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: arduino/setup-task@v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark workspace as safe for root
+        # actions/checkout leaves the repo owned by the runner user; git
+        # refuses "dubious ownership" once root reads it below, which
+        # would otherwise make `go test`'s VCS stamping fail.
+        run: sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Run unit tests as root
+        # sudo's secure_path policy overrides -E's preserved PATH for
+        # exactly the PATH variable, which would hide the go/task binaries
+        # setup-go/setup-task just installed -- routing through `env`
+        # re-asserts it explicitly. -E otherwise keeps HOME (and so
+        # GOPATH/GOMODCACHE) pointed at the same module cache test-unit
+        # already populated, instead of root's empty one.
+        run: sudo -E env "PATH=$PATH" task test:unit
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -68,8 +109,24 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install eBPF build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+
       - name: Build binary
+        # task build's build:ebpf step regenerates
+        # internal/plumbing/ebpf/prog's bpf2go output (usid_bpfel/eb.go
+        # and their embedded .o's) from usid.c as a side effect, before
+        # build:binaries ever runs -- so what this step produces is what
+        # actually ships in the image. The check below diffs the
+        # regenerated artifacts against the committed ones: the .o's
+        # `go test` and go.datum.net/galactic/internal/plumbing/ebpf/prog
+        # itself load are otherwise just checked-in blobs that can drift
+        # silently out of sync with usid.c, since nothing else forces
+        # them to be regenerated on a source change.
         run: task build
+
+      - name: Verify committed eBPF artifacts match usid.c
+        run: git diff --exit-code -- internal/plumbing/ebpf/prog
 
   # Tier 2: Integration tests (every PR, main branch, and releases)
   test-e2e:
