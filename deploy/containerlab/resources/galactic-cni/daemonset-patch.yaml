@@ -13,3 +13,19 @@ spec:
         - name: credential-refresh
           image: galactic-cni:latest
           imagePullPolicy: Never
+          env:
+            # Every lab node is dual-homed: eth0 carries the IPv6 default
+            # route but only reaches the Kind/ContainerLab management
+            # bridge (kubectl/API-server traffic), while eth1 is the
+            # dedicated point-to-point link to the transit fabric (tr1-4)
+            # that actual SRv6-encapsulated VPC traffic arrives on.
+            # ResolveInterfaces' auto-detection (default-IPv6-route
+            # heuristic, internal/plumbing/ebpf/attach/interfaces.go) picks
+            # eth0 here since it's ambiguous between the two -- confirmed
+            # live by tcpdump: cross-region SRv6 packets arrive on eth1 but
+            # the eBPF usid_ingress filter was only ever attached to eth0,
+            # so decapsulation never ran and every VPC ping between sites
+            # silently blackholed. This override forces the correct
+            # interface for this topology; see docs/cni/configuration.md.
+            - name: GALACTIC_CNI_EBPF_INTERFACES
+              value: eth1

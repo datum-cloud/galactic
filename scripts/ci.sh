@@ -69,6 +69,18 @@ case "$COMMAND" in
       docker exec "$node" sysctl -w net.vrf.strict_mode=1
     done
 
+    echo "--- Mounting bpffs on Kind node(s)"
+    # The eBPF uSID datapath pins its maps under /sys/fs/bpf/galactic (see
+    # internal/plumbing/ebpf/attach.PinDir). config/cni/daemonset.yaml's
+    # bpf-fs hostPath volume comment spells out why this can't be created
+    # from inside a pod's own mount namespace: bpffs must already be
+    # mounted at this path by the node itself. A real node's OS/kubelet
+    # setup does this at boot; a Kind node container doesn't, so mount it
+    # here once per node.
+    for node in $(kind get nodes --name "$CLUSTER_NAME"); do
+      docker exec "$node" sh -c 'mkdir -p /sys/fs/bpf && (mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf)'
+    done
+
     echo "--- Installing BGP CRDs (datum-cloud/network)"
     # Extract the datum-cloud/network commit SHA from go.mod (pseudo-version
     # suffix after the last hyphen), same approach as
