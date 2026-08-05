@@ -20,6 +20,13 @@ const (
 	EnvLogFile             = "GALACTIC_CNI_LOG_FILE"
 	EnvNamespace           = "GALACTIC_CNI_NAMESPACE"
 	EnvNodeNameLegacy      = "NODE_NAME"
+
+	// EnvCNIEBPFInterfaces overrides auto-detection of the interface(s)
+	// the eBPF uSID datapath attaches its TC-BPF ingress hook to -- a
+	// comma-separated list of interface names, for multi-homed nodes
+	// where auto-detection (the interface(s) carrying the default IPv6
+	// route) is ambiguous.
+	EnvCNIEBPFInterfaces = "GALACTIC_CNI_EBPF_INTERFACES"
 )
 
 // --- CNIConfig -------------------------------------------------------------
