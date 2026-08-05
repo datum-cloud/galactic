@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,35 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/gc"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
+
+// ebpfHealthCheckInterval controls how often Run polls
+// internal/plumbing/ebpf/attach.Health once the eBPF datapath is running.
+// A package-level var (not a const) so tests can shrink it, the same
+// override pattern internal/plumbing/ebpf/attach/watch.go's
+// debounceInterval already uses.
+var ebpfHealthCheckInterval = 10 * time.Second
+
+// ebpfGCSweepInterval controls how often Run calls gc.SweepEBPFVRFTable
+// once the eBPF datapath is running. A package-level var, same override
+// pattern as ebpfHealthCheckInterval above -- matches galactic-router's
+// own GC controller's documented default period (docs/agents/
+// ARCHITECTURE.md: "ticker-driven, default every 5m").
+var ebpfGCSweepInterval = 5 * time.Minute
+
+// ebpfHealthServiceName is the gRPC health service name (see
+// grpc_health_v1.HealthServer) reporting the live status of the eBPF uSID
+// datapath specifically, separate from the overall (""), always-serving
+// status the credential-refresh/log-rotation loop reports -- so a BPF
+// datapath degradation (e.g. something external detaches the tc filter)
+// doesn't get conflated with, or masked by, the rest of this container's
+// unrelated responsibilities.
+const ebpfHealthServiceName = "ebpf-datapath"
 
 var (
 	// Host paths, configurable for testing
@@ -165,6 +194,12 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	_ = clientgoscheme.AddToScheme(scheme)
+	// bgpv1alpha1 registration is required for gc.SweepEBPFVRFTable's
+	// BGPRouter/BGPVRFInstance List calls (Milestone 7.3) -- newK8sClientFn
+	// below is shared with Bootstrap's plain Node lookup, which doesn't
+	// need it, but the client itself must know about every kind either
+	// caller lists.
+	_ = bgpv1alpha1.AddToScheme(scheme)
 }
 
 var newK8sClientFn = func() (client.Client, error) {
@@ -178,6 +213,23 @@ var newK8sClientFn = func() (client.Client, error) {
 // addrListFn can be overridden in tests to mock netlink interface addresses.
 var addrListFn = func(family int) ([]netlink.Addr, error) {
 	return netlink.AddrList(nil, family)
+}
+
+// ebpfStartFn loads, pins, and attaches the eBPF/TC-BPF uSID datapath, then
+// keeps its resolved interface set re-evaluated against netlink link/route
+// change events for the life of ctx (design plan
+// .local/plan-ebpf-xdp-usid-datapath.md §4.1, §4.4, §5.4; Milestones 3.1
+// and 3.2 of .local/implementation-plan-ebpf-xdp-usid-datapath.md). It is a
+// package-level override point -- like addrListFn and newK8sClientFn above
+// -- so tests can exercise Run's wiring without needing root, a real kernel
+// BPF stack, or a live network interface. The returned io.Closer is
+// internal/plumbing/ebpf/attach.StartWatching's *prog.UsidObjects in
+// production; Run keeps it open for the process lifetime and Closes it on
+// shutdown (see the attach package doc comment for why that does not
+// disrupt already-attached forwarding). Canceling ctx stops the background
+// netlink watch loop but does not, by itself, close the returned object.
+var ebpfStartFn = func(ctx context.Context, pinDir string) (io.Closer, []string, error) {
+	return attach.StartWatching(ctx, pinDir)
 }
 
 // resolveLogLevel reads GALACTIC_CNI_LOG_LEVEL and returns a validated level
@@ -340,13 +392,131 @@ users:
 	return atomicWriteFile(kubeconfigPath, []byte(kubeconfigTemplate), 0600)
 }
 
+// ebpfDatapathState bundles what startEBPFDatapath resolves for Run to use
+// afterward (health polling, metrics, the GC sweep) -- a named type purely
+// to avoid a many-value return signature.
+type ebpfDatapathState struct {
+	objs      *prog.UsidObjects
+	ifaces    []string
+	k8sClient client.Client
+	namespace string
+	nodeName  string
+}
+
+// startEBPFDatapath is Run's eBPF-datapath startup path, split out solely
+// to keep Run's own cyclomatic complexity within golangci-lint's gocyclo
+// budget -- behaviorally this is inlined exactly where it used to live. A
+// failure here (including a failed kernel preflight check, design plan §6)
+// is fatal: Run returns an error rather than falling back to a partial or
+// unsafe datapath state -- this is the only forwarding path, there is no
+// legacy path to fall back to.
+func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathState, io.Closer, error) {
+	attach.SetHooks(m.Events.Hooks())
+
+	datapath, ifaces, err := ebpfStartFn(ctx, attach.PinDir)
+	if err != nil {
+		return ebpfDatapathState{}, nil, fmt.Errorf("start eBPF uSID datapath: %w", err)
+	}
+	slog.Info("eBPF uSID datapath loaded, pinned, and attached", "interfaces", ifaces, "pinDir", attach.PinDir)
+
+	state := ebpfDatapathState{ifaces: ifaces}
+
+	// ebpfStartFn's io.Closer is *prog.UsidObjects in production (test
+	// fakes stand in a plain mock closer, which correctly leaves
+	// metrics/health/GC wiring inert below -- see installer_test.go's
+	// fakeDatapathCloser).
+	if objs, ok := datapath.(*prog.UsidObjects); ok {
+		state.objs = objs
+		if err := m.RegisterDatapathCollector(objs); err != nil {
+			slog.Warn("Failed to register eBPF datapath metrics collector", "err", err)
+		}
+	}
+
+	// Best-effort setup for the eBPF vrf_table GC sweep (Milestone 7.3).
+	// A failure here is not fatal to Run -- unlike the datapath start
+	// above, GC is a background maintenance task, not a hard requirement
+	// for the datapath to forward traffic -- it just means this node's
+	// sweep ticker stays inert until the next restart.
+	if hostConf, err := loadHostConf(HostConflist); err != nil {
+		slog.Warn("eBPF vrf_table GC sweep disabled: failed to load host conf", "err", err)
+	} else if k8sClient, err := newK8sClientFn(); err != nil {
+		slog.Warn("eBPF vrf_table GC sweep disabled: failed to create k8s client", "err", err)
+	} else {
+		state.k8sClient, state.namespace, state.nodeName = k8sClient, hostConf.Namespace, hostConf.NodeName
+	}
+
+	return state, datapath, nil
+}
+
 // Run executes the CNI installer main container tasks:
-// 1. Sets up log rotation periodically.
-// 2. Starts a simple ServiceAccount token refresh ticker.
-// 3. Deferred cleanup of stale .bin wrapper file.
-// 4. Starts the gRPC health check server.
-func Run(ctx context.Context, grpcHealthPort int) error {
-	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort)
+//  1. Loads/pins/attaches the eBPF/TC-BPF uSID datapath and keeps its
+//     attachment set re-evaluated against netlink link/route change events
+//     for the life of ctx (design plan §4.1, §4.4, §5.4; Milestones 3.1
+//     and 3.2 of .local/implementation-plan-ebpf-xdp-usid-datapath.md) --
+//     the only forwarding path. A failure here (including a failed kernel
+//     preflight check, design plan §6) is fatal: Run returns an error
+//     rather than falling back to a partial or unsafe datapath state.
+//     Once running, the netlink-driven re-attachment loop logs and retries
+//     its own failures rather than propagating them back into Run -- see
+//     internal/plumbing/ebpf/attach.Watch's doc comment. Datapath
+//     load/attach/detach events are counted via
+//     internal/plumbing/ebpf/metrics's EventCounters (Milestone 4), and
+//     live vrf_table/locator_table/drop_reasons state is exposed through
+//     the same metrics endpoint.
+//  2. Serves Prometheus metrics on metricsPort.
+//  3. Sets up log rotation periodically.
+//  4. Starts a simple ServiceAccount token refresh ticker.
+//  5. Deferred cleanup of stale .bin wrapper file.
+//  6. Starts the gRPC health check server -- the overall ("") service
+//     always reports SERVING once the process is up (credential
+//     refresh/log rotation have no meaningful "unhealthy" state of their
+//     own); a separate ebpfHealthServiceName ("ebpf-datapath") service is
+//     polled on a ticker and reports the live result of
+//     internal/plumbing/ebpf/attach.Health -- exit criterion "health check
+//     fails correctly when the program is unloaded".
+//  7. Periodically sweeps stale vrf_table entries via gc.SweepEBPFVRFTable
+//     (design plan §5.3; Milestone 7.3). This runs from here, not from
+//     galactic-router's existing GC controller
+//     (internal/controller/gc_controller.go), because the pinned maps
+//     only exist inside this container -- see gc.SweepEBPFVRFTable's own
+//     doc comment for the full reasoning.
+func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
+	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
+
+	m := metrics.New()
+
+	ebpfState, datapath, err := startEBPFDatapath(ctx, m)
+	if err != nil {
+		return err
+	}
+	if datapath != nil {
+		defer func() {
+			if err := datapath.Close(); err != nil {
+				slog.Warn("Failed to close eBPF uSID datapath objects", "err", err)
+			}
+		}()
+	}
+
+	// Serve Prometheus metrics at the conventional /metrics scrape path.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", m.Handler())
+	metricsSrv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", metricsPort),
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Metrics server exited with error", "err", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("Failed to gracefully shut down metrics server", "err", err)
+		}
+	}()
 
 	// Start gRPC health check server
 	var lc net.ListenConfig
@@ -358,6 +528,9 @@ func Run(ctx context.Context, grpcHealthPort int) error {
 	healthSrv := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	if ebpfState.objs != nil {
+		healthSrv.SetServingStatus(ebpfHealthServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
+	}
 
 	go func() {
 		if err := grpcSrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
@@ -376,6 +549,20 @@ func Run(ctx context.Context, grpcHealthPort int) error {
 	// Deferred old binary cleanup after 2 minutes
 	cleanupTimer := time.NewTimer(2 * time.Minute)
 	defer cleanupTimer.Stop()
+
+	// eBPF datapath health poll -- only meaningful once datapathObjs is
+	// set (eBPF datapath enabled and actually running); otherwise this
+	// fires harmlessly and does nothing every tick.
+	ebpfHealthTicker := time.NewTicker(ebpfHealthCheckInterval)
+	defer ebpfHealthTicker.Stop()
+	var ebpfLastHealthy = true // matches the initial SetServingStatus(SERVING) above
+
+	// eBPF vrf_table GC sweep (Milestone 7.3) -- only meaningful once
+	// gcK8sClient is set (eBPF datapath enabled and host conf/k8s client
+	// setup above succeeded); otherwise this fires harmlessly and does
+	// nothing every tick, same as the health poll above.
+	ebpfGCSweepTicker := time.NewTicker(ebpfGCSweepInterval)
+	defer ebpfGCSweepTicker.Stop()
 
 	for {
 		select {
@@ -405,6 +592,37 @@ func Run(ctx context.Context, grpcHealthPort int) error {
 			logFileHostPath := getLogFileHostPath()
 			if logFileHostPath != "" {
 				rotateLogFile(logFileHostPath)
+			}
+
+		case <-ebpfHealthTicker.C:
+			if ebpfState.objs == nil {
+				continue
+			}
+			h := attach.Handle{Objs: ebpfState.objs}
+			healthErr := h.Healthy()
+			healthy := healthErr == nil
+			if healthy != ebpfLastHealthy {
+				if healthy {
+					slog.Info("eBPF uSID datapath health check recovered")
+				} else {
+					slog.Error("eBPF uSID datapath health check failed", "err", healthErr)
+				}
+				ebpfLastHealthy = healthy
+			}
+			status := grpc_health_v1.HealthCheckResponse_NOT_SERVING
+			if healthy {
+				status = grpc_health_v1.HealthCheckResponse_SERVING
+			}
+			healthSrv.SetServingStatus(ebpfHealthServiceName, status)
+
+		case <-ebpfGCSweepTicker.C:
+			if ebpfState.k8sClient == nil {
+				continue
+			}
+			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
+			if result.EBPFVRFEntriesRemoved > 0 || result.Errors > 0 {
+				slog.Info("eBPF vrf_table GC sweep complete",
+					"removed", result.EBPFVRFEntriesRemoved, "errors", result.Errors)
 			}
 		}
 	}
