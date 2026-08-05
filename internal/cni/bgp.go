@@ -322,10 +322,10 @@ func newK8sClient() (client.Client, error) {
 // fail immediately without retry.
 func publishBGPState(
 	args *skel.CmdArgs, pluginConf *PluginConf, nodeName, namespace string, ipamResult *ipamResult,
-	tracker *resourceTracker,
+	guestHWAddr net.HardwareAddr, tracker *resourceTracker,
 ) error {
 	// ---- non-k8s operations (run once) ----
-	if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
+	if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, guestHWAddr); err != nil {
 		return err
 	}
 
@@ -528,7 +528,14 @@ func routeConflicts(existing, desired *netlink.Route) bool {
 // address is added with IFA_F_NOPREFIXROUTE: the kernel skips auto-creating
 // the connected /25 route entirely, leaving the explicit pod-subnet route
 // below as the only thing that governs delivery to this VM's address.
-func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
+//
+// guestHWAddr is the guest-side veth's MAC address, used to prime a
+// permanent neighbor table entry for the pod's own address (see
+// installGatewayNeighbor). It is nil for tap attachments, which have no
+// separate guest-side link in this netns to resolve a MAC from -- tap's
+// neighbor resolution, if it turns out to need the same fix, is out of
+// scope here since this fix targets the veth-only bug it was found from.
+func configureHostGateway(vpc, vpcAttachment string, res *ipamResult, guestHWAddr net.HardwareAddr) error {
 	if res == nil {
 		return nil
 	}
@@ -547,6 +554,11 @@ func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
 		if err := installGatewayRoute(hostLink, gwNet, res.ipv6Subnet, netlink.FAMILY_V6, int(tableID), 0); err != nil {
 			return err
 		}
+		if guestHWAddr != nil {
+			if err := installGatewayNeighbor(hostLink, res.ipv6Subnet.IP, netlink.FAMILY_V6, guestHWAddr); err != nil {
+				return err
+			}
+		}
 	}
 	if res.ipv4Gateway != nil {
 		ipv4Mask, addrFlags := ipv4GatewayAddrParams(hostLink)
@@ -555,6 +567,44 @@ func configureHostGateway(vpc, vpcAttachment string, res *ipamResult) error {
 		if err := installGatewayRoute(hostLink, gwNet, ipv4Subnet, netlink.FAMILY_V4, int(tableID), addrFlags); err != nil {
 			return err
 		}
+		if guestHWAddr != nil {
+			if err := installGatewayNeighbor(hostLink, res.ipv4Address, netlink.FAMILY_V4, guestHWAddr); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// installGatewayNeighbor installs a permanent neighbor table entry mapping
+// podIP to guestHWAddr on hostLink.
+//
+// The eBPF uSID ingress datapath (internal/plumbing/ebpf/prog/usid.c)
+// decapsulates SRv6 traffic and calls bpf_fib_lookup() to resolve the
+// egress path for the inner packet, then redirects it straight to the
+// resolved neighbor -- entirely in-kernel, never touching the normal
+// forwarding stack. bpf_fib_lookup() does not itself trigger ARP/NDP
+// resolution the way ordinary kernel packet forwarding does (that
+// resolution happens as a side effect of the slow-path forwarding this
+// datapath deliberately bypasses), so without a pre-existing neighbor table
+// entry it fails with BPF_FIB_LKUP_RET_NO_NEIGH and the datapath counts and
+// drops the packet (DROP_REASON_FIB_LOOKUP_FAILED) -- confirmed live: every
+// cross-region packet to a pod that had never otherwise triggered NDP for
+// its own address was silently and permanently blackholed, since nothing
+// else in this attach path ever resolves it. A permanent entry (installed
+// once, at CNI ADD, using the guest veth's own known MAC) means this
+// resolution never depends on dynamic ARP/NDP at all.
+func installGatewayNeighbor(hostLink netlink.Link, podIP net.IP, family int, guestHWAddr net.HardwareAddr) error {
+	neigh := &netlink.Neigh{
+		LinkIndex:    hostLink.Attrs().Index,
+		Family:       family,
+		State:        netlink.NUD_PERMANENT,
+		IP:           podIP,
+		HardwareAddr: guestHWAddr,
+	}
+	if err := netlink.NeighSet(neigh); err != nil {
+		return fmt.Errorf("add permanent neighbor %s -> %s on host interface %q: %w",
+			podIP, guestHWAddr, hostLink.Attrs().Name, err)
 	}
 	return nil
 }
