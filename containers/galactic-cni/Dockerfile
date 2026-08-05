@@ -11,16 +11,6 @@ ARG GIT_URL=https://github.com/datum-cloud/galactic
 
 WORKDIR /workspace
 
-# clang/LLVM builds the eBPF/TC-BPF uSID datapath (internal/plumbing/ebpf/
-# prog/usid.c) via bpf2go, invoked by `go generate` below -- a build-time
-# only dependency; the final runtime images below embed the resulting
-# compiled object via go:embed in the galactic-cni binary itself and need
-# no eBPF toolchain of their own (design plan
-# .local/plan-ebpf-xdp-usid-datapath.md §6; Milestone 5.2 of
-# .local/implementation-plan-ebpf-xdp-usid-datapath.md).
-RUN apt-get update && apt-get install -y --no-install-recommends clang llvm linux-libc-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -32,10 +22,15 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# Regenerate the eBPF uSID datapath's compiled object and Go bindings from
-# usid.c -- always, not just when the committed usid_bpfel.o/usid_bpfeb.o
-# are stale, matching `task build:ebpf`'s own semantics (Taskfile.yaml).
-RUN go generate ./internal/plumbing/ebpf/prog/...
+# No eBPF toolchain needed here: internal/plumbing/ebpf/prog's committed
+# usid_bpfel.o/usid_bpfeb.o (go:embed'd into the galactic-cni binary below)
+# ship as-is from the COPY above, rather than being regenerated from
+# usid.c by this build -- so the object embedded in the image is bit-for-
+# bit the one committed to git, reviewed in the PR, and verified against
+# usid.c by CI's drift check (.github/workflows/ci.yaml's `build` job),
+# not a separate build produced by this builder image's own clang. design
+# plan .local/plan-ebpf-xdp-usid-datapath.md §6; Milestone 5.2 of
+# .local/implementation-plan-ebpf-xdp-usid-datapath.md.
 
 # Build CNI plugin
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
