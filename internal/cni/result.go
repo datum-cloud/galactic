@@ -88,7 +88,7 @@ func buildVethResult(
 	hostName, guestName string,
 	hostMac string,
 	hostMTU int,
-) (*ipamResult, error) {
+) (*ipamResult, net.HardwareAddr, error) {
 	// Only call host-device ADD if the guest interface is still in the host
 	// namespace. If a prior attempt already moved it to the container netns but
 	// failed at a later step, we must not try to move it again.
@@ -97,10 +97,10 @@ func buildVethResult(
 		// previous run. The host-device plugin renames the moved interface
 		// to args.IfName, so a prior run may have left that name behind.
 		if err := cleanupContainerNetns(args.Netns, args.IfName); err != nil {
-			return nil, fmt.Errorf("cleanup container netns: %w", err)
+			return nil, nil, fmt.Errorf("cleanup container netns: %w", err)
 		}
 		if err := hostDevice("ADD", args, pluginConf); err != nil {
-			return nil, fmt.Errorf("host-device ADD: %w", err)
+			return nil, nil, fmt.Errorf("host-device ADD: %w", err)
 		}
 	}
 
@@ -109,7 +109,7 @@ func buildVethResult(
 	if wantsIPAM(pluginConf) {
 		result, err := configureIPAM(args, pluginConf, args.IfName)
 		if err != nil {
-			return nil, fmt.Errorf("configure IPAM: %w", err)
+			return nil, nil, fmt.Errorf("configure IPAM: %w", err)
 		}
 		ipamResult = result
 	}
@@ -117,14 +117,18 @@ func buildVethResult(
 	// Read guest veth attributes inside the container netns.
 	guestMac, guestMTU, err := readGuestInterface(args.Netns, args.IfName)
 	if err != nil {
-		return nil, fmt.Errorf("read guest interface: %w", err)
+		return nil, nil, fmt.Errorf("read guest interface: %w", err)
+	}
+	guestHWAddr, err := net.ParseMAC(guestMac)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse guest interface MAC %q: %w", guestMac, err)
 	}
 	result := buildResult(pluginConf, ipamResult, hostName, args.IfName, hostMac, guestMac, hostMTU, guestMTU, args.Netns)
 	if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
-		return nil, fmt.Errorf("print CNI result: %w", err)
+		return nil, nil, fmt.Errorf("print CNI result: %w", err)
 	}
 
-	return ipamResult, nil
+	return ipamResult, guestHWAddr, nil
 }
 
 // buildTapResult constructs the CNI result for tap mode: a single host
