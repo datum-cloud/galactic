@@ -89,22 +89,23 @@
 // The BPF ELF "license" section below is a kernel-required
 // self-declaration for the compiled bytecode: the verifier's
 // license_is_gpl_compatible() check reads it to decide whether this
-// program may call a gpl_only helper. It is set to this file's own
-// AGPL-3.0-or-later SPDX identifier (above) rather than a borrowed
-// GPL-compatible string like "GPL" or "Dual BSD/GPL" -- unlike Cilium or
-// Katran, which deliberately dual-license their BPF C sources under GPL
-// specifically so the compiled bytecode can claim a whitelisted string,
-// this file has exactly one license, and the ELF section says so directly
-// instead of offering the compiled datapath under a license the rest of
-// the file doesn't intend.
-//
-// Consequence: the kernel only recognizes a fixed whitelist here ("GPL",
-// "GPL v2", "GPL and additional rights", "Dual MIT/GPL", "Dual BSD/GPL")
-// as GPL-compatible; "AGPL-3.0-or-later" is not on it, so this program
-// loads as license-incompatible with gpl_only helpers. None of the
-// helpers this program calls today are gpl_only, so it loads fine as-is
-// -- but the day one is added, the load will fail with -EPERM until this
-// decision is revisited.
+// program may call a gpl_only helper -- and it already does: the VRF FIB
+// lookup below calls bpf_fib_lookup(), which the kernel implements as
+// gpl_only (net/core/filter.c's bpf_fib_lookup_proto). That check accepts
+// only a fixed whitelist of exact strings ("GPL", "GPL v2", "GPL and
+// additional rights", "Dual MIT/GPL", "Dual BSD/GPL"); this file's own
+// AGPL-3.0-or-later SPDX identifier (above) is not on it, so declaring
+// the ELF section as literally "AGPL-3.0-or-later" makes the program
+// fail to load at all (verifier: "cannot call GPL-restricted function
+// from non-GPL compatible program"), not merely a hypothetical future
+// tradeoff. "GPL" is used instead (not "Dual BSD/GPL" -- this program
+// isn't itself dual-licensed, so it declares plain "GPL" rather than a
+// disjunction it doesn't mean), same as Cilium, Katran, and every other
+// AGPL/Apache/BSD-licensed project embedding a BPF datapath: the ELF
+// license section governs which helpers the verifier allows and says
+// nothing about the licensing of the surrounding Go project, so this is
+// independent of (and doesn't relicense) the file's own
+// AGPL-3.0-or-later SPDX header.
 
 #include <linux/bpf.h>
 
@@ -765,4 +766,4 @@ int usid_ingress(struct __sk_buff *skb)
 	return redirect_rc;
 }
 
-char __license[] SEC("license") = "AGPL-3.0-or-later";
+char __license[] SEC("license") = "GPL";

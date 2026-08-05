@@ -24,13 +24,14 @@ type UsidLocatorValue struct {
 }
 
 type UsidVrfValue struct {
-	_          structs.HostLayout
-	VrfTableId uint32
-	EgressKind uint32
-	Packets    uint64
-	Bytes      uint64
-	LastSeenNs uint64
-	Generation uint64
+	_              structs.HostLayout
+	VrfTableId     uint32
+	EgressKind     uint32
+	Packets        uint64
+	Bytes          uint64
+	LastSeenNs     uint64
+	Generation     uint64
+	DroppedPackets uint64
 }
 
 // Names of all BPF objects in the ELF.
