@@ -64,18 +64,18 @@ sequenceDiagram
     CNI->>CNI: AddrAdd(gateway/128) on host veth
     CNI->>CNI: RouteAdd(subnet to host veth) in VRF table
 
-    CNI->>CNI: decode VPC hex + VRFID
+    CNI->>CNI: decode VPC hex
     CNI->>K8s: newK8sClient()
 
     CNI->>CNI: publishBGPStateK8s() (retry loop)
     activate CNI
     CNI->>K8s: lookupBGPRouter(node)
-    CNI->>CNI: resolveSRv6SID(locator, nodeID, vrfID)
-    CNI->>SRv6: RouteIngressAdd(sid, vpc, attachment)
-    activate SRv6
-    SRv6->>SRv6: seg6local End.DT46 route
-    SRv6-->>CNI: ok
-    deactivate SRv6
+    CNI->>CNI: allocateArgument(ctx, k8s, namespace, routerName, vrfInstanceName) -> vrfID (local per-node Argument)
+    CNI->>CNI: registerEBPFDatapath(bgp, vpc, attachment, ifaceType, vrfID, PinDir)
+    activate EBPF
+    EBPF->>EBPF: Locator.Register / Function.Register / VRF.Register (locator_table, function_table, vrf_table)
+    EBPF-->>CNI: ok (fatal to ADD on error -- this is the only forwarding path)
+    deactivate EBPF
     CNI->>K8s: CreateOrUpdate BGPVRFInstance
     CNI->>K8s: CreateOrUpdate BGPAdvertisement(prefix, annotations)
     CNI-->>Runtime: ok
@@ -128,18 +128,18 @@ sequenceDiagram
 
     CNI->>CNI: buildTapResult(ipamResult) + PrintResult()
 
-    CNI->>CNI: decode VPC hex + VRFID
+    CNI->>CNI: decode VPC hex
     CNI->>K8s: newK8sClient()
 
     CNI->>CNI: publishBGPStateK8s() (retry loop)
     activate CNI
     CNI->>K8s: lookupBGPRouter(node)
-    CNI->>CNI: resolveSRv6SID(locator, nodeID, vrfID)
-    CNI->>SRv6: RouteIngressAdd(sid, vpc, attachment)
-    activate SRv6
-    SRv6->>SRv6: seg6local End.DT46 route
-    SRv6-->>CNI: ok
-    deactivate SRv6
+    CNI->>CNI: allocateArgument(ctx, k8s, namespace, routerName, vrfInstanceName) -> vrfID (local per-node Argument)
+    CNI->>CNI: registerEBPFDatapath(bgp, vpc, attachment, ifaceType, vrfID, PinDir)
+    activate EBPF
+    EBPF->>EBPF: Locator.Register / Function.Register / VRF.Register (locator_table, function_table, vrf_table)
+    EBPF-->>CNI: ok (fatal to ADD on error -- this is the only forwarding path)
+    deactivate EBPF
     CNI->>K8s: CreateOrUpdate BGPVRFInstance
     CNI->>K8s: CreateOrUpdate BGPAdvertisement(prefix, annotations)
     CNI-->>Runtime: ok
@@ -175,7 +175,7 @@ sequenceDiagram
             end
         end
 
-        Note over CNI: Shared resources (VRF, interface, routes, SRv6,<br/>BGPAdvertisement, BGPVRFInstance) are NOT deleted here.<br/>They may be in use by another pod on the same (vpc, attachment).<br/>The GC controller collects orphans periodically.
+        Note over CNI: Shared resources (VRF, interface, routes,<br/>eBPF vrf_table entry, BGPAdvertisement, BGPVRFInstance) are NOT deleted here.<br/>They may be in use by another pod on the same (vpc, attachment).<br/>The GC controller (and, for vrf_table specifically, gc.SweepEBPFVRFTable) collects orphans periodically.
 
         CNI->>CNI: slog.Info("DEL: skipping shared resource cleanup (handled by GC)")
         CNI->>CNI: print empty result

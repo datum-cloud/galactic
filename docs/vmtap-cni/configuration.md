@@ -4,9 +4,7 @@
 Unikraft microVM managed by `kraftlet` access to the pod's real Cilium-assigned
 identity. It has no VPC/VPCAttachment configuration and no Kubernetes API
 dependency — it never creates a `BGPAdvertisement`, never touches a VRF, and
-these pods have no `vpc`/`vpcattachment`. See
-[.local/kraftlet-cilium-tap-plan.md](../../.local/kraftlet-cilium-tap-plan.md)
-for the full design.
+these pods have no `vpc`/`vpcattachment`.
 
 > This plugin has not yet been validated against a real Cilium-managed cluster
 > — see [Open items / unvalidated caveats](#open-items--unvalidated-caveats) below
@@ -136,6 +134,3 @@ cluster to confirm:
 - **kraftlet hand-off convention.** The `sandbox: CNI_CONTAINERID` convention
   described above is this plugin's own choice, not something confirmed
   against kraftlet's actual CRI/containerd integration.
-
-See [.local/kraftlet-cilium-tap-plan.md](../../.local/kraftlet-cilium-tap-plan.md)
-section 7 for the full list.

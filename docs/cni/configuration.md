@@ -4,8 +4,11 @@
 (or any CNI manager), plus node-local settings resolved at runtime from the
 conflist, environment variables, and (as a last resort) the Kubernetes API.
 
-> Last verified: 2026-07-28 against the current working tree of `internal/cni/config.go`,
-> `internal/cni/ipam_ops.go`, and `internal/installer/installer.go`.
+> Last verified: 2026-08-02 against the current working tree of `internal/cni/config.go`,
+> `internal/cni/ipam_ops.go`, `internal/installer/installer.go`, `internal/config/cni.go`,
+> and `internal/plumbing/ebpf/prog/usid.c` — the eBPF uSID datapath is now the only
+> forwarding path (direct cutover, not a phased rollout); `GALACTIC_CNI_ENABLE_EBPF_DATAPATH`
+> and `GALACTIC_CNI_EBPF_OBSERVE_ONLY` no longer exist.
 
 ## Runtime Configuration
 
@@ -84,6 +87,54 @@ and this environment variable has no effect on the allocation behavior.
 **Type:** bool
 **Default:** `false`
 
+### eBPF uSID datapath
+
+The eBPF/TC-BPF `uFMT 48+16` uSID datapath is the only forwarding path for
+SRv6 uSID traffic — there is no legacy static-route fallback and no feature
+flag to disable it. The DaemonSet's
+long-lived `run` container (`internal/installer.Run`, via
+`internal/plumbing/ebpf/attach`) always loads/pins/attaches the compiled
+`usid_ingress` program at startup; a kernel preflight-check failure
+(`internal/plumbing/ebpf/preflight`) is fatal to that container. The CNI
+plugin binary's ADD path (`internal/cni/bgp.go`'s `registerEBPFDatapath`)
+always registers this attachment's `vrf_table` entry; a registration
+failure is fatal to the ADD.
+
+**Argument allocation.** `registerEBPFDatapath` uses a real,
+per-node-allocated 12-bit Argument value (`internal/cni/bgp.go`'s
+`allocateArgument`) — the same value the router independently recomputes
+the BGP-advertised SID from (`internal/reconcile`).
+
+**Both `veth` and `tap` modes supported.** The datapath's final redirect
+step (`internal/plumbing/ebpf/prog/usid.c`) picks a redirect helper per
+`vrf_table` entry: `bpf_redirect_peer` for `veth` attachments (the
+resolved egress interface's peer lives in the container's netns) or plain
+`bpf_redirect` for `tap` attachments (`internal/cni/tap` never moves the
+interface out of this netns, so there is no peer to cross into).
+`registerEBPFDatapath` sets this per-entry from the CNI's own
+`interface_type`, so no manual configuration is needed. The branch logic
+itself is simple and verifier-accepted, but a real FIB-lookup-and-redirect
+success/failure by egress kind requires a live route/interface (a real
+net_device backing the packet) to observe — `BPF_PROG_TEST_RUN`, used for
+this program's other unit tests, cannot simulate that without one, so this
+specific behavior is verified in a live cluster (ContainerLab or e2e), not
+by a kernel-level unit test.
+
+| Variable                       | Description                                                                                                                                                                                                               | Type                     | Default         |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | --------------- |
+| `GALACTIC_CNI_EBPF_INTERFACES`  | Comma-separated list of interface names the eBPF datapath attaches its TC-BPF ingress hook to, overriding auto-detection (the interface(s) currently carrying the default IPv6 route). For multi-homed nodes where auto-detection is ambiguous. | string (comma-separated) | _(auto-detect)_ |
+
+The `run` container also exposes Prometheus metrics (packets/bytes per
+Argument, drops by reason, load/attach/detach event counts, and per-Block
+Argument-space utilization — `internal/plumbing/ebpf/metrics`) at
+`/metrics` on the port set by `galactic-cni run --metrics-port`
+(default `9091`; alongside the existing `--grpc-health-port`, default
+`5180`), regardless of whether the flag above is set — datapath-specific
+series are simply absent/zero until it is. A separate gRPC health service
+named `ebpf-datapath` (distinct from the always-serving `""` overall
+service) reports the live result of `internal/plumbing/ebpf/attach.Health`
+once the datapath has actually started.
+
 ## CNI Configuration JSON
 
 The CNI configuration is a JSON object passed at pod creation time. It extends
@@ -93,7 +144,7 @@ the standard CNI `PluginConf` with Galactic-specific fields.
 
 | Field            | Required | Type            | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ---------------- | -------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `vpc`            | **Yes**  | `string`        | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets.                                                                                                                                                                                                                                                                                                                                                                                           |
+| `vpc`            | **Yes**  | `string`        | Base62-encoded VPC identifier (16-bit value, cluster-scoped). Used to derive VRF names, interface names, and BGP route targets.                                                                                                                                                                                                                                                                                                                                                                           |
 | `vpcattachment`  | **Yes**  | `string`        | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming.                                                                                                                                                                                                                                                                                                                                                                                              |
 | `interface_type` | No       | `string`        | Interface mode: `"veth"` (default, for containers) or `"tap"` (for VMs such as Kata, Firecracker, QEMU). Both modes run IPAM and SRv6/BGP publish; `tap` mode only skips host-device delegation and guest-netns configuration (see the Tap mode section below).                                                                                                                                                                                                                                           |
 | `mtu`            | No       | `int`           | MTU for the host-side interface. For `veth` mode this applies to both veth endpoints; for `tap` mode it applies to the tap interface.                                                                                                                                                                                                                                                                                                                                                                     |
