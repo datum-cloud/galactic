@@ -25,9 +25,20 @@ spec:
       # and brings up the node's lo address, both of which galactic-router
       # depends on before it can start — so this must tolerate NotReady the
       # same way a CNI plugin does, or it never gets scheduled early enough.
+      # It must also tolerate the route-reflector role's own
+      # galactic.datumapis.com/node=control:NoSchedule taint -- the affinity
+      # below already targets that label, but without this toleration the
+      # matching taint silently keeps this DaemonSet off the node entirely,
+      # so the route reflector's lo address (and BGP_LOCAL_ADDRESS
+      # auto-detection) never gets configured and galactic-router-control
+      # crashloops forever.
       tolerations:
         - key: node.kubernetes.io/not-ready
           operator: Exists
+          effect: NoSchedule
+        - key: galactic.datumapis.com/node
+          operator: Equal
+          value: control
           effect: NoSchedule
       # Opt-in only, same as galactic-cni and galactic-router: runs on every
       # node labeled either for regular tenant traffic or for the
