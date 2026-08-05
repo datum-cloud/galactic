@@ -172,14 +172,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			return fmt.Errorf("print CNI result: %w", err)
 		}
 
-		// Decode VPC/VRFID for BGP state publish.
+		// Decode VPC for BGP state publish.
 		vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 		if err != nil {
 			return fmt.Errorf("decode VPC: %w", err)
-		}
-		vrfID, err := vrfIDFromAttachment(pluginConf.VPCAttachment)
-		if err != nil {
-			return fmt.Errorf("decode VPCAttachment: %w", err)
 		}
 
 		// Publish BGP state (SRv6 ingress + BGP CRDs).
@@ -187,7 +183,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			return errors.New("k8s client not set in tracker")
 		}
 		slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", interfaceTypeTap)
-		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
+		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, tracker.k8s, tracker)
 	}
 
 	slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", pluginConf.InterfaceType)
