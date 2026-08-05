@@ -5,15 +5,19 @@
 package cni
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"go.datum.net/galactic/internal/plumbing/intf"
-	"go.datum.net/galactic/internal/plumbing/srv6"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -145,128 +149,183 @@ func TestRouteConflicts(t *testing.T) {
 	}
 }
 
-// ---- vrfIDFromAttachment --------------------------------------------------
+// ---- allocateArgument ------------------------------------------------------
 
-func TestVRFIDFromAttachment(t *testing.T) {
+// vrfInstanceForRouter builds a BGPVRFInstance targeting routerName with the
+// given VRFID (the allocated Argument), for allocateArgument's test fixtures.
+func vrfInstanceForRouter(name, namespace, routerName string, vrfID int32) *bgpv1alpha1.BGPVRFInstance {
+	return &bgpv1alpha1.BGPVRFInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: bgpv1alpha1.BGPVRFInstanceSpec{
+			RouterTarget: bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: routerName}},
+			VRFID:        vrfID,
+		},
+	}
+}
+
+func TestAllocateArgument(t *testing.T) {
+	const (
+		namespace  = "default"
+		routerName = "router-a"
+	)
+
+	t.Run("no existing instances allocates the lowest value", func(t *testing.T) {
+		k8s := fakeClient()
+		got, err := allocateArgument(context.Background(), k8s, namespace, routerName, "vpc-att-1")
+		if err != nil {
+			t.Fatalf("allocateArgument: unexpected error: %v", err)
+		}
+		if got != int32(uformat.ArgumentMin) {
+			t.Errorf("allocateArgument() = %d, want %d", got, uformat.ArgumentMin)
+		}
+	})
+
+	t.Run("existing instance by name is reused idempotently", func(t *testing.T) {
+		existing := vrfInstanceForRouter("vpc-att-1", namespace, routerName, 99)
+		k8s := fakeClient(existing)
+		got, err := allocateArgument(context.Background(), k8s, namespace, routerName, "vpc-att-1")
+		if err != nil {
+			t.Fatalf("allocateArgument: unexpected error: %v", err)
+		}
+		if got != 99 {
+			t.Errorf("allocateArgument() = %d, want 99 (reused from existing BGPVRFInstance)", got)
+		}
+	})
+
+	t.Run("skips values used by this router and ignores other routers", func(t *testing.T) {
+		used1 := vrfInstanceForRouter("other-att-1", namespace, routerName, 1)
+		used2 := vrfInstanceForRouter("other-att-2", namespace, routerName, 2)
+		// Same VRFID (1) under a different router -- must not count toward
+		// this router's used set, since Argument allocation is per node
+		// (i.e. per BGPRouter), not platform-wide.
+		differentRouter := vrfInstanceForRouter("different-router-att", namespace, "other-router", 1)
+		k8s := fakeClient(used1, used2, differentRouter)
+		got, err := allocateArgument(context.Background(), k8s, namespace, routerName, "new-att")
+		if err != nil {
+			t.Fatalf("allocateArgument: unexpected error: %v", err)
+		}
+		if got != 3 {
+			t.Errorf("allocateArgument() = %d, want 3 (lowest free, skipping 1 and 2)", got)
+		}
+	})
+
+	t.Run("ignores instances in a different namespace", func(t *testing.T) {
+		otherNamespace := vrfInstanceForRouter("vpc-att-1", "other-namespace", routerName, 1)
+		k8s := fakeClient(otherNamespace)
+		got, err := allocateArgument(context.Background(), k8s, namespace, routerName, "vpc-att-1")
+		if err != nil {
+			t.Fatalf("allocateArgument: unexpected error: %v", err)
+		}
+		if got != int32(uformat.ArgumentMin) {
+			t.Errorf("allocateArgument() = %d, want %d (cross-namespace instance must not be reused or counted as used)",
+				got, uformat.ArgumentMin)
+		}
+	})
+
+	t.Run("exhausted Argument space returns an error", func(t *testing.T) {
+		objs := make([]client.Object, 0, uformat.ArgumentMax)
+		for i := int32(uformat.ArgumentMin); i <= int32(uformat.ArgumentMax); i++ {
+			objs = append(objs, vrfInstanceForRouter(fmt.Sprintf("att-%d", i), namespace, routerName, i))
+		}
+		k8s := fakeClient(objs...)
+		_, err := allocateArgument(context.Background(), k8s, namespace, routerName, "new-att")
+		if err == nil {
+			t.Fatal("allocateArgument: error = nil, want exhaustion error")
+		}
+		if !strings.Contains(err.Error(), "no free Argument") {
+			t.Errorf("error %q does not contain %q", err, "no free Argument")
+		}
+	})
+}
+
+// ---- checkArgumentCollision -------------------------------------------------
+
+// TestCheckArgumentCollision guards against a regression of the fix where a
+// lexicographic-name tie-break let exactly one of two colliding instances
+// "win" without ever proving the other side's check would run after this
+// one's create -- concurrent create+check interleaving could let both sides
+// pass. Detection must not depend on name ordering: it must fire regardless
+// of whether the other instance's name sorts before or after this one's.
+func TestCheckArgumentCollision(t *testing.T) {
+	const (
+		namespace  = "default"
+		routerName = "router-a"
+		vrfID      = int32(42)
+	)
+
+	t.Run("no collision when no other instance shares the VRFID", func(t *testing.T) {
+		other := vrfInstanceForRouter("other-att", namespace, routerName, vrfID+1)
+		k8s := fakeClient(other)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "this-att", vrfID); err != nil {
+			t.Errorf("checkArgumentCollision() = %v, want nil", err)
+		}
+	})
+
+	t.Run("detects collision when the other name sorts before this one", func(t *testing.T) {
+		colliding := vrfInstanceForRouter("aaa-att", namespace, routerName, vrfID)
+		k8s := fakeClient(colliding)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "zzz-att", vrfID); err == nil {
+			t.Error("checkArgumentCollision() = nil, want a collision error")
+		}
+	})
+
+	t.Run("detects collision when the other name sorts after this one", func(t *testing.T) {
+		colliding := vrfInstanceForRouter("zzz-att", namespace, routerName, vrfID)
+		k8s := fakeClient(colliding)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "aaa-att", vrfID); err == nil {
+			t.Error("checkArgumentCollision() = nil, want a collision error")
+		}
+	})
+
+	t.Run("ignores a same-VRFID instance under a different router", func(t *testing.T) {
+		differentRouter := vrfInstanceForRouter("other-router-att", namespace, "other-router", vrfID)
+		k8s := fakeClient(differentRouter)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "this-att", vrfID); err != nil {
+			t.Errorf("checkArgumentCollision() = %v, want nil", err)
+		}
+	})
+
+	t.Run("ignores this instance's own entry", func(t *testing.T) {
+		self := vrfInstanceForRouter("this-att", namespace, routerName, vrfID)
+		k8s := fakeClient(self)
+		if err := checkArgumentCollision(context.Background(), k8s, namespace, routerName, "this-att", vrfID); err != nil {
+			t.Errorf("checkArgumentCollision() = %v, want nil", err)
+		}
+	})
+}
+
+// ---- egressKindForInterfaceType --------------------------------------------
+
+func TestEgressKindForInterfaceType(t *testing.T) {
 	tests := []struct {
 		name    string
-		input   string
-		want    int32
-		wantErr string
+		iface   string
+		want    uint32
+		wantErr bool
 	}{
-		{
-			name:  "valid base62 decodes to VRFID",
-			input: "jU", // 1234 decimal; see internal/plumbing/intf fixtures
-			want:  1234,
-		},
-		{
-			name:    "invalid base62 fails to decode",
-			input:   testInvalidBase62,
-			wantErr: "decode VPCAttachment",
-		},
-		{
-			name:    "value exceeding 16 bits is rejected",
-			input:   mustHexToBase62(t, "10000"), // 65536, out of range for VRFID
-			wantErr: "parse VPCAttachment hex",
-		},
+		{name: "veth maps to EgressKindVeth", iface: interfaceTypeVeth, want: usidmap.EgressKindVeth},
+		{name: "empty defaults to EgressKindVeth", iface: "", want: usidmap.EgressKindVeth},
+		{name: "tap maps to EgressKindTap", iface: interfaceTypeTap, want: usidmap.EgressKindTap},
+		{name: "unknown type errors", iface: "bogus", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := vrfIDFromAttachment(tt.input)
-			if tt.wantErr != "" {
+			got, err := egressKindForInterfaceType(tt.iface)
+			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
+					t.Fatalf("egressKindForInterfaceType(%q) error = nil, want error", tt.iface)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+				t.Fatalf("egressKindForInterfaceType(%q) unexpected error: %v", tt.iface, err)
 			}
 			if got != tt.want {
-				t.Errorf("vrfIDFromAttachment(%q) = %d, want %d", tt.input, got, tt.want)
+				t.Errorf("egressKindForInterfaceType(%q) = %d, want %d", tt.iface, got, tt.want)
 			}
 		})
 	}
-}
-
-func mustHexToBase62(t *testing.T, hex string) string {
-	t.Helper()
-	b62, err := intf.HexToBase62(hex)
-	if err != nil {
-		t.Fatalf("HexToBase62(%q): %v", hex, err)
-	}
-	return b62
-}
-
-// ---- resolveSRv6SID --------------------------------------------------------
-
-func TestResolveSRv6SID(t *testing.T) {
-	const locator = "fd00:10::/48"
-	const nodeID, vrfID = int32(7), int32(1234)
-
-	computed, err := srv6.ComputeSID(locator, nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
-	if err != nil {
-		t.Fatalf("srv6.ComputeSID setup: %v", err)
-	}
-
-	tests := []struct {
-		name    string
-		bgp     bgpConfig
-		vrfID   int32
-		want    string
-		wantErr string
-	}{
-		{
-			name:  "computed from router locator+nodeID when explicit is empty",
-			bgp:   bgpConfig{srv6Locator: locator, nodeID: nodeID},
-			vrfID: vrfID,
-			want:  computed.String(),
-		},
-		{
-			name:  "no locator configured on router — SID skipped",
-			bgp:   bgpConfig{nodeID: nodeID},
-			vrfID: vrfID,
-			want:  "",
-		},
-		{
-			name:  "no nodeID configured on router — SID skipped",
-			bgp:   bgpConfig{srv6Locator: locator},
-			vrfID: vrfID,
-			want:  "",
-		},
-		{
-			name:    "ComputeSID error propagates",
-			bgp:     bgpConfig{srv6Locator: "fd00:10::/33", nodeID: nodeID}, // not byte-aligned
-			vrfID:   vrfID,
-			wantErr: "compute SRv6 SID",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveSRv6SID(tt.bgp, tt.vrfID)
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("resolveSRv6SID() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-
 }
 
 // ---- buildVRFInstanceSpec ---------------------------------------------------

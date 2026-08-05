@@ -678,7 +678,7 @@ func TestRouteTarget(t *testing.T) {
 			want:     "65000:1234",
 		},
 		{
-			name:     "upper 16 bits of 48-bit VPC stripped",
+			name:     "upper bits beyond 32 stripped",
 			asNumber: 65000,
 			vpcHex:   "000100000001", // 0x000100000001; low32 = 1
 			want:     testRD65000_1,
@@ -1527,9 +1527,6 @@ func TestResourceTrackerFieldsSet(t *testing.T) {
 	}
 	if tracker.vrfCreated {
 		t.Error("vrfCreated should be false by default")
-	}
-	if tracker.srv6SID != "" {
-		t.Errorf("srv6SID should be empty by default, got %q", tracker.srv6SID)
 	}
 	if tracker.advCreated {
 		t.Error("advCreated should be false by default")

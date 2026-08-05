@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"syscall"
 	"time"
@@ -23,8 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
-	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -122,7 +125,7 @@ func bgpAdvertisementName(vpc, vpcAttachment string) string {
 
 // routeTarget returns the RT in "ASN:NN" format using the low 32 bits of the
 // VPC identifier. All nodes in the same VRF produce the same value, enabling
-// VPC-scoped route import/export. vpcHex is the 48-bit hex VPC identifier.
+// VPC-scoped route import/export. vpcHex is the 16-bit hex VPC identifier.
 func routeTarget(asNumber int64, vpcHex string) (string, error) {
 	v, err := strconv.ParseUint(vpcHex, 16, 64)
 	if err != nil {
@@ -131,39 +134,91 @@ func routeTarget(asNumber int64, vpcHex string) (string, error) {
 	return fmt.Sprintf("%d:%d", asNumber, uint32(v)), nil
 }
 
-// vrfIDFromAttachment decodes the base62-encoded VPCAttachment identifier
-// into the numeric 16-bit VRFID required by BGPVRFInstanceSpec.VRFID and
-// BGPAdvertisementSpec.VRFID.
-func vrfIDFromAttachment(vpcAttachment string) (int32, error) {
-	hex, err := intf.Base62ToHex(vpcAttachment)
-	if err != nil {
-		return 0, fmt.Errorf("decode VPCAttachment %q: %w", vpcAttachment, err)
+// allocateArgument returns the 12-bit Argument value (design plan
+// .local/plan-ebpf-xdp-usid-datapath.md §4.2, §5.2) for the VPC attachment
+// named vrfInstanceName under routerName: the value already registered if
+// a BGPVRFInstance with that exact name exists (an idempotent CNI ADD
+// retry, or a repeat ADD on an attachment that is already live), or -- if
+// none does -- the lowest unused value in
+// [uformat.ArgumentMin, uformat.ArgumentMax] among that router's other
+// BGPVRFInstances.
+//
+// Scoping this to one BGPRouter -- one per node, in the tenant role -- is
+// what makes this a local, per-node allocation rather than a
+// platform-wide one: confirmed 2026-08-02 that the eBPF datapath's
+// vrf_table is populated and consulted entirely per node (a packet only
+// reaches it after locator_table has already routed it to that specific
+// node), so no two nodes ever need to agree on a shared Argument
+// numbering authority. This mirrors
+// internal/plumbing/vrf.findNextAvailableVRFID's own first-available-slot
+// pattern for the Linux kernel VRF table ID, just scoped to
+// BGPVRFInstance CRD state -- the same "CRD state is the source of
+// truth" pattern the GC controller already uses for VRFs -- instead of
+// kernel state, so this works whether or not the eBPF datapath is even
+// enabled on this node.
+func allocateArgument(
+	ctx context.Context, k8s client.Client, namespace, routerName, vrfInstanceName string,
+) (int32, error) {
+	list := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return 0, fmt.Errorf("list BGPVRFInstances in namespace %s: %w", namespace, err)
 	}
-	v, err := strconv.ParseUint(hex, 16, 16)
-	if err != nil {
-		return 0, fmt.Errorf("parse VPCAttachment hex %q as VRFID: %w", hex, err)
+
+	used := make(map[int32]struct{}, len(list.Items))
+	for _, inst := range list.Items {
+		if inst.Spec.RouterRef == nil || inst.Spec.RouterRef.Name != routerName {
+			continue // not one of this node's router's VRF instances
+		}
+		if inst.Name == vrfInstanceName {
+			// Idempotent: this attachment already has an Argument.
+			return inst.Spec.VRFID, nil
+		}
+		used[inst.Spec.VRFID] = struct{}{}
 	}
-	return int32(v), nil
+
+	for arg := int32(uformat.ArgumentMin); arg <= int32(uformat.ArgumentMax); arg++ {
+		if _, ok := used[arg]; !ok {
+			return arg, nil
+		}
+	}
+	return 0, fmt.Errorf("allocate SID argument: router %s has no free Argument in [%#x,%#x] (all %d in use)",
+		routerName, uint16(uformat.ArgumentMin), uint16(uformat.ArgumentMax), len(used))
 }
 
-// resolveSRv6SID determines the SRv6 SID to use for this endpoint's ingress
-// decap route.
-//
-//   - When the router has both srv6Locator and nodeID configured,
-//     the SID is computed from the locator, nodeID, and vrfID using the
-//     End.DT46 function — the only endpoint behavior CNI's kernel ingress
-//     route ever installs (see setupSRv6Ingress/srv6.RouteIngressAdd).
-//   - Otherwise, an empty string is returned with no error, matching today's
-//     behavior of skipping SRv6 ingress setup entirely.
-func resolveSRv6SID(bgp bgpConfig, vrfID int32) (string, error) {
-	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
-		return "", nil
+// checkArgumentCollision detects whether a race condition occurred where
+// another BGPVRFInstance on the same router was assigned the same VRFID
+// concurrently (allocateArgument's list-then-write is not atomic against a
+// second, concurrent CNI ADD racing it). Any other instance found still
+// holding this VRFID is treated as a collision -- deliberately without a
+// tie-breaker: allocateArgument -> create -> checkArgumentCollision runs
+// sequentially within one call, so if A's create happens before B's create,
+// then either B's own check (which always runs after B's own create) sees
+// A's already-committed CRD and B reports a collision, or it doesn't only if
+// A's check already ran (and hence already reported the collision itself)
+// before B created its CRD. At least one side always detects it this way; a
+// tie-breaker that lets exactly one side "win" without that guarantee (as a
+// prior version of this function did) can let both sides pass when the two
+// creates and checks interleave, leaving two BGPVRFInstances -- and,
+// consequently, two vrf_table registrations -- permanently sharing the same
+// VRFID. Both sides erroring out is harmless: the caller's non-transient
+// error triggers the failed-ADD rollback (resourceTracker.cleanup), which
+// deletes each side's own BGPVRFInstance, and the CNI runtime retries ADD.
+func checkArgumentCollision(
+	ctx context.Context, k8s client.Client, namespace, routerName, vrfName string, vrfID int32,
+) error {
+	list := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list BGPVRFInstances to verify argument uniqueness: %w", err)
 	}
-	sid, err := srv6.ComputeSID(bgp.srv6Locator, bgp.nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
-	if err != nil {
-		return "", fmt.Errorf("compute SRv6 SID: %w", err)
+	for _, inst := range list.Items {
+		if inst.Spec.RouterRef == nil || inst.Spec.RouterRef.Name != routerName {
+			continue
+		}
+		if inst.Name != vrfName && inst.Spec.VRFID == vrfID {
+			return fmt.Errorf("argument collision: VRFID %d claimed by both %s and %s, retrying", vrfID, inst.Name, vrfName)
+		}
 	}
-	return sid.String(), nil
+	return nil
 }
 
 // lookupBGPRouter finds the BGPRouter targeting this node in the given namespace.
@@ -223,9 +278,9 @@ func buildVRFInstanceSpec(routerName, rtValue string, vrfID int32) bgpv1alpha1.B
 // galactic-router's buildEVPNPaths for the corresponding per-family gateway
 // handling. VRFID and Function record structurally what used to live in the
 // legacy galactic.datum.net/srv6-sid annotation: which VRF this advertisement
-// belongs to, and which SRv6 endpoint behavior the CNI kernel ingress route
-// installs (always End.DT46, regardless of pod-subnet address family — see
-// setupSRv6Ingress/srv6.RouteIngressAdd).
+// belongs to, and which SRv6 endpoint behavior the eBPF uSID datapath
+// resolves (always End.DT46, regardless of pod-subnet address family — see
+// registerEBPFDatapath).
 func buildAdvertisementSpec(
 	routerName, rtValue string, prefixes []string, vrfID int32,
 ) bgpv1alpha1.BGPAdvertisementSpec {
@@ -279,17 +334,16 @@ func publishBGPState(
 		return fmt.Errorf("decode VPC: %w", err)
 	}
 
-	vrfID, err := vrfIDFromAttachment(pluginConf.VPCAttachment)
-	if err != nil {
-		return err
-	}
-
 	if tracker.k8s == nil {
 		return errors.New("k8s client not set in tracker")
 	}
 
 	// ---- k8s operations (retry on transient errors) ----
-	return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
+	// The SID Argument is allocated inside publishBGPStateK8s's retry
+	// closure, not here: it depends on this node's BGPRouter (looked up
+	// there) and must itself be a k8s-retried operation, since it lists
+	// BGPVRFInstance CRDs.
+	return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, tracker.k8s, tracker)
 }
 
 // ipamAdvertisementPrefixes derives the BGPAdvertisement prefixes to
@@ -323,7 +377,7 @@ func ipamAdvertisementPrefixes(ipamResult *ipamResult) (prefixes []string, ipv6S
 // used by both veth and tap code paths.
 func publishBGPStateK8s(
 	args *skel.CmdArgs, pluginConf *PluginConf, nodeName, namespace string, ipamResult *ipamResult,
-	vpcHex string, vrfID int32, k8s client.Client, tracker *resourceTracker,
+	vpcHex string, k8s client.Client, tracker *resourceTracker,
 ) error {
 	return retryK8sOps(cniTimeout, func(ctx context.Context) error {
 		bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
@@ -331,26 +385,15 @@ func publishBGPStateK8s(
 			return err
 		}
 
+		vrfID, err := allocateArgument(
+			ctx, k8s, namespace, bgp.routerName, bgpVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment))
+		if err != nil {
+			return err
+		}
+
 		rtValue, err := routeTarget(int64(bgp.asNumber), vpcHex)
 		if err != nil {
 			return fmt.Errorf("compute route target: %w", err)
-		}
-
-		// SID resolution needs the router's srv6Locator/nodeID, so it happens
-		// here rather than in the non-k8s section above. RouteIngressAdd is
-		// idempotent, so re-running it on retry is safe.
-		sidStr, err := resolveSRv6SID(bgp, vrfID)
-		if err != nil {
-			return err
-		}
-		srv6SIDStr, err := setupSRv6Ingress(sidStr, pluginConf.VPC, pluginConf.VPCAttachment)
-		if err != nil {
-			return err
-		}
-		if srv6SIDStr != "" {
-			tracker.srv6SID = srv6SIDStr
-			slog.Debug("BGP: SRv6 ingress route installed", "sid", srv6SIDStr,
-				"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 		}
 
 		// Create the BGPVRFInstance to configure the VRF with its VRFID and
@@ -373,6 +416,34 @@ func publishBGPStateK8s(
 		tracker.vrfInstanceCreated = true
 		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
 			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName)
+
+		if err := checkArgumentCollision(ctx, k8s, namespace, bgp.routerName, vrfName, vrfID); err != nil {
+			return err
+		}
+
+		// eBPF uSID datapath registration -- the only forwarding path
+		// (the legacy seg6local static-route path was removed once this
+		// datapath covered both veth and tap attachments). registered is
+		// false, with no error, only when the router has no
+		// srv6Locator/nodeID configured at all -- SRv6 is intentionally
+		// not set up for this attachment. Any other failure is fatal:
+		// with no legacy path to fall back to, an attachment with no
+		// registered datapath entry has no forwarding path at all.
+		// registerEBPFDatapath is itself idempotent (Register
+		// overwrites), so re-running it on a k8s-op retry is safe.
+		registered, ebpfBlock, err := registerEBPFDatapath(
+			bgp, pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.InterfaceType, uint16(vrfID), attach.PinDir)
+		if err != nil {
+			return fmt.Errorf("register eBPF uSID datapath: %w", err)
+		}
+		if registered {
+			// Recorded so a failed-ADD rollback (resourceTracker.cleanup)
+			// can unregister this exact (block, argument) pair -- see
+			// Milestone 7.2.
+			tracker.ebpfRegistered = true
+			tracker.ebpfBlock = ebpfBlock
+			tracker.ebpfArgument = uint16(vrfID)
+		}
 
 		// Create the BGPAdvertisement to originate the pod's subnet prefix(es).
 		adv := &bgpv1alpha1.BGPAdvertisement{
@@ -557,14 +628,167 @@ func installGatewayRoute(hostLink netlink.Link, gwNet, subnet *net.IPNet, family
 	return nil
 }
 
-// setupSRv6Ingress installs the End.DT46 SRv6 ingress decap route for the given
-// USID and returns the SID string. Returns empty string when SID is not configured.
-func setupSRv6Ingress(sid, vpc, vpcAttachment string) (string, error) {
-	if sid == "" {
-		return "", nil
+// registerEBPFDatapath registers this attachment against the eBPF uSID
+// datapath's pinned maps (design plan §5.1) -- the only forwarding path
+// (the legacy seg6local static-route path was removed once this covered
+// both veth and tap attachments, Milestone 6.1's tap-mode redirect fix).
+//
+// Design plan §4.4 assigns locator_table/function_table population to "the
+// control daemon, at startup + on locator change." The actual control
+// daemon (galactic-cni's "run" subcommand) does not read BGPRouter/watch
+// for locator changes -- it only loads/attaches/pins the program -- so
+// those two maps would otherwise sit permanently empty and every packet
+// would locator_table-miss and pass through unchanged. This function
+// registers all three tables (locator_table, function_table, vrf_table)
+// from here instead, since the CNI ADD path already independently
+// resolves bgp.srv6Locator/bgp.nodeID via lookupBGPRouter on every
+// invocation -- an intentional deviation from the design plan's literal
+// placement, not an oversight, tracked for revisiting once a real
+// control-daemon-side CRD watch exists.
+//
+// argument is the same real, allocated 12-bit value (Milestone 6.1's
+// allocateArgument) the router independently recomputes the BGP-advertised
+// SID from (internal/reconcile) -- both must agree on the same value or a
+// remote node's encapsulated traffic decodes into the wrong VRF.
+//
+// registerEBPFDatapath's return values let the caller record exactly what
+// (if anything) was registered, so a later failed-ADD rollback
+// (resourceTracker.cleanup, Milestone 7.2) can unregister the same
+// (block, argument) pair without having to recompute or guess it.
+// registered is false, with a nil error, only when this router has no
+// srv6Locator/nodeID configured at all -- SRv6 is intentionally not set up
+// for this attachment. Any other failure is returned as an error: with no
+// legacy path to fall back to, the caller must treat that as fatal.
+func registerEBPFDatapath(
+	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string,
+) (registered bool, block uint64, err error) {
+	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
+		return false, 0, nil
 	}
-	if err := srv6.RouteIngressAdd(sid, vpc, vpcAttachment); err != nil {
-		return "", fmt.Errorf("add SRv6 ingress route: %w", err)
+
+	// Validate the raw int32 nodeID against uformat's actual encode-time
+	// range *before* the uint16 narrowing below, mirroring srv6.ComputeSID's
+	// own bounds check on this exact value (internal/plumbing/srv6/usid.go).
+	// registry.Locator.Register below validates its uint16 argument via
+	// uformat.ValidateNodeID too, but only after this narrowing has already
+	// happened -- an out-of-[uint16] nodeID (e.g. 65537) wraps to some
+	// other, often perfectly in-range uint16 (1, here) that check can't
+	// tell apart from a legitimately-registered node's real Node-ID. Left
+	// unchecked here, that silently registers a locator_table entry for a
+	// Node-ID this router was never actually assigned, while ComputeSID
+	// (used independently by the router to build the SID it advertises)
+	// rejects the same raw value outright -- so nothing ever advertises
+	// reachability for the bogus entry this node just committed to
+	// forwarding, and it may collide with a different node's genuine one.
+	if bgp.nodeID < uformat.NodeIDMin || bgp.nodeID > uformat.NodeIDMax {
+		return false, 0, fmt.Errorf("eBPF registration: nodeID %d out of range [%#x,%#x]",
+			bgp.nodeID, uint16(uformat.NodeIDMin), uint16(uformat.NodeIDMax))
 	}
-	return sid, nil
+
+	egressKind, err := egressKindForInterfaceType(ifaceType)
+	if err != nil {
+		return false, 0, fmt.Errorf("determine eBPF egress kind: %w", err)
+	}
+
+	prefix, err := netip.ParsePrefix(bgp.srv6Locator)
+	if err != nil {
+		return false, 0, fmt.Errorf("parse SRv6 locator %q for eBPF registration: %w", bgp.srv6Locator, err)
+	}
+	block, err = uformat.Block(prefix.Addr())
+	if err != nil {
+		return false, 0, fmt.Errorf("derive eBPF uSID Block from locator %q: %w", bgp.srv6Locator, err)
+	}
+
+	vrfTableID, err := vrf.TableID(vpc, vpcAttachment)
+	if err != nil {
+		return false, 0, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
+	}
+
+	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		return false, 0, fmt.Errorf("open pinned eBPF uSID maps: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	if err := registry.Locator.Register(block, uint16(bgp.nodeID)); err != nil {
+		return false, 0, fmt.Errorf("register eBPF locator_table entry: %w", err)
+	}
+	if err := registry.Function.Register(block, uformat.FunctionEndDT46); err != nil {
+		return false, 0, fmt.Errorf("register eBPF function_table entry: %w", err)
+	}
+
+	if err := registry.VRF.Register(block, argument, vrfTableID, egressKind); err != nil {
+		return false, 0, fmt.Errorf("register eBPF vrf_table entry: %w", err)
+	}
+	return true, block, nil
+}
+
+// egressKindForInterfaceType maps the CNI's InterfaceType field to the
+// vrf_table egress_kind value usid.c's step 9 uses to pick between
+// bpf_redirect_peer (veth, crosses into the container's netns) and plain
+// bpf_redirect (tap, which never leaves this netns -- internal/cni/tap
+// creates it here and never moves it). This is what closes the tap-mode
+// redirect_failed gap (Milestone 6.1's fix, design plan §4.2 step 9).
+func egressKindForInterfaceType(ifaceType string) (uint32, error) {
+	switch ifaceType {
+	case interfaceTypeVeth, "":
+		// Empty matches config.go's own default-to-veth behavior for an
+		// omitted interface_type field.
+		return usidmap.EgressKindVeth, nil
+	case interfaceTypeTap:
+		return usidmap.EgressKindTap, nil
+	default:
+		return 0, fmt.Errorf("unknown interface type %q", ifaceType)
+	}
+}
+
+// unregisterEBPFDatapath removes the vrf_table entry registerEBPFDatapath
+// wrote for this (block, argument) pair, from the failed-ADD rollback path
+// (resourceTracker.cleanup, Milestone 7.2). Unlike registerEBPFDatapath,
+// this has no flag/config short-circuit of its own -- callers only invoke
+// it when resourceTracker recorded a real registration
+// (resourceTracker.ebpfRegistered), so by construction the flag was on and
+// the maps were reachable at Register time. Idempotent: not an error if
+// the entry is already gone (VRFTable.Unregister's own documented
+// behavior).
+//
+// expectedVRFTableID must be this attachment's own VRF table id (recomputed
+// by the caller via vrf.TableID, not read back from the tracker, since it's
+// cheap and deterministic to recompute and the whole point here is not to
+// trust stale state). A retried k8s-op attempt (retryK8sOps) can re-run the
+// same publishBGPStateK8s closure without re-registering the eBPF entry
+// (registerEBPFDatapath only runs again if that attempt gets far enough),
+// so by the time a later attempt's checkArgumentCollision failure triggers
+// this rollback, the (block, argument) slot this attachment originally
+// wrote may have since been overwritten by the very other attachment the
+// collision was detected against (vrf_table's key is just (block,
+// argument); Register always overwrites). Unregistering unconditionally in
+// that case would delete a live attachment's forwarding entry instead of
+// this rolled-back one's own -- so this only deletes the entry when it
+// still resolves to expectedVRFTableID, and leaves it alone otherwise.
+func unregisterEBPFDatapath(block uint64, argument uint16, expectedVRFTableID uint32, pinDir string) error {
+	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	entry, ok, err := registry.VRF.Get(block, argument)
+	if err != nil {
+		return fmt.Errorf("read eBPF vrf_table entry before unregister: %w", err)
+	}
+	if !ok {
+		return nil // already gone
+	}
+	if entry.VRFTableID != expectedVRFTableID {
+		slog.Warn("Rollback: eBPF vrf_table entry no longer belongs to this attachment, leaving it in place",
+			"block", block, "argument", argument,
+			"expectedVRFTableID", expectedVRFTableID, "currentVRFTableID", entry.VRFTableID)
+		return nil
+	}
+
+	if err := registry.VRF.Unregister(block, argument); err != nil {
+		return fmt.Errorf("unregister eBPF vrf_table entry: %w", err)
+	}
+	return nil
 }
