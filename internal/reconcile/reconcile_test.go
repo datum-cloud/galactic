@@ -5,11 +5,17 @@
 package reconcile
 
 import (
+	"context"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"go.datum.net/galactic/internal/model"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -133,7 +139,7 @@ func TestResolveSRv6SID(t *testing.T) {
 			router: &bgpv1alpha1.BGPRouter{
 				Spec: bgpv1alpha1.BGPRouterSpec{
 					SRv6Locator: testLocator,
-					NodeID:      0xE000, // one past uformat.NodeIDMax (0xDFFF) -- PR #740's reserved Node-ID range
+					NodeID:      uformat.NodeIDMax + 1, // one past uformat.NodeIDMax -- PR #740's reserved Node-ID range
 				},
 			},
 			adv: &bgpv1alpha1.BGPAdvertisement{
@@ -159,5 +165,102 @@ func TestResolveSRv6SID(t *testing.T) {
 				t.Errorf("resolveSRv6SID() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// buildDesiredRouterTestScheme builds a fake client scheme plus the field
+// indexes BuildDesiredRouter's client.MatchingFields lookups require
+// (mirroring internal/controller.RegisterIndexes, without importing that
+// package -- a controller/reconcile layering inversion just for a test).
+func buildDesiredRouterTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(s); err != nil {
+		t.Fatalf("AddToScheme (client-go): %v", err)
+	}
+	if err := bgpv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("AddToScheme (bgpv1alpha1): %v", err)
+	}
+	return s
+}
+
+func routerRefIndexer(obj client.Object) []string {
+	switch o := obj.(type) {
+	case *bgpv1alpha1.BGPAdvertisement:
+		return []string{o.Spec.RouterRef.Name}
+	case *bgpv1alpha1.BGPVRFInstance:
+		if o.Spec.RouterRef == nil {
+			return nil
+		}
+		return []string{o.Spec.RouterRef.Name}
+	default:
+		return nil
+	}
+}
+
+// TestBuildDesiredRouter_SkipsAdvertisementWithOutOfRangeVRFID guards
+// against a regression of the fix where one BGPAdvertisement whose VRFID
+// the eBPF datapath's 12-bit Argument can't represent (e.g. a pre-cutover
+// object allocated under the old, wider legacy VRFID scheme, still valid
+// per the CRD's own wider field maximum) used to abort resolveSRv6SID's
+// caller entirely -- discarding peers, VRFs, and every other advertisement
+// for the whole router, not just the one bad object. It must instead be
+// skipped on its own, leaving every valid advertisement intact.
+func TestBuildDesiredRouter_SkipsAdvertisementWithOutOfRangeVRFID(t *testing.T) {
+	const (
+		namespace  = "default"
+		nodeName   = "node-a"
+		routerName = "router-a"
+	)
+
+	router := &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Name: routerName, Namespace: namespace},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: "Node", Name: nodeName},
+			Roles:       []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+			LocalASN:    65000,
+			SRv6Locator: testLocator,
+			NodeID:      7,
+		},
+	}
+	validAdv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{Name: "valid-adv", Namespace: namespace},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{"2001:db8:1::/64"},
+			VRFID:         ptrInt32(42),
+			Function:      ptrFunction(bgpv1alpha1.SRv6FunctionEndDT46),
+		},
+	}
+	badAdv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-adv", Namespace: namespace},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{"2001:db8:2::/64"},
+			VRFID:         ptrInt32(int32(uformat.ArgumentMax) + 1),
+			Function:      ptrFunction(bgpv1alpha1.SRv6FunctionEndDT46),
+		},
+	}
+
+	k8s := fake.NewClientBuilder().
+		WithScheme(buildDesiredRouterTestScheme(t)).
+		WithObjects(router, validAdv, badAdv).
+		WithIndex(&bgpv1alpha1.BGPAdvertisement{}, ".spec.routerRef.name", routerRefIndexer).
+		WithIndex(&bgpv1alpha1.BGPVRFInstance{}, ".spec.routerRef.name", routerRefIndexer).
+		Build()
+
+	r := New(k8s, nodeName, string(bgpv1alpha1.RouterRoleTenant), "2001:db8:ffff::1")
+
+	got, err := r.BuildDesiredRouter(context.Background(), router)
+	if err != nil {
+		t.Fatalf("BuildDesiredRouter: unexpected error: %v (bad-adv should be skipped, not fail the whole build)", err)
+	}
+	if len(got.Advertisements) != 1 {
+		t.Fatalf("Advertisements = %+v, want exactly 1 (bad-adv skipped, valid-adv kept)", got.Advertisements)
+	}
+	if got.Advertisements[0].Name != "valid-adv" {
+		t.Errorf("Advertisements[0].Name = %q, want %q", got.Advertisements[0].Name, "valid-adv")
 	}
 }

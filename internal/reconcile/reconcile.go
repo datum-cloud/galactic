@@ -9,6 +9,7 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"slices"
 	"sort"
@@ -164,7 +165,17 @@ func (r *Reconciler) BuildDesiredRouter(
 		}
 		srv6SID, err := resolveSRv6SID(router, &adv)
 		if err != nil {
-			return nil, fmt.Errorf("BGPAdvertisement %s/%s: %w", namespace, adv.Name, err)
+			// Skip only this advertisement rather than failing the whole
+			// router build: a single BGPAdvertisement with a VRFID the
+			// eBPF datapath's 12-bit Argument can't represent (e.g. a
+			// pre-cutover object whose VRFID was allocated under the old,
+			// wider legacy scheme) would otherwise take down every peer,
+			// VRF, and advertisement for this node until someone finds and
+			// deletes it -- one stale object should not wedge the whole
+			// router during a rolling upgrade.
+			slog.Warn("BuildDesiredRouter: skipping BGPAdvertisement, could not compute SRv6 SID",
+				"namespace", namespace, "name", adv.Name, "err", err)
+			continue
 		}
 		desired.Advertisements = append(desired.Advertisements, model.DesiredAdvertisement{
 			Name:            adv.Name,

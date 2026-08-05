@@ -28,6 +28,7 @@ import (
 	"go.datum.net/galactic/internal/hash"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/loaddr"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/frr"
@@ -77,6 +78,19 @@ func runCmd(cfg *config.RouterConfig) error {
 	switch mode {
 	case config.ModeTenant:
 		factory = gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr)
+		// Pre-flight SEG6 reduced-encap check (log-and-continue, same
+		// non-fatal posture as checkWatchPermissions' RBAC pre-flight
+		// below -- the control plane still has useful work to do without
+		// a working data plane). A kernel that fails this will instead
+		// fail every single cross-region EVPN path install later, one at a
+		// time, each logged individually by internal/runtime/gobgp/monitor.go
+		// with no standing signal that the *kernel itself* -- not any one
+		// path -- is the problem; this turns that into one clear
+		// diagnostic up front.
+		if err := srv6.CheckSEG6EncapRed(); err != nil {
+			log.Printf("SEG6 reduced-encap pre-flight failed: %v -- every cross-region uSID path this node "+
+				"tries to install will fail identically until this kernel is upgraded", err)
+		}
 	case config.ModeFabric:
 		factory = frr.NewRuntimeFactory()
 	case config.ModeTransit:
