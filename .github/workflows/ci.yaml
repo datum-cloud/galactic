@@ -132,7 +132,7 @@ jobs:
   test-e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
-    needs: [lint, test-unit, build]
+    needs: [lint, test-unit, test-unit-root, build]
     steps:
       - uses: actions/checkout@v7
 
