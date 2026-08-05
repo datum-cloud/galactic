@@ -16,27 +16,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 )
 
-// drop_reasons map indices. These are not generated from usid.c's
-// `enum drop_reason` (bpf2go's -type flag can't produce a Go type for an
-// enum whose values are only ever used as literal constants, never as a
-// typed variable/field the compiler retains in BTF -- see the comment on
-// the go:generate line in doc.go) so they are hand-kept in sync with
-// usid.c instead. If usid.c's enum drop_reason ever changes, update these
-// too.
-const (
-	dropReasonUnknownFunction   = 0
-	dropReasonUnknownArgument   = 1
-	dropReasonMalformedInner    = 2
-	dropReasonUnknownInnerVer   = 3
-	dropReasonStripFailed       = 4
-	dropReasonFibLookupFailed   = 5
-	dropReasonRedirectFailed    = 6
-	dropReasonFibNoNeigh        = 7
-	dropReasonFibUnreachable    = 8
-	dropReasonFibFragNeeded     = 9
-	dropReasonUnexpectedNextHdr = 10
-	dropReasonCount             = 11
-)
+// Drop reason indices used below are the exported DropReason* constants
+// from dropreason.go (this package) -- see that file's doc comment for why
+// they're hand-kept in sync with usid.c's `enum drop_reason` rather than
+// generated.
 
 const (
 	tcActOK       = 0
@@ -292,7 +275,7 @@ func sumPerCPU(t *testing.T, m *ebpf.Map, index uint32) uint64 {
 // was also triggered.
 func assertOnlyDropReason(t *testing.T, m *ebpf.Map, want uint32, wantCount uint64) {
 	t.Helper()
-	for i := range uint32(dropReasonCount) {
+	for i := range DropReasonCount {
 		got := sumPerCPU(t, m, i)
 		switch {
 		case i == want && got != wantCount:
@@ -391,7 +374,47 @@ func TestUsidIngress_UnknownFunctionDropsCounted(t *testing.T) {
 	if string(out) != string(pkt) {
 		t.Errorf("packet was mutated on a function_table miss:\n in: % x\nout: % x", pkt, out)
 	}
-	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownFunction, 1)
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonUnknownFunction, 1)
+}
+
+// TestUsidIngress_UnsupportedBehaviorDropsCounted covers ecv's review of
+// #281: a function_table entry whose behavior isn't BEHAVIOR_END_DT46 (here,
+// BEHAVIOR_END_DT2 -- reserved for a future L2 uEnd.DT2 path this program
+// doesn't implement) must be dropped and counted as
+// DROP_REASON_UNSUPPORTED_BEHAVIOR before step 5/6's Argument/vrf_table
+// lookup ever runs, not silently decapsulated as if it were DT46. #740 makes
+// Function 0xE and 0xF fully independent service universes (VRF ID + L3
+// lookup vs. EVI ID + Bridge Domain MAC lookup); reaching
+// DROP_REASON_UNSUPPORTED_BEHAVIOR here, rather than DROP_REASON_UNKNOWN_
+// ARGUMENT, proves the behavior gate fired before any vrf_table lookup was
+// attempted (vrf_table is deliberately left unpopulated for this Argument).
+func TestUsidIngress_UnsupportedBehaviorDropsCounted(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT2, argument: 0x123}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	const behaviorEndDT2 = 2 // usid.c's enum function_behavior; not yet implemented by this program
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: behaviorEndDT2}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	// Deliberately do not populate vrf_table for this Argument.
+
+	pkt := buildPacket(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), false)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet was mutated on a behavior-gate drop:\n in: % x\nout: % x", pkt, out)
+	}
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonUnsupportedBehavior, 1)
 }
 
 // TestUsidIngress_UnknownArgumentDropsCounted covers design plan §4.2 step
@@ -428,7 +451,7 @@ func TestUsidIngress_UnknownArgumentDropsCounted(t *testing.T) {
 		t.Errorf("packet mutated on a vrf_table miss (Function/Argument extraction must not mutate, R2):\n in: % x\nout: % x",
 			pkt, out)
 	}
-	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownArgument, 1)
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonUnknownArgument, 1)
 }
 
 // TestUsidIngress_ReservedArgumentZeroAlwaysMisses covers design plan R4 /
@@ -463,7 +486,7 @@ func TestUsidIngress_ReservedArgumentZeroAlwaysMisses(t *testing.T) {
 	if ret != tcActShot {
 		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
 	}
-	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownArgument, 1)
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonUnknownArgument, 1)
 }
 
 // TestUsidIngress_VRFTableMatchReachesFIBLookup covers design plan §4.2
@@ -504,11 +527,11 @@ func TestUsidIngress_VRFTableMatchReachesFIBLookup(t *testing.T) {
 			ret, tcActShot)
 	}
 
-	got := sumPerCPU(t, objs.DropReasons, dropReasonFibLookupFailed)
+	got := sumPerCPU(t, objs.DropReasons, DropReasonFibLookupFailed)
 	if got != 1 {
 		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (vrf_table entry must have been found and used)", got)
 	}
-	if unknownArg := sumPerCPU(t, objs.DropReasons, dropReasonUnknownArgument); unknownArg != 0 {
+	if unknownArg := sumPerCPU(t, objs.DropReasons, DropReasonUnknownArgument); unknownArg != 0 {
 		t.Errorf("drop_reasons[unknown_argument] = %d, want 0 -- vrf_table should have matched, not missed", unknownArg)
 	}
 
@@ -563,13 +586,13 @@ func TestUsidIngress_InnerIPv4ReachesFIBLookup(t *testing.T) {
 		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d) (fib_lookup against a nonexistent VRF table must fail, not succeed)",
 			ret, tcActShot)
 	}
-	if got := sumPerCPU(t, objs.DropReasons, dropReasonFibLookupFailed); got != 1 {
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonFibLookupFailed); got != 1 {
 		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (inner-IPv4 must parse and reach FIB lookup)", got)
 	}
-	if got := sumPerCPU(t, objs.DropReasons, dropReasonUnknownInnerVer); got != 0 {
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonUnknownInnerVer); got != 0 {
 		t.Errorf("drop_reasons[unknown_inner_version] = %d, want 0 -- a v4 header must not be misclassified", got)
 	}
-	if got := sumPerCPU(t, objs.DropReasons, dropReasonMalformedInner); got != 0 {
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonMalformedInner); got != 0 {
 		t.Errorf("drop_reasons[malformed_inner] = %d, want 0 -- a well-formed v4 header must parse cleanly", got)
 	}
 }
@@ -601,7 +624,7 @@ func TestUsidIngress_UnknownInnerVersionDropped(t *testing.T) {
 	if ret != tcActShot {
 		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
 	}
-	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownInnerVer, 1)
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonUnknownInnerVer, 1)
 }
 
 // TestUsidIngress_UnexpectedNextHdrDropped covers the nexthdr gate ahead of
@@ -638,7 +661,7 @@ func TestUsidIngress_UnexpectedNextHdrDropped(t *testing.T) {
 	if ret != tcActShot {
 		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
 	}
-	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnexpectedNextHdr, 1)
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonUnexpectedNextHdr, 1)
 }
 
 // TestUsidIngress_MalformedInnerDropped covers an inner packet present in
@@ -669,7 +692,7 @@ func TestUsidIngress_MalformedInnerDropped(t *testing.T) {
 	if ret != tcActShot {
 		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
 	}
-	assertOnlyDropReason(t, objs.DropReasons, dropReasonMalformedInner, 1)
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonMalformedInner, 1)
 }
 
 // TestUsidIngress_VRFTableKeyIncludesBlock covers design plan R8/§4.4's
@@ -714,7 +737,7 @@ func TestUsidIngress_VRFTableKeyIncludesBlock(t *testing.T) {
 	if string(out) != string(pkt) {
 		t.Errorf("packet mutated on a vrf_table miss:\n in: % x\nout: % x", pkt, out)
 	}
-	assertOnlyDropReason(t, objs.DropReasons, dropReasonUnknownArgument, 1)
+	assertOnlyDropReason(t, objs.DropReasons, DropReasonUnknownArgument, 1)
 
 	// Block A's entry must be completely untouched by Block B's packet.
 	var vrfVal UsidVrfValue

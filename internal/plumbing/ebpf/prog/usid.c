@@ -24,7 +24,14 @@
 //  4. Exact-match (matched Block, Function) against function_table. No
 //     match -- drop, counted (DROP_REASON_UNKNOWN_FUNCTION): this packet
 //     was already claimed by step 2's locator match, so silent
-//     pass-through here would duplicate-deliver it to the normal stack.
+//     pass-through here would duplicate-deliver it to the normal stack. A
+//     match whose behavior isn't BEHAVIOR_END_DT46 (i.e.
+//     BEHAVIOR_END_DT2, reserved for a future L2 uEnd.DT2 path this
+//     program does not implement yet) is dropped and counted separately
+//     (DROP_REASON_UNSUPPORTED_BEHAVIOR) rather than falling through to
+//     DT46 decap -- #740 makes 0xE and 0xF fully independent service
+//     universes, so a DT2 entry reaching steps 5-9 below would parse an
+//     L2 frame as an inner IP packet against the wrong table entirely.
 //  5. Read Argument directly from the unmutated packet at its fixed
 //     offset (bits 69-80) -- no shift, no mutation (R2, R4). Argument
 //     0x000 is reserved and never registered into vrf_table (R4, design
@@ -34,7 +41,12 @@
 //     drop, counted (DROP_REASON_UNKNOWN_ARGUMENT). Per-Argument hit
 //     counters (packets, bytes, last_seen) are updated in vrf_table's
 //     value on every match that reaches this step, supporting R8's
-//     dual-key migration counters.
+//     dual-key migration counters -- these count packets *claimed* by
+//     this Argument, not packets successfully forwarded: a claimed packet
+//     can still be dropped by any of steps 7-9 below (malformed inner,
+//     strip failure, FIB failure, redirect failure), in which case it
+//     also bumps that same vrf_table entry's dropped_packets counter, so
+//     "packets - dropped_packets" is what actually left via step 9.
 //  7. Strip the outer IPv6 header (bpf_skb_adjust_room, BPF_ADJ_ROOM_MAC),
 //     exposing the inner IPv4/IPv6 packet (dual-stack, uEnd.DT46 -- R5).
 //  8. bpf_fib_lookup() against the resolved Linux VRF table id
@@ -75,12 +87,24 @@
 // against a kernel struct layout.
 //
 // The BPF ELF "license" section below is a kernel-required
-// self-declaration for the compiled bytecode (governs which helper
-// functions the verifier allows), independent of this file's own
-// AGPL-3.0-or-later SPDX header above: it says nothing about the licensing
-// of the surrounding Go project, exactly as Cilium, Katran, and every
-// other AGPL/Apache/BSD-licensed project embedding a BPF datapath declares
-// a GPL-compatible license string here for the same reason.
+// self-declaration for the compiled bytecode: the verifier's
+// license_is_gpl_compatible() check reads it to decide whether this
+// program may call a gpl_only helper. It is set to this file's own
+// AGPL-3.0-or-later SPDX identifier (above) rather than a borrowed
+// GPL-compatible string like "GPL" or "Dual BSD/GPL" -- unlike Cilium or
+// Katran, which deliberately dual-license their BPF C sources under GPL
+// specifically so the compiled bytecode can claim a whitelisted string,
+// this file has exactly one license, and the ELF section says so directly
+// instead of offering the compiled datapath under a license the rest of
+// the file doesn't intend.
+//
+// Consequence: the kernel only recognizes a fixed whitelist here ("GPL",
+// "GPL v2", "GPL and additional rights", "Dual MIT/GPL", "Dual BSD/GPL")
+// as GPL-compatible; "AGPL-3.0-or-later" is not on it, so this program
+// loads as license-incompatible with gpl_only helpers. None of the
+// helpers this program calls today are gpl_only, so it loads fine as-is
+// -- but the day one is added, the load will fail with -EPERM until this
+// decision is revisited.
 
 #include <linux/bpf.h>
 
@@ -108,6 +132,11 @@
 // ---------------------------------------------------------------------
 
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *) BPF_FUNC_map_lookup_elem;
+
+// Called once, unconditionally, at the top of usid_ingress -- see its call
+// site for why a defensive linearization pass runs before any direct
+// data/data_end read in this program.
+static long (*bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len) = (void *) BPF_FUNC_skb_pull_data;
 
 static long (*bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff, __u32 mode,
 				    __u64 flags) = (void *) BPF_FUNC_skb_adjust_room;
@@ -214,9 +243,10 @@ struct locator_value {
 };
 
 // struct function_value is function_table's value: `{ behavior_enum }`.
-// BEHAVIOR_END_DT46 is the only behavior defined today (design plan R3);
-// BEHAVIOR_END_DT2 is reserved for the future L2 uEnd.DT2 path and is not
-// otherwise referenced by this program.
+// BEHAVIOR_END_DT46 is the only behavior this program implements (design
+// plan R3); BEHAVIOR_END_DT2 is reserved for a future L2 uEnd.DT2 path.
+// usid_ingress reads this field (step 4) only to reject anything that
+// isn't BEHAVIOR_END_DT46 -- it does not itself implement DT2 decap.
 enum function_behavior {
 	BEHAVIOR_END_DT46 = 1,
 	BEHAVIOR_END_DT2 = 2,
@@ -256,6 +286,22 @@ enum egress_kind {
 // occupies what was previously an explicit alignment-only pad field
 // between vrf_table_id and packets; generation is placed last so every
 // pre-existing field keeps its original offset.
+//
+// `bytes` is bumped by skb->len as read at step 6, i.e. before step 7's
+// strip -- it counts the whole tunneled frame (outer IPv6 header +
+// Ethernet included), not just the inner payload that eventually reaches
+// the egress interface.
+//
+// dropped_packets counts packets that matched this vrf_table entry
+// (bumping `packets` above) but were then dropped by one of steps 7-9
+// (malformed inner, strip failure, FIB failure, redirect failure) rather
+// than actually forwarded -- so `packets` alone is a *claimed* count, not
+// a *forwarded* one, and `packets - dropped_packets` is what actually left
+// via step 9. Added after ecv's review of #281 pointed out that a VRF
+// dropping everything still showed healthy per-Argument packets/bytes
+// with no per-tenant signal in drop_reasons (which has no Block/Argument
+// dimension). Placed last, like generation, so every pre-existing field
+// keeps its original offset.
 struct vrf_value {
 	__u32 vrf_table_id;
 	__u32 egress_kind;
@@ -263,6 +309,7 @@ struct vrf_value {
 	__u64 bytes;
 	__u64 last_seen_ns;
 	__u64 generation;
+	__u64 dropped_packets;
 };
 
 // enum drop_reason indexes drop_reasons (design plan §4.4's fourth map,
@@ -285,6 +332,11 @@ enum drop_reason {
 	// nibble. Counted apart from DROP_REASON_UNKNOWN_INNER_VERSION,
 	// which this case would otherwise be silently folded into.
 	DROP_REASON_UNEXPECTED_NEXTHDR = 10,
+	// function_table matched, but the entry's behavior isn't
+	// BEHAVIOR_END_DT46 (i.e. it's BEHAVIOR_END_DT2, reserved for a
+	// future L2 path this program doesn't implement) -- step 4, see its
+	// comment above.
+	DROP_REASON_UNSUPPORTED_BEHAVIOR = 11,
 	__DROP_REASON_MAX,
 };
 
@@ -327,7 +379,12 @@ struct {
 	// Design plan §2: Option 2 caps each uSID Block at 4,095 usable
 	// Argument values; R8 needs up to 2x that per Block during a
 	// make-before-break migration. 8192 covers one Block's worst case
-	// with headroom; tune alongside R7 multi-Block sizing later.
+	// with headroom -- i.e. this map is deliberately sized for ~2 uSID
+	// Blocks' worth of Argument space today, not #740's full 64-Block
+	// range that locator_table/function_table already support. A third
+	// concurrent Block exhausts this map at registration time (surfacing
+	// as a failed CNI ADD, not a datapath drop) before R7's multi-Block
+	// work revisits this map's sizing alongside theirs.
 	__uint(max_entries, 8192);
 	__type(key, __u64);
 	__type(value, struct vrf_value);
@@ -352,6 +409,16 @@ static USID_ALWAYS_INLINE void count_drop(__u32 reason)
 		__sync_fetch_and_add(count, 1);
 }
 
+// count_claimed_drop is count_drop plus the per-vrf_table-entry
+// dropped_packets bump (struct vrf_value's comment above) -- used for
+// every drop that occurs after step 6's vrf_table match, i.e. every drop
+// of a packet already claimed by a specific (Block, Argument) tenant.
+static USID_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vrf_value *vrf)
+{
+	count_drop(reason);
+	__sync_fetch_and_add(&vrf->dropped_packets, 1);
+}
+
 // read_be64 composes an 8-byte big-endian (network order) buffer into a
 // host-native __u64, byte by byte -- deliberately not a `*(__u64 *)p`
 // cast, since p is not guaranteed to be 8-byte aligned (it points 38
@@ -371,6 +438,21 @@ static USID_ALWAYS_INLINE __u64 read_be64(const __u8 *p)
 SEC("tc")
 int usid_ingress(struct __sk_buff *skb)
 {
+	// Defensive linearization (ecv's review of #281): every read below
+	// is direct data/data_end pointer access, never bpf_skb_load_bytes,
+	// so a non-linear skb (fragmented linear head -- GRO normally avoids
+	// this for tunnel headers, but nothing here depends on that holding)
+	// would fail its bounds check and misreport as
+	// DROP_REASON_MALFORMED_INNER instead of actually being malformed.
+	// bpf_skb_pull_data(skb, 0) pulls the entire packet into the linear
+	// area unconditionally, up front, so every direct read below is safe
+	// regardless of the skb's arriving layout. A failure here is treated
+	// like "not applicable to us" per R6 -- pass through unmodified
+	// rather than drop traffic this program hasn't even determined is a
+	// uSID packet yet.
+	if (bpf_skb_pull_data(skb, 0))
+		return TC_ACT_OK;
+
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
 
@@ -421,6 +503,17 @@ int usid_ingress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	// #740 makes Function 0xE (uEnd.DT46: VRF ID, L3 route lookup) and
+	// 0xF (uEnd.DT2: EVI ID, Bridge Domain MAC lookup) fully independent
+	// service universes. This program only implements DT46 -- a DT2
+	// entry falling through to steps 5-9 below would parse an L2 frame
+	// as an inner IP packet against the wrong table entirely, not a
+	// near-miss, so it's rejected here instead.
+	if (fn->behavior != BEHAVIOR_END_DT46) {
+		count_drop(DROP_REASON_UNSUPPORTED_BEHAVIOR);
+		return TC_ACT_SHOT;
+	}
+
 	// Step 5: read Argument directly from the unmutated packet at its
 	// fixed offset -- bits 69-80, the low nibble of daddr byte 8 plus
 	// all of byte 9. No shift, no mutation (R2, R4).
@@ -462,7 +555,7 @@ int usid_ingress(struct __sk_buff *skb)
 	// covered by the `(void *) (ip6 + 1) > data_end` bounds check above,
 	// so no further bounds check is needed to read it.
 	if (ip6->nexthdr != USID_IPPROTO_IPIP && ip6->nexthdr != USID_IPPROTO_IPV6) {
-		count_drop(DROP_REASON_UNEXPECTED_NEXTHDR);
+		count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf);
 		return TC_ACT_SHOT;
 	}
 
@@ -471,7 +564,7 @@ int usid_ingress(struct __sk_buff *skb)
 	// this function did) -- step 7 below needs to know the AF *before*
 	// it decides how to strip, not after.
 	if ((void *) (ip6 + 1) + 1 > data_end) {
-		count_drop(DROP_REASON_MALFORMED_INNER);
+		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
 		return TC_ACT_SHOT;
 	}
 
@@ -479,7 +572,7 @@ int usid_ingress(struct __sk_buff *skb)
 	__u8 inner_version = (*inner_peek) >> 4;
 
 	if (inner_version != 4 && inner_version != 6) {
-		count_drop(DROP_REASON_UNKNOWN_INNER_VERSION);
+		count_claimed_drop(DROP_REASON_UNKNOWN_INNER_VERSION, vrf);
 		return TC_ACT_SHOT;
 	}
 
@@ -537,14 +630,14 @@ int usid_ingress(struct __sk_buff *skb)
 
 	if (inner_version == 4) {
 		if (bpf_skb_change_proto(skb, __builtin_bswap16(USID_ETH_P_IP), 0)) {
-			count_drop(DROP_REASON_STRIP_FAILED);
+			count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
 			return TC_ACT_SHOT;
 		}
 		strip_len = (__s32) sizeof(struct usid_iphdr);
 	}
 
 	if (bpf_skb_adjust_room(skb, -strip_len, BPF_ADJ_ROOM_MAC, 0)) {
-		count_drop(DROP_REASON_STRIP_FAILED);
+		count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
 
@@ -557,7 +650,7 @@ int usid_ingress(struct __sk_buff *skb)
 	struct usid_ethhdr *new_eth = data;
 
 	if ((void *) (new_eth + 1) > data_end) {
-		count_drop(DROP_REASON_MALFORMED_INNER);
+		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
 		return TC_ACT_SHOT;
 	}
 
@@ -570,7 +663,7 @@ int usid_ingress(struct __sk_buff *skb)
 		struct usid_ip6hdr *inner6 = (void *) inner;
 
 		if ((void *) (inner6 + 1) > data_end) {
-			count_drop(DROP_REASON_MALFORMED_INNER);
+			count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
 			return TC_ACT_SHOT;
 		}
 
@@ -592,7 +685,7 @@ int usid_ingress(struct __sk_buff *skb)
 		struct usid_iphdr *inner4 = (void *) inner;
 
 		if ((void *) (inner4 + 1) > data_end) {
-			count_drop(DROP_REASON_MALFORMED_INNER);
+			count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
 			return TC_ACT_SHOT;
 		}
 
@@ -620,13 +713,17 @@ int usid_ingress(struct __sk_buff *skb)
 
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH)
-			count_drop(DROP_REASON_FIB_NO_NEIGH);
+			count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf);
 		else if (fib_rc == BPF_FIB_LKUP_RET_UNREACHABLE || fib_rc == BPF_FIB_LKUP_RET_BLACKHOLE || fib_rc == BPF_FIB_LKUP_RET_PROHIBIT)
-			count_drop(DROP_REASON_FIB_UNREACHABLE);
+			count_claimed_drop(DROP_REASON_FIB_UNREACHABLE, vrf);
 		else if (fib_rc == BPF_FIB_LKUP_RET_FRAG_NEEDED)
-			count_drop(DROP_REASON_FIB_FRAG_NEEDED);
+			// No ICMPv6 Packet Too Big is generated here, unlike the
+			// static-route SEG6 decap path this replaces -- an
+			// accepted PMTUD gap for this milestone; see
+			// docs/agents/ARCHITECTURE.md's Known Constraints.
+			count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, vrf);
 		else
-			count_drop(DROP_REASON_FIB_LOOKUP_FAILED);
+			count_claimed_drop(DROP_REASON_FIB_LOOKUP_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
 
@@ -661,11 +758,11 @@ int usid_ingress(struct __sk_buff *skb)
 		redirect_rc = bpf_redirect_peer(fib_params.ifindex, 0);
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
-		count_drop(DROP_REASON_REDIRECT_FAILED);
+		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
 
 	return redirect_rc;
 }
 
-char __license[] SEC("license") = "Dual BSD/GPL";
+char __license[] SEC("license") = "AGPL-3.0-or-later";

@@ -28,12 +28,15 @@
 //	bytes 10-15 (48 bits) Padding (must be zero)
 //
 // Every accessor in this package reads (or writes) its field at that
-// field's fixed offset only. There is deliberately no bit-shift of the
-// address anywhere in this package (design plan R2): Block, Node-ID,
-// Function, and Argument are always independently readable at their fixed
-// offsets from an unmutated address, and locator_table/function_table keys
-// are built by directly copying or composing those fixed-offset reads, not
-// by shifting the address to bring a field into a canonical position.
+// field's fixed offset only. There is deliberately no shift that relocates
+// one field's bits into another field's frame (design plan R2): Block,
+// Node-ID, Function, and Argument are always independently readable at
+// their fixed offsets from an unmutated address, and locator_table/
+// function_table keys are built by directly copying or composing those
+// fixed-offset reads, never by shifting the address to bring a field into
+// some other field's canonical position. A field's own minimal,
+// right-justifying shift out of its fixed offset -- e.g. Block()'s
+// `>> NodeIDBits` -- is not what this rules out.
 //
 // Placement note: this package lives under internal/plumbing/ebpf/ rather
 // than as a sibling of internal/plumbing/{srv6,vrf,intf,sysctl} directly,
@@ -257,7 +260,7 @@ func Encode(f Fields) (netip.Addr, error) {
 
 	var b [16]byte
 	binary.BigEndian.PutUint64(b[:8], f.Block<<NodeIDBits|uint64(f.NodeID))
-	b[8] = f.Function<<4 | byte(f.Argument>>8)&0x0F
+	b[8] = (f.Function << 4) | (byte(f.Argument>>8) & 0x0F)
 	b[9] = byte(f.Argument)
 	// bytes 10-15 remain zero (padding).
 	return netip.AddrFrom16(b), nil
