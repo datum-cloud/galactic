@@ -1,0 +1,55 @@
+// Copyright 2025 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Package prog holds the compiled TC-BPF program that implements the
+// `uFMT 48+16` uSID decode/forward datapath (design plan
+// .local/plan-ebpf-xdp-usid-datapath.md §4.2/§4.4; Milestone 2.2 of
+// .local/implementation-plan-ebpf-xdp-usid-datapath.md).
+//
+// usid.c is the single source of truth for the packet path; see its
+// header comment for the full 9-step walkthrough. `go generate` (via
+// bpf2go, github.com/cilium/ebpf's code generator) compiles it with clang
+// into a CO-RE-portable BPF object and generates matching Go bindings
+// (UsidObjects, LoadUsid, LoadUsidObjects, plus per-map/per-program
+// fields) in this package -- run `go generate ./...` from the repo root,
+// or `go generate` from this directory, after editing usid.c. The
+// generated *_bpfel.go/*_bpfel.o (and *_bpfeb.go/*_bpfeb.o) files are
+// committed alongside the source they're generated from, matching this
+// repo's convention for other generated code (see CLAUDE.md: "Generated
+// protobuf files ... are committed; never hand-edit them" -- the same
+// rule applies here to bpf2go's output).
+//
+// Placement: sibling of internal/plumbing/ebpf/uformat (Milestone 2.1)
+// under the shared internal/plumbing/ebpf/ umbrella -- uformat is the
+// pure-Go bit-layout library with no kernel dependency; this package is
+// the compiled BPF program itself. The two intentionally share the exact
+// same key-composition arithmetic (locator_key = top 8 bytes of the
+// address as-is; function_key = Block<<4|Function; vrf_key =
+// Block<<12|Argument) so the kernel program and the Go control plane
+// (Milestone 3.x, which will populate these maps) can never drift on bit
+// positions -- see usid.c's map-key comment block for the details.
+//
+// This package does not itself load or attach the compiled program to any
+// interface -- that is Milestone 3.1's job (extending galactic-cni's `run`
+// subcommand). This package only builds the object and exposes typed Go
+// handles to its maps and program, via bpf2go's generated loader
+// functions, for that later milestone (and this milestone's own
+// BPF_PROG_TEST_RUN-based tests) to use.
+package prog
+
+// The -idirafter flags below work around a clang quirk specific to
+// Debian/Ubuntu-style multiarch layouts (confirmed via containers/
+// galactic-cni/Dockerfile's real `docker build`, Milestone 5.2): with
+// `-target bpfel`/`bpfeb`, clang's default header search list drops
+// `/usr/include/<triple>` (present for the host GNU target, absent for
+// the BPF virtual target), so `<linux/bpf.h>`'s own `<asm/types.h>`
+// include goes unresolved even though `linux-libc-dev`/`libc6-dev` did
+// install it -- just not somewhere the BPF target's search path looks.
+// Listing both the amd64 and arm64 multiarch directories explicitly
+// covers this repo's two supported architectures (TARGETARCH in that
+// Dockerfile); -idirafter silently skips whichever one doesn't exist on
+// the host, so this is harmless on non-Debian systems (Fedora, Alpine,
+// macOS) that resolve these headers without any multiarch subdirectory.
+//
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type locator_value -type function_value -type vrf_value Usid usid.c
