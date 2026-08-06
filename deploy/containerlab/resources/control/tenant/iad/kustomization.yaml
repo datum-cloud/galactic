@@ -1,9 +1,0 @@
-namePrefix: iad-
-namespace: galactic-system
-resources:
-  - tenant-control
-patches:
-  - path: router-lab-patch.yaml
-    target:
-      kind: DaemonSet
-      name: galactic-router

@@ -96,15 +96,15 @@ the ones with a pod running today. The FRR fabric DaemonSet advertises the same
 
 Each site's tenant node advertises its own `/56` SRv6 locator block into the
 fabric — never the site's full `/48` uSID Block, which would create an
-anycast ambiguity the instant a second tenant node joins a site. Test VPCs
-`vpc10` and `vpc20` (see [docs/vpc.md](docs/vpc.md)) get sequential host addresses
-within their node's block rather than a separate per-VPC prefix:
+anycast ambiguity the instant a second tenant node joins a site. The test VPC
+`ns50` (see [docs/vpc.md](docs/vpc.md)) gets a host address within its node's
+block:
 
-| Cluster     | FRR loopback   | Node locator block     | USID vpc10                    | USID vpc20                    | galactic-router address |
-|-------------|----------------|-------------------------|--------------------------------|--------------------------------|-------------------------|
-| dfw         | fc00:0:2::1/128 | 2001:db8:ff01:100::/56 | 2001:db8:ff01:100:3e00::/128  | 2001:db8:ff01:100:7c00::/128  | fc00:0:2::1             |
-| sjc         | fc00:0:3::1/128 | 2001:db8:ff02:100::/56 | 2001:db8:ff02:100:3e00::/128  | 2001:db8:ff02:100:7c00::/128  | fc00:0:3::1             |
-| iad         | fc00:0:4::1/128 | 2001:db8:ff03:100::/56 | 2001:db8:ff03:100:3e00::/128  | 2001:db8:ff03:100:7c00::/128  | fc00:0:4::1             |
+| Cluster     | FRR loopback   | Node locator block     | USID ns50                     | galactic-router address |
+|-------------|----------------|-------------------------|--------------------------------|-------------------------|
+| dfw         | fc00:0:2::1/128 | 2001:db8:ff01:100::/56 | 2001:db8:ff01:100:c800::/128  | fc00:0:2::1             |
+| sjc         | fc00:0:3::1/128 | 2001:db8:ff02:100::/56 | 2001:db8:ff02:100:c800::/128  | fc00:0:3::1             |
+| iad         | fc00:0:4::1/128 | 2001:db8:ff03:100::/56 | 2001:db8:ff03:100:c800::/128  | fc00:0:4::1             |
 
 The `galactic-router address` column is no longer set explicitly in the
 per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
@@ -132,12 +132,12 @@ deploy/containerlab/
 ├── containers/
 │   └── kindest-node-galactic/   # Custom Kind node image (git/tcpdump, kubectl DooD wrapper)
 ├── resources/
-│   ├── cni/                     # galactic-cni installer DaemonSet + ConfigMap
-│   ├── fabric/                  # FRR DaemonSet manifests (dfw, iad, sjc)
-│   ├── tenant/                  # galactic-router DaemonSet overlays (dfw, iad, sjc)
-│   ├── vpc/                     # vpc10/vpc20 NAD manifests + test workload Deployments (dfw, iad, sjc)
-│   ├── control/                 # iad-control node resources (fabric/iad, tenant/iad)
-│   └── bgp/                     # BGP CRs (tenant/$SITE, control/tenant/$SITE)
+│   ├── galactic-cni/            # galactic-cni installer DaemonSet + ConfigMap
+│   ├── fabric-router/           # FRR DaemonSet per-site overlays (dfw, iad, sjc)
+│   ├── fabric-control/iad/        # FRR DaemonSet iad-control overlay
+│   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs (dfw, iad, sjc)
+│   ├── galactic-control/iad/    # galactic-router RR + BGP CRs (iad-control)
+│   └── ns50/                    # ns50 NAD manifests + webapp Deployments (dfw, iad, sjc)
 ├── node_files/
 │   ├── dfw/     config.yaml
 │   ├── iad/     config.yaml
@@ -155,8 +155,8 @@ deploy/containerlab/
     ├── deploy-system.sh
     ├── deploy-cni.sh
     ├── deploy-fabric.sh
-    ├── deploy-tenant.sh
-    └── deploy-vpc.sh
+    ├── deploy-galactic-router.sh
+    └── deploy-ns50.sh
 ```
 
 ## Prerequisites
@@ -198,8 +198,8 @@ task deploy
 | `deploy:system`         | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
 | `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet               |
 | `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                     |
-| `deploy:tenant`         | Apply galactic-router DaemonSets and BGP CRs                             |
-| `deploy:vpc`            | Deploy vpc10 and vpc20 test workloads across all clusters (6 pods)       |
+| `deploy:galactic-router` | Apply galactic-router DaemonSets and BGP CRs                             |
+| `deploy:ns50`           | Deploy ns50 namespace, NADs, and webapp workloads across all clusters    |
 | `destroy`               | Destroy the lab and remove all Kind clusters                             |
 | `reload`                | Full rebuild — destroy then redeploy                                     |
 | `rebuild`               | Full rebuild — clean (destroy + delete images/artifacts) then redeploy   |
@@ -212,11 +212,11 @@ task deploy
 ## Verification
 
 See [docs/verification.md](docs/verification.md) for transit fabric, FRR, and galactic-router
-health checks, and [docs/vpc.md](docs/vpc.md) for deploying the `vpc10`/`vpc20` test
+health checks, and [docs/vpc.md](docs/vpc.md) for deploying the `ns50` test
 workloads and verifying cross-site and cross-VPC connectivity. Quick smoke test:
 
 ```bash
-task test  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
+task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 ```
 
 ## Notes

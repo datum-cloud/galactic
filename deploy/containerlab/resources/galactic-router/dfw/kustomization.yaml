@@ -1,0 +1,5 @@
+namespace: galactic-system
+resources:
+  - ../base
+  - bgprouter.yaml
+  - bgppeer.yaml

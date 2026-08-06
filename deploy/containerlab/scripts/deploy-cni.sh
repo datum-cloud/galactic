@@ -12,9 +12,9 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 # The configmap/daemonset base lives in config/cni/ (shared with
-# production); resources/cni/kustomization.yaml patches in the lab-only
-# image. It's copied into resources/cni/base/ on the node
-# at deploy time (kustomize requires resources in or below the overlay
+# production); resources/galactic-cni/kustomization.yaml patches in the
+# lab-only image. It's copied into resources/galactic-cni/base/ on the
+# node at deploy time (kustomize requires resources in or below the overlay
 # root) rather than duplicated in the repo.
 GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../../config/cni" && pwd)
 
@@ -43,11 +43,11 @@ for site in dfw sjc iad; do
   # docker cp nests SRC inside an existing DEST dir instead of overwriting
   # it, so a rerun against an already-provisioned node would silently keep
   # serving the prior kustomization.yaml/base/ from underneath the new copy.
-  docker exec "${node}" rm -rf /galactic/resources/cni
-  copy_to "${node}" cni
-  docker cp "${GALACTIC_CNI_DIR}" "${node}:/galactic/resources/cni/base"
+  docker exec "${node}" rm -rf /galactic/resources/galactic-cni
+  copy_to "${node}" galactic-cni
+  docker cp "${GALACTIC_CNI_DIR}" "${node}:/galactic/resources/galactic-cni/base"
 
-  apply_k "${node}" /galactic/resources/cni/
+  apply_k "${node}" /galactic/resources/galactic-cni/
   docker exec "${node}" kubectl -n galactic-system rollout status daemonset galactic-cni
 done
 

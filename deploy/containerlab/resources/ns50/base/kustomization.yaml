@@ -1,0 +1,4 @@
+namespace: ns50
+resources:
+  - namespace.yaml
+  - webapp.yaml

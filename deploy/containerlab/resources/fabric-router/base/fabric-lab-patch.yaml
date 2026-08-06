@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-router
+spec:
+  template:
+    spec:
+      # Narrower than config/fabric/'s default (edge or control): iad's
+      # control-node fabric pod is deployed separately by
+      # resources/fabric-control/iad/, with its own frr.conf for that
+      # node's distinct peering — so this per-site overlay sticks to edge only,
+      # or the control node would get two competing fabric pods.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - edge
+      initContainers:
+        - name: frr-init
+          image: fabric-router:latest
+          imagePullPolicy: Never
+      containers:
+        - name: frr
+          image: fabric-router:latest
+          imagePullPolicy: Never

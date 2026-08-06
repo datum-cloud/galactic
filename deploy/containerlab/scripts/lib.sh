@@ -22,7 +22,7 @@ copy_to() {
 # NODE at /galactic/config/, alongside /galactic/resources/. deploy-system.sh
 # applies the namespace/RBAC/ServiceAccount manifests straight from here
 # instead of maintaining lab copies. DaemonSet bases are handled separately
-# (see deploy-cni.sh and deploy-tenant.sh): they're copied into a base/
+# (see deploy-cni.sh and deploy-galactic-router.sh): they're copied into a base/
 # subdirectory nested under the consuming kustomization's own root, since
 # kubectl apply -k refuses to load resource files from outside that root.
 copy_config() {

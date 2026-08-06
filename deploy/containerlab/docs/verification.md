@@ -1,8 +1,8 @@
 # Verification
 
 Run these checks after `task deploy` to confirm the lab is healthy end-to-end. For
-deploying and verifying the `vpc10`/`vpc20` test workloads specifically (cross-site and
-cross-VPC connectivity), see [docs/vpc.md](vpc.md).
+deploying and verifying the `ns50` test workloads (cross-site connectivity),
+see [docs/vpc.md](vpc.md).
 
 ## Transit fabric
 
@@ -11,7 +11,7 @@ cross-VPC connectivity), see [docs/vpc.md](vpc.md).
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast summary"
 
 # Each site's per-node /56 SRv6 locator block should be present on all TR nodes
-# (covers every VPC's USID on that node, vpc10 and vpc20 alike — see docs/vpc.md)
+# (covers ns50's USID on that node — see docs/vpc.md)
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01:100::/56"
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02:100::/56"
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03:100::/56"
@@ -59,10 +59,10 @@ docker exec sjc-control-plane kubectl get bgprouters -A
 ## Automated checks
 
 ```bash
-task test           # run all verification (bgp-transit, bgp-fabric, bgp-peers, srv6, evpn)
-task test:bgp-transit
-task test:bgp-fabric
-task test:bgp-peers
-task test:srv6
-task test:evpn
+task verify           # run all verification (bgp-transit, bgp-fabric, bgp-peers, srv6, evpn)
+task verify:bgp-transit
+task verify:bgp-fabric
+task verify:bgp-peers
+task verify:srv6
+task verify:evpn
 ```
