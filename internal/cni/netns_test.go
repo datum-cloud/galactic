@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/containernetworking/plugins/pkg/testutils"
 	"github.com/vishvananda/netlink"
 )
 
@@ -24,14 +25,31 @@ func requireRoot(t *testing.T) {
 	}
 }
 
-// createTestNetnsWithDummy creates a temporary network namespace, creates a
-// dummy interface inside it, and returns the netns path and a cleanup function.
+// createTestNetnsWithDummy creates a network namespace, creates a dummy
+// interface inside it, and returns the netns path and a cleanup function.
+//
+// Uses testutils.NewNS() (a persistent, bind-mounted netns under
+// /var/run/netns), not ns.TempNetNS(): the latter's Path() is
+// /proc/<pid>/task/<tid>/ns/net -- valid only while that specific OS
+// thread is still alive and still in that netns. Every caller of this
+// helper immediately reopens netnsPath independently via the production
+// code under test (configureInterfaceInNetns/cleanupContainerNetns/
+// flushGuestNetnsConfig all call ns.GetNS(netnsPath) themselves), and by
+// the time that happens, nsObj.Do() above has already returned and
+// unlocked its OS thread -- which the Go runtime is then free to reuse
+// for an unrelated goroutine sitting in a different netns entirely. A
+// fresh ns.GetNS() open of the stale TID path then silently resolves to
+// whatever netns that thread happens to be in now instead of erroring,
+// so the dummy interface created below appears to vanish ("Link not
+// found") even though nothing actually deleted it. testutils.NewNS()
+// sidesteps this by bind-mounting the netns to a stable path that
+// doesn't depend on any one thread's continued existence.
 func createTestNetnsWithDummy(t *testing.T) (netnsPath string, cleanup func()) {
 	t.Helper()
 
 	requireRoot(t)
 
-	nsObj, err := ns.TempNetNS()
+	nsObj, err := testutils.NewNS()
 	if err != nil {
 		t.Fatalf("create new netns: %v", err)
 	}
@@ -55,7 +73,8 @@ func createTestNetnsWithDummy(t *testing.T) (netnsPath string, cleanup func()) {
 		return nil
 	})
 	if err != nil {
-		nsObj.Close() //nolint:errcheck // best-effort cleanup
+		nsObj.Close()              //nolint:errcheck // best-effort cleanup
+		testutils.UnmountNS(nsObj) //nolint:errcheck // best-effort cleanup
 		t.Fatalf("setup dummy interface: %v", err)
 	}
 
@@ -72,7 +91,8 @@ func createTestNetnsWithDummy(t *testing.T) (netnsPath string, cleanup func()) {
 			}
 			return handle.LinkDel(link)
 		})
-		nsObj.Close() //nolint:errcheck // best-effort cleanup
+		nsObj.Close()              //nolint:errcheck // best-effort cleanup
+		testutils.UnmountNS(nsObj) //nolint:errcheck // best-effort cleanup
 	}
 
 	return nsObj.Path(), cleanup
@@ -112,17 +132,30 @@ func TestCleanupContainerNetnsNonExistent(t *testing.T) {
 func TestCleanupContainerNetnsVeth(t *testing.T) {
 	requireRoot(t)
 
-	// Create a temporary network namespace with a veth pair.
-	nsObj, err := ns.TempNetNS()
+	// A persistent (bind-mounted) netns, not ns.TempNetNS()'s ephemeral
+	// /proc/<pid>/task/<tid>/ns/net -- see createTestNetnsWithDummy's
+	// comment for why that distinction matters here: cleanupContainerNetns
+	// below reopens netnsPath independently via ns.GetNS.
+	nsObj, err := testutils.NewNS()
 	if err != nil {
 		t.Fatalf("create new netns: %v", err)
 	}
-	defer nsObj.Close() //nolint:errcheck // best-effort cleanup
+	defer func() {
+		nsObj.Close()              //nolint:errcheck // best-effort cleanup
+		testutils.UnmountNS(nsObj) //nolint:errcheck // best-effort cleanup
+	}()
 
-	// Create a veth pair: one end in the new namespace ("test-veth"),
-	// the other end in the host namespace ("test-veth-peer").
-	hostVethName := "test-veth-host"
+	// netlink.Veth's LinkAdd creates both ends of the pair in whatever
+	// netns the call is made in -- there is no cross-netns split here
+	// (that would need an explicit peer-namespace move afterward, which
+	// this test doesn't do and cleanupContainerNetns doesn't need: a
+	// veth pair is a single kernel object, and deleting either end via
+	// LinkDel removes both, wherever they live). So both "test-veth" and
+	// its peer "test-veth-host" land inside nsObj here; the only thing
+	// under test is that cleanupContainerNetns treats a veth-typed
+	// ifName as safe to delete.
 	guestVethName := "test-veth"
+	peerVethName := "test-veth-host"
 
 	err = nsObj.Do(func(_ ns.NetNS) error {
 		handle, err := netlink.NewHandle()
@@ -133,7 +166,7 @@ func TestCleanupContainerNetnsVeth(t *testing.T) {
 
 		veth := &netlink.Veth{
 			LinkAttrs: netlink.LinkAttrs{Name: guestVethName},
-			PeerName:  hostVethName,
+			PeerName:  peerVethName,
 		}
 		if err := handle.LinkAdd(veth); err != nil {
 			return fmt.Errorf("add veth link: %w", err)
@@ -147,51 +180,29 @@ func TestCleanupContainerNetnsVeth(t *testing.T) {
 		t.Fatalf("setup veth pair: %v", err)
 	}
 
-	// Verify the peer exists in host namespace.
-	hostHandle, err := netlink.NewHandle()
-	if err != nil {
-		t.Fatalf("create host netlink handle: %v", err)
-	}
-	defer hostHandle.Close() //nolint:errcheck // best-effort cleanup
-
-	_, err = hostHandle.LinkByName(hostVethName)
-	if err != nil {
-		t.Fatalf("veth peer %q not found in host ns: %v", hostVethName, err)
-	}
-
 	// Now call cleanupContainerNetns — it should succeed and delete the veth.
 	err = cleanupContainerNetns(nsObj.Path(), guestVethName)
 	if err != nil {
 		t.Fatalf("cleanupContainerNetns(veth) returned error: %v", err)
 	}
 
-	// Verify the veth is gone from the container namespace.
+	// Verify both ends of the pair are gone from the netns (LinkDel on
+	// either end of a veth removes the whole pair).
 	err = nsObj.Do(func(_ ns.NetNS) error {
 		handle, err := netlink.NewHandle()
 		if err != nil {
 			return err
 		}
 		defer handle.Close() //nolint:errcheck // best-effort cleanup
-		_, err = handle.LinkByName(guestVethName)
-		if err == nil {
-			return fmt.Errorf("interface %q still exists after cleanup", guestVethName)
+		for _, name := range []string{guestVethName, peerVethName} {
+			if _, err := handle.LinkByName(name); err == nil {
+				return fmt.Errorf("interface %q still exists after cleanup", name)
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	// Verify the host-side peer still exists (only guest veth was deleted).
-	_, err = hostHandle.LinkByName(hostVethName)
-	if err != nil {
-		t.Fatalf("veth peer %q was unexpectedly deleted from host ns: %v", hostVethName, err)
-	}
-
-	// Clean up the host-side peer.
-	peer, _ := hostHandle.LinkByName(hostVethName)
-	if peer != nil {
-		_ = hostHandle.LinkDel(peer) //nolint:errcheck // best-effort cleanup
 	}
 }
 

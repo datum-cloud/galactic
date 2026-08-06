@@ -39,17 +39,23 @@
 package prog
 
 // The -idirafter flags below work around a clang quirk specific to
-// Debian/Ubuntu-style multiarch layouts (confirmed via containers/
-// galactic-cni/Dockerfile's real `docker build`, Milestone 5.2): with
-// `-target bpfel`/`bpfeb`, clang's default header search list drops
-// `/usr/include/<triple>` (present for the host GNU target, absent for
-// the BPF virtual target), so `<linux/bpf.h>`'s own `<asm/types.h>`
-// include goes unresolved even though `linux-libc-dev`/`libc6-dev` did
-// install it -- just not somewhere the BPF target's search path looks.
-// Listing both the amd64 and arm64 multiarch directories explicitly
-// covers this repo's two supported architectures (TARGETARCH in that
-// Dockerfile); -idirafter silently skips whichever one doesn't exist on
+// Debian/Ubuntu-style multiarch layouts (confirmed via the `build` job's
+// real run of this directive in .github/workflows/ci.yaml, on
+// ubuntu-latest): with `-target bpfel`/`bpfeb`, clang's default header
+// search list drops `/usr/include/<triple>` (present for the host GNU
+// target, absent for the BPF virtual target), so `<linux/bpf.h>`'s own
+// `<asm/types.h>` include goes unresolved even though
+// `linux-libc-dev`/`libc6-dev` did install it -- just not somewhere the
+// BPF target's search path looks. Listing both the amd64 and arm64
+// multiarch directories explicitly covers this repo's two supported
+// architectures; -idirafter silently skips whichever one doesn't exist on
 // the host, so this is harmless on non-Debian systems (Fedora, Alpine,
 // macOS) that resolve these headers without any multiarch subdirectory.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type locator_value -type function_value -type vrf_value Usid usid.c
+// -cc is deliberately omitted: bpf2go's own default is
+// getEnv("BPF2GO_CC", "clang"), so CI can pin an exact clang version by
+// setting $BPF2GO_CC (see the `build` job's drift-check step) without
+// this directive needing to change, while everyone else keeps getting
+// plain "clang" off their PATH.
+//
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type locator_value -type function_value -type vrf_value Usid usid.c

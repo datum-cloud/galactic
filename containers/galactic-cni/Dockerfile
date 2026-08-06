@@ -10,6 +10,7 @@ ARG SPDX_LICENSE=AGPL-3.0-or-later
 ARG GIT_URL=https://github.com/datum-cloud/galactic
 
 WORKDIR /workspace
+
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -20,6 +21,16 @@ RUN go mod download
 # Copy the go source
 COPY cmd/ cmd/
 COPY internal/ internal/
+
+# No eBPF toolchain needed here: internal/plumbing/ebpf/prog's committed
+# usid_bpfel.o/usid_bpfeb.o (go:embed'd into the galactic-cni binary below)
+# ship as-is from the COPY above, rather than being regenerated from
+# usid.c by this build -- so the object embedded in the image is bit-for-
+# bit the one committed to git, reviewed in the PR, and verified against
+# usid.c by CI's drift check (.github/workflows/ci.yaml's `build` job),
+# not a separate build produced by this builder image's own clang. design
+# plan .local/plan-ebpf-xdp-usid-datapath.md §6; Milestone 5.2 of
+# .local/implementation-plan-ebpf-xdp-usid-datapath.md.
 
 # Build CNI plugin
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

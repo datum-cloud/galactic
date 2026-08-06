@@ -37,7 +37,7 @@ tasks:
       - GOOS=linux go vet ./...
 
   ci:
-    desc: Run the full CI pipeline (lint, build, test:unit, test:e2e)
+    desc: Run the full CI pipeline
     cmds:
       - task: lint
       - task: build
@@ -77,6 +77,33 @@ tasks:
   build:
     desc: Build binaries
     deps: [fmt, vet]
+    cmds:
+      - task: build:ebpf
+      - task: build:binaries
+
+  build:ebpf:
+    desc: >-
+      Regenerate the eBPF uSID datapath (skips, using the committed
+      artifacts, if clang isn't installed)
+    run: once
+    cmds:
+      - |
+        if command -v clang >/dev/null 2>&1; then
+          go generate ./internal/plumbing/ebpf/prog/...
+        else
+          echo "WARNING: clang not found; skipping regeneration of the eBPF" >&2
+          echo "uSID datapath (internal/plumbing/ebpf/prog/usid.c, via bpf2go)" >&2
+          echo "and building against the committed usid_bpfel.o/usid_bpfeb.o" >&2
+          echo "as-is. If you edited usid.c, install clang and re-run 'task" >&2
+          echo "build:ebpf' (or 'task build') before committing -- CI's build" >&2
+          echo "job regenerates and diffs unconditionally, so a stale commit" >&2
+          echo "will fail there even if it builds fine here. Install, e.g.:" >&2
+          echo "  Fedora/RHEL: sudo dnf install clang llvm" >&2
+          echo "  Debian/Ubuntu: sudo apt install clang llvm" >&2
+        fi
+
+  build:binaries:
+    internal: true
     vars:
       VERSION:
         sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
@@ -110,6 +137,11 @@ tasks:
     desc: Unit tests with race detection and coverage
     cmds:
       - bash scripts/ci.sh unittest
+
+  test:unit-root:
+    desc: Re-run just the requireRoot(t)-gated unit tests, as root
+    cmds:
+      - bash scripts/ci.sh unittest-root
 
   test:e2e:
     desc: E2E tests (Kind cluster, build+load image, lifecycle)

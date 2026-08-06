@@ -9,6 +9,33 @@ case "$COMMAND" in
     go test -v -race -coverprofile=coverage.out ./cmd/... ./internal/...
     ;;
 
+  unittest-root)
+    # Scoped to just the packages with requireRoot(t)-gated tests, found by
+    # grep rather than a hardcoded list -- unlike `unittest` above (run
+    # unprivileged, where those cases just skip), this re-runs them as root
+    # so they actually load/attach real kernel state (BPF programs, netns,
+    # VRFs) instead of skipping. Discovering the list dynamically means new
+    # root-gated packages (e.g. the planned internal/plumbing/ebpf/attach,
+    # internal/plumbing/ebpf/usidmap milestones) get picked up automatically
+    # instead of silently running unprivileged until someone remembers to
+    # add them here. Scoping (instead of re-running the whole suite, as
+    # test-unit-root used to) avoids the duplicated runtime and any risk of
+    # a permission-denied assertion elsewhere in the suite behaving
+    # differently once actually run as root.
+    echo "--- Discovering root-gated packages"
+    mapfile -t pkgs < <(
+      grep -rl 'requireRoot(t)' --include='*_test.go' ./cmd ./internal 2>/dev/null \
+        | xargs -n1 dirname | sort -u | sed 's#^\./#./#'
+    )
+    if [ "${#pkgs[@]}" -eq 0 ]; then
+      echo "no requireRoot(t)-gated packages found; nothing to do"
+      exit 0
+    fi
+    printf '%s\n' "${pkgs[@]}"
+    echo "--- Running Go unit tests as root"
+    go test -v -race "${pkgs[@]}"
+    ;;
+
   e2etest)
     CLUSTER_NAME="${CLUSTER_NAME:-galactic-e2e}"
     IMG="${IMG:-galactic-cni:e2e}"
@@ -101,7 +128,7 @@ EOF
     ;;
 
   *)
-    echo "Usage: $0 {unittest|e2etest}"
+    echo "Usage: $0 {unittest|unittest-root|e2etest}"
     exit 1
     ;;
 esac
