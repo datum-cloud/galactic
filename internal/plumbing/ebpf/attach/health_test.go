@@ -14,6 +14,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
@@ -94,6 +95,105 @@ func TestCheckAttached_FakeNetlink(t *testing.T) {
 			t.Fatal("checkAttached() error = nil, want an error when FilterList itself fails")
 		}
 	})
+}
+
+// TestHandleHealthy_WatcherAware is a real, root-gated integration test
+// (Health's own program/map Info() checks have no fake seam, unlike
+// checkAttached, so a fully faked unit test can't exercise a passing
+// Health result) covering two of ecv's review questions together against
+// a genuinely healthy datapath:
+//   - "should a dead watcher fail health?" -- a Watcher whose Watch loop
+//     never started (Alive() == false) must make Healthy report unhealthy
+//     even though Health's own checks all pass;
+//   - "should a failed health check drive a reconcile before it fails the
+//     probe?" -- once the filter is externally cleared (Health now fails
+//     too), Healthy must nudge a *live* Watcher for an out-of-band
+//     reconcile.
+func TestHandleHealthy_WatcherAware(t *testing.T) {
+	requireRoot(t)
+
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-health-watcher-test-%d", 0))
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	const ifaceName = "usidhwtest0"
+	// Handle.Healthy() always calls the real ResolveInterfaces() (it takes
+	// no ifaces parameter, unlike Health itself) -- override it to the
+	// dummy interface below, since a test netns has no default IPv6 route
+	// for auto-detection to find.
+	t.Setenv(config.EnvCNIEBPFInterfaces, ifaceName)
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer handle.Close() //nolint:errcheck // best-effort cleanup
+
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := handle.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		return handle.LinkSetUp(dummy)
+	})
+	if err != nil {
+		t.Fatalf("setup dummy interface: %v", err)
+	}
+
+	var objs *prog.UsidObjects
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		var loadErr error
+		objs, loadErr = Load(pinDir)
+		if loadErr != nil {
+			return fmt.Errorf("load: %w", loadErr)
+		}
+		return Attach(objs.UsidIngress, []string{ifaceName})
+	})
+	if err != nil {
+		t.Fatalf("load/attach: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		h := &Handle{Objs: objs} // no Watcher wired up at all -- must not change existing behavior
+		if err := h.Healthy(); err != nil {
+			return fmt.Errorf("Healthy() with no Watcher = %w, want nil (unaffected by the watcher check)", err)
+		}
+
+		w := newWatcher() // never started (Watch never ran against it) -- Alive() == false
+		h.Watcher = w
+		err := h.Healthy()
+		if err == nil {
+			return errors.New("Healthy() with a never-started Watcher = nil, want an error (dead watcher)")
+		}
+		if !strings.Contains(err.Error(), "watch loop is not running") {
+			return fmt.Errorf("Healthy() error = %w, want it to mention the watch loop is not running", err)
+		}
+
+		// Now simulate a live Watch loop (Alive() == true) and externally
+		// clear the filter, so Health's own checkAttached fails too.
+		w.alive.Store(true)
+		if err := Detach([]string{ifaceName}); err != nil {
+			return fmt.Errorf("simulate external filter clear: %w", err)
+		}
+		if err := h.Healthy(); err == nil {
+			return errors.New("Healthy() after Detach = nil, want an error from Health's own checkAttached")
+		}
+		select {
+		case <-w.nudge:
+			// A reconcile request is now pending, exactly as Watch's own
+			// select loop would consume it on its next iteration.
+		default:
+			return errors.New("Healthy() on a Health failure did not nudge its live Watcher for an out-of-band reconcile")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestHealth_RealDatapath_FlipsAfterAttachIsKilled is this milestone's exit

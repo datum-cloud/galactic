@@ -280,8 +280,8 @@ func TestRun(t *testing.T) {
 	// ebpfStartFn rather than requiring root/a real kernel BPF stack here.
 	origEBPFStartFn := ebpfStartFn
 	t.Cleanup(func() { ebpfStartFn = origEBPFStartFn })
-	ebpfStartFn = func(_ context.Context, _ string) (io.Closer, []string, error) {
-		return &fakeDatapathCloser{}, []string{"eth0"}, nil
+	ebpfStartFn = func(_ context.Context, _ string) (io.Closer, []string, *attach.Watcher, error) {
+		return &fakeDatapathCloser{}, []string{"eth0"}, nil, nil
 	}
 
 	// Set up directories
@@ -387,9 +387,9 @@ func TestRun_EBPFDatapathEnabled_StartsAndClosesOnShutdown(t *testing.T) {
 
 	fakeDP := &fakeDatapathCloser{}
 	var gotPinDir atomic.Value
-	ebpfStartFn = func(_ context.Context, pinDir string) (io.Closer, []string, error) {
+	ebpfStartFn = func(_ context.Context, pinDir string) (io.Closer, []string, *attach.Watcher, error) {
 		gotPinDir.Store(pinDir)
-		return fakeDP, []string{"eth0"}, nil
+		return fakeDP, []string{"eth0"}, nil, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -434,8 +434,8 @@ func TestRun_EBPFDatapathEnabled_StartFailureIsFatal(t *testing.T) {
 	t.Cleanup(func() { ebpfStartFn = origEBPFStartFn })
 
 	wantErr := errors.New("simulated preflight/load/attach failure")
-	ebpfStartFn = func(_ context.Context, _ string) (io.Closer, []string, error) {
-		return nil, nil, wantErr
+	ebpfStartFn = func(_ context.Context, _ string) (io.Closer, []string, *attach.Watcher, error) {
+		return nil, nil, nil, wantErr
 	}
 
 	err := Run(context.Background(), 25181, 26181)
@@ -466,7 +466,7 @@ func TestRun_EBPFDatapathEnabled_MetricsAndHealthReflectRealDatapath(t *testing.
 
 	origEBPFStartFn := ebpfStartFn
 	t.Cleanup(func() { ebpfStartFn = origEBPFStartFn })
-	ebpfStartFn = func(ctx context.Context, _ string) (io.Closer, []string, error) {
+	ebpfStartFn = func(ctx context.Context, _ string) (io.Closer, []string, *attach.Watcher, error) {
 		return attach.StartWatching(ctx, pinDir)
 	}
 
@@ -556,7 +556,7 @@ func TestRun_EBPFDatapathEnabled_MetricsAndHealthReflectRealDatapath(t *testing.
 	checkStatus(t, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
 	// Re-attach and confirm recovery.
-	objs, ifaces, err := ebpfStartFn(ctx, pinDir)
+	objs, ifaces, _, err := ebpfStartFn(ctx, pinDir)
 	if err != nil {
 		t.Fatalf("re-attach via ebpfStartFn: %v", err)
 	}

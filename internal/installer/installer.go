@@ -228,7 +228,12 @@ var addrListFn = func(family int) ([]netlink.Addr, error) {
 // shutdown (see the attach package doc comment for why that does not
 // disrupt already-attached forwarding). Canceling ctx stops the background
 // netlink watch loop but does not, by itself, close the returned object.
-var ebpfStartFn = func(ctx context.Context, pinDir string) (io.Closer, []string, error) {
+//
+// The returned *attach.Watcher is Run's handle onto that background watch
+// loop -- wired into the ebpfHealthTicker case below so a failed health
+// check can nudge an out-of-band reconcile, and a watch loop that has
+// died is itself reported as unhealthy (ecv's review of #283).
+var ebpfStartFn = func(ctx context.Context, pinDir string) (io.Closer, []string, *attach.Watcher, error) {
 	return attach.StartWatching(ctx, pinDir)
 }
 
@@ -398,6 +403,7 @@ users:
 type ebpfDatapathState struct {
 	objs      *prog.UsidObjects
 	ifaces    []string
+	watcher   *attach.Watcher
 	k8sClient client.Client
 	namespace string
 	nodeName  string
@@ -413,13 +419,13 @@ type ebpfDatapathState struct {
 func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathState, io.Closer, error) {
 	attach.SetHooks(m.Events.Hooks())
 
-	datapath, ifaces, err := ebpfStartFn(ctx, attach.PinDir)
+	datapath, ifaces, watcher, err := ebpfStartFn(ctx, attach.PinDir)
 	if err != nil {
 		return ebpfDatapathState{}, nil, fmt.Errorf("start eBPF uSID datapath: %w", err)
 	}
 	slog.Info("eBPF uSID datapath loaded, pinned, and attached", "interfaces", ifaces, "pinDir", attach.PinDir)
 
-	state := ebpfDatapathState{ifaces: ifaces}
+	state := ebpfDatapathState{ifaces: ifaces, watcher: watcher}
 
 	// ebpfStartFn's io.Closer is *prog.UsidObjects in production (test
 	// fakes stand in a plain mock closer, which correctly leaves
@@ -598,7 +604,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			if ebpfState.objs == nil {
 				continue
 			}
-			h := attach.Handle{Objs: ebpfState.objs}
+			h := attach.Handle{Objs: ebpfState.objs, Watcher: ebpfState.watcher}
 			healthErr := h.Healthy()
 			healthy := healthErr == nil
 			if healthy != ebpfLastHealthy {

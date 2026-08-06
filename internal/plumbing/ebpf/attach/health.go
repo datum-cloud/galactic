@@ -151,6 +151,22 @@ func checkAttachedOne(name string) error {
 // load.
 type Handle struct {
 	Objs *prog.UsidObjects
+
+	// Watcher, if non-nil (StartWatching's return value in production),
+	// is consulted by Healthy alongside Health's own program/map/filter
+	// checks (ecv's review of #283):
+	//   - a Watch loop that is no longer running (Watcher.Alive() ==
+	//     false) can't self-heal drift on its own -- an externally
+	//     cleared tc filter or a moved default route would otherwise sit
+	//     unfixed indefinitely, since nothing else in this package
+	//     restarts it -- so Healthy reports that as unhealthy even if
+	//     Health's own checks currently pass;
+	//   - a failing Health result nudges the watcher (Watcher.Reconcile)
+	//     to re-evaluate before the next health-check tick, on the chance
+	//     the failure is exactly the kind of drift Watch's own reconcile
+	//     heals, rather than only ever healing via an unrelated netlink
+	//     event or the liveness probe restarting the container.
+	Watcher *Watcher
 }
 
 // Close releases this process's own BPF map/program file descriptors -- it
@@ -170,10 +186,29 @@ func (h *Handle) Close() error {
 // (e.g. no default route momentarily) is reported as unhealthy here too,
 // which is the correct, if occasionally noisy, behavior for a liveness/
 // readiness signal.
+//
+// If h.Watcher is set, a non-nil Health result nudges it (Watcher.
+// Reconcile) before Healthy returns -- asynchronously and debounced by
+// Watch's own debounceInterval, so this call still reports the failure it
+// just observed, but the *next* Healthy call (one health-check interval
+// later) may find the drift already self-healed instead of needing an
+// unrelated netlink event or a full container restart to fix it (ecv's
+// review of #283). Separately, and regardless of Health's own result, a
+// dead watcher (h.Watcher.Alive() == false) is always reported as
+// unhealthy: it can no longer react to anything, including this nudge.
 func (h *Handle) Healthy() error {
 	ifaces, err := ResolveInterfaces()
 	if err != nil {
 		return fmt.Errorf("attach: health: resolve interfaces: %w", err)
 	}
-	return Health(h.Objs, ifaces)
+
+	healthErr := Health(h.Objs, ifaces)
+	if healthErr != nil {
+		h.Watcher.Reconcile() // nil-safe no-op if no Watcher is wired up
+	}
+	if h.Watcher != nil && !h.Watcher.Alive() {
+		return errors.Join(healthErr, errors.New("attach: health: netlink watch loop is not running "+
+			"(dead watcher can't self-heal drift)"))
+	}
+	return healthErr
 }

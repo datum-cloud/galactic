@@ -112,10 +112,82 @@ func withWatchTestDefaults(t *testing.T) {
 	debounceInterval = 10 * time.Millisecond
 }
 
+// TestWatcher_AliveTracksLoopLifetime covers Watcher.Alive transitioning
+// true once Watch's subscriptions are established and back to false once
+// Watch returns, on both a clean ctx-cancel exit and a subscription-
+// failure exit that never even started the loop.
+func TestWatcher_AliveTracksLoopLifetime(t *testing.T) {
+	withWatchTestDefaults(t)
+
+	t.Run("clean exit", func(t *testing.T) {
+		w := newWatcher()
+		ctx, cancel := context.WithCancel(context.Background())
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- Watch(ctx, fakeProgram, []string{testIfaceEth0}, w) }()
+
+		// Give Watch a moment to reach its subscribe-then-mark-alive point.
+		deadline := time.After(2 * time.Second)
+		for !w.Alive() {
+			select {
+			case <-deadline:
+				t.Fatal("Watcher never became alive")
+			case <-time.After(time.Millisecond):
+			}
+		}
+
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("Watch() error = %v, want nil on ctx cancel", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Watch() did not return after ctx was canceled")
+		}
+		if w.Alive() {
+			t.Error("Watcher.Alive() = true after Watch returned, want false")
+		}
+	})
+
+	t.Run("subscription failure never goes alive", func(t *testing.T) {
+		origLink := linkSubscribeFn
+		t.Cleanup(func() { linkSubscribeFn = origLink })
+		linkSubscribeFn = func(chan<- netlink.LinkUpdate, <-chan struct{}, netlink.LinkSubscribeOptions) error {
+			return errors.New("simulated subscribe failure")
+		}
+
+		w := newWatcher()
+		if err := Watch(context.Background(), fakeProgram, nil, w); err == nil {
+			t.Fatal("Watch() error = nil, want the simulated subscribe failure")
+		}
+		if w.Alive() {
+			t.Error("Watcher.Alive() = true after a subscription failure that never started the loop, want false")
+		}
+	})
+}
+
+// TestWatcher_NilIsSafe confirms a nil *Watcher (Watch's zero-value default
+// when no caller wants liveness tracking or out-of-band reconcile) is safe
+// to call Alive/Reconcile on, and safe to pass into Watch itself.
+func TestWatcher_NilIsSafe(t *testing.T) {
+	withWatchTestDefaults(t)
+
+	var w *Watcher
+	if w.Alive() {
+		t.Error("nil Watcher.Alive() = true, want false")
+	}
+	w.Reconcile() // must not panic
+
+	if err := Watch(context.Background(), nil, []string{testIfaceEth0}, nil); err == nil {
+		t.Fatal("Watch(nil program, ..., nil watcher) error = nil, want an error (nil program guard)")
+	}
+}
+
 func TestWatch_NilProgramIsError(t *testing.T) {
 	withWatchTestDefaults(t)
 
-	err := Watch(context.Background(), nil, []string{testIfaceEth0})
+	err := Watch(context.Background(), nil, []string{testIfaceEth0}, nil)
 	if err == nil {
 		t.Fatal("Watch(nil program, ...) error = nil, want an error")
 	}
@@ -129,7 +201,7 @@ func TestWatch_LinkSubscribeFailurePropagates(t *testing.T) {
 		return wantErr
 	}
 
-	err := Watch(context.Background(), fakeProgram, nil)
+	err := Watch(context.Background(), fakeProgram, nil, nil)
 	if !errors.Is(err, wantErr) {
 		t.Errorf("Watch() error = %v, want it to wrap %v", err, wantErr)
 	}
@@ -143,7 +215,7 @@ func TestWatch_RouteSubscribeFailurePropagates(t *testing.T) {
 		return wantErr
 	}
 
-	err := Watch(context.Background(), fakeProgram, nil)
+	err := Watch(context.Background(), fakeProgram, nil, nil)
 	if !errors.Is(err, wantErr) {
 		t.Errorf("Watch() error = %v, want it to wrap %v", err, wantErr)
 	}
@@ -158,7 +230,7 @@ func TestWatch_ContextCancelReturnsNil(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- Watch(ctx, fakeProgram, []string{testIfaceEth0}) }()
+	go func() { errCh <- Watch(ctx, fakeProgram, []string{testIfaceEth0}, nil) }()
 
 	cancel()
 
@@ -324,7 +396,7 @@ func TestWatch_ReEvaluatesAndReattachesOnInterfaceSetChange(t *testing.T) {
 			cancel()
 		}()
 
-		if err := Watch(ctx, objs.UsidIngress, []string{ifaceA}); err != nil {
+		if err := Watch(ctx, objs.UsidIngress, []string{ifaceA}, nil); err != nil {
 			return fmt.Errorf("watch: %w", err)
 		}
 
@@ -474,7 +546,7 @@ func TestWatch_HealsExternallyClearedFilterWithoutSetChange(t *testing.T) {
 			cancel()
 		}()
 
-		if err := Watch(ctx, objs.UsidIngress, []string{ifaceA}); err != nil {
+		if err := Watch(ctx, objs.UsidIngress, []string{ifaceA}, nil); err != nil {
 			return fmt.Errorf("watch: %w", err)
 		}
 		return nil
@@ -495,6 +567,128 @@ func TestWatch_HealsExternallyClearedFilterWithoutSetChange(t *testing.T) {
 		if len(filters) != 1 {
 			return fmt.Errorf(
 				"filter count on %q = %d, want 1 (self-healed after external drift, with no interface-set change)",
+				ifaceA, len(filters))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("post-watch verification: %v", err)
+	}
+}
+
+// TestWatch_HealsExternallyClearedFilterViaWatcherReconcile is the same
+// externally-cleared-filter scenario as
+// TestWatch_HealsExternallyClearedFilterWithoutSetChange above, but driven
+// by Watcher.Reconcile() instead of a simulated netlink event -- proving
+// the out-of-band nudge path (internal/installer's health-check ticker,
+// via Handle.Healthy) reaches the same reconcile Watch's own netlink
+// subscriptions do, not a separate/parallel code path that could drift
+// from it.
+func TestWatch_HealsExternallyClearedFilterViaWatcherReconcile(t *testing.T) {
+	requireRoot(t)
+	withWatchTestDefaults(t)
+
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-watch-nudge-test-%d", os.Getpid()))
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	const ifaceA = "usidnudgeA"
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer handle.Close() //nolint:errcheck // best-effort cleanup
+
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceA}}
+		if err := handle.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link %q: %w", ifaceA, err)
+		}
+		return handle.LinkSetUp(dummy)
+	})
+	if err != nil {
+		t.Fatalf("setup dummy interface: %v", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		objs, err := Load(pinDir)
+		if err != nil {
+			return fmt.Errorf("load: %w", err)
+		}
+		defer func() { _ = objs.Close() }()
+
+		if err := Attach(objs.UsidIngress, []string{ifaceA}); err != nil {
+			return fmt.Errorf("initial attach to %q: %w", ifaceA, err)
+		}
+
+		// Simulate the external drift, same as the netlink-event variant.
+		link, err := netlink.LinkByName(ifaceA)
+		if err != nil {
+			return fmt.Errorf("find link %q: %w", ifaceA, err)
+		}
+		filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
+		if err != nil {
+			return fmt.Errorf("list filters on %q: %w", ifaceA, err)
+		}
+		if len(filters) != 1 {
+			return fmt.Errorf("filter count on %q = %d, want 1 before simulated drift", ifaceA, len(filters))
+		}
+		if err := netlink.FilterDel(filters[0]); err != nil {
+			return fmt.Errorf("simulate external filter clear on %q: %w", ifaceA, err)
+		}
+
+		resolveInterfacesFn = func() ([]string, error) { return []string{ifaceA}, nil }
+
+		reconciled := make(chan struct{}, 4)
+		onReconcileDone = func() {
+			select {
+			case reconciled <- struct{}{}:
+			default:
+			}
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		w := newWatcher()
+
+		// No netlink event at all -- only the Watcher nudge drives this.
+		go func() {
+			w.Reconcile()
+			select {
+			case <-reconciled:
+			case <-time.After(5 * time.Second):
+			}
+			cancel()
+		}()
+
+		if err := Watch(ctx, objs.UsidIngress, []string{ifaceA}, w); err != nil {
+			return fmt.Errorf("watch: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("watch scenario: %v", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		link, err := netlink.LinkByName(ifaceA)
+		if err != nil {
+			return fmt.Errorf("find link %q: %w", ifaceA, err)
+		}
+		filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
+		if err != nil {
+			return fmt.Errorf("list filters on %q: %w", ifaceA, err)
+		}
+		if len(filters) != 1 {
+			return fmt.Errorf(
+				"filter count on %q = %d, want 1 (self-healed via Watcher.Reconcile(), with no netlink event at all)",
 				ifaceA, len(filters))
 		}
 		return nil
