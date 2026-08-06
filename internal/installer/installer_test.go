@@ -6,11 +6,15 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +28,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
+
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("test requires root (CAP_BPF/CAP_NET_ADMIN/CAP_SYS_ADMIN) to load/attach a real BPF " +
+			"program; re-run via sudo")
+	}
+}
 
 func TestResolveLogLevel(t *testing.T) {
 	tests := []struct {
@@ -261,6 +274,16 @@ func TestBootstrap(t *testing.T) {
 }
 
 func TestRun(t *testing.T) {
+	// This test exercises Run's general daemon behavior (health server,
+	// log rotation, shutdown) -- not the eBPF datapath itself (covered by
+	// the TestRun_EBPFDatapathEnabled_* tests below), so stand in a fake
+	// ebpfStartFn rather than requiring root/a real kernel BPF stack here.
+	origEBPFStartFn := ebpfStartFn
+	t.Cleanup(func() { ebpfStartFn = origEBPFStartFn })
+	ebpfStartFn = func(_ context.Context, _ string) (io.Closer, []string, error) {
+		return &fakeDatapathCloser{}, []string{"eth0"}, nil
+	}
+
 	// Set up directories
 	tmpDir := t.TempDir()
 	HostBinDir = filepath.Join(tmpDir, "host", "opt", "cni", "bin")
@@ -300,7 +323,7 @@ func TestRun(t *testing.T) {
 	// Run in background
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Run(ctx, healthPort)
+		errCh <- Run(ctx, healthPort, healthPort+1000)
 	}()
 
 	// Query gRPC health endpoint
@@ -335,4 +358,211 @@ func TestRun(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not exit on context cancel")
 	}
+}
+
+// fakeDatapathCloser is a mocked io.Closer standing in for
+// *prog.UsidObjects in tests, so Run's eBPF datapath wiring can be
+// exercised without root, a real kernel BPF stack, or a live network
+// interface. closed is an atomic.Bool (not a bare bool) because Run's
+// deferred Close() runs on the goroutine Run itself executes on, which
+// this test observes from its own goroutine with no other synchronization
+// between the two.
+type fakeDatapathCloser struct {
+	closed atomic.Bool
+	err    error
+}
+
+func (f *fakeDatapathCloser) Close() error {
+	f.closed.Store(true)
+	return f.err
+}
+
+// TestRun_EBPFDatapathEnabled_StartsAndClosesOnShutdown covers Milestone
+// 3.1's wiring of the eBPF uSID datapath into the run subcommand: Run
+// calls ebpfStartFn with attach.PinDir and closes the returned object on
+// shutdown.
+func TestRun_EBPFDatapathEnabled_StartsAndClosesOnShutdown(t *testing.T) {
+	origEBPFStartFn := ebpfStartFn
+	t.Cleanup(func() { ebpfStartFn = origEBPFStartFn })
+
+	fakeDP := &fakeDatapathCloser{}
+	var gotPinDir atomic.Value
+	ebpfStartFn = func(_ context.Context, pinDir string) (io.Closer, []string, error) {
+		gotPinDir.Store(pinDir)
+		return fakeDP, []string{"eth0"}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	healthPort := 25180
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, healthPort, healthPort+1000)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if got, _ := gotPinDir.Load().(string); got != attach.PinDir {
+		t.Errorf("ebpfStartFn pinDir = %q, want %q", got, attach.PinDir)
+	}
+	if fakeDP.closed.Load() {
+		t.Error("datapath closed before shutdown")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit on context cancel")
+	}
+
+	if !fakeDP.closed.Load() {
+		t.Error("datapath was not closed on shutdown")
+	}
+}
+
+// TestRun_EBPFDatapathEnabled_StartFailureIsFatal covers the milestone's
+// requirement that a preflight/load/attach failure blocks the datapath --
+// here, that failure must also be fatal to Run itself, not silently
+// swallowed or degraded into a partial datapath state.
+func TestRun_EBPFDatapathEnabled_StartFailureIsFatal(t *testing.T) {
+	origEBPFStartFn := ebpfStartFn
+	t.Cleanup(func() { ebpfStartFn = origEBPFStartFn })
+
+	wantErr := errors.New("simulated preflight/load/attach failure")
+	ebpfStartFn = func(_ context.Context, _ string) (io.Closer, []string, error) {
+		return nil, nil, wantErr
+	}
+
+	err := Run(context.Background(), 25181, 26181)
+	if err == nil {
+		t.Fatal("Run() error = nil, want the eBPF datapath start failure surfaced")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("Run() error = %v, want it to wrap %v", err, wantErr)
+	}
+}
+
+// TestRun_EBPFDatapathEnabled_MetricsAndHealthReflectRealDatapath is
+// Milestone 4's real-kernel exit criterion, exercised through Run() itself
+// rather than attach/metrics' own lower-level unit tests: metrics are
+// visible in a local test run, and the gRPC "ebpf-datapath" health service
+// flips to NOT_SERVING when the program is detached, then recovers once
+// re-attached. Attaches to "lo" (always present, no test network namespace
+// needed -- lo carries no traffic this test could disrupt) via
+// GALACTIC_CNI_EBPF_INTERFACES, using a throwaway pin directory under the
+// real bpffs so it never collides with attach.PinDir's production path.
+func TestRun_EBPFDatapathEnabled_MetricsAndHealthReflectRealDatapath(t *testing.T) {
+	requireRoot(t)
+
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-run-test-%d", os.Getpid()))
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	t.Setenv(config.EnvCNIEBPFInterfaces, "lo")
+
+	origEBPFStartFn := ebpfStartFn
+	t.Cleanup(func() { ebpfStartFn = origEBPFStartFn })
+	ebpfStartFn = func(ctx context.Context, _ string) (io.Closer, []string, error) {
+		return attach.StartWatching(ctx, pinDir)
+	}
+
+	origInterval := ebpfHealthCheckInterval
+	t.Cleanup(func() { ebpfHealthCheckInterval = origInterval })
+	ebpfHealthCheckInterval = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const healthPort = 25182
+	const metricsPort = 26182
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, healthPort, metricsPort)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+			t.Error("Run did not exit on context cancel during cleanup")
+		}
+	})
+
+	// Allow Load/Attach and both listeners to come up.
+	time.Sleep(300 * time.Millisecond)
+
+	conn, err := grpc.NewClient(
+		fmt.Sprintf("127.0.0.1:%d", healthPort),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	hc := grpc_health_v1.NewHealthClient(conn)
+
+	checkStatus := func(t *testing.T, want grpc_health_v1.HealthCheckResponse_ServingStatus) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		var last grpc_health_v1.HealthCheckResponse_ServingStatus
+		for time.Now().Before(deadline) {
+			resp, err := hc.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: ebpfHealthServiceName})
+			if err != nil {
+				t.Fatalf("Health check for %q failed: %v", ebpfHealthServiceName, err)
+			}
+			last = resp.Status
+			if last == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("Health status for %q = %v, want %v (timed out waiting)", ebpfHealthServiceName, last, want)
+	}
+
+	// Initially attached: SERVING.
+	checkStatus(t, grpc_health_v1.HealthCheckResponse_SERVING)
+
+	// Metrics endpoint is up and exposes this milestone's namespace.
+	metricsReq, err := http.NewRequestWithContext(
+		context.Background(), http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/metrics", metricsPort), nil)
+	if err != nil {
+		t.Fatalf("build /metrics request: %v", err)
+	}
+	metricsResp, err := http.DefaultClient.Do(metricsReq)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer func() { _ = metricsResp.Body.Close() }()
+	if metricsResp.StatusCode != http.StatusOK {
+		t.Errorf("GET /metrics status = %d, want 200", metricsResp.StatusCode)
+	}
+	body := make([]byte, 64*1024)
+	n, _ := metricsResp.Body.Read(body)
+	if !strings.Contains(string(body[:n]), "galactic_usid_") {
+		t.Errorf("GET /metrics body does not contain the galactic_usid_ namespace: %q", string(body[:n]))
+	}
+
+	// Kill the attach (without closing our own fds -- same distinction
+	// attach's own TestHealth_RealDatapath_FlipsAfterAttachIsKilled draws)
+	// and confirm the health service flips.
+	if err := attach.Detach([]string{"lo"}); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	checkStatus(t, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+
+	// Re-attach and confirm recovery.
+	objs, ifaces, err := ebpfStartFn(ctx, pinDir)
+	if err != nil {
+		t.Fatalf("re-attach via ebpfStartFn: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	if len(ifaces) != 1 || ifaces[0] != "lo" {
+		t.Fatalf("re-attach ifaces = %v, want [lo]", ifaces)
+	}
+	checkStatus(t, grpc_health_v1.HealthCheckResponse_SERVING)
 }
