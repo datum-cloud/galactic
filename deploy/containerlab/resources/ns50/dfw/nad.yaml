@@ -1,0 +1,39 @@
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: private
+  namespace: ns50
+spec:
+  config: |
+    {
+      "cniVersion": "1.0.0",
+      "name": "private",
+      "type": "galactic-cni",
+      "vpc": "50",
+      "vpcattachment": "50",
+      "namespace": "galactic-system",
+      "ipv4_subnet": "172.20.1.0/24",
+      "address_families": ["ipv4"]
+    }
+
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: igw
+  namespace: ns50
+spec:
+  config: |
+    {
+      "cniVersion": "1.0.0",
+      "name": "public",
+      "type": "ptp",
+      "ipMasq": false,
+      "mtu": 1500,
+      "ipam": {
+        "type": "host-local",
+        "subnet": "2001:db8:1::/64",
+        "gateway": "2001:db8:1::1"
+      }
+    }

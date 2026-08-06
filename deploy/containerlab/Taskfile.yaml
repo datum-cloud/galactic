@@ -53,8 +53,8 @@ tasks:
       - task: "deploy:system"
       - task: "deploy:cni"
       - task: "deploy:fabric"
-      - task: "deploy:tenant"
-      - task: "deploy:vpc"
+      - task: "deploy:galactic-router"
+      - task: "deploy:ns50"
 
   "deploy:clusters":
     desc: Create Kind clusters
@@ -113,7 +113,7 @@ tasks:
         vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
 
   "deploy:system":
-    desc: Install BGP and VPC CRDs; apply galactic-system namespace and shared RBAC
+    desc: Install CRDs, namespace, and RBAC
     cmds:
       - ./scripts/deploy-system.sh
 
@@ -162,26 +162,26 @@ tasks:
     cmds:
       - ./scripts/deploy-fabric.sh
 
-  "deploy:tenant":
-    desc: Install tenant DaemonSets and BGP resources
+  "deploy:galactic-router":
+    desc: Install galactic-router DaemonSets and BGP resources
     cmds:
-      - ./scripts/deploy-tenant.sh
+      - ./scripts/deploy-galactic-router.sh
 
-  "deploy:vpc":
-    desc: Deploy vpc10/vpc20 NADs and test workloads across all clusters (6 pods)
+  "deploy:ns50":
+    desc: Deploy ns50 namespace, NADs, and webapp workloads across all clusters
     cmds:
-      - ./scripts/deploy-vpc.sh
+      - ./scripts/deploy-ns50.sh
 
-  test:
+  verify:
     desc: Run all verification checks
     cmds:
-      - task: "test:bgp-transit"
-      - task: "test:bgp-fabric"
-      - task: "test:bgp-peers"
-      - task: "test:srv6"
-      - task: "test:evpn"
+      - task: "verify:bgp-transit"
+      - task: "verify:bgp-fabric"
+      - task: "verify:bgp-peers"
+      - task: "verify:srv6"
+      - task: "verify:evpn"
 
-  "test:bgp-transit":
+  "verify:bgp-transit":
     desc: Verify transit router BGP sessions (iBGP full mesh)
     cmds:
       - |
@@ -190,7 +190,7 @@ tasks:
           docker exec clab-gvpc-$r vtysh -c "show bgp ipv6 unicast summary"
         done
 
-  "test:bgp-fabric":
+  "verify:bgp-fabric":
     desc: Verify fabric BGP sessions on dfw, iad, and sjc workers
     cmds:
       - |
@@ -210,22 +210,22 @@ tasks:
           kubectl exec -n galactic-system ds/fabric-control \
           -- vtysh -c "show bgp ipv6 unicast summary"
 
-  "test:bgp-peers":
-    desc: Verify tenant BGP peer sessions (galactic-router embedded GoBGP)
+  "verify:bgp-peers":
+    desc: Verify galactic-router BGP peer sessions (GoBGP)
     cmds:
       - docker exec dfw-control-plane kubectl get bgppeers -n galactic-system
       - docker exec sjc-control-plane kubectl get bgppeers -n galactic-system
       - docker exec iad-control-plane kubectl get bgppeers -n galactic-system
 
-  "test:srv6":
+  "verify:srv6":
     desc: Verify each site's SRv6 locator prefix on tr1
     cmds:
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 
-  "test:evpn":
-    desc: Verify EVPN BGP routes on iad, sjc, and dfw via BGPRouter status
+  "verify:evpn":
+    desc: Verify EVPN routes via BGPRouter status
     cmds:
       - docker exec iad-control-plane kubectl get bgprouters -A
       - docker exec sjc-control-plane kubectl get bgprouters -A

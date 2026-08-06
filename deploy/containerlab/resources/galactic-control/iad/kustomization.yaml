@@ -1,0 +1,12 @@
+namespace: galactic-system
+resources:
+  - tenant-control
+  - bgprouter.yaml
+  - bgppeer-dfw.yaml
+  - bgppeer-iad.yaml
+  - bgppeer-sjc.yaml
+patches:
+  - path: router-lab-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-router

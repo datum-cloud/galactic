@@ -1,0 +1,28 @@
+namespace: galactic-system
+resources:
+  - fabric
+patches:
+  - path: fabric-lab-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fabric-router
+  # Strategic-merge patches can't rename a resource (Kustomize keeps the
+  # target's original identity regardless of what metadata.name the patch
+  # body says), so the rename to "fabric-control" needs a JSON6902 patch.
+  # iad is the one cluster where two fabric overlays land: this one (the
+  # control node) and resources/fabric-router/iad/ (the regular workers), each
+  # with its own frr.conf — without a distinct name both would produce a
+  # DaemonSet named "fabric-router" in the same namespace and silently
+  # clobber each other.
+  - target:
+      kind: DaemonSet
+      name: fabric-router
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: fabric-control
+
+configMapGenerator:
+  - name: fabric-config
+    files:
+      - frr.conf.iad-worker-control=frr.conf

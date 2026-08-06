@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  namespace: ns50
+  labels:
+    app: private
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: private
+  template:
+    metadata:
+      labels:
+        app: private
+      annotations:
+        v1.multus-cni.io/default-network: ns50/private
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
