@@ -96,15 +96,19 @@ func TestVRFTable_RegisterRejectsBlockOverflow(t *testing.T) {
 	}
 }
 
-// TestVRFTable_RegisterOverwritesExistingKeyAndResetsCounters confirms
-// that re-registering an existing (block, argument) key overwrites the
-// stored VRFTableID/Generation and resets the datapath's own hit counters
-// to zero, per Register's documented "always a fresh registration"
-// semantics (vrf.go). Packets/Bytes/LastSeenNs are seeded directly into
-// the fake table here (bypassing Register, which never sets them) to
-// simulate the datapath itself having already recorded traffic against
-// this entry before the second Register call.
-func TestVRFTable_RegisterOverwritesExistingKeyAndResetsCounters(t *testing.T) {
+// TestVRFTable_RegisterPreservesCountersOnReRegister confirms that
+// re-registering an existing (block, argument) key updates its stored
+// VRFTableID/Generation but *preserves* the datapath's own hit counters,
+// per Register's documented read-modify-write semantics (vrf.go). This is
+// what makes a CNI ADD retry safe against an Argument that may already be
+// carrying live traffic: R8's make-before-break migration gate reads these
+// counters to prove an Argument carried no traffic before cutover, and a
+// blind overwrite on every retry would make a previously-live Argument
+// read as untouched. Packets/Bytes/LastSeenNs/DroppedPackets are seeded
+// directly into the fake table here (bypassing Register, which never sets
+// them itself) to simulate the datapath having already recorded traffic
+// against this entry before the second Register call.
+func TestVRFTable_RegisterPreservesCountersOnReRegister(t *testing.T) {
 	vt, ft := newTestVRFTable(constClock(1))
 
 	if err := vt.Register(testBlock, 0x123, 42, EgressKindVeth); err != nil {
@@ -112,7 +116,10 @@ func TestVRFTable_RegisterOverwritesExistingKeyAndResetsCounters(t *testing.T) {
 	}
 
 	key := mustVRFKey(t, testBlock, 0x123)
-	seeded := prog.UsidVrfValue{VrfTableId: 42, Generation: 1, Packets: 100, Bytes: 5000, LastSeenNs: 123}
+	seeded := prog.UsidVrfValue{
+		VrfTableId: 42, Generation: 1,
+		Packets: 100, Bytes: 5000, LastSeenNs: 123, DroppedPackets: 4,
+	}
 	if err := ft.Put(key, seeded); err != nil {
 		t.Fatalf("seed simulated traffic: %v", err)
 	}
@@ -132,9 +139,58 @@ func TestVRFTable_RegisterOverwritesExistingKeyAndResetsCounters(t *testing.T) {
 	if entry.Generation != 99 {
 		t.Errorf("Generation = %d after re-register, want 99 (the second Register's clock reading)", entry.Generation)
 	}
-	if entry.Packets != 0 || entry.Bytes != 0 || entry.LastSeenNs != 0 {
-		t.Errorf("hit counters after re-register = %+v, want all zero", entry)
+	if entry.Packets != 100 || entry.Bytes != 5000 || entry.LastSeenNs != 123 || entry.DroppedPackets != 4 {
+		t.Errorf("hit counters after re-register = %+v, want the pre-existing counters carried forward untouched", entry)
 	}
+}
+
+// TestVRFTable_RegisterStartsCountersAtZeroForNewKey confirms a genuinely
+// new (block, argument) key -- no prior entry to carry counters forward
+// from -- still starts every counter at zero, exercising the
+// ebpf.ErrKeyNotExist branch of Register's read-modify-write Lookup.
+func TestVRFTable_RegisterStartsCountersAtZeroForNewKey(t *testing.T) {
+	vt, _ := newTestVRFTable(constClock(1))
+
+	if err := vt.Register(testBlock, 0x123, 42, EgressKindVeth); err != nil {
+		t.Fatalf("Register: unexpected error: %v", err)
+	}
+
+	entry, ok, err := vt.Get(testBlock, 0x123)
+	if err != nil || !ok {
+		t.Fatalf("Get after Register: ok=%v err=%v", ok, err)
+	}
+	if entry.Packets != 0 || entry.Bytes != 0 || entry.LastSeenNs != 0 || entry.DroppedPackets != 0 {
+		t.Errorf("hit counters for a brand-new key = %+v, want all zero", entry)
+	}
+}
+
+// TestVRFTable_RegisterPropagatesLookupFailure confirms Register surfaces
+// a Lookup error other than ebpf.ErrKeyNotExist rather than silently
+// treating it as "no existing entry" and writing zeroed counters over
+// whatever the datapath may have already recorded.
+func TestVRFTable_RegisterPropagatesLookupFailure(t *testing.T) {
+	vt, ft := newTestVRFTable(constClock(1))
+	sabotaged := &lookupFailingTable{fakeTable: ft}
+	sabotagedVT := &VRFTable{table: sabotaged, clock: vt.clock}
+
+	if err := sabotagedVT.Register(testBlock, 0x123, 42, EgressKindVeth); err == nil {
+		t.Fatalf("Register: want a non-nil error when the pre-write Lookup fails")
+	} else if !errors.Is(err, errIntentionalTestFailure) {
+		t.Errorf("Register error = %v, want it to wrap errIntentionalTestFailure", err)
+	}
+	if ft.len() != 0 {
+		t.Errorf("Register wrote %d entries despite the Lookup failure, want 0", ft.len())
+	}
+}
+
+// lookupFailingTable wraps a *fakeTable and fails every Lookup, to test
+// Register's handling of a Lookup error that isn't ebpf.ErrKeyNotExist.
+type lookupFailingTable struct {
+	*fakeTable
+}
+
+func (l *lookupFailingTable) Lookup(key, valueOut any) error {
+	return errIntentionalTestFailure
 }
 
 func TestVRFTable_Unregister(t *testing.T) {

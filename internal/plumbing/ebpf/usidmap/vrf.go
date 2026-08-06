@@ -47,13 +47,17 @@ type VRFEntry struct {
 	// Reconcile uses it.
 	Generation uint64
 
-	// Packets, Bytes, and LastSeenNs are the datapath's own per-Argument
-	// hit counters (design plan R8), updated by usid_ingress itself on
-	// every packet that matches this entry -- Register never sets these;
-	// they only ever come from a real map read (Get/List/Reconcile).
-	Packets    uint64
-	Bytes      uint64
-	LastSeenNs uint64
+	// Packets, Bytes, LastSeenNs, and DroppedPackets are the datapath's own
+	// per-Argument hit counters (design plan R8), updated by usid_ingress
+	// itself on every packet that matches this entry. Register carries
+	// these forward on a re-registration of an existing key rather than
+	// resetting them (see Register's doc comment) -- they only ever
+	// originate from a real map write by the datapath itself, and are read
+	// back here via Get/List/Reconcile.
+	Packets        uint64
+	Bytes          uint64
+	LastSeenNs     uint64
+	DroppedPackets uint64
 }
 
 // VRFTable is the read/write API for vrf_table.
@@ -90,18 +94,22 @@ func (t *VRFTable) Generation() uint64 {
 // cannot silently plant a live entry for the one value that must always
 // miss.
 //
-// Re-registering an existing (block, argument) key overwrites its value
-// wholesale, including resetting Packets/Bytes/LastSeenNs to zero and
-// bumping Generation. This is intentional: R8's make-before-break
-// migration needs two independently keyed entries for the same Argument
-// (one per Block) to coexist, never the same key registered twice with
-// different meanings, so a repeat Register of the *same* key (e.g. a CNI
-// ADD retry re-registering after a transient failure) is always a
-// legitimate fresh registration, not a collision -- and resetting the hit
-// counters on that fresh registration is correct, not a loss: they should
-// reflect traffic under the current registration, not accumulate across
-// distinct registrations of what the caller now intends as a new
-// attachment lifecycle.
+// Re-registering an existing (block, argument) key updates its
+// VRFTableID/EgressKind and bumps Generation, but preserves whatever
+// Packets/Bytes/LastSeenNs usid_ingress has already accumulated against it
+// (a read-modify-write: Register looks the key up first, and carries its
+// existing counter fields forward into the value it writes). This matters
+// because a repeat Register of the *same* key is not always a fresh
+// attachment lifecycle -- it is also, in the ordinary case, the CNI ADD
+// retry path re-registering after a transient k8s-op failure
+// (internal/cni/bgp.go's retryK8sOps), which happens on an Argument that
+// may already be carrying live traffic. R8's make-before-break migration
+// gate reads these counters to prove an Argument carried no traffic before
+// cutover; a blind overwrite that zeroed them on every retry would make a
+// previously-live Argument read as untouched. A genuinely new key (no
+// prior entry) still starts every counter at zero, since there is nothing
+// to carry forward -- ebpf.ErrKeyNotExist from the Lookup below is exactly
+// that case, not a failure.
 func (t *VRFTable) Register(block uint64, argument uint16, vrfTableID uint32, egressKind uint32) error {
 	if err := uformat.ValidateArgument(argument); err != nil {
 		return fmt.Errorf("usidmap: vrf_table: register block=%#x argument=%#x: %w", block, argument, err)
@@ -111,10 +119,20 @@ func (t *VRFTable) Register(block uint64, argument uint16, vrfTableID uint32, eg
 		return fmt.Errorf("usidmap: vrf_table: register block=%#x argument=%#x: %w", block, argument, err)
 	}
 
+	var existing prog.UsidVrfValue
+	if err := t.table.Lookup(uint64(key), &existing); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("usidmap: vrf_table: register block=%#x argument=%#x: look up existing entry: %w",
+			block, argument, err)
+	}
+
 	value := prog.UsidVrfValue{
-		VrfTableId: vrfTableID,
-		EgressKind: egressKind,
-		Generation: t.clock(),
+		VrfTableId:     vrfTableID,
+		EgressKind:     egressKind,
+		Generation:     t.clock(),
+		Packets:        existing.Packets,
+		Bytes:          existing.Bytes,
+		LastSeenNs:     existing.LastSeenNs,
+		DroppedPackets: existing.DroppedPackets,
 	}
 	if err := t.table.Put(uint64(key), value); err != nil {
 		return fmt.Errorf("usidmap: vrf_table: register block=%#x argument=%#x: %w", block, argument, err)
@@ -157,13 +175,14 @@ func (t *VRFTable) Get(block uint64, argument uint16) (VRFEntry, bool, error) {
 		return VRFEntry{}, false, fmt.Errorf("usidmap: vrf_table: get block=%#x argument=%#x: %w", block, argument, err)
 	}
 	return VRFEntry{
-		VRFKey:     VRFKey{Block: block, Argument: argument},
-		VRFTableID: value.VrfTableId,
-		EgressKind: value.EgressKind,
-		Generation: value.Generation,
-		Packets:    value.Packets,
-		Bytes:      value.Bytes,
-		LastSeenNs: value.LastSeenNs,
+		VRFKey:         VRFKey{Block: block, Argument: argument},
+		VRFTableID:     value.VrfTableId,
+		EgressKind:     value.EgressKind,
+		Generation:     value.Generation,
+		Packets:        value.Packets,
+		Bytes:          value.Bytes,
+		LastSeenNs:     value.LastSeenNs,
+		DroppedPackets: value.DroppedPackets,
 	}, true, nil
 }
 
@@ -185,12 +204,13 @@ func (t *VRFTable) List() ([]VRFEntry, error) {
 				Block:    rawKey >> uformat.ArgumentBits,
 				Argument: uint16(rawKey & (1<<uformat.ArgumentBits - 1)),
 			},
-			VRFTableID: value.VrfTableId,
-			EgressKind: value.EgressKind,
-			Generation: value.Generation,
-			Packets:    value.Packets,
-			Bytes:      value.Bytes,
-			LastSeenNs: value.LastSeenNs,
+			VRFTableID:     value.VrfTableId,
+			EgressKind:     value.EgressKind,
+			Generation:     value.Generation,
+			Packets:        value.Packets,
+			Bytes:          value.Bytes,
+			LastSeenNs:     value.LastSeenNs,
+			DroppedPackets: value.DroppedPackets,
 		})
 	}
 	if err := it.Err(); err != nil {
