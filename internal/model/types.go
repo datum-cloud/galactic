@@ -83,8 +83,11 @@ type DesiredAdvertisement struct {
 	// NextHop is the BGP next-hop address placed in MpReachNLRI (node's transit-reachable
 	// IPv6 address). Required when AddressFamily is l2vpn/evpn.
 	NextHop string
-	// SRv6SID, when set, is placed in the EVPN Type 5 GWIPAddress field instead of NextHop.
-	// Must be the End.DT46 SID for this VPC attachment so that receiving nodes install
+	// SRv6SID, when set, is placed in a BGP Prefix-SID path attribute (RFC 9252
+	// SRv6 L3 Service TLV) rather than NextHop or the EVPN route's own Gateway
+	// IP field — that field can't carry an IPv6 SID for an IPv4 prefix, since
+	// RFC 9136 requires it to share the prefix's own address family. Must be
+	// the End.DT46 SID for this VPC attachment so that receiving nodes install
 	// a seg6 encap route targeting the correct SRv6 decap instruction.
 	SRv6SID string
 	// VRFID is the 16-bit PoP-local VRF identifier carried from the BGPAdvertisement

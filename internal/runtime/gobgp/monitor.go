@@ -100,11 +100,8 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	if !ok {
 		return
 	}
-	// Skip locally-originated paths (our own EVPN advertisements). Compare the
-	// MpReachNLRI next-hop against localAddr rather than GWIPAddress — after
-	// the SRv6SID fix, GWIPAddress is the End.DT46 SID (not the BGP peering
-	// loopback), so the old check would miss locally-originated paths and try
-	// to install a seg6 encap route for our own VPC subnet.
+	// Skip locally-originated paths (our own EVPN advertisements), identified
+	// by the MpReachNLRI next-hop matching our own address.
 	if evpnMpReachNexthop(path.Attrs) == r.localAddress {
 		return
 	}
@@ -115,18 +112,34 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	}
 
 	prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
-	gw := addrToNetIP(ipPrefix.GWIPAddress)
 
 	if path.Withdrawal {
 		slog.Info(logPrefix+": withdrawing route", "prefix", prefix, "table", tableID)
 		if delErr := srv6.RouteEgressDel(prefix, tableID); delErr != nil {
 			slog.Error(logPrefix+": RouteEgressDel failed", "prefix", prefix, "table", tableID, "err", delErr)
 		}
-	} else {
-		slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID)
-		if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
-			slog.Error(logPrefix+": RouteEgressAdd failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
+		return
+	}
+
+	// The destination SRv6 SID travels in the BGP Prefix-SID attribute (see
+	// prefixSIDAttr in paths.go), not the EVPN route's own Gateway IP field —
+	// that field can't carry an IPv6 SID for an IPv4 prefix (RFC 9136 requires
+	// the Gateway IP and Prefix to share an address family), so relying on it
+	// here silently installed a garbage seg6 segment for every IPv4 VPC
+	// prefix. Fall back to the transit next-hop when no Prefix-SID attribute
+	// is present (non-SRv6 advertisements — see buildEVPNPaths).
+	gw, ok := evpnPrefixSID(path.Attrs)
+	if !ok {
+		if nh := evpnMpReachNexthop(path.Attrs); nh != "" {
+			if addr, err := netip.ParseAddr(nh); err == nil {
+				gw = addrToNetIP(addr)
+			}
 		}
+	}
+
+	slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID)
+	if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
+		slog.Error(logPrefix+": RouteEgressAdd failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
 	}
 }
 
@@ -164,7 +177,8 @@ func vrfTableID(vrfName string) (uint32, error) {
 
 // evpnMpReachNexthop returns the MpReachNLRI next-hop address string from path
 // attrs, or empty string if none is found. Used to identify locally-originated
-// EVPN paths without relying on GWIPAddress (which is now the SRv6 SID).
+// EVPN paths, and as the non-SRv6 fallback gateway when no Prefix-SID
+// attribute is present (see evpnPrefixSID).
 func evpnMpReachNexthop(attrs []bgp.PathAttributeInterface) string {
 	for _, attr := range attrs {
 		if mp, ok := attr.(*bgp.PathAttributeMpReachNLRI); ok {
@@ -172,6 +186,35 @@ func evpnMpReachNexthop(attrs []bgp.PathAttributeInterface) string {
 		}
 	}
 	return ""
+}
+
+// evpnPrefixSID extracts the destination SRv6 SID from a BGP Prefix-SID path
+// attribute's SRv6 L3 Service TLV (RFC 9252), if present. This is the sole
+// carrier for the SID in this design — see prefixSIDAttr in paths.go. Unlike
+// the EVPN Type 5 route's own Gateway IP field, the Prefix-SID attribute is a
+// separate path attribute independent of the NLRI's address family, so it
+// carries a SID correctly for both IPv4 and IPv6 VPC prefixes.
+func evpnPrefixSID(attrs []bgp.PathAttributeInterface) (net.IP, bool) {
+	for _, attr := range attrs {
+		psid, ok := attr.(*bgp.PathAttributePrefixSID)
+		if !ok {
+			continue
+		}
+		for _, tlv := range psid.TLVs {
+			svc, ok := tlv.(*bgp.SRv6ServiceTLV)
+			if !ok || svc.Type != bgp.TLVTypeSRv6L3Service {
+				continue
+			}
+			for _, sub := range svc.SubTLVs {
+				info, ok := sub.(*bgp.SRv6InformationSubTLV)
+				if !ok || len(info.SID) == 0 {
+					continue
+				}
+				return net.IP(info.SID), true
+			}
+		}
+	}
+	return nil, false
 }
 
 // addrToIPNet converts a netip.Addr and prefix length to a masked *net.IPNet.

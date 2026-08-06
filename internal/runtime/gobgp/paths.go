@@ -38,23 +38,36 @@ func parseSIDAddr(sid string) (netip.Addr, error) {
 }
 
 // gatewayForPrefix returns the EVPN Type 5 Gateway IP Address to pair with
-// prefix. RFC 9136 requires the Prefix and Gateway IP Address fields to share
-// an address family, and GoBGP's wire encoding for this NLRI only recognizes
-// an all-IPv4 or an all-IPv6 layout (see EVPNIPPrefixRoute.Len/Serialize) —
-// mixing families produces a route whose declared length doesn't match its
-// serialized bytes. ipv6GW (the SRv6 SID, or the plain next-hop as a
-// fallback) is always an IPv6 address in this architecture, since SRv6 SIDs
-// and the transit next-hop are both IPv6-only, so it can only serve as the
-// gateway for an IPv6 prefix. An IPv4 prefix has no IPv4-shaped equivalent to
-// offer here, so its Gateway is left at the IPv4 zero address — RFC-compliant
-// per draft-ietf-bess-evpn-prefix-advertisement ("the GW IP field SHOULD be
-// zero if it is not used as an Overlay Index") rather than fabricating a
-// value nothing in this design actually produces.
-func gatewayForPrefix(prefix netip.Prefix, ipv6GW netip.Addr) netip.Addr {
+// prefix. This field is left unused — RFC-compliant per
+// draft-ietf-bess-evpn-prefix-advertisement ("the GW IP field SHOULD be zero
+// if it is not used as an Overlay Index") — always the zero address in
+// prefix's own family. The SRv6 SID travels in the BGP Prefix-SID path
+// attribute instead (see buildEVPNPaths), which is a separate attribute
+// independent of the NLRI's address family and so, unlike this field, can
+// carry a SID for an IPv4 prefix: RFC 9136 requires the Prefix and Gateway IP
+// Address fields to share an address family, and GoBGP's wire encoding for
+// this NLRI only recognizes an all-IPv4 or an all-IPv6 layout (see
+// EVPNIPPrefixRoute.Len/Serialize) — mixing families produces a route whose
+// declared length doesn't match its serialized bytes, so there was never a
+// way to fit a 16-byte IPv6 SID into an IPv4 prefix's Gateway field.
+func gatewayForPrefix(prefix netip.Prefix) netip.Addr {
 	if prefix.Addr().Is4() {
 		return netip.IPv4Unspecified()
 	}
-	return ipv6GW
+	return netip.IPv6Unspecified()
+}
+
+// prefixSIDAttr builds the BGP Prefix-SID path attribute (RFC 9252 SRv6 L3
+// Service TLV) carrying sid as an End.DT46 SRv6 Information Sub-TLV. This is
+// the sole carrier for the destination SID in this design — see
+// gatewayForPrefix for why the EVPN route's own Gateway IP field can't be
+// used for this instead.
+func prefixSIDAttr(sid netip.Addr) bgp.PathAttributeInterface {
+	return bgp.NewPathAttributePrefixSID(
+		bgp.NewSRv6ServiceTLV(bgp.TLVTypeSRv6L3Service,
+			bgp.NewSRv6InformationSubTLV(sid, bgp.END_DT46),
+		),
+	)
 }
 
 // buildEVPNPaths adds or withdraws EVPN Type 5 IP Prefix paths for each prefix
@@ -64,23 +77,24 @@ func gatewayForPrefix(prefix netip.Prefix, ipv6GW netip.Addr) netip.Addr {
 // per-VRF route distinguisher (Type 1 IP-address: routerID:vrfID) when adv.VRFID
 // is set, matching the RD used by applyVRF during VRF registration. adv.NextHop
 // is the transit-reachable BGP peering address placed in MpReachNLRI. adv.SRv6SID,
-// when set, is the End.DT46 SID placed in the EVPN GWIPAddress field for IPv6
-// prefixes — this is the SRv6 segment that remote nodes install in their seg6
-// encap kernel routes. When adv.SRv6SID is empty the next-hop is used instead
-// (non-SRv6 fallback). See gatewayForPrefix for the IPv4-prefix case.
+// when set, is the End.DT46 SID placed in a BGP Prefix-SID path attribute (see
+// prefixSIDAttr) — this is the SRv6 segment that remote nodes install in their
+// seg6 encap kernel routes, for both IPv4 and IPv6 prefixes alike. When
+// adv.SRv6SID is empty, no Prefix-SID attribute is attached (non-SRv6 fallback);
+// remote nodes then fall back to the plain next-hop (see monitor.go).
 func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, routerID string, withdraw bool) error {
 	nextHop, err := netip.ParseAddr(adv.NextHop)
 	if err != nil {
 		return fmt.Errorf("invalid EVPN next-hop %q: %w", adv.NextHop, err)
 	}
 
-	ipv6GW := nextHop
+	var sidAttr bgp.PathAttributeInterface
 	if adv.SRv6SID != "" {
 		sid, err := parseSIDAddr(adv.SRv6SID)
 		if err != nil {
 			return fmt.Errorf("invalid SRv6 SID %q: %w", adv.SRv6SID, err)
 		}
-		ipv6GW = sid
+		sidAttr = prefixSIDAttr(sid)
 	}
 
 	// Type 1 (IP-address:local-admin) RD, unique per VRF.
@@ -106,11 +120,10 @@ func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, ro
 		}
 
 		// EVPN Type 5 IP Prefix route. ESI all-zeros (Type 0 = not multihomed),
-		// ETag 0, label 0 (SRv6 — MPLS label unused).
-		// gwIP is the End.DT46 SRv6 SID (or nextHop fallback) for an IPv6
-		// prefix, matching its family; see gatewayForPrefix for the IPv4 case.
-		// Remote nodes use this as the seg6 encap segment.
-		gwIP := gatewayForPrefix(prefix, ipv6GW)
+		// ETag 0, label 0 (SRv6 — MPLS label unused). The Gateway IP field is
+		// left unused (see gatewayForPrefix) — the SID travels in sidAttr
+		// instead, attached to attrs below.
+		gwIP := gatewayForPrefix(prefix)
 		nlri, err := bgp.NewEVPNIPPrefixRoute(
 			rd,
 			bgp.EthernetSegmentIdentifier{},
@@ -135,6 +148,9 @@ func buildEVPNPaths(b *gobgpserver.BgpServer, adv model.DesiredAdvertisement, ro
 		attrs := []bgp.PathAttributeInterface{
 			bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP),
 			mpreach,
+		}
+		if sidAttr != nil {
+			attrs = append(attrs, sidAttr)
 		}
 		if len(rts) > 0 {
 			attrs = append(attrs, bgp.NewPathAttributeExtendedCommunities(rts))

@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"testing"
 
+	api "github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"go.datum.net/galactic/internal/model"
@@ -192,26 +194,24 @@ func TestBuildEVPNPathsWithdraw(t *testing.T) {
 	}
 }
 
-// TestGatewayForPrefix verifies that gatewayForPrefix selects a Gateway IP
-// matching each prefix's own address family: the IPv6 gateway (SRv6 SID or
-// next-hop) for an IPv6 prefix, and the IPv4 zero address for an IPv4
-// prefix — never the IPv6 gateway reused for an IPv4 prefix, which is the
-// bug this fixes (see buildEVPNPaths doc comment).
+// TestGatewayForPrefix verifies that gatewayForPrefix always returns the zero
+// address in each prefix's own family — this field is unused (see its doc
+// comment); the SRv6 SID travels in the Prefix-SID attribute instead (see
+// TestBuildEVPNPathsCarriesPrefixSIDForIPv4Prefix), which works regardless of
+// the prefix's address family.
 func TestGatewayForPrefix(t *testing.T) {
-	ipv6GW := netip.MustParseAddr(testSID1)
-
 	tests := []struct {
 		name   string
 		prefix string
 		want   netip.Addr
 	}{
 		{
-			name:   "IPv6 prefix uses the IPv6 gateway",
+			name:   "IPv6 prefix",
 			prefix: testPrefix,
-			want:   ipv6GW,
+			want:   netip.IPv6Unspecified(),
 		},
 		{
-			name:   "IPv4 prefix uses the IPv4 zero address, not the IPv6 gateway",
+			name:   "IPv4 prefix",
 			prefix: "10.128.0.5/32",
 			want:   netip.IPv4Unspecified(),
 		},
@@ -223,11 +223,69 @@ func TestGatewayForPrefix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParsePrefix(%q): %v", tt.prefix, err)
 			}
-			got := gatewayForPrefix(prefix, ipv6GW)
+			got := gatewayForPrefix(prefix)
 			if got != tt.want {
-				t.Errorf("gatewayForPrefix(%q, %v) = %v, want %v", tt.prefix, ipv6GW, got, tt.want)
+				t.Errorf("gatewayForPrefix(%q) = %v, want %v", tt.prefix, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestBuildEVPNPathsCarriesPrefixSIDForIPv4Prefix verifies that an IPv4 VPC
+// prefix's EVPN Type 5 path carries its destination SRv6 SID in a BGP
+// Prefix-SID attribute (RFC 9252 SRv6 L3 Service TLV). Before this fix, the
+// SID rode in the EVPN route's Gateway IP field — a field RFC 9136 requires
+// to share the NLRI's own address family, so an IPv4 prefix could never carry
+// an IPv6 SID there at all; receivers installed a zeroed/garbage seg6 segment
+// instead of the real remote SID (see monitor.go). The Prefix-SID attribute
+// is a separate, family-independent attribute, so it must be present and
+// correct here regardless of the prefix being IPv4.
+func TestBuildEVPNPathsCarriesPrefixSIDForIPv4Prefix(t *testing.T) {
+	b := newTestBgpServer(t)
+
+	const ipv4Prefix = "172.20.20.2/32"
+
+	adv := model.DesiredAdvertisement{
+		Name: "adv-ipv4",
+		AddressFamily: model.AddressFamily{
+			AFI:  afiL2VPN,
+			SAFI: safiEVPN,
+		},
+		Prefixes:    []string{ipv4Prefix},
+		NextHop:     testNextHop,
+		SRv6SID:     testSID1,
+		VRFID:       ptrInt32Test(50),
+		Communities: []string{testRT100},
+	}
+
+	if err := buildEVPNPaths(b, adv, testRouterID1, false); err != nil {
+		t.Fatalf("buildEVPNPaths() error = %v", err)
+	}
+
+	var foundAttrs []bgp.PathAttributeInterface
+	err := b.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
+		Family:    bgp.RF_EVPN,
+	}, func(_ bgp.NLRI, paths []*apiutil.Path) {
+		for _, path := range paths {
+			foundAttrs = path.Attrs
+		}
+	})
+	if err != nil {
+		t.Fatalf("ListPath() error = %v", err)
+	}
+	if foundAttrs == nil {
+		t.Fatal("no path found for the IPv4 prefix")
+	}
+
+	gotSID, ok := evpnPrefixSID(foundAttrs)
+	if !ok {
+		t.Fatal("evpnPrefixSID() found no Prefix-SID attribute on the IPv4 prefix's path — SID was not carried")
+	}
+	wantSID := netip.MustParseAddr(testSID1)
+	gotAddr, ok := netip.AddrFromSlice(gotSID)
+	if !ok || gotAddr.As16() != wantSID.As16() {
+		t.Errorf("SID = %v, want %v", gotSID, wantSID)
 	}
 }
 
@@ -267,14 +325,13 @@ func TestBuildEVPNPathsMixedFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRouteDistinguisher: %v", err)
 	}
-	ipv6GW := netip.MustParseAddr(testSID1)
 
 	for _, prefixStr := range adv.Prefixes {
 		prefix, err := netip.ParsePrefix(prefixStr)
 		if err != nil {
 			t.Fatalf("ParsePrefix(%q): %v", prefixStr, err)
 		}
-		gwIP := gatewayForPrefix(prefix, ipv6GW)
+		gwIP := gatewayForPrefix(prefix)
 
 		nlri, err := bgp.NewEVPNIPPrefixRoute(
 			rd, bgp.EthernetSegmentIdentifier{}, 0, uint8(prefix.Bits()), prefix.Addr(), gwIP, 0,

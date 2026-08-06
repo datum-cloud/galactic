@@ -38,7 +38,10 @@ itself computes the SID in `resolveSRv6SID` (`internal/cni/bgp.go`) from the nod
 `internal/plumbing/srv6/usid.go`), using the End.DT46 function. If the router lacks either
 `srv6Locator` or `nodeID`, SID resolution — and SRv6 ingress setup — is skipped entirely for
 that attachment. The CNI installs an END.DT46 decap route for the computed /128 and
-advertises it as the EVPN Type 5 GWIPAddress.
+advertises it in a BGP Prefix-SID path attribute (RFC 9252 SRv6 L3 Service TLV,
+`internal/runtime/gobgp/paths.go`'s `prefixSIDAttr`) — not the EVPN Type 5 route's own
+Gateway IP field, which RFC 9136 requires to share the prefix's own address family and so
+cannot carry an IPv6 SID for an IPv4 VPC prefix.
 
 All nodes in the same VPC derive the same BGP Route Target by truncating the
 48-bit hex VPC identifier to its low 32 bits (`uint32(v)`), formatted as
