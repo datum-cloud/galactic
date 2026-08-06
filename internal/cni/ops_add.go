@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -133,10 +134,11 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// Host-device delegation and IPAM are veth-only.
 	// In tap mode the guest VM manages its own networking.
 	var ipamResult *ipamResult
+	var guestHWAddr net.HardwareAddr
 	switch pluginConf.InterfaceType {
 	case interfaceTypeVeth:
 		guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
-		ipamResult, err = buildVethResult(args, pluginConf, hostName, guestName, hostMac, hostMTU)
+		ipamResult, guestHWAddr, err = buildVethResult(args, pluginConf, hostName, guestName, hostMac, hostMTU)
 		if err != nil {
 			return err
 		}
@@ -159,7 +161,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 
 		// Configure the gateway address on the host tap and install the VRF route.
-		if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult); err != nil {
+		if err := configureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, nil); err != nil {
 			return err
 		}
 		if ipamResult != nil && ipamResult.ipv6Gateway != nil {
@@ -172,14 +174,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			return fmt.Errorf("print CNI result: %w", err)
 		}
 
-		// Decode VPC/VRFID for BGP state publish.
+		// Decode VPC for BGP state publish.
 		vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
 		if err != nil {
 			return fmt.Errorf("decode VPC: %w", err)
-		}
-		vrfID, err := vrfIDFromAttachment(pluginConf.VPCAttachment)
-		if err != nil {
-			return fmt.Errorf("decode VPCAttachment: %w", err)
 		}
 
 		// Publish BGP state (SRv6 ingress + BGP CRDs).
@@ -187,9 +185,9 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			return errors.New("k8s client not set in tracker")
 		}
 		slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", interfaceTypeTap)
-		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, vrfID, tracker.k8s, tracker)
+		return publishBGPStateK8s(args, pluginConf, nodeName, namespace, ipamResult, vpcHex, tracker.k8s, tracker)
 	}
 
 	slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID, "interfaceType", pluginConf.InterfaceType)
-	return publishBGPState(args, pluginConf, nodeName, namespace, ipamResult, tracker)
+	return publishBGPState(args, pluginConf, nodeName, namespace, ipamResult, guestHWAddr, tracker)
 }

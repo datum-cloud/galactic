@@ -81,8 +81,12 @@ func TestResolveSRv6SID(t *testing.T) {
 					Function: ptrFunction(bgpv1alpha1.SRv6FunctionEndDT46),
 				},
 			},
-			// locator 2001:db8:ff01::/48 (6 bytes) + NodeID 0x07 + VRFID 0x002a + Function 0x00
-			want: "2001:db8:ff01:700:2a00::",
+			// locator 2001:db8:ff01::/48 (uSID Block) + Node-ID 0x0007 (bits
+			// 49-64) + Function 0xE (uformat.FunctionEndDT46, bits 65-68) +
+			// Argument 0x02a (bits 69-80) -- uFMT 48+16 layout, not the
+			// legacy NodeID(8)/VRFID(16)/Function(8) suffix ComputeSID used
+			// before #283's rewrite onto uformat.
+			want: "2001:db8:ff01:7:e02a::",
 		},
 		{
 			name: "falls back to legacy annotation when adv VRFID/Function unset",
@@ -129,7 +133,7 @@ func TestResolveSRv6SID(t *testing.T) {
 			router: &bgpv1alpha1.BGPRouter{
 				Spec: bgpv1alpha1.BGPRouterSpec{
 					SRv6Locator: testLocator,
-					NodeID:      255, // out of ComputeSID's [1,254] range
+					NodeID:      0xE000, // one past uformat.NodeIDMax (0xDFFF) -- PR #740's reserved Node-ID range
 				},
 			},
 			adv: &bgpv1alpha1.BGPAdvertisement{

@@ -16,7 +16,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cni/veth"
-	"go.datum.net/galactic/internal/plumbing/srv6"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -43,11 +43,24 @@ type resourceTracker struct {
 	ifaceType          string
 	vrfCreated         bool
 	routesCreated      int
-	srv6SID            string
 	vrfInstanceCreated bool
 	advCreated         bool
 	k8s                client.Client
 	namespace          string
+
+	// ebpfRegistered, ebpfBlock, and ebpfArgument record the eBPF uSID
+	// datapath's vrf_table registration (registerEBPFDatapath, Milestone
+	// 7.1), if one actually happened (the BGPRouter may not be
+	// configured, in which case ebpfRegistered stays false and cleanup
+	// has nothing to unregister). Only vrf_table
+	// is rolled back here -- locator_table/function_table entries are
+	// keyed by Block, not by this specific (vpc, vpcAttachment), and
+	// typically shared across many attachments on the same node, so they
+	// are never this attachment's rollback's responsibility to remove
+	// (Milestone 7.2).
+	ebpfRegistered bool
+	ebpfBlock      uint64
+	ebpfArgument   uint16
 }
 
 // cleanup rolls back all tracked resources in reverse creation order.
@@ -88,13 +101,26 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 3. Delete SRv6 ingress route (only if we got a SID)
-	if rt.srv6SID != "" {
-		if err := srv6.RouteIngressDel(rt.srv6SID, rt.vpc, rt.vpcAttachment); err != nil {
-			slog.Error("Rollback: failed to delete SRv6 ingress route", "err", err,
-				"sid", rt.srv6SID)
+	// 3. Unregister the eBPF uSID datapath's vrf_table entry (only if
+	// registerEBPFDatapath actually wrote one, Milestone 7.2). A pinned
+	// BPF map entry has no implicit teardown when the VRF/interfaces are
+	// deleted below, so it must be removed explicitly here and nowhere
+	// else in the normal cmdDel path is expected to (design plan §5.1).
+	if rt.ebpfRegistered {
+		// Recomputed fresh rather than cached at registration time: this is
+		// exactly the value unregisterEBPFDatapath needs to confirm the
+		// vrf_table slot still belongs to this attachment before deleting it
+		// (see its doc comment). The VRF interface itself isn't deleted
+		// until step 6 below, so it's still resolvable here.
+		if vrfTableID, err := vrf.TableID(rt.vpc, rt.vpcAttachment); err != nil {
+			slog.Error("Rollback: failed to resolve VRF table id, skipping eBPF vrf_table unregister", "err", err,
+				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+		} else if err := unregisterEBPFDatapath(rt.ebpfBlock, rt.ebpfArgument, vrfTableID, attach.PinDir); err != nil {
+			slog.Error("Rollback: failed to unregister eBPF vrf_table entry", "err", err,
+				"block", rt.ebpfBlock, "argument", rt.ebpfArgument)
 		} else {
-			slog.Debug("Rollback: deleted SRv6 ingress route", "sid", rt.srv6SID)
+			slog.Debug("Rollback: unregistered eBPF vrf_table entry",
+				"block", rt.ebpfBlock, "argument", rt.ebpfArgument)
 		}
 	}
 

@@ -15,10 +15,11 @@
 // design plan's §4.4 map inventory):
 //
 //  1. Parse the outer Ethernet + IPv6 header (bounds-checked). Not IPv6,
-//     or too short to parse -- TC_ACT_OK (pass through unmodified, R6).
+//     or too short to parse -- TC_ACT_UNSPEC (hand off to the next tc
+//     filter on this device unmodified, R6).
 //  2. Exact-match the destination address's top 64 bits (uSID Block(48) +
 //     Node-ID(16), read with no shift) against locator_table. No match --
-//     TC_ACT_OK (not one of this node's uSID Blocks, R6).
+//     TC_ACT_UNSPEC (not one of this node's uSID Blocks, R6).
 //  3. Read Function directly from the unmutated packet at its fixed
 //     offset (bits 65-68) -- no shift, no mutation (R2).
 //  4. Exact-match (matched Block, Function) against function_table. No
@@ -166,6 +167,7 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 // integers.
 // ---------------------------------------------------------------------
 
+#define TC_ACT_UNSPEC (-1)
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
 #define TC_ACT_REDIRECT 7
@@ -448,40 +450,60 @@ int usid_ingress(struct __sk_buff *skb)
 	// bpf_skb_pull_data(skb, 0) pulls the entire packet into the linear
 	// area unconditionally, up front, so every direct read below is safe
 	// regardless of the skb's arriving layout. A failure here is treated
-	// like "not applicable to us" per R6 -- pass through unmodified
-	// rather than drop traffic this program hasn't even determined is a
-	// uSID packet yet.
+	// like "not applicable to us" per R6 -- hand off to the next tc
+	// filter on this device unmodified (TC_ACT_UNSPEC, not TC_ACT_OK: see
+	// the note below step 2) rather than drop traffic this program hasn't
+	// even determined is a uSID packet yet.
 	if (bpf_skb_pull_data(skb, 0))
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
 
 	// Step 1: parse the outer Ethernet + IPv6 header (fixed 40B,
-	// bounds-checked). Not a match -- TC_ACT_OK, pass through
-	// unmodified (R6).
+	// bounds-checked). Not a match -- TC_ACT_UNSPEC, hand off unmodified
+	// (R6; see the note below step 2).
 	struct usid_ethhdr *eth = data;
 
 	if ((void *) (eth + 1) > data_end)
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 
 	if (eth->h_proto != __builtin_bswap16(USID_ETH_P_IPV6))
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 
 	struct usid_ip6hdr *ip6 = (void *) (eth + 1);
 
 	if ((void *) (ip6 + 1) > data_end)
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 
 	// Step 2: exact-match the destination address's top 64 bits
 	// (Block(48) + Node-ID(16), read with no shift) against
-	// locator_table. No match -- TC_ACT_OK, pass through (R6).
+	// locator_table. No match -- TC_ACT_UNSPEC, hand off unmodified (R6).
+	//
+	// TC_ACT_UNSPEC, not TC_ACT_OK, on every fail-open path through this
+	// point (ecv's review of #283): this filter attaches direct-action at
+	// a fixed tc priority, and Cilium attaches its own tc/bpf programs to
+	// the same native-device ingress hook on these hosts. In direct-action
+	// mode TC_ACT_OK is a final verdict that ends the qdisc's filter
+	// chain, so a packet this program doesn't claim would never reach a
+	// colocated Cilium filter at a later priority; TC_ACT_UNSPEC instead
+	// tells tc "not matched here," letting the next filter run exactly as
+	// if this program weren't attached at all. Every fail-open path from
+	// here through the rest of the program is before step 2's
+	// locator_table match, i.e. before this program has claimed the
+	// packet as one of its own uSID Blocks at all -- once a packet is
+	// claimed (this locator_table lookup hits), every subsequent failure
+	// (unknown Function/Argument, malformed inner, FIB miss, redirect
+	// failure) is still TC_ACT_SHOT: this program is the packet's only
+	// intended handler past this point, so silently falling through to
+	// Cilium (or the normal stack) would misdeliver it, not just fail to
+	// accelerate it.
 	__u64 locator_key = read_be64(&ip6->daddr[0]);
 
 	struct locator_value *loc = bpf_map_lookup_elem(&locator_table, &locator_key);
 
 	if (!loc)
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 
 	__u64 block = locator_key >> 16;
 

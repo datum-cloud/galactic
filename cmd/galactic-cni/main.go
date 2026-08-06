@@ -55,15 +55,17 @@ func newInitCommand() *cobra.Command {
 
 func newRunCommand() *cobra.Command {
 	var grpcHealthPort int
+	var metricsPort int
 
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Lightweight run loop to refresh credentials and run gRPC health server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return installer.Run(cmd.Context(), grpcHealthPort)
+			return installer.Run(cmd.Context(), grpcHealthPort, metricsPort)
 		},
 	}
 	runCmd.Flags().IntVar(&grpcHealthPort, "grpc-health-port", 5180, "gRPC health check port")
+	runCmd.Flags().IntVar(&metricsPort, "metrics-port", 9091, "Prometheus metrics HTTP port")
 	return runCmd
 }
 

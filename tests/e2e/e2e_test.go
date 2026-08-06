@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
 
 const (
@@ -179,24 +181,45 @@ func TestCNITapInterface(t *testing.T) {
 	// hostNetwork is required too: net.vrf.strict_mode (enabled on the Kind
 	// node in scripts/ci.sh) is per-netns, and the SEG6Local VRFTABLE route
 	// this test exercises needs it set in whichever netns the route lands in.
-	_, err := kubectl(
+	// The bpf-fs hostPath volume mirrors config/cni/daemonset.yaml's own
+	// bpf-fs mount: the eBPF uSID datapath's maps can only be pinned under
+	// attach.PinDir if the node's real bpffs (mounted onto the Kind node in
+	// scripts/ci.sh) is visible inside the pod -- a pod's own mount
+	// namespace can't create /sys/fs/bpf itself. The whole container spec
+	// (image, command, privileged) has to live in --overrides too, not the
+	// usual --image/--command/--privileged flags: kubectl run's overrides
+	// merge replaces the generated "containers" list wholesale rather than
+	// merging into it, so anything set only via those flags would otherwise
+	// be silently dropped the moment "containers" is also set here.
+	overrides := fmt.Sprintf(`{"spec":{"serviceAccountName":"galactic-cni","hostNetwork":true,`+
+		`"volumes":[{"name":"bpf-fs","hostPath":{"path":"/sys/fs/bpf","type":"Directory"}}],`+
+		`"containers":[{"name":%q,"image":%q,"imagePullPolicy":"Never","command":["sleep","infinity"],`+
+		`"securityContext":{"privileged":true},`+
+		`"volumeMounts":[{"name":"bpf-fs","mountPath":"/sys/fs/bpf"}]}]}}`, name, image())
+	runOut, err := kubectl(
 		t.Context(),
 		"run", name,
 		"--image="+image(),
-		"--image-pull-policy=Never",
 		"--restart=Never",
-		"--privileged",
-		"--overrides={\"spec\":{\"serviceAccountName\":\"galactic-cni\",\"hostNetwork\":true}}",
-		"--command", "--",
-		"sleep", "infinity",
+		"--overrides="+overrides,
 	)
 	if err != nil {
-		t.Fatalf("kubectl run failed: %v", err)
+		t.Fatalf("kubectl run failed: %v\n%s", err, runOut)
 	}
 
 	if err := waitForPodPhase(t, name, "Running"); err != nil {
 		t.Fatalf("pod did not reach Running phase: %v", err)
 	}
+
+	// The eBPF uSID datapath is now the only forwarding path (see
+	// internal/cni/bgp.go's registerEBPFDatapath), so CNI ADD requires this
+	// node's locator_table/function_table/vrf_table maps to already be
+	// pinned under attach.PinDir. In production that's done ahead of time by
+	// the CNI DaemonSet's long-running "credential-refresh" container
+	// (config/cni/daemonset.yaml, `/galactic-cni run`); this test runs its
+	// own pod instead of relying on that DaemonSet, so it must start the
+	// same control daemon itself before exercising CNI ADD below.
+	startEBPFControlDaemon(t, name)
 
 	// Write the CNI config to a file inside the pod, then run the plugin
 	// with the config piped via stdin.  The plugin reads config from stdin
@@ -290,6 +313,34 @@ GALACTIC_CNI_ENABLE_LOCAL_IPAM=true \
 	if len(ips) != 1 {
 		t.Errorf("ips count = %d, want 1", len(ips))
 	}
+}
+
+// startEBPFControlDaemon runs `/galactic-cni run` inside the already-running
+// pod named name and waits for it to load and pin the eBPF uSID datapath's
+// maps under attach.PinDir. GALACTIC_CNI_EBPF_INTERFACES pins the attach
+// step to the pod's (hostNetwork) eth0 rather than relying on default-route
+// auto-detection -- only the pinning (not the attach itself) matters for
+// the vrf_table registration TestCNITapInterface exercises.
+func startEBPFControlDaemon(t *testing.T, name string) {
+	t.Helper()
+
+	_, err := kubectl(t.Context(), "exec", name, "--", "sh", "-c",
+		"GALACTIC_CNI_EBPF_INTERFACES=eth0 nohup /galactic-cni run >/tmp/run.log 2>&1 &")
+	if err != nil {
+		t.Fatalf("start eBPF control daemon: %v", err)
+	}
+
+	pinnedVRFTable := attach.PinDir + "/vrf_table"
+	deadline := time.Now().Add(podReadyTimeout)
+	for time.Now().Before(deadline) {
+		if _, err := kubectl(t.Context(), "exec", name, "--", "test", "-e", pinnedVRFTable); err == nil {
+			return
+		}
+		time.Sleep(podPollInterval)
+	}
+
+	log, _ := kubectl(t.Context(), "exec", name, "--", "cat", "/tmp/run.log")
+	t.Fatalf("timed out waiting for %s to be pinned; control daemon log:\n%s", pinnedVRFTable, log)
 }
 
 // nodeName returns the name of the node this pod runs on, or falls back to
