@@ -6,6 +6,7 @@ package cni
 
 import (
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -333,6 +334,72 @@ func TestIPAMAdvertisementPrefixesDualStack(t *testing.T) {
 	}
 	if len(prefixes) != 2 || prefixes[0] != ipv6Subnet.String() || prefixes[1] != "10.128.0.5/32" {
 		t.Errorf("prefixes = %v, want [%q, \"10.128.0.5/32\"]", prefixes, ipv6Subnet.String())
+	}
+}
+
+// ---- allAdvertisedPrefixes ---------------------------------------------------
+
+func TestAllAdvertisedPrefixesEmpty(t *testing.T) {
+	if got := allAdvertisedPrefixes(nil); got != nil {
+		t.Errorf("prefixes = %v, want nil", got)
+	}
+	if got := allAdvertisedPrefixes(map[string]string{}); got != nil {
+		t.Errorf("prefixes = %v, want nil", got)
+	}
+}
+
+func TestAllAdvertisedPrefixesSingleContainer(t *testing.T) {
+	const v6, v4 = "fd00:20:ff01::1234/96", "172.20.1.5"
+	annotations := map[string]string{
+		netnsAnnotationKey("cid-a"):      testNetns,
+		subnetAnnotationKeyIPv6("cid-a"): v6,
+		subnetAnnotationKeyIPv4("cid-a"): v4,
+	}
+
+	got := allAdvertisedPrefixes(annotations)
+
+	want := []string{v4 + "/32", v6}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prefixes = %v, want %v", got, want)
+	}
+}
+
+// TestAllAdvertisedPrefixesMultipleContainers is the regression test for the
+// bug this function fixes: a second container attaching under the same
+// (vpc, vpcAttachment) — and thus sharing this BGPAdvertisement CRD — must
+// not cause the first, still-live container's prefix to disappear from
+// Spec.Prefixes. See allAdvertisedPrefixes's doc comment.
+func TestAllAdvertisedPrefixesMultipleContainers(t *testing.T) {
+	const aV4, bV6, bV4 = "172.20.1.5", "fd00:20:ff01::1234/96", "172.21.1.2"
+	annotations := map[string]string{
+		netnsAnnotationKey("cid-a"):        testNetns,
+		subnetAnnotationKeyIPv4("cid-a"):   aV4,
+		netnsAnnotationKey("cid-b"):        testNetns,
+		subnetAnnotationKeyIPv6("cid-b"):   bV6,
+		subnetAnnotationKeyIPv4(("cid-b")): bV4,
+	}
+
+	got := allAdvertisedPrefixes(annotations)
+
+	want := []string{aV4 + "/32", bV4 + "/32", bV6}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prefixes = %v, want %v (a second container's annotations must not drop the first's prefix)", got, want)
+	}
+}
+
+func TestAllAdvertisedPrefixesIgnoresOtherAnnotations(t *testing.T) {
+	const v4 = "172.20.1.5"
+	annotations := map[string]string{
+		netnsAnnotationKey("cid-a"):      testNetns,
+		subnetAnnotationKeyIPv4("cid-a"): v4,
+		"some.other/annotation":          "should be ignored",
+	}
+
+	got := allAdvertisedPrefixes(annotations)
+
+	want := []string{v4 + "/32"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prefixes = %v, want %v", got, want)
 	}
 }
 
