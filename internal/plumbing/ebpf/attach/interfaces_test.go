@@ -5,10 +5,12 @@
 package attach
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"testing"
 
+	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/config"
@@ -182,6 +184,69 @@ func TestResolveInterfaces_AutoDetect(t *testing.T) {
 			t.Fatal("ResolveInterfaces() error = nil, want the underlying route-list error surfaced")
 		}
 	})
+}
+
+// TestAutoDetectInterfaces_FindsDefaultRouteInNonMainTable is a real,
+// root-gated integration test (not routeListFn-faked, unlike
+// TestResolveInterfaces_AutoDetect above) covering the gap ecv's review
+// flagged: a default IPv6 route living in a table other than main (e.g. a
+// VRF-scoped underlay) must still be found. It exercises the real
+// routeListFn against an actual kernel routing table entry, proving
+// RouteListFiltered's RT_FILTER_TABLE/RT_TABLE_UNSPEC combination in
+// interfaces.go genuinely surfaces non-main-table routes, not just that a
+// faked routeListFn can be made to return one.
+func TestAutoDetectInterfaces_FindsDefaultRouteInNonMainTable(t *testing.T) {
+	requireRoot(t)
+
+	const ifaceName = "usidrt0"
+	const nonMainTable = 100
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+
+		link, err := netlink.LinkByName(ifaceName)
+		if err != nil {
+			return fmt.Errorf("find link: %w", err)
+		}
+
+		// A default IPv6 route in a non-main table -- no actual VRF device
+		// needs to bind to nonMainTable for RTM_GETROUTE's dump to report
+		// it; auto-detection only needs to observe that the route exists.
+		_, zeroNet, _ := net.ParseCIDR("::/0")
+		route := &netlink.Route{
+			LinkIndex: link.Attrs().Index,
+			Dst:       zeroNet,
+			Table:     nonMainTable,
+		}
+		if err := netlink.RouteAdd(route); err != nil {
+			return fmt.Errorf("add default route in table %d: %w", nonMainTable, err)
+		}
+
+		got, err := autoDetectInterfaces()
+		if err != nil {
+			return fmt.Errorf("autoDetectInterfaces: %w", err)
+		}
+		if !equalStringSlices(got, []string{ifaceName}) {
+			return fmt.Errorf("autoDetectInterfaces() = %v, want [%s] (default route in table %d must still be found)",
+				got, ifaceName, nonMainTable)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 var errFixtureNotFound = fixtureError("not found")
