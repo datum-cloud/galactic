@@ -25,6 +25,14 @@ const (
 	tcActOK       = 0
 	tcActShot     = 2
 	tcActRedirect = 7
+
+	// tcActUnspec is TC_ACT_UNSPEC (-1 as a C int), which usid.c returns on
+	// its fail-open paths (ecv's review of #283: TC_ACT_UNSPEC hands off
+	// to the next tc filter on this device, unlike TC_ACT_OK, which ends
+	// the chain in direct-action mode). Program.Test reports the verdict
+	// as a uint32, i.e. the raw 32 bits of -1's two's-complement
+	// representation, not a negative Go int.
+	tcActUnspec = uint32(0xFFFFFFFF)
 )
 
 func requireRoot(t *testing.T) {
@@ -311,8 +319,8 @@ func TestUsidIngress_LocatorMissFailsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
-	if ret != tcActOK {
-		t.Errorf("verdict = %d, want TC_ACT_OK (%d)", ret, tcActOK)
+	if ret != tcActUnspec {
+		t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d)", ret, tcActUnspec)
 	}
 	if string(out) != string(pkt) {
 		t.Errorf("packet was mutated on a locator_table miss:\n in: % x\nout: % x", pkt, out)
@@ -337,8 +345,8 @@ func TestUsidIngress_NonIPv6FailsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
-	if ret != tcActOK {
-		t.Errorf("verdict = %d, want TC_ACT_OK (%d)", ret, tcActOK)
+	if ret != tcActUnspec {
+		t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d)", ret, tcActUnspec)
 	}
 	if string(out) != string(pkt) {
 		t.Errorf("packet was mutated on a non-IPv6 frame:\n in: % x\nout: % x", pkt, out)

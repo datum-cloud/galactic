@@ -11,9 +11,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
@@ -170,6 +173,57 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 	}
 }
 
+// TestLoad_RecreatesIncompatiblyPinnedMap covers the gap ecv's review
+// flagged: a map pinned by a previous version of this program with a
+// different shape (e.g. a changed value struct size, as vrf_value grew
+// this cycle) must be recreated from scratch on the next Load, not treated
+// as a fatal error that crashloops the node until an operator manually
+// deletes the stale pin. Every map here is control-plane-owned and
+// reconstructable (usidmap.Register/the GC controller repopulate it), so
+// losing its contents across a schema change is the correct trade-off.
+func TestLoad_RecreatesIncompatiblyPinnedMap(t *testing.T) {
+	requireRoot(t)
+
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-test-schema-%d", os.Getpid()))
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	if err := os.MkdirAll(pinDir, 0o755); err != nil {
+		t.Fatalf("create pin dir: %v", err)
+	}
+
+	// Pre-pin a vrf_table with a deliberately incompatible shape (wrong
+	// ValueSize) -- standing in for a previous process version's now-stale
+	// pin after a value struct change.
+	stale, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name:       prog.UsidMapVrfTable,
+		Type:       ebpf.Hash,
+		KeySize:    8,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+	if err != nil {
+		t.Fatalf("create stale map: %v", err)
+	}
+	if err := stale.Pin(filepath.Join(pinDir, prog.UsidMapVrfTable)); err != nil {
+		t.Fatalf("pin stale map: %v", err)
+	}
+	_ = stale.Close()
+
+	objs, err := Load(pinDir)
+	if err != nil {
+		t.Fatalf("Load() with an incompatible pinned map = %v, want it to recreate the map and succeed", err)
+	}
+	defer func() { _ = objs.Close() }()
+
+	info, err := objs.VrfTable.Info()
+	if err != nil {
+		t.Fatalf("VrfTable.Info(): %v", err)
+	}
+	if info.ValueSize == 4 {
+		t.Errorf("vrf_table ValueSize after recreation = %d, want the real program's value size, not the stale 4-byte one",
+			info.ValueSize)
+	}
+}
+
 // TestAttach_NoInterfacesIsError covers the defensive nil/empty-input
 // guards in Attach directly, without needing root.
 func TestAttach_NoInterfacesIsError(t *testing.T) {
@@ -178,5 +232,68 @@ func TestAttach_NoInterfacesIsError(t *testing.T) {
 	}
 	if err := Attach(nil, nil); err == nil {
 		t.Error("Attach(nil, nil) error = nil, want an error")
+	}
+}
+
+// TestEnsureClsact_TreatsConcurrentEEXISTAsSuccess covers ensureClsact's
+// race window against another agent (notably Cilium, which manages its own
+// clsact qdisc on the same native devices) adding the same qdisc between
+// ensureClsact's List and its own Add call: QdiscAdd returning EEXIST in
+// that window must be treated as success, not propagated as an error,
+// since the qdisc ensureClsact wanted to exist now does.
+func TestEnsureClsact_TreatsConcurrentEEXISTAsSuccess(t *testing.T) {
+	origList, origAdd := qdiscListFn, qdiscAddFn
+	t.Cleanup(func() { qdiscListFn, qdiscAddFn = origList, origAdd })
+
+	// List sees no clsact yet -- the race window ensureClsact is exposed
+	// to is exactly a List that runs before the other agent's Add.
+	qdiscListFn = func(netlink.Link) ([]netlink.Qdisc, error) { return nil, nil }
+	qdiscAddFn = func(netlink.Qdisc) error { return unix.EEXIST }
+
+	link := &fakeLink{attrs: netlink.LinkAttrs{Index: 1, Name: testIfaceEth0}}
+	if err := ensureClsact(link); err != nil {
+		t.Errorf("ensureClsact() = %v, want nil when QdiscAdd races EEXIST", err)
+	}
+}
+
+// TestEnsureClsact_PropagatesOtherAddErrors confirms ensureClsact only
+// swallows EEXIST specifically -- any other QdiscAdd failure must still be
+// reported.
+func TestEnsureClsact_PropagatesOtherAddErrors(t *testing.T) {
+	origList, origAdd := qdiscListFn, qdiscAddFn
+	t.Cleanup(func() { qdiscListFn, qdiscAddFn = origList, origAdd })
+
+	wantErr := errors.New("simulated netlink failure")
+	qdiscListFn = func(netlink.Link) ([]netlink.Qdisc, error) { return nil, nil }
+	qdiscAddFn = func(netlink.Qdisc) error { return wantErr }
+
+	link := &fakeLink{attrs: netlink.LinkAttrs{Index: 1, Name: testIfaceEth0}}
+	if err := ensureClsact(link); !errors.Is(err, wantErr) {
+		t.Errorf("ensureClsact() = %v, want it to wrap %v", err, wantErr)
+	}
+}
+
+// TestResolveFilterPriority_EnvOverride covers
+// config.EnvCNIEBPFFilterPriority overriding the default tc priority, and
+// falling back to the default on an unset or invalid value -- the same
+// override-then-fallback pattern interfaces_test.go's
+// TestResolveInterfaces_EnvOverride exercises for interface selection.
+func TestResolveFilterPriority_EnvOverride(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		want     uint16
+	}{
+		{name: "unset uses default", envValue: "", want: defaultFilterPriority},
+		{name: "valid override", envValue: "5", want: 5},
+		{name: "invalid value falls back to default", envValue: "not-a-number", want: defaultFilterPriority},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(config.EnvCNIEBPFFilterPriority, tt.envValue)
+			if got := resolveFilterPriority(); got != tt.want {
+				t.Errorf("resolveFilterPriority() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }

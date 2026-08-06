@@ -7,13 +7,18 @@ package attach
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/preflight"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
@@ -24,14 +29,39 @@ import (
 // forwarding").
 const PinDir = "/sys/fs/bpf/galactic"
 
-// filterName and filterPriority identify this package's own TC-BPF ingress
-// filter on an interface, so re-attachment (across a container restart, or
-// Watch's netlink-driven re-attachment, Milestone 3.2) replaces the same
-// filter instead of stacking a duplicate.
-const (
-	filterName     = "galactic_usid_ingress"
-	filterPriority = 1
-)
+// filterName identifies this package's own TC-BPF ingress filter on an
+// interface, so re-attachment (across a container restart, or Watch's
+// netlink-driven re-attachment, Milestone 3.2) replaces the same filter
+// instead of stacking a duplicate.
+const filterName = "galactic_usid_ingress"
+
+// defaultFilterPriority is the tc priority attachOne uses when
+// config.EnvCNIEBPFFilterPriority is unset. Priority 1 is the highest
+// (lowest-numbered) priority tc allows; this has not been validated
+// against Cilium's own clsact priority on any specific version/datapath
+// mode -- see config.EnvCNIEBPFFilterPriority's doc comment. Override via
+// that env var if it collides.
+const defaultFilterPriority = 1
+
+// filterPriorityFn resolves the tc priority attachOne attaches at. It is a
+// package-level override point (the same pattern interfaces.go's
+// routeListFn/linkByIndexFn use) so tests can exercise a non-default
+// priority without setting a real process environment variable.
+var filterPriorityFn = resolveFilterPriority
+
+// resolveFilterPriority reads config.EnvCNIEBPFFilterPriority, if set and a
+// valid uint16, as the tc priority to attach this package's ingress filter
+// at; otherwise it returns defaultFilterPriority.
+func resolveFilterPriority() uint16 {
+	if v := strings.TrimSpace(os.Getenv(config.EnvCNIEBPFFilterPriority)); v != "" {
+		if parsed, err := strconv.ParseUint(v, 10, 16); err == nil {
+			return uint16(parsed)
+		}
+		slog.Warn("attach: ignoring invalid filter priority override, using default",
+			"env", config.EnvCNIEBPFFilterPriority, "value", v, "default", defaultFilterPriority)
+	}
+	return defaultFilterPriority
+}
 
 // preflightCheckFn is a package-level override point so tests can force the
 // preflight failure path without touching the real kernel -- the same
@@ -119,7 +149,27 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 	opts := &ebpf.CollectionOptions{
 		Maps: ebpf.MapOptions{PinPath: pinDir},
 	}
-	if loadErr := spec.LoadAndAssign(&loaded, opts); loadErr != nil {
+	loadErr := spec.LoadAndAssign(&loaded, opts)
+	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
+		// A pin left by a previous version of this program no longer
+		// matches the newly compiled map spec (e.g. a changed value
+		// struct size or max_entries) -- cilium/ebpf refuses to reuse it
+		// as-is. Every map here is control-plane-owned and reconstructable
+		// (usidmap.Register calls re-populate it from BGPVRFInstance/
+		// BGPRouter CRD state, and the GC controller sweeps anything
+		// stale), so recreating it from scratch on a schema mismatch is
+		// safe -- the alternative, leaving this fatal, would crashloop
+		// every node on the first such schema change until an operator
+		// manually deletes the stale pins under pinDir.
+		slog.Warn("attach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
+			"(control-plane state will repopulate on the next CNI ADD/GC sweep)", "pinDir", pinDir, "err", loadErr)
+		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
+			err = fmt.Errorf("attach: recreate incompatible pinned maps: %w", unpinErr)
+			return nil, err
+		}
+		loadErr = spec.LoadAndAssign(&loaded, opts)
+	}
+	if loadErr != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(loadErr, &ve) {
 			detail := fmt.Sprintf("%+v", ve)
@@ -131,6 +181,35 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 	}
 
 	return &loaded, nil
+}
+
+// unpinIncompatibleMaps removes the on-disk pin for every map spec.Maps
+// names, if one exists under pinDir -- called after LoadAndAssign fails
+// with ebpf.ErrMapIncompatible, so the immediately following retry creates
+// each map fresh instead of failing against the stale pin again. A map
+// with no existing pin (os.ErrNotExist from LoadPinnedMap) isn't an error
+// here: LoadAndAssign would have created that one fine on the first
+// attempt, so only the actually-incompatible pin(s) need clearing, but
+// clearing all of them unconditionally is simpler and equally safe since
+// every one of these maps is control-plane-reconstructable.
+func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
+	var errs []error
+	for name := range spec.Maps {
+		path := filepath.Join(pinDir, name)
+		m, err := ebpf.LoadPinnedMap(path, nil)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("load pinned map %q for recreation: %w", name, err))
+			continue
+		}
+		if err := m.Unpin(); err != nil {
+			errs = append(errs, fmt.Errorf("unpin stale map %q: %w", name, err))
+		}
+		_ = m.Close()
+	}
+	return errors.Join(errs...)
 }
 
 // Attach attaches program to the ingress hook of each named interface via a
@@ -184,7 +263,7 @@ func attachOne(program *ebpf.Program, name string) (err error) {
 			Parent:    netlink.HANDLE_MIN_INGRESS,
 			Handle:    netlink.MakeHandle(0, 1),
 			Protocol:  unix.ETH_P_ALL,
-			Priority:  filterPriority,
+			Priority:  filterPriorityFn(),
 		},
 		Fd:           program.FD(),
 		Name:         filterName,
@@ -255,9 +334,28 @@ func detachOne(name string) (err error) {
 	return nil
 }
 
+// qdiscListFn and qdiscAddFn are package-level override points -- the same
+// pattern used throughout this package (interfaces.go's
+// routeListFn/linkByIndexFn) -- so ensureClsact's own tests can simulate
+// the concurrent-EEXIST race below without a live netlink socket or root
+// privileges.
+var (
+	qdiscListFn = netlink.QdiscList
+	qdiscAddFn  = netlink.QdiscAdd
+)
+
 // ensureClsact adds a clsact qdisc to link if one isn't already present.
+//
+// Listing qdiscs and then conditionally adding one is inherently racy
+// against any other agent doing the same thing to the same device --
+// notably Cilium, which also ensures a clsact qdisc exists on native
+// devices for its own tc/bpf programs. If something else wins that race
+// and creates the qdisc between this function's List and its Add call,
+// QdiscAdd returns EEXIST; that is exactly the outcome ensureClsact itself
+// was trying to reach (a clsact qdisc now exists on link), so it is
+// treated as success rather than propagated as an error.
 func ensureClsact(link netlink.Link) error {
-	qdiscs, err := netlink.QdiscList(link)
+	qdiscs, err := qdiscListFn(link)
 	if err != nil {
 		return fmt.Errorf("list qdiscs: %w", err)
 	}
@@ -274,7 +372,7 @@ func ensureClsact(link netlink.Link) error {
 			Parent:    netlink.HANDLE_CLSACT,
 		},
 	}
-	if err := netlink.QdiscAdd(qdisc); err != nil {
+	if err := qdiscAddFn(qdisc); err != nil && !errors.Is(err, unix.EEXIST) {
 		return fmt.Errorf("add clsact qdisc: %w", err)
 	}
 	return nil
