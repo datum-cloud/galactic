@@ -14,6 +14,7 @@ import (
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"go.datum.net/galactic/internal/model"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 )
 
 const (
@@ -349,6 +350,82 @@ func TestBuildEVPNPathsMixedFamily(t *testing.T) {
 				prefixStr, len(serialized), nlri.Len())
 		}
 	}
+}
+
+// TestPrefixSIDAttrCarriesSIDStructure verifies that prefixSIDAttr's
+// PathAttributePrefixSID, once serialized to wire bytes and decoded back via
+// GoBGP's own DecodeFromBytes, carries an RFC 9252 §3.2.1 SRv6 SID Structure
+// Sub-Sub-TLV describing the uFMT 48+16 layout with no transposition. Before
+// this fix, NewSRv6InformationSubTLV was called with no sub-sub-TLV values at
+// all, so the attribute Galactic put on the wire never contained a Structure
+// Sub-Sub-TLV — a spec-compliant third-party EVPN/SRv6 receiver would be
+// missing the structure description entirely.
+func TestPrefixSIDAttrCarriesSIDStructure(t *testing.T) {
+	sid := netip.MustParseAddr(testSID1)
+
+	attr := prefixSIDAttr(sid)
+
+	serialized, err := attr.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize() error = %v", err)
+	}
+
+	// PathAttribute.Serialize() includes the attribute header (flags, type
+	// code, and length); DecodeFromBytes expects that same header back, so
+	// round-trip through a fresh attribute rather than re-using attr.
+	got := &bgp.PathAttributePrefixSID{}
+	if err := got.DecodeFromBytes(serialized); err != nil {
+		t.Fatalf("DecodeFromBytes() error = %v", err)
+	}
+
+	structure := extractSIDStructure(t, got)
+
+	if structure.LocatorBlockLength != uformat.BlockBits {
+		t.Errorf("LocatorBlockLength = %d, want %d", structure.LocatorBlockLength, uformat.BlockBits)
+	}
+	if structure.LocatorNodeLength != uformat.NodeIDBits {
+		t.Errorf("LocatorNodeLength = %d, want %d", structure.LocatorNodeLength, uformat.NodeIDBits)
+	}
+	if structure.FunctionLength != uformat.FunctionBits {
+		t.Errorf("FunctionLength = %d, want %d", structure.FunctionLength, uformat.FunctionBits)
+	}
+	if structure.ArgumentLength != uformat.ArgumentBits {
+		t.Errorf("ArgumentLength = %d, want %d", structure.ArgumentLength, uformat.ArgumentBits)
+	}
+	if structure.TranspositionLength != 0 {
+		t.Errorf("TranspositionLength = %d, want 0", structure.TranspositionLength)
+	}
+	if structure.TranspositionOffset != 0 {
+		t.Errorf("TranspositionOffset = %d, want 0", structure.TranspositionOffset)
+	}
+}
+
+// extractSIDStructure digs the SRv6 SID Structure Sub-Sub-TLV out of a
+// decoded Prefix-SID attribute's L3 Service TLV / Information Sub-TLV, or
+// fails the test if any layer is missing.
+func extractSIDStructure(t *testing.T, attr *bgp.PathAttributePrefixSID) *bgp.SRv6SIDStructureSubSubTLV {
+	t.Helper()
+
+	for _, tlv := range attr.TLVs {
+		svc, ok := tlv.(*bgp.SRv6ServiceTLV)
+		if !ok || svc.Type != bgp.TLVTypeSRv6L3Service {
+			continue
+		}
+		for _, sub := range svc.SubTLVs {
+			info, ok := sub.(*bgp.SRv6InformationSubTLV)
+			if !ok {
+				continue
+			}
+			for _, subSub := range info.SubSubTLVs {
+				if structure, ok := subSub.(*bgp.SRv6SIDStructureSubSubTLV); ok {
+					return structure
+				}
+			}
+		}
+	}
+
+	t.Fatal("no SRv6SIDStructureSubSubTLV found in decoded Prefix-SID attribute")
+	return nil
 }
 
 // TestBuildEVPNPathsMatchesApplyVRFRD verifies that the RD derived by
