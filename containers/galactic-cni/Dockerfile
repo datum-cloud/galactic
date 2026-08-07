@@ -22,15 +22,20 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# No eBPF toolchain needed here: internal/plumbing/ebpf/prog's committed
-# usid_bpfel.o/usid_bpfeb.o (go:embed'd into the galactic-cni binary below)
-# ship as-is from the COPY above, rather than being regenerated from
-# usid.c by this build -- so the object embedded in the image is bit-for-
-# bit the one committed to git, reviewed in the PR, and verified against
-# usid.c by CI's drift check (.github/workflows/ci.yaml's `build` job),
-# not a separate build produced by this builder image's own clang. design
-# plan .local/plan-ebpf-xdp-usid-datapath.md §6; Milestone 5.2 of
-# .local/implementation-plan-ebpf-xdp-usid-datapath.md.
+# Install the eBPF build toolchain and regenerate
+# internal/plumbing/ebpf/prog's bpf2go output (usid_bpfel.go/.o,
+# usid_bpfeb.go/.o -- go:embed'd into the galactic-cni binary below) from
+# usid.c. These aren't committed to git (see that package's doc.go), so
+# every build site produces them fresh instead of embedding a copy
+# checked into the repo; this builder stage is no exception. Package
+# names are the generic Debian ones (this base image, unlike the CI
+# runner's Ubuntu, doesn't have a clang-18 package available) -- byte-
+# identical output across build sites isn't the goal here, a working BPF
+# program compiled from usid.c is.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      clang llvm linux-libc-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN go generate ./internal/plumbing/ebpf/prog/...
 
 # Build CNI plugin
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

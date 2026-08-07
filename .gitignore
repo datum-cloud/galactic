@@ -27,6 +27,16 @@ go.work.sum
 ko-local/
 *.img
 
+# eBPF (bpf2go) generated artifacts -- regenerated from usid.c by `task
+# build:ebpf` (requires clang; see internal/plumbing/ebpf/prog/doc.go).
+# Unlike other generated code (e.g. *.pb.go), these embed a compiled
+# binary blob and are deliberately NOT committed, so the bytes shipped
+# never drift from usid.c without anyone noticing a stale commit.
+internal/plumbing/ebpf/prog/usid_bpfel.go
+internal/plumbing/ebpf/prog/usid_bpfel.o
+internal/plumbing/ebpf/prog/usid_bpfeb.go
+internal/plumbing/ebpf/prog/usid_bpfeb.o
+
 # ============================================================
 # Kubernetes / controller-runtime / kubebuilder
 # ============================================================
