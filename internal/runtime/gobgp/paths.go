@@ -15,6 +15,7 @@ import (
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
 
 	"go.datum.net/galactic/internal/model"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 )
 
 // deriveRD builds an RFC 4364 Type 1 route distinguisher from the router ID
@@ -62,10 +63,25 @@ func gatewayForPrefix(prefix netip.Prefix) netip.Addr {
 // the sole carrier for the destination SID in this design — see
 // gatewayForPrefix for why the EVPN route's own Gateway IP field can't be
 // used for this instead.
+//
+// The Information Sub-TLV also carries an RFC 9252 §3.2.1 SID Structure
+// Sub-Sub-TLV describing the uSID layout (uFMT 48+16, see
+// internal/plumbing/ebpf/uformat) already present in sid, with no
+// transposition (TL/TO = 0). The field widths are derived from uformat's own
+// constants rather than re-hardcoded, so the wire encoding and the eBPF
+// datapath's bit layout can't silently drift apart.
 func prefixSIDAttr(sid netip.Addr) bgp.PathAttributeInterface {
+	structure := bgp.NewSRv6SIDStructureSubSubTLV(
+		uformat.BlockBits,    // LBL = 48, uSID Block
+		uformat.NodeIDBits,   // LNL = 16, Node-ID
+		uformat.FunctionBits, // FL  = 4,  Function
+		uformat.ArgumentBits, // AL  = 12, Instance ID (Argument)
+		0,                    // TL  = 0,  no transposition
+		0,                    // TO  = 0,  n/a when TL=0
+	)
 	return bgp.NewPathAttributePrefixSID(
 		bgp.NewSRv6ServiceTLV(bgp.TLVTypeSRv6L3Service,
-			bgp.NewSRv6InformationSubTLV(sid, bgp.END_DT46),
+			bgp.NewSRv6InformationSubTLV(sid, bgp.END_DT46, structure),
 		),
 	)
 }
