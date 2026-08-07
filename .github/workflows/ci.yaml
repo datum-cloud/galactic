@@ -92,6 +92,20 @@ jobs:
         # would otherwise make `go test`'s VCS stamping fail.
         run: sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Load vrf kernel module
+        # internal/cni's bgp_ebpf_test.go creates a real netlink.Vrf link
+        # (vrf.Add, internal/plumbing/vrf/vrf.go). The kernel normally
+        # autoloads a link kind's backing module on demand via
+        # request_module() when an rtnl_link_ops lookup misses, but this
+        # runner image doesn't have the vrf module loaded and its kernel
+        # doesn't autoload it from inside the netlink path -- LinkAdd
+        # fails with "operation not supported" (EOPNOTSUPP) instead.
+        # Loading it explicitly here, once, before the tests run is the
+        # same fix task's own containerlab lab bootstrap already relies on
+        # (group_files/common/bootstrap.sh's `grep -q vrf /proc/modules`
+        # check assumes the module is already loaded for the same reason).
+        run: sudo modprobe vrf
+
       - name: Run root-gated unit tests as root
         # sudo's secure_path policy overrides -E's preserved PATH for
         # exactly the PATH variable, which would hide the go/task binaries
