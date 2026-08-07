@@ -94,17 +94,20 @@ jobs:
 
       - name: Load vrf kernel module
         # internal/cni's bgp_ebpf_test.go creates a real netlink.Vrf link
-        # (vrf.Add, internal/plumbing/vrf/vrf.go). The kernel normally
-        # autoloads a link kind's backing module on demand via
-        # request_module() when an rtnl_link_ops lookup misses, but this
-        # runner image doesn't have the vrf module loaded and its kernel
-        # doesn't autoload it from inside the netlink path -- LinkAdd
-        # fails with "operation not supported" (EOPNOTSUPP) instead.
-        # Loading it explicitly here, once, before the tests run is the
-        # same fix task's own containerlab lab bootstrap already relies on
-        # (group_files/common/bootstrap.sh's `grep -q vrf /proc/modules`
-        # check assumes the module is already loaded for the same reason).
-        run: sudo modprobe vrf
+        # (vrf.Add, internal/plumbing/vrf/vrf.go), which fails with
+        # "operation not supported" (EOPNOTSUPP) on this runner: the vrf
+        # module isn't built into its kernel and isn't preinstalled either,
+        # so a bare `modprobe vrf` 404s with "Module vrf not found". It
+        # lives in linux-modules-extra-<kernel-version> -- pinned to
+        # `uname -r` rather than the unversioned meta-package, which can
+        # pull a newer kernel's modules than the one actually running --
+        # same fix and same reasoning as scripts/ci.sh's e2etest case,
+        # which needs this for the same underlying reason (SEG6Local
+        # END.DT46's VRFTABLE flag) and already does this exact install.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+          sudo modprobe vrf
 
       - name: Run root-gated unit tests as root
         # sudo's secure_path policy overrides -E's preserved PATH for
