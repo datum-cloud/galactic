@@ -97,7 +97,7 @@ the ones with a pod running today. The FRR fabric DaemonSet advertises the same
 Each site's tenant node advertises its own `/56` SRv6 locator block into the
 fabric — never the site's full `/48` uSID Block, which would create an
 anycast ambiguity the instant a second tenant node joins a site. The test VPC
-`ns50` (see [docs/vpc.md](docs/vpc.md)) gets a host address within its node's
+`ns50` (see [docs/tenants.md](docs/tenants.md)) gets a host address within its node's
 block:
 
 | Cluster     | FRR loopback   | Node locator block     | USID ns50                     | galactic-router address |
@@ -137,7 +137,13 @@ deploy/containerlab/
 │   ├── fabric-control/iad/        # FRR DaemonSet iad-control overlay
 │   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs (dfw, iad, sjc)
 │   ├── galactic-control/iad/    # galactic-router RR + BGP CRs (iad-control)
-│   └── ns50/                    # ns50 NAD manifests + webapp Deployments (dfw, iad, sjc)
+│   └── tenants/                 # test VPCs — one shared base/ (Namespace + netshoot
+│       ├── base/                 # Deployment), each tenant patching its namespace,
+│       ├── ns50/                 # default-network annotation, and (ns30/ns40) replica
+│       ├── ns10/                 # count; per-site dirs hold each site's NAD(s):
+│       ├── ns20/                 #   ns50 (IPv4, 3-site), ns10 (IPv6-only, 3-site),
+│       ├── ns30/                 #   ns20 (dual-stack, 3-site), ns30 (IPv6-only,
+│       └── ns40/                 #   dfw only, 2 pods), ns40 (IPv4-only, iad only, 2 pods)
 ├── node_files/
 │   ├── dfw/     config.yaml
 │   ├── iad/     config.yaml
@@ -156,7 +162,7 @@ deploy/containerlab/
     ├── deploy-cni.sh
     ├── deploy-fabric.sh
     ├── deploy-galactic-router.sh
-    └── deploy-ns50.sh
+    └── deploy-ns.sh
 ```
 
 ## Prerequisites
@@ -199,9 +205,20 @@ task deploy
 | `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet               |
 | `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                     |
 | `deploy:galactic-router` | Apply galactic-router DaemonSets and BGP CRs                             |
-| `deploy:ns50`           | Deploy ns50 namespace, NADs, and webapp workloads across all clusters    |
+| `deploy:scenarios`      | Deploy all VPC test scenarios                                            |
+| `deploy:ns50`           | Deploy ns50 test VPC (IPv4, 3-site)                                      |
+| `deploy:ns10`           | Deploy ns10 test VPC (IPv6-only, fd20 ULA)                               |
+| `deploy:ns20`           | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                       |
+| `deploy:ns30`           | Deploy ns30 test VPC (dfw only, 2 pods)                                  |
+| `deploy:ns40`           | Deploy ns40 test VPC (iad only, 2 pods)                                  |
+| `verify:scenarios`      | Verify ping across all VPC test scenarios                                |
+| `verify:ns50`           | Verify ns50 ping (IPv4, 3-site mesh)                                     |
+| `verify:ns10`           | Verify ns10 ping (IPv6-only, 3-site mesh)                                |
+| `verify:ns20`           | Verify ns20 ping (dual-stack, 3-site mesh)                               |
+| `verify:ns30`           | Verify ns30 ping (dfw only, 2 pods)                                      |
+| `verify:ns40`           | Verify ns40 ping (iad only, 2 pods)                                      |
 | `destroy`               | Destroy the lab and remove all Kind clusters                             |
-| `reload`                | Full rebuild — destroy then redeploy                                     |
+| `restart`               | Full rebuild — destroy then redeploy                                     |
 | `rebuild`               | Full rebuild — clean (destroy + delete images/artifacts) then redeploy   |
 | `inspect`               | Show running nodes and management addresses                              |
 | `graph`                 | Generate a draw.io diagram for the topology                              |
@@ -212,8 +229,16 @@ task deploy
 ## Verification
 
 See [docs/verification.md](docs/verification.md) for transit fabric, FRR, and galactic-router
-health checks, and [docs/vpc.md](docs/vpc.md) for deploying the `ns50` test
-workloads and verifying cross-site and cross-VPC connectivity. Quick smoke test:
+health checks, and [docs/tenants.md](docs/tenants.md) for deploying and verifying
+the `ns50`/`ns10`/`ns20`/`ns30`/`ns40` test VPCs.
+
+`task verify` (and its constituent `task verify:scenarios`) also pings every
+VPC's pods end-to-end via `task verify:ns50`/`ns10`/`ns20`/`ns30`/`ns40` —
+full site-pair mesh for the 3-site VPCs, both-direction pod-to-pod for the
+single-site `ns30`/`ns40`. Run one on its own after redeploying a single
+scenario, e.g. `task verify:ns30` after `task deploy:ns30`.
+
+Quick smoke test:
 
 ```bash
 task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn

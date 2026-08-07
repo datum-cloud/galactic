@@ -1,0 +1,24 @@
+# ns40 is single-site (iad only, see ../iad/) — 2 replicas land two pods on
+# iad-worker (the only untainted worker in that cluster), attached to the
+# same VPC/NAD, for same-node same-VPC pod-to-pod connectivity testing
+# rather than cross-site.
+namespace: ns40
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+      name: netshoot
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: netshoot
+      spec:
+        template:
+          metadata:
+            annotations:
+              v1.multus-cni.io/default-network: ns40/private
+replicas:
+  - name: netshoot
+    count: 2

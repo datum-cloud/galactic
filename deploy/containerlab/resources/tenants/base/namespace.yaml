@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Overwritten by each tenant's base/kustomization.yaml `namespace:` field —
+  # kustomize's namespace transformer renames a Namespace-kind resource's own
+  # metadata.name to match, not just metadata.namespace on everything else.
+  name: tenant-placeholder
