@@ -1,0 +1,23 @@
+# ns30 is single-site (dfw only, see ../dfw/) — 2 replicas land two pods on
+# the same worker, attached to the same VPC/NAD, for same-node same-VPC
+# pod-to-pod connectivity testing rather than cross-site.
+namespace: ns30
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+      name: netshoot
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: netshoot
+      spec:
+        template:
+          metadata:
+            annotations:
+              v1.multus-cni.io/default-network: ns30/private
+replicas:
+  - name: netshoot
+    count: 2

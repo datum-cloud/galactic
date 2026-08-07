@@ -1,0 +1,8 @@
+# Shared by every tenant under resources/tenants/<ns>/base/ — a bare
+# Namespace + netshoot Deployment. Each tenant's own base/kustomization.yaml
+# sets `namespace:` (renames the Namespace and injects metadata.namespace
+# everywhere else) and patches the default-network annotation and, for the
+# two single-site tenants, `replicas:`.
+resources:
+  - namespace.yaml
+  - pod.yaml

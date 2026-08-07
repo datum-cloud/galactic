@@ -54,7 +54,7 @@ tasks:
       - task: "deploy:cni"
       - task: "deploy:fabric"
       - task: "deploy:galactic-router"
-      - task: "deploy:ns50"
+      - task: "deploy:scenarios"
 
   "deploy:clusters":
     desc: Create Kind clusters
@@ -130,10 +130,10 @@ tasks:
       - kind delete cluster --name sjc || true
       - kind delete cluster --name iad || true
 
-  reload:
+  restart:
     desc: Full rebuild and redeploy
     cmds:
-      - task: destroy
+      - task: clean
       - task: deploy
 
   rebuild:
@@ -167,10 +167,39 @@ tasks:
     cmds:
       - ./scripts/deploy-galactic-router.sh
 
-  "deploy:ns50":
-    desc: Deploy ns50 namespace, NADs, and webapp workloads across all clusters
+  "deploy:scenarios":
+    desc: Deploy all VPC test scenarios
     cmds:
-      - ./scripts/deploy-ns50.sh
+      - task: "deploy:ns50"
+      - task: "deploy:ns10"
+      - task: "deploy:ns20"
+      - task: "deploy:ns30"
+      - task: "deploy:ns40"
+
+  "deploy:ns50":
+    desc: Deploy ns50 test VPC (IPv4, 3-site)
+    cmds:
+      - ./scripts/deploy-ns.sh ns50 dfw sjc iad
+
+  "deploy:ns10":
+    desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
+    cmds:
+      - ./scripts/deploy-ns.sh ns10 dfw sjc iad
+
+  "deploy:ns20":
+    desc: Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)
+    cmds:
+      - ./scripts/deploy-ns.sh ns20 dfw sjc iad
+
+  "deploy:ns30":
+    desc: Deploy ns30 test VPC (dfw only, 2 pods)
+    cmds:
+      - ./scripts/deploy-ns.sh ns30 dfw
+
+  "deploy:ns40":
+    desc: Deploy ns40 test VPC (iad only, 2 pods)
+    cmds:
+      - ./scripts/deploy-ns.sh ns40 iad
 
   verify:
     desc: Run all verification checks
@@ -180,6 +209,7 @@ tasks:
       - task: "verify:bgp-peers"
       - task: "verify:srv6"
       - task: "verify:evpn"
+      - task: "verify:scenarios"
 
   "verify:bgp-transit":
     desc: Verify transit router BGP sessions (iBGP full mesh)
@@ -230,6 +260,40 @@ tasks:
       - docker exec iad-control-plane kubectl get bgprouters -A
       - docker exec sjc-control-plane kubectl get bgprouters -A
       - docker exec dfw-control-plane kubectl get bgprouters -A
+
+  "verify:scenarios":
+    desc: Verify ping across all VPC test scenarios
+    cmds:
+      - task: "verify:ns50"
+      - task: "verify:ns10"
+      - task: "verify:ns20"
+      - task: "verify:ns30"
+      - task: "verify:ns40"
+
+  "verify:ns50":
+    desc: Verify ns50 ping (IPv4, 3-site mesh)
+    cmds:
+      - ./scripts/verify-ns50.sh
+
+  "verify:ns10":
+    desc: Verify ns10 ping (IPv6-only, 3-site mesh)
+    cmds:
+      - ./scripts/verify-ns10.sh
+
+  "verify:ns20":
+    desc: Verify ns20 ping (dual-stack, 3-site mesh)
+    cmds:
+      - ./scripts/verify-ns20.sh
+
+  "verify:ns30":
+    desc: Verify ns30 ping (dfw only, 2 pods)
+    cmds:
+      - ./scripts/verify-ns30.sh
+
+  "verify:ns40":
+    desc: Verify ns40 ping (iad only, 2 pods)
+    cmds:
+      - ./scripts/verify-ns40.sh
 
   clean:
     desc: Destroy the lab and delete artifacts

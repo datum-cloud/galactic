@@ -1,0 +1,17 @@
+namespace: ns50
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+      name: netshoot
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: netshoot
+      spec:
+        template:
+          metadata:
+            annotations:
+              v1.multus-cni.io/default-network: ns50/private

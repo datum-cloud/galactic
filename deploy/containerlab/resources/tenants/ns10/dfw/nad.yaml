@@ -1,0 +1,18 @@
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: private
+  namespace: ns10
+spec:
+  config: |
+    {
+      "cniVersion": "1.0.0",
+      "name": "private",
+      "type": "galactic-cni",
+      "vpc": "10",
+      "vpcattachment": "10",
+      "namespace": "galactic-system",
+      "ipv6_subnet": "fd20:10:ff01::/48",
+      "address_families": ["ipv6"]
+    }

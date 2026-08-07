@@ -41,8 +41,8 @@ copy_router_control_config() {
 
 # apply_galactic_router applies the site's galactic-router overlay (DaemonSet
 # + BGP CRDs). Shared by all three sites; iad layers its route-reflector on
-# top after calling this. NADs and test workloads live under resources/ns50/
-# and are applied by deploy-ns50.sh.
+# top after calling this. NADs and test workloads live under
+# resources/tenants/ns50/ and are applied by deploy-ns.sh.
 apply_galactic_router() {
   local node="$1" site="$2"
   apply_k "${node}" "/galactic/resources/galactic-router/${site}/"
