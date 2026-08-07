@@ -56,13 +56,23 @@ const seg6IptunModeEncapRed = 3
 // what happened before this check existed (an EVPN path with no usable SID
 // attribute was fed straight through). Fail loudly instead.
 //
-// The resolved next-hop is attached via RTA_VIA (netlink.Route.Via), not the
-// plain Gw field. SRv6 SIDs are IPv6-only in this architecture, but prefix —
-// the inner destination being matched — can be IPv4 (an IPv4 VPC prefix
-// egressing over an IPv6 SRv6 underlay). Gw requires its address to share
-// Dst's family and the kernel rejects the mismatch outright; Via carries a
-// next-hop of a different family than Dst by design, which is exactly this
-// case: an IPv4 route whose next-hop is only reachable over an IPv6 link.
+// The resolved next-hop is attached via RTA_VIA (netlink.Route.Via) only
+// when prefix's family differs from the next-hop's — SRv6 SIDs are
+// IPv6-only in this architecture, so that's exactly the IPv4 VPC prefix
+// case (egressing over an IPv6 SRv6 underlay), where the plain Gw field
+// can't be used: Gw requires its address to share Dst's family and the
+// kernel rejects the mismatch outright, while Via carries a next-hop of a
+// different family than Dst by design.
+//
+// For an IPv6 VPC prefix, though, the next-hop already shares Dst's family,
+// and Via must NOT be used: unlike iproute2's `via` keyword, which silently
+// downgrades to a plain RTA_GATEWAY whenever the given address turns out to
+// share Dst's family, this netlink library sends whatever attribute the
+// caller set verbatim — RTA_VIA with a same-family address is rejected by
+// the kernel with EINVAL. Confirmed empirically: this function unconditionally
+// using Via previously blackholed every IPv6 VPC prefix's egress route
+// (RouteEgressAdd failing with "invalid argument"), while the IPv4 case,
+// which does need Via, worked fine.
 func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 	if gateway == nil || gateway.IsUnspecified() {
 		return fmt.Errorf("refusing to install seg6 encap route for %s: gateway %s is not a usable SRv6 SID", prefix, gateway)
@@ -84,8 +94,14 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 		Encap:     encap,
 		LinkIndex: routes[0].LinkIndex,
 	}
-	if len(routes[0].Gw) > 0 {
-		route.Via = &netlink.Via{AddrFamily: netlink.FAMILY_V6, Addr: routes[0].Gw}
+	if nextHop := routes[0].Gw; len(nextHop) > 0 {
+		if prefix.IP.To4() != nil {
+			// IPv4 VPC prefix, IPv6 next-hop: cross-family, must use Via.
+			route.Via = &netlink.Via{AddrFamily: netlink.FAMILY_V6, Addr: nextHop}
+		} else {
+			// IPv6 VPC prefix: next-hop shares Dst's family, use Gw.
+			route.Gw = nextHop
+		}
 	}
 	return netlink.RouteReplace(route)
 }
