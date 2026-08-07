@@ -9,8 +9,40 @@ import (
 	"net"
 
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netlink/nl"
 )
+
+// seg6IptunModeEncapRed is SEG6_IPTUN_MODE_ENCAP_RED from the kernel UAPI
+// (include/uapi/linux/seg6_iptunnel.h's mode enum: INLINE=0, ENCAP=1,
+// L2ENCAP=2, ENCAP_RED=3, L2ENCAP_RED=4). The vendored
+// github.com/vishvananda/netlink/nl package only exports INLINE(0)/ENCAP(1)
+// -- it has never picked up the kernel's later reduced-mode values -- but
+// netlink.SEG6Encap.Mode is a plain int forwarded verbatim to the kernel via
+// nl.EncodeSEG6Encap with no validation, so the numeric value can be used
+// directly without patching or forking that dependency.
+//
+// "Reduced" encap matters here because it changes the wire format for the
+// single-segment case this function always installs (Segments always has
+// exactly one entry, the resolved SID). Confirmed empirically against this
+// SID/lab's kernel and iproute2 (ip -6 route add ... encap seg6 mode
+// encap.red segs <sid> ..., captured on the wire both for an IPv6 inner
+// packet and, matching this codebase's actual IPv4-VPC-over-IPv6-underlay
+// case, an IPv4 inner packet): SEG6_IPTUN_MODE_ENCAP (the previous value
+// here) always prepends a full Segment Routing Header (RFC 8754, outer
+// Next Header = 43/Routing), even for one segment. SEG6_IPTUN_MODE_ENCAP_RED
+// omits the SRH entirely for a single segment -- the one segment is already
+// fully expressed by the outer destination address, so there is nothing
+// left for an SRH to carry -- leaving the outer Next Header set directly to
+// the inner packet's own protocol (4/IPIP or 41/IPv6-in-IPv6).
+//
+// That distinction is why cross-node pod traffic was silently black-holed:
+// internal/plumbing/ebpf/prog/usid.c's galactic_usid_ingress TC-BPF program
+// (the sole ingress/decap path since the legacy seg6local route model was
+// removed) requires the outer Next Header to name the inner packet's AF
+// directly (IPIP=4 or IPv6-in-IPv6=41) and unconditionally drops anything
+// else -- including a Routing Header -- as DROP_REASON_UNEXPECTED_NEXTHDR.
+// Every packet this function's previous SEG6_IPTUN_MODE_ENCAP route
+// produced hit exactly that drop on arrival at the destination node.
+const seg6IptunModeEncapRed = 3
 
 // RouteEgressAdd installs a SEG6 encap route for prefix into routing table
 // tableID, encapsulating to the given SRv6 SID (gateway). The outgoing
@@ -43,7 +75,7 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 		return fmt.Errorf("no route to gateway %s", gateway)
 	}
 	encap := &netlink.SEG6Encap{
-		Mode:     nl.SEG6_IPTUN_MODE_ENCAP,
+		Mode:     seg6IptunModeEncapRed,
 		Segments: []net.IP{gateway},
 	}
 	route := &netlink.Route{
