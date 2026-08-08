@@ -16,25 +16,19 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 )
 
-// Termination represents a network termination point with a destination
-// CIDR and next-hop gateway address.
-type Termination struct {
-	Network string `json:"network"`
-	Via     string `json:"via,omitempty"`
-}
-
 // PluginConf is the CNI plugin configuration passed via stdin on each
 // invocation of galactic-tap-cni.
 //
 // IPAM addressing fields live entirely inside the "ipam" block — see
 // go.datum.net/galactic/internal/cniipam's doc comment for the explicit
-// delegation contract.
+// delegation contract. Termination routes are galactic-route's own
+// concern now (see internal/cniroute) — this plugin's own JSON stanza
+// carries no "terminations" field of its own to read.
 type PluginConf struct {
 	types.PluginConf
 	VPC           string        `json:"vpc"`
 	VPCAttachment string        `json:"vpcattachment"`
 	MTU           int           `json:"mtu,omitempty"`
-	Terminations  []Termination `json:"terminations,omitempty"`
 	IPAM          *cniipam.IPAM `json:"ipam"`
 	Namespace     string        `json:"namespace,omitempty"`
 }
