@@ -97,8 +97,9 @@ func (r *Reconciler) BuildDesiredRouter(
 		return nil, fmt.Errorf("list BGPAdvertisements for router %s/%s: %w", namespace, router.Name, err)
 	}
 
-	// Gather VRF instances. A node hosts one BGPVRFInstance per VPC attachment,
-	// which can number in the thousands, so every instance targeting this
+	// Gather VRF instances. A node hosts one BGPVRFInstance per VPC that has
+	// at least one attachment here — shared by every attachment on that
+	// VPC/node, not one per attachment — so every instance targeting this
 	// router must be carried into DesiredRouter — not just the first.
 	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
 	if err := r.client.List(ctx, vrfList,

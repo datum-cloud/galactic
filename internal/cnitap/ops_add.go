@@ -64,10 +64,9 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 	}()
 
-	if err := vrf.Add(pluginConf.VPC, pluginConf.VPCAttachment); err != nil {
+	if err := vrf.Add(pluginConf.VPC); err != nil {
 		return fmt.Errorf("add VRF: %w", err)
 	}
-	tracker.vrfCreated = true
 	slog.Debug("ADD: VRF ready", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 
 	if err := tap.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {

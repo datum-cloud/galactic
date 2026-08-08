@@ -57,7 +57,7 @@ func cmdStatus(args *skel.CmdArgs) error {
 // checkTerminationRoutes verifies that all termination routes exist in the
 // VRF table for the given VPC/VPCAttachment pair.
 func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Termination) error {
-	tableID, err := vrf.TableID(vpc, vpcAttachment)
+	tableID, err := vrf.TableID(vpc)
 	if err != nil {
 		return fmt.Errorf("get VRF table ID: %w", err)
 	}
