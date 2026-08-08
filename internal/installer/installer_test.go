@@ -71,6 +71,17 @@ func TestResolveLogLevel(t *testing.T) {
 	}
 }
 
+// assertBinaryCopied verifies that the binary at path exists and contains
+// wantContent, factored out of TestBootstrap to keep its own cyclomatic
+// complexity within golangci-lint's gocyclo budget.
+func assertBinaryCopied(t *testing.T, path, wantContent string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != wantContent {
+		t.Fatalf("binary copy verification failed for %q: err=%v content=%q", path, err, got)
+	}
+}
+
 func TestBootstrap(t *testing.T) {
 	// Set up temporary directories for testing overrides
 	tmpDir := t.TempDir()
@@ -92,9 +103,13 @@ func TestBootstrap(t *testing.T) {
 
 	// Create mock CNI source binary files
 	SourceCNIBinary = filepath.Join(tmpDir, "source-galactic-cni")
+	SourceTapCNIBinary = filepath.Join(tmpDir, "source-galactic-tap-cni")
 	SourceHostDeviceBinary = filepath.Join(tmpDir, "source-host-device")
 	if err := os.WriteFile(SourceCNIBinary, []byte("cni-content"), 0755); err != nil {
 		t.Fatalf("write SourceCNIBinary: %v", err)
+	}
+	if err := os.WriteFile(SourceTapCNIBinary, []byte("tap-cni-content"), 0755); err != nil {
+		t.Fatalf("write SourceTapCNIBinary: %v", err)
 	}
 	if err := os.WriteFile(SourceHostDeviceBinary, []byte("host-device-content"), 0755); err != nil {
 		t.Fatalf("write SourceHostDeviceBinary: %v", err)
@@ -151,10 +166,8 @@ func TestBootstrap(t *testing.T) {
 		}
 
 		// Verify binaries copied
-		cniContent, err := os.ReadFile(filepath.Join(HostBinDir, "galactic-cni"))
-		if err != nil || string(cniContent) != "cni-content" {
-			t.Fatalf("galactic-cni binary copy verification failed")
-		}
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-cni"), "cni-content")
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap-cni"), "tap-cni-content")
 
 		// Verify conflist written
 		conflist, err := loadHostConf(HostConflist)

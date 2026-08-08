@@ -15,19 +15,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/config"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 func TestMain(m *testing.M) {
@@ -39,17 +33,12 @@ func TestMain(m *testing.M) {
 const (
 	testVPC           = "abc"
 	testAttachment    = "def"
-	testVPCHex1234    = "0000000004d2" // decimal 1234
-	testRD65000_1     = "65000:1"      // RD/RT for ASN 65000, NN 1
 	testContainerID   = "test-container"
 	testInvalidBase62 = "abc-def" // shared invalid base62 string for tests
 	testNetns         = "/proc/1/ns/net"
 	testMac           = "aa:bb:cc:dd:ee:ff"
 	testIfName        = "eth0"
-	testRouterName    = "overlay-router"
-	testSID128        = "2001:db8::1/128"
 	testCNIVersion    = "1.0.0"
-	testIPv4Subnet    = "10.128.0.0/20"
 
 	// testPrevResult is a valid CNI v1.0.0 result used in prevResult tests.
 	testPrevResult = `{"cniVersion":"1.0.0",` +
@@ -57,32 +46,6 @@ const (
 		`"sandbox":"/proc/1/ns/net"}],` +
 		`"ips":[{"version":"6","address":"fd00:1::1/64"}]}`
 )
-
-func fakeClient(objs ...client.Object) client.Client {
-	return fake.NewClientBuilder().WithScheme(cniScheme).WithObjects(objs...).Build()
-}
-
-// routerForNode builds a BGPRouter with spec.targetRef.name set to nodeName.
-func routerForNode(name, nodeName, namespace string, asn int64) *bgpv1alpha1.BGPRouter {
-	return &bgpv1alpha1.BGPRouter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: bgpv1alpha1.BGPRouterSpec{
-			TargetRef: bgpv1alpha1.TargetRef{
-				Kind: "Node",
-				Name: nodeName,
-			},
-			LocalASN: asn,
-			RouterID: "10.0.0.1",
-			Roles:    []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-			AddressFamilies: []bgpv1alpha1.AddressFamily{
-				{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-			},
-		},
-	}
-}
 
 // assertCNIError verifies that err is a *types.Error with the expected Code
 // and that its Msg contains wantMsg (substring match). Pass wantMsg == "" to
@@ -108,7 +71,6 @@ func TestParseConf(t *testing.T) {
 		name                string
 		input               string
 		wantVPC             string
-		wantIfType          string
 		wantAddressFamilies []string // nil means "don't check"
 		wantErr             string
 		wantCode            uint // CNI error code; 0 means "don't check"
@@ -118,11 +80,10 @@ func TestParseConf(t *testing.T) {
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_sid":"2001:db8::1/128"}`,
+					`"vpcattachment":"%s"}`,
 				testVPC, testAttachment,
 			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
+			wantVPC: testVPC,
 		},
 		{
 			name:     "invalid JSON",
@@ -134,50 +95,6 @@ func TestParseConf(t *testing.T) {
 			name:     "empty input",
 			input:    "",
 			wantErr:  "invalid CNI config",
-			wantCode: 7,
-		},
-		{
-			name: "interface_type=veth",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","interface_type":"veth"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
-		},
-		{
-			name: "interface_type=tap",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","interface_type":"tap"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeTap,
-		},
-		{
-			name: "interface_type empty defaults to veth",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","interface_type":""}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
-		},
-		{
-			name: "interface_type=unknown",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","interface_type":"unknown"}`,
-				testVPC, testAttachment,
-			),
-			wantErr:  `invalid interface_type "unknown": must be "veth" or "tap"`,
 			wantCode: 7,
 		},
 		{
@@ -260,54 +177,8 @@ func TestParseConf(t *testing.T) {
 			input: `{"cniVersion":"1.0.0","name":"test",` +
 				`"type":"galactic-cni","vpc":"Abc123XYZ",` +
 				`"vpcattachment":"DeF456"}`,
-			wantVPC:    "Abc123XYZ",
-			wantIfType: interfaceTypeVeth,
+			wantVPC: "Abc123XYZ",
 		},
-		{
-			name: "valid srv6_sid with /128",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_sid":"2001:db8::1/128"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
-		},
-		{
-			name: "valid srv6_sid bare IPv6 address",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_sid":"2001:db8::1"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
-		},
-		{
-			name: "srv6_sid empty is allowed",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","srv6_sid":""}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
-		},
-		{
-			name: "srv6_sid missing is allowed",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
-		},
-
 		{
 			name: "prevResult valid JSON result is accepted",
 			input: fmt.Sprintf(
@@ -317,8 +188,7 @@ func TestParseConf(t *testing.T) {
 					`"prevResult":%s}`,
 				testVPC, testAttachment, testPrevResult,
 			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
+			wantVPC: testVPC,
 		},
 
 		// ---- dual-stack addressing fields (ipv6_subnet, ipv4_subnet, address_families) ----
@@ -332,7 +202,6 @@ func TestParseConf(t *testing.T) {
 				testVPC, testAttachment,
 			),
 			wantVPC:             testVPC,
-			wantIfType:          interfaceTypeVeth,
 			wantAddressFamilies: []string{addressFamilyIPv6},
 		},
 		{
@@ -343,8 +212,7 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"%s","ipv6_subnet":"fd00:10:ff01::/48"}`,
 				testVPC, testAttachment,
 			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
+			wantVPC: testVPC,
 		},
 		{
 			name: "invalid ipv6_subnet CIDR rejected",
@@ -387,8 +255,7 @@ func TestParseConf(t *testing.T) {
 					`"vpcattachment":"%s","ipv4_subnet":"10.0.0.0/20"}`,
 				testVPC, testAttachment,
 			),
-			wantVPC:    testVPC,
-			wantIfType: interfaceTypeVeth,
+			wantVPC: testVPC,
 		},
 		{
 			// A standard dotted-decimal CIDR can never carry a mask longer
@@ -425,7 +292,6 @@ func TestParseConf(t *testing.T) {
 				testVPC, testAttachment,
 			),
 			wantVPC:             testVPC,
-			wantIfType:          interfaceTypeVeth,
 			wantAddressFamilies: []string{addressFamilyIPv6},
 		},
 		{
@@ -437,7 +303,6 @@ func TestParseConf(t *testing.T) {
 				testVPC, testAttachment,
 			),
 			wantVPC:             testVPC,
-			wantIfType:          interfaceTypeVeth,
 			wantAddressFamilies: []string{addressFamilyIPv6, addressFamilyIPv4},
 		},
 		{
@@ -473,9 +338,6 @@ func TestParseConf(t *testing.T) {
 			}
 			if conf.VPC != tt.wantVPC {
 				t.Errorf("VPC = %q, want %q", conf.VPC, tt.wantVPC)
-			}
-			if conf.InterfaceType != tt.wantIfType {
-				t.Errorf("InterfaceType = %q, want %q", conf.InterfaceType, tt.wantIfType)
 			}
 			if tt.wantAddressFamilies != nil && !reflect.DeepEqual(conf.AddressFamilies, tt.wantAddressFamilies) {
 				t.Errorf("AddressFamilies = %v, want %v", conf.AddressFamilies, tt.wantAddressFamilies)
@@ -631,242 +493,12 @@ func TestValidatePrevResultAdd(t *testing.T) {
 	}
 }
 
-// ---- bgpVRFInstanceName --------------------------------------------------
-
-func TestBGPVRFInstanceName(t *testing.T) {
-	tests := []struct{ vpc, attachment, want string }{
-		{testVPC, testAttachment, testVPC + "-" + testAttachment},
-		{"0000000jU", "00G", "0000000jU-00G"},
-	}
-	for _, tt := range tests {
-		got := bgpVRFInstanceName(tt.vpc, tt.attachment)
-		if got != tt.want {
-			t.Errorf("bgpVRFInstanceName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
-		}
-	}
-}
-
-// ---- bgpAdvertisementName ------------------------------------------------
-
-func TestBGPAdvertisementName(t *testing.T) {
-	tests := []struct{ vpc, attachment, want string }{
-		{testVPC, testAttachment, testVPC + "-" + testAttachment},
-		{"0000000jU", "00G", "0000000jU-00G"},
-	}
-	for _, tt := range tests {
-		got := bgpAdvertisementName(tt.vpc, tt.attachment)
-		if got != tt.want {
-			t.Errorf("bgpAdvertisementName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
-		}
-	}
-}
-
-// ---- routeTarget ---------------------------------------------------------
-
-func TestRouteTarget(t *testing.T) {
-	tests := []struct {
-		name     string
-		asNumber int64
-		vpcHex   string
-		want     string
-		wantErr  bool
-	}{
-		{
-			name:     "VPC value fits in 32 bits",
-			asNumber: 65000,
-			vpcHex:   testVPCHex1234,
-			want:     "65000:1234",
-		},
-		{
-			name:     "upper bits beyond 32 stripped",
-			asNumber: 65000,
-			vpcHex:   "000100000001", // 0x000100000001; low32 = 1
-			want:     testRD65000_1,
-		},
-		{
-			name:     "low 32 bits all set",
-			asNumber: 65000,
-			vpcHex:   "0000ffffffff",
-			want:     "65000:4294967295",
-		},
-		{
-			name:     "different ASN",
-			asNumber: 4200000000,
-			vpcHex:   testVPCHex1234,
-			want:     "4200000000:1234",
-		},
-		{
-			name:    "invalid hex string",
-			vpcHex:  "zzzzzz",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := routeTarget(tt.asNumber, tt.vpcHex)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("routeTarget(%d, %q) = %q, want %q", tt.asNumber, tt.vpcHex, got, tt.want)
-			}
-		})
-	}
-}
-
-// ---- SetEnableLocalIPAM --------------------------------------------------
-
-func TestSetEnableLocalIPAM(t *testing.T) {
-	// Save and restore original state.
-	original := enableLocalIPAM
-	defer func() { enableLocalIPAM = original }()
-
-	// Default should be false.
-	if enableLocalIPAM {
-		t.Error("enableLocalIPAM default = true, want false")
-	}
-
-	// Setting to true should work.
-	SetEnableLocalIPAM(true)
-	if !enableLocalIPAM {
-		t.Error("enableLocalIPAM after SetEnableLocalIPAM(true) = false, want true")
-	}
-
-	// Setting back to false should work.
-	SetEnableLocalIPAM(false)
-	if enableLocalIPAM {
-		t.Error("enableLocalIPAM after SetEnableLocalIPAM(false) = true, want false")
-	}
-}
-
-// ---- lookupBGPRouter -----------------------------------------------------
-
-func TestLookupBGPRouter(t *testing.T) {
-	ctx := context.Background()
-	const (
-		nodeName  = "node1"
-		namespace = "default"
-	)
-
-	matchingRouter := routerForNode(testRouterName, nodeName, namespace, 65000)
-
-	tests := []struct {
-		name    string
-		objects []client.Object
-		wantErr string
-		check   func(t *testing.T, cfg bgpConfig)
-	}{
-		{
-			name:    "no router for node",
-			objects: nil,
-			wantErr: "no BGPRouter found",
-		},
-		{
-			name:    "single matching router returns correct config",
-			objects: []client.Object{matchingRouter},
-			check: func(t *testing.T, cfg bgpConfig) {
-				t.Helper()
-				if cfg.asNumber != 65000 {
-					t.Errorf("asNumber = %d, want 65000", cfg.asNumber)
-				}
-				if cfg.routerName != testRouterName {
-					t.Errorf("routerName = %q, want %q", cfg.routerName, testRouterName)
-				}
-				if cfg.srv6Locator != "" {
-					t.Errorf("srv6Locator = %q, want empty (not configured on fixture)", cfg.srv6Locator)
-				}
-				if cfg.nodeID != 0 {
-					t.Errorf("nodeID = %d, want 0 (not configured on fixture)", cfg.nodeID)
-				}
-			},
-		},
-		{
-			name: "router with SRv6Locator and NodeID configured",
-			objects: []client.Object{
-				func() *bgpv1alpha1.BGPRouter {
-					r := routerForNode("srv6-router", nodeName, namespace, 65000)
-					r.Spec.SRv6Locator = "fd00:10::/48"
-					r.Spec.NodeID = 7
-					return r
-				}(),
-			},
-			check: func(t *testing.T, cfg bgpConfig) {
-				t.Helper()
-				if cfg.srv6Locator != "fd00:10::/48" {
-					t.Errorf("srv6Locator = %q, want %q", cfg.srv6Locator, "fd00:10::/48")
-				}
-				if cfg.nodeID != 7 {
-					t.Errorf("nodeID = %d, want 7", cfg.nodeID)
-				}
-			},
-		},
-		{
-			name: "router in different namespace is ignored",
-			objects: []client.Object{
-				routerForNode("other-ns-router", nodeName, "other-ns", 65001),
-			},
-			wantErr: "no BGPRouter found",
-		},
-		{
-			name: "non-matching node router is ignored",
-			objects: []client.Object{
-				routerForNode("other-node-router", "node2", namespace, 65001),
-				matchingRouter,
-			},
-			check: func(t *testing.T, cfg bgpConfig) {
-				t.Helper()
-				if cfg.routerName != testRouterName {
-					t.Errorf("routerName = %q, want %q", cfg.routerName, testRouterName)
-				}
-			},
-		},
-		{
-			name: "ambiguous: two routers target same node",
-			objects: []client.Object{
-				routerForNode("router-a", nodeName, namespace, 65000),
-				routerForNode("router-b", nodeName, namespace, 65001),
-			},
-			wantErr: "ambiguous",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			k8s := fakeClient(tt.objects...)
-
-			cfg, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tt.check != nil {
-				tt.check(t, cfg)
-			}
-		})
-	}
-}
-
 // ---- buildResult ---------------------------------------------------------
 
 func TestBuildResult(t *testing.T) {
 	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
 	gateway := net.ParseIP("fd00:10:ff01::1")
-	route := mustParseCIDR(t, "::/0")
+	defaultRoute := mustParseCIDR(t, "::/0")
 	netns := "/proc/1234/ns/net"
 
 	conf := &PluginConf{
@@ -877,7 +509,7 @@ func TestBuildResult(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		ipRes      *ipamResult
+		ipRes      *cniipam.IPAMResult
 		wantInts   int
 		wantIPs    int
 		wantRoutes int
@@ -885,7 +517,7 @@ func TestBuildResult(t *testing.T) {
 	}{
 		{
 			name:       "with IPAM config",
-			ipRes:      &ipamResult{ipv6Subnet: subnet, ipv6Gateway: gateway, routes: []*net.IPNet{route}},
+			ipRes:      &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway, Routes: []*net.IPNet{defaultRoute}},
 			wantInts:   2,
 			wantIPs:    1,
 			wantRoutes: 1,
@@ -995,12 +627,12 @@ func TestBuildResultDualStack(t *testing.T) {
 		VPC:           testVPC,
 		VPCAttachment: testAttachment,
 	}
-	ipRes := &ipamResult{
-		ipv6Subnet:  ipv6Subnet,
-		ipv6Gateway: ipv6Gateway,
-		ipv4Address: ipv4Address,
-		ipv4Gateway: ipv4Gateway,
-		routes:      []*net.IPNet{ipv6Route, ipv4Route},
+	ipRes := &cniipam.IPAMResult{
+		IPv6Subnet:  ipv6Subnet,
+		IPv6Gateway: ipv6Gateway,
+		IPv4Address: ipv4Address,
+		IPv4Gateway: ipv4Gateway,
+		Routes:      []*net.IPNet{ipv6Route, ipv4Route},
 	}
 
 	result := buildResult(conf, ipRes, "G09-vpc03-vpcAttH", "eth0",
@@ -1046,10 +678,10 @@ func TestBuildResultIPv4Only(t *testing.T) {
 		VPC:           testVPC,
 		VPCAttachment: testAttachment,
 	}
-	ipRes := &ipamResult{
-		ipv4Address: ipv4Address,
-		ipv4Gateway: ipv4Gateway,
-		routes:      []*net.IPNet{ipv4Route},
+	ipRes := &cniipam.IPAMResult{
+		IPv4Address: ipv4Address,
+		IPv4Gateway: ipv4Gateway,
+		Routes:      []*net.IPNet{ipv4Route},
 	}
 
 	result := buildResult(conf, ipRes, "G09-vpc03-vpcAttH", "eth0",
@@ -1073,162 +705,6 @@ func TestBuildResultIPv4Only(t *testing.T) {
 	}
 }
 
-// ---- buildTapResult ------------------------------------------------------
-
-func TestBuildTapResult(t *testing.T) {
-	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
-	gateway := net.ParseIP("fd00:10:ff01::1")
-	route := mustParseCIDR(t, "::/0")
-
-	conf := &PluginConf{
-		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
-		VPC:           testVPC,
-		VPCAttachment: testAttachment,
-	}
-
-	tests := []struct {
-		name       string
-		ipRes      *ipamResult
-		wantIPs    int
-		wantRoutes int
-	}{
-		{
-			name:       "with IPAM config",
-			ipRes:      &ipamResult{ipv6Subnet: subnet, ipv6Gateway: gateway, routes: []*net.IPNet{route}},
-			wantIPs:    1,
-			wantRoutes: 1,
-		},
-		{
-			name:       "without IPAM config",
-			ipRes:      nil,
-			wantIPs:    0,
-			wantRoutes: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := buildTapResult(conf, tt.ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
-
-			if result.CNIVersion != testCNIVersion {
-				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, testCNIVersion)
-			}
-
-			if len(result.Interfaces) != 1 {
-				t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
-			}
-
-			if result.Interfaces[0].Name != "H0abc123" {
-				t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, "H0abc123")
-			}
-			if result.Interfaces[0].Mac != "aa:bb:cc:dd:ee:ff" {
-				t.Errorf("Interfaces[0].Mac = %q, want %q", result.Interfaces[0].Mac, "aa:bb:cc:dd:ee:ff")
-			}
-			if result.Interfaces[0].Mtu != 1500 {
-				t.Errorf("Interfaces[0].Mtu = %d, want 1500", result.Interfaces[0].Mtu)
-			}
-			if result.Interfaces[0].Sandbox != "" {
-				t.Errorf("Interfaces[0].Sandbox = %q, want empty", result.Interfaces[0].Sandbox)
-			}
-
-			if len(result.IPs) != tt.wantIPs {
-				t.Errorf("IPs count = %d, want %d", len(result.IPs), tt.wantIPs)
-			}
-			if tt.wantIPs > 0 {
-				if result.IPs[0].Address.String() != subnet.String() {
-					t.Errorf("IPs[0].Address = %q, want %q", result.IPs[0].Address, subnet)
-				}
-				if !result.IPs[0].Gateway.Equal(gateway) {
-					t.Errorf("IPs[0].Gateway = %v, want %v", result.IPs[0].Gateway, gateway)
-				}
-				if result.IPs[0].Interface == nil || *result.IPs[0].Interface != 0 {
-					t.Errorf("IPs[0].Interface = %v, want 0", result.IPs[0].Interface)
-				}
-			}
-
-			if len(result.Routes) != tt.wantRoutes {
-				t.Errorf("Routes count = %d, want %d", len(result.Routes), tt.wantRoutes)
-			}
-		})
-	}
-}
-
-// TestBuildTapResultIPv4Mask verifies that buildTapResult reports the IPv4
-// address with a /25 mask (matching the host gateway mask
-// ipv4GatewayAddrParams installs on the tap interface), not the /32 used for
-// veth.
-func TestBuildTapResultIPv4Mask(t *testing.T) {
-	ipv4Address := net.ParseIP("172.20.1.5")
-	ipv4Gateway := net.ParseIP("172.20.1.1")
-	ipv4Route := mustParseCIDR(t, "0.0.0.0/0")
-
-	conf := &PluginConf{
-		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
-		VPC:           testVPC,
-		VPCAttachment: testAttachment,
-	}
-	ipRes := &ipamResult{
-		ipv4Address: ipv4Address,
-		ipv4Gateway: ipv4Gateway,
-		routes:      []*net.IPNet{ipv4Route},
-	}
-
-	result := buildTapResult(conf, ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
-
-	if len(result.IPs) != 1 {
-		t.Fatalf("IPs count = %d, want 1", len(result.IPs))
-	}
-	wantIPv4Mask := net.CIDRMask(25, 32).String()
-	if result.IPs[0].Address.IP.String() != ipv4Address.String() || result.IPs[0].Address.Mask.String() != wantIPv4Mask {
-		t.Errorf("IPs[0].Address = %v, want %s/25", result.IPs[0].Address, ipv4Address)
-	}
-	if !result.IPs[0].Gateway.Equal(ipv4Gateway) {
-		t.Errorf("IPs[0].Gateway = %v, want %v", result.IPs[0].Gateway, ipv4Gateway)
-	}
-	if result.IPs[0].Interface == nil || *result.IPs[0].Interface != 0 {
-		t.Errorf("IPs[0].Interface = %v, want 0 (host tap)", result.IPs[0].Interface)
-	}
-}
-
-// TestBuildTapResultHostNetns verifies that the tap path produces a valid
-// CNI result when args.Netns is the host network namespace. Kraftlet/unikraft
-// workloads pass the host netns because they don't have a Linux network
-// namespace. The main.go entry point detects interface_type=tap and sets
-// CNI_NETNS_OVERRIDE to bypass the CNI library's same-netns rejection check.
-// The tap result must not reference a sandbox.
-func TestBuildTapResultHostNetns(t *testing.T) {
-	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
-	gateway := net.ParseIP("fd00:10:ff01::1")
-	route := mustParseCIDR(t, "::/0")
-
-	conf := &PluginConf{
-		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
-		VPC:           testVPC,
-		VPCAttachment: testAttachment,
-	}
-	ipRes := &ipamResult{ipv6Subnet: subnet, ipv6Gateway: gateway, routes: []*net.IPNet{route}}
-
-	result := buildTapResult(conf, ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
-
-	// Result should be structurally valid for kraftlet (host netns) workloads.
-	if result.CNIVersion != testCNIVersion {
-		t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, testCNIVersion)
-	}
-	if len(result.Interfaces) != 1 {
-		t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
-	}
-	// Host tap interface must not reference a sandbox (kraftlet has no netns).
-	if result.Interfaces[0].Sandbox != "" {
-		t.Errorf("Interfaces[0].Sandbox = %q, want empty (host netns, no sandbox)", result.Interfaces[0].Sandbox)
-	}
-	if len(result.IPs) != 1 {
-		t.Fatalf("IPs count = %d, want 1", len(result.IPs))
-	}
-	if len(result.Routes) != 1 {
-		t.Fatalf("Routes count = %d, want 1", len(result.Routes))
-	}
-}
-
 // ---- cmdDel idempotency --------------------------------------------------
 
 // TestCmdDelIdempotent returns nil even when the CNI config is invalid.
@@ -1248,14 +724,10 @@ func TestCmdDelIdempotent(t *testing.T) {
 // TestCmdDelIdempotentMissingResources returns nil even when the config is
 // valid but all resources are missing (k8s client creation fails in tests).
 func TestCmdDelIdempotentMissingResources(t *testing.T) {
-	// Save and restore the original enableLocalIPAM state.
-	original := enableLocalIPAM
-	defer func() { enableLocalIPAM = original }()
-
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
 			`"type":"galactic-cni","vpc":"%s",`+
-			`"vpcattachment":"%s","interface_type":"veth"}`,
+			`"vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
 	args := &skel.CmdArgs{
@@ -1292,7 +764,7 @@ func TestCmdDelFlushesGuestNetnsConfig(t *testing.T) {
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
 			`"type":"galactic-cni","vpc":"%s",`+
-			`"vpcattachment":"%s","interface_type":"veth"}`,
+			`"vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
 	args := &skel.CmdArgs{
@@ -1340,27 +812,6 @@ func TestCmdCheckInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestCmdCheckInvalidInterfaceType(t *testing.T) {
-	conf := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
-			`"vpcattachment":"%s","interface_type":"bogus"}`,
-		testVPC, testAttachment,
-	)
-	args := &skel.CmdArgs{
-		ContainerID: testContainerID,
-		StdinData:   []byte(conf),
-	}
-
-	err := cmdCheck(args)
-	if err == nil {
-		t.Fatalf("expected error for invalid interface_type, got nil")
-	}
-	if !strings.Contains(err.Error(), `invalid interface_type "bogus"`) {
-		t.Fatalf("error %q does not contain expected message", err.Error())
-	}
-}
-
 func TestCmdCheckValidConfigMissingResources(t *testing.T) {
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
@@ -1379,27 +830,6 @@ func TestCmdCheckValidConfigMissingResources(t *testing.T) {
 		t.Fatalf("expected CHECK failure for missing resources, got nil")
 	}
 	// Should report CHECK failed with VRF not found.
-	if !strings.Contains(err.Error(), "CHECK failed") {
-		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
-	}
-}
-
-func TestCmdCheckTapModeValidConfigMissingResources(t *testing.T) {
-	conf := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
-			`"vpcattachment":"%s","interface_type":"tap"}`,
-		testVPC, testAttachment,
-	)
-	args := &skel.CmdArgs{
-		ContainerID: testContainerID,
-		StdinData:   []byte(conf),
-	}
-
-	err := cmdCheck(args)
-	if err == nil {
-		t.Fatalf("expected CHECK failure for missing resources, got nil")
-	}
 	if !strings.Contains(err.Error(), "CHECK failed") {
 		t.Fatalf("error %q does not contain 'CHECK failed'", err.Error())
 	}
@@ -1498,7 +928,6 @@ func TestResourceTrackerCleanupPartialState(t *testing.T) {
 	tracker := &resourceTracker{
 		vpc:           testVPC,
 		vpcAttachment: testAttachment,
-		ifaceType:     interfaceTypeVeth,
 		namespace:     "default",
 	}
 	ctx := context.Background()
@@ -1509,7 +938,6 @@ func TestResourceTrackerFieldsSet(t *testing.T) {
 	tracker := &resourceTracker{
 		vpc:           testVPC,
 		vpcAttachment: testAttachment,
-		ifaceType:     interfaceTypeTap,
 		namespace:     "test-ns",
 	}
 
@@ -1518,9 +946,6 @@ func TestResourceTrackerFieldsSet(t *testing.T) {
 	}
 	if tracker.vpcAttachment != testAttachment {
 		t.Errorf("vpcAttachment = %q, want %q", tracker.vpcAttachment, testAttachment)
-	}
-	if tracker.ifaceType != interfaceTypeTap {
-		t.Errorf("ifaceType = %q, want %q", tracker.ifaceType, interfaceTypeTap)
 	}
 	if tracker.namespace != "test-ns" {
 		t.Errorf("namespace = %q, want %q", tracker.namespace, "test-ns")
@@ -1543,22 +968,6 @@ func TestCmdStatusInvalidConfig(t *testing.T) {
 
 	err := cmdStatus(args)
 	assertCNIError(t, err, 7, "invalid CNI config")
-}
-
-func TestCmdStatusInvalidInterfaceType(t *testing.T) {
-	conf := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
-			`"vpcattachment":"%s","interface_type":"bogus"}`,
-		testVPC, testAttachment,
-	)
-	args := &skel.CmdArgs{
-		ContainerID: testContainerID,
-		StdinData:   []byte(conf),
-	}
-
-	err := cmdStatus(args)
-	assertCNIError(t, err, 7, `invalid interface_type "bogus"`)
 }
 
 func TestCmdStatusValidConfigMissingResources(t *testing.T) {
@@ -1653,163 +1062,6 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 	assertCNIError(t, err, 50, "API server health check failed")
 }
 
-// ---- isTransientError ----------------------------------------------------
-
-func TestIsTransientError(t *testing.T) {
-	tests := []struct {
-		name      string
-		err       error
-		wantTrans bool
-	}{
-		{
-			name:      "nil error is not transient",
-			err:       nil,
-			wantTrans: false,
-		},
-		{
-			name:      "context deadline exceeded is transient",
-			err:       context.DeadlineExceeded,
-			wantTrans: true,
-		},
-		{
-			name:      "context canceled is transient",
-			err:       context.Canceled,
-			wantTrans: true,
-		},
-		{
-			name:      "wrapped context deadline exceeded is transient",
-			err:       fmt.Errorf("k8s: %w", context.DeadlineExceeded),
-			wantTrans: true,
-		},
-		{
-			name:      "wrapped context canceled is transient",
-			err:       fmt.Errorf("k8s: %w", context.Canceled),
-			wantTrans: true,
-		},
-		{
-			name:      "generic error is not transient",
-			err:       errors.New("some error"),
-			wantTrans: false,
-		},
-		{
-			name:      "validation error is not transient",
-			err:       apierrors.NewBadRequest("bad request"),
-			wantTrans: false,
-		},
-		{
-			name: "not found error is not transient",
-			err: apierrors.NewNotFound(
-				schema.GroupResource{Group: "network.datumapis.com", Resource: "bgpadvertisements"}, "test"),
-			wantTrans: false,
-		},
-		{
-			name: "503 service unavailable is transient",
-			err:  apierrors.NewServiceUnavailable("service unavailable"),
-			// apierrors.IsServiceUnavailable catches 503.
-			wantTrans: true,
-		},
-		{
-			name: "429 too many requests is transient",
-			err:  apierrors.NewTooManyRequests("too many requests", 0),
-			// apierrors.IsTooManyRequests catches 429.
-			wantTrans: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isTransientError(tt.err)
-			if got != tt.wantTrans {
-				t.Errorf("isTransientError(%v) = %v, want %v", tt.err, got, tt.wantTrans)
-			}
-		})
-	}
-}
-
-// ---- retryK8sOps ---------------------------------------------------------
-
-func TestRetryK8sOpsSucceedsImmediately(t *testing.T) {
-	calls := 0
-	err := retryK8sOps(100*time.Millisecond, func(ctx context.Context) error {
-		calls++
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if calls != 1 {
-		t.Errorf("expected 1 call, got %d", calls)
-	}
-}
-
-func TestRetryK8sOpsRetriesOnTransientError(t *testing.T) {
-	calls := 0
-	err := retryK8sOps(2*time.Second, func(ctx context.Context) error {
-		calls++
-		if calls < 3 {
-			return context.DeadlineExceeded
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if calls != 3 {
-		t.Errorf("expected 3 calls (initial + 2 retries), got %d", calls)
-	}
-}
-
-func TestRetryK8sOpsFailsAfterMaxRetries(t *testing.T) {
-	calls := 0
-	err := retryK8sOps(2*time.Second, func(ctx context.Context) error {
-		calls++
-		return context.DeadlineExceeded
-	})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if calls != maxRetries+1 {
-		t.Errorf("expected %d calls (initial + maxRetries), got %d", maxRetries+1, calls)
-	}
-}
-
-func TestRetryK8sOpsNoRetryOnNonTransientError(t *testing.T) {
-	calls := 0
-	permanentErr := errors.New("validation failed")
-	err := retryK8sOps(2*time.Second, func(ctx context.Context) error {
-		calls++
-		return permanentErr
-	})
-	if !errors.Is(err, permanentErr) {
-		t.Fatalf("expected %v, got %v", permanentErr, err)
-	}
-	if calls != 1 {
-		t.Errorf("expected 1 call (no retry), got %d", calls)
-	}
-}
-
-func TestRetryK8sOpsExhaustsDeadline(t *testing.T) {
-	// When the timeout is very short, retries still happen but the fn
-	// completes instantly — so we exhaust maxRetries and get the last
-	// transient error back (not a context timeout, since fn is fast).
-	calls := 0
-	err := retryK8sOps(1*time.Millisecond, func(ctx context.Context) error {
-		calls++
-		return apierrors.NewServiceUnavailable("unavailable")
-	})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	// Should have made maxRetries+1 attempts (initial + 2 retries).
-	if calls != maxRetries+1 {
-		t.Errorf("expected %d calls, got %d", maxRetries+1, calls)
-	}
-	// Final error is the last transient error returned by fn.
-	if !strings.Contains(err.Error(), "unavailable") {
-		t.Errorf("expected 'unavailable' in error, got %v", err)
-	}
-}
-
 // ---- probeAPIServer ------------------------------------------------------
 
 func TestProbeAPIServerErrNotInCluster(t *testing.T) {
@@ -1851,7 +1103,6 @@ func TestCmdAddPrevResultValid(t *testing.T) {
 	t.Setenv("GALACTIC_CNI_NODE_NAME", "")
 	t.Setenv("NODE_NAME", "")
 	// prevResult that is a valid CNI result. cmdAdd should pass prevResult
-
 	// validation and fail later due to missing node name.
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
@@ -1966,45 +1217,6 @@ func TestEnableLocalIPAMRequired(t *testing.T) {
 	}
 	if conf.IPAM == nil {
 		t.Fatal("expected IPAM block to be non-nil")
-	}
-}
-
-// ---- annotation key length -------------------------------------------------
-
-// TestAnnotationKeyNameLength verifies that every annotation key builder stays
-// within Kubernetes' 63-byte limit on the "name" part of an annotation key
-// (the segment after the last "/"), using a realistic 64-character container
-// ID (containerd/Docker use full SHA256 hex digests). This guards against a
-// real production incident: annotationContainerIDLen was sized for the old
-// "allocated-subnet." prefix (17 bytes) and wasn't updated when the prefix
-// grew by 5 bytes to "allocated-subnet-ipv6."/"-ipv4." — every BGPAdvertisement
-// apply failed with "name part must be no more than 63 bytes" until fixed.
-func TestAnnotationKeyNameLength(t *testing.T) {
-	const maxAnnotationNameLen = 63
-	// A realistic full-length container ID (64 hex chars, as containerd/Docker use).
-	fullContainerID := strings.Repeat("a", 64)
-
-	tests := []struct {
-		name string
-		key  string
-	}{
-		{"subnetAnnotationKeyIPv6", subnetAnnotationKeyIPv6(fullContainerID)},
-		{"subnetAnnotationKeyIPv4", subnetAnnotationKeyIPv4(fullContainerID)},
-		{"netnsAnnotationKey", netnsAnnotationKey(fullContainerID)},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			slash := strings.LastIndex(tt.key, "/")
-			namePart := tt.key
-			if slash != -1 {
-				namePart = tt.key[slash+1:]
-			}
-			if len(namePart) > maxAnnotationNameLen {
-				t.Errorf("%s(%d-char containerID) name part %q is %d bytes, want <= %d",
-					tt.name, len(fullContainerID), namePart, len(namePart), maxAnnotationNameLen)
-			}
-		})
 	}
 }
 

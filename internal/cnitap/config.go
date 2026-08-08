@@ -1,8 +1,8 @@
-// Copyright 2025 Datum Cloud, Inc.
+// Copyright 2026 Datum Cloud, Inc.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package cni
+package cnitap
 
 import (
 	"encoding/json"
@@ -25,7 +25,7 @@ import (
 var ConfFile = config.DefaultConfFile
 
 // cniConfig is the shared config resolver for env var resolution.
-// Initialized by InitCNIConfig() (called from cmd/galactic-cni/main.go).
+// Initialized by InitCNIConfig() (called from cmd/galactic-tap-cni/main.go).
 var cniConfig *config.CNIConfig
 
 // InitCNIConfig initializes the shared config resolver for CNI env var
@@ -37,41 +37,25 @@ func InitCNIConfig() {
 
 const sanitizeForErrorBinary = "<binary>"
 
-// errInvalidCNIConfig is the message for CNI config parse errors (code 7).
 const errInvalidCNIConfig = "invalid CNI config"
 
-// errVPCRequired and errVPCAttachmentRequired are messages for missing
-// identifier fields (code 7).
 const (
 	errVPCRequired           = "vpc is required and must be a non-empty base62 string"
 	errVPCAttachmentRequired = "vpcattachment is required and must be a non-empty base62 string"
 )
 
 const (
-	// maxIPv6SubnetPrefixLen is the maximum (longest) prefix length allowed
-	// for ipv6_subnet. It matches ipam.PoolAllocator's constraint that the
-	// pool prefix must be no longer than the per-allocation subnet length;
-	// dual-stack tenant addressing allocates /96 endpoints from this subnet,
-	// so the subnet itself must be a /96 or shorter.
 	maxIPv6SubnetPrefixLen = 96
-
-	// maxIPv4SubnetPrefixLen is the maximum (longest) prefix length allowed
-	// for ipv4_subnet: a full IPv4 host route.
 	maxIPv4SubnetPrefixLen = 32
 )
 
-// addressFamilyIPv6 and addressFamilyIPv4 are the only valid entries for
-// the address_families config field.
 const (
 	addressFamilyIPv6 = "ipv6"
 	addressFamilyIPv4 = "ipv4"
 )
 
 // isValidBase62 reports whether s contains only valid base62 characters
-// ([0-9a-zA-Z]) and is non-empty. VPC and VPCAttachment identifiers are
-// base62-encoded and used throughout the ADD path (interface naming,
-// BGP CRD population). Rejecting them early in parseConf prevents cryptic
-// errors deep in the stack after partial kernel state has been created.
+// ([0-9a-zA-Z]) and is non-empty.
 func isValidBase62(s string) bool {
 	if len(s) == 0 {
 		return false
@@ -104,10 +88,9 @@ func loadHostConf(filePath string) (*HostConf, error) {
 	return conf, nil
 }
 
-// unwrapPathError returns the innermost *os.PathError-shaped error wrapped
-// by err, if any, so os.IsNotExist (which does not itself traverse %w
-// wrapping) can still recognize a missing conflist file wrapped by
-// hostconf.Load's fmt.Errorf("read conflist file %q: %w", ...).
+// unwrapPathError returns the innermost error wrapped by err, so
+// os.IsNotExist (which does not itself traverse %w wrapping) can still
+// recognize a missing conflist file wrapped by hostconf.Load.
 func unwrapPathError(err error) error {
 	for {
 		unwrapped := errors.Unwrap(err)
@@ -154,7 +137,6 @@ func setupLogging(logPath, logLevel string) {
 		slog.Warn("Invalid log level, falling back to default",
 			"value", logLevel, "default", config.DefaultLogLevel, "err", err)
 	}
-	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
 		slog.Warn("Failed to create log directory", "path", filepath.Dir(logPath), "err", err)
 		return
@@ -164,25 +146,16 @@ func setupLogging(logPath, logLevel string) {
 		slog.Warn("Failed to open log file, falling back to Stderr", "path", logPath, "err", err)
 		return
 	}
-	// Use JSON handler for structured logging to file.
 	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: level})
 	slog.SetDefault(slog.New(handler))
 }
 
 // statusConf holds the minimal CNI config fields needed for STATUS validation.
-//
-// STATUS only checks that the config is parseable and the API server is
-// reachable; it does not validate attachment-specific fields (VPC,
-// VPCAttachment) because STATUS must succeed before any ADD has ever run.
 type statusConf struct {
 	CNIVersion string `json:"cniVersion"`
 	Type       string `json:"type"`
 }
 
-// parseStatusConf validates that the CNI config is parseable and contains the
-// required top-level fields (cniVersion, type). Unlike parseConf, it does not
-// validate VPC or VPCAttachment because STATUS must succeed on a freshly
-// started node before any ADD has run.
 func parseStatusConf(data []byte) error {
 	var sc statusConf
 	if err := json.Unmarshal(data, &sc); err != nil {
@@ -197,16 +170,10 @@ func parseStatusConf(data []byte) error {
 	return nil
 }
 
-// validatePrevResult checks that the prevResult (from a preceding plugin in
-// the CNI chain) is a valid, parseable CNI result. Returns an error if the
-// result is non-nil but cannot be parsed as a versioned CNI result, ensuring
-// galactic-cni fails fast rather than silently operating on garbage state.
 func validatePrevResult(res types.Result) error {
 	if res == nil {
 		return nil
 	}
-	// Marshal to JSON and re-parse to verify the result is structurally valid.
-	// This catches malformed results that survived CNI framework unmarshaling.
 	jsonBytes, err := json.Marshal(res)
 	if err != nil {
 		return fmt.Errorf("marshal prevResult: %w", err)
@@ -217,11 +184,6 @@ func validatePrevResult(res types.Result) error {
 	return nil
 }
 
-// validatePrevResultAdd performs content-level validation of prevResult during
-// the ADD operation. It ensures the preceding plugin produced a result with at
-// least one interface or IP assignment, which is the minimum expected structure
-// for any meaningful CNI chain. Returns nil when prevResult is nil (no
-// preceding plugin) or structurally valid with expected content.
 func validatePrevResultAdd(res types.Result) error {
 	if res == nil {
 		return nil
@@ -238,7 +200,6 @@ func validatePrevResultAdd(res types.Result) error {
 	if err != nil {
 		return fmt.Errorf("get prevResult version: %w", err)
 	}
-	// A valid prevResult must declare at least one interface or IP assignment.
 	if len(versioned.Interfaces) == 0 && len(versioned.IPs) == 0 {
 		return errors.New("prevResult declares no interfaces or IP assignments")
 	}
@@ -272,13 +233,11 @@ func parseConf(data []byte) (*PluginConf, error) {
 		}
 	}
 
-	// Load host CNI config
 	hostConf, err := loadHostConf(ConfFile)
 	if err != nil {
 		return nil, fmt.Errorf("load host CNI config: %w", err)
 	}
 
-	// Resolve config: env var > conflist > default.
 	cniConfig.Resolve(&config.ConflistValues{
 		NodeName:   hostConf.NodeName,
 		Kubeconfig: hostConf.Kubeconfig,
@@ -287,10 +246,6 @@ func parseConf(data []byte) (*PluginConf, error) {
 		LogLevel:   hostConf.LogLevel,
 	})
 
-	// NodeName fallback: auto-detect from the Kubernetes API by matching local
-	// interface addresses against node InternalIPs. This handles cases where
-	// the conflist file is missing (e.g. hostPath mount issues in container-
-	// based environments like Kind).
 	if cniConfig.NodeName == "" {
 		detected, detectErr := hostconf.DetectNodeNameFromAPI()
 		if detectErr != nil {
@@ -302,40 +257,23 @@ func parseConf(data []byte) (*PluginConf, error) {
 		return nil, &types.Error{Code: 4, Msg: "node name is required (or set GALACTIC_CNI_NODE_NAME)"}
 	}
 	_ = os.Setenv("NODE_NAME", cniConfig.NodeName)
-
-	// Propagate Kubeconfig
 	_ = os.Setenv("KUBECONFIG", cniConfig.Kubeconfig)
 
-	// Resolve and propagate Namespace fallback
 	namespace := conf.Namespace
 	if namespace == "" {
 		namespace = cniConfig.Namespace
 	}
 	conf.Namespace = namespace
 
-	// Setup Logging
 	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
 	slog.Debug("CNI config received", "stdin", string(data))
 
-	// Resolve local IPAM flag and propagate it to internal/cniipam, which
-	// owns wantsIPAM/allocateIPAM. (This env-var-as-trigger shape is
-	// slated to be replaced by an explicit ipam-block-presence contract
-	// once internal/cniipam becomes its own delegated plugin.)
 	localIPAM := config.CNIGetEnableLocalIPAM()
 	cniipam.SetEnableLocalIPAM(localIPAM)
-
-	// Enforce required IPAM block if local IPAM is enabled
 	if localIPAM && conf.IPAM == nil {
 		return nil, &types.Error{Code: 7, Msg: "local IPAM is enabled, but no 'ipam' block is present in the configuration"}
 	}
 
-	// Validate dual-stack addressing fields (ipv6_subnet, ipv4_subnet,
-	// address_families). Both subnet fields stay optional at the parseConf
-	// level: whether one is actually required depends on which IPAM path a
-	// given ADD takes (static, local-IPAM fallback, or pool), which is
-	// resolved in internal/cniipam.Allocate — see WantsIPAM/Allocate there.
-	// When present, both are validated for CIDR shape so misconfigurations
-	// are caught early regardless of which path runs.
 	if conf.IPv6Subnet != "" {
 		ip, mask, err := net.ParseCIDR(conf.IPv6Subnet)
 		if err != nil {
@@ -397,8 +335,6 @@ func parseConf(data []byte) (*PluginConf, error) {
 	return conf, nil
 }
 
-// sanitizeForError returns s unchanged if it contains only printable ASCII
-// characters; otherwise returns "<binary>" to avoid corrupting log output.
 func sanitizeForError(s string) string {
 	for _, c := range s {
 		if c < 0x20 || c > 0x7e {

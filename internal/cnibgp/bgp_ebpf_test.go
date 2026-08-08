@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package cni
+package cnibgp
 
 import (
 	"fmt"
@@ -15,6 +15,16 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
+// requireRoot skips the test unless running as root — pinned eBPF maps and
+// real VRF/netlink state need CAP_NET_ADMIN/CAP_BPF and a real kernel. See
+// internal/cni's own requireRoot for the project-wide pattern.
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("requires root (CAP_NET_ADMIN/CAP_BPF); run under scripts/ci.sh unittest-root")
+	}
+}
+
 // TestRegisterEBPFDatapath_NotConfiguredIsNoOp covers the short-circuit for
 // a node whose BGPRouter has no SRv6Locator/NodeID configured at all: SRv6
 // is intentionally not set up for this attachment, so registerEBPFDatapath
@@ -22,7 +32,7 @@ import (
 func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "", nodeID: 0}
 	registered, _, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, interfaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
+		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
 	if err != nil {
 		t.Errorf("registerEBPFDatapath with unconfigured BGPRouter = %v, want nil (no-op)", err)
 	}
@@ -35,18 +45,11 @@ func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 // bounds check on the raw nodeID *before* it narrows to uint16 for
 // registration: an out-of-[uformat.NodeIDMin,NodeIDMax] value (here, one
 // that wraps to an in-range-looking uint16 if narrowed unchecked -- 0x10001
-// wraps to 1, which alone would otherwise pass uformat.ValidateNodeID inside
-// registry.Locator.Register) must be rejected here, before any pinned map
-// is even opened -- proven the same way
-// TestRegisterEBPFDatapath_NotConfiguredIsNoOp proves its own no-op, via a
-// pinDir that doesn't exist: if this check ran after the narrowing (or not
-// at all), the call would instead fail later with an "open pinned eBPF uSID
-// maps" error against that bogus path, not the bounds-check error this test
-// asserts.
+// wraps to 1) must be rejected here, before any pinned map is even opened.
 func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "2001:db8:1::/48", nodeID: 0x10001} // wraps to uint16(1) if narrowed unchecked
 	registered, _, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, interfaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
+		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
 	if err == nil {
 		t.Fatal("registerEBPFDatapath with nodeID=0x10001 = nil error, want an out-of-range rejection")
 	}
@@ -58,11 +61,11 @@ func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 	}
 }
 
-// TestRegisterEBPFDatapath_RegistersAllThreeTables is Milestone 7.1's exit
-// criterion: a single registerEBPFDatapath call populates locator_table,
-// function_table, and vrf_table consistently for the same (vpc,
-// vpcAttachment), against real pinned eBPF maps under a throwaway pin
-// directory -- not the production attach.PinDir.
+// TestRegisterEBPFDatapath_RegistersAllThreeTables: a single
+// registerEBPFDatapath call populates locator_table, function_table, and
+// vrf_table consistently for the same (vpc, vpcAttachment), against real
+// pinned eBPF maps under a throwaway pin directory — not the production
+// attach.PinDir.
 func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	requireRoot(t)
 
@@ -88,7 +91,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
-	registered, _, err := registerEBPFDatapath(cfg, vpc, vpcAttachment, interfaceTypeVeth, uint16(vrfID), pinDir)
+	registered, _, err := registerEBPFDatapath(cfg, vpc, vpcAttachment, ifaceTypeVeth, uint16(vrfID), pinDir)
 	if err != nil {
 		t.Fatalf("registerEBPFDatapath: %v", err)
 	}
@@ -119,8 +122,8 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 			entries[0].VRFTableID, vrfTableID)
 	}
 	if entries[0].EgressKind != usidmap.EgressKindVeth {
-		t.Errorf("vrf_table entry EgressKind = %d, want %d (EgressKindVeth, from InterfaceType %q)",
-			entries[0].EgressKind, usidmap.EgressKindVeth, interfaceTypeVeth)
+		t.Errorf("vrf_table entry EgressKind = %d, want %d (EgressKindVeth, from interfaceType %q)",
+			entries[0].EgressKind, usidmap.EgressKindVeth, ifaceTypeVeth)
 	}
 
 	locEntries, err := reg.Locator.List()
@@ -140,24 +143,10 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	}
 }
 
-// TestResourceTrackerCleanup_UnregistersEBPFVRFEntry is Milestone 7.2's
-// exit criterion: a failed ADD's rollback (resourceTracker.cleanup) cleans
-// up both the kernel route (existing behavior, already covered by
-// TestResourceTrackerCleanupPartialState) and the new eBPF vrf_table map
-// entry, when one was actually registered. cleanup's own unregister step
-// always targets the real, production attach.PinDir (it is not
-// parameterized, unlike registerEBPFDatapath -- see resource.go), so this
-// test loads/pins the real datapath there for the duration of the test,
-// cleaning it up fully afterward; this mirrors the same "real global
-// state" pattern this file's other resourceTracker tests already use for
-// vrf.Delete/veth.Delete.
-//
-// cleanup's unregister step now recomputes this attachment's own VRF table
-// id (vrf.TableID) and only deletes the vrf_table entry if it still
-// resolves there, so a real VRF interface for (testVPC, testAttachment)
-// must exist for the duration of this test -- unlike before this fix,
-// where the seeded entry's VRFTableID was an arbitrary, unrelated value.
-func TestResourceTrackerCleanup_UnregistersEBPFVRFEntry(t *testing.T) {
+// TestUnregisterEBPFDatapath_RemovesOwnEntry covers UnregisterEBPFDatapath's
+// normal path: an entry this attachment registered gets removed when its
+// VRFTableID still matches.
+func TestUnregisterEBPFDatapath_RemovesOwnEntry(t *testing.T) {
 	requireRoot(t)
 
 	if err := vrf.Add(testVPC, testAttachment); err != nil {
@@ -169,16 +158,17 @@ func TestResourceTrackerCleanup_UnregistersEBPFVRFEntry(t *testing.T) {
 		t.Fatalf("vrf.TableID: %v", err)
 	}
 
-	loaderObjs, err := attach.Load(attach.PinDir)
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	loaderObjs, err := attach.Load(pinDir)
 	if err != nil {
-		t.Fatalf("attach.Load(attach.PinDir): %v", err)
+		t.Fatalf("attach.Load: %v", err)
 	}
 	t.Cleanup(func() { _ = loaderObjs.Close() })
-	t.Cleanup(func() { _ = os.RemoveAll(attach.PinDir) })
 
-	reg, closer, err := usidmap.OpenPinnedRegistry(attach.PinDir)
+	reg, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
-		t.Fatalf("OpenPinnedRegistry(attach.PinDir): %v", err)
+		t.Fatalf("OpenPinnedRegistry: %v", err)
 	}
 	defer func() { _ = closer.Close() }()
 
@@ -188,62 +178,46 @@ func TestResourceTrackerCleanup_UnregistersEBPFVRFEntry(t *testing.T) {
 	if err := reg.VRF.Register(testBlock, testArgument, vrfTableID, usidmap.EgressKindVeth); err != nil {
 		t.Fatalf("seed vrf_table entry: %v", err)
 	}
-	if _, ok, err := reg.VRF.Get(testBlock, testArgument); err != nil || !ok {
-		t.Fatalf("seeded entry not visible before cleanup: ok=%v err=%v", ok, err)
-	}
 
-	tracker := &resourceTracker{
-		vpc:            testVPC,
-		vpcAttachment:  testAttachment,
-		namespace:      "ebpf-cleanup-test",
-		ebpfRegistered: true,
-		ebpfBlock:      testBlock,
-		ebpfArgument:   testArgument,
+	if err := UnregisterEBPFDatapath(testBlock, testArgument, vrfTableID, pinDir); err != nil {
+		t.Fatalf("UnregisterEBPFDatapath: %v", err)
 	}
-	tracker.cleanup(t.Context())
 
 	if _, ok, err := reg.VRF.Get(testBlock, testArgument); err != nil || ok {
-		t.Errorf("vrf_table entry after cleanup: ok=%v err=%v, want ok=false (unregistered)", ok, err)
+		t.Errorf("vrf_table entry after unregister: ok=%v err=%v, want ok=false", ok, err)
 	}
 }
 
-// TestResourceTrackerCleanup_LeavesEBPFVRFEntryOwnedByAnotherAttachment
-// covers the race this fix closes: retryK8sOps can re-run
-// publishBGPStateK8s's whole closure on a later attempt without
-// re-registering the eBPF entry (registerEBPFDatapath only runs again if
-// that attempt gets that far), so by the time a later attempt's
-// checkArgumentCollision failure triggers this rollback, the (block,
+// TestUnregisterEBPFDatapath_LeavesEntryOwnedByAnotherAttachment covers the
+// race UnregisterEBPFDatapath guards against: retryK8sOps can re-run
+// PublishBGPStateK8s's whole closure on a later attempt without
+// re-registering the eBPF entry, so by the time a later attempt's
+// checkArgumentCollision failure triggers a caller's rollback, the (block,
 // argument) slot this attachment originally wrote may have since been
 // overwritten by the very other attachment the collision was detected
-// against -- unregistering unconditionally would delete a live
-// attachment's forwarding entry instead of this rolled-back one's own. If
-// the current entry's VRFTableID no longer matches this attachment's own
-// (recomputed fresh, not read from the tracker), cleanup must leave it in
-// place.
-func TestResourceTrackerCleanup_LeavesEBPFVRFEntryOwnedByAnotherAttachment(t *testing.T) {
+// against. Unregistering unconditionally would delete a live attachment's
+// forwarding entry instead of this rolled-back one's own.
+func TestUnregisterEBPFDatapath_LeavesEntryOwnedByAnotherAttachment(t *testing.T) {
 	requireRoot(t)
 
-	if err := vrf.Add(testVPC, testAttachment); err != nil {
-		t.Fatalf("vrf.Add: %v", err)
-	}
-	t.Cleanup(func() { _ = vrf.Delete(testVPC, testAttachment) })
-
-	loaderObjs, err := attach.Load(attach.PinDir)
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	loaderObjs, err := attach.Load(pinDir)
 	if err != nil {
-		t.Fatalf("attach.Load(attach.PinDir): %v", err)
+		t.Fatalf("attach.Load: %v", err)
 	}
 	t.Cleanup(func() { _ = loaderObjs.Close() })
-	t.Cleanup(func() { _ = os.RemoveAll(attach.PinDir) })
 
-	reg, closer, err := usidmap.OpenPinnedRegistry(attach.PinDir)
+	reg, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
-		t.Fatalf("OpenPinnedRegistry(attach.PinDir): %v", err)
+		t.Fatalf("OpenPinnedRegistry: %v", err)
 	}
 	defer func() { _ = closer.Close() }()
 
 	const testBlock uint64 = 0x0102030405
 	const testArgument uint16 = 0x042
 	const anotherAttachmentsVRFTableID uint32 = 0x9999
+	const thisAttachmentsVRFTableID uint32 = 0x1111
 
 	// Simulate the colliding attachment having since overwritten this same
 	// (block, argument) slot with its own, different VRF table id.
@@ -251,23 +225,17 @@ func TestResourceTrackerCleanup_LeavesEBPFVRFEntryOwnedByAnotherAttachment(t *te
 		t.Fatalf("seed vrf_table entry: %v", err)
 	}
 
-	tracker := &resourceTracker{
-		vpc:            testVPC,
-		vpcAttachment:  testAttachment,
-		namespace:      "ebpf-cleanup-test",
-		ebpfRegistered: true,
-		ebpfBlock:      testBlock,
-		ebpfArgument:   testArgument,
+	if err := UnregisterEBPFDatapath(testBlock, testArgument, thisAttachmentsVRFTableID, pinDir); err != nil {
+		t.Fatalf("UnregisterEBPFDatapath: %v", err)
 	}
-	tracker.cleanup(t.Context())
 
 	entry, ok, err := reg.VRF.Get(testBlock, testArgument)
 	if err != nil || !ok {
-		t.Fatalf("vrf_table entry after cleanup: ok=%v err=%v, want ok=true (must survive, it's not this attachment's)",
+		t.Fatalf("vrf_table entry after unregister: ok=%v err=%v, want ok=true (must survive, it's not this attachment's)",
 			ok, err)
 	}
 	if entry.VRFTableID != anotherAttachmentsVRFTableID {
-		t.Errorf("vrf_table entry VRFTableID after cleanup = %#x, want unchanged %#x",
+		t.Errorf("vrf_table entry VRFTableID after unregister = %#x, want unchanged %#x",
 			entry.VRFTableID, anotherAttachmentsVRFTableID)
 	}
 }

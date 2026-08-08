@@ -48,6 +48,20 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-cni cmd/galactic-cni/main.go
 
+# Build galactic-tap-cni, the tap master plugin in the galactic CNI chain
+# (VM workloads: Kata, Firecracker, kraftlet/Unikraft). Ships in this same
+# image/binary set since every plugin in the chain is staged onto the host
+# by the same galactic-cni init container (installer.Bootstrap).
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -ldflags "-s -w \
+      -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
+      -X go.datum.net/galactic/internal/metadata.GitCommit=${GIT_COMMIT} \
+      -X go.datum.net/galactic/internal/metadata.GitTreeState=${GIT_TREE_STATE} \
+      -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
+      -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
+      -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
+    -o galactic-tap-cni cmd/galactic-tap-cni/main.go
+
 # Build vmtap-cni. It ships in this image rather than one of its own so the
 # vmtap DaemonSet (config/vmtap/) can reference the same published
 # ghcr.io/datum-cloud/galactic-cni image instead of a second, separately
@@ -82,6 +96,7 @@ FROM gcr.io/distroless/static:nonroot AS production
 
 # Copy binaries from builder into the distroless production image
 COPY --from=builder /workspace/galactic-cni /galactic-cni
+COPY --from=builder /workspace/galactic-tap-cni /galactic-tap-cni
 COPY --from=builder /workspace/vmtap-cni /vmtap-cni
 COPY --from=builder /workspace/host-device /host-device
 COPY --from=builder /var/run/galactic-cni /var/run/galactic-cni
@@ -94,6 +109,7 @@ FROM docker.io/library/alpine:latest
 
 # Copy binaries from the production (distroless) image
 COPY --from=production /galactic-cni /galactic-cni
+COPY --from=production /galactic-tap-cni /galactic-tap-cni
 COPY --from=production /vmtap-cni /vmtap-cni
 COPY --from=production /host-device /host-device
 COPY --from=production /var/run/galactic-cni /var/run/galactic-cni
