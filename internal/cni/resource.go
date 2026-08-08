@@ -51,12 +51,12 @@ func newK8sClient() (client.Client, error) {
 // rollback. galactic-cni is veth-only, and its ADD only ever creates the
 // VRF and the veth pair — BGP/SRv6/eBPF publish is galactic-bgp's own,
 // separately chain-invoked plugin now, with its own smaller tracker
-// (internal/cnibgp), so this one no longer needs to know anything about
-// that state at all.
+// (internal/cnibgp); termination routes are galactic-route's own, with its
+// own smaller tracker (internal/cniroute); so this one no longer needs to
+// know anything about either.
 type resourceTracker struct {
 	vpc, vpcAttachment string
 	vrfCreated         bool
-	routesCreated      int
 }
 
 // cleanup rolls back all tracked resources in reverse creation order.
