@@ -242,7 +242,7 @@ func TestCNITapInterface(t *testing.T) {
   "vpcattachment": "1",
   "ipam": {
     "type": "galactic-ipam",
-    "ipv6_subnet": "fd00:e2e:tap::/48"
+    "ipv6_subnet": "fd00:e2e::/48"
   }
 }`
 	// Step 1: write the CNI config and a wrapper script into the pod.
