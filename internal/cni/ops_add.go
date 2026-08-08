@@ -15,7 +15,6 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/nadpatch"
-	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -114,16 +113,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		return fmt.Errorf("annotate NAD: %w", err)
 	}
 
-	dev := hostName
-	for _, termination := range pluginConf.Terminations {
-		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
-			return fmt.Errorf("add route %s: %w", termination.Network, err)
-		}
-		tracker.routesCreated++
-	}
-	if tracker.routesCreated > 0 {
-		slog.Debug("ADD: termination routes installed", "count", tracker.routesCreated, "dev", dev)
-	}
+	// Termination routes are galactic-route's job now — chained next after
+	// this plugin, when the attachment has any (see internal/cniroute).
 
 	guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
 	return buildVethResult(args, pluginConf, hostName, guestName, hostMac, hostMTU)

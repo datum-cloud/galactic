@@ -49,11 +49,11 @@ func newK8sClient() (client.Client, error) {
 // rollback. galactic-tap-cni's ADD only ever creates the VRF, the tap
 // device, and (if delegated) an IPAM allocation — BGP/SRv6/eBPF publish is
 // galactic-bgp's own, separately chain-invoked plugin now, with its own
-// smaller tracker (internal/cnibgp).
+// smaller tracker (internal/cnibgp); termination routes are galactic-
+// route's own, with its own smaller tracker (internal/cniroute).
 type resourceTracker struct {
 	vpc, vpcAttachment string
 	vrfCreated         bool
-	routesCreated      int
 
 	// ipamDelegated, ipamType, and ipamStdin record enough to release the
 	// IPAM allocation during rollback — see internal/cni's own
