@@ -12,12 +12,14 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/vishvananda/netlink"
+
+	"go.datum.net/galactic/internal/cniipam"
 )
 
 // buildResult constructs the CNI result, including IPAM data if configured.
 func buildResult(
 	pluginConf *PluginConf,
-	ipRes *ipamResult,
+	ipRes *cniipam.IPAMResult,
 	hostName, guestName string,
 	hostMac, guestMac string,
 	hostMTU, guestMTU int,
@@ -46,32 +48,28 @@ func buildResult(
 
 // appendIPConfigs adds one IPConfig per allocated address family in ipRes
 // (IPv6, and IPv4 when present) plus any default routes, all pointing at the
-// given Interfaces index. ipv4Mask sets the prefix length reported for the
-// IPv4 address — /32 for veth, /25 for tap (matching the host gateway mask
-// installed by ipv4GatewayAddrParams, so downstream consumers such as
-// kraftlet configure the guest with the same real subnet the host side
-// advertises). No-op when ipRes is nil.
-func appendIPConfigs(result *type100.Result, ipRes *ipamResult, ifaceIndex int, ipv4Mask net.IPMask) {
+// given Interfaces index. No-op when ipRes is nil.
+func appendIPConfigs(result *type100.Result, ipRes *cniipam.IPAMResult, ifaceIndex int, ipv4Mask net.IPMask) {
 	if ipRes == nil {
 		return
 	}
-	if ipRes.ipv6Subnet != nil {
+	if ipRes.IPv6Subnet != nil {
 		result.IPs = append(result.IPs, &type100.IPConfig{
-			Address:   *ipRes.ipv6Subnet,
-			Gateway:   ipRes.ipv6Gateway,
+			Address:   *ipRes.IPv6Subnet,
+			Gateway:   ipRes.IPv6Gateway,
 			Interface: type100.Int(ifaceIndex),
 		})
 	}
-	if ipRes.ipv4Address != nil {
+	if ipRes.IPv4Address != nil {
 		result.IPs = append(result.IPs, &type100.IPConfig{
-			Address:   net.IPNet{IP: ipRes.ipv4Address, Mask: ipv4Mask},
-			Gateway:   ipRes.ipv4Gateway,
+			Address:   net.IPNet{IP: ipRes.IPv4Address, Mask: ipv4Mask},
+			Gateway:   ipRes.IPv4Gateway,
 			Interface: type100.Int(ifaceIndex),
 		})
 	}
-	if len(ipRes.routes) > 0 {
-		result.Routes = make([]*types.Route, 0, len(ipRes.routes))
-		for _, dst := range ipRes.routes {
+	if len(ipRes.Routes) > 0 {
+		result.Routes = make([]*types.Route, 0, len(ipRes.Routes))
+		for _, dst := range ipRes.Routes {
 			result.Routes = append(result.Routes, &types.Route{
 				Dst: *dst,
 			})
@@ -88,7 +86,7 @@ func buildVethResult(
 	hostName, guestName string,
 	hostMac string,
 	hostMTU int,
-) (*ipamResult, net.HardwareAddr, error) {
+) (*cniipam.IPAMResult, net.HardwareAddr, error) {
 	// Only call host-device ADD if the guest interface is still in the host
 	// namespace. If a prior attempt already moved it to the container netns but
 	// failed at a later step, we must not try to move it again.
@@ -105,9 +103,10 @@ func buildVethResult(
 	}
 
 	// Configure IP address on the guest interface inside the container netns.
-	var ipamResult *ipamResult
-	if wantsIPAM(pluginConf) {
-		result, err := configureIPAM(args, pluginConf, args.IfName)
+	cfg := allocConfig(pluginConf)
+	var ipamResult *cniipam.IPAMResult
+	if cniipam.WantsIPAM(cfg) {
+		result, err := configureIPAM(args, cfg, args.IfName)
 		if err != nil {
 			return nil, nil, fmt.Errorf("configure IPAM: %w", err)
 		}
@@ -131,28 +130,28 @@ func buildVethResult(
 	return ipamResult, guestHWAddr, nil
 }
 
-// buildTapResult constructs the CNI result for tap mode: a single host
-// interface with optional IPAM data. The guest VM manages its own interface;
-// the IP here describes the allocated subnet for BGP advertisement. The IPv4
-// address is reported with a /25 mask, matching the mask
-// ipv4GatewayAddrParams installs on the host side of the tap (see bgp.go).
-func buildTapResult(
-	pluginConf *PluginConf,
-	ipRes *ipamResult,
-	hostName, hostMac string,
-	hostMTU int,
-) *type100.Result {
-	result := &type100.Result{
-		CNIVersion: pluginConf.CNIVersion,
-		Interfaces: []*type100.Interface{
-			{
-				Name:    hostName,
-				Mac:     hostMac,
-				Mtu:     hostMTU,
-				Sandbox: "",
-			},
-		},
+// configureIPAM allocates addresses and configures the guest interface inside
+// the container network namespace with both families (when dual-stack).
+func configureIPAM(args *skel.CmdArgs, cfg cniipam.AllocConfig, guestName string) (*cniipam.IPAMResult, error) {
+	ipamResult, err := cniipam.Allocate(args, cfg)
+	if err != nil {
+		return nil, err
 	}
-	appendIPConfigs(result, ipRes, 0, net.CIDRMask(25, 32)) // index into Interfaces (host tap)
-	return result
+	if ipamResult == nil {
+		return nil, nil
+	}
+
+	var ipv4Net *net.IPNet
+	if ipamResult.IPv4Address != nil {
+		ipv4Net = &net.IPNet{IP: ipamResult.IPv4Address, Mask: net.CIDRMask(32, 32)}
+	}
+	if err := configureInterfaceInNetns(
+		args.Netns, guestName,
+		ipamResult.IPv6Subnet, ipamResult.IPv6Gateway,
+		ipv4Net, ipamResult.IPv4Gateway,
+	); err != nil {
+		return nil, err
+	}
+
+	return ipamResult, nil
 }
