@@ -82,6 +82,17 @@ func assertBinaryCopied(t *testing.T, path, wantContent string) {
 	}
 }
 
+// writeSourceBinary writes content to path, failing the test on error.
+// Factored out alongside assertBinaryCopied for the same reason — each
+// binary this test seeds would otherwise add its own branch to
+// TestBootstrap's own cyclomatic complexity.
+func writeSourceBinary(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write source binary %q: %v", path, err)
+	}
+}
+
 func TestBootstrap(t *testing.T) {
 	// Set up temporary directories for testing overrides
 	tmpDir := t.TempDir()
@@ -105,19 +116,13 @@ func TestBootstrap(t *testing.T) {
 	SourceCNIBinary = filepath.Join(tmpDir, "source-galactic-cni")
 	SourceTapCNIBinary = filepath.Join(tmpDir, "source-galactic-tap-cni")
 	SourceIPAMBinary = filepath.Join(tmpDir, "source-galactic-ipam")
+	SourceBGPBinary = filepath.Join(tmpDir, "source-galactic-bgp")
 	SourceHostDeviceBinary = filepath.Join(tmpDir, "source-host-device")
-	if err := os.WriteFile(SourceCNIBinary, []byte("cni-content"), 0755); err != nil {
-		t.Fatalf("write SourceCNIBinary: %v", err)
-	}
-	if err := os.WriteFile(SourceTapCNIBinary, []byte("tap-cni-content"), 0755); err != nil {
-		t.Fatalf("write SourceTapCNIBinary: %v", err)
-	}
-	if err := os.WriteFile(SourceIPAMBinary, []byte("ipam-content"), 0755); err != nil {
-		t.Fatalf("write SourceIPAMBinary: %v", err)
-	}
-	if err := os.WriteFile(SourceHostDeviceBinary, []byte("host-device-content"), 0755); err != nil {
-		t.Fatalf("write SourceHostDeviceBinary: %v", err)
-	}
+	writeSourceBinary(t, SourceCNIBinary, "cni-content")
+	writeSourceBinary(t, SourceTapCNIBinary, "tap-cni-content")
+	writeSourceBinary(t, SourceIPAMBinary, "ipam-content")
+	writeSourceBinary(t, SourceBGPBinary, "bgp-content")
+	writeSourceBinary(t, SourceHostDeviceBinary, "host-device-content")
 
 	// Mock node object
 	node := &corev1.Node{
@@ -173,6 +178,7 @@ func TestBootstrap(t *testing.T) {
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-cni"), "cni-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap-cni"), "tap-cni-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-ipam"), "ipam-content")
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-bgp"), "bgp-content")
 
 		// Verify conflist written
 		conflist, err := loadHostConf(HostConflist)

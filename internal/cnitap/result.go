@@ -15,9 +15,11 @@ import (
 
 // buildTapResult constructs the CNI result for tap mode: a single host
 // interface with optional IPAM data. The guest VM manages its own
-// interface; the IP here describes the allocated subnet for BGP
-// advertisement. The IPv4 address is reported with a /25 mask, matching the
-// mask cnibgp.ConfigureHostGateway installs on the host side of the tap.
+// interface; the IP here describes the allocated subnet, which
+// galactic-bgp (chained next by the runtime) reads back out of this same
+// result to know what to advertise — see internal/cnibgp's doc comment.
+// The IPv4 address is reported with a /25 mask, matching the mask
+// hostgw.ConfigureHostGateway installs on the host side of the tap.
 func buildTapResult(
 	pluginConf *PluginConf,
 	ipRes *cniipam.IPAMResult,

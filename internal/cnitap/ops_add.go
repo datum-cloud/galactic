@@ -6,7 +6,6 @@ package cnitap
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,20 +15,20 @@ import (
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/cni/hostgw"
 	"go.datum.net/galactic/internal/cni/nadpatch"
 	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/tap"
-	"go.datum.net/galactic/internal/cnibgp"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// cmdAdd mirrors internal/cni's own cmdAdd (see its doc comment for why the
-// return is named), minus everything specific to a guest-side netns: no
-// host-device delegation, no guest interface, no netns IP configuration.
-// The VM manages its own interface entirely; galactic-tap-cni only
-// configures the host side and publishes BGP state for it.
+// cmdAdd mirrors internal/cni's own cmdAdd, minus everything specific to a
+// guest-side netns: no host-device delegation, no guest interface, no
+// netns IP configuration. The VM manages its own interface entirely.
+// BGP/SRv6/eBPF publish is galactic-bgp's job, invoked next by the CNI
+// runtime per conflist order, not by this process.
 func cmdAdd(args *skel.CmdArgs) (err error) {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -57,16 +56,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
-		namespace:     namespace,
 	}
-
-	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer func() {
 		if err != nil {
 			slog.Error("ADD: failed, rolling back created resources", "err", err,
 				"containerID", args.ContainerID, "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
-			tracker.cleanup(rollbackCtx)
-			rollbackCancel()
+			tracker.cleanup()
 		}
 	}()
 
@@ -93,9 +88,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
 	}
-	tracker.k8s = k8sClient
 	podNamespace := nadpatch.ParsePodNamespace(args.Args)
-	if err := nadpatch.AnnotateNAD(rollbackCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
+	nadCtx, nadCancel := context.WithTimeout(context.Background(), cniTimeout)
+	defer nadCancel()
+	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
 		return fmt.Errorf("annotate NAD: %w", err)
 	}
 
@@ -131,8 +127,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			"ipv4Address", ipamResult.IPv4Address, "ipv4Gateway", ipamResult.IPv4Gateway)
 	}
 
-	// Configure the gateway address on the host tap and install the VRF route.
-	if err := cnibgp.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, nil); err != nil {
+	// Configure the gateway address on the host tap and install the VRF
+	// route — kernel-interface work this plugin owns (see
+	// internal/cni/hostgw's doc comment).
+	if err := hostgw.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, nil); err != nil {
 		return err
 	}
 	if ipamResult != nil && ipamResult.IPv6Gateway != nil {
@@ -140,26 +138,5 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 
 	result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
-	if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
-		return fmt.Errorf("print CNI result: %w", err)
-	}
-
-	vpcHex, err := intf.Base62ToHex(pluginConf.VPC)
-	if err != nil {
-		return fmt.Errorf("decode VPC: %w", err)
-	}
-
-	if tracker.k8s == nil {
-		return errors.New("k8s client not set in tracker")
-	}
-	slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID)
-	pubResult, err := cnibgp.PublishBGPStateK8s(
-		args, cnibgp.PublishConfig{VPC: pluginConf.VPC, VPCAttachment: pluginConf.VPCAttachment, InterfaceType: "tap"},
-		nodeName, namespace, ipamResult, vpcHex, tracker.k8s)
-	tracker.vrfInstanceCreated = pubResult.VRFInstanceCreated
-	tracker.advCreated = pubResult.AdvertisementCreated
-	tracker.ebpfRegistered = pubResult.EBPFRegistered
-	tracker.ebpfBlock = pubResult.EBPFBlock
-	tracker.ebpfArgument = pubResult.EBPFArgument
-	return err
+	return types.PrintResult(result, pluginConf.CNIVersion)
 }
