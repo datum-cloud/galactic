@@ -31,16 +31,17 @@ type DualStackResult struct {
 // the resulting allocator only allocates IPv4 addresses (IPv6 fields in
 // DualStackResult are left nil). If ipv4Pool is empty, the resulting
 // allocator only allocates IPv6 addresses (IPv4 fields in DualStackResult
-// are left nil) and ipv4LockDir is ignored. ipv4LockDir is passed straight
-// through to NewIPv4PoolAllocator (see DefaultIPv4LockDir for the production
-// path).
+// are left nil). lockDir is passed straight through to both
+// NewPoolAllocator and NewIPv4PoolAllocator (see DefaultLockDir for the
+// production path) — one shared root serves both families, since each
+// pool's own CIDR namespaces its state into a distinct subdirectory.
 func NewDualStackAllocator(
-	ipv6Pool, ipv6Gateway, ipv4Pool, ipv4Gateway, ipv4LockDir string,
+	ipv6Pool, ipv6Gateway, ipv4Pool, ipv4Gateway, lockDir string,
 ) (*DualStackAllocator, error) {
 	a := &DualStackAllocator{}
 
 	if ipv6Pool != "" {
-		ipv6, err := NewPoolAllocator(ipv6Pool, ipv6Gateway, DefaultSubnetLen)
+		ipv6, err := NewPoolAllocator(ipv6Pool, ipv6Gateway, DefaultSubnetLen, lockDir)
 		if err != nil {
 			return nil, err
 		}
@@ -48,7 +49,7 @@ func NewDualStackAllocator(
 	}
 
 	if ipv4Pool != "" {
-		ipv4, err := NewIPv4PoolAllocator(ipv4Pool, ipv4Gateway, ipv4LockDir)
+		ipv4, err := NewIPv4PoolAllocator(ipv4Pool, ipv4Gateway, lockDir)
 		if err != nil {
 			return nil, err
 		}

@@ -67,6 +67,7 @@ var (
 	SADir                  = "/var/run/secrets/kubernetes.io/serviceaccount"
 	SourceCNIBinary        = "/galactic-cni"
 	SourceTapCNIBinary     = "/galactic-tap-cni"
+	SourceIPAMBinary       = "/galactic-ipam"
 	SourceHostDeviceBinary = "/host-device"
 )
 
@@ -267,6 +268,9 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	}
 	if err := atomicCopyFile(SourceTapCNIBinary, filepath.Join(HostBinDir, "galactic-tap-cni"), 0755); err != nil {
 		return fmt.Errorf("copy galactic-tap-cni binary: %w", err)
+	}
+	if err := atomicCopyFile(SourceIPAMBinary, filepath.Join(HostBinDir, "galactic-ipam"), 0755); err != nil {
+		return fmt.Errorf("copy galactic-ipam binary: %w", err)
 	}
 	if err := atomicCopyFile(SourceHostDeviceBinary, filepath.Join(HostBinDir, "host-device"), 0755); err != nil {
 		return fmt.Errorf("copy host-device binary: %w", err)

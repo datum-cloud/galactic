@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
 	"go.datum.net/galactic/internal/cni/hostconf"
-	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/config"
 )
 
@@ -45,26 +43,6 @@ const errInvalidCNIConfig = "invalid CNI config"
 const (
 	errVPCRequired           = "vpc is required and must be a non-empty base62 string"
 	errVPCAttachmentRequired = "vpcattachment is required and must be a non-empty base62 string"
-)
-
-const (
-	// maxIPv6SubnetPrefixLen is the maximum (longest) prefix length allowed
-	// for ipv6_subnet. It matches ipam.PoolAllocator's constraint that the
-	// pool prefix must be no longer than the per-allocation subnet length;
-	// dual-stack tenant addressing allocates /96 endpoints from this subnet,
-	// so the subnet itself must be a /96 or shorter.
-	maxIPv6SubnetPrefixLen = 96
-
-	// maxIPv4SubnetPrefixLen is the maximum (longest) prefix length allowed
-	// for ipv4_subnet: a full IPv4 host route.
-	maxIPv4SubnetPrefixLen = 32
-)
-
-// addressFamilyIPv6 and addressFamilyIPv4 are the only valid entries for
-// the address_families config field.
-const (
-	addressFamilyIPv6 = "ipv6"
-	addressFamilyIPv4 = "ipv4"
 )
 
 // isValidBase62 reports whether s contains only valid base62 characters
@@ -317,77 +295,15 @@ func parseConf(data []byte) (*PluginConf, error) {
 	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
 	slog.Debug("CNI config received", "stdin", string(data))
 
-	// Resolve local IPAM flag and propagate it to internal/cniipam, which
-	// owns wantsIPAM/allocateIPAM. (This env-var-as-trigger shape is
-	// slated to be replaced by an explicit ipam-block-presence contract
-	// once internal/cniipam becomes its own delegated plugin.)
-	localIPAM := config.CNIGetEnableLocalIPAM()
-	cniipam.SetEnableLocalIPAM(localIPAM)
-
-	// Enforce required IPAM block if local IPAM is enabled
-	if localIPAM && conf.IPAM == nil {
-		return nil, &types.Error{Code: 7, Msg: "local IPAM is enabled, but no 'ipam' block is present in the configuration"}
-	}
-
-	// Validate dual-stack addressing fields (ipv6_subnet, ipv4_subnet,
-	// address_families). Both subnet fields stay optional at the parseConf
-	// level: whether one is actually required depends on which IPAM path a
-	// given ADD takes (static, local-IPAM fallback, or pool), which is
-	// resolved in internal/cniipam.Allocate — see WantsIPAM/Allocate there.
-	// When present, both are validated for CIDR shape so misconfigurations
-	// are caught early regardless of which path runs.
-	if conf.IPv6Subnet != "" {
-		ip, mask, err := net.ParseCIDR(conf.IPv6Subnet)
-		if err != nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"invalid CIDR value for field 'ipv6_subnet': %q", sanitizeForError(conf.IPv6Subnet)),
-			}
-		}
-		if ip.To4() != nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv6_subnet must be an IPv6 CIDR, got IPv4: %q", sanitizeForError(conf.IPv6Subnet)),
-			}
-		}
-		if prefixLen, _ := mask.Mask.Size(); prefixLen > maxIPv6SubnetPrefixLen {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv6_subnet prefix length %d exceeds maximum of %d: %q",
-				prefixLen, maxIPv6SubnetPrefixLen, sanitizeForError(conf.IPv6Subnet)),
-			}
-		}
-	}
-	if conf.IPv4Subnet != "" {
-		ip, mask, err := net.ParseCIDR(conf.IPv4Subnet)
-		if err != nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"invalid CIDR value for field 'ipv4_subnet': %q", sanitizeForError(conf.IPv4Subnet)),
-			}
-		}
-		if ip.To4() == nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv4_subnet must be an IPv4 CIDR, got IPv6: %q", sanitizeForError(conf.IPv4Subnet)),
-			}
-		}
-		if prefixLen, _ := mask.Mask.Size(); prefixLen > maxIPv4SubnetPrefixLen {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv4_subnet prefix length %d exceeds maximum of %d: %q",
-				prefixLen, maxIPv4SubnetPrefixLen, sanitizeForError(conf.IPv4Subnet)),
-			}
-		}
-	}
-	if len(conf.AddressFamilies) == 0 {
-		conf.AddressFamilies = []string{addressFamilyIPv6}
-	} else {
-		for _, af := range conf.AddressFamilies {
-			switch af {
-			case addressFamilyIPv6, addressFamilyIPv4:
-			default:
-				return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-					"invalid address_families entry %q: must be %q or %q",
-					sanitizeForError(af), addressFamilyIPv6, addressFamilyIPv4),
-				}
-			}
-		}
-	}
+	// Whether IPAM runs at all is decided entirely by whether "ipam" is
+	// present — no environment variable or sibling field can trigger or
+	// suppress that. Addressing fields (ipv6_subnet, ipv4_subnet,
+	// address_families, static_ip) and their own default-filling/CIDR
+	// validation live inside internal/cniipam, since they're only ever
+	// read by whichever binary "ipam.type" names — this plugin passes its
+	// own StdinData straight through unmodified when it delegates
+	// (ops_add.go/ops_del.go), so validating them here too would just be
+	// redundant work on the same bytes.
 
 	if conf.PrevResult != nil {
 		if err := validatePrevResult(conf.PrevResult); err != nil {

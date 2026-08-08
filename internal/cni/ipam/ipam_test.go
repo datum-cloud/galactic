@@ -93,7 +93,7 @@ func TestNewPoolAllocator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pa, err := NewPoolAllocator(tt.poolCIDR, tt.gateway, tt.subnetLen)
+			pa, err := NewPoolAllocator(tt.poolCIDR, tt.gateway, tt.subnetLen, t.TempDir())
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -115,7 +115,7 @@ func TestNewPoolAllocator(t *testing.T) {
 }
 
 func TestPoolAllocatorAllocate(t *testing.T) {
-	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen)
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestPoolAllocatorAllocate(t *testing.T) {
 }
 
 func TestPoolAllocatorSkipsAllocatedSubnets(t *testing.T) {
-	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen)
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestPoolAllocatorSkipsAllocatedSubnets(t *testing.T) {
 }
 
 func TestPoolAllocatorReservesGatewaySubnet(t *testing.T) {
-	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen)
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestPoolAllocatorReservesGatewaySubnet(t *testing.T) {
 }
 
 func TestPoolAllocatorDeallocate(t *testing.T) {
-	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen)
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestPoolAllocatorDeallocate(t *testing.T) {
 }
 
 func TestPoolAllocatorDeallocateUnknown(t *testing.T) {
-	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen)
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,8 +250,62 @@ func TestPoolAllocatorDeallocateUnknown(t *testing.T) {
 	pa.Deallocate("fd00:dead::/80")
 }
 
+func TestPoolAllocatorRejectsEmptyLockDir(t *testing.T) {
+	if _, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, ""); err == nil {
+		t.Fatal("expected error for empty lockDir, got nil")
+	}
+}
+
+// TestPoolAllocatorPersistsAcrossInstances is the regression test for the
+// bug this package's on-disk persistence fixes: each CNI ADD/DEL is a
+// separate OS process, so a fresh *PoolAllocator constructed by DEL must
+// still see the allocation ADD's own (now-exited) *PoolAllocator made.
+func TestPoolAllocatorPersistsAcrossInstances(t *testing.T) {
+	lockDir := t.TempDir()
+
+	addPA, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, lockDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	subnet, err := addPA.Allocate("container-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A brand new instance, as DEL's own process would construct, must see
+	// the allocation the (conceptually already-exited) ADD process made.
+	delPA, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, lockDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !delPA.IsAllocated(subnet.String()) {
+		t.Fatalf("IsAllocated(%q) = false on a fresh instance, want true (persisted)", subnet)
+	}
+
+	gotSubnet, ok := delPA.DeallocateContainer("container-a")
+	if !ok {
+		t.Fatal("DeallocateContainer(\"container-a\") = false, want true")
+	}
+	if gotSubnet != subnet.String() {
+		t.Errorf("DeallocateContainer returned %q, want %q", gotSubnet, subnet.String())
+	}
+	if delPA.IsAllocated(subnet.String()) {
+		t.Error("IsAllocated after DeallocateContainer = true, want false")
+	}
+}
+
+func TestPoolAllocatorDeallocateContainerUnknown(t *testing.T) {
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := pa.DeallocateContainer("no-such-container"); ok {
+		t.Error("DeallocateContainer for unknown container = true, want false")
+	}
+}
+
 func TestPoolAllocatorIsAllocated(t *testing.T) {
-	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen)
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
