@@ -17,19 +17,17 @@ import (
 	"go.datum.net/galactic/internal/cni/nadpatch"
 	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/veth"
-	"go.datum.net/galactic/internal/cnibgp"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 // cmdAdd uses a named return (err) so that the deferred selective rollback
-// below always observes the real failure: several branches check errors via
-// "if err := f(); err != nil" inside nested if/switch blocks, which declares
-// a block-scoped err that would otherwise shadow this function's err and
-// leave the deferred rollback thinking the call succeeded. A plain
-// "return expr" always assigns expr to a named result, regardless of that
-// local shadowing, so naming the return here is what makes rollback fire on
-// every failure path instead of just the ones using top-level "x, err := f()".
+// below always observes the real failure — see the doc comment on the
+// original version of this function for why a named return matters here;
+// still true with fewer branches. galactic-cni's own ADD ends by printing
+// its own result and returning: BGP/SRv6/eBPF publish is galactic-bgp's
+// job, invoked next by the CNI runtime per conflist order, not by this
+// process.
 func cmdAdd(args *skel.CmdArgs) (err error) {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -62,19 +60,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
-		namespace:     namespace,
 	}
-
-	// Selective rollback: clean up only resources that were created.
-	// We need a context for k8s operations in rollback; the k8s client
-	// will be populated below before it's needed.
-	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer func() {
 		if err != nil {
 			slog.Error("ADD: failed, rolling back created resources", "err", err,
 				"containerID", args.ContainerID, "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
-			tracker.cleanup(rollbackCtx)
-			rollbackCancel()
+			tracker.cleanup()
 		}
 	}()
 
@@ -104,9 +95,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
 	}
-	tracker.k8s = k8sClient
 	podNamespace := nadpatch.ParsePodNamespace(args.Args)
-	if err := nadpatch.AnnotateNAD(rollbackCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
+	nadCtx, nadCancel := context.WithTimeout(context.Background(), cniTimeout)
+	defer nadCancel()
+	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
 		return fmt.Errorf("annotate NAD: %w", err)
 	}
 
@@ -122,24 +114,5 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 
 	guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
-	ipamResult, guestHWAddr, err := buildVethResult(args, pluginConf, hostName, guestName, hostMac, hostMTU)
-	if err != nil {
-		return err
-	}
-	if ipamResult != nil {
-		slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,
-			"ipv6Subnet", ipamResult.IPv6Subnet, "ipv6Gateway", ipamResult.IPv6Gateway,
-			"ipv4Address", ipamResult.IPv4Address, "ipv4Gateway", ipamResult.IPv4Gateway)
-	}
-
-	slog.Debug("ADD: publishing BGP state", "containerID", args.ContainerID)
-	result, err := cnibgp.PublishBGPState(
-		args, cnibgp.PublishConfig{VPC: pluginConf.VPC, VPCAttachment: pluginConf.VPCAttachment, InterfaceType: "veth"},
-		nodeName, namespace, ipamResult, guestHWAddr, tracker.k8s)
-	tracker.vrfInstanceCreated = result.VRFInstanceCreated
-	tracker.advCreated = result.AdvertisementCreated
-	tracker.ebpfRegistered = result.EBPFRegistered
-	tracker.ebpfBlock = result.EBPFBlock
-	tracker.ebpfArgument = result.EBPFArgument
-	return err
+	return buildVethResult(args, pluginConf, hostName, guestName, hostMac, hostMTU)
 }
