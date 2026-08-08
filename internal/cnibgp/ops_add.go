@@ -41,6 +41,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
+		nodeName:      nodeName,
 		namespace:     namespace,
 	}
 
@@ -67,11 +68,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 
 	cfg := publishConfig{vpc: pluginConf.VPC, vpcAttachment: pluginConf.VPCAttachment, ifaceType: ifaceType}
 	result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, vpcHex, k8sClient)
-	tracker.vrfInstanceCreated = result.vrfInstanceCreated
 	tracker.advertisementCreated = result.advertisementCreated
-	tracker.ebpfRegistered = result.ebpfRegistered
-	tracker.ebpfBlock = result.ebpfBlock
-	tracker.ebpfArgument = result.ebpfArgument
+	tracker.vrfInstanceCreated = result.vrfInstanceCreated
 	if err != nil {
 		return err
 	}

@@ -10,15 +10,29 @@ import (
 )
 
 func TestBGPVRFInstanceName(t *testing.T) {
-	tests := []struct{ vpc, attachment, want string }{
-		{"abc", "def", "abc-def"},
-		{"0000000jU", "00G", "0000000jU-00G"},
+	tests := []struct{ vpc, nodeName, want string }{
+		{"abc", "worker-1", "abc-worker-1"},
+		{"0000000jU", "dfw-worker", "0000000jU-dfw-worker"},
 	}
 	for _, tt := range tests {
-		got := BGPVRFInstanceName(tt.vpc, tt.attachment)
+		got := BGPVRFInstanceName(tt.vpc, tt.nodeName)
 		if got != tt.want {
-			t.Errorf("BGPVRFInstanceName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
+			t.Errorf("BGPVRFInstanceName(%q, %q) = %q, want %q", tt.vpc, tt.nodeName, got, tt.want)
 		}
+	}
+}
+
+// TestBGPVRFInstanceNameSharedAcrossAttachments verifies that two different
+// attachments (vpcAttachment values) on the same VPC and node converge on
+// the identical BGPVRFInstance name — the whole point of keying this by
+// (vpc, node) instead of (vpc, vpcAttachment).
+func TestBGPVRFInstanceNameSharedAcrossAttachments(t *testing.T) {
+	const vpc, nodeName = "abc", "dfw-worker"
+	first := BGPVRFInstanceName(vpc, nodeName)
+	second := BGPVRFInstanceName(vpc, nodeName)
+	if first != second {
+		t.Errorf("BGPVRFInstanceName(%q, %q) should be stable regardless of caller/attachment, got %q and %q",
+			vpc, nodeName, first, second)
 	}
 }
 

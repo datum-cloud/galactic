@@ -69,10 +69,16 @@ func NetNSKey(containerID string) string {
 }
 
 // BGPVRFInstanceName returns the deterministic name for a BGPVRFInstance.
-// Each VPCAttachment is unique per interface across the cluster, so the
-// (vpc, vpcAttachment) pair is a reliable 1:1 key.
-func BGPVRFInstanceName(vpc, vpcAttachment string) string {
-	return fmt.Sprintf("%s-%s", vpc, vpcAttachment)
+// Unlike BGPAdvertisementName, this is keyed by (vpc, node) rather than
+// (vpc, vpcAttachment): the underlying kernel VRF is shared by every
+// attachment (pod or VM) on this VPC on this node (see internal/plumbing/vrf
+// and internal/plumbing/intf's GenerateInterfaceNameVRF), so every attachment
+// on the same VPC/node must resolve to the same BGPVRFInstance rather than
+// creating its own. This is the one CRD name that needs node identity at
+// all — the kernel side never does, since interface names only need to be
+// unique within one host's own namespace.
+func BGPVRFInstanceName(vpc, nodeName string) string {
+	return fmt.Sprintf("%s-%s", vpc, nodeName)
 }
 
 // BGPAdvertisementName returns the deterministic name for a
