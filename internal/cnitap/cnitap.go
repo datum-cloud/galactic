@@ -1,8 +1,8 @@
-// Copyright 2025 Datum Cloud, Inc.
+// Copyright 2026 Datum Cloud, Inc.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package cni
+package cnitap
 
 import (
 	"time"
@@ -10,18 +10,10 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/version"
 
-	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/metadata"
 )
 
 const cniTimeout = 10 * time.Second
-
-// SetEnableLocalIPAM sets the local IPAM flag from the CLI. Kept here as a
-// thin forwarder so cmd/galactic-cni/main.go doesn't need to know that IPAM
-// allocation itself now lives in internal/cniipam.
-func SetEnableLocalIPAM(v bool) {
-	cniipam.SetEnableLocalIPAM(v)
-}
 
 // RunPlugin starts the CNI plugin, handling ADD, DEL, CHECK, and STATUS operations.
 func RunPlugin() {
@@ -33,6 +25,6 @@ func RunPlugin() {
 			Status: cmdStatus,
 		},
 		version.All,
-		"CNI galactic plugin "+metadata.Version,
+		"CNI galactic-tap plugin "+metadata.Version,
 	)
 }

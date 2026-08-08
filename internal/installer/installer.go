@@ -66,6 +66,7 @@ var (
 	HostEtcDir             = "/host/var/lib/galactic"
 	SADir                  = "/var/run/secrets/kubernetes.io/serviceaccount"
 	SourceCNIBinary        = "/galactic-cni"
+	SourceTapCNIBinary     = "/galactic-tap-cni"
 	SourceHostDeviceBinary = "/host-device"
 )
 
@@ -254,12 +255,18 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 
 	slog.Info("Starting CNI installer bootstrap", "nodeName", nodeName)
 
-	// 1. Copy CNI and host-device binaries to the host
+	// 1. Copy the CNI plugin chain's binaries to the host. Every binary in
+	// the chain ships in this same image and is staged here by this one
+	// init container, regardless of which master plugin(s) a given node's
+	// workloads actually use.
 	if err := os.MkdirAll(HostBinDir, 0755); err != nil {
 		return fmt.Errorf("create host CNI bin dir: %w", err)
 	}
 	if err := atomicCopyFile(SourceCNIBinary, filepath.Join(HostBinDir, "galactic-cni"), 0755); err != nil {
 		return fmt.Errorf("copy galactic-cni binary: %w", err)
+	}
+	if err := atomicCopyFile(SourceTapCNIBinary, filepath.Join(HostBinDir, "galactic-tap-cni"), 0755); err != nil {
+		return fmt.Errorf("copy galactic-tap-cni binary: %w", err)
 	}
 	if err := atomicCopyFile(SourceHostDeviceBinary, filepath.Join(HostBinDir, "host-device"), 0755); err != nil {
 		return fmt.Errorf("copy host-device binary: %w", err)
