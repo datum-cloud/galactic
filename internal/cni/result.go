@@ -6,6 +6,7 @@ package cni
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -14,6 +15,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/cni/hostgw"
 	"go.datum.net/galactic/internal/cniipam"
 )
 
@@ -79,15 +81,18 @@ func appendIPConfigs(result *type100.Result, ipRes *cniipam.IPAMResult, ifaceInd
 }
 
 // buildVethResult handles veth-specific result building: host-device
-// delegation, IPAM, guest interface reading, and result printing.
-// Returns the IPAM result for BGP advertisement, or nil if no IPAM.
+// delegation, IPAM, host gateway configuration, guest interface reading,
+// and result printing. galactic-bgp (chained next by the runtime) picks up
+// everything it needs — the allocated addresses, and that this was a veth
+// attachment — from the result this prints, not from a Go-level return
+// value.
 func buildVethResult(
 	args *skel.CmdArgs,
 	pluginConf *PluginConf,
 	hostName, guestName string,
 	hostMac string,
 	hostMTU int,
-) (*cniipam.IPAMResult, net.HardwareAddr, error) {
+) error {
 	// Only call host-device ADD if the guest interface is still in the host
 	// namespace. If a prior attempt already moved it to the container netns but
 	// failed at a later step, we must not try to move it again.
@@ -96,10 +101,10 @@ func buildVethResult(
 		// previous run. The host-device plugin renames the moved interface
 		// to args.IfName, so a prior run may have left that name behind.
 		if err := cleanupContainerNetns(args.Netns, args.IfName); err != nil {
-			return nil, nil, fmt.Errorf("cleanup container netns: %w", err)
+			return fmt.Errorf("cleanup container netns: %w", err)
 		}
 		if err := hostDevice("ADD", args, pluginConf); err != nil {
-			return nil, nil, fmt.Errorf("host-device ADD: %w", err)
+			return fmt.Errorf("host-device ADD: %w", err)
 		}
 	}
 
@@ -111,26 +116,40 @@ func buildVethResult(
 	if pluginConf.IPAM != nil {
 		result, err := configureIPAM(args, pluginConf, args.IfName)
 		if err != nil {
-			return nil, nil, fmt.Errorf("configure IPAM: %w", err)
+			return fmt.Errorf("configure IPAM: %w", err)
 		}
 		ipamResult = result
+	}
+	if ipamResult != nil {
+		slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,
+			"ipv6Subnet", ipamResult.IPv6Subnet, "ipv6Gateway", ipamResult.IPv6Gateway,
+			"ipv4Address", ipamResult.IPv4Address, "ipv4Gateway", ipamResult.IPv4Gateway)
 	}
 
 	// Read guest veth attributes inside the container netns.
 	guestMac, guestMTU, err := readGuestInterface(args.Netns, args.IfName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read guest interface: %w", err)
+		return fmt.Errorf("read guest interface: %w", err)
 	}
 	guestHWAddr, err := net.ParseMAC(guestMac)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse guest interface MAC %q: %w", guestMac, err)
-	}
-	result := buildResult(pluginConf, ipamResult, hostName, args.IfName, hostMac, guestMac, hostMTU, guestMTU, args.Netns)
-	if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
-		return nil, nil, fmt.Errorf("print CNI result: %w", err)
+		return fmt.Errorf("parse guest interface MAC %q: %w", guestMac, err)
 	}
 
-	return ipamResult, guestHWAddr, nil
+	// Configure the host-side gateway address and VRF route before printing
+	// the result — kernel-interface work this plugin owns (see
+	// internal/cni/hostgw's doc comment for why galactic-bgp no longer does
+	// this itself).
+	if err := hostgw.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, guestHWAddr); err != nil {
+		return fmt.Errorf("configure host gateway: %w", err)
+	}
+
+	result := buildResult(pluginConf, ipamResult, hostName, args.IfName, hostMac, guestMac, hostMTU, guestMTU, args.Netns)
+	if err := types.PrintResult(result, pluginConf.CNIVersion); err != nil {
+		return fmt.Errorf("print CNI result: %w", err)
+	}
+
+	return nil
 }
 
 // configureIPAM delegates IPAM allocation to whatever binary pluginConf's
