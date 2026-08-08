@@ -20,8 +20,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
 
 const (
@@ -158,10 +156,20 @@ func TestKernelCapabilities(t *testing.T) {
 	}
 }
 
-// TestCNITapInterface exercises galactic-tap-cni, the tap master plugin.
-// It creates a pod that invokes the plugin with CNI_COMMAND=ADD and a tap
-// config, then validates the CNI result JSON: a single host interface with an
-// empty sandbox and the host-side gateway/subnet IPAM allocated for it.
+// TestCNITapInterface exercises galactic-tap-cni, the tap master plugin in
+// the galactic CNI chain (see internal/cnitap). It creates a pod that
+// invokes the plugin with CNI_COMMAND=ADD and a tap config, then validates
+// the CNI result JSON: a single host interface with an empty sandbox and
+// the host-side gateway/subnet IPAM allocated for it.
+//
+// This only exercises galactic-tap-cni's own ADD (VRF + tap creation, IPAM
+// delegation to galactic-ipam). It does not chain into galactic-route
+// (this config has no terminations) or galactic-bgp (BGP/SRv6/eBPF
+// publish) — manually driving the rest of the chain would need a
+// BGPRouter fixture and additional RBAC this test doesn't set up, and no
+// e2e test before this split's own predecessor (the monolithic
+// galactic-cni) ever verified BGPAdvertisement/BGPVRFInstance CRD
+// creation either, so this preserves the same scope the test always had.
 //
 // This test requires a cluster node with VRF/tap kernel support (the same
 // prerequisites checked by TestKernelCapabilities). It will fail rather than
@@ -173,29 +181,26 @@ func TestCNITapInterface(t *testing.T) {
 	deletePod(t, name)
 
 	// Start a shell so we can later exec the CNI plugin with stdin.
-	// The galactic-cni entrypoint is overridden to "sh" so the pod stays
-	// running and we can pipe the CNI config via kubectl exec -i.
-	// Run as the galactic-cni ServiceAccount so the CNI plugin's in-cluster
-	// client is bound by the galactic-cni ClusterRole (config/cni/rbac.yaml)
-	// when it lists/creates BGPRouter, BGPAdvertisement, and BGPVRFInstance.
-	// hostNetwork is required too: net.vrf.strict_mode (enabled on the Kind
-	// node in scripts/ci.sh) is per-netns, and the SEG6Local VRFTABLE route
-	// this test exercises needs it set in whichever netns the route lands in.
-	// The bpf-fs hostPath volume mirrors config/cni/daemonset.yaml's own
-	// bpf-fs mount: the eBPF uSID datapath's maps can only be pinned under
-	// attach.PinDir if the node's real bpffs (mounted onto the Kind node in
-	// scripts/ci.sh) is visible inside the pod -- a pod's own mount
-	// namespace can't create /sys/fs/bpf itself. The whole container spec
-	// (image, command, privileged) has to live in --overrides too, not the
-	// usual --image/--command/--privileged flags: kubectl run's overrides
-	// merge replaces the generated "containers" list wholesale rather than
-	// merging into it, so anything set only via those flags would otherwise
-	// be silently dropped the moment "containers" is also set here.
+	// The galactic-cni image's entrypoint is overridden to "sh" so the pod
+	// stays running and we can pipe the CNI config via kubectl exec -i.
+	// galactic-tap-cni ships in the same image (see containers/galactic-cni/
+	// Dockerfile) alongside every other binary in the CNI chain, so no
+	// separate image is needed here. Run as the galactic-cni ServiceAccount:
+	// galactic-tap-cni's own ADD unconditionally builds an in-cluster k8s
+	// client for its NAD-annotation step (config/cni/rbac.yaml grants it),
+	// even though that step itself no-ops here (no CNI_ARGS, so
+	// nadpatch.ParsePodNamespace resolves an empty namespace). hostNetwork
+	// is required too, so the VRF/tap interfaces this test creates land in
+	// the same netns production's own hostNetwork DaemonSet would use. The
+	// whole container spec (image, command, privileged) has to live in
+	// --overrides too, not the usual --image/--command/--privileged flags:
+	// kubectl run's overrides merge replaces the generated "containers"
+	// list wholesale rather than merging into it, so anything set only via
+	// those flags would otherwise be silently dropped the moment
+	// "containers" is also set here.
 	overrides := fmt.Sprintf(`{"spec":{"serviceAccountName":"galactic-cni","hostNetwork":true,`+
-		`"volumes":[{"name":"bpf-fs","hostPath":{"path":"/sys/fs/bpf","type":"Directory"}}],`+
 		`"containers":[{"name":%q,"image":%q,"imagePullPolicy":"Never","command":["sleep","infinity"],`+
-		`"securityContext":{"privileged":true},`+
-		`"volumeMounts":[{"name":"bpf-fs","mountPath":"/sys/fs/bpf"}]}]}}`, name, image())
+		`"securityContext":{"privileged":true}}]}}`, name, image())
 	runOut, err := kubectl(
 		t.Context(),
 		"run", name,
@@ -211,29 +216,14 @@ func TestCNITapInterface(t *testing.T) {
 		t.Fatalf("pod did not reach Running phase: %v", err)
 	}
 
-	// The eBPF uSID datapath is now the only forwarding path (see
-	// internal/cnibgp/bgp.go's registerEBPFDatapath, called inline from
-	// galactic-tap-cni's own cmdAdd at this point in the CNI plugin-chain
-	// split), so CNI ADD requires this node's locator_table/function_table/
-	// vrf_table maps to already be pinned under attach.PinDir. In
-	// production that's done ahead of time by the CNI DaemonSet's
-	// long-running "credential-refresh" container (config/cni/
-	// daemonset.yaml, `/galactic-cni run`); this test runs its own pod
-	// instead of relying on that DaemonSet, so it must start the same
-	// control daemon itself before exercising CNI ADD below.
-	startEBPFControlDaemon(t, name)
-
 	// Write the CNI config to a file inside the pod, then run the plugin
 	// with the config piped via stdin.  The plugin reads config from stdin
 	// (the CNI protocol) and CNI_NETNS from the environment.
 	//
-	// The "ipam" block's "type" now names the delegated binary
-	// (galactic-ipam), not a pool-vs-static mode selector -- this step
-	// rewired IPAM from an in-process call into real CNI IPAM delegation
-	// (github.com/containernetworking/plugins/pkg/ipam.ExecAdd), so
-	// "pool" is no longer a valid type value; presence of ipv6_subnet
-	// alone opts this config into pool IPAM (see internal/cniipam's doc
-	// comment and docs/cni/configuration.md).
+	// The "ipam" block's "type" names the delegated binary (galactic-ipam),
+	// not a pool-vs-static mode selector — presence of ipv6_subnet alone
+	// opts this config into pool IPAM (see internal/cniipam's doc comment
+	// and docs/cni/configuration.md).
 	cniConf := `{
   "cniVersion": "1.0.0",
   "name": "galactic",
@@ -247,11 +237,11 @@ func TestCNITapInterface(t *testing.T) {
 }`
 	// Step 1: write the CNI config and a wrapper script into the pod.
 	// CNI_PATH=/ lets IPAM delegation (galactic-tap-cni execs galactic-ipam
-	// via ipam.ExecAdd) find the delegate binary: every binary in the
-	// chain is copied to the image root by containers/galactic-cni/
-	// Dockerfile (not /opt/cni/bin -- that path only exists on the real
-	// host once installer.Bootstrap's init container stages it there,
-	// which this test's pod never runs).
+	// via github.com/containernetworking/plugins/pkg/ipam.ExecAdd) find the
+	// delegate binary: every binary in the chain is copied to the image
+	// root by containers/galactic-cni/Dockerfile (not /opt/cni/bin — that
+	// path only exists on the real host once installer.Bootstrap's init
+	// container stages it there, which this test's pod never runs).
 	script := `#!/bin/sh
 ip netns add e2e-tap-ns
 CNI_NETNS=/var/run/netns/e2e-tap-ns \
@@ -323,34 +313,6 @@ NODE_NAME=` + nodeName() + ` \
 	if len(ips) != 1 {
 		t.Errorf("ips count = %d, want 1", len(ips))
 	}
-}
-
-// startEBPFControlDaemon runs `/galactic-cni run` inside the already-running
-// pod named name and waits for it to load and pin the eBPF uSID datapath's
-// maps under attach.PinDir. GALACTIC_CNI_EBPF_INTERFACES pins the attach
-// step to the pod's (hostNetwork) eth0 rather than relying on default-route
-// auto-detection -- only the pinning (not the attach itself) matters for
-// the vrf_table registration TestCNITapInterface exercises.
-func startEBPFControlDaemon(t *testing.T, name string) {
-	t.Helper()
-
-	_, err := kubectl(t.Context(), "exec", name, "--", "sh", "-c",
-		"GALACTIC_CNI_EBPF_INTERFACES=eth0 nohup /galactic-cni run >/tmp/run.log 2>&1 &")
-	if err != nil {
-		t.Fatalf("start eBPF control daemon: %v", err)
-	}
-
-	pinnedVRFTable := attach.PinDir + "/vrf_table"
-	deadline := time.Now().Add(podReadyTimeout)
-	for time.Now().Before(deadline) {
-		if _, err := kubectl(t.Context(), "exec", name, "--", "test", "-e", pinnedVRFTable); err == nil {
-			return
-		}
-		time.Sleep(podPollInterval)
-	}
-
-	log, _ := kubectl(t.Context(), "exec", name, "--", "cat", "/tmp/run.log")
-	t.Fatalf("timed out waiting for %s to be pinned; control daemon log:\n%s", pinnedVRFTable, log)
 }
 
 // nodeName returns the name of the node this pod runs on, or falls back to
