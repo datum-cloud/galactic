@@ -21,21 +21,19 @@ type Termination struct {
 // PluginConf is the CNI plugin configuration passed via stdin on each
 // invocation of galactic-cni, the veth master plugin.
 //
-// IPv6Subnet, IPv4Subnet, and AddressFamilies feed the dual-stack IPAM
-// allocators (internal/cni/ipam, IPv4PoolAllocator/DualStackAllocator); as of
-// this change allocateIPAM does not yet consume them, and format/requiredness
-// validation in parseConf lands in a later phase.
+// IPAM addressing fields (ipv6_subnet, ipv4_subnet, address_families,
+// static_ip) live entirely inside the "ipam" block now — see
+// go.datum.net/galactic/internal/cniipam's doc comment for the explicit
+// delegation contract: this struct only decides *whether* to delegate
+// (IPAM != nil), never anything about how allocation itself works.
 type PluginConf struct {
 	types.PluginConf
-	VPC             string        `json:"vpc"`
-	VPCAttachment   string        `json:"vpcattachment"`
-	MTU             int           `json:"mtu,omitempty"`
-	Terminations    []Termination `json:"terminations,omitempty"`
-	IPAM            *cniipam.IPAM `json:"ipam"`
-	Namespace       string        `json:"namespace,omitempty"`
-	IPv6Subnet      string        `json:"ipv6_subnet,omitempty"`      // region IPv6 pool CIDR; endpoints alloc /96
-	IPv4Subnet      string        `json:"ipv4_subnet,omitempty"`      // optional site IPv4 pool CIDR; endpoints alloc /32
-	AddressFamilies []string      `json:"address_families,omitempty"` // families to allocate; default ["ipv6"]
+	VPC           string        `json:"vpc"`
+	VPCAttachment string        `json:"vpcattachment"`
+	MTU           int           `json:"mtu,omitempty"`
+	Terminations  []Termination `json:"terminations,omitempty"`
+	IPAM          *cniipam.IPAM `json:"ipam"`
+	Namespace     string        `json:"namespace,omitempty"`
 }
 
 // HostConf holds node-local settings read from /etc/cni/net.d/10-galactic.conflist.
@@ -46,20 +44,4 @@ type HostConf = hostconf.HostConf
 type HostDevicePluginConf struct {
 	types.PluginConf
 	Device string `json:"device"`
-}
-
-// allocConfig adapts pluginConf's fields into cniipam.AllocConfig, the shape
-// internal/cniipam actually needs — see that package's doc comment for why
-// it takes its own minimal config shape rather than this package's full
-// PluginConf.
-func allocConfig(pluginConf *PluginConf) cniipam.AllocConfig {
-	return cniipam.AllocConfig{
-		VPC:             pluginConf.VPC,
-		VPCAttachment:   pluginConf.VPCAttachment,
-		Namespace:       pluginConf.Namespace,
-		IPAM:            pluginConf.IPAM,
-		IPv6Subnet:      pluginConf.IPv6Subnet,
-		IPv4Subnet:      pluginConf.IPv4Subnet,
-		AddressFamilies: pluginConf.AddressFamilies,
-	}
 }

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
 	"go.datum.net/galactic/internal/cni/hostconf"
-	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/config"
 )
 
@@ -42,16 +40,6 @@ const errInvalidCNIConfig = "invalid CNI config"
 const (
 	errVPCRequired           = "vpc is required and must be a non-empty base62 string"
 	errVPCAttachmentRequired = "vpcattachment is required and must be a non-empty base62 string"
-)
-
-const (
-	maxIPv6SubnetPrefixLen = 96
-	maxIPv4SubnetPrefixLen = 32
-)
-
-const (
-	addressFamilyIPv6 = "ipv6"
-	addressFamilyIPv4 = "ipv4"
 )
 
 // isValidBase62 reports whether s contains only valid base62 characters
@@ -268,64 +256,11 @@ func parseConf(data []byte) (*PluginConf, error) {
 	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
 	slog.Debug("CNI config received", "stdin", string(data))
 
-	localIPAM := config.CNIGetEnableLocalIPAM()
-	cniipam.SetEnableLocalIPAM(localIPAM)
-	if localIPAM && conf.IPAM == nil {
-		return nil, &types.Error{Code: 7, Msg: "local IPAM is enabled, but no 'ipam' block is present in the configuration"}
-	}
-
-	if conf.IPv6Subnet != "" {
-		ip, mask, err := net.ParseCIDR(conf.IPv6Subnet)
-		if err != nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"invalid CIDR value for field 'ipv6_subnet': %q", sanitizeForError(conf.IPv6Subnet)),
-			}
-		}
-		if ip.To4() != nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv6_subnet must be an IPv6 CIDR, got IPv4: %q", sanitizeForError(conf.IPv6Subnet)),
-			}
-		}
-		if prefixLen, _ := mask.Mask.Size(); prefixLen > maxIPv6SubnetPrefixLen {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv6_subnet prefix length %d exceeds maximum of %d: %q",
-				prefixLen, maxIPv6SubnetPrefixLen, sanitizeForError(conf.IPv6Subnet)),
-			}
-		}
-	}
-	if conf.IPv4Subnet != "" {
-		ip, mask, err := net.ParseCIDR(conf.IPv4Subnet)
-		if err != nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"invalid CIDR value for field 'ipv4_subnet': %q", sanitizeForError(conf.IPv4Subnet)),
-			}
-		}
-		if ip.To4() == nil {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv4_subnet must be an IPv4 CIDR, got IPv6: %q", sanitizeForError(conf.IPv4Subnet)),
-			}
-		}
-		if prefixLen, _ := mask.Mask.Size(); prefixLen > maxIPv4SubnetPrefixLen {
-			return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-				"ipv4_subnet prefix length %d exceeds maximum of %d: %q",
-				prefixLen, maxIPv4SubnetPrefixLen, sanitizeForError(conf.IPv4Subnet)),
-			}
-		}
-	}
-	if len(conf.AddressFamilies) == 0 {
-		conf.AddressFamilies = []string{addressFamilyIPv6}
-	} else {
-		for _, af := range conf.AddressFamilies {
-			switch af {
-			case addressFamilyIPv6, addressFamilyIPv4:
-			default:
-				return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
-					"invalid address_families entry %q: must be %q or %q",
-					sanitizeForError(af), addressFamilyIPv6, addressFamilyIPv4),
-				}
-			}
-		}
-	}
+	// Whether IPAM runs at all is decided entirely by "ipam" block
+	// presence — see internal/cni's own parseConf for the full reasoning,
+	// identical here. Addressing fields and their validation live inside
+	// internal/cniipam, invoked via delegation with this plugin's own
+	// StdinData passed straight through unmodified.
 
 	if conf.PrevResult != nil {
 		if err := validatePrevResult(conf.PrevResult); err != nil {
