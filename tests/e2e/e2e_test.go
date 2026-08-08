@@ -158,8 +158,8 @@ func TestKernelCapabilities(t *testing.T) {
 	}
 }
 
-// TestCNITapInterface exercises the galactic CNI plugin in tap interface mode.
-// It creates a pod that invokes the CNI plugin with CNI_COMMAND=ADD and a tap
+// TestCNITapInterface exercises galactic-tap-cni, the tap master plugin.
+// It creates a pod that invokes the plugin with CNI_COMMAND=ADD and a tap
 // config, then validates the CNI result JSON: a single host interface with an
 // empty sandbox and the host-side gateway/subnet IPAM allocated for it.
 //
@@ -212,13 +212,15 @@ func TestCNITapInterface(t *testing.T) {
 	}
 
 	// The eBPF uSID datapath is now the only forwarding path (see
-	// internal/cni/bgp.go's registerEBPFDatapath), so CNI ADD requires this
-	// node's locator_table/function_table/vrf_table maps to already be
-	// pinned under attach.PinDir. In production that's done ahead of time by
-	// the CNI DaemonSet's long-running "credential-refresh" container
-	// (config/cni/daemonset.yaml, `/galactic-cni run`); this test runs its
-	// own pod instead of relying on that DaemonSet, so it must start the
-	// same control daemon itself before exercising CNI ADD below.
+	// internal/cnibgp/bgp.go's registerEBPFDatapath, called inline from
+	// galactic-tap-cni's own cmdAdd at this point in the CNI plugin-chain
+	// split), so CNI ADD requires this node's locator_table/function_table/
+	// vrf_table maps to already be pinned under attach.PinDir. In
+	// production that's done ahead of time by the CNI DaemonSet's
+	// long-running "credential-refresh" container (config/cni/
+	// daemonset.yaml, `/galactic-cni run`); this test runs its own pod
+	// instead of relying on that DaemonSet, so it must start the same
+	// control daemon itself before exercising CNI ADD below.
 	startEBPFControlDaemon(t, name)
 
 	// Write the CNI config to a file inside the pod, then run the plugin
@@ -227,11 +229,9 @@ func TestCNITapInterface(t *testing.T) {
 	cniConf := `{
   "cniVersion": "1.0.0",
   "name": "galactic",
-  "type": "galactic-cni",
+  "type": "galactic-tap-cni",
   "vpc": "1",
   "vpcattachment": "1",
-  "interface_type": "tap",
-  "srv6_locator": "2001:db8:ff01::/48",
   "ipam": {
     "type": "pool"
   }
@@ -250,7 +250,7 @@ CNI_IFNAME=eth0 \
 CNI_PATH=/opt/cni/bin \
 NODE_NAME=` + nodeName() + ` \
 GALACTIC_CNI_ENABLE_LOCAL_IPAM=true \
-	/galactic-cni < /tmp/cni.json
+	/galactic-tap-cni < /tmp/cni.json
 `
 	_, err = kubectl(t.Context(), "exec", name, "--",
 		"sh", "-c",
