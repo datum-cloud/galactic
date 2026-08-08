@@ -8,6 +8,14 @@ on:
 
 env:
   GO_VERSION: '1.26'
+  # Pins every job's regeneration of internal/plumbing/ebpf/prog's bpf2go
+  # output (usid_bpfel/eb.go and their embedded .o's; not committed, see
+  # that package's doc.go) to the same explicit clang version, rather than
+  # each job/runner resolving its own unversioned "clang" off PATH.
+  # clang-18/llvm-18 is the noble/ubuntu-latest default at the time this
+  # was written -- reconfirm against the runner image if installation
+  # starts failing.
+  BPF2GO_CC: clang-18
 
 jobs:
   # Tier 1: Fast checks (every PR)
@@ -26,6 +34,14 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install eBPF build dependencies
+        # `task lint` type-checks the whole module, which needs
+        # internal/plumbing/ebpf/prog's bpf2go output regenerated first
+        # (see build job's identical step below for the package pins).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+
       - name: Run lint
         run: task lint
 
@@ -43,6 +59,14 @@ jobs:
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install eBPF build dependencies
+        # `task test:unit` builds internal/plumbing/ebpf/prog, which needs
+        # its bpf2go output regenerated first (see build job's identical
+        # step below for the package pins).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
 
       - name: Run unit tests
         run: task test:unit
@@ -109,6 +133,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
           sudo modprobe vrf
 
+      - name: Install eBPF build dependencies
+        # `task test:unit-root` builds internal/plumbing/ebpf/prog, which
+        # needs its bpf2go output regenerated first (see build job's
+        # identical step below for the package pins). This runs as the
+        # unprivileged runner user -- it's the regeneration below, run as
+        # root via `sudo -E task test:unit-root`, that needs clang on
+        # root's PATH, which -E's preserved PATH (asserted explicitly via
+        # `env "PATH=$PATH"`) already covers.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+
       - name: Run root-gated unit tests as root
         # sudo's secure_path policy overrides -E's preserved PATH for
         # exactly the PATH variable, which would hide the go/task binaries
@@ -134,13 +170,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install eBPF build dependencies
-        # Pinned to an explicit versioned package (clang-18/llvm-18, the
-        # noble/ubuntu-latest default at the time this was written --
-        # reconfirm against the runner image if this starts failing) rather
-        # than the unversioned clang/llvm meta-packages: BPF object bytes
-        # (BTF, debug info, section layout) move with the compiler, so an
-        # unpinned install would let a future runner-image clang bump flip
-        # the drift check below red on PRs that never touched usid.c.
+        # Pinned to an explicit versioned package (clang-18/llvm-18) rather
+        # than the unversioned clang/llvm meta-packages, matching the
+        # workflow-level BPF2GO_CC pin above -- keeps the BPF object bytes
+        # (BTF, debug info, section layout) produced by this job identical
+        # to every other job's regeneration instead of drifting with
+        # whatever clang a future runner-image bump resolves to.
         # linux-libc-dev is listed explicitly too -- doc.go's -idirafter
         # workaround exists specifically to find its headers, so this job
         # shouldn't rely on it merely happening to be preinstalled.
@@ -151,22 +186,11 @@ jobs:
       - name: Build binary
         # task build's build:ebpf step regenerates
         # internal/plumbing/ebpf/prog's bpf2go output (usid_bpfel/eb.go
-        # and their embedded .o's) from usid.c as a side effect, before
-        # build:binaries ever runs. The check below diffs the regenerated
-        # artifacts against the committed ones: the .o's `go test` and
-        # go.datum.net/galactic/internal/plumbing/ebpf/prog itself load are
-        # otherwise just checked-in blobs that can drift silently out of
-        # sync with usid.c, since nothing else forces them to be
-        # regenerated on a source change. BPF2GO_CC pins this regeneration
-        # to the exact clang installed above (see doc.go's go:generate
-        # directive, which omits -cc for exactly this reason) instead of
-        # whatever unversioned "clang" resolves to.
+        # and their embedded .o's) from usid.c before build:binaries ever
+        # runs -- these are gitignored (see that package's doc.go), so
+        # there's nothing checked in for this to drift against; it's
+        # produced fresh on every build, here exactly as everywhere else.
         run: task build
-        env:
-          BPF2GO_CC: clang-18
-
-      - name: Verify committed eBPF artifacts match usid.c
-        run: git diff --exit-code -- internal/plumbing/ebpf/prog
 
   # Tier 2: Integration tests (every PR, main branch, and releases)
   test-e2e:
@@ -184,6 +208,17 @@ jobs:
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install eBPF build dependencies
+        # `task test:e2e` compiles ./tests/e2e/... on the host (the
+        # galactic-cni image it builds separately regenerates its own copy
+        # inside containers/galactic-cni/Dockerfile's builder stage), which
+        # needs internal/plumbing/ebpf/prog's bpf2go output regenerated
+        # first -- see build job's identical step above for the package
+        # pins.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
 
       - name: Run E2E tests
         run: task test:e2e

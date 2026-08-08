@@ -13,12 +13,21 @@
 // into a CO-RE-portable BPF object and generates matching Go bindings
 // (UsidObjects, LoadUsid, LoadUsidObjects, plus per-map/per-program
 // fields) in this package -- run `go generate ./...` from the repo root,
-// or `go generate` from this directory, after editing usid.c. The
-// generated *_bpfel.go/*_bpfel.o (and *_bpfeb.go/*_bpfeb.o) files are
-// committed alongside the source they're generated from, matching this
-// repo's convention for other generated code (see CLAUDE.md: "Generated
-// protobuf files ... are committed; never hand-edit them" -- the same
-// rule applies here to bpf2go's output).
+// or `go generate` from this directory, after editing usid.c.
+//
+// Unlike this repo's other generated code (e.g. *.pb.go, committed
+// per CLAUDE.md: "Generated protobuf files ... are committed; never
+// hand-edit them"), the generated *_bpfel.go/*_bpfel.o and
+// *_bpfeb.go/*_bpfeb.o files are gitignored, not committed: they embed a
+// compiled binary blob rather than plain Go source, and committing a
+// compiled artifact risks it silently drifting out of sync with usid.c
+// with nothing to catch the mismatch short of a byte-diff. Instead, every
+// build site regenerates them fresh via `task build:ebpf` -- a hard
+// dependency of `task build`/`lint`/`test:unit`/`test:unit-root`/`test:e2e`
+// (see Taskfile.yaml), and of containers/galactic-cni/Dockerfile and
+// containers/galactic-router/Dockerfile's builder stages -- so clang must
+// be on PATH (or $BPF2GO_CC) to build or test this module at all; there is
+// no fallback to a checked-in copy.
 //
 // Placement: sibling of internal/plumbing/ebpf/uformat (Milestone 2.1)
 // under the shared internal/plumbing/ebpf/ umbrella -- uformat is the
@@ -54,8 +63,8 @@ package prog
 //
 // -cc is deliberately omitted: bpf2go's own default is
 // getEnv("BPF2GO_CC", "clang"), so CI can pin an exact clang version by
-// setting $BPF2GO_CC (see the `build` job's drift-check step) without
-// this directive needing to change, while everyone else keeps getting
-// plain "clang" off their PATH.
+// setting $BPF2GO_CC (see .github/workflows/ci.yaml) without this
+// directive needing to change, while everyone else keeps getting plain
+// "clang" off their PATH.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type locator_value -type function_value -type vrf_value Usid usid.c
