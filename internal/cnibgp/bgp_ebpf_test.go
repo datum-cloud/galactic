@@ -179,7 +179,7 @@ func TestUnregisterEBPFDatapath_RemovesOwnEntry(t *testing.T) {
 		t.Fatalf("seed vrf_table entry: %v", err)
 	}
 
-	if err := UnregisterEBPFDatapath(testBlock, testArgument, vrfTableID, pinDir); err != nil {
+	if err := unregisterEBPFDatapath(testBlock, testArgument, vrfTableID, pinDir); err != nil {
 		t.Fatalf("UnregisterEBPFDatapath: %v", err)
 	}
 
@@ -225,7 +225,7 @@ func TestUnregisterEBPFDatapath_LeavesEntryOwnedByAnotherAttachment(t *testing.T
 		t.Fatalf("seed vrf_table entry: %v", err)
 	}
 
-	if err := UnregisterEBPFDatapath(testBlock, testArgument, thisAttachmentsVRFTableID, pinDir); err != nil {
+	if err := unregisterEBPFDatapath(testBlock, testArgument, thisAttachmentsVRFTableID, pinDir); err != nil {
 		t.Fatalf("UnregisterEBPFDatapath: %v", err)
 	}
 

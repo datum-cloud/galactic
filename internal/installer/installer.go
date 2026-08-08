@@ -68,6 +68,7 @@ var (
 	SourceCNIBinary        = "/galactic-cni"
 	SourceTapCNIBinary     = "/galactic-tap-cni"
 	SourceIPAMBinary       = "/galactic-ipam"
+	SourceBGPBinary        = "/galactic-bgp"
 	SourceHostDeviceBinary = "/host-device"
 )
 
@@ -271,6 +272,9 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	}
 	if err := atomicCopyFile(SourceIPAMBinary, filepath.Join(HostBinDir, "galactic-ipam"), 0755); err != nil {
 		return fmt.Errorf("copy galactic-ipam binary: %w", err)
+	}
+	if err := atomicCopyFile(SourceBGPBinary, filepath.Join(HostBinDir, "galactic-bgp"), 0755); err != nil {
+		return fmt.Errorf("copy galactic-bgp binary: %w", err)
 	}
 	if err := atomicCopyFile(SourceHostDeviceBinary, filepath.Join(HostBinDir, "host-device"), 0755); err != nil {
 		return fmt.Errorf("copy host-device binary: %w", err)

@@ -284,7 +284,7 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 
 func TestResourceTrackerCleanupZeroValue(t *testing.T) {
 	tracker := &resourceTracker{}
-	tracker.cleanup(t.Context()) // should not panic
+	tracker.cleanup() // should not panic
 }
 
 // ---- loadHostConf / logging -----------------------------------------------
