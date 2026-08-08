@@ -62,17 +62,20 @@ type publishConfig struct {
 }
 
 // publishResult records what publishBGPState actually created, so cmdAdd
-// can fold it into its own rollback tracker.
+// can fold it into its own rollback tracker. There is no record of the eBPF
+// vrf_table registration: it's shared by every attachment on this VPC/node
+// (see crdnames.BGPVRFInstanceName) with no "did I just create this"
+// signal the way a k8s object's CreateOrUpdate result gives us, so a failed
+// ADD must never unregister it — see resourceTracker.cleanup's doc comment.
 type publishResult struct {
-	vrfInstanceCreated   bool
 	advertisementCreated bool
-	// ebpfRegistered, ebpfBlock, and ebpfArgument record the eBPF uSID
-	// datapath's vrf_table registration, if one actually happened (the
-	// BGPRouter may not be configured, in which case ebpfRegistered stays
-	// false). See unregisterEBPFDatapath for rolling this back.
-	ebpfRegistered bool
-	ebpfBlock      uint64
-	ebpfArgument   uint16
+	// vrfInstanceCreated is true only when this ADD's own CreateOrUpdate
+	// call for the (shared) BGPVRFInstance reported OperationResultCreated —
+	// i.e. this is the first attachment on this VPC/node, not one reusing an
+	// already-live sibling's CRD. See resourceTracker.cleanup's doc comment
+	// for why that distinction, not "CreateOrUpdate succeeded" alone, is
+	// what makes rollback-deletion safe.
+	vrfInstanceCreated bool
 }
 
 // isTransientError reports whether err is a transient failure that may
@@ -326,8 +329,13 @@ func publishBGPState(
 			return err
 		}
 
-		vrfID, err := allocateArgument(
-			ctx, k8s, namespace, bgp.routerName, crdnames.BGPVRFInstanceName(cfg.vpc, cfg.vpcAttachment))
+		// The BGPVRFInstance name is keyed by (vpc, node) — not (vpc,
+		// vpcAttachment) — since the underlying kernel VRF is shared by every
+		// attachment on this VPC on this node. allocateArgument's own
+		// idempotent-by-name lookup means every attachment sharing a VPC/node
+		// converges on the same CRD and the same Argument.
+		vrfName := crdnames.BGPVRFInstanceName(cfg.vpc, nodeName)
+		vrfID, err := allocateArgument(ctx, k8s, namespace, bgp.routerName, vrfName)
 		if err != nil {
 			return err
 		}
@@ -337,37 +345,43 @@ func publishBGPState(
 			return fmt.Errorf("compute route target: %w", err)
 		}
 
-		vrfName := crdnames.BGPVRFInstanceName(cfg.vpc, cfg.vpcAttachment)
 		vrfInst := &bgpv1alpha1.BGPVRFInstance{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      vrfName,
 				Namespace: namespace,
 			},
 		}
-		_, err = controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
+		op, err := controllerutil.CreateOrUpdate(ctx, k8s, vrfInst, func() error {
 			vrfInst.Spec = buildVRFInstanceSpec(bgp.routerName, rtValue, vrfID)
 			return nil
 		})
 		if err != nil {
 			return fmt.Errorf("apply BGPVRFInstance: %w", err)
 		}
-		result.vrfInstanceCreated = true
+		if op == controllerutil.OperationResultCreated {
+			result.vrfInstanceCreated = true
+		}
 		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
-			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName)
+			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName, "operation", op)
 
+		// A collision here means allocateArgument's read-then-write raced
+		// against another VPC's first attachment on this same node landing
+		// on the same "lowest free slot" before either write was visible to
+		// the other — only possible when this CreateOrUpdate was a genuine
+		// create (result.vrfInstanceCreated), never when reusing an
+		// already-live sibling's CRD (whose VRFID was already validated
+		// when it was first created). Rollback needs that distinction to
+		// safely self-heal this race — see resourceTracker.cleanup.
 		if err := checkArgumentCollision(ctx, k8s, namespace, bgp.routerName, vrfName, vrfID); err != nil {
 			return err
 		}
 
-		registered, ebpfBlock, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.ifaceType, uint16(vrfID), attach.PinDir)
-		if err != nil {
+		// The return values aren't tracked for rollback: the vrf_table entry
+		// they'd describe is shared by every attachment on this VPC/node,
+		// same as the BGPVRFInstance above — see resourceTracker.cleanup's
+		// doc comment for why a failed ADD must never unregister it.
+		if _, err := registerEBPFDatapath(bgp, cfg.vpc, cfg.ifaceType, uint16(vrfID), attach.PinDir); err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
-		}
-		if registered {
-			result.ebpfRegistered = true
-			result.ebpfBlock = ebpfBlock
-			result.ebpfArgument = uint16(vrfID)
 		}
 
 		adv := &bgpv1alpha1.BGPAdvertisement{
@@ -414,52 +428,52 @@ func publishBGPState(
 // returned as an error.
 func registerEBPFDatapath(
 	bgp bgpConfig, vpc, ifaceType string, argument uint16, pinDir string,
-) (registered bool, block uint64, err error) {
+) (registered bool, err error) {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
-		return false, 0, nil
+		return false, nil
 	}
 
 	if bgp.nodeID < uformat.NodeIDMin || bgp.nodeID > uformat.NodeIDMax {
-		return false, 0, fmt.Errorf("eBPF registration: nodeID %d out of range [%#x,%#x]",
+		return false, fmt.Errorf("eBPF registration: nodeID %d out of range [%#x,%#x]",
 			bgp.nodeID, uint16(uformat.NodeIDMin), uint16(uformat.NodeIDMax))
 	}
 
 	egressKind, err := egressKindForInterfaceType(ifaceType)
 	if err != nil {
-		return false, 0, fmt.Errorf("determine eBPF egress kind: %w", err)
+		return false, fmt.Errorf("determine eBPF egress kind: %w", err)
 	}
 
 	prefix, err := netip.ParsePrefix(bgp.srv6Locator)
 	if err != nil {
-		return false, 0, fmt.Errorf("parse SRv6 locator %q for eBPF registration: %w", bgp.srv6Locator, err)
+		return false, fmt.Errorf("parse SRv6 locator %q for eBPF registration: %w", bgp.srv6Locator, err)
 	}
-	block, err = uformat.Block(prefix.Addr())
+	block, err := uformat.Block(prefix.Addr())
 	if err != nil {
-		return false, 0, fmt.Errorf("derive eBPF uSID Block from locator %q: %w", bgp.srv6Locator, err)
+		return false, fmt.Errorf("derive eBPF uSID Block from locator %q: %w", bgp.srv6Locator, err)
 	}
 
 	vrfTableID, err := vrf.TableID(vpc)
 	if err != nil {
-		return false, 0, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
+		return false, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
 	}
 
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
-		return false, 0, fmt.Errorf("open pinned eBPF uSID maps: %w", err)
+		return false, fmt.Errorf("open pinned eBPF uSID maps: %w", err)
 	}
 	defer func() { _ = closer.Close() }()
 
 	if err := registry.Locator.Register(block, uint16(bgp.nodeID)); err != nil {
-		return false, 0, fmt.Errorf("register eBPF locator_table entry: %w", err)
+		return false, fmt.Errorf("register eBPF locator_table entry: %w", err)
 	}
 	if err := registry.Function.Register(block, uformat.FunctionEndDT46); err != nil {
-		return false, 0, fmt.Errorf("register eBPF function_table entry: %w", err)
+		return false, fmt.Errorf("register eBPF function_table entry: %w", err)
 	}
 
 	if err := registry.VRF.Register(block, argument, vrfTableID, egressKind); err != nil {
-		return false, 0, fmt.Errorf("register eBPF vrf_table entry: %w", err)
+		return false, fmt.Errorf("register eBPF vrf_table entry: %w", err)
 	}
-	return true, block, nil
+	return true, nil
 }
 
 // egressKindForInterfaceType maps a "veth"/"tap" interface type string to the
@@ -475,39 +489,4 @@ func egressKindForInterfaceType(ifaceType string) (uint32, error) {
 	default:
 		return 0, fmt.Errorf("unknown interface type %q", ifaceType)
 	}
-}
-
-// unregisterEBPFDatapath removes the vrf_table entry registerEBPFDatapath
-// wrote for this (block, argument) pair, from cmdAdd's failed-ADD rollback
-// path. Idempotent: not an error if the entry is already gone.
-//
-// expectedVRFTableID must be this attachment's own VRF table id (recomputed
-// by the caller via vrf.TableID). Only deletes the entry when it still
-// resolves to expectedVRFTableID, and leaves it alone otherwise — see
-// resourceTracker.cleanup's doc comment for the race this guards against.
-func unregisterEBPFDatapath(block uint64, argument uint16, expectedVRFTableID uint32, pinDir string) error {
-	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
-	if err != nil {
-		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)
-	}
-	defer func() { _ = closer.Close() }()
-
-	entry, ok, err := registry.VRF.Get(block, argument)
-	if err != nil {
-		return fmt.Errorf("read eBPF vrf_table entry before unregister: %w", err)
-	}
-	if !ok {
-		return nil
-	}
-	if entry.VRFTableID != expectedVRFTableID {
-		slog.Warn("Rollback: eBPF vrf_table entry no longer belongs to this attachment, leaving it in place",
-			"block", block, "argument", argument,
-			"expectedVRFTableID", expectedVRFTableID, "currentVRFTableID", entry.VRFTableID)
-		return nil
-	}
-
-	if err := registry.VRF.Unregister(block, argument); err != nil {
-		return fmt.Errorf("unregister eBPF vrf_table entry: %w", err)
-	}
-	return nil
 }

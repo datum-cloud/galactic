@@ -31,7 +31,7 @@ func requireRoot(t *testing.T) {
 // must do nothing (no error, no attempt to open any pinned map).
 func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "", nodeID: 0}
-	registered, _, err := registerEBPFDatapath(
+	registered, err := registerEBPFDatapath(
 		cfg, testVPC, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
 	if err != nil {
 		t.Errorf("registerEBPFDatapath with unconfigured BGPRouter = %v, want nil (no-op)", err)
@@ -48,7 +48,7 @@ func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 // wraps to 1) must be rejected here, before any pinned map is even opened.
 func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "2001:db8:1::/48", nodeID: 0x10001} // wraps to uint16(1) if narrowed unchecked
-	registered, _, err := registerEBPFDatapath(
+	registered, err := registerEBPFDatapath(
 		cfg, testVPC, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
 	if err == nil {
 		t.Fatal("registerEBPFDatapath with nodeID=0x10001 = nil error, want an out-of-range rejection")
@@ -63,7 +63,7 @@ func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 
 // TestRegisterEBPFDatapath_RegistersAllThreeTables: a single
 // registerEBPFDatapath call populates locator_table, function_table, and
-// vrf_table consistently for the same vpc, against real pinned eBPF maps
+// vrf_table consistently for the same VPC, against real pinned eBPF maps
 // under a throwaway pin directory — not the production attach.PinDir.
 func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	requireRoot(t)
@@ -89,7 +89,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
-	registered, _, err := registerEBPFDatapath(cfg, vpc, ifaceTypeVeth, uint16(vrfID), pinDir)
+	registered, err := registerEBPFDatapath(cfg, vpc, ifaceTypeVeth, uint16(vrfID), pinDir)
 	if err != nil {
 		t.Fatalf("registerEBPFDatapath: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 		t.Fatalf("vrf_table entries = %+v, want exactly 1", entries)
 	}
 	if entries[0].VRFTableID != vrfTableID {
-		t.Errorf("vrf_table entry VRFTableID = %#x, want %#x (this attachment's real VRF table id)",
+		t.Errorf("vrf_table entry VRFTableID = %#x, want %#x (this VPC's real VRF table id)",
 			entries[0].VRFTableID, vrfTableID)
 	}
 	if entries[0].EgressKind != usidmap.EgressKindVeth {
@@ -141,20 +141,29 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	}
 }
 
-// TestUnregisterEBPFDatapath_RemovesOwnEntry covers UnregisterEBPFDatapath's
-// normal path: an entry this attachment registered gets removed when its
-// VRFTableID still matches.
-func TestUnregisterEBPFDatapath_RemovesOwnEntry(t *testing.T) {
+// TestRegisterEBPFDatapath_SecondAttachmentSharesEntry covers the whole
+// point of keying vrf_table registration by VPC alone: a second attachment
+// on the same VPC (different Argument would be a bug — allocateArgument's
+// idempotent-by-name lookup is what keeps every attachment on this VPC/node
+// converging on one shared Argument, exercised at the cnibgp package level
+// in bgp_test.go) re-registering the identical (block, argument) key is a
+// harmless idempotent overwrite, not a collision — repeat registration is
+// the ordinary case (see usidmap.VRF.Register's own doc comment), and here
+// specifically it's what two live sibling attachments both depend on.
+func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 	requireRoot(t)
 
-	if err := vrf.Add(testVPC); err != nil {
+	const (
+		vpc     = testVPC
+		locator = "2001:db8:1::/48"
+		nodeID  = int32(5)
+		vrfID   = int32(42)
+	)
+
+	if err := vrf.Add(vpc); err != nil {
 		t.Fatalf("vrf.Add: %v", err)
 	}
-	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
-	vrfTableID, err := vrf.TableID(testVPC)
-	if err != nil {
-		t.Fatalf("vrf.TableID: %v", err)
-	}
+	t.Cleanup(func() { _ = vrf.Delete(vpc) })
 
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
 	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
@@ -164,47 +173,19 @@ func TestUnregisterEBPFDatapath_RemovesOwnEntry(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
-	reg, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
+	if _, err := registerEBPFDatapath(cfg, vpc, ifaceTypeVeth, uint16(vrfID), pinDir); err != nil {
+		t.Fatalf("first attachment's registerEBPFDatapath: %v", err)
+	}
+	// A second attachment on the same VPC/node resolves the same Argument
+	// (allocateArgument's idempotent lookup) and re-registers the same key.
+	registered, err := registerEBPFDatapath(cfg, vpc, ifaceTypeVeth, uint16(vrfID), pinDir)
 	if err != nil {
-		t.Fatalf("OpenPinnedRegistry: %v", err)
+		t.Fatalf("second attachment's registerEBPFDatapath: %v", err)
 	}
-	defer func() { _ = closer.Close() }()
-
-	const testBlock uint64 = 0x0102030405
-	const testArgument uint16 = 0x042
-
-	if err := reg.VRF.Register(testBlock, testArgument, vrfTableID, usidmap.EgressKindVeth); err != nil {
-		t.Fatalf("seed vrf_table entry: %v", err)
+	if !registered {
+		t.Fatal("second attachment's registerEBPFDatapath reported registered=false, want true")
 	}
-
-	if err := unregisterEBPFDatapath(testBlock, testArgument, vrfTableID, pinDir); err != nil {
-		t.Fatalf("UnregisterEBPFDatapath: %v", err)
-	}
-
-	if _, ok, err := reg.VRF.Get(testBlock, testArgument); err != nil || ok {
-		t.Errorf("vrf_table entry after unregister: ok=%v err=%v, want ok=false", ok, err)
-	}
-}
-
-// TestUnregisterEBPFDatapath_LeavesEntryOwnedByAnotherAttachment covers the
-// race UnregisterEBPFDatapath guards against: retryK8sOps can re-run
-// PublishBGPStateK8s's whole closure on a later attempt without
-// re-registering the eBPF entry, so by the time a later attempt's
-// checkArgumentCollision failure triggers a caller's rollback, the (block,
-// argument) slot this attachment originally wrote may have since been
-// overwritten by the very other attachment the collision was detected
-// against. Unregistering unconditionally would delete a live attachment's
-// forwarding entry instead of this rolled-back one's own.
-func TestUnregisterEBPFDatapath_LeavesEntryOwnedByAnotherAttachment(t *testing.T) {
-	requireRoot(t)
-
-	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
-	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
-	loaderObjs, err := attach.Load(pinDir)
-	if err != nil {
-		t.Fatalf("attach.Load: %v", err)
-	}
-	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	reg, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
@@ -212,28 +193,12 @@ func TestUnregisterEBPFDatapath_LeavesEntryOwnedByAnotherAttachment(t *testing.T
 	}
 	defer func() { _ = closer.Close() }()
 
-	const testBlock uint64 = 0x0102030405
-	const testArgument uint16 = 0x042
-	const anotherAttachmentsVRFTableID uint32 = 0x9999
-	const thisAttachmentsVRFTableID uint32 = 0x1111
-
-	// Simulate the colliding attachment having since overwritten this same
-	// (block, argument) slot with its own, different VRF table id.
-	if err := reg.VRF.Register(testBlock, testArgument, anotherAttachmentsVRFTableID, usidmap.EgressKindVeth); err != nil {
-		t.Fatalf("seed vrf_table entry: %v", err)
+	entries, err := reg.VRF.List()
+	if err != nil {
+		t.Fatalf("VRF.List: %v", err)
 	}
-
-	if err := unregisterEBPFDatapath(testBlock, testArgument, thisAttachmentsVRFTableID, pinDir); err != nil {
-		t.Fatalf("UnregisterEBPFDatapath: %v", err)
-	}
-
-	entry, ok, err := reg.VRF.Get(testBlock, testArgument)
-	if err != nil || !ok {
-		t.Fatalf("vrf_table entry after unregister: ok=%v err=%v, want ok=true (must survive, it's not this attachment's)",
-			ok, err)
-	}
-	if entry.VRFTableID != anotherAttachmentsVRFTableID {
-		t.Errorf("vrf_table entry VRFTableID after unregister = %#x, want unchanged %#x",
-			entry.VRFTableID, anotherAttachmentsVRFTableID)
+	if len(entries) != 1 {
+		t.Errorf("vrf_table entries after two attachments share one VPC = %+v, want exactly 1 (shared, not duplicated)",
+			entries)
 	}
 }
