@@ -15,7 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/cni/veth"
-	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -56,13 +55,24 @@ func newK8sClient() (client.Client, error) {
 // know anything about either.
 type resourceTracker struct {
 	vpc, vpcAttachment string
-	vrfCreated         bool
 }
 
 // cleanup rolls back all tracked resources in reverse creation order.
 // Errors are logged but never returned — the caller already has a failure.
 // Takes no context: unlike before this split, nothing here makes a k8s
 // call anymore (BGP CRD/eBPF rollback is galactic-bgp's own tracker now).
+//
+// Deliberately absent: deleting the VRF. veth.Delete below only removes
+// this attachment's own host/guest veth pair, which is genuinely private to
+// it — but the VRF itself is shared by every attachment on this VPC on this
+// node (internal/plumbing/vrf), and vrf.Add is idempotent, so a "vrfCreated"
+// flag here could never distinguish "I created it" from "a sibling
+// attachment already had." Deleting it on this attachment's own failed ADD
+// could tear down a still-live sibling's VRF out from under it — the same
+// reasoning internal/cnibgp's resourceTracker applies to the BGPVRFInstance
+// CRD and eBPF vrf_table entry. Reclaiming it is exclusively
+// galactic-router's GC controller's job, once it has confirmed via every
+// BGPAdvertisement for this VPC/node that none remain.
 func (rt *resourceTracker) cleanup() {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
@@ -72,12 +82,5 @@ func (rt *resourceTracker) cleanup() {
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	} else {
 		slog.Debug("Rollback: deleted veth", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-	}
-
-	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
-		slog.Error("Rollback: failed to delete VRF", "err", err,
-			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-	} else {
-		slog.Debug("Rollback: deleted VRF", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	}
 }

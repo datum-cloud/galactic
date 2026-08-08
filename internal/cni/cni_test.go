@@ -822,9 +822,6 @@ func TestResourceTrackerFieldsSet(t *testing.T) {
 	if tracker.vpcAttachment != testAttachment {
 		t.Errorf("vpcAttachment = %q, want %q", tracker.vpcAttachment, testAttachment)
 	}
-	if tracker.vrfCreated {
-		t.Error("vrfCreated should be false by default")
-	}
 }
 
 // ---- cmdStatus ---------------------------------------------------------

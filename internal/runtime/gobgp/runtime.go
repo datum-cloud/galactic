@@ -220,8 +220,10 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 }
 
 // applyVRFs configures every desired VRF instance and removes stale ones. A
-// node can host thousands of VRFs (one per VPC attachment), so this — unlike
-// the single-VRF code it replaces — must handle the full set, not just one.
+// node can host many VRFs (one per VPC that has at least one attachment on
+// this node, shared by every attachment on that VPC/node — not one per
+// attachment), so this — unlike the single-VRF code it replaces — must
+// handle the full set, not just one.
 func (r *GoBGPRuntime) applyVRFs(
 	ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance, routerID string,
 ) error {

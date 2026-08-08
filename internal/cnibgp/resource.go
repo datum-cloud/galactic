@@ -98,7 +98,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 	}
 
 	if rt.ebpfRegistered {
-		if vrfTableID, err := vrf.TableID(rt.vpc, rt.vpcAttachment); err != nil {
+		if vrfTableID, err := vrf.TableID(rt.vpc); err != nil {
 			slog.Error("Rollback: failed to resolve VRF table id, skipping eBPF vrf_table unregister", "err", err,
 				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 		} else if err := unregisterEBPFDatapath(rt.ebpfBlock, rt.ebpfArgument, vrfTableID, attach.PinDir); err != nil {

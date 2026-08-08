@@ -64,7 +64,7 @@ func updateForwardRule(interfaceName string, action string) error {
 // applies sysctls and iptables FORWARD rules. Idempotent — repairs state
 // if the tap already exists (crash-recovery).
 func Add(vpc, vpcAttachment string, mtu int) error {
-	vrfName := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 	tapName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 
 	vrfLink, err := netlink.LinkByName(vrfName)

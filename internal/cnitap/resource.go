@@ -15,7 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/cni/tap"
-	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -49,9 +48,17 @@ func newK8sClient() (client.Client, error) {
 // tracker (internal/cniroute).
 type resourceTracker struct {
 	vpc, vpcAttachment string
-	vrfCreated         bool
 }
 
+// Deliberately absent: deleting the VRF. tap.Delete below only removes this
+// attachment's own tap device, which is genuinely private to it — but the
+// VRF itself is shared by every attachment on this VPC on this node
+// (internal/plumbing/vrf), and vrf.Add is idempotent, so a "vrfCreated" flag
+// here could never distinguish "I created it" from "a sibling attachment
+// already had." Deleting it on this attachment's own failed ADD could tear
+// down a still-live sibling's VRF out from under it — see internal/cni's own
+// resourceTracker.cleanup for the identical reasoning. Reclaiming it is
+// exclusively galactic-router's GC controller's job.
 func (rt *resourceTracker) cleanup() {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
@@ -61,12 +68,5 @@ func (rt *resourceTracker) cleanup() {
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	} else {
 		slog.Debug("Rollback: deleted tap", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-	}
-
-	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
-		slog.Error("Rollback: failed to delete VRF", "err", err,
-			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-	} else {
-		slog.Debug("Rollback: deleted VRF", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	}
 }

@@ -360,7 +360,7 @@ func publishBGPState(
 		}
 
 		registered, ebpfBlock, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), attach.PinDir)
+			bgp, cfg.vpc, cfg.ifaceType, uint16(vrfID), attach.PinDir)
 		if err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
@@ -413,7 +413,7 @@ func publishBGPState(
 // intentionally not set up for this attachment. Any other failure is
 // returned as an error.
 func registerEBPFDatapath(
-	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string,
+	bgp bgpConfig, vpc, ifaceType string, argument uint16, pinDir string,
 ) (registered bool, block uint64, err error) {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return false, 0, nil
@@ -438,7 +438,7 @@ func registerEBPFDatapath(
 		return false, 0, fmt.Errorf("derive eBPF uSID Block from locator %q: %w", bgp.srv6Locator, err)
 	}
 
-	vrfTableID, err := vrf.TableID(vpc, vpcAttachment)
+	vrfTableID, err := vrf.TableID(vpc)
 	if err != nil {
 		return false, 0, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
 	}

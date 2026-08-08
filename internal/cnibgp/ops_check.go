@@ -111,7 +111,7 @@ func checkEBPFEntry(ctx context.Context, k8s client.Client, pluginConf *PluginCo
 		return fmt.Errorf("derive eBPF uSID Block from locator %q: %w", bgp.srv6Locator, err)
 	}
 
-	vrfTableID, err := vrf.TableID(pluginConf.VPC, pluginConf.VPCAttachment)
+	vrfTableID, err := vrf.TableID(pluginConf.VPC)
 	if err != nil {
 		return fmt.Errorf("get VRF table ID: %w", err)
 	}

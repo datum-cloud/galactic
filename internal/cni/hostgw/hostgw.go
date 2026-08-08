@@ -33,12 +33,28 @@ import (
 )
 
 // ConfigureHostGateway assigns each configured family's gateway address as a
-// host address (/128 for IPv6, /32 for IPv4 on veth) on the host-side
-// interface (veth or tap) and installs an explicit pod-subnet route for that
-// family into the VRF table. IPv4 is skipped entirely when the attachment is
-// IPv6-only.
+// host address (/128 for IPv6, /32 for IPv4 on veth) on this attachment's
+// own host-side interface (veth or tap) and installs an explicit pod-subnet
+// route for that family into the (now VPC-shared, not per-attachment) VRF
+// table. IPv4 is skipped entirely when the attachment is IPv6-only.
 //
-// Using a full-length host address (not the pod subnet mask) prevents the
+// The gateway address is deliberately kept on this attachment's own link
+// rather than the shared VRF device, even though the VRF/table are shared
+// by every attachment on this VPC on this node (internal/plumbing/vrf) —
+// this was tried and reverted (see git history): IPv6 NDP resolution for an
+// address only works on links that address is actually configured on
+// (or has an explicit proxy-neighbor entry for); unlike IPv4's proxy_arp,
+// enabling net.ipv6.conf.*.proxy_ndp does not make the kernel auto-answer
+// for an address it can merely *route* to via another interface. Since a
+// VRF master device and its enslaved links are still separate link-layer
+// segments to NDP, a gateway address bound only to the VRF device is
+// invisible to Neighbor Solicitations arriving on any one attachment's own
+// veth/tap, and every guest's default-route NDP resolution fails outright.
+// Each attachment has its own distinct gateway address anyway (from its own
+// IPAM subnet), so there's no actual duplication to avoid by centralizing
+// it — keeping it per-attachment is both correct and no more wasteful.
+//
+// Using a full-length gateway address (not the pod subnet mask) prevents the
 // kernel from auto-creating a subnet-router anycast entry in the VRF local
 // table. When the pod address equals the subnet network address the anycast
 // absorbs seg6local-decapped inner packets before they reach the guest
@@ -65,14 +81,17 @@ func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, gu
 	if err != nil {
 		return fmt.Errorf("get host interface %q: %w", hostName, err)
 	}
-	tableID, err := vrf.TableID(vpc, vpcAttachment)
+	tableID, err := vrf.TableID(vpc)
 	if err != nil {
 		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
 	}
 
 	if res.IPv6Gateway != nil {
 		gwNet := &net.IPNet{IP: res.IPv6Gateway, Mask: net.CIDRMask(128, 128)}
-		if err := installGatewayRoute(hostLink, gwNet, res.IPv6Subnet, netlink.FAMILY_V6, int(tableID), 0); err != nil {
+		if err := installGatewayAddress(hostLink, gwNet, 0); err != nil {
+			return err
+		}
+		if err := installPodSubnetRoute(hostLink, res.IPv6Subnet, netlink.FAMILY_V6, int(tableID)); err != nil {
 			return err
 		}
 		if guestHWAddr != nil {
@@ -84,8 +103,11 @@ func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, gu
 	if res.IPv4Gateway != nil {
 		ipv4Mask, addrFlags := ipv4GatewayAddrParams(hostLink)
 		gwNet := &net.IPNet{IP: res.IPv4Gateway, Mask: ipv4Mask}
+		if err := installGatewayAddress(hostLink, gwNet, addrFlags); err != nil {
+			return err
+		}
 		ipv4Subnet := &net.IPNet{IP: res.IPv4Address, Mask: net.CIDRMask(32, 32)}
-		if err := installGatewayRoute(hostLink, gwNet, ipv4Subnet, netlink.FAMILY_V4, int(tableID), addrFlags); err != nil {
+		if err := installPodSubnetRoute(hostLink, ipv4Subnet, netlink.FAMILY_V4, int(tableID)); err != nil {
 			return err
 		}
 		if guestHWAddr != nil {
@@ -138,18 +160,26 @@ func ipv4GatewayAddrParams(hostLink netlink.Link) (net.IPMask, int) {
 	return net.CIDRMask(32, 32), 0
 }
 
-// installGatewayRoute assigns gwNet as a host address on hostLink and
-// installs an explicit route to subnet into the given VRF table, for one
-// address family. Idempotent: existing matching routes/addresses are left
-// alone, and conflicting ones return an error rather than being overwritten.
-func installGatewayRoute(hostLink netlink.Link, gwNet, subnet *net.IPNet, family, tableID, addrFlags int) error {
-	hostName := hostLink.Attrs().Name
+// installGatewayAddress assigns gwNet as an address on hostLink (this
+// attachment's own host-side interface — see ConfigureHostGateway's doc
+// comment for why not the shared VRF device). Idempotent: EEXIST from a
+// prior attempt having already installed the identical address is not an
+// error.
+func installGatewayAddress(hostLink netlink.Link, gwNet *net.IPNet, addrFlags int) error {
 	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet, Flags: addrFlags}); err != nil {
 		if !errors.Is(err, syscall.EEXIST) {
-			return fmt.Errorf("add gateway address %s to host interface %q: %w", gwNet, hostName, err)
+			return fmt.Errorf("add gateway address %s to host interface %q: %w", gwNet, hostLink.Attrs().Name, err)
 		}
 	}
+	return nil
+}
 
+// installPodSubnetRoute installs an explicit route to subnet, into the given
+// VRF table, pointing at hostLink (this attachment's own host-side
+// interface), for one address family. Idempotent: an existing matching
+// route is left alone, and a conflicting one returns an error rather than
+// being overwritten.
+func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tableID int) error {
 	desiredRoute := &netlink.Route{
 		Dst:       subnet,
 		LinkIndex: hostLink.Attrs().Index,
