@@ -1,6 +1,7 @@
 #!/bin/bash
 # verify-ns30.sh — confirm IPv6 ping connectivity between ns30's two pods on
-# dfw (same node, same VPC), in both directions. ns30 is single-site (dfw).
+# dfw (same node, same VPC, two distinct attachments sharing one VRF), in
+# both directions. ns30 is single-site (dfw).
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -9,11 +10,20 @@ source "${SCRIPT_DIR}/lib.sh"
 NS=ns30
 NODE=$(control_plane dfw)
 
-mapfile -t PODS < <(pod_names "${NODE}" "${NS}" | tr ' ' '\n')
-if [ "${#PODS[@]}" -ne 2 ]; then
-  echo "expected 2 ns30 pods on dfw, found ${#PODS[@]}: ${PODS[*]:-none}" >&2
-  exit 1
-fi
+# ns30's two pods are two distinct attachments (see
+# resources/tenants/ns30/base/kustomization.yaml), each its own Deployment
+# with its own label — not two replicas of one Deployment — so each is
+# fetched by its own label rather than via pod_names' default "app=private".
+LABELS=(app=private app=private-b)
+PODS=()
+for label in "${LABELS[@]}"; do
+  pod=$(pod_name "${NODE}" "${NS}" "${label}")
+  if [ -z "${pod}" ]; then
+    echo "ns30 pod (label ${label}) not found on dfw" >&2
+    exit 1
+  fi
+  PODS+=("${pod}")
+done
 
 IP0=$(pod_ip6 "${NODE}" "${NS}" "${PODS[0]}")
 IP1=$(pod_ip6 "${NODE}" "${NS}" "${PODS[1]}")

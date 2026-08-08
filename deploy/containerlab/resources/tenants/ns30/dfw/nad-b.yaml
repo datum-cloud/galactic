@@ -1,0 +1,31 @@
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: private-b
+  namespace: ns30
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "private-b",
+      "plugins": [
+        {
+          "type": "galactic-cni",
+          "vpc": "30",
+          "vpcattachment": "31",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv6_subnet": "fd20:30:ff02::/48",
+            "address_families": ["ipv6"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "30",
+          "vpcattachment": "31",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

@@ -1,0 +1,38 @@
+# The second of ns40's two attachments — see ../base/kustomization.yaml's
+# doc comment for why this is a standalone Deployment on its own NAD
+# (nad-b.yaml, vpcattachment "41") rather than a second replica of ../base's
+# Deployment. Mirrors ../../base/pod.yaml (the shared tenant Deployment
+# template) directly rather than composing it through kustomize, since a
+# second copy needs a different name/label/annotation than kustomize's
+# nameSuffix + patch ordering can reliably guarantee.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netshoot-b
+  namespace: ns40
+  labels:
+    app: private-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: private-b
+  template:
+    metadata:
+      labels:
+        app: private-b
+      annotations:
+        v1.multus-cni.io/default-network: ns40/private-b
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: netshoot
+          image: nicolaka/netshoot:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
