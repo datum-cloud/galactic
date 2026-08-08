@@ -117,11 +117,13 @@ func TestBootstrap(t *testing.T) {
 	SourceTapCNIBinary = filepath.Join(tmpDir, "source-galactic-tap-cni")
 	SourceIPAMBinary = filepath.Join(tmpDir, "source-galactic-ipam")
 	SourceBGPBinary = filepath.Join(tmpDir, "source-galactic-bgp")
+	SourceRouteBinary = filepath.Join(tmpDir, "source-galactic-route")
 	SourceHostDeviceBinary = filepath.Join(tmpDir, "source-host-device")
 	writeSourceBinary(t, SourceCNIBinary, "cni-content")
 	writeSourceBinary(t, SourceTapCNIBinary, "tap-cni-content")
 	writeSourceBinary(t, SourceIPAMBinary, "ipam-content")
 	writeSourceBinary(t, SourceBGPBinary, "bgp-content")
+	writeSourceBinary(t, SourceRouteBinary, "route-content")
 	writeSourceBinary(t, SourceHostDeviceBinary, "host-device-content")
 
 	// Mock node object
@@ -179,6 +181,7 @@ func TestBootstrap(t *testing.T) {
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap-cni"), "tap-cni-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-ipam"), "ipam-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-bgp"), "bgp-content")
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-route"), "route-content")
 
 		// Verify conflist written
 		conflist, err := loadHostConf(HostConflist)

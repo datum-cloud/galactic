@@ -825,9 +825,6 @@ func TestResourceTrackerFieldsSet(t *testing.T) {
 	if tracker.vrfCreated {
 		t.Error("vrfCreated should be false by default")
 	}
-	if tracker.routesCreated != 0 {
-		t.Error("routesCreated should be zero by default")
-	}
 }
 
 // ---- cmdStatus ---------------------------------------------------------
