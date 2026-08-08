@@ -9,11 +9,13 @@ pod-to-pod connectivity. Every one of them follows the same mechanism: Multus
 attaches each `netshoot` pod to its VPC's `private` NetworkAttachmentDefinition
 (via the `v1.multus-cni.io/default-network` annotation, which makes the VPC
 interface the pod's `eth0` rather than an additional `net1` — there is no
-`k8s.v1.cni.cncf.io/networks` annotation in play here), which invokes
-`galactic-cni` to create a VRF, veth pair, SRv6 encapsulation route, and a
-`BGPAdvertisement` CRD. The `galactic-router` controller then advertises each
-pod's EVPN route to the route reflector, distributing reachability across
-sites.
+`k8s.v1.cni.cncf.io/networks` annotation in play here), which invokes the
+galactic CNI plugin chain: `galactic-cni` creates a VRF and veth pair, then
+`galactic-bgp` registers the attachment against the eBPF uSID datapath and
+writes a `BGPAdvertisement` CRD (see [docs/cni-cmd-sequence.md](../../../docs/cni-cmd-sequence.md)
+for the full per-binary ADD sequence). The `galactic-router` controller then
+advertises each pod's EVPN route to the route reflector, distributing
+reachability across sites.
 
 They differ only in scope and addressing:
 
@@ -37,7 +39,7 @@ fabric. The low hextet of a pod's USID is `(Function << 12) | Argument`
 `0xE` (`FunctionEndDT46`) for every plain L3 VRF attachment, and `Argument` is
 a 12-bit value `galactic-router` allocates per-node as the lowest unused slot
 in `[0x001, 0xFFF]` among that node's existing `BGPVRFInstance` CRDs
-(`allocateArgument`, `internal/cni/bgp.go`) — **not** a decode of the NAD's
+(`allocateArgument`, `internal/cnibgp/bgp.go`) — **not** a decode of the NAD's
 `vpc`/`vpcattachment` values. Concretely, expect hextets in the
 `0xe001`–`0xefff` range; the exact value depends on allocation order (`ns50`
 is provisioned first in `task deploy`, then `ns10`, `ns20`, `ns30`, `ns40` in

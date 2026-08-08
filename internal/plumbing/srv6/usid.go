@@ -20,7 +20,7 @@ import (
 // no distinct wire code for a per-family variant anyway, design plan R3):
 // it is the only endpoint behavior the eBPF datapath's vrf_table ever
 // installs, regardless of pod-subnet address family (see
-// internal/cni/bgp.go's registerEBPFDatapath/buildAdvertisementSpec).
+// internal/cnibgp/bgp.go's registerEBPFDatapath/buildAdvertisementSpec).
 func functionNibble(fn bgpv1alpha1.SRv6Function) (uint8, error) {
 	if fn == bgpv1alpha1.SRv6FunctionEndDT46 {
 		return uformat.FunctionEndDT46, nil

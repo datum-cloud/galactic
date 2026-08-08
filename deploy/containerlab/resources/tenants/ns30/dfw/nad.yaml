@@ -5,14 +5,27 @@ metadata:
   name: private
   namespace: ns30
 spec:
-  config: |
+  config: |-
     {
       "cniVersion": "1.0.0",
       "name": "private",
-      "type": "galactic-cni",
-      "vpc": "30",
-      "vpcattachment": "30",
-      "namespace": "galactic-system",
-      "ipv6_subnet": "fd20:30:ff01::/48",
-      "address_families": ["ipv6"]
+      "plugins": [
+        {
+          "type": "galactic-cni",
+          "vpc": "30",
+          "vpcattachment": "30",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv6_subnet": "fd20:30:ff01::/48",
+            "address_families": ["ipv6"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "30",
+          "vpcattachment": "30",
+          "namespace": "galactic-system"
+        }
+      ]
     }

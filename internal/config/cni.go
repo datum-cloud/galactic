@@ -6,7 +6,6 @@ package config
 
 import (
 	"os"
-	"strings"
 )
 
 // --- CNI environment variable keys -----------------------------------------
@@ -15,7 +14,6 @@ const (
 	EnvCNINodeName         = "GALACTIC_CNI_NODE_NAME"
 	EnvCNIKubeconfig       = "GALACTIC_CNI_KUBECONFIG"
 	EnvCNIKubernetesConfig = "GALACTIC_CNI_KUBERNETES_CONFIG"
-	EnvCNIEnableLocalIPAM  = "GALACTIC_CNI_ENABLE_LOCAL_IPAM"
 	EnvLogLevel            = "GALACTIC_CNI_LOG_LEVEL"
 	EnvLogFile             = "GALACTIC_CNI_LOG_FILE"
 	EnvNamespace           = "GALACTIC_CNI_NAMESPACE"
@@ -104,11 +102,4 @@ type ConflistValues struct {
 	Namespace  string
 	LogFile    string
 	LogLevel   string
-}
-
-// CNIGetEnableLocalIPAM reports whether local (in-memory) IPAM is enabled via
-// environment variable. Returns false if the variable is unset or not "true".
-func CNIGetEnableLocalIPAM() bool {
-	val := os.Getenv(EnvCNIEnableLocalIPAM)
-	return strings.EqualFold(val, "true")
 }

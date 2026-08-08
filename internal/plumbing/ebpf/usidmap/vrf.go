@@ -102,7 +102,7 @@ func (t *VRFTable) Generation() uint64 {
 // because a repeat Register of the *same* key is not always a fresh
 // attachment lifecycle -- it is also, in the ordinary case, the CNI ADD
 // retry path re-registering after a transient k8s-op failure
-// (internal/cni/bgp.go's retryK8sOps), which happens on an Argument that
+// (internal/cnibgp/bgp.go's retryK8sOps), which happens on an Argument that
 // may already be carrying live traffic. R8's make-before-break migration
 // gate reads these counters to prove an Argument carried no traffic before
 // cutover; a blind overwrite that zeroed them on every retry would make a
