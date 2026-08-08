@@ -2,20 +2,17 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package cni
+package cniipam
 
 import (
-	"time"
-
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/version"
 
 	"go.datum.net/galactic/internal/metadata"
 )
 
-const cniTimeout = 10 * time.Second
-
-// RunPlugin starts the CNI plugin, handling ADD, DEL, CHECK, and STATUS operations.
+// RunPlugin starts galactic-ipam, handling the CNI IPAM delegation
+// protocol's ADD, DEL, CHECK, and STATUS operations.
 func RunPlugin() {
 	skel.PluginMainFuncs(
 		skel.CNIFuncs{
@@ -25,6 +22,6 @@ func RunPlugin() {
 			Status: cmdStatus,
 		},
 		version.All,
-		"CNI galactic plugin "+metadata.Version,
+		"CNI galactic-ipam plugin "+metadata.Version,
 	)
 }

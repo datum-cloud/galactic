@@ -25,31 +25,19 @@ type Termination struct {
 
 // PluginConf is the CNI plugin configuration passed via stdin on each
 // invocation of galactic-tap-cni.
+//
+// IPAM addressing fields live entirely inside the "ipam" block — see
+// go.datum.net/galactic/internal/cniipam's doc comment for the explicit
+// delegation contract.
 type PluginConf struct {
 	types.PluginConf
-	VPC             string        `json:"vpc"`
-	VPCAttachment   string        `json:"vpcattachment"`
-	MTU             int           `json:"mtu,omitempty"`
-	Terminations    []Termination `json:"terminations,omitempty"`
-	IPAM            *cniipam.IPAM `json:"ipam"`
-	Namespace       string        `json:"namespace,omitempty"`
-	IPv6Subnet      string        `json:"ipv6_subnet,omitempty"`
-	IPv4Subnet      string        `json:"ipv4_subnet,omitempty"`
-	AddressFamilies []string      `json:"address_families,omitempty"`
+	VPC           string        `json:"vpc"`
+	VPCAttachment string        `json:"vpcattachment"`
+	MTU           int           `json:"mtu,omitempty"`
+	Terminations  []Termination `json:"terminations,omitempty"`
+	IPAM          *cniipam.IPAM `json:"ipam"`
+	Namespace     string        `json:"namespace,omitempty"`
 }
 
 // HostConf holds node-local settings read from /etc/cni/net.d/10-galactic.conflist.
 type HostConf = hostconf.HostConf
-
-// allocConfig adapts pluginConf's fields into cniipam.AllocConfig.
-func allocConfig(pluginConf *PluginConf) cniipam.AllocConfig {
-	return cniipam.AllocConfig{
-		VPC:             pluginConf.VPC,
-		VPCAttachment:   pluginConf.VPCAttachment,
-		Namespace:       pluginConf.Namespace,
-		IPAM:            pluginConf.IPAM,
-		IPv6Subnet:      pluginConf.IPv6Subnet,
-		IPv4Subnet:      pluginConf.IPv4Subnet,
-		AddressFamilies: pluginConf.AddressFamilies,
-	}
-}

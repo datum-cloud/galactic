@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -68,12 +67,11 @@ func assertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
 
 func TestParseConf(t *testing.T) {
 	tests := []struct {
-		name                string
-		input               string
-		wantVPC             string
-		wantAddressFamilies []string // nil means "don't check"
-		wantErr             string
-		wantCode            uint // CNI error code; 0 means "don't check"
+		name     string
+		input    string
+		wantVPC  string
+		wantErr  string
+		wantCode uint // CNI error code; 0 means "don't check"
 	}{
 		{
 			name: "valid config",
@@ -191,130 +189,15 @@ func TestParseConf(t *testing.T) {
 			wantVPC: testVPC,
 		},
 
-		// ---- dual-stack addressing fields (ipv6_subnet, ipv4_subnet, address_families) ----
-
 		{
-			name: "dual-stack fields omitted parses successfully",
+			name: "ipam block present is accepted, delegated per its own contract",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:             testVPC,
-			wantAddressFamilies: []string{addressFamilyIPv6},
-		},
-		{
-			name: "valid ipv6_subnet accepted",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipv6_subnet":"fd00:10:ff01::/48"}`,
+					`"vpcattachment":"%s","ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00:10:ff01::/48"}}`,
 				testVPC, testAttachment,
 			),
 			wantVPC: testVPC,
-		},
-		{
-			name: "invalid ipv6_subnet CIDR rejected",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipv6_subnet":"not-a-cidr"}`,
-				testVPC, testAttachment,
-			),
-			wantErr:  "invalid CIDR value for field 'ipv6_subnet'",
-			wantCode: 7,
-		},
-		{
-			name: "ipv4 CIDR given where ipv6_subnet expected rejected",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipv6_subnet":"10.0.0.0/24"}`,
-				testVPC, testAttachment,
-			),
-			wantErr:  "ipv6_subnet must be an IPv6 CIDR, got IPv4",
-			wantCode: 7,
-		},
-		{
-			name: "ipv6_subnet prefix length over 96 rejected",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipv6_subnet":"fd00:10:ff01::/112"}`,
-				testVPC, testAttachment,
-			),
-			wantErr:  "ipv6_subnet prefix length 112 exceeds maximum of 96",
-			wantCode: 7,
-		},
-		{
-			name: "valid ipv4_subnet accepted",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipv4_subnet":"10.0.0.0/20"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC: testVPC,
-		},
-		{
-			// A standard dotted-decimal CIDR can never carry a mask longer
-			// than /32 (net.ParseCIDR itself rejects e.g. "10.0.0.0/33"), so
-			// this exercises the prefix-length guard via an IPv4-mapped IPv6
-			// literal, which Go parses with a 128-bit mask space.
-			name: "ipv4_subnet prefix length over 32 rejected",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipv4_subnet":"::ffff:10.0.0.0/40"}`,
-				testVPC, testAttachment,
-			),
-			wantErr:  "ipv4_subnet prefix length 40 exceeds maximum of 32",
-			wantCode: 7,
-		},
-		{
-			name: "ipv6 CIDR given where ipv4_subnet expected rejected",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipv4_subnet":"2001:db8::/64"}`,
-				testVPC, testAttachment,
-			),
-			wantErr:  "ipv4_subnet must be an IPv4 CIDR, got IPv6",
-			wantCode: 7,
-		},
-		{
-			name: "address_families defaults to ipv6 when omitted",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:             testVPC,
-			wantAddressFamilies: []string{addressFamilyIPv6},
-		},
-		{
-			name: "address_families explicit dual-stack accepted",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","address_families":["ipv6","ipv4"]}`,
-				testVPC, testAttachment,
-			),
-			wantVPC:             testVPC,
-			wantAddressFamilies: []string{addressFamilyIPv6, addressFamilyIPv4},
-		},
-		{
-			name: "invalid address_families entry rejected",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","address_families":["ipv6","bogus"]}`,
-				testVPC, testAttachment,
-			),
-			wantErr:  `invalid address_families entry "bogus": must be "ipv6" or "ipv4"`,
-			wantCode: 7,
 		},
 	}
 
@@ -338,9 +221,6 @@ func TestParseConf(t *testing.T) {
 			}
 			if conf.VPC != tt.wantVPC {
 				t.Errorf("VPC = %q, want %q", conf.VPC, tt.wantVPC)
-			}
-			if tt.wantAddressFamilies != nil && !reflect.DeepEqual(conf.AddressFamilies, tt.wantAddressFamilies) {
-				t.Errorf("AddressFamilies = %v, want %v", conf.AddressFamilies, tt.wantAddressFamilies)
 			}
 		})
 	}
@@ -1186,37 +1066,47 @@ func TestLoadHostConf(t *testing.T) {
 	}
 }
 
-// ---- enableLocalIPAM required check -----------------------------------------
+// ---- explicit IPAM delegation contract -------------------------------------
 
-func TestEnableLocalIPAMRequired(t *testing.T) {
-	// Set local IPAM enabled
-	t.Setenv("GALACTIC_CNI_ENABLE_LOCAL_IPAM", "true")
+// TestIPAMBlockPresenceIsTheOnlyTrigger is the regression test for the
+// explicit contract internal/cniipam's doc comment describes: whether this
+// plugin delegates to IPAM at all is decided solely by whether "ipam" is
+// present in its own config — no environment variable can manufacture (or
+// suppress) that block. The historical GALACTIC_CNI_ENABLE_LOCAL_IPAM
+// trigger no longer exists at all (that flag, renamed
+// GALACTIC_IPAM_ENABLE_LOCAL_IPAM, now lives entirely inside
+// internal/cniipam as a default-filler for an already-present ipam block).
+func TestIPAMBlockPresenceIsTheOnlyTrigger(t *testing.T) {
 	t.Setenv("GALACTIC_CNI_NODE_NAME", "test-node")
 
-	// Missing IPAM block should cause a hard error.
+	// Missing ipam block: no error, no delegation signal — conf.IPAM stays nil.
 	inputNoIPAM := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
-	_, err := parseConf([]byte(inputNoIPAM))
-	if err == nil {
-		t.Fatal("expected error for missing ipam block when local IPAM is enabled, got nil")
+	conf, err := parseConf([]byte(inputNoIPAM))
+	if err != nil {
+		t.Fatalf("unexpected error for missing ipam block: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no 'ipam' block is present") {
-		t.Fatalf("expected error containing 'no 'ipam' block', got: %v", err)
+	if conf.IPAM != nil {
+		t.Fatalf("IPAM = %+v, want nil (absent block must never be manufactured)", conf.IPAM)
 	}
 
-	// Present IPAM block should succeed.
+	// Present ipam block: conf.IPAM is populated, ready for delegation.
 	inputWithIPAM := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s","ipam":{"type":"pool"}}`,
+		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s",`+
+			`"ipam":{"type":"galactic-ipam"}}`,
 		testVPC, testAttachment,
 	)
-	conf, err := parseConf([]byte(inputWithIPAM))
+	conf, err = parseConf([]byte(inputWithIPAM))
 	if err != nil {
 		t.Fatalf("unexpected error with present ipam block: %v", err)
 	}
 	if conf.IPAM == nil {
 		t.Fatal("expected IPAM block to be non-nil")
+	}
+	if conf.IPAM.Type != "galactic-ipam" {
+		t.Errorf("IPAM.Type = %q, want %q", conf.IPAM.Type, "galactic-ipam")
 	}
 }
 

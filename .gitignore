@@ -15,6 +15,10 @@ coverage.html
 /galactic
 /galactic-router
 /galactic-cni
+/galactic-tap-cni
+/galactic-ipam
+/galactic-bgp
+/galactic-route
 
 # Go workspace
 go.work
