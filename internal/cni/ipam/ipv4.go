@@ -18,12 +18,6 @@ const (
 	// ipv4Bits is the number of bits in an IPv4 address.
 	ipv4Bits = 32
 
-	// DefaultIPv4LockDir is the well-known parent directory for the
-	// node-local on-disk lock and allocation state IPv4PoolAllocator uses to
-	// stay correct across separate CNI plugin invocations (each ADD/DEL is
-	// its own OS process) sharing the same site-wide IPv4 pool.
-	DefaultIPv4LockDir = "/var/lib/cni/galactic-ipv4"
-
 	// ipv4LockFileName is the flock target within each pool's state
 	// directory; every other entry in that directory is an allocation
 	// marker file named after the address it reserves.
@@ -55,7 +49,7 @@ type IPv4PoolAllocator struct {
 // an optional gateway address. The pool must be an IPv4 prefix. If gateway is
 // empty, the network address plus 1 is used as the gateway. lockDir is the
 // parent directory for this pool's on-disk lock and allocation state (see
-// DefaultIPv4LockDir for the production path); it must not be empty, and a
+// DefaultLockDir for the production path); it must not be empty, and a
 // pool-scoped subdirectory under it is created if it doesn't already exist.
 func NewIPv4PoolAllocator(poolCIDR, gateway, lockDir string) (*IPv4PoolAllocator, error) {
 	_, pool, err := net.ParseCIDR(poolCIDR)
@@ -172,6 +166,62 @@ func (a *IPv4PoolAllocator) Deallocate(addr string) {
 	}
 
 	_ = os.Remove(filepath.Join(a.stateDir, addr))
+}
+
+// LookupContainer reports the address, if any, allocated to containerID,
+// without removing it — used by CHECK to confirm an allocation is still in
+// place. Returns ("", false) if none is found.
+func (a *IPv4PoolAllocator) LookupContainer(containerID string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.findContainerMarker(containerID)
+}
+
+// DeallocateContainer removes the allocation, if any, held by containerID,
+// without the caller needing to already know the allocated address —
+// mirrors PoolAllocator.DeallocateContainer (IPv6); see its doc comment.
+// Returns the deallocated address and true if one was found; ("", false)
+// otherwise.
+func (a *IPv4PoolAllocator) DeallocateContainer(containerID string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	addr, ok := a.findContainerMarker(containerID)
+	if !ok {
+		return "", false
+	}
+	_ = os.Remove(filepath.Join(a.stateDir, addr))
+	return addr, true
+}
+
+// findContainerMarker scans this pool's state directory under its own
+// flock for the marker file whose content matches containerID, returning
+// its filename (the address it reserves). Callers must hold mu.
+func (a *IPv4PoolAllocator) findContainerMarker(containerID string) (string, bool) {
+	lock, err := newFileLock(filepath.Join(a.stateDir, ipv4LockFileName))
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = lock.close() }()
+
+	if err := lock.lock(); err != nil {
+		return "", false
+	}
+
+	entries, err := os.ReadDir(a.stateDir)
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if e.Name() == ipv4LockFileName {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(a.stateDir, e.Name()))
+		if err == nil && string(content) == containerID {
+			return e.Name(), true
+		}
+	}
+	return "", false
 }
 
 // IsAllocated reports whether the given address string is actively

@@ -184,6 +184,46 @@ func TestIPv4PoolAllocatorDeallocate(t *testing.T) {
 	}
 }
 
+func TestIPv4PoolAllocatorDeallocateContainer(t *testing.T) {
+	lockDir := t.TempDir()
+
+	addA, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, lockDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	addr, err := addA.Allocate("container-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A fresh instance, as DEL's own process would construct, must see the
+	// allocation the (conceptually already-exited) ADD process made.
+	delA, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, lockDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	gotAddr, ok := delA.DeallocateContainer("container-a")
+	if !ok {
+		t.Fatal("DeallocateContainer(\"container-a\") = false, want true")
+	}
+	if gotAddr != addr.String() {
+		t.Errorf("DeallocateContainer returned %q, want %q", gotAddr, addr.String())
+	}
+	if delA.IsAllocated(addr.String()) {
+		t.Error("IsAllocated after DeallocateContainer = true, want false")
+	}
+}
+
+func TestIPv4PoolAllocatorDeallocateContainerUnknown(t *testing.T) {
+	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := a.DeallocateContainer("no-such-container"); ok {
+		t.Error("DeallocateContainer for unknown container = true, want false")
+	}
+}
+
 func TestIPv4PoolAllocatorDeallocateUnknown(t *testing.T) {
 	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 	if err != nil {

@@ -10,8 +10,7 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
-
-	"go.datum.net/galactic/internal/cniipam"
+	"github.com/containernetworking/plugins/pkg/ipam"
 )
 
 func cmdDel(args *skel.CmdArgs) error {
@@ -32,13 +31,13 @@ func cmdDel(args *skel.CmdArgs) error {
 	vpc, vpcAtt := pluginConf.VPC, pluginConf.VPCAttachment
 
 	// Deallocate the pod's IPAM subnet. This is pod-specific and safe to
-	// release immediately.
-	cfg := allocConfig(pluginConf)
-	if cniipam.WantsIPAM(cfg) {
-		if k8s, err := newK8sClient(); err == nil {
-			cniipam.Deallocate(args, cfg, k8s)
-		} else {
-			slog.Warn("DEL: failed to create k8s client, skipping IPAM deallocation", "err", err,
+	// release immediately. Delegating at all (or not) is entirely
+	// pluginConf.IPAM's own presence — no k8s client needed here at all
+	// now that galactic-ipam's own DEL looks its allocation up locally
+	// (see internal/cniipam's doc comment).
+	if pluginConf.IPAM != nil {
+		if err := ipam.ExecDel(pluginConf.IPAM.Type, args.StdinData); err != nil {
+			slog.Warn("DEL: IPAM delegation failed, allocation may not have been released", "err", err,
 				"containerID", args.ContainerID)
 		}
 	}
