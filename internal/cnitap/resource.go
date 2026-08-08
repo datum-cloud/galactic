@@ -1,8 +1,8 @@
-// Copyright 2025 Datum Cloud, Inc.
+// Copyright 2026 Datum Cloud, Inc.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package cni
+package cnitap
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/cni/crdnames"
-	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cnibgp"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -32,9 +32,7 @@ func init() {
 }
 
 // newK8sClient creates a new Kubernetes client using the in-cluster config,
-// scoped to cniScheme (core types + BGP CRDs — the latter needed for both
-// rollback's own CRD deletes and the cnibgp.PublishBGPState call this
-// client gets passed into).
+// scoped to cniScheme.
 func newK8sClient() (client.Client, error) {
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {
@@ -48,10 +46,11 @@ func newK8sClient() (client.Client, error) {
 }
 
 // resourceTracker tracks resources created during cmdAdd for selective
-// rollback. galactic-cni is veth-only, so this is scoped to exactly what its
-// own ADD creates: the VRF, the veth pair, and — for now, until BGP publish
-// becomes its own chain-invoked plugin — the BGP CRDs and eBPF vrf_table
-// entry that internal/cnibgp.PublishBGPState wrote on its behalf.
+// rollback. galactic-tap-cni is tap-only, so this is scoped to exactly what
+// its own ADD creates: the VRF, the tap device, and — for now, until BGP
+// publish becomes its own chain-invoked plugin — the BGP CRDs and eBPF
+// vrf_table entry that internal/cnibgp.PublishBGPStateK8s wrote on its
+// behalf. Mirrors internal/cni's own resourceTracker.
 type resourceTracker struct {
 	vpc, vpcAttachment string
 	vrfCreated         bool
@@ -61,21 +60,15 @@ type resourceTracker struct {
 	k8s                client.Client
 	namespace          string
 
-	// ebpfRegistered, ebpfBlock, and ebpfArgument mirror
-	// cnibgp.PublishResult's fields, recorded here so cleanup can call
-	// cnibgp.UnregisterEBPFDatapath for the same (block, argument) pair.
 	ebpfRegistered bool
 	ebpfBlock      uint64
 	ebpfArgument   uint16
 }
 
-// cleanup rolls back all tracked resources in reverse creation order.
-// Errors are logged but never returned — the caller already has a failure.
 func (rt *resourceTracker) cleanup(ctx context.Context) {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 
-	// 1. Delete BGPAdvertisement (withdraws prefixes)
 	if rt.advCreated && rt.k8s != nil {
 		adv := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{
@@ -91,7 +84,6 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 2. Delete BGPVRFInstance
 	if rt.vrfInstanceCreated && rt.k8s != nil {
 		vrfInst := &bgpv1alpha1.BGPVRFInstance{
 			ObjectMeta: metav1.ObjectMeta{
@@ -107,10 +99,6 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 3. Unregister the eBPF uSID datapath's vrf_table entry (only if
-	// PublishBGPState actually wrote one). A pinned BPF map entry has no
-	// implicit teardown when the VRF/interfaces are deleted below, so it
-	// must be removed explicitly here.
 	if rt.ebpfRegistered {
 		if vrfTableID, err := vrf.TableID(rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to resolve VRF table id, skipping eBPF vrf_table unregister", "err", err,
@@ -124,15 +112,13 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 4. Delete host veth
-	if err := veth.Delete(rt.vpc, rt.vpcAttachment); err != nil {
-		slog.Error("Rollback: failed to delete veth", "err", err,
+	if err := tap.Delete(rt.vpc, rt.vpcAttachment); err != nil {
+		slog.Error("Rollback: failed to delete tap", "err", err,
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	} else {
-		slog.Debug("Rollback: deleted veth", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
+		slog.Debug("Rollback: deleted tap", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	}
 
-	// 5. Delete VRF (flushes all routes, removes VRF interface)
 	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 		slog.Error("Rollback: failed to delete VRF", "err", err,
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)

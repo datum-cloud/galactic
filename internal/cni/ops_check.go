@@ -38,7 +38,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 		return err
 	}
 	slog.Info("CHECK: starting", "containerID", args.ContainerID,
-		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment, "interfaceType", pluginConf.InterfaceType)
+		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 
 	var errs []error
 
@@ -46,17 +46,15 @@ func cmdCheck(args *skel.CmdArgs) error {
 	hostName, nodeErrs := checkNodeLevelState(pluginConf.VPC, pluginConf.VPCAttachment)
 	errs = append(errs, nodeErrs...)
 
-	// For veth mode, verify the guest interface is in the container netns.
-	if pluginConf.InterfaceType == interfaceTypeVeth {
-		guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
-		if err := checkGuestInterface(args.Netns, guestName); err != nil {
-			errs = append(errs, fmt.Errorf("guest interface %q: %w", guestName, err))
-		}
+	// Verify the guest interface is in the container netns.
+	guestName := intf.GenerateInterfaceNameGuest(pluginConf.VPC, pluginConf.VPCAttachment)
+	if err := checkGuestInterface(args.Netns, guestName); err != nil {
+		errs = append(errs, fmt.Errorf("guest interface %q: %w", guestName, err))
+	}
 
-		// Verify termination routes exist in the VRF table.
-		if err := checkTerminationRoutes(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.Terminations); err != nil {
-			errs = append(errs, fmt.Errorf("termination routes: %w", err))
-		}
+	// Verify termination routes exist in the VRF table.
+	if err := checkTerminationRoutes(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.Terminations); err != nil {
+		errs = append(errs, fmt.Errorf("termination routes: %w", err))
 	}
 
 	// Validate kernel state against prevResult (CNI spec §4.3).
