@@ -106,16 +106,3 @@ func TestCNIConfigNodeNameLegacyFallback(t *testing.T) {
 		t.Errorf("NodeName = %q, want %q", cfg.NodeName, "legacy-node")
 	}
 }
-
-func TestCNIGetEnableLocalIPAM(t *testing.T) {
-	t.Setenv(EnvCNIEnableLocalIPAM, "true")
-	if got := CNIGetEnableLocalIPAM(); !got {
-		t.Error("CNIGetEnableLocalIPAM() = false, want true")
-	}
-}
-
-func TestCNIGetEnableLocalIPAMFalse(t *testing.T) {
-	if got := CNIGetEnableLocalIPAM(); got {
-		t.Error("CNIGetEnableLocalIPAM() = true, want false (env unset)")
-	}
-}

@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
@@ -71,17 +70,10 @@ func newRootCommand() *cobra.Command {
 			// Tap mode never enters a network namespace — all operations
 			// are host-side. Set the override so the CNI library skips its
 			// same-netns rejection check, which would otherwise reject
-			// kraftlet workloads that pass the host netns.
-			stdinData, _ := io.ReadAll(os.Stdin)
-			r, w, _ := os.Pipe()
-			go func() {
-				_, _ = w.Write(stdinData)
-				_ = w.Close()
-			}()
-			oldStdin := os.Stdin
-			os.Stdin = r
-			defer func() { os.Stdin = oldStdin }()
-
+			// kraftlet workloads that pass the host netns. Unconditional
+			// here (unlike galactic-cni, which has no override logic at
+			// all): every invocation of this binary is tap mode, so there
+			// is no config content to peek at first.
 			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
 
 			cnitap.RunPlugin()

@@ -5,10 +5,8 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
@@ -108,27 +106,14 @@ func newRootCommand() *cobra.Command {
 				return nil
 			}
 
-			// Read stdin once so we can inspect the CNI config before the
-			// library runs its netns validation. We pipe the buffered bytes
-			// back as os.Stdin so the CNI library can still read them.
-			stdinData, _ := io.ReadAll(os.Stdin)
-			r, w, _ := os.Pipe()
-			go func() {
-				_, _ = w.Write(stdinData)
-				_ = w.Close()
-			}()
-			oldStdin := os.Stdin
-			os.Stdin = r
-
-			// Tap mode never enters a network namespace — all operations are
-			// host-side. Set the override so the CNI library skips its same-
-			// netns rejection check, which would otherwise reject kraftlet
-			// workloads that pass the host netns.
-			if isTapMode(stdinData) {
-				_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
-			}
-
-			defer func() { os.Stdin = oldStdin }()
+			// galactic-cni is veth-only: it always moves an interface into
+			// the container's own netns, so it always needs the CNI
+			// library's normal same-netns rejection check — unlike
+			// galactic-tap-cni (which unconditionally sets
+			// CNI_NETNS_OVERRIDE, since tap workloads never enter a netns
+			// at all), there is no stdin-peeking tap-mode detection here
+			// anymore. Interface kind is which binary you invoke now, not a
+			// config field this process branches on.
 			cni.RunPlugin()
 			return nil
 		},
@@ -140,17 +125,6 @@ func newRootCommand() *cobra.Command {
 
 	cmd.AddCommand(newInitCommand(), newRunCommand())
 	return cmd
-}
-
-// isTapMode returns true when the CNI config requests tap interface type.
-// Only a minimal JSON parse is needed — full validation happens later in
-// parseConf inside cmdAdd.
-func isTapMode(stdinData []byte) bool {
-	var cfg struct {
-		InterfaceType string `json:"interface_type"`
-	}
-	_ = json.Unmarshal(stdinData, &cfg)
-	return cfg.InterfaceType == "tap"
 }
 
 func main() {

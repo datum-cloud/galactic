@@ -377,7 +377,7 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	if len(routers) == 0 {
 		// A node with any live eBPF-registered attachment at all necessarily
 		// has a BGPRouter targeting it -- registerEBPFDatapath requires one
-		// to run at all (internal/cni/bgp.go). Finding none here is
+		// to run at all (internal/cnibgp/bgp.go). Finding none here is
 		// indistinguishable from a transient listing/cache hiccup or the
 		// router having just been renamed/recreated, so it must not be
 		// treated the same as "genuinely zero live attachments": doing so
