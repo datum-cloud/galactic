@@ -227,8 +227,8 @@ func TestEgressKindForInterfaceType(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "veth maps to EgressKindVeth", iface: ifaceTypeVeth, want: usidmap.EgressKindVeth},
-		{name: "empty defaults to EgressKindVeth", iface: "", want: usidmap.EgressKindVeth},
 		{name: "tap maps to EgressKindTap", iface: ifaceTypeTap, want: usidmap.EgressKindTap},
+		{name: "empty type errors", iface: "", wantErr: true},
 		{name: "unknown type errors", iface: "bogus", wantErr: true},
 	}
 

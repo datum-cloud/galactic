@@ -17,14 +17,17 @@ import (
 
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
-	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 var cniScheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(cniScheme))
-	utilruntime.Must(bgpv1alpha1.AddToScheme(cniScheme))
+	// No BGP CRD scheme registration: this package no longer reads or
+	// writes BGP CRDs itself (that's galactic-bgp's own, chain-invoked
+	// concern now — internal/cnibgp/resource.go registers bgpv1alpha1 for
+	// its own client), and NAD annotation's unstructured.Unstructured Patch
+	// call doesn't require any scheme registration at all.
 }
 
 // newK8sClient creates a new Kubernetes client using the in-cluster config,
