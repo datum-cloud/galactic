@@ -1,3 +1,5 @@
 resources:
   - ../base
   - nad.yaml
+  - pod-b.yaml
+  - nad-b.yaml
