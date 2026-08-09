@@ -160,6 +160,38 @@ func TestPoolAllocatorAllocate(t *testing.T) {
 	}
 }
 
+func TestPoolAllocatorAllocateIdempotentPerContainer(t *testing.T) {
+	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	first, err := pa.Allocate("container-1")
+	if err != nil {
+		t.Fatalf("unexpected error on first allocation: %v", err)
+	}
+
+	// A CNI runtime may retry ADD for the same container after a transient
+	// failure; a retry must get back the same subnet, not a fresh one (and
+	// must not leak the first attempt's marker file).
+	second, err := pa.Allocate("container-1")
+	if err != nil {
+		t.Fatalf("unexpected error on retry allocation: %v", err)
+	}
+	if second.String() != first.String() {
+		t.Errorf("retry Allocate() = %q, want %q (same as first allocation)", second.String(), first.String())
+	}
+
+	// A different container must still get a distinct subnet.
+	other, err := pa.Allocate("container-2")
+	if err != nil {
+		t.Fatalf("unexpected error on other container's allocation: %v", err)
+	}
+	if other.String() == first.String() {
+		t.Errorf("other container's Allocate() = %q, want distinct from %q", other.String(), first.String())
+	}
+}
+
 func TestPoolAllocatorSkipsAllocatedSubnets(t *testing.T) {
 	pa, err := NewPoolAllocator(testPoolCIDR, testPoolGw, testSubnetLen, t.TempDir())
 	if err != nil {

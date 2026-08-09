@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/containernetworking/plugins/pkg/ipam"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -63,6 +64,15 @@ type resourceTracker struct {
 	ebpfRegistered bool
 	ebpfBlock      uint64
 	ebpfArgument   uint16
+
+	// ipamDelegated, ipamType, and ipamStdin record enough to release the
+	// IPAM allocation during rollback — see internal/cni's own
+	// resourceTracker for the full doc comment on why this fires
+	// unconditionally on "ipam" block presence rather than only after a
+	// confirmed ExecAdd.
+	ipamDelegated bool
+	ipamType      string
+	ipamStdin     []byte
 }
 
 func (rt *resourceTracker) cleanup(ctx context.Context) {
@@ -109,6 +119,14 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		} else {
 			slog.Debug("Rollback: unregistered eBPF vrf_table entry",
 				"block", rt.ebpfBlock, "argument", rt.ebpfArgument)
+		}
+	}
+
+	if rt.ipamDelegated {
+		if err := ipam.ExecDel(rt.ipamType, rt.ipamStdin); err != nil {
+			slog.Error("Rollback: failed to release IPAM allocation", "err", err, "ipamType", rt.ipamType)
+		} else {
+			slog.Debug("Rollback: released IPAM allocation", "ipamType", rt.ipamType)
 		}
 	}
 

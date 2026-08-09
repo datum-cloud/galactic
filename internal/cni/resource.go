@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/containernetworking/plugins/pkg/ipam"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -67,6 +68,21 @@ type resourceTracker struct {
 	ebpfRegistered bool
 	ebpfBlock      uint64
 	ebpfArgument   uint16
+
+	// ipamDelegated, ipamType, and ipamStdin record enough to release the
+	// IPAM allocation during rollback. Set as soon as pluginConf.IPAM != nil
+	// is known (before configureIPAM/ipam.ExecAdd is even attempted) rather
+	// than only after a successful ExecAdd: ipam.ExecDel is idempotent per
+	// the CNI IPAM delegation protocol (galactic-ipam's own cmdDel no-ops
+	// when it finds no allocation for the containerID), so calling it
+	// unconditionally whenever an "ipam" block was configured is safe and
+	// covers every failure path, including ones where ExecAdd itself never
+	// ran. Without this, a failed ADD that got past IPAM permanently burns
+	// an address/subnet out of the pool — the on-disk marker file has no
+	// implicit teardown the way the old in-memory-only allocator did.
+	ipamDelegated bool
+	ipamType      string
+	ipamStdin     []byte
 }
 
 // cleanup rolls back all tracked resources in reverse creation order.
@@ -124,7 +140,18 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		}
 	}
 
-	// 4. Delete host veth
+	// 4. Release the IPAM allocation (if pluginConf carried an "ipam" block
+	// at all — see the ipamDelegated field doc comment for why this fires
+	// unconditionally on that alone, not just after a confirmed ExecAdd).
+	if rt.ipamDelegated {
+		if err := ipam.ExecDel(rt.ipamType, rt.ipamStdin); err != nil {
+			slog.Error("Rollback: failed to release IPAM allocation", "err", err, "ipamType", rt.ipamType)
+		} else {
+			slog.Debug("Rollback: released IPAM allocation", "ipamType", rt.ipamType)
+		}
+	}
+
+	// 5. Delete host veth
 	if err := veth.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 		slog.Error("Rollback: failed to delete veth", "err", err,
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
@@ -132,7 +159,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		slog.Debug("Rollback: deleted veth", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	}
 
-	// 5. Delete VRF (flushes all routes, removes VRF interface)
+	// 6. Delete VRF (flushes all routes, removes VRF interface)
 	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
 		slog.Error("Rollback: failed to delete VRF", "err", err,
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)

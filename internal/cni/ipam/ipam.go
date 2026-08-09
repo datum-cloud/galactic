@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -57,6 +58,7 @@ type PoolAllocator struct {
 	reserved  string     // subnet CIDR string containing the gateway; never allocated
 	mu        sync.Mutex // serializes Allocate/Deallocate within this process
 	stateDir  string     // directory holding the lock file and one allocation marker file per allocated subnet
+	state     lockedState
 }
 
 // NewPoolAllocator creates a new pool allocator from an IPv6 CIDR pool, an
@@ -129,6 +131,7 @@ func NewPoolAllocator(poolCIDR, gateway string, subnetLen int, lockDir string) (
 		return nil, fmt.Errorf("create pool state dir %q: %w", stateDir, err)
 	}
 	pa.stateDir = stateDir
+	pa.state = lockedState{stateDir: stateDir, lockFileName: poolLockFileName}
 
 	return pa, nil
 }
@@ -137,69 +140,79 @@ func NewPoolAllocator(poolCIDR, gateway string, subnetLen int, lockDir string) (
 // given container ID, skipping the subnet that contains the pool's gateway
 // address and any subnet another allocation already holds (per the on-disk
 // marker files, so this is correct across separate CNI plugin invocations
-// on the same pool). Returns the allocated subnet CIDR or an error if the
+// on the same pool). If containerID already holds an allocation in this
+// pool, that same subnet is returned rather than a fresh one being handed
+// out — the CNI spec permits a runtime to retry ADD for the same container
+// after a transient failure, and without this check each retry would leak
+// the marker file from the previous attempt (findContainerMarker only ever
+// returns the first match, so only one of the leaked markers would ever be
+// recoverable via DEL). Returns the allocated subnet CIDR or an error if the
 // pool is exhausted. Thread-safe.
 func (a *PoolAllocator) Allocate(containerID string) (*net.IPNet, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	lock, err := newFileLock(filepath.Join(a.stateDir, poolLockFileName))
-	if err != nil {
-		return nil, fmt.Errorf("open lock for pool %s: %w", a.pool.String(), err)
-	}
-	defer func() { _ = lock.close() }()
+	var result *net.IPNet
+	err := a.state.withLock(func() error {
+		if name, ok := a.state.findContainerMarkerLocked(containerID); ok {
+			existing, err := parseAllocatedSubnet(desanitizeMarkerName(name))
+			if err != nil {
+				return fmt.Errorf("parse existing allocation marker %q: %w", name, err)
+			}
+			result = existing
+			return nil
+		}
 
-	if err := lock.lock(); err != nil {
-		return nil, fmt.Errorf("lock pool %s: %w", a.pool.String(), err)
-	}
+		used, err := a.usedSubnets()
+		if err != nil {
+			return err
+		}
 
-	used, err := a.usedSubnets()
+		// Iterate subnet boundaries within the pool.
+		subnetStart := make(net.IP, ipv6Bits/8)
+		copy(subnetStart, a.poolIP)
+
+		for ; a.pool.Contains(subnetStart); subnetStart = incSubnet(subnetStart, a.subnetLen) {
+			subnet := &net.IPNet{
+				IP:   make(net.IP, ipv6Bits/8),
+				Mask: net.CIDRMask(a.subnetLen, ipv6Bits),
+			}
+			copy(subnet.IP, subnetStart)
+			subnetStr := subnet.String()
+
+			if subnetStr == a.reserved {
+				continue
+			}
+			if _, ok := used[subnetStr]; ok {
+				continue
+			}
+
+			markerPath := filepath.Join(a.stateDir, sanitizePoolDirName(subnetStr))
+			if err := os.WriteFile(markerPath, []byte(containerID), 0o600); err != nil {
+				return fmt.Errorf("write allocation marker %q: %w", markerPath, err)
+			}
+			result = subnet
+			return nil
+		}
+
+		return fmt.Errorf("pool %s exhausted (subnet /%d)", a.pool.String(), a.subnetLen)
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Iterate subnet boundaries within the pool.
-	subnetStart := make(net.IP, ipv6Bits/8)
-	copy(subnetStart, a.poolIP)
-
-	for ; a.pool.Contains(subnetStart); subnetStart = incSubnet(subnetStart, a.subnetLen) {
-		subnet := &net.IPNet{
-			IP:   make(net.IP, ipv6Bits/8),
-			Mask: net.CIDRMask(a.subnetLen, ipv6Bits),
-		}
-		copy(subnet.IP, subnetStart)
-		subnetStr := subnet.String()
-
-		if subnetStr == a.reserved {
-			continue
-		}
-		if _, ok := used[subnetStr]; ok {
-			continue
-		}
-
-		markerPath := filepath.Join(a.stateDir, sanitizePoolDirName(subnetStr))
-		if err := os.WriteFile(markerPath, []byte(containerID), 0o600); err != nil {
-			return nil, fmt.Errorf("write allocation marker %q: %w", markerPath, err)
-		}
-		return subnet, nil
-	}
-
-	return nil, fmt.Errorf("pool %s exhausted (subnet /%d)", a.pool.String(), a.subnetLen)
+	return result, nil
 }
 
 // usedSubnets reads the pool's state directory and returns the set of
 // subnet CIDR strings currently marked allocated. Callers must hold both mu
 // and the pool's flock.
 func (a *PoolAllocator) usedSubnets() (map[string]struct{}, error) {
-	entries, err := os.ReadDir(a.stateDir)
+	entries, err := a.state.entries()
 	if err != nil {
-		return nil, fmt.Errorf("read pool state dir %q: %w", a.stateDir, err)
+		return nil, err
 	}
 	used := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
-		if e.Name() == poolLockFileName {
-			continue
-		}
 		used[desanitizeMarkerName(e.Name())] = struct{}{}
 	}
 	return used, nil
@@ -213,17 +226,9 @@ func (a *PoolAllocator) Deallocate(subnetCIDR string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	lock, err := newFileLock(filepath.Join(a.stateDir, poolLockFileName))
-	if err != nil {
-		return
-	}
-	defer func() { _ = lock.close() }()
-
-	if err := lock.lock(); err != nil {
-		return
-	}
-
-	_ = os.Remove(filepath.Join(a.stateDir, sanitizePoolDirName(subnetCIDR)))
+	_ = a.state.withLock(func() error {
+		return os.Remove(filepath.Join(a.stateDir, sanitizePoolDirName(subnetCIDR)))
+	})
 }
 
 // LookupContainer reports the subnet CIDR, if any, allocated to
@@ -233,7 +238,12 @@ func (a *PoolAllocator) LookupContainer(containerID string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	name, ok := a.findContainerMarker(containerID)
+	var name string
+	var ok bool
+	_ = a.state.withLock(func() error {
+		name, ok = a.state.findContainerMarkerLocked(containerID)
+		return nil
+	})
 	if !ok {
 		return "", false
 	}
@@ -244,49 +254,29 @@ func (a *PoolAllocator) LookupContainer(containerID string) (string, bool) {
 // without the caller needing to already know the allocated subnet — the
 // on-disk marker file records which containerID holds each subnet, so this
 // is a direct scan of this pool's own state, no external lookup (e.g. a
-// CRD read) required. Returns the deallocated subnet CIDR and true if one
-// was found; ("", false) otherwise.
+// CRD read) required. The scan and the removal happen under a single flock
+// acquisition (via lockedState.withLock) so a concurrent process sharing
+// this pool can never interleave between them. Returns the deallocated
+// subnet CIDR and true if one was found; ("", false) otherwise.
 func (a *PoolAllocator) DeallocateContainer(containerID string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	name, ok := a.findContainerMarker(containerID)
+	var subnet string
+	var ok bool
+	_ = a.state.withLock(func() error {
+		name, found := a.state.findContainerMarkerLocked(containerID)
+		if !found {
+			return nil
+		}
+		subnet = desanitizeMarkerName(name)
+		ok = true
+		return os.Remove(filepath.Join(a.stateDir, name))
+	})
 	if !ok {
 		return "", false
 	}
-	subnet := desanitizeMarkerName(name)
-	_ = os.Remove(filepath.Join(a.stateDir, name))
 	return subnet, true
-}
-
-// findContainerMarker scans this pool's state directory under its own
-// flock for the marker file whose content matches containerID, returning
-// its (still-sanitized) filename. Callers must hold mu.
-func (a *PoolAllocator) findContainerMarker(containerID string) (string, bool) {
-	lock, err := newFileLock(filepath.Join(a.stateDir, poolLockFileName))
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = lock.close() }()
-
-	if err := lock.lock(); err != nil {
-		return "", false
-	}
-
-	entries, err := os.ReadDir(a.stateDir)
-	if err != nil {
-		return "", false
-	}
-	for _, e := range entries {
-		if e.Name() == poolLockFileName {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(a.stateDir, e.Name()))
-		if err == nil && string(content) == containerID {
-			return e.Name(), true
-		}
-	}
-	return "", false
 }
 
 // IsAllocated reports whether the given subnet CIDR string is actively
@@ -358,4 +348,29 @@ func desanitizeMarkerName(name string) string {
 		return name
 	}
 	return before + "/" + after
+}
+
+// parseAllocatedSubnet parses a subnet CIDR string previously produced by
+// Allocate (via (*net.IPNet).String()) back into a *net.IPNet, preserving
+// its IP exactly as allocated. net.ParseCIDR is deliberately not used here:
+// it returns the *masked* network address, which would zero out incSubnet's
+// per-subnet counter byte — the byte incSubnet advances sits inside what a
+// strict /subnetLen mask treats as host bits (see incSubnet's own doc
+// comment), so re-masking a stored subnet string would silently collapse
+// every allocated subnet in the pool back down to the same reserved-subnet
+// address.
+func parseAllocatedSubnet(cidr string) (*net.IPNet, error) {
+	ipStr, prefixStr, found := strings.Cut(cidr, "/")
+	if !found {
+		return nil, fmt.Errorf("missing '/' in subnet CIDR %q", cidr)
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP in subnet CIDR %q", cidr)
+	}
+	prefixLen, err := strconv.Atoi(prefixStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid prefix length in subnet CIDR %q: %w", cidr, err)
+	}
+	return &net.IPNet{IP: ip.To16(), Mask: net.CIDRMask(prefixLen, ipv6Bits)}, nil
 }

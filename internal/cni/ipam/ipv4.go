@@ -43,6 +43,7 @@ type IPv4PoolAllocator struct {
 	gateway  net.IP     // gateway IP address
 	mu       sync.Mutex // serializes Allocate/Deallocate within this process
 	stateDir string     // directory holding the lock file and one allocation marker file per allocated address
+	state    lockedState
 }
 
 // NewIPv4PoolAllocator creates a new IPv4 pool allocator from a CIDR pool and
@@ -92,61 +93,68 @@ func NewIPv4PoolAllocator(poolCIDR, gateway, lockDir string) (*IPv4PoolAllocator
 		return nil, fmt.Errorf("create pool state dir %q: %w", stateDir, err)
 	}
 	a.stateDir = stateDir
+	a.state = lockedState{stateDir: stateDir, lockFileName: ipv4LockFileName}
 
 	return a, nil
 }
 
 // Allocate assigns the next available IPv4 /32 address from the pool for the
 // given container ID, skipping reserved addresses (the network address, the
-// gateway, the second-to-last address, and the last address of the pool).
-// Returns an error if the pool is exhausted. The read-modify-write against
-// the on-disk allocation state is serialized both within this process (via
-// mu) and across processes sharing the same pool (via a flock on the pool's
-// lock file), so concurrent ADDs from different VPCs on the same node never
-// return the same address.
+// gateway, the second-to-last address, and the last address of the pool). If
+// containerID already holds an allocation in this pool, that same address is
+// returned rather than a fresh one being handed out — see
+// PoolAllocator.Allocate's doc comment (IPv6) for why this idempotency check
+// matters for CNI ADD retries. Returns an error if the pool is exhausted.
+// The read-modify-write against the on-disk allocation state is serialized
+// both within this process (via mu) and across processes sharing the same
+// pool (via a flock on the pool's lock file), so concurrent ADDs from
+// different VPCs on the same node never return the same address.
 func (a *IPv4PoolAllocator) Allocate(containerID string) (net.IP, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	lock, err := newFileLock(filepath.Join(a.stateDir, ipv4LockFileName))
-	if err != nil {
-		return nil, fmt.Errorf("open lock for pool %s: %w", a.pool.String(), err)
-	}
-	defer func() { _ = lock.close() }()
+	var result net.IP
+	err := a.state.withLock(func() error {
+		if addrStr, ok := a.state.findContainerMarkerLocked(containerID); ok {
+			result = net.ParseIP(addrStr).To4()
+			return nil
+		}
 
-	if err := lock.lock(); err != nil {
-		return nil, fmt.Errorf("lock pool %s: %w", a.pool.String(), err)
-	}
+		used, err := a.usedAddresses()
+		if err != nil {
+			return err
+		}
 
-	used, err := a.usedAddresses()
+		reserved := a.reservedAddresses()
+
+		ones, bits := a.pool.Mask.Size()
+		total := uint64(1) << uint(bits-ones)
+
+		for i := range total {
+			addr := offsetIP4(a.pool.IP, i)
+			addrStr := addr.String()
+
+			if _, ok := reserved[addrStr]; ok {
+				continue
+			}
+			if _, ok := used[addrStr]; ok {
+				continue
+			}
+
+			markerPath := filepath.Join(a.stateDir, addrStr)
+			if err := os.WriteFile(markerPath, []byte(containerID), 0o600); err != nil {
+				return fmt.Errorf("write allocation marker %q: %w", markerPath, err)
+			}
+			result = addr
+			return nil
+		}
+
+		return fmt.Errorf("pool %s exhausted", a.pool.String())
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	reserved := a.reservedAddresses()
-
-	ones, bits := a.pool.Mask.Size()
-	total := uint64(1) << uint(bits-ones)
-
-	for i := range total {
-		addr := offsetIP4(a.pool.IP, i)
-		addrStr := addr.String()
-
-		if _, ok := reserved[addrStr]; ok {
-			continue
-		}
-		if _, ok := used[addrStr]; ok {
-			continue
-		}
-
-		markerPath := filepath.Join(a.stateDir, addrStr)
-		if err := os.WriteFile(markerPath, []byte(containerID), 0o600); err != nil {
-			return nil, fmt.Errorf("write allocation marker %q: %w", markerPath, err)
-		}
-		return addr, nil
-	}
-
-	return nil, fmt.Errorf("pool %s exhausted", a.pool.String())
+	return result, nil
 }
 
 // Deallocate removes the allocation for the given address string. Silently
@@ -155,17 +163,9 @@ func (a *IPv4PoolAllocator) Deallocate(addr string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	lock, err := newFileLock(filepath.Join(a.stateDir, ipv4LockFileName))
-	if err != nil {
-		return
-	}
-	defer func() { _ = lock.close() }()
-
-	if err := lock.lock(); err != nil {
-		return
-	}
-
-	_ = os.Remove(filepath.Join(a.stateDir, addr))
+	_ = a.state.withLock(func() error {
+		return os.Remove(filepath.Join(a.stateDir, addr))
+	})
 }
 
 // LookupContainer reports the address, if any, allocated to containerID,
@@ -174,54 +174,41 @@ func (a *IPv4PoolAllocator) Deallocate(addr string) {
 func (a *IPv4PoolAllocator) LookupContainer(containerID string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.findContainerMarker(containerID)
+
+	var addr string
+	var ok bool
+	_ = a.state.withLock(func() error {
+		addr, ok = a.state.findContainerMarkerLocked(containerID)
+		return nil
+	})
+	return addr, ok
 }
 
 // DeallocateContainer removes the allocation, if any, held by containerID,
 // without the caller needing to already know the allocated address —
-// mirrors PoolAllocator.DeallocateContainer (IPv6); see its doc comment.
+// mirrors PoolAllocator.DeallocateContainer (IPv6); see its doc comment for
+// why the scan and the removal must happen under a single flock acquisition.
 // Returns the deallocated address and true if one was found; ("", false)
 // otherwise.
 func (a *IPv4PoolAllocator) DeallocateContainer(containerID string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	addr, ok := a.findContainerMarker(containerID)
+	var addr string
+	var ok bool
+	_ = a.state.withLock(func() error {
+		found, wasFound := a.state.findContainerMarkerLocked(containerID)
+		if !wasFound {
+			return nil
+		}
+		addr = found
+		ok = true
+		return os.Remove(filepath.Join(a.stateDir, found))
+	})
 	if !ok {
 		return "", false
 	}
-	_ = os.Remove(filepath.Join(a.stateDir, addr))
 	return addr, true
-}
-
-// findContainerMarker scans this pool's state directory under its own
-// flock for the marker file whose content matches containerID, returning
-// its filename (the address it reserves). Callers must hold mu.
-func (a *IPv4PoolAllocator) findContainerMarker(containerID string) (string, bool) {
-	lock, err := newFileLock(filepath.Join(a.stateDir, ipv4LockFileName))
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = lock.close() }()
-
-	if err := lock.lock(); err != nil {
-		return "", false
-	}
-
-	entries, err := os.ReadDir(a.stateDir)
-	if err != nil {
-		return "", false
-	}
-	for _, e := range entries {
-		if e.Name() == ipv4LockFileName {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(a.stateDir, e.Name()))
-		if err == nil && string(content) == containerID {
-			return e.Name(), true
-		}
-	}
-	return "", false
 }
 
 // IsAllocated reports whether the given address string is actively
@@ -235,16 +222,13 @@ func (a *IPv4PoolAllocator) IsAllocated(addr string) bool {
 // addresses currently marked allocated by any process sharing this pool.
 // Callers must hold both mu and the pool's flock.
 func (a *IPv4PoolAllocator) usedAddresses() (map[string]struct{}, error) {
-	entries, err := os.ReadDir(a.stateDir)
+	entries, err := a.state.entries()
 	if err != nil {
-		return nil, fmt.Errorf("read pool state dir %q: %w", a.stateDir, err)
+		return nil, err
 	}
 
 	used := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
-		if e.Name() == ipv4LockFileName {
-			continue
-		}
 		used[e.Name()] = struct{}{}
 	}
 	return used, nil
