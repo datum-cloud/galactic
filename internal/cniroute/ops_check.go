@@ -79,26 +79,37 @@ func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Terminatio
 
 	dev := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	for _, term := range terminations {
-		viaIP := net.ParseIP(term.Via)
-		if viaIP == nil {
-			return fmt.Errorf("invalid termination gateway %q", term.Via)
+		// An empty Via is not an error: assembleRoute (route.go) installs a
+		// valid on-link route for it, device-scoped with no gateway, and
+		// cmdAdd installs it fine. Only reject a non-empty Via that fails to
+		// parse.
+		var viaIP net.IP
+		if term.Via != "" {
+			viaIP = net.ParseIP(term.Via)
+			if viaIP == nil {
+				return fmt.Errorf("invalid termination gateway %q", term.Via)
+			}
 		}
 		found := false
 		for _, r := range routes {
-			if r.Dst != nil &&
-				r.Dst.String() == term.Network &&
-				r.Gw != nil &&
-				r.Gw.Equal(viaIP) &&
-				r.LinkIndex > 0 {
-				// Verify the link name matches (defers to the veth/tap device).
-				if link, linkErr := handle.LinkByIndex(r.LinkIndex); linkErr == nil && link.Attrs().Name == dev {
-					found = true
-					break
+			if r.Dst == nil || r.Dst.String() != term.Network || r.LinkIndex <= 0 {
+				continue
+			}
+			if viaIP != nil {
+				if r.Gw == nil || !r.Gw.Equal(viaIP) {
+					continue
 				}
+			} else if r.Gw != nil {
+				continue
+			}
+			// Verify the link name matches (defers to the veth/tap device).
+			if link, linkErr := handle.LinkByIndex(r.LinkIndex); linkErr == nil && link.Attrs().Name == dev {
+				found = true
+				break
 			}
 		}
 		if !found {
-			return fmt.Errorf("missing route %s via %s in VRF table %d", term.Network, term.Via, tableID)
+			return fmt.Errorf("missing route %s via %q in VRF table %d", term.Network, term.Via, tableID)
 		}
 	}
 	return nil
