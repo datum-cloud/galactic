@@ -94,6 +94,22 @@ func allocatePool(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 	}, nil
 }
 
+// effectiveIPv6Subnet returns conf.IPv6Subnet if either family's subnet was
+// ever explicitly set. Otherwise — neither ipv6_subnet nor ipv4_subnet is
+// set — the only pool an allocation could possibly have come from is
+// parseConf's default-filler pool, so that's returned directly instead of
+// re-deriving it from GALACTIC_IPAM_ENABLE_LOCAL_IPAM. deallocate/
+// checkAllocation must not depend on that env var still agreeing at DEL/
+// CHECK time with whatever it resolved to at ADD time: if it flips in
+// between, re-checking it here would see an empty subnet and silently skip
+// cleanup/verification, leaking the allocation instead of releasing it.
+func effectiveIPv6Subnet(conf *IPAM) string {
+	if conf.IPv6Subnet != "" || conf.IPv4Subnet != "" {
+		return conf.IPv6Subnet
+	}
+	return localIPAMDefaultPool
+}
+
 // deallocate releases whatever allocation containerID holds against conf's
 // pools — entirely local: each family's own on-disk marker file is looked
 // up directly by containerID (internal/cni/ipam's DeallocateContainer), no
@@ -108,8 +124,8 @@ func deallocate(containerID string, conf *IPAM) {
 		return
 	}
 
-	if conf.IPv6Subnet != "" {
-		pa, err := ipam.NewPoolAllocator(conf.IPv6Subnet, "", 0, lockDir)
+	if ipv6Subnet := effectiveIPv6Subnet(conf); ipv6Subnet != "" {
+		pa, err := ipam.NewPoolAllocator(ipv6Subnet, "", 0, lockDir)
 		if err != nil {
 			slog.Warn("IPAM: failed to build IPv6 pool allocator for deallocation, skipping", "err", err,
 				"containerID", containerID)
@@ -141,8 +157,8 @@ func checkAllocation(containerID string, conf *IPAM) []error {
 	}
 
 	var errs []error
-	if conf.IPv6Subnet != "" {
-		pa, err := ipam.NewPoolAllocator(conf.IPv6Subnet, "", 0, lockDir)
+	if ipv6Subnet := effectiveIPv6Subnet(conf); ipv6Subnet != "" {
+		pa, err := ipam.NewPoolAllocator(ipv6Subnet, "", 0, lockDir)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("open IPv6 pool: %w", err))
 		} else if _, ok := pa.LookupContainer(containerID); !ok {

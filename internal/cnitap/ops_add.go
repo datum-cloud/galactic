@@ -59,6 +59,13 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		vpcAttachment: pluginConf.VPCAttachment,
 		namespace:     namespace,
 	}
+	// Record IPAM delegation intent up front, before the ExecAdd call
+	// below ever runs — see resourceTracker's ipamDelegated doc comment.
+	if pluginConf.IPAM != nil {
+		tracker.ipamDelegated = true
+		tracker.ipamType = pluginConf.IPAM.Type
+		tracker.ipamStdin = args.StdinData
+	}
 
 	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer func() {

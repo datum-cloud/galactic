@@ -4,7 +4,10 @@
 
 package ipam
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 const (
 	// testIPv4PoolCIDR is a /29 (8 addresses) so tests can exercise
@@ -117,6 +120,34 @@ func TestIPv4PoolAllocatorAllocate(t *testing.T) {
 	}
 }
 
+func TestIPv4PoolAllocatorAllocateIdempotentPerContainer(t *testing.T) {
+	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	first, err := a.Allocate("container-1")
+	if err != nil {
+		t.Fatalf("unexpected error on first allocation: %v", err)
+	}
+
+	second, err := a.Allocate("container-1")
+	if err != nil {
+		t.Fatalf("unexpected error on retry allocation: %v", err)
+	}
+	if !second.Equal(first) {
+		t.Errorf("retry Allocate() = %q, want %q (same as first allocation)", second, first)
+	}
+
+	other, err := a.Allocate("container-2")
+	if err != nil {
+		t.Fatalf("unexpected error on other container's allocation: %v", err)
+	}
+	if other.Equal(first) {
+		t.Errorf("other container's Allocate() = %q, want distinct from %q", other, first)
+	}
+}
+
 func TestIPv4PoolAllocatorSkipsReservedAddresses(t *testing.T) {
 	a, err := NewIPv4PoolAllocator(testIPv4PoolCIDR, testIPv4Gw, t.TempDir())
 	if err != nil {
@@ -150,9 +181,13 @@ func TestIPv4PoolAllocatorExhaustion(t *testing.T) {
 	}
 
 	// The /29 has exactly 4 usable addresses (.2-.5); the 5th allocation
-	// must fail with an exhaustion error.
+	// must fail with an exhaustion error. Each iteration uses a distinct
+	// container ID -- Allocate is idempotent per containerID (a CNI ADD
+	// retry must get back the same address, not a fresh one), so reusing
+	// one ID here would only ever consume a single address.
 	for i := range 4 {
-		if _, err := a.Allocate("container"); err != nil {
+		containerID := fmt.Sprintf("container-%d", i)
+		if _, err := a.Allocate(containerID); err != nil {
 			t.Fatalf("unexpected error on allocation %d: %v", i, err)
 		}
 	}

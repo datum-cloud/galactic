@@ -31,47 +31,47 @@ func TestParseConf(t *testing.T) {
 		wantType string
 	}{
 		{
-			name:    "missing ipam block rejected",
+			name:    "MissingIPAMBlockRejected",
 			input:   fmt.Sprintf(`{"cniVersion":"%s","name":"test","type":"%s"}`, testCNIVersion, testIPAMType),
 			wantErr: "ipam block is required",
 		},
 		{
-			name:     "static_ip accepted",
+			name:     "StaticIPAccepted",
 			input:    confJSON(fmt.Sprintf(`"type":%q,"static_ip":"fd00::1234"`, testIPAMType)),
 			wantType: testIPAMType,
 		},
 		{
-			name:    "invalid ipv6_subnet CIDR rejected",
+			name:    "InvalidIPv6SubnetCIDRRejected",
 			input:   confJSON(fmt.Sprintf(`"type":%q,"ipv6_subnet":"not-a-cidr"`, testIPAMType)),
 			wantErr: "invalid CIDR value for field 'ipam.ipv6_subnet'",
 		},
 		{
-			name:    "ipv4 given where ipv6_subnet expected rejected",
+			name:    "IPv4GivenWhereIPv6SubnetExpectedRejected",
 			input:   confJSON(fmt.Sprintf(`"type":%q,"ipv6_subnet":"10.0.0.0/24"`, testIPAMType)),
 			wantErr: "ipam.ipv6_subnet must be an IPv6 CIDR, got IPv4",
 		},
 		{
-			name:    "ipv6_subnet prefix length over 96 rejected",
+			name:    "IPv6SubnetPrefixLengthOver96Rejected",
 			input:   confJSON(fmt.Sprintf(`"type":%q,"ipv6_subnet":"fd00:10:ff01::/112"`, testIPAMType)),
 			wantErr: "ipam.ipv6_subnet prefix length 112 exceeds maximum of 96",
 		},
 		{
-			name:    "invalid ipv4_subnet CIDR rejected",
+			name:    "InvalidIPv4SubnetCIDRRejected",
 			input:   confJSON(fmt.Sprintf(`"type":%q,"ipv4_subnet":"not-a-cidr"`, testIPAMType)),
 			wantErr: "invalid CIDR value for field 'ipam.ipv4_subnet'",
 		},
 		{
-			name:    "ipv6 given where ipv4_subnet expected rejected",
+			name:    "IPv6GivenWhereIPv4SubnetExpectedRejected",
 			input:   confJSON(fmt.Sprintf(`"type":%q,"ipv4_subnet":"2001:db8::/64"`, testIPAMType)),
 			wantErr: "ipam.ipv4_subnet must be an IPv4 CIDR, got IPv6",
 		},
 		{
-			name:    "ipv4_subnet prefix length over 32 rejected",
+			name:    "IPv4SubnetPrefixLengthOver32Rejected",
 			input:   confJSON(fmt.Sprintf(`"type":%q,"ipv4_subnet":"::ffff:10.0.0.0/40"`, testIPAMType)),
 			wantErr: "ipam.ipv4_subnet prefix length 40 exceeds maximum of 32",
 		},
 		{
-			name: "invalid address_families entry rejected",
+			name: "InvalidAddressFamiliesEntryRejected",
 			input: confJSON(fmt.Sprintf(
 				`"type":%q,"ipv6_subnet":"fd00::/64","address_families":["ipv6","bogus"]`, testIPAMType)),
 			wantErr: `invalid ipam.address_families entry "bogus"`,
