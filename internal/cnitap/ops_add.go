@@ -18,6 +18,7 @@ import (
 	"go.datum.net/galactic/internal/cni/hostgw"
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -35,7 +36,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 
 	if pluginConf.PrevResult != nil {
-		if err := validatePrevResultAdd(pluginConf.PrevResult); err != nil {
+		if err := cnimaster.ValidatePrevResultAdd(pluginConf.PrevResult); err != nil {
 			return &types.Error{Code: 6, Msg: fmt.Sprintf("prevResult validation in ADD: %v", err)}
 		}
 	}
@@ -91,7 +92,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	hostMTU := hostLink.Attrs().MTU
 	slog.Debug("ADD: host interface ready", "name", hostName, "mac", hostMac, "mtu", hostMTU)
 
-	k8sClient, err := newK8sClient()
+	k8sClient, err := cnimaster.NewK8sClient()
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
 	}

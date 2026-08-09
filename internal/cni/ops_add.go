@@ -15,6 +15,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -38,7 +39,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// assignment. A nil or structurally broken prevResult indicates a mis-
 	// configured chain that galactic-cni should not silently ignore.
 	if pluginConf.PrevResult != nil {
-		if err := validatePrevResultAdd(pluginConf.PrevResult); err != nil {
+		if err := cnimaster.ValidatePrevResultAdd(pluginConf.PrevResult); err != nil {
 			return &types.Error{Code: 6, Msg: fmt.Sprintf("prevResult validation in ADD: %v", err)}
 		}
 	}
@@ -102,7 +103,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// Annotate the NAD with the host interface name. The NAD must already
 	// exist (created by the external VPC operator); a missing or otherwise
 	// unpatchable NAD is a hard failure.
-	k8sClient, err := newK8sClient()
+	k8sClient, err := cnimaster.NewK8sClient()
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
 	}
