@@ -193,15 +193,23 @@ func TestCNITapInterface(t *testing.T) {
 	// nadpatch.ParsePodNamespace resolves an empty namespace). hostNetwork
 	// is required too, so the VRF/tap interfaces this test creates land in
 	// the same netns production's own hostNetwork DaemonSet would use. The
-	// whole container spec (image, command, privileged) has to live in
-	// --overrides too, not the usual --image/--command/--privileged flags:
-	// kubectl run's overrides merge replaces the generated "containers"
-	// list wholesale rather than merging into it, so anything set only via
-	// those flags would otherwise be silently dropped the moment
-	// "containers" is also set here.
+	// bpf-fs hostPath volume mirrors config/cni/daemonset.yaml's own bpf-fs
+	// mount: this test chains galactic-bgp (testChainedGalacticBGP below),
+	// which registers the eBPF uSID datapath, and its maps can only be
+	// pinned under attach.PinDir if the node's real bpffs (mounted onto the
+	// Kind node in scripts/ci.sh) is visible inside the pod -- a pod's own
+	// mount namespace can't create /sys/fs/bpf itself. The whole container
+	// spec (image, command, privileged) has to live in --overrides too, not
+	// the usual --image/--command/--privileged flags: kubectl run's
+	// overrides merge replaces the generated "containers" list wholesale
+	// rather than merging into it, so anything set only via those flags
+	// would otherwise be silently dropped the moment "containers" is also
+	// set here.
 	overrides := fmt.Sprintf(`{"spec":{"serviceAccountName":"galactic-cni","hostNetwork":true,`+
+		`"volumes":[{"name":"bpf-fs","hostPath":{"path":"/sys/fs/bpf","type":"Directory"}}],`+
 		`"containers":[{"name":%q,"image":%q,"imagePullPolicy":"Never","command":["sleep","infinity"],`+
-		`"securityContext":{"privileged":true}}]}}`, name, image())
+		`"securityContext":{"privileged":true},`+
+		`"volumeMounts":[{"name":"bpf-fs","mountPath":"/sys/fs/bpf"}]}]}}`, name, image())
 	runOut, err := kubectl(
 		t.Context(),
 		"run", name,
