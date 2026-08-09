@@ -80,7 +80,7 @@ func updateForwardRule(interfaceName string, action string) error {
 }
 
 func Add(vpc, vpcAttachment string, mtu int) error {
-	vrfName := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	guestName := intf.GenerateInterfaceNameGuest(vpc, vpcAttachment)
 

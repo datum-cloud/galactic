@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package vrf manages Linux VRF interfaces for Galactic VPC network isolation.
-// Each VPC attachment gets its own VRF with a unique routing table ID.
-// Requires CAP_NET_ADMIN.
+// Each VPC gets its own VRF with a unique routing table ID, per node — shared
+// by every attachment (pod or VM) landing on that VPC on that node, not
+// per-attachment. Requires CAP_NET_ADMIN.
 package vrf
 
 import (
@@ -30,13 +31,16 @@ const maxVRFID = uint32(math.MaxUint32 - 1)
 // cross-process flock in lock.go.
 var vrfMu sync.Mutex
 
-// Add creates a Linux VRF interface for the given base62-encoded VPC and
-// VPCAttachment, allocating the next available routing table ID and applying
-// the required sysctl settings. Concurrent calls, whether from goroutines in
-// this process or from separate CNI plugin processes on the same node, are
-// serialized. If a VRF with the same name already exists (e.g. left behind
-// by a previous failed cmdAdd with no corresponding cmdDel), Add returns nil.
-func Add(vpc, vpcAttachment string) error {
+// Add creates a Linux VRF interface for the given base62-encoded VPC,
+// allocating the next available routing table ID and applying the required
+// sysctl settings. The VRF is shared by every attachment (pod or VM) on this
+// VPC on this node: concurrent calls — whether from goroutines in this
+// process, from separate CNI plugin processes attaching different pods to
+// the same VPC, or both — are serialized, and Add is idempotent by name. If
+// a VRF with the same name already exists (because another attachment on
+// this VPC already created it, or one was left behind by a previous failed
+// cmdAdd with no corresponding cmdDel), Add returns nil.
+func Add(vpc string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
 
@@ -46,7 +50,7 @@ func Add(vpc, vpcAttachment string) error {
 	}
 	defer func() { _ = lock.close() }()
 
-	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	name := intf.GenerateInterfaceNameVRF(vpc)
 
 	if _, err := netlink.LinkByName(name); err == nil {
 		return nil
@@ -80,9 +84,14 @@ func Add(vpc, vpcAttachment string) error {
 }
 
 // Delete flushes all routes from the VRF routing table and removes the VRF
-// interface for the given base62-encoded VPC and VPCAttachment. Delete is
-// idempotent: if the VRF interface does not exist, it returns nil.
-func Delete(vpc, vpcAttachment string) error {
+// interface for the given base62-encoded VPC. Delete is idempotent: if the
+// VRF interface does not exist, it returns nil. Callers must only invoke
+// Delete once no attachment on this VPC on this node remains live — deleting
+// out from under a still-live sibling attachment breaks it. galactic-cni's
+// own cmdDel never calls this directly for exactly that reason; only
+// galactic-router's GC controller does, after confirming via every
+// BGPAdvertisement for this VPC/node that none are still in use.
+func Delete(vpc string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
 
@@ -92,7 +101,7 @@ func Delete(vpc, vpcAttachment string) error {
 	}
 	defer func() { _ = lock.close() }()
 
-	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+	name := intf.GenerateInterfaceNameVRF(vpc)
 
 	vrfID, err := getVRFIDForInterface(name)
 	if err != nil {
@@ -112,15 +121,15 @@ func Delete(vpc, vpcAttachment string) error {
 }
 
 // TableID returns the Linux routing table ID for the VRF associated with the
-// given base62-encoded VPC and VPCAttachment.
-func TableID(vpc, vpcAttachment string) (uint32, error) {
-	return getVRFIDForInterface(intf.GenerateInterfaceNameVRF(vpc, vpcAttachment))
+// given base62-encoded VPC.
+func TableID(vpc string) (uint32, error) {
+	return getVRFIDForInterface(intf.GenerateInterfaceNameVRF(vpc))
 }
 
-// Exists reports whether a VRF interface for the given VPC and VPCAttachment
-// exists in the kernel.
-func Exists(vpc, vpcAttachment string) error {
-	name := intf.GenerateInterfaceNameVRF(vpc, vpcAttachment)
+// Exists reports whether a VRF interface for the given VPC exists in the
+// kernel.
+func Exists(vpc string) error {
+	name := intf.GenerateInterfaceNameVRF(vpc)
 	if _, err := netlink.LinkByName(name); err != nil {
 		return fmt.Errorf("VRF interface %q not found", name)
 	}
