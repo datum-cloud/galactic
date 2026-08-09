@@ -31,7 +31,6 @@ import (
 
 	"go.datum.net/galactic/internal/cni/crdnames"
 	"go.datum.net/galactic/internal/cniipam"
-	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -360,7 +359,7 @@ func publishBGPState(
 		}
 
 		registered, ebpfBlock, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), attach.PinDir)
+			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir)
 		if err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
@@ -468,7 +467,7 @@ func registerEBPFDatapath(
 // bpf_redirect (tap, which never leaves this netns).
 func egressKindForInterfaceType(ifaceType string) (uint32, error) {
 	switch ifaceType {
-	case ifaceTypeVeth, "":
+	case ifaceTypeVeth:
 		return usidmap.EgressKindVeth, nil
 	case ifaceTypeTap:
 		return usidmap.EgressKindTap, nil

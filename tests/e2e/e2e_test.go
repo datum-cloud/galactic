@@ -212,12 +212,13 @@ func TestCNITapInterface(t *testing.T) {
 	}
 
 	// The eBPF uSID datapath is now the only forwarding path (see
-	// internal/cnibgp/bgp.go's registerEBPFDatapath, called inline from
-	// galactic-tap-cni's own cmdAdd at this point in the CNI plugin-chain
-	// split), so CNI ADD requires this node's locator_table/function_table/
-	// vrf_table maps to already be pinned under attach.PinDir. In
-	// production that's done ahead of time by the CNI DaemonSet's
-	// long-running "credential-refresh" container (config/cni/
+	// internal/cnibgp/bgp.go's registerEBPFDatapath, called from
+	// galactic-bgp's own cmdAdd — a separately chain-invoked binary since
+	// the CNI plugin-chain split, not inline in galactic-tap-cni's cmdAdd
+	// any more), so CNI ADD requires this node's locator_table/
+	// function_table/vrf_table maps to already be pinned under
+	// attach.PinDir. In production that's done ahead of time by the CNI
+	// DaemonSet's long-running "credential-refresh" container (config/cni/
 	// daemonset.yaml, `/galactic-cni run`); this test runs its own pod
 	// instead of relying on that DaemonSet, so it must start the same
 	// control daemon itself before exercising CNI ADD below.
@@ -322,6 +323,109 @@ NODE_NAME=` + nodeName() + ` \
 	}
 	if len(ips) != 1 {
 		t.Errorf("ips count = %d, want 1", len(ips))
+	}
+
+	// Step 3: chain galactic-bgp — the CNI runtime's next plugin in the
+	// conflist — after galactic-tap-cni, feeding it the tap master's own
+	// CNI result as prevResult, exactly as the runtime would. Everything
+	// up to this point only exercises galactic-tap-cni's own cmdAdd;
+	// BGPVRFInstance/BGPAdvertisement CRD creation and eBPF
+	// locator_table/function_table/vrf_table registration all moved into
+	// galactic-bgp's own cmdAdd with the CNI plugin-chain split (see
+	// internal/cnibgp's doc comment), so without this step the whole BGP
+	// publish path has no e2e coverage on the ADD path at all.
+	testChainedGalacticBGP(t, name, result)
+}
+
+// testChainedGalacticBGP runs galactic-bgp's own ADD, chained after the tap
+// master's ADD (tapResult is exactly what that ADD printed, fed through as
+// prevResult — see internal/cnibgp/prevresult.go's inferFromPrevResult),
+// then CHECK. It asserts the BGPVRFInstance/BGPAdvertisement CRDs exist
+// after ADD, and — since checkEBPFEntry (internal/cnibgp/ops_check.go) reads
+// back the locator_table, function_table, and vrf_table entries
+// registerEBPFDatapath wrote and fails if any are missing or inconsistent —
+// that CHECK succeeding is itself the assertion that eBPF registration
+// happened correctly on ADD; there is no separate bpftool-style dump here.
+func testChainedGalacticBGP(t *testing.T, podName string, tapResult map[string]any) {
+	t.Helper()
+
+	const vpc, vpcAttachment = "1", "1"
+	crdName := vpc + "-" + vpcAttachment
+	t.Cleanup(func() {
+		//nolint:errcheck // best-effort cleanup, mirrors deletePod
+		kubectl(context.Background(), "delete", "bgpvrfinstance", crdName, "--ignore-not-found")
+		//nolint:errcheck // best-effort cleanup, mirrors deletePod
+		kubectl(context.Background(), "delete", "bgpadvertisement", crdName, "--ignore-not-found")
+	})
+
+	prevResultJSON, err := json.Marshal(tapResult)
+	if err != nil {
+		t.Fatalf("marshal tap ADD result for prevResult: %v", err)
+	}
+	bgpConf := fmt.Sprintf(`{
+  "cniVersion": "1.0.0",
+  "name": "galactic",
+  "type": "galactic-bgp",
+  "vpc": %q,
+  "vpcattachment": %q,
+  "prevResult": %s
+}`, vpc, vpcAttachment, prevResultJSON)
+
+	// Reuses the same netns/containerID/ifname galactic-tap-cni's own step
+	// (above) already set up: a real chained plugin sees the identical
+	// values across every plugin invoked for one CNI ADD.
+	bgpScript := `#!/bin/sh
+CNI_NETNS=/var/run/netns/e2e-tap-ns \
+CNI_COMMAND=$1 \
+CNI_CONTAINERID=e2e-tap-001 \
+CNI_IFNAME=eth0 \
+CNI_PATH=/ \
+NODE_NAME=` + nodeName() + ` \
+	/galactic-bgp < /tmp/cni-bgp.json
+`
+	_, err = kubectl(t.Context(), "exec", podName, "--",
+		"sh", "-c",
+		"echo '"+bgpConf+"' > /tmp/cni-bgp.json && "+
+			"echo '"+bgpScript+"' > /tmp/run-bgp.sh && "+
+			"chmod +x /tmp/run-bgp.sh",
+	)
+	if err != nil {
+		t.Fatalf("write galactic-bgp config and script: %v", err)
+	}
+
+	addOut, err := kubectl(t.Context(), "exec", podName, "-i", "--", "/tmp/run-bgp.sh", "ADD")
+	if err != nil {
+		t.Fatalf("galactic-bgp ADD failed: %v\noutput: %s", err, addOut)
+	}
+
+	// galactic-bgp is the last plugin in the chain: its own result is
+	// prevResult passed through unchanged, not a new one it builds itself.
+	jsonStart := strings.Index(addOut, "{")
+	if jsonStart == -1 {
+		t.Fatalf("no JSON found in galactic-bgp ADD output:\n%s", addOut)
+	}
+	var bgpResult map[string]any
+	if err := json.Unmarshal([]byte(addOut[jsonStart:]), &bgpResult); err != nil {
+		t.Fatalf("galactic-bgp ADD output is not valid JSON: %v\noutput:\n%s", err, addOut)
+	}
+	if bgpIfaces, _ := bgpResult["interfaces"].([]any); len(bgpIfaces) != 1 {
+		t.Errorf("galactic-bgp ADD result interfaces count = %d, want 1 (passed through from prevResult unchanged)",
+			len(bgpIfaces))
+	}
+
+	if out, err := kubectl(t.Context(), "get", "bgpvrfinstance", crdName); err != nil {
+		t.Errorf("BGPVRFInstance %s not found after galactic-bgp ADD: %v\n%s", crdName, err, out)
+	}
+	if out, err := kubectl(t.Context(), "get", "bgpadvertisement", crdName); err != nil {
+		t.Errorf("BGPAdvertisement %s not found after galactic-bgp ADD: %v\n%s", crdName, err, out)
+	}
+
+	// CHECK reads back the locator_table/function_table/vrf_table entries
+	// registerEBPFDatapath wrote on ADD (see ops_check.go's checkEBPFEntry)
+	// — its success is this test's assertion that eBPF registration
+	// actually happened, not just that the CRDs exist.
+	if checkOut, err := kubectl(t.Context(), "exec", podName, "-i", "--", "/tmp/run-bgp.sh", "CHECK"); err != nil {
+		t.Errorf("galactic-bgp CHECK failed: %v\noutput: %s", err, checkOut)
 	}
 }
 

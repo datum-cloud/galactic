@@ -22,7 +22,6 @@ import (
 
 	"go.datum.net/galactic/internal/cni/crdnames"
 	"go.datum.net/galactic/internal/config"
-	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -88,8 +87,14 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-// checkEBPFEntry verifies the eBPF vrf_table entry for this attachment
-// still resolves to its own VRF table id. Returns nil (not an error) when
+// checkEBPFEntry verifies every eBPF table registerEBPFDatapath wrote for
+// this attachment still exists and is intact: the locator_table entry (this
+// router's own node), the function_table entry (SRv6 End.DT46 behavior),
+// and the vrf_table entry (still resolving to this attachment's own VRF
+// table id) — plus the same nodeID range check ADD treats as a hard error.
+// Checking vrf_table alone would miss a corrupted/missing locator or
+// function entry, or a nodeID that drifted out of range after ADD, while
+// still reporting the attachment healthy. Returns nil (not an error) when
 // this node's router has no SRv6Locator/nodeID configured — SRv6 was
 // intentionally never set up for this attachment, matching
 // registerEBPFDatapath's own no-op case.
@@ -100,6 +105,11 @@ func checkEBPFEntry(ctx context.Context, k8s client.Client, pluginConf *PluginCo
 	}
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return nil
+	}
+
+	if bgp.nodeID < uformat.NodeIDMin || bgp.nodeID > uformat.NodeIDMax {
+		return fmt.Errorf("eBPF check: nodeID %d out of range [%#x,%#x]",
+			bgp.nodeID, uint16(uformat.NodeIDMin), uint16(uformat.NodeIDMax))
 	}
 
 	prefix, err := netip.ParsePrefix(bgp.srv6Locator)
@@ -116,23 +126,41 @@ func checkEBPFEntry(ctx context.Context, k8s client.Client, pluginConf *PluginCo
 		return fmt.Errorf("get VRF table ID: %w", err)
 	}
 
-	registry, closer, err := usidmap.OpenPinnedRegistry(attach.PinDir)
+	registry, closer, err := usidmap.OpenPinnedRegistry(ebpfPinDir)
 	if err != nil {
 		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)
 	}
 	defer func() { _ = closer.Close() }()
 
+	var errs []error
+
+	if _, ok, err := registry.Locator.Get(block, uint16(bgp.nodeID)); err != nil {
+		errs = append(errs, fmt.Errorf("read eBPF locator_table entry: %w", err))
+	} else if !ok {
+		errs = append(errs, fmt.Errorf(
+			"eBPF locator_table entry for block %#x node-id %#x not found", block, uint16(bgp.nodeID)))
+	}
+
+	if funcEntry, ok, err := registry.Function.Get(block, uformat.FunctionEndDT46); err != nil {
+		errs = append(errs, fmt.Errorf("read eBPF function_table entry: %w", err))
+	} else if !ok {
+		errs = append(errs, fmt.Errorf(
+			"eBPF function_table entry for block %#x function %#x not found", block, uformat.FunctionEndDT46))
+	} else if funcEntry.Behavior != usidmap.BehaviorEndDT46 {
+		errs = append(errs, fmt.Errorf(
+			"eBPF function_table entry Behavior = %#x, want %#x", funcEntry.Behavior, usidmap.BehaviorEndDT46))
+	}
+
 	entry, ok, err := registry.VRF.Get(block, argument)
 	if err != nil {
-		return fmt.Errorf("read eBPF vrf_table entry: %w", err)
+		errs = append(errs, fmt.Errorf("read eBPF vrf_table entry: %w", err))
+	} else if !ok {
+		errs = append(errs, fmt.Errorf("eBPF vrf_table entry for block %#x argument %#x not found", block, argument))
+	} else if entry.VRFTableID != vrfTableID {
+		errs = append(errs, fmt.Errorf("eBPF vrf_table entry VRFTableID = %#x, want %#x", entry.VRFTableID, vrfTableID))
 	}
-	if !ok {
-		return fmt.Errorf("eBPF vrf_table entry for block %#x argument %#x not found", block, argument)
-	}
-	if entry.VRFTableID != vrfTableID {
-		return fmt.Errorf("eBPF vrf_table entry VRFTableID = %#x, want %#x", entry.VRFTableID, vrfTableID)
-	}
-	return nil
+
+	return errors.Join(errs...)
 }
 
 // cmdStatus implements the CNI spec STATUS operation — galactic-bgp talks

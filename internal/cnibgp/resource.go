@@ -17,7 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/cni/crdnames"
-	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -49,16 +48,18 @@ func newK8sClient() (client.Client, error) {
 // alongside these in one process-wide tracker is now each master plugin's
 // own, smaller tracker (internal/cni, internal/cnitap), scoped to exactly
 // what its own ADD creates.
+//
+// publishResult is embedded, rather than its five fields being copied over
+// field-by-field, so a future field added to one struct can't silently stop
+// being tracked in the other with no compiler error to catch it — cmdAdd
+// assigns the whole publishResult from publishBGPState in one shot
+// (tracker.publishResult = result).
 type resourceTracker struct {
 	vpc, vpcAttachment string
 	namespace          string
 	k8s                client.Client
 
-	vrfInstanceCreated   bool
-	advertisementCreated bool
-	ebpfRegistered       bool
-	ebpfBlock            uint64
-	ebpfArgument         uint16
+	publishResult
 }
 
 // cleanup rolls back all tracked resources. Errors are logged but never
@@ -101,7 +102,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 		if vrfTableID, err := vrf.TableID(rt.vpc, rt.vpcAttachment); err != nil {
 			slog.Error("Rollback: failed to resolve VRF table id, skipping eBPF vrf_table unregister", "err", err,
 				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-		} else if err := unregisterEBPFDatapath(rt.ebpfBlock, rt.ebpfArgument, vrfTableID, attach.PinDir); err != nil {
+		} else if err := unregisterEBPFDatapath(rt.ebpfBlock, rt.ebpfArgument, vrfTableID, ebpfPinDir); err != nil {
 			slog.Error("Rollback: failed to unregister eBPF vrf_table entry", "err", err,
 				"block", rt.ebpfBlock, "argument", rt.ebpfArgument)
 		} else {

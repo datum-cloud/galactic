@@ -111,6 +111,16 @@ v1.3.0 in `go.mod`) and returns CNI Result `1.0.0` (`type100`); generated
 configs (the installer's default conflist, Multus `NetworkAttachmentDefinition`
 manifests) use `"cniVersion": "1.0.0"`.
 
+Despite that broad declared range, `cniVersion` must be `"1.0.0"` or `"1.1.0"`
+in practice: `galactic-bgp`, chained after the master plugin, reconstructs
+`prevResult` via `type100.NewResult` (`internal/cnibgp/prevresult.go`), which
+only accepts a Result whose own `cniVersion` field is exactly one of those two
+values — the master plugin echoes the conflist's `cniVersion` straight into
+its printed Result, so an older value (e.g. `"0.4.0"`) makes `galactic-bgp`'s
+ADD fail for every attachment in the chain. Every config in this doc already
+uses `"1.0.0"`; keep it that way for any config authored outside these
+examples.
+
 ### Interface Types
 
 #### `veth` (default)

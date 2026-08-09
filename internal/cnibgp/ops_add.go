@@ -44,11 +44,22 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		namespace:     namespace,
 	}
 
-	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer func() {
 		if err != nil {
 			slog.Error("ADD: failed, rolling back created resources", "err", err,
 				"containerID", args.ContainerID, "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
+			// rollbackCtx is created here, fresh, rather than up front and
+			// shared with the work that just failed: publishBGPState's own
+			// retryK8sOps (bgp.go) can burn up to ~30s across its retries,
+			// each on its own fresh cniTimeout context. A context created
+			// before that call and reused here could already be expired by
+			// the time cleanup runs, so Delete would fail with "context
+			// deadline exceeded" instead of NotFound — client.IgnoreNotFound
+			// doesn't catch that, and the just-created CRDs would leak.
+			// Giving rollback its own full cniTimeout budget, on the failure
+			// path only, also means a successful ADD never allocates (and
+			// must remember to cancel) a context it doesn't use.
+			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), cniTimeout)
 			tracker.cleanup(rollbackCtx)
 			rollbackCancel()
 		}
@@ -67,11 +78,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 
 	cfg := publishConfig{vpc: pluginConf.VPC, vpcAttachment: pluginConf.VPCAttachment, ifaceType: ifaceType}
 	result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, vpcHex, k8sClient)
-	tracker.vrfInstanceCreated = result.vrfInstanceCreated
-	tracker.advertisementCreated = result.advertisementCreated
-	tracker.ebpfRegistered = result.ebpfRegistered
-	tracker.ebpfBlock = result.ebpfBlock
-	tracker.ebpfArgument = result.ebpfArgument
+	tracker.publishResult = result
 	if err != nil {
 		return err
 	}
