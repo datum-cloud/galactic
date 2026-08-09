@@ -16,7 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"go.datum.net/galactic/internal/cni/crdnames"
+	"go.datum.net/galactic/internal/crdnames"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 

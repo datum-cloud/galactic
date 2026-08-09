@@ -23,8 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"go.datum.net/galactic/internal/cni/crdnames"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
