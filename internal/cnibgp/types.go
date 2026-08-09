@@ -7,7 +7,7 @@ package cnibgp
 import (
 	"github.com/containernetworking/cni/pkg/types"
 
-	"go.datum.net/galactic/internal/cni/hostconf"
+	"go.datum.net/galactic/internal/hostconf"
 )
 
 // PluginConf is the CNI plugin configuration passed via stdin on each

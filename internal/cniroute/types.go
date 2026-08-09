@@ -18,7 +18,7 @@ package cniroute
 import (
 	"github.com/containernetworking/cni/pkg/types"
 
-	"go.datum.net/galactic/internal/cni/hostconf"
+	"go.datum.net/galactic/internal/hostconf"
 )
 
 // Termination represents a network termination point with a destination

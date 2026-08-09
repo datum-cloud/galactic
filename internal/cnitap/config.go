@@ -16,8 +16,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
-	"go.datum.net/galactic/internal/cni/hostconf"
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/hostconf"
 )
 
 var ConfFile = config.DefaultConfFile

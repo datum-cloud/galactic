@@ -14,8 +14,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/vishvananda/netlink"
 
-	"go.datum.net/galactic/internal/cni/nadpatch"
 	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
