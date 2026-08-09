@@ -27,7 +27,7 @@ func (rt *resourceTracker) cleanup() {
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 
 	for _, term := range rt.added {
-		if err := route.Delete(rt.vpc, rt.vpcAttachment, term.Network, term.Via, rt.dev); err != nil {
+		if err := route.Delete(rt.vpc, term.Network, term.Via, rt.dev); err != nil {
 			slog.Error("Rollback: failed to delete route", "err", err,
 				"network", term.Network, "via", term.Via, "dev", rt.dev)
 		} else {

@@ -54,7 +54,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}()
 
 	for _, termination := range pluginConf.Terminations {
-		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
+		if err := route.Add(pluginConf.VPC, termination.Network, termination.Via, dev); err != nil {
 			return fmt.Errorf("add route %s: %w", termination.Network, err)
 		}
 		tracker.added = append(tracker.added, termination)

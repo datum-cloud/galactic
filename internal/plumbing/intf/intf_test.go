@@ -24,10 +24,10 @@ const (
 )
 
 func TestGenerateInterfaceNameVRF(t *testing.T) {
-	expected := "G0000000jU00GV"
-	got := intf.GenerateInterfaceNameVRF(testVPC, testVPCAttachment)
+	expected := "G0000000jUV"
+	got := intf.GenerateInterfaceNameVRF(testVPC)
 	if got != expected {
-		t.Errorf("GenerateInterfaceNameVRF(%s, %s) = %s, want %s", testVPC, testVPCAttachment, got, expected)
+		t.Errorf("GenerateInterfaceNameVRF(%s) = %s, want %s", testVPC, got, expected)
 	}
 }
 

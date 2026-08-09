@@ -165,14 +165,20 @@ func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (uint32,
 	return 0, false
 }
 
-// vrfTableID resolves the kernel VRF table ID for a VRF named "{vpc}-{vpcAttachment}"
-// in base62 — see bgpVRFInstanceName in cni.go.
+// vrfTableID resolves the kernel VRF table ID for a VRF named "{vpc}-{node}"
+// in base62 — see crdnames.BGPVRFInstanceName. The kernel VRF itself is
+// keyed by vpc alone (it's shared by every attachment on this VPC on this
+// node — vrfpkg.TableID needs no node component, since interface names only
+// need to be unique within one host's own namespace), so only the segment
+// before the first '-' matters here; node can itself contain '-' (e.g.
+// "dfw-worker-control"), which is why this splits into exactly 2 parts
+// instead of parsing node back out too.
 func vrfTableID(vrfName string) (uint32, error) {
 	parts := strings.SplitN(vrfName, "-", 2)
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("VRF name %q does not contain '-'", vrfName)
 	}
-	return vrfpkg.TableID(parts[0], parts[1])
+	return vrfpkg.TableID(parts[0])
 }
 
 // evpnMpReachNexthop returns the MpReachNLRI next-hop address string from path

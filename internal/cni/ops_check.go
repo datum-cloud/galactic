@@ -174,8 +174,8 @@ var probeAPIServer = probeAPIServerFn
 func checkNodeLevelState(vpc, vpcAttachment string) (string, []error) {
 	var errs []error
 
-	if err := vrf.Exists(vpc, vpcAttachment); err != nil {
-		errs = append(errs, fmt.Errorf("vrf %s-%s: %w", vpc, vpcAttachment, err))
+	if err := vrf.Exists(vpc); err != nil {
+		errs = append(errs, fmt.Errorf("vrf %s: %w", vpc, err))
 	}
 
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)

@@ -50,9 +50,11 @@ type CleanupResult struct {
 }
 
 // vrfNameRegex matches the deterministic VRF interface name pattern used by
-// Galactic. The template is "G%09s%03sV" where %09s is the base62 VPC and
-// %03s is the base62 VPCAttachment. Base62 includes digits and letters.
-var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})([A-Za-z0-9]{3})V$`)
+// Galactic. The template is "G%09sV" where %09s is the base62 VPC — the
+// kernel VRF is shared by every attachment on this VPC on this node, so
+// unlike the host/guest veth templates it carries no VPCAttachment segment.
+// Base62 includes digits and letters.
+var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})V$`)
 
 // routerNamesForNode returns the names of every BGPRouter in the namespace
 // whose TargetRef points at nodeName. BGPAdvertisement/BGPVRFInstance CRDs
@@ -99,9 +101,20 @@ func routersForNode(
 	return routers, nil
 }
 
+// vpcFromName extracts the VPC segment from a "vpc-suffix" CRD name —
+// BGPAdvertisement's vpc-vpcAttachment (crdnames.BGPAdvertisementName) or
+// BGPVRFInstance's vpc-node (crdnames.BGPVRFInstanceName). The base62 VPC
+// value itself never contains '-', so the first segment is always
+// unambiguous regardless of what the suffix contains — including a node
+// name that itself contains '-' (e.g. "dfw-worker-control").
+func vpcFromName(name string) string {
+	vpc, _, _ := strings.Cut(name, "-")
+	return vpc
+}
+
 // CollectOrphanedCRDs scans BGPAdvertisement and BGPVRFInstance CRDs owned by
 // nodeName's BGPRouter(s) in the given namespace and returns those whose
-// associated container no longer exists on this node.
+// associated container(s)/attachment(s) no longer exist on this node.
 //
 // A CRD is considered orphaned when:
 //   - It is a BGPAdvertisement targeting one of nodeName's BGPRouters, with
@@ -111,8 +124,13 @@ func routersForNode(
 //     annotation entry without removing old ones — see cmdDel in
 //     internal/cni/ops_del.go), so the object is only orphaned once every
 //     container that ever referenced it is gone, not just one.
-//   - It is a BGPVRFInstance whose name matches a BGPAdvertisement that
-//     is itself orphaned (same vpc-vpcattachment name).
+//   - It is a BGPVRFInstance (named vpc-node — crdnames.BGPVRFInstanceName —
+//     shared by every attachment on this VPC on this node, unlike the 1:1
+//     BGPAdvertisement) whose VPC has no surviving BGPAdvertisement: every
+//     BGPAdvertisement whose name's vpc segment matches is either orphaned
+//     or absent entirely. A BGPAdvertisement this pass could not determine
+//     the liveness of (no netns annotations at all) counts as surviving,
+//     not orphaned — GC must never guess a shared VRF is safe to reclaim.
 func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, nodeName string) ([]OrphanedCRD, error) {
 	routerNames, err := routerNamesForNode(ctx, k8s, namespace, nodeName)
 	if err != nil {
@@ -125,18 +143,25 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 	}
 
 	var orphaned []OrphanedCRD
-	orphanedAdvNames := make(map[string]struct{})
+	// vpcSurvives records every VPC (attachments owned by this node's
+	// router(s) only) with at least one BGPAdvertisement that is live, or
+	// whose liveness could not be determined — the shared BGPVRFInstance for
+	// that VPC must not be touched while any of these remain.
+	vpcSurvives := make(map[string]struct{})
 
 	for _, adv := range advList.Items {
 		if _, ownedByThisNode := routerNames[adv.Spec.RouterRef.Name]; !ownedByThisNode {
 			// Belongs to a router on another node — not ours to judge.
 			continue
 		}
+		vpc := vpcFromName(adv.Name)
 
 		netnsPaths := collectNetNSPaths(&adv)
 		if len(netnsPaths) == 0 {
 			// No netns annotations — skip (might be legacy or manually
-			// created). We cannot determine if it is orphaned.
+			// created). We cannot determine if it is orphaned, so its VPC
+			// must be treated as surviving.
+			vpcSurvives[vpc] = struct{}{}
 			continue
 		}
 
@@ -150,6 +175,7 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 		if liveContainerID != "" {
 			// At least one container that attached to this
 			// vpc/vpcAttachment is still alive — not orphaned.
+			vpcSurvives[vpc] = struct{}{}
 			continue
 		}
 
@@ -166,16 +192,30 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 			Kind:        "BGPAdvertisement",
 			ContainerID: anyContainerID,
 		})
-		orphanedAdvNames[adv.Name] = struct{}{}
 	}
 
-	// BGPVRFInstance CRDs share the same name as their corresponding
-	// BGPAdvertisement (both use vpc-vpcattachment naming). If a
-	// BGPAdvertisement is orphaned, its BGPVRFInstance counterpart is
-	// also orphaned.
-	for name := range orphanedAdvNames {
+	// A BGPVRFInstance is orphaned only once every attachment on its VPC —
+	// not just one — is gone, since it's shared by all of them. This counts
+	// across every BGPAdvertisement for the VPC rather than aliasing 1:1 off
+	// a single BGPAdvertisement's name, the way the two used to share an
+	// identical vpc-vpcattachment name before BGPVRFInstance moved to
+	// vpc-node naming.
+	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(ctx, vrfList, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list BGPVRFInstances: %w", err)
+	}
+	for _, inst := range vrfList.Items {
+		if inst.Spec.RouterRef == nil {
+			continue
+		}
+		if _, ownedByThisNode := routerNames[inst.Spec.RouterRef.Name]; !ownedByThisNode {
+			continue
+		}
+		if _, survives := vpcSurvives[vpcFromName(inst.Name)]; survives {
+			continue
+		}
 		orphaned = append(orphaned, OrphanedCRD{
-			Name:      name,
+			Name:      inst.Name,
 			Namespace: namespace,
 			Kind:      "BGPVRFInstance",
 		})
@@ -231,16 +271,20 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 }
 
 // CollectOrphanedVRFs scans all VRF interfaces on this node and returns the
-// vpc/vpcAttachment pairs for VRFs whose corresponding BGPAdvertisement CRD,
-// owned by nodeName's BGPRouter(s), no longer exists in the given namespace.
+// names of VRFs whose VPC has no surviving BGPAdvertisement CRD owned by
+// nodeName's BGPRouter(s) in the given namespace.
 //
 // A VRF is considered orphaned when:
 //   - Its interface name matches the Galactic VRF naming pattern.
-//   - No BGPAdvertisement owned by this node (name = vpc-vpcattachment,
-//     RouterRef pointing at one of nodeName's BGPRouters) exists for it.
-//     Other nodes sharing this namespace may coincidentally reuse the same
-//     vpc-vpcattachment name for their own, unrelated attachment — only
-//     this node's own BGPAdvertisements can vouch for a local VRF.
+//   - No BGPAdvertisement owned by this node (name's vpc segment matches,
+//     RouterRef pointing at one of nodeName's BGPRouters) exists for its
+//     VPC. The VRF is shared by every attachment on this VPC on this node
+//     (crdnames.BGPVRFInstanceName), so any one surviving BGPAdvertisement
+//     for the VPC — regardless of which vpcAttachment it names — keeps it
+//     alive, not just a single exact-name match. Other nodes sharing this
+//     namespace may coincidentally reuse the same VPC for their own,
+//     unrelated attachment — only this node's own BGPAdvertisements can
+//     vouch for a local VRF.
 func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, nodeName string) ([]string, error) {
 	vrfs, err := vrf.ListVRFLinks()
 	if err != nil {
@@ -252,31 +296,30 @@ func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, node
 		return nil, err
 	}
 
-	// Build a set of active BGPAdvertisement names owned by this node.
+	// Build the set of VPCs with at least one active BGPAdvertisement owned
+	// by this node.
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := k8s.List(ctx, advList, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPAdvertisements: %w", err)
 	}
 
-	activeAdvNames := make(map[string]struct{}, len(advList.Items))
+	activeVPCs := make(map[string]struct{}, len(advList.Items))
 	for _, adv := range advList.Items {
 		if _, ownedByThisNode := routerNames[adv.Spec.RouterRef.Name]; !ownedByThisNode {
 			continue
 		}
-		activeAdvNames[adv.Name] = struct{}{}
+		activeVPCs[vpcFromName(adv.Name)] = struct{}{}
 	}
 
 	var orphaned []string
 	for _, v := range vrfs {
-		vpc, vpcAtt, ok := parseVRFName(v.Name)
+		vpc, ok := parseVRFName(v.Name)
 		if !ok {
 			// Not a Galactic VRF — skip.
 			continue
 		}
 
-		// Check if the corresponding BGPAdvertisement exists.
-		advName := fmt.Sprintf("%s-%s", vpc, vpcAtt)
-		if _, exists := activeAdvNames[advName]; !exists {
+		if _, exists := activeVPCs[vpc]; !exists {
 			orphaned = append(orphaned, v.Name)
 		}
 	}
@@ -291,9 +334,8 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 	result := CleanupResult{}
 
 	for _, name := range vrfNames {
-		// We need the vpc/vpcAttachment to call vrf.Delete. Parse the name
-		// back to get those values.
-		vpc, vpcAtt, ok := parseVRFName(name)
+		// We need the vpc to call vrf.Delete. Parse the name back to get it.
+		vpc, ok := parseVRFName(name)
 		if !ok {
 			// Try to delete by name directly.
 			link, err := netlink.LinkByName(name)
@@ -309,14 +351,13 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 			continue
 		}
 
-		if err := vrf.Delete(vpc, vpcAtt); err != nil {
+		if err := vrf.Delete(vpc); err != nil {
 			slog.Error("GC: failed to delete orphaned VRF",
-				"name", name, "vpc", vpc, "vpcAttachment", vpcAtt, "err", err)
+				"name", name, "vpc", vpc, "err", err)
 			result.Errors++
 			continue
 		}
-		slog.Info("GC: removed orphaned VRF",
-			"name", name, "vpc", vpc, "vpcAttachment", vpcAtt)
+		slog.Info("GC: removed orphaned VRF", "name", name, "vpc", vpc)
 		result.OrphanedVRFsRemoved++
 	}
 
@@ -516,15 +557,14 @@ func collectNetNSPaths(adv *bgpv1alpha1.BGPAdvertisement) map[string]string {
 // The interface name template ("G%09s%03sV") zero-pads the base62 components,
 // but BGP CRD names use the raw (unpadded) base62 values. parseVRFName strips
 // leading zeros so the returned values match the CRD naming convention.
-func parseVRFName(name string) (vpc, vpcAttachment string, ok bool) {
-	// The template is "G%09s%03sV" — 1 + 9 + 3 + 1 = 14 characters.
-	// But base62 encoding can produce mixed alphanumeric, so we need a
-	// regex approach.
+func parseVRFName(name string) (vpc string, ok bool) {
+	// The template is "G%09sV" — 1 + 9 + 1 = 11 characters. But base62
+	// encoding can produce mixed alphanumeric, so we need a regex approach.
 	matches := vrfNameRegex.FindStringSubmatch(name)
 	if matches == nil {
-		return "", "", false
+		return "", false
 	}
-	// Strip leading zeros to reverse the %09s/%03s padding. BGP CRD names
-	// use the raw base62 values (e.g. "10-10" not "000000010-010").
-	return strings.TrimLeft(matches[1], "0"), strings.TrimLeft(matches[2], "0"), true
+	// Strip leading zeros to reverse the %09s padding. BGP CRD names use the
+	// raw base62 value (e.g. "10-dfw-worker" not "000000010-dfw-worker").
+	return strings.TrimLeft(matches[1], "0"), true
 }
