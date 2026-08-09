@@ -466,10 +466,10 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `internal/metadata`           | every binary    | Build-time vars (`Version`, `GitCommit`, `GitTreeState`, `BuildDate`) stamped via `-ldflags`         | No         |
 | `internal/gc`                 | galactic-router | Collects orphaned `BGPAdvertisement`/`BGPVRFInstance` CRDs, stale kernel VRFs, and stale eBPF `vrf_table` entries; invoked by the GC controller's ticker | No |
 | `internal/cni`                | galactic-cni    | Veth master plugin: `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`; PluginConf parsing; NAD annotation; host-device delegation; delegates kernel work to plumbing | No |
-| `internal/cni/hostconf`       | every CNI-chain binary | Shared `HostConf` schema + static-conflist loader, plus API-based node-name auto-detect          | No         |
+| `internal/hostconf`           | every CNI-chain binary | Shared `HostConf` schema + static-conflist loader, plus API-based node-name auto-detect          | No         |
 | `internal/cni/hostgw`         | galactic-cni, galactic-tap-cni | Host-side gateway address/route configuration for a VPC attachment's allocated IPAM addresses | No |
-| `internal/cni/crdnames`       | galactic-cni, galactic-bgp, galactic-router (gc) | Deterministic `BGPVRFInstance`/`BGPAdvertisement` CRD name + annotation-key derivation | No |
-| `internal/cni/nadpatch`       | galactic-cni, galactic-tap-cni | NAD annotation patch (host interface name) + pod-namespace parsing from `CNI_ARGS`          | No         |
+| `internal/crdnames`           | galactic-cni, galactic-bgp, galactic-router (gc) | Deterministic `BGPVRFInstance`/`BGPAdvertisement` CRD name + annotation-key derivation | No |
+| `internal/nadpatch`           | galactic-cni, galactic-tap-cni | NAD annotation patch (host interface name) + pod-namespace parsing from `CNI_ARGS`          | No         |
 | `internal/cni/ipam`           | galactic-ipam   | IPv6/IPv4 pool allocators + static IP allocator; on-disk marker-file persistence (flock-guarded, keyed by containerID) | Yes (pool allocations + marker files) |
 | `internal/cni/route`          | galactic-route  | Host-side static route add/delete via netlink                                                        | No         |
 | `internal/cni/tap`            | galactic-tap-cni | Tap interface create/delete for VM workloads (Kata, Firecracker, kraftlet/Unikraft)                   | No         |
@@ -576,7 +576,7 @@ Runs on every PR and push to `main`. Two tiers:
 |--------------------------------------------|--------------------------------------------------------------|
 | CNI master-plugin attach/detach flow (veth) | `internal/cni/ops_add.go:cmdAdd`, `internal/cni/ops_del.go:cmdDel` (`internal/cni/cni.go` only holds `RunPlugin`) |
 | CNI master-plugin attach/detach flow (tap) | `internal/cnitap/ops_add.go:cmdAdd`, `internal/cnitap/ops_del.go:cmdDel` (mirrors `internal/cni`) |
-| CNI runtime config resolution (conflist/env/API auto-detect) | `internal/cni/config.go:parseConf`, `loadHostConf`, `internal/cni/hostconf.DetectNodeNameFromAPI` |
+| CNI runtime config resolution (conflist/env/API auto-detect) | `internal/cni/config.go:parseConf`, `loadHostConf`, `internal/hostconf.DetectNodeNameFromAPI` |
 | IPAM delegation (master plugin side)       | `internal/cni/result.go:configureIPAM` (`ipam.ExecAdd`), `internal/cni/ops_del.go:cmdDel` (`ipam.ExecDel`) |
 | IPAM delegation protocol (delegate side)   | `internal/cniipam/ops.go:cmdAdd`/`cmdDel`, `internal/cniipam/allocate.go`                     |
 | Termination-route chain stage              | `internal/cniroute/ops_add.go:cmdAdd`, `internal/cni/route/route.go`                          |

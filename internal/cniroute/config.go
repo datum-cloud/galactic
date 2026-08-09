@@ -16,8 +16,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
-	"go.datum.net/galactic/internal/cni/hostconf"
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/hostconf"
 )
 
 var ConfFile = config.DefaultConfFile
@@ -29,7 +29,7 @@ var ConfFile = config.DefaultConfFile
 // the chain — it never resolves NodeName or Kubeconfig. It uses
 // config.CNIConfig purely for LogFile/LogLevel's env-var > conflist >
 // default precedence, so logging behaves the same way here as everywhere
-// else in the chain (see internal/cni/hostconf's doc comment on the one
+// else in the chain (see internal/hostconf's doc comment on the one
 // static conflist file every binary shares).
 var cniConfig *config.CNIConfig
 
