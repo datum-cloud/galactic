@@ -152,11 +152,11 @@ func TestResourceTrackerCleanup_MissingCRDsAreNotError(t *testing.T) {
 func TestResourceTrackerCleanup_UnregistersOwnEBPFEntry(t *testing.T) {
 	requireRoot(t)
 
-	if err := vrf.Add(testVPC, testAttachment); err != nil {
+	if err := vrf.Add(testVPC); err != nil {
 		t.Fatalf("vrf.Add: %v", err)
 	}
-	t.Cleanup(func() { _ = vrf.Delete(testVPC, testAttachment) })
-	vrfTableID, err := vrf.TableID(testVPC, testAttachment)
+	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
+	vrfTableID, err := vrf.TableID(testVPC)
 	if err != nil {
 		t.Fatalf("vrf.TableID: %v", err)
 	}
@@ -219,10 +219,10 @@ func TestResourceTrackerCleanup_UnregistersOwnEBPFEntry(t *testing.T) {
 func TestResourceTrackerCleanup_LeavesEBPFEntryOwnedByAnotherAttachment(t *testing.T) {
 	requireRoot(t)
 
-	if err := vrf.Add(testVPC, testAttachment); err != nil {
+	if err := vrf.Add(testVPC); err != nil {
 		t.Fatalf("vrf.Add: %v", err)
 	}
-	t.Cleanup(func() { _ = vrf.Delete(testVPC, testAttachment) })
+	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
 
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
 	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })

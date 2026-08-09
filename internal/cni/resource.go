@@ -16,7 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/cni/veth"
-	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 var cniScheme = runtime.NewScheme()
@@ -54,7 +53,6 @@ func newK8sClient() (client.Client, error) {
 // so this one no longer needs to know anything about either.
 type resourceTracker struct {
 	vpc, vpcAttachment string
-	vrfCreated         bool
 
 	// ipamDelegated, ipamType, and ipamStdin record enough to release the
 	// IPAM allocation during rollback. Set as soon as pluginConf.IPAM != nil
@@ -78,6 +76,18 @@ type resourceTracker struct {
 // here is ipam.ExecDel, which (like ExecAdd) shells out to the delegated
 // plugin binary rather than making a k8s API call (BGP CRD/eBPF rollback is
 // galactic-bgp's own tracker now).
+//
+// Deliberately absent: deleting the VRF. veth.Delete below only removes
+// this attachment's own host/guest veth pair, which is genuinely private to
+// it — but the VRF itself is now shared by every attachment on this VPC on
+// this node (internal/plumbing/vrf keys it by VPC alone), and vrf.Add is
+// idempotent, so there's no way to distinguish "I created it" from "a
+// sibling attachment already had." Deleting it on this attachment's own
+// failed ADD could tear down a still-live sibling's VRF out from under it —
+// the same reasoning internal/cnibgp's resourceTracker applies to the
+// BGPVRFInstance CRD and eBPF vrf_table entry. Reclaiming it is exclusively
+// galactic-router's GC controller's job, once it has confirmed via every
+// BGPAdvertisement for this VPC/node that none remain.
 func (rt *resourceTracker) cleanup() {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
@@ -99,13 +109,5 @@ func (rt *resourceTracker) cleanup() {
 			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	} else {
 		slog.Debug("Rollback: deleted veth", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-	}
-
-	// 3. Delete VRF (flushes all routes, removes VRF interface)
-	if err := vrf.Delete(rt.vpc, rt.vpcAttachment); err != nil {
-		slog.Error("Rollback: failed to delete VRF", "err", err,
-			"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-	} else {
-		slog.Debug("Rollback: deleted VRF", "vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
 	}
 }

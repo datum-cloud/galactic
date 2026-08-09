@@ -45,8 +45,8 @@ func assembleRoute(vrfID uint32, prefix, nextHop, dev string) (*netlink.Route, e
 	}, nil
 }
 
-func Add(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
-	vrfID, err := vrf.TableID(vpc, vpcAttachment)
+func Add(vpc, prefix, nextHop, dev string) error {
+	vrfID, err := vrf.TableID(vpc)
 	if err != nil {
 		return err
 	}
@@ -61,8 +61,8 @@ func Add(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
 	return nil
 }
 
-func Delete(vpc, vpcAttachment string, prefix, nextHop, dev string) error {
-	vrfID, err := vrf.TableID(vpc, vpcAttachment)
+func Delete(vpc, prefix, nextHop, dev string) error {
+	vrfID, err := vrf.TableID(vpc)
 	if err != nil {
 		return err
 	}
