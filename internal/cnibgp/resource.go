@@ -17,7 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.datum.net/galactic/internal/cni/crdnames"
-	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -55,15 +54,37 @@ func newK8sClient() (client.Client, error) {
 // assigns the whole publishResult from publishBGPState in one shot
 // (tracker.publishResult = result).
 type resourceTracker struct {
-	vpc, vpcAttachment string
-	namespace          string
-	k8s                client.Client
+	vpc, vpcAttachment, nodeName string
+	namespace                    string
+	k8s                          client.Client
 
 	publishResult
 }
 
 // cleanup rolls back all tracked resources. Errors are logged but never
 // returned — the caller already has a failure.
+//
+// Deliberately conditional: deleting the BGPVRFInstance CRD only when this
+// ADD's own attempt just created it (vrfInstanceCreated), and never
+// unregistering the eBPF vrf_table entry registerEBPFDatapath wrote at all.
+// Unlike the BGPAdvertisement below (still a reliable 1:1 key per
+// attachment — see crdnames.BGPAdvertisementName), both the BGPVRFInstance
+// and the vrf_table entry are shared by every attachment on this VPC on
+// this node (crdnames.BGPVRFInstanceName): once a second attachment's ADD
+// reuses an already-live sibling's CRD/eBPF entry (publishBGPState's
+// CreateOrUpdate and usidmap.VRF.Register are both idempotent-by-name/key,
+// so this is the ordinary case, not an edge case), unconditionally rolling
+// either back here would tear down a live sibling's VRF out from under it.
+// This is the same reasoning internal/cni/veth and internal/plumbing/vrf
+// already apply on the kernel side (see vrf.Delete's doc comment): shared
+// per-(vpc,node) state is exclusively galactic-router's GC controller's job
+// to reclaim, once it has confirmed via every BGPAdvertisement for this
+// VPC/node that none remain (internal/gc's CollectOrphanedCRDs and
+// SweepEBPFVRFTable) — the eBPF entry has no cheap "did I just create this"
+// signal the way a k8s object's CreateOrUpdate result gives us, so it stays
+// unconditional there; the BGPVRFInstance does, which is what lets a
+// checkArgumentCollision rejection of a freshly-created instance (see
+// publishBGPState) self-heal on retry instead of wedging permanently.
 func (rt *resourceTracker) cleanup(ctx context.Context) {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
@@ -86,28 +107,15 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 	if rt.vrfInstanceCreated && rt.k8s != nil {
 		vrfInst := &bgpv1alpha1.BGPVRFInstance{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      crdnames.BGPVRFInstanceName(rt.vpc, rt.vpcAttachment),
+				Name:      crdnames.BGPVRFInstanceName(rt.vpc, rt.nodeName),
 				Namespace: rt.namespace,
 			},
 		}
 		if err := rt.k8s.Delete(ctx, vrfInst); client.IgnoreNotFound(err) != nil {
-			slog.Error("Rollback: failed to delete BGPVRFInstance", "err", err,
+			slog.Error("Rollback: failed to delete freshly-created BGPVRFInstance", "err", err,
 				"name", vrfInst.Name, "namespace", rt.namespace)
 		} else {
-			slog.Debug("Rollback: deleted BGPVRFInstance", "name", vrfInst.Name, "namespace", rt.namespace)
-		}
-	}
-
-	if rt.ebpfRegistered {
-		if vrfTableID, err := vrf.TableID(rt.vpc); err != nil {
-			slog.Error("Rollback: failed to resolve VRF table id, skipping eBPF vrf_table unregister", "err", err,
-				"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)
-		} else if err := unregisterEBPFDatapath(rt.ebpfBlock, rt.ebpfArgument, vrfTableID, ebpfPinDir); err != nil {
-			slog.Error("Rollback: failed to unregister eBPF vrf_table entry", "err", err,
-				"block", rt.ebpfBlock, "argument", rt.ebpfArgument)
-		} else {
-			slog.Debug("Rollback: unregistered eBPF vrf_table entry",
-				"block", rt.ebpfBlock, "argument", rt.ebpfArgument)
+			slog.Debug("Rollback: deleted freshly-created BGPVRFInstance", "name", vrfInst.Name, "namespace", rt.namespace)
 		}
 	}
 }
