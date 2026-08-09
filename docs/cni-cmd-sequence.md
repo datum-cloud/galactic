@@ -1,8 +1,38 @@
 # CNI cmdAdd / cmdDel Sequence Diagrams
 
-Per-interface-type sequence diagrams for the galactic-cni ADD and DEL paths.
+Per-binary sequence diagrams for the galactic CNI plugin chain's ADD and DEL
+paths.
 
-## cmdAdd — veth
+## Chain overview
+
+The chain is one master plugin, plus up to two optional plugins invoked
+after it in conflist order:
+
+1. **Master** — `galactic-cni` (veth, for containers) or `galactic-tap-cni`
+   (tap, for VM workloads: Kata, Firecracker, kraftlet/Unikraft). Creates
+   the VRF and host-side interface, annotates the NAD, delegates IPAM (if
+   an `"ipam"` block is present) and — for `galactic-cni` only —
+   host-device (to move the guest veth into the container netns), then
+   configures the host gateway address/route and prints the CNI result.
+2. **`galactic-route`** (optional — present only when the attachment has
+   `terminations`) — installs each termination as a route into the VRF
+   table, then passes `prevResult` through unchanged.
+3. **`galactic-bgp`** — publishes BGP/SRv6/eBPF state: `BGPVRFInstance`,
+   `BGPAdvertisement`, and (when this node's `BGPRouter` has SRv6
+   configured) the eBPF uSID datapath's `vrf_table` registration. Learns
+   everything it needs (interface kind, allocated addresses) from
+   `prevResult` alone — it never touches a kernel interface. Passes
+   `prevResult` through unchanged as the final CNI result.
+
+Every binary's own `cmdDel` is a no-op beyond binary-local, per-container
+cleanup (IPAM deallocation, guest netns flush, host-device DEL — all
+`galactic-cni`/`galactic-tap-cni` only). Shared node-level state (VRF,
+host interface, routes, SRv6/eBPF registration, `BGPVRFInstance`,
+`BGPAdvertisement`) is kept because it may still be in use by another
+pod/VM on the same `(vpc, vpcAttachment)`; `galactic-router`'s GC
+controller reclaims it once nothing references it anymore.
+
+## cmdAdd — veth (galactic-cni → galactic-route → galactic-bgp)
 
 ```mermaid
 sequenceDiagram
@@ -11,7 +41,7 @@ sequenceDiagram
     activate CNI
 
     CNI->>CNI: parseConf()
-    CNI->>CNI: resourceTracker{vpc, attachment, veth}
+    CNI->>CNI: resourceTracker{vpc, attachment}
 
     CNI->>VRF: Add(vpc, attachment)
     activate VRF
@@ -28,16 +58,8 @@ sequenceDiagram
     Veth-->>CNI: ok
     deactivate Veth
 
-    loop terminations
-        CNI->>Route: Add(vpc, attachment, network, via, dev)
-        activate Route
-        Route->>Route: netlink.RouteAdd in VRF table
-        Route-->>CNI: ok
-        deactivate Route
-    end
-
-    CNI->>CNI: buildVethResult()
-    activate CNI
+    CNI->>K8s: newK8sClient()
+    CNI->>K8s: AnnotateNAD(name, podNamespace, hostName)
 
     Note over CNI: host-device delegation
     CNI->>HostDevice: ADD (move guest veth to container netns)
@@ -45,47 +67,72 @@ sequenceDiagram
     HostDevice-->>CNI: ok
     deactivate HostDevice
 
-    CNI->>CNI: configureIPAM()
-    CNI->>CNI: allocateIPAM() -> subnet + gateway
-    CNI->>NetNS: configureInterfaceInNetns(guest, subnet, gw)
-    activate NetNS
-    NetNS->>NetNS: AddrAdd(subnet), LinkSetUp, RouteAdd(default via gw)
-    NetNS-->>CNI: ok
-    deactivate NetNS
+    opt "ipam" block present
+        CNI->>IPAM: ExecAdd(ipam.type, stdin)
+        activate IPAM
+        IPAM->>IPAM: allocate subnet/address (pool or static)
+        IPAM-->>CNI: CNI IPAM result
+        deactivate IPAM
+        CNI->>NetNS: configureInterfaceInNetns(guest, subnet, gw)
+        activate NetNS
+        NetNS->>NetNS: AddrAdd(subnet), LinkSetUp, RouteAdd(default via gw)
+        NetNS-->>CNI: ok
+        deactivate NetNS
+    end
 
     CNI->>CNI: readGuestInterface(MAC, MTU)
+    CNI->>HostGW: ConfigureHostGateway(vpc, attachment, ipamResult, guestMAC)
+    activate HostGW
+    HostGW->>HostGW: AddrAdd(gateway) on host veth
+    HostGW->>HostGW: RouteAdd(pod subnet) in VRF table
+    HostGW->>HostGW: NeighSet(pod IP -> guest MAC), permanent
+    HostGW-->>CNI: ok
+    deactivate HostGW
+
     CNI->>CNI: buildResult() + PrintResult()
+    CNI-->>Runtime: CNI result (JSON) — becomes next plugin's prevResult
     deactivate CNI
 
-    CNI->>CNI: publishBGPState()
-    activate CNI
+    opt attachment has terminations
+        Runtime->>Route: ADD (stdin config, prevResult)
+        activate Route
+        Route->>Route: parseConf(); require prevResult
+        loop terminations
+            Route->>Route: route.Add(vpc, attachment, network, via, dev)
+        end
+        Route-->>Runtime: prevResult, unchanged
+        deactivate Route
+    end
 
-    CNI->>CNI: configureHostGateway(vpc, attachment, ipamResult)
-    CNI->>CNI: AddrAdd(gateway/128) on host veth
-    CNI->>CNI: RouteAdd(subnet to host veth) in VRF table
+    Runtime->>BGP: ADD (stdin config, prevResult)
+    activate BGP
+    BGP->>BGP: parseConf(); inferFromPrevResult(prevResult)
+    Note over BGP: interface kind + IPAM result inferred from<br/>prevResult shape alone — no kernel access
+    BGP->>K8s: newK8sClient()
 
-    CNI->>CNI: decode VPC hex + VRFID
-    CNI->>K8s: newK8sClient()
+    BGP->>BGP: publishBGPState() (retry loop)
+    activate BGP
+    BGP->>K8s: lookupBGPRouter(node)
+    BGP->>K8s: allocateArgument() -> VRFID
+    BGP->>K8s: CreateOrUpdate BGPVRFInstance
+    BGP->>K8s: checkArgumentCollision()
+    opt router has srv6Locator + nodeID
+        BGP->>eBPF: registerEBPFDatapath(block, argument, vrfTableID, egressKind)
+        activate eBPF
+        eBPF->>eBPF: locator_table / function_table / vrf_table entries
+        eBPF-->>BGP: ok
+        deactivate eBPF
+    end
+    BGP->>K8s: CreateOrUpdate BGPAdvertisement(prefixes, annotations)
+    deactivate BGP
 
-    CNI->>CNI: publishBGPStateK8s() (retry loop)
-    activate CNI
-    CNI->>K8s: lookupBGPRouter(node)
-    CNI->>CNI: resolveSRv6SID(locator, nodeID, vrfID)
-    CNI->>SRv6: RouteIngressAdd(sid, vpc, attachment)
-    activate SRv6
-    SRv6->>SRv6: seg6local End.DT46 route
-    SRv6-->>CNI: ok
-    deactivate SRv6
-    CNI->>K8s: CreateOrUpdate BGPVRFInstance
-    CNI->>K8s: CreateOrUpdate BGPAdvertisement(prefix, annotations)
-    CNI-->>Runtime: ok
-    deactivate CNI
+    BGP-->>Runtime: prevResult, unchanged
+    deactivate BGP
 
     Runtime-->>Runtime: CNI result (JSON)
-    deactivate CNI
 ```
 
-## cmdAdd — tap
+## cmdAdd — tap (galactic-tap-cni → galactic-route → galactic-bgp)
 
 ```mermaid
 sequenceDiagram
@@ -94,7 +141,7 @@ sequenceDiagram
     activate CNI
 
     CNI->>CNI: parseConf()
-    CNI->>CNI: resourceTracker{vpc, attachment, tap}
+    CNI->>CNI: resourceTracker{vpc, attachment}
 
     CNI->>VRF: Add(vpc, attachment)
     activate VRF
@@ -111,48 +158,76 @@ sequenceDiagram
     Tap-->>CNI: ok
     deactivate Tap
 
-    loop terminations
-        CNI->>Route: Add(vpc, attachment, network, via, dev)
+    CNI->>K8s: newK8sClient()
+    CNI->>K8s: AnnotateNAD(name, podNamespace, hostName)
+
+    Note over CNI: tap branch — no host-device, no guest netns
+
+    opt "ipam" block present
+        CNI->>IPAM: ExecAdd(ipam.type, stdin)
+        activate IPAM
+        IPAM->>IPAM: allocate subnet/address (pool or static)
+        IPAM-->>CNI: CNI IPAM result
+        deactivate IPAM
+    end
+
+    CNI->>HostGW: ConfigureHostGateway(vpc, attachment, ipamResult, nil)
+    activate HostGW
+    HostGW->>HostGW: AddrAdd(gateway, /25 + NOPREFIXROUTE) on host tap
+    HostGW->>HostGW: RouteAdd(pod subnet) in VRF table
+    Note over HostGW: no guest MAC in tap mode — no neighbor entry installed
+    HostGW-->>CNI: ok
+    deactivate HostGW
+
+    CNI->>CNI: buildTapResult(ipamResult) + PrintResult()
+    CNI-->>Runtime: CNI result (JSON) — becomes next plugin's prevResult
+    deactivate CNI
+
+    opt attachment has terminations
+        Runtime->>Route: ADD (stdin config, prevResult)
         activate Route
-        Route->>Route: netlink.RouteAdd in VRF table
-        Route-->>CNI: ok
+        Route->>Route: parseConf(); require prevResult
+        loop terminations
+            Route->>Route: route.Add(vpc, attachment, network, via, dev)
+        end
+        Route-->>Runtime: prevResult, unchanged
         deactivate Route
     end
 
-    Note over CNI: tap branch - no host-device, no guest netns
+    Runtime->>BGP: ADD (stdin config, prevResult)
+    activate BGP
+    BGP->>BGP: parseConf(); inferFromPrevResult(prevResult)
+    Note over BGP: single interface, empty sandbox -> ifaceType = tap
+    BGP->>K8s: newK8sClient()
 
-    CNI->>CNI: allocateIPAM() -> subnet + gateway
-    CNI->>CNI: configureHostGateway(vpc, attachment, ipamResult)
-    CNI->>CNI: AddrAdd(gateway/128) on host tap
-    CNI->>CNI: RouteAdd(subnet to host tap) in VRF table
+    BGP->>BGP: publishBGPState() (retry loop)
+    activate BGP
+    BGP->>K8s: lookupBGPRouter(node)
+    BGP->>K8s: allocateArgument() -> VRFID
+    BGP->>K8s: CreateOrUpdate BGPVRFInstance
+    BGP->>K8s: checkArgumentCollision()
+    opt router has srv6Locator + nodeID
+        BGP->>eBPF: registerEBPFDatapath(block, argument, vrfTableID, egressKind)
+        activate eBPF
+        eBPF->>eBPF: locator_table / function_table / vrf_table entries
+        eBPF-->>BGP: ok
+        deactivate eBPF
+    end
+    BGP->>K8s: CreateOrUpdate BGPAdvertisement(prefixes, annotations)
+    deactivate BGP
 
-    CNI->>CNI: buildTapResult(ipamResult) + PrintResult()
-
-    CNI->>CNI: decode VPC hex + VRFID
-    CNI->>K8s: newK8sClient()
-
-    CNI->>CNI: publishBGPStateK8s() (retry loop)
-    activate CNI
-    CNI->>K8s: lookupBGPRouter(node)
-    CNI->>CNI: resolveSRv6SID(locator, nodeID, vrfID)
-    CNI->>SRv6: RouteIngressAdd(sid, vpc, attachment)
-    activate SRv6
-    SRv6->>SRv6: seg6local End.DT46 route
-    SRv6-->>CNI: ok
-    deactivate SRv6
-    CNI->>K8s: CreateOrUpdate BGPVRFInstance
-    CNI->>K8s: CreateOrUpdate BGPAdvertisement(prefix, annotations)
-    CNI-->>Runtime: ok
-    deactivate CNI
+    BGP-->>Runtime: prevResult, unchanged
+    deactivate BGP
 
     Runtime-->>Runtime: CNI result (JSON)
-    deactivate CNI
 ```
 
-## cmdDel — veth / tap (shared)
+## cmdDel — every binary in the chain
 
-Both interface types share the same DEL path. Per the CNI spec, DEL is
-idempotent — missing resources are never errors.
+Per the CNI spec, DEL is idempotent — missing resources are never errors.
+The runtime calls DEL on every chain entry that had a successful ADD, in
+reverse order; every one of those calls is independently idempotent, so
+the order doesn't matter for correctness.
 
 ```mermaid
 sequenceDiagram
@@ -166,16 +241,17 @@ sequenceDiagram
         CNI-->>Runtime: nil
         deactivate CNI
     else parse succeeds
-        alt hasIPAM
-            CNI->>K8s: newK8sClient()
-            alt k8s client OK
-                CNI->>CNI: deallocateIPAM()
-                CNI->>K8s: Get BGPAdvertisement -> read subnet annotation
-                CNI->>IPAM: PoolAllocator.Deallocate(subnet)
-            end
+        alt "ipam" block present (galactic-cni/galactic-tap-cni only)
+            CNI->>IPAM: ExecDel(ipam.type, stdin)
+            activate IPAM
+            IPAM->>IPAM: look up this containerID's own marker file, delete it
+            IPAM-->>CNI: ok
+            deactivate IPAM
         end
 
-        Note over CNI: Shared resources (VRF, interface, routes, SRv6,<br/>BGPAdvertisement, BGPVRFInstance) are NOT deleted here.<br/>They may be in use by another pod on the same (vpc, attachment).<br/>The GC controller collects orphans periodically.
+        Note over CNI: galactic-cni only: flush the guest netns'<br/>address/route, then forward DEL to host-device
+
+        Note over CNI,BGP: Shared resources (VRF, host interface, routes,<br/>eBPF vrf_table entry, BGPAdvertisement, BGPVRFInstance) are<br/>NOT deleted by any binary's DEL — they may be in use by<br/>another pod/VM on the same (vpc, attachment).<br/>galactic-router's GC controller collects orphans periodically.
 
         CNI->>CNI: slog.Info("DEL: skipping shared resource cleanup (handled by GC)")
         CNI->>CNI: print empty result
