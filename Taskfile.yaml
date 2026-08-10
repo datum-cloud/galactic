@@ -135,6 +135,7 @@ tasks:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-cni ./cmd/galactic-cni
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-tap-cni ./cmd/galactic-tap-cni
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-ipam ./cmd/galactic-ipam
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-bgp ./cmd/galactic-bgp
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-router ./cmd/galactic-router
       - go build -ldflags "{{.LDFLAGS}}" -o bin/vmtap-cni ./cmd/vmtap-cni
       - GOBIN={{.LOCALBIN}} go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1

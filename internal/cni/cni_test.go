@@ -5,7 +5,6 @@
 package cni
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -798,8 +797,7 @@ func TestResourceTrackerCleanupZeroValue(t *testing.T) {
 	// cleanup with a zero-value tracker must not panic — it's called in a
 	// defer and the caller may have failed before setting any fields.
 	tracker := &resourceTracker{}
-	ctx := context.Background()
-	tracker.cleanup(ctx) // should not panic
+	tracker.cleanup() // should not panic
 }
 
 func TestResourceTrackerCleanupPartialState(t *testing.T) {
@@ -808,17 +806,14 @@ func TestResourceTrackerCleanupPartialState(t *testing.T) {
 	tracker := &resourceTracker{
 		vpc:           testVPC,
 		vpcAttachment: testAttachment,
-		namespace:     "default",
 	}
-	ctx := context.Background()
-	tracker.cleanup(ctx) // should not panic; vrf.Delete will fail but is logged
+	tracker.cleanup() // should not panic; vrf.Delete will fail but is logged
 }
 
 func TestResourceTrackerFieldsSet(t *testing.T) {
 	tracker := &resourceTracker{
 		vpc:           testVPC,
 		vpcAttachment: testAttachment,
-		namespace:     "test-ns",
 	}
 
 	if tracker.vpc != testVPC {
@@ -827,14 +822,11 @@ func TestResourceTrackerFieldsSet(t *testing.T) {
 	if tracker.vpcAttachment != testAttachment {
 		t.Errorf("vpcAttachment = %q, want %q", tracker.vpcAttachment, testAttachment)
 	}
-	if tracker.namespace != "test-ns" {
-		t.Errorf("namespace = %q, want %q", tracker.namespace, "test-ns")
-	}
 	if tracker.vrfCreated {
 		t.Error("vrfCreated should be false by default")
 	}
-	if tracker.advCreated {
-		t.Error("advCreated should be false by default")
+	if tracker.routesCreated != 0 {
+		t.Error("routesCreated should be zero by default")
 	}
 }
 

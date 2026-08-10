@@ -2,19 +2,14 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package cnibgp holds the BGP/SRv6/eBPF publish logic shared by every
-// master plugin in the galactic CNI chain (galactic-cni, veth;
-// galactic-tap-cni, tap) — interface-agnostic aside from
-// EgressKindForInterfaceType's eBPF egress_kind lookup.
-//
-// Like internal/cniipam, this is a plain library today, imported directly by
-// the master plugins rather than a chain-invoked plugin of its own — that
-// lands in a follow-up step (cmd/galactic-bgp, new CHECK logic for the CRDs/
-// eBPF state this package writes, and replacing PublishConfig.InterfaceType
-// with an inference from prevResult.interfaces[] shape so no config field
-// carries it at all). Callers pass in a k8s client already scoped to a
-// scheme that includes go.datum.net/network/api/v1alpha1 — this package
-// never builds its own client.
+// Package cnibgp implements galactic-bgp, the SRv6/BGP/eBPF publish plugin
+// in the galactic CNI chain. It is chain-invoked (per CNI conflist order)
+// after the master plugin (galactic-cni or galactic-tap-cni), not called
+// as a library — it has zero kernel-interface dependency: every address it
+// advertises comes from prevResult (see prevresult.go), never from a
+// runtime call into the interface it doesn't own. Host-interface gateway
+// configuration lives in internal/cni/hostgw instead, called directly by
+// the master plugins, for exactly this reason.
 package cnibgp
 
 import (
@@ -22,17 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,57 +31,47 @@ import (
 
 	"go.datum.net/galactic/internal/cni/crdnames"
 	"go.datum.net/galactic/internal/cniipam"
-	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
-
-// cniTimeout bounds each individual k8s API retry attempt in
-// PublishBGPStateK8s.
-const cniTimeout = 10 * time.Second
 
 // maxRetries is the maximum number of retry attempts for transient k8s API
 // errors during the BGP state publish phase. The total number of attempts
 // is maxRetries+1 (initial + retries).
 const maxRetries = 2
 
-// ifaceTypeVeth and ifaceTypeTap are the two values PublishConfig.InterfaceType
-// accepts. Duplicated here (rather than imported) since they're plain
-// protocol-level string literals every caller already knows independently.
+// ifaceTypeVeth and ifaceTypeTap are the two values publishConfig.ifaceType
+// accepts, inferred from prevResult (see prevresult.go) rather than a
+// config field.
 const (
 	ifaceTypeVeth = "veth"
 	ifaceTypeTap  = "tap"
 )
 
-// PublishConfig carries the subset of a caller's own CNI config that BGP
-// publish needs. Each master plugin passes its own values in.
-type PublishConfig struct {
-	VPC           string
-	VPCAttachment string
-	// InterfaceType selects the eBPF vrf_table egress_kind (veth vs tap) —
-	// see EgressKindForInterfaceType. A follow-up step replaces this with an
-	// inference from prevResult.interfaces[] shape instead of a config field.
-	InterfaceType string
+// publishConfig carries the subset of this plugin's own config that
+// publishing needs.
+type publishConfig struct {
+	vpc, vpcAttachment string
+	// ifaceType selects the eBPF vrf_table egress_kind (veth vs tap) — see
+	// egressKindForInterfaceType. Inferred from prevResult, never a config
+	// field.
+	ifaceType string
 }
 
-// PublishResult records what PublishBGPState/PublishBGPStateK8s actually
-// created, so callers can fold it into their own rollback bookkeeping — the
-// rollback for a partially-failed ADD still belongs to whichever master
-// plugin's ADD is failing, even though the BGP publish logic itself lives
-// here.
-type PublishResult struct {
-	VRFInstanceCreated   bool
-	AdvertisementCreated bool
-	// EBPFRegistered, EBPFBlock, and EBPFArgument record the eBPF uSID
+// publishResult records what publishBGPState actually created, so cmdAdd
+// can fold it into its own rollback tracker.
+type publishResult struct {
+	vrfInstanceCreated   bool
+	advertisementCreated bool
+	// ebpfRegistered, ebpfBlock, and ebpfArgument record the eBPF uSID
 	// datapath's vrf_table registration, if one actually happened (the
-	// BGPRouter may not be configured, in which case EBPFRegistered stays
-	// false). See UnregisterEBPFDatapath for rolling this back.
-	EBPFRegistered bool
-	EBPFBlock      uint64
-	EBPFArgument   uint16
+	// BGPRouter may not be configured, in which case ebpfRegistered stays
+	// false). See unregisterEBPFDatapath for rolling this back.
+	ebpfRegistered bool
+	ebpfBlock      uint64
+	ebpfArgument   uint16
 }
 
 // isTransientError reports whether err is a transient failure that may
@@ -290,34 +271,11 @@ func buildAdvertisementSpec(
 	}
 }
 
-// PublishBGPState configures the host gateway, sets up the SRv6 ingress
-// route, and creates the BGPVRFInstance and BGPAdvertisement CRDs. The host
-// gateway configuration is interface-agnostic (works for both veth and
-// tap) — callers that already invoked ConfigureHostGateway themselves
-// (tap mode, which needs the gateway configured before printing its own CNI
-// result) should call PublishBGPStateK8s directly instead, to avoid
-// configuring it twice.
-func PublishBGPState(
-	args *skel.CmdArgs, cfg PublishConfig, nodeName, namespace string, ipamResult *cniipam.IPAMResult,
-	guestHWAddr net.HardwareAddr, k8s client.Client,
-) (PublishResult, error) {
-	if err := ConfigureHostGateway(cfg.VPC, cfg.VPCAttachment, ipamResult, guestHWAddr); err != nil {
-		return PublishResult{}, err
-	}
-
-	vpcHex, err := intf.Base62ToHex(cfg.VPC)
-	if err != nil {
-		return PublishResult{}, fmt.Errorf("decode VPC: %w", err)
-	}
-
-	return PublishBGPStateK8s(args, cfg, nodeName, namespace, ipamResult, vpcHex, k8s)
-}
-
 // ipamAdvertisementPrefixes derives the BGPAdvertisement prefixes to
 // originate, plus the per-family values to record in the annotations, from
-// ipamResult. ipamResult is nil when the attachment has no IPAM allocation
-// (e.g. a tap workload that manages its own addressing), in which case
-// prefixes is empty.
+// ipamResult (reconstructed from prevResult — see prevresult.go). ipamResult
+// is nil when the attachment has no IPAM allocation (e.g. a tap workload
+// that manages its own addressing), in which case prefixes is empty.
 func ipamAdvertisementPrefixes(ipamResult *cniipam.IPAMResult) (prefixes []string, ipv6Subnet, ipv4Addr string) {
 	if ipamResult == nil {
 		return nil, "", ""
@@ -352,15 +310,15 @@ func allAdvertisedPrefixes(annotations map[string]string) []string {
 	return prefixes
 }
 
-// PublishBGPStateK8s creates the BGPVRFInstance and BGPAdvertisement CRDs
-// with retry on transient k8s API errors. The host gateway must already be
-// configured before calling this (via ConfigureHostGateway, or PublishBGPState
-// which calls it first).
-func PublishBGPStateK8s(
-	args *skel.CmdArgs, cfg PublishConfig, nodeName, namespace string, ipamResult *cniipam.IPAMResult,
+// publishBGPState creates the BGPVRFInstance and BGPAdvertisement CRDs and
+// registers the eBPF uSID datapath entry, with retry on transient k8s API
+// errors. Assumes the host gateway is already configured (internal/cni/
+// hostgw, called by the master plugin before this ever runs).
+func publishBGPState(
+	args *skel.CmdArgs, cfg publishConfig, nodeName, namespace string, ipamResult *cniipam.IPAMResult,
 	vpcHex string, k8s client.Client,
-) (PublishResult, error) {
-	var result PublishResult
+) (publishResult, error) {
+	var result publishResult
 	err := retryK8sOps(cniTimeout, func(ctx context.Context) error {
 		bgp, err := lookupBGPRouter(ctx, k8s, nodeName, namespace)
 		if err != nil {
@@ -368,7 +326,7 @@ func PublishBGPStateK8s(
 		}
 
 		vrfID, err := allocateArgument(
-			ctx, k8s, namespace, bgp.routerName, crdnames.BGPVRFInstanceName(cfg.VPC, cfg.VPCAttachment))
+			ctx, k8s, namespace, bgp.routerName, crdnames.BGPVRFInstanceName(cfg.vpc, cfg.vpcAttachment))
 		if err != nil {
 			return err
 		}
@@ -378,7 +336,7 @@ func PublishBGPStateK8s(
 			return fmt.Errorf("compute route target: %w", err)
 		}
 
-		vrfName := crdnames.BGPVRFInstanceName(cfg.VPC, cfg.VPCAttachment)
+		vrfName := crdnames.BGPVRFInstanceName(cfg.vpc, cfg.vpcAttachment)
 		vrfInst := &bgpv1alpha1.BGPVRFInstance{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      vrfName,
@@ -392,7 +350,7 @@ func PublishBGPStateK8s(
 		if err != nil {
 			return fmt.Errorf("apply BGPVRFInstance: %w", err)
 		}
-		result.VRFInstanceCreated = true
+		result.vrfInstanceCreated = true
 		slog.Debug("BGP: BGPVRFInstance applied", "name", vrfName, "namespace", namespace,
 			"vrfID", vrfID, "routeTarget", rtValue, "router", bgp.routerName)
 
@@ -401,19 +359,19 @@ func PublishBGPStateK8s(
 		}
 
 		registered, ebpfBlock, err := registerEBPFDatapath(
-			bgp, cfg.VPC, cfg.VPCAttachment, cfg.InterfaceType, uint16(vrfID), attach.PinDir)
+			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir)
 		if err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
 		if registered {
-			result.EBPFRegistered = true
-			result.EBPFBlock = ebpfBlock
-			result.EBPFArgument = uint16(vrfID)
+			result.ebpfRegistered = true
+			result.ebpfBlock = ebpfBlock
+			result.ebpfArgument = uint16(vrfID)
 		}
 
 		adv := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      crdnames.BGPAdvertisementName(cfg.VPC, cfg.VPCAttachment),
+				Name:      crdnames.BGPAdvertisementName(cfg.vpc, cfg.vpcAttachment),
 				Namespace: namespace,
 			},
 		}
@@ -437,163 +395,15 @@ func PublishBGPStateK8s(
 		if err != nil {
 			return fmt.Errorf("apply BGPAdvertisement: %w", err)
 		}
-		result.AdvertisementCreated = true
+		result.advertisementCreated = true
 		slog.Debug("BGP: BGPAdvertisement applied", "name", adv.Name, "namespace", namespace,
 			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID)
 
 		slog.Info("ADD: BGP state published", "containerID", args.ContainerID,
-			"vpc", cfg.VPC, "vpcAttachment", cfg.VPCAttachment)
+			"vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
 		return nil
 	})
 	return result, err
-}
-
-// routeConflicts reports whether an existing route conflicts with the desired
-// pod-subnet route. A conflict occurs when the destination matches but the
-// gateway or link index differs.
-func routeConflicts(existing, desired *netlink.Route) bool {
-	if existing.Dst == nil || desired.Dst == nil {
-		return false
-	}
-	if existing.Dst.String() != desired.Dst.String() {
-		return false
-	}
-	if (existing.Gw != nil) != (desired.Gw != nil) {
-		return true
-	}
-	if existing.Gw != nil && !existing.Gw.Equal(desired.Gw) {
-		return true
-	}
-	if existing.LinkIndex != 0 && desired.LinkIndex != 0 && existing.LinkIndex != desired.LinkIndex {
-		return true
-	}
-	return false
-}
-
-// ConfigureHostGateway assigns each configured family's gateway address as a
-// host address (/128 for IPv6, /32 for IPv4 on veth) on the host-side
-// interface (veth or tap) and installs an explicit pod-subnet route for that
-// family into the VRF table. IPv4 is skipped entirely when the attachment is
-// IPv6-only. guestHWAddr is nil for tap attachments.
-func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, guestHWAddr net.HardwareAddr) error {
-	if res == nil {
-		return nil
-	}
-	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
-	hostLink, err := netlink.LinkByName(hostName)
-	if err != nil {
-		return fmt.Errorf("get host interface %q: %w", hostName, err)
-	}
-	tableID, err := vrf.TableID(vpc, vpcAttachment)
-	if err != nil {
-		return fmt.Errorf("get VRF table ID for pod subnet route: %w", err)
-	}
-
-	if res.IPv6Gateway != nil {
-		gwNet := &net.IPNet{IP: res.IPv6Gateway, Mask: net.CIDRMask(128, 128)}
-		if err := installGatewayRoute(hostLink, gwNet, res.IPv6Subnet, netlink.FAMILY_V6, int(tableID), 0); err != nil {
-			return err
-		}
-		if guestHWAddr != nil {
-			if err := installGatewayNeighbor(hostLink, res.IPv6Subnet.IP, netlink.FAMILY_V6, guestHWAddr); err != nil {
-				return err
-			}
-		}
-	}
-	if res.IPv4Gateway != nil {
-		ipv4Mask, addrFlags := ipv4GatewayAddrParams(hostLink)
-		gwNet := &net.IPNet{IP: res.IPv4Gateway, Mask: ipv4Mask}
-		ipv4Subnet := &net.IPNet{IP: res.IPv4Address, Mask: net.CIDRMask(32, 32)}
-		if err := installGatewayRoute(hostLink, gwNet, ipv4Subnet, netlink.FAMILY_V4, int(tableID), addrFlags); err != nil {
-			return err
-		}
-		if guestHWAddr != nil {
-			if err := installGatewayNeighbor(hostLink, res.IPv4Address, netlink.FAMILY_V4, guestHWAddr); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// installGatewayNeighbor installs a permanent neighbor table entry mapping
-// podIP to guestHWAddr on hostLink — see the design plan's note on why the
-// eBPF ingress datapath needs this pre-installed rather than relying on
-// dynamic ARP/NDP.
-func installGatewayNeighbor(hostLink netlink.Link, podIP net.IP, family int, guestHWAddr net.HardwareAddr) error {
-	neigh := &netlink.Neigh{
-		LinkIndex:    hostLink.Attrs().Index,
-		Family:       family,
-		State:        netlink.NUD_PERMANENT,
-		IP:           podIP,
-		HardwareAddr: guestHWAddr,
-	}
-	if err := netlink.NeighSet(neigh); err != nil {
-		return fmt.Errorf("add permanent neighbor %s -> %s on host interface %q: %w",
-			podIP, guestHWAddr, hostLink.Attrs().Name, err)
-	}
-	return nil
-}
-
-// ipv4GatewayAddrParams returns the IPv4 gateway mask and netlink address
-// flags to use for hostLink. Tap interfaces get a /25 with
-// IFA_F_NOPREFIXROUTE; veth interfaces keep the plain /32 host address with
-// no flags.
-func ipv4GatewayAddrParams(hostLink netlink.Link) (net.IPMask, int) {
-	if _, isTap := hostLink.(*netlink.Tuntap); isTap {
-		return net.CIDRMask(25, 32), unix.IFA_F_NOPREFIXROUTE
-	}
-	return net.CIDRMask(32, 32), 0
-}
-
-// installGatewayRoute assigns gwNet as a host address on hostLink and
-// installs an explicit route to subnet into the given VRF table, for one
-// address family. Idempotent.
-func installGatewayRoute(hostLink netlink.Link, gwNet, subnet *net.IPNet, family, tableID, addrFlags int) error {
-	hostName := hostLink.Attrs().Name
-	if err := netlink.AddrAdd(hostLink, &netlink.Addr{IPNet: gwNet, Flags: addrFlags}); err != nil {
-		if !errors.Is(err, syscall.EEXIST) {
-			return fmt.Errorf("add gateway address %s to host interface %q: %w", gwNet, hostName, err)
-		}
-	}
-
-	desiredRoute := &netlink.Route{
-		Dst:       subnet,
-		LinkIndex: hostLink.Attrs().Index,
-		Table:     tableID,
-	}
-
-	existingRoutes, err := netlink.RouteListFiltered(
-		family,
-		&netlink.Route{Table: tableID},
-		netlink.RT_FILTER_TABLE,
-	)
-	if err != nil {
-		return fmt.Errorf("list routes in VRF table: %w", err)
-	}
-	for _, r := range existingRoutes {
-		if r.Dst == nil {
-			continue
-		}
-		if r.Dst.String() != desiredRoute.Dst.String() {
-			continue
-		}
-		if routeConflicts(&r, desiredRoute) {
-			return fmt.Errorf(
-				"existing route %v to %s conflicts with desired route %v",
-				r, desiredRoute.Dst, desiredRoute,
-			)
-		}
-		return nil
-	}
-
-	if err := netlink.RouteAdd(desiredRoute); err != nil {
-		if errors.Is(err, syscall.EEXIST) {
-			return nil
-		}
-		return fmt.Errorf("add pod subnet route to VRF table: %w", err)
-	}
-	return nil
 }
 
 // registerEBPFDatapath registers this attachment against the eBPF uSID
@@ -613,7 +423,7 @@ func registerEBPFDatapath(
 			bgp.nodeID, uint16(uformat.NodeIDMin), uint16(uformat.NodeIDMax))
 	}
 
-	egressKind, err := EgressKindForInterfaceType(ifaceType)
+	egressKind, err := egressKindForInterfaceType(ifaceType)
 	if err != nil {
 		return false, 0, fmt.Errorf("determine eBPF egress kind: %w", err)
 	}
@@ -651,13 +461,13 @@ func registerEBPFDatapath(
 	return true, block, nil
 }
 
-// EgressKindForInterfaceType maps a "veth"/"tap" interface type string to the
+// egressKindForInterfaceType maps a "veth"/"tap" interface type string to the
 // vrf_table egress_kind value usid.c's step 9 uses to pick between
 // bpf_redirect_peer (veth, crosses into the container's netns) and plain
 // bpf_redirect (tap, which never leaves this netns).
-func EgressKindForInterfaceType(ifaceType string) (uint32, error) {
+func egressKindForInterfaceType(ifaceType string) (uint32, error) {
 	switch ifaceType {
-	case ifaceTypeVeth, "":
+	case ifaceTypeVeth:
 		return usidmap.EgressKindVeth, nil
 	case ifaceTypeTap:
 		return usidmap.EgressKindTap, nil
@@ -666,16 +476,15 @@ func EgressKindForInterfaceType(ifaceType string) (uint32, error) {
 	}
 }
 
-// UnregisterEBPFDatapath removes the vrf_table entry registerEBPFDatapath
-// wrote for this (block, argument) pair, from a caller's failed-ADD
-// rollback path. Idempotent: not an error if the entry is already gone.
+// unregisterEBPFDatapath removes the vrf_table entry registerEBPFDatapath
+// wrote for this (block, argument) pair, from cmdAdd's failed-ADD rollback
+// path. Idempotent: not an error if the entry is already gone.
 //
 // expectedVRFTableID must be this attachment's own VRF table id (recomputed
 // by the caller via vrf.TableID). Only deletes the entry when it still
-// resolves to expectedVRFTableID, and leaves it alone otherwise — see the
-// original resourceTracker.cleanup's doc comment for the race this guards
-// against.
-func UnregisterEBPFDatapath(block uint64, argument uint16, expectedVRFTableID uint32, pinDir string) error {
+// resolves to expectedVRFTableID, and leaves it alone otherwise — see
+// resourceTracker.cleanup's doc comment for the race this guards against.
+func unregisterEBPFDatapath(block uint64, argument uint16, expectedVRFTableID uint32, pinDir string) error {
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
 		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)

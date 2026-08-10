@@ -75,6 +75,19 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-ipam cmd/galactic-ipam/main.go
 
+# Build galactic-bgp, the BGP/SRv6/eBPF publish plugin in the galactic CNI
+# chain. Ships in this same image/binary set for the same reason
+# galactic-tap-cni/galactic-ipam do — see their own comments above.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -ldflags "-s -w \
+      -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
+      -X go.datum.net/galactic/internal/metadata.GitCommit=${GIT_COMMIT} \
+      -X go.datum.net/galactic/internal/metadata.GitTreeState=${GIT_TREE_STATE} \
+      -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
+      -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
+      -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
+    -o galactic-bgp cmd/galactic-bgp/main.go
+
 # Build vmtap-cni. It ships in this image rather than one of its own so the
 # vmtap DaemonSet (config/vmtap/) can reference the same published
 # ghcr.io/datum-cloud/galactic-cni image instead of a second, separately
@@ -111,6 +124,7 @@ FROM gcr.io/distroless/static:nonroot AS production
 COPY --from=builder /workspace/galactic-cni /galactic-cni
 COPY --from=builder /workspace/galactic-tap-cni /galactic-tap-cni
 COPY --from=builder /workspace/galactic-ipam /galactic-ipam
+COPY --from=builder /workspace/galactic-bgp /galactic-bgp
 COPY --from=builder /workspace/vmtap-cni /vmtap-cni
 COPY --from=builder /workspace/host-device /host-device
 COPY --from=builder /var/run/galactic-cni /var/run/galactic-cni
@@ -125,6 +139,7 @@ FROM docker.io/library/alpine:latest
 COPY --from=production /galactic-cni /galactic-cni
 COPY --from=production /galactic-tap-cni /galactic-tap-cni
 COPY --from=production /galactic-ipam /galactic-ipam
+COPY --from=production /galactic-bgp /galactic-bgp
 COPY --from=production /vmtap-cni /vmtap-cni
 COPY --from=production /host-device /host-device
 COPY --from=production /var/run/galactic-cni /var/run/galactic-cni
