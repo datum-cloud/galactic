@@ -3,8 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered by base branch: stacked pull requests target
+  # another pull request's branch rather than main, and a "branches: [main]"
+  # filter here skips this whole workflow for them -- leaving only the
+  # publish jobs and the CLA check reporting, which reads as a green pull
+  # request that was never tested.
   pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   GO_VERSION: '1.26'
