@@ -250,6 +250,13 @@ func parseConf(data []byte) (*PluginConf, error) {
 		}
 	}
 
+	// Refuse a config still written against the old flat addressing shape
+	// before anything else happens — those keys would otherwise be dropped
+	// as unknown fields and the pod would attach with no addresses at all.
+	if err := hostconf.RejectMovedIPAMKeys(data); err != nil {
+		return nil, err
+	}
+
 	// Load host CNI config
 	hostConf, err := loadHostConf(ConfFile)
 	if err != nil {
@@ -302,8 +309,9 @@ func parseConf(data []byte) (*PluginConf, error) {
 	// validation live inside internal/cniipam, since they're only ever
 	// read by whichever binary "ipam.type" names — this plugin passes its
 	// own StdinData straight through unmodified when it delegates
-	// (ops_add.go/ops_del.go), so validating them here too would just be
-	// redundant work on the same bytes.
+	// (ops_add.go/ops_del.go), so validating their values here too would
+	// just be redundant work on the same bytes. Their *placement* is this
+	// plugin's concern, though — see the RejectMovedIPAMKeys call above.
 
 	if conf.PrevResult != nil {
 		if err := validatePrevResult(conf.PrevResult); err != nil {

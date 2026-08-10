@@ -17,6 +17,11 @@
 // reading a well-known path off disk, independent of how it was actually
 // invoked. Bootstrap only ever writes one entry, typed PluginType, so every
 // caller in this repo passes that same constant.
+//
+// It also carries RejectMovedIPAMKeys, the guard every master plugin runs
+// over that per-attachment config — shared here for the same reason Load
+// is, so the two master plugins cannot drift apart on which keys they
+// refuse.
 package hostconf
 
 import (
@@ -26,7 +31,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
+	"github.com/containernetworking/cni/pkg/types"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -93,6 +100,69 @@ func Load(filePath string, acceptedTypes ...string) (*HostConf, error) {
 	}
 
 	return nil, fmt.Errorf("conflist at %q does not contain a plugin with type in %v", filePath, acceptedTypes)
+}
+
+// movedIPAMKeys holds exactly the addressing keys that used to sit at the
+// top level of a master plugin's config and now live inside its "ipam"
+// block. Every field is a json.RawMessage so presence is all that is
+// decoded: a wrong-typed value must still be reported as present rather
+// than failing the decode, and no value here is ever read.
+type movedIPAMKeys struct {
+	IPv6Subnet      json.RawMessage `json:"ipv6_subnet"`
+	IPv4Subnet      json.RawMessage `json:"ipv4_subnet"`
+	AddressFamilies json.RawMessage `json:"address_families"`
+	StaticIP        json.RawMessage `json:"static_ip"`
+}
+
+// RejectMovedIPAMKeys reports a CNI validation error (code 7) when data
+// carries any of the moved addressing keys at the top level of a master
+// plugin's config.
+//
+// Whether a master plugin allocates addresses at all is decided purely by
+// whether the "ipam" block is present. encoding/json drops unknown fields,
+// so a config still written against the old flat shape parses cleanly, the
+// pod attaches with a working interface and no addresses, and its
+// BGPAdvertisement is created advertising nothing — no error, no warning.
+// Guessing wrong about a pod's addressing is worse than refusing to attach
+// it, so the keys are refused by name instead.
+func RejectMovedIPAMKeys(data []byte) error {
+	var moved movedIPAMKeys
+	// A decode error here is the caller's own to report: every master
+	// plugin unmarshals the same bytes into its full config first, so
+	// malformed JSON has already been rejected with its own message.
+	if err := json.Unmarshal(data, &moved); err != nil {
+		return nil
+	}
+
+	var found []string
+	for _, key := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"ipv6_subnet", moved.IPv6Subnet},
+		{"ipv4_subnet", moved.IPv4Subnet},
+		{"address_families", moved.AddressFamilies},
+		{"static_ip", moved.StaticIP},
+	} {
+		// An explicit JSON null carries no addressing intent, so it reads
+		// the same as the key being absent.
+		if len(key.raw) > 0 && string(key.raw) != "null" {
+			found = append(found, "'"+key.name+"'")
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+
+	field, belong := "field", "belongs"
+	if len(found) > 1 {
+		field, belong = "fields", "belong"
+	}
+	return &types.Error{
+		Code: 7,
+		Msg: fmt.Sprintf("addressing %s %s %s inside the 'ipam' block, not at the top level of the config",
+			field, strings.Join(found, ", "), belong),
+	}
 }
 
 // detectScheme returns a minimal scheme containing only corev1 types needed

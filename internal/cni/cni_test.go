@@ -62,6 +62,17 @@ func assertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
 	}
 }
 
+// movedKeyConf builds an otherwise-valid galactic-cni config carrying the
+// supplied raw JSON member(s) at the top level, for the addressing keys
+// that belong inside the "ipam" block.
+func movedKeyConf(members string) string {
+	return fmt.Sprintf(
+		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni",`+
+			`"vpc":"%s","vpcattachment":"%s",%s}`,
+		testVPC, testAttachment, members,
+	)
+}
+
 // ---- parseConf -----------------------------------------------------------
 
 func TestParseConf(t *testing.T) {
@@ -194,6 +205,50 @@ func TestParseConf(t *testing.T) {
 				`{"cniVersion":"1.0.0","name":"test",`+
 					`"type":"galactic-cni","vpc":"%s",`+
 					`"vpcattachment":"%s","ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00:10:ff01::/48"}}`,
+				testVPC, testAttachment,
+			),
+			wantVPC: testVPC,
+		},
+		{
+			name:     "top-level ipv6_subnet is rejected",
+			input:    movedKeyConf(`"ipv6_subnet":"fd00:10:ff01::/48"`),
+			wantErr:  "addressing field 'ipv6_subnet' belongs inside the 'ipam' block",
+			wantCode: 7,
+		},
+		{
+			name:     "top-level ipv4_subnet is rejected",
+			input:    movedKeyConf(`"ipv4_subnet":"172.20.1.0/24"`),
+			wantErr:  "addressing field 'ipv4_subnet' belongs inside the 'ipam' block",
+			wantCode: 7,
+		},
+		{
+			name:     "top-level address_families is rejected",
+			input:    movedKeyConf(`"address_families":["ipv6"]`),
+			wantErr:  "addressing field 'address_families' belongs inside the 'ipam' block",
+			wantCode: 7,
+		},
+		{
+			name:     "top-level static_ip is rejected",
+			input:    movedKeyConf(`"static_ip":"fd00::1234"`),
+			wantErr:  "addressing field 'static_ip' belongs inside the 'ipam' block",
+			wantCode: 7,
+		},
+		{
+			name: "every moved key is named at once",
+			input: movedKeyConf(`"ipv6_subnet":"fd00::/48","ipv4_subnet":"172.20.1.0/24",` +
+				`"address_families":["ipv6"],"static_ip":"fd00::1"`),
+			wantErr: "addressing fields 'ipv6_subnet', 'ipv4_subnet', 'address_families', " +
+				"'static_ip' belong inside the 'ipam' block",
+			wantCode: 7,
+		},
+		{
+			name: "same keys inside the ipam block still parse",
+			input: fmt.Sprintf(
+				`{"cniVersion":"1.0.0","name":"test",`+
+					`"type":"galactic-cni","vpc":"%s","vpcattachment":"%s",`+
+					`"ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00:10:ff01::/48",`+
+					`"ipv4_subnet":"172.20.1.0/24","address_families":["ipv6","ipv4"],`+
+					`"static_ip":"fd00::1234"}}`,
 				testVPC, testAttachment,
 			),
 			wantVPC: testVPC,

@@ -221,6 +221,12 @@ func parseConf(data []byte) (*PluginConf, error) {
 		}
 	}
 
+	// Refuse a config still written against the old flat addressing shape —
+	// see internal/cni's own parseConf, identical here.
+	if err := hostconf.RejectMovedIPAMKeys(data); err != nil {
+		return nil, err
+	}
+
 	hostConf, err := loadHostConf(ConfFile)
 	if err != nil {
 		return nil, fmt.Errorf("load host CNI config: %w", err)
@@ -258,9 +264,10 @@ func parseConf(data []byte) (*PluginConf, error) {
 
 	// Whether IPAM runs at all is decided entirely by "ipam" block
 	// presence — see internal/cni's own parseConf for the full reasoning,
-	// identical here. Addressing fields and their validation live inside
-	// internal/cniipam, invoked via delegation with this plugin's own
-	// StdinData passed straight through unmodified.
+	// identical here. Addressing fields and their value validation live
+	// inside internal/cniipam, invoked via delegation with this plugin's
+	// own StdinData passed straight through unmodified; their placement is
+	// checked by the RejectMovedIPAMKeys call above.
 
 	if conf.PrevResult != nil {
 		if err := validatePrevResult(conf.PrevResult); err != nil {

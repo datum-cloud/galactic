@@ -8,7 +8,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/containernetworking/cni/pkg/types"
 )
 
 func TestLoadMissingFile(t *testing.T) {
@@ -74,6 +77,83 @@ func TestLoadMatchingPluginType(t *testing.T) {
 	}
 	if conf.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q, want %q", conf.LogLevel, "debug")
+	}
+}
+
+func TestRejectMovedIPAMKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{
+			name:  "no addressing keys at all",
+			input: `{"cniVersion":"1.0.0","type":"galactic-cni","vpc":"abc"}`,
+		},
+		{
+			name:  "keys inside the ipam block",
+			input: `{"type":"galactic-cni","ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00::/48","static_ip":"fd00::1"}}`,
+		},
+		{
+			name:    "top-level ipv6_subnet",
+			input:   `{"type":"galactic-cni","ipv6_subnet":"fd00::/48"}`,
+			wantErr: "addressing field 'ipv6_subnet' belongs inside the 'ipam' block",
+		},
+		{
+			name:    "top-level ipv4_subnet",
+			input:   `{"type":"galactic-cni","ipv4_subnet":"172.20.1.0/24"}`,
+			wantErr: "addressing field 'ipv4_subnet' belongs inside the 'ipam' block",
+		},
+		{
+			name:    "top-level address_families",
+			input:   `{"type":"galactic-cni","address_families":["ipv6"]}`,
+			wantErr: "addressing field 'address_families' belongs inside the 'ipam' block",
+		},
+		{
+			name:    "top-level static_ip",
+			input:   `{"type":"galactic-cni","static_ip":"fd00::1234"}`,
+			wantErr: "addressing field 'static_ip' belongs inside the 'ipam' block",
+		},
+		{
+			name:    "wrong-typed value is still reported as present",
+			input:   `{"type":"galactic-cni","ipv6_subnet":42}`,
+			wantErr: "addressing field 'ipv6_subnet' belongs inside the 'ipam' block",
+		},
+		{
+			name:  "explicit null carries no addressing intent",
+			input: `{"type":"galactic-cni","ipv6_subnet":null,"static_ip":null}`,
+		},
+		{
+			name:    "several keys are all named",
+			input:   `{"type":"galactic-cni","ipv4_subnet":"172.20.1.0/24","static_ip":"fd00::1"}`,
+			wantErr: "addressing fields 'ipv4_subnet', 'static_ip' belong inside the 'ipam' block",
+		},
+		{
+			name:  "malformed JSON is left to the caller to report",
+			input: "not json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := RejectMovedIPAMKeys([]byte(tt.input))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			var cniErr *types.Error
+			if !errors.As(err, &cniErr) {
+				t.Fatalf("expected *types.Error, got %T: %v", err, err)
+			}
+			if cniErr.Code != 7 {
+				t.Errorf("Code = %d, want 7", cniErr.Code)
+			}
+			if !strings.Contains(cniErr.Msg, tt.wantErr) {
+				t.Errorf("Msg = %q, want it to contain %q", cniErr.Msg, tt.wantErr)
+			}
+		})
 	}
 }
 
