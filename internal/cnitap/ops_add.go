@@ -17,7 +17,6 @@ import (
 
 	"go.datum.net/galactic/internal/cni/hostgw"
 	"go.datum.net/galactic/internal/cni/nadpatch"
-	"go.datum.net/galactic/internal/cni/route"
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/plumbing/intf"
@@ -103,16 +102,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		return fmt.Errorf("annotate NAD: %w", err)
 	}
 
-	dev := hostName
-	for _, termination := range pluginConf.Terminations {
-		if err := route.Add(pluginConf.VPC, pluginConf.VPCAttachment, termination.Network, termination.Via, dev); err != nil {
-			return fmt.Errorf("add route %s: %w", termination.Network, err)
-		}
-		tracker.routesCreated++
-	}
-	if tracker.routesCreated > 0 {
-		slog.Debug("ADD: termination routes installed", "count", tracker.routesCreated, "dev", dev)
-	}
+	// Termination routes are galactic-route's job now — chained next after
+	// this plugin, when the attachment has any (see internal/cniroute).
 
 	// Allocate IPAM for the tap interface via delegation (only if pluginConf
 	// carries an "ipam" block at all — see internal/cniipam's doc comment

@@ -97,7 +97,6 @@ the standard CNI `PluginConf` with Galactic-specific fields.
 | `vpcattachment`  | **Yes**  | `string`        | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming.                                                                                                                                                                                                                                                                                                                                                                                              |
 | `interface_type` | No       | `string`        | Interface mode: `"veth"` (default, for containers) or `"tap"` (for VMs such as Kata, Firecracker, QEMU). Both modes run IPAM and SRv6/BGP publish; `tap` mode only skips host-device delegation and guest-netns configuration (see the Tap mode section below).                                                                                                                                                                                                                                           |
 | `mtu`            | No       | `int`           | MTU for the host-side interface. For `veth` mode this applies to both veth endpoints; for `tap` mode it applies to the tap interface.                                                                                                                                                                                                                                                                                                                                                                     |
-| `terminations`   | No       | `[]Termination` | Array of static routes to add on the host side (see Termination sub-fields below).                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `namespace`      | No       | `string`        | Kubernetes namespace used to look up the `BGPRouter` CRD. Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` (conflist) → `galactic-system`. See [Runtime Configuration](#runtime-configuration) above.                                                                                                                                                                                                                                                                   |
 | `ipam`           | No*      | `IPAM`          | Legacy static-IP / local-IPAM configuration block (see IPAM sub-fields below). Only `type: "static"` still drives its own allocation path; `type: "pool"` is otherwise superseded by `ipv6_subnet`/`ipv4_subnet` below. *Required unless `GALACTIC_CNI_ENABLE_LOCAL_IPAM`, `ipv6_subnet`, or `ipv4_subnet` is set — applies identically in `veth` and `tap` mode. In `tap` mode `cmdAdd` (`internal/cni/ops_add.go`) calls `allocateIPAM` unconditionally (unlike `veth` mode, which checks first), so a config satisfying none of those currently produces a nil-pointer panic in `tap` mode rather than a clean validation error — always set one of them for tap. |
 | `ipv6_subnet`    | No*      | `string`        | Region IPv6 pool CIDR for the NAD-driven pool-IPAM path; endpoints allocate a `/96` from it by default. Setting this field or `ipv4_subnet` (or both) opts a config into pool IPAM directly — no `ipam` block needed. See [Pool IPAM via `ipv6_subnet`/`ipv4_subnet`](#pool-ipam-via-ipv6_subnetipv4_subnet) below. |
@@ -120,6 +119,13 @@ its printed Result, so an older value (e.g. `"0.4.0"`) makes `galactic-bgp`'s
 ADD fail for every attachment in the chain. Every config in this doc already
 uses `"1.0.0"`; keep it that way for any config authored outside these
 examples.
+
+`terminations` (static routes to add on the host side) is **not** a
+`galactic-cni`/`galactic-tap-cni` field — it belongs to `galactic-route`, the
+chained plugin invoked after the master plugin per conflist order (see
+[Termination Fields](#termination-fields) below). Putting a `terminations`
+array in the master's own stanza does nothing: `galactic-cni`'s slimmer
+`PluginConf` silently drops the unknown field on unmarshal.
 
 ### Interface Types
 
@@ -201,15 +207,22 @@ this fallback is IPv6-only; there is no default IPv4 pool.
 
 ### Termination Fields
 
-Each entry in the `terminations` array has the following fields:
+`terminations` is a field of `galactic-route`'s own conflist stanza — the
+chained CNI plugin invoked after `galactic-cni`/`galactic-tap-cni` and before
+`galactic-bgp` per conflist order, present only for attachments that need
+static routes installed on the host side. Each entry in the array has the
+following fields:
 
 | Field     | Required | Type     | Description                                                                                |
 | --------- | -------- | -------- | ------------------------------------------------------------------------------------------ |
 | `network` | **Yes**  | `string` | CIDR prefix for a static route (e.g. `"fd00::/48"`).                                       |
 | `via`     | No       | `string` | Next-hop gateway IP. If omitted, a link-local route is installed via the host-side device. |
 
-Used in `cmdAdd` to install routes into the VRF table for each termination
-entry. Deleted in `cmdDel` in reverse order.
+`galactic-route`'s `cmdAdd` installs routes into the VRF table for each
+termination entry. `cmdDel` is a no-op — routes are keyed by
+`(vpc, vpcattachment)` and may still be in use by another pod/VM sharing the
+same attachment, so cleanup is left entirely to `galactic-router`'s GC
+controller.
 
 ## Example Configurations
 
@@ -225,8 +238,10 @@ entry. Deleted in `cmdDel` in reverse order.
 }
 ```
 
-Omits `namespace` (defaults to `galactic-system`), `ipam`, and `terminations`.
-Without `GALACTIC_CNI_ENABLE_LOCAL_IPAM` set, no IP address is assigned to the
+Omits `namespace` (defaults to `galactic-system`) and `ipam`, and has no
+`galactic-route` chain entry (see [Configuration with terminations](#configuration-with-terminations)
+below) since there are no static routes to install. Without
+`GALACTIC_CNI_ENABLE_LOCAL_IPAM` set, no IP address is assigned to the
 guest interface. With `GALACTIC_CNI_ENABLE_LOCAL_IPAM` set, a subnet is allocated
 from the built-in pool.
 
@@ -304,26 +319,38 @@ carries only the IPv4 `/32` prefix.
 
 ### Configuration with terminations
 
+`terminations` goes in `galactic-route`'s own stanza of the conflist's
+`plugins` array, not the master plugin's:
+
 ```json
 {
   "cniVersion": "1.0.0",
   "name": "galactic",
-  "type": "galactic-cni",
-  "vpc": "1",
-  "vpcattachment": "1",
-  "terminations": [
-    { "network": "fd00::/48", "via": "fe80::1" },
-    { "network": "fd01::/48" }
-  ],
-  "ipam": {
-    "type": "pool",
-    "pool": "fd00:1:ff01::/48"
-  }
+  "plugins": [
+    {
+      "type": "galactic-cni",
+      "vpc": "1",
+      "vpcattachment": "1",
+      "ipam": {
+        "type": "pool",
+        "pool": "fd00:1:ff01::/48"
+      }
+    },
+    {
+      "type": "galactic-route",
+      "vpc": "1",
+      "vpcattachment": "1",
+      "terminations": [
+        { "network": "fd00::/48", "via": "fe80::1" },
+        { "network": "fd01::/48" }
+      ]
+    }
+  ]
 }
 ```
 
 The first termination installs a specific next-hop route; the second installs
-a link-local route via the host-side device.
+an on-link route via the host-side device.
 
 ### Tap interface configuration (VM workloads)
 

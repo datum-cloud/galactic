@@ -53,10 +53,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 		errs = append(errs, fmt.Errorf("guest interface %q: %w", guestName, err))
 	}
 
-	// Verify termination routes exist in the VRF table.
-	if err := checkTerminationRoutes(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.Terminations); err != nil {
-		errs = append(errs, fmt.Errorf("termination routes: %w", err))
-	}
+	// Termination routes are galactic-route's own CHECK now (see
+	// internal/cniroute's checkTerminationRoutes) — this plugin's CHECK no
+	// longer verifies them.
 
 	// Validate kernel state against prevResult (CNI spec §4.3).
 	if pluginConf.RawPrevResult != nil {
@@ -208,56 +207,6 @@ func checkGuestInterface(netnsPath, ifName string) error {
 		}
 		return nil
 	})
-}
-
-// checkTerminationRoutes verifies that all termination routes exist in the
-// VRF table for the given VPC/VPCAttachment pair.
-func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Termination) error {
-	tableID, err := vrf.TableID(vpc, vpcAttachment)
-	if err != nil {
-		return fmt.Errorf("get VRF table ID: %w", err)
-	}
-
-	handle, err := netlink.NewHandle()
-	if err != nil {
-		return fmt.Errorf("create netlink handle: %w", err)
-	}
-	defer handle.Close() //nolint:errcheck // netlink cleanup on teardown
-
-	routes, err := handle.RouteListFiltered(
-		netlink.FAMILY_V6,
-		&netlink.Route{Table: int(tableID)},
-		netlink.RT_FILTER_TABLE,
-	)
-	if err != nil {
-		return fmt.Errorf("list routes: %w", err)
-	}
-
-	dev := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
-	for _, term := range terminations {
-		viaIP := net.ParseIP(term.Via)
-		if viaIP == nil {
-			return fmt.Errorf("invalid termination gateway %q", term.Via)
-		}
-		found := false
-		for _, r := range routes {
-			if r.Dst != nil &&
-				r.Dst.String() == term.Network &&
-				r.Gw != nil &&
-				r.Gw.Equal(viaIP) &&
-				r.LinkIndex > 0 {
-				// Verify the link name matches (defers to the veth/tap device).
-				if link, linkErr := handle.LinkByIndex(r.LinkIndex); linkErr == nil && link.Attrs().Name == dev {
-					found = true
-					break
-				}
-			}
-		}
-		if !found {
-			return fmt.Errorf("missing route %s via %s in VRF table %d", term.Network, term.Via, tableID)
-		}
-	}
-	return nil
 }
 
 // checkPrevResult validates that kernel state matches the interfaces and IPs
