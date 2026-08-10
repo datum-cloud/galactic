@@ -56,6 +56,19 @@ type CleanupResult struct {
 // Base62 includes digits and letters.
 var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})V$`)
 
+// legacyVRFNameRegex matches the VRF interface name Galactic generated before
+// the VRF became per-VPC: the template was "G%09s%03sV", carrying the same
+// VPCAttachment segment the host/guest veth names still do (14 chars). A node
+// upgraded in place keeps whatever VRFs it created under the old template, and
+// those interfaces hold a routing table ID and its routes for as long as they
+// survive — so collection has to recognise them, map them to the same VPC the
+// current name would yield, and reclaim them once nothing references that VPC.
+//
+// This is deliberately a collection-only concern: nothing creates these names
+// any more, and the removal path must NOT resolve one back through
+// intf.GenerateInterfaceNameVRF (see vpcFromVRFName and RemoveOrphanedVRFs).
+var legacyVRFNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})[A-Za-z0-9]{3}V$`)
+
 // routerNamesForNode returns the names of every BGPRouter in the namespace
 // whose TargetRef points at nodeName. BGPAdvertisement/BGPVRFInstance CRDs
 // are namespace-scoped, not node-scoped — a namespace can hold CRDs created
@@ -275,7 +288,12 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 // nodeName's BGPRouter(s) in the given namespace.
 //
 // A VRF is considered orphaned when:
-//   - Its interface name matches the Galactic VRF naming pattern.
+//   - Its interface name matches the Galactic VRF naming pattern — either the
+//     current per-VPC name or the legacy pre-rename name that carried a
+//     VPCAttachment segment, both of which resolve to the same VPC (see
+//     vpcFromVRFName). A node upgraded in place still carries the latter, and
+//     they must be reclaimed too rather than stranding a routing table ID and
+//     its routes forever.
 //   - No BGPAdvertisement owned by this node (name's vpc segment matches,
 //     RouterRef pointing at one of nodeName's BGPRouters) exists for its
 //     VPC. The VRF is shared by every attachment on this VPC on this node
@@ -313,7 +331,7 @@ func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, node
 
 	var orphaned []string
 	for _, v := range vrfs {
-		vpc, ok := parseVRFName(v.Name)
+		vpc, ok := vpcFromVRFName(v.Name)
 		if !ok {
 			// Not a Galactic VRF — skip.
 			continue
@@ -334,20 +352,29 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 	result := CleanupResult{}
 
 	for _, name := range vrfNames {
-		// We need the vpc to call vrf.Delete. Parse the name back to get it.
+		// We need the vpc to call vrf.Delete. Parse the name back to get it —
+		// deliberately with parseVRFName, not vpcFromVRFName: vrf.Delete
+		// rebuilds the current "G%09sV" interface name from the VPC, so a
+		// legacy "G%09s%03sV" interface resolved that way would be looked up
+		// under a name that does not exist and silently reported as removed.
 		vpc, ok := parseVRFName(name)
 		if !ok {
-			// Try to delete by name directly.
+			// Not a current-shape name — this is where a legacy VRF collected
+			// by vpcFromVRFName lands. Delete the interface we actually
+			// observed, by name.
 			link, err := netlink.LinkByName(name)
 			if err != nil {
 				// Already gone — not an error.
 				continue
 			}
 			if delErr := netlink.LinkDel(link); delErr != nil {
-				slog.Error("GC: failed to delete orphaned VRF (parse failed)",
+				slog.Error("GC: failed to delete orphaned VRF by name",
 					"name", name, "err", delErr)
 				result.Errors++
+				continue
 			}
+			slog.Info("GC: removed orphaned VRF by name", "name", name)
+			result.OrphanedVRFsRemoved++
 			continue
 		}
 
@@ -566,5 +593,30 @@ func parseVRFName(name string) (vpc string, ok bool) {
 	}
 	// Strip leading zeros to reverse the %09s padding. BGP CRD names use the
 	// raw base62 value (e.g. "10-dfw-worker" not "000000010-dfw-worker").
+	return strings.TrimLeft(matches[1], "0"), true
+}
+
+// vpcFromVRFName resolves the VPC that a kernel VRF interface belongs to,
+// accepting both the current per-VPC name (parseVRFName) and the legacy
+// pre-rename name (legacyVRFNameRegex). Both shapes carry the same base62 VPC
+// in the same leading position, so a legacy VRF resolves to exactly the VPC
+// its BGPAdvertisements are named after and is judged against them like any
+// other.
+//
+// Only CollectOrphanedVRFs uses this. RemoveOrphanedVRFs deliberately keeps
+// using parseVRFName: it deletes a resolved VPC via vrf.Delete, which rebuilds
+// the *current* interface name from that VPC and so would silently no-op
+// against a legacy interface. Leaving a legacy name unresolved there routes it
+// into the by-name fallback, which deletes the interface actually observed.
+func vpcFromVRFName(name string) (vpc string, ok bool) {
+	if vpc, ok := parseVRFName(name); ok {
+		return vpc, true
+	}
+	matches := legacyVRFNameRegex.FindStringSubmatch(name)
+	if matches == nil {
+		return "", false
+	}
+	// Strip the %09s padding exactly as parseVRFName does, so the VPC matches
+	// CRD naming.
 	return strings.TrimLeft(matches[1], "0"), true
 }
