@@ -41,6 +41,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
+		nodeName:      nodeName,
 		namespace:     namespace,
 	}
 

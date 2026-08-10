@@ -54,7 +54,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	var errs []error
 
 	vrfInst := &bgpv1alpha1.BGPVRFInstance{}
-	vrfName := crdnames.BGPVRFInstanceName(pluginConf.VPC, pluginConf.VPCAttachment)
+	vrfName := crdnames.BGPVRFInstanceName(pluginConf.VPC, cniConfig.NodeName)
 	vrfErr := k8s.Get(ctx, client.ObjectKey{Name: vrfName, Namespace: pluginConf.Namespace}, vrfInst)
 	if vrfErr != nil {
 		errs = append(errs, fmt.Errorf("BGPVRFInstance %s: %w", vrfName, vrfErr))

@@ -364,12 +364,13 @@ func testChainedGalacticBGP(t *testing.T, podName string, tapResult map[string]a
 	t.Helper()
 
 	const vpc, vpcAttachment = "1", "1"
-	crdName := vpc + "-" + vpcAttachment
+	vrfCRDName := vpc + "-" + nodeName()    // BGPVRFInstance keyed by (vpc, node)
+	advCRDName := vpc + "-" + vpcAttachment // BGPAdvertisement keyed by (vpc, vpcAttachment)
 	t.Cleanup(func() {
 		//nolint:errcheck // best-effort cleanup, mirrors deletePod
-		kubectl(context.Background(), "delete", "bgpvrfinstance", crdName, "--ignore-not-found")
+		kubectl(context.Background(), "delete", "bgpvrfinstance", vrfCRDName, "--ignore-not-found")
 		//nolint:errcheck // best-effort cleanup, mirrors deletePod
-		kubectl(context.Background(), "delete", "bgpadvertisement", crdName, "--ignore-not-found")
+		kubectl(context.Background(), "delete", "bgpadvertisement", advCRDName, "--ignore-not-found")
 	})
 
 	prevResultJSON, err := json.Marshal(tapResult)
@@ -414,12 +415,11 @@ NODE_NAME=` + nodeName() + ` \
 
 	// galactic-bgp is the last plugin in the chain: its own result is
 	// prevResult passed through unchanged, not a new one it builds itself.
-	jsonStart := strings.Index(addOut, "{")
-	if jsonStart == -1 {
-		t.Fatalf("no JSON found in galactic-bgp ADD output:\n%s", addOut)
-	}
+	// Decode only the first JSON value so trailing log lines are ignored.
 	var bgpResult map[string]any
-	if err := json.Unmarshal([]byte(addOut[jsonStart:]), &bgpResult); err != nil {
+	if jsonStart := strings.Index(addOut, "{"); jsonStart == -1 {
+		t.Fatalf("no JSON found in galactic-bgp ADD output:\n%s", addOut)
+	} else if err := json.NewDecoder(strings.NewReader(addOut[jsonStart:])).Decode(&bgpResult); err != nil {
 		t.Fatalf("galactic-bgp ADD output is not valid JSON: %v\noutput:\n%s", err, addOut)
 	}
 	if bgpIfaces, _ := bgpResult["interfaces"].([]any); len(bgpIfaces) != 1 {
@@ -427,11 +427,11 @@ NODE_NAME=` + nodeName() + ` \
 			len(bgpIfaces))
 	}
 
-	if out, err := kubectl(t.Context(), "get", "bgpvrfinstance", crdName); err != nil {
-		t.Errorf("BGPVRFInstance %s not found after galactic-bgp ADD: %v\n%s", crdName, err, out)
+	if out, err := kubectl(t.Context(), "get", "bgpvrfinstance", vrfCRDName); err != nil {
+		t.Errorf("BGPVRFInstance %s not found after galactic-bgp ADD: %v\n%s", vrfCRDName, err, out)
 	}
-	if out, err := kubectl(t.Context(), "get", "bgpadvertisement", crdName); err != nil {
-		t.Errorf("BGPAdvertisement %s not found after galactic-bgp ADD: %v\n%s", crdName, err, out)
+	if out, err := kubectl(t.Context(), "get", "bgpadvertisement", advCRDName); err != nil {
+		t.Errorf("BGPAdvertisement %s not found after galactic-bgp ADD: %v\n%s", advCRDName, err, out)
 	}
 
 	// CHECK reads back the locator_table/function_table/vrf_table entries
