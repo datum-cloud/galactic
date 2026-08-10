@@ -287,13 +287,13 @@ NODE_NAME=` + nodeName() + ` \
 		t.Fatalf("CNI ADD failed: %v", err)
 	}
 
-	// The CNI result is JSON; find the first '{'.
-	jsonStart := strings.Index(out, "{")
-	if jsonStart == -1 {
-		t.Fatalf("no JSON found in CNI ADD output:\n%s", out)
-	}
+	// The CNI result is JSON on stdout, but kubectl exec interleaves
+	// stderr (slog log lines) into the captured output.  Decode only
+	// the first JSON value so trailing log lines are ignored.
 	var result map[string]any
-	if err := json.Unmarshal([]byte(out[jsonStart:]), &result); err != nil {
+	if jsonStart := strings.Index(out, "{"); jsonStart == -1 {
+		t.Fatalf("no JSON found in CNI ADD output:\n%s", out)
+	} else if err := json.NewDecoder(strings.NewReader(out[jsonStart:])).Decode(&result); err != nil {
 		t.Fatalf("CNI ADD output is not valid JSON: %v\noutput:\n%s", err, out)
 	}
 
