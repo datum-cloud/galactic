@@ -62,6 +62,13 @@ func newRootCommand() *cobra.Command {
 				return nil
 			}
 
+			// This plugin never enters a network namespace — it only
+			// allocates addresses from on-disk marker files. For tap-mode
+			// attachments, CNI_NETNS points at the host netns which equals
+			// this process's ambient netns, so the CNI library's same-netns
+			// rejection check would fire without the override.
+			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
+
 			cniipam.RunPlugin()
 			return nil
 		},

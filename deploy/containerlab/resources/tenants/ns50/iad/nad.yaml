@@ -5,17 +5,27 @@ metadata:
   name: private
   namespace: ns50
 spec:
-  config: |
+  config: |-
     {
       "cniVersion": "1.0.0",
       "name": "private",
-      "type": "galactic-cni",
-      "vpc": "50",
-      "vpcattachment": "50",
-      "namespace": "galactic-system",
-      "ipam": {
-        "type": "galactic-ipam",
-        "ipv4_subnet": "172.20.10.0/24",
-        "address_families": ["ipv4"]
-      }
+      "plugins": [
+        {
+          "type": "galactic-cni",
+          "vpc": "50",
+          "vpcattachment": "50",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv4_subnet": "172.20.10.0/24",
+            "address_families": ["ipv4"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "50",
+          "vpcattachment": "50",
+          "namespace": "galactic-system"
+        }
+      ]
     }

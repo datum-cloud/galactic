@@ -32,13 +32,13 @@
 //     external event silently clearing the filter -- requires it.
 //   - usidmap: the read/write API that populates and reconciles
 //     locator_table/function_table/vrf_table, used by the CNI ADD path's
-//     registration call (internal/cni/bgp.go) and by the GC controller's
+//     registration call (internal/cnibgp/bgp.go) and by the GC controller's
 //     sweep (internal/gc).
 //   - metrics: Prometheus metrics and health-check event hooks spanning the
 //     whole datapath (load/attach events, drops by reason, per-Argument
 //     hit counters and Argument-space utilization).
 //
-// internal/cni and internal/gc are the two callers outside this tree that
+// internal/cnibgp and internal/gc are the two callers outside this tree that
 // drive usidmap's register/unregister/reconcile calls; internal/reconcile
 // and internal/plumbing/srv6's ComputeSID independently compute the same
 // SID this datapath decodes, for the BGP control-plane side of the same
