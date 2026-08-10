@@ -68,11 +68,13 @@ func newRootCommand() *cobra.Command {
 				return nil
 			}
 
-			// Unlike galactic-cni/galactic-tap-cni, this plugin never enters
-			// any network namespace at all (it only makes k8s API calls),
-			// so it needs neither the stdin peek-and-repipe dance nor
-			// CNI_NETNS_OVERRIDE those two use to detect and handle
-			// tap-mode's host-netns invocation.
+			// This plugin never enters a network namespace — it only makes
+			// k8s API calls to publish BGP advertisements. For tap-mode
+			// attachments, CNI_NETNS points at the host netns which equals
+			// this process's ambient netns, so the CNI library's same-netns
+			// rejection check would fire without the override.
+			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
+
 			cnibgp.RunPlugin()
 			return nil
 		},
