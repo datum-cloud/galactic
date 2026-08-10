@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	testVRFName      = "G0000000jUV"
-	testVRFNameHost  = "G0000000jU00GH"
-	testVRFNameGuest = "G0000000jU00GG"
-	testEth0         = "eth0"
+	testVRFName       = "G0000000jUV"
+	testVRFNameLegacy = "G0000000jU00GV"
+	testVRFNameHost   = "G0000000jU00GH"
+	testVRFNameGuest  = "G0000000jU00GG"
+	testEth0          = "eth0"
 )
 
 func TestCollectNetNSPaths(t *testing.T) {
@@ -120,6 +121,15 @@ func TestParseVRFName(t *testing.T) {
 			wantOk:  true,
 		},
 		{
+			// parseVRFName must keep rejecting the legacy shape: it feeds
+			// vrf.Delete, which rebuilds the current name from the VPC and
+			// would no-op against a legacy interface. RemoveOrphanedVRFs
+			// relies on this to route legacy names into its by-name fallback.
+			name:    "legacy VRF name is not resolvable to a deletable VPC",
+			vrfName: testVRFNameLegacy,
+			wantOk:  false,
+		},
+		{
 			name:    "not a VRF name (host interface)",
 			vrfName: testVRFNameHost,
 			wantOk:  false,
@@ -155,6 +165,79 @@ func TestParseVRFName(t *testing.T) {
 	}
 }
 
+// TestVPCFromVRFName covers the collection-side name resolution, which must
+// accept both the current per-VPC VRF name and the legacy pre-rename name that
+// still carried a VPCAttachment segment. Both resolve to the same VPC, so a
+// VRF created before the rename is judged against the same BGPAdvertisements
+// as one created after it, instead of being skipped as "not a Galactic VRF"
+// and stranding its routing table ID forever.
+func TestVPCFromVRFName(t *testing.T) {
+	tests := []struct {
+		name    string
+		vrfName string
+		wantVPC string
+		wantOk  bool
+	}{
+		{
+			name:    "legacy VRF name resolves to the same VPC",
+			vrfName: testVRFNameLegacy,
+			wantVPC: "jU",
+			wantOk:  true,
+		},
+		{
+			name:    "legacy VRF name with a numeric VPC",
+			vrfName: "G000000010001V",
+			wantVPC: "10",
+			wantOk:  true,
+		},
+		{
+			name:    "current VRF name still resolves",
+			vrfName: testVRFName,
+			wantVPC: "jU",
+			wantOk:  true,
+		},
+		{
+			name:    "current VRF name with a numeric VPC still resolves",
+			vrfName: "G000000010V",
+			wantVPC: "10",
+			wantOk:  true,
+		},
+		{
+			name:    "host veth is still not a VRF",
+			vrfName: testVRFNameHost,
+			wantOk:  false,
+		},
+		{
+			name:    "guest veth is still not a VRF",
+			vrfName: testVRFNameGuest,
+			wantOk:  false,
+		},
+		{
+			name:    "random name is still not a VRF",
+			vrfName: testEth0,
+			wantOk:  false,
+		},
+		{
+			name:    "empty name is still not a VRF",
+			vrfName: "",
+			wantOk:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVPC, gotOk := vpcFromVRFName(tt.vrfName)
+			if gotOk != tt.wantOk {
+				t.Errorf("vpcFromVRFName(%q) ok = %v, want %v", tt.vrfName, gotOk, tt.wantOk)
+				return
+			}
+			if gotVPC != tt.wantVPC {
+				t.Errorf("vpcFromVRFName(%q) vpc = %q, want %q", tt.vrfName, gotVPC, tt.wantVPC)
+			}
+		})
+	}
+}
+
 func TestVRFNameRegex(t *testing.T) {
 	// Verify the regex matches the expected VRF naming pattern. The template
 	// is "G%09sV" where %09s is the base62-padded VPC — no VPCAttachment
@@ -168,6 +251,9 @@ func TestVRFNameRegex(t *testing.T) {
 		{testVRFName, testVRFName, true},
 		{"G000000000V", "G000000000V", true},
 		{"G123456789V", "G123456789V", true},
+		// The legacy shape is matched by legacyVRFNameRegex during
+		// collection only — never by this one.
+		{testVRFNameLegacy, testVRFNameLegacy, false},
 		// Non-VRF names should not match.
 		{testVRFNameHost, testVRFNameHost, false},
 		{testVRFNameGuest, testVRFNameGuest, false},
