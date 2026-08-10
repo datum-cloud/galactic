@@ -32,7 +32,7 @@ func requireRoot(t *testing.T) {
 func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "", nodeID: 0}
 	registered, _, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
+		cfg, testVPC, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
 	if err != nil {
 		t.Errorf("registerEBPFDatapath with unconfigured BGPRouter = %v, want nil (no-op)", err)
 	}
@@ -49,7 +49,7 @@ func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "2001:db8:1::/48", nodeID: 0x10001} // wraps to uint16(1) if narrowed unchecked
 	registered, _, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
+		cfg, testVPC, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
 	if err == nil {
 		t.Fatal("registerEBPFDatapath with nodeID=0x10001 = nil error, want an out-of-range rejection")
 	}
@@ -63,24 +63,22 @@ func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 
 // TestRegisterEBPFDatapath_RegistersAllThreeTables: a single
 // registerEBPFDatapath call populates locator_table, function_table, and
-// vrf_table consistently for the same (vpc, vpcAttachment), against real
-// pinned eBPF maps under a throwaway pin directory — not the production
-// attach.PinDir.
+// vrf_table consistently for the same vpc, against real pinned eBPF maps
+// under a throwaway pin directory — not the production attach.PinDir.
 func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	requireRoot(t)
 
 	const (
-		vpc           = testVPC
-		vpcAttachment = testAttachment
-		locator       = "2001:db8:1::/48"
-		nodeID        = int32(5)
-		vrfID         = int32(42)
+		vpc     = testVPC
+		locator = "2001:db8:1::/48"
+		nodeID  = int32(5)
+		vrfID   = int32(42)
 	)
 
-	if err := vrf.Add(vpc, vpcAttachment); err != nil {
+	if err := vrf.Add(vpc); err != nil {
 		t.Fatalf("vrf.Add: %v", err)
 	}
-	t.Cleanup(func() { _ = vrf.Delete(vpc, vpcAttachment) })
+	t.Cleanup(func() { _ = vrf.Delete(vpc) })
 
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
 	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
@@ -91,7 +89,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
-	registered, _, err := registerEBPFDatapath(cfg, vpc, vpcAttachment, ifaceTypeVeth, uint16(vrfID), pinDir)
+	registered, _, err := registerEBPFDatapath(cfg, vpc, ifaceTypeVeth, uint16(vrfID), pinDir)
 	if err != nil {
 		t.Fatalf("registerEBPFDatapath: %v", err)
 	}
@@ -105,7 +103,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	}
 	defer func() { _ = closer.Close() }()
 
-	vrfTableID, err := vrf.TableID(vpc, vpcAttachment)
+	vrfTableID, err := vrf.TableID(vpc)
 	if err != nil {
 		t.Fatalf("vrf.TableID: %v", err)
 	}
@@ -149,11 +147,11 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 func TestUnregisterEBPFDatapath_RemovesOwnEntry(t *testing.T) {
 	requireRoot(t)
 
-	if err := vrf.Add(testVPC, testAttachment); err != nil {
+	if err := vrf.Add(testVPC); err != nil {
 		t.Fatalf("vrf.Add: %v", err)
 	}
-	t.Cleanup(func() { _ = vrf.Delete(testVPC, testAttachment) })
-	vrfTableID, err := vrf.TableID(testVPC, testAttachment)
+	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
+	vrfTableID, err := vrf.TableID(testVPC)
 	if err != nil {
 		t.Fatalf("vrf.TableID: %v", err)
 	}
