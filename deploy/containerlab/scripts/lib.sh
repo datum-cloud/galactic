@@ -63,6 +63,16 @@ pod_names() {
   docker exec "${node}" kubectl get pods -n "${ns}" -l "${label}" -o jsonpath='{.items[*].metadata.name}'
 }
 
+# pod_scheduling_node NODE NAMESPACE POD
+# The Kubernetes node POD is scheduled onto (.spec.nodeName), e.g. "dfw-worker".
+# Not to be confused with this helper's own NODE argument, which — as everywhere
+# else in this file — is the docker container kubectl runs in (a site's Kind
+# control-plane container), not a scheduling target.
+pod_scheduling_node() {
+  local node="$1" ns="$2" pod="$3"
+  docker exec "${node}" kubectl get pod -n "${ns}" "${pod}" -o jsonpath='{.spec.nodeName}'
+}
+
 # pod_ip4 NODE NAMESPACE POD
 # POD's IPv4 address on eth0 (the VPC interface). Every ns*/base/pod.yaml
 # attaches its NAD via the v1.multus-cni.io/default-network annotation, which
