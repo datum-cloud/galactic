@@ -5,28 +5,20 @@
 package cni
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
-	"os"
-	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
-	"k8s.io/client-go/rest"
-	ctrl "sigs.k8s.io/controller-runtime"
 
-	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/plumbing/intf"
-	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 // cmdCheck validates that the container's network state matches what was
@@ -44,7 +36,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	var errs []error
 
 	// Check node-level state (VRF + host interface).
-	hostName, nodeErrs := checkNodeLevelState(pluginConf.VPC, pluginConf.VPCAttachment)
+	hostName, nodeErrs := cnimaster.CheckNodeLevelState(pluginConf.VPC, pluginConf.VPCAttachment)
 	errs = append(errs, nodeErrs...)
 
 	// Verify the guest interface is in the container netns.
@@ -83,107 +75,11 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-// cmdStatus implements the CNI spec STATUS operation. It is called by the
-// runtime to determine whether the plugin is ready to service ADD requests.
-// Unlike cmdCheck, no container is attached so there is no Netns to inspect.
-// STATUS validates the plugin's own readiness: config is parseable and the
-// API server is reachable for BGPAdvertisement CRD operations. Attachment-
-// specific kernel resources (VRF, host interface) are NOT checked because
-// STATUS must succeed before any ADD has ever run.
+// cmdStatus implements the CNI spec STATUS operation — see
+// internal/cnimaster.RunStatus for the full reasoning, shared verbatim with
+// galactic-tap-cni.
 func cmdStatus(args *skel.CmdArgs) error {
-	// Validate config is parseable (minimal check — no VPC/VPCAttachment
-	// validation since STATUS must succeed before any ADD has run).
-	if err := parseStatusConf(args.StdinData); err != nil {
-		return err
-	}
-
-	// Load host CNI config to resolve Kubeconfig and LogFile
-	hostConf, err := loadHostConf(ConfFile)
-	if err != nil {
-		return &types.Error{Code: 7, Msg: fmt.Sprintf("load host CNI config: %v", err)}
-	}
-
-	// Resolve config: env var > conflist > default.
-	cniConfig.Resolve(&config.ConflistValues{
-		Kubeconfig: hostConf.Kubeconfig,
-		Namespace:  hostConf.Namespace,
-		LogFile:    hostConf.LogFile,
-		LogLevel:   hostConf.LogLevel,
-	})
-
-	// Propagate Kubeconfig
-	_ = os.Setenv("KUBECONFIG", cniConfig.Kubeconfig)
-
-	// Setup Logging
-	setupLogging(cniConfig.LogFile, cniConfig.LogLevel)
-	slog.Debug("CNI config received", "stdin", string(args.StdinData))
-
-	// Config is parseable and API server is reachable.
-	slog.Info("STATUS: probing API server reachability")
-	if err := probeAPIServer(); err != nil {
-		slog.Error("STATUS: API server probe failed", "err", err)
-		return &types.Error{Code: 50, Msg: fmt.Sprintf("API server health check failed: %v", err)}
-	}
-	slog.Info("STATUS: ready")
-	return nil
-}
-
-// probeAPIServer performs a lightweight GET against the in-cluster API server
-// to verify reachability. Returns nil when the server responds (any HTTP
-// status code) or when running outside a cluster with no kubeconfig.
-//
-// probeAPIServerFn is a variable so tests can override it.
-var probeAPIServerFn = func() error {
-	kubeconfig, err := ctrl.GetConfig()
-	if err != nil {
-		if errors.Is(err, rest.ErrNotInCluster) {
-			// Not running in-cluster; skip API check.
-			return nil
-		}
-		return fmt.Errorf("load kubeconfig: %w", err)
-	}
-	kubeconfig.Timeout = 2 * time.Second
-	httpClient, err := rest.HTTPClientFor(kubeconfig)
-	if err != nil {
-		return fmt.Errorf("build http client: %w", err)
-	}
-	req, err := http.NewRequestWithContext(
-		context.Background(),
-		http.MethodGet,
-		kubeconfig.Host+"/healthz",
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf("build healthz request: %w", err)
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("healthz request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort probe
-	return nil
-}
-
-var probeAPIServer = probeAPIServerFn
-
-// checkNodeLevelState verifies that node-level networking resources exist:
-// the VRF interface and the host-side endpoint interface. Returns the host
-// interface name (for callers that need it, e.g. cmdCheck's prevResult
-// validation) and a slice of errors (nil when all checks pass) so callers
-// can accumulate and report all failures at once.
-func checkNodeLevelState(vpc, vpcAttachment string) (string, []error) {
-	var errs []error
-
-	if err := vrf.Exists(vpc); err != nil {
-		errs = append(errs, fmt.Errorf("vrf %s: %w", vpc, err))
-	}
-
-	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
-	if _, err := netlink.LinkByName(hostName); err != nil {
-		errs = append(errs, fmt.Errorf("host interface %q: %w", hostName, err))
-	}
-
-	return hostName, errs
+	return cnimaster.RunStatus(args.StdinData, cniConfig, ConfFile)
 }
 
 // checkGuestInterface verifies that the named interface exists inside the
@@ -236,7 +132,7 @@ func checkPrevResult(rawPrevResult map[string]interface{}, _ string, netns strin
 
 		// Host-side interface: validate MAC and MTU from the host namespace.
 		if iface.Sandbox == "" {
-			if err := validateHostInterface(iface.Name, iface.Mac, iface.Mtu); err != nil {
+			if err := cnimaster.ValidateHostInterface(iface.Name, iface.Mac, iface.Mtu); err != nil {
 				return fmt.Errorf("interface %q (host): %w", iface.Name, err)
 			}
 			continue
@@ -267,22 +163,6 @@ func checkPrevResult(rawPrevResult map[string]interface{}, _ string, netns strin
 		}
 	}
 
-	return nil
-}
-
-// validateHostInterface checks that a host-side interface's MAC and MTU match
-// the values recorded in prevResult.
-func validateHostInterface(name, wantMac string, wantMtu int) error {
-	link, err := netlink.LinkByName(name)
-	if err != nil {
-		return fmt.Errorf("find link: %w", err)
-	}
-	if wantMac != "" && link.Attrs().HardwareAddr.String() != wantMac {
-		return fmt.Errorf("MAC mismatch: expected %q, got %q", wantMac, link.Attrs().HardwareAddr.String())
-	}
-	if wantMtu > 0 && link.Attrs().MTU != wantMtu {
-		return fmt.Errorf("MTU mismatch: expected %d, got %d", wantMtu, link.Attrs().MTU)
-	}
 	return nil
 }
 

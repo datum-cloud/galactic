@@ -16,6 +16,7 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/cnimaster"
 )
 
 const (
@@ -317,9 +318,9 @@ func TestCmdStatusInvalidConfig(t *testing.T) {
 }
 
 func TestCmdStatusAPIProbeFailure(t *testing.T) {
-	original := probeAPIServer
-	probeAPIServer = func() error { return errors.New("connection refused") }
-	defer func() { probeAPIServer = original }()
+	original := cnimaster.ProbeAPIServer
+	cnimaster.ProbeAPIServer = func() error { return errors.New("connection refused") }
+	defer func() { cnimaster.ProbeAPIServer = original }()
 
 	conf := fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpc":"%s","vpcattachment":"%s"}`,
 		testVPC, testAttachment)
@@ -333,16 +334,4 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 func TestResourceTrackerCleanupZeroValue(t *testing.T) {
 	tracker := &resourceTracker{}
 	tracker.cleanup() // should not panic
-}
-
-// ---- loadHostConf / logging -----------------------------------------------
-
-func TestLoadHostConfMissingFile(t *testing.T) {
-	conf, err := loadHostConf("/nonexistent/path/10-galactic.conflist")
-	if err != nil {
-		t.Fatalf("unexpected error for missing conflist: %v", err)
-	}
-	if conf.Namespace == "" {
-		t.Error("Namespace = empty, want default namespace")
-	}
 }

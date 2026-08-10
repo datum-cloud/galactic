@@ -7,19 +7,16 @@ package cni
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
-	type100 "github.com/containernetworking/cni/pkg/types/100"
 
 	"go.datum.net/galactic/internal/cniipam"
-	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/cnimaster"
 )
 
 func TestMain(m *testing.M) {
@@ -59,371 +56,6 @@ func assertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
 	}
 	if wantMsg != "" && !strings.Contains(cniErr.Msg, wantMsg) {
 		t.Fatalf("expected Msg to contain %q, got %q", wantMsg, cniErr.Msg)
-	}
-}
-
-// movedKeyConf builds an otherwise-valid galactic-cni config carrying the
-// supplied raw JSON member(s) at the top level, for the addressing keys
-// that belong inside the "ipam" block.
-func movedKeyConf(members string) string {
-	return fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni",`+
-			`"vpc":"%s","vpcattachment":"%s",%s}`,
-		testVPC, testAttachment, members,
-	)
-}
-
-// ---- parseConf -----------------------------------------------------------
-
-func TestParseConf(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		wantVPC  string
-		wantErr  string
-		wantCode uint // CNI error code; 0 means "don't check"
-	}{
-		{
-			name: "valid config",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s"}`,
-				testVPC, testAttachment,
-			),
-			wantVPC: testVPC,
-		},
-		{
-			name:     "invalid JSON",
-			input:    "not json",
-			wantErr:  "invalid CNI config",
-			wantCode: 7,
-		},
-		{
-			name:     "empty input",
-			input:    "",
-			wantErr:  "invalid CNI config",
-			wantCode: 7,
-		},
-		{
-			name: "missing vpc",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpcattachment":"%s"}`,
-				testAttachment,
-			),
-			wantErr:  "vpc is required and must be a non-empty base62 string",
-			wantCode: 7,
-		},
-		{
-			name: "empty vpc",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"",`+
-					`"vpcattachment":"%s"}`,
-				testAttachment,
-			),
-			wantErr:  "vpc is required and must be a non-empty base62 string",
-			wantCode: 7,
-		},
-		{
-			name: "vpc with invalid char hyphen",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s"}`,
-				testInvalidBase62, testAttachment,
-			),
-			wantErr:  fmt.Sprintf("invalid base62 value for field 'vpc': %q", testInvalidBase62),
-			wantCode: 7,
-		},
-		{
-			name: "vpc with invalid char underscore",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"abc_def",`+
-					`"vpcattachment":"%s"}`,
-				testAttachment,
-			),
-			wantErr:  `invalid base62 value for field 'vpc': "abc_def"`,
-			wantCode: 7,
-		},
-		{
-			name: "missing vpcattachment",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s"}`,
-				testVPC,
-			),
-			wantErr:  "vpcattachment is required and must be a non-empty base62 string",
-			wantCode: 7,
-		},
-		{
-			name: "empty vpcattachment",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":""}`,
-				testVPC,
-			),
-			wantErr:  "vpcattachment is required and must be a non-empty base62 string",
-			wantCode: 7,
-		},
-		{
-			name: "vpcattachment with invalid char space",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"def ghi"}`,
-				testVPC,
-			),
-			wantErr:  `invalid base62 value for field 'vpcattachment': "def ghi"`,
-			wantCode: 7,
-		},
-		{
-			name: "valid vpc and vpcattachment with mixed case base62",
-			input: `{"cniVersion":"1.0.0","name":"test",` +
-				`"type":"galactic-cni","vpc":"Abc123XYZ",` +
-				`"vpcattachment":"DeF456"}`,
-			wantVPC: "Abc123XYZ",
-		},
-		{
-			name: "prevResult valid JSON result is accepted",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s",`+
-					`"prevResult":%s}`,
-				testVPC, testAttachment, testPrevResult,
-			),
-			wantVPC: testVPC,
-		},
-
-		{
-			name: "ipam block present is accepted, delegated per its own contract",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
-					`"vpcattachment":"%s","ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00:10:ff01::/48"}}`,
-				testVPC, testAttachment,
-			),
-			wantVPC: testVPC,
-		},
-		{
-			name:     "top-level ipv6_subnet is rejected",
-			input:    movedKeyConf(`"ipv6_subnet":"fd00:10:ff01::/48"`),
-			wantErr:  "addressing field 'ipv6_subnet' belongs inside the 'ipam' block",
-			wantCode: 7,
-		},
-		{
-			name:     "top-level ipv4_subnet is rejected",
-			input:    movedKeyConf(`"ipv4_subnet":"172.20.1.0/24"`),
-			wantErr:  "addressing field 'ipv4_subnet' belongs inside the 'ipam' block",
-			wantCode: 7,
-		},
-		{
-			name:     "top-level address_families is rejected",
-			input:    movedKeyConf(`"address_families":["ipv6"]`),
-			wantErr:  "addressing field 'address_families' belongs inside the 'ipam' block",
-			wantCode: 7,
-		},
-		{
-			name:     "top-level static_ip is rejected",
-			input:    movedKeyConf(`"static_ip":"fd00::1234"`),
-			wantErr:  "addressing field 'static_ip' belongs inside the 'ipam' block",
-			wantCode: 7,
-		},
-		{
-			name: "every moved key is named at once",
-			input: movedKeyConf(`"ipv6_subnet":"fd00::/48","ipv4_subnet":"172.20.1.0/24",` +
-				`"address_families":["ipv6"],"static_ip":"fd00::1"`),
-			wantErr: "addressing fields 'ipv6_subnet', 'ipv4_subnet', 'address_families', " +
-				"'static_ip' belong inside the 'ipam' block",
-			wantCode: 7,
-		},
-		{
-			name: "same keys inside the ipam block still parse",
-			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s","vpcattachment":"%s",`+
-					`"ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00:10:ff01::/48",`+
-					`"ipv4_subnet":"172.20.1.0/24","address_families":["ipv6","ipv4"],`+
-					`"static_ip":"fd00::1234"}}`,
-				testVPC, testAttachment,
-			),
-			wantVPC: testVPC,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			conf, err := parseConf([]byte(tt.input))
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
-				}
-				if tt.wantCode > 0 {
-					assertCNIError(t, err, tt.wantCode, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if conf.VPC != tt.wantVPC {
-				t.Errorf("VPC = %q, want %q", conf.VPC, tt.wantVPC)
-			}
-		})
-	}
-}
-
-// ---- isValidBase62 -------------------------------------------------------
-
-func TestIsValidBase62(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{"empty", "", false},
-		{"digits only", "1234567890", true},
-		{"lowercase only", "abcdefghij", true},
-		{"uppercase only", "ABCDEFGHIJ", true},
-		{"mixed case", "aBcDeFgHiJ", true},
-		{"mixed digits and letters", "abc123XYZ", true},
-		{"hyphen", testInvalidBase62, false},
-		{"underscore", "abc_def", false},
-		{"space", "abc def", false},
-		{"dot", "abc.def", false},
-		{"slash", "abc/def", false},
-		{"plus", "abc+def", false},
-		{"equals", "abc=def", false},
-		{"single digit", "0", true},
-		{"single lowercase", "a", true},
-		{"single uppercase", "Z", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isValidBase62(tt.input)
-			if got != tt.want {
-				t.Errorf("isValidBase62(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSanitizeForError(t *testing.T) {
-	printable := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()"
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{"normal string", testInvalidBase62, testInvalidBase62},
-		{"empty", "", ""},
-		{"newline", "abc\ndef", sanitizeForErrorBinary},
-		{"null byte", "abc\x00def", sanitizeForErrorBinary},
-		{"del char", "abc\x7fdef", sanitizeForErrorBinary},
-		{"printable range", printable, printable},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := sanitizeForError(tt.input)
-			if got != tt.want {
-				t.Errorf("sanitizeForError(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-// ---- validatePrevResult --------------------------------------------------
-
-func TestValidatePrevResult(t *testing.T) {
-	validResult := &type100.Result{
-		CNIVersion: testCNIVersion,
-		Interfaces: []*type100.Interface{
-			{Name: testIfName, Mac: testMac, Sandbox: testNetns},
-		},
-		IPs: []*type100.IPConfig{
-			{Address: *mustParseCIDR(t, "fd00:1::1/64")},
-		},
-	}
-
-	tests := []struct {
-		name    string
-		input   types.Result
-		wantErr bool
-	}{
-		{"nil result allowed", nil, false},
-		{"valid CNI result", validResult, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validatePrevResult(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestValidatePrevResultAdd(t *testing.T) {
-	validWithInterface := &type100.Result{
-		CNIVersion: testCNIVersion,
-		Interfaces: []*type100.Interface{
-			{Name: testIfName, Mac: testMac, Sandbox: testNetns},
-		},
-		IPs: []*type100.IPConfig{
-			{Address: *mustParseCIDR(t, "fd00:1::1/64")},
-		},
-	}
-	validWithIPsOnly := &type100.Result{
-		CNIVersion: testCNIVersion,
-		IPs: []*type100.IPConfig{
-			{Address: *mustParseCIDR(t, "fd00:1::1/64")},
-		},
-	}
-	emptyResult := &type100.Result{
-		CNIVersion: testCNIVersion,
-		// No interfaces, no IPs — should fail content validation.
-	}
-
-	tests := []struct {
-		name    string
-		input   types.Result
-		wantErr bool
-	}{
-		{"nil result allowed", nil, false},
-		{"valid result with interface", validWithInterface, false},
-		{"valid result with IPs only", validWithIPsOnly, false},
-		{"empty result (no interfaces or IPs)", emptyResult, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validatePrevResultAdd(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
 	}
 }
 
@@ -755,7 +387,7 @@ func TestCmdCheckValidConfigMissingResources(t *testing.T) {
 	)
 	args := &skel.CmdArgs{
 		ContainerID: testContainerID,
-		Netns:       "/proc/1/ns/net",
+		Netns:       testNetns,
 		StdinData:   []byte(conf),
 	}
 
@@ -806,7 +438,7 @@ func TestCmdCheckWithPrevResultMissingResources(t *testing.T) {
 	)
 	args := &skel.CmdArgs{
 		ContainerID: testContainerID,
-		Netns:       "/proc/1/ns/net",
+		Netns:       testNetns,
 		StdinData:   []byte(conf),
 	}
 
@@ -834,6 +466,7 @@ func TestCmdCheckWithInvalidPrevResult(t *testing.T) {
 	)
 	args := &skel.CmdArgs{
 		ContainerID: testContainerID,
+		Netns:       testNetns,
 		StdinData:   []byte(conf),
 	}
 
@@ -895,9 +528,9 @@ func TestCmdStatusValidConfigMissingResources(t *testing.T) {
 	// STATUS should succeed with valid config even when VRF/interface
 	// resources don't exist — STATUS answers "is the plugin ready to ADD?"
 	// not "does a prior ADD's state persist?".
-	original := probeAPIServer
-	probeAPIServer = func() error { return nil }
-	defer func() { probeAPIServer = original }()
+	original := cnimaster.ProbeAPIServer
+	cnimaster.ProbeAPIServer = func() error { return nil }
+	defer func() { cnimaster.ProbeAPIServer = original }()
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
@@ -919,9 +552,9 @@ func TestCmdStatusValidConfigMissingResources(t *testing.T) {
 func TestCmdStatusMissingVPC(t *testing.T) {
 	// STATUS does not validate attachment-specific fields — it only checks
 	// that the config is parseable and the API server is reachable.
-	original := probeAPIServer
-	probeAPIServer = func() error { return nil }
-	defer func() { probeAPIServer = original }()
+	original := cnimaster.ProbeAPIServer
+	cnimaster.ProbeAPIServer = func() error { return nil }
+	defer func() { cnimaster.ProbeAPIServer = original }()
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
@@ -942,9 +575,9 @@ func TestCmdStatusMissingVPC(t *testing.T) {
 func TestCmdStatusMissingVPCAttachment(t *testing.T) {
 	// STATUS does not validate attachment-specific fields — it only checks
 	// that the config is parseable and the API server is reachable.
-	original := probeAPIServer
-	probeAPIServer = func() error { return nil }
-	defer func() { probeAPIServer = original }()
+	original := cnimaster.ProbeAPIServer
+	cnimaster.ProbeAPIServer = func() error { return nil }
+	defer func() { cnimaster.ProbeAPIServer = original }()
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
@@ -964,9 +597,9 @@ func TestCmdStatusMissingVPCAttachment(t *testing.T) {
 
 func TestCmdStatusAPIProbeFailure(t *testing.T) {
 	// STATUS should return CNI error code 50 when the API server probe fails.
-	original := probeAPIServer
-	probeAPIServer = func() error { return errors.New("connection refused") }
-	defer func() { probeAPIServer = original }()
+	original := cnimaster.ProbeAPIServer
+	cnimaster.ProbeAPIServer = func() error { return errors.New("connection refused") }
+	defer func() { cnimaster.ProbeAPIServer = original }()
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
@@ -981,41 +614,6 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 
 	err := cmdStatus(args)
 	assertCNIError(t, err, 50, "API server health check failed")
-}
-
-// ---- probeAPIServer ------------------------------------------------------
-
-func TestProbeAPIServerErrNotInCluster(t *testing.T) {
-	// When probeAPIServerFn returns ErrNotInCluster, probeAPIServer should
-	// return nil (not running in-cluster; skip API check).
-	original := probeAPIServer
-	probeAPIServer = func() error { return nil }
-	defer func() { probeAPIServer = original }()
-
-	if err := probeAPIServer(); err != nil {
-		t.Fatalf("expected nil for ErrNotInCluster, got %v", err)
-	}
-}
-
-func TestProbeAPIServerMalformedKubeconfig(t *testing.T) {
-	// When probeAPIServerFn returns a non-ErrNotInCluster error (e.g. a
-	// malformed kubeconfig file), probeAPIServer should surface it wrapped.
-	original := probeAPIServer
-	probeAPIServer = func() error {
-		return errors.New("load kubeconfig: invalid kubeconfig: permission denied")
-	}
-	defer func() { probeAPIServer = original }()
-
-	err := probeAPIServer()
-	if err == nil {
-		t.Fatal("expected error for malformed kubeconfig, got nil")
-	}
-	if !strings.Contains(err.Error(), "load kubeconfig") {
-		t.Fatalf("error %q does not contain 'load kubeconfig'", err.Error())
-	}
-	if !strings.Contains(err.Error(), "permission denied") {
-		t.Fatalf("error %q does not contain original error", err.Error())
-	}
 }
 
 // ---- cmdAdd prevResult validation ----------------------------------------
@@ -1041,201 +639,4 @@ func TestCmdAddPrevResultValid(t *testing.T) {
 	// Should fail with code 4 (invalid env vars) for missing node name,
 	// not code 6 for prevResult.
 	assertCNIError(t, err, 4, "node name is required")
-}
-
-// ---- loadHostConf -----------------------------------------------------------
-
-func TestLoadHostConf(t *testing.T) {
-	tmpDir := t.TempDir()
-	conflistPath := filepath.Join(tmpDir, "10-galactic.conflist")
-
-	// 1. Missing file tolerated, defaults to galactic-system namespace.
-	conf, err := loadHostConf(conflistPath)
-	if err != nil {
-		t.Fatalf("unexpected error for missing conflist: %v", err)
-	}
-	if conf.Namespace != config.DefaultNamespace {
-		t.Errorf("Namespace = %q, want %q", conf.Namespace, config.DefaultNamespace)
-	}
-
-	// 2. Conflist parses but lacks galactic-cni entry.
-	badContent := `{"cniVersion":"1.0.0","name":"test","plugins":[{"type":"some-other-plugin"}]}`
-	if err := os.WriteFile(conflistPath, []byte(badContent), 0644); err != nil {
-		t.Fatalf("os.WriteFile: %v", err)
-	}
-	_, err = loadHostConf(conflistPath)
-	if err == nil {
-		t.Fatal("expected error for missing plugin type, got nil")
-	}
-
-	// 3. Conflist parses correctly.
-	goodContent := `{
-		"cniVersion": "1.0.0",
-		"name": "galactic",
-		"plugins": [
-			{
-				"type": "galactic-cni",
-				"node_name": "test-worker",
-				"kubeconfig": "/etc/custom-kubeconfig",
-				"namespace": "custom-namespace",
-				"log_file": "/var/log/custom.log",
-				"log_level": "debug"
-			}
-		]
-	}`
-	if err := os.WriteFile(conflistPath, []byte(goodContent), 0644); err != nil {
-		t.Fatalf("os.WriteFile: %v", err)
-	}
-	conf, err = loadHostConf(conflistPath)
-	if err != nil {
-		t.Fatalf("unexpected error for good conflist: %v", err)
-	}
-	if conf.NodeName != "test-worker" {
-		t.Errorf("NodeName = %q, want %q", conf.NodeName, "test-worker")
-	}
-	if conf.Kubeconfig != "/etc/custom-kubeconfig" {
-		t.Errorf("Kubeconfig = %q, want %q", conf.Kubeconfig, "/etc/custom-kubeconfig")
-	}
-	if conf.Namespace != "custom-namespace" {
-		t.Errorf("Namespace = %q, want %q", conf.Namespace, "custom-namespace")
-	}
-	if conf.LogFile != "/var/log/custom.log" {
-		t.Errorf("LogFile = %q, want %q", conf.LogFile, "/var/log/custom.log")
-	}
-	if conf.LogLevel != config.LogLevelDebug {
-		t.Errorf("LogLevel = %q, want %q", conf.LogLevel, config.LogLevelDebug)
-	}
-}
-
-// ---- explicit IPAM delegation contract -------------------------------------
-
-// TestIPAMBlockPresenceIsTheOnlyTrigger is the regression test for the
-// explicit contract internal/cniipam's doc comment describes: whether this
-// plugin delegates to IPAM at all is decided solely by whether "ipam" is
-// present in its own config — no environment variable can manufacture (or
-// suppress) that block. The historical GALACTIC_CNI_ENABLE_LOCAL_IPAM
-// trigger no longer exists at all (that flag, renamed
-// GALACTIC_IPAM_ENABLE_LOCAL_IPAM, now lives entirely inside
-// internal/cniipam as a default-filler for an already-present ipam block).
-func TestIPAMBlockPresenceIsTheOnlyTrigger(t *testing.T) {
-	t.Setenv("GALACTIC_CNI_NODE_NAME", "test-node")
-
-	// Missing ipam block: no error, no delegation signal — conf.IPAM stays nil.
-	inputNoIPAM := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s"}`,
-		testVPC, testAttachment,
-	)
-	conf, err := parseConf([]byte(inputNoIPAM))
-	if err != nil {
-		t.Fatalf("unexpected error for missing ipam block: %v", err)
-	}
-	if conf.IPAM != nil {
-		t.Fatalf("IPAM = %+v, want nil (absent block must never be manufactured)", conf.IPAM)
-	}
-
-	// Present ipam block: conf.IPAM is populated, ready for delegation.
-	inputWithIPAM := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s",`+
-			`"ipam":{"type":"galactic-ipam"}}`,
-		testVPC, testAttachment,
-	)
-	conf, err = parseConf([]byte(inputWithIPAM))
-	if err != nil {
-		t.Fatalf("unexpected error with present ipam block: %v", err)
-	}
-	if conf.IPAM == nil {
-		t.Fatal("expected IPAM block to be non-nil")
-	}
-	if conf.IPAM.Type != "galactic-ipam" {
-		t.Errorf("IPAM.Type = %q, want %q", conf.IPAM.Type, "galactic-ipam")
-	}
-}
-
-// ---- logging setup ----------------------------------------------------------
-
-func TestLoggingSetup(t *testing.T) {
-	tmpDir := t.TempDir()
-	logPath := filepath.Join(tmpDir, "sub", "test.log")
-
-	// Setup logging, which should create the directory and open/write to the file.
-	setupLogging(logPath, config.DefaultLogLevel)
-	slog.Info("test log message")
-
-	// Read the log file to verify the message was logged.
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log file: %v", err)
-	}
-	if !strings.Contains(string(data), "test log message") {
-		t.Fatalf("log content does not contain message: %s", string(data))
-	}
-}
-
-func TestParseLogLevel(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      string
-		want    slog.Level
-		wantErr bool
-	}{
-		{"empty defaults to info", "", slog.LevelInfo, false},
-		{"debug", config.LogLevelDebug, slog.LevelDebug, false},
-		{"info", config.DefaultLogLevel, slog.LevelInfo, false},
-		{"warn", config.LogLevelWarn, slog.LevelWarn, false},
-		{"warning alias", config.LogLevelWarning, slog.LevelWarn, false},
-		{"error", config.LogLevelError, slog.LevelError, false},
-		{"case insensitive", "DEBUG", slog.LevelDebug, false},
-		{"surrounding whitespace", "  warn  ", slog.LevelWarn, false},
-		{"unknown falls back to info with error", "verbose", slog.LevelInfo, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseLogLevel(tt.in)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseLogLevel(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Errorf("parseLogLevel(%q) = %v, want %v", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestLoggingSetupRespectsLevel(t *testing.T) {
-	tmpDir := t.TempDir()
-	logPath := filepath.Join(tmpDir, "test.log")
-
-	setupLogging(logPath, config.LogLevelWarn)
-	slog.Info("should be suppressed at warn level")
-	slog.Warn("should appear at warn level")
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log file: %v", err)
-	}
-	content := string(data)
-	if strings.Contains(content, "should be suppressed at warn level") {
-		t.Errorf("expected info message to be filtered out at warn level, got: %s", content)
-	}
-	if !strings.Contains(content, "should appear at warn level") {
-		t.Errorf("expected warn message to be present, got: %s", content)
-	}
-}
-
-func TestLoggingSetupInvalidLevelFallsBackToInfo(t *testing.T) {
-	tmpDir := t.TempDir()
-	logPath := filepath.Join(tmpDir, "test.log")
-
-	// An invalid level must not fail the CNI operation; it should fall back
-	// to DefaultLogLevel (info) rather than panic or drop all logging.
-	setupLogging(logPath, "verbose")
-	slog.Info("should appear at fallback info level")
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log file: %v", err)
-	}
-	if !strings.Contains(string(data), "should appear at fallback info level") {
-		t.Errorf("expected info message to be present after fallback, got: %s", string(data))
-	}
 }

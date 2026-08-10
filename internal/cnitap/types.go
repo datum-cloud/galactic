@@ -10,28 +10,16 @@
 package cnitap
 
 import (
-	"github.com/containernetworking/cni/pkg/types"
-
-	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/hostconf"
 )
 
 // PluginConf is the CNI plugin configuration passed via stdin on each
-// invocation of galactic-tap-cni.
-//
-// IPAM addressing fields live entirely inside the "ipam" block — see
-// go.datum.net/galactic/internal/cniipam's doc comment for the explicit
-// delegation contract. Termination routes are galactic-route's own
-// concern now (see internal/cniroute) — this plugin's own JSON stanza
-// carries no "terminations" field of its own to read.
-type PluginConf struct {
-	types.PluginConf
-	VPC           string        `json:"vpc"`
-	VPCAttachment string        `json:"vpcattachment"`
-	MTU           int           `json:"mtu,omitempty"`
-	IPAM          *cniipam.IPAM `json:"ipam"`
-	Namespace     string        `json:"namespace,omitempty"`
-}
+// invocation of galactic-tap-cni. It's the same shape galactic-cni
+// (internal/cni) uses — see internal/cnimaster's own doc comment — so both
+// packages alias the one canonical definition rather than each declaring
+// their own copy.
+type PluginConf = cnimaster.PluginConf
 
 // HostConf holds node-local settings read from /etc/cni/net.d/10-galactic.conflist.
 type HostConf = hostconf.HostConf
