@@ -1,0 +1,31 @@
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: private-b
+  namespace: ns40
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "private-b",
+      "plugins": [
+        {
+          "type": "galactic-cni",
+          "vpc": "40",
+          "vpcattachment": "41",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv4_subnet": "172.40.20.0/24",
+            "address_families": ["ipv4"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "40",
+          "vpcattachment": "41",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

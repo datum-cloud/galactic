@@ -138,12 +138,15 @@ deploy/containerlab/
 │   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs (dfw, iad, sjc)
 │   ├── galactic-control/iad/    # galactic-router RR + BGP CRs (iad-control)
 │   └── tenants/                 # test VPCs — one shared base/ (Namespace + netshoot
-│       ├── base/                 # Deployment), each tenant patching its namespace,
-│       ├── ns50/                 # default-network annotation, and (ns30/ns40) replica
-│       ├── ns10/                 # count; per-site dirs hold each site's NAD(s):
-│       ├── ns20/                 #   ns50 (IPv4, 3-site), ns10 (IPv6-only, 3-site),
-│       ├── ns30/                 #   ns20 (dual-stack, 3-site), ns30 (IPv6-only,
-│       └── ns40/                 #   dfw only, 2 pods), ns40 (IPv4-only, iad only, 2 pods)
+│       ├── base/                 # Deployment), each tenant patching its namespace and
+│       ├── ns50/                 # default-network annotation; per-site dirs hold each
+│       ├── ns10/                 # site's NAD(s): ns50 (IPv4, 3-site), ns10 (IPv6-only,
+│       ├── ns20/                 # 3-site), ns20 (dual-stack, 3-site), ns30 (IPv6-only,
+│       ├── ns30/                 # dfw only, 2 attachments), ns40 (IPv4-only, iad only,
+│       └── ns40/                 # 2 attachments) — ns30/ns40's two attachments are each
+│                                  # their own NAD+Deployment (distinct vpcattachment,
+│                                  # same vpc), not one NAD scaled to replicas: 2 — see
+│                                  # docs/tenants.md for why.
 ├── node_files/
 │   ├── dfw/     config.yaml
 │   ├── iad/     config.yaml
