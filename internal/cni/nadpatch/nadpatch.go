@@ -2,7 +2,11 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package cni
+// Package nadpatch patches the NetworkAttachmentDefinition with the
+// deterministic host-side interface name a master plugin (galactic-cni,
+// galactic-tap-cni) just created — shared since NAD annotation is identical
+// regardless of interface type.
+package nadpatch
 
 import (
 	"context"
@@ -17,10 +21,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// annotationHostInterface is the NAD annotation key that records the
+// AnnotationHostInterface is the NAD annotation key that records the
 // deterministic host-side interface name created by the CNI plugin for
 // this VPC+VPCAttachment pair.
-const annotationHostInterface = "k8s.v1.cni.cncf.io/host-interface"
+const AnnotationHostInterface = "k8s.v1.cni.cncf.io/host-interface"
 
 // nadGVK is the GroupVersionKind for NetworkAttachmentDefinition.
 var nadGVK = schema.GroupVersionKind{
@@ -29,10 +33,11 @@ var nadGVK = schema.GroupVersionKind{
 	Kind:    "NetworkAttachmentDefinition",
 }
 
-// parsePodNamespace extracts the K8S_POD_NAMESPACE value from the CNI_ARGS
-// environment variable string passed as args.Args by Multus. Returns an empty
-// string when the value is not present (e.g. standalone CNI invocation).
-func parsePodNamespace(cniArgs string) string {
+// ParsePodNamespace extracts the K8S_POD_NAMESPACE value from the CNI_ARGS
+// environment variable string passed as args.Args by Multus. Returns an
+// empty string when the value is not present (e.g. standalone CNI
+// invocation).
+func ParsePodNamespace(cniArgs string) string {
 	for _, part := range strings.Split(cniArgs, ";") {
 		key, value, ok := strings.Cut(part, "=")
 		if ok && key == "K8S_POD_NAMESPACE" {
@@ -42,13 +47,13 @@ func parsePodNamespace(cniArgs string) string {
 	return ""
 }
 
-// annotateNAD patches the NetworkAttachmentDefinition with the host interface
-// name. The NAD is expected to already exist (created by the external VPC
-// operator before the CNI is invoked), so a not-found response is a hard
-// failure rather than something to tolerate. A conflict response is the one
-// case treated as non-fatal: it means the annotation was already applied by a
-// previous invocation.
-func annotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, hostInterface string) error {
+// AnnotateNAD patches the NetworkAttachmentDefinition with the host
+// interface name. The NAD is expected to already exist (created by the
+// external VPC operator before the CNI is invoked), so a not-found response
+// is a hard failure rather than something to tolerate. A conflict response
+// is the one case treated as non-fatal: it means the annotation was already
+// applied by a previous invocation.
+func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, hostInterface string) error {
 	if nadNamespace == "" {
 		return nil
 	}
@@ -59,7 +64,7 @@ func annotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 	nad.SetNamespace(nadNamespace)
 
 	patch := fmt.Sprintf(`[{"op":"add","path":"/metadata/annotations","value":{"%s":"%s"}}]`,
-		annotationHostInterface, hostInterface)
+		AnnotationHostInterface, hostInterface)
 
 	err := k8s.Patch(ctx, nad, client.RawPatch(types.JSONPatchType, []byte(patch)))
 	if err != nil {

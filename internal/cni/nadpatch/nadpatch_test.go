@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package cni
+package nadpatch
 
 import (
 	"context"
@@ -10,8 +10,14 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func fakeClient(objs ...client.Object) client.Client {
+	return fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(objs...).Build()
+}
 
 func TestParsePodNamespace(t *testing.T) {
 	tests := []struct {
@@ -19,16 +25,8 @@ func TestParsePodNamespace(t *testing.T) {
 		cniArgs  string
 		expected string
 	}{
-		{
-			name:     "empty string",
-			cniArgs:  "",
-			expected: "",
-		},
-		{
-			name:     "namespace only",
-			cniArgs:  "K8S_POD_NAMESPACE=default",
-			expected: "default",
-		},
+		{name: "empty string", cniArgs: "", expected: ""},
+		{name: "namespace only", cniArgs: "K8S_POD_NAMESPACE=default", expected: "default"},
 		{
 			name:     "full multus args",
 			cniArgs:  "K8S_POD_NAME=my-pod;K8S_POD_NAMESPACE=galactic-system;K8S_POD_INFRA_CONTAINER_ID=abc123",
@@ -39,18 +37,14 @@ func TestParsePodNamespace(t *testing.T) {
 			cniArgs:  "K8S_POD_NAME=my-pod;K8S_POD_INFRA_CONTAINER_ID=abc123",
 			expected: "",
 		},
-		{
-			name:     "namespace with hyphens",
-			cniArgs:  "K8S_POD_NAMESPACE=my-custom-namespace",
-			expected: "my-custom-namespace",
-		},
+		{name: "namespace with hyphens", cniArgs: "K8S_POD_NAMESPACE=my-custom-namespace", expected: "my-custom-namespace"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parsePodNamespace(tc.cniArgs)
+			got := ParsePodNamespace(tc.cniArgs)
 			if got != tc.expected {
-				t.Errorf("parsePodNamespace(%q) = %q, want %q", tc.cniArgs, got, tc.expected)
+				t.Errorf("ParsePodNamespace(%q) = %q, want %q", tc.cniArgs, got, tc.expected)
 			}
 		})
 	}
@@ -66,7 +60,7 @@ func TestAnnotateNAD(t *testing.T) {
 	t.Run("NAD does not exist is a hard failure", func(t *testing.T) {
 		k8s := fakeClient()
 
-		err := annotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface)
+		err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface)
 		if err == nil {
 			t.Fatal("expected error when NAD does not exist, got nil")
 		}
@@ -82,8 +76,8 @@ func TestAnnotateNAD(t *testing.T) {
 		nad.SetNamespace(nadNamespace)
 		k8s := fakeClient(nad)
 
-		if err := annotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface); err != nil {
-			t.Fatalf("annotateNAD() = %v, want nil", err)
+		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface); err != nil {
+			t.Fatalf("AnnotateNAD() = %v, want nil", err)
 		}
 
 		got := &unstructured.Unstructured{}
@@ -91,16 +85,16 @@ func TestAnnotateNAD(t *testing.T) {
 		if err := k8s.Get(context.Background(), client.ObjectKey{Name: nadName, Namespace: nadNamespace}, got); err != nil {
 			t.Fatalf("get NAD after annotate: %v", err)
 		}
-		if gotAnnotation := got.GetAnnotations()[annotationHostInterface]; gotAnnotation != hostIface {
-			t.Errorf("annotation %s = %q, want %q", annotationHostInterface, gotAnnotation, hostIface)
+		if gotAnnotation := got.GetAnnotations()[AnnotationHostInterface]; gotAnnotation != hostIface {
+			t.Errorf("annotation %s = %q, want %q", AnnotationHostInterface, gotAnnotation, hostIface)
 		}
 	})
 
 	t.Run("empty pod namespace is a no-op", func(t *testing.T) {
 		k8s := fakeClient()
 
-		if err := annotateNAD(context.Background(), k8s, nadName, "", hostIface); err != nil {
-			t.Fatalf("annotateNAD() with empty namespace = %v, want nil", err)
+		if err := AnnotateNAD(context.Background(), k8s, nadName, "", hostIface); err != nil {
+			t.Fatalf("AnnotateNAD() with empty namespace = %v, want nil", err)
 		}
 	})
 }
