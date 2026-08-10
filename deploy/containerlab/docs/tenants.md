@@ -24,8 +24,8 @@ They differ only in scope and addressing:
 | `ns50` | dfw, sjc, iad (3-site)       | IPv4 + public IPv6 ptp | `G000000050V` | Also defines a `public` NAD with an IPv6 IPAM pool for external-connectivity testing. |
 | `ns10` | dfw, sjc, iad (3-site)       | IPv6-only (fd20 ULA) | `G000000010V` | No `ipv4_subnet` at all. |
 | `ns20` | dfw, sjc, iad (3-site)       | Dual-stack (fd20 ULA + IPv4) | `G000000020V` | Both families active; exercises the dual-stack IPAM path. |
-| `ns30` | dfw only, 2 attachments      | IPv6-only (fd20 ULA) | `G000000030V` | Two distinct attachments (`private`/`private-b`, distinct `vpcattachment` values, same `vpc`), each its own single-replica Deployment, both land on `dfw-worker` and share one VRF — same-node connectivity, no cross-site hop. |
-| `ns40` | iad only, 2 attachments      | IPv4-only | `G000000040V` | Two distinct attachments (`private`/`private-b`), each its own single-replica Deployment, both land on `iad-worker` (not `iad-worker-control`, which is tainted for the route-reflector role) and share one VRF. |
+| `ns30` | dfw only, 2 attachments      | IPv6-only (fd20 ULA) | `G000000030V` | Two distinct attachments (`private`/`private-b`, distinct `vpcattachment` values, same `vpc`), each its own single-replica Deployment, both land on `dfw-worker` and share one VRF — same-node connectivity, no cross-site hop. `verify:ns30` asserts the two pods share a node. |
+| `ns40` | iad only, 2 attachments      | IPv4-only | `G000000040V` | Two distinct attachments (`private`/`private-b`), each its own single-replica Deployment, both land on `iad-worker` (not `iad-worker-control`, which is tainted for the route-reflector role) and share one VRF. `verify:ns40` asserts the two pods share a node. |
 
 The VRF interface name follows `G<vpc, zero-padded to 9>V` on every worker —
 e.g. `ns20` (`vpc="20"`) is `G000000020V`. Unlike the host/guest veth
@@ -182,12 +182,21 @@ task verify:ns30   # same-node pod-to-pod, IPv6 (dfw)
 task verify:ns40   # same-node pod-to-pod, IPv4 (iad)
 ```
 
+The two single-site scripts check one thing the 3-site ones don't: before
+pinging, they compare both pods' `.spec.nodeName` (`lib.sh`'s
+`pod_scheduling_node`) and exit non-zero if the pair is split across workers.
+Nothing in either fixture pins the pods together — see the [table
+above](#overview) for what actually keeps them there today — and a split pair
+would still ping fine over the cross-site path, so without the assertion these
+VPCs would silently stop exercising the same-node/same-VRF case they exist for.
+
 `task verify` (via `task verify:scenarios`) runs all five. Use the scripts as
 the reference for how to resolve pod names/addresses by hand (`lib.sh`'s
-`pod_name`/`pod_ip4`/`pod_ip6`/`ping_pod` helpers) if you need to reproduce a
-step manually while debugging — e.g. to ping the `ns30` pods on dfw directly.
-`ns30`'s two pods are two distinct attachments/labels, not two replicas of
-one, so each is resolved by its own `pod_name` call rather than `pod_names`:
+`pod_name`/`pod_scheduling_node`/`pod_ip4`/`pod_ip6`/`ping_pod` helpers) if you
+need to reproduce a step manually while debugging — e.g. to ping the `ns30`
+pods on dfw directly. `ns30`'s two pods are two distinct attachments/labels,
+not two replicas of one, so each is resolved by its own `pod_name` call
+rather than `pod_names`:
 
 ```bash
 source scripts/lib.sh
@@ -282,6 +291,10 @@ assuming the affinity alone keeps pods off it:
 ```bash
 docker exec iad-control-plane kubectl describe node iad-worker-control | grep -A2 Taints
 ```
+
+If the taint is gone the pods schedule fine but may split across the two
+workers, in which case `task verify:ns40` fails with an `expected both ns40
+pods on one node` error naming the node each pod landed on.
 
 ## See also
 

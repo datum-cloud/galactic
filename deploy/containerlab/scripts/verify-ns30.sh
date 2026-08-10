@@ -25,6 +25,20 @@ for label in "${LABELS[@]}"; do
   PODS+=("${pod}")
 done
 
+# ns30 exists to prove two attachments on one VPC share a single kernel VRF on
+# one worker, so both pods landing on the same node is the subject of the test,
+# not an incidental detail. Nothing in the fixture pins them together — dfw
+# just happens to have exactly one schedulable worker — so if that ever changes
+# the pings below would still pass over the cross-node path and quietly stop
+# testing what ns30 is named for. Assert it instead.
+SCHED0=$(pod_scheduling_node "${NODE}" "${NS}" "${PODS[0]}")
+SCHED1=$(pod_scheduling_node "${NODE}" "${NS}" "${PODS[1]}")
+if [ "${SCHED0}" != "${SCHED1}" ]; then
+  echo "expected both ns30 pods on one node, found ${PODS[0]} on ${SCHED0} and ${PODS[1]} on ${SCHED1}" >&2
+  exit 1
+fi
+echo "both pods scheduled on ${SCHED0}"
+
 IP0=$(pod_ip6 "${NODE}" "${NS}" "${PODS[0]}")
 IP1=$(pod_ip6 "${NODE}" "${NS}" "${PODS[1]}")
 echo "${PODS[0]}: ${IP0}"
