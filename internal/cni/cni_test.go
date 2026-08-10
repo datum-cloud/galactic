@@ -387,7 +387,7 @@ func TestCmdCheckValidConfigMissingResources(t *testing.T) {
 	)
 	args := &skel.CmdArgs{
 		ContainerID: testContainerID,
-		Netns:       "/proc/1/ns/net",
+		Netns:       testNetns,
 		StdinData:   []byte(conf),
 	}
 
@@ -438,7 +438,7 @@ func TestCmdCheckWithPrevResultMissingResources(t *testing.T) {
 	)
 	args := &skel.CmdArgs{
 		ContainerID: testContainerID,
-		Netns:       "/proc/1/ns/net",
+		Netns:       testNetns,
 		StdinData:   []byte(conf),
 	}
 
@@ -466,7 +466,7 @@ func TestCmdCheckWithInvalidPrevResult(t *testing.T) {
 	)
 	args := &skel.CmdArgs{
 		ContainerID: testContainerID,
-		Netns:       "/proc/1/ns/net",
+		Netns:       testNetns,
 		StdinData:   []byte(conf),
 	}
 

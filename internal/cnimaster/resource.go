@@ -14,7 +14,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -46,16 +45,20 @@ func NewK8sClient() (client.Client, error) {
 	return c, nil
 }
 
-// CleanupAttachment rolls back a failed ADD's host-side interface and VRF,
-// in that order, for selective rollback. Errors are logged but never
-// returned — the caller already has a failure to report.
+// CleanupAttachment rolls back a failed ADD's host-side interface for
+// selective rollback. Errors are logged but never returned — the caller
+// already has a failure to report.
 //
 // ifaceKind names the interface kind for log messages ("veth", "tap"); del
-// removes the attachment's own host/guest interface pair. Both the
-// interface and the VRF (internal/plumbing/vrf, keyed by (vpc,
-// vpcAttachment) here) are this attachment's own, so unconditional deletion
-// of both is safe — neither call tears down state a sibling attachment
-// still depends on.
+// removes the attachment's own host/guest interface pair.
+//
+// Deliberately absent: deleting the VRF. The VRF is shared by every
+// attachment on this VPC on this node (internal/plumbing/vrf keys it by
+// VPC alone), and vrf.Add is idempotent, so there's no way to distinguish
+// "I created it" from "a sibling attachment already had." Deleting it on
+// this attachment's own failed ADD could tear down a still-live sibling's
+// VRF out from under it. Reclaiming it is exclusively galactic-router's GC
+// controller's job.
 func CleanupAttachment(vpc, vpcAttachment, ifaceKind string, del func(vpc, vpcAttachment string) error) {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", vpc, "vpcAttachment", vpcAttachment)
@@ -65,12 +68,5 @@ func CleanupAttachment(vpc, vpcAttachment, ifaceKind string, del func(vpc, vpcAt
 			"vpc", vpc, "vpcAttachment", vpcAttachment)
 	} else {
 		slog.Debug("Rollback: deleted "+ifaceKind, "vpc", vpc, "vpcAttachment", vpcAttachment)
-	}
-
-	if err := vrf.Delete(vpc, vpcAttachment); err != nil {
-		slog.Error("Rollback: failed to delete VRF", "err", err,
-			"vpc", vpc, "vpcAttachment", vpcAttachment)
-	} else {
-		slog.Debug("Rollback: deleted VRF", "vpc", vpc, "vpcAttachment", vpcAttachment)
 	}
 }

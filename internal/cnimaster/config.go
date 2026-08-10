@@ -311,6 +311,13 @@ func ParseConf(data []byte, cniConfig *config.CNIConfig, confFile string) (*Plug
 	SetupLogging(cniConfig.LogFile, cniConfig.LogLevel)
 	slog.Debug("CNI config received", "stdin", string(data))
 
+	// Refuse a config still written against the old flat addressing shape
+	// before anything else happens — those keys would otherwise be dropped
+	// as unknown fields and the pod would attach with no addresses at all.
+	if err := hostconf.RejectMovedIPAMKeys(data); err != nil {
+		return nil, err
+	}
+
 	// Whether IPAM runs at all is decided entirely by whether "ipam" is
 	// present — no environment variable or sibling field can trigger or
 	// suppress that. Addressing fields (ipv6_subnet, ipv4_subnet,
@@ -319,7 +326,8 @@ func ParseConf(data []byte, cniConfig *config.CNIConfig, confFile string) (*Plug
 	// read by whichever binary "ipam.type" names — the master plugin passes
 	// its own StdinData straight through unmodified when it delegates, so
 	// validating them here too would just be redundant work on the same
-	// bytes.
+	// bytes. Their *placement* is this plugin's concern, though — see the
+	// RejectMovedIPAMKeys call above.
 
 	if conf.PrevResult != nil {
 		if err := ValidatePrevResult(conf.PrevResult); err != nil {
