@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func loadHostConf(filePath string) (*HostConf, error) {
 	}
 	conf, err := hostconf.Load(filePath, hostconf.PluginType)
 	if err != nil {
-		if os.IsNotExist(unwrapPathError(err)) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &HostConf{Namespace: config.DefaultNamespace}, nil
 		}
 		return nil, err
@@ -74,19 +75,6 @@ func loadHostConf(filePath string) (*HostConf, error) {
 		conf.Namespace = config.DefaultNamespace
 	}
 	return conf, nil
-}
-
-// unwrapPathError returns the innermost error wrapped by err, so
-// os.IsNotExist (which does not itself traverse %w wrapping) can still
-// recognize a missing conflist file wrapped by hostconf.Load.
-func unwrapPathError(err error) error {
-	for {
-		unwrapped := errors.Unwrap(err)
-		if unwrapped == nil {
-			return err
-		}
-		err = unwrapped
-	}
 }
 
 // parseLogLevel maps a config-supplied level name to a slog.Level. Matching is
