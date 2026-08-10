@@ -11,6 +11,7 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cniipam"
@@ -103,10 +104,12 @@ func buildVethResult(
 	}
 
 	// Configure IP address on the guest interface inside the container netns.
-	cfg := allocConfig(pluginConf)
+	// Delegating at all is this plugin's own call, decided solely by "ipam"
+	// block presence — no config field or env var elsewhere can override
+	// that (see internal/cniipam's doc comment for the explicit contract).
 	var ipamResult *cniipam.IPAMResult
-	if cniipam.WantsIPAM(cfg) {
-		result, err := configureIPAM(args, cfg, args.IfName)
+	if pluginConf.IPAM != nil {
+		result, err := configureIPAM(args, pluginConf, args.IfName)
 		if err != nil {
 			return nil, nil, fmt.Errorf("configure IPAM: %w", err)
 		}
@@ -130,15 +133,22 @@ func buildVethResult(
 	return ipamResult, guestHWAddr, nil
 }
 
-// configureIPAM allocates addresses and configures the guest interface inside
-// the container network namespace with both families (when dual-stack).
-func configureIPAM(args *skel.CmdArgs, cfg cniipam.AllocConfig, guestName string) (*cniipam.IPAMResult, error) {
-	ipamResult, err := cniipam.Allocate(args, cfg)
+// configureIPAM delegates IPAM allocation to whatever binary pluginConf's
+// own "ipam.type" names (per the CNI IPAM delegation protocol — see
+// github.com/containernetworking/plugins/pkg/ipam.ExecAdd), then applies
+// the returned addresses to the guest interface inside the container
+// network namespace with both families (when dual-stack). args.StdinData
+// is passed straight through as the delegate's own netconf: it already
+// contains the "ipam" block (plus everything else in this plugin's own
+// config, which the delegate simply ignores).
+func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string) (*cniipam.IPAMResult, error) {
+	cniResult, err := ipam.ExecAdd(pluginConf.IPAM.Type, args.StdinData)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("delegate to %s ADD: %w", pluginConf.IPAM.Type, err)
 	}
-	if ipamResult == nil {
-		return nil, nil
+	ipamResult, err := cniipam.ResultToIPAMResult(cniResult)
+	if err != nil {
+		return nil, fmt.Errorf("convert IPAM result: %w", err)
 	}
 
 	var ipv4Net *net.IPNet

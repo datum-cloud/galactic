@@ -104,12 +104,16 @@ func TestBootstrap(t *testing.T) {
 	// Create mock CNI source binary files
 	SourceCNIBinary = filepath.Join(tmpDir, "source-galactic-cni")
 	SourceTapCNIBinary = filepath.Join(tmpDir, "source-galactic-tap-cni")
+	SourceIPAMBinary = filepath.Join(tmpDir, "source-galactic-ipam")
 	SourceHostDeviceBinary = filepath.Join(tmpDir, "source-host-device")
 	if err := os.WriteFile(SourceCNIBinary, []byte("cni-content"), 0755); err != nil {
 		t.Fatalf("write SourceCNIBinary: %v", err)
 	}
 	if err := os.WriteFile(SourceTapCNIBinary, []byte("tap-cni-content"), 0755); err != nil {
 		t.Fatalf("write SourceTapCNIBinary: %v", err)
+	}
+	if err := os.WriteFile(SourceIPAMBinary, []byte("ipam-content"), 0755); err != nil {
+		t.Fatalf("write SourceIPAMBinary: %v", err)
 	}
 	if err := os.WriteFile(SourceHostDeviceBinary, []byte("host-device-content"), 0755); err != nil {
 		t.Fatalf("write SourceHostDeviceBinary: %v", err)
@@ -168,6 +172,7 @@ func TestBootstrap(t *testing.T) {
 		// Verify binaries copied
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-cni"), "cni-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap-cni"), "tap-cni-content")
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-ipam"), "ipam-content")
 
 		// Verify conflist written
 		conflist, err := loadHostConf(HostConflist)

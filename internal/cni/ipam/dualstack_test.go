@@ -4,7 +4,10 @@
 
 package ipam
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestNewDualStackAllocator(t *testing.T) {
 	tests := []struct {
@@ -167,8 +170,12 @@ func TestDualStackAllocatorAllocate(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
+		// Each iteration uses a distinct container ID -- Allocate is
+		// idempotent per containerID, so reusing one ID would only ever
+		// consume a single IPv4 address instead of exhausting the pool.
 		for i := range 4 {
-			if _, err := a.Allocate("container"); err != nil {
+			containerID := fmt.Sprintf("container-%d", i)
+			if _, err := a.Allocate(containerID); err != nil {
 				t.Fatalf("unexpected error on allocation %d: %v", i, err)
 			}
 		}

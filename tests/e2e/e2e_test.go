@@ -226,6 +226,14 @@ func TestCNITapInterface(t *testing.T) {
 	// Write the CNI config to a file inside the pod, then run the plugin
 	// with the config piped via stdin.  The plugin reads config from stdin
 	// (the CNI protocol) and CNI_NETNS from the environment.
+	//
+	// The "ipam" block's "type" now names the delegated binary
+	// (galactic-ipam), not a pool-vs-static mode selector -- this step
+	// rewired IPAM from an in-process call into real CNI IPAM delegation
+	// (github.com/containernetworking/plugins/pkg/ipam.ExecAdd), so
+	// "pool" is no longer a valid type value; presence of ipv6_subnet
+	// alone opts this config into pool IPAM (see internal/cniipam's doc
+	// comment and docs/cni/configuration.md).
 	cniConf := `{
   "cniVersion": "1.0.0",
   "name": "galactic",
@@ -233,23 +241,25 @@ func TestCNITapInterface(t *testing.T) {
   "vpc": "1",
   "vpcattachment": "1",
   "ipam": {
-    "type": "pool"
+    "type": "galactic-ipam",
+    "ipv6_subnet": "fd00:e2e::/48"
   }
 }`
 	// Step 1: write the CNI config and a wrapper script into the pod.
-	// Tap mode now runs IPAM allocation unconditionally (matching veth mode).
-	// GALACTIC_CNI_ENABLE_LOCAL_IPAM fills in default pool/subnet_len when
-	// omitted, but parseConf still requires an explicit "ipam" block to be
-	// present in the config (see docs/cni/configuration.md).
+	// CNI_PATH=/ lets IPAM delegation (galactic-tap-cni execs galactic-ipam
+	// via ipam.ExecAdd) find the delegate binary: every binary in the
+	// chain is copied to the image root by containers/galactic-cni/
+	// Dockerfile (not /opt/cni/bin -- that path only exists on the real
+	// host once installer.Bootstrap's init container stages it there,
+	// which this test's pod never runs).
 	script := `#!/bin/sh
 ip netns add e2e-tap-ns
 CNI_NETNS=/var/run/netns/e2e-tap-ns \
 CNI_COMMAND=ADD \
 CNI_CONTAINERID=e2e-tap-001 \
 CNI_IFNAME=eth0 \
-CNI_PATH=/opt/cni/bin \
+CNI_PATH=/ \
 NODE_NAME=` + nodeName() + ` \
-GALACTIC_CNI_ENABLE_LOCAL_IPAM=true \
 	/galactic-tap-cni < /tmp/cni.json
 `
 	_, err = kubectl(t.Context(), "exec", name, "--",

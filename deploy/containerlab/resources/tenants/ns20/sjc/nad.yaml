@@ -13,7 +13,10 @@ spec:
       "vpc": "20",
       "vpcattachment": "20",
       "namespace": "galactic-system",
-      "ipv6_subnet": "fd20:20:ff02::/48",
-      "ipv4_subnet": "172.21.20.0/24",
-      "address_families": ["ipv6", "ipv4"]
+      "ipam": {
+        "type": "galactic-ipam",
+        "ipv6_subnet": "fd20:20:ff02::/48",
+        "ipv4_subnet": "172.21.20.0/24",
+        "address_families": ["ipv6", "ipv4"]
+      }
     }

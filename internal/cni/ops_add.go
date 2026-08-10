@@ -64,6 +64,16 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		vpcAttachment: pluginConf.VPCAttachment,
 		namespace:     namespace,
 	}
+	// Record IPAM delegation intent up front, before configureIPAM (called
+	// from buildVethResult below) ever runs — see resourceTracker's
+	// ipamDelegated doc comment for why rollback needs this set
+	// unconditionally on "ipam" block presence, not just after a
+	// successful ExecAdd.
+	if pluginConf.IPAM != nil {
+		tracker.ipamDelegated = true
+		tracker.ipamType = pluginConf.IPAM.Type
+		tracker.ipamStdin = args.StdinData
+	}
 
 	// Selective rollback: clean up only resources that were created.
 	// We need a context for k8s operations in rollback; the k8s client

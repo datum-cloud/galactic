@@ -18,6 +18,7 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/vishvananda/netlink"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,6 +52,14 @@ func cmdCheck(args *skel.CmdArgs) error {
 	if pluginConf.RawPrevResult != nil {
 		if err := checkPrevResult(pluginConf.RawPrevResult, hostName); err != nil {
 			errs = append(errs, fmt.Errorf("prevResult validation: %w", err))
+		}
+	}
+
+	// Delegate CHECK to the IPAM plugin so a lost or corrupted allocation
+	// marker file is caught here too, not just at ADD/DEL time.
+	if pluginConf.IPAM != nil {
+		if err := ipam.ExecCheck(pluginConf.IPAM.Type, args.StdinData); err != nil {
+			errs = append(errs, fmt.Errorf("IPAM CHECK: %w", err))
 		}
 	}
 

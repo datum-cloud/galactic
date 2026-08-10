@@ -13,6 +13,7 @@ import (
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
+	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/nadpatch"
@@ -57,6 +58,13 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
 		namespace:     namespace,
+	}
+	// Record IPAM delegation intent up front, before the ExecAdd call
+	// below ever runs — see resourceTracker's ipamDelegated doc comment.
+	if pluginConf.IPAM != nil {
+		tracker.ipamDelegated = true
+		tracker.ipamType = pluginConf.IPAM.Type
+		tracker.ipamStdin = args.StdinData
 	}
 
 	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), cniTimeout)
@@ -109,11 +117,20 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		slog.Debug("ADD: termination routes installed", "count", tracker.routesCreated, "dev", dev)
 	}
 
-	// Allocate IPAM for the tap interface. The VM manages its own guest
-	// interface; the CNI only configures the host side.
-	ipamResult, err := cniipam.Allocate(args, allocConfig(pluginConf))
-	if err != nil {
-		return fmt.Errorf("allocate IPAM: %w", err)
+	// Allocate IPAM for the tap interface via delegation (only if pluginConf
+	// carries an "ipam" block at all — see internal/cniipam's doc comment
+	// for the explicit contract). The VM manages its own guest interface;
+	// this plugin only configures the host side.
+	var ipamResult *cniipam.IPAMResult
+	if pluginConf.IPAM != nil {
+		cniResult, err := ipam.ExecAdd(pluginConf.IPAM.Type, args.StdinData)
+		if err != nil {
+			return fmt.Errorf("delegate to %s ADD: %w", pluginConf.IPAM.Type, err)
+		}
+		ipamResult, err = cniipam.ResultToIPAMResult(cniResult)
+		if err != nil {
+			return fmt.Errorf("convert IPAM result: %w", err)
+		}
 	}
 	if ipamResult != nil {
 		slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,

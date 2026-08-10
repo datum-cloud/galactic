@@ -13,6 +13,9 @@ spec:
       "vpc": "40",
       "vpcattachment": "40",
       "namespace": "galactic-system",
-      "ipv4_subnet": "172.40.10.0/24",
-      "address_families": ["ipv4"]
+      "ipam": {
+        "type": "galactic-ipam",
+        "ipv4_subnet": "172.40.10.0/24",
+        "address_families": ["ipv4"]
+      }
     }
