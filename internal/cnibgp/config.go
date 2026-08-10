@@ -17,8 +17,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
-	"go.datum.net/galactic/internal/cni/hostconf"
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/hostconf"
 )
 
 var ConfFile = config.DefaultConfFile
@@ -31,7 +31,7 @@ var ConfFile = config.DefaultConfFile
 // are shared node-level settings, not domain-specific behavior the way
 // galactic-ipam's own enable-local-ipam flag is — every binary in the chain
 // resolves them from the same static conflist file (see
-// go.datum.net/galactic/internal/cni/hostconf's doc comment).
+// go.datum.net/galactic/internal/hostconf's doc comment).
 var cniConfig *config.CNIConfig
 
 // InitCNIConfig initializes the shared config resolver for CNI env var

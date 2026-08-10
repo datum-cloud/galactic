@@ -16,9 +16,9 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/hostgw"
-	"go.datum.net/galactic/internal/cni/nadpatch"
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
