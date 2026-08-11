@@ -42,7 +42,7 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
-	// Explicitly flush the address/default-route galactic-cni's IPAM step
+	// Explicitly flush the address/default-route galactic-veth's IPAM step
 	// installed on the guest interface, ahead of host-device delegation.
 	// hostDevice DEL's move of the guest veth end back out of the container
 	// netns normally flushes this as a side effect of crossing a namespace

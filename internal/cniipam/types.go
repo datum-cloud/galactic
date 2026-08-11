@@ -4,8 +4,8 @@
 
 // Package cniipam implements galactic-ipam, the delegated CNI IPAM plugin
 // in the galactic CNI chain (see github.com/containernetworking/cni/pkg/ipam
-// for the delegation protocol both master plugins, galactic-cni and
-// galactic-tap-cni, invoke this through via ExecAdd/ExecDel/ExecCheck).
+// for the delegation protocol both master plugins, galactic-veth and
+// galactic-tap, invoke this through via ExecAdd/ExecDel/ExecCheck).
 //
 // Explicit contract: a master plugin delegates here if and only if its own
 // "ipam" block is present at all — no environment variable or sibling

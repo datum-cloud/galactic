@@ -56,12 +56,12 @@ func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
 	return ipnet
 }
 
-// movedKeyConf builds an otherwise-valid galactic-tap-cni config carrying
+// movedKeyConf builds an otherwise-valid galactic-tap config carrying
 // the supplied raw JSON member(s) at the top level, for the addressing keys
 // that belong inside the "ipam" block.
 func movedKeyConf(members string) string {
 	return fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpc":"%s","vpcattachment":"%s",%s}`,
+		`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap","vpc":"%s","vpcattachment":"%s",%s}`,
 		testVPC, testAttachment, members,
 	)
 }
@@ -79,7 +79,7 @@ func TestParseConf(t *testing.T) {
 		{
 			name: "valid config",
 			input: fmt.Sprintf(
-				`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpc":"%s","vpcattachment":"%s"}`,
+				`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap","vpc":"%s","vpcattachment":"%s"}`,
 				testVPC, testAttachment,
 			),
 			wantVPC: testVPC,
@@ -87,14 +87,14 @@ func TestParseConf(t *testing.T) {
 		{name: "invalid JSON", input: "not json", wantErr: "invalid CNI config", wantCode: 7},
 		{
 			name: "missing vpc",
-			input: fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpcattachment":"%s"}`,
+			input: fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap","vpcattachment":"%s"}`,
 				testAttachment),
 			wantErr:  "vpc is required and must be a non-empty base62 string",
 			wantCode: 7,
 		},
 		{
 			name: "vpc with invalid char",
-			input: fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpc":"%s","vpcattachment":"%s"}`,
+			input: fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap","vpc":"%s","vpcattachment":"%s"}`,
 				testInvalidBase62, testAttachment),
 			wantErr:  fmt.Sprintf("invalid base62 value for field 'vpc': %q", testInvalidBase62),
 			wantCode: 7,
@@ -285,7 +285,7 @@ func TestCmdDelIdempotent(t *testing.T) {
 }
 
 func TestCmdDelIdempotentMissingResources(t *testing.T) {
-	conf := fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpc":"%s","vpcattachment":"%s"}`,
+	conf := fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap","vpc":"%s","vpcattachment":"%s"}`,
 		testVPC, testAttachment)
 	args := &skel.CmdArgs{ContainerID: testContainerID, StdinData: []byte(conf)}
 	if err := cmdDel(args); err != nil {
@@ -302,7 +302,7 @@ func TestCmdCheckInvalidConfig(t *testing.T) {
 }
 
 func TestCmdCheckValidConfigMissingResources(t *testing.T) {
-	conf := fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpc":"%s","vpcattachment":"%s"}`,
+	conf := fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap","vpc":"%s","vpcattachment":"%s"}`,
 		testVPC, testAttachment)
 	args := &skel.CmdArgs{ContainerID: testContainerID, StdinData: []byte(conf)}
 	err := cmdCheck(args)
@@ -322,7 +322,7 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 	cnimaster.ProbeAPIServer = func() error { return errors.New("connection refused") }
 	defer func() { cnimaster.ProbeAPIServer = original }()
 
-	conf := fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap-cni","vpc":"%s","vpcattachment":"%s"}`,
+	conf := fmt.Sprintf(`{"cniVersion":"1.0.0","name":"test","type":"galactic-tap","vpc":"%s","vpcattachment":"%s"}`,
 		testVPC, testAttachment)
 	args := &skel.CmdArgs{ContainerID: testContainerID, StdinData: []byte(conf)}
 	err := cmdStatus(args)

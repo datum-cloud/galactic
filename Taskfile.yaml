@@ -133,7 +133,8 @@ tasks:
         -X go.datum.net/galactic/internal/metadata.GitURL={{.GIT_URL}}
     cmds:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-cni ./cmd/galactic-cni
-      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-tap-cni ./cmd/galactic-tap-cni
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-veth ./cmd/galactic-veth
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-tap ./cmd/galactic-tap
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-ipam ./cmd/galactic-ipam
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-bgp ./cmd/galactic-bgp
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-route ./cmd/galactic-route

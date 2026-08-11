@@ -2,7 +2,7 @@
 
 The galactic CNI plugin chain is configured through the CNI JSON conflist passed
 by Multus (or any CNI manager), plus node-local settings resolved at runtime from
-the static conflist, environment variables, and (for `galactic-cni`/`galactic-tap-cni`/
+the static conflist, environment variables, and (for `galactic-veth`/`galactic-tap`/
 `galactic-bgp`, as a last resort) the Kubernetes API.
 
 > Last verified: 2026-08-08 against the current working tree of `internal/cni/`,
@@ -21,17 +21,17 @@ inside the master plugin. A real-world attachment's conflist has this shape:
   "cniVersion": "1.0.0",
   "name": "private",
   "plugins": [
-    { "type": "galactic-cni", "...": "..." },
+    { "type": "galactic-veth", "...": "..." },
     { "type": "galactic-route", "...": "..." },
     { "type": "galactic-bgp", "...": "..." }
   ]
 }
 ```
 
-- **`galactic-cni`** (veth, containers) or **`galactic-tap-cni`** (tap, VM
+- **`galactic-veth`** (veth, containers) or **`galactic-tap`** (tap, VM
   workloads) — always first. Creates the VRF and host-side interface,
   annotates the NAD, delegates IPAM (if an `"ipam"` block is present) and
-  — `galactic-cni` only — host-device (to move the guest veth into the
+  — `galactic-veth` only — host-device (to move the guest veth into the
   container netns), configures the host gateway, and prints the CNI
   result.
 - **`galactic-route`** — optional; include only when the attachment has
@@ -61,8 +61,10 @@ variables, and a `HostConf` block parsed out of the conflist at `--conf-file`
 (default `/etc/cni/net.d/10-galactic.conflist` — this is the one *static*,
 node-level conflist every binary shares; not the per-attachment `plugins[]`
 conflist described above). `HostConf` is written by the `galactic-cni init`
-subcommand (`internal/installer.Bootstrap`), which runs as the CNI DaemonSet's
-init container — see [docs/agents/ARCHITECTURE.md](../agents/ARCHITECTURE.md#known-constraints)
+subcommand (`internal/installer.Bootstrap`) — `galactic-cni` is a separate
+installer binary, never itself a CNI plugin, whose `init`/`run` subcommands
+run as the CNI DaemonSet's init and long-running containers respectively —
+see [docs/agents/ARCHITECTURE.md](../agents/ARCHITECTURE.md#known-constraints)
 for how the DaemonSet stages it.
 
 `galactic-ipam` and `galactic-route` have no Kubernetes dependency at all, so
@@ -83,9 +85,9 @@ they resolve only `LogFile`/`LogLevel` from `HostConf` — never `NodeName` or
 
 | Setting    | Precedence (highest first)                                                                                                                                                                                                       | Default (if nothing resolves)        | Resolved by                                       |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | -------------------------------------------------- |
-| Node name  | `GALACTIC_CNI_NODE_NAME` env → `NODE_NAME` env → `HostConf.NodeName` → auto-detect via the Kubernetes API (`detectNodeNameFromAPI`: lists Nodes, matches local interface addresses against `status.addresses[].type=InternalIP`) | _(error: "node name is required")_    | `galactic-cni`, `galactic-tap-cni`, `galactic-bgp` |
-| Kubeconfig | `GALACTIC_CNI_KUBECONFIG` env → `HostConf.Kubeconfig`                                                                                                                                                                             | `/var/lib/galactic/kubeconfig`         | `galactic-cni`, `galactic-tap-cni`, `galactic-bgp` |
-| Namespace  | `namespace` field in the CNI config JSON → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace`                                                                                                                                    | `galactic-system`                     | `galactic-cni`, `galactic-tap-cni`, `galactic-bgp` |
+| Node name  | `GALACTIC_CNI_NODE_NAME` env → `NODE_NAME` env → `HostConf.NodeName` → auto-detect via the Kubernetes API (`detectNodeNameFromAPI`: lists Nodes, matches local interface addresses against `status.addresses[].type=InternalIP`) | _(error: "node name is required")_    | `galactic-veth`, `galactic-tap`, `galactic-bgp` |
+| Kubeconfig | `GALACTIC_CNI_KUBECONFIG` env → `HostConf.Kubeconfig`                                                                                                                                                                             | `/var/lib/galactic/kubeconfig`         | `galactic-veth`, `galactic-tap`, `galactic-bgp` |
+| Namespace  | `namespace` field in the CNI config JSON → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace`                                                                                                                                    | `galactic-system`                     | `galactic-veth`, `galactic-tap`, `galactic-bgp` |
 | Log file   | `GALACTIC_CNI_LOG_FILE` env → `HostConf.LogFile`                                                                                                                                                                                  | `/var/log/galactic/galactic-cni.log`  | every binary in the chain                          |
 | Log level  | `GALACTIC_CNI_LOG_LEVEL` env → `HostConf.LogLevel`                                                                                                                                                                                | `info`                                | every binary in the chain                          |
 
@@ -96,8 +98,8 @@ reads them (unlike `GALACTIC_IPAM_ENABLE_LOCAL_IPAM` below, which is a
 domain-specific knob belonging entirely to `galactic-ipam`).
 
 The resolved node name is re-exported as the `NODE_NAME` process environment
-variable and the resolved kubeconfig as `KUBECONFIG` (`galactic-cni`/
-`galactic-tap-cni`/`galactic-bgp` only), since other code in those packages
+variable and the resolved kubeconfig as `KUBECONFIG` (`galactic-veth`/
+`galactic-tap`/`galactic-bgp` only), since other code in those packages
 reads those directly. Auto-detection exists to tolerate environments (e.g.
 Kind-based e2e) where the conflist's hostPath mount isn't populated yet.
 
@@ -144,13 +146,13 @@ contract.
 **Type:** bool
 **Default:** `false`
 
-## Master Plugin Fields (`galactic-cni` / `galactic-tap-cni`)
+## Master Plugin Fields (`galactic-veth` / `galactic-tap`)
 
 | Field           | Required | Type     | Description                                                                                                                                                                                |
 | --------------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `vpc`           | **Yes**  | `string` | Base62-encoded VPC identifier (48-bit value). Used to derive VRF names, interface names, and BGP route targets.                                                                            |
 | `vpcattachment` | **Yes**  | `string` | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming.                                                                                |
-| `mtu`           | No       | `int`    | MTU for the host-side interface. For `galactic-cni` this applies to both veth endpoints; for `galactic-tap-cni` it applies to the tap interface.                                            |
+| `mtu`           | No       | `int`    | MTU for the host-side interface. For `galactic-veth` this applies to both veth endpoints; for `galactic-tap` it applies to the tap interface.                                            |
 | `namespace`     | No       | `string` | Kubernetes namespace used for NAD lookup (and, for `galactic-bgp`'s own stanza, `BGPRouter`/BGP CRD lookup). Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` → `galactic-system`. |
 | `ipam`          | No       | `IPAM`   | IPAM delegation block (see [IPAM Fields](#ipam-fields) below). Presence alone decides whether IPAM runs at all — no env var or sibling field can trigger or suppress it.                    |
 
@@ -170,13 +172,13 @@ uses `"1.0.0"`; keep it that way for any config authored outside these
 examples.
 
 There is no `interface_type` field anymore: which binary you invoke *is* the
-interface type. `galactic-cni` always creates a veth pair; `galactic-tap-cni`
+interface type. `galactic-veth` always creates a veth pair; `galactic-tap`
 always creates a tap device. There is likewise no `terminations` field on
 either master plugin's own stanza anymore — that field now lives entirely on
 `galactic-route`'s own stanza (see [Termination Fields](#termination-fields)
 below).
 
-### `galactic-cni` (veth)
+### `galactic-veth` (veth)
 
 Creates a veth pair: one endpoint stays in the host namespace (named
 `G<vpc, zero-padded to 9><vpcattachment, zero-padded to 3>H`, e.g. `G0000000010010H`)
@@ -185,7 +187,7 @@ and the other is moved into the container via the host-device CNI plugin
 receives an IP address from IPAM (if configured) and a default route via the
 pool gateway.
 
-### `galactic-tap-cni` (tap)
+### `galactic-tap` (tap)
 
 Creates a tap interface in the host namespace (same naming pattern as the veth
 host endpoint: `G<vpc9><vpcattachment3>H`) and enslaves it to the VRF. No
@@ -193,7 +195,7 @@ interface is moved into a container — the tap fd is managed directly by the
 guest VM hypervisor (Kata, Firecracker, kraftlet/Unikraft), so this binary
 never delegates to host-device and never configures a guest netns. It still
 runs IPAM (if `"ipam"` is present) and configures the host gateway exactly as
-`galactic-cni` does; the CNI result carries a single interface (the host tap,
+`galactic-veth` does; the CNI result carries a single interface (the host tap,
 empty sandbox) since there's no guest-side interface entry.
 
 The IPv4 gateway address on the host tap is a `/25`, not the `/32` used
@@ -285,8 +287,8 @@ Each entry in `terminations` has:
 
 Used in `cmdAdd` to install routes into the VRF table for each termination
 entry, via the host-side interface name derived from `(vpc, vpcAttachment)`
-alone — identical whether the preceding master plugin was `galactic-cni` or
-`galactic-tap-cni`. `cmdDel` is a no-op: like every other shared, per-attachment
+alone — identical whether the preceding master plugin was `galactic-veth` or
+`galactic-tap`. `cmdDel` is a no-op: like every other shared, per-attachment
 resource in the chain, termination routes may still be in use by another pod/VM
 on the same attachment, so cleanup is left to `galactic-router`'s GC controller.
 
@@ -311,7 +313,7 @@ plugin object — per [Chain structure](#chain-structure) above.
   "cniVersion": "1.0.0",
   "name": "galactic",
   "plugins": [
-    { "type": "galactic-cni", "vpc": "1", "vpcattachment": "1" },
+    { "type": "galactic-veth", "vpc": "1", "vpcattachment": "1" },
     { "type": "galactic-bgp", "vpc": "1", "vpcattachment": "1" }
   ]
 }
@@ -329,7 +331,7 @@ address is assigned to the guest interface.
   "name": "testvpc",
   "plugins": [
     {
-      "type": "galactic-cni",
+      "type": "galactic-veth",
       "vpc": "10",
       "vpcattachment": "10",
       "namespace": "galactic-system",
@@ -352,7 +354,7 @@ address is assigned to the guest interface.
   "name": "vpc21",
   "plugins": [
     {
-      "type": "galactic-cni",
+      "type": "galactic-veth",
       "vpc": "21",
       "vpcattachment": "21",
       "namespace": "galactic-system",
@@ -379,7 +381,7 @@ the IPv6 `/96` and IPv4 `/32` prefixes.
   "name": "vpc20",
   "plugins": [
     {
-      "type": "galactic-tap-cni",
+      "type": "galactic-tap",
       "vpc": "20",
       "vpcattachment": "20",
       "namespace": "galactic-system",
@@ -405,7 +407,7 @@ all; the resulting `BGPAdvertisement` carries only the IPv4 `/32` prefix.
   "name": "galactic",
   "plugins": [
     {
-      "type": "galactic-cni",
+      "type": "galactic-veth",
       "vpc": "1",
       "vpcattachment": "1",
       "ipam": { "type": "galactic-ipam", "static_ip": "fd00:1::1" }
@@ -426,7 +428,7 @@ all; the resulting `BGPAdvertisement` carries only the IPv4 `/32` prefix.
   "name": "galactic",
   "plugins": [
     {
-      "type": "galactic-cni",
+      "type": "galactic-veth",
       "vpc": "1",
       "vpcattachment": "1",
       "ipam": { "type": "galactic-ipam", "ipv6_subnet": "fd00:1:ff01::/48" }
@@ -457,7 +459,7 @@ master plugin and `galactic-bgp`.
   "name": "galactic-tap",
   "plugins": [
     {
-      "type": "galactic-tap-cni",
+      "type": "galactic-tap",
       "vpc": "1",
       "vpcattachment": "1",
       "mtu": 9000,
@@ -468,10 +470,10 @@ master plugin and `galactic-bgp`.
 }
 ```
 
-`galactic-tap-cni` creates a tap interface in the host namespace, enslaves it
+`galactic-tap` creates a tap interface in the host namespace, enslaves it
 to the VRF, and applies forwarding sysctls. It then runs IPAM (allocating the
-subnet shown above) and configures the host gateway exactly as `galactic-cni`
-does — see [`galactic-tap-cni` (tap)](#galactic-tap-cni-tap) above. Only
+subnet shown above) and configures the host gateway exactly as `galactic-veth`
+does — see [`galactic-tap` (tap)](#galactic-tap-tap) above. Only
 host-device delegation and guest-netns configuration are skipped; the guest VM
 still configures its own IP addresses independently once the hypervisor
 (Kata, Firecracker, kraftlet/Unikraft) opens the tap fd at runtime.

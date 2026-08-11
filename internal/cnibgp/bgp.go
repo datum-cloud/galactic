@@ -4,7 +4,7 @@
 
 // Package cnibgp implements galactic-bgp, the SRv6/BGP/eBPF publish plugin
 // in the galactic CNI chain. It is chain-invoked (per CNI conflist order)
-// after the master plugin (galactic-cni or galactic-tap-cni), not called
+// after the master plugin (galactic-veth or galactic-tap), not called
 // as a library — it has zero kernel-interface dependency: every address it
 // advertises comes from prevResult (see prevresult.go), never from a
 // runtime call into the interface it doesn't own. Host-interface gateway

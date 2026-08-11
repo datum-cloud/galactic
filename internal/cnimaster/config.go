@@ -22,7 +22,7 @@ import (
 )
 
 // PluginConf is the CNI plugin configuration passed via stdin on each
-// invocation of either master plugin (galactic-cni or galactic-tap-cni).
+// invocation of either master plugin (galactic-veth or galactic-tap).
 //
 // IPAM addressing fields (ipv6_subnet, ipv4_subnet, address_families,
 // static_ip) live entirely inside the "ipam" block — see

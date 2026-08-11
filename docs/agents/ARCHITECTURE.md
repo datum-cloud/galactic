@@ -20,14 +20,17 @@ reflector, enabling pods/VMs on different nodes or clusters to reach each other
 via SRv6-encapsulated traffic.
 
 The CNI attach side is a **chain of small binaries**, not one monolithic
-plugin: a master plugin (`galactic-cni` for containers, `galactic-tap-cni` for
+plugin: a master plugin (`galactic-veth` for containers, `galactic-tap` for
 VM workloads) creates the VRF and host-side interface; an optional
 `galactic-route` installs static termination routes; `galactic-bgp` publishes
 the BGP/SRv6/eBPF state. IPAM is delegated to a separate `galactic-ipam`
-binary via the standard CNI IPAM delegation protocol, not chained. All five
-binaries (plus `vmtap-cni`, `host-device`) ship in the same
-`ghcr.io/datum-cloud/galactic-cni` image and are staged onto the host by the
-same init container — see [Repository Layout](#repository-layout) and
+binary via the standard CNI IPAM delegation protocol, not chained. None of
+these five binaries are ever installed by hand: `galactic-cni`, a sixth
+binary that is never itself a CNI plugin (no NAD ever names it in a `"type"`
+field), stages the other five (plus `vmtap-cni`, `host-device`) onto the
+host from its own `init`/`run` DaemonSet containers. All six ship in the
+same `ghcr.io/datum-cloud/galactic-cni` image — see
+[Repository Layout](#repository-layout) and
 [Module / Package Reference](#module--package-reference) below.
 
 VPC and VPCAttachment CRDs are owned by a separate companion operator
@@ -81,8 +84,10 @@ Distinguisher and import/export Route Target.
 ```
 galactic/
 ├── cmd/
-│   ├── galactic-cni/        # veth master plugin binary
-│   ├── galactic-tap-cni/    # tap master plugin binary (VM workloads)
+│   ├── galactic-cni/        # CNI installer binary (init/run DaemonSet
+│   │                        #   subcommands; never itself a CNI plugin)
+│   ├── galactic-veth/       # veth master plugin binary
+│   ├── galactic-tap/        # tap master plugin binary (VM workloads)
 │   ├── galactic-ipam/       # delegated CNI IPAM plugin binary
 │   ├── galactic-bgp/        # BGP/SRv6/eBPF publish plugin binary
 │   ├── galactic-route/      # termination-route plugin binary (optional chain stage)
@@ -103,7 +108,7 @@ galactic/
 │   ├── gc/                  # Orphaned BGPAdvertisement/BGPVRFInstance CRD, stale
 │   │                        #   kernel VRF, and eBPF vrf_table entry cleanup,
 │   │                        #   driven by the GC controller
-│   ├── cni/                 # galactic-cni: veth master plugin (cmdAdd/cmdDel/
+│   ├── cni/                 # galactic-veth: veth master plugin (cmdAdd/cmdDel/
 │   │   │                    #   cmdCheck/cmdStatus, PluginConf parsing, NAD
 │   │   │                    #   annotation, host-device delegation)
 │   │   ├── hostconf/        # Shared static-conflist HostConf schema/loader,
@@ -118,7 +123,7 @@ galactic/
 │   │   ├── route/           # Host-side static routes via netlink
 │   │   ├── tap/             # Tap interface management (VM workloads)
 │   │   └── veth/            # veth pair management
-│   ├── cnitap/              # galactic-tap-cni: tap master plugin (mirrors
+│   ├── cnitap/              # galactic-tap: tap master plugin (mirrors
 │   │                        #   internal/cni; no host-device delegation, no
 │   │                        #   guest netns)
 │   ├── cniipam/             # galactic-ipam: CNI IPAM delegation protocol
@@ -165,7 +170,7 @@ galactic/
 ├── deploy/
 │   └── containerlab/        # ContainerLab lab topology and scripts
 └── containers/
-    ├── galactic-cni/        # galactic-cni/-tap-cni/-ipam/-bgp/-route + vmtap-cni
+    ├── galactic-cni/        # galactic-veth/galactic-tap/-ipam/-bgp/-route + vmtap-cni
     │                        #   + host-device image (e2e test and production publish)
     └── galactic-router/     # galactic-router production image
 ```
@@ -194,8 +199,8 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 | `internal/hash` | `galactic-router` | Change detection |
 | `internal/metadata` | every binary | Build-time version info stamped via `-ldflags` |
 | `internal/gc` | `galactic-router` | Orphaned CRD/VRF/eBPF-entry cleanup, driven by the GC controller's ticker |
-| `internal/cni` | `galactic-cni` | Veth master plugin: cmdAdd/cmdDel/cmdCheck/cmdStatus, PluginConf parsing, NAD annotation, host-device delegation |
-| `internal/cnitap` | `galactic-tap-cni` | Tap master plugin (mirrors `internal/cni`, no guest netns) |
+| `internal/cni` | `galactic-veth` | Veth master plugin: cmdAdd/cmdDel/cmdCheck/cmdStatus, PluginConf parsing, NAD annotation, host-device delegation |
+| `internal/cnitap` | `galactic-tap` | Tap master plugin (mirrors `internal/cni`, no guest netns) |
 | `internal/cniipam` | `galactic-ipam` | Delegated CNI IPAM plugin (no k8s dependency) |
 | `internal/cnibgp` | `galactic-bgp` | BGP/SRv6/eBPF publish plugin (zero kernel-interface dependency) |
 | `internal/cniroute` | `galactic-route` | Termination-route plugin (no k8s dependency) |
@@ -205,23 +210,47 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 | `internal/plumbing/srv6` | `galactic-router` | SID computation (`ComputeSID`) for the BGP Prefix-SID path attribute |
 | `internal/plumbing/ebpf` | `galactic-cni` (attach/metrics via `run`), `galactic-bgp` (registration), `galactic-router` (GC sweep) | TC-BPF uSID datapath: preflight, uformat, prog, attach, usidmap, metrics |
 | `internal/plumbing/vrf` | every CNI-chain binary + router | Linux VRF create/delete/lookup |
-| `internal/plumbing/sysctl` | `galactic-cni`, `galactic-tap-cni` | Interface sysctl helpers |
+| `internal/plumbing/sysctl` | `galactic-veth`, `galactic-tap` | Interface sysctl helpers |
 
 ---
 
 ## Entry Points
 
-### `cmd/galactic-cni/main.go` — CNI plugin
+### `cmd/galactic-cni/main.go` — installer
 
-A cobra command (no viper — see External Dependencies below) with three roles under
-one binary: the CNI plugin invocation itself (root command, invoked by the container
-runtime per the CNI spec), and two DaemonSet-lifecycle subcommands (`init`, `run`) that
-wrap `internal/installer`.
+A cobra command (no viper — see External Dependencies below) hosting the two
+DaemonSet-lifecycle subcommands (`init`, `run`) that wrap `internal/installer`.
+This binary is never itself a CNI plugin — no NAD's `"plugins"` array ever
+names it in a `"type"` field, and the container runtime never execs it. Its
+only callers are the `galactic-cni` DaemonSet's own `install-cni` init
+container and `credential-refresh` long-running container (see Known
+Constraints below for the manifest).
+
+- `init` — `--node-name`/`-n` flag (or `GALACTIC_CNI_NODE_NAME`/`NODE_NAME` env),
+  calls `installer.Bootstrap(ctx, nodeName)`: stages every binary in the CNI chain
+  (`galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`,
+  `galactic-route`, `host-device`) onto the host, does a one-shot dual-stack
+  node-identity check against the Kubernetes API, and writes `ca.crt`/kubeconfig
+  plus the static conflist.
+- `run` — `--grpc-health-port` flag (default `5180`), calls `installer.Run(ctx,
+  grpcHealthPort)`: serves gRPC health checks, manages the eBPF uSID datapath's
+  load/attach lifecycle, and periodically refreshes the kubeconfig token and
+  rotates the CNI log file.
+
+`--build-info` and `--version`/`-V` utility flags are also present on the root
+command, same as every other binary.
+
+### `cmd/galactic-veth/main.go` — CNI plugin
+
+A cobra command with a single role: the CNI plugin invocation itself (root
+command, invoked by the container runtime per the CNI spec). Unlike before the
+CNI installer split (see `cmd/galactic-cni/main.go` above), this binary carries
+no DaemonSet-lifecycle subcommands at all.
 
 `newRootCommand()` builds a root command with a persistent `--conf-file` flag
 (default `cni.DefaultConfFile`, `/etc/cni/net.d/10-galactic.conflist`) plus
 `--build-info` and `--version`/`-V` utility flags. There is no `--node-name` or
-`--enable-local-ipam` flag on this path anymore — those are resolved entirely inside
+`--enable-local-ipam` flag on this path — those are resolved entirely inside
 `internal/cni` at ADD/DEL/CHECK/STATUS time (see Configuration below). On `RunE`:
 
 1. `PersistentPreRunE` overrides `cni.ConfFile` from `--conf-file` if set.
@@ -232,31 +261,20 @@ wrap `internal/installer`.
    `parseConf()` resolves node name, kubeconfig, namespace, and log file on every
    invocation (conflist → env vars → API auto-detect, in that precedence).
 
-`galactic-cni`'s own ADD creates the VRF, veth pair, and (if `"ipam"` is
+`galactic-veth`'s own ADD creates the VRF, veth pair, and (if `"ipam"` is
 present) delegates IPAM and configures the host gateway — it prints its own
 CNI result and returns; BGP/SRv6/eBPF publish is `galactic-bgp`'s job,
 invoked next by the CNI runtime per conflist order, not by this process.
 
-Two subcommands support the DaemonSet (see Known Constraints below for the manifest):
-
-- `init` — `--node-name`/`-n` flag (or `GALACTIC_CNI_NODE_NAME`/`NODE_NAME` env),
-  calls `installer.Bootstrap(ctx, nodeName)`: stages every binary in the CNI chain
-  (`galactic-cni`, `galactic-tap-cni`, `galactic-ipam`, `galactic-bgp`,
-  `galactic-route`, `host-device`) onto the host, does a one-shot dual-stack
-  node-identity check against the Kubernetes API, and writes `ca.crt`/kubeconfig
-  plus the static conflist.
-- `run` — `--grpc-health-port` flag (default `5180`), calls `installer.Run(ctx,
-  grpcHealthPort)`: serves gRPC health checks, manages the eBPF uSID datapath's
-  load/attach lifecycle, and periodically refreshes the kubeconfig token and
-  rotates the CNI log file.
-
 See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full ADD/DEL sequence.
 
-### `cmd/galactic-tap-cni/main.go` — tap master plugin
+### `cmd/galactic-tap/main.go` — tap master plugin
 
-Mirrors `cmd/galactic-cni/main.go`'s CNI-invocation role exactly (`internal/cnitap.RunPlugin()`),
-minus the `init`/`run` DaemonSet subcommands — those live only on `galactic-cni`, since
-there's exactly one init container per node regardless of how many workload types it serves.
+Mirrors `cmd/galactic-veth/main.go`'s CNI-invocation role exactly (`internal/cnitap.RunPlugin()`)
+— both are pure CNI plugins with zero DaemonSet-lifecycle subcommands; that
+logic lives solely on the separate `galactic-cni` installer binary, since
+there's exactly one init container per node regardless of how many workload
+types it serves.
 `internal/cnitap` mirrors `internal/cni` (VRF + tap creation, NAD annotation, IPAM
 delegation, host gateway configuration) but never delegates to host-device and never
 configures a guest netns — the VM hypervisor manages the tap fd directly.
@@ -348,28 +366,28 @@ field tables and seven example conflists; summary:
 |-----------------|-------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
 | `vpc`           | every binary                                          | Base62-encoded 48-bit VPC identifier                                                                        |
 | `vpcattachment` | every binary                                          | Base62-encoded 16-bit VPCAttachment identifier                                                              |
-| `namespace`     | `galactic-cni`/`galactic-tap-cni`/`galactic-bgp`      | Kubernetes namespace for NAD/BGP CRD lookup; resolution order is this field → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` → `galactic-system` |
-| `mtu`           | `galactic-cni`/`galactic-tap-cni`                     | MTU for the host-side interface (veth pair or tap); 0 uses kernel default                                   |
-| `ipam`          | `galactic-cni`/`galactic-tap-cni` (decides whether to delegate), `galactic-ipam` (reads the block's own sub-fields) | IPAM delegation block; `type` names the delegate binary (`galactic-ipam`). See [docs/cni/configuration.md](../cni/configuration.md#ipam-fields). |
+| `namespace`     | `galactic-veth`/`galactic-tap`/`galactic-bgp`         | Kubernetes namespace for NAD/BGP CRD lookup; resolution order is this field → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` → `galactic-system` |
+| `mtu`           | `galactic-veth`/`galactic-tap`                        | MTU for the host-side interface (veth pair or tap); 0 uses kernel default                                   |
+| `ipam`          | `galactic-veth`/`galactic-tap` (decides whether to delegate), `galactic-ipam` (reads the block's own sub-fields) | IPAM delegation block; `type` names the delegate binary (`galactic-ipam`). See [docs/cni/configuration.md](../cni/configuration.md#ipam-fields). |
 | `terminations`  | `galactic-route` only                                 | Static routes to install on the host-side interface (`network`, `via`)                                      |
 
 There is no `interface_type` field anymore — which binary you invoke *is* the
-interface type (`galactic-cni` → veth, `galactic-tap-cni` → tap).
+interface type (`galactic-veth` → veth, `galactic-tap` → tap).
 
-### galactic-cni / galactic-tap-cni / galactic-bgp environment variables
+### galactic-veth / galactic-tap / galactic-bgp environment variables
 
 There is no `--node-name`/`--enable-local-ipam` CLI flag on any plugin invocation
-path (`--node-name` exists only on `galactic-cni`'s own `init` installer
-subcommand). Each binary's own `parseConf()` resolves the settings below on every
+path (`--node-name` exists only on the separate `galactic-cni` installer
+binary's own `init` subcommand). Each binary's own `parseConf()` resolves the settings below on every
 ADD/DEL/CHECK/STATUS call, in the listed precedence, re-exporting the result as a
 process env var. `galactic-ipam` and `galactic-route` skip this table entirely —
 see [docs/cni/configuration.md](../cni/configuration.md#runtime-configuration).
 
 | Variable                          | Resolution precedence (highest first)                                                                 | Default | Resolved by |
 |------------------------------------|--------------------------------------------------------------------------------------------------------|---------|-------------|
-| Node name (`NODE_NAME`)            | `GALACTIC_CNI_NODE_NAME` → `NODE_NAME` → `HostConf.NodeName` (conflist) → `detectNodeNameFromAPI()` (matches local interface addrs against Node `InternalIP`) | _(error if still empty)_ | `galactic-cni`, `galactic-tap-cni`, `galactic-bgp` |
-| Kubeconfig (`KUBECONFIG`)          | `GALACTIC_CNI_KUBECONFIG` → `HostConf.Kubeconfig` (conflist)                                            | `/var/lib/galactic/kubeconfig` | `galactic-cni`, `galactic-tap-cni`, `galactic-bgp` |
-| Namespace                          | `conf.Namespace` (CNI config JSON) → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` (conflist)         | `galactic-system` | `galactic-cni`, `galactic-tap-cni`, `galactic-bgp` |
+| Node name (`NODE_NAME`)            | `GALACTIC_CNI_NODE_NAME` → `NODE_NAME` → `HostConf.NodeName` (conflist) → `detectNodeNameFromAPI()` (matches local interface addrs against Node `InternalIP`) | _(error if still empty)_ | `galactic-veth`, `galactic-tap`, `galactic-bgp` |
+| Kubeconfig (`KUBECONFIG`)          | `GALACTIC_CNI_KUBECONFIG` → `HostConf.Kubeconfig` (conflist)                                            | `/var/lib/galactic/kubeconfig` | `galactic-veth`, `galactic-tap`, `galactic-bgp` |
+| Namespace                          | `conf.Namespace` (CNI config JSON) → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` (conflist)         | `galactic-system` | `galactic-veth`, `galactic-tap`, `galactic-bgp` |
 | Log file                           | `GALACTIC_CNI_LOG_FILE` → `HostConf.LogFile` (conflist)                                                 | `/var/log/galactic/galactic-cni.log` | every binary in the chain |
 | Log level                          | `GALACTIC_CNI_LOG_LEVEL` → `HostConf.LogLevel` (conflist)                                               | `info` | every binary in the chain |
 | `GALACTIC_IPAM_ENABLE_LOCAL_IPAM`  | Read directly as an env var by `galactic-ipam` only (`internal/config/ipam.go`); no conflist/CLI-flag equivalent, and it can no longer manufacture an `"ipam"` block that isn't already present | `false` | `galactic-ipam` only |
@@ -390,7 +408,7 @@ start/outcome plus all warnings/errors; `debug` adds per-resource milestones. Se
 
 ### CNI chain ADD result
 
-On a successful ADD, the master plugin (`galactic-cni`/`galactic-tap-cni`)
+On a successful ADD, the master plugin (`galactic-veth`/`galactic-tap`)
 returns a CNI spec v1.0.0 result with the following structure (veth shown):
 
 ```json
@@ -418,13 +436,13 @@ returns a CNI spec v1.0.0 result with the following structure (veth shown):
 
 The VRF dummy interface (`G{vpc}{att}V`) is **not** reported — it is pre-existing infrastructure created by the `vrf.Add()` plumbing function, not by the CNI attachment itself.
 
-This is the veth-master result. `galactic-tap-cni`'s own result has a single
+This is the veth-master result. `galactic-tap`'s own result has a single
 interface (the host-side tap, empty sandbox, index `0`) — there is no guest
 interface entry since the fd is handed off to the VM hypervisor, not moved
 into a container netns. Both masters run IPAM identically (if `"ipam"` is
 present) and both configure the host gateway (`internal/cni/hostgw`) before
 printing their own result — see
-[Interface Types](../cni/configuration.md#master-plugin-fields-galactic-cni--galactic-tap-cni)
+[Interface Types](../cni/configuration.md#master-plugin-fields-galactic-veth--galactic-tap)
 in the CNI config doc.
 
 The host gateway's IPv4 address is assigned as a `/25` on the host tap (vs.
@@ -446,7 +464,7 @@ On DEL, every binary's result contains only `cniVersion` (empty result). Each
 binary's own DEL only cleans up what it itself created *and* is safe to
 release immediately for that specific container — IPAM deallocation
 (`galactic-ipam`, via its own on-disk marker file) and the guest-netns
-flush/host-device DEL (`galactic-cni` only). It does not attempt to unwind
+flush/host-device DEL (`galactic-veth` only). It does not attempt to unwind
 any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) and Known Constraints below.
 
@@ -465,16 +483,16 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `internal/hash`               | galactic-router | SHA-256 fingerprint of `DesiredRouter` for no-op suppression                                        | No         |
 | `internal/metadata`           | every binary    | Build-time vars (`Version`, `GitCommit`, `GitTreeState`, `BuildDate`) stamped via `-ldflags`         | No         |
 | `internal/gc`                 | galactic-router | Collects orphaned `BGPAdvertisement`/`BGPVRFInstance` CRDs, stale kernel VRFs, and stale eBPF `vrf_table` entries; invoked by the GC controller's ticker | No |
-| `internal/cni`                | galactic-cni    | Veth master plugin: `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`; PluginConf parsing; NAD annotation; host-device delegation; delegates kernel work to plumbing | No |
+| `internal/cni`                | galactic-veth   | Veth master plugin: `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`; PluginConf parsing; NAD annotation; host-device delegation; delegates kernel work to plumbing | No |
 | `internal/hostconf`           | every CNI-chain binary | Shared `HostConf` schema + static-conflist loader, plus API-based node-name auto-detect          | No         |
-| `internal/cni/hostgw`         | galactic-cni, galactic-tap-cni | Host-side gateway address/route configuration for a VPC attachment's allocated IPAM addresses | No |
-| `internal/crdnames`           | galactic-cni, galactic-bgp, galactic-router (gc) | Deterministic `BGPVRFInstance`/`BGPAdvertisement` CRD name + annotation-key derivation | No |
-| `internal/nadpatch`           | galactic-cni, galactic-tap-cni | NAD annotation patch (host interface name) + pod-namespace parsing from `CNI_ARGS`          | No         |
+| `internal/cni/hostgw`         | galactic-veth, galactic-tap | Host-side gateway address/route configuration for a VPC attachment's allocated IPAM addresses | No |
+| `internal/crdnames`           | galactic-veth, galactic-bgp, galactic-router (gc) | Deterministic `BGPVRFInstance`/`BGPAdvertisement` CRD name + annotation-key derivation | No |
+| `internal/nadpatch`           | galactic-veth, galactic-tap | NAD annotation patch (host interface name) + pod-namespace parsing from `CNI_ARGS`          | No         |
 | `internal/cni/ipam`           | galactic-ipam   | IPv6/IPv4 pool allocators + static IP allocator; on-disk marker-file persistence (flock-guarded, keyed by containerID) | Yes (pool allocations + marker files) |
 | `internal/cni/route`          | galactic-route  | Host-side static route add/delete via netlink                                                        | No         |
-| `internal/cni/tap`            | galactic-tap-cni | Tap interface create/delete for VM workloads (Kata, Firecracker, kraftlet/Unikraft)                   | No         |
-| `internal/cni/veth`           | galactic-cni    | veth pair create/delete                                                                               | No         |
-| `internal/cnitap`             | galactic-tap-cni | Tap master plugin (mirrors `internal/cni`; no host-device delegation, no guest netns)                | No         |
+| `internal/cni/tap`            | galactic-tap    | Tap interface create/delete for VM workloads (Kata, Firecracker, kraftlet/Unikraft)                   | No         |
+| `internal/cni/veth`           | galactic-veth   | veth pair create/delete                                                                               | No         |
+| `internal/cnitap`             | galactic-tap    | Tap master plugin (mirrors `internal/cni`; no host-device delegation, no guest netns)                | No         |
 | `internal/cniipam`            | galactic-ipam   | CNI IPAM delegation protocol (`cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`); explicit `"ipam"`-block contract; no k8s dependency | No |
 | `internal/cnibgp`             | galactic-bgp    | BGP/SRv6/eBPF publish: SID/Argument allocation + collision detection, `registerEBPFDatapath`/`unregisterEBPFDatapath`, `BGPVRFInstance`/`BGPAdvertisement` CRUD with retry; learns everything from `prevResult` | No |
 | `internal/cniroute`           | galactic-route  | Termination-route plugin: installs/rolls-back VRF-table routes; no k8s dependency                    | No         |
@@ -484,7 +502,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `internal/plumbing/srv6`      | galactic-router | SID computation (`ComputeSID`) for the router's own BGP Prefix-SID path attribute                     | No         |
 | `internal/plumbing/ebpf`      | galactic-cni (attach/metrics via `run`), galactic-bgp (registration), galactic-router (gc sweep) | TC-BPF uSID datapath: kernel preflight, uFMT bit-layout codec, compiled program + bindings, load/pin/attach lifecycle, map read/write API, Prometheus metrics | Yes (pinned BPF maps) |
 | `internal/plumbing/vrf`       | every CNI-chain binary + router | Linux VRF create/delete/lookup via netlink                                                           | No         |
-| `internal/plumbing/sysctl`    | galactic-cni, galactic-tap-cni | Per-interface sysctl helpers                                                                          | No         |
+| `internal/plumbing/sysctl`    | galactic-veth, galactic-tap | Per-interface sysctl helpers                                                                          | No         |
 
 ---
 
@@ -498,7 +516,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `github.com/spf13/cobra`               | v1.10.2  | CLI command/flag handling for every binary                |
 | `github.com/spf13/viper`               | v1.21.0  | Config resolution (flags/env/defaults) for `galactic-router` only; every CNI-chain binary resolves config itself (conflist/env/API auto-detect) and does not import viper |
 | `github.com/containernetworking/cni`   | v1.3.0   | CNI plugin spec, skel, invoke                            |
-| `github.com/containernetworking/plugins` | v1.9.1 | `pkg/ipam.ExecAdd`/`ExecDel`/`ExecCheck` (real IPAM delegation to `galactic-ipam`, used by `galactic-cni`/`galactic-tap-cni`); `host-device` plugin, delegated to by `galactic-cni` for moving the guest veth into the pod netns |
+| `github.com/containernetworking/plugins` | v1.9.1 | `pkg/ipam.ExecAdd`/`ExecDel`/`ExecCheck` (real IPAM delegation to `galactic-ipam`, used by `galactic-veth`/`galactic-tap`); `host-device` plugin, delegated to by `galactic-veth` for moving the guest veth into the pod netns |
 | `github.com/vishvananda/netlink`        | pinned pseudo-version | Linux netlink: VRF, veth, SRv6 routes           |
 | `github.com/kenshaw/baseconv`           | v0.1.1   | Base62↔hex conversion for interface names               |
 | `github.com/lorenzosaino/go-sysctl`    | v0.3.1   | Interface sysctl helpers                                 |
@@ -518,7 +536,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 - **CRD-driven config, no sidecar gRPC.** `galactic-router` watches BGP CRDs directly via controller-runtime. `galactic-bgp` writes `BGPVRFInstance`/`BGPAdvertisement` CRDs; the router reconciler picks them up. No in-node gRPC calls between any of the CNI-chain binaries and `galactic-router`.
 - **Hash-based no-op suppression.** SHA-256 over the sorted `DesiredRouter` prevents redundant GoBGP Apply calls on every CRD event.
 - **RuntimeFactory pattern.** `--mode=tenant` (`GALACTIC_ROUTER_ROUTER_MODE=tenant`) selects GoBGP; `--mode=fabric` selects the FRR stub; `--mode=transit` is accepted by validation but returns an error at startup (not yet implemented). The mode is selected at startup; no controller changes are needed to add a new mode.
-- **DEL is intentionally minimal everywhere in the CNI chain; GC reclaims shared state asynchronously.** Every binary's own `cmdDel` only cleans up what it itself created *and* is safe to release immediately per-container (IPAM deallocation via `galactic-ipam`'s own on-disk marker file; guest-netns flush/host-device DEL in `galactic-cni`). None of them delete the VRF, veth/tap, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — those are keyed by `(vpc, vpcAttachment)` and may be shared/reused by another pod/VM (deleting them in DEL would race with a concurrent ADD during restarts). `galactic-router`'s GC controller (ticker-driven, default every 5m) reclaims orphaned CRDs, stale kernel VRFs, and stale eBPF entries once no live container still references them.
+- **DEL is intentionally minimal everywhere in the CNI chain; GC reclaims shared state asynchronously.** Every binary's own `cmdDel` only cleans up what it itself created *and* is safe to release immediately per-container (IPAM deallocation via `galactic-ipam`'s own on-disk marker file; guest-netns flush/host-device DEL in `galactic-veth`). None of them delete the VRF, veth/tap, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — those are keyed by `(vpc, vpcAttachment)` and may be shared/reused by another pod/VM (deleting them in DEL would race with a concurrent ADD during restarts). `galactic-router`'s GC controller (ticker-driven, default every 5m) reclaims orphaned CRDs, stale kernel VRFs, and stale eBPF entries once no live container still references them.
 - **gRPC health, configurable port.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on a configurable port (default `5000`). No HTTP health endpoint.
 
 ---
@@ -528,7 +546,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | Layer      | Command          | Framework           | Scope                                                                |
 |------------|------------------|---------------------|------------------------------------------------------------------------|
 | Unit       | `task test:unit` | `go test -race`     | `internal/cni`, `internal/cnitap`, `internal/cniipam`, `internal/cnibgp`, `internal/cniroute` (`buildResult`/`buildVethResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`, `inferFromPrevResult` — each package's own `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`), `internal/cni/{hostconf,hostgw,crdnames,nadpatch,ipam,route,tap,veth}`, `internal/installer` (`installer_test.go` — `Bootstrap`/`Run` with mocked k8s client and netlink/host paths), `internal/plumbing/{srv6,ebpf}`, `internal/gc`, `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
-| E2E        | `task test:e2e`  | Kind + `go test`    | `galactic-tap-cni`'s own ADD (VRF + tap + IPAM delegation), kernel capability checks, CNI VERSION report. Does **not** exercise `galactic-route` or `galactic-bgp` (no BGPRouter fixture in the e2e suite) — see Known Constraints below. Full BGPRouter lifecycle coverage for `galactic-router` comes from this same Kind cluster's separate reconciler tests. |
+| E2E        | `task test:e2e`  | Kind + `go test`    | `galactic-tap`'s own ADD (VRF + tap + IPAM delegation), kernel capability checks, CNI VERSION report. Does **not** exercise `galactic-route` or `galactic-bgp` (no BGPRouter fixture in the e2e suite) — see Known Constraints below. Full BGPRouter lifecycle coverage for `galactic-router` comes from this same Kind cluster's separate reconciler tests. |
 | CI full    | `task ci`        | all of the above    | lint → build → test:unit → test:e2e                                  |
 
 `internal/plumbing/vrf` has no unit tests — it requires `CAP_NET_ADMIN` and a real kernel. `internal/cni/route` (wrapped by `internal/cniroute`) also has no unit tests of its own. `internal/plumbing/intf` is pure-function and fully unit-testable.
@@ -547,7 +565,7 @@ Runs on every PR and push to `main`. Two tiers:
 **Publish pipeline:** `.github/workflows/publish.yaml`, modeled on the `compute` repo's. Runs on every push and on published releases, via reusable `datum-cloud/actions` workflows: `publish-galactic-cni-image` and `publish-galactic-router-image` each build and push their own image (`ghcr.io/datum-cloud/galactic-cni`, `ghcr.io/datum-cloud/galactic-router`), and `publish-kustomize-bundles` (which `needs` both image jobs) pushes `config/` as an OCI Kustomize bundle (`ghcr.io/datum-cloud/galactic-kustomize`), using the `images` input (`datum-cloud/actions` v1.20.0+) to stamp each job's real published tag into `config/cni` and `config/router/base` respectively — the bundle ships with matching versioned image references, not `:latest`. This replaces the old single-image `.github/workflows/release.yaml` (removed — see history below) with two per-binary images, matching the split `deploy/containerlab/` already used for local dev.
 
 **Container images:**
-- `containers/galactic-cni/Dockerfile` — multi-stage build (golang builder → distroless → final Alpine stage for `iproute2`/`nsenter`); builds `galactic-cni` plus the delegated `host-device` CNI plugin binary, `ENTRYPOINT ["/galactic-cni"]`. Used both by `task test:e2e` (`scripts/ci.sh e2etest` builds it, tags `galactic-cni:e2e`, `kind load`s it into the ephemeral e2e cluster) and by `publish.yaml` (pushed as `ghcr.io/datum-cloud/galactic-cni`). Both the init container (`/galactic-cni init`) and the long-running container (`/galactic-cni run`) run this same image; the DaemonSet no longer shells out to an `install.sh` script, so the Alpine/`iproute2` final stage exists purely for e2e test needs (kernel `ip`/`nsenter` operations exercised via `task test:e2e`) rather than anything the installer subcommands require. Reusing the e2e-tested artifact for publish is preferred over maintaining a second, untested variant.
+- `containers/galactic-cni/Dockerfile` — multi-stage build (golang builder → distroless → final Alpine stage for `iproute2`/`nsenter`); builds `galactic-cni` (the installer), `galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`, `galactic-route`, `vmtap-cni`, and the delegated `host-device` CNI plugin binary, `ENTRYPOINT ["/galactic-cni"]`. Used both by `task test:e2e` (`scripts/ci.sh e2etest` builds it, tags `galactic-cni:e2e`, `kind load`s it into the ephemeral e2e cluster) and by `publish.yaml` (pushed as `ghcr.io/datum-cloud/galactic-cni`). Both the init container (`/galactic-cni init`) and the long-running container (`/galactic-cni run`) run this same image; the DaemonSet no longer shells out to an `install.sh` script, so the Alpine/`iproute2` final stage exists purely for e2e test needs (kernel `ip`/`nsenter` operations exercised via `task test:e2e`) rather than anything the installer subcommands require. Reusing the e2e-tested artifact for publish is preferred over maintaining a second, untested variant.
 - `containers/galactic-router/Dockerfile` — golang builder → `gcr.io/distroless/static:nonroot`, `ENTRYPOINT ["/galactic-router"]`. No shell or CLI tools: `galactic-router` drives VRF/SRv6/route/BGP state entirely through the netlink and GoBGP Go libraries, never shells out. Pushed by `publish.yaml` as `ghcr.io/datum-cloud/galactic-router`.
 
 **History:** the original `.github/workflows/release.yaml` built and pushed a single `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` image from a shared `containers/galactic/Dockerfile`, but that image only ever built `galactic-cni` while `config/router/base/daemonset.yaml` ran `command: [/galactic-router]` against it — the image advertised a binary it never built. Both were removed. `publish.yaml` and the two per-binary Dockerfiles above fix this by building each binary into its own image, so `config/cni/daemonset.yaml` and `config/router/base/daemonset.yaml` now reference `ghcr.io/datum-cloud/galactic-cni:latest` and `ghcr.io/datum-cloud/galactic-router:latest` respectively — matching images, matching binaries.
@@ -560,8 +578,8 @@ Runs on every PR and push to `main`. Two tiers:
 - **EVPN Type 5 is implemented, not deferred.** `internal/runtime/gobgp/paths.go`'s `buildEVPNPaths` builds real `EVPNIPPrefixRoute` NLRIs, deriving the Route Distinguisher from `routerID + ":0"` (not from the CRD). The `BGPVRFInstance` CRD carries its own explicit `RouteDistinguisher` and import/export Route Targets (see Key Design Decisions above), applied via `internal/runtime/gobgp/runtime.go`'s `applyVRFs`. There is no `ErrMissingRouteDistinguisher` or similar rejection path in the current code.
 - **No binary's `cmdDel` tears down shared kernel/CRD state.** By design (see Key Design Decisions above) — cleanup of VRF, veth/tap, routes, the eBPF `vrf_table` entry, and BGP CRDs is deferred to `galactic-router`'s asynchronous GC controller, not performed synchronously in any chain binary's `cmdDel`.
 - **`internal/plumbing/vrf` and `internal/cni/route` have no unit tests.** `vrf` requires `CAP_NET_ADMIN` and a real kernel; `route` (wrapped by `internal/cniroute`, which does have its own tests) was never backfilled with tests of its own when the CNI plugin-chain split moved its caller out of `internal/cni`. `internal/plumbing/intf` is fully unit-testable (pure functions only). Kernel-path coverage otherwise comes from the e2e suite (`task test:e2e`).
-- **The e2e suite doesn't cover `galactic-route` or `galactic-bgp`.** `TestCNITapInterface` (`tests/e2e/e2e_test.go`) only drives `galactic-tap-cni`'s own ADD — verifying BGP/SRv6/eBPF publish end-to-end would need a `BGPRouter` CRD fixture and additional RBAC the test doesn't set up. This gap predates the CNI plugin-chain split too: the monolithic `galactic-cni` this replaced was never e2e-verified past its own CNI result shape either.
-- **`docs/agents/ARCHITECTURE.md` and `docs/cni-cmd-sequence.md` describe the CNI chain; `vmtap-cni`/`internal/vmtap` (a separate, Cilium-chain-conflist-patching binary for VM tap interfaces, unrelated to the `galactic-cni`/`galactic-tap-cni`/`galactic-ipam`/`galactic-bgp`/`galactic-route` chain) has its own doc at `docs/vmtap-cni/configuration.md`** — cross-referenced from [Repository Layout](#repository-layout) and the [Module / Package Reference](#module--package-reference) table above, but not otherwise elaborated on in this document.
+- **The e2e suite doesn't cover `galactic-route` or `galactic-bgp`.** `TestCNITapInterface` (`tests/e2e/e2e_test.go`) only drives `galactic-tap`'s own ADD — verifying BGP/SRv6/eBPF publish end-to-end would need a `BGPRouter` CRD fixture and additional RBAC the test doesn't set up. This gap predates the CNI plugin-chain split too: the monolithic `galactic-cni` this replaced was never e2e-verified past its own CNI result shape either.
+- **`docs/agents/ARCHITECTURE.md` and `docs/cni-cmd-sequence.md` describe the CNI chain; `vmtap-cni`/`internal/vmtap` (a separate, Cilium-chain-conflist-patching binary for VM tap interfaces, unrelated to the `galactic-veth`/`galactic-tap`/`galactic-ipam`/`galactic-bgp`/`galactic-route` chain) has its own doc at `docs/vmtap-cni/configuration.md`** — cross-referenced from [Repository Layout](#repository-layout) and the [Module / Package Reference](#module--package-reference) table above, but not otherwise elaborated on in this document.
 - **`--mode=transit` is unimplemented.** Accepted by CLI/env validation, but `runCmd` returns an error at startup ("mode=transit is not yet supported").
 - **`galactic-cni`'s install DaemonSet is a Go installer, not a shell script.** `config/cni/configmap.yaml`/`install.sh` were deleted; `config/cni/daemonset.yaml` now runs `hostNetwork: true` with an `install-cni` init container (`command: ["/galactic-cni", "init"]`, calling `installer.Bootstrap`) and a `credential-refresh` main container (`command: ["/galactic-cni", "run"]`, calling `installer.Run`), both on the same image (see CI/CD above). `Bootstrap` writes every binary in the CNI chain to `/opt/cni/bin`, the static conflist to `/etc/cni/net.d/10-galactic.conflist`, and `ca.crt`/kubeconfig to `/var/lib/galactic` (chosen over `/etc/galactic` specifically so it lands under `/var`, the one path immutable-root distros like Talos allow hostPath writes to without a host-level `extraMounts` entry); `Run` refreshes the kubeconfig token every 300s and rotates the CNI log once it exceeds 10MB. `/opt/cni/bin` is fixed by the CNI/kubelet plugin-discovery convention and can't be relocated by this DaemonSet alone — on Talos it needs its own `extraMounts` entry in the machine config if it isn't writable by default. The `run` container also serves gRPC health checks on port `5180` (`livenessProbe`/`readinessProbe` in the DaemonSet spec), and `config/cni/rbac.yaml` grants `get` on `nodes` for `Bootstrap`'s node-identity check.
 - **The uSID TC-BPF datapath (`internal/plumbing/ebpf/prog/usid.c`) doesn't generate PMTUD ICMPv6 errors.** When `bpf_fib_lookup()` returns `BPF_FIB_LKUP_RET_FRAG_NEEDED` (egress route's MTU is smaller than the inner packet), the program counts `DROP_REASON_FIB_FRAG_NEEDED` and silently drops (`TC_ACT_SHOT`) rather than sending an ICMPv6 Packet Too Big back to the original sender — unlike the static-route `SEG6_LOCAL_ACTION_END_DT46` path this datapath replaces, where the kernel's own IPv6 stack emits that ICMP message. Accepted as a known cost of the TC-BPF cutover for this milestone; generating ICMPv6 PTB from the datapath itself is unscheduled future work, not planned for a specific milestone yet.

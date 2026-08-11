@@ -12,8 +12,8 @@ import (
 )
 
 // PluginConf is the CNI plugin configuration passed via stdin on each
-// invocation of galactic-cni, the veth master plugin. It's the same shape
-// galactic-tap-cni (internal/cnitap) uses — see internal/cnimaster's own
+// invocation of galactic-veth, the veth master plugin. It's the same shape
+// galactic-tap (internal/cnitap) uses — see internal/cnimaster's own
 // doc comment — so both packages alias the one canonical definition rather
 // than each declaring their own copy.
 type PluginConf = cnimaster.PluginConf

@@ -292,7 +292,7 @@ func TestCmdDelIdempotent(t *testing.T) {
 func TestCmdDelIdempotentMissingResources(t *testing.T) {
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
@@ -329,7 +329,7 @@ func TestCmdDelFlushesGuestNetnsConfig(t *testing.T) {
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
@@ -381,7 +381,7 @@ func TestCmdCheckInvalidConfig(t *testing.T) {
 func TestCmdCheckValidConfigMissingResources(t *testing.T) {
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
@@ -402,7 +402,7 @@ func TestCmdCheckValidConfigMissingResources(t *testing.T) {
 }
 
 func TestCmdCheckMissingVPC(t *testing.T) {
-	conf := `{"cniVersion":"1.0.0","name":"test","type":"galactic-cni"}`
+	conf := `{"cniVersion":"1.0.0","name":"test","type":"galactic-veth"}`
 	args := &skel.CmdArgs{
 		ContainerID: testContainerID,
 		StdinData:   []byte(conf),
@@ -431,7 +431,7 @@ func TestCmdCheckWithPrevResultMissingResources(t *testing.T) {
 		`]}`
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s",`+
 			`"prevResult":%s}`,
 		testVPC, testAttachment, prevResult,
@@ -459,7 +459,7 @@ func TestCmdCheckWithInvalidPrevResult(t *testing.T) {
 	// prevResult that is structurally valid JSON but not a valid CNI result.
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s",`+
 			`"prevResult":{"not":"a valid cni result"}}`,
 		testVPC, testAttachment,
@@ -534,7 +534,7 @@ func TestCmdStatusValidConfigMissingResources(t *testing.T) {
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
@@ -558,7 +558,7 @@ func TestCmdStatusMissingVPC(t *testing.T) {
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpcattachment":"%s"}`,
+			`"type":"galactic-veth","vpcattachment":"%s"}`,
 		testAttachment,
 	)
 	args := &skel.CmdArgs{
@@ -581,7 +581,7 @@ func TestCmdStatusMissingVPCAttachment(t *testing.T) {
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s"}`,
+			`"type":"galactic-veth","vpc":"%s"}`,
 		testVPC,
 	)
 	args := &skel.CmdArgs{
@@ -603,7 +603,7 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
@@ -625,7 +625,7 @@ func TestCmdAddPrevResultValid(t *testing.T) {
 	// validation and fail later due to missing node name.
 	conf := fmt.Sprintf(
 		`{"cniVersion":"1.0.0","name":"test",`+
-			`"type":"galactic-cni","vpc":"%s",`+
+			`"type":"galactic-veth","vpc":"%s",`+
 			`"vpcattachment":"%s",`+
 			`"prevResult":%s}`,
 		testVPC, testAttachment, testPrevResult,

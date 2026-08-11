@@ -29,8 +29,8 @@ func TestSubcommandsRegistered(t *testing.T) {
 	if !containsString(output, "run") {
 		t.Errorf("expected output to contain 'run', got: %s", output)
 	}
-	if !containsString(output, "--conf-file") {
-		t.Errorf("expected output to contain '--conf-file', got: %s", output)
+	if !containsString(output, "--build-info") {
+		t.Errorf("expected output to contain '--build-info', got: %s", output)
 	}
 }
 

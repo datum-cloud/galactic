@@ -24,7 +24,7 @@ const (
 	appDesc = `Galactic IPAM CNI Plugin
 
  The delegated CNI IPAM plugin in the galactic CNI chain — invoked by
- galactic-cni/galactic-tap-cni's own "ipam" block via the CNI IPAM
+ galactic-veth/galactic-tap's own "ipam" block via the CNI IPAM
  delegation protocol (github.com/containernetworking/cni/pkg/ipam), never
  run directly from a conflist. Has no Kubernetes dependency at all:
  allocation state persists in on-disk marker files under this node's own

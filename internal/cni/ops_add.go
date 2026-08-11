@@ -24,7 +24,7 @@ import (
 // cmdAdd uses a named return (err) so that the deferred selective rollback
 // below always observes the real failure — see the doc comment on the
 // original version of this function for why a named return matters here;
-// still true with fewer branches. galactic-cni's own ADD ends by printing
+// still true with fewer branches. galactic-veth's own ADD ends by printing
 // its own result and returning: BGP/SRv6/eBPF publish is galactic-bgp's
 // job, invoked next by the CNI runtime per conflist order, not by this
 // process.
@@ -37,7 +37,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// Validate prevResult structure when present. The preceding plugin in the
 	// CNI chain should have produced a result with at least one interface or IP
 	// assignment. A nil or structurally broken prevResult indicates a mis-
-	// configured chain that galactic-cni should not silently ignore.
+	// configured chain that galactic-veth should not silently ignore.
 	if pluginConf.PrevResult != nil {
 		if err := cnimaster.ValidatePrevResultAdd(pluginConf.PrevResult); err != nil {
 			return &types.Error{Code: 6, Msg: fmt.Sprintf("prevResult validation in ADD: %v", err)}

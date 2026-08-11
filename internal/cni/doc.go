@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package cni implements galactic-cni, the veth master plugin for wiring
+// Package cni implements galactic-veth, the veth master plugin for wiring
 // container workloads into SRv6-backed VPC networks. Tap-based workloads
-// (Kata, Firecracker, kraftlet/Unikraft) are galactic-tap-cni's own master
+// (Kata, Firecracker, kraftlet/Unikraft) are galactic-tap's own master
 // plugin (internal/cnitap) — interface kind is which binary is invoked now,
 // not a config field either binary branches on.
 //

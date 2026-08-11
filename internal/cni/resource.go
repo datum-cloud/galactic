@@ -14,7 +14,7 @@ import (
 )
 
 // resourceTracker tracks resources created during cmdAdd for selective
-// rollback. galactic-cni is veth-only, and its ADD only ever creates the
+// rollback. galactic-veth is veth-only, and its ADD only ever creates the
 // VRF, the veth pair, and (if delegated) an IPAM allocation — BGP/SRv6/eBPF
 // publish is galactic-bgp's own, separately chain-invoked plugin now, with
 // its own smaller tracker (internal/cnibgp); termination routes are
@@ -61,7 +61,7 @@ func (rt *resourceTracker) cleanup() {
 	// Release the IPAM allocation first (if pluginConf carried an "ipam"
 	// block at all — see the ipamDelegated field doc comment for why this
 	// fires unconditionally on that alone, not just after a confirmed
-	// ExecAdd). Interface/VRF cleanup is shared with galactic-tap-cni's own
+	// ExecAdd). Interface/VRF cleanup is shared with galactic-tap's own
 	// tracker, so it lives in cnimaster.CleanupAttachment.
 	if rt.ipamDelegated {
 		if err := ipam.ExecDel(rt.ipamType, rt.ipamStdin); err != nil {

@@ -113,14 +113,14 @@ func TestBootstrap(t *testing.T) {
 	}
 
 	// Create mock CNI source binary files
-	SourceCNIBinary = filepath.Join(tmpDir, "source-galactic-cni")
-	SourceTapCNIBinary = filepath.Join(tmpDir, "source-galactic-tap-cni")
+	SourceVethBinary = filepath.Join(tmpDir, "source-galactic-veth")
+	SourceTapBinary = filepath.Join(tmpDir, "source-galactic-tap")
 	SourceIPAMBinary = filepath.Join(tmpDir, "source-galactic-ipam")
 	SourceBGPBinary = filepath.Join(tmpDir, "source-galactic-bgp")
 	SourceRouteBinary = filepath.Join(tmpDir, "source-galactic-route")
 	SourceHostDeviceBinary = filepath.Join(tmpDir, "source-host-device")
-	writeSourceBinary(t, SourceCNIBinary, "cni-content")
-	writeSourceBinary(t, SourceTapCNIBinary, "tap-cni-content")
+	writeSourceBinary(t, SourceVethBinary, "cni-content")
+	writeSourceBinary(t, SourceTapBinary, "tap-cni-content")
 	writeSourceBinary(t, SourceIPAMBinary, "ipam-content")
 	writeSourceBinary(t, SourceBGPBinary, "bgp-content")
 	writeSourceBinary(t, SourceRouteBinary, "route-content")
@@ -177,8 +177,8 @@ func TestBootstrap(t *testing.T) {
 		}
 
 		// Verify binaries copied
-		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-cni"), "cni-content")
-		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap-cni"), "tap-cni-content")
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-veth"), "cni-content")
+		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-tap"), "tap-cni-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-ipam"), "ipam-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-bgp"), "bgp-content")
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-route"), "route-content")

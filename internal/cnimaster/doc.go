@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package cnimaster holds logic shared by galactic-cni (internal/cni, the
-// veth master plugin) and galactic-tap-cni (internal/cnitap, the tap master
+// Package cnimaster holds logic shared by galactic-veth (internal/cni, the
+// veth master plugin) and galactic-tap (internal/cnitap, the tap master
 // plugin). Both own the same node-level lifecycle — parse the CNI config,
 // resolve node/API settings, create a VRF, patch the pod's NAD, and answer
 // CHECK/STATUS — differing only in which kernel interface primitive they

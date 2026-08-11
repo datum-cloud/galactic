@@ -37,7 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN go generate ./internal/plumbing/ebpf/prog/...
 
-# Build CNI plugin
+# Build galactic-cni, the CNI installer: stages every chain binary onto the
+# host, writes the static conflist/kubeconfig, and (via "run") refreshes
+# credentials and drives the eBPF uSID datapath. It is never itself a CNI
+# plugin -- only the DaemonSet's own init/run containers exec it.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
       -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
@@ -48,7 +51,18 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-cni cmd/galactic-cni/main.go
 
-# Build galactic-tap-cni, the tap master plugin in the galactic CNI chain
+# Build CNI plugin
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -ldflags "-s -w \
+      -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
+      -X go.datum.net/galactic/internal/metadata.GitCommit=${GIT_COMMIT} \
+      -X go.datum.net/galactic/internal/metadata.GitTreeState=${GIT_TREE_STATE} \
+      -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
+      -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
+      -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
+    -o galactic-veth cmd/galactic-veth/main.go
+
+# Build galactic-tap, the tap master plugin in the galactic CNI chain
 # (VM workloads: Kata, Firecracker, kraftlet/Unikraft). Ships in this same
 # image/binary set since every plugin in the chain is staged onto the host
 # by the same galactic-cni init container (installer.Bootstrap).
@@ -60,11 +74,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
       -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
-    -o galactic-tap-cni cmd/galactic-tap-cni/main.go
+    -o galactic-tap cmd/galactic-tap/main.go
 
 # Build galactic-ipam, the delegated CNI IPAM plugin in the galactic CNI
 # chain. Ships in this same image/binary set for the same reason
-# galactic-tap-cni does — see its own comment above.
+# galactic-tap does — see its own comment above.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
       -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
@@ -77,7 +91,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 
 # Build galactic-bgp, the BGP/SRv6/eBPF publish plugin in the galactic CNI
 # chain. Ships in this same image/binary set for the same reason
-# galactic-tap-cni/galactic-ipam do — see their own comments above.
+# galactic-tap/galactic-ipam do — see their own comments above.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
       -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
@@ -90,7 +104,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
 
 # Build galactic-route, the termination-route plugin in the galactic CNI
 # chain. Ships in this same image/binary set for the same reason
-# galactic-tap-cni/galactic-ipam/galactic-bgp do — see their own comments
+# galactic-tap/galactic-ipam/galactic-bgp do — see their own comments
 # above.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
@@ -116,7 +130,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o vmtap-cni cmd/vmtap-cni/main.go
 
-# Build the host-device CNI plugin binary, used by galactic-cni to move
+# Build the host-device CNI plugin binary, used by galactic-veth to move
 # the veth endpoint into the container network namespace. GOBIN can't be set
 # for a cross-compiled `go install` (the toolchain rejects it outright when
 # TARGETARCH differs from the builder's native arch, e.g. arm64 on an amd64
@@ -136,7 +150,8 @@ FROM gcr.io/distroless/static:nonroot AS production
 
 # Copy binaries from builder into the distroless production image
 COPY --from=builder /workspace/galactic-cni /galactic-cni
-COPY --from=builder /workspace/galactic-tap-cni /galactic-tap-cni
+COPY --from=builder /workspace/galactic-veth /galactic-veth
+COPY --from=builder /workspace/galactic-tap /galactic-tap
 COPY --from=builder /workspace/galactic-ipam /galactic-ipam
 COPY --from=builder /workspace/galactic-bgp /galactic-bgp
 COPY --from=builder /workspace/galactic-route /galactic-route
@@ -152,7 +167,8 @@ FROM docker.io/library/alpine:latest
 
 # Copy binaries from the production (distroless) image
 COPY --from=production /galactic-cni /galactic-cni
-COPY --from=production /galactic-tap-cni /galactic-tap-cni
+COPY --from=production /galactic-veth /galactic-veth
+COPY --from=production /galactic-tap /galactic-tap
 COPY --from=production /galactic-ipam /galactic-ipam
 COPY --from=production /galactic-bgp /galactic-bgp
 COPY --from=production /galactic-route /galactic-route

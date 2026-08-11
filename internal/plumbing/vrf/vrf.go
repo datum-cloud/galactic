@@ -87,7 +87,7 @@ func Add(vpc string) error {
 // interface for the given base62-encoded VPC. Delete is idempotent: if the
 // VRF interface does not exist, it returns nil. Callers must only invoke
 // Delete once no attachment on this VPC on this node remains live — deleting
-// out from under a still-live sibling attachment breaks it. galactic-cni's
+// out from under a still-live sibling attachment breaks it. galactic-veth's
 // own cmdDel never calls this directly for exactly that reason; only
 // galactic-router's GC controller does, after confirming via every
 // BGPAdvertisement for this VPC/node that none are still in use.

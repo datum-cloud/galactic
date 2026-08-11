@@ -8,7 +8,7 @@ See [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md) for a full archit
 
 Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of two binaries deployed on each Kubernetes node:
 
-- **`galactic-cni`** — CNI plugin that wires containers into VPC networks (VRF, veth, SRv6 ingress route) and writes `BGPAdvertisement` CRDs.
+- **`galactic-veth`** — CNI plugin that wires containers into VPC networks (VRF, veth, SRv6 ingress route) and writes `BGPAdvertisement` CRDs.
 - **`galactic-router`** — controller-runtime reconciler that watches BGP CRDs and drives an embedded GoBGP server per node to distribute EVPN paths.
 
 VPC and VPCAttachment CRD management lives in a separate companion operator; Galactic receives pre-populated identifiers through the CNI config and acts on them.
@@ -27,7 +27,7 @@ VPC and VPCAttachment CRD management lives in a separate companion operator; Gal
 ## Development Workflow
 
 ```
-task build          # produces bin/galactic-cni and bin/galactic-router
+task build          # produces bin/galactic-veth and bin/galactic-router
 task ci             # full pipeline: lint → build → test:unit → test:e2e
 task test           # runs test:unit then test:e2e
 task test:unit      # unit tests with race detection

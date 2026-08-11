@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package nadpatch patches the NetworkAttachmentDefinition with the
-// deterministic host-side interface name a master plugin (galactic-cni,
-// galactic-tap-cni) just created — shared since NAD annotation is identical
+// deterministic host-side interface name a master plugin (galactic-veth,
+// galactic-tap) just created — shared since NAD annotation is identical
 // regardless of interface type.
 package nadpatch
 

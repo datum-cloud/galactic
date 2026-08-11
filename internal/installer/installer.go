@@ -65,8 +65,8 @@ var (
 	HostConflist           = "/host/etc/cni/net.d/10-galactic.conflist"
 	HostEtcDir             = "/host/var/lib/galactic"
 	SADir                  = "/var/run/secrets/kubernetes.io/serviceaccount"
-	SourceCNIBinary        = "/galactic-cni"
-	SourceTapCNIBinary     = "/galactic-tap-cni"
+	SourceVethBinary       = "/galactic-veth"
+	SourceTapBinary        = "/galactic-tap"
 	SourceIPAMBinary       = "/galactic-ipam"
 	SourceBGPBinary        = "/galactic-bgp"
 	SourceRouteBinary      = "/galactic-route"
@@ -153,7 +153,7 @@ func atomicWriteFile(destPath string, content []byte, mode os.FileMode) error {
 
 // atomicCopyFile streams a file from srcPath to destPath atomically. It
 // copies via io.Copy rather than reading the whole source into memory
-// first, since binaries copied here (e.g. galactic-cni itself) run tens of
+// first, since binaries copied here (e.g. galactic-veth itself) run tens of
 // megabytes and the installer runs under a tight memory limit.
 func atomicCopyFile(srcPath, destPath string, mode os.FileMode) error {
 	src, err := os.Open(srcPath)
@@ -265,11 +265,11 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	if err := os.MkdirAll(HostBinDir, 0755); err != nil {
 		return fmt.Errorf("create host CNI bin dir: %w", err)
 	}
-	if err := atomicCopyFile(SourceCNIBinary, filepath.Join(HostBinDir, "galactic-cni"), 0755); err != nil {
-		return fmt.Errorf("copy galactic-cni binary: %w", err)
+	if err := atomicCopyFile(SourceVethBinary, filepath.Join(HostBinDir, "galactic-veth"), 0755); err != nil {
+		return fmt.Errorf("copy galactic-veth binary: %w", err)
 	}
-	if err := atomicCopyFile(SourceTapCNIBinary, filepath.Join(HostBinDir, "galactic-tap-cni"), 0755); err != nil {
-		return fmt.Errorf("copy galactic-tap-cni binary: %w", err)
+	if err := atomicCopyFile(SourceTapBinary, filepath.Join(HostBinDir, "galactic-tap"), 0755); err != nil {
+		return fmt.Errorf("copy galactic-tap binary: %w", err)
 	}
 	if err := atomicCopyFile(SourceIPAMBinary, filepath.Join(HostBinDir, "galactic-ipam"), 0755); err != nil {
 		return fmt.Errorf("copy galactic-ipam binary: %w", err)

@@ -14,7 +14,7 @@ import (
 )
 
 // resourceTracker tracks resources created during cmdAdd for selective
-// rollback. galactic-tap-cni's ADD only ever creates the VRF, the tap
+// rollback. galactic-tap's ADD only ever creates the VRF, the tap
 // device, and (if delegated) an IPAM allocation — BGP/SRv6/eBPF publish is
 // galactic-bgp's own, separately chain-invoked plugin now, with its own
 // smaller tracker (internal/cnibgp); termination routes are galactic-
@@ -45,7 +45,7 @@ func (rt *resourceTracker) cleanup() {
 	// Release the IPAM allocation first — see internal/cni's own
 	// resourceTracker for the full doc comment on why this fires
 	// unconditionally on ipamDelegated alone. Interface/VRF cleanup is
-	// shared with galactic-cni's own tracker, so it lives in
+	// shared with galactic-veth's own tracker, so it lives in
 	// cnimaster.CleanupAttachment.
 	if rt.ipamDelegated {
 		if err := ipam.ExecDel(rt.ipamType, rt.ipamStdin); err != nil {

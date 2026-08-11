@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	appName = "galactic-tap-cni"
+	appName = "galactic-tap"
 
 	appDesc = `Galactic tap CNI Plugin
 
@@ -71,7 +71,7 @@ func newRootCommand() *cobra.Command {
 			// are host-side. Set the override so the CNI library skips its
 			// same-netns rejection check, which would otherwise reject
 			// kraftlet workloads that pass the host netns. Unconditional
-			// here (unlike galactic-cni, which has no override logic at
+			// here (unlike galactic-veth, which has no override logic at
 			// all): every invocation of this binary is tap mode, so there
 			// is no config content to peek at first.
 			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")

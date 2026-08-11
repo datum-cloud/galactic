@@ -92,7 +92,7 @@ task          # list available tasks
 #### Building
 
 ```bash
-task build           # produces bin/galactic-cni and bin/galactic-router
+task build           # produces bin/galactic-veth and bin/galactic-router
 task lint            # golangci-lint + yamlfmt; lint-fix applies safe auto-fixes
 task ci              # full pipeline: lint → build → test:unit → test:e2e
 ```

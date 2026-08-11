@@ -1,4 +1,4 @@
-// Copyright 2026 Datum Cloud, Inc.
+// Copyright 2025 Datum Cloud, Inc.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -14,20 +14,14 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"go.datum.net/galactic/internal/cnibgp"
+	"go.datum.net/galactic/internal/cni"
 	"go.datum.net/galactic/internal/metadata"
 )
 
 const (
-	appName = "galactic-bgp"
+	appName = "galactic-veth"
 
-	appDesc = `Galactic BGP CNI Plugin
-
- The BGP/SRv6/eBPF publish plugin in the galactic CNI chain — chained after
- galactic-veth/galactic-tap (and, when present, galactic-route) per
- conflist order, never run standalone. Has zero kernel-interface
- dependency: every address it advertises comes from prevResult, not from a
- runtime call into an interface it doesn't own.
+	appDesc = `Galactic CNI Plugin
 
  Find more information at: https://www.datum.net/docs`
 )
@@ -38,10 +32,10 @@ func newRootCommand() *cobra.Command {
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			cnibgp.InitCNIConfig()
+			cni.InitCNIConfig()
 			confFile, _ := cmd.Flags().GetString("conf-file")
 			if confFile != "" {
-				cnibgp.ConfFile = confFile
+				cni.ConfFile = confFile
 			}
 			return nil
 		},
@@ -51,38 +45,43 @@ func newRootCommand() *cobra.Command {
 				return nil
 			}
 			if ok, _ := cmd.Flags().GetBool("version"); ok {
-				fmt.Printf("%s version %s\n", appName, metadata.Version)
+				fmt.Printf("galactic-veth version %s\n", metadata.Version)
 				return nil
 			}
+			// Handle CNI_COMMAND=VERSION before config validation
 			if os.Getenv("CNI_COMMAND") == "VERSION" {
 				return version.All.Encode(os.Stdout)
 			}
 
-			// Real CNI runtimes always pipe the network config JSON on
-			// stdin and close it. If stdin is an interactive terminal
-			// instead, no config will ever arrive and skel's blocking
-			// stdin read would hang forever — print version info instead.
+			// Real CNI runtimes (containerd, CRI-O) always pipe the network
+			// config JSON on stdin and close it. If stdin is an interactive
+			// terminal instead, no config will ever arrive, and both skel's
+			// blocking stdin read and the io.ReadAll below would hang
+			// forever. Detect that case up front and print version info
+			// rather than hanging.
 			if term.IsTerminal(int(os.Stdin.Fd())) {
-				fmt.Printf("%s version %s\n", appName, metadata.Version)
+				fmt.Printf("galactic-veth version %s\n", metadata.Version)
 				fmt.Printf("CNI protocol versions supported: %s\n", strings.Join(version.All.SupportedVersions(), ", "))
 				return nil
 			}
 
-			// This plugin never enters a network namespace — it only makes
-			// k8s API calls to publish BGP advertisements. For tap-mode
-			// attachments, CNI_NETNS points at the host netns which equals
-			// this process's ambient netns, so the CNI library's same-netns
-			// rejection check would fire without the override.
-			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
-
-			cnibgp.RunPlugin()
+			// galactic-veth is veth-only: it always moves an interface into
+			// the container's own netns, so it always needs the CNI
+			// library's normal same-netns rejection check — unlike
+			// galactic-tap (which unconditionally sets
+			// CNI_NETNS_OVERRIDE, since tap workloads never enter a netns
+			// at all), there is no stdin-peeking tap-mode detection here
+			// anymore. Interface kind is which binary you invoke now, not a
+			// config field this process branches on.
+			cni.RunPlugin()
 			return nil
 		},
 	}
 
-	cmd.PersistentFlags().String("conf-file", cnibgp.ConfFile, "Path to CNI conflist file")
+	cmd.PersistentFlags().String("conf-file", cni.ConfFile, "Path to CNI conflist file")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
+
 	return cmd
 }
 
