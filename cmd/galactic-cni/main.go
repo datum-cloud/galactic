@@ -1,4 +1,4 @@
-// Copyright 2025 Datum Cloud, Inc.
+// Copyright 2026 Datum Cloud, Inc.
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -11,11 +11,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containernetworking/cni/pkg/version"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
-	"go.datum.net/galactic/internal/cni"
 	"go.datum.net/galactic/internal/installer"
 	"go.datum.net/galactic/internal/metadata"
 )
@@ -23,7 +20,15 @@ import (
 const (
 	appName = "galactic-cni"
 
-	appDesc = `Galactic CNI Plugin
+	appDesc = `Galactic CNI installer
+
+ Bootstraps and maintains the CNI plugin chain on a node: stages every
+ chain binary (galactic-veth, galactic-tap, galactic-ipam, galactic-bgp,
+ galactic-route, host-device) into /opt/cni/bin, writes the static
+ conflist and kubeconfig, and (via "run") keeps credentials fresh and
+ drives the eBPF uSID datapath. This binary is never itself a CNI plugin —
+ the container runtime never execs it via a NAD's "type" field, only the
+ galactic-cni DaemonSet's own init/run containers do.
 
  Find more information at: https://www.datum.net/docs`
 )
@@ -72,14 +77,6 @@ func newRootCommand() *cobra.Command {
 		Use:   appName,
 		Short: strings.Split(appDesc, "\n")[0],
 		Long:  appDesc,
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			cni.InitCNIConfig()
-			confFile, _ := cmd.Flags().GetString("conf-file")
-			if confFile != "" {
-				cni.ConfFile = confFile
-			}
-			return nil
-		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ok, _ := cmd.Flags().GetBool("build-info"); ok {
 				fmt.Println(metadata.BuildInfo(appName))
@@ -89,37 +86,10 @@ func newRootCommand() *cobra.Command {
 				fmt.Printf("galactic-cni version %s\n", metadata.Version)
 				return nil
 			}
-			// Handle CNI_COMMAND=VERSION before config validation
-			if os.Getenv("CNI_COMMAND") == "VERSION" {
-				return version.All.Encode(os.Stdout)
-			}
-
-			// Real CNI runtimes (containerd, CRI-O) always pipe the network
-			// config JSON on stdin and close it. If stdin is an interactive
-			// terminal instead, no config will ever arrive, and both skel's
-			// blocking stdin read and the io.ReadAll below would hang
-			// forever. Detect that case up front and print version info
-			// rather than hanging.
-			if term.IsTerminal(int(os.Stdin.Fd())) {
-				fmt.Printf("galactic-cni version %s\n", metadata.Version)
-				fmt.Printf("CNI protocol versions supported: %s\n", strings.Join(version.All.SupportedVersions(), ", "))
-				return nil
-			}
-
-			// galactic-cni is veth-only: it always moves an interface into
-			// the container's own netns, so it always needs the CNI
-			// library's normal same-netns rejection check — unlike
-			// galactic-tap-cni (which unconditionally sets
-			// CNI_NETNS_OVERRIDE, since tap workloads never enter a netns
-			// at all), there is no stdin-peeking tap-mode detection here
-			// anymore. Interface kind is which binary you invoke now, not a
-			// config field this process branches on.
-			cni.RunPlugin()
-			return nil
+			return cmd.Help()
 		},
 	}
 
-	cmd.PersistentFlags().String("conf-file", cni.ConfFile, "Path to CNI conflist file")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 

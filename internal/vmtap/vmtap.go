@@ -18,7 +18,7 @@ const pluginName = "vmtap-cni"
 
 // RunPlugin starts the CNI plugin, handling ADD, DEL, and CHECK operations.
 // STATUS is intentionally omitted (optional per the CNI spec): unlike
-// galactic-cni, vmtap-cni has no Kubernetes API dependency or node-level
+// galactic-veth, vmtap-cni has no Kubernetes API dependency or node-level
 // bootstrap state to probe readiness against.
 func RunPlugin() {
 	skel.PluginMainFuncs(

@@ -88,44 +88,44 @@ func TestRejectMovedIPAMKeys(t *testing.T) {
 	}{
 		{
 			name:  "no addressing keys at all",
-			input: `{"cniVersion":"1.0.0","type":"galactic-cni","vpc":"abc"}`,
+			input: `{"cniVersion":"1.0.0","type":"galactic-veth","vpc":"abc"}`,
 		},
 		{
 			name:  "keys inside the ipam block",
-			input: `{"type":"galactic-cni","ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00::/48","static_ip":"fd00::1"}}`,
+			input: `{"type":"galactic-veth","ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00::/48","static_ip":"fd00::1"}}`,
 		},
 		{
 			name:    "top-level ipv6_subnet",
-			input:   `{"type":"galactic-cni","ipv6_subnet":"fd00::/48"}`,
+			input:   `{"type":"galactic-veth","ipv6_subnet":"fd00::/48"}`,
 			wantErr: "addressing field 'ipv6_subnet' belongs inside the 'ipam' block",
 		},
 		{
 			name:    "top-level ipv4_subnet",
-			input:   `{"type":"galactic-cni","ipv4_subnet":"172.20.1.0/24"}`,
+			input:   `{"type":"galactic-veth","ipv4_subnet":"172.20.1.0/24"}`,
 			wantErr: "addressing field 'ipv4_subnet' belongs inside the 'ipam' block",
 		},
 		{
 			name:    "top-level address_families",
-			input:   `{"type":"galactic-cni","address_families":["ipv6"]}`,
+			input:   `{"type":"galactic-veth","address_families":["ipv6"]}`,
 			wantErr: "addressing field 'address_families' belongs inside the 'ipam' block",
 		},
 		{
 			name:    "top-level static_ip",
-			input:   `{"type":"galactic-cni","static_ip":"fd00::1234"}`,
+			input:   `{"type":"galactic-veth","static_ip":"fd00::1234"}`,
 			wantErr: "addressing field 'static_ip' belongs inside the 'ipam' block",
 		},
 		{
 			name:    "wrong-typed value is still reported as present",
-			input:   `{"type":"galactic-cni","ipv6_subnet":42}`,
+			input:   `{"type":"galactic-veth","ipv6_subnet":42}`,
 			wantErr: "addressing field 'ipv6_subnet' belongs inside the 'ipam' block",
 		},
 		{
 			name:  "explicit null carries no addressing intent",
-			input: `{"type":"galactic-cni","ipv6_subnet":null,"static_ip":null}`,
+			input: `{"type":"galactic-veth","ipv6_subnet":null,"static_ip":null}`,
 		},
 		{
 			name:    "several keys are all named",
-			input:   `{"type":"galactic-cni","ipv4_subnet":"172.20.1.0/24","static_ip":"fd00::1"}`,
+			input:   `{"type":"galactic-veth","ipv4_subnet":"172.20.1.0/24","static_ip":"fd00::1"}`,
 			wantErr: "addressing fields 'ipv4_subnet', 'static_ip' belong inside the 'ipam' block",
 		},
 		{
@@ -160,12 +160,12 @@ func TestRejectMovedIPAMKeys(t *testing.T) {
 func TestLoadAcceptsAnyOfMultipleTypes(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "10-galactic.conflist")
-	content := `{"cniVersion":"1.0.0","name":"test","plugins":[{"type":"galactic-tap-cni","node_name":"tap-node"}]}`
+	content := `{"cniVersion":"1.0.0","name":"test","plugins":[{"type":"galactic-tap","node_name":"tap-node"}]}`
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("os.WriteFile: %v", err)
 	}
 
-	conf, err := Load(path, "galactic-cni", "galactic-tap-cni")
+	conf, err := Load(path, "galactic-veth", "galactic-tap")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

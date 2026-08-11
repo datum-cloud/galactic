@@ -42,7 +42,9 @@ import (
 )
 
 // PluginType is the "type" value Bootstrap always writes into the static
-// conflist's single plugin entry, regardless of which binary is actually
+// conflist's single plugin entry. It names galactic-cni, the installer that
+// actually authors this file, not any particular master plugin — veth, tap,
+// and bgp all read this same value regardless of which binary is actually
 // reading it. Every caller in the chain passes this to Load.
 const PluginType = "galactic-cni"
 

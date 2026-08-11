@@ -12,7 +12,7 @@ import (
 // invocation, as a chained entry inside the pod's primary conflist (e.g.
 // appended to whatever Cilium installs at /etc/cni/net.d/05-cilium.conflist).
 // It carries no VPC/VPCAttachment identifiers — those belong exclusively to
-// galactic-cni.
+// galactic-veth.
 type PluginConf struct {
 	types.PluginConf
 

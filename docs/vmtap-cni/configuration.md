@@ -1,6 +1,6 @@
 # vmtap-cni Configuration
 
-`vmtap-cni` is a standalone CNI plugin, separate from `galactic-cni`, that gives a
+`vmtap-cni` is a standalone CNI plugin, separate from `galactic-veth`, that gives a
 Unikraft microVM managed by `kraftlet` access to the pod's real Cilium-assigned
 identity. It has no VPC/VPCAttachment configuration and no Kubernetes API
 dependency — it never creates a `BGPAdvertisement`, never touches a VRF, and

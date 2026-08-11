@@ -19,7 +19,7 @@ import (
 )
 
 // cmdAdd installs each of pluginConf's termination routes into the VRF
-// routing table the preceding master plugin (galactic-cni/galactic-tap-cni)
+// routing table the preceding master plugin (galactic-veth/galactic-tap)
 // already created, then passes prevResult through unchanged — galactic-
 // route adds no interfaces or IPs of its own, only kernel routes alongside
 // whatever came before it in the chain.

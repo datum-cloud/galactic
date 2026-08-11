@@ -69,7 +69,7 @@ func TestCNIPluginVersionReport(t *testing.T) {
 		"--restart=Never",
 		"--env=CNI_COMMAND=VERSION",
 		"--command", "--",
-		"/galactic-cni",
+		"/galactic-veth",
 	)
 	if err != nil {
 		t.Fatalf("kubectl run failed: %v", err)
@@ -158,13 +158,13 @@ func TestKernelCapabilities(t *testing.T) {
 	}
 }
 
-// TestCNITapInterface exercises galactic-tap-cni, the tap master plugin in
+// TestCNITapInterface exercises galactic-tap, the tap master plugin in
 // the galactic CNI chain (see internal/cnitap). It creates a pod that
 // invokes the plugin with CNI_COMMAND=ADD and a tap config, then validates
 // the CNI result JSON: a single host interface with an empty sandbox and
 // the host-side gateway/subnet IPAM allocated for it.
 //
-// This exercises galactic-tap-cni's own ADD (VRF + tap creation, IPAM
+// This exercises galactic-tap's own ADD (VRF + tap creation, IPAM
 // delegation to galactic-ipam) directly, then manually chains galactic-bgp
 // after it (testChainedGalacticBGP below), feeding it the tap master's own
 // CNI result as prevResult exactly as the CNI runtime would — the same
@@ -184,10 +184,10 @@ func TestCNITapInterface(t *testing.T) {
 	// Start a shell so we can later exec the CNI plugin with stdin.
 	// The galactic-cni image's entrypoint is overridden to "sh" so the pod
 	// stays running and we can pipe the CNI config via kubectl exec -i.
-	// galactic-tap-cni ships in the same image (see containers/galactic-cni/
+	// galactic-tap ships in the same image (see containers/galactic-cni/
 	// Dockerfile) alongside every other binary in the CNI chain, so no
 	// separate image is needed here. Run as the galactic-cni ServiceAccount:
-	// galactic-tap-cni's own ADD unconditionally builds an in-cluster k8s
+	// galactic-tap's own ADD unconditionally builds an in-cluster k8s
 	// client for its NAD-annotation step (config/cni/rbac.yaml grants it),
 	// even though that step itself no-ops here (no CNI_ARGS, so
 	// nadpatch.ParsePodNamespace resolves an empty namespace). hostNetwork
@@ -228,7 +228,7 @@ func TestCNITapInterface(t *testing.T) {
 	// The eBPF uSID datapath is now the only forwarding path (see
 	// internal/cnibgp/bgp.go's registerEBPFDatapath, called from
 	// galactic-bgp's own cmdAdd — a separately chain-invoked binary since
-	// the CNI plugin-chain split, not inline in galactic-tap-cni's cmdAdd
+	// the CNI plugin-chain split, not inline in galactic-tap's cmdAdd
 	// any more), so CNI ADD requires this node's locator_table/
 	// function_table/vrf_table maps to already be pinned under
 	// attach.PinDir. In production that's done ahead of time by the CNI
@@ -252,7 +252,7 @@ func TestCNITapInterface(t *testing.T) {
 	cniConf := `{
   "cniVersion": "1.0.0",
   "name": "galactic",
-  "type": "galactic-tap-cni",
+  "type": "galactic-tap",
   "vpc": "1",
   "vpcattachment": "1",
   "ipam": {
@@ -261,7 +261,7 @@ func TestCNITapInterface(t *testing.T) {
   }
 }`
 	// Step 1: write the CNI config and a wrapper script into the pod.
-	// CNI_PATH=/ lets IPAM delegation (galactic-tap-cni execs galactic-ipam
+	// CNI_PATH=/ lets IPAM delegation (galactic-tap execs galactic-ipam
 	// via github.com/containernetworking/plugins/pkg/ipam.ExecAdd) find the
 	// delegate binary: every binary in the chain is copied to the image
 	// root by containers/galactic-cni/Dockerfile (not /opt/cni/bin — that
@@ -275,7 +275,7 @@ CNI_CONTAINERID=e2e-tap-001 \
 CNI_IFNAME=eth0 \
 CNI_PATH=/ \
 NODE_NAME=` + nodeName() + ` \
-	/galactic-tap-cni < /tmp/cni.json
+	/galactic-tap < /tmp/cni.json
 `
 	_, err = kubectl(t.Context(), "exec", name, "--",
 		"sh", "-c",
@@ -340,9 +340,9 @@ NODE_NAME=` + nodeName() + ` \
 	}
 
 	// Step 3: chain galactic-bgp — the CNI runtime's next plugin in the
-	// conflist — after galactic-tap-cni, feeding it the tap master's own
+	// conflist — after galactic-tap, feeding it the tap master's own
 	// CNI result as prevResult, exactly as the runtime would. Everything
-	// up to this point only exercises galactic-tap-cni's own cmdAdd;
+	// up to this point only exercises galactic-tap's own cmdAdd;
 	// BGPVRFInstance/BGPAdvertisement CRD creation and eBPF
 	// locator_table/function_table/vrf_table registration all moved into
 	// galactic-bgp's own cmdAdd with the CNI plugin-chain split (see
@@ -386,7 +386,7 @@ func testChainedGalacticBGP(t *testing.T, podName string, tapResult map[string]a
   "prevResult": %s
 }`, vpc, vpcAttachment, prevResultJSON)
 
-	// Reuses the same netns/containerID/ifname galactic-tap-cni's own step
+	// Reuses the same netns/containerID/ifname galactic-tap's own step
 	// (above) already set up: a real chained plugin sees the identical
 	// values across every plugin invoked for one CNI ADD.
 	bgpScript := `#!/bin/sh

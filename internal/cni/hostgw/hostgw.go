@@ -6,8 +6,8 @@
 // pod-subnet route for a VPC attachment's allocated IPAM addresses.
 //
 // This is kernel-interface work (netlink address/route/neighbor
-// manipulation on the interface a master plugin — galactic-cni,
-// galactic-tap-cni — itself created), not BGP/SRv6/eBPF publish, so it
+// manipulation on the interface a master plugin — galactic-veth,
+// galactic-tap — itself created), not BGP/SRv6/eBPF publish, so it
 // lives here rather than in internal/cnibgp: once galactic-bgp became its
 // own chain-invoked plugin (a separate process, invoked after the master
 // has already printed its own result), it no longer has any interface to

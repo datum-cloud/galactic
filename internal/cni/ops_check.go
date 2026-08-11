@@ -77,7 +77,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 
 // cmdStatus implements the CNI spec STATUS operation — see
 // internal/cnimaster.RunStatus for the full reasoning, shared verbatim with
-// galactic-tap-cni.
+// galactic-tap.
 func cmdStatus(args *skel.CmdArgs) error {
 	return cnimaster.RunStatus(args.StdinData, cniConfig, ConfFile)
 }

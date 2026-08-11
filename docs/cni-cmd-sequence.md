@@ -8,10 +8,10 @@ paths.
 The chain is one master plugin, plus up to two optional plugins invoked
 after it in conflist order:
 
-1. **Master** — `galactic-cni` (veth, for containers) or `galactic-tap-cni`
+1. **Master** — `galactic-veth` (veth, for containers) or `galactic-tap`
    (tap, for VM workloads: Kata, Firecracker, kraftlet/Unikraft). Creates
    the VRF and host-side interface, annotates the NAD, delegates IPAM (if
-   an `"ipam"` block is present) and — for `galactic-cni` only —
+   an `"ipam"` block is present) and — for `galactic-veth` only —
    host-device (to move the guest veth into the container netns), then
    configures the host gateway address/route and prints the CNI result.
 2. **`galactic-route`** (optional — present only when the attachment has
@@ -26,13 +26,13 @@ after it in conflist order:
 
 Every binary's own `cmdDel` is a no-op beyond binary-local, per-container
 cleanup (IPAM deallocation, guest netns flush, host-device DEL — all
-`galactic-cni`/`galactic-tap-cni` only). Shared node-level state (VRF,
+`galactic-veth`/`galactic-tap` only). Shared node-level state (VRF,
 host interface, routes, SRv6/eBPF registration, `BGPVRFInstance`,
 `BGPAdvertisement`) is kept because it may still be in use by another
 pod/VM on the same `(vpc, vpcAttachment)`; `galactic-router`'s GC
 controller reclaims it once nothing references it anymore.
 
-## cmdAdd — veth (galactic-cni → galactic-route → galactic-bgp)
+## cmdAdd — veth (galactic-veth → galactic-route → galactic-bgp)
 
 ```mermaid
 sequenceDiagram
@@ -132,7 +132,7 @@ sequenceDiagram
     Runtime-->>Runtime: CNI result (JSON)
 ```
 
-## cmdAdd — tap (galactic-tap-cni → galactic-route → galactic-bgp)
+## cmdAdd — tap (galactic-tap → galactic-route → galactic-bgp)
 
 ```mermaid
 sequenceDiagram
@@ -241,7 +241,7 @@ sequenceDiagram
         CNI-->>Runtime: nil
         deactivate CNI
     else parse succeeds
-        alt "ipam" block present (galactic-cni/galactic-tap-cni only)
+        alt "ipam" block present (galactic-veth/galactic-tap only)
             CNI->>IPAM: ExecDel(ipam.type, stdin)
             activate IPAM
             IPAM->>IPAM: look up this containerID's own marker file, delete it
@@ -249,7 +249,7 @@ sequenceDiagram
             deactivate IPAM
         end
 
-        Note over CNI: galactic-cni only: flush the guest netns'<br/>address/route, then forward DEL to host-device
+        Note over CNI: galactic-veth only: flush the guest netns'<br/>address/route, then forward DEL to host-device
 
         Note over CNI,BGP: Shared resources (VRF, host interface, routes,<br/>eBPF vrf_table entry, BGPAdvertisement, BGPVRFInstance) are<br/>NOT deleted by any binary's DEL — they may be in use by<br/>another pod/VM on the same (vpc, attachment).<br/>galactic-router's GC controller collects orphans periodically.
 

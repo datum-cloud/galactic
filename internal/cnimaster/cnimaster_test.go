@@ -84,7 +84,7 @@ func TestParseConf(t *testing.T) {
 			name: "valid config",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
+					`"type":"galactic-veth","vpc":"%s",`+
 					`"vpcattachment":"%s"}`,
 				testVPC, testAttachment,
 			),
@@ -106,7 +106,7 @@ func TestParseConf(t *testing.T) {
 			name: "missing vpc",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpcattachment":"%s"}`,
+					`"type":"galactic-veth","vpcattachment":"%s"}`,
 				testAttachment,
 			),
 			wantErr:  "vpc is required and must be a non-empty base62 string",
@@ -116,7 +116,7 @@ func TestParseConf(t *testing.T) {
 			name: "empty vpc",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"",`+
+					`"type":"galactic-veth","vpc":"",`+
 					`"vpcattachment":"%s"}`,
 				testAttachment,
 			),
@@ -127,7 +127,7 @@ func TestParseConf(t *testing.T) {
 			name: "vpc with invalid char hyphen",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
+					`"type":"galactic-veth","vpc":"%s",`+
 					`"vpcattachment":"%s"}`,
 				testInvalidBase62, testAttachment,
 			),
@@ -138,7 +138,7 @@ func TestParseConf(t *testing.T) {
 			name: "vpc with invalid char underscore",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"abc_def",`+
+					`"type":"galactic-veth","vpc":"abc_def",`+
 					`"vpcattachment":"%s"}`,
 				testAttachment,
 			),
@@ -149,7 +149,7 @@ func TestParseConf(t *testing.T) {
 			name: "missing vpcattachment",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s"}`,
+					`"type":"galactic-veth","vpc":"%s"}`,
 				testVPC,
 			),
 			wantErr:  "vpcattachment is required and must be a non-empty base62 string",
@@ -159,7 +159,7 @@ func TestParseConf(t *testing.T) {
 			name: "empty vpcattachment",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
+					`"type":"galactic-veth","vpc":"%s",`+
 					`"vpcattachment":""}`,
 				testVPC,
 			),
@@ -170,7 +170,7 @@ func TestParseConf(t *testing.T) {
 			name: "vpcattachment with invalid char space",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
+					`"type":"galactic-veth","vpc":"%s",`+
 					`"vpcattachment":"def ghi"}`,
 				testVPC,
 			),
@@ -180,7 +180,7 @@ func TestParseConf(t *testing.T) {
 		{
 			name: "valid vpc and vpcattachment with mixed case base62",
 			input: `{"cniVersion":"1.0.0","name":"test",` +
-				`"type":"galactic-cni","vpc":"Abc123XYZ",` +
+				`"type":"galactic-veth","vpc":"Abc123XYZ",` +
 				`"vpcattachment":"DeF456"}`,
 			wantVPC: "Abc123XYZ",
 		},
@@ -188,7 +188,7 @@ func TestParseConf(t *testing.T) {
 			name: "prevResult valid JSON result is accepted",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
+					`"type":"galactic-veth","vpc":"%s",`+
 					`"vpcattachment":"%s",`+
 					`"prevResult":%s}`,
 				testVPC, testAttachment, testPrevResult,
@@ -199,7 +199,7 @@ func TestParseConf(t *testing.T) {
 			name: "ipam block present is accepted, delegated per its own contract",
 			input: fmt.Sprintf(
 				`{"cniVersion":"1.0.0","name":"test",`+
-					`"type":"galactic-cni","vpc":"%s",`+
+					`"type":"galactic-veth","vpc":"%s",`+
 					`"vpcattachment":"%s","ipam":{"type":"galactic-ipam","ipv6_subnet":"fd00:10:ff01::/48"}}`,
 				testVPC, testAttachment,
 			),
@@ -242,7 +242,7 @@ func TestIPAMBlockPresenceIsTheOnlyTrigger(t *testing.T) {
 
 	// Missing ipam block: no error, no delegation signal — conf.IPAM stays nil.
 	inputNoIPAM := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s"}`,
+		`{"cniVersion":"1.0.0","name":"test","type":"galactic-veth","vpc":"%s","vpcattachment":"%s"}`,
 		testVPC, testAttachment,
 	)
 	conf, err := ParseConf([]byte(inputNoIPAM), cniConfig, config.DefaultConfFile)
@@ -255,7 +255,7 @@ func TestIPAMBlockPresenceIsTheOnlyTrigger(t *testing.T) {
 
 	// Present ipam block: conf.IPAM is populated, ready for delegation.
 	inputWithIPAM := fmt.Sprintf(
-		`{"cniVersion":"1.0.0","name":"test","type":"galactic-cni","vpc":"%s","vpcattachment":"%s",`+
+		`{"cniVersion":"1.0.0","name":"test","type":"galactic-veth","vpc":"%s","vpcattachment":"%s",`+
 			`"ipam":{"type":"galactic-ipam"}}`,
 		testVPC, testAttachment,
 	)

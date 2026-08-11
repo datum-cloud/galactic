@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package cniroute implements galactic-route, the termination-route plugin
-// in the galactic CNI chain — chained after galactic-cni/galactic-tap-cni
+// in the galactic CNI chain — chained after galactic-veth/galactic-tap
 // and before galactic-bgp per conflist order (optional: only present when
 // an attachment has terminations to install). It installs kernel routes
 // into the VRF routing table the preceding master plugin already created,

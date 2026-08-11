@@ -24,7 +24,7 @@ const (
 	appDesc = `Galactic Route CNI Plugin
 
  The termination-route plugin in the galactic CNI chain — chained after
- galactic-cni/galactic-tap-cni and before galactic-bgp per conflist order,
+ galactic-veth/galactic-tap and before galactic-bgp per conflist order,
  never run standalone, and optional (only present for attachments with
  terminations to install). Has no Kubernetes dependency at all: it only
  installs kernel routes into the VRF routing table the master plugin
