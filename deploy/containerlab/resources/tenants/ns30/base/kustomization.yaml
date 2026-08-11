@@ -1,7 +1,7 @@
 # ns30 is single-site (dfw only, see ../dfw/). This is the first of its two
 # attachments — ../dfw/pod-b.yaml is the second, on its own NAD
 # (ns30/private-b). They deliberately use two distinct vpcattachment values
-# under the same vpc rather than one NAD scaled to replicas: 2: galactic-cni
+# under the same vpc rather than one NAD scaled to replicas: 2: galactic-veth
 # derives its host/guest veth interface names from (vpc, vpcAttachment)
 # alone (internal/plumbing/intf), so two pods sharing one vpcAttachment on
 # the same node collide on that name — internal/cni/veth's "stale veth"
