@@ -10,7 +10,7 @@ attaches each `netshoot` pod to its VPC's `private` NetworkAttachmentDefinition
 (via the `v1.multus-cni.io/default-network` annotation, which makes the VPC
 interface the pod's `eth0` rather than an additional `net1` — there is no
 `k8s.v1.cni.cncf.io/networks` annotation in play here), which invokes the
-galactic CNI plugin chain: `galactic-cni` creates a VRF and veth pair, then
+galactic CNI plugin chain: `galactic-veth` creates a VRF and veth pair, then
 `galactic-bgp` registers the attachment against the eBPF uSID datapath and
 writes a `BGPAdvertisement` CRD (see [docs/cni-cmd-sequence.md](../../../docs/cni-cmd-sequence.md)
 for the full per-binary ADD sequence). The `galactic-router` controller then
@@ -40,7 +40,7 @@ below for why `ns30`/`ns40` deliberately use two attachments instead of one.
 `ns30` and `ns40` each define **two** NADs (`private` and `private-b`) with
 the same `vpc` but different `vpcattachment` values, each backing its own
 single-replica Deployment — not one NAD scaled to `replicas: 2`. This is
-required, not a style choice: `galactic-cni` derives its host/guest veth
+required, not a style choice: `galactic-veth` derives its host/guest veth
 interface names from `(vpc, vpcAttachment)` alone, so two pods sharing one
 `vpcattachment` on the same node would collide on that name, and
 `internal/cni/veth`'s "stale veth" self-heal would delete whichever pod's

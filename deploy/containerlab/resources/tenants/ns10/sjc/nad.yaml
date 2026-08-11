@@ -11,7 +11,7 @@ spec:
       "name": "private",
       "plugins": [
         {
-          "type": "galactic-cni",
+          "type": "galactic-veth",
           "vpc": "10",
           "vpcattachment": "10",
           "namespace": "galactic-system",
