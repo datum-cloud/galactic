@@ -28,13 +28,29 @@ for site in dfw sjc iad; do
   node=$(control_plane "${site}")
   echo "Installing galactic-cni on ${site}..."
 
-  # Cilium
+  # Cilium — explicit IPv6 flags required: the clusters are IPv6-only
+  # (ipFamily: ipv6) and without these flags Cilium may allocate IPv4
+  # addresses from its 10.0.0.0/8 default pool. Pods with IPv4 can't
+  # reach the IPv6 API server ([fd00:200::1]:443) and crash-loop.
   docker exec "${node}" bash -c "
     curl -sL https://github.com/cilium/cilium-cli/releases/download/${CILIUM_VERSION}/cilium-linux-${ARCH}.tar.gz | tar xz -C /usr/local/bin
     chmod +x /usr/local/bin/cilium
-    cilium install --set cni.exclusive=false --set kubeProxyReplacement=true
+    cilium install \
+      --set ipv4.enabled=false \
+      --set ipv6.enabled=true \
+      --set ipv6.clusterPoolIPv6ClusterCIDR=fd00:100::/48 \
+      --set ipv6.clusterPoolIPv6MaskSize=64 \
+      --set cni.exclusive=false \
+      --set kubeProxyReplacement=true \
+      --set kubeProxyReplacement.healthzBindAddress=:9879
     cilium status --wait
   "
+
+  # Kind installs local-path-provisioner by default (disableDefaultCNI
+  # only disables kindnet, not the storage provisioner). It gets an IPv4
+  # address and can't reach the IPv6 API server — delete it before it
+  # starts crash-looping. Cilium replaces kindnet; we don't need local-path.
+  docker exec "${node}" kubectl delete deployment local-path-provisioner -n local-path-storage --ignore-not-found
 
   # Multus
   docker exec "${node}" kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
