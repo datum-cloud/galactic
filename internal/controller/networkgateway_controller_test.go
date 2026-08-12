@@ -135,6 +135,37 @@ func TestNetworkGatewayReconciler_StopsEngineOnNotFound(t *testing.T) {
 	}
 }
 
+// TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway is the
+// regression test for #364: every gateway node's process reconciles every
+// NetworkGateway in the namespace (SetupWithManager has no predicate), so
+// deleting gw-b's NetworkGateway also enqueues a NotFound reconcile for
+// gw-a's process. gw-a's own NetworkGateway is untouched, so its engine
+// must keep running.
+func TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA) // this node's own gateway; still exists
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+
+	// gw-b's NetworkGateway was deleted (it never existed in this fixture
+	// -- only its NamespacedName is needed to reconstruct the NotFound
+	// reconcile gw-a's own process would receive for it).
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWB)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+	if engine.stopped {
+		t.Fatal("engine.Stop was called for another node's deleted NetworkGateway; " +
+			"this node's own NetworkGateway is untouched and its engine must keep running")
+	}
+}
+
 func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedAssignedRules(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)

@@ -111,6 +111,23 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	gw := &bgpv1alpha1.NetworkGateway{}
 	if err := r.Get(ctx, req.NamespacedName, gw); err != nil {
 		if apierrors.IsNotFound(err) {
+			// Every gateway node's process reconciles every NetworkGateway
+			// in the namespace (SetupWithManager has no predicate), so a
+			// sibling node's deletion reaches this reconciler too, and by
+			// the time we get here the deleted object can no longer be
+			// read to check whose it was. Ask instead whether *some*
+			// NetworkGateway still targets this node: if one does, this
+			// node's own object is untouched and its engine must keep
+			// running. Only stop when this node no longer has a
+			// NetworkGateway of its own -- otherwise one node's deletion
+			// tears down every other gateway node's data plane too (#364).
+			stillOwned, checkErr := isGatewayNode(ctx, r.Client, req.Namespace, r.NodeName)
+			if checkErr != nil {
+				return ctrl.Result{}, fmt.Errorf("check for this node's own NetworkGateway: %w", checkErr)
+			}
+			if stillOwned {
+				return ctrl.Result{}, nil
+			}
 			if stopErr := r.Engine.Stop(ctx); stopErr != nil {
 				logger.Error(stopErr, "stop gateway engine for deleted NetworkGateway", "networkGateway", req.NamespacedName)
 			}
