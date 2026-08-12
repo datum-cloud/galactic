@@ -29,6 +29,9 @@ func testCmd(t *testing.T) *cobra.Command {
 	cmd.Flags().IntP("grpc-health-port", "", config.DefaultRouterGRPCHealthPort, "gRPC health check port")
 	cmd.Flags().StringP("gc-namespace", "", config.DefaultRouterGCNamespace, "Namespace for orphaned CRD cleanup")
 	cmd.Flags().DurationP("gc-interval", "", config.DefaultRouterGCInterval, "Cleanup interval")
+	cmd.Flags().Bool("webhook-enabled", false, "Enable the NetworkRule admission webhook")
+	cmd.Flags().IntP("webhook-port", "", config.DefaultRouterWebhookPort, "Webhook server listen port")
+	cmd.Flags().StringP("webhook-cert-dir", "", "", "Webhook server TLS cert/key directory")
 	return cmd
 }
 
@@ -219,6 +222,30 @@ func TestGRPCHealthPortFlagOverridesEnv(t *testing.T) {
 
 	if cfg.GRPCHealthPort != 9092 {
 		t.Errorf("GRPCHealthPort = %d, want %d (flag should override env var)", cfg.GRPCHealthPort, 9092)
+	}
+}
+
+func TestWebhookFlagsOverrideEnv(t *testing.T) {
+	t.Setenv(config.EnvRouterNodeName, "test-node")
+	t.Setenv(config.EnvRouterMode, config.ModeTenant)
+	t.Setenv(config.EnvRouterWebhookEnabled, "false")
+	t.Setenv(config.EnvRouterWebhookPort, "9443")
+
+	cfg := config.NewRouterConfig()
+	cmd := testCmd(t)
+	if err := cmd.Flags().Set("webhook-enabled", "true"); err != nil {
+		t.Fatalf("set --webhook-enabled flag: %v", err)
+	}
+	if err := cmd.Flags().Set("webhook-port", "9444"); err != nil {
+		t.Fatalf("set --webhook-port flag: %v", err)
+	}
+	cfg.BindFlags(cmd.Flags())
+
+	if !cfg.WebhookEnabled {
+		t.Error("WebhookEnabled = false, want true (flag should override env var)")
+	}
+	if cfg.WebhookPort != 9444 {
+		t.Errorf("WebhookPort = %d, want 9444 (flag should override env var)", cfg.WebhookPort)
 	}
 }
 

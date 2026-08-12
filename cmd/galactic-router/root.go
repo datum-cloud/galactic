@@ -22,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
@@ -32,6 +33,7 @@ import (
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/frr"
 	"go.datum.net/galactic/internal/runtime/gobgp"
+	networkwebhook "go.datum.net/galactic/internal/webhook"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -89,13 +91,27 @@ func runCmd(cfg *config.RouterConfig) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: "0",
 		Metrics: metricsserver.Options{
 			BindAddress: fmt.Sprintf(":%d", metricsPort),
 		},
-	})
+	}
+	// The NetworkRule admission webhook (internal/webhook) is opt-in: it is
+	// the first webhook in this codebase, and enabling it requires TLS cert
+	// material (config/webhook/'s kustomization.yaml documents the
+	// cert-manager-or-equivalent prerequisite) plus the
+	// ValidatingWebhookConfiguration/Service manifests to actually be
+	// applied — see config.RouterConfig.WebhookEnabled's doc comment.
+	if cfg.WebhookEnabled {
+		mgrOptions.WebhookServer = webhook.NewServer(webhook.Options{
+			Port:    cfg.WebhookPort,
+			CertDir: cfg.WebhookCertDir,
+		})
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
@@ -120,6 +136,18 @@ func runCmd(cfg *config.RouterConfig) error {
 		<-ctx.Done()
 		grpcSrv.GracefulStop()
 	}()
+
+	if cfg.WebhookEnabled {
+		validator := &networkwebhook.NetworkRuleValidator{
+			// TODO(edge-gateway): AllowAllAuthorizer is a placeholder — see
+			// its doc comment. Wire a real Authorizer here once the
+			// companion operator integration exists.
+			Authorizer: networkwebhook.AllowAllAuthorizer{},
+		}
+		if err := validator.SetupWebhookWithManager(mgr); err != nil {
+			return fmt.Errorf("setup NetworkRule webhook: %w", err)
+		}
+	}
 
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
@@ -286,6 +314,13 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().DurationP("gc-interval", "",
 		config.DefaultRouterGCInterval,
 		"Cleanup interval")
+	cmd.Flags().Bool("webhook-enabled", false,
+		"Enable the NetworkRule admission webhook (requires TLS cert material; see config/webhook/)")
+	cmd.Flags().IntP("webhook-port", "",
+		config.DefaultRouterWebhookPort,
+		"Webhook server listen port")
+	cmd.Flags().StringP("webhook-cert-dir", "", "",
+		"Directory containing the webhook server's TLS cert/key; defaults to controller-runtime's own default")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd
