@@ -92,6 +92,9 @@ galactic/
 │   ├── galactic-bgp/        # BGP/SRv6/eBPF publish plugin binary
 │   ├── galactic-route/      # termination-route plugin binary (optional chain stage)
 │   ├── galactic-router/     # Router binary (controller-runtime reconciler)
+│   ├── galactic-gateway/    # Edge XDP NAT+LB gateway binary (NetworkGateway/
+│   │                        #   NetworkRule reconcilers + eBPF/XDP load-attach;
+│   │                        #   split out of galactic-router)
 │   └── vmtap-cni/           # Cilium chain-conflist patcher for VM tap interfaces
 ├── internal/
 │   ├── controller/          # controller-runtime reconcilers (BGPRouter, BGPPeer,
@@ -172,7 +175,8 @@ galactic/
 └── containers/
     ├── galactic-cni/        # galactic-veth/galactic-tap/-ipam/-bgp/-route + vmtap-cni
     │                        #   + host-device image (e2e test and production publish)
-    └── galactic-router/     # galactic-router production image
+    ├── galactic-router/     # galactic-router production image
+    └── galactic-gateway/    # galactic-gateway production image
 ```
 
 Production images are published by `.github/workflows/publish.yaml` — see CI/CD below.
@@ -562,13 +566,14 @@ Runs on every PR and push to `main`. Two tiers:
 - **Tier 1 (parallel):** `lint` (golangci-lint v2.12.2 + yamlfmt), `test-unit` (race detector + codecov upload), `build`
 - **Tier 2 (sequential):** `test-e2e` — blocked on all Tier 1 jobs passing
 
-**Publish pipeline:** `.github/workflows/publish.yaml`, modeled on the `compute` repo's. Runs on every push and on published releases, via reusable `datum-cloud/actions` workflows: `publish-galactic-cni-image` and `publish-galactic-router-image` each build and push their own image (`ghcr.io/datum-cloud/galactic-cni`, `ghcr.io/datum-cloud/galactic-router`), and `publish-kustomize-bundles` (which `needs` both image jobs) pushes `config/` as an OCI Kustomize bundle (`ghcr.io/datum-cloud/galactic-kustomize`), using the `images` input (`datum-cloud/actions` v1.20.0+) to stamp each job's real published tag into `config/cni` and `config/router/base` respectively — the bundle ships with matching versioned image references, not `:latest`. This replaces the old single-image `.github/workflows/release.yaml` (removed — see history below) with two per-binary images, matching the split `deploy/containerlab/` already used for local dev.
+**Publish pipeline:** `.github/workflows/publish.yaml`, modeled on the `compute` repo's. Runs on every push and on published releases, via reusable `datum-cloud/actions` workflows: `publish-galactic-cni-image`, `publish-galactic-router-image`, `publish-galactic-gateway-image`, and `publish-fabric-router-image` each build and push their own image, and `publish-kustomize-bundles` (which `needs` all four image jobs) pushes `config/` as an OCI Kustomize bundle (`ghcr.io/datum-cloud/galactic-kustomize`), using the `images` input (`datum-cloud/actions` v1.20.0+) to stamp each job's real published tag into `config/cni`, `config/router/base`, `config/gateway/base` (twice — that DaemonSet has two containers, `galactic-router` and `galactic-gateway`), and `config/fabric` respectively — the bundle ships with matching versioned image references, not `:latest`. This replaces the old single-image `.github/workflows/release.yaml` (removed — see history below) with one image per binary, matching the split `deploy/containerlab/` already used for local dev.
 
 **Container images:**
 - `containers/galactic-cni/Dockerfile` — multi-stage build (golang builder → distroless → final Alpine stage for `iproute2`/`nsenter`); builds `galactic-cni` (the installer), `galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`, `galactic-route`, `vmtap-cni`, and the delegated `host-device` CNI plugin binary, `ENTRYPOINT ["/galactic-cni"]`. Used both by `task test:e2e` (`scripts/ci.sh e2etest` builds it, tags `galactic-cni:e2e`, `kind load`s it into the ephemeral e2e cluster) and by `publish.yaml` (pushed as `ghcr.io/datum-cloud/galactic-cni`). Both the init container (`/galactic-cni init`) and the long-running container (`/galactic-cni run`) run this same image; the DaemonSet no longer shells out to an `install.sh` script, so the Alpine/`iproute2` final stage exists purely for e2e test needs (kernel `ip`/`nsenter` operations exercised via `task test:e2e`) rather than anything the installer subcommands require. Reusing the e2e-tested artifact for publish is preferred over maintaining a second, untested variant.
 - `containers/galactic-router/Dockerfile` — golang builder → `gcr.io/distroless/static:nonroot`, `ENTRYPOINT ["/galactic-router"]`. No shell or CLI tools: `galactic-router` drives VRF/SRv6/route/BGP state entirely through the netlink and GoBGP Go libraries, never shells out. Pushed by `publish.yaml` as `ghcr.io/datum-cloud/galactic-router`.
+- `containers/galactic-gateway/Dockerfile` — same shape as `galactic-router`'s (golang builder → `gcr.io/distroless/static:nonroot`, no shell), but additionally regenerates `internal/plumbing/ebpf/prog`'s bpf2go output (via `edgepreflight`) alongside `internal/plumbing/ebpf/edgeprog`'s own, since neither is committed to git. Pushed by `publish.yaml` as `ghcr.io/datum-cloud/galactic-gateway`. Split out of `galactic-router`.
 
-**History:** the original `.github/workflows/release.yaml` built and pushed a single `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` image from a shared `containers/galactic/Dockerfile`, but that image only ever built `galactic-cni` while `config/router/base/daemonset.yaml` ran `command: [/galactic-router]` against it — the image advertised a binary it never built. Both were removed. `publish.yaml` and the two per-binary Dockerfiles above fix this by building each binary into its own image, so `config/cni/daemonset.yaml` and `config/router/base/daemonset.yaml` now reference `ghcr.io/datum-cloud/galactic-cni:latest` and `ghcr.io/datum-cloud/galactic-router:latest` respectively — matching images, matching binaries.
+**History:** the original `.github/workflows/release.yaml` built and pushed a single `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` image from a shared `containers/galactic/Dockerfile`, but that image only ever built `galactic-cni` while `config/router/base/daemonset.yaml` ran `command: [/galactic-router]` against it — the image advertised a binary it never built. Both were removed. `publish.yaml` and the per-binary Dockerfiles above fix this by building each binary into its own image, so `config/cni/daemonset.yaml`, `config/router/base/daemonset.yaml`, and `config/gateway/base/daemonset.yaml` now reference `ghcr.io/datum-cloud/galactic-cni:latest`, `ghcr.io/datum-cloud/galactic-router:latest`, and `ghcr.io/datum-cloud/galactic-gateway:latest` respectively — matching images, matching binaries.
 
 ---
 
@@ -608,10 +613,11 @@ Runs on every PR and push to `main`. Two tiers:
 | Controller watch graph                     | `internal/controller/bgprouter_controller.go:SetupWithManager` |
 | CRD status update logic                    | `internal/controller/status.go`, `bgprouter_controller.go:updateRouterStatus` |
 | Orphaned CRD/VRF garbage collection         | `internal/controller/gc_controller.go`, `internal/gc/gc.go`   |
-| RBAC pre-flight self-check                 | `cmd/galactic-router/main.go:checkWatchPermissions`           |
+| RBAC pre-flight self-check                 | `cmd/galactic-router/main.go:checkWatchPermissions` (BGP-family CRDs), `cmd/galactic-gateway/main.go:checkWatchPermissions` (NetworkGateway/NetworkRule/BGPAdvertisement/BGPRouter) |
 | Interface naming / base62 encoding         | `internal/plumbing/intf/intf.go`                             |
 | Hash-based no-op suppression               | `internal/hash/hash.go`; annotation `galactic.datum.net/config-hash` on BGPRouter |
 | GoBGP server lifecycle (start/reconfigure) | `internal/runtime/gobgp/server.go`                          |
+| Edge XDP NAT+LB gateway (full detail)      | `internal/gateway/doc.go`, `internal/plumbing/ebpf/edgeprog/doc.go` |
 
 **Stable vs. frequently changed:**
 - Stable: `internal/plumbing/` (pure kernel primitives), `internal/model/types.go`, `internal/runtime/runtime.go` (interface)
@@ -628,4 +634,4 @@ Runs on every PR and push to `main`. Two tiers:
 - The master plugin's ADD result is the runtime's authoritative CNI result for the whole chain — `galactic-route`/`galactic-bgp` (chained after it) both pass `prevResult` straight through unchanged. A successful ADD response does not by itself guarantee `galactic-bgp` has even run yet, let alone that the BGP CRDs exist.
 - `types.PluginConf.PrevResult` (from `containernetworking/cni/pkg/types`) has JSON tag `"-"` and is **never populated** by plain `json.Unmarshal`; only the sibling `RawPrevResult map[string]interface{}` field actually receives the previous plugin's result. A pre-existing quirk of that library, not specific to this codebase — every CNI-chain package that reads prevResult (`internal/cni/ops_check.go`, `internal/cnibgp/prevresult.go`, `internal/cniroute/ops_add.go`) reads `RawPrevResult` for this reason.
 - No binary's `cmdDel` deletes the VRF, veth/tap, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — each binary's own DEL only handles its own per-container bookkeeping (IPAM deallocation, guest-netns/host-device cleanup). Shared-resource cleanup is entirely the GC controller's job (`internal/gc`), to avoid racing a concurrent ADD during pod restarts.
-- Production images are published by `.github/workflows/publish.yaml` as two separate per-binary images (`galactic-cni`, `galactic-router`), not one shared image — see CI/CD above. `galactic-cni`'s own image carries all five CNI-chain binaries plus `vmtap-cni`/`host-device`, not just `galactic-cni` itself.
+- Production images are published by `.github/workflows/publish.yaml` as separate per-binary images (`galactic-cni`, `galactic-router`, `galactic-gateway`, `fabric-router`), not one shared image — see CI/CD above. `galactic-cni`'s own image carries all five CNI-chain binaries plus `vmtap-cni`/`host-device`, not just `galactic-cni` itself.
