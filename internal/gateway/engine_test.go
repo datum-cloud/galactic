@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -187,6 +188,59 @@ func TestEngine_ReconcileApplyErrorReportsUnhealthyKeepsGoing(t *testing.T) {
 	}
 }
 
+func TestEngine_ReconcileApplyErrorReleasesQuotaReservation(t *testing.T) {
+	dp := newFakeDatapath()
+	dp.applyErr = errors.New("simulated datapath failure")
+	quota := &fakeQuota{}
+	e := NewEngine(dp, quota, &fakeTelemetry{})
+
+	desired := EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}}
+	if _, err := e.Reconcile(context.Background(), desired); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Reconcile never adds a failed key to e.active, so this is the only
+	// chance the reservation ever gets to be released.
+	if len(quota.released) != 1 || quota.released[0] != testKeyA {
+		t.Errorf("quota.released = %v, want [%s] after a failed apply", quota.released, testKeyA)
+	}
+}
+
+func TestEngine_ReconcileRemoveErrorKeepsRuleActiveAndReleasesQuota(t *testing.T) {
+	dp := newFakeDatapath()
+	quota := &fakeQuota{}
+	e := NewEngine(dp, quota, &fakeTelemetry{})
+	ctx := context.Background()
+
+	if _, err := e.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}}}); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+
+	dp.removeErr = errors.New("simulated teardown failure")
+	status, err := e.Reconcile(ctx, EngineState{Rules: map[string]DesiredRule{}})
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if status.Healthy {
+		t.Error("status.Healthy = true, want false (datapath teardown failed)")
+	}
+	if len(status.Rules) != 1 || !strings.Contains(status.Rules[0].Error, "simulated teardown failure") {
+		t.Errorf("status.Rules = %+v, want one entry reporting the datapath error", status.Rules)
+	}
+	if len(quota.released) != 1 || quota.released[0] != testKeyA {
+		t.Errorf("quota.released = %v, want [%s] even though datapath removal failed", quota.released, testKeyA)
+	}
+
+	// The key stays active so the next pass retries the datapath teardown.
+	active, err := e.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(active.Rules) != 1 || active.Rules[0].Key != testKeyA {
+		t.Errorf("Status() = %+v, want %q still active after a failed teardown", active, testKeyA)
+	}
+}
+
 func TestEngine_StatusReflectsActiveRulesWithoutReconciling(t *testing.T) {
 	dp := newFakeDatapath()
 	e := NewEngine(dp, &fakeQuota{}, &fakeTelemetry{})
@@ -228,6 +282,33 @@ func TestEngine_StopTearsDownEveryActiveRule(t *testing.T) {
 	}
 	if len(status.Rules) != 0 {
 		t.Errorf("Status() after Stop = %+v, want no active rules", status)
+	}
+}
+
+func TestEngine_StopKeepsEveryFailedTeardownActive(t *testing.T) {
+	dp := newFakeDatapath()
+	e := NewEngine(dp, &fakeQuota{}, &fakeTelemetry{})
+	ctx := context.Background()
+
+	desired := EngineState{Rules: map[string]DesiredRule{testKeyA: {Key: testKeyA}, testKeyB: {Key: testKeyB}}}
+	if _, err := e.Reconcile(ctx, desired); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	dp.removeErr = errors.New("simulated teardown failure")
+	if err := e.Stop(ctx); err == nil {
+		t.Fatal("Stop() = nil, want the first teardown error")
+	}
+
+	// Both teardowns failed, so neither may be dropped -- whichever key
+	// map iteration reaches second must not fall through to the delete
+	// just because the first one already set firstErr.
+	status, err := e.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.Rules) != 2 {
+		t.Errorf("Status() after a wholly-failed Stop = %+v, want both rules still active", status)
 	}
 }
 

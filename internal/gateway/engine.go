@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -112,8 +113,12 @@ func (e *Engine) Stop(ctx context.Context) error {
 
 	var firstErr error
 	for key := range e.active {
-		if err := e.removeRuleLocked(ctx, key); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("stop: remove rule %s: %w", key, err)
+		// A key whose teardown failed stays active whether or not an
+		// earlier key already failed; only the first error is returned.
+		if err := e.removeRuleLocked(ctx, key); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("stop: remove rule %s: %w", key, err)
+			}
 			continue
 		}
 		delete(e.active, key)
@@ -143,6 +148,14 @@ func (e *Engine) applyRuleLocked(ctx context.Context, rule DesiredRule) error {
 	}
 
 	if err := e.datapath.ApplyRule(ctx, rule); err != nil {
+		// Reconcile only adds the key to e.active on success, so no later
+		// removeRuleLocked would ever release the reservation made above.
+		if relErr := e.quota.Release(ctx, rule.Key); relErr != nil {
+			return errors.Join(
+				fmt.Errorf("apply datapath rule %s: %w", rule.Key, err),
+				fmt.Errorf("release quota for %s: %w", rule.Key, relErr),
+			)
+		}
 		return fmt.Errorf("apply datapath rule %s: %w", rule.Key, err)
 	}
 
@@ -153,11 +166,18 @@ func (e *Engine) applyRuleLocked(ctx context.Context, rule DesiredRule) error {
 // removeRuleLocked tears down a single rule's datapath and quota state.
 // Caller must hold e.mu.
 func (e *Engine) removeRuleLocked(ctx context.Context, key string) error {
-	if err := e.datapath.RemoveRule(ctx, key); err != nil {
-		return fmt.Errorf("remove datapath rule %s: %w", key, err)
+	// Quota is released even when datapath removal fails, so a reservation
+	// cannot outlive the rule; Release is a no-op for an already-released
+	// key, so the caller's next retry stays correct.
+	dpErr := e.datapath.RemoveRule(ctx, key)
+	if dpErr != nil {
+		dpErr = fmt.Errorf("remove datapath rule %s: %w", key, dpErr)
 	}
 	if err := e.quota.Release(ctx, key); err != nil {
-		return fmt.Errorf("release quota for %s: %w", key, err)
+		return errors.Join(dpErr, fmt.Errorf("release quota for %s: %w", key, err))
+	}
+	if dpErr != nil {
+		return dpErr
 	}
 
 	e.telemetry.RuleRemoved(ctx, key)
