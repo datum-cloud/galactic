@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
 
 	"github.com/cilium/ebpf/link"
@@ -88,12 +87,6 @@ func setupGatewayDatapath(
 	if err != nil {
 		_ = objs.Close()
 		return nil, fmt.Errorf("attach edge gateway datapath to public interface %q: %w", publicInterface, err)
-	}
-
-	if _, err := net.InterfaceByName(publicInterface); err != nil {
-		_ = xdpLink.Close()
-		_ = objs.Close()
-		return nil, fmt.Errorf("resolve public interface %q: %w", publicInterface, err)
 	}
 
 	datapath, err := gateway.NewKernelDatapath(objs, gwAddr)

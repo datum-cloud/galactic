@@ -5,8 +5,9 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 
@@ -68,9 +69,19 @@ func runCmd(cfg *config.GatewayConfig) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 
-	ctx := ctrl.SetupSignalHandler()
+	// ctx's cause distinguishes a normal signal-triggered shutdown from the
+	// health server's own Serve failure below (#360) -- see the cause check
+	// after mgr.Start.
+	ctx, cancel := context.WithCancelCause(ctrl.SetupSignalHandler())
+	defer cancel(nil)
 
-	// Start gRPC health server.
+	// Start gRPC health server. grpchealth.NewServer() defaults the ""
+	// overall-health service to SERVING, so that must be overridden to
+	// NOT_SERVING here, explicitly and immediately: otherwise a probe could
+	// see "healthy" for the entire window before the datapath below is
+	// even attached, which is exactly the failure #360 describes. Only once
+	// the datapath is attached and the rule table is reachable does this
+	// flip to SERVING, further down.
 	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", fmt.Sprintf(":%d", grpcHealthPort))
 	if err != nil {
 		return fmt.Errorf("listen on gRPC health port %d: %w", grpcHealthPort, err)
@@ -78,10 +89,15 @@ func runCmd(cfg *config.GatewayConfig) error {
 	grpcSrv := grpc.NewServer()
 	healthSrv := grpchealth.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
-	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	go func() {
+		// A Serve failure here is fatal, not merely logged: with no health
+		// server left running and nothing to notice, the process would
+		// otherwise carry on with no health signal at all. Canceling ctx
+		// with this error as its cause carries it out through mgr.Start
+		// below, the same way any other fatal startup error does.
 		if serveErr := grpcSrv.Serve(lis); serveErr != nil {
-			log.Printf("gRPC health server: %v", serveErr)
+			cancel(fmt.Errorf("gRPC health server: %w", serveErr))
 		}
 	}()
 	go func() {
@@ -101,6 +117,9 @@ func runCmd(cfg *config.GatewayConfig) error {
 	if err != nil {
 		return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 	}
+	// Only now is the datapath attached and its rule table reachable --
+	// report serving from here on, not from process start (#360).
+	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	// Real (not stubbed) QuotaEnforcer/TelemetryEmitter — see
 	// internal/gateway/quota.go and telemetry.go's doc comments for what
@@ -134,6 +153,13 @@ func runCmd(cfg *config.GatewayConfig) error {
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
+	}
+	// mgr.Start only returns nil once ctx is Done, and by then ctx always
+	// has a cause: either context.Canceled (an ordinary signal-triggered
+	// shutdown) or the gRPC health server's own fatal Serve error from
+	// above. Only the latter should fail the process.
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause
 	}
 
 	return nil

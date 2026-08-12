@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -143,6 +144,18 @@ func (c *GatewayConfig) Validate() error {
 	if c.SRv6Address == "" {
 		return fmt.Errorf(
 			"SRv6 address is required (use --gateway-srv6-address flag or %s env var)", EnvGatewaySRv6Address)
+	}
+	addr, err := netip.ParseAddr(c.SRv6Address)
+	if err != nil {
+		return fmt.Errorf("SRv6 address %q is not a valid IP address: %w", c.SRv6Address, err)
+	}
+	// Caught eventually anyway by internal/gateway/kerneldatapath.go's own
+	// identical Is6()/Is4In6() check, but late: only once setupGatewayDatapath
+	// has already loaded and attached the eBPF datapath. Reject it here
+	// instead, at startup, with a message that names the actual problem
+	// rather than surfacing as a deeper, less obvious kernel-datapath error.
+	if !addr.Is6() || addr.Is4In6() {
+		return fmt.Errorf("SRv6 address %q must be a native IPv6 address, not IPv4", c.SRv6Address)
 	}
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
 		return errors.New("metrics port must be between 1 and 65535")

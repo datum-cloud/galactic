@@ -81,6 +81,28 @@ func TestGatewayConfigValidate(t *testing.T) {
 			wantErr: "SRv6 address is required",
 		},
 		{
+			name: "unparseable srv6 address",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     "not-an-ip-address",
+			},
+			wantErr: "is not a valid IP address",
+		},
+		{
+			// Regression test for #360: an IPv4 address used to pass this
+			// Validate() call and only fail later, deeper in, at
+			// internal/gateway/kerneldatapath.go's identical Is6()/Is4In6()
+			// check -- reject it here instead, at startup.
+			name: "ipv4 srv6 address is wrong family",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     "203.0.113.1",
+			},
+			wantErr: "must be a native IPv6 address",
+		},
+		{
 			name: "invalid metrics port",
 			envVars: map[string]string{
 				EnvGatewayNodeName:        testGatewayNodeName,
