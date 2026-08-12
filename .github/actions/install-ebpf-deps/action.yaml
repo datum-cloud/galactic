@@ -1,0 +1,29 @@
+# Copyright 2026 Datum Cloud, Inc.
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: Install eBPF build dependencies
+description: >-
+  Installs the pinned clang/llvm/linux-libc-dev toolchain every job needs to
+  regenerate internal/plumbing/ebpf/prog's bpf2go output, which is gitignored
+  (see that package's doc.go).
+
+runs:
+  using: composite
+  steps:
+    # Pinned to an explicit versioned package (clang-18/llvm-18) rather than
+    # the unversioned clang/llvm meta-packages, matching ci.yaml's
+    # workflow-level BPF2GO_CC pin -- keeps the BPF object bytes (BTF, debug
+    # info, section layout) produced by one job identical to every other
+    # job's regeneration instead of drifting with whatever clang a future
+    # runner-image bump resolves to. Bumping the version here means bumping
+    # BPF2GO_CC with it.
+    #
+    # linux-libc-dev is listed explicitly too -- prog/doc.go's -idirafter
+    # workaround exists specifically to find its headers, so no job should
+    # rely on it merely happening to be preinstalled.
+    - name: Install clang/llvm/linux-libc-dev
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
