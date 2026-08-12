@@ -15,10 +15,10 @@ import (
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/vishvananda/netlink"
 
-	"go.datum.net/galactic/internal/cni/hostgw"
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/cnimaster"
+	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -128,7 +128,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 
 	// Configure the gateway address on the host tap and install the VRF
 	// route — kernel-interface work this plugin owns (see
-	// internal/cni/hostgw's doc comment).
+	// internal/hostgw's doc comment).
 	if err := hostgw.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, nil); err != nil {
 		return err
 	}
