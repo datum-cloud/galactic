@@ -88,11 +88,12 @@ tasks:
       - task: build:binaries
 
   build:ebpf:
-    desc: Regenerate the eBPF uSID datapath from usid.c (requires clang)
+    desc: Regenerate the eBPF uSID and edge gateway NAT/LB datapaths (requires clang)
     run: once
     deps: [require-clang]
     cmds:
       - go generate ./internal/plumbing/ebpf/prog/...
+      - go generate ./internal/plumbing/ebpf/edgeprog/...
 
   require-clang:
     internal: true
