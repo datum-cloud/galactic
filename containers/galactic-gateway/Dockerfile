@@ -1,4 +1,4 @@
-# Build the galactic router binary
+# Build the galactic-gateway binary
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -21,20 +21,20 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# galactic-router transitively imports both internal/plumbing/ebpf/prog
-# (via usidmap) and, via the NetworkGateway/NetworkRule reconcilers'
-# internal/gateway.Engine, internal/plumbing/ebpf/edgemap's
-# internal/plumbing/ebpf/edgeprog -- neither package's bpf2go output
+# galactic-gateway transitively imports both internal/plumbing/ebpf/edgeprog
+# (the edge NAT+LB XDP program it loads directly) and, via
+# internal/plumbing/ebpf/edgepreflight, internal/plumbing/ebpf/prog (the
+# SRv6 uSID TC-BPF program) -- neither package's bpf2go output
 # (*_bpfel.go/.o, *_bpfeb.go/.o) is committed to git (see each package's
 # doc.go), so both must be regenerated here, same as
-# containers/galactic-gateway/Dockerfile does.
+# containers/galactic-router/Dockerfile now does too.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       clang llvm linux-libc-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN go generate ./internal/plumbing/ebpf/prog/...
 RUN go generate ./internal/plumbing/ebpf/edgeprog/...
 
-# Build the router
+# Build galactic-gateway
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
       -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
@@ -43,16 +43,16 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
       -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
-    -o galactic-router ./cmd/galactic-router
+    -o galactic-gateway ./cmd/galactic-gateway
 
-# Use distroless as minimal base image to package the binary. galactic-router
-# drives all VRF/SRv6/route/BGP state through the netlink and GoBGP Go
-# libraries directly, never shells out to `ip` or any other host CLI tool, so
-# no shell is required in the final image.
+# Use distroless as minimal base image to package the binary. galactic-gateway
+# drives its eBPF/XDP and BGPAdvertisement CRD state through the cilium/ebpf
+# and controller-runtime Go libraries directly, never shells out to `ip` or
+# any other host CLI tool, so no shell is required in the final image.
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/galactic-router .
+COPY --from=builder /workspace/galactic-gateway .
 USER 65532:65532
 
-ENTRYPOINT ["/galactic-router"]
+ENTRYPOINT ["/galactic-gateway"]

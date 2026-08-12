@@ -32,6 +32,19 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  publish-galactic-gateway-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    with:
+      image-name: galactic-gateway
+      dockerfile-path: containers/galactic-gateway/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   publish-fabric-router-image:
     permissions:
       id-token: write
@@ -46,7 +59,13 @@ jobs:
     secrets: inherit
 
   publish-kustomize-bundles:
-    needs: [publish-galactic-cni-image, publish-galactic-router-image, publish-fabric-router-image]
+    needs:
+      [
+        publish-galactic-cni-image,
+        publish-galactic-router-image,
+        publish-galactic-gateway-image,
+        publish-fabric-router-image,
+      ]
     permissions:
       id-token: write
       contents: read
