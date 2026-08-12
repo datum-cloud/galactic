@@ -36,6 +36,15 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if cfg.Reflector {
 		t.Error("Reflector = true, want false")
 	}
+	if cfg.WebhookEnabled {
+		t.Error("WebhookEnabled = true, want false (disabled by default)")
+	}
+	if cfg.WebhookPort != DefaultRouterWebhookPort {
+		t.Errorf("WebhookPort = %d, want %d", cfg.WebhookPort, DefaultRouterWebhookPort)
+	}
+	if cfg.WebhookCertDir != "" {
+		t.Errorf("WebhookCertDir = %q, want empty", cfg.WebhookCertDir)
+	}
 }
 
 func TestRouterConfigEnvOverride(t *testing.T) {
@@ -48,6 +57,9 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterGRPCHealthPort, "5179")
 	t.Setenv(EnvRouterGCNamespace, "custom-ns")
 	t.Setenv(EnvRouterGCInterval, "10m")
+	t.Setenv(EnvRouterWebhookEnabled, testBoolTrue)
+	t.Setenv(EnvRouterWebhookPort, "9444")
+	t.Setenv(EnvRouterWebhookCertDir, "/tmp/certs")
 
 	cfg := NewRouterConfig()
 
@@ -77,6 +89,15 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	}
 	if cfg.GCInterval != 10*time.Minute {
 		t.Errorf("GCInterval = %v, want 10m", cfg.GCInterval)
+	}
+	if !cfg.WebhookEnabled {
+		t.Error("WebhookEnabled = false, want true")
+	}
+	if cfg.WebhookPort != 9444 {
+		t.Errorf("WebhookPort = %d, want 9444", cfg.WebhookPort)
+	}
+	if cfg.WebhookCertDir != "/tmp/certs" {
+		t.Errorf("WebhookCertDir = %q, want %q", cfg.WebhookCertDir, "/tmp/certs")
 	}
 }
 
@@ -171,6 +192,15 @@ func TestRouterConfigValidate(t *testing.T) {
 				EnvRouterGRPCHealthPort: "0",
 			},
 			wantErr: "grpc health port must be between",
+		},
+		{
+			name: "invalid webhook port",
+			envVars: map[string]string{
+				EnvRouterNodeName:    testRouterNodeName,
+				EnvRouterMode:        ModeTenant,
+				EnvRouterWebhookPort: "0",
+			},
+			wantErr: "webhook port must be between",
 		},
 	}
 

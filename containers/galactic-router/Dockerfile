@@ -21,14 +21,18 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# galactic-router transitively imports internal/plumbing/ebpf/prog (via
-# usidmap), whose bpf2go output (usid_bpfel.go/.o, usid_bpfeb.go/.o) isn't
-# committed to git (see that package's doc.go) -- regenerate it from
-# usid.c here, same as containers/galactic-cni/Dockerfile.
+# galactic-router transitively imports both internal/plumbing/ebpf/prog
+# (via usidmap) and, via the NetworkGateway/NetworkRule reconcilers'
+# internal/gateway.Engine, internal/plumbing/ebpf/edgemap's
+# internal/plumbing/ebpf/edgeprog -- neither package's bpf2go output
+# (*_bpfel.go/.o, *_bpfeb.go/.o) is committed to git (see each package's
+# doc.go), so both must be regenerated here, same as
+# containers/galactic-cni/Dockerfile does for prog.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       clang llvm linux-libc-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN go generate ./internal/plumbing/ebpf/prog/...
+RUN go generate ./internal/plumbing/ebpf/edgeprog/...
 
 # Build the router
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

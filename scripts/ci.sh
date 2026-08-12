@@ -84,8 +84,10 @@ case "$COMMAND" in
     echo "--- Installing BGP CRDs (datum-cloud/network)"
     # Extract the datum-cloud/network commit SHA from go.mod (pseudo-version
     # suffix after the last hyphen), same approach as
-    # deploy/containerlab/scripts/deploy-system.sh.
-    NETWORK_SHA=$(awk '/go\.datum\.net\/network / {print $2}' go.mod | sed 's/.*-//')
+    # deploy/containerlab/scripts/deploy-system.sh. $1 must match the
+    # require line's module path exactly, not just a substring, so an
+    # unrelated line can't corrupt NETWORK_SHA.
+    NETWORK_SHA=$(awk '$1 == "go.datum.net/network" {print $2}' go.mod | sed 's/.*-//')
     NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
     for crd in \
       network.datumapis.com_bgpadvertisements.yaml \

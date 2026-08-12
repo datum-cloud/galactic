@@ -21,6 +21,11 @@ const (
 	DefaultRouterGRPCHealthPort = 5000
 	DefaultRouterGCNamespace    = "galactic-system"
 	DefaultRouterGCInterval     = 5 * time.Minute
+
+	// DefaultRouterWebhookPort matches sigs.k8s.io/controller-runtime/pkg/webhook's
+	// own DefaultPort, named here so callers don't need that import just to
+	// read the default.
+	DefaultRouterWebhookPort = 9443
 )
 
 // --- Router environment variable keys --------------------------------------
@@ -35,6 +40,18 @@ const (
 	EnvRouterGRPCHealthPort = "GALACTIC_ROUTER_GRPC_HEALTH_PORT"
 	EnvRouterGCNamespace    = "GALACTIC_ROUTER_GC_NAMESPACE"
 	EnvRouterGCInterval     = "GALACTIC_ROUTER_GC_INTERVAL"
+
+	// EnvRouterWebhookEnabled gates the NetworkRule admission webhook
+	// (internal/webhook). Defaults to false: this is the first webhook in
+	// this codebase, and enabling it requires TLS cert material
+	// (config/webhook/'s kustomization.yaml documents the cert-manager-or-
+	// equivalent prerequisite this repo does not itself provision) plus the
+	// ValidatingWebhookConfiguration/Service manifests to actually be
+	// applied — turning it on without both is a broken deployment, not a
+	// safe default.
+	EnvRouterWebhookEnabled = "GALACTIC_ROUTER_WEBHOOK_ENABLED"
+	EnvRouterWebhookPort    = "GALACTIC_ROUTER_WEBHOOK_PORT"
+	EnvRouterWebhookCertDir = "GALACTIC_ROUTER_WEBHOOK_CERT_DIR"
 )
 
 // --- Router mode constants -------------------------------------------------
@@ -64,6 +81,13 @@ type RouterConfig struct {
 	GRPCHealthPort int
 	GCNamespace    string
 	GCInterval     time.Duration
+
+	// WebhookEnabled/WebhookPort/WebhookCertDir configure the NetworkRule
+	// admission webhook (internal/webhook) -- see
+	// EnvRouterWebhookEnabled's doc comment. Disabled by default.
+	WebhookEnabled bool
+	WebhookPort    int
+	WebhookCertDir string
 }
 
 // NewRouterConfig creates a router config resolver with the GALACTIC_ROUTER
@@ -83,6 +107,9 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("grpc_health_port", DefaultRouterGRPCHealthPort)
 	v.SetDefault("gc_namespace", DefaultRouterGCNamespace)
 	v.SetDefault("gc_interval", DefaultRouterGCInterval.String())
+	v.SetDefault("webhook_enabled", false)
+	v.SetDefault("webhook_port", DefaultRouterWebhookPort)
+	v.SetDefault("webhook_cert_dir", "")
 
 	cfg := &RouterConfig{
 		v:      v,
@@ -108,6 +135,9 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"grpc-health-port", "grpc_health_port"},
 		{"gc-namespace", "gc_namespace"},
 		{"gc-interval", "gc_interval"},
+		{"webhook-enabled", "webhook_enabled"},
+		{"webhook-port", "webhook_port"},
+		{"webhook-cert-dir", "webhook_cert_dir"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -131,6 +161,9 @@ func (c *RouterConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt("grpc_health_port")
 	c.GCNamespace = c.v.GetString("gc_namespace")
 	c.GCInterval = c.v.GetDuration("gc_interval")
+	c.WebhookEnabled = c.v.GetBool("webhook_enabled")
+	c.WebhookPort = c.v.GetInt("webhook_port")
+	c.WebhookCertDir = c.v.GetString("webhook_cert_dir")
 }
 
 // Validate checks that the required configuration fields are set and that
@@ -159,6 +192,9 @@ func (c *RouterConfig) Validate() error {
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
+	}
+	if c.WebhookPort < 1 || c.WebhookPort > 65535 {
+		return errors.New("webhook port must be between 1 and 65535")
 	}
 	return nil
 }

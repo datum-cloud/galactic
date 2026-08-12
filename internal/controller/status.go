@@ -101,3 +101,21 @@ func setVRFInstanceCondition(vrf *bgpv1alpha1.BGPVRFInstance, condition metav1.C
 	condition.ObservedGeneration = vrf.Generation
 	meta.SetStatusCondition(&vrf.Status.Conditions, condition)
 }
+
+// setGatewayCondition sets or updates a condition on NetworkGateway.
+// ConditionTypeReady (reused from peer_types.go, not redeclared) is the
+// only condition type NetworkGateway currently uses.
+func setGatewayCondition(gw *bgpv1alpha1.NetworkGateway, condition metav1.Condition) {
+	condition.ObservedGeneration = gw.Generation
+	meta.SetStatusCondition(&gw.Status.Conditions, condition)
+}
+
+// setRuleCondition sets or updates a condition on NetworkRule.
+// ConditionTypeReady and ConditionTypeAccepted (both reused from
+// peer_types.go) are the condition types NetworkRule uses — Accepted per
+// the admission-webhook ownership check (internal/webhook), Ready per the
+// engine's own convergence result for that rule.
+func setRuleCondition(rule *bgpv1alpha1.NetworkRule, condition metav1.Condition) {
+	condition.ObservedGeneration = rule.Generation
+	meta.SetStatusCondition(&rule.Status.Conditions, condition)
+}
