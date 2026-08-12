@@ -1,0 +1,211 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-gateway
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: galactic-gateway
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-gateway
+    spec:
+      # Dedicated gateway-role nodes only, opt-in, matching every other
+      # role's pattern (config/router/tenant, config/router/tenant-control).
+      # Excludes control-plane outright for the same reason those do. See
+      # ../kustomization.yaml for why this base is meant to be instantiated
+      # once per gateway node rather than applied as-is.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - gateway
+      # See ../rbac.yaml's header comment: one ServiceAccount for both
+      # containers is a Kubernetes constraint (a Pod has exactly one
+      # ServiceAccount identity), not a design choice — its ClusterRole
+      # bindings grant the union of what each container needs.
+      serviceAccountName: galactic-gateway
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        # Tenant BGP only — no gateway-role flags/env exist on
+        # galactic-router at all anymore. Identical to config/router/tenant's
+        # own container spec; duplicated here (rather than patched from
+        # config/router/base) because this pod additionally needs a second
+        # container, a distinct grpc-health port, and a scoped-down
+        # securityContext the shared tenant/tenant-control roles don't need
+        # to think about.
+        - name: galactic-router
+          # ":latest" is a placeholder only: no such tag is ever pushed to
+          # GHCR for either container's image. CI resolves and stamps real
+          # version tags here when it publishes the
+          # ghcr.io/datum-cloud/galactic-kustomize OCI bundle (see
+          # .github/workflows/publish.yaml); applying this manifest
+          # directly from a git checkout will fail to pull either image
+          # unless you override both tags first.
+          image: ghcr.io/datum-cloud/galactic-router:latest
+          command:
+            - /galactic-router
+          env:
+            - name: GALACTIC_ROUTER_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: GALACTIC_ROUTER_ROUTER_MODE
+              value: tenant
+            - name: GALACTIC_ROUTER_GC_NAMESPACE
+              value: galactic-system
+            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              value: "-1"
+            # Talos nodes permanently bind 127.0.0.1:5000 for the built-in
+            # /sbin/dashboard; since this DaemonSet runs hostNetwork: true,
+            # the default gRPC health port (5000) always collides on Talos
+            # — see docs/router/configuration.md. This pod's galactic-gateway
+            # container shares the same network namespace (hostNetwork:
+            # true), so its own grpc-health port (below) must also differ
+            # from this one, not just from 5000.
+            - name: GALACTIC_ROUTER_GRPC_HEALTH_PORT
+              value: "5179"
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc-health
+              containerPort: 5179
+              protocol: TCP
+          livenessProbe:
+            grpc:
+              port: 5179
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            grpc:
+              port: 5179
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - NET_ADMIN
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            # GC (internal/gc) checks whether a container's netns bind-mount
+            # still exists on the host to decide whether shared BGP CRDs/VRFs
+            # are orphaned. Without this mount the container has no
+            # visibility into /var/run/netns at all, so that check always
+            # (and incorrectly) reports every namespace as gone.
+            - name: netns
+              mountPath: /var/run/netns
+              readOnly: true
+        - name: galactic-gateway
+          # See the galactic-router container above: same placeholder-tag
+          # caveat.
+          image: ghcr.io/datum-cloud/galactic-gateway:latest
+          command:
+            - /galactic-gateway
+          env:
+            - name: GALACTIC_GATEWAY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: GALACTIC_GATEWAY_GRPC_HEALTH_PORT
+              value: "5181"
+            # GALACTIC_GATEWAY_PUBLIC_INTERFACE/_SRV6_ADDRESS are
+            # intentionally left unset here: the interface name is
+            # deployment-specific and the SRv6 address must be unique per
+            # gateway node (no in-cluster mechanism yet derives it
+            # automatically — see internal/controller/
+            # networkgateway_controller.go's publishSelfAddress doc
+            # comment). Unlike the pre-split galactic-router gateway role
+            # (RouterConfig.Validate treated the jointly-optional pair
+            # both-unset as a harmless no-op), config.GatewayConfig.Validate
+            # requires both — applying this base as-is produces a
+            # crash-looping container, not a quiet no-op. The deployer's
+            # per-node overlay must set both; see
+            # deploy/containerlab/resources/galactic-router-gateway/ for a
+            # worked example (two instances, iad-gateway1/iad-gateway2).
+          ports:
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+            - name: grpc-health
+              containerPort: 5181
+              protocol: TCP
+          livenessProbe:
+            grpc:
+              port: 5181
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            grpc:
+              port: 5181
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # This container needs CAP_BPF for the bpf() syscalls themselves
+          # (program/map creation) on top of NET_ADMIN for the netlink XDP
+          # attach — the same pair config/cni/daemonset.yaml's eBPF-loading
+          # container already uses for its own (TC-BPF) program. PERFMON is
+          # additionally required: the verifier only allows pointer+scalar
+          # arithmetic on packet data/data_end (edgenat.c's DNAT/SNAT
+          # header rewrites) when the loading process is perfmon_capable()
+          # — without it the verifier falls back to its unprivileged-BPF
+          # ruleset and rejects the program with "pointer arithmetic ...
+          # prohibited for !root" even though the container runs as root.
+          # Unlike the pre-split single-container gateway role, the
+          # galactic-router container above no longer carries any of these
+          # — BPF/PERFMON are now confined to the one container that
+          # actually calls into edgeattach.
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - NET_ADMIN
+                - BPF
+                - PERFMON
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            # edgeattach.PinDir pins every edgenat map under
+            # /sys/fs/bpf/galactic-edge, same convention config/cni/
+            # daemonset.yaml's bpf-fs mount documents: bpffs must already be
+            # mounted at this host path by the node itself (type: Directory,
+            # not DirectoryOrCreate — creating a plain directory here if
+            # bpffs weren't mounted would silently produce a regular
+            # filesystem path instead of a real bpf filesystem, masking the
+            # failure instead of surfacing it at load time). The
+            # galactic-edge/ subdirectory itself is created by this
+            # container on first pin.
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+      volumes:
+        - name: netns
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
