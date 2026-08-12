@@ -3,7 +3,7 @@ apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
   name: private
-  namespace: ns50
+  namespace: ns60
 spec:
   config: |-
     {
@@ -12,19 +12,19 @@ spec:
       "plugins": [
         {
           "type": "galactic-veth",
-          "vpc": "50",
-          "vpcattachment": "50",
+          "vpc": "60",
+          "vpcattachment": "60",
           "namespace": "galactic-system",
           "ipam": {
             "type": "galactic-ipam",
-            "ipv4_subnet": "172.20.10.0/24",
-            "address_families": ["ipv4"]
+            "ipv6_subnet": "fd20:60:ff03::/48",
+            "address_families": ["ipv6"]
           }
         },
         {
           "type": "galactic-bgp",
-          "vpc": "50",
-          "vpcattachment": "50",
+          "vpc": "60",
+          "vpcattachment": "60",
           "namespace": "galactic-system"
         }
       ]

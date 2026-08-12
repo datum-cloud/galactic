@@ -19,6 +19,42 @@ nodes:
             - key: galactic.datumapis.com/node
               value: control
               effect: NoSchedule
+  # Dedicated edge XDP NAT+LB gateway nodes -- canary for
+  # config/gateway/base/. Two nodes, active-active, matching the design's
+  # own topology requirement (see
+  # internal/gateway/doc.go): a single gateway node would still work but
+  # would never actually exercise the primary/secondary BGP local-pref
+  # failover path. Tainted the same way the control role is above, to
+  # keep ordinary tenant pods (resources/tenants/*/base/pod.yaml's
+  # netshoot Deployments) off these dedicated nodes -- only DaemonSets
+  # with a blanket toleration (config/router/base/daemonset.yaml,
+  # config/fabric/daemonset.yaml) tolerate it.
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: iad
+      galactic.datumapis.com/node: gateway
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          name: iad-gateway1
+          taints:
+            - key: galactic.datumapis.com/node
+              value: gateway
+              effect: NoSchedule
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: iad
+      galactic.datumapis.com/node: gateway
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          name: iad-gateway2
+          taints:
+            - key: galactic.datumapis.com/node
+              value: gateway
+              effect: NoSchedule
 networking:
   ipFamily: ipv6
   disableDefaultCNI: true

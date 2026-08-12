@@ -5,4 +5,4 @@ resources:
 configMapGenerator:
   - name: fabric-config
     files:
-      - frr.conf.dfw-worker=frr.conf
+      - frr.conf.dfw-worker

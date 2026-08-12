@@ -1,0 +1,21 @@
+# iad-gateway2's instantiation of config/gateway/base — the sibling of
+# ../iad-gateway1/; see that dir's kustomization.yaml for the shared doc
+# comment on why this role needs one instance per gateway node.
+namespace: galactic-system
+resources:
+  - ../base
+  - bgprouter.yaml
+  - bgppeer.yaml
+  - networkgateway.yaml
+patches:
+  - path: node-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-gateway
+  - target:
+      kind: DaemonSet
+      name: galactic-gateway
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: galactic-gateway2

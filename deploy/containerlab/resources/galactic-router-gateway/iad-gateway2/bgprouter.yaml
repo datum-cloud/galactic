@@ -1,0 +1,18 @@
+apiVersion: network.datumapis.com/v1alpha1
+kind: BGPRouter
+metadata:
+  name: iad-gateway2-tenant
+  namespace: galactic-system
+spec:
+  targetRef:
+    kind: Node
+    name: iad-gateway2
+  roles:
+    - tenant
+  localASN: 65000
+  routerID: "10.0.2.3"
+  srv6Locator: "2001:db8:ff03::/48"
+  nodeID: 3
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn

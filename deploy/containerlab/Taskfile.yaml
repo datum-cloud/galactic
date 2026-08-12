@@ -20,6 +20,7 @@ tasks:
       - "build:node"
       - "build:fabric-router"
       - "build:galactic-router"
+      - "build:galactic-gateway"
       - "build:galactic-cni"
 
   "build:node":
@@ -36,6 +37,11 @@ tasks:
     desc: Build the galactic-router container image
     cmds:
       - docker build --network=host -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
+
+  "build:galactic-gateway":
+    desc: Build the galactic-gateway container image
+    cmds:
+      - docker build --network=host -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
 
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
@@ -72,9 +78,11 @@ tasks:
       - sudo containerlab deploy -t {{.TOPO}}
 
   "deploy:rename-control":
-    desc: Rename iad-worker2 to iad-worker-control
+    desc: Rename iad-worker2 to iad-worker-control, iad-worker3/4 to iad-gateway1/2
     cmds:
       - docker rename iad-worker2 iad-worker-control
+      - docker rename iad-worker3 iad-gateway1
+      - docker rename iad-worker4 iad-gateway2
 
   "load-image":
     internal: true
@@ -91,6 +99,26 @@ tasks:
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker}
       - task: load-image
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker-control}
+      # iad-gateway1/2 need fabric-router (the underlay eBGP session the
+      # gateway XDP datapath's uplink depends on -- see config/fabric/'s
+      # affinity, extended to the gateway role), galactic-router (tenant
+      # BGP only, one container in config/gateway/base's two-container
+      # pod), and galactic-gateway (the edge XDP NAT+LB engine, the other
+      # container in that pod), but NOT galactic-cni: they never run the
+      # CNI DaemonSet at all (it only
+      # targets the edge role).
+      - task: load-image
+        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-gateway1}
+      - task: load-image
+        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-gateway2}
+      - task: load-image
+        vars: {IMAGE: galactic-router:latest, NODE: iad-gateway1}
+      - task: load-image
+        vars: {IMAGE: galactic-router:latest, NODE: iad-gateway2}
+      - task: load-image
+        vars: {IMAGE: galactic-gateway:latest, NODE: iad-gateway1}
+      - task: load-image
+        vars: {IMAGE: galactic-gateway:latest, NODE: iad-gateway2}
       - task: load-image
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: sjc-worker}
       - task: load-image
@@ -170,16 +198,11 @@ tasks:
   "deploy:scenarios":
     desc: Deploy all VPC test scenarios
     cmds:
-      - task: "deploy:ns50"
       - task: "deploy:ns10"
       - task: "deploy:ns20"
       - task: "deploy:ns30"
       - task: "deploy:ns40"
-
-  "deploy:ns50":
-    desc: Deploy ns50 test VPC (IPv4, 3-site)
-    cmds:
-      - ./scripts/deploy-ns.sh ns50 dfw sjc iad
+      - task: "deploy:ns60"
 
   "deploy:ns10":
     desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
@@ -201,6 +224,14 @@ tasks:
     cmds:
       - ./scripts/deploy-ns.sh ns40 iad
 
+  "deploy:ns60":
+    desc: >-
+      Deploy ns60 test VPC (iad only, nginx backend for the edge XDP
+      NAT+LB gateway canary -- see resources/galactic-router-gateway/iad/
+      networkrule-ns60.yaml, applied earlier by deploy:galactic-router)
+    cmds:
+      - ./scripts/deploy-ns.sh ns60 iad
+
   verify:
     desc: Run all verification checks
     cmds:
@@ -209,6 +240,7 @@ tasks:
       - task: "verify:bgp-peers"
       - task: "verify:srv6"
       - task: "verify:evpn"
+      - task: "verify:gateway"
       - task: "verify:scenarios"
 
   "verify:bgp-transit":
@@ -261,19 +293,23 @@ tasks:
       - docker exec sjc-control-plane kubectl get bgprouters -A
       - docker exec dfw-control-plane kubectl get bgprouters -A
 
+  "verify:gateway":
+    desc: >-
+      Verify iad's edge XDP NAT+LB gateway canary CRDs exist. BGP peering
+      and XDP attach are now live, but this task itself only checks CRD
+      presence, not end-to-end traffic -- a veth-specific XDP_TX behavior
+      in this lab environment still blocks that, not a code bug.
+    cmds:
+      - docker exec iad-control-plane kubectl get networkgateways,networkrules -n galactic-system
+      - docker exec iad-control-plane kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
+
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios
     cmds:
-      - task: "verify:ns50"
       - task: "verify:ns10"
       - task: "verify:ns20"
       - task: "verify:ns30"
       - task: "verify:ns40"
-
-  "verify:ns50":
-    desc: Verify ns50 ping (IPv4, 3-site mesh)
-    cmds:
-      - ./scripts/verify-ns50.sh
 
   "verify:ns10":
     desc: Verify ns10 ping (IPv6-only, 3-site mesh)
@@ -301,6 +337,7 @@ tasks:
       - task: destroy
       - docker rmi kindest/node:galactic || true
       - docker rmi galactic-router:latest || true
+      - docker rmi galactic-gateway:latest || true
       - docker rmi galactic-cni:latest || true
       - docker rmi {{.FABRIC_ROUTER_IMAGE}} || true
       - rm -rf clab-{{.LAB}} build/

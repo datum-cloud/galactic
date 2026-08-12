@@ -1,8 +1,8 @@
-# Tenant Test VPCs (ns10–ns50)
+# Tenant Test VPCs (ns10–ns40)
 
 ## Overview
 
-The lab deploys five test VPCs — `ns50`, `ns10`, `ns20`, `ns30`, `ns40` — to
+The lab deploys four test VPCs — `ns10`, `ns20`, `ns30`, `ns40` — to
 exercise different corners of the CNI/BGP/SRv6 path: single- vs. dual-stack
 addressing, 3-site cross-site EVPN reachability, and same-node/same-VRF
 pod-to-pod connectivity. Every one of them follows the same mechanism: Multus
@@ -21,7 +21,6 @@ They differ only in scope and addressing:
 
 | VPC    | Sites                        | Address families | VRF interface    | Notes |
 |--------|------------------------------|-------------------|-------------------|-------|
-| `ns50` | dfw, sjc, iad (3-site)       | IPv4 + public IPv6 ptp | `G000000050V` | Also defines a `public` NAD with an IPv6 IPAM pool for external-connectivity testing. |
 | `ns10` | dfw, sjc, iad (3-site)       | IPv6-only (fd20 ULA) | `G000000010V` | No `ipv4_subnet` at all. |
 | `ns20` | dfw, sjc, iad (3-site)       | Dual-stack (fd20 ULA + IPv4) | `G000000020V` | Both families active; exercises the dual-stack IPAM path. |
 | `ns30` | dfw only, 2 attachments      | IPv6-only (fd20 ULA) | `G000000030V` | Two distinct attachments (`private`/`private-b`, distinct `vpcattachment` values, same `vpc`), each its own single-replica Deployment, both land on `dfw-worker` and share one VRF — same-node connectivity, no cross-site hop. `verify:ns30` asserts the two pods share a node. |
@@ -63,8 +62,8 @@ sharing a VPC on a node (`ns30`'s and `ns40`'s two apiece) resolves to the
 same `BGPVRFInstance` and therefore the same Argument, so each VPC still
 consumes exactly one slot per node regardless of how many attachments land on
 it. Concretely, expect hextets in the `0xe001`–`0xefff` range; the exact
-value depends on allocation order (`ns50` is provisioned first in `task
-deploy`, then `ns10`, `ns20`, `ns30`, `ns40` in that order, each consuming the
+value depends on allocation order (`ns10` is provisioned first in `task
+deploy`, then `ns20`, `ns30`, `ns40` in that order, each consuming the
 next free slot on each node it lands on). Always confirm the live value
 rather than trusting a table:
 
@@ -74,27 +73,24 @@ docker exec dfw-control-plane kubectl get bgpvrfinstances -A
 
 ## Addressing reference
 
-| Site | VPC    | IPv6 pool (fd20 ULA)  | IPv4 subnet       | Public IPv6 pool   |
-|------|--------|------------------------|--------------------|---------------------|
-| dfw  | `ns50` | —                      | `172.20.1.0/24`   | `2001:db8:1::/64`  |
-| sjc  | `ns50` | —                      | `172.20.20.0/24`  | `2001:db8:20::/64` |
-| iad  | `ns50` | —                      | `172.20.10.0/24`  | `2001:db8:10::/64` |
-| dfw  | `ns10` | `fd20:10:ff01::/48`   | none               | —                   |
-| sjc  | `ns10` | `fd20:10:ff02::/48`   | none               | —                   |
-| iad  | `ns10` | `fd20:10:ff03::/48`   | none               | —                   |
-| dfw  | `ns20` | `fd20:20:ff01::/48`   | `172.21.1.0/24`   | —                   |
-| sjc  | `ns20` | `fd20:20:ff02::/48`   | `172.21.20.0/24`  | —                   |
-| iad  | `ns20` | `fd20:20:ff03::/48`   | `172.21.10.0/24`  | —                   |
-| dfw  | `ns30` (`private`)   | `fd20:30:ff01::/48`   | none               | —                   |
-| dfw  | `ns30` (`private-b`) | `fd20:30:ff02::/48`   | none               | —                   |
-| iad  | `ns40` (`private`)   | none                   | `172.40.10.0/24`  | —                   |
-| iad  | `ns40` (`private-b`) | none                   | `172.40.20.0/24`  | —                   |
+| Site | VPC    | IPv6 pool (fd20 ULA)  | IPv4 subnet       |
+|------|--------|------------------------|--------------------|
+| dfw  | `ns10` | `fd20:10:ff01::/48`   | none               |
+| sjc  | `ns10` | `fd20:10:ff02::/48`   | none               |
+| iad  | `ns10` | `fd20:10:ff03::/48`   | none               |
+| dfw  | `ns20` | `fd20:20:ff01::/48`   | `172.21.1.0/24`   |
+| sjc  | `ns20` | `fd20:20:ff02::/48`   | `172.21.20.0/24`  |
+| iad  | `ns20` | `fd20:20:ff03::/48`   | `172.21.10.0/24`  |
+| dfw  | `ns30` (`private`)   | `fd20:30:ff01::/48`   | none               |
+| dfw  | `ns30` (`private-b`) | `fd20:30:ff02::/48`   | none               |
+| iad  | `ns40` (`private`)   | none                   | `172.40.10.0/24`  |
+| iad  | `ns40` (`private-b`) | none                   | `172.40.20.0/24`  |
 
-`ns50`'s IPv4 pools and `ns20`'s are deliberately from distinct `/16` blocks
-(`172.20.0.0/16` vs. `172.21.0.0/16`) so the two VPCs' addressing never
-overlaps; `ns40`'s `172.40.0.0/16` is separate again, split further into a
-`.10.0/24`/`.20.0/24` pair between its two attachments (same pattern `ns20`
-uses per-site). The IPv6 pools for `ns10`/`ns20`/`ns30` share the `fd20` ULA
+`ns20`'s IPv4 pool (`172.21.0.0/16`) and `ns40`'s (`172.40.0.0/16`) are
+deliberately from distinct `/16` blocks so the two VPCs' addressing never
+overlaps; `ns40`'s is split further into a `.10.0/24`/`.20.0/24` pair
+between its two attachments (same pattern `ns20` uses per-site). The IPv6
+pools for `ns10`/`ns20`/`ns30` share the `fd20` ULA
 prefix, distinguished by the second hextet (`10`/`20`/`30`); `ns30`'s two
 attachments split further into `ff01`/`ff02` (same pattern `ns10`/`ns20` use
 per-site).
@@ -119,13 +115,12 @@ docker exec sjc-control-plane kubectl get pods -n galactic-system
 
 ## Deploying a VPC's workloads
 
-`task deploy` already runs all five as its final steps. To (re-)apply just
+`task deploy` already runs all four as its final steps. To (re-)apply just
 one VPC's workloads on its own — e.g. after the lab was restarted — use its
 `task deploy:nsNN` target, which wraps `scripts/deploy-ns.sh <namespace>
 <site...>`:
 
 ```bash
-task deploy:ns50   # -> deploy-ns.sh ns50 dfw sjc iad
 task deploy:ns10   # -> deploy-ns.sh ns10 dfw sjc iad
 task deploy:ns20   # -> deploy-ns.sh ns20 dfw sjc iad
 task deploy:ns30   # -> deploy-ns.sh ns30 dfw
@@ -145,7 +140,7 @@ docker exec sjc-control-plane kubectl get pods -n <namespace> -o wide
 docker exec iad-control-plane kubectl get pods -n <namespace> -o wide
 ```
 
-For the 3-site VPCs (`ns50`, `ns10`, `ns20`), expect one `Running` pod per
+For the 3-site VPCs (`ns10`, `ns20`), expect one `Running` pod per
 site. For the single-site VPCs, expect **two** `Running` pods — one per
 attachment (`private`/`private-b`, distinct Deployments) — both on the one
 site's worker (`dfw-worker` for `ns30`, `iad-worker` for `ns40` — not
@@ -175,7 +170,6 @@ resolves every pod's address and pings across every applicable pair, in both
 directions:
 
 ```bash
-task verify:ns50   # 3-site mesh, IPv4
 task verify:ns10   # 3-site mesh, IPv6
 task verify:ns20   # 3-site mesh, both families
 task verify:ns30   # same-node pod-to-pod, IPv6 (dfw)
@@ -190,7 +184,7 @@ above](#overview) for what actually keeps them there today — and a split pair
 would still ping fine over the cross-site path, so without the assertion these
 VPCs would silently stop exercising the same-node/same-VRF case they exist for.
 
-`task verify` (via `task verify:scenarios`) runs all five. Use the scripts as
+`task verify` (via `task verify:scenarios`) runs all four. Use the scripts as
 the reference for how to resolve pod names/addresses by hand (`lib.sh`'s
 `pod_name`/`pod_scheduling_node`/`pod_ip4`/`pod_ip6`/`ping_pod` helpers) if you
 need to reproduce a step manually while debugging — e.g. to ping the `ns30`
@@ -224,7 +218,7 @@ affected VPC's `deploy:nsNN`:
 
 ```bash
 task deploy:cni
-task deploy:ns50   # or whichever VPC's pods aren't getting IPs
+task deploy:ns10   # or whichever VPC's pods aren't getting IPs
 ```
 
 ### BGPAdvertisements not created
@@ -267,7 +261,6 @@ docker exec dfw-worker dmesg | grep galactic
    interface name from the [Overview](#overview) table:
 
    ```bash
-   docker exec dfw-worker ip -4 route show table G000000050V   # ns50
    docker exec dfw-worker ip -6 route show table G000000010V   # ns10
    docker exec dfw-worker ip -6 route show table G000000020V   # ns20 (IPv6 leg)
    docker exec dfw-worker ip -4 route show table G000000020V   # ns20 (IPv4 leg)

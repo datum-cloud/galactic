@@ -1,0 +1,13 @@
+# ns60's own base — unlike every other tenant, ns60 doesn't reuse
+# ../../base's netshoot Deployment: it exists to expose a real web service
+# through the edge XDP NAT+LB gateway (see
+# resources/galactic-router-gateway/iad/networkrule-ns60.yaml), so its pod
+# is an nginx server instead. namespace.yaml is a local duplicate of
+# ../../base/namespace.yaml rather than a direct reference to it — see that
+# file's own doc comment for why. pod.yaml here is ns60's own, already
+# namespace-qualified in its multus annotation, so no patches: block is
+# needed the way the netshoot-based tenants require.
+namespace: ns60
+resources:
+  - namespace.yaml
+  - pod.yaml

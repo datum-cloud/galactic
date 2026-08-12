@@ -5,4 +5,6 @@ resources:
 configMapGenerator:
   - name: fabric-config
     files:
-      - frr.conf.iad-worker=frr.conf
+      - frr.conf.iad-worker
+      - frr.conf.iad-gateway1
+      - frr.conf.iad-gateway2

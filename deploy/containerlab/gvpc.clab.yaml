@@ -145,6 +145,55 @@ topology:
       exec:
         - /galactic/scripts/install.sh
 
+    # Kind names these two containers iad-worker3/iad-worker4 (sequential,
+    # matching declaration order in node_files/iad/config.yaml) even though
+    # their Kubernetes node names are iad-gateway1/iad-gateway2 (set via
+    # that file's kubeadmConfigPatches, same indirection iad-worker2/
+    # iad-worker-control already uses) -- Taskfile.yaml's deploy:rename-*
+    # step renames both to match after cluster creation, purely cosmetic
+    # (doesn't affect the links below, which are wired to the container
+    # before the rename happens). No blackhole route in `exec`: unlike
+    # iad-worker, these nodes never run galactic-veth's usid.c decap
+    # program at all (config/cni's DaemonSet only targets the edge role),
+    # so the blackhole-route workaround it needs doesn't apply here.
+    iad-worker3:
+      kind: ext-container
+      labels:
+        cluster: iad
+        graph-group: kind-worker
+        graph-level: 1
+        graph-icon: server
+        platform: kind
+        reload: disabled
+        worker-index: "3"
+      mgmt-ipv6: fc00:10::115
+      sysctls:
+        fs.inotify.max_user_instances: "256"
+        net.ipv4.conf.all.arp_announce: "2"
+        net.ipv4.ip_forward: "1"
+        net.ipv6.conf.all.forwarding: "1"
+      exec:
+        - /galactic/scripts/install.sh
+
+    iad-worker4:
+      kind: ext-container
+      labels:
+        cluster: iad
+        graph-group: kind-worker
+        graph-level: 1
+        graph-icon: server
+        platform: kind
+        reload: disabled
+        worker-index: "4"
+      mgmt-ipv6: fc00:10::116
+      sysctls:
+        fs.inotify.max_user_instances: "256"
+        net.ipv4.conf.all.arp_announce: "2"
+        net.ipv4.ip_forward: "1"
+        net.ipv6.conf.all.forwarding: "1"
+      exec:
+        - /galactic/scripts/install.sh
+
     tr1:
       group: transit
       labels:
@@ -199,6 +248,36 @@ topology:
     - endpoints: ["sjc-worker:eth1", "tr2:eth1"]
     - endpoints: ["iad-worker:eth1", "tr3:eth5"]
     - endpoints: ["iad-worker2:eth1", "tr3:eth4"]
+
+    # Gateway node uplinks (edge XDP NAT+LB DaemonSet; see
+    # config/gateway/base/ and deploy/containerlab/resources/
+    # galactic-router-gateway/). tr3 (iad's transit router) already
+    # consumed eth1/eth2/eth3 for the TR mesh and eth4/eth5 for
+    # iad-worker/iad-worker2, so these take the next free ports. BGP
+    # peering on these links is now configured (node_files/tr3/frr.conf,
+    # plus two BGPPeer objects in resources/galactic-control/iad/ for the
+    # route reflector side) and the fabric fully converges over them, but
+    # real end-to-end ingress traffic through the datapath still doesn't
+    # reach a backend -- a veth-specific XDP_TX behavior in this lab
+    # environment, not a code bug.
+    #
+    # mtu: 1500 on both ends, unlike every other link in this topology
+    # (which gets containerlab's jumbo-frame veth default, ~9500) --
+    # required, not cosmetic: galactic-router's edge NAT+LB datapath
+    # attaches its XDP program to this link's gateway-side interface in
+    # native/driver mode (edgeattach.go, XDPDriverMode; generic/SKB mode
+    # is deliberately not attempted, see that package's doc comment), and
+    # the kernel's veth_xdp_set() rejects native XDP with -ERANGE
+    # whenever the *peer's* MTU exceeds what fits in one page-sized
+    # buffer (SKB_WITH_OVERHEAD(PAGE_SIZE - VETH_XDP_HEADROOM), ~3.5-3.8KB
+    # on a 4K-page host) -- 9500 blows well past that regardless of which
+    # end asks. Confirmed live: galactic-router-gateway{1,2} crash-looped
+    # with exactly this ERANGE until both ends of these two links were
+    # dropped to 1500.
+    - endpoints: ["iad-worker3:eth1", "tr3:eth6"]
+      mtu: 1500
+    - endpoints: ["iad-worker4:eth1", "tr3:eth7"]
+      mtu: 1500
 
     # TR full mesh (iBGP within AS 65100)
     - endpoints: ["tr1:eth2", "tr2:eth2"]

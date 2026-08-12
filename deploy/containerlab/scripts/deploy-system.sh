@@ -11,8 +11,9 @@ source "${SCRIPT_DIR}/lib.sh"
 
 # Extract the datum-cloud/network commit SHA from go.mod (pseudo-version
 # suffix after the last hyphen, e.g. v0.0.0-20260708202618-77cf276d17f1 →
-# 77cf276d17f1).
-NETWORK_SHA=$(awk '/go\.datum\.net\/network/ {print $2}' "${SCRIPT_DIR}/../../../go.mod" | sed 's/.*-//')
+# 77cf276d17f1). $1 must match the require line's module path exactly, not
+# just a substring, so an unrelated line can't corrupt NETWORK_SHA.
+NETWORK_SHA=$(awk '$1 == "go.datum.net/network" {print $2}' "${SCRIPT_DIR}/../../../go.mod" | sed 's/.*-//')
 NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
 
 # VPC/VPCAttachment CRDs come from the separate companion VPC operator,
@@ -29,6 +30,8 @@ network_crds=(
   network.datumapis.com_bgppolicies.yaml
   network.datumapis.com_bgprouters.yaml
   network.datumapis.com_bgpvrfinstances.yaml
+  network.datumapis.com_networkgateways.yaml
+  network.datumapis.com_networkrules.yaml
 )
 
 cloud_crds=(
