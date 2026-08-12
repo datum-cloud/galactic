@@ -28,21 +28,29 @@ for site in dfw sjc iad; do
   node=$(control_plane "${site}")
   echo "Installing galactic-cni on ${site}..."
 
-  # Cilium — explicit IPv6 flags required: the clusters are IPv6-only
-  # (ipFamily: ipv6) and without these flags Cilium may allocate IPv4
-  # addresses from its 10.0.0.0/8 default pool. Pods with IPv4 can't
-  # reach the IPv6 API server ([fd00:200::1]:443) and crash-loop.
+  # Cilium — installed via the cilium CLI (no Helm binary/repo needed;
+  # the CLI vendors the chart itself). What looked like the CLI
+  # "ignoring --set" was actually stale value keys: Cilium's chart
+  # flattened ipv4.enabled/ipv6.enabled into top-level enableIPv4/
+  # enableIPv6, so the old nested --set was a silent no-op against the
+  # current chart and Cilium fell back to its IPv4 default, allocating
+  # from 10.0.0.0/8 — unreachable from these IPv6-only clusters
+  # (ipFamily: ipv6). The clusters need Cilium told to disable IPv4 via
+  # the current flat keys. Tunnel mode is used since Cilium v1.20
+  # requires IPv4 for native routing mode with cluster-pool IPAM.
   docker exec "${node}" bash -c "
     curl -sL https://github.com/cilium/cilium-cli/releases/download/${CILIUM_VERSION}/cilium-linux-${ARCH}.tar.gz | tar xz -C /usr/local/bin
     chmod +x /usr/local/bin/cilium
     cilium install \
-      --set ipv4.enabled=false \
-      --set ipv6.enabled=true \
-      --set ipv6.clusterPoolIPv6ClusterCIDR=fd00:100::/48 \
-      --set ipv6.clusterPoolIPv6MaskSize=64 \
+      --set enableIPv4=false \
+      --set enableIPv6=true \
+      --set ipam.mode=cluster-pool \
+      --set clusterPoolIPv6.clusterCIDR=fd00:100::/48 \
+      --set clusterPoolIPv6.maskSize=64 \
       --set cni.exclusive=false \
       --set kubeProxyReplacement=true \
-      --set kubeProxyReplacement.healthzBindAddress=:9879
+      --set tunnelProtocol=vxlan \
+      --wait --wait-duration 5m
     cilium status --wait
   "
 
@@ -56,9 +64,14 @@ for site in dfw sjc iad; do
   docker exec "${node}" kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/refs/tags/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
   docker exec "${node}" kubectl -n kube-system rollout status daemonset kube-multus-ds
 
-  # docker cp nests SRC inside an existing DEST dir instead of overwriting
-  # it, so a rerun against an already-provisioned node would silently keep
-  # serving the prior kustomization.yaml/base/ from underneath the new copy.
+  # docker cp copies SRC *into* an already-existing DEST directory
+  # (nesting SRC's basename underneath it) instead of overwriting it,
+  # which would break kustomize's "../base" resource reference — so
+  # rm -rf first and only docker cp into paths that don't yet exist:
+  # copy_to lands resources/galactic-cni/ fresh, then the config/cni/
+  # copy targets "base", a leaf copy_to didn't create. A rerun without
+  # the rm -rf would otherwise silently keep serving the prior copy from
+  # underneath the new nested directory.
   docker exec "${node}" rm -rf /galactic/resources/galactic-cni
   copy_to "${node}" galactic-cni
   docker cp "${GALACTIC_CNI_DIR}" "${node}:/galactic/resources/galactic-cni/base"

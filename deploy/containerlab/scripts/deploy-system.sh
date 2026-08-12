@@ -41,11 +41,15 @@ for site in dfw sjc iad; do
   echo "Applying system to ${node}..."
 
   # Install CRDs from GitHub before any namespace-scoped resources.
+  # -f makes curl exit non-zero on a 4xx/5xx instead of piping an empty/
+  # error body into "kubectl apply -f -" (which fails opaquely with
+  # "no objects passed to apply"); --retry rides out transient GitHub
+  # hiccups (rate-limits, cold CDN cache) instead of failing the deploy.
   for crd in "${network_crds[@]}"; do
-    curl -sL "${NETWORK_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
+    curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "${NETWORK_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
   done
   for crd in "${cloud_crds[@]}"; do
-    curl -sL "${CLOUD_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
+    curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "${CLOUD_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
   done
 
   copy_config "${node}"
