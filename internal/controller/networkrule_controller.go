@@ -17,7 +17,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"go.datum.net/galactic/internal/gateway"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -125,10 +127,9 @@ func (r *NetworkRuleReconciler) assignPrimaryNode(ctx context.Context, rule *bgp
 	if len(nodes) == 0 {
 		// No gateway nodes registered yet for this PoP. Surface this via
 		// the Accepted condition rather than silently doing nothing — the
-		// next NetworkGateway create event re-triggers this rule via
-		// ruleToGatewayRequests's inverse (NetworkGatewayReconciler watches
-		// NetworkRule, not the other way around, so this reconciler relies
-		// on this NetworkRule's own periodic resync to retry).
+		// NetworkGateway watch (see gatewayToRuleRequests) re-queues this
+		// rule as soon as a gateway node registers, so it is not parked
+		// here until the next periodic resync.
 		setRuleCondition(ruleCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeAccepted,
 			Status:  metav1.ConditionFalse,
@@ -241,11 +242,53 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 }
 
 // SetupWithManager registers the NetworkRuleReconciler with the manager.
+//
+// The NetworkGateway watch is the mirror image of
+// NetworkGatewayReconciler's NetworkRule watch: both of this reconciler's
+// jobs (isGatewayNode gating in Reconcile, primary-node assignment in
+// assignPrimaryNode) are functions of the namespace's gateway-node pool, so
+// a rule must be re-examined whenever that pool changes rather than waiting
+// on its own periodic resync.
 func (r *NetworkRuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.NetworkRule{}).
+		Watches(&bgpv1alpha1.NetworkGateway{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return gatewayToRuleRequests(ctx, r.Client, obj)
+			}),
+		).
 		Named("networkrule").
 		Complete(r)
+}
+
+// gatewayToRuleRequests maps a NetworkGateway change to every NetworkRule in
+// its namespace — the inverse of ruleToGatewayRequests, and a deliberate
+// broadcast for the same reason: a NetworkRule carries no gatewayRef, and
+// every rule's Accepted condition and primary-node assignment depend on the
+// namespace's whole gateway-node pool (see assignPrimaryNode). Without this,
+// a rule created before any gateway node registered stays parked at
+// Accepted=False — and therefore excluded from NetworkGatewayReconciler's
+// rule-gathering loop — until the informer's periodic resync (10 hours by
+// default).
+func gatewayToRuleRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
+	gw, ok := obj.(*bgpv1alpha1.NetworkGateway)
+	if !ok {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+
+	ruleList := &bgpv1alpha1.NetworkRuleList{}
+	if err := c.List(ctx, ruleList, client.InNamespace(gw.Namespace)); err != nil {
+		logger.Error(err, "list NetworkRules for NetworkGateway change", "networkGateway", gw.Name)
+		return nil
+	}
+	reqs := make([]ctrlreconcile.Request, 0, len(ruleList.Items))
+	for _, rule := range ruleList.Items {
+		reqs = append(reqs, ctrlreconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: rule.Namespace, Name: rule.Name},
+		})
+	}
+	return reqs
 }
 
 // bgpAdvertisementNamesForRule returns the deterministic BGPAdvertisement

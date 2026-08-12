@@ -254,6 +254,77 @@ func TestNetworkRuleReconciler_AssignPrimaryNode_AcceptedFalseWithNoGatewayNodes
 	}
 }
 
+// TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule covers the
+// full recovery path for a rule created before any gateway node registered:
+// it parks at Accepted=False, and the NetworkGateway watch's mapper
+// (gatewayToRuleRequests) enqueues it as soon as a gateway registers, at
+// which point the ordinary reconcile flips it to Accepted=True. Without that
+// watch the rule waits for the informer's periodic resync (#367).
+func TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithObjects(rule).
+		Build()
+
+	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+
+	// No NetworkGateway exists yet, so this is the zero-nodes branch (see
+	// TestNetworkRuleReconciler_AssignPrimaryNode_AcceptedFalseWithNoGatewayNodes
+	// for why it is reached directly rather than through Reconcile).
+	if err := r.assignPrimaryNode(ctx, rule); err != nil {
+		t.Fatalf("assignPrimaryNode: unexpected error: %v", err)
+	}
+	parked := &bgpv1alpha1.NetworkRule{}
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleName), parked); err != nil {
+		t.Fatalf("get rule: %v", err)
+	}
+	if meta.IsStatusConditionTrue(parked.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
+		t.Fatal("Accepted must not be True with no gateway nodes registered")
+	}
+
+	// A gateway node registers: the mapper must enqueue the parked rule.
+	gwA := newTestGateway(testNodeGWA)
+	if err := fakeClient.Create(ctx, gwA); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	reqs := gatewayToRuleRequests(ctx, fakeClient, gwA)
+	want := testRuleKey(testRuleName)
+	found := false
+	for _, req := range reqs {
+		if req.NamespacedName == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("gatewayToRuleRequests(%s) = %v, want a request for %s", gwA.Name, reqs, want)
+	}
+
+	// Non-NetworkGateway objects must map to nothing.
+	if got := gatewayToRuleRequests(ctx, fakeClient, rule); got != nil {
+		t.Fatalf("gatewayToRuleRequests on a non-NetworkGateway = %v, want nil", got)
+	}
+
+	// Reconciling that enqueued request must unpark the rule.
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: want}); err != nil {
+		t.Fatalf("Reconcile after gateway registration: unexpected error: %v", err)
+	}
+	got := &bgpv1alpha1.NetworkRule{}
+	if err := fakeClient.Get(ctx, want, got); err != nil {
+		t.Fatalf("get rule after requeue: %v", err)
+	}
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
+		t.Fatal("Accepted was not flipped to True after a gateway node registered")
+	}
+	if got.Status.PrimaryNode != testNodeGWA {
+		t.Fatalf("PrimaryNode = %q, want %q", got.Status.PrimaryNode, testNodeGWA)
+	}
+}
+
 func TestNetworkRuleReconciler_NoOpOnNonGatewayNode(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
