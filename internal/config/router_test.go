@@ -13,6 +13,11 @@ import (
 const (
 	testRouterNodeName = "test-node"
 	testBoolTrue       = "true"
+	// testGatewayIface/testGatewaySRv6 are shared with gateway_test.go's
+	// GatewayConfig tests, which took over the equivalent fields dropped
+	// from RouterConfig by the galactic-gateway split.
+	testGatewayIface = "eth0"
+	testGatewaySRv6  = "2001:db8:3::1"
 )
 
 func TestRouterConfigDefaults(t *testing.T) {
