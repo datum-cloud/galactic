@@ -10,6 +10,13 @@
 // /home/sprygada/.claude/datum/plans/merry-percolating-tulip.md for the
 // full rationale versus the earlier, rejected gwprog/Geneve approach).
 //
+// The same program also implements a second, direction-mirrored
+// personality (datum-cloud/enhancements#865): egress masquerade
+// (SNAT/PAT) for tenant VPC backends reaching arbitrary internet
+// destinations, reusing the ingress path's Full-NAT/PAT machinery rather
+// than a parallel subsystem -- see docs/plans/865-edge-gateway-nat66-egress.md
+// and edgenat.c's own header comment (points 4-5) for the full walkthrough.
+//
 // edgenat.c is the single source of truth for the packet path; see its
 // header comment for the full walkthrough. `go generate` (via bpf2go,
 // github.com/cilium/ebpf's code generator) compiles it with clang into a
@@ -52,4 +59,4 @@ package edgeprog
 // attribute, so there is no real unaligned-access risk to suppress
 // unsafely here.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-address-of-packed-member -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type rule_key -type backend -type rule_value -type conn_key -type conn_value -type gw_config Edgenat edgenat.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-address-of-packed-member -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type rule_key -type backend -type rule_value -type conn_key -type conn_value -type gw_config -type egress_config -type egress_conn_key -type egress_conn_value Edgenat edgenat.c

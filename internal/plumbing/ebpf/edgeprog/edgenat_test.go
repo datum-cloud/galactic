@@ -491,7 +491,7 @@ func TestEdgeNat_ForwardSYNAllocatesRewritesAndEncapsulates(t *testing.T) {
 	}
 	gotSNATPort := binary.BigEndian.Uint16(tcp[0:2])
 
-	wantCsum := ipv6L4ChecksumZeroed(t, mustAddr(t, testGWAddr), mustAddr(t, testBackendIP), 6, tcp)
+	wantCsum := ipv6L4ChecksumZeroed(t, mustAddr(t, testGWAddr), mustAddr(t, testBackendIP), tcp)
 	if gotCsum := binary.BigEndian.Uint16(tcp[16:18]); gotCsum != wantCsum {
 		t.Errorf("inner TCP checksum = %#04x, want %#04x (independently recomputed)", gotCsum, wantCsum)
 	}
@@ -713,7 +713,7 @@ func TestEdgeNat_ReturnPacketUnNATsEndToEnd(t *testing.T) {
 		t.Errorf("dest port = %d, want client port %d", got, testClientPort)
 	}
 
-	wantCsum := ipv6L4ChecksumZeroed(t, mustAddr(t, testVIP), mustAddr(t, testClient), 6, tcp)
+	wantCsum := ipv6L4ChecksumZeroed(t, mustAddr(t, testVIP), mustAddr(t, testClient), tcp)
 	if gotCsum := binary.BigEndian.Uint16(tcp[16:18]); gotCsum != wantCsum {
 		t.Errorf("TCP checksum = %#04x, want %#04x (independently recomputed)", gotCsum, wantCsum)
 	}
@@ -747,15 +747,17 @@ func TestEdgeNat_ReturnWithNoConnDrops(t *testing.T) {
 	}
 }
 
-// ipv6L4ChecksumZeroed recomputes the expected checksum for l4 (whose own
-// checksum field is NOT already zero) by zeroing a copy of that field
-// first, matching how a real TCP/IP stack computes it.
-func ipv6L4ChecksumZeroed(t *testing.T, src, dst netip.Addr, protocol uint8, l4 []byte) uint16 {
+// ipv6L4ChecksumZeroed recomputes the expected TCP checksum for l4 (whose
+// own checksum field is NOT already zero) by zeroing a copy of that field
+// first, matching how a real TCP/IP stack computes it. Every call site in
+// this package checksums a TCP segment, so protocol (6) is not a
+// parameter.
+func ipv6L4ChecksumZeroed(t *testing.T, src, dst netip.Addr, l4 []byte) uint16 {
 	t.Helper()
 	cp := make([]byte, len(l4))
 	copy(cp, l4)
 	binary.BigEndian.PutUint16(cp[16:18], 0)
-	return ipv6L4Checksum(src, dst, protocol, cp)
+	return ipv6L4Checksum(src, dst, 6, cp)
 }
 
 // sumPerCPU sums a BPF_MAP_TYPE_PERCPU_ARRAY counter across every CPU.

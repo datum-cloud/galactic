@@ -103,6 +103,72 @@
 //     new L2 next-hop via bpf_fib_lookup and XDP_TX back out this same
 //     interface.
 //
+//  4. EGRESS FORWARD BRANCH (datum-cloud/enhancements#865): if the outer
+//     destination's uSID *locator* (Block+Node-ID, the top 64 bits)
+//     matches this node's own configured egress_sid (egress_config_table)
+//     -- masking off the Function/Argument/Padding bits, exactly the way
+//     internal/plumbing/ebpf/prog/usid.c's own locator_table match works,
+//     just against a single configured value instead of a table -- this
+//     is a fresh outbound flow from a tenant VPC backend Pod toward an
+//     arbitrary internet destination. The unmasked 12-bit uFMT Argument
+//     value carried in the matched address is this flow's tenant/VRF
+//     identifier (tenant_arg), extracted directly from the still-unmutated
+//     packet before anything is stripped -- see handle_egress_forward().
+//     This program never interprets egress_sid's Function nibble.
+//
+//     tenant_arg exists because #865's own motivation is that tenant ULA
+//     space is not guaranteed unique (independent orgs' RFC 4193
+//     self-generated prefixes can collide): without it, two different
+//     tenants presenting the same colliding backend_addr:backend_port
+//     toward the same dest_addr:dest_port would collide in the same
+//     egress_conn_table row. This is an isolation fix, not an enablement
+//     check -- whether a tenant can reach egress_sid at all stays a
+//     routing-layer decision (does its VRF have a default route pointed
+//     here), never a per-packet datapath lookup.
+//
+//     Outer next header must be 41 (the same plain IPv6-in-IPv6 wire
+//     format every other cross-node SRv6 packet in this codebase uses --
+//     a tenant VRF's default route needs zero new encap format). Strip
+//     the outer header (reuse strip_outer_header verbatim), look up
+//     egress_conn_table by the forward key (proto, tenant_arg,
+//     backend_addr:backend_port -> dest_addr:dest_port). A miss on a TCP
+//     SYN or any UDP packet allocates a masq_port via the same
+//     linear-probe/BPF_NOEXIST technique handle_forward's own SNAT-port
+//     claim uses, against the reverse key (proto, dest_addr:dest_port ->
+//     masq_addr:masq_port) -- tenant_arg is fixed at 0 in that reverse
+//     row, since masq_addr:masq_port is already globally unique by
+//     construction (the claim itself guarantees it) and needs no tenant
+//     dimension. SNAT saddr to masq_addr:masq_port, fix the L4 checksum,
+//     and XDP_TX the *inner* packet back out this same interface
+//     unwrapped -- no outer header pushed. This is the one genuinely new
+//     tail shape in this file: every other branch either pushes an outer
+//     header (handle_forward) or has already stripped one before
+//     rewriting (handle_return); this one strips one and sends the
+//     revealed inner packet on as a plain IPv6 frame toward the real
+//     internet.
+//
+//  5. EGRESS RETURN BRANCH (#865): if the outer destination matches this
+//     node's own configured masq_addr (egress_config_table) -- a plain
+//     address compare, no nexthdr==41 requirement, since this arrives as
+//     an ordinary internet-originated IPv6 packet, not an SRv6-encapsulated
+//     one -- parse the L4 header and look up egress_conn_table by the
+//     reverse key (proto, dest_addr:dest_port -> masq_addr:masq_port); no
+//     tenant_arg needed in this direction, masq_addr:masq_port is already
+//     unique per flow by construction. A miss drops (claimed address, no
+//     pass-through -- same fail-closed convention every other
+//     claimed-address branch in this file already uses; this includes any
+//     non-TCP/UDP protocol arriving addressed to masq_addr, e.g. ICMPv6,
+//     which this program does not special-case and drops rather than
+//     XDP_PASS, the same choice already made for gw_addr's own return
+//     branch). A hit DNATs daddr to backend_addr:backend_port (source
+//     address/port untouched -- a destination-only rewrite, unlike
+//     Full-NAT's four-field rewrite), fixes the checksum, and pushes a
+//     fresh 40-byte outer SRv6 header (reusing push_outer_header verbatim)
+//     sourced from this node's own gw_addr (gw_config_table -- the same
+//     "this node, as an SRv6 speaker" identity handle_forward's own push
+//     already uses) and addressed to backend_usid, then XDP_TX -- the
+//     return-trip mirror of handle_egress_forward().
+//
 // A real eBPF verifier gotcha carried over from gwprog's own header
 // comment: the backend-selection index (hash % backend_count, then
 // rule->backends[idx]) needs an explicit bounds-narrowing op for the
@@ -326,6 +392,65 @@ struct gw_config {
 	__u8 gw_addr[16];
 };
 
+// struct egress_config is egress_config_table's single-entry value
+// (datum-cloud/enhancements#865). A sibling of gw_config, not a repurposed
+// field on it -- a schema change to the ingress gw_config wire format
+// should never force a review of egress logic, and vice versa (same
+// one-map-one-purpose convention struct backend/struct rule_value already
+// follow). egress_sid is a uSID *locator* (only its top 64 bits, Block+
+// Node-ID, are ever compared -- see locator_eq); masq_addr is a plain,
+// publicly-routable address with no uSID structure at all, matched in
+// full like gw_addr.
+struct egress_config {
+	__u8 egress_sid[16];
+	__u8 masq_addr[16];
+};
+
+// struct egress_conn_key is egress_conn_table's key -- like conn_key, one
+// struct shared by both the forward and reverse row of a flow, filled
+// according to whichever direction's packet is actually being looked up:
+// the forward row is keyed by the tenant backend Pod's own outbound tuple
+// (saddr:sport = backend_addr:backend_port, daddr:dport =
+// dest_addr:dest_port) plus tenant_arg (the uFMT Argument bits extracted
+// from the packet's egress_sid destination address, design plan §3.1) --
+// needed here because backend_addr alone is not guaranteed globally unique
+// (independent tenants' RFC 4193 ULA prefixes can collide). The reverse
+// row is keyed by the internet peer's reply tuple (saddr:sport =
+// dest_addr:dest_port, daddr:dport = masq_addr:masq_port) with tenant_arg
+// always 0 -- masq_addr:masq_port is already unique per flow by
+// construction (the SNAT-port claim itself guarantees it), so the reverse
+// direction needs no tenant dimension at all.
+struct egress_conn_key {
+	__u8 proto;
+	__u8 pad[1];
+	__be16 sport;
+	__be16 dport;
+	__u8 saddr[16];
+	__u8 daddr[16];
+	__u16 tenant_arg;
+};
+
+// struct egress_conn_value carries the full picture of one translated
+// egress flow. A new struct, not a repurposed conn_value: conn_value's
+// fields (client_addr, vip_addr, backend_addr, gw_addr) are named for the
+// ingress direction and don't map cleanly onto an egress flow's shape --
+// there is no "client" or "VIP" here, only a backend's own address, an
+// arbitrary internet destination, and the masquerade address. tenant_arg
+// is carried here too (alongside the reverse row, where it is always 0)
+// so both directions share one struct shape.
+struct egress_conn_value {
+	__u16 tenant_arg;
+	__u8 backend_addr[16];
+	__be16 backend_port;
+	__u8 backend_usid[16];
+	__u8 dest_addr[16];
+	__be16 dest_port;
+	__u8 masq_addr[16];
+	__be16 masq_port;
+	__u8 proto;
+	__u8 pad[1];
+};
+
 // Drop reason indices into the drop_reasons map -- see dropreason.go for
 // the exported Go constants any caller outside this package should use
 // instead of a hand-kept copy of this enum (bpf2go's -type flag cannot
@@ -348,7 +473,17 @@ enum edge_drop_reason {
 	// header has already been written): this reason means the header
 	// itself was never written at all.
 	DROP_REASON_ADJUST_HEAD_FAILED = 9,
-	DROP_REASON_COUNT              = 10,
+	// Egress (masquerade) drop reasons (#865) -- see handle_egress_forward/
+	// handle_egress_return. FIB and adjust-head failures on the egress
+	// path reuse the FIB_*/ADJUST_HEAD_FAILED reasons above (shared
+	// helpers, direction-agnostic); these four are specific to the new
+	// branches' own claimed-packet checks.
+	DROP_REASON_MALFORMED_EGRESS_FORWARD = 10,
+	DROP_REASON_NO_EGRESS_CONN_NOT_SYN   = 11,
+	DROP_REASON_EGRESS_PAT_EXHAUSTED     = 12,
+	DROP_REASON_MALFORMED_EGRESS_RETURN  = 13,
+	DROP_REASON_NO_EGRESS_RETURN_CONN    = 14,
+	DROP_REASON_COUNT                    = 15,
 };
 
 // ---------------------------------------------------------------------
@@ -380,6 +515,26 @@ struct {
 	__type(key, __u32);
 	__type(value, struct gw_config);
 } gw_config_table SEC(".maps");
+
+// egress_config_table and egress_conn_table (#865) -- see struct
+// egress_config/egress_conn_key/egress_conn_value's own comments above.
+// egress_conn_table is BPF_MAP_TYPE_LRU_HASH for the same reason
+// conn_table is: self-evicting under pressure is the sole port-reclaim
+// mechanism, no separate GC pass (this file's own header comment,
+// design plan §2).
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct egress_config);
+} egress_config_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct egress_conn_key);
+	__type(value, struct egress_conn_value);
+} egress_conn_table SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -420,6 +575,35 @@ static EDGE_ALWAYS_INLINE int addr6_eq(const __u8 a[16], const __u8 b[16])
 			return 0;
 	}
 	return 1;
+}
+
+// locator_eq compares only the uSID *locator* portion (Block(48)+Node-ID
+// (16), bytes 0-7) of an address against a configured locator, masking off
+// Function/Argument/Padding (#865) -- mirrors
+// internal/plumbing/ebpf/prog/usid.c's own locator_table match (its
+// LocatorKey is the same top-64-bits read), just as a two-address compare
+// instead of a table lookup, since this program has exactly one configured
+// egress_sid rather than a table of many.
+static EDGE_ALWAYS_INLINE int locator_eq(const __u8 daddr[16], const __u8 locator[16])
+{
+	for (int i = 0; i < 8; i++) {
+		if (daddr[i] != locator[i])
+			return 0;
+	}
+	return 1;
+}
+
+// egress_argument extracts the 12-bit uFMT Argument field (bits 69-80: the
+// low nibble of byte 8 plus all of byte 9) directly from an unmutated
+// address -- the packet's own tenant/VRF identifier for the egress
+// datapath (#865), with no map lookup and no shift of the address itself.
+// Same fixed-offset technique internal/plumbing/ebpf/prog/usid.c's own
+// Argument read uses (design plan R2/R4 there); this program never
+// interprets the uFMT Function nibble (bits 65-68) at all -- egress_sid's
+// Function bits are unused by this datapath.
+static EDGE_ALWAYS_INLINE __u16 egress_argument(const __u8 daddr[16])
+{
+	return ((__u16) (daddr[8] & 0x0F) << 8) | daddr[9];
 }
 
 // fnv1a_flow is a deterministic, stateless hash of a flow's client-facing
@@ -877,6 +1061,231 @@ static EDGE_ALWAYS_INLINE int handle_return(struct xdp_md *ctx, struct edge_ip6h
 }
 
 // ---------------------------------------------------------------------
+// Egress branch (masquerade) (datum-cloud/enhancements#865).
+// ---------------------------------------------------------------------
+
+// handle_egress_forward is triggered when the outer destination's locator
+// matches this node's own configured egress_sid and outer nexthdr == 41 --
+// a fresh (or already-established) outbound flow from a tenant VPC backend
+// Pod toward an arbitrary internet destination. tenant_arg is the uFMT
+// Argument value already extracted from the packet's own destination
+// address by the caller (edge_nat), before this function strips the outer
+// header that address lives on.
+static EDGE_ALWAYS_INLINE int handle_egress_forward(struct xdp_md *ctx, struct edge_ip6hdr *outer,
+						      __u16 tenant_arg, void *data_end)
+{
+	if (outer->nexthdr != EDGE_IPPROTO_IPV6) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	// The outer source is the originating worker node's own SRv6 address
+	// -- the same node that encapsulated this packet via its tenant VRF's
+	// default route toward egress_sid (internal/plumbing/srv6.
+	// RouteEgressAdd's SEG6 encap route, design plan §4.4). Captured here,
+	// before strip_outer_header discards the outer header entirely, and
+	// remembered in egress_conn_value.backend_usid so the eventual reply
+	// (handle_egress_return) knows which node to push a return SRv6
+	// header toward -- there is no rule_table-equivalent policy entry for
+	// egress (design plan §3.2), so this wire-derived value is the only
+	// source of that address Phase B has.
+	//
+	// ASSUMPTION FLAGGED FOR REVIEW: this relies on the kernel's SEG6
+	// encap route always selecting the node's own uSID address as the
+	// pushed outer source, the same way it does for every other cross-
+	// node SRv6 packet in this codebase. That has not been independently
+	// verified against RouteEgressAdd's actual netlink-level source-
+	// address-selection behavior as part of this phase -- worth
+	// confirming before Phase D's e2e proof relies on it.
+	__u8 backend_usid[16];
+	__builtin_memcpy(backend_usid, outer->saddr, 16);
+
+	struct edge_ethhdr *eth;
+	if (strip_outer_header(ctx, &eth) != 0) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	data_end = (void *) (long) ctx->data_end;
+
+	struct edge_ip6hdr *inner = (void *) (eth + 1);
+	if ((void *) (inner + 1) > data_end) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+	if (inner->nexthdr != EDGE_IPPROTO_TCP && inner->nexthdr != EDGE_IPPROTO_UDP) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	struct l4_view l4v;
+	if (parse_l4(inner->nexthdr, (void *) (inner + 1), data_end, &l4v) != 0) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	// Forward key: the backend Pod's own outbound tuple, as it appears on
+	// this packet, plus tenant_arg -- see struct egress_conn_key's comment
+	// for why tenant_arg is part of this direction's key.
+	struct egress_conn_key fwd_key;
+	__builtin_memset(&fwd_key, 0, sizeof(fwd_key));
+	fwd_key.proto = inner->nexthdr;
+	__builtin_memcpy(fwd_key.saddr, inner->saddr, 16);
+	fwd_key.sport = l4v.sport;
+	__builtin_memcpy(fwd_key.daddr, inner->daddr, 16);
+	fwd_key.dport = l4v.dport;
+	fwd_key.tenant_arg = tenant_arg;
+
+	struct egress_conn_value *existing = bpf_map_lookup_elem(&egress_conn_table, &fwd_key);
+	struct egress_conn_value cv;
+
+	if (existing) {
+		__builtin_memcpy(&cv, existing, sizeof(cv));
+	} else {
+		if (!l4v.is_syn) {
+			count_drop(DROP_REASON_NO_EGRESS_CONN_NOT_SYN);
+			return XDP_DROP;
+		}
+
+		__u32 cfg_key = 0;
+		struct egress_config *ecfg = bpf_map_lookup_elem(&egress_config_table, &cfg_key);
+		if (!ecfg) {
+			count_drop(DROP_REASON_NO_EGRESS_CONN_NOT_SYN);
+			return XDP_DROP;
+		}
+
+		__builtin_memset(&cv, 0, sizeof(cv));
+		cv.tenant_arg = tenant_arg;
+		__builtin_memcpy(cv.backend_addr, inner->saddr, 16);
+		cv.backend_port = l4v.sport;
+		__builtin_memcpy(cv.backend_usid, backend_usid, 16);
+		__builtin_memcpy(cv.dest_addr, inner->daddr, 16);
+		cv.dest_port = l4v.dport;
+		__builtin_memcpy(cv.masq_addr, ecfg->masq_addr, 16);
+		cv.proto = inner->nexthdr;
+
+		__u32 base = fnv1a_flow(inner->saddr, l4v.sport) ^ (__u32) l4v.dport;
+		int claimed = 0;
+
+		#pragma unroll
+		for (int i = 0; i < EDGE_PAT_PROBE_LIMIT; i++) {
+			__u16 candidate = EDGE_PAT_PORT_BASE + ((base + (__u32) i) % EDGE_PAT_PORT_RANGE);
+			cv.masq_port = __builtin_bswap16(candidate);
+
+			struct egress_conn_key rev_key;
+			__builtin_memset(&rev_key, 0, sizeof(rev_key));
+			rev_key.proto = inner->nexthdr;
+			__builtin_memcpy(rev_key.saddr, inner->daddr, 16);
+			rev_key.sport = l4v.dport;
+			__builtin_memcpy(rev_key.daddr, ecfg->masq_addr, 16);
+			rev_key.dport = cv.masq_port;
+			// tenant_arg left at 0 in the reverse row -- see struct
+			// egress_conn_key's comment.
+
+			if (bpf_map_update_elem(&egress_conn_table, &rev_key, &cv, BPF_NOEXIST) == 0) {
+				claimed = 1;
+				break;
+			}
+		}
+
+		if (!claimed) {
+			count_drop(DROP_REASON_EGRESS_PAT_EXHAUSTED);
+			return XDP_DROP;
+		}
+
+		bpf_map_update_elem(&egress_conn_table, &fwd_key, &cv, BPF_ANY);
+	}
+
+	// Source-only rewrite (SNAT): destination is left untouched, unlike
+	// Full-NAT's four-field rewrite -- fix_l4_checksum is still safe to
+	// call generically here since passing the same old/new value for
+	// daddr/dport contributes zero diff for those fields.
+	__u8 old_saddr[16];
+	__builtin_memcpy(old_saddr, inner->saddr, 16);
+	__be16 old_sport = l4v.sport;
+
+	fix_l4_checksum(l4v.check_ptr, old_saddr, inner->daddr, old_sport, l4v.dport,
+			cv.masq_addr, inner->daddr, cv.masq_port, l4v.dport);
+
+	__builtin_memcpy(inner->saddr, cv.masq_addr, 16);
+	*l4v.sport_ptr = cv.masq_port;
+
+	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, cv.masq_addr, cv.dest_addr,
+						 __builtin_bswap16(inner->payload_len) + (__u16) sizeof(*inner), eth);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc);
+		return XDP_DROP;
+	}
+
+	return XDP_TX;
+}
+
+// handle_egress_return is triggered when the outer destination matches this
+// node's own configured masq_addr -- an ordinary internet-originated IPv6
+// packet (no SRv6 encapsulation), the reply half of a flow
+// handle_egress_forward already established.
+static EDGE_ALWAYS_INLINE int handle_egress_return(struct xdp_md *ctx, struct edge_ip6hdr *ip6, void *data_end)
+{
+	// Claimed address past this point (masq_addr): any protocol other
+	// than TCP/UDP -- e.g. ICMPv6 -- is dropped rather than passed
+	// through to the normal kernel stack, the same fail-closed choice
+	// already made for gw_addr's own return branch (this file's header
+	// comment, point 2).
+	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_RETURN);
+		return XDP_DROP;
+	}
+
+	struct l4_view l4v;
+	if (parse_l4(ip6->nexthdr, (void *) (ip6 + 1), data_end, &l4v) != 0) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_RETURN);
+		return XDP_DROP;
+	}
+
+	// Reverse key: the internet peer's reply tuple, as it appears on this
+	// packet. tenant_arg is left at 0 -- masq_addr:masq_port is already
+	// unique per flow by construction (struct egress_conn_key's comment).
+	struct egress_conn_key rev_key;
+	__builtin_memset(&rev_key, 0, sizeof(rev_key));
+	rev_key.proto = ip6->nexthdr;
+	__builtin_memcpy(rev_key.saddr, ip6->saddr, 16);
+	rev_key.sport = l4v.sport;
+	__builtin_memcpy(rev_key.daddr, ip6->daddr, 16);
+	rev_key.dport = l4v.dport;
+
+	struct egress_conn_value *cv = bpf_map_lookup_elem(&egress_conn_table, &rev_key);
+	if (!cv) {
+		count_drop(DROP_REASON_NO_EGRESS_RETURN_CONN);
+		return XDP_DROP;
+	}
+
+	// Destination-only rewrite (DNAT): source address/port untouched.
+	__u8 old_daddr[16];
+	__builtin_memcpy(old_daddr, ip6->daddr, 16);
+	__be16 old_dport = l4v.dport;
+
+	fix_l4_checksum(l4v.check_ptr, ip6->saddr, old_daddr, l4v.sport, old_dport,
+			ip6->saddr, cv->backend_addr, l4v.sport, cv->backend_port);
+
+	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
+	*l4v.dport_ptr = cv->backend_port;
+
+	__u32 cfg_key = 0;
+	struct gw_config *cfg = bpf_map_lookup_elem(&gw_config_table, &cfg_key);
+	if (!cfg) {
+		count_drop(DROP_REASON_NO_EGRESS_RETURN_CONN);
+		return XDP_DROP;
+	}
+
+	__be16 inner_payload_len = ip6->payload_len;
+
+	if (push_outer_header(ctx, cfg->gw_addr, cv->backend_usid, inner_payload_len) != 0)
+		return XDP_DROP;
+
+	return XDP_TX;
+}
+
+// ---------------------------------------------------------------------
 // Entry point.
 // ---------------------------------------------------------------------
 
@@ -900,6 +1309,22 @@ int edge_nat(struct xdp_md *ctx)
 	struct gw_config *cfg = bpf_map_lookup_elem(&gw_config_table, &cfg_key);
 	if (cfg && addr6_eq(ip6->daddr, cfg->gw_addr))
 		return handle_return(ctx, ip6, data_end);
+
+	// Egress (masquerade) dispatch (#865): egress_config_table is a
+	// single ARRAY entry holding both egress_sid and masq_addr, so this
+	// is one extra map lookup covering both new address checks -- same
+	// "read once per packet" shape as the gw_config_table lookup above,
+	// no regression to existing ingress performance. A node not offering
+	// egress leaves egress_config_table zeroed, and the zero address
+	// never legitimately matches a real packet's daddr, so both checks
+	// below are no-ops on such a node.
+	struct egress_config *ecfg = bpf_map_lookup_elem(&egress_config_table, &cfg_key);
+	if (ecfg && locator_eq(ip6->daddr, ecfg->egress_sid)) {
+		__u16 tenant_arg = egress_argument(ip6->daddr);
+		return handle_egress_forward(ctx, ip6, tenant_arg, data_end);
+	}
+	if (ecfg && addr6_eq(ip6->daddr, ecfg->masq_addr))
+		return handle_egress_return(ctx, ip6, data_end);
 
 	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP)
 		return XDP_PASS;

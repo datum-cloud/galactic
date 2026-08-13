@@ -24,21 +24,35 @@ const (
 	DropReasonFibFragNeeded    uint32 = 7
 	DropReasonFibLookupFailed  uint32 = 8
 	DropReasonAdjustHeadFailed uint32 = 9
-	DropReasonCount            uint32 = 10
+
+	// Egress (masquerade) drop reasons (datum-cloud/enhancements#865) --
+	// see edgenat.c's handle_egress_forward/handle_egress_return.
+	DropReasonMalformedEgressForward uint32 = 10
+	DropReasonNoEgressConnNotSyn     uint32 = 11
+	DropReasonEgressPATExhausted     uint32 = 12
+	DropReasonMalformedEgressReturn  uint32 = 13
+	DropReasonNoEgressReturnConn     uint32 = 14
+
+	DropReasonCount uint32 = 15
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
 // metrics/log-friendly name, decoupling Prometheus label values and any
 // other external representation from edgenat.c's C identifier spelling.
 var DropReasonNames = map[uint32]string{
-	DropReasonNoBackends:       "no_backends",
-	DropReasonNoConnNotSyn:     "no_conn_not_syn",
-	DropReasonPATExhausted:     "pat_exhausted",
-	DropReasonMalformedReturn:  "malformed_return",
-	DropReasonNoReturnConn:     "no_return_conn",
-	DropReasonFibNoNeigh:       "fib_no_neigh",
-	DropReasonFibUnreachable:   "fib_unreachable",
-	DropReasonFibFragNeeded:    "fib_frag_needed",
-	DropReasonFibLookupFailed:  "fib_lookup_failed",
-	DropReasonAdjustHeadFailed: "adjust_head_failed",
+	DropReasonNoBackends:             "no_backends",
+	DropReasonNoConnNotSyn:           "no_conn_not_syn",
+	DropReasonPATExhausted:           "pat_exhausted",
+	DropReasonMalformedReturn:        "malformed_return",
+	DropReasonNoReturnConn:           "no_return_conn",
+	DropReasonFibNoNeigh:             "fib_no_neigh",
+	DropReasonFibUnreachable:         "fib_unreachable",
+	DropReasonFibFragNeeded:          "fib_frag_needed",
+	DropReasonFibLookupFailed:        "fib_lookup_failed",
+	DropReasonAdjustHeadFailed:       "adjust_head_failed",
+	DropReasonMalformedEgressForward: "malformed_egress_forward",
+	DropReasonNoEgressConnNotSyn:     "no_egress_conn_not_syn",
+	DropReasonEgressPATExhausted:     "egress_pat_exhausted",
+	DropReasonMalformedEgressReturn:  "malformed_egress_return",
+	DropReasonNoEgressReturnConn:     "no_egress_return_conn",
 }
