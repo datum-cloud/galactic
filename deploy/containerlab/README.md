@@ -21,18 +21,18 @@ over iBGP to the route reflector on iad-control.
 
 ### Node roles
 
-| Node                  | Kind          | Role                                          |
-|-----------------------|---------------|-----------------------------------------------|
-| `dfw-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
-| `dfw-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
-| `iad-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
-| `iad-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
-| `iad-worker2` (renamed `iad-worker-control` post-deploy) | ext-container | Kind worker; runs FRR PE + galactic-router RR |
-| `iad-worker3` (renamed `iad-gateway1` post-deploy) | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
-| `iad-worker4` (renamed `iad-gateway2` post-deploy) | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
-| `sjc-control-plane`   | ext-container | Kind control-plane; runs Cilium, Multus       |
-| `sjc-worker`          | ext-container | Kind worker; runs FRR PE + galactic-router PE |
-| `tr1`–`tr4`           | linux (FRR)   | iBGP full mesh, AS 65100                      |
+| Node                                                     | Kind          | Role                                                  |
+|----------------------------------------------------------|---------------|-------------------------------------------------------|
+| `dfw-control-plane`                                      | ext-container | Kind control-plane; runs Cilium, Multus               |
+| `dfw-worker`                                             | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
+| `iad-control-plane`                                      | ext-container | Kind control-plane; runs Cilium, Multus               |
+| `iad-worker`                                             | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
+| `iad-worker2` (renamed `iad-worker-control` post-deploy) | ext-container | Kind worker; runs FRR PE + galactic-router RR         |
+| `iad-worker3` (renamed `iad-gateway1` post-deploy)       | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
+| `iad-worker4` (renamed `iad-gateway2` post-deploy)       | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
+| `sjc-control-plane`                                      | ext-container | Kind control-plane; runs Cilium, Multus               |
+| `sjc-worker`                                             | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
+| `tr1`–`tr4`                                              | linux (FRR)   | iBGP full mesh, AS 65100                              |
 
 `iad-gateway1`/`iad-gateway2` are tainted (`galactic.datumapis.com/node=gateway:NoSchedule`)
 dedicated nodes, same idea as `iad-worker-control`'s taint: no tenant pods land there, only
@@ -43,7 +43,7 @@ They never run `galactic-cni` (config/cni's affinity is edge-only) or a route-re
 plus two `BGPPeer` objects in `resources/galactic-control/iad/` for the route reflector side)
 and the full fabric converges, but real end-to-end ingress traffic through the datapath still
 doesn't reach a backend in this topology — it currently stops on a veth-specific `XDP_TX`
-behavior in this lab environment, not a code bug; see `resources/galactic-router-gateway/`.
+behavior in this lab environment, not a code bug; see `resources/galactic-gateway/`.
 
 `dfw`, `iad`, and `sjc` are the three Kind cluster names — not separate ContainerLab
 topology nodes. Each cluster's `control-plane`/`worker` nodes above are its members.
@@ -118,11 +118,11 @@ anycast ambiguity the instant a second tenant node joins a site. The test VPC
 block (illustrative only — the exact hextet depends on allocation order; see
 docs/tenants.md's [SRv6 USID Argument allocation](docs/tenants.md#srv6-usid-argument-allocation)):
 
-| Cluster     | FRR loopback   | Node locator block     | USID ns10                     | galactic-router address |
-|-------------|----------------|-------------------------|--------------------------------|-------------------------|
-| dfw         | fc00:0:2::1/128 | 2001:db8:ff01:100::/56 | 2001:db8:ff01:100:c800::/128  | fc00:0:2::1             |
-| sjc         | fc00:0:3::1/128 | 2001:db8:ff02:100::/56 | 2001:db8:ff02:100:c800::/128  | fc00:0:3::1             |
-| iad         | fc00:0:4::1/128 | 2001:db8:ff03:100::/56 | 2001:db8:ff03:100:c800::/128  | fc00:0:4::1             |
+| Cluster | FRR loopback    | Node locator block     | USID ns10                    | galactic-router address |
+|---------|-----------------|------------------------|------------------------------|-------------------------|
+| dfw     | fc00:0:2::1/128 | 2001:db8:ff01:100::/56 | 2001:db8:ff01:100:c800::/128 | fc00:0:2::1             |
+| sjc     | fc00:0:3::1/128 | 2001:db8:ff02:100::/56 | 2001:db8:ff02:100:c800::/128 | fc00:0:3::1             |
+| iad     | fc00:0:4::1/128 | 2001:db8:ff03:100::/56 | 2001:db8:ff03:100:c800::/128 | fc00:0:4::1             |
 
 The `galactic-router address` column is no longer set explicitly in the
 per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
@@ -139,26 +139,26 @@ derive this value (it rejects `argument==0` by design), so these were
 computed directly via `internal/plumbing/ebpf/uformat.Encode` and are
 supplied statically through `GALACTIC_GATEWAY_SRV6_ADDRESS` (originally
 `GALACTIC_ROUTER_GATEWAY_SRV6_ADDRESS` before the binary split) — see
-`resources/galactic-router-gateway/iad-gateway{1,2}/node-patch.yaml`.
+`resources/galactic-gateway/iad-gateway{1,2}/node-patch.yaml`.
 
-| Node          | FRR loopback     | nodeID | SRv6 self-address (Argument 0)  |
-|---------------|------------------|--------|----------------------------------|
-| iad-gateway1  | fc00:0:9::1/128  | 2      | 2001:db8:ff03:2:e000::           |
-| iad-gateway2  | fc00:0:a::1/128  | 3      | 2001:db8:ff03:3:e000::           |
+| Node         | FRR loopback    | nodeID | SRv6 self-address (Argument 0) |
+|--------------|-----------------|--------|--------------------------------|
+| iad-gateway1 | fc00:0:9::1/128 | 2      | 2001:db8:ff03:2:e000::         |
+| iad-gateway2 | fc00:0:a::1/128 | 3      | 2001:db8:ff03:3:e000::         |
 
 ### Management network (fc00:10::/64)
 
-| Node                                          | Address       |
-|------------------------------------------------|---------------|
-| dfw-control-plane                             | fc00:10::102  |
-| dfw-worker                                    | fc00:10::103  |
-| sjc-control-plane                             | fc00:10::122  |
-| sjc-worker                                    | fc00:10::123  |
-| iad-control-plane                             | fc00:10::112  |
-| iad-worker                                    | fc00:10::113  |
-| iad-worker2 (renamed `iad-worker-control`)    | fc00:10::114  |
-| iad-worker3 (renamed `iad-gateway1`)          | fc00:10::115  |
-| iad-worker4 (renamed `iad-gateway2`)          | fc00:10::116  |
+| Node                                       | Address      |
+|--------------------------------------------|--------------|
+| dfw-control-plane                          | fc00:10::102 |
+| dfw-worker                                 | fc00:10::103 |
+| sjc-control-plane                          | fc00:10::122 |
+| sjc-worker                                 | fc00:10::123 |
+| iad-control-plane                          | fc00:10::112 |
+| iad-worker                                 | fc00:10::113 |
+| iad-worker2 (renamed `iad-worker-control`) | fc00:10::114 |
+| iad-worker3 (renamed `iad-gateway1`)       | fc00:10::115 |
+| iad-worker4 (renamed `iad-gateway2`)       | fc00:10::116 |
 
 ## Lab layout
 
@@ -229,41 +229,41 @@ task deploy
 
 ## Tasks
 
-| Task                    | Description                                                              |
-|-------------------------|--------------------------------------------------------------------------|
-| `build`                 | Build all container images (node, galactic-router, galactic-cni, frr)    |
-| `build:node`            | Build the custom `kindest/node:galactic` image                           |
-| `build:galactic-router` | Build the galactic-router container from Go source                       |
-| `build:galactic-cni`    | Build the galactic-cni installer image                                   |
-| `build:frr`             | Build the FRR container from Alpine edge                                 |
-| `deploy`                | Build images, apply host sysctls, and deploy the lab                     |
-| `deploy:topology`       | Deploy the ContainerLab topology (transit routers)                       |
-| `deploy:clusters`       | Create the three Kind clusters and export their kubeconfigs              |
-| `deploy:rename-control` | Rename `iad-worker2`→`iad-worker-control`, `iad-worker3/4`→`iad-gateway1/2` |
-| `deploy:images`         | Load container images into Kind clusters                                 |
-| `deploy:system`         | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
-| `deploy:cni`            | Install Cilium and Multus, then the galactic-cni DaemonSet               |
-| `deploy:fabric`         | Apply FRR DaemonSets to all clusters                                     |
-| `deploy:galactic-router` | Apply galactic-router DaemonSets and BGP CRs                             |
-| `deploy:scenarios`      | Deploy all VPC test scenarios                                            |
-| `deploy:ns10`           | Deploy ns10 test VPC (IPv6-only, fd20 ULA)                               |
-| `deploy:ns20`           | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                       |
-| `deploy:ns30`           | Deploy ns30 test VPC (dfw only, 2 pods)                                  |
-| `deploy:ns40`           | Deploy ns40 test VPC (iad only, 2 pods)                                  |
-| `verify:scenarios`      | Verify ping across all VPC test scenarios                                |
-| `verify:ns10`           | Verify ns10 ping (IPv6-only, 3-site mesh)                                |
-| `verify:ns20`           | Verify ns20 ping (dual-stack, 3-site mesh)                               |
-| `verify:ns30`           | Verify ns30 ping (dfw only, 2 pods)                                      |
-| `verify:ns40`           | Verify ns40 ping (iad only, 2 pods)                                      |
-| `verify:gateway`        | Verify iad's gateway canary CRDs exist (manifests only, no live traffic) |
-| `destroy`               | Destroy the lab and remove all Kind clusters                             |
-| `restart`               | Full rebuild — destroy then redeploy                                     |
-| `rebuild`               | Full rebuild — clean (destroy + delete images/artifacts) then redeploy   |
-| `inspect`               | Show running nodes and management addresses                              |
-| `graph`                 | Generate a draw.io diagram for the topology                              |
-| `host-setup`            | Apply required host sysctls (IPv6 forwarding, inotify limits)            |
-| `clean`                 | Destroy lab, delete built images, and remove lab artifacts               |
-| `test`                  | Run all verification checks                                              |
+| Task                     | Description                                                                   |
+|--------------------------|-------------------------------------------------------------------------------|
+| `build`                  | Build all container images (node, galactic-router, galactic-cni, frr)         |
+| `build:node`             | Build the custom `kindest/node:galactic` image                                |
+| `build:galactic-router`  | Build the galactic-router container from Go source                            |
+| `build:galactic-cni`     | Build the galactic-cni installer image                                        |
+| `build:frr`              | Build the FRR container from Alpine edge                                      |
+| `deploy`                 | Build images, apply host sysctls, and deploy the lab                          |
+| `deploy:topology`        | Deploy the ContainerLab topology (transit routers)                            |
+| `deploy:clusters`        | Create the three Kind clusters and export their kubeconfigs                   |
+| `deploy:rename-control`  | Rename `iad-worker2`→`iad-worker-control`, `iad-worker3/4`→`iad-gateway1/2`   |
+| `deploy:images`          | Load container images into Kind clusters                                      |
+| `deploy:system`          | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
+| `deploy:cni`             | Install Cilium and Multus, then the galactic-cni DaemonSet                    |
+| `deploy:fabric`          | Apply FRR DaemonSets to all clusters                                          |
+| `deploy:galactic-router` | Apply galactic-router DaemonSets and BGP CRs                                  |
+| `deploy:scenarios`       | Deploy all VPC test scenarios                                                 |
+| `deploy:ns10`            | Deploy ns10 test VPC (IPv6-only, fd20 ULA)                                    |
+| `deploy:ns20`            | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                            |
+| `deploy:ns30`            | Deploy ns30 test VPC (dfw only, 2 pods)                                       |
+| `deploy:ns40`            | Deploy ns40 test VPC (iad only, 2 pods)                                       |
+| `verify:scenarios`       | Verify ping across all VPC test scenarios                                     |
+| `verify:ns10`            | Verify ns10 ping (IPv6-only, 3-site mesh)                                     |
+| `verify:ns20`            | Verify ns20 ping (dual-stack, 3-site mesh)                                    |
+| `verify:ns30`            | Verify ns30 ping (dfw only, 2 pods)                                           |
+| `verify:ns40`            | Verify ns40 ping (iad only, 2 pods)                                           |
+| `verify:gateway`         | Verify iad's gateway canary CRDs exist (manifests only, no live traffic)      |
+| `destroy`                | Destroy the lab and remove all Kind clusters                                  |
+| `restart`                | Full rebuild — destroy then redeploy                                          |
+| `rebuild`                | Full rebuild — clean (destroy + delete images/artifacts) then redeploy        |
+| `inspect`                | Show running nodes and management addresses                                   |
+| `graph`                  | Generate a draw.io diagram for the topology                                   |
+| `host-setup`             | Apply required host sysctls (IPv6 forwarding, inotify limits)                 |
+| `clean`                  | Destroy lab, delete built images, and remove lab artifacts                    |
+| `test`                   | Run all verification checks                                                   |
 
 ## Verification
 

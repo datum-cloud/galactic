@@ -251,7 +251,7 @@ topology:
 
     # Gateway node uplinks (edge XDP NAT+LB DaemonSet; see
     # config/gateway/base/ and deploy/containerlab/resources/
-    # galactic-router-gateway/). tr3 (iad's transit router) already
+    # galactic-gateway/). tr3 (iad's transit router) already
     # consumed eth1/eth2/eth3 for the TR mesh and eth4/eth5 for
     # iad-worker/iad-worker2, so these take the next free ports. BGP
     # peering on these links is now configured (node_files/tr3/frr.conf,
@@ -271,7 +271,7 @@ topology:
     # whenever the *peer's* MTU exceeds what fits in one page-sized
     # buffer (SKB_WITH_OVERHEAD(PAGE_SIZE - VETH_XDP_HEADROOM), ~3.5-3.8KB
     # on a 4K-page host) -- 9500 blows well past that regardless of which
-    # end asks. Confirmed live: galactic-router-gateway{1,2} crash-looped
+    # end asks. Confirmed live: galactic-gateway{1,2} crash-looped
     # with exactly this ERANGE until both ends of these two links were
     # dropped to 1500.
     - endpoints: ["iad-worker3:eth1", "tr3:eth6"]
