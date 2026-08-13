@@ -581,7 +581,7 @@ static EDGE_ALWAYS_INLINE void count_fib_drop(long fib_rc)
 	else if (fib_rc == BPF_FIB_LKUP_RET_FRAG_NEEDED)
 		// No ICMPv6 Packet Too Big is generated here -- the same
 		// accepted PMTUD gap usid.c's own FIB lookup has (see
-		// docs/agents/ARCHITECTURE.md's Known Constraints).
+		// docs/agents/ARCHITECTURE-GATEWAY.md's Known Constraints).
 		count_drop(DROP_REASON_FIB_FRAG_NEEDED);
 	else
 		count_drop(DROP_REASON_FIB_LOOKUP_FAILED);

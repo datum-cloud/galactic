@@ -154,7 +154,7 @@ Always use the `.yaml` extension, never `.yml`. This applies to all YAML files i
 
 ## Markdown
 
-Align all table columns so that the `|` delimiters are vertically flush. Pad cells with spaces to match the widest value in each column. Apply this to every table in `.md` files, including CLAUDE.md, CONVENTIONS.md, ARCHITECTURE.md, and inline doc comments.
+Align all table columns so that the `|` delimiters are vertically flush. Pad cells with spaces to match the widest value in each column. Apply this to every table in `.md` files, including CLAUDE.md, CONVENTIONS.md, every `ARCHITECTURE*.md` file, and inline doc comments.
 
 ```markdown
 // unaligned — not allowed

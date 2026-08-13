@@ -118,7 +118,7 @@ The lab environment has its own `Taskfile.yaml`; run `task` from `deploy/contain
 
 ## Contributing
 
-See [AGENTS.md](./AGENTS.md) for the contributor guide (development workflow, code standards, architecture pointers) and [docs/agents/ARCHITECTURE.md](./docs/agents/ARCHITECTURE.md) for the full architecture reference.
+See [AGENTS.md](./AGENTS.md) for the contributor guide (development workflow, code standards, architecture pointers) and its [Architecture Reference](./AGENTS.md#architecture-reference) section for links to the full per-component architecture docs (CNI, router, gateway).
 
 ## License
 

@@ -743,7 +743,7 @@ int usid_ingress(struct __sk_buff *skb)
 			// No ICMPv6 Packet Too Big is generated here, unlike the
 			// static-route SEG6 decap path this replaces -- an
 			// accepted PMTUD gap for this milestone; see
-			// docs/agents/ARCHITECTURE.md's Known Constraints.
+			// docs/agents/ARCHITECTURE-CNI.md's Known Constraints.
 			count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, vrf);
 		else
 			count_claimed_drop(DROP_REASON_FIB_LOOKUP_FAILED, vrf);

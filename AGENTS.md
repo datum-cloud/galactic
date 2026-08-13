@@ -2,14 +2,29 @@
 
 ## Architecture Reference
 
-See [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md) for a full architecture reference including module layout, entry points, data flow, configuration, external dependencies, and known constraints.
+The architecture reference is split into three component-scoped documents —
+each self-contained (layout, entry points, data flow, configuration, module
+reference, external dependencies, key design decisions, testing, CI/CD, known
+constraints, and a "For Claude" quick-start table). Start from whichever one
+matches the binary or subsystem you're touching; each cross-links to the
+other two where the boundary matters:
+
+| Document                                                                   | Covers                                                                                                                                            | Start here when you're touching...                                                                                                                                                                                                                                                   |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [docs/agents/ARCHITECTURE-CNI.md](docs/agents/ARCHITECTURE-CNI.md)         | The CNI attach chain: `galactic-cni` (installer), `galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`, `galactic-route`, `vmtap-cni` | Pod/VM attach or detach behavior, CNI config fields/conflists, IPAM, the SRv6 uSID TC-BPF datapath's CNI-side registration, or anything under `cmd/galactic-{cni,veth,tap,ipam,bgp,route}`/`cmd/vmtap-cni`, `internal/cni*`, `internal/installer`, `internal/vmtap`                  |
+| [docs/agents/ARCHITECTURE-ROUTER.md](docs/agents/ARCHITECTURE-ROUTER.md)   | The BGP/EVPN control plane: `galactic-router` (BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/BGPVRFInstance reconcilers, embedded GoBGP, GC)       | BGP CRD reconciliation, GoBGP runtime behavior, EVPN path construction, orphaned-CRD/VRF garbage collection, or anything under `cmd/galactic-router`, `internal/reconcile`, `internal/runtime`, `internal/gc`, `internal/model`, `internal/hash`                                     |
+| [docs/agents/ARCHITECTURE-GATEWAY.md](docs/agents/ARCHITECTURE-GATEWAY.md) | The edge XDP NAT+LB gateway: `galactic-gateway`, `NetworkGateway`/`NetworkRule` reconcilers, the edge XDP datapath                                | Ingress load-balancing/NAT, `NetworkGateway`/`NetworkRule` CRDs, Active-Active BGP placement, or anything under `cmd/galactic-gateway`, `internal/gateway`, `internal/plumbing/ebpf/edge{prog,map,attach}`, the `NetworkGateway`/`NetworkRule`-related code in `internal/controller` |
+
+These three documents supersede the former monolithic `ARCHITECTURE.md`,
+which is now a short pointer to them.
 
 ## Purpose
 
-Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of two binaries deployed on each Kubernetes node:
+Galactic is the SRv6 data plane for multi-cloud VPC networking. It consists of three binaries deployed on each Kubernetes node (the third only on dedicated gateway-role nodes):
 
 - **`galactic-veth`** — CNI plugin that wires containers into VPC networks (VRF, veth, SRv6 ingress route) and writes `BGPAdvertisement` CRDs.
 - **`galactic-router`** — controller-runtime reconciler that watches BGP CRDs and drives an embedded GoBGP server per node to distribute EVPN paths.
+- **`galactic-gateway`** — controller-runtime process that loads an edge XDP NAT+LB datapath on gateway-role nodes and drives it from `NetworkGateway`/`NetworkRule` CRDs, publishing an Active-Active BGP local-preference model over the same EVPN mesh.
 
 VPC and VPCAttachment CRD management lives in a separate companion operator; Galactic receives pre-populated identifiers through the CNI config and acts on them.
 
@@ -17,11 +32,12 @@ VPC and VPCAttachment CRD management lives in a separate companion operator; Gal
 
 ## Tech Stack
 
-- **Go 1.26** — router and CNI plugin
-- **controller-runtime** — BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/BGPVRFInstance reconcilers
-- **BGP API** (`go.datum.net/network`) — BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance CRDs
+- **Go 1.26** — every binary
+- **controller-runtime** — BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/BGPVRFInstance reconcilers (`galactic-router`) and NetworkGateway/NetworkRule reconcilers (`galactic-gateway`); a bare `pkg/client` (no manager) in `galactic-bgp`/`galactic-cni`
+- **BGP API** (`go.datum.net/network`) — BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, NetworkGateway, NetworkRule CRDs
 - **GoBGP v4** — embedded BGP server (tenant role)
 - **SRv6 + netlink** — kernel-level routing; `github.com/vishvananda/netlink`
+- **eBPF** (`github.com/cilium/ebpf`) — TC-BPF SRv6 uSID decap datapath (CNI side) and XDP edge NAT+LB datapath (`galactic-gateway`)
 - **Multus CNI** — multi-network for pods; NAD generation handled by the external operator
 
 ## Development Workflow
@@ -35,7 +51,7 @@ task test:e2e       # Kind cluster lifecycle test
 task lint           # golangci-lint; lint-fix applies safe auto-fixes
 ```
 
-Production release images are built by `.github/workflows/publish.yaml`, not by any `task` in this file — see [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md#cicd) for the full pipeline (per-binary `containers/*/Dockerfile`s pushed to `ghcr.io/datum-cloud/*`, plus a `config/` Kustomize OCI bundle). This replaced an earlier single shared image (`containers/galactic/Dockerfile`, `.github/workflows/release.yaml`, both removed — see that section's History note) that was found to advertise `galactic-router` without ever building it. `containers/galactic-cni/Dockerfile` is also used directly by `task test:e2e` (not just by the publish pipeline).
+Production release images are built by `.github/workflows/publish.yaml`, not by any `task` in this file — see the CI/CD section of each component's architecture doc ([CNI](docs/agents/ARCHITECTURE-CNI.md#cicd), [router](docs/agents/ARCHITECTURE-ROUTER.md#cicd), [gateway](docs/agents/ARCHITECTURE-GATEWAY.md#cicd)) for the full pipeline (per-binary `containers/*/Dockerfile`s pushed to `ghcr.io/datum-cloud/*`, plus a `config/` Kustomize OCI bundle). This replaced an earlier single shared image (`containers/galactic/Dockerfile`, `.github/workflows/release.yaml`, both removed — see the router doc's History note) that was found to advertise `galactic-router` without ever building it. `containers/galactic-cni/Dockerfile` is also used directly by `task test:e2e` (not just by the publish pipeline).
 
 **Before every PR:** `task ci` (lint → build → test:unit → test:e2e).
 
@@ -66,9 +82,10 @@ Summary:
 ## New Developer Entry Points
 
 1. Run `task build` to verify toolchain; run `task test` to confirm unit tests pass.
-2. Read `internal/cni/cni.go` (cmdAdd/cmdDel) to understand the container attach path and how `BGPAdvertisement` CRDs are created.
-3. Read `internal/controller/` for the controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, Node, Secret) plus garbage collection (`gc_controller.go`, backed by `internal/gc/`). Read `internal/reconcile/reconcile.go` to understand how the BGPRouter CRD is translated into a `DesiredRouter` applied to the runtime.
+2. Read `internal/cni/cni.go` (cmdAdd/cmdDel) to understand the container attach path and how `BGPAdvertisement` CRDs are created. See [ARCHITECTURE-CNI.md](docs/agents/ARCHITECTURE-CNI.md).
+3. Read `internal/controller/` for the controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, Node, Secret) plus garbage collection (`gc_controller.go`, backed by `internal/gc/`). Read `internal/reconcile/reconcile.go` to understand how the BGPRouter CRD is translated into a `DesiredRouter` applied to the runtime. See [ARCHITECTURE-ROUTER.md](docs/agents/ARCHITECTURE-ROUTER.md).
 4. Read `internal/runtime/gobgp/runtime.go` to understand how `DesiredRouter` is applied to GoBGP.
 5. Read `internal/plumbing/intf/intf.go` to understand SRv6 endpoint encoding, interface naming, and base62↔hex conversion.
 6. Explore `internal/plumbing/` for shared kernel and network primitives (VRF, sysctl, interface naming, SRv6).
-7. See `docs/cni-cmd-sequence.md` and `docs/agent-startup.md` for Mermaid sequence diagrams of the CNI attach path and router startup. `docs/cni/configuration.md` and `docs/router/configuration.md` document CNI config fields and router environment variables.
+7. Read `internal/gateway/engine.go` and `internal/controller/networkgateway_controller.go` to understand the edge XDP NAT+LB gateway's convergence loop and Active-Active BGP placement model. See [ARCHITECTURE-GATEWAY.md](docs/agents/ARCHITECTURE-GATEWAY.md).
+8. See `docs/cni-cmd-sequence.md` and `docs/agent-startup.md` for Mermaid sequence diagrams of the CNI attach path and router startup. `docs/cni/configuration.md` and `docs/router/configuration.md` document CNI config fields and router environment variables.
