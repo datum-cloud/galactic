@@ -41,11 +41,8 @@ jobs:
 
       - name: Install eBPF build dependencies
         # `task lint` type-checks the whole module, which needs
-        # internal/plumbing/ebpf/prog's bpf2go output regenerated first
-        # (see build job's identical step below for the package pins).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+        # internal/plumbing/ebpf/prog's bpf2go output regenerated first.
+        uses: ./.github/actions/install-ebpf-deps
 
       - name: Run lint
         run: task lint
@@ -67,11 +64,8 @@ jobs:
 
       - name: Install eBPF build dependencies
         # `task test:unit` builds internal/plumbing/ebpf/prog, which needs
-        # its bpf2go output regenerated first (see build job's identical
-        # step below for the package pins).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+        # its bpf2go output regenerated first.
+        uses: ./.github/actions/install-ebpf-deps
 
       - name: Run unit tests
         run: task test:unit
@@ -140,15 +134,12 @@ jobs:
 
       - name: Install eBPF build dependencies
         # `task test:unit-root` builds internal/plumbing/ebpf/prog, which
-        # needs its bpf2go output regenerated first (see build job's
-        # identical step below for the package pins). This runs as the
+        # needs its bpf2go output regenerated first. This runs as the
         # unprivileged runner user -- it's the regeneration below, run as
         # root via `sudo -E task test:unit-root`, that needs clang on
         # root's PATH, which -E's preserved PATH (asserted explicitly via
         # `env "PATH=$PATH"`) already covers.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+        uses: ./.github/actions/install-ebpf-deps
 
       - name: Run root-gated unit tests as root
         # sudo's secure_path policy overrides -E's preserved PATH for
@@ -175,18 +166,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install eBPF build dependencies
-        # Pinned to an explicit versioned package (clang-18/llvm-18) rather
-        # than the unversioned clang/llvm meta-packages, matching the
-        # workflow-level BPF2GO_CC pin above -- keeps the BPF object bytes
-        # (BTF, debug info, section layout) produced by this job identical
-        # to every other job's regeneration instead of drifting with
-        # whatever clang a future runner-image bump resolves to.
-        # linux-libc-dev is listed explicitly too -- doc.go's -idirafter
-        # workaround exists specifically to find its headers, so this job
-        # shouldn't rely on it merely happening to be preinstalled.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+        # `task build`'s build:ebpf step regenerates
+        # internal/plumbing/ebpf/prog's bpf2go output before it builds any
+        # binary -- see the composite action for the package pins.
+        uses: ./.github/actions/install-ebpf-deps
 
       - name: Build binary
         # task build's build:ebpf step regenerates
@@ -219,11 +202,8 @@ jobs:
         # galactic-cni image it builds separately regenerates its own copy
         # inside containers/galactic-cni/Dockerfile's builder stage), which
         # needs internal/plumbing/ebpf/prog's bpf2go output regenerated
-        # first -- see build job's identical step above for the package
-        # pins.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+        # first.
+        uses: ./.github/actions/install-ebpf-deps
 
       - name: Run E2E tests
         run: task test:e2e
