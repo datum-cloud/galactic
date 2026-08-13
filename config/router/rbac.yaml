@@ -9,14 +9,21 @@ rules:
       - bgppeers
       - bgppolicies
     verbs: ["get", "list", "watch", "update", "patch"]
-  # bgpadvertisements/bgpvrfinstances also need delete: the GC reconciler
+  # bgpadvertisements/bgpvrfinstances need delete: the GC reconciler
   # periodically removes orphaned CRDs left behind when CNI DEL never fires
-  # (e.g. a force-terminated container).
+  # (e.g. a force-terminated container). No create/update/patch on either
+  # base resource: galactic-cni already owns creating/updating both
+  # (config/cni/rbac.yaml) via galactic-bgp, and this binary's own
+  # reconcilers only read them and write their /status subresource (see
+  # the rule below) — create/update/patch on bgpadvertisements was only
+  # ever needed by NetworkGatewayReconciler/NetworkRuleReconciler, which no
+  # longer live in this binary (see config/gateway/rbac.yaml for their
+  # replacement RBAC).
   - apiGroups: ["network.datumapis.com"]
     resources:
       - bgpadvertisements
       - bgpvrfinstances
-    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["network.datumapis.com"]
     resources:
       - bgprouters/status

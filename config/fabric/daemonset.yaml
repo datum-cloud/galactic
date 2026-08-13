@@ -26,12 +26,14 @@ spec:
       # depends on before it can start — so this must tolerate NotReady the
       # same way a CNI plugin does, or it never gets scheduled early enough.
       # It must also tolerate the route-reflector role's own
-      # galactic.datumapis.com/node=control:NoSchedule taint -- the affinity
-      # below already targets that label, but without this toleration the
-      # matching taint silently keeps this DaemonSet off the node entirely,
-      # so the route reflector's lo address (and BGP_LOCAL_ADDRESS
-      # auto-detection) never gets configured and galactic-router-control
-      # crashloops forever.
+      # galactic.datumapis.com/node=control:NoSchedule taint and the edge
+      # XDP NAT+LB gateway role's own galactic.datumapis.com/node=gateway:
+      # NoSchedule taint -- the affinity below already targets both labels,
+      # but without these tolerations the matching taint silently keeps
+      # this DaemonSet off the node entirely, so the route reflector's lo
+      # address (and BGP_LOCAL_ADDRESS auto-detection) or the gateway
+      # node's underlay session never comes up and galactic-router-control/
+      # galactic-router-gateway crashloops forever.
       tolerations:
         - key: node.kubernetes.io/not-ready
           operator: Exists
@@ -40,10 +42,19 @@ spec:
           operator: Equal
           value: control
           effect: NoSchedule
+        - key: galactic.datumapis.com/node
+          operator: Equal
+          value: gateway
+          effect: NoSchedule
       # Opt-in only, same as galactic-cni and galactic-router: runs on every
-      # node labeled either for regular tenant traffic or for the
-      # galactic-router route-reflector role, since both need underlay
-      # connectivity; new node types (GPU, monitoring, etc.) don't
+      # node labeled for regular tenant traffic, the galactic-router
+      # route-reflector role, or the edge XDP NAT+LB gateway role
+      # (config/gateway/base/, a separate galactic-gateway binary), since
+      # all three need underlay connectivity -- the gateway role's own XDP
+      # datapath attaches to
+      # this same interface (see internal/gateway's doc.go) and depends on
+      # FRR having already brought it up and established the eBGP
+      # underlay session. New node types (GPU, monitoring, etc.) don't
       # automatically get fabric.
       affinity:
         nodeAffinity:
@@ -57,6 +68,7 @@ spec:
                     values:
                       - edge
                       - control
+                      - gateway
       initContainers:
         - name: frr-init
           # ":latest" is a placeholder only: no such tag is ever pushed to
