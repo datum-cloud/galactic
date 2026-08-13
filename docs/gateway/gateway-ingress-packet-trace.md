@@ -2,10 +2,10 @@
 
 This sequence diagram walks one ingress TCP flow through
 `galactic-gateway`'s edge XDP Full-NAT datapath end to end: an external
-client hitting a VIP, through the gateway node's `edge_nat` XDP program
-(`internal/plumbing/ebpf/edgeprog/edgenat.c`), across the SRv6 underlay to
-the backend Pod's worker node, and back. `2001:db8::1:8080` is an
-illustrative VIP:port, not a value from any config in this repo.
+client hitting a VIP, through the gateway node's `edge_nat` XDP program,
+across the SRv6 underlay to the backend Pod's worker node, and back.
+`2001:db8::1:8080` is an illustrative VIP:port, not a value from any config
+in this repo.
 
 Two things about this datapath are easy to get wrong and matter for
 reading the diagram correctly:
@@ -20,13 +20,12 @@ reading the diagram correctly:
   There is no kernel `seg6local` route involved (that path was removed in
   an earlier cutover — see
   [ARCHITECTURE-CNI.md](../agents/ARCHITECTURE-CNI.md)). A single TC-BPF
-  program, `usid_ingress` (`internal/plumbing/ebpf/prog/usid.c`), matches
-  the outer destination against its locator table, strips the outer IPv6
-  header, resolves the tenant VRF via a scoped FIB lookup, and redirects
-  straight into the Pod's veth (`bpf_redirect_peer()`) — all in the same
-  packet pass. The function this program implements is End.DT46
-  (dual-stack), not End.DT6 — this codebase's SRv6 type explicitly rejects
-  `End.DT6` as unsupported.
+  program, `usid_ingress`, matches the outer destination against its
+  locator table, strips the outer IPv6 header, resolves the tenant VRF via
+  a scoped FIB lookup, and redirects straight into the Pod's veth
+  (`bpf_redirect_peer()`) — all in the same packet pass. The function this
+  program implements is End.DT46 (dual-stack), not End.DT6 — this
+  codebase's SRv6 type explicitly rejects `End.DT6` as unsupported.
 
 ```mermaid
 sequenceDiagram
@@ -62,10 +61,8 @@ sequenceDiagram
 This diagram covers the control-plane side: how a `NetworkRule` CRD
 becomes `rule_table` rows the datapath above actually reads. The only CRDs
 `galactic-gateway`'s reconcilers watch are `NetworkGateway` and
-`NetworkRule` (`internal/controller/networkgateway_controller.go`,
-`networkrule_controller.go` — `SetupWithManager`); `BGPAdvertisement`/
-`BGPRouter` are read, not watched, purely to resolve backend uSIDs
-(`internal/controller/usidresolver.go`).
+`NetworkRule`; `BGPAdvertisement`/`BGPRouter` are read, not watched, purely
+to resolve backend uSIDs.
 
 The `rule_table` key deliberately carries **no tenant dimension** —
 `(proto, VIP address, VIP port)` alone disambiguates every rule on a node,
@@ -83,7 +80,7 @@ sequenceDiagram
 
     Note over K8s, XDP: --- CONTROL PLANE: MAP POPULATION FLOW ---
     K8s->>Op: Watch event (NetworkGateway, NetworkRule)
-    Note over Op: 1. List accepted, non-deleting NetworkRules: extract VIP(s), protocol, port, backend address:port pairs<br/>2. Resolve each backend's SRv6 uSID (usidresolver.go, matched against BGPAdvertisement/BGPRouter CRDs)
+    Note over Op: 1. List accepted, non-deleting NetworkRules: extract VIP(s), protocol, port, backend address:port pairs<br/>2. Resolve each backend's SRv6 uSID, matched against BGPAdvertisement/BGPRouter CRDs
     Note over Op: Build rule_table Key:<br/>(proto, VIP address, VIP port), no tenant dimension, a VIP is globally unique by construction
     Note over Op: Build rule_table Value:<br/>backend list [Pod ULA:port + WorkerNode uSID], up to 8 backends
     Op->>Map: bpf_map_update_elem() via edgemap.RuleTable (cilium/ebpf)
