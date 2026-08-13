@@ -24,6 +24,20 @@ rules:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "watch", "delete"]
+  # networkgateways/networkegresspolicies (datum-cloud/enhancements#865):
+  # read-only, for internal/egressroute.Run (invoked by
+  # EgressRouteReconciler, internal/controller/egressroute_controller.go).
+  # This binary's own reconcilers never write either — enablement and
+  # gateway-node assignment are set by NetworkEgressPolicyReconciler in
+  # galactic-gateway (config/gateway/rbac.yaml), and EgressSID is
+  # published by NetworkGatewayReconciler, also in galactic-gateway. This
+  # binary only ever reads both to decide whether/where to point a local
+  # tenant VRF's own default route.
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - networkgateways
+      - networkegresspolicies
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
       - bgprouters/status

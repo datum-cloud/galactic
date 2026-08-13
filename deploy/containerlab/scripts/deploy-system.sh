@@ -32,6 +32,7 @@ network_crds=(
   network.datumapis.com_bgpvrfinstances.yaml
   network.datumapis.com_networkgateways.yaml
   network.datumapis.com_networkrules.yaml
+  network.datumapis.com_networkegresspolicies.yaml
 )
 
 cloud_crds=(

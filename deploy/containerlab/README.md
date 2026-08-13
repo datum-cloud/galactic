@@ -146,6 +146,43 @@ supplied statically through `GALACTIC_GATEWAY_SRV6_ADDRESS` (originally
 | iad-gateway1 | fc00:0:9::1/128 | 2      | 2001:db8:ff03:2:e000::         |
 | iad-gateway2 | fc00:0:a::1/128 | 3      | 2001:db8:ff03:3:e000::         |
 
+### Egress (masquerade) canary (Phase E, datum-cloud/enhancements#865)
+
+Each gateway node also gets a second, dedicated fabric loopback address
+(`GALACTIC_GATEWAY_EGRESS_ADDRESS`) and shares its ingress locator for
+`GALACTIC_GATEWAY_EGRESS_SID` (only the top 64 bits — Block+Node-ID — are
+ever compared for egress dispatch, so the low bits shown below are just an
+obviously-distinct placeholder, not a value with its own meaning). The
+egress address must be its own, separate address from the node's BGP
+session address (`fc00:0:9::1`/`fc00:0:a::1` above) — reusing it would mean
+`edgenat.c`'s fail-closed egress-return dispatch also claims, and drops,
+this node's own inbound BGP TCP traffic.
+
+| Node         | Egress address (masq_addr) | Egress SID (locator, low bits arbitrary) |
+|--------------|-----------------------------|-------------------------------------------|
+| iad-gateway1 | fc00:0:9::2/128             | 2001:db8:ff03:2:e0ff::                    |
+| iad-gateway2 | fc00:0:a::2/128             | 2001:db8:ff03:3:e0ff::                    |
+
+`ns10`'s iad attachment (`resources/galactic-gateway/iad/
+networkegresspolicy-ns10.yaml`) is the egress canary tenant — chosen over
+`ns60` (the ingress canary) because its `netshoot` image has `ping`; `ns60`'s
+`nginx` image doesn't. Only `ns10`'s **iad** attachment can egress in this
+lab: `NetworkGateway`/`NetworkEgressPolicy` only exist in iad's own Kind
+cluster, since each site here is a fully separate cluster connected only by
+the data-plane SRv6/BGP mesh, not a shared control plane — see
+`scripts/verify-egress.sh`. `task verify:egress` pings `tr1`'s own loopback
+(`fc00:0:1::1`, already announced into the transit mesh, standing in for "an
+arbitrary internet destination" since this lab has no real internet uplink)
+from that pod.
+
+**This canary could not be run live in this session** — bringing up three
+Kind clusters plus the full FRR/BGP mesh is a multi-minute operation not
+attempted here. Every value and code path above was worked through by
+reading the existing lab's real configuration and this design's own
+datapath code, not confirmed against a live cluster; treat it as a
+reasoned-through starting point; the first real run of `task verify:egress`
+is this canary's actual proof.
+
 ### Management network (fc00:10::/64)
 
 | Node                                       | Address      |
@@ -256,6 +293,7 @@ task deploy
 | `verify:ns30`            | Verify ns30 ping (dfw only, 2 pods)                                           |
 | `verify:ns40`            | Verify ns40 ping (iad only, 2 pods)                                           |
 | `verify:gateway`         | Verify iad's gateway canary CRDs exist (manifests only, no live traffic)      |
+| `verify:egress`          | Verify egress (masquerade) datapath end-to-end (ns10/iad → tr1's loopback)    |
 | `destroy`                | Destroy the lab and remove all Kind clusters                                  |
 | `restart`                | Full rebuild — destroy then redeploy                                          |
 | `rebuild`                | Full rebuild — clean (destroy + delete images/artifacts) then redeploy        |

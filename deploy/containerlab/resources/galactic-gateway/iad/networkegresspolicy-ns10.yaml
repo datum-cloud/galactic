@@ -1,0 +1,17 @@
+# ns10 (resources/tenants/ns10/, vpc=10/vpcattachment=10, fd20:10:ff03::/48
+# on iad -- see ns10/iad/nad.yaml) is the egress (masquerade) canary
+# (datum-cloud/enhancements#865): its iad pod is the only ns10 attachment
+# that can actually exercise egress in this lab, since NetworkGateway/
+# NetworkEgressPolicy only exist in iad's own Kind cluster -- dfw/sjc are
+# separate clusters with no visibility into iad's gateway-node CRDs at all
+# (see scripts/verify-egress.sh's own doc comment). ns10 was chosen over
+# ns60 (the ingress canary) specifically because its netshoot image has
+# ping/curl; ns60's nginx image doesn't.
+apiVersion: network.datumapis.com/v1alpha1
+kind: NetworkEgressPolicy
+metadata:
+  name: ns10-egress
+  namespace: galactic-system
+spec:
+  vpcRef: "10"
+  vpcAttachmentRef: "10"

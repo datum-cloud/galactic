@@ -8,6 +8,22 @@ interface lo
  ! BGP_LOCAL_ADDRESS auto-detected from lo, matching iad-worker/
  ! iad-worker-control's own convention).
  ipv6 address fc00:0:9::1/128
+ ! A second, dedicated loopback address for GALACTIC_GATEWAY_EGRESS_ADDRESS
+ ! (datum-cloud/enhancements#865, design plan §3.1's masq_addr) --
+ ! deliberately its own address, not a reuse of fc00:0:9::1 above: edgenat.c's
+ ! egress-return dispatch (edgenat.c's header comment, point 5) claims *every*
+ ! packet addressed to masq_addr regardless of protocol/port and drops
+ ! anything that isn't a recognized egress reply, fail-closed. Reusing this
+ ! node's own BGP session address would mean that same dispatch also claims
+ ! (and drops) the inbound half of this node's own outbound BGP TCP session
+ ! to the route reflector -- breaking this node's own control-plane
+ ! connectivity, not just being untidy. A real deployment provisions this
+ ! from actual public IPv6 space (design plan §7.5, "no in-cluster
+ ! derivation mechanism yet"); this lab has no real internet uplink to
+ ! provision from, so it reuses the same "dedicated per-node fabric
+ ! loopback, redistributed via a /128 network statement" technique the line
+ ! above already establishes for SRv6Address's own reachability.
+ ipv6 address fc00:0:9::2/128
 !
 interface eth1
  description tr3-facing
@@ -37,6 +53,10 @@ router bgp 65000
   # stuck in Active forever -- caught only once this link's underlay
   # eBGP was actually brought up live (see node_files/tr3/frr.conf).
   network fc00:0:9::1/128
+  ! GALACTIC_GATEWAY_EGRESS_ADDRESS -- see the matching interface lo comment
+  ! above for why this is a second, dedicated address rather than a reuse
+  ! of fc00:0:9::1.
+  network fc00:0:9::2/128
  exit-address-family
 
 ipv6 forwarding

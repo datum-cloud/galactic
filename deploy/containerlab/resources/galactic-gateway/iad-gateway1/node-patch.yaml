@@ -50,3 +50,25 @@ spec:
             # reconciler today).
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
               value: "2001:db8:ff03:2:e000::"
+            # datum-cloud/enhancements#865 (egress masquerade): a real,
+            # publicly-routable IPv6 address in production (design plan
+            # §7.5, no in-cluster derivation mechanism yet); this lab has
+            # no real internet uplink, so it reuses a second dedicated
+            # loopback address on this node's own fabric-router
+            # (resources/fabric-router/iad/frr.conf.iad-gateway1),
+            # redistributed the same way that file's own
+            # fc00:0:9::1 (this node's BGP session address) already is.
+            - name: GALACTIC_GATEWAY_EGRESS_ADDRESS
+              value: "fc00:0:9::2"
+            # Same locator (Block+Node-ID) as GALACTIC_GATEWAY_SRV6_ADDRESS
+            # above -- edgenat.c's egress dispatch only ever compares the
+            # top 64 bits (locator_eq, design plan §3.1), so egress_sid
+            # can safely share gw_addr's own locator; the low bits shown
+            # here (e0ff) are a distinct, obviously-placeholder value only
+            # so the two env vars don't look like a copy-paste of each
+            # other, not because they carry any meaning of their own (the
+            # Argument bits are never read from this configured value at
+            # all -- only from each packet's own destination address, at
+            # runtime, as that flow's tenant_arg).
+            - name: GALACTIC_GATEWAY_EGRESS_SID
+              value: "2001:db8:ff03:2:e0ff::"

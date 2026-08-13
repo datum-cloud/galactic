@@ -36,11 +36,18 @@ rules:
     resources:
       - networkgateways
       - networkrules
+      # networkegresspolicies (datum-cloud/enhancements#865): read/write
+      # for NetworkEgressPolicyReconciler's one-time gateway-node
+      # assignment (internal/controller/networkegresspolicy_controller.go),
+      # the same shape NetworkRuleReconciler already has for
+      # primary_node/Accepted on NetworkRule.
+      - networkegresspolicies
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
       - networkgateways/status
       - networkrules/status
+      - networkegresspolicies/status
     verbs: ["get", "update", "patch"]
   # Full CRUD: NetworkGatewayReconciler creates one BGPAdvertisement per VIP
   # address family per NetworkRule it serves plus one for its own

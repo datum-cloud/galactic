@@ -8,6 +8,10 @@ interface lo
  ! BGP_LOCAL_ADDRESS auto-detected from lo, matching iad-worker/
  ! iad-worker-control's own convention).
  ipv6 address fc00:0:a::1/128
+ ! GALACTIC_GATEWAY_EGRESS_ADDRESS -- see frr.conf.iad-gateway1's identical
+ ! comment for why this is a second, dedicated address rather than a reuse
+ ! of fc00:0:a::1.
+ ipv6 address fc00:0:a::2/128
 !
 interface eth1
  description tr3-facing
@@ -26,6 +30,9 @@ router bgp 65000
   neighbor 2001:db8:1:33::1 allowas-in 1
   # /128, not /48 -- see frr.conf.iad-gateway1's identical comment.
   network fc00:0:a::1/128
+  ! GALACTIC_GATEWAY_EGRESS_ADDRESS -- see frr.conf.iad-gateway1's identical
+  ! comment.
+  network fc00:0:a::2/128
  exit-address-family
 
 ipv6 forwarding

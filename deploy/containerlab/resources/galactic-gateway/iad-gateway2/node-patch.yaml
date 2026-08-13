@@ -50,3 +50,11 @@ spec:
             # reconciler today).
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
               value: "2001:db8:ff03:3:e000::"
+            # datum-cloud/enhancements#865 (egress masquerade) -- see
+            # iad-gateway1/node-patch.yaml's identical comment.
+            - name: GALACTIC_GATEWAY_EGRESS_ADDRESS
+              value: "fc00:0:a::2"
+            # Same locator as GALACTIC_GATEWAY_SRV6_ADDRESS above -- see
+            # iad-gateway1/node-patch.yaml's identical comment for why.
+            - name: GALACTIC_GATEWAY_EGRESS_SID
+              value: "2001:db8:ff03:3:e0ff::"

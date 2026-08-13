@@ -227,6 +227,7 @@ tasks:
       - task: "verify:evpn"
       - task: "verify:gateway"
       - task: "verify:scenarios"
+      - task: "verify:egress"
 
   "verify:bgp-transit":
     desc: Verify transit router BGP sessions (iBGP full mesh)
@@ -281,8 +282,13 @@ tasks:
   "verify:gateway":
     desc: Verify iad's gateway canary CRDs exist
     cmds:
-      - docker exec iad-control-plane kubectl get networkgateways,networkrules -n galactic-system
+      - docker exec iad-control-plane kubectl get networkgateways,networkrules,networkegresspolicies -n galactic-system
       - docker exec iad-control-plane kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
+
+  "verify:egress":
+    desc: Verify egress (masquerade) datapath end-to-end (ns10/iad -> tr1's loopback, datum-cloud/enhancements#865)
+    cmds:
+      - ./scripts/verify-egress.sh
 
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios
