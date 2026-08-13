@@ -1,0 +1,36 @@
+@startuml context
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic — System Context
+
+Person(operator, "Platform Operator", "Deploys Galactic DaemonSets; labels control-plane/gateway-role nodes")
+Person(tenant, "Tenant / Developer", "Deploys pods/VMs onto VPC networks; authors NetworkRule ingress specs")
+Person_Ext(client, "External Client", "Sends traffic to a NetworkGateway VIP:port")
+
+System(galactic, "Galactic", "The SRv6 data plane at the center of Datum Cloud's multi-cloud VPC networking — every other product surface's traffic ultimately moves over Galactic")
+
+System_Ext(compute, "Compute", "Datum Cloud pod/VM workloads")
+System_Ext(connectors, "Connectors", "Datum Cloud interconnect / multi-site peering products")
+System_Ext(gateways, "Gateways", "Datum Cloud ingress load-balancing product")
+
+System_Ext(k8s, "Kubernetes API Server", "Source of truth: BGP/Gateway CRDs, Node, Secret objects")
+System_Ext(vpcop, "VPC Operator", "go.datum.net/cloud — owns VPC/VPCAttachment CRD lifecycle")
+System_Ext(fabric, "Underlay Fabric", "FRR eBGP DaemonSet (fabric-router) providing node-to-node IP reachability")
+System_Ext(rr, "iBGP Route Reflector / External Peers", "Distributes EVPN paths between nodes and clusters")
+
+Rel(operator, galactic, "Deploys / configures", "kubectl apply -k, Kustomize")
+Rel(tenant, galactic, "Attaches workloads to VPCs; authors NetworkRule specs", "Kubernetes API")
+Rel(client, galactic, "Connects to a NetworkGateway VIP:port", "IPv6")
+
+Rel(compute, galactic, "Relies on for pod/VM VPC-attached networking", "SRv6, EVPN")
+Rel(connectors, galactic, "Relies on for EVPN route distribution between sites", "SRv6, EVPN")
+Rel(gateways, galactic, "Relies on for edge NAT+LB and Active-Active BGP placement", "XDP, EVPN")
+
+Rel(galactic, k8s, "Watches / writes BGP and Gateway CRDs", "controller-runtime, bare client")
+Rel(vpcop, galactic, "Pre-populates VPC/VPCAttachment identifiers", "CNI config / NAD annotation")
+Rel(galactic, fabric, "Peers over eBGP underlay", "eBGP, port 179")
+Rel(galactic, rr, "Distributes tenant EVPN + Active-Active gateway routes", "iBGP, port 1790")
+
+@enduml

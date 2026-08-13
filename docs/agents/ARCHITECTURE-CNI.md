@@ -161,7 +161,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (veth ADD, tap ADD, shared DEL).
+See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (veth ADD, tap ADD, shared DEL), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries.
 
 ---
 

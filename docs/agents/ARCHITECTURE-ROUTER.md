@@ -105,7 +105,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram.
+See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram, and [docs/architecture/](../architecture/) for C4 context/container diagrams covering all three Galactic applications.
 
 ---
 
