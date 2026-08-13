@@ -15,8 +15,8 @@ import (
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/vishvananda/netlink"
 
-	"go.datum.net/galactic/internal/cni/hostgw"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/hostgw"
 )
 
 // buildResult constructs the CNI result, including IPAM data if configured.
@@ -138,7 +138,7 @@ func buildVethResult(
 
 	// Configure the host-side gateway address and VRF route before printing
 	// the result — kernel-interface work this plugin owns (see
-	// internal/cni/hostgw's doc comment for why galactic-bgp no longer does
+	// internal/hostgw's doc comment for why galactic-bgp no longer does
 	// this itself).
 	if err := hostgw.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, guestHWAddr); err != nil {
 		return fmt.Errorf("configure host gateway: %w", err)

@@ -8,7 +8,7 @@
 // as a library — it has zero kernel-interface dependency: every address it
 // advertises comes from prevResult (see prevresult.go), never from a
 // runtime call into the interface it doesn't own. Host-interface gateway
-// configuration lives in internal/cni/hostgw instead, called directly by
+// configuration lives in internal/hostgw instead, called directly by
 // the master plugins, for exactly this reason.
 package cnibgp
 

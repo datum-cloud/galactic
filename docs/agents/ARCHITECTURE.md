@@ -108,16 +108,16 @@ galactic/
 │   ├── gc/                  # Orphaned BGPAdvertisement/BGPVRFInstance CRD, stale
 │   │                        #   kernel VRF, and eBPF vrf_table entry cleanup,
 │   │                        #   driven by the GC controller
+│   ├── hostconf/            # Shared static-conflist HostConf schema/loader,
+│   │                        #   read by every binary in the chain
+│   ├── hostgw/              # Host-side gateway address/route configuration,
+│   │                        #   called directly by both master plugins
+│   ├── crdnames/            # Deterministic BGPVRFInstance/BGPAdvertisement
+│   │                        #   CRD name derivation, shared by cnibgp/gc
+│   ├── nadpatch/            # NAD annotation patch, shared by cni/cnitap
 │   ├── cni/                 # galactic-veth: veth master plugin (cmdAdd/cmdDel/
 │   │   │                    #   cmdCheck/cmdStatus, PluginConf parsing, NAD
 │   │   │                    #   annotation, host-device delegation)
-│   │   ├── hostconf/        # Shared static-conflist HostConf schema/loader,
-│   │   │                    #   read by every binary in the chain
-│   │   ├── hostgw/          # Host-side gateway address/route configuration,
-│   │   │                    #   called directly by both master plugins
-│   │   ├── crdnames/        # Deterministic BGPVRFInstance/BGPAdvertisement
-│   │   │                    #   CRD name derivation, shared by cnibgp/gc
-│   │   ├── nadpatch/        # NAD annotation patch, shared by cni/cnitap
 │   │   ├── ipam/            # Built-in IPv6/IPv4 pool + static IP allocators,
 │   │   │                    #   on-disk marker-file persistence
 │   │   ├── route/           # Host-side static routes via netlink
@@ -440,7 +440,7 @@ This is the veth-master result. `galactic-tap`'s own result has a single
 interface (the host-side tap, empty sandbox, index `0`) — there is no guest
 interface entry since the fd is handed off to the VM hypervisor, not moved
 into a container netns. Both masters run IPAM identically (if `"ipam"` is
-present) and both configure the host gateway (`internal/cni/hostgw`) before
+present) and both configure the host gateway (`internal/hostgw`) before
 printing their own result — see
 [Interface Types](../cni/configuration.md#master-plugin-fields-galactic-veth--galactic-tap)
 in the CNI config doc.
@@ -485,7 +485,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `internal/gc`                 | galactic-router | Collects orphaned `BGPAdvertisement`/`BGPVRFInstance` CRDs, stale kernel VRFs, and stale eBPF `vrf_table` entries; invoked by the GC controller's ticker | No |
 | `internal/cni`                | galactic-veth   | Veth master plugin: `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`; PluginConf parsing; NAD annotation; host-device delegation; delegates kernel work to plumbing | No |
 | `internal/hostconf`           | every CNI-chain binary | Shared `HostConf` schema + static-conflist loader, plus API-based node-name auto-detect          | No         |
-| `internal/cni/hostgw`         | galactic-veth, galactic-tap | Host-side gateway address/route configuration for a VPC attachment's allocated IPAM addresses | No |
+| `internal/hostgw`             | galactic-veth, galactic-tap | Host-side gateway address/route configuration for a VPC attachment's allocated IPAM addresses | No |
 | `internal/crdnames`           | galactic-veth, galactic-bgp, galactic-router (gc) | Deterministic `BGPVRFInstance`/`BGPAdvertisement` CRD name + annotation-key derivation | No |
 | `internal/nadpatch`           | galactic-veth, galactic-tap | NAD annotation patch (host interface name) + pod-namespace parsing from `CNI_ARGS`          | No         |
 | `internal/cni/ipam`           | galactic-ipam   | IPv6/IPv4 pool allocators + static IP allocator; on-disk marker-file persistence (flock-guarded, keyed by containerID) | Yes (pool allocations + marker files) |
@@ -545,7 +545,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 
 | Layer      | Command          | Framework           | Scope                                                                |
 |------------|------------------|---------------------|------------------------------------------------------------------------|
-| Unit       | `task test:unit` | `go test -race`     | `internal/cni`, `internal/cnitap`, `internal/cniipam`, `internal/cnibgp`, `internal/cniroute` (`buildResult`/`buildVethResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`, `inferFromPrevResult` — each package's own `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`), `internal/cni/{hostconf,hostgw,crdnames,nadpatch,ipam,route,tap,veth}`, `internal/installer` (`installer_test.go` — `Bootstrap`/`Run` with mocked k8s client and netlink/host paths), `internal/plumbing/{srv6,ebpf}`, `internal/gc`, `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
+| Unit       | `task test:unit` | `go test -race`     | `internal/cni`, `internal/cnitap`, `internal/cniipam`, `internal/cnibgp`, `internal/cniroute` (`buildResult`/`buildVethResult`, `parseConf`, `routeTarget`, `lookupBGPRouter`, `inferFromPrevResult` — each package's own `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`), `internal/{hostconf,hostgw,crdnames,nadpatch}`, `internal/cni/{ipam,route,tap,veth}`, `internal/installer` (`installer_test.go` — `Bootstrap`/`Run` with mocked k8s client and netlink/host paths), `internal/plumbing/{srv6,ebpf}`, `internal/gc`, `internal/reconcile`, `internal/controller`, `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
 | E2E        | `task test:e2e`  | Kind + `go test`    | `galactic-tap`'s own ADD (VRF + tap + IPAM delegation), kernel capability checks, CNI VERSION report. Does **not** exercise `galactic-route` or `galactic-bgp` (no BGPRouter fixture in the e2e suite) — see Known Constraints below. Full BGPRouter lifecycle coverage for `galactic-router` comes from this same Kind cluster's separate reconciler tests. |
 | CI full    | `task ci`        | all of the above    | lint → build → test:unit → test:e2e                                  |
 
@@ -600,7 +600,7 @@ Runs on every PR and push to `main`. Two tiers:
 | Termination-route chain stage              | `internal/cniroute/ops_add.go:cmdAdd`, `internal/cni/route/route.go`                          |
 | BGP CRD publish (VRF + advertisement) + eBPF registration | `internal/cnibgp/bgp.go:publishBGPState`, `registerEBPFDatapath`; entry point `internal/cnibgp/ops_add.go:cmdAdd` |
 | How `galactic-bgp`/`galactic-route` learn state without touching the kernel | `internal/cnibgp/prevresult.go:inferFromPrevResult` (reads `RawPrevResult`, not the dead `PrevResult` field) |
-| Host gateway address/route configuration (shared by both master plugins) | `internal/cni/hostgw/hostgw.go:ConfigureHostGateway`         |
+| Host gateway address/route configuration (shared by both master plugins) | `internal/hostgw/hostgw.go:ConfigureHostGateway`             |
 | CNI DaemonSet install/refresh              | `internal/installer/installer.go:Bootstrap` (init container), `internal/installer/installer.go:Run` (long-running container) |
 | CRD → BGP translation                      | `internal/reconcile/reconcile.go:BuildDesiredRouter`         |
 | BGP runtime application (GoBGP)            | `internal/runtime/gobgp/runtime.go:Apply`                   |
