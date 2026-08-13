@@ -54,15 +54,15 @@ copy_router_control_config() {
 }
 
 # copy_router_gateway_config NODE copies config/gateway/base onto NODE,
-# nested under resources/galactic-router-gateway/base/ so that overlay's
+# nested under resources/galactic-gateway/base/ so that overlay's
 # "gateway" resource reference resolves. Each per-node overlay
 # (iad-gateway1/, iad-gateway2/) references ../base, so this is only
 # copied once regardless of how many gateway nodes exist. rm -rf first --
 # see copy_router_config's comment.
 copy_router_gateway_config() {
   local node="$1"
-  docker exec "${node}" rm -rf /galactic/resources/galactic-router-gateway/base/gateway
-  docker cp "${GALACTIC_GATEWAY_BASE_DIR}" "${node}:/galactic/resources/galactic-router-gateway/base/gateway"
+  docker exec "${node}" rm -rf /galactic/resources/galactic-gateway/base/gateway
+  docker cp "${GALACTIC_GATEWAY_BASE_DIR}" "${node}:/galactic/resources/galactic-gateway/base/gateway"
 }
 
 # apply_galactic_router applies the site's galactic-router overlay (DaemonSet
@@ -105,10 +105,10 @@ echo "Applying galactic-gateway RBAC to ${node}..."
 apply_f "${node}" /galactic/config/gateway/serviceaccount.yaml
 apply_f "${node}" /galactic/config/gateway/rbac.yaml
 
-echo "Applying galactic-router-gateway/iad to ${node}..."
-docker exec "${node}" rm -rf /galactic/resources/galactic-router-gateway
-copy_to "${node}" galactic-router-gateway
+echo "Applying galactic-gateway/iad to ${node}..."
+docker exec "${node}" rm -rf /galactic/resources/galactic-gateway
+copy_to "${node}" galactic-gateway
 copy_router_gateway_config "${node}"
-apply_k "${node}" /galactic/resources/galactic-router-gateway/iad/
+apply_k "${node}" /galactic/resources/galactic-gateway/iad/
 
 echo "Done."

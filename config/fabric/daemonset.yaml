@@ -33,7 +33,7 @@ spec:
       # this DaemonSet off the node entirely, so the route reflector's lo
       # address (and BGP_LOCAL_ADDRESS auto-detection) or the gateway
       # node's underlay session never comes up and galactic-router-control/
-      # galactic-router-gateway crashloops forever.
+      # galactic-gateway crashloops forever.
       tolerations:
         - key: node.kubernetes.io/not-ready
           operator: Exists

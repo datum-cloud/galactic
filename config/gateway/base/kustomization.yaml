@@ -3,7 +3,7 @@
 # per gateway node by a further overlay that pins it to one node
 # (kubernetes.io/hostname) and sets that node's own
 # GALACTIC_GATEWAY_PUBLIC_INTERFACE/_SRV6_ADDRESS values. See
-# deploy/containerlab/resources/galactic-router-gateway/ for a worked
+# deploy/containerlab/resources/galactic-gateway/ for a worked
 # example (two instances, iad-gateway1/iad-gateway2).
 resources:
   - daemonset.yaml

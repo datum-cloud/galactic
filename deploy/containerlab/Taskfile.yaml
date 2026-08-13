@@ -78,7 +78,7 @@ tasks:
       - sudo containerlab deploy -t {{.TOPO}}
 
   "deploy:rename-control":
-    desc: Rename iad-worker2 to iad-worker-control, iad-worker3/4 to iad-gateway1/2
+    desc: Rename iad worker nodes
     cmds:
       - docker rename iad-worker2 iad-worker-control
       - docker rename iad-worker3 iad-gateway1
@@ -158,18 +158,6 @@ tasks:
       - kind delete cluster --name sjc || true
       - kind delete cluster --name iad || true
 
-  restart:
-    desc: Full rebuild and redeploy
-    cmds:
-      - task: clean
-      - task: deploy
-
-  rebuild:
-    desc: Rebuild the full deployment
-    cmds:
-      - task: clean
-      - task: deploy
-
   inspect:
     desc: Inspect deployed nodes and management addresses
     cmds:
@@ -225,10 +213,7 @@ tasks:
       - ./scripts/deploy-ns.sh ns40 iad
 
   "deploy:ns60":
-    desc: >-
-      Deploy ns60 test VPC (iad only, nginx backend for the edge XDP
-      NAT+LB gateway canary -- see resources/galactic-router-gateway/iad/
-      networkrule-ns60.yaml, applied earlier by deploy:galactic-router)
+    desc: Deploy ns60 test VPC, nginx backend for the gateway canary
     cmds:
       - ./scripts/deploy-ns.sh ns60 iad
 
@@ -294,11 +279,7 @@ tasks:
       - docker exec dfw-control-plane kubectl get bgprouters -A
 
   "verify:gateway":
-    desc: >-
-      Verify iad's edge XDP NAT+LB gateway canary CRDs exist. BGP peering
-      and XDP attach are now live, but this task itself only checks CRD
-      presence, not end-to-end traffic -- a veth-specific XDP_TX behavior
-      in this lab environment still blocks that, not a code bug.
+    desc: Verify iad's gateway canary CRDs exist
     cmds:
       - docker exec iad-control-plane kubectl get networkgateways,networkrules -n galactic-system
       - docker exec iad-control-plane kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway

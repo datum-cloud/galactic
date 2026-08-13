@@ -140,7 +140,7 @@ spec:
             # requires both — applying this base as-is produces a
             # crash-looping container, not a quiet no-op. The deployer's
             # per-node overlay must set both; see
-            # deploy/containerlab/resources/galactic-router-gateway/ for a
+            # deploy/containerlab/resources/galactic-gateway/ for a
             # worked example (two instances, iad-gateway1/iad-gateway2).
           ports:
             - name: metrics

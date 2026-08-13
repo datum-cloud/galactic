@@ -94,7 +94,7 @@ galactic/
 │                              #   run on gateway-role nodes — see ARCHITECTURE-CNI.md
 │                              #   and root CLAUDE.md's config/fabric/ note)
 ├── deploy/containerlab/resources/
-│   └── galactic-router-gateway/   # Worked two-node example — see below
+│   └── galactic-gateway/   # Worked two-node example — see below
 └── containers/
     └── galactic-gateway/    # galactic-gateway production image
 ```
@@ -110,7 +110,7 @@ node's own public-interface/SRv6-address values.
 
 ### Worked ContainerLab example
 
-`deploy/containerlab/resources/galactic-router-gateway/` has two gateway
+`deploy/containerlab/resources/galactic-gateway/` has two gateway
 nodes (`iad-gateway1`/`iad-gateway2`) as a canary for this gateway role in
 the `iad` cluster. Each node's overlay directory (`iad-gateway1/`,
 `iad-gateway2/`) carries:
