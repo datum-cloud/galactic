@@ -438,15 +438,16 @@ func TestNetworkGatewayReconciler_PublishesSelfAddress(t *testing.T) {
 	}
 }
 
-// TestNetworkGatewayReconciler_PublishesEgressAddress verifies
-// publishEgressAddress writes status.egressAddress and creates a plain (no
-// VRFID/Function) BGPAdvertisement for it once a BGPRouter targets this
-// node -- the egress-specific sibling of
+// TestNetworkGatewayReconciler_PublishesEgressAddresses verifies
+// publishEgressAddresses writes status.egressAddress/egressSID and creates
+// a plain (no VRFID/Function) BGPAdvertisement for each once a BGPRouter
+// targets this node -- the egress-specific sibling of
 // TestNetworkGatewayReconciler_PublishesSelfAddress
 // (datum-cloud/enhancements#865).
-func TestNetworkGatewayReconciler_PublishesEgressAddress(t *testing.T) {
+func TestNetworkGatewayReconciler_PublishesEgressAddresses(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	const egressAddr = "2001:db8:eeee::1"
+	const egressSID = "2001:db8:dddd::1"
 	gw := newTestGateway(testNodeGWA)
 	router := newTestRouter()
 
@@ -458,6 +459,7 @@ func TestNetworkGatewayReconciler_PublishesEgressAddress(t *testing.T) {
 	engine := newFakeGatewayEngine()
 	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
 	r.EgressAddress = egressAddr
+	r.EgressSID = egressSID
 	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
@@ -471,6 +473,9 @@ func TestNetworkGatewayReconciler_PublishesEgressAddress(t *testing.T) {
 	if gotGW.Status.EgressAddress != egressAddr {
 		t.Errorf("Status.EgressAddress = %q, want %q", gotGW.Status.EgressAddress, egressAddr)
 	}
+	if gotGW.Status.EgressSID != egressSID {
+		t.Errorf("Status.EgressSID = %q, want %q", gotGW.Status.EgressSID, egressSID)
+	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
 	if err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA+"-egressaddr"), adv); err != nil {
@@ -483,12 +488,20 @@ func TestNetworkGatewayReconciler_PublishesEgressAddress(t *testing.T) {
 		t.Errorf("egress-address advertisement must carry no VRFID/Function, got VRFID=%v Function=%v",
 			adv.Spec.VRFID, adv.Spec.Function)
 	}
+
+	sidAdv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA+"-egresssid"), sidAdv); err != nil {
+		t.Fatalf("get egress-sid BGPAdvertisement: %v", err)
+	}
+	if len(sidAdv.Spec.Prefixes) != 1 || sidAdv.Spec.Prefixes[0] != bgpv1alpha1.Prefix(egressSID+"/128") {
+		t.Errorf("Prefixes = %v, want [%s/128]", sidAdv.Spec.Prefixes, egressSID)
+	}
 }
 
 // TestNetworkGatewayReconciler_NoEgressAddressSkipsPublication verifies a
-// gateway node with EgressAddress unset (the common case -- a node not
-// offering egress) neither writes status.egressAddress nor creates an
-// egress-address BGPAdvertisement.
+// gateway node with EgressAddress/EgressSID unset (the common case -- a
+// node not offering egress) neither writes status.egressAddress/egressSID
+// nor creates either egress BGPAdvertisement.
 func TestNetworkGatewayReconciler_NoEgressAddressSkipsPublication(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gw := newTestGateway(testNodeGWA)
@@ -514,10 +527,17 @@ func TestNetworkGatewayReconciler_NoEgressAddressSkipsPublication(t *testing.T) 
 	if gotGW.Status.EgressAddress != "" {
 		t.Errorf("Status.EgressAddress = %q, want empty (this node does not offer egress)", gotGW.Status.EgressAddress)
 	}
+	if gotGW.Status.EgressSID != "" {
+		t.Errorf("Status.EgressSID = %q, want empty (this node does not offer egress)", gotGW.Status.EgressSID)
+	}
 
 	err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA+"-egressaddr"), &bgpv1alpha1.BGPAdvertisement{})
 	if err == nil {
 		t.Error("egress-address BGPAdvertisement was created for a node with no EgressAddress configured")
+	}
+	err = fakeClient.Get(context.Background(), testRuleKey(testNodeGWA+"-egresssid"), &bgpv1alpha1.BGPAdvertisement{})
+	if err == nil {
+		t.Error("egress-sid BGPAdvertisement was created for a node with no EgressSID configured")
 	}
 }
 

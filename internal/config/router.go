@@ -22,6 +22,14 @@ const (
 	DefaultRouterGCNamespace    = "galactic-system"
 	DefaultRouterGCInterval     = 5 * time.Minute
 
+	// DefaultRouterEgressRouteInterval is the default reconcile period for
+	// EgressRouteReconciler (datum-cloud/enhancements#865, design plan
+	// §4.4/§7.1), a separate tunable from DefaultRouterGCInterval despite
+	// sharing a default value: GC cleans up stale kernel/CRD state, this
+	// installs/removes live egress default routes -- conceptually distinct
+	// concerns that operators may want to tune independently.
+	DefaultRouterEgressRouteInterval = 5 * time.Minute
+
 	// DefaultRouterWebhookPort matches sigs.k8s.io/controller-runtime/pkg/webhook's
 	// own DefaultPort, named here so callers don't need that import just to
 	// read the default.
@@ -40,6 +48,11 @@ const (
 	EnvRouterGRPCHealthPort = "GALACTIC_ROUTER_GRPC_HEALTH_PORT"
 	EnvRouterGCNamespace    = "GALACTIC_ROUTER_GC_NAMESPACE"
 	EnvRouterGCInterval     = "GALACTIC_ROUTER_GC_INTERVAL"
+
+	// EnvRouterEgressRouteInterval configures EgressRouteReconciler's
+	// reconcile period -- see DefaultRouterEgressRouteInterval's doc
+	// comment for why this is a separate knob from EnvRouterGCInterval.
+	EnvRouterEgressRouteInterval = "GALACTIC_ROUTER_EGRESS_ROUTE_INTERVAL"
 
 	// EnvRouterWebhookEnabled gates the NetworkRule admission webhook
 	// (internal/webhook). Defaults to false: this is the first webhook in
@@ -72,15 +85,16 @@ type RouterConfig struct {
 	prefix string
 
 	// Resolved fields.
-	NodeName       string
-	Mode           string
-	Reflector      bool
-	BGPListenPort  int
-	BGPLocalAddr   string
-	MetricsPort    int
-	GRPCHealthPort int
-	GCNamespace    string
-	GCInterval     time.Duration
+	NodeName            string
+	Mode                string
+	Reflector           bool
+	BGPListenPort       int
+	BGPLocalAddr        string
+	MetricsPort         int
+	GRPCHealthPort      int
+	GCNamespace         string
+	GCInterval          time.Duration
+	EgressRouteInterval time.Duration
 
 	// WebhookEnabled/WebhookPort/WebhookCertDir configure the NetworkRule
 	// admission webhook (internal/webhook) -- see
@@ -107,6 +121,7 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("grpc_health_port", DefaultRouterGRPCHealthPort)
 	v.SetDefault("gc_namespace", DefaultRouterGCNamespace)
 	v.SetDefault("gc_interval", DefaultRouterGCInterval.String())
+	v.SetDefault("egress_route_interval", DefaultRouterEgressRouteInterval.String())
 	v.SetDefault("webhook_enabled", false)
 	v.SetDefault("webhook_port", DefaultRouterWebhookPort)
 	v.SetDefault("webhook_cert_dir", "")
@@ -135,6 +150,7 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"grpc-health-port", "grpc_health_port"},
 		{"gc-namespace", "gc_namespace"},
 		{"gc-interval", "gc_interval"},
+		{"egress-route-interval", "egress_route_interval"},
 		{"webhook-enabled", "webhook_enabled"},
 		{"webhook-port", "webhook_port"},
 		{"webhook-cert-dir", "webhook_cert_dir"},
@@ -161,6 +177,7 @@ func (c *RouterConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt("grpc_health_port")
 	c.GCNamespace = c.v.GetString("gc_namespace")
 	c.GCInterval = c.v.GetDuration("gc_interval")
+	c.EgressRouteInterval = c.v.GetDuration("egress_route_interval")
 	c.WebhookEnabled = c.v.GetBool("webhook_enabled")
 	c.WebhookPort = c.v.GetInt("webhook_port")
 	c.WebhookCertDir = c.v.GetString("webhook_cert_dir")

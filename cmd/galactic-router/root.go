@@ -282,6 +282,14 @@ func runCmd(cfg *config.RouterConfig) error {
 		}
 	}()
 
+	// Register EgressRoute controller and start its ticker goroutine
+	// (datum-cloud/enhancements#865, design plan §4.4/§7.1) -- extracted
+	// to its own function to keep this function's own cyclomatic
+	// complexity down (gocyclo), not for any reuse reason.
+	if err := startEgressRouteController(ctx, mgr, cfg, nodeName); err != nil {
+		return err
+	}
+
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
 	}
@@ -292,6 +300,52 @@ func runCmd(cfg *config.RouterConfig) error {
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
 		return cause
 	}
+
+	return nil
+}
+
+// startEgressRouteController registers controller.EgressRouteReconciler and
+// starts its ticker goroutine, reconciling tenant VRF ::/0 default routes
+// toward each VPC's assigned gateway egress_sid (datum-cloud/
+// enhancements#865, design plan §4.4/§7.1). Mirrors the GC ticker in
+// runCmd exactly (including waiting for cache sync first, so the initial
+// pass doesn't see an empty NetworkEgressPolicy list and remove every live
+// egress route) -- reuses cfg.GCNamespace (both scan the same namespace's
+// CRDs) but its own separate interval, see DefaultRouterEgressRouteInterval's
+// doc comment for why.
+func startEgressRouteController(
+	ctx context.Context, mgr ctrl.Manager, cfg *config.RouterConfig, nodeName string,
+) error {
+	rec := &controller.EgressRouteReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Namespace: cfg.GCNamespace,
+		NodeName:  nodeName,
+		Interval:  cfg.EgressRouteInterval,
+	}
+	if err := rec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup EgressRoute controller: %w", err)
+	}
+
+	go func() {
+		ticker := time.NewTicker(cfg.EgressRouteInterval)
+		defer ticker.Stop()
+
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
+			log.Printf("EgressRoute: cache sync failed, skipping initial pass")
+			return
+		}
+		rec.RunOnce(ctx)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				rec.RunOnce(ctx)
+			}
+		}
+	}()
 
 	return nil
 }
@@ -344,6 +398,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().DurationP("gc-interval", "",
 		config.DefaultRouterGCInterval,
 		"Cleanup interval")
+	cmd.Flags().DurationP("egress-route-interval", "",
+		config.DefaultRouterEgressRouteInterval,
+		"Egress default-route reconcile interval (datum-cloud/enhancements#865)")
 	cmd.Flags().Bool("webhook-enabled", false,
 		"Enable the NetworkRule admission webhook (requires TLS cert material; see config/webhook/)")
 	cmd.Flags().IntP("webhook-port", "",

@@ -119,3 +119,12 @@ func setRuleCondition(rule *bgpv1alpha1.NetworkRule, condition metav1.Condition)
 	condition.ObservedGeneration = rule.Generation
 	meta.SetStatusCondition(&rule.Status.Conditions, condition)
 }
+
+// setEgressPolicyCondition sets or updates a condition on NetworkEgressPolicy
+// (datum-cloud/enhancements#865). ConditionTypeAccepted (reused from
+// peer_types.go, same as NetworkRule) is the only condition type this
+// reconciler sets — see NetworkEgressPolicyReconciler's doc comment.
+func setEgressPolicyCondition(policy *bgpv1alpha1.NetworkEgressPolicy, condition metav1.Condition) {
+	condition.ObservedGeneration = policy.Generation
+	meta.SetStatusCondition(&policy.Status.Conditions, condition)
+}

@@ -175,3 +175,91 @@ func TestRouteEgressAdd_InstallsForBothPrefixFamilies(t *testing.T) {
 		})
 	}
 }
+
+// TestRouteEgressDel_RemovesInstalledRoute is the regression test for a bug
+// found while building datum-cloud/enhancements#865's egress route
+// reconciler: every call to RouteEgressDel failed with "EncodeSEG6Encap: No
+// Segment in srh", because it set Encap to an empty &netlink.SEG6Encap{}
+// on the delete request, and netlink.RouteDel's shared encoding path
+// (routeHandle, used by every Route* function regardless of message type)
+// tries to encode whatever Encap is set to -- unconditionally rejecting a
+// SEG6Encap with zero Segments. This was a real, previously-untested bug in
+// already-shipped production code: internal/runtime/gobgp/monitor.go's BGP
+// path-withdrawal handler has called this function since it was written,
+// with nothing to notice every call was actually failing.
+func TestRouteEgressDel_RemovesInstalledRoute(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		ifaceName = "srv6del0"
+		ifaceAddr = "2001:db8:2::1/64"
+		sidRoute  = "2001:db8:9::9/128"
+		sidGw     = "2001:db8:2::2"
+		sid       = "2001:db8:9::9"
+		prefix    = "fd20:10:ff03::/96"
+		table     = 101
+	)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	_, dst, err := net.ParseCIDR(prefix)
+	if err != nil {
+		t.Fatalf("ParseCIDR: %v", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		if err := netlink.AddrAdd(dummy, addr); err != nil {
+			return fmt.Errorf("add addr: %w", err)
+		}
+		_, sidDst, err := net.ParseCIDR(sidRoute)
+		if err != nil {
+			return fmt.Errorf("parse SID route: %w", err)
+		}
+		route := &netlink.Route{LinkIndex: dummy.Attrs().Index, Dst: sidDst, Gw: net.ParseIP(sidGw)}
+		if err := netlink.RouteAdd(route); err != nil {
+			return fmt.Errorf("add route to SID: %w", err)
+		}
+		return RouteEgressAdd(dst, net.ParseIP(sid), table)
+	})
+	if err != nil {
+		t.Fatalf("setup (install route to delete): %v", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return RouteEgressDel(dst, table)
+	})
+	if err != nil {
+		t.Fatalf("RouteEgressDel: %v, want success", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for _, r := range routes {
+			if r.Dst != nil && r.Dst.String() == dst.String() {
+				return fmt.Errorf("route to %s still present in table %d after RouteEgressDel", dst, table)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
+}

@@ -108,9 +108,19 @@ type NetworkGatewayReconciler struct {
 	// source for tenant egress (datum-cloud/enhancements#865,
 	// config.GatewayConfig.EgressAddress), already the address the
 	// running datapath was configured with. Empty on a gateway node not
-	// offering egress — see publishEgressAddress's doc comment, the
+	// offering egress — see publishEgressAddresses's doc comment, the
 	// egress-specific sibling of publishSelfAddress.
 	EgressAddress string
+
+	// EgressSID is this node's own egress_sid uSID locator
+	// (config.GatewayConfig.EgressSID), already the value the running
+	// datapath's egress_config_table was configured with. Always set
+	// together with EgressAddress, or neither — see
+	// publishEgressAddresses's doc comment. Published so compute nodes
+	// (internal/egressroute's route reconciler) can resolve a real kernel
+	// route to it before encapsulating a tenant VRF's default route
+	// toward it.
+	EgressSID string
 }
 
 const (
@@ -193,9 +203,9 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(err, "publish gateway self-address", "networkGateway", req.NamespacedName)
 		advErrs = append(advErrs, fmt.Errorf("publish self-address: %w", err))
 	}
-	if err := r.publishEgressAddress(ctx, gw); err != nil {
-		logger.Error(err, "publish gateway egress address", "networkGateway", req.NamespacedName)
-		advErrs = append(advErrs, fmt.Errorf("publish egress address: %w", err))
+	if err := r.publishEgressAddresses(ctx, gw); err != nil {
+		logger.Error(err, "publish gateway egress addresses", "networkGateway", req.NamespacedName)
+		advErrs = append(advErrs, fmt.Errorf("publish egress addresses: %w", err))
 	}
 
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
@@ -371,20 +381,33 @@ func (r *NetworkGatewayReconciler) publishSelfAddress(ctx context.Context, gw *b
 		return nil // nothing to advertise into yet
 	}
 
-	addr, err := netip.ParseAddr(r.SRv6Address)
+	return r.publishHostRouteAdvertisement(ctx, gw.Namespace, gw.Name+"-selfaddr", routerName, r.SRv6Address)
+}
+
+// publishHostRouteAdvertisement ensures a BGPAdvertisement exists at
+// namespace/name distributing addrStr as a /128 (or /32 for IPv4) host
+// route via routerName — the shared "self-address" advertisement shape
+// publishSelfAddress and publishEgressAddresses (for both EgressAddress and
+// EgressSID) all need identically, differing only in which status field
+// and object name each caller uses. Extracted here once a third caller
+// (EgressSID, design plan §4.3) would otherwise have triplicated this
+// get-or-create-or-update block.
+func (r *NetworkGatewayReconciler) publishHostRouteAdvertisement(
+	ctx context.Context, namespace, name, routerName, addrStr string,
+) error {
+	addr, err := netip.ParseAddr(addrStr)
 	if err != nil {
-		return fmt.Errorf("parse gateway SRv6 address %q: %w", r.SRv6Address, err)
+		return fmt.Errorf("parse address %q: %w", addrStr, err)
 	}
 	prefix := netip.PrefixFrom(addr, addr.BitLen())
 
-	name := gw.Name + "-selfaddr"
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	key := types.NamespacedName{Namespace: gw.Namespace, Name: name}
+	key := types.NamespacedName{Namespace: namespace, Name: name}
 	getErr := r.Get(ctx, key, adv)
 	switch {
 	case apierrors.IsNotFound(getErr):
 		adv = &bgpv1alpha1.BGPAdvertisement{
-			ObjectMeta: metav1.ObjectMeta{Namespace: gw.Namespace, Name: name},
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 			Spec: bgpv1alpha1.BGPAdvertisementSpec{
 				RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
 				AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
@@ -392,11 +415,11 @@ func (r *NetworkGatewayReconciler) publishSelfAddress(ctx context.Context, gw *b
 			},
 		}
 		if createErr := r.Create(ctx, adv); createErr != nil {
-			return fmt.Errorf("create self-address BGPAdvertisement %s: %w", name, createErr)
+			return fmt.Errorf("create BGPAdvertisement %s: %w", name, createErr)
 		}
 		return nil
 	case getErr != nil:
-		return fmt.Errorf("get self-address BGPAdvertisement %s: %w", name, getErr)
+		return fmt.Errorf("get BGPAdvertisement %s: %w", name, getErr)
 	}
 
 	advCopy := adv.DeepCopy()
@@ -404,28 +427,36 @@ func (r *NetworkGatewayReconciler) publishSelfAddress(ctx context.Context, gw *b
 	advCopy.Spec.AddressFamily = bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}
 	advCopy.Spec.Prefixes = []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())}
 	if updateErr := r.Update(ctx, advCopy); updateErr != nil {
-		return fmt.Errorf("update self-address BGPAdvertisement %s: %w", name, updateErr)
+		return fmt.Errorf("update BGPAdvertisement %s: %w", name, updateErr)
 	}
 	return nil
 }
 
-// publishEgressAddress sets gw.Status.EgressAddress to r.EgressAddress and
-// ensures a BGPAdvertisement exists distributing it as a /128 host route --
-// the egress-specific sibling of publishSelfAddress, mirroring its pattern
-// exactly (design plan §4.3), kept as a separate function rather than
-// folded into publishSelfAddress because the two fields are independently
-// optional: a node can have SRv6Address set with EgressAddress empty (not
-// offering egress), so combining them would tangle two unrelated
-// early-return conditions into one function.
+// publishEgressAddresses sets gw.Status.EgressAddress/EgressSID to
+// r.EgressAddress/r.EgressSID and ensures a BGPAdvertisement exists for
+// each, distributing it as a /128 host route -- the egress-specific
+// sibling of publishSelfAddress, mirroring its pattern exactly (design
+// plan §4.3), kept as a separate function rather than folded into
+// publishSelfAddress because SRv6Address is unconditionally required while
+// EgressAddress/EgressSID are optional as a pair (config.GatewayConfig.
+// Validate) — combining them would tangle an always-true condition with a
+// sometimes-true one.
 //
-// Unlike SRv6Address (reachable only within the SRv6 fabric), EgressAddress
-// must additionally be reachable from the public internet -- an
-// eBGP/uplink-peering concern entirely outside this repo (likely
-// config/fabric's FRR underlay, or a dedicated transit peer). This method
-// only publishes the value into the CRD and the internal iBGP/EVPN mesh, the
-// same way publishSelfAddress does for SRv6Address; it does not, and
-// cannot, arrange the internet-facing side of that reachability.
-func (r *NetworkGatewayReconciler) publishEgressAddress(ctx context.Context, gw *bgpv1alpha1.NetworkGateway) error {
+// Both fields get published here, not two separate functions, because
+// unlike EgressAddress-vs-SRv6Address they are never independently
+// optional from *each other* — always both set or both empty.
+//
+// EgressAddress must additionally be reachable from the public internet --
+// an eBGP/uplink-peering concern entirely outside this repo (likely
+// config/fabric's FRR underlay, or a dedicated transit peer). EgressSID, by
+// contrast, is exactly like SRv6Address: a real uSID other (compute) nodes
+// need a kernel route to before they can install a SEG6 encap route naming
+// it as the destination (internal/egressroute's route reconciler) -- this
+// method only publishes both values into the CRD and the internal
+// iBGP/EVPN mesh, the same way publishSelfAddress does for SRv6Address; it
+// does not, and cannot, arrange EgressAddress's internet-facing
+// reachability.
+func (r *NetworkGatewayReconciler) publishEgressAddresses(ctx context.Context, gw *bgpv1alpha1.NetworkGateway) error {
 	if r.EgressAddress == "" {
 		return nil // this gateway node does not offer egress
 	}
@@ -435,12 +466,13 @@ func (r *NetworkGatewayReconciler) publishEgressAddress(ctx context.Context, gw 
 		return fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, err)
 	}
 
-	if gw.Status.EgressAddress != r.EgressAddress {
+	if gw.Status.EgressAddress != r.EgressAddress || gw.Status.EgressSID != r.EgressSID {
 		// Updated in place, not through a copy -- same reasoning as
 		// publishSelfAddress's identical in-place update (#365).
 		gw.Status.EgressAddress = r.EgressAddress
+		gw.Status.EgressSID = r.EgressSID
 		if err := r.Status().Update(ctx, gw); err != nil {
-			return fmt.Errorf("update NetworkGateway status.egressAddress: %w", err)
+			return fmt.Errorf("update NetworkGateway status.egressAddress/egressSID: %w", err)
 		}
 	}
 
@@ -448,40 +480,13 @@ func (r *NetworkGatewayReconciler) publishEgressAddress(ctx context.Context, gw 
 		return nil // nothing to advertise into yet
 	}
 
-	addr, err := netip.ParseAddr(r.EgressAddress)
-	if err != nil {
-		return fmt.Errorf("parse gateway egress address %q: %w", r.EgressAddress, err)
+	if err := r.publishHostRouteAdvertisement(
+		ctx, gw.Namespace, gw.Name+"-egressaddr", routerName, r.EgressAddress); err != nil {
+		return fmt.Errorf("publish egress-address route: %w", err)
 	}
-	prefix := netip.PrefixFrom(addr, addr.BitLen())
-
-	name := gw.Name + "-egressaddr"
-	adv := &bgpv1alpha1.BGPAdvertisement{}
-	key := types.NamespacedName{Namespace: gw.Namespace, Name: name}
-	getErr := r.Get(ctx, key, adv)
-	switch {
-	case apierrors.IsNotFound(getErr):
-		adv = &bgpv1alpha1.BGPAdvertisement{
-			ObjectMeta: metav1.ObjectMeta{Namespace: gw.Namespace, Name: name},
-			Spec: bgpv1alpha1.BGPAdvertisementSpec{
-				RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
-				AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-				Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())},
-			},
-		}
-		if createErr := r.Create(ctx, adv); createErr != nil {
-			return fmt.Errorf("create egress-address BGPAdvertisement %s: %w", name, createErr)
-		}
-		return nil
-	case getErr != nil:
-		return fmt.Errorf("get egress-address BGPAdvertisement %s: %w", name, getErr)
-	}
-
-	advCopy := adv.DeepCopy()
-	advCopy.Spec.RouterRef = bgpv1alpha1.RouterRef{Name: routerName}
-	advCopy.Spec.AddressFamily = bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}
-	advCopy.Spec.Prefixes = []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())}
-	if updateErr := r.Update(ctx, advCopy); updateErr != nil {
-		return fmt.Errorf("update egress-address BGPAdvertisement %s: %w", name, updateErr)
+	if err := r.publishHostRouteAdvertisement(
+		ctx, gw.Namespace, gw.Name+"-egresssid", routerName, r.EgressSID); err != nil {
+		return fmt.Errorf("publish egress-sid route: %w", err)
 	}
 	return nil
 }

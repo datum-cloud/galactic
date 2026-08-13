@@ -138,6 +138,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		NodeName:      nodeName,
 		SRv6Address:   cfg.SRv6Address,
 		EgressAddress: cfg.EgressAddress,
+		EgressSID:     cfg.EgressSID,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -151,6 +152,17 @@ func runCmd(cfg *config.GatewayConfig) error {
 		NodeName: nodeName,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkRule controller: %w", err)
+	}
+
+	// Register NetworkEgressPolicy controller (one-time gateway-node
+	// assignment; see internal/controller/networkegresspolicy_controller.go,
+	// datum-cloud/enhancements#865).
+	if err := (&controller.NetworkEgressPolicyReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		NodeName: nodeName,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup NetworkEgressPolicy controller: %w", err)
 	}
 
 	if err := mgr.Start(ctx); err != nil {

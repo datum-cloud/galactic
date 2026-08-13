@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/vishvananda/netlink"
@@ -153,6 +155,38 @@ func flush(vrfID uint32) error {
 		}
 	}
 	return nil
+}
+
+// vrfNameRegex matches the deterministic VRF interface name pattern this
+// package's own Add generates ("G%09sV" — see intf.GenerateInterfaceNameVRF)
+// — one VRF per VPC, shared across every attachment on that VPC on this
+// node. Base62 includes digits and letters. Mirrors internal/gc/gc.go's
+// identical, older regex (kept separate rather than shared: this is a new,
+// narrower need — reading a VPC back out of a name, not the GC sweep's own
+// orphan-detection bookkeeping — datum-cloud/enhancements#865).
+var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})V$`)
+
+// legacyVRFNameRegex matches the VRF interface name this package generated
+// before the VRF became per-VPC: the template was "G%09s%03sV", carrying a
+// VPCAttachment segment the current per-VPC name no longer does. A node
+// upgraded in place keeps whatever VRFs it created under the old template
+// — see internal/gc/gc.go's identical regex for the fuller history.
+var legacyVRFNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})[A-Za-z0-9]{3}V$`)
+
+// ResolveVPC extracts the base62-encoded VPC a Galactic-managed VRF
+// interface belongs to, accepting both the current per-VPC name and the
+// legacy pre-rename name — both resolve to the same VPC, since only the
+// leading base62 segment ever encodes it. Returns ok=false for a name that
+// doesn't match either Galactic VRF shape at all (e.g. a non-Galactic VRF
+// interface on the same host).
+func ResolveVPC(name string) (vpc string, ok bool) {
+	if matches := vrfNameRegex.FindStringSubmatch(name); matches != nil {
+		return strings.TrimLeft(matches[1], "0"), true
+	}
+	if matches := legacyVRFNameRegex.FindStringSubmatch(name); matches != nil {
+		return strings.TrimLeft(matches[1], "0"), true
+	}
+	return "", false
 }
 
 // ListVRFLinks returns all VRF interfaces currently present on the host.

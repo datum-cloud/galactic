@@ -145,3 +145,31 @@ func TestDelete_ThenAddRecreates(t *testing.T) {
 		t.Errorf("Exists after re-Add: %v", err)
 	}
 }
+
+// TestResolveVPC covers both current and legacy Galactic VRF interface name
+// shapes, plus non-Galactic names (datum-cloud/enhancements#865's
+// internal/egressroute needs this to identify which local VRF interfaces
+// are its own).
+func TestResolveVPC(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantVPC string
+		wantOK  bool
+	}{
+		{name: "G000000123V", wantVPC: "123", wantOK: true},           // current per-VPC shape
+		{name: "G000000123abcV", wantVPC: "123", wantOK: true},        // legacy shape (VPCAttachment segment)
+		{name: "eth0", wantOK: false},                                 // not a Galactic VRF at all
+		{name: "Gzzz_nonexistent_vpczzz_nonexistentV", wantOK: false}, // wrong shape entirely
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			vpc, ok := vrf.ResolveVPC(tc.name)
+			if ok != tc.wantOK {
+				t.Fatalf("ResolveVPC(%q) ok = %v, want %v", tc.name, ok, tc.wantOK)
+			}
+			if ok && vpc != tc.wantVPC {
+				t.Errorf("ResolveVPC(%q) vpc = %q, want %q", tc.name, vpc, tc.wantVPC)
+			}
+		})
+	}
+}

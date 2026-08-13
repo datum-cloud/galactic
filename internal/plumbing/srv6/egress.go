@@ -106,11 +106,24 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 	return netlink.RouteReplace(route)
 }
 
-// RouteEgressDel removes the SEG6 encap route for prefix from routing table tableID.
+// RouteEgressDel removes the SEG6 encap route for prefix from routing table
+// tableID.
+//
+// Deliberately does not set Encap on the delete request the way the
+// analogous add/replace path does: RTM_DELROUTE only needs Dst+Table to
+// identify which route to remove, but netlink.RouteDel's shared encoding
+// path (routeHandle, used by every Route* function regardless of message
+// type) still tries to encode whatever Encap is set to, and
+// nl.EncodeSEG6Encap unconditionally rejects a SEG6Encap with zero
+// Segments — exactly what an empty &netlink.SEG6Encap{} is. Every call to
+// this function failed with "EncodeSEG6Encap: No Segment in srh" until
+// this fix (datum-cloud/enhancements#865's internal/egressroute is the
+// first caller with a test that actually exercises the delete path;
+// existing production callers — internal/runtime/gobgp/monitor.go's BGP
+// path-withdrawal handler — had none).
 func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
 	return netlink.RouteDel(&netlink.Route{
 		Dst:   prefix,
 		Table: int(tableID),
-		Encap: &netlink.SEG6Encap{},
 	})
 }

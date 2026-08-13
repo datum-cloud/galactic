@@ -38,6 +38,9 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if cfg.GCInterval != DefaultRouterGCInterval {
 		t.Errorf("GCInterval = %v, want %v", cfg.GCInterval, DefaultRouterGCInterval)
 	}
+	if cfg.EgressRouteInterval != DefaultRouterEgressRouteInterval {
+		t.Errorf("EgressRouteInterval = %v, want %v", cfg.EgressRouteInterval, DefaultRouterEgressRouteInterval)
+	}
 	if cfg.Reflector {
 		t.Error("Reflector = true, want false")
 	}
@@ -62,6 +65,7 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterGRPCHealthPort, "5179")
 	t.Setenv(EnvRouterGCNamespace, "custom-ns")
 	t.Setenv(EnvRouterGCInterval, "10m")
+	t.Setenv(EnvRouterEgressRouteInterval, "15m")
 	t.Setenv(EnvRouterWebhookEnabled, testBoolTrue)
 	t.Setenv(EnvRouterWebhookPort, "9444")
 	t.Setenv(EnvRouterWebhookCertDir, "/tmp/certs")
@@ -94,6 +98,9 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	}
 	if cfg.GCInterval != 10*time.Minute {
 		t.Errorf("GCInterval = %v, want 10m", cfg.GCInterval)
+	}
+	if cfg.EgressRouteInterval != 15*time.Minute {
+		t.Errorf("EgressRouteInterval = %v, want 15m", cfg.EgressRouteInterval)
 	}
 	if !cfg.WebhookEnabled {
 		t.Error("WebhookEnabled = false, want true")
