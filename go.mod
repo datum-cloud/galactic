@@ -104,3 +104,9 @@ require (
 )
 
 tool github.com/cilium/ebpf/cmd/bpf2go
+
+// TEMPORARY — Phase A dev-only, per docs/plans/865-edge-gateway-nat66-egress.md
+// §4.1: NetworkEgressPolicy/NetworkGatewayStatus.EgressAddress must land and
+// be tagged in datum-cloud/network before this pin can be a real pseudo-version.
+// Remove once that PR (feat/865-networkegresspolicy-crd) merges and a tag is cut.
+replace go.datum.net/network => ../network
