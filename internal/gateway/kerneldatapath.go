@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgemap"
@@ -107,8 +108,16 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 		backends[i] = edgemap.Backend{Addr: b.Address, Port: b.Port, USID: b.USID}
 	}
 
-	for _, key := range keys {
+	for i, key := range keys {
 		if err := d.ruleTable.Register(key, backends); err != nil {
+			// Record the keys that did land, alongside the ones this rule
+			// already owned (the prune below has not run yet), so
+			// RemoveRule can still find every live entry.
+			for _, written := range keys[:i] {
+				if !slices.Contains(d.ruleKeysByName[rule.Key], written) {
+					d.ruleKeysByName[rule.Key] = append(d.ruleKeysByName[rule.Key], written)
+				}
+			}
 			return fmt.Errorf("kerneldatapath: apply rule %s: %w", rule.Key, err)
 		}
 	}
