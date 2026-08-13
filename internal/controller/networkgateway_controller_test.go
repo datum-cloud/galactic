@@ -6,7 +6,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 
@@ -16,9 +18,17 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"go.datum.net/galactic/internal/gateway"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+)
+
+// errAdvertisementWrite and errOrphanSweep are the injected failures the
+// #365 regression tests below assert are surfaced rather than swallowed.
+var (
+	errAdvertisementWrite = errors.New("simulated BGPAdvertisement write failure")
+	errOrphanSweep        = errors.New("simulated orphan sweep failure")
 )
 
 // fakeGatewayEngine records the EngineState passed to Reconcile so tests can
@@ -29,6 +39,7 @@ type fakeGatewayEngine struct {
 	lastDesired    gateway.EngineState
 	reconciled     int
 	reconcileErr   error
+	orphansErr     error
 	stopped        bool
 	generation     uint64
 	orphansCutoffs []uint64
@@ -59,7 +70,7 @@ func (f *fakeGatewayEngine) ReconcileOrphans(_ context.Context, _ gateway.Engine
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.orphansCutoffs = append(f.orphansCutoffs, cutoff)
-	return nil
+	return f.orphansErr
 }
 
 func (f *fakeGatewayEngine) Stop(context.Context) error {
@@ -99,6 +110,38 @@ func newGatewayReconciler(
 	c client.Client, scheme *runtime.Scheme, engine GatewayEngine, node string,
 ) *NetworkGatewayReconciler {
 	return &NetworkGatewayReconciler{Client: c, Scheme: scheme, Engine: engine, NodeName: node}
+}
+
+// newTestRouter returns the BGPRouter targeting testNodeGWA, resolved
+// through the
+// BGPRouterByTargetName index newIndexedClientBuilder registers. Without
+// one, routerNameForNode returns "" and Reconcile skips every
+// BGPAdvertisement it would otherwise write.
+func newTestRouter() *bgpv1alpha1.BGPRouter {
+	return &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRouterName},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef: bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testNodeGWA},
+			LocalASN:  65000,
+			RouterID:  "1.1.1.1",
+			Roles:     []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+		},
+	}
+}
+
+// gatewayReadyCondition returns node's NetworkGateway Ready condition,
+// failing the test if the object or the condition is missing.
+func gatewayReadyCondition(t *testing.T, c client.Client, node string) *metav1.Condition {
+	t.Helper()
+	gw := &bgpv1alpha1.NetworkGateway{}
+	if err := c.Get(context.Background(), testRuleKey(node), gw); err != nil {
+		t.Fatalf("get NetworkGateway %s: %v", node, err)
+	}
+	cond := meta.FindStatusCondition(gw.Status.Conditions, bgpv1alpha1.ConditionTypeReady)
+	if cond == nil {
+		t.Fatalf("NetworkGateway %s has no %s condition", node, bgpv1alpha1.ConditionTypeReady)
+	}
+	return cond
 }
 
 func TestNetworkGatewayReconciler_SkipsNonMatchingNode(t *testing.T) {
@@ -311,15 +354,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisementWithComputedLocalPref(t
 	gwA := newTestGateway(testNodeGWA)
 	gwB := newTestGateway(testNodeGWB)
 	backendRouter, backendAdv := newBackendFixtures()
-	router := &bgpv1alpha1.BGPRouter{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRouterName},
-		Spec: bgpv1alpha1.BGPRouterSpec{
-			TargetRef: bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testNodeGWA},
-			LocalASN:  65000,
-			RouterID:  "1.1.1.1",
-			Roles:     []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-		},
-	}
+	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Status.PrimaryNode = testNodeGWB // this node (gw-a) is secondary
 	acceptRule(rule)
@@ -366,15 +401,7 @@ func TestNetworkGatewayReconciler_PublishesSelfAddress(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	const selfAddr = "2001:db8:ffff::1"
 	gw := newTestGateway(testNodeGWA)
-	router := &bgpv1alpha1.BGPRouter{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRouterName},
-		Spec: bgpv1alpha1.BGPRouterSpec{
-			TargetRef: bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testNodeGWA},
-			LocalASN:  65000,
-			RouterID:  "1.1.1.1",
-			Roles:     []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
-		},
-	}
+	router := newTestRouter()
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
@@ -408,6 +435,131 @@ func TestNetworkGatewayReconciler_PublishesSelfAddress(t *testing.T) {
 	if adv.Spec.VRFID != nil || adv.Spec.Function != nil {
 		t.Errorf("self-address advertisement must carry no VRFID/Function, got VRFID=%v Function=%v",
 			adv.Spec.VRFID, adv.Spec.Function)
+	}
+}
+
+// TestNetworkGatewayReconciler_AdvertisementFailureSurfaces is the
+// regression test for #365: BGPAdvertisement write failures used to be
+// logged and dropped, so a node that had advertised nothing still reported
+// Ready=True/EngineHealthy (the condition was computed from the engine
+// result alone) and Reconcile returned nil, so nothing retried either.
+func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+	backendRouter, backendAdv := newBackendFixtures()
+	router := newTestRouter()
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Status.PrimaryNode = testNodeGWA
+	acceptRule(rule)
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA, router, backendRouter, backendAdv, rule).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(
+				ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption,
+			) error {
+				if _, ok := obj.(*bgpv1alpha1.BGPAdvertisement); ok {
+					return errAdvertisementWrite
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	_, err := r.Reconcile(context.Background(), req)
+	if err == nil {
+		t.Fatal("Reconcile returned nil for a failed BGPAdvertisement write; the failure must be retried")
+	}
+	if !errors.Is(err, errAdvertisementWrite) {
+		t.Errorf("Reconcile error = %v, want it to wrap %v", err, errAdvertisementWrite)
+	}
+
+	cond := gatewayReadyCondition(t, fakeClient, testNodeGWA)
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Ready status = %s, want %s", cond.Status, metav1.ConditionFalse)
+	}
+	if cond.Reason != reasonAdvertisementFailed {
+		t.Errorf("Ready reason = %q, want %q", cond.Reason, reasonAdvertisementFailed)
+	}
+	if !strings.Contains(cond.Message, testRuleName) {
+		t.Errorf("Ready message = %q, want it to name the failing NetworkRule %q", cond.Message, testRuleName)
+	}
+}
+
+// TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass is the
+// other half of #365: with every advertisement written, the node still
+// reports Ready=True/EngineHealthy and Reconcile returns nil.
+func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+	backendRouter, backendAdv := newBackendFixtures()
+	router := newTestRouter()
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Status.PrimaryNode = testNodeGWA
+	acceptRule(rule)
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA, router, backendRouter, backendAdv, rule).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	}
+
+	cond := gatewayReadyCondition(t, fakeClient, testNodeGWA)
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("Ready status = %s, want %s", cond.Status, metav1.ConditionTrue)
+	}
+	if cond.Reason != reasonEngineHealthy {
+		t.Errorf("Ready reason = %q, want %q", cond.Reason, reasonEngineHealthy)
+	}
+}
+
+// TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure covers the third
+// swallowed error from #365. The sweep is crash recovery, so its failure
+// must be retried -- and the status write that precedes it still has to
+// land, hence the Ready assertion.
+func TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	engine.orphansErr = errOrphanSweep
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	_, err := r.Reconcile(context.Background(), req)
+	if err == nil {
+		t.Fatal("Reconcile returned nil for a failed orphan sweep; the sweep must be retried")
+	}
+	if !errors.Is(err, errOrphanSweep) {
+		t.Errorf("Reconcile error = %v, want it to wrap %v", err, errOrphanSweep)
+	}
+
+	cond := gatewayReadyCondition(t, fakeClient, testNodeGWA)
+	if cond.Reason != reasonEngineHealthy {
+		t.Errorf("Ready reason = %q, want %q (status is written before the sweep runs)",
+			cond.Reason, reasonEngineHealthy)
 	}
 }
 
