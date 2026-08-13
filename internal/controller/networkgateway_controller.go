@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 
@@ -104,6 +105,19 @@ type NetworkGatewayReconciler struct {
 	SRv6Address string
 }
 
+const (
+	// reasonEngineHealthy is the Ready condition reason for a fully
+	// converged and fully advertised node.
+	reasonEngineHealthy = "EngineHealthy"
+
+	// reasonAdvertisementFailed is the Ready condition reason for a node
+	// whose engine converged but which could not publish one or more of the
+	// BGPAdvertisements that make that convergence reachable — its own
+	// self-address route, or a rule's VIP route. Such a node serves
+	// nothing, so it must not report reasonEngineHealthy (#365).
+	reasonAdvertisementFailed = "AdvertisementFailed"
+)
+
 // Reconcile reconciles a single NetworkGateway.
 func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -160,8 +174,16 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
+	// Advertisement failures are collected rather than returned on the spot:
+	// the rest of the pass still runs (one bad rule must not stop the
+	// others), then they are reported on the object as
+	// reasonAdvertisementFailed and returned, so controller-runtime retries
+	// with backoff instead of leaving a node that advertised nothing
+	// claiming EngineHealthy (#365).
+	var advErrs []error
 	if err := r.publishSelfAddress(ctx, gw); err != nil {
 		logger.Error(err, "publish gateway self-address", "networkGateway", req.NamespacedName)
+		advErrs = append(advErrs, fmt.Errorf("publish self-address: %w", err))
 	}
 
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
@@ -240,31 +262,52 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	for _, w := range work {
 		if err := r.applyBGPAdvertisements(ctx, w.rule, w.desired, routerName); err != nil {
 			logger.Error(err, "apply BGPAdvertisements for NetworkRule", "networkRule", w.rule.Name)
+			advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", w.rule.Name, err))
 		}
 	}
+	advErr := errors.Join(advErrs...)
 
 	gwCopy := gw.DeepCopy()
 	gwCopy.Status.ObservedGeneration = gw.Generation
-	if status.Healthy {
-		setGatewayCondition(gwCopy, metav1.Condition{
-			Type: bgpv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue,
-			Reason: "EngineHealthy", Message: "gateway engine converged",
-		})
-	} else {
-		setGatewayCondition(gwCopy, metav1.Condition{
-			Type: bgpv1alpha1.ConditionTypeReady, Status: metav1.ConditionFalse,
-			Reason: "EngineDegraded", Message: "one or more NetworkRules failed to apply",
-		})
-	}
+	setGatewayCondition(gwCopy, readyConditionFor(status, advErr))
 	if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
 		logger.Error(updateErr, "update NetworkGateway status")
 	}
 
+	// Crash recovery (see GatewayEngine.ReconcileOrphans): a failed sweep
+	// leaves orphaned rule_table state behind until some later pass
+	// succeeds, so it is returned for retry too, after the status write
+	// above so the failure is still visible on the object.
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		logger.Error(err, "reconcile orphaned rule_table state")
+		return ctrl.Result{}, errors.Join(advErr, fmt.Errorf("reconcile orphaned rule_table state: %w", err))
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, advErr
+}
+
+// readyConditionFor computes the Ready condition for a completed pass:
+// engine health first, then advertisement failures — a node whose engine
+// converged but whose routes never reached BGP serves no traffic, so it
+// must not report reasonEngineHealthy (#365).
+func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Condition {
+	switch {
+	case !status.Healthy:
+		return metav1.Condition{
+			Type: bgpv1alpha1.ConditionTypeReady, Status: metav1.ConditionFalse,
+			Reason: "EngineDegraded", Message: "one or more NetworkRules failed to apply",
+		}
+	case advErr != nil:
+		return metav1.Condition{
+			Type: bgpv1alpha1.ConditionTypeReady, Status: metav1.ConditionFalse,
+			Reason: reasonAdvertisementFailed, Message: advErr.Error(),
+		}
+	default:
+		return metav1.Condition{
+			Type: bgpv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue,
+			Reason: reasonEngineHealthy, Message: "gateway engine converged",
+		}
+	}
 }
 
 // publishSelfAddress sets gw.Status.SRv6Address to r.SRv6Address and
@@ -302,9 +345,12 @@ func (r *NetworkGatewayReconciler) publishSelfAddress(ctx context.Context, gw *b
 	}
 
 	if gw.Status.SRv6Address != r.SRv6Address {
-		gwCopy := gw.DeepCopy()
-		gwCopy.Status.SRv6Address = r.SRv6Address
-		if err := r.Status().Update(ctx, gwCopy); err != nil {
+		// Updated in place, not through a copy: Reconcile writes the Ready
+		// condition from this same object afterwards, and a copy would leave
+		// it holding a stale resourceVersion — losing that write to a
+		// conflict on exactly the pass whose outcome matters most (#365).
+		gw.Status.SRv6Address = r.SRv6Address
+		if err := r.Status().Update(ctx, gw); err != nil {
 			return fmt.Errorf("update NetworkGateway status.sRv6Address: %w", err)
 		}
 	}
