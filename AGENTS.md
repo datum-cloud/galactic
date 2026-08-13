@@ -35,7 +35,7 @@ task test:e2e       # Kind cluster lifecycle test
 task lint           # golangci-lint; lint-fix applies safe auto-fixes
 ```
 
-There is no production release image build in this repo (`task docker-build` and the release workflow were removed after the shared image was found to advertise `galactic-router` without ever building it — see [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md#known-constraints)). `containers/galactic-cni/Dockerfile` exists solely for `task test:e2e`.
+Production release images are built by `.github/workflows/publish.yaml`, not by any `task` in this file — see [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md#cicd) for the full pipeline (per-binary `containers/*/Dockerfile`s pushed to `ghcr.io/datum-cloud/*`, plus a `config/` Kustomize OCI bundle). This replaced an earlier single shared image (`containers/galactic/Dockerfile`, `.github/workflows/release.yaml`, both removed — see that section's History note) that was found to advertise `galactic-router` without ever building it. `containers/galactic-cni/Dockerfile` is also used directly by `task test:e2e` (not just by the publish pipeline).
 
 **Before every PR:** `task ci` (lint → build → test:unit → test:e2e).
 
