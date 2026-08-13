@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -76,13 +77,49 @@ type KernelDatapath struct {
 // SRv6-reachable address (NetworkGatewayStatus.SRv6Address), stable for
 // the life of the process, so there is no per-rule or per-reconcile path
 // that ever needs to rewrite it again.
-func NewKernelDatapath(objs *edgeprog.EdgenatObjects, gwAddr netip.Addr) (*KernelDatapath, error) {
+//
+// egressSID/masqAddr optionally populate egress_config_table the same
+// way, for the egress (masquerade) datapath
+// (datum-cloud/enhancements#865). Both must be their zero netip.Addr
+// together (a gateway node not offering egress, the common case today —
+// design plan §5) or both valid native IPv6 addresses together
+// (config.GatewayConfig.Validate already enforces this pairing before
+// this constructor is ever called; this is a defensive second check, not
+// the primary one). Leaving egress_config_table unwritten is safe: it
+// stays zeroed, and edgenat.c's dispatch never matches a packet against
+// the zero address (this file's own header comment).
+func NewKernelDatapath(objs *edgeprog.EdgenatObjects, gwAddr, egressSID, masqAddr netip.Addr) (*KernelDatapath, error) {
 	if !gwAddr.Is6() || gwAddr.Is4In6() {
 		return nil, fmt.Errorf("kerneldatapath: gateway address %s is not a native IPv6 address", gwAddr)
 	}
 
+	// All validation runs before any map I/O -- including the egress
+	// pair's -- so a validation-only failure never touches
+	// gw_config_table/egress_config_table at all (matches
+	// TestNewKernelDatapath_RejectsIPv4GatewayAddress's own convention of
+	// testing address-family validation without a loaded program).
+	egressEnabled := egressSID.IsValid() || masqAddr.IsValid()
+	if egressEnabled {
+		if !egressSID.IsValid() || !masqAddr.IsValid() {
+			return nil, errors.New("kerneldatapath: egress SID and masquerade address must both be set, or neither")
+		}
+		if !egressSID.Is6() || egressSID.Is4In6() {
+			return nil, fmt.Errorf("kerneldatapath: egress SID %s is not a native IPv6 address", egressSID)
+		}
+		if !masqAddr.Is6() || masqAddr.Is4In6() {
+			return nil, fmt.Errorf("kerneldatapath: masquerade address %s is not a native IPv6 address", masqAddr)
+		}
+	}
+
 	if err := objs.GwConfigTable.Put(uint32(0), edgeprog.EdgenatGwConfig{GwAddr: gwAddr.As16()}); err != nil {
 		return nil, fmt.Errorf("kerneldatapath: populate gw_config_table: %w", err)
+	}
+
+	if egressEnabled {
+		egressCfg := edgeprog.EdgenatEgressConfig{EgressSid: egressSID.As16(), MasqAddr: masqAddr.As16()}
+		if err := objs.EgressConfigTable.Put(uint32(0), egressCfg); err != nil {
+			return nil, fmt.Errorf("kerneldatapath: populate egress_config_table: %w", err)
+		}
 	}
 
 	return &KernelDatapath{

@@ -151,14 +151,24 @@ func runCmd(cfg *config.RouterConfig) error {
 	}()
 
 	if cfg.WebhookEnabled {
-		validator := &networkwebhook.NetworkRuleValidator{
-			// TODO(edge-gateway): AllowAllAuthorizer is a placeholder — see
-			// its doc comment. Wire a real Authorizer here once the
-			// companion operator integration exists.
-			Authorizer: networkwebhook.AllowAllAuthorizer{},
-		}
-		if err := validator.SetupWebhookWithManager(mgr); err != nil {
+		// TODO(edge-gateway): AllowAllAuthorizer is a placeholder — see
+		// its doc comment. Wire a real Authorizer here once the companion
+		// operator integration exists. Shared between both validators
+		// below: they pose the identical vpc/vpcattachment ownership
+		// question (internal/webhook.Authorizer's own doc comment).
+		authorizer := networkwebhook.AllowAllAuthorizer{}
+
+		ruleValidator := &networkwebhook.NetworkRuleValidator{Authorizer: authorizer}
+		if err := ruleValidator.SetupWebhookWithManager(mgr); err != nil {
 			return fmt.Errorf("setup NetworkRule webhook: %w", err)
+		}
+
+		// NetworkEgressPolicy (datum-cloud/enhancements#865) requires the
+		// same ownership-verification admission webhook NetworkRule
+		// already does (design plan §4.1).
+		egressPolicyValidator := &networkwebhook.NetworkEgressPolicyValidator{Authorizer: authorizer}
+		if err := egressPolicyValidator.SetupWebhookWithManager(mgr); err != nil {
+			return fmt.Errorf("setup NetworkEgressPolicy webhook: %w", err)
 		}
 	}
 

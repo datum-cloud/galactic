@@ -22,7 +22,7 @@ type fakeAuthorizer struct {
 }
 
 func (f fakeAuthorizer) Authorize(
-	context.Context, authenticationv1.UserInfo, *networkv1alpha1.NetworkRule,
+	context.Context, authenticationv1.UserInfo, string, string,
 ) (bool, error) {
 	return f.allow, f.err
 }
@@ -95,7 +95,7 @@ func TestNetworkRuleValidator_MissingAdmissionRequestErrors(t *testing.T) {
 
 func TestAllowAllAuthorizer_AlwaysAllows(t *testing.T) {
 	a := AllowAllAuthorizer{}
-	ok, err := a.Authorize(context.Background(), authenticationv1.UserInfo{Username: "anyone"}, testRule())
+	ok, err := a.Authorize(context.Background(), authenticationv1.UserInfo{Username: "anyone"}, "vpc-1", "attach-1")
 	if err != nil {
 		t.Fatalf("Authorize: unexpected error: %v", err)
 	}

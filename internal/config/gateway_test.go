@@ -11,6 +11,9 @@ import (
 
 const (
 	testGatewayNodeName = "test-gateway-node"
+	testGatewayEgress   = "2001:db8:8::1"
+	testInvalidAddr     = "not-an-ip-address"
+	testIPv4Addr        = "203.0.113.1"
 )
 
 func TestGatewayConfigDefaults(t *testing.T) {
@@ -31,6 +34,12 @@ func TestGatewayConfigDefaults(t *testing.T) {
 	if cfg.SRv6Address != "" {
 		t.Errorf("SRv6Address = %q, want empty", cfg.SRv6Address)
 	}
+	if cfg.EgressAddress != "" {
+		t.Errorf("EgressAddress = %q, want empty", cfg.EgressAddress)
+	}
+	if cfg.EgressSID != "" {
+		t.Errorf("EgressSID = %q, want empty", cfg.EgressSID)
+	}
 }
 
 func TestGatewayConfigEnvOverride(t *testing.T) {
@@ -39,6 +48,8 @@ func TestGatewayConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvGatewayGRPCHealthPort, "9091")
 	t.Setenv(EnvGatewayPublicInterface, testGatewayIface)
 	t.Setenv(EnvGatewaySRv6Address, testGatewaySRv6)
+	t.Setenv(EnvGatewayEgressAddress, testGatewayEgress)
+	t.Setenv(EnvGatewayEgressSID, testGatewaySRv6)
 
 	cfg := NewGatewayConfig()
 
@@ -56,6 +67,12 @@ func TestGatewayConfigEnvOverride(t *testing.T) {
 	}
 	if cfg.SRv6Address != testGatewaySRv6 {
 		t.Errorf("SRv6Address = %q, want %q", cfg.SRv6Address, testGatewaySRv6)
+	}
+	if cfg.EgressAddress != testGatewayEgress {
+		t.Errorf("EgressAddress = %q, want %q", cfg.EgressAddress, testGatewayEgress)
+	}
+	if cfg.EgressSID != testGatewaySRv6 {
+		t.Errorf("EgressSID = %q, want %q", cfg.EgressSID, testGatewaySRv6)
 	}
 }
 
@@ -85,7 +102,7 @@ func TestGatewayConfigValidate(t *testing.T) {
 			envVars: map[string]string{
 				EnvGatewayNodeName:        testGatewayNodeName,
 				EnvGatewayPublicInterface: testGatewayIface,
-				EnvGatewaySRv6Address:     "not-an-ip-address",
+				EnvGatewaySRv6Address:     testInvalidAddr,
 			},
 			wantErr: "is not a valid IP address",
 		},
@@ -98,7 +115,7 @@ func TestGatewayConfigValidate(t *testing.T) {
 			envVars: map[string]string{
 				EnvGatewayNodeName:        testGatewayNodeName,
 				EnvGatewayPublicInterface: testGatewayIface,
-				EnvGatewaySRv6Address:     "203.0.113.1",
+				EnvGatewaySRv6Address:     testIPv4Addr,
 			},
 			wantErr: "must be a native IPv6 address",
 		},
@@ -128,6 +145,81 @@ func TestGatewayConfigValidate(t *testing.T) {
 				EnvGatewayNodeName:        testGatewayNodeName,
 				EnvGatewayPublicInterface: testGatewayIface,
 				EnvGatewaySRv6Address:     testGatewaySRv6,
+			},
+			wantErr: "",
+		},
+		{
+			name: "egress address without egress sid",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     testGatewaySRv6,
+				EnvGatewayEgressAddress:   testGatewayEgress,
+			},
+			wantErr: "must be set together",
+		},
+		{
+			name: "egress sid without egress address",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     testGatewaySRv6,
+				EnvGatewayEgressSID:       testGatewayEgress,
+			},
+			wantErr: "must be set together",
+		},
+		{
+			name: "unparseable egress address",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     testGatewaySRv6,
+				EnvGatewayEgressAddress:   testInvalidAddr,
+				EnvGatewayEgressSID:       testGatewayEgress,
+			},
+			wantErr: "egress address \"not-an-ip-address\" is not a valid IP address",
+		},
+		{
+			name: "ipv4 egress address is wrong family",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     testGatewaySRv6,
+				EnvGatewayEgressAddress:   testIPv4Addr,
+				EnvGatewayEgressSID:       testGatewayEgress,
+			},
+			wantErr: "egress address \"203.0.113.1\" must be a native IPv6 address",
+		},
+		{
+			name: "unparseable egress sid",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     testGatewaySRv6,
+				EnvGatewayEgressAddress:   testGatewayEgress,
+				EnvGatewayEgressSID:       testInvalidAddr,
+			},
+			wantErr: "egress SID \"not-an-ip-address\" is not a valid IP address",
+		},
+		{
+			name: "ipv4 egress sid is wrong family",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     testGatewaySRv6,
+				EnvGatewayEgressAddress:   testGatewayEgress,
+				EnvGatewayEgressSID:       testIPv4Addr,
+			},
+			wantErr: "egress SID \"203.0.113.1\" must be a native IPv6 address",
+		},
+		{
+			name: "valid config with egress pair",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewaySRv6Address:     testGatewaySRv6,
+				EnvGatewayEgressAddress:   testGatewayEgress,
+				EnvGatewayEgressSID:       testGatewaySRv6,
 			},
 			wantErr: "",
 		},

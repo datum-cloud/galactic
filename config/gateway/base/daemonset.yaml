@@ -142,6 +142,20 @@ spec:
             # per-node overlay must set both; see
             # deploy/containerlab/resources/galactic-gateway/ for a
             # worked example (two instances, iad-gateway1/iad-gateway2).
+            #
+            # GALACTIC_GATEWAY_EGRESS_ADDRESS/_EGRESS_SID
+            # (datum-cloud/enhancements#865) are also left unset here, but
+            # for a different reason: unlike PUBLIC_INTERFACE/SRV6_ADDRESS,
+            # this pair is genuinely optional — a gateway node not offering
+            # tenant internet egress is a valid deployment, and
+            # config.GatewayConfig.Validate only rejects setting one of the
+            # pair without the other. A per-node overlay that wants this
+            # node to offer egress must set both: EGRESS_ADDRESS is a real,
+            # publicly-routable IPv6 allocation on this node's uplink (not
+            # an internally-derived uSID, so it has no in-cluster
+            # derivation mechanism either), and EGRESS_SID is the shared
+            # egress locator's own reserved Argument value for this
+            # deployment.
           ports:
             - name: metrics
               containerPort: 8081

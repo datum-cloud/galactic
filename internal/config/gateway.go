@@ -51,6 +51,24 @@ const (
 	// SRv6Address), used as the Full-NAT SNAT source for every ingress
 	// flow this node translates. Required — see EnvGatewayPublicInterface.
 	EnvGatewaySRv6Address = "GALACTIC_GATEWAY_SRV6_ADDRESS"
+
+	// EnvGatewayEgressAddress is this gateway node's publicly-routable
+	// masquerade SNAT source (network.datumapis.com/v1alpha1's
+	// NetworkGatewayStatus.EgressAddress), for tenant VPC backends
+	// reaching arbitrary internet destinations
+	// (datum-cloud/enhancements#865). Unlike EnvGatewaySRv6Address, this
+	// is optional — a gateway node not offering egress is a valid
+	// deployment — but must be set together with EnvGatewayEgressSID; see
+	// GatewayConfig.Validate.
+	EnvGatewayEgressAddress = "GALACTIC_GATEWAY_EGRESS_ADDRESS"
+
+	// EnvGatewayEgressSID is this gateway node's egress_sid uSID locator
+	// — the reserved Argument *range* tenant VRF default routes point at
+	// (design plan §3.1, a second reserved value alongside SRv6Address's
+	// own Argument 0), resolved from operator config exactly the way
+	// SRv6Address is today, not computed in-cluster (publishSelfAddress's
+	// doc comment). Optional, paired with EnvGatewayEgressAddress.
+	EnvGatewayEgressSID = "GALACTIC_GATEWAY_EGRESS_SID"
 )
 
 // --- GatewayConfig -----------------------------------------------------
@@ -73,6 +91,15 @@ type GatewayConfig struct {
 	// required; GatewayConfig.Validate rejects either being empty.
 	PublicInterface string
 	SRv6Address     string
+
+	// EgressAddress/EgressSID configure the edge gateway's egress
+	// (masquerade) datapath (datum-cloud/enhancements#865) -- see
+	// EnvGatewayEgressAddress's doc comment. Both optional, but
+	// GatewayConfig.Validate rejects setting only one of the pair: a
+	// gateway node offering egress needs both, and a node not offering it
+	// needs neither.
+	EgressAddress string
+	EgressSID     string
 }
 
 // NewGatewayConfig creates a gateway config resolver with the
@@ -89,6 +116,8 @@ func NewGatewayConfig() *GatewayConfig {
 	v.SetDefault("grpc_health_port", DefaultGatewayGRPCHealthPort)
 	v.SetDefault("public_interface", "")
 	v.SetDefault("srv6_address", "")
+	v.SetDefault("egress_address", "")
+	v.SetDefault("egress_sid", "")
 
 	cfg := &GatewayConfig{
 		v:      v,
@@ -110,6 +139,8 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		{"grpc-health-port", "grpc_health_port"},
 		{"gateway-public-interface", "public_interface"},
 		{"gateway-srv6-address", "srv6_address"},
+		{"gateway-egress-address", "egress_address"},
+		{"gateway-egress-sid", "egress_sid"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -129,6 +160,8 @@ func (c *GatewayConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt("grpc_health_port")
 	c.PublicInterface = c.v.GetString("public_interface")
 	c.SRv6Address = c.v.GetString("srv6_address")
+	c.EgressAddress = c.v.GetString("egress_address")
+	c.EgressSID = c.v.GetString("egress_sid")
 }
 
 // Validate checks that the required configuration fields are set.
@@ -162,6 +195,33 @@ func (c *GatewayConfig) Validate() error {
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
+	}
+
+	// EgressAddress/EgressSID are optional, but only together: a gateway
+	// node offering egress needs both to populate egress_config_table; a
+	// node not offering it needs neither (design plan §5).
+	if (c.EgressAddress == "") != (c.EgressSID == "") {
+		return fmt.Errorf(
+			"gateway egress address and egress SID must be set together, or neither (use %s and %s env vars)",
+			EnvGatewayEgressAddress, EnvGatewayEgressSID)
+	}
+	if c.EgressAddress != "" {
+		addr, err := netip.ParseAddr(c.EgressAddress)
+		if err != nil {
+			return fmt.Errorf("egress address %q is not a valid IP address: %w", c.EgressAddress, err)
+		}
+		if !addr.Is6() || addr.Is4In6() {
+			return fmt.Errorf("egress address %q must be a native IPv6 address, not IPv4", c.EgressAddress)
+		}
+	}
+	if c.EgressSID != "" {
+		addr, err := netip.ParseAddr(c.EgressSID)
+		if err != nil {
+			return fmt.Errorf("egress SID %q is not a valid IP address: %w", c.EgressSID, err)
+		}
+		if !addr.Is6() || addr.Is4In6() {
+			return fmt.Errorf("egress SID %q must be a native IPv6 address, not IPv4", c.EgressSID)
+		}
 	}
 	return nil
 }

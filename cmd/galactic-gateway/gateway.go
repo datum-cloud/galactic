@@ -59,6 +59,12 @@ var gatewayDatapathKeepAlive struct {
 // rejects either being empty before runCmd ever calls this function, since
 // this binary only exists to run the gateway role.
 //
+// egressAddress/egressSID configure the egress (masquerade) datapath
+// (datum-cloud/enhancements#865) and are genuinely optional — both empty
+// is a valid deployment (a gateway node not offering egress), and
+// config.GatewayConfig.Validate already rejects setting only one of the
+// pair before this function is ever called.
+//
 // The loaded *edgeprog.EdgenatObjects and the returned link.Link are
 // stashed in gatewayDatapathKeepAlive (see that var's doc comment for why)
 // rather than Closed here: they, and the XDP attachment itself, must
@@ -71,11 +77,29 @@ var gatewayDatapathKeepAlive struct {
 // at every scrape — see that package's doc comment for why this is a
 // pull-based Collector rather than incrementally-updated Gauges.
 func setupGatewayDatapath(
-	publicInterface, srv6Address string, metricsReg prometheus.Registerer,
+	publicInterface, srv6Address, egressAddress, egressSID string, metricsReg prometheus.Registerer,
 ) (gateway.Datapath, error) {
 	gwAddr, err := netip.ParseAddr(srv6Address)
 	if err != nil {
 		return nil, fmt.Errorf("parse gateway SRv6 address %q: %w", srv6Address, err)
+	}
+
+	// A gateway node not offering egress leaves both fields empty
+	// (config.GatewayConfig.Validate enforces the pairing) — netip.Addr's
+	// zero value is what gateway.NewKernelDatapath treats as "no egress
+	// configured for this node."
+	var egressAddr, egressSIDAddr netip.Addr
+	if egressAddress != "" {
+		egressAddr, err = netip.ParseAddr(egressAddress)
+		if err != nil {
+			return nil, fmt.Errorf("parse gateway egress address %q: %w", egressAddress, err)
+		}
+	}
+	if egressSID != "" {
+		egressSIDAddr, err = netip.ParseAddr(egressSID)
+		if err != nil {
+			return nil, fmt.Errorf("parse gateway egress SID %q: %w", egressSID, err)
+		}
 	}
 
 	objs, err := edgeattach.Load(edgeattach.PinDir)
@@ -89,7 +113,7 @@ func setupGatewayDatapath(
 		return nil, fmt.Errorf("attach edge gateway datapath to public interface %q: %w", publicInterface, err)
 	}
 
-	datapath, err := gateway.NewKernelDatapath(objs, gwAddr)
+	datapath, err := gateway.NewKernelDatapath(objs, gwAddr, egressSIDAddr, egressAddr)
 	if err != nil {
 		_ = xdpLink.Close()
 		_ = objs.Close()

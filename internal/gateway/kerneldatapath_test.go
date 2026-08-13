@@ -229,8 +229,42 @@ func TestNewKernelDatapath_RejectsIPv4GatewayAddress(t *testing.T) {
 	// (root-gated, covered by edgeattach's own tests) -- this test only
 	// exercises the address-family validation, which runs before that
 	// call.
-	_, err := NewKernelDatapath(&edgeprog.EdgenatObjects{}, netip.MustParseAddr("192.0.2.1"))
+	_, err := NewKernelDatapath(&edgeprog.EdgenatObjects{}, netip.MustParseAddr("192.0.2.1"), netip.Addr{}, netip.Addr{})
 	if err == nil {
 		t.Error("NewKernelDatapath with an IPv4 gateway address: want an error, got nil")
+	}
+}
+
+// TestNewKernelDatapath_RejectsMismatchedEgressPair covers the defensive
+// pairing check on egressSID/masqAddr (datum-cloud/enhancements#865) --
+// config.GatewayConfig.Validate already enforces this pairing before this
+// constructor is reached in production, but this constructor must not
+// silently half-configure egress if that invariant is ever violated.
+// Exercises only the validation, which runs before any real Put call --
+// same reasoning as TestNewKernelDatapath_RejectsIPv4GatewayAddress above.
+func TestNewKernelDatapath_RejectsMismatchedEgressPair(t *testing.T) {
+	gwAddr := netip.MustParseAddr("2001:db8:3::1")
+	egressSID := netip.MustParseAddr("2001:db8:8::1")
+
+	_, err := NewKernelDatapath(&edgeprog.EdgenatObjects{}, gwAddr, egressSID, netip.Addr{})
+	if err == nil {
+		t.Error("NewKernelDatapath with egressSID set but masqAddr empty: want an error, got nil")
+	}
+
+	_, err = NewKernelDatapath(&edgeprog.EdgenatObjects{}, gwAddr, netip.Addr{}, egressSID)
+	if err == nil {
+		t.Error("NewKernelDatapath with masqAddr set but egressSID empty: want an error, got nil")
+	}
+}
+
+// TestNewKernelDatapath_RejectsIPv4EgressSID covers the same address-family
+// validation NewKernelDatapath applies to gwAddr, mirrored onto egressSID.
+func TestNewKernelDatapath_RejectsIPv4EgressSID(t *testing.T) {
+	gwAddr := netip.MustParseAddr("2001:db8:3::1")
+	masqAddr := netip.MustParseAddr("2001:db8:8::1")
+
+	_, err := NewKernelDatapath(&edgeprog.EdgenatObjects{}, gwAddr, netip.MustParseAddr("192.0.2.1"), masqAddr)
+	if err == nil {
+		t.Error("NewKernelDatapath with an IPv4 egress SID: want an error, got nil")
 	}
 }

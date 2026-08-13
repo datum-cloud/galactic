@@ -103,6 +103,14 @@ type NetworkGatewayReconciler struct {
 	// reconciler publishes it, it does not compute it; see
 	// publishSelfAddress's doc comment.
 	SRv6Address string
+
+	// EgressAddress is this node's own publicly-routable masquerade SNAT
+	// source for tenant egress (datum-cloud/enhancements#865,
+	// config.GatewayConfig.EgressAddress), already the address the
+	// running datapath was configured with. Empty on a gateway node not
+	// offering egress — see publishEgressAddress's doc comment, the
+	// egress-specific sibling of publishSelfAddress.
+	EgressAddress string
 }
 
 const (
@@ -184,6 +192,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.publishSelfAddress(ctx, gw); err != nil {
 		logger.Error(err, "publish gateway self-address", "networkGateway", req.NamespacedName)
 		advErrs = append(advErrs, fmt.Errorf("publish self-address: %w", err))
+	}
+	if err := r.publishEgressAddress(ctx, gw); err != nil {
+		logger.Error(err, "publish gateway egress address", "networkGateway", req.NamespacedName)
+		advErrs = append(advErrs, fmt.Errorf("publish egress address: %w", err))
 	}
 
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
@@ -393,6 +405,83 @@ func (r *NetworkGatewayReconciler) publishSelfAddress(ctx context.Context, gw *b
 	advCopy.Spec.Prefixes = []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())}
 	if updateErr := r.Update(ctx, advCopy); updateErr != nil {
 		return fmt.Errorf("update self-address BGPAdvertisement %s: %w", name, updateErr)
+	}
+	return nil
+}
+
+// publishEgressAddress sets gw.Status.EgressAddress to r.EgressAddress and
+// ensures a BGPAdvertisement exists distributing it as a /128 host route --
+// the egress-specific sibling of publishSelfAddress, mirroring its pattern
+// exactly (design plan §4.3), kept as a separate function rather than
+// folded into publishSelfAddress because the two fields are independently
+// optional: a node can have SRv6Address set with EgressAddress empty (not
+// offering egress), so combining them would tangle two unrelated
+// early-return conditions into one function.
+//
+// Unlike SRv6Address (reachable only within the SRv6 fabric), EgressAddress
+// must additionally be reachable from the public internet -- an
+// eBGP/uplink-peering concern entirely outside this repo (likely
+// config/fabric's FRR underlay, or a dedicated transit peer). This method
+// only publishes the value into the CRD and the internal iBGP/EVPN mesh, the
+// same way publishSelfAddress does for SRv6Address; it does not, and
+// cannot, arrange the internet-facing side of that reachability.
+func (r *NetworkGatewayReconciler) publishEgressAddress(ctx context.Context, gw *bgpv1alpha1.NetworkGateway) error {
+	if r.EgressAddress == "" {
+		return nil // this gateway node does not offer egress
+	}
+
+	routerName, err := r.routerNameForNode(ctx, gw.Namespace)
+	if err != nil {
+		return fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, err)
+	}
+
+	if gw.Status.EgressAddress != r.EgressAddress {
+		// Updated in place, not through a copy -- same reasoning as
+		// publishSelfAddress's identical in-place update (#365).
+		gw.Status.EgressAddress = r.EgressAddress
+		if err := r.Status().Update(ctx, gw); err != nil {
+			return fmt.Errorf("update NetworkGateway status.egressAddress: %w", err)
+		}
+	}
+
+	if routerName == "" {
+		return nil // nothing to advertise into yet
+	}
+
+	addr, err := netip.ParseAddr(r.EgressAddress)
+	if err != nil {
+		return fmt.Errorf("parse gateway egress address %q: %w", r.EgressAddress, err)
+	}
+	prefix := netip.PrefixFrom(addr, addr.BitLen())
+
+	name := gw.Name + "-egressaddr"
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	key := types.NamespacedName{Namespace: gw.Namespace, Name: name}
+	getErr := r.Get(ctx, key, adv)
+	switch {
+	case apierrors.IsNotFound(getErr):
+		adv = &bgpv1alpha1.BGPAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{Namespace: gw.Namespace, Name: name},
+			Spec: bgpv1alpha1.BGPAdvertisementSpec{
+				RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
+				AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+				Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())},
+			},
+		}
+		if createErr := r.Create(ctx, adv); createErr != nil {
+			return fmt.Errorf("create egress-address BGPAdvertisement %s: %w", name, createErr)
+		}
+		return nil
+	case getErr != nil:
+		return fmt.Errorf("get egress-address BGPAdvertisement %s: %w", name, getErr)
+	}
+
+	advCopy := adv.DeepCopy()
+	advCopy.Spec.RouterRef = bgpv1alpha1.RouterRef{Name: routerName}
+	advCopy.Spec.AddressFamily = bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}
+	advCopy.Spec.Prefixes = []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())}
+	if updateErr := r.Update(ctx, advCopy); updateErr != nil {
+		return fmt.Errorf("update egress-address BGPAdvertisement %s: %w", name, updateErr)
 	}
 	return nil
 }

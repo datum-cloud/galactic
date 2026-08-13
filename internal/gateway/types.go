@@ -61,6 +61,26 @@ type DesiredRule struct {
 	IsPrimary bool
 }
 
+// DesiredEgressPolicy is the engine's internal representation of one
+// NetworkEgressPolicy (datum-cloud/enhancements#865): egress is on or off
+// for a (vpcRef, vpcAttachmentRef) pair, existence-implies-enabled, so
+// unlike DesiredRule there is no VIP/backend/port here at all — see
+// network.datumapis.com/v1alpha1's NetworkEgressPolicySpec, which this
+// mirrors field-for-field.
+//
+// Deliberately not added to EngineState/consumed by Engine.Reconcile in
+// this phase: design plan §7.2 resolves *enablement* (should a tenant
+// reach egress_sid at all) toward a routing-layer decision (does the
+// tenant's VRF have a default route pointed there), not a per-packet
+// datapath lookup, so Datapath gains no new per-call method for it either
+// (§4.2). This type exists for NetworkGatewayReconciler's own
+// bookkeeping/status use and as the shape a future per-tenant enforcement
+// path would consume, if one is ever needed.
+type DesiredEgressPolicy struct {
+	VPCRef           string
+	VPCAttachmentRef string
+}
+
 // EngineState is the full desired state for one gateway node's Engine,
 // assembled by the NetworkGateway controller from every accepted
 // NetworkRule in the node's PoP (both primary- and secondary-assigned —

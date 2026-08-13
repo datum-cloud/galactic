@@ -438,6 +438,89 @@ func TestNetworkGatewayReconciler_PublishesSelfAddress(t *testing.T) {
 	}
 }
 
+// TestNetworkGatewayReconciler_PublishesEgressAddress verifies
+// publishEgressAddress writes status.egressAddress and creates a plain (no
+// VRFID/Function) BGPAdvertisement for it once a BGPRouter targets this
+// node -- the egress-specific sibling of
+// TestNetworkGatewayReconciler_PublishesSelfAddress
+// (datum-cloud/enhancements#865).
+func TestNetworkGatewayReconciler_PublishesEgressAddress(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	const egressAddr = "2001:db8:eeee::1"
+	gw := newTestGateway(testNodeGWA)
+	router := newTestRouter()
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gw, router).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	r.EgressAddress = egressAddr
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	gotGW := &bgpv1alpha1.NetworkGateway{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA), gotGW); err != nil {
+		t.Fatalf("get NetworkGateway: %v", err)
+	}
+	if gotGW.Status.EgressAddress != egressAddr {
+		t.Errorf("Status.EgressAddress = %q, want %q", gotGW.Status.EgressAddress, egressAddr)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA+"-egressaddr"), adv); err != nil {
+		t.Fatalf("get egress-address BGPAdvertisement: %v", err)
+	}
+	if len(adv.Spec.Prefixes) != 1 || adv.Spec.Prefixes[0] != bgpv1alpha1.Prefix(egressAddr+"/128") {
+		t.Errorf("Prefixes = %v, want [%s/128]", adv.Spec.Prefixes, egressAddr)
+	}
+	if adv.Spec.VRFID != nil || adv.Spec.Function != nil {
+		t.Errorf("egress-address advertisement must carry no VRFID/Function, got VRFID=%v Function=%v",
+			adv.Spec.VRFID, adv.Spec.Function)
+	}
+}
+
+// TestNetworkGatewayReconciler_NoEgressAddressSkipsPublication verifies a
+// gateway node with EgressAddress unset (the common case -- a node not
+// offering egress) neither writes status.egressAddress nor creates an
+// egress-address BGPAdvertisement.
+func TestNetworkGatewayReconciler_NoEgressAddressSkipsPublication(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gw := newTestGateway(testNodeGWA)
+	router := newTestRouter()
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gw, router).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	gotGW := &bgpv1alpha1.NetworkGateway{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA), gotGW); err != nil {
+		t.Fatalf("get NetworkGateway: %v", err)
+	}
+	if gotGW.Status.EgressAddress != "" {
+		t.Errorf("Status.EgressAddress = %q, want empty (this node does not offer egress)", gotGW.Status.EgressAddress)
+	}
+
+	err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA+"-egressaddr"), &bgpv1alpha1.BGPAdvertisement{})
+	if err == nil {
+		t.Error("egress-address BGPAdvertisement was created for a node with no EgressAddress configured")
+	}
+}
+
 // TestNetworkGatewayReconciler_AdvertisementFailureSurfaces is the
 // regression test for #365: BGPAdvertisement write failures used to be
 // logged and dropped, so a node that had advertised nothing still reported

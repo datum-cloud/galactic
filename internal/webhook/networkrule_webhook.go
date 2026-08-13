@@ -68,7 +68,7 @@ func (v *NetworkRuleValidator) authorize(ctx context.Context, rule *networkv1alp
 		return fmt.Errorf("resolve admission request: %w", err)
 	}
 
-	ok, err := v.Authorizer.Authorize(ctx, req.UserInfo, rule)
+	ok, err := v.Authorizer.Authorize(ctx, req.UserInfo, rule.Spec.VPCRef, rule.Spec.VPCAttachmentRef)
 	if err != nil {
 		// Fail closed: an authorization check that itself failed (e.g. the
 		// companion operator was unreachable) must never be treated as an

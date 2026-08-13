@@ -113,7 +113,8 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// setupGatewayDatapath, there is no gateway.NoopDatapath{} case here:
 	// config.GatewayConfig.Validate already rejects an empty
 	// PublicInterface/SRv6Address before runCmd is ever reached.
-	gwDatapath, err := setupGatewayDatapath(cfg.PublicInterface, cfg.SRv6Address, ctrlmetrics.Registry)
+	gwDatapath, err := setupGatewayDatapath(
+		cfg.PublicInterface, cfg.SRv6Address, cfg.EgressAddress, cfg.EgressSID, ctrlmetrics.Registry)
 	if err != nil {
 		return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 	}
@@ -131,11 +132,12 @@ func runCmd(cfg *config.GatewayConfig) error {
 
 	// Register NetworkGateway controller (edge XDP NAT+LB gateway engine).
 	if err := (&controller.NetworkGatewayReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Engine:      gwEngine,
-		NodeName:    nodeName,
-		SRv6Address: cfg.SRv6Address,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Engine:        gwEngine,
+		NodeName:      nodeName,
+		SRv6Address:   cfg.SRv6Address,
+		EgressAddress: cfg.EgressAddress,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -202,6 +204,12 @@ func newRootCommand() *cobra.Command {
 		"Public/underlay-facing uplink interface for the edge NAT+LB gateway datapath (required)")
 	cmd.Flags().StringP("gateway-srv6-address", "", "",
 		"This gateway node's own SRv6-reachable address, used as the Full-NAT SNAT source (required)")
+	cmd.Flags().StringP("gateway-egress-address", "", "",
+		"This gateway node's publicly-routable masquerade SNAT source for tenant egress "+
+			"(optional, pairs with --gateway-egress-sid)")
+	cmd.Flags().StringP("gateway-egress-sid", "", "",
+		"This gateway node's egress_sid uSID locator for tenant egress "+
+			"(optional, pairs with --gateway-egress-address)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

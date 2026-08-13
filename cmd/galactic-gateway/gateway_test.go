@@ -17,8 +17,27 @@ import (
 // binary's config.GatewayConfig.Validate rejects an empty
 // PublicInterface/SRv6Address before setupGatewayDatapath is ever called.
 func TestSetupGatewayDatapath_InvalidAddressIsError(t *testing.T) {
-	_, err := setupGatewayDatapath("eth0", "not-an-ip-address", prometheus.NewRegistry())
+	_, err := setupGatewayDatapath("eth0", "not-an-ip-address", "", "", prometheus.NewRegistry())
 	if err == nil {
 		t.Error("setupGatewayDatapath with an invalid SRv6 address: want an error, got nil")
+	}
+}
+
+// TestSetupGatewayDatapath_InvalidEgressAddressIsError covers the
+// egressAddress parse-failure path (datum-cloud/enhancements#865), which
+// also runs before any kernel/eBPF interaction.
+func TestSetupGatewayDatapath_InvalidEgressAddressIsError(t *testing.T) {
+	_, err := setupGatewayDatapath("eth0", "2001:db8:3::1", "not-an-ip-address", "2001:db8:8::1", prometheus.NewRegistry())
+	if err == nil {
+		t.Error("setupGatewayDatapath with an invalid egress address: want an error, got nil")
+	}
+}
+
+// TestSetupGatewayDatapath_InvalidEgressSIDIsError covers the egressSID
+// parse-failure path.
+func TestSetupGatewayDatapath_InvalidEgressSIDIsError(t *testing.T) {
+	_, err := setupGatewayDatapath("eth0", "2001:db8:3::1", "2001:db8:8::1", "not-an-ip-address", prometheus.NewRegistry())
+	if err == nil {
+		t.Error("setupGatewayDatapath with an invalid egress SID: want an error, got nil")
 	}
 }
