@@ -64,7 +64,7 @@ conflist described above). `HostConf` is written by the `galactic-cni init`
 subcommand (`internal/installer.Bootstrap`) — `galactic-cni` is a separate
 installer binary, never itself a CNI plugin, whose `init`/`run` subcommands
 run as the CNI DaemonSet's init and long-running containers respectively —
-see [docs/agents/ARCHITECTURE.md](../agents/ARCHITECTURE.md#known-constraints)
+see [docs/agents/ARCHITECTURE-CNI.md](../agents/ARCHITECTURE-CNI.md#known-constraints)
 for how the DaemonSet stages it.
 
 `galactic-ipam` and `galactic-route` have no Kubernetes dependency at all, so

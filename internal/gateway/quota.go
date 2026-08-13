@@ -57,7 +57,7 @@ const (
 // rate-based enforcement needs live traffic data to calibrate sensible
 // thresholds against, which is exactly what the design plan's Phase D
 // (validated live, not just manifests) was meant to provide before this
-// phase built on top of it — see docs/agents/ARCHITECTURE.md and the
+// phase built on top of it — see docs/agents/ARCHITECTURE-GATEWAY.md and the
 // design plan's own Phase E note. This type is the enforceable subset
 // buildable without that data.
 type NodeQuotaEnforcer struct {

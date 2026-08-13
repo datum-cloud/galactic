@@ -47,7 +47,7 @@ var ebpfHealthCheckInterval = 10 * time.Second
 // once the eBPF datapath is running. A package-level var, same override
 // pattern as ebpfHealthCheckInterval above -- matches galactic-router's
 // own GC controller's documented default period (docs/agents/
-// ARCHITECTURE.md: "ticker-driven, default every 5m").
+// ARCHITECTURE-ROUTER.md: "ticker-driven, default every 5m").
 var ebpfGCSweepInterval = 5 * time.Minute
 
 // ebpfHealthServiceName is the gRPC health service name (see
