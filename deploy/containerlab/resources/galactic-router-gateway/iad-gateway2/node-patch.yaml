@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-gateway
+spec:
+  template:
+    spec:
+      # kubernetes.io/hostname pins this DaemonSet instance to exactly one
+      # node: GALACTIC_GATEWAY_SRV6_ADDRESS below must be unique per
+      # gateway node (see config/gateway/base/kustomization.yaml's doc
+      # comment), so galactic-gateway1/galactic-gateway2 are two separate
+      # DaemonSets rather than one DaemonSet matching both gateway-labeled
+      # nodes with identical env.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - gateway
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - iad-gateway2
+      containers:
+        - name: galactic-gateway
+          env:
+            # eth1 is this lab's dedicated transit-fabric-facing uplink on
+            # every node (see resources/galactic-cni/daemonset-patch.yaml's
+            # comment) -- the same interface edgenat's XDP program attaches
+            # to for both underlay BGP and (once wired) ingress traffic.
+            - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
+              value: eth1
+            # uFMT 48+16 uSID over this PoP's shared locator
+            # (2001:db8:ff03::/48, see bgprouter.yaml's srv6Locator).
+            # nodeID=3, Function=End.DT46 (arbitrary -- Argument 0 always
+            # misses vrf_table, so no Function value is ever consulted for
+            # it; see internal/plumbing/ebpf/prog/usid.c's Step 5-6
+            # comment), Argument=0 (reserved, PR #740). Computed via
+            # internal/plumbing/ebpf/uformat.Encode directly, bypassing
+            # srv6.ComputeSID's argument==0 guard (that guard exists for
+            # tenant-VRF SID derivation specifically -- see
+            # internal/controller/networkgateway_controller.go's
+            # publishSelfAddress doc comment for why this value is
+            # supplied statically rather than computed by that
+            # reconciler today).
+            - name: GALACTIC_GATEWAY_SRV6_ADDRESS
+              value: "2001:db8:ff03:3:e000::"

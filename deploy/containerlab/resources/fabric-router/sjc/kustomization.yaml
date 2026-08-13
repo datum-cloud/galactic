@@ -5,4 +5,4 @@ resources:
 configMapGenerator:
   - name: fabric-config
     files:
-      - frr.conf.sjc-worker=frr.conf
+      - frr.conf.sjc-worker

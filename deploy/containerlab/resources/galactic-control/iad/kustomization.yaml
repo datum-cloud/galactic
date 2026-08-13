@@ -5,6 +5,8 @@ resources:
   - bgppeer-dfw.yaml
   - bgppeer-iad.yaml
   - bgppeer-sjc.yaml
+  - bgppeer-gateway1.yaml
+  - bgppeer-gateway2.yaml
 patches:
   - path: router-lab-patch.yaml
     target:

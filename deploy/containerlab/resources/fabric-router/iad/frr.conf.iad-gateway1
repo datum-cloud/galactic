@@ -1,0 +1,42 @@
+frr defaults traditional
+hostname iad-fabric-gateway1
+log syslog informational
+
+interface lo
+ ! /128 provides a reachable address for this node's own outbound BGP
+ ! session to the route reflector (fc00:0:8::1:1790, GALACTIC_ROUTER_
+ ! BGP_LOCAL_ADDRESS auto-detected from lo, matching iad-worker/
+ ! iad-worker-control's own convention).
+ ipv6 address fc00:0:9::1/128
+!
+interface eth1
+ description tr3-facing
+ ipv6 address 2001:db8:1:32::2/64
+!
+
+router bgp 65000
+ bgp router-id 10.255.255.5
+ no bgp default ipv4-unicast
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ neighbor 2001:db8:1:32::1 remote-as 65100
+
+ address-family ipv6 unicast
+  neighbor 2001:db8:1:32::1 activate
+  neighbor 2001:db8:1:32::1 allowas-in 1
+  # /128, not /48 -- matching every other node's own-loopback
+  # origination (e.g. tr3's "network fc00:0:6::1/128"). Every transit
+  # router's inbound FILTER_PREFIX route-map denies anything <=/48
+  # (node_files/tr3/frr.conf's MIN48 prefix-list) specifically so a
+  # site's aggregate locator/loopback block never leaks onto the
+  # transit as a single de-aggregated route; only a per-node /128
+  # peering loopback is meant to cross it. The original "network
+  # fc00:0:9::/48" (backed by "ipv6 route fc00:0:9::/48 Null0", removed
+  # here) got silently filtered by that same rule on every hop back to
+  # the route reflector, leaving this node's outbound BGPPeer session
+  # stuck in Active forever -- caught only once this link's underlay
+  # eBGP was actually brought up live (see node_files/tr3/frr.conf).
+  network fc00:0:9::1/128
+ exit-address-family
+
+ipv6 forwarding

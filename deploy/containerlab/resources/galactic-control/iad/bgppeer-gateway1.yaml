@@ -1,0 +1,13 @@
+apiVersion: network.datumapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: iad-control-tenant-to-gateway1
+  namespace: galactic-system
+spec:
+  routerRef:
+    name: iad-control-tenant
+  peerASN: 65000
+  address: "fc00:0:9::1"
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn

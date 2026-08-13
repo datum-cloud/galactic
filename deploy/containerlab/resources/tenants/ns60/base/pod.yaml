@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: private
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: private
+  template:
+    metadata:
+      labels:
+        app: private
+      annotations:
+        # Namespace-qualified for the same reason as tenants/base/pod.yaml's
+        # identical annotation: Multus resolves an unqualified
+        # default-network name against kube-system in this lab, not the
+        # pod's own namespace (verified empirically).
+        v1.multus-cni.io/default-network: ns60/private
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: nginx
+          image: nginx:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80

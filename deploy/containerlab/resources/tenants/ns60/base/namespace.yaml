@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Overwritten by this directory's kustomization.yaml `namespace:` field,
+  # exactly like ../../base/namespace.yaml (the shared placeholder every
+  # netshoot-based tenant reuses). Duplicated here rather than referenced
+  # directly (`../../base/namespace.yaml`) because kustomize's default load
+  # restrictor only allows a raw resource *file* reference to resolve
+  # within the referencing kustomization's own root — unlike referencing an
+  # entire sibling *kustomization directory* (what every other tenant's
+  # base/kustomization.yaml does via `../../base`), which ns60 can't do
+  # here without also pulling in that shared kustomization's netshoot
+  # pod.yaml.
+  name: tenant-placeholder

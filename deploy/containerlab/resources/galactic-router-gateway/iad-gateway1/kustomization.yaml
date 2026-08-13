@@ -1,0 +1,29 @@
+# iad-gateway1's instantiation of config/gateway/base (see that dir's
+# kustomization.yaml doc comment for why this role needs one instance per
+# gateway node rather than one shared DaemonSet). iad-gateway2/ is the
+# sibling instantiation.
+namespace: galactic-system
+resources:
+  - ../base
+  - bgprouter.yaml
+  - bgppeer.yaml
+  - networkgateway.yaml
+patches:
+  - path: node-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-gateway
+  # Strategic-merge patches can't rename a resource (Kustomize keeps the
+  # target's original identity regardless of what metadata.name the patch
+  # body says), so the rename to "galactic-gateway1" needs a JSON6902
+  # patch -- same reason resources/fabric-control/iad/ renames its own
+  # DaemonSet: without a distinct name, this and iad-gateway2/'s DaemonSet
+  # would both be named "galactic-gateway" in the same namespace and
+  # silently clobber each other.
+  - target:
+      kind: DaemonSet
+      name: galactic-gateway
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: galactic-gateway1

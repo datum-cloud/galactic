@@ -5,11 +5,19 @@ metadata:
 spec:
   template:
     spec:
-      # Narrower than config/fabric/'s default (edge or control): iad's
-      # control-node fabric pod is deployed separately by
+      # Narrower than config/fabric/'s default (edge, control, or gateway):
+      # iad's control-node fabric pod is deployed separately by
       # resources/fabric-control/iad/, with its own frr.conf for that
-      # node's distinct peering — so this per-site overlay sticks to edge only,
-      # or the control node would get two competing fabric pods.
+      # node's distinct peering — so this per-site overlay sticks to edge
+      # and gateway, or the control node would get two competing fabric
+      # pods. edge and gateway share this one DaemonSet because both just
+      # need an underlay eBGP session brought up before galactic-router
+      # starts (config/fabric/daemonset.yaml's own doc comment) — nothing
+      # about FRR itself differs by role, only the per-node frr.conf key
+      # each pod selects via NODE_NAME (../iad/kustomization.yaml's
+      # configMapGenerator carries both iad-worker's and iad-gateway1/2's
+      # keys in the same fabric-config ConfigMap). dfw/sjc have no
+      # gateway-labeled nodes, so this widening is a no-op there.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -21,6 +29,7 @@ spec:
                     operator: In
                     values:
                       - edge
+                      - gateway
       initContainers:
         - name: frr-init
           image: fabric-router:latest

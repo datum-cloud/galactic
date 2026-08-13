@@ -1,0 +1,31 @@
+frr defaults traditional
+hostname iad-fabric-gateway2
+log syslog informational
+
+interface lo
+ ! /128 provides a reachable address for this node's own outbound BGP
+ ! session to the route reflector (fc00:0:8::1:1790, GALACTIC_ROUTER_
+ ! BGP_LOCAL_ADDRESS auto-detected from lo, matching iad-worker/
+ ! iad-worker-control's own convention).
+ ipv6 address fc00:0:a::1/128
+!
+interface eth1
+ description tr3-facing
+ ipv6 address 2001:db8:1:33::2/64
+!
+
+router bgp 65000
+ bgp router-id 10.255.255.6
+ no bgp default ipv4-unicast
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ neighbor 2001:db8:1:33::1 remote-as 65100
+
+ address-family ipv6 unicast
+  neighbor 2001:db8:1:33::1 activate
+  neighbor 2001:db8:1:33::1 allowas-in 1
+  # /128, not /48 -- see frr.conf.iad-gateway1's identical comment.
+  network fc00:0:a::1/128
+ exit-address-family
+
+ipv6 forwarding

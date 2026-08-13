@@ -7,14 +7,18 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 # config/fabric/ (shared with production) is a single DaemonSet whose
-# affinity allows both the edge and control node labels. resources/fabric-router/
-# base/ and resources/fabric-control/iad/ each build on a copy of it and
-# patch in the lab-only image/imagePullPolicy plus a narrower affinity
-# (edge-only / control-only respectively) — iad needs the two split back
-# apart because its two nodes need different frr.conf. Copied onto the node
-# at deploy time nested under each consuming overlay's own root so its
-# "fabric" resource reference resolves (kustomize requires resources in or
-# below the overlay root).
+# affinity allows the edge, control, and gateway node labels.
+# resources/fabric-router/base/ and resources/fabric-control/iad/ each
+# build on a copy of it and patch in the lab-only image/imagePullPolicy
+# plus a narrower affinity (edge+gateway / control-only respectively) —
+# iad needs the control node split back out because it needs its own
+# frr.conf and would otherwise get two competing fabric pods; edge and
+# gateway share one DaemonSet since neither needs anything but a
+# per-node frr.conf key (fabric-router/iad/kustomization.yaml's
+# configMapGenerator carries both). Copied onto the node at deploy time
+# nested under each consuming overlay's own root so its "fabric" resource
+# reference resolves (kustomize requires resources in or below the
+# overlay root).
 FABRIC_DIR=$(cd "${SCRIPT_DIR}/../../../config/fabric" && pwd)
 
 # copy_fabric_config NODE copies config/fabric/ onto NODE, nested under
@@ -42,7 +46,9 @@ for site in dfw sjc; do
 done
 
 # iad-control-plane needs fabric + fabric-control + galactic-router —
-# batch all copies together.
+# batch all copies together. fabric-router/iad/ alone covers both
+# iad-worker and iad-gateway1/2 (its ConfigMap carries all three
+# frr.conf.<nodename> keys; ../base/'s affinity matches both roles).
 node=$(control_plane iad)
 echo "Copying resources to ${node}..."
 copy_to "${node}" fabric-router
@@ -52,7 +58,8 @@ copy_fabric_control_config "${node}"
 copy_to "${node}" galactic-router
 copy_to "${node}" galactic-control
 
-# Both fabric overlays (per-site and iad's control role) are kustomize now.
+# Both fabric overlays (per-site/gateway, and iad's control role) are
+# kustomize now.
 apply_k "${node}" /galactic/resources/fabric-router/iad/
 apply_k "${node}" /galactic/resources/fabric-control/iad/
 

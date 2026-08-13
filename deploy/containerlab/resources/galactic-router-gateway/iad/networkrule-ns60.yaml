@@ -1,0 +1,30 @@
+# ns60: a live web service (resources/tenants/ns60/, vpc=60/vpcattachment=60,
+# fd20:60:ff03::/48 -- see ns60/iad/nad.yaml) exposed through the edge XDP
+# NAT+LB gateway on a real, routable ingress VIP. This rule's backend
+# address is the nginx Deployment's actual live pod address
+# (`kubectl get pod -n ns60 -o wide`) and its VIP is IPv6, matching the
+# datapath's current scope: IPv6-only, plain TCP/UDP, no IPv4 support yet
+# (see edgenat.c).
+# 2001:db8:6060::1 is a documentation-range (RFC 3849, 2001:db8::/32)
+# address picked to avoid colliding with any address already in use
+# elsewhere in this topology (transit mesh: 2001:db8:0:*::/64 and
+# 2001:db8:1:*::/64; SRv6 locators: 2001:db8:ff0X::/48) -- there is no
+# real "public internet" in this lab, so this rule's own BGPAdvertisement
+# (originated by both iad-gateway1 and iad-gateway2, active-active) is what
+# makes it reachable from any other site's node once the underlay carries
+# it, exactly like a real anycast ingress VIP would be.
+apiVersion: network.datumapis.com/v1alpha1
+kind: NetworkRule
+metadata:
+  name: ns60-web
+  namespace: galactic-system
+spec:
+  vpcRef: "60"
+  vpcAttachmentRef: "60"
+  vipAddresses:
+    - 2001:db8:6060::1
+  protocol: tcp
+  port: 80
+  backends:
+    - address: fd20:60:ff03::100:0
+      port: 80

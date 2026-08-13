@@ -1,0 +1,9 @@
+apiVersion: network.datumapis.com/v1alpha1
+kind: NetworkGateway
+metadata:
+  name: iad-gateway1
+  namespace: galactic-system
+spec:
+  targetRef:
+    kind: Node
+    name: iad-gateway1
