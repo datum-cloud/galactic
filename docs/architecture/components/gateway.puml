@@ -1,0 +1,56 @@
+@startuml gateway
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title galactic-gateway — Component Diagram (Active-Active edge XDP NAT+LB control plane)
+
+Container_Boundary(gatewaybin, "galactic-gateway binary") {
+    Component(nwgwrecon, "NetworkGatewayReconciler", "Go, controller-runtime reconciler", "networkgateway_controller.go Reconcile: publishSelfAddress, assembles desired state, applyBGPAdvertisements, runs Engine.ReconcileOrphans")
+    Component(nwrulerecon, "NetworkRuleReconciler", "Go, controller-runtime reconciler", "networkrule_controller.go Reconcile: assignPrimaryNode (once, at creation), reconcileDelete (finalizer-guarded teardown ordering)")
+    Component(usidresolver, "usidresolver.go", "Go", "buildBackendSIDIndex / resolveUSID: resolves each NetworkRule backend address to its worker node's SRv6 uSID")
+    Component(engine, "Engine", "internal/gateway/engine.go", "Reconcile / applyRuleLocked / removeRuleLocked: mutex-guarded convergence loop over DesiredRule/DesiredBackend")
+    Component(placement, "placement.go / localpref.go", "Go, pure functions", "AssignPrimaryNode(vpcRef, gatewayNodes) hash % count; LocalPreference(nodeName, primaryNode) 100 or 50")
+    Component(quota, "NodeQuotaEnforcer", "internal/gateway/quota.go", "CheckAndReserve / Release: node-level admission caps, max rules/tenant and total rule_table capacity")
+    Component(telemetry, "PrometheusTelemetryEmitter", "internal/gateway/telemetry.go", "RuleApplied / RuleRemoved / DropObserved: placement gauge and control-plane-drop counter")
+    Component(recovery, "Engine.ReconcileOrphans", "internal/gateway/recovery.go", "Generation-cutoff crash recovery: a rule created after the cutoff snapshot is never mistaken for an orphan")
+    Component(kerneldatapath, "KernelDatapath", "internal/gateway/kerneldatapath.go", "ApplyRule / RemoveRule / Generation: the real Datapath, backed by edgemap over a loaded EdgenatObjects")
+    Component(edgemap, "edgemap.RuleTable", "internal/plumbing/ebpf/edgemap", "Register / Unregister / Reconcile: rule_table + gw_config_table read/write API")
+    Component(edgeattach, "edgeattach", "internal/plumbing/ebpf/edgeattach", "Load / Attach: loads EdgenatObjects, native-XDP-only attach to the public interface")
+}
+
+Container_Ext(edgeprog, "Edge XDP NAT+LB datapath (edge_nat)", "XDP, cilium/ebpf, edgenat.c", "Full-NAT DNAT+SNAT load-balancing on the gateway node's public interface")
+Container_Ext(crds, "NetworkGateway / NetworkRule CRDs", "go.datum.net/network API")
+Container_Ext(bgpcrds, "BGPAdvertisement / BGPRouter CRDs", "go.datum.net/network API")
+System_Ext(k8sapi, "Kubernetes API Server")
+System_Ext(router, "galactic-router", "Co-located, separate container, same hostNetwork pod")
+
+Rel(nwgwrecon, crds, "Watches NetworkGateway; broadcasts every NetworkRule change to itself", "ruleToGatewayRequests")
+Rel(nwrulerecon, crds, "Watches NetworkRule; broadcasts every NetworkGateway change to itself", "gatewayToRuleRequests")
+Rel(nwgwrecon, bgpcrds, "Publishes self-address /128 route and one BGPAdvertisement per rule per node", "applyBGPAdvertisements")
+Rel(nwrulerecon, bgpcrds, "Withdraws BGPAdvertisements before releasing NAT/conntrack state on delete", "reconcileDelete")
+Rel(usidresolver, bgpcrds, "Reads BGPRouter/BGPAdvertisement to match backend address to a worker uSID")
+Rel(nwgwrecon, usidresolver, "Resolves each backend's uSID before building the desired rule set")
+Rel(nwrulerecon, placement, "Calls AssignPrimaryNode exactly once at NetworkRule creation")
+Rel(nwgwrecon, placement, "Calls LocalPreference per rule per node when wiring BGP")
+Rel(nwgwrecon, engine, "Converges Engine toward the assembled desired state")
+Rel(nwgwrecon, recovery, "Captures Engine.DatapathGeneration() before listing NetworkRules, then calls ReconcileOrphans")
+Rel(engine, kerneldatapath, "ApplyRule / RemoveRule")
+Rel(engine, quota, "CheckAndReserve before ApplyRule, Release after RemoveRule")
+Rel(engine, telemetry, "RuleApplied / RuleRemoved / DropObserved")
+Rel(kerneldatapath, edgemap, "Register / Unregister / Reconcile")
+Rel(edgemap, edgeprog, "bpf_map_update_elem() on rule_table / gw_config_table", "cilium/ebpf")
+Rel(edgeattach, edgeprog, "Loads and XDP-attaches edge_nat to the public interface at startup")
+Rel(nwgwrecon, k8sapi, "Full manager + reconcile", "client-go")
+Rel(nwrulerecon, k8sapi, "Full manager + reconcile", "client-go")
+Rel(nwgwrecon, router, "Co-located, separate container, no direct RPC")
+
+note right of edgeprog
+  No VRF/Geneve dependency: the outer SRv6
+  header is pushed from this program's own
+  rule_table, not a kernel VRF route -- no
+  shared state with galactic-router's own
+  TC-BPF uSID datapath.
+end note
+
+@enduml

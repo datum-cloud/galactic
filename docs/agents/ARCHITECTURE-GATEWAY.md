@@ -132,6 +132,8 @@ sample rule.
 
 ## Data Flow
 
+See [docs/architecture/](../architecture/) for C4 context/container diagrams covering all three Galactic applications, including how `galactic-gateway` co-locates with `galactic-router` on gateway-role nodes.
+
 ### Control-plane reconcile flow (per gateway node, per `NetworkGateway` reconcile)
 
 `NetworkGatewayReconciler.Reconcile` runs the aggregate, List-driven pass

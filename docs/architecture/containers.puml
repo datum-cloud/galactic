@@ -1,0 +1,49 @@
+@startuml containers
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Galactic — Container Diagram (the three deployable applications)
+
+Person(tenant, "Tenant / Developer", "Deploys pods/VMs; authors NetworkRule specs")
+Person_Ext(client, "External Client")
+
+System_Boundary(galactic, "Galactic") {
+    Container(cnichain, "galactic-veth CNI chain", "Go binaries: galactic-cni (installer), galactic-veth/galactic-tap (master plugins), galactic-ipam, galactic-bgp, galactic-route, vmtap-cni", "Wires pods/VMs into VPC networks: VRF, veth/tap, IPAM, SRv6 registration; writes BGP CRDs")
+    Container(usidbpf, "SRv6 uSID datapath", "TC-BPF (cilium/ebpf)", "Kernel decap/encap for VPC traffic; loaded by galactic-cni, map entries registered by galactic-bgp")
+
+    Container(router, "galactic-router", "Go, controller-runtime", "Reconciles BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/BGPVRFInstance CRDs; runs orphaned-CRD/VRF GC")
+    Container(gobgp, "Embedded GoBGP", "osrg/gobgp v4 (in-process library)", "Tenant-role BGP speaker; EVPN path origination, per-node RIB (ephemeral)")
+
+    Container(gateway, "galactic-gateway", "Go, controller-runtime", "Reconciles NetworkGateway/NetworkRule CRDs; Active-Active BGP placement; co-located with galactic-router on gateway-role nodes")
+    Container(edgebpf, "Edge XDP NAT+LB datapath", "XDP (cilium/ebpf)", "Full-NAT (DNAT+SNAT) load-balancing on the gateway node's public interface")
+}
+
+Container_Ext(crds, "BGP / Gateway CRDs", "go.datum.net/network API", "BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, NetworkGateway, NetworkRule")
+Container_Ext(vpccrds, "VPC / VPCAttachment CRDs", "go.datum.net/cloud API", "Owned by the companion VPC operator")
+Container_Ext(fabric, "fabric-router", "FRR DaemonSet", "eBGP underlay reachability")
+System_Ext(k8sapi, "Kubernetes API Server")
+
+' CNI chain internals
+Rel(tenant, cnichain, "Triggers ADD/DEL", "CNI invocation by container runtime")
+Rel(cnichain, vpccrds, "Reads pre-populated identifiers", "CNI config / NAD annotation")
+Rel(cnichain, crds, "Writes BGPVRFInstance + BGPAdvertisement", "bare controller-runtime client")
+Rel(cnichain, usidbpf, "Registers locator/function/vrf_table map entries", "cilium/ebpf")
+
+' Router internals
+Rel(router, crds, "Watches BGP CRDs; updates status", "controller-runtime manager")
+Rel(router, gobgp, "Applies DesiredRouter (peers, VRFs, EVPN paths, policies)", "in-process")
+Rel(router, usidbpf, "GC sweeps stale vrf_table entries", "cilium/ebpf")
+Rel(gobgp, fabric, "Peers over eBGP underlay", "eBGP")
+
+' Gateway internals
+Rel(gateway, crds, "Reconciles NetworkGateway/NetworkRule; reads BGPRouter/BGPAdvertisement for uSID resolution; writes per-rule BGPAdvertisement", "controller-runtime manager")
+Rel(gateway, edgebpf, "Loads/attaches XDP program; writes rule_table / gw_config_table", "cilium/ebpf")
+Rel(client, edgebpf, "External ingress traffic to VIP:port", "IPv6")
+Rel(gateway, router, "Co-located, separate container in same hostNetwork pod on gateway-role nodes", "no direct RPC")
+
+Rel(cnichain, k8sapi, "Node lookup, kubeconfig refresh", "client-go")
+Rel(router, k8sapi, "Full manager + reconcile", "client-go")
+Rel(gateway, k8sapi, "Full manager + reconcile", "client-go")
+
+@enduml
