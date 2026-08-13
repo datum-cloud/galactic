@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -116,7 +117,12 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 
-	ctx := ctrl.SetupSignalHandler()
+	// ctx carries a cause so that an ordinary signal-triggered shutdown can
+	// be told apart from the health server's own Serve failure below (#372),
+	// which cmd/galactic-gateway already treats as fatal -- see the cause
+	// check after mgr.Start.
+	ctx, cancel := context.WithCancelCause(ctrl.SetupSignalHandler())
+	defer cancel(nil)
 
 	// Start gRPC health server.
 	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", fmt.Sprintf(":%d", grpcHealthPort))
@@ -128,8 +134,15 @@ func runCmd(cfg *config.RouterConfig) error {
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	go func() {
+		// Serve returning non-nil means this node has lost its health
+		// signal for good: logging it and continuing would leave the
+		// router running unprobeable, with nothing to restart it and
+		// nothing to report it. Cancelling ctx with the failure as its
+		// cause routes it out through mgr.Start below, so it surfaces
+		// like any other fatal startup error. The GracefulStop path
+		// below is unaffected: Serve returns nil there.
 		if serveErr := grpcSrv.Serve(lis); serveErr != nil {
-			log.Printf("gRPC health server: %v", serveErr)
+			cancel(fmt.Errorf("gRPC health server: %w", serveErr))
 		}
 	}()
 	go func() {
@@ -261,6 +274,13 @@ func runCmd(cfg *config.RouterConfig) error {
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
+	}
+	// A nil return from mgr.Start means ctx is Done, so it always has a
+	// cause by now: context.Canceled for a signal-triggered shutdown, or
+	// the health server's fatal Serve error from above. Only the second
+	// should fail the process.
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause
 	}
 
 	return nil
