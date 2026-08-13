@@ -128,6 +128,9 @@ skaffold.local.yaml
 .agents/
 .claude/scratch/
 .claude/settings.local.json
+# Agent worktrees are full git checkouts nested inside this one. Left
+# untracked, `git add -A` stages them as embedded repositories.
+.claude/worktrees/
 
 # ============================================================
 # IDEs and editors
