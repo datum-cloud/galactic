@@ -462,6 +462,17 @@ func publishBGPState(
 			if ipv4Addr != "" {
 				adv.Annotations[crdnames.SubnetKeyIPv4(args.ContainerID)] = ipv4Addr
 			}
+			// ipamResult is nil when this attachment's config carries no
+			// "ipam" block at all (e.g. a tap workload managing its own
+			// addressing) — mark the advertisement so its empty
+			// spec.prefixes reads as intentional, not as addressing that
+			// silently failed to arrive (#342). Cleared the moment any ADD
+			// for this attachment does carry an allocation.
+			if ipamResult == nil {
+				adv.Annotations[crdnames.AnnotationNoAddressing] = crdnames.AnnotationNoAddressingValue
+			} else {
+				delete(adv.Annotations, crdnames.AnnotationNoAddressing)
+			}
 			// Prune dead siblings before merging: a replaced pod's stale
 			// annotation must not be allowed to collide with this ADD's own
 			// (often identical, since IPAM re-allocates the same subnet for
