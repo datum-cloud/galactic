@@ -17,7 +17,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260803231012-156a440d85e5
 	github.com/vishvananda/netns v0.0.5
-	go.datum.net/network v0.0.0-20260812184454-6e8a6c4cbd40
+	go.datum.net/network v0.0.0-20260814001919-96677d648672
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	google.golang.org/grpc v1.83.0
@@ -104,9 +104,3 @@ require (
 )
 
 tool github.com/cilium/ebpf/cmd/bpf2go
-
-// TEMPORARY — Phase A dev-only, per docs/plans/865-edge-gateway-nat66-egress.md
-// §4.1: NetworkEgressPolicy/NetworkGatewayStatus.EgressAddress must land and
-// be tagged in datum-cloud/network before this pin can be a real pseudo-version.
-// Remove once that PR (feat/865-networkegresspolicy-crd) merges and a tag is cut.
-replace go.datum.net/network => ../network
