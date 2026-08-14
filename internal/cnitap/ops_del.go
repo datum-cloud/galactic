@@ -11,6 +11,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ipam"
+
+	"go.datum.net/galactic/internal/cni/tap"
 )
 
 // cmdDel mirrors internal/cni's own cmdDel, minus everything guest-netns
@@ -37,11 +39,25 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
-	// Shared resources (VRF, tap, routes, SRv6 ingress, BGPAdvertisement,
-	// BGPVRFInstance) are keyed by (vpc, vpcAttachment) and may still be in
-	// use by another VM. Deleting them here races with cmdAdd during
-	// restarts, so cleanup is left to galactic-router's GC controller — see
-	// internal/cni's own cmdDel for the full reasoning.
+	// Delete this attachment's own tap device. Unlike the VRF and BGP CRDs
+	// below, the tap device is genuinely private to this attachment (see
+	// resourceTracker.cleanup's doc comment) — no sibling VM can ever still
+	// be depending on it, so there is no ADD-race to defer to GC for.
+	//
+	// A VMM (Kata/Firecracker/QEMU) that still holds the tap's fd open at
+	// this point can make the kernel delete lazily rather than immediately,
+	// but never blocks or fails this call — tap.Delete is best-effort and
+	// idempotent either way, matching every other step in this function.
+	if err := tap.Delete(vpc, vpcAtt); err != nil {
+		slog.Warn("DEL: failed to delete tap device", "err", err,
+			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
+	}
+
+	// Shared resources (VRF, BGPAdvertisement, BGPVRFInstance) are keyed by
+	// (vpc, vpcAttachment) or (vpc, node) and may still be in use by another
+	// VM. Deleting them here races with cmdAdd during restarts, so cleanup
+	// is left to galactic-router's GC controller — see internal/cni's own
+	// cmdDel for the full reasoning.
 	slog.Info("DEL: skipping shared resource cleanup (handled by GC)",
 		"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
 
