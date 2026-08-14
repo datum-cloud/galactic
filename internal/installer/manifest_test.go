@@ -16,11 +16,11 @@ import (
 
 // TestDaemonsetManifest_RunContainerMountsHostConflistDir is a regression
 // test for a manifest/code mismatch that shipped silently: startEBPFDatapath
-// (and getLogFileHostPath) call loadHostConf(HostConflist) from inside
+// (and getLogFileHostPath) call hostconf.Load(HostConflist, ...) from inside
 // whichever container runs the installer's "run" command
 // (credential-refresh in config/cni/daemonset.yaml). If that container's
 // volumeMounts don't cover the host directory HostConflist lives under,
-// loadHostConf fails on every node, and the eBPF vrf_table GC sweep (and
+// hostconf.Load fails on every node, and the eBPF vrf_table GC sweep (and
 // log-rotation's host-path lookup) permanently disables itself with only a
 // slog.Warn("eBPF vrf_table GC sweep disabled: ...") to show for it --
 // config/cni/daemonset.yaml previously mounted cni-net-dir into the
@@ -51,7 +51,7 @@ func TestDaemonsetManifest_RunContainerMountsHostConflistDir(t *testing.T) {
 	}
 
 	// Find the container that invokes `/galactic-cni run` -- that's the one
-	// that calls loadHostConf(HostConflist) at runtime.
+	// that calls hostconf.Load(HostConflist, ...) at runtime.
 	var runContainerName string
 	var mountPaths []string
 	found := false
@@ -77,7 +77,7 @@ func TestDaemonsetManifest_RunContainerMountsHostConflistDir(t *testing.T) {
 	hostConflistDir := filepath.Dir(hostConflistDefault)
 	if !slices.Contains(mountPaths, hostConflistDir) {
 		t.Errorf("container %q in %s does not mount %s (needed to read HostConflist=%s via "+
-			"loadHostConf; without it the eBPF vrf_table GC sweep and log-rotation host-path "+
+			"hostconf.Load; without it the eBPF vrf_table GC sweep and log-rotation host-path "+
 			"lookup silently disable themselves on every node); mounted paths: %v",
 			runContainerName, manifestPath, hostConflistDir, hostConflistDefault, mountPaths)
 	}

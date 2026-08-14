@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
 
@@ -184,7 +185,7 @@ func TestBootstrap(t *testing.T) {
 		assertBinaryCopied(t, filepath.Join(HostBinDir, "galactic-route"), "route-content")
 
 		// Verify conflist written
-		conflist, err := loadHostConf(HostConflist)
+		conflist, err := hostconf.Load(HostConflist, hostconf.PluginType)
 		if err != nil {
 			t.Fatalf("failed to read conflist: %v", err)
 		}
@@ -263,7 +264,7 @@ func TestBootstrap(t *testing.T) {
 			t.Fatalf("Bootstrap failed unexpectedly: %v", err)
 		}
 
-		conflist, err := loadHostConf(HostConflist)
+		conflist, err := hostconf.Load(HostConflist, hostconf.PluginType)
 		if err != nil {
 			t.Fatalf("failed to read conflist: %v", err)
 		}
@@ -289,7 +290,7 @@ func TestBootstrap(t *testing.T) {
 			t.Fatalf("Bootstrap failed unexpectedly: %v", err)
 		}
 
-		conflist, err := loadHostConf(HostConflist)
+		conflist, err := hostconf.Load(HostConflist, hostconf.PluginType)
 		if err != nil {
 			t.Fatalf("failed to read conflist: %v", err)
 		}

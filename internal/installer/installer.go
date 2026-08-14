@@ -6,7 +6,6 @@ package installer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +29,7 @@ import (
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/gc"
+	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -72,52 +72,6 @@ var (
 	SourceRouteBinary      = "/galactic-route"
 	SourceHostDeviceBinary = "/host-device"
 )
-
-// HostConf holds node-local settings read from the conflist.
-type HostConf struct {
-	NodeName   string `json:"node_name"`
-	Kubeconfig string `json:"kubeconfig"`
-	Namespace  string `json:"namespace"`
-	LogFile    string `json:"log_file"`
-	LogLevel   string `json:"log_level,omitempty"`
-}
-
-type conflistEnvelope struct {
-	CNIVersion string            `json:"cniVersion"`
-	Name       string            `json:"name"`
-	Plugins    []json.RawMessage `json:"plugins"`
-}
-
-// loadHostConf is a helper to read the HostConf from HostConflist.
-func loadHostConf(filePath string) (*HostConf, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	var env conflistEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, fmt.Errorf("parse conflist envelope: %w", err)
-	}
-
-	for _, raw := range env.Plugins {
-		var meta struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(raw, &meta); err != nil {
-			continue
-		}
-		if meta.Type == "galactic-cni" {
-			var conf HostConf
-			if err := json.Unmarshal(raw, &conf); err != nil {
-				return nil, fmt.Errorf("parse host CNI config: %w", err)
-			}
-			return &conf, nil
-		}
-	}
-
-	return nil, fmt.Errorf("conflist at %q does not contain a plugin with type \"galactic-cni\"", filePath)
-}
 
 // atomicWriteFile writes data to destPath atomically.
 func atomicWriteFile(destPath string, content []byte, mode os.FileMode) error {
@@ -462,7 +416,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	// above, GC is a background maintenance task, not a hard requirement
 	// for the datapath to forward traffic -- it just means this node's
 	// sweep ticker stays inert until the next restart.
-	if hostConf, err := loadHostConf(HostConflist); err != nil {
+	if hostConf, err := hostconf.Load(HostConflist, hostconf.PluginType); err != nil {
 		slog.Warn("eBPF vrf_table GC sweep disabled: failed to load host conf", "err", err)
 	} else if k8sClient, err := newK8sClientFn(); err != nil {
 		slog.Warn("eBPF vrf_table GC sweep disabled: failed to create k8s client", "err", err)
@@ -656,7 +610,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 // getLogFileHostPath resolves the CNI log file path from HostConflist
 // and prefixes it with "/host" since the container views host filesystem via /host mount.
 func getLogFileHostPath() string {
-	hostConf, err := loadHostConf(HostConflist)
+	hostConf, err := hostconf.Load(HostConflist, hostconf.PluginType)
 	if err != nil || hostConf.LogFile == "" {
 		return filepath.Join("/host", config.DefaultLogFile)
 	}
