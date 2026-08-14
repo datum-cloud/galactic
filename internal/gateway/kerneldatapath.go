@@ -86,7 +86,8 @@ func NewKernelDatapath(objs *edgeprog.EdgenatObjects, gwAddr netip.Addr) (*Kerne
 	}
 
 	return &KernelDatapath{
-		ruleTable:      edgemap.NewRuleTable(edgemap.KernelTable{Map: objs.RuleTable}),
+		ruleTable: edgemap.NewRuleTable(
+			edgemap.KernelTable{Map: objs.RuleTable}, edgemap.KernelTable{Map: objs.RuleStatsTable}),
 		ruleKeysByName: make(map[string][]edgemap.RuleKey),
 	}, nil
 }

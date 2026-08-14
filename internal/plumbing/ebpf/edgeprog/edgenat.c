@@ -152,7 +152,7 @@ static __s64 (*bpf_csum_diff)(__be32 *from, __u32 from_size, __be32 *to, __u32 t
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 plen,
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 
-// Timestamps rule_value.last_seen_ns (Phase E hit counters) -- CLOCK_MONOTONIC
+// Timestamps rule_stats_value.last_seen_ns (Phase E hit counters) -- CLOCK_MONOTONIC
 // nanoseconds since boot, same clock source usid.c's vrf_value.last_seen_ns
 // and gwnat.c's identical field already use.
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
@@ -255,35 +255,59 @@ struct rule_key {
 };
 
 // struct rule_value is rule_table's value: the load-balancing target set
-// for one VIP+port+protocol, plus per-rule hit counters (Phase E) backing
-// internal/gateway's QuotaEnforcer/TelemetryEmitter -- same
-// packets/bytes/dropped_packets/last_seen_ns convention as an earlier,
-// rejected design's equivalent rule_value, deliberately deferred out
-// of Phase B/C's scope (see internal/gateway/datapath.go's QuotaEnforcer
-// doc comment for why) rather than spread across two phases' worth of
-// speculative fields. generation is a __u64 monotonic-clock reading
+// for one VIP+port+protocol. generation is a __u64 monotonic-clock reading
 // stamped by the Go control plane's edgemap.RuleTable.Register on every
 // write, backing its crash-safe Reconcile cutoff (same pattern as
 // internal/plumbing/ebpf/usidmap's locator_value.generation and gwprog's
 // identical rule_value.generation) -- this program never reads this field
 // itself, so widening or repurposing it has no effect on the packet path.
 //
+// Deliberately no packets/bytes/dropped_packets/last_seen_ns fields here
+// (issue #361) -- those hit counters used to live on this struct, and
+// edgemap.RuleTable.Register carried them forward with a Lookup-then-Put
+// read-modify-write on every re-registration so that overwriting
+// rule_table's backend list wouldn't also zero a healthy rule's counters.
+// But Engine.Reconcile re-registers every desired rule on every reconcile
+// pass, and this program increments those same fields with
+// __sync_fetch_and_add on every packet -- any increment landing between
+// Register's Lookup and its Put was silently discarded, for the lifetime
+// of the rule. See struct rule_stats_value below for where the counters
+// live now: a separate map the control plane never writes to at all,
+// closing the race instead of narrowing it.
+struct rule_value {
+	__u32 backend_count;
+	struct backend backends[EDGE_MAX_BACKENDS];
+	__u64 generation;
+};
+
+// struct rule_stats_value is rule_stats_table's value: the same per-rule
+// hit counters (Phase E) that used to live on struct rule_value, backing
+// internal/gateway's QuotaEnforcer/TelemetryEmitter and
+// internal/plumbing/ebpf/edgemetrics's Collector. Split into its own map,
+// keyed identically to rule_table (struct rule_key), so that
+// edgemap.RuleTable.Register -- which only ever writes rule_table -- has
+// no read-modify-write to race against this program's per-packet
+// __sync_fetch_and_add calls (issue #361; see struct rule_value's doc
+// comment for the bug this replaced). Entries are created lazily by this
+// program itself, on a rule's first matching packet (handle_forward's
+// BPF_NOEXIST insert), never by the Go control plane -- Register/
+// Unregister only ever touch rule_table; RuleTable.Unregister deletes the
+// matching rule_stats_table row too, so a removed rule's counters don't
+// linger under a key a future, unrelated rule could reuse.
+//
 // Deliberately NOT __attribute__((packed)) -- a map value has no
 // on-the-wire byte-layout requirement (bpf2go derives the matching Go
 // struct from BTF, padding included, regardless), and packing this one
-// specifically would misalign the u64 counter fields below out of natural
+// specifically would misalign these u64 counter fields out of natural
 // 8-byte alignment, which __sync_fetch_and_add requires (clang warns
 // -Wsync-alignment; some architectures fault outright on a misaligned
 // atomic op). Same unpacked choice as gwnat.c's identical struct, for the
 // same reason.
-struct rule_value {
-	__u32 backend_count;
-	struct backend backends[EDGE_MAX_BACKENDS];
+struct rule_stats_value {
 	__u64 packets;
 	__u64 bytes;
 	__u64 dropped_packets;
 	__u64 last_seen_ns;
-	__u64 generation;
 };
 
 // struct conn_key is conn_table's key: a plain 5-tuple, oriented however
@@ -362,6 +386,18 @@ struct {
 	__type(value, struct rule_value);
 } rule_table SEC(".maps");
 
+// rule_stats_table: same key, same 4096 capacity as rule_table (a
+// rule_stats_table row only ever exists for a key rule_table also has one
+// for -- see struct rule_stats_value's doc comment), but a separate map so
+// edgemap.RuleTable.Register's rule_table writes never race this
+// program's own counter increments (issue #361).
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct rule_key);
+	__type(value, struct rule_stats_value);
+} rule_stats_table SEC(".maps");
+
 // BPF_MAP_TYPE_LRU_HASH: self-evicting under pressure rather than failing
 // closed once full -- see edgepreflight's doc comment on why this map
 // type specifically is a required kernel capability, and this file's
@@ -398,15 +434,20 @@ static EDGE_ALWAYS_INLINE void count_drop(__u32 reason)
 // count_claimed_drop records a drop that happened after rule was already
 // matched against rule_table -- i.e. this gateway definitely owns this
 // VIP+port+protocol, so the drop counts against that rule's own
-// dropped_packets in addition to the global drop_reasons counter (same
-// convention as an earlier, rejected design's equivalent). Unlike
-// drop_reasons (BPF_MAP_TYPE_PERCPU_ARRAY, so count_drop's plain
-// increment is race-free), rule_table is a plain HASH shared across CPUs,
-// so this uses __sync_fetch_and_add.
-static EDGE_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct rule_value *rule)
+// dropped_packets (rule_stats_table, not rule_table -- see struct
+// rule_stats_value's doc comment) in addition to the global drop_reasons
+// counter (same convention as an earlier, rejected design's equivalent).
+// Unlike drop_reasons (BPF_MAP_TYPE_PERCPU_ARRAY, so count_drop's plain
+// increment is race-free), rule_stats_table is a plain HASH shared across
+// CPUs, so this uses __sync_fetch_and_add. stats may be NULL (the
+// rule_stats_table insert in handle_forward can fail, e.g. the map is
+// momentarily full) -- this still counts the drop globally via
+// count_drop even when it can't attribute it to the rule.
+static EDGE_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct rule_stats_value *stats)
 {
 	count_drop(reason);
-	__sync_fetch_and_add(&rule->dropped_packets, 1);
+	if (stats)
+		__sync_fetch_and_add(&stats->dropped_packets, 1);
 }
 
 // ---------------------------------------------------------------------
@@ -656,10 +697,26 @@ static EDGE_ALWAYS_INLINE int handle_forward(struct xdp_md *ctx, struct edge_ip6
 	// counters regardless of what happens next -- a PAT-exhausted or
 	// no-backends drop still legitimately consumed this rule's capacity
 	// (same convention as an earlier, rejected design's equivalent).
-	__sync_fetch_and_add(&rule->packets, 1);
-	__sync_fetch_and_add(&rule->bytes,
-			      (__u64) ((char *) data_end - (char *) (long) ctx->data));
-	rule->last_seen_ns = bpf_ktime_get_ns();
+	//
+	// rule_stats_table (not rule_table) holds those counters (issue #361)
+	// -- look up this rule's row, creating it on first use. BPF_NOEXIST
+	// makes the create racing-CPUs-safe: if another CPU's insert wins,
+	// this lookup-after-failed-insert just finds what it wrote. stats can
+	// still come back NULL (e.g. rule_stats_table is momentarily full);
+	// every write below tolerates that rather than dereferencing NULL.
+	struct rule_stats_value *stats = bpf_map_lookup_elem(&rule_stats_table, &rk);
+	if (!stats) {
+		struct rule_stats_value init;
+		__builtin_memset(&init, 0, sizeof(init));
+		bpf_map_update_elem(&rule_stats_table, &rk, &init, BPF_NOEXIST);
+		stats = bpf_map_lookup_elem(&rule_stats_table, &rk);
+	}
+	if (stats) {
+		__sync_fetch_and_add(&stats->packets, 1);
+		__sync_fetch_and_add(&stats->bytes,
+				      (__u64) ((char *) data_end - (char *) (long) ctx->data));
+		stats->last_seen_ns = bpf_ktime_get_ns();
+	}
 
 	struct conn_key fwd_key;
 	__builtin_memset(&fwd_key, 0, sizeof(fwd_key));
@@ -676,11 +733,11 @@ static EDGE_ALWAYS_INLINE int handle_forward(struct xdp_md *ctx, struct edge_ip6
 		__builtin_memcpy(&cv, existing, sizeof(cv));
 	} else {
 		if (!l4v.is_syn) {
-			count_claimed_drop(DROP_REASON_NO_CONN_NOT_SYN, rule);
+			count_claimed_drop(DROP_REASON_NO_CONN_NOT_SYN, stats);
 			return XDP_DROP;
 		}
 		if (rule->backend_count == 0 || rule->backend_count > EDGE_MAX_BACKENDS) {
-			count_claimed_drop(DROP_REASON_NO_BACKENDS, rule);
+			count_claimed_drop(DROP_REASON_NO_BACKENDS, stats);
 			return XDP_DROP;
 		}
 
@@ -706,7 +763,7 @@ static EDGE_ALWAYS_INLINE int handle_forward(struct xdp_md *ctx, struct edge_ip6
 		__u32 cfg_key = 0;
 		struct gw_config *cfg = bpf_map_lookup_elem(&gw_config_table, &cfg_key);
 		if (!cfg) {
-			count_claimed_drop(DROP_REASON_NO_BACKENDS, rule);
+			count_claimed_drop(DROP_REASON_NO_BACKENDS, stats);
 			return XDP_DROP;
 		}
 
@@ -744,7 +801,7 @@ static EDGE_ALWAYS_INLINE int handle_forward(struct xdp_md *ctx, struct edge_ip6
 		}
 
 		if (!claimed) {
-			count_claimed_drop(DROP_REASON_PAT_EXHAUSTED, rule);
+			count_claimed_drop(DROP_REASON_PAT_EXHAUSTED, stats);
 			return XDP_DROP;
 		}
 

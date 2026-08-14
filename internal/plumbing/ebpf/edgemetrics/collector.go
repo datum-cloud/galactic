@@ -61,7 +61,7 @@ func NewCollector(
 // maps -- e.g. the object internal/plumbing/ebpf/edgeattach.Load returns.
 func NewCollectorFromObjects(objs *edgeprog.EdgenatObjects) *Collector {
 	return NewCollector(
-		edgemap.NewRuleTable(edgemap.KernelTable{Map: objs.RuleTable}),
+		edgemap.NewRuleTable(edgemap.KernelTable{Map: objs.RuleTable}, edgemap.KernelTable{Map: objs.RuleStatsTable}),
 		edgemap.KernelTable{Map: objs.ConnTable},
 		objs.ConnTable.MaxEntries(),
 		objs.DropReasons,
@@ -77,20 +77,23 @@ const (
 var (
 	rulePacketsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "rule", "packets_total"),
-		"Packets that matched this rule_table entry's VIP+port+protocol, regardless of outcome, "+
-			"since it was last (re-)registered.",
+		"Packets that matched this rule's VIP+port+protocol, regardless of outcome, since the rule "+
+			"was first registered. Not reset by re-registration (e.g. a controller reconcile pass "+
+			"that only changes the backend list) -- rule_table and this counter's backing map "+
+			"(rule_stats_table) are separate, so registering a rule never touches it.",
 		[]string{labelProto, labelPort, labelVIP}, nil,
 	)
 	ruleBytesDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "rule", "bytes_total"),
-		"Bytes that matched this rule_table entry's VIP+port+protocol, regardless of outcome, "+
-			"since it was last (re-)registered.",
+		"Bytes that matched this rule's VIP+port+protocol, regardless of outcome, since the rule "+
+			"was first registered. Not reset by re-registration -- see rule_packets_total's help text.",
 		[]string{labelProto, labelPort, labelVIP}, nil,
 	)
 	ruleDroppedDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "rule", "dropped_packets_total"),
 		"Packets that matched this rule but were then dropped by the datapath (e.g. no backends, "+
-			"PAT-port exhaustion) -- a subset of rule_packets_total, not an additional count.",
+			"PAT-port exhaustion) -- a subset of rule_packets_total, not an additional count. Not "+
+			"reset by re-registration -- see rule_packets_total's help text.",
 		[]string{labelProto, labelPort, labelVIP}, nil,
 	)
 	ruleBackendsDesc = prometheus.NewDesc(
@@ -100,7 +103,7 @@ var (
 	)
 	ruleSecondsSinceLastPacketDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "rule", "seconds_since_last_packet"),
-		"Seconds since the most recent packet matched this rule, per rule_table's LastSeenNs "+
+		"Seconds since the most recent packet matched this rule, per rule_stats_table's LastSeenNs "+
 			"(CLOCK_MONOTONIC). Absent for a rule that has never seen a matching packet.",
 		[]string{labelProto, labelPort, labelVIP}, nil,
 	)

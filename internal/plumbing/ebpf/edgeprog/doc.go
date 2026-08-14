@@ -52,4 +52,4 @@ package edgeprog
 // attribute, so there is no real unaligned-access risk to suppress
 // unsafely here.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-address-of-packed-member -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type rule_key -type backend -type rule_value -type conn_key -type conn_value -type gw_config Edgenat edgenat.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-address-of-packed-member -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type rule_key -type backend -type rule_value -type rule_stats_value -type conn_key -type conn_value -type gw_config Edgenat edgenat.c
