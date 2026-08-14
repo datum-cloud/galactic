@@ -79,34 +79,46 @@ type RuleEntry struct {
 	Generation uint64
 
 	// Packets/Bytes/DroppedPackets/LastSeenNs are per-rule hit counters
-	// maintained by the datapath itself (edgenat.c's rule_value, Phase E),
-	// backing internal/gateway's QuotaEnforcer/TelemetryEmitter. Packets
-	// counts every packet that matched this rule's VIP+port+protocol,
-	// regardless of outcome; DroppedPackets is the subset of those the
-	// datapath then dropped (count_claimed_drop) -- so DroppedPackets is
-	// always <= Packets. LastSeenNs is a CLOCK_MONOTONIC nanosecond
-	// timestamp of the most recent matching packet, 0 if none yet.
+	// maintained by the datapath itself (edgenat.c's rule_stats_table,
+	// Phase E), backing internal/gateway's QuotaEnforcer/TelemetryEmitter.
+	// Packets counts every packet that matched this rule's
+	// VIP+port+protocol, regardless of outcome; DroppedPackets is the
+	// subset of those the datapath then dropped (count_claimed_drop) --
+	// so DroppedPackets is always <= Packets. LastSeenNs is a
+	// CLOCK_MONOTONIC nanosecond timestamp of the most recent matching
+	// packet, 0 if none yet.
 	//
-	// Register preserves these across re-registration (read-modify-write)
-	// -- see that method's doc comment for why a naive overwrite would
-	// zero them on every controller reconcile pass.
+	// These live in a separate map from the rest of RuleEntry (rule_table
+	// itself), keyed identically -- see Register's doc comment for why
+	// (issue #361): Register never reads or writes them, so re-
+	// registering a rule (e.g. every controller reconcile pass) can never
+	// race, and therefore never lose, the datapath's own increments. A
+	// key with no rule_stats_table row yet (a rule that has never seen a
+	// matching packet) reads back as all zero, not an error.
 	Packets        uint64
 	Bytes          uint64
 	DroppedPackets uint64
 	LastSeenNs     uint64
 }
 
-// RuleTable is the read/write API for rule_table.
+// RuleTable is the read/write API for rule_table and rule_stats_table
+// together -- two separate eBPF maps, keyed identically (RuleKey), that
+// this type presents as one logical table (see Register's doc comment for
+// why they're split: issue #361). table backs rule_table (config: backend
+// list, Generation); stats backs rule_stats_table (the datapath's own hit
+// counters -- Register never touches it).
 type RuleTable struct {
 	table Table
+	stats Table
 	clock func() uint64
 }
 
-// NewRuleTable wraps table as a RuleTable. Production callers pass a
-// KernelTable wrapping a loaded *edgeprog.EdgenatObjects's RuleTable map;
-// tests pass a fake Table.
-func NewRuleTable(table Table) *RuleTable {
-	return &RuleTable{table: table, clock: clockFn}
+// NewRuleTable wraps table (rule_table) and stats (rule_stats_table) as a
+// RuleTable. Production callers pass two KernelTables wrapping a loaded
+// *edgeprog.EdgenatObjects's RuleTable/RuleStatsTable map fields; tests
+// pass fake Tables.
+func NewRuleTable(table, stats Table) *RuleTable {
+	return &RuleTable{table: table, stats: stats, clock: clockFn}
 }
 
 // Generation returns a snapshot of this table's monotonic clock. A caller
@@ -142,16 +154,22 @@ func toWireBackends(backends []Backend) ([MaxBackends]edgeprog.EdgenatBackend, e
 // Rejects an empty or over-capacity backend list before ever writing to
 // the map, per MaxBackends' doc comment.
 //
-// This is a read-modify-write, not a blind overwrite: it looks up any
-// existing entry first and carries its Packets/Bytes/DroppedPackets/
-// LastSeenNs counters forward into the new value. Those counters are
-// maintained by the datapath itself on every packet (edgenat.c), not by
-// this method -- internal/gateway.Engine.Reconcile calls ApplyRule (and
+// This is a blind overwrite of rule_table, not a read-modify-write --
+// unlike an earlier version of this method (issue #361), it never touches
+// rule_stats_table at all, so it has nothing to race against the
+// datapath's own per-packet __sync_fetch_and_add calls into that map.
+// That earlier version looked up any existing entry first specifically to
+// carry its Packets/Bytes/DroppedPackets/LastSeenNs counters forward,
+// because internal/gateway.Engine.Reconcile calls ApplyRule (and
 // therefore this method) for every desired rule on *every* reconcile
-// pass, not just changed ones (see that method's own doc comment), so a
-// naive overwrite would zero a long-lived, healthy rule's counters on
-// every controller resync. Same fix as an earlier, rejected design's
-// equivalent register method.
+// pass, not just changed ones (see that method's own doc comment) -- so a
+// naive overwrite of a single combined map would have zeroed a
+// long-lived, healthy rule's counters on every controller resync. Moving
+// the counters to their own map (rule_stats_table, populated lazily by
+// the datapath itself, never by this method) closes the race instead of
+// narrowing it: nothing this method does can ever discard a concurrent
+// datapath increment, because this method has no reason to read or write
+// that map.
 func (t *RuleTable) Register(key RuleKey, backends []Backend) error {
 	if len(backends) == 0 {
 		return fmt.Errorf("edgemap: rule_table: register %+v: at least one backend is required", key)
@@ -170,19 +188,10 @@ func (t *RuleTable) Register(key RuleKey, backends []Backend) error {
 		return fmt.Errorf("edgemap: rule_table: register %+v: %w", key, err)
 	}
 
-	var existing edgeprog.EdgenatRuleValue
-	if err := t.table.Lookup(wireKey, &existing); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("edgemap: rule_table: register %+v: look up existing entry: %w", key, err)
-	}
-
 	value := edgeprog.EdgenatRuleValue{
-		BackendCount:   uint32(len(backends)),
-		Backends:       wireBackends,
-		Generation:     t.clock(),
-		Packets:        existing.Packets,
-		Bytes:          existing.Bytes,
-		DroppedPackets: existing.DroppedPackets,
-		LastSeenNs:     existing.LastSeenNs,
+		BackendCount: uint32(len(backends)),
+		Backends:     wireBackends,
+		Generation:   t.clock(),
 	}
 	if err := t.table.Put(wireKey, value); err != nil {
 		return fmt.Errorf("edgemap: rule_table: register %+v: %w", key, err)
@@ -190,23 +199,49 @@ func (t *RuleTable) Register(key RuleKey, backends []Backend) error {
 	return nil
 }
 
-// Unregister removes the rule_table entry for key, if present. Not an
-// error if already absent.
+// Unregister removes the rule_table entry for key, if present, and its
+// rule_stats_table counterpart, if any (best-effort past that point --
+// see below). Not an error if either is already absent.
+//
+// Deleting the stats row too, rather than leaving it behind, keeps
+// rule_stats_table from accumulating rows for rules that no longer exist:
+// unlike rule_table, whose capacity is enforced up front by
+// internal/gateway's QuotaEnforcer, nothing else here bounds
+// rule_stats_table's own occupancy, and it is a plain BPF_MAP_TYPE_HASH
+// (edgenat.c), not self-evicting the way conn_table's LRU_HASH is. If the
+// stats delete fails after the config delete already succeeded, the rule
+// itself is still gone (the caller's Reconcile/RemoveRule sees it as
+// removed); the orphaned stats row is a latent leak, not a correctness
+// problem for anything reading rule_table, so this reports the error
+// rather than silently swallowing it, but does not roll back the config
+// delete to "fix" it.
 func (t *RuleTable) Unregister(key RuleKey) error {
 	wireKey, err := toWireKey(key)
 	if err != nil {
 		return fmt.Errorf("edgemap: rule_table: unregister %+v: %w", key, err)
 	}
-	if err := t.table.Delete(wireKey); err != nil {
-		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil
-		}
+	if err := t.table.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("edgemap: rule_table: unregister %+v: %w", key, err)
+	}
+	if err := t.stats.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("edgemap: rule_table: unregister %+v: delete rule_stats_table row: %w", key, err)
 	}
 	return nil
 }
 
-func fromWireValue(key RuleKey, value edgeprog.EdgenatRuleValue) RuleEntry {
+// lookupStats reads rule_stats_table's row for wireKey, defaulting to the
+// zero value (a rule that has never seen a matching packet has no row yet
+// -- see RuleEntry's doc comment) rather than treating a miss as an
+// error.
+func (t *RuleTable) lookupStats(wireKey edgeprog.EdgenatRuleKey) (edgeprog.EdgenatRuleStatsValue, error) {
+	var stats edgeprog.EdgenatRuleStatsValue
+	if err := t.stats.Lookup(wireKey, &stats); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return edgeprog.EdgenatRuleStatsValue{}, err
+	}
+	return stats, nil
+}
+
+func fromWireValue(key RuleKey, value edgeprog.EdgenatRuleValue, stats edgeprog.EdgenatRuleStatsValue) RuleEntry {
 	backends := make([]Backend, value.BackendCount)
 	for i := range backends {
 		wb := value.Backends[i]
@@ -220,14 +255,15 @@ func fromWireValue(key RuleKey, value edgeprog.EdgenatRuleValue) RuleEntry {
 		RuleKey:        key,
 		Backends:       backends,
 		Generation:     value.Generation,
-		Packets:        value.Packets,
-		Bytes:          value.Bytes,
-		DroppedPackets: value.DroppedPackets,
-		LastSeenNs:     value.LastSeenNs,
+		Packets:        stats.Packets,
+		Bytes:          stats.Bytes,
+		DroppedPackets: stats.DroppedPackets,
+		LastSeenNs:     stats.LastSeenNs,
 	}
 }
 
-// Get reads the rule_table entry for key, reporting whether it exists.
+// Get reads the rule_table entry for key (joined with its rule_stats_table
+// counterpart, if any), reporting whether the rule_table entry exists.
 func (t *RuleTable) Get(key RuleKey) (RuleEntry, bool, error) {
 	wireKey, err := toWireKey(key)
 	if err != nil {
@@ -241,10 +277,15 @@ func (t *RuleTable) Get(key RuleKey) (RuleEntry, bool, error) {
 		}
 		return RuleEntry{}, false, fmt.Errorf("edgemap: rule_table: get %+v: %w", key, err)
 	}
-	return fromWireValue(key, value), true, nil
+	stats, err := t.lookupStats(wireKey)
+	if err != nil {
+		return RuleEntry{}, false, fmt.Errorf("edgemap: rule_table: get %+v: read rule_stats_table row: %w", key, err)
+	}
+	return fromWireValue(key, value, stats), true, nil
 }
 
-// List returns every entry currently in rule_table, in unspecified order.
+// List returns every rule_table entry, joined with its rule_stats_table
+// counterpart if any, in unspecified order.
 func (t *RuleTable) List() ([]RuleEntry, error) {
 	var (
 		entries []RuleEntry
@@ -254,7 +295,11 @@ func (t *RuleTable) List() ([]RuleEntry, error) {
 	it := t.table.Iterate()
 	for it.Next(&rawKey, &value) {
 		key := RuleKey{Proto: rawKey.Proto, VPort: beU16(rawKey.Port), VIP: netip.AddrFrom16(rawKey.Vip)}
-		entries = append(entries, fromWireValue(key, value))
+		stats, err := t.lookupStats(rawKey)
+		if err != nil {
+			return nil, fmt.Errorf("edgemap: rule_table: list: read rule_stats_table row for %+v: %w", key, err)
+		}
+		entries = append(entries, fromWireValue(key, value, stats))
 	}
 	if err := it.Err(); err != nil {
 		return nil, fmt.Errorf("edgemap: rule_table: list: %w", err)

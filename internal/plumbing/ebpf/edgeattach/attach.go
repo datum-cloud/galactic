@@ -64,11 +64,13 @@ func Load(pinDir string) (*edgeprog.EdgenatObjects, error) {
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
 		// Every map here is control-plane-owned and reconstructable
 		// (edgemap.RuleTable.Register repopulates rule_table from live
-		// NetworkRule CRDs; conn_table is a pure cache the datapath
-		// itself repopulates from live traffic; gw_config_table is a
-		// single entry the caller rewrites on every Engine reconcile) --
-		// a stale pin from an older, incompatible map layout is safe to
-		// recreate rather than fatal.
+		// NetworkRule CRDs; rule_stats_table and conn_table are both
+		// pure caches the datapath itself repopulates from live traffic
+		// -- see edgenat.c's struct rule_stats_value doc comment for why
+		// rule_stats_table exists separately from rule_table;
+		// gw_config_table is a single entry the caller rewrites on every
+		// Engine reconcile) -- a stale pin from an older, incompatible
+		// map layout is safe to recreate rather than fatal.
 		slog.Warn("edgeattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate on the next NetworkRule reconcile)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {

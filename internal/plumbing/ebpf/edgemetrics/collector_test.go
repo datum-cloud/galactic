@@ -83,6 +83,70 @@ func (it *fakeRuleIterator) Err() error { return nil }
 
 var _ edgemap.Table = (*fakeRuleTable)(nil)
 
+// fakeStatsTable is an in-memory edgemap.Table standing in for
+// rule_stats_table (issue #361's split-out counters map) -- same
+// technique as fakeRuleTable, but keyed/valued for
+// edgeprog.EdgenatRuleStatsValue.
+type fakeStatsTable struct {
+	entries map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue
+}
+
+func newFakeStatsTable() *fakeStatsTable {
+	return &fakeStatsTable{entries: make(map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue)}
+}
+
+func (f *fakeStatsTable) Put(key, value any) error {
+	f.entries[key.(edgeprog.EdgenatRuleKey)] = value.(edgeprog.EdgenatRuleStatsValue)
+	return nil
+}
+
+func (f *fakeStatsTable) Lookup(key, valueOut any) error {
+	v, ok := f.entries[key.(edgeprog.EdgenatRuleKey)]
+	if !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	*valueOut.(*edgeprog.EdgenatRuleStatsValue) = v
+	return nil
+}
+
+func (f *fakeStatsTable) Delete(key any) error {
+	k := key.(edgeprog.EdgenatRuleKey)
+	if _, ok := f.entries[k]; !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	delete(f.entries, k)
+	return nil
+}
+
+func (f *fakeStatsTable) Iterate() edgemap.Iterator {
+	keys := make([]edgeprog.EdgenatRuleKey, 0, len(f.entries))
+	for k := range f.entries {
+		keys = append(keys, k)
+	}
+	return &fakeStatsIterator{table: f, keys: keys}
+}
+
+type fakeStatsIterator struct {
+	table *fakeStatsTable
+	keys  []edgeprog.EdgenatRuleKey
+	i     int
+}
+
+func (it *fakeStatsIterator) Next(keyOut, valueOut any) bool {
+	if it.i >= len(it.keys) {
+		return false
+	}
+	k := it.keys[it.i]
+	it.i++
+	*keyOut.(*edgeprog.EdgenatRuleKey) = k
+	*valueOut.(*edgeprog.EdgenatRuleStatsValue) = it.table.entries[k]
+	return true
+}
+
+func (it *fakeStatsIterator) Err() error { return nil }
+
+var _ edgemap.Table = (*fakeStatsTable)(nil)
+
 // fakeConnTable is an in-memory ConnCounter for tests -- Collector only
 // ever needs to count entries, so this just yields count zero-value rows.
 type fakeConnTable struct {
@@ -215,7 +279,8 @@ func findMetric(
 
 func TestCollector_CollectsRuleCounters(t *testing.T) {
 	table := newFakeRuleTable()
-	rt := edgemap.NewRuleTable(table)
+	statsTable := newFakeStatsTable()
+	rt := edgemap.NewRuleTable(table, statsTable)
 	key := edgemap.RuleKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
 	backend := edgemap.Backend{
 		Addr: mustAddr(t, "fd00:10:1::20"),
@@ -226,17 +291,19 @@ func TestCollector_CollectsRuleCounters(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	// Simulate datapath-accumulated counters directly on the fake's
-	// backing map, the way edgenat.c's __sync_fetch_and_add calls would
-	// in the real kernel map. LastSeenNs is set behind "now" (the fake
-	// table's own clock, read via rt.Generation() below) by exactly 5s.
+	// Simulate datapath-accumulated counters directly on the fake stats
+	// table's backing map, the way edgenat.c's __sync_fetch_and_add calls
+	// into rule_stats_table would in the real kernel map. LastSeenNs is
+	// set behind "now" (the fake table's own clock, read via
+	// rt.Generation() below) by exactly 5s.
 	now := rt.Generation()
-	for k, v := range table.entries {
-		v.Packets = 10
-		v.Bytes = 2000
-		v.DroppedPackets = 1
-		v.LastSeenNs = now - 5_000_000_000
-		table.entries[k] = v
+	for k := range table.entries {
+		statsTable.entries[k] = edgeprog.EdgenatRuleStatsValue{
+			Packets:        10,
+			Bytes:          2000,
+			DroppedPackets: 1,
+			LastSeenNs:     now - 5_000_000_000,
+		}
 	}
 
 	c := NewCollector(rt, fakeConnTable{count: 3}, 100, fakeDropReasons{})
@@ -276,7 +343,7 @@ func TestCollector_CollectsRuleCounters(t *testing.T) {
 
 func TestCollector_OmitsSecondsSinceLastPacketWhenNeverSeen(t *testing.T) {
 	table := newFakeRuleTable()
-	rt := edgemap.NewRuleTable(table)
+	rt := edgemap.NewRuleTable(table, newFakeStatsTable())
 	key := edgemap.RuleKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
 	if err := rt.Register(key, []edgemap.Backend{{
 		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
@@ -305,7 +372,7 @@ func TestCollector_CollectsDropsByReason(t *testing.T) {
 		edgeprog.DropReasonNoBackends:   3,
 		edgeprog.DropReasonPATExhausted: 7,
 	}
-	c := NewCollector(edgemap.NewRuleTable(newFakeRuleTable()), fakeConnTable{}, 100, drops)
+	c := NewCollector(edgemap.NewRuleTable(newFakeRuleTable(), newFakeStatsTable()), fakeConnTable{}, 100, drops)
 	metrics := collect(t, c)
 
 	noBackends := findMetric(t, metrics, dropsDesc, "reason", "no_backends")
@@ -319,7 +386,8 @@ func TestCollector_CollectsDropsByReason(t *testing.T) {
 }
 
 func TestCollector_ConnTableEntriesAndUtilization(t *testing.T) {
-	c := NewCollector(edgemap.NewRuleTable(newFakeRuleTable()), fakeConnTable{count: 25}, 100, fakeDropReasons{})
+	rt := edgemap.NewRuleTable(newFakeRuleTable(), newFakeStatsTable())
+	c := NewCollector(rt, fakeConnTable{count: 25}, 100, fakeDropReasons{})
 	metrics := collect(t, c)
 
 	entries := findMetric(t, metrics, connTableEntriesDesc, "", "")
@@ -338,7 +406,8 @@ func TestCollector_ConnTableEntriesAndUtilization(t *testing.T) {
 // than emitting a divide-by-zero NaN/Inf series -- conn_table_entries
 // itself is still reported.
 func TestCollector_ZeroConnMaxOmitsUtilization(t *testing.T) {
-	c := NewCollector(edgemap.NewRuleTable(newFakeRuleTable()), fakeConnTable{count: 5}, 0, fakeDropReasons{})
+	rt := edgemap.NewRuleTable(newFakeRuleTable(), newFakeStatsTable())
+	c := NewCollector(rt, fakeConnTable{count: 5}, 0, fakeDropReasons{})
 	metrics := collect(t, c)
 
 	entries := findMetric(t, metrics, connTableEntriesDesc, "", "")

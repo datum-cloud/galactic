@@ -90,9 +90,58 @@ func (it *fakeRuleIterator) Err() error { return nil }
 
 var _ edgemap.Table = (*fakeRuleTable)(nil)
 
+// fakeStatsTable is an in-memory edgemap.Table standing in for
+// rule_stats_table -- KernelDatapath's own tests never assert on hit
+// counters (that's edgemetrics/collector_test.go's job), so this needs no
+// injected-failure knobs, just enough of edgemap.Table to satisfy
+// NewRuleTable's second argument.
+type fakeStatsTable struct {
+	entries map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue
+}
+
+func newFakeStatsTable() *fakeStatsTable {
+	return &fakeStatsTable{entries: make(map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue)}
+}
+
+func (f *fakeStatsTable) Put(key, value any) error {
+	f.entries[key.(edgeprog.EdgenatRuleKey)] = value.(edgeprog.EdgenatRuleStatsValue)
+	return nil
+}
+
+func (f *fakeStatsTable) Lookup(key, valueOut any) error {
+	v, ok := f.entries[key.(edgeprog.EdgenatRuleKey)]
+	if !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	*valueOut.(*edgeprog.EdgenatRuleStatsValue) = v
+	return nil
+}
+
+func (f *fakeStatsTable) Delete(key any) error {
+	k := key.(edgeprog.EdgenatRuleKey)
+	if _, ok := f.entries[k]; !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	delete(f.entries, k)
+	return nil
+}
+
+func (f *fakeStatsTable) Iterate() edgemap.Iterator {
+	return &fakeStatsIterator{}
+}
+
+// fakeStatsIterator always yields zero entries -- nothing in this
+// package's tests lists rule_stats_table.
+type fakeStatsIterator struct{}
+
+func (it *fakeStatsIterator) Next(keyOut, valueOut any) bool { return false }
+func (it *fakeStatsIterator) Err() error                     { return nil }
+
+var _ edgemap.Table = (*fakeStatsTable)(nil)
+
 func newTestKernelDatapath() *KernelDatapath {
 	return &KernelDatapath{
-		ruleTable:      edgemap.NewRuleTable(newFakeRuleTable()),
+		ruleTable:      edgemap.NewRuleTable(newFakeRuleTable(), newFakeStatsTable()),
 		ruleKeysByName: make(map[string][]edgemap.RuleKey),
 	}
 }
@@ -150,7 +199,7 @@ func TestKernelDatapath_ApplyRuleTracksKeysWrittenBeforeAPartialFailure(t *testi
 	table := newFakeRuleTable()
 	table.failOnNthPut = 2 // fail registering the second of three VIPs
 	d := &KernelDatapath{
-		ruleTable:      edgemap.NewRuleTable(table),
+		ruleTable:      edgemap.NewRuleTable(table, newFakeStatsTable()),
 		ruleKeysByName: make(map[string][]edgemap.RuleKey),
 	}
 	ctx := context.Background()

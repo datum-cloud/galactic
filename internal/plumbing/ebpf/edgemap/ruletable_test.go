@@ -78,6 +78,75 @@ func (it *fakeIterator) Err() error { return nil }
 
 var _ Table = (*fakeTable)(nil)
 
+// fakeStatsTable is an in-memory Table standing in for rule_stats_table
+// (issue #361's split-out counters map) -- same shape as fakeTable, but
+// keyed/valued for EdgenatRuleStatsValue instead of EdgenatRuleValue, and
+// tracking put/lookup call counts so tests can assert Register never
+// touches it (see TestRuleTable_RegisterNeverTouchesStatsTable).
+type fakeStatsTable struct {
+	entries     map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue
+	putCalls    int
+	lookupCalls int
+}
+
+func newFakeStatsTable() *fakeStatsTable {
+	return &fakeStatsTable{entries: make(map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue)}
+}
+
+func (f *fakeStatsTable) Put(key, value any) error {
+	f.putCalls++
+	f.entries[key.(edgeprog.EdgenatRuleKey)] = value.(edgeprog.EdgenatRuleStatsValue)
+	return nil
+}
+
+func (f *fakeStatsTable) Lookup(key, valueOut any) error {
+	f.lookupCalls++
+	v, ok := f.entries[key.(edgeprog.EdgenatRuleKey)]
+	if !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	*valueOut.(*edgeprog.EdgenatRuleStatsValue) = v
+	return nil
+}
+
+func (f *fakeStatsTable) Delete(key any) error {
+	k := key.(edgeprog.EdgenatRuleKey)
+	if _, ok := f.entries[k]; !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	delete(f.entries, k)
+	return nil
+}
+
+func (f *fakeStatsTable) Iterate() Iterator {
+	keys := make([]edgeprog.EdgenatRuleKey, 0, len(f.entries))
+	for k := range f.entries {
+		keys = append(keys, k)
+	}
+	return &fakeStatsIterator{table: f, keys: keys}
+}
+
+type fakeStatsIterator struct {
+	table *fakeStatsTable
+	keys  []edgeprog.EdgenatRuleKey
+	i     int
+}
+
+func (it *fakeStatsIterator) Next(keyOut, valueOut any) bool {
+	if it.i >= len(it.keys) {
+		return false
+	}
+	k := it.keys[it.i]
+	it.i++
+	*keyOut.(*edgeprog.EdgenatRuleKey) = k
+	*valueOut.(*edgeprog.EdgenatRuleStatsValue) = it.table.entries[k]
+	return true
+}
+
+func (it *fakeStatsIterator) Err() error { return nil }
+
+var _ Table = (*fakeStatsTable)(nil)
+
 func mustAddr(t *testing.T, s string) netip.Addr {
 	t.Helper()
 	a, err := netip.ParseAddr(s)
@@ -100,7 +169,7 @@ func testBackend(t *testing.T) Backend {
 }
 
 func TestRuleTable_RegisterGetRoundTrip(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	key, backend := testKey(t), testBackend(t)
 
 	if err := rt.Register(key, []Backend{backend}); err != nil {
@@ -120,14 +189,14 @@ func TestRuleTable_RegisterGetRoundTrip(t *testing.T) {
 }
 
 func TestRuleTable_RegisterRejectsEmptyBackends(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	if err := rt.Register(testKey(t), nil); err == nil {
 		t.Error("Register with no backends: want error, got nil")
 	}
 }
 
 func TestRuleTable_RegisterRejectsTooManyBackends(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	backends := make([]Backend, MaxBackends+1)
 	for i := range backends {
 		backends[i] = testBackend(t)
@@ -138,7 +207,7 @@ func TestRuleTable_RegisterRejectsTooManyBackends(t *testing.T) {
 }
 
 func TestRuleTable_RegisterRejectsIPv4Backend(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	backend := testBackend(t)
 	backend.Addr = netip.MustParseAddr("192.0.2.1")
 	if err := rt.Register(testKey(t), []Backend{backend}); err == nil {
@@ -147,7 +216,7 @@ func TestRuleTable_RegisterRejectsIPv4Backend(t *testing.T) {
 }
 
 func TestRuleTable_UnregisterIsIdempotent(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	key := testKey(t)
 	if err := rt.Unregister(key); err != nil {
 		t.Fatalf("Unregister on an absent key: %v, want nil", err)
@@ -167,7 +236,7 @@ func TestRuleTable_UnregisterIsIdempotent(t *testing.T) {
 }
 
 func TestRuleTable_GetMissingReturnsFalseNotError(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	_, ok, err := rt.Get(testKey(t))
 	if err != nil {
 		t.Fatalf("Get on an absent key: %v, want nil error", err)
@@ -178,7 +247,7 @@ func TestRuleTable_GetMissingReturnsFalseNotError(t *testing.T) {
 }
 
 func TestRuleTable_List(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	key1 := testKey(t)
 	key2 := RuleKey{Proto: 17, VPort: 53, VIP: mustAddr(t, "2001:db8:1::11")}
 
@@ -200,7 +269,7 @@ func TestRuleTable_List(t *testing.T) {
 
 func TestRuleTable_ReconcileRemovesStaleNotLive(t *testing.T) {
 	var fakeClock uint64
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	rt.clock = func() uint64 { return fakeClock }
 
 	liveKey := testKey(t)
@@ -245,7 +314,7 @@ func TestRuleTable_ReconcileRemovesStaleNotLive(t *testing.T) {
 // the caller's live set yet.
 func TestRuleTable_ReconcileSparesRecentGeneration(t *testing.T) {
 	var fakeClock uint64
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	rt.clock = func() uint64 { return fakeClock }
 
 	cutoff := rt.Generation() // 0
@@ -269,7 +338,7 @@ func TestRuleTable_ReconcileSparesRecentGeneration(t *testing.T) {
 }
 
 func TestRuleTable_RegisterOverwritesExistingKey(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	key := testKey(t)
 	b1 := testBackend(t)
 	b2 := Backend{Addr: mustAddr(t, "fd00:10:1::99"), Port: 9999, USID: mustAddr(t, "2001:db8:2::2")}
@@ -290,15 +359,16 @@ func TestRuleTable_RegisterOverwritesExistingKey(t *testing.T) {
 	}
 }
 
-// TestRuleTable_RegisterPreservesHitCounters verifies Register's
-// read-modify-write behavior (Phase E): re-registering an existing key
-// (e.g. every controller reconcile pass, per Engine.Reconcile's "apply
-// everything in desired" convention) must not zero the datapath-maintained
-// Packets/Bytes/DroppedPackets/LastSeenNs counters, only Backends/
-// Generation.
+// TestRuleTable_RegisterPreservesHitCounters verifies that re-registering
+// an existing key (e.g. every controller reconcile pass, per
+// Engine.Reconcile's "apply everything in desired" convention) never
+// disturbs the datapath-maintained Packets/Bytes/DroppedPackets/
+// LastSeenNs counters -- because, post-#361, Register only ever writes
+// rule_table (Backends/Generation) and has no read-modify-write into
+// rule_stats_table to race against a concurrent datapath increment.
 func TestRuleTable_RegisterPreservesHitCounters(t *testing.T) {
-	table := newFakeTable()
-	rt := NewRuleTable(table)
+	statsTable := newFakeStatsTable()
+	rt := NewRuleTable(newFakeTable(), statsTable)
 	key := testKey(t)
 
 	if err := rt.Register(key, []Backend{testBackend(t)}); err != nil {
@@ -306,19 +376,19 @@ func TestRuleTable_RegisterPreservesHitCounters(t *testing.T) {
 	}
 
 	// Simulate the datapath having handled traffic between reconciles by
-	// writing counters directly into the fake table's backing map, the
-	// same way edgenat.c's __sync_fetch_and_add calls would in the real
-	// kernel map.
+	// writing counters directly into the fake stats table's backing map,
+	// the same way edgenat.c's __sync_fetch_and_add calls into
+	// rule_stats_table would in the real kernel map.
 	wireKey, err := toWireKey(key)
 	if err != nil {
 		t.Fatalf("toWireKey: %v", err)
 	}
-	entry := table.entries[wireKey]
-	entry.Packets = 42
-	entry.Bytes = 4096
-	entry.DroppedPackets = 3
-	entry.LastSeenNs = 123456789
-	table.entries[wireKey] = entry
+	statsTable.entries[wireKey] = edgeprog.EdgenatRuleStatsValue{
+		Packets:        42,
+		Bytes:          4096,
+		DroppedPackets: 3,
+		LastSeenNs:     123456789,
+	}
 
 	// Re-register with a different backend, exactly as a later
 	// convergence pass would (e.g. a backend Pod rescheduled).
@@ -348,11 +418,69 @@ func TestRuleTable_RegisterPreservesHitCounters(t *testing.T) {
 	}
 }
 
+// TestRuleTable_RegisterNeverTouchesStatsTable is the direct regression
+// test for issue #361: Register must never Put or Lookup on
+// rule_stats_table at all, on either a fresh key or a re-registration --
+// only the datapath (edgenat.c) and RuleTable.Unregister ever touch that
+// map. This is the structural guarantee that makes
+// TestRuleTable_RegisterPreservesHitCounters true by construction rather
+// than by coincidence: there is no read-modify-write left to race.
+func TestRuleTable_RegisterNeverTouchesStatsTable(t *testing.T) {
+	statsTable := newFakeStatsTable()
+	rt := NewRuleTable(newFakeTable(), statsTable)
+	key := testKey(t)
+
+	if err := rt.Register(key, []Backend{testBackend(t)}); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+	b2 := Backend{Addr: mustAddr(t, "fd00:10:1::99"), Port: 9999, USID: mustAddr(t, "2001:db8:2::2")}
+	if err := rt.Register(key, []Backend{b2}); err != nil {
+		t.Fatalf("second Register (re-registration): %v", err)
+	}
+
+	if statsTable.putCalls != 0 {
+		t.Errorf("stats table Put calls = %d, want 0 (Register must never write rule_stats_table)",
+			statsTable.putCalls)
+	}
+	if statsTable.lookupCalls != 0 {
+		t.Errorf("stats table Lookup calls = %d, want 0 (Register must never read rule_stats_table)",
+			statsTable.lookupCalls)
+	}
+}
+
+// TestRuleTable_UnregisterDeletesStatsRow verifies Unregister cleans up
+// rule_stats_table alongside rule_table, so a removed rule's counters
+// don't linger under a key a future, unrelated rule could reuse.
+func TestRuleTable_UnregisterDeletesStatsRow(t *testing.T) {
+	statsTable := newFakeStatsTable()
+	rt := NewRuleTable(newFakeTable(), statsTable)
+	key := testKey(t)
+
+	if err := rt.Register(key, []Backend{testBackend(t)}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	wireKey, err := toWireKey(key)
+	if err != nil {
+		t.Fatalf("toWireKey: %v", err)
+	}
+	// Simulate the datapath having populated a stats row for this rule.
+	statsTable.entries[wireKey] = edgeprog.EdgenatRuleStatsValue{Packets: 7}
+
+	if err := rt.Unregister(key); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	if _, ok := statsTable.entries[wireKey]; ok {
+		t.Error("Unregister left the rule_stats_table row behind")
+	}
+}
+
 // TestRuleTable_RegisterOnFreshKeyStartsCountersAtZero verifies a brand
 // new key's counters start at zero, not garbage from an unrelated
-// previous lookup failure.
+// previous lookup failure -- rule_stats_table simply has no row for it
+// yet (the datapath hasn't seen a matching packet), which Get/List must
+// read back as zero, not as an error.
 func TestRuleTable_RegisterOnFreshKeyStartsCountersAtZero(t *testing.T) {
-	rt := NewRuleTable(newFakeTable())
+	rt := NewRuleTable(newFakeTable(), newFakeStatsTable())
 	key := testKey(t)
 
 	if err := rt.Register(key, []Backend{testBackend(t)}); err != nil {

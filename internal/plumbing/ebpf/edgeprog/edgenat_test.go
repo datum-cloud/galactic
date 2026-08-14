@@ -514,9 +514,11 @@ func TestEdgeNat_ForwardSYNAllocatesRewritesAndEncapsulates(t *testing.T) {
 
 // TestEdgeNat_ForwardIncrementsRuleHitCounters covers the design plan's
 // Phase E hit counters: a successfully forwarded packet must bump
-// rule_table's Packets/Bytes/LastSeenNs (backing internal/gateway's
+// rule_stats_table's Packets/Bytes/LastSeenNs (backing internal/gateway's
 // QuotaEnforcer/TelemetryEmitter), with DroppedPackets left at zero since
-// nothing was dropped.
+// nothing was dropped. These counters live in rule_stats_table, not
+// rule_table (issue #361) -- see struct rule_stats_value's doc comment in
+// edgenat.c for why they were split out.
 func TestEdgeNat_ForwardIncrementsRuleHitCounters(t *testing.T) {
 	env, cleanup := setupTestEnv(t, []netip.Addr{mustAddr(t, testBackendSID)})
 	defer cleanup()
@@ -531,40 +533,41 @@ func TestEdgeNat_ForwardIncrementsRuleHitCounters(t *testing.T) {
 	}
 
 	rk := EdgenatRuleKey{Proto: 6, Port: htons(testVIPPort), Vip: mustAddr(t, testVIP).As16()}
-	var rv EdgenatRuleValue
-	if err := objs.RuleTable.Lookup(rk, &rv); err != nil {
-		t.Fatalf("read back rule_table entry: %v", err)
+	var rv EdgenatRuleStatsValue
+	if err := objs.RuleStatsTable.Lookup(rk, &rv); err != nil {
+		t.Fatalf("read back rule_stats_table entry: %v", err)
 	}
 	if rv.Packets != 1 {
-		t.Errorf("rule_table Packets = %d, want 1", rv.Packets)
+		t.Errorf("rule_stats_table Packets = %d, want 1", rv.Packets)
 	}
 	if rv.Bytes != uint64(len(pkt)) {
-		t.Errorf("rule_table Bytes = %d, want %d (the ingress packet's own length)", rv.Bytes, len(pkt))
+		t.Errorf("rule_stats_table Bytes = %d, want %d (the ingress packet's own length)", rv.Bytes, len(pkt))
 	}
 	if rv.DroppedPackets != 0 {
-		t.Errorf("rule_table DroppedPackets = %d, want 0 (nothing was dropped)", rv.DroppedPackets)
+		t.Errorf("rule_stats_table DroppedPackets = %d, want 0 (nothing was dropped)", rv.DroppedPackets)
 	}
 	if rv.LastSeenNs == 0 {
-		t.Error("rule_table LastSeenNs was never stamped")
+		t.Error("rule_stats_table LastSeenNs was never stamped")
 	}
 
 	// A second packet on the same flow must add to Packets/Bytes, not
-	// reset them -- edgemap.RuleTable.Register's read-modify-write must
-	// preserve these across re-registration too (see ruletable_test.go),
-	// but this confirms the datapath side accumulates correctly first.
+	// reset them -- edgemap.RuleTable.Register never touches
+	// rule_stats_table at all post-#361 (see ruletable_test.go), but this
+	// confirms the datapath side accumulates correctly first.
 	pkt2 := buildTCPPacket(mustAddr(t, testClient), mustAddr(t, testVIP), testClientPort, testVIPPort, false)
 	if ret2, _ := runXDP(t, objs.EdgeNat, pkt2, env.ifindex); ret2 != xdpTx {
 		t.Fatalf("second packet verdict = %d, want XDP_TX (%d)", ret2, xdpTx)
 	}
-	var rv2 EdgenatRuleValue
-	if err := objs.RuleTable.Lookup(rk, &rv2); err != nil {
-		t.Fatalf("read back rule_table entry after second packet: %v", err)
+	var rv2 EdgenatRuleStatsValue
+	if err := objs.RuleStatsTable.Lookup(rk, &rv2); err != nil {
+		t.Fatalf("read back rule_stats_table entry after second packet: %v", err)
 	}
 	if rv2.Packets != 2 {
-		t.Errorf("rule_table Packets after second packet = %d, want 2 (accumulated, not reset)", rv2.Packets)
+		t.Errorf("rule_stats_table Packets after second packet = %d, want 2 (accumulated, not reset)", rv2.Packets)
 	}
 	if rv2.Bytes != rv.Bytes+uint64(len(pkt2)) {
-		t.Errorf("rule_table Bytes after second packet = %d, want %d (accumulated)", rv2.Bytes, rv.Bytes+uint64(len(pkt2)))
+		t.Errorf("rule_stats_table Bytes after second packet = %d, want %d (accumulated)",
+			rv2.Bytes, rv.Bytes+uint64(len(pkt2)))
 	}
 }
 
@@ -592,21 +595,22 @@ func TestEdgeNat_ForwardNonSYNWithNoConnDrops(t *testing.T) {
 	// The drop happened after this packet's VIP+port+protocol matched
 	// rule_table (design plan Phase E), so it counts against both the
 	// rule's own Packets (every packet that matched, regardless of
-	// outcome) and DroppedPackets (the claimed-drop subset) -- see
+	// outcome) and DroppedPackets (the claimed-drop subset) -- both live
+	// in rule_stats_table, not rule_table (issue #361) -- see
 	// edgenat.c's count_claimed_drop.
 	rk := EdgenatRuleKey{Proto: 6, Port: htons(testVIPPort), Vip: mustAddr(t, testVIP).As16()}
-	var rv EdgenatRuleValue
-	if err := objs.RuleTable.Lookup(rk, &rv); err != nil {
-		t.Fatalf("read back rule_table entry: %v", err)
+	var rv EdgenatRuleStatsValue
+	if err := objs.RuleStatsTable.Lookup(rk, &rv); err != nil {
+		t.Fatalf("read back rule_stats_table entry: %v", err)
 	}
 	if rv.Packets != 1 {
-		t.Errorf("rule_table Packets = %d, want 1", rv.Packets)
+		t.Errorf("rule_stats_table Packets = %d, want 1", rv.Packets)
 	}
 	if rv.DroppedPackets != 1 {
-		t.Errorf("rule_table DroppedPackets = %d, want 1", rv.DroppedPackets)
+		t.Errorf("rule_stats_table DroppedPackets = %d, want 1", rv.DroppedPackets)
 	}
 	if rv.LastSeenNs == 0 {
-		t.Error("rule_table LastSeenNs was never stamped")
+		t.Error("rule_stats_table LastSeenNs was never stamped")
 	}
 }
 

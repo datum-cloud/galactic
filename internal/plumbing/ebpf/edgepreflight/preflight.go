@@ -35,8 +35,9 @@
 //     package has no runtime dependency on the other one.
 //   - Kernel BTF, for the same CO-RE-adjacent reason usid.c's preflight
 //     requires it: edgenat.c is compiled with -g and bpf2go's generated
-//     Go bindings for rule_value/conn_value/backend depend on the running
-//     kernel accepting BTF-annotated map value types.
+//     Go bindings for rule_value/rule_stats_value/conn_value/backend
+//     depend on the running kernel accepting BTF-annotated map value
+//     types.
 //
 // Deliberately NOT checked here: whether a specific interface's driver
 // supports *native* (driver-mode) XDP attach, as opposed to generic

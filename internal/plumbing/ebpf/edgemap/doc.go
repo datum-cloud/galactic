@@ -10,6 +10,19 @@
 // ever touches it directly, the same boundary the earlier, rejected
 // gwprog/gwnatmap design drew for its own conn_table.
 //
+// rule_stats_table is a partial exception to "control-plane maps": this
+// package reads it (RuleTable.Get/List, to report a rule's hit counters)
+// and deletes from it (RuleTable.Unregister, so a removed rule's counters
+// don't linger), but never writes to it -- edgenat.c populates every
+// rule_stats_table row itself, lazily, on a rule's first matching packet.
+// See RuleTable.Register's doc comment for why (issue #361): rule_table
+// and rule_stats_table used to be one map, and Register's read-
+// modify-write to preserve that map's counters across re-registration
+// raced the datapath's own per-packet increments into the same fields,
+// discarding whichever landed second. Splitting the counters into a map
+// Register never touches at all removes the race instead of narrowing
+// it.
+//
 // This package does not itself decide *when* to register anything, load
 // the program, or attach it to an interface -- that is
 // internal/gateway.Engine's job (via its Datapath interface) and
@@ -24,7 +37,9 @@
 // RuleTable.Reconcile's cutoff/Generation mechanism guards exactly that
 // crash-restart window -- the same register-after-snapshot-is-safe
 // guarantee internal/plumbing/ebpf/usidmap.VRFTable's identical mechanism
-// already documents.
+// already documents. Generation lives on rule_table's own value
+// (EdgenatRuleValue), not rule_stats_table -- it is stamped by Register,
+// which never touches rule_stats_table (see above).
 //
 // # Testability
 //
