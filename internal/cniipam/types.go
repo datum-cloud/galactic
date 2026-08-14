@@ -41,10 +41,19 @@ type IPAM struct {
 	// pkg/ipam.ExecAdd/ExecDel read this to know which binary to exec), not
 	// a mode selector. Mode is decided from which of the fields below are
 	// present instead — see the package doc comment.
-	Type            string    `json:"type"`
-	StaticIP        string    `json:"static_ip,omitempty"`
-	IPv6Subnet      string    `json:"ipv6_subnet,omitempty"`
-	IPv4Subnet      string    `json:"ipv4_subnet,omitempty"`
+	Type       string `json:"type"`
+	StaticIP   string `json:"static_ip,omitempty"`
+	IPv6Subnet string `json:"ipv6_subnet,omitempty"`
+	IPv4Subnet string `json:"ipv4_subnet,omitempty"`
+	// AddressFamilies, when non-empty, restricts allocation to the listed
+	// families ("ipv6"/"ipv4"): parseConf clears whichever of
+	// IPv6Subnet/IPv4Subnet names an excluded family before allocate/
+	// deallocate/checkAllocation ever see them. It only narrows whichever
+	// pools are already configured — it can't widen allocation to a family
+	// with no pool CIDR set. Empty means no restriction (allocate from every
+	// configured pool, same as if this field didn't exist). Meaningless for
+	// the static_ip path, which allocates a single fixed IPv6 address
+	// regardless of this field.
 	AddressFamilies []string  `json:"address_families,omitempty"`
 	Routes          []Route   `json:"routes,omitempty"`
 	Addresses       []Address `json:"addresses,omitempty"`

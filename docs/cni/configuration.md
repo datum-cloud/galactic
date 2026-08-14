@@ -216,15 +216,15 @@ protocol, `github.com/containernetworking/plugins/pkg/ipam.ExecAdd`/`ExecDel`/
 `"galactic-ipam"` in practice. It is not a pool-vs-static mode selector: mode
 is decided entirely by which of the fields below are present.
 
-| Field              | Required | Type       | Description                                                                                                          |
-| ------------------ | -------- | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `type`             | **Yes**  | `string`   | Names the delegated CNI IPAM binary. Always `"galactic-ipam"` today.                                                  |
-| `static_ip`        | No       | `string`   | A single IPv6 address to assign. Presence selects the static allocation path (below); mutually exclusive in practice with the subnet fields. |
-| `ipv6_subnet`      | No       | `string`   | Region IPv6 pool CIDR; endpoints allocate a `/96` from it by default.                                                 |
-| `ipv4_subnet`      | No       | `string`   | Site IPv4 pool CIDR; endpoints allocate a `/32` host address from it.                                                 |
-| `address_families` | No       | `[]string` | Families to record as in-use: any of `"ipv6"`, `"ipv4"`. Defaults to `["ipv6"]`. Validated at parse time — keep this consistent with which of `ipv6_subnet`/`ipv4_subnet` are set. |
-| `routes`           | No       | `[]Route`  | Declared on the `IPAM` struct (`dst`, `gw`) but not read by any current allocation path — vestigial.                 |
-| `addresses`        | No       | `[]Address`| Declared on the `IPAM` struct (`address`) but not read by any current allocation path — vestigial.                    |
+| Field              | Required | Type        | Description                                                                                                                                                                                                                                                                        |
+| ------------------ | -------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`             | **Yes**  | `string`    | Names the delegated CNI IPAM binary. Always `"galactic-ipam"` today.                                                                                                                                                                                                               |
+| `static_ip`        | No       | `string`    | A single IPv6 address to assign. Presence selects the static allocation path (below); mutually exclusive in practice with the subnet fields.                                                                                                                                       |
+| `ipv6_subnet`      | No       | `string`    | Region IPv6 pool CIDR; endpoints allocate a `/96` from it by default.                                                                                                                                                                                                              |
+| `ipv4_subnet`      | No       | `string`    | Site IPv4 pool CIDR; endpoints allocate a `/32` host address from it.                                                                                                                                                                                                              |
+| `address_families` | No       | `[]string`  | Restricts allocation to the listed families, narrowing whichever of `ipv6_subnet`/`ipv4_subnet` are configured on this attachment (never widens beyond them). Omit for no restriction — allocate from every pool configured. Rejects a config that excludes every configured pool. |
+| `routes`           | No       | `[]Route`   | Declared on the `IPAM` struct (`dst`, `gw`) but not read by any current allocation path — vestigial.                                                                                                                                                                               |
+| `addresses`        | No       | `[]Address` | Declared on the `IPAM` struct (`address`) but not read by any current allocation path — vestigial.                                                                                                                                                                                 |
 
 Whether IPAM runs at all is decided **solely** by `"ipam"` block presence in
 the master plugin's own stanza — no environment variable can trigger or
