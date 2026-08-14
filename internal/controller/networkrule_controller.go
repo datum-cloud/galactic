@@ -7,7 +7,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"net/netip"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -29,6 +28,16 @@ import (
 // NetworkRule deletion: BGP-route withdrawal must complete before
 // NAT/conntrack state is released — see reconcileDelete.
 const networkRuleFinalizer = "galactic.datum.net/networkrule-teardown"
+
+// networkRuleLabel is set to rule.Name on every BGPAdvertisement a
+// NetworkRule owns (one per gateway node per non-empty VIP address family —
+// see NetworkGatewayReconciler.applyBGPAdvertisements), so reconcileDelete
+// can discover all of them with a List + label selector instead of
+// reconstructing their names from the namespace's *current* gateway-node
+// membership. A node that was registered when the rule was created and has
+// since left would not appear in that reconstruction, leaving its
+// advertisement never found and never withdrawn — see issue #367.
+const networkRuleLabel = "galactic.datum.net/network-rule"
 
 // NetworkRuleReconciler owns two pieces of NetworkRule per-object lifecycle
 // that NetworkGatewayReconciler's aggregate, List-driven reconcile loop is
@@ -199,25 +208,23 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 		return ctrl.Result{}, nil
 	}
 
-	nodeNames, err := gatewayNodeNames(ctx, r.Client, rule.Namespace)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("list gateway nodes for NetworkRule %s/%s teardown: %w",
+	// Listed by networkRuleLabel rather than reconstructed from the
+	// namespace's current gateway-node membership (as a name-based lookup
+	// would have to be) — this finds every advertisement this rule ever
+	// caused to be created, including ones for a node that has since left
+	// the namespace. See networkRuleLabel's doc comment and issue #367.
+	advList := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := r.List(ctx, advList,
+		client.InNamespace(rule.Namespace),
+		client.MatchingLabels{networkRuleLabel: rule.Name},
+	); err != nil {
+		return ctrl.Result{}, fmt.Errorf("list BGPAdvertisements for NetworkRule %s/%s teardown: %w",
 			rule.Namespace, rule.Name, err)
 	}
-
-	for _, name := range bgpAdvertisementNamesForRule(rule, nodeNames) {
-		adv := &bgpv1alpha1.BGPAdvertisement{}
-		key := types.NamespacedName{Namespace: rule.Namespace, Name: name}
-		err := r.Get(ctx, key, adv)
-		switch {
-		case apierrors.IsNotFound(err):
-			// already withdrawn
-		case err != nil:
-			return ctrl.Result{}, fmt.Errorf("get BGPAdvertisement %s for teardown: %w", name, err)
-		default:
-			if delErr := r.Delete(ctx, adv); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("withdraw BGPAdvertisement %s: %w", name, delErr)
-			}
+	for i := range advList.Items {
+		adv := &advList.Items[i]
+		if delErr := r.Delete(ctx, adv); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return ctrl.Result{}, fmt.Errorf("withdraw BGPAdvertisement %s: %w", adv.Name, delErr)
 		}
 	}
 
@@ -289,37 +296,4 @@ func gatewayToRuleRequests(ctx context.Context, c client.Client, obj client.Obje
 		})
 	}
 	return reqs
-}
-
-// bgpAdvertisementNamesForRule returns the deterministic BGPAdvertisement
-// object name(s) for rule — one per gateway node in nodeNames per
-// non-empty VIP address family, matching
-// NetworkGatewayReconciler.applyBGPAdvertisements's naming convention
-// exactly (including the node-name qualifier — see that method's doc
-// comment for why it's required, not cosmetic), so this reconciler's
-// teardown always finds every object that reconciler created across every
-// gateway node, not just the first one to have reconciled this rule.
-func bgpAdvertisementNamesForRule(rule *bgpv1alpha1.NetworkRule, nodeNames []string) []string {
-	var hasV4, hasV6 bool
-	for _, v := range rule.Spec.VIPAddresses {
-		addr, err := netip.ParseAddr(v)
-		if err != nil {
-			continue
-		}
-		if addr.Is4() {
-			hasV4 = true
-		} else {
-			hasV6 = true
-		}
-	}
-	var names []string
-	for _, node := range nodeNames {
-		if hasV4 {
-			names = append(names, rule.Name+"-"+node+"-v4")
-		}
-		if hasV6 {
-			names = append(names, rule.Name+"-"+node+"-v6")
-		}
-	}
-	return names
 }
