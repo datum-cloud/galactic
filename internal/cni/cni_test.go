@@ -17,6 +17,7 @@ import (
 
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/cnimaster"
+	"go.datum.net/galactic/internal/cnitestutil"
 )
 
 func TestMain(m *testing.M) {
@@ -42,29 +43,12 @@ const (
 		`"ips":[{"version":"6","address":"fd00:1::1/64"}]}`
 )
 
-// assertCNIError verifies that err is a *types.Error with the expected Code
-// and that its Msg contains wantMsg (substring match). Pass wantMsg == "" to
-// skip the message check.
-func assertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
-	t.Helper()
-	var cniErr *types.Error
-	if !errors.As(err, &cniErr) {
-		t.Fatalf("expected *types.Error, got %T: %v", err, err)
-	}
-	if cniErr.Code != wantCode {
-		t.Fatalf("expected code %d, got %d (Msg: %q)", wantCode, cniErr.Code, cniErr.Msg)
-	}
-	if wantMsg != "" && !strings.Contains(cniErr.Msg, wantMsg) {
-		t.Fatalf("expected Msg to contain %q, got %q", wantMsg, cniErr.Msg)
-	}
-}
-
 // ---- buildResult ---------------------------------------------------------
 
 func TestBuildResult(t *testing.T) {
-	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
+	subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/80")
 	gateway := net.ParseIP("fd00:10:ff01::1")
-	defaultRoute := mustParseCIDR(t, "::/0")
+	defaultRoute := cnitestutil.MustParseCIDR(t, "::/0")
 	netns := "/proc/1234/ns/net"
 
 	conf := &PluginConf{
@@ -181,12 +165,12 @@ func TestBuildResult(t *testing.T) {
 // an IPv4 IPConfig, both pointing at the guest interface, plus both default
 // routes, when ipamResult carries an IPv4 allocation.
 func TestBuildResultDualStack(t *testing.T) {
-	ipv6Subnet := mustParseCIDR(t, "fd00:10:ff01::1234/96")
+	ipv6Subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/96")
 	ipv6Gateway := net.ParseIP("fd00:10:ff01::1")
 	ipv4Address := net.ParseIP("10.128.0.5")
 	ipv4Gateway := net.ParseIP("10.128.0.1")
-	ipv6Route := mustParseCIDR(t, "::/0")
-	ipv4Route := mustParseCIDR(t, "0.0.0.0/0")
+	ipv6Route := cnitestutil.MustParseCIDR(t, "::/0")
+	ipv4Route := cnitestutil.MustParseCIDR(t, "0.0.0.0/0")
 
 	conf := &PluginConf{
 		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
@@ -237,7 +221,7 @@ func TestBuildResultDualStack(t *testing.T) {
 func TestBuildResultIPv4Only(t *testing.T) {
 	ipv4Address := net.ParseIP("172.20.1.5")
 	ipv4Gateway := net.ParseIP("172.20.1.1")
-	ipv4Route := mustParseCIDR(t, "0.0.0.0/0")
+	ipv4Route := cnitestutil.MustParseCIDR(t, "0.0.0.0/0")
 
 	conf := &PluginConf{
 		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
@@ -350,15 +334,6 @@ func TestCmdDelFlushesGuestNetnsConfig(t *testing.T) {
 	if gw := defaultRouteVia(t, netnsPath); gw != nil {
 		t.Fatalf("default route gateway = %v, want nil (flushed by DEL)", gw)
 	}
-}
-
-func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
-	t.Helper()
-	_, ipnet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		t.Fatalf("parse CIDR %q: %v", cidr, err)
-	}
-	return ipnet
 }
 
 // ---- cmdCheck ----------------------------------------------------------
@@ -521,7 +496,7 @@ func TestCmdStatusInvalidConfig(t *testing.T) {
 	}
 
 	err := cmdStatus(args)
-	assertCNIError(t, err, 7, "invalid CNI config")
+	cnitestutil.AssertCNIError(t, err, 7, "invalid CNI config")
 }
 
 func TestCmdStatusValidConfigMissingResources(t *testing.T) {
@@ -613,7 +588,7 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 	}
 
 	err := cmdStatus(args)
-	assertCNIError(t, err, 50, "API server health check failed")
+	cnitestutil.AssertCNIError(t, err, 50, "API server health check failed")
 }
 
 // ---- cmdAdd prevResult validation ----------------------------------------
@@ -638,5 +613,5 @@ func TestCmdAddPrevResultValid(t *testing.T) {
 	err := cmdAdd(args)
 	// Should fail with code 4 (invalid env vars) for missing node name,
 	// not code 6 for prevResult.
-	assertCNIError(t, err, 4, "node name is required")
+	cnitestutil.AssertCNIError(t, err, 4, "node name is required")
 }

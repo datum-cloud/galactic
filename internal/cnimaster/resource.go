@@ -7,6 +7,7 @@ package cnimaster
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -16,6 +17,11 @@ import (
 
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
+
+// NADPatchTimeout bounds the NAD-annotation patch call each master plugin
+// makes with the k8s client from NewK8sClient, right after creating it —
+// veth's and tap's own ADD both use the same budget.
+const NADPatchTimeout = 10 * time.Second
 
 var scheme = runtime.NewScheme()
 

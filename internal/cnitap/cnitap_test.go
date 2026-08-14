@@ -17,6 +17,7 @@ import (
 
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/cnimaster"
+	"go.datum.net/galactic/internal/cnitestutil"
 )
 
 const (
@@ -31,29 +32,6 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("GALACTIC_CNI_NODE_NAME", "test-node")
 	InitCNIConfig()
 	os.Exit(m.Run())
-}
-
-func assertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
-	t.Helper()
-	var cniErr *types.Error
-	if !errors.As(err, &cniErr) {
-		t.Fatalf("expected *types.Error, got %T: %v", err, err)
-	}
-	if cniErr.Code != wantCode {
-		t.Fatalf("expected code %d, got %d (Msg: %q)", wantCode, cniErr.Code, cniErr.Msg)
-	}
-	if wantMsg != "" && !strings.Contains(cniErr.Msg, wantMsg) {
-		t.Fatalf("expected Msg to contain %q, got %q", wantMsg, cniErr.Msg)
-	}
-}
-
-func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
-	t.Helper()
-	_, ipnet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		t.Fatalf("parse CIDR %q: %v", cidr, err)
-	}
-	return ipnet
 }
 
 // movedKeyConf builds an otherwise-valid galactic-tap config carrying
@@ -150,7 +128,7 @@ func TestParseConf(t *testing.T) {
 					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
 				}
 				if tt.wantCode > 0 {
-					assertCNIError(t, err, tt.wantCode, tt.wantErr)
+					cnitestutil.AssertCNIError(t, err, tt.wantCode, tt.wantErr)
 				}
 				return
 			}
@@ -167,9 +145,9 @@ func TestParseConf(t *testing.T) {
 // ---- buildTapResult ------------------------------------------------------
 
 func TestBuildTapResult(t *testing.T) {
-	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
+	subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/80")
 	gateway := net.ParseIP("fd00:10:ff01::1")
-	defaultRoute := mustParseCIDR(t, "::/0")
+	defaultRoute := cnitestutil.MustParseCIDR(t, "::/0")
 
 	conf := &PluginConf{
 		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
@@ -230,7 +208,7 @@ func TestBuildTapResult(t *testing.T) {
 func TestBuildTapResultIPv4Mask(t *testing.T) {
 	ipv4Address := net.ParseIP("172.20.1.5")
 	ipv4Gateway := net.ParseIP("172.20.1.1")
-	ipv4Route := mustParseCIDR(t, "0.0.0.0/0")
+	ipv4Route := cnitestutil.MustParseCIDR(t, "0.0.0.0/0")
 
 	conf := &PluginConf{
 		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
@@ -257,9 +235,9 @@ func TestBuildTapResultIPv4Mask(t *testing.T) {
 // CNI library's same-netns rejection check. The tap result must not
 // reference a sandbox.
 func TestBuildTapResultHostNetns(t *testing.T) {
-	subnet := mustParseCIDR(t, "fd00:10:ff01::1234/80")
+	subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/80")
 	gateway := net.ParseIP("fd00:10:ff01::1")
-	defaultRoute := mustParseCIDR(t, "::/0")
+	defaultRoute := cnitestutil.MustParseCIDR(t, "::/0")
 
 	conf := &PluginConf{
 		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
@@ -314,7 +292,7 @@ func TestCmdCheckValidConfigMissingResources(t *testing.T) {
 func TestCmdStatusInvalidConfig(t *testing.T) {
 	args := &skel.CmdArgs{ContainerID: testContainerID, StdinData: []byte("not valid json")}
 	err := cmdStatus(args)
-	assertCNIError(t, err, 7, "invalid CNI config")
+	cnitestutil.AssertCNIError(t, err, 7, "invalid CNI config")
 }
 
 func TestCmdStatusAPIProbeFailure(t *testing.T) {
@@ -326,7 +304,7 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 		testVPC, testAttachment)
 	args := &skel.CmdArgs{ContainerID: testContainerID, StdinData: []byte(conf)}
 	err := cmdStatus(args)
-	assertCNIError(t, err, 50, "API server health check failed")
+	cnitestutil.AssertCNIError(t, err, 50, "API server health check failed")
 }
 
 // ---- resourceTracker ------------------------------------------------------
