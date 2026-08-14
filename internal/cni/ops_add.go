@@ -107,7 +107,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		return fmt.Errorf("create k8s client: %w", err)
 	}
 	podNamespace := nadpatch.ParsePodNamespace(args.Args)
-	nadCtx, nadCancel := context.WithTimeout(context.Background(), cniTimeout)
+	nadCtx, nadCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
 	defer nadCancel()
 	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
 		return fmt.Errorf("annotate NAD: %w", err)
