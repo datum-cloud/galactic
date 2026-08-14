@@ -161,7 +161,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (veth ADD, tap ADD, shared DEL), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries.
+See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (one unified ADD diagram covering both the veth and tap master-plugin paths, one DEL diagram covering the whole chain), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries.
 
 ---
 
@@ -181,10 +181,14 @@ See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL 
 | `internal/plumbing/vrf`    | every CNI-chain binary                                                   | Linux VRF create/delete/lookup                                                                                                            |
 | `internal/plumbing/sysctl` | `galactic-veth`, `galactic-tap`                                          | Interface sysctl helpers                                                                                                                  |
 
-`internal/gc` (in `galactic-router`) is the counterpart that reclaims
-orphaned CRD/VRF/eBPF-entry state this chain's DEL paths deliberately leave
-behind — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) and Known
-Constraints below.
+`internal/gc` is the counterpart that reclaims orphaned CRD/VRF/eBPF-entry
+state this chain's DEL paths deliberately leave behind — its orphaned-CRD
+and kernel-VRF sweep runs inside `galactic-router` (see
+[ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)), while its eBPF
+`vrf_table` sweep runs inside this component's own `galactic-cni` `run`
+container instead, since the pinned map only exists there. See
+[docs/gc-cmd-sequence.md](../cni/gc-cmd-sequence.md) for both sweeps' sequence
+diagrams and Known Constraints below.
 
 ---
 
@@ -240,7 +244,7 @@ present) delegates IPAM and configures the host gateway — it prints its own
 CNI result and returns; BGP/SRv6/eBPF publish is `galactic-bgp`'s job,
 invoked next by the CNI runtime per conflist order, not by this process.
 
-See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full ADD/DEL sequence.
+See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full ADD/DEL sequence.
 
 ### `cmd/galactic-tap/main.go` — tap master plugin
 
@@ -391,7 +395,7 @@ interfaces or IPs of their own. This means the master's own printed result is
 the runtime's authoritative CNI result for the whole chain; a successful ADD
 response does not by itself guarantee `galactic-bgp` has even run yet, let
 alone that the `BGPAdvertisement`/`BGPVRFInstance` CRDs exist (see
-[docs/cni-cmd-sequence.md](../cni-cmd-sequence.md)).
+[docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md)).
 
 On DEL, every binary's result contains only `cniVersion` (empty result). Each
 binary's own DEL only cleans up what it itself created *and* is safe to
@@ -399,7 +403,7 @@ release immediately for that specific container — IPAM deallocation
 (`galactic-ipam`, via its own on-disk marker file) and the guest-netns
 flush/host-device DEL (`galactic-veth` only). It does not attempt to unwind
 any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
-[docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) and Known Constraints below.
+[docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) and Known Constraints below.
 
 ---
 
