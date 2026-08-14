@@ -11,6 +11,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ipam"
+
+	"go.datum.net/galactic/internal/cni/veth"
 )
 
 func cmdDel(args *skel.CmdArgs) error {
@@ -69,10 +71,22 @@ func cmdDel(args *skel.CmdArgs) error {
 			"err", err, "containerID", args.ContainerID, "netns", args.Netns)
 	}
 
-	// Shared resources (VRF, veth, routes, SRv6 ingress, BGPAdvertisement,
-	// BGPVRFInstance) are keyed by (vpc, vpcAttachment) and may still be in use
-	// by another pod. Deleting them here races with cmdAdd during pod restarts —
-	// the old pod's DEL can destroy resources the new pod just created.
+	// Delete this attachment's own host/guest veth pair. Unlike the VRF and
+	// BGP CRDs below, the veth pair is genuinely private to this attachment
+	// (see resourceTracker.cleanup's doc comment) — no sibling pod can ever
+	// still be depending on it, so there is no ADD-race to defer to GC for.
+	// Deleting the host end removes both ends of the pair regardless of
+	// which netns the guest end currently lives in, so this reclaims the
+	// interface even when the host-device DEL step above failed or no-op'd.
+	if err := veth.Delete(vpc, vpcAtt); err != nil {
+		slog.Warn("DEL: failed to delete host/guest veth pair", "err", err,
+			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
+	}
+
+	// Shared resources (VRF, BGPAdvertisement, BGPVRFInstance) are keyed by
+	// (vpc, vpcAttachment) or (vpc, node) and may still be in use by another
+	// pod. Deleting them here races with cmdAdd during pod restarts — the old
+	// pod's DEL can destroy resources the new pod just created.
 	//
 	// The GC runs periodically and removes orphaned resources safely by checking
 	// whether any live container still references them. See gc.CollectOrphanedCRDs
