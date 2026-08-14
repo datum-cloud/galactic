@@ -8,12 +8,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/containernetworking/cni/pkg/skel"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +39,10 @@ const (
 	testRD65000_1  = "65000:1"
 	testVPCHex1234 = "0000000004d2" // decimal 1234
 	testNetns      = "/proc/1/ns/net"
+
+	testUnrelatedAnnotationKey = "some.other/annotation"
+	testLiveNetnsPath          = "/proc/live/ns/net"
+	testDeadNetnsPath          = "/proc/dead/ns/net"
 )
 
 var testScheme = func() *runtime.Scheme {
@@ -370,7 +376,7 @@ func TestAllAdvertisedPrefixesIgnoresOtherAnnotations(t *testing.T) {
 	annotations := map[string]string{
 		crdnames.NetNSKey("cid-a"):      testNetns,
 		crdnames.SubnetKeyIPv4("cid-a"): v4,
-		"some.other/annotation":         "should be ignored",
+		testUnrelatedAnnotationKey:      "should be ignored",
 	}
 
 	got := allAdvertisedPrefixes(annotations)
@@ -378,6 +384,171 @@ func TestAllAdvertisedPrefixesIgnoresOtherAnnotations(t *testing.T) {
 	want := []string{v4 + "/32"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("prefixes = %v, want %v", got, want)
+	}
+}
+
+// TestAllAdvertisedPrefixesDedupesDuplicateCIDR is the regression test for
+// the bug this covers: BGPAdvertisement.spec.prefixes is
+// x-kubernetes-list-type=set, so two annotations that carry the identical
+// CIDR value under different containerID keys — the shape left behind when
+// a pod is replaced and IPAM re-allocates the same subnet for the same
+// vpcAttachment identity, and the old containerID's annotation was never
+// removed — must collapse to one entry rather than reach the API server as
+// a duplicate and reject the update.
+func TestAllAdvertisedPrefixesDedupesDuplicateCIDR(t *testing.T) {
+	const dupeV6 = "fd00:40:ff01::100:0/96"
+	annotations := map[string]string{
+		crdnames.NetNSKey("cid-old"):      testNetns,
+		crdnames.SubnetKeyIPv6("cid-old"): dupeV6,
+		crdnames.NetNSKey("cid-new"):      testNetns,
+		crdnames.SubnetKeyIPv6("cid-new"): dupeV6,
+	}
+
+	got := allAdvertisedPrefixes(annotations)
+
+	want := []string{dupeV6}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prefixes = %v, want %v (identical CIDR from two containerIDs must collapse to one entry)", got, want)
+	}
+}
+
+func TestAllAdvertisedPrefixesDedupesDuplicateIPv4(t *testing.T) {
+	const dupeV4 = "172.20.1.5"
+	annotations := map[string]string{
+		crdnames.NetNSKey("cid-old"):      testNetns,
+		crdnames.SubnetKeyIPv4("cid-old"): dupeV4,
+		crdnames.NetNSKey("cid-new"):      testNetns,
+		crdnames.SubnetKeyIPv4("cid-new"): dupeV4,
+	}
+
+	got := allAdvertisedPrefixes(annotations)
+
+	want := []string{dupeV4 + "/32"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prefixes = %v, want %v (identical address from two containerIDs must collapse to one entry)", got, want)
+	}
+}
+
+// ---- pruneDeadContainerAnnotations ------------------------------------------
+
+// withNetNSExistsFn overrides netNSExistsFn for the duration of the test,
+// so pruneDeadContainerAnnotations can be tested without a real netns
+// bind-mount under /var/run/netns.
+func withNetNSExistsFn(t *testing.T, fn func(string) bool) {
+	t.Helper()
+	orig := netNSExistsFn
+	netNSExistsFn = fn
+	t.Cleanup(func() { netNSExistsFn = orig })
+}
+
+func TestPruneDeadContainerAnnotationsRemovesDeadSibling(t *testing.T) {
+	const subnet = "fd00:40:ff01::100:0/96"
+	live := map[string]bool{testLiveNetnsPath: true, testDeadNetnsPath: false}
+	withNetNSExistsFn(t, func(path string) bool { return live[path] })
+
+	annotations := map[string]string{
+		crdnames.NetNSKey("cid-dead"):      testDeadNetnsPath,
+		crdnames.SubnetKeyIPv6("cid-dead"): subnet,
+		crdnames.NetNSKey("cid-live"):      testLiveNetnsPath,
+		crdnames.SubnetKeyIPv6("cid-live"): subnet,
+	}
+
+	pruneDeadContainerAnnotations(annotations)
+
+	want := map[string]string{
+		crdnames.NetNSKey("cid-live"):      testLiveNetnsPath,
+		crdnames.SubnetKeyIPv6("cid-live"): subnet,
+	}
+	if !reflect.DeepEqual(annotations, want) {
+		t.Errorf("annotations = %v, want %v (dead sibling annotations not fully removed)", annotations, want)
+	}
+}
+
+func TestPruneDeadContainerAnnotationsKeepsLiveContainers(t *testing.T) {
+	withNetNSExistsFn(t, func(string) bool { return true })
+
+	annotations := map[string]string{
+		crdnames.NetNSKey("cid-a"):      "/proc/a/ns/net",
+		crdnames.SubnetKeyIPv6("cid-a"): "fd00:10:ff01::1234/96",
+		crdnames.NetNSKey("cid-b"):      "/proc/b/ns/net",
+		crdnames.SubnetKeyIPv4("cid-b"): "172.20.1.5",
+	}
+	want := maps.Clone(annotations)
+
+	pruneDeadContainerAnnotations(annotations)
+
+	if !reflect.DeepEqual(annotations, want) {
+		t.Errorf("annotations = %v, want unchanged %v (every container is still live)", annotations, want)
+	}
+}
+
+func TestPruneDeadContainerAnnotationsIgnoresUnrelatedAnnotations(t *testing.T) {
+	withNetNSExistsFn(t, func(string) bool { return false })
+
+	annotations := map[string]string{
+		testUnrelatedAnnotationKey: "should be untouched",
+	}
+	want := map[string]string{
+		testUnrelatedAnnotationKey: "should be untouched",
+	}
+
+	pruneDeadContainerAnnotations(annotations)
+
+	if !reflect.DeepEqual(annotations, want) {
+		t.Errorf("annotations = %v, want %v (non-netns annotations must never be touched)", annotations, want)
+	}
+}
+
+// TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix is the integration-style
+// regression test for the bug this file fixes end-to-end: a second
+// publishBGPState call for a replaced pod on the same vpcAttachment — same
+// subnet re-allocated by IPAM under a new containerID, old containerID's
+// netns now gone — must succeed, and must not leave two annotations with the
+// same CIDR value in spec.Prefixes.
+func TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix(t *testing.T) {
+	const (
+		nodeName  = "node1"
+		namespace = "default"
+	)
+	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
+
+	router := routerForNode(testRouterName, nodeName, namespace, 65000)
+	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+	ipv6Subnet := mustParseCIDR(t, "fd00:40:ff01::100:0/96")
+
+	// Simulate the first pod's ADD, whose netns has since gone away, but
+	// whose annotation — recording the exact same subnet IPAM is about to
+	// re-allocate to the replacement pod below — was never cleaned up.
+	existing := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      advName,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				crdnames.NetNSKey("old-container"):      "/proc/gone/ns/net",
+				crdnames.SubnetKeyIPv6("old-container"): ipv6Subnet.String(),
+			},
+		},
+	}
+	k8s := fakeClient(router, existing)
+
+	ipamResult := &cniipam.IPAMResult{IPv6Subnet: ipv6Subnet}
+	cfg := publishConfig{vpc: testVPC, vpcAttachment: testAttachment, ifaceType: ifaceTypeVeth}
+	args := &skel.CmdArgs{ContainerID: "new-container", Netns: testNetns}
+
+	_, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, testVPCHex1234, k8s)
+	if err != nil {
+		t.Fatalf("publishBGPState: unexpected error: %v", err)
+	}
+
+	got := &bgpv1alpha1.BGPAdvertisement{}
+	if err := k8s.Get(context.Background(), client.ObjectKey{Name: advName, Namespace: namespace}, got); err != nil {
+		t.Fatalf("get BGPAdvertisement: %v", err)
+	}
+	if len(got.Spec.Prefixes) != 1 || string(got.Spec.Prefixes[0]) != ipv6Subnet.String() {
+		t.Errorf("Prefixes = %+v, want exactly one entry for the re-allocated subnet", got.Spec.Prefixes)
+	}
+	if _, ok := got.Annotations[crdnames.NetNSKey("old-container")]; ok {
+		t.Errorf("annotations = %v, want old-container's dead annotations pruned", got.Annotations)
 	}
 }
 

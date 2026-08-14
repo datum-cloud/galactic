@@ -31,6 +31,7 @@ import (
 
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -299,18 +300,77 @@ func ipamAdvertisementPrefixes(ipamResult *cniipam.IPAMResult) (prefixes []strin
 // it, rather than from just the container currently being processed — see
 // crdnames' doc comment for why a single BGPAdvertisement can be shared by
 // more than one container.
+//
+// The result is deduplicated by CIDR value. spec.Prefixes is
+// x-kubernetes-list-type=set, so a duplicate value is rejected outright by
+// the API server: when a replaced pod's IPAM allocation lands on the same
+// subnet its predecessor held (the common case — IPAM re-allocates the same
+// subnet for the same vpcAttachment identity), the predecessor's own
+// per-containerID annotation is often still present (see
+// pruneDeadContainerAnnotations's doc comment for why that can outlast the
+// pod), and without this dedup the two identical-value annotations would
+// both land in Prefixes and permanently fail every CNI ADD retry for this
+// attachment. Deduplicating here is a hard backstop independent of whether
+// pruning above has run yet.
 func allAdvertisedPrefixes(annotations map[string]string) []string {
+	seen := make(map[string]struct{})
 	var prefixes []string
+	addUnique := func(p string) {
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		prefixes = append(prefixes, p)
+	}
 	for key, value := range annotations {
 		switch {
 		case strings.HasPrefix(key, crdnames.AnnotationAllocatedSubnetIPv6+"."):
-			prefixes = append(prefixes, value)
+			addUnique(value)
 		case strings.HasPrefix(key, crdnames.AnnotationAllocatedSubnetIPv4+"."):
-			prefixes = append(prefixes, value+"/32")
+			addUnique(value + "/32")
 		}
 	}
 	sort.Strings(prefixes)
 	return prefixes
+}
+
+// netNSExistsFn is a variable so tests can override it without needing a
+// real netns bind-mount under /var/run/netns.
+var netNSExistsFn = gc.NetNSExists
+
+// pruneDeadContainerAnnotations removes every per-container annotation
+// (netns plus allocated-subnet-ipv6/ipv4) belonging to a containerID whose
+// recorded netns path no longer exists on this node.
+//
+// Without this, a replaced pod's dead sibling containerID's annotations
+// survive on the shared BGPAdvertisement forever: galactic-router's GC
+// controller (internal/gc.CollectOrphanedCRDs) only ever deletes the whole
+// CRD, and only once every container that has ever referenced it is dead —
+// which never happens while the vpcAttachment has any live pod, i.e.
+// exactly the pod-replacement case this exists to handle. So the set of
+// per-container annotations on a long-lived, frequently-churned
+// vpcAttachment (e.g. a Deployment) grows without bound, and whenever a
+// replacement pod's IPAM allocation reuses a dead sibling's subnet (the
+// common case), allAdvertisedPrefixes' dedup is the only thing standing
+// between that and a rejected update. Pruning here, on the write path that
+// already holds this attachment's current annotation set, is what actually
+// keeps it bounded and self-heals the moment a new container attaches —
+// independent of GC's periodic tick, which for this case never fires at
+// all.
+func pruneDeadContainerAnnotations(annotations map[string]string) {
+	prefix := crdnames.AnnotationNetNS + "."
+	for key, netnsPath := range annotations {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if netNSExistsFn(netnsPath) {
+			continue
+		}
+		containerIDSuffix := strings.TrimPrefix(key, prefix)
+		delete(annotations, key)
+		delete(annotations, crdnames.AnnotationAllocatedSubnetIPv6+"."+containerIDSuffix)
+		delete(annotations, crdnames.AnnotationAllocatedSubnetIPv4+"."+containerIDSuffix)
+	}
 }
 
 // publishBGPState creates the BGPVRFInstance and BGPAdvertisement CRDs and
@@ -402,6 +462,12 @@ func publishBGPState(
 			if ipv4Addr != "" {
 				adv.Annotations[crdnames.SubnetKeyIPv4(args.ContainerID)] = ipv4Addr
 			}
+			// Prune dead siblings before merging: a replaced pod's stale
+			// annotation must not be allowed to collide with this ADD's own
+			// (often identical, since IPAM re-allocates the same subnet for
+			// the same vpcAttachment identity) prefix — see
+			// pruneDeadContainerAnnotations's doc comment.
+			pruneDeadContainerAnnotations(adv.Annotations)
 			mergedPrefixes = allAdvertisedPrefixes(adv.Annotations)
 			adv.Spec = buildAdvertisementSpec(bgp.routerName, rtValue, mergedPrefixes, vrfID)
 			return nil
