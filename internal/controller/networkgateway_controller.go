@@ -459,18 +459,23 @@ func (r *NetworkGatewayReconciler) routerNameForNode(ctx context.Context, namesp
 
 // applyBGPAdvertisements reconciles the BGPAdvertisement object(s) for a
 // single rule — one per non-empty VIP address family, name-qualified by
-// r.NodeName, per bgpAdvertisementNamesForRule's naming convention (shared
-// with networkrule_controller.go's teardown logic, so both sides always
-// agree on which objects exist for a given rule). The node qualifier is
-// required, not cosmetic: this reconciler runs once per gateway node
-// (Active-Active — every gateway node advertises every rule it holds, at
-// its own local preference, see this file's package doc comment), so
-// without it every gateway node in a namespace would compute the exact
-// same name for the same rule and race to create/update a single shared
-// object — confirmed live the first time a rule's primary node differed
-// from the first node to reconcile it: the second node's Create failed
-// with AlreadyExists on every pass, forever, and only the first node's
-// advertisement (and therefore only its BGP path) ever existed.
+// r.NodeName. The node qualifier is required, not cosmetic: this reconciler
+// runs once per gateway node (Active-Active — every gateway node advertises
+// every rule it holds, at its own local preference, see this file's package
+// doc comment), so without it every gateway node in a namespace would
+// compute the exact same name for the same rule and race to create/update a
+// single shared object — confirmed live the first time a rule's primary
+// node differed from the first node to reconcile it: the second node's
+// Create failed with AlreadyExists on every pass, forever, and only the
+// first node's advertisement (and therefore only its BGP path) ever
+// existed.
+//
+// Every object created or touched here is also labeled with
+// networkRuleLabel (backfilled on existing objects too), which is what lets
+// networkrule_controller.go's teardown find every advertisement this rule
+// ever caused across every gateway node — including one for a node that
+// has since left the namespace — without depending on this naming
+// convention at all; see networkRuleLabel's doc comment.
 func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired gateway.DesiredRule, routerName string,
 ) error {
@@ -510,7 +515,11 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 		switch {
 		case apierrors.IsNotFound(err):
 			adv = &bgpv1alpha1.BGPAdvertisement{
-				ObjectMeta: metav1.ObjectMeta{Namespace: rule.Namespace, Name: name},
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: rule.Namespace,
+					Name:      name,
+					Labels:    map[string]string{networkRuleLabel: rule.Name},
+				},
 				Spec: bgpv1alpha1.BGPAdvertisementSpec{
 					RouterRef:       bgpv1alpha1.RouterRef{Name: routerName},
 					AddressFamily:   bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
@@ -530,6 +539,14 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 		}
 
 		advCopy := adv.DeepCopy()
+		// Backfills networkRuleLabel on an advertisement created before this
+		// label existed, so teardown's label-selector List (see
+		// networkrule_controller.go's reconcileDelete) finds it too — self-
+		// healing, not just a create-time concern.
+		if advCopy.Labels == nil {
+			advCopy.Labels = map[string]string{}
+		}
+		advCopy.Labels[networkRuleLabel] = rule.Name
 		advCopy.Spec.RouterRef = bgpv1alpha1.RouterRef{Name: routerName}
 		advCopy.Spec.AddressFamily = bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}
 		advCopy.Spec.Prefixes = prefixes

@@ -364,7 +364,11 @@ func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer
 	rule.DeletionTimestamp = &now
 
 	adv := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRuleAdvV4},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testRuleAdvV4,
+			Labels:    map[string]string{networkRuleLabel: testRuleName},
+		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: testRouterName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
@@ -397,6 +401,99 @@ func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer
 	err = fakeClient.Get(context.Background(), req.NamespacedName, gotRule)
 	if err == nil {
 		t.Fatal("NetworkRule was not removed after finalizer teardown completed")
+	}
+}
+
+// TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode is
+// the regression test for issue #367: an advertisement created for a node
+// that has since left the namespace (no corresponding NetworkGateway object
+// exists any more) must still be withdrawn on rule teardown. Discovery by
+// networkRuleLabel doesn't depend on the namespace's current gateway-node
+// membership the way reconstructing the name from gatewayNodeNames did.
+func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	// Only gw-a is registered now; the advertisement below was created for
+	// gw-b, which has since left.
+	gwA := newTestGateway(testNodeGWA)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Finalizers = []string{networkRuleFinalizer}
+	now := metav1.Now()
+	rule.DeletionTimestamp = &now
+
+	departedNodeAdvName := testRuleName + "-" + testNodeGWB + "-v4"
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      departedNodeAdvName,
+			Labels:    map[string]string{networkRuleLabel: testRuleName},
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: testRouterName},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{testVIPPrefix},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithObjects(gwA, rule, adv).
+		Build()
+
+	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	gotAdv := &bgpv1alpha1.BGPAdvertisement{}
+	err := fakeClient.Get(context.Background(), testRuleKey(departedNodeAdvName), gotAdv)
+	if err == nil {
+		t.Fatal("BGPAdvertisement for a departed node was not withdrawn on NetworkRule deletion")
+	}
+}
+
+// TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule
+// guards against a label selector broad enough to sweep up another rule's
+// advertisement in the same namespace.
+func TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Finalizers = []string{networkRuleFinalizer}
+	now := metav1.Now()
+	rule.DeletionTimestamp = &now
+
+	const otherRuleName = "rule-2"
+	otherAdvName := otherRuleName + "-" + testNodeGWA + "-v4"
+	otherAdv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      otherAdvName,
+			Labels:    map[string]string{networkRuleLabel: otherRuleName},
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: testRouterName},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{testVIPPrefix},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithObjects(gwA, rule, otherAdv).
+		Build()
+
+	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	gotAdv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(otherAdvName), gotAdv); err != nil {
+		t.Fatalf("another rule's BGPAdvertisement was incorrectly withdrawn: %v", err)
 	}
 }
 

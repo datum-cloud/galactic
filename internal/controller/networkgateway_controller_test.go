@@ -390,6 +390,55 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisementWithComputedLocalPref(t
 	if len(adv.Spec.Prefixes) != 1 || adv.Spec.Prefixes[0] != testVIPPrefix {
 		t.Errorf("Prefixes = %v, want [%s]", adv.Spec.Prefixes, testVIPPrefix)
 	}
+	if got := adv.Labels[networkRuleLabel]; got != testRuleName {
+		t.Errorf("Labels[%s] = %q, want %q (networkrule_controller.go's teardown depends on this)",
+			networkRuleLabel, got, testRuleName)
+	}
+}
+
+// TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement covers
+// applyBGPAdvertisements's update path self-healing an advertisement that
+// was created before networkRuleLabel existed (issue #367) — without this,
+// an advertisement from an older release would stay permanently invisible
+// to NetworkRuleReconciler's teardown List.
+func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+	backendRouter, backendAdv := newBackendFixtures()
+	router := newTestRouter()
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Status.PrimaryNode = testNodeGWA
+	acceptRule(rule)
+
+	preexisting := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRuleAdvV4}, // no label
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: testRouterName},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{testVIPPrefix},
+		},
+	}
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA, router, backendRouter, backendAdv, rule, preexisting).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	}
+	if got := adv.Labels[networkRuleLabel]; got != testRuleName {
+		t.Errorf("Labels[%s] = %q, want %q (backfill on update path)", networkRuleLabel, got, testRuleName)
+	}
 }
 
 // TestNetworkGatewayReconciler_PublishesSelfAddress verifies
