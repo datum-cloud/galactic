@@ -199,7 +199,7 @@ func TestKernelDatapath_ApplyRuleTracksKeysWrittenBeforeAPartialFailure(t *testi
 	table := newFakeRuleTable()
 	table.failOnNthPut = 2 // fail registering the second of three VIPs
 	d := &KernelDatapath{
-		ruleTable:      edgemap.NewRuleTable(table),
+		ruleTable:      edgemap.NewRuleTable(table, newFakeStatsTable()),
 		ruleKeysByName: make(map[string][]edgemap.RuleKey),
 	}
 	ctx := context.Background()
