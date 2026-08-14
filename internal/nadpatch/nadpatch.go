@@ -19,6 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"go.datum.net/galactic/internal/hostconf"
 )
 
 // AnnotationHostInterface is the NAD annotation key that records the
@@ -80,4 +82,34 @@ func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 	}
 	slog.Debug("NAD annotated", "name", nadName, "namespace", nadNamespace, "interface", hostInterface)
 	return nil
+}
+
+// VerifyChainComplete fetches nadName's NetworkAttachmentDefinition and
+// fails if its own spec.config does not chain expectedType anywhere in its
+// plugins list. A conflist that omits it — stale, hand-edited, or a bug in
+// the external operator that authors it — would otherwise let every plugin
+// that DOES run report ADD success, handing back a pod with a working
+// interface and no path to its VPC (issue #331).
+//
+// nadNamespace == "" (no CNI_ARGS — a standalone/manual chain invocation,
+// not a real Multus-driven attach; see tests/e2e's TestCNITapInterface) is
+// treated as nothing to check, mirroring AnnotateNAD's own convention:
+// there is no NAD to read in that case.
+func VerifyChainComplete(ctx context.Context, k8s client.Client, nadName, nadNamespace, expectedType string) error {
+	if nadNamespace == "" {
+		return nil
+	}
+
+	nad := &unstructured.Unstructured{}
+	nad.SetGroupVersionKind(nadGVK)
+	if err := k8s.Get(ctx, client.ObjectKey{Name: nadName, Namespace: nadNamespace}, nad); err != nil {
+		return fmt.Errorf("get NetworkAttachmentDefinition %s/%s: %w", nadNamespace, nadName, err)
+	}
+
+	configStr, found, err := unstructured.NestedString(nad.Object, "spec", "config")
+	if err != nil || !found || configStr == "" {
+		return fmt.Errorf("NetworkAttachmentDefinition %s/%s has no spec.config", nadNamespace, nadName)
+	}
+
+	return hostconf.VerifyChainIncludes([]byte(configStr), expectedType)
 }

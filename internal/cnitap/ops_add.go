@@ -18,6 +18,7 @@ import (
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/cnimaster"
+	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
@@ -52,6 +53,24 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		"containerID", args.ContainerID, "netns", args.Netns, "ifName", args.IfName,
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment,
 		"namespace", namespace, "nodeName", nodeName)
+
+	// Chain-completeness check, before any kernel state is created: a
+	// conflist missing galactic-bgp would otherwise attach successfully
+	// with no BGP/SRv6 path to its VPC (issue #331). k8sClient/podNamespace
+	// are created here rather than at the NAD-annotation site below so a
+	// stale conflist fails ADD with nothing to roll back yet.
+	k8sClient, err := cnimaster.NewK8sClient()
+	if err != nil {
+		return fmt.Errorf("create k8s client: %w", err)
+	}
+	podNamespace := nadpatch.ParsePodNamespace(args.Args)
+	chainCtx, chainCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
+	defer chainCancel()
+	if err := nadpatch.VerifyChainComplete(
+		chainCtx, k8sClient, pluginConf.Name, podNamespace, hostconf.BGPPluginType,
+	); err != nil {
+		return &types.Error{Code: 7, Msg: fmt.Sprintf("chain completeness check: %v", err)}
+	}
 
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,
@@ -91,11 +110,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	hostMTU := hostLink.Attrs().MTU
 	slog.Debug("ADD: host interface ready", "name", hostName, "mac", hostMac, "mtu", hostMTU)
 
-	k8sClient, err := cnimaster.NewK8sClient()
-	if err != nil {
-		return fmt.Errorf("create k8s client: %w", err)
-	}
-	podNamespace := nadpatch.ParsePodNamespace(args.Args)
+	// Reuses the k8sClient/podNamespace resolved above for the
+	// chain-completeness check.
 	nadCtx, nadCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
 	defer nadCancel()
 	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {

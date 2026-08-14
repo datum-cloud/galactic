@@ -48,6 +48,13 @@ import (
 // reading it. Every caller in the chain passes this to Load.
 const PluginType = "galactic-cni"
 
+// BGPPluginType is the "type" value a conflist entry must carry for
+// galactic-bgp, the chained plugin that publishes BGP/SRv6/eBPF state after
+// a master plugin (galactic-veth/galactic-tap) creates the interface. Both
+// master plugins check for its presence in their own attachment's conflist
+// before doing any other work — see VerifyChainIncludes.
+const BGPPluginType = "galactic-bgp"
+
 // HostConf holds node-local settings read from the static per-node conflist
 // (default /etc/cni/net.d/10-galactic.conflist).
 type HostConf struct {
@@ -102,6 +109,45 @@ func Load(filePath string, acceptedTypes ...string) (*HostConf, error) {
 	}
 
 	return nil, fmt.Errorf("conflist at %q does not contain a plugin with type in %v", filePath, acceptedTypes)
+}
+
+// VerifyChainIncludes parses configJSON as a CNI NetConfList — the same
+// {"plugins":[{"type":...}, ...]} envelope Load already parses, here read
+// from a NetworkAttachmentDefinition's own spec.config rather than a file —
+// and reports a CNI error (code 7) naming expectedType if no entry's "type"
+// field equals it anywhere in the list.
+//
+// Presence-only, not position-aware: a conflist that names expectedType out
+// of order is a separate authoring bug this does not catch. Presence is
+// what issue #331 asks for ("attach fails when the chain is incomplete")
+// and is the cheapest check that catches the actual failure mode reported
+// there — a stale/hand-edited conflist that drops the entry entirely. A
+// conflist with no "plugins" key at all (the pre-#305 flat single-plugin
+// shape) has zero entries to match and fails the same way a conflist
+// missing just the galactic-bgp entry does.
+func VerifyChainIncludes(configJSON []byte, expectedType string) error {
+	var env conflistEnvelope
+	if err := json.Unmarshal(configJSON, &env); err != nil {
+		return fmt.Errorf("parse attachment conflist: %w", err)
+	}
+
+	for _, raw := range env.Plugins {
+		var meta struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			continue
+		}
+		if meta.Type == expectedType {
+			return nil
+		}
+	}
+
+	return &types.Error{
+		Code: 7,
+		Msg: fmt.Sprintf("attachment conflist is missing required plugin %q — "+
+			"the attachment would succeed with no path to its VPC", expectedType),
+	}
 }
 
 // movedIPAMKeys holds exactly the addressing keys that used to sit at the

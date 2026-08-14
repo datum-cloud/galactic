@@ -42,10 +42,14 @@ inside the master plugin. A real-world attachment's conflist has this shape:
   datapath's `vrf_table` registration. Learns everything it needs
   (interface kind, allocated addresses) from `prevResult` alone. In
   practice this stage is not optional — without it the attachment is
-  never BGP-advertised and stays unreachable from other nodes — but
-  nothing enforces its presence at the CNI-config level; that's the
-  conflist author's responsibility (the companion operator, cross-repo,
-  out of scope here).
+  never BGP-advertised and stays unreachable from other nodes. The
+  conflist itself is still authored outside this repo (the companion
+  operator, cross-repo), but the master plugin (`galactic-veth`/
+  `galactic-tap`) fetches its own attachment's `NetworkAttachmentDefinition`
+  and fails ADD before creating any kernel state if `galactic-bgp` is
+  missing from its `plugins` list — see `internal/hostconf.VerifyChainIncludes`
+  and `internal/nadpatch.VerifyChainComplete`
+  ([#331](https://github.com/datum-cloud/galactic/issues/331)).
 
 Every binary's own JSON stanza carries only the fields that binary itself
 reads (`vpc`/`vpcattachment` are duplicated across every stanza; nothing

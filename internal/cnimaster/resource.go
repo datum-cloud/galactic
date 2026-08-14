@@ -18,9 +18,10 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// NADPatchTimeout bounds the NAD-annotation patch call each master plugin
-// makes with the k8s client from NewK8sClient, right after creating it —
-// veth's and tap's own ADD both use the same budget.
+// NADPatchTimeout bounds each k8s call a master plugin makes with the
+// client from NewK8sClient: the chain-completeness Get run right after
+// creating it, and the NAD-annotation Patch later in the same ADD — veth's
+// and tap's own ADD both use the same budget for both calls.
 const NADPatchTimeout = 10 * time.Second
 
 var scheme = runtime.NewScheme()
