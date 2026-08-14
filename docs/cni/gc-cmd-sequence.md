@@ -11,18 +11,29 @@ no plugin or preprocessing required in either viewer.
 ## Why GC exists
 
 Every CNI-chain binary's own `cmdDel` is intentionally minimal — see
-[docs/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-del). The VRF, host
-veth/tap interface, VRF-table routes, the eBPF `vrf_table` entry, and the
-`BGPVRFInstance`/`BGPAdvertisement` CRDs are all keyed by
-`(vpc, vpcAttachment)`, not by `containerID`, so no per-container DEL call is
-ever allowed to delete them outright: another pod/VM on the same attachment
-might still depend on them, and deleting them synchronously would race a
+[docs/cni/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-del). The VRF,
+VRF-table routes, the eBPF `vrf_table` entry, and the `BGPVRFInstance`/
+`BGPAdvertisement` CRDs are all keyed by `(vpc, vpcAttachment)` or
+`(vpc, node)`, not by `containerID`, so no per-container DEL call is ever
+allowed to delete them outright: another pod/VM on the same attachment might
+still depend on them, and deleting them synchronously would race a
 concurrent ADD during a pod restart. That leaves a gap — a force-terminated
 container (kubelet SIGKILL, node crash, netns torn down without CNI DEL ever
 running) leaves this shared state behind with nothing left alive to
 eventually clean it up on DEL. GC exists to close that gap asynchronously,
 on a periodic sweep, by checking actual liveness on the node rather than
 trusting that DEL always fires.
+
+The per-attachment host veth/tap interface itself is **not** part of that
+list. It is private to one attachment, so `cmdDel` deletes it directly and
+immediately (`veth.Delete`/`tap.Delete`) rather than deferring it here — see
+[docs/cni/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-del) for why that
+is safe. It used to be deferred the same way as the VRF, which was a real
+leak: GC's own kernel sweep below only ever recognizes VRF-shaped interface
+names, so a host interface deferred to GC was never actually reclaimed by
+anything, and was left behind enslaved to a VRF that no longer existed once
+GC collected it. Nothing in this document's diagrams covers the host
+veth/tap interface for that reason — it has no GC path at all, by design.
 
 Both sweeps below are conceptually "GC" and live in the same `internal/gc`
 package, but run as two unrelated ticker loops in two different processes,
@@ -136,6 +147,19 @@ sequenceDiagram
   without removing old ones — `cmdDel` never touches this shared CRD. The
   object is only orphaned once **every** container that ever referenced it is
   confirmed gone, not just the most recent one.
+- **A dead sibling's annotations don't have to wait for this sweep.** This
+  whole-object collection only fires once every container that ever
+  referenced the `BGPAdvertisement` is dead, which is never true while the
+  attachment still has any live pod — the ordinary case for a
+  Deployment-style replacement. `galactic-bgp`'s own ADD path now prunes a
+  dead sibling's netns and subnet annotations directly
+  (`pruneDeadContainerAnnotations`, using the same `NetNSExists` liveness
+  check this sweep uses) the moment a new container attaches, so that class
+  of staleness self-heals on the very next ADD and never depends on this
+  ticker at all. See
+  [docs/cni/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-add). This
+  sweep still owns the case pruning cannot reach: reclaiming the entire CRD
+  once no container ever attaches again.
 - **No netns annotations at all means "assume alive," never "assume
   orphaned."** A `BGPAdvertisement` GC can't judge — no annotations recorded,
   possibly a legacy or manually-created object — counts as surviving. GC's
@@ -164,6 +188,12 @@ sequenceDiagram
   is deleted by the exact interface observed instead, since rebuilding the
   *current* name from its VPC and deleting that would silently no-op against
   the legacy interface.
+- **This sweep never matches a per-attachment host veth/tap interface, by
+  design.** Both the current and legacy name shapes above end in the VRF
+  suffix (`V`); the host interface's own suffix (`H`) never matches either
+  regex. That interface isn't orphaned state for this sweep to find at all —
+  `cmdDel` deletes it directly and immediately, see
+  [docs/cni/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-del).
 - **Node scoping matters because CRDs are namespace-, not node-, scoped.**
   `BGPAdvertisement`/`BGPVRFInstance` objects in a namespace can belong to
   routers on other nodes (e.g. the tenant and tenant-control roles watching

@@ -31,13 +31,16 @@ after it in conflist order:
    `prevResult` alone — it never touches a kernel interface. Passes
    `prevResult` through unchanged as the final CNI result.
 
-Every binary's own `cmdDel` is a no-op beyond binary-local, per-container
-cleanup (IPAM deallocation, guest netns flush, host-device DEL — all
-`galactic-veth`/`galactic-tap` only). Shared node-level state (VRF,
-host interface, routes, SRv6/eBPF registration, `BGPVRFInstance`,
-`BGPAdvertisement`) is kept because it may still be in use by another
-pod/VM on the same `(vpc, vpcAttachment)`; `galactic-router`'s GC
-controller reclaims it once nothing references it anymore.
+Every binary's own `cmdDel` cleans up only what is private to this specific
+attachment: IPAM deallocation, guest netns flush, host-device DEL, and —
+`galactic-veth`/`galactic-tap` only — deleting this attachment's own host
+veth pair or tap device outright, since no other pod/VM can ever be
+depending on it. Node-level state genuinely shared across every attachment
+on the same VPC (the VRF, its routes, SRv6/eBPF registration,
+`BGPVRFInstance`, `BGPAdvertisement`) is left alone, because it may still be
+in use by another pod/VM on the same `(vpc, vpcAttachment)`;
+`galactic-router`'s GC controller reclaims it once nothing references it
+anymore — see [docs/cni/gc-cmd-sequence.md](gc-cmd-sequence.md).
 
 ---
 
@@ -162,7 +165,11 @@ sequenceDiagram
         deactivate eBPF
     end
     Note over BGP,eBPF: missing srv6Locator or nodeID skips eBPF<br/>registration entirely (registered=false, not an error)
-    BGP->>K8s: CreateOrUpdate BGPAdvertisement(prefixes, annotations)
+
+    BGP->>BGP: set this container's own netns + subnet annotations
+    BGP->>BGP: pruneDeadContainerAnnotations — drop annotations for<br/>any other containerID whose recorded netns no longer exists<br/>(self-heals stale siblings without waiting on GC)
+    BGP->>BGP: allAdvertisedPrefixes — dedupe by CIDR value, sort<br/>(hard backstop against a duplicate spec.Prefixes entry)
+    BGP->>K8s: CreateOrUpdate BGPAdvertisement(mergedPrefixes, annotations)
     deactivate BGP
 
     BGP-->>Runtime: prevResult, unchanged — galactic-bgp is last in the chain
@@ -220,6 +227,23 @@ sequenceDiagram
   only for errors classified as transient (API server unavailability,
   timeouts, `Temporary()` network errors) — validation and not-found
   failures fail immediately without retry.
+- **`BGPAdvertisement` annotations self-heal on every ADD, independent of
+  GC.** A shared `BGPAdvertisement` accumulates one netns/subnet annotation
+  set per `containerID` that has ever attached to it, and `cmdDel` never
+  removes its own — see the DEL notes below. When a replaced pod's IPAM
+  allocation reuses its dead predecessor's subnet (the common case for a
+  Deployment-style replacement), the predecessor's stale annotation used to
+  survive until GC deleted the *entire* CRD, which it only ever does once
+  every container that ever referenced it is dead — never true while the
+  attachment has any live pod. Two annotations carrying the identical CIDR
+  then both landed in `spec.Prefixes`, a `x-kubernetes-list-type=set` field,
+  and the API server rejected the update as a duplicate, wedging every ADD
+  retry for that attachment permanently. `pruneDeadContainerAnnotations` now
+  removes a dead sibling's annotations the moment a new container attaches,
+  before its own prefix is merged in, and `allAdvertisedPrefixes`
+  deduplicates by CIDR value regardless, as a hard backstop against a
+  duplicate ever reaching `spec.Prefixes`. Both fire on this ADD alone — they
+  do not depend on GC's ticker at all.
 - **VRFID (the eBPF `Argument`) allocation is idempotency-aware.**
   `allocateArgument` first checks whether a `BGPVRFInstance` already exists
   for this exact attachment name — an idempotent CNI ADD retry, or a repeat
@@ -303,31 +327,52 @@ sequenceDiagram
         end
         Note over Master,HostDevice: tap branch: no flush, no host-device DEL —<br/>tap mode never touches a container netns
 
-        Note over Master: Shared resources (VRF, host interface, routes, the eBPF<br/>vrf_table entry, BGPVRFInstance/BGPAdvertisement) are<br/>NOT deleted by any binary's DEL — another pod/VM on the<br/>same (vpc, attachment) may still reference them
+        alt galactic-veth
+            Master->>Master: veth.Delete(vpc, vpcAttachment)<br/>delete host+guest veth pair (best-effort, idempotent)
+        else galactic-tap
+            Master->>Master: tap.Delete(vpc, vpcAttachment)<br/>delete tap device (best-effort, idempotent, a VMM still<br/>holding the fd open makes the kernel delete it lazily,<br/>never blocks this call)
+        end
+        Note over Master: this attachment's own host/guest interface is private —<br/>no sibling pod/VM can ever depend on it, so it is deleted<br/>here, immediately, unlike the shared resources below
+
+        Note over Master: Shared resources (VRF, VRF-table routes, the eBPF<br/>vrf_table entry, BGPVRFInstance/BGPAdvertisement) are<br/>NOT deleted by any binary's DEL — another pod/VM on the<br/>same (vpc, attachment) may still reference them
         Master->>Master: slog.Info("DEL: skipping shared resource cleanup (handled by GC)")
         Master->>Master: print empty result
         Master-->>Runtime: nil
     end
     deactivate Master
 
-    Note over Runtime: galactic-router's GC controller reclaims orphaned VRFs,<br/>veth/tap interfaces, routes, eBPF vrf_table entries, and<br/>BGPVRFInstance/BGPAdvertisement CRDs asynchronously,<br/>once no live container still references them
+    Note over Runtime: galactic-router's GC controller reclaims orphaned VRFs,<br/>routes, eBPF vrf_table entries, and BGPVRFInstance/<br/>BGPAdvertisement CRDs asynchronously, once no live<br/>container still references them — the host/guest<br/>interface deleted above never depended on GC at all
 ```
 
 ### Notes on DEL
 
-- **Nothing shared is ever deleted synchronously.** Every binary's own
-  `cmdDel` cleans up only what is unambiguously safe to release
-  immediately for *this specific container*: `galactic-ipam`'s own on-disk
-  marker file, and — `galactic-veth` only — the guest netns' address/route
-  and the host-device move-back. The VRF, host veth/tap interface, VRF-table
-  routes, the eBPF `vrf_table` entry, and the `BGPVRFInstance`/
-  `BGPAdvertisement` CRDs are all keyed by `(vpc, vpcAttachment)`, not by
-  `containerID` — they may legitimately be shared with another pod/VM on
-  the same attachment, so deleting them here would race a concurrent ADD
-  during a pod restart (the old pod's DEL destroying state the new pod's
-  ADD just created). `galactic-router`'s GC controller reclaims this state
-  asynchronously and safely, by checking whether any live container still
-  references it before removing anything.
+- **Nothing genuinely shared is ever deleted synchronously — but the host
+  interface now is.** Every binary's own `cmdDel` cleans up what is
+  unambiguously safe to release immediately: `galactic-ipam`'s own on-disk
+  marker file; `galactic-veth`'s guest netns' address/route and the
+  host-device move-back; and, unconditionally for both master plugins, this
+  attachment's own host/guest veth pair or tap device via `veth.Delete`/
+  `tap.Delete`. That interface is private to this one attachment — no
+  sibling pod/VM can ever depend on it — so there is no ADD-race to defer
+  to GC for, unlike the VRF, VRF-table routes, the eBPF `vrf_table` entry,
+  and the `BGPVRFInstance`/`BGPAdvertisement` CRDs, which are all keyed by
+  `(vpc, vpcAttachment)` or `(vpc, node)` and may legitimately be shared
+  with another pod/VM on the same attachment. Deleting *those* here would
+  race a concurrent ADD during a pod restart (the old pod's DEL destroying
+  state the new pod's ADD just created), so `galactic-router`'s GC
+  controller reclaims them asynchronously and safely instead, by checking
+  whether any live container still references them before removing
+  anything.
+- **This closes a real leak, not a theoretical one.** Before this, `cmdDel`
+  deferred the host veth/tap interface to GC the same way it deferred the
+  VRF — but GC's own kernel sweep only ever recognized VRF-shaped interface
+  names (see [docs/cni/gc-cmd-sequence.md](gc-cmd-sequence.md)), so the
+  per-attachment host interface was never reclaimed by anything. Once GC
+  collected the shared VRF an orphaned host interface depended on, the
+  interface was left behind enslaved to a VRF that no longer existed.
+  `veth.Delete`/`tap.Delete` here are the same idempotent functions already
+  used for ADD-failure rollback, so calling them again from DEL adds no new
+  failure mode.
 - **`galactic-bgp` and `galactic-route` are pure no-ops on DEL.** Neither
   holds any per-container state to release — their entire DEL body is a log
   line plus an empty CNI result. `galactic-route`'s DEL doesn't even parse
