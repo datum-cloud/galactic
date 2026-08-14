@@ -61,7 +61,7 @@ func Add(vpc string) error {
 		return err
 	}
 
-	if err := flush(vrfID); err != nil {
+	if err := FlushTable(vrfID); err != nil {
 		return err
 	}
 
@@ -108,7 +108,7 @@ func Delete(vpc string) error {
 		return nil // VRF already gone — idempotent
 	}
 
-	if err := flush(vrfID); err != nil {
+	if err := FlushTable(vrfID); err != nil {
 		return err
 	}
 
@@ -136,7 +136,19 @@ func Exists(vpc string) error {
 	return nil
 }
 
-func flush(vrfID uint32) error {
+// FlushTable removes every IPv4 and IPv6 route from the given Linux routing
+// table ID. Add calls this before creating a VRF on a reused table ID (a
+// table can be reused if a previous VRF using it was removed without going
+// through Delete, e.g. a hard node reboot), and Delete calls it before
+// removing the VRF interface — so a stale table is always cleared on reuse
+// rather than inherited.
+//
+// Exported so internal/gc's legacy-name fallback in RemoveOrphanedVRFs (a
+// pre-rename VRF interface Delete can't resolve by name, so it removes the
+// link directly instead of going through Delete) can flush the table itself
+// before removing the link, and get the same guarantee Delete gives the
+// normal path — see RemoveOrphanedVRFs' own doc comment and #343.
+func FlushTable(vrfID uint32) error {
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		routes, err := netlink.RouteListFiltered(
 			family,

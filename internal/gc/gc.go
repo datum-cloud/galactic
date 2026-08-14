@@ -361,11 +361,30 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 		if !ok {
 			// Not a current-shape name — this is where a legacy VRF collected
 			// by vpcFromVRFName lands. Delete the interface we actually
-			// observed, by name.
+			// observed, by name, but flush its routing table first — the
+			// same order vrf.Delete uses — so this path leaves behind the
+			// same state as the one above rather than leaning on Add's own
+			// flush-on-reuse to clean up a table this path skipped (#343).
 			link, err := netlink.LinkByName(name)
 			if err != nil {
 				// Already gone — not an error.
 				continue
+			}
+			if vrfLink, ok := link.(*netlink.Vrf); ok {
+				if flushErr := vrf.FlushTable(vrfLink.Table); flushErr != nil {
+					slog.Error("GC: failed to flush routing table for orphaned VRF by name",
+						"name", name, "table", vrfLink.Table, "err", flushErr)
+					result.Errors++
+					continue
+				}
+			} else {
+				// CollectOrphanedVRFs only ever collects names from
+				// vrf.ListVRFLinks, which filters to *netlink.Vrf — this
+				// branch means the interface changed kind between that scan
+				// and this delete. Nothing to flush; fall through and
+				// remove whatever is there now.
+				slog.Warn("GC: orphaned VRF name no longer resolves to a VRF interface, skipping flush",
+					"name", name)
 			}
 			if delErr := netlink.LinkDel(link); delErr != nil {
 				slog.Error("GC: failed to delete orphaned VRF by name",
