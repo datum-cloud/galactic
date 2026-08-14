@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"testing"
 
@@ -18,8 +19,15 @@ import (
 // fakeRuleTable is an in-memory edgemap.Table, letting KernelDatapath's
 // key-management logic (apply/prune/remove/reconcile) be exercised without
 // a kernel or root privileges -- same pattern as edgemap's own tests.
+//
+// failOnNthPut, when non-zero, makes the failOnNthPut-th call to Put
+// (1-indexed) fail instead of writing the entry, letting a test simulate
+// ApplyRule failing partway through a multi-VIP rule's Register loop.
 type fakeRuleTable struct {
 	entries map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleValue
+
+	failOnNthPut int
+	putCount     int
 }
 
 func newFakeRuleTable() *fakeRuleTable {
@@ -27,6 +35,10 @@ func newFakeRuleTable() *fakeRuleTable {
 }
 
 func (f *fakeRuleTable) Put(key, value any) error {
+	f.putCount++
+	if f.failOnNthPut != 0 && f.putCount == f.failOnNthPut {
+		return fmt.Errorf("fakeRuleTable: injected failure on Put #%d", f.putCount)
+	}
 	f.entries[key.(edgeprog.EdgenatRuleKey)] = value.(edgeprog.EdgenatRuleValue)
 	return nil
 }
@@ -125,6 +137,48 @@ func TestKernelDatapath_ApplyRuleRegistersOneKeyPerVIP(t *testing.T) {
 		if len(entry.Backends) != 1 || entry.Backends[0].USID != rule.Backends[0].USID {
 			t.Errorf("Get(%+v).Backends = %+v, want backend with USID %s", key, entry.Backends, rule.Backends[0].USID)
 		}
+	}
+}
+
+// TestKernelDatapath_ApplyRuleTracksKeysWrittenBeforeAPartialFailure covers
+// issue #359 item 3: a multi-VIP rule's Register loop writes one rule_table
+// entry per VIP, and a failure partway through must not leave the earlier
+// entries untracked -- RemoveRule only knows what to unregister via
+// ruleKeysByName, so an untracked entry would be invisible to teardown and
+// left for ReconcileOrphans to eventually sweep up instead.
+func TestKernelDatapath_ApplyRuleTracksKeysWrittenBeforeAPartialFailure(t *testing.T) {
+	table := newFakeRuleTable()
+	table.failOnNthPut = 2 // fail registering the second of three VIPs
+	d := &KernelDatapath{
+		ruleTable:      edgemap.NewRuleTable(table),
+		ruleKeysByName: make(map[string][]edgemap.RuleKey),
+	}
+	ctx := context.Background()
+	rule := testDesiredRule(t, testKeyA, "2001:db8:1::10", "2001:db8:1::11", "2001:db8:1::12")
+
+	if err := d.ApplyRule(ctx, rule); err == nil {
+		t.Fatal("ApplyRule: want an error from the injected Put failure, got nil")
+	}
+
+	writtenKey := edgemap.RuleKey{Proto: 6, VPort: 443, VIP: netip.MustParseAddr("2001:db8:1::10")}
+	if got := d.ruleKeysByName[testKeyA]; len(got) != 1 || got[0] != writtenKey {
+		t.Fatalf("ruleKeysByName[%s] = %v, want [%v] (only the key written before the failure)",
+			testKeyA, got, writtenKey)
+	}
+	if _, ok, err := d.ruleTable.Get(writtenKey); err != nil || !ok {
+		t.Fatalf("Get(%+v): ok=%v err=%v, want the pre-failure entry still present", writtenKey, ok, err)
+	}
+
+	// RemoveRule must find and clean up the partial write via
+	// ruleKeysByName rather than relying on ReconcileOrphans.
+	if err := d.RemoveRule(ctx, testKeyA); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+	if _, ok, _ := d.ruleTable.Get(writtenKey); ok {
+		t.Error("RemoveRule left the partially-applied rule's entry in rule_table")
+	}
+	if len(d.ruleKeysByName[testKeyA]) != 0 {
+		t.Errorf("ruleKeysByName[%s] = %v, want empty after RemoveRule", testKeyA, d.ruleKeysByName[testKeyA])
 	}
 }
 
