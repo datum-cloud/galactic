@@ -188,9 +188,11 @@ func TestCNITapInterface(t *testing.T) {
 	// Dockerfile) alongside every other binary in the CNI chain, so no
 	// separate image is needed here. Run as the galactic-cni ServiceAccount:
 	// galactic-tap's own ADD unconditionally builds an in-cluster k8s
-	// client for its NAD-annotation step (config/cni/rbac.yaml grants it),
-	// even though that step itself no-ops here (no CNI_ARGS, so
-	// nadpatch.ParsePodNamespace resolves an empty namespace). hostNetwork
+	// client for its chain-completeness check and NAD-annotation step
+	// (config/cni/rbac.yaml grants it), even though both steps no-op here
+	// (no CNI_ARGS, so nadpatch.ParsePodNamespace resolves an empty
+	// namespace and nadpatch.VerifyChainComplete/AnnotateNAD both treat
+	// that as nothing to check/patch). hostNetwork
 	// is required too, so the VRF/tap interfaces this test creates land in
 	// the same netns production's own hostNetwork DaemonSet would use. The
 	// bpf-fs hostPath volume mirrors config/cni/daemonset.yaml's own bpf-fs

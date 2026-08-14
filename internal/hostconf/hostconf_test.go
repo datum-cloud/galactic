@@ -157,6 +157,63 @@ func TestRejectMovedIPAMKeys(t *testing.T) {
 	}
 }
 
+func TestVerifyChainIncludes(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:  "complete chain",
+			input: `{"cniVersion":"1.0.0","name":"private","plugins":[{"type":"galactic-veth"},{"type":"galactic-bgp"}]}`,
+		},
+		{
+			name:    "galactic-bgp missing",
+			input:   `{"cniVersion":"1.0.0","name":"private","plugins":[{"type":"galactic-veth"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "empty plugins list",
+			input:   `{"cniVersion":"1.0.0","name":"private","plugins":[]}`,
+			wantErr: true,
+		},
+		{
+			name:    "malformed plugin entry",
+			input:   `{"cniVersion":"1.0.0","name":"private","plugins":["not-an-object"]}`,
+			wantErr: true,
+		},
+		{
+			name:    "pre-#305 flat single-plugin shape has no plugins key at all",
+			input:   `{"cniVersion":"1.0.0","name":"private","type":"galactic-veth"}`,
+			wantErr: true,
+		},
+		{
+			name:    "malformed JSON",
+			input:   "not json",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := VerifyChainIncludes([]byte(tt.input), BGPPluginType)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				var cniErr *types.Error
+				if errors.As(err, &cniErr) && cniErr.Code != 7 {
+					t.Errorf("Code = %d, want 7", cniErr.Code)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadAcceptsAnyOfMultipleTypes(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "10-galactic.conflist")

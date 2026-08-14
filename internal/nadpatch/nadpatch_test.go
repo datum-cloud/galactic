@@ -6,6 +6,7 @@ package nadpatch
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -97,4 +98,88 @@ func TestAnnotateNAD(t *testing.T) {
 			t.Fatalf("AnnotateNAD() with empty namespace = %v, want nil", err)
 		}
 	})
+}
+
+func TestVerifyChainComplete(t *testing.T) {
+	const (
+		nadName      = "test-net"
+		nadNamespace = "default"
+		bgpType      = "galactic-bgp"
+	)
+
+	nadWithConfig := func(config string) *unstructured.Unstructured {
+		nad := &unstructured.Unstructured{}
+		nad.SetGroupVersionKind(nadGVK)
+		nad.SetName(nadName)
+		nad.SetNamespace(nadNamespace)
+		_ = unstructured.SetNestedField(nad.Object, config, "spec", "config")
+		return nad
+	}
+
+	t.Run("NAD does not exist is a hard failure", func(t *testing.T) {
+		k8s := fakeClient()
+
+		err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType)
+		if err == nil {
+			t.Fatal("expected error when NAD does not exist, got nil")
+		}
+	})
+
+	t.Run("complete chain passes", func(t *testing.T) {
+		nad := nadWithConfig(
+			`{"cniVersion":"1.0.0","name":"private","plugins":[{"type":"galactic-veth"},{"type":"galactic-bgp"}]}`,
+		)
+		k8s := fakeClient(nad)
+
+		if err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType); err != nil {
+			t.Fatalf("VerifyChainComplete() = %v, want nil", err)
+		}
+	})
+
+	t.Run("galactic-bgp missing from spec.config fails", func(t *testing.T) {
+		nad := nadWithConfig(`{"cniVersion":"1.0.0","name":"private","plugins":[{"type":"galactic-veth"}]}`)
+		k8s := fakeClient(nad)
+
+		err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType)
+		if err == nil {
+			t.Fatal("expected error when galactic-bgp is missing, got nil")
+		}
+		if !strings.Contains(err.Error(), bgpType) {
+			t.Errorf("error %q does not name the missing plugin type %q", err, bgpType)
+		}
+	})
+
+	t.Run("NAD with no spec.config fails", func(t *testing.T) {
+		nad := &unstructured.Unstructured{}
+		nad.SetGroupVersionKind(nadGVK)
+		nad.SetName(nadName)
+		nad.SetNamespace(nadNamespace)
+		k8s := fakeClient(nad)
+
+		if err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType); err == nil {
+			t.Fatal("expected error when spec.config is absent, got nil")
+		}
+	})
+
+	t.Run("empty pod namespace is a no-op, no Get issued", func(t *testing.T) {
+		k8s := failingClient{t: t}
+
+		if err := VerifyChainComplete(context.Background(), k8s, nadName, "", bgpType); err != nil {
+			t.Fatalf("VerifyChainComplete() with empty namespace = %v, want nil", err)
+		}
+	})
+}
+
+// failingClient is a client.Client that fails the test if any method is
+// called — used to prove VerifyChainComplete's empty-namespace short
+// circuit never touches the k8s client at all.
+type failingClient struct {
+	client.Client
+	t *testing.T
+}
+
+func (f failingClient) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	f.t.Helper()
+	f.t.Fatal("Get should not be called when nadNamespace is empty")
+	return nil
 }
