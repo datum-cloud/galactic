@@ -68,16 +68,41 @@ func parseConf(data []byte) (*pluginConf, error) {
 		}
 	}
 
-	if len(conf.IPAM.AddressFamilies) == 0 {
-		conf.IPAM.AddressFamilies = []string{addressFamilyIPv6}
-	} else {
+	// Unset means "no restriction" — allocate from whatever pool(s) are
+	// configured, exactly like before this field had any effect at all.
+	// Defaulting an unset field to ["ipv6"] here would silently turn every
+	// existing dual-stack or IPv4-only config that has never set this field
+	// into IPv6-only once the filter below is applied.
+	if len(conf.IPAM.AddressFamilies) > 0 {
+		var wantIPv6, wantIPv4 bool
 		for _, af := range conf.IPAM.AddressFamilies {
 			switch af {
-			case addressFamilyIPv6, addressFamilyIPv4:
+			case addressFamilyIPv6:
+				wantIPv6 = true
+			case addressFamilyIPv4:
+				wantIPv4 = true
 			default:
 				return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
 					"invalid ipam.address_families entry %q: must be %q or %q",
 					sanitizeForError(af), addressFamilyIPv6, addressFamilyIPv4),
+				}
+			}
+		}
+
+		// Meaningless for the single-address static path — allocate picks
+		// that path on static_ip presence alone, unconditionally, regardless
+		// of what else is configured.
+		if conf.IPAM.StaticIP == "" {
+			if !wantIPv6 {
+				conf.IPAM.IPv6Subnet = ""
+			}
+			if !wantIPv4 {
+				conf.IPAM.IPv4Subnet = ""
+			}
+			if conf.IPAM.IPv6Subnet == "" && conf.IPAM.IPv4Subnet == "" {
+				return nil, &types.Error{Code: 7, Msg: fmt.Sprintf(
+					"ipam.address_families %v excludes every pool this config configures "+
+						"(ipam.ipv6_subnet/ipam.ipv4_subnet)", conf.IPAM.AddressFamilies),
 				}
 			}
 		}

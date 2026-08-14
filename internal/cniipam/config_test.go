@@ -11,8 +11,10 @@ import (
 )
 
 const (
-	testCNIVersion = "1.0.0"
-	testIPAMType   = "galactic-ipam"
+	testCNIVersion     = "1.0.0"
+	testIPAMType       = "galactic-ipam"
+	testIPv6SubnetCIDR = "fd00::/64"
+	testIPv4SubnetCIDR = "10.0.0.0/24"
 )
 
 // confJSON builds a minimal CNI config document carrying the given "ipam"
@@ -76,6 +78,12 @@ func TestParseConf(t *testing.T) {
 				`"type":%q,"ipv6_subnet":"fd00::/64","address_families":["ipv6","bogus"]`, testIPAMType)),
 			wantErr: `invalid ipam.address_families entry "bogus"`,
 		},
+		{
+			name: "AddressFamiliesExcludingEveryConfiguredPoolRejected",
+			input: confJSON(fmt.Sprintf(
+				`"type":%q,"ipv6_subnet":"fd00::/64","address_families":["ipv4"]`, testIPAMType)),
+			wantErr: "excludes every pool this config configures",
+		},
 	}
 
 	for _, tt := range tests {
@@ -114,12 +122,84 @@ func TestParseConfDefaultFillerOnlyWhenUnderspecified(t *testing.T) {
 
 	// ipam present and already specifies a subnet: default-filler must not
 	// override it.
-	conf, err = parseConf([]byte(confJSON(fmt.Sprintf(`"type":%q,"ipv4_subnet":"10.0.0.0/24"`, testIPAMType))))
+	conf, err = parseConf([]byte(confJSON(fmt.Sprintf(
+		`"type":%q,"ipv4_subnet":%q`, testIPAMType, testIPv4SubnetCIDR))))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if conf.IPAM.IPv6Subnet != "" {
 		t.Errorf("IPv6Subnet = %q, want empty (ipv4_subnet already specified)", conf.IPAM.IPv6Subnet)
+	}
+}
+
+// TestParseConfAddressFamiliesRestrictsConfiguredPools covers issue #330:
+// address_families must actually narrow which of ipv6_subnet/ipv4_subnet
+// take effect, not just be validated and discarded.
+func TestParseConfAddressFamiliesRestrictsConfiguredPools(t *testing.T) {
+	bothSubnets := fmt.Sprintf(`"ipv6_subnet":%q,"ipv4_subnet":%q`, testIPv6SubnetCIDR, testIPv4SubnetCIDR)
+
+	tests := []struct {
+		name           string
+		input          string
+		wantIPv6Subnet string
+		wantIPv4Subnet string
+	}{
+		{
+			// The issue's own repro: both pools configured, restricted to
+			// IPv6 — the IPv4 pool must not survive parseConf.
+			name: "RestrictsToIPv6WhenBothConfigured",
+			input: confJSON(fmt.Sprintf(
+				`"type":%q,%s,"address_families":["ipv6"]`, testIPAMType, bothSubnets)),
+			wantIPv6Subnet: testIPv6SubnetCIDR,
+			wantIPv4Subnet: "",
+		},
+		{
+			name: "RestrictsToIPv4WhenBothConfigured",
+			input: confJSON(fmt.Sprintf(
+				`"type":%q,%s,"address_families":["ipv4"]`, testIPAMType, bothSubnets)),
+			wantIPv6Subnet: "",
+			wantIPv4Subnet: testIPv4SubnetCIDR,
+		},
+		{
+			name: "BothFamiliesListedLeavesDualStackUnaffected",
+			input: confJSON(fmt.Sprintf(
+				`"type":%q,%s,"address_families":["ipv6","ipv4"]`, testIPAMType, bothSubnets)),
+			wantIPv6Subnet: testIPv6SubnetCIDR,
+			wantIPv4Subnet: testIPv4SubnetCIDR,
+		},
+		{
+			// Regression test: an unset field must mean "no restriction",
+			// not silently default to IPv6-only.
+			name:           "UnsetLeavesBothConfiguredPoolsUnaffected",
+			input:          confJSON(fmt.Sprintf(`"type":%q,%s`, testIPAMType, bothSubnets)),
+			wantIPv6Subnet: testIPv6SubnetCIDR,
+			wantIPv4Subnet: testIPv4SubnetCIDR,
+		},
+		{
+			// Meaningless for the static path — the filter must not touch
+			// anything when static_ip is set, even if address_families
+			// would otherwise exclude every pool.
+			name: "StaticIPBypassesFilter",
+			input: confJSON(fmt.Sprintf(
+				`"type":%q,"static_ip":"fd00::1234","address_families":["ipv4"]`, testIPAMType)),
+			wantIPv6Subnet: "",
+			wantIPv4Subnet: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conf, err := parseConf([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if conf.IPAM.IPv6Subnet != tt.wantIPv6Subnet {
+				t.Errorf("IPv6Subnet = %q, want %q", conf.IPAM.IPv6Subnet, tt.wantIPv6Subnet)
+			}
+			if conf.IPAM.IPv4Subnet != tt.wantIPv4Subnet {
+				t.Errorf("IPv4Subnet = %q, want %q", conf.IPAM.IPv4Subnet, tt.wantIPv4Subnet)
+			}
+		})
 	}
 }
 

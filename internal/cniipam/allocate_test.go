@@ -5,6 +5,7 @@
 package cniipam
 
 import (
+	"fmt"
 	"net"
 	"testing"
 
@@ -57,6 +58,39 @@ func TestAllocatePoolDualStack(t *testing.T) {
 	}
 	if len(res.Routes) != 2 {
 		t.Errorf("Routes = %v, want one default route per family", res.Routes)
+	}
+}
+
+// TestAllocateHonoursAddressFamilies drives the full ADD path — parseConf
+// followed by allocate — for issue #330's repro: both pools configured, but
+// address_families restricts this attachment to IPv6 only. Unlike the other
+// tests in this file, which construct *IPAM literals directly and so bypass
+// parseConf's filtering, this is the one test that exercises the config path
+// an actual ADD invocation takes.
+func TestAllocateHonoursAddressFamilies(t *testing.T) {
+	withTempLockDir(t)
+	input := confJSON(fmt.Sprintf(
+		`"type":%q,"ipv6_subnet":%q,"ipv4_subnet":%q,"address_families":["ipv6"]`,
+		testIPAMType, testIPv6PoolDefault, testIPv4Subnet))
+
+	conf, err := parseConf([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	args := &skel.CmdArgs{ContainerID: testContainerID}
+	res, err := allocate(args, conf.IPAM)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IPv6Subnet == nil {
+		t.Error("IPv6Subnet = nil, want an allocated /96")
+	}
+	if res.IPv4Address != nil {
+		t.Errorf("IPv4Address = %v, want nil (address_families excludes ipv4)", res.IPv4Address)
+	}
+	if len(res.Routes) != 1 {
+		t.Errorf("Routes = %v, want exactly one default route (ipv6 only)", res.Routes)
 	}
 }
 
