@@ -552,6 +552,85 @@ func TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix(t *testing.T) {
 	}
 }
 
+// TestPublishBGPStateNilIPAMMarksNoAddressing verifies that an attachment
+// with no IPAM allocation at all (e.g. a tap workload managing its own
+// addressing) gets crdnames.AnnotationNoAddressing set on its
+// BGPAdvertisement — so its empty spec.Prefixes reads as intentional, not as
+// addressing that silently failed to arrive (#342).
+func TestPublishBGPStateNilIPAMMarksNoAddressing(t *testing.T) {
+	const (
+		nodeName  = "node1"
+		namespace = "default"
+	)
+	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
+
+	router := routerForNode(testRouterName, nodeName, namespace, 65000)
+	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+	k8s := fakeClient(router)
+
+	cfg := publishConfig{vpc: testVPC, vpcAttachment: testAttachment, ifaceType: ifaceTypeTap}
+	args := &skel.CmdArgs{ContainerID: "self-addressed-container", Netns: testNetns}
+
+	if _, err := publishBGPState(args, cfg, nodeName, namespace, nil, testVPCHex1234, k8s); err != nil {
+		t.Fatalf("publishBGPState: unexpected error: %v", err)
+	}
+
+	got := &bgpv1alpha1.BGPAdvertisement{}
+	if err := k8s.Get(context.Background(), client.ObjectKey{Name: advName, Namespace: namespace}, got); err != nil {
+		t.Fatalf("get BGPAdvertisement: %v", err)
+	}
+	if len(got.Spec.Prefixes) != 0 {
+		t.Errorf("Prefixes = %+v, want empty for an attachment with no IPAM allocation", got.Spec.Prefixes)
+	}
+	if got.Annotations[crdnames.AnnotationNoAddressing] != crdnames.AnnotationNoAddressingValue {
+		t.Errorf("annotations = %v, want %s=%s", got.Annotations,
+			crdnames.AnnotationNoAddressing, crdnames.AnnotationNoAddressingValue)
+	}
+}
+
+// TestPublishBGPStateIPAMClearsNoAddressing verifies that once an attachment
+// does carry an IPAM allocation, crdnames.AnnotationNoAddressing is cleared —
+// covering an attachment whose config changes, or a retried ADD that now
+// resolves an allocation after a previous attempt ran without one.
+func TestPublishBGPStateIPAMClearsNoAddressing(t *testing.T) {
+	const (
+		nodeName  = "node1"
+		namespace = "default"
+	)
+	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
+
+	router := routerForNode(testRouterName, nodeName, namespace, 65000)
+	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+	existing := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      advName,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				crdnames.AnnotationNoAddressing: crdnames.AnnotationNoAddressingValue,
+			},
+		},
+	}
+	k8s := fakeClient(router, existing)
+
+	ipv6Subnet := mustParseCIDR(t, "fd00:40:ff01::100:0/96")
+	ipamResult := &cniipam.IPAMResult{IPv6Subnet: ipv6Subnet}
+	cfg := publishConfig{vpc: testVPC, vpcAttachment: testAttachment, ifaceType: ifaceTypeVeth}
+	args := &skel.CmdArgs{ContainerID: "addressed-container", Netns: testNetns}
+
+	if _, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, testVPCHex1234, k8s); err != nil {
+		t.Fatalf("publishBGPState: unexpected error: %v", err)
+	}
+
+	got := &bgpv1alpha1.BGPAdvertisement{}
+	if err := k8s.Get(context.Background(), client.ObjectKey{Name: advName, Namespace: namespace}, got); err != nil {
+		t.Fatalf("get BGPAdvertisement: %v", err)
+	}
+	if _, ok := got.Annotations[crdnames.AnnotationNoAddressing]; ok {
+		t.Errorf("annotations = %v, want %s cleared once an allocation exists",
+			got.Annotations, crdnames.AnnotationNoAddressing)
+	}
+}
+
 // ---- buildAdvertisementSpec -------------------------------------------------
 
 func TestBuildAdvertisementSpec(t *testing.T) {

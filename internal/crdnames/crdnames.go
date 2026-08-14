@@ -34,6 +34,27 @@ const AnnotationAllocatedSubnetIPv4 = "galactic.datum.net/allocated-subnet-ipv4"
 // full key appends a truncated container ID; see NetNSKey.
 const AnnotationNetNS = "galactic.datum.net/netns"
 
+// AnnotationNoAddressing marks a BGPAdvertisement whose spec.prefixes is
+// empty by design — the attachment's config carries no "ipam" block, so no
+// address was ever requested for it (a VM managing its own addressing is a
+// supported case; see internal/cnitap). Unlike the annotations above, this
+// one is not keyed per container ID: every container attaching under the
+// same VPCAttachment shares the same master-plugin config, so they always
+// agree on whether addressing was requested, and the value only needs to
+// reflect the most recent ADD.
+//
+// Without this, an empty spec.prefixes cannot be told apart from one whose
+// addressing silently failed to arrive (#342) — the same failure #327 closed
+// for the case where a stale config caused it. Set to
+// AnnotationNoAddressingValue whenever publishBGPState runs with a nil
+// *cniipam.IPAMResult, cleared otherwise.
+const AnnotationNoAddressing = "galactic.datum.net/no-addressing"
+
+// AnnotationNoAddressingValue is the only value AnnotationNoAddressing is
+// ever set to — a named constant instead of a literal "true" purely so
+// callers and tests share one spelling.
+const AnnotationNoAddressingValue = "true"
+
 // containerIDLen is the number of characters used from a container ID in
 // annotation keys. Kubernetes limits the name part of an annotation key to
 // 63 bytes. The longest prefix sharing this constant is
