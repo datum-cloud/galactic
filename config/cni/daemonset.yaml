@@ -100,6 +100,9 @@ spec:
             limits:
               memory: 32Mi
           volumeMounts:
+            - name: cni-net-dir
+              mountPath: /host/etc/cni/net.d
+              readOnly: true
             - name: galactic-etc
               mountPath: /host/var/lib/galactic
             - name: galactic-log
