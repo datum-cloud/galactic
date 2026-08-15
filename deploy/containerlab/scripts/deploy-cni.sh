@@ -29,24 +29,40 @@ for site in dfw sjc iad; do
   echo "Installing galactic-cni on ${site}..."
 
   # Cilium — installed via the cilium CLI (no Helm binary/repo needed;
-  # the CLI vendors the chart itself). What looked like the CLI
-  # "ignoring --set" was actually stale value keys: Cilium's chart
-  # flattened ipv4.enabled/ipv6.enabled into top-level enableIPv4/
-  # enableIPv6, so the old nested --set was a silent no-op against the
-  # current chart and Cilium fell back to its IPv4 default, allocating
-  # from 10.0.0.0/8 — unreachable from these IPv6-only clusters
-  # (ipFamily: ipv6). The clusters need Cilium told to disable IPv4 via
-  # the current flat keys. Tunnel mode is used since Cilium v1.20
-  # requires IPv4 for native routing mode with cluster-pool IPAM.
+  # the CLI vendors the chart itself). There is no "flattened" enableIPv4/
+  # enableIPv6 key in any Cilium chart (checked v1.18.2, the CLI's
+  # unpinned default, and v1.20.0, the CLI's "stable" — both only expose
+  # the nested ipv4.enabled/ipv6.enabled). --set enableIPv4=false/
+  # enableIPv6=true was a silent no-op against those unknown keys, so
+  # Cilium fell back to its real default (ipv4.enabled: true, ipv6.enabled:
+  # false), allocating from 10.0.0.0/8 — unreachable from these IPv6-only
+  # clusters (ipFamily: ipv6) and why CoreDNS/any non-edge-node pod can't
+  # reach the IPv6 [fd00:200::1]:443 apiserver service. Likewise the
+  # cluster-pool IPv6 CIDR lives at ipam.operator.clusterPoolIPv6PodCIDRList
+  # (a list) / clusterPoolIPv6MaskSize, not clusterPoolIPv6.clusterCIDR/
+  # maskSize. Tunnel mode is used since Cilium v1.20 requires IPv4 for
+  # native routing mode with cluster-pool IPAM.
+  # `install` vs `upgrade`: install refuses to touch an already-existing
+  # Helm release ("cannot re-use a name that is still in use") but doesn't
+  # fail the outer script — that error is printed by the *inner* bash -c,
+  # which has no `set -e` of its own, so it falls through to `cilium
+  # status --wait` (which succeeds against the untouched old release) and
+  # docker exec exits 0. Re-running this script against an already-cilium'd
+  # node silently kept serving the old config instead of applying the fix
+  # above. `set -e` inside the inner script plus install-or-upgrade makes
+  # reruns actually idempotent.
   docker exec "${node}" bash -c "
+    set -e
     curl -sL https://github.com/cilium/cilium-cli/releases/download/${CILIUM_VERSION}/cilium-linux-${ARCH}.tar.gz | tar xz -C /usr/local/bin
     chmod +x /usr/local/bin/cilium
-    cilium install \
-      --set enableIPv4=false \
-      --set enableIPv6=true \
+    CILIUM_ACTION=install
+    cilium status &>/dev/null && CILIUM_ACTION=upgrade
+    cilium \${CILIUM_ACTION} \
+      --set ipv4.enabled=false \
+      --set ipv6.enabled=true \
       --set ipam.mode=cluster-pool \
-      --set clusterPoolIPv6.clusterCIDR=fd00:100::/48 \
-      --set clusterPoolIPv6.maskSize=64 \
+      --set ipam.operator.clusterPoolIPv6PodCIDRList='{fd00:100::/48}' \
+      --set ipam.operator.clusterPoolIPv6MaskSize=64 \
       --set cni.exclusive=false \
       --set kubeProxyReplacement=true \
       --set tunnelProtocol=vxlan \
