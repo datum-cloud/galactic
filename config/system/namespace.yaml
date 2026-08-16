@@ -9,3 +9,9 @@ metadata:
     # against a cluster with the restricted/baseline PodSecurity default
     # fails admission with no pointer to the fix.
     pod-security.kubernetes.io/enforce: privileged
+    # audit/warn don't change enforcement (enforce: privileged already
+    # allows everything) — they just surface drift from the baseline
+    # profile in events/audit logs as the manifest set evolves, at no
+    # cost since nothing is actually blocked.
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

@@ -41,3 +41,14 @@ spec:
               # host's lo interface by default (the stable peering address
               # other tenant routers reflect through). Set it explicitly here
               # only if lo doesn't carry the desired address on this cluster.
+          # Documentation only (hostNetwork: true, so this doesn't change
+          # behavior): the reflector role is the one place galactic-router
+          # actually listens for inbound BGP -- tenant nodes (see
+          # ../tenant/daemonset-patch.yaml) and the router container in
+          # config/gateway/base/daemonset.yaml both set
+          # GALACTIC_ROUTER_BGP_LISTEN_PORT=-1 and open no BGP port at all,
+          # so this entry only belongs on this patch, not the shared base.
+          ports:
+            - name: bgp
+              containerPort: 1790
+              protocol: TCP

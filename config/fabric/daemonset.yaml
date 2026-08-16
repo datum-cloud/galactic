@@ -21,6 +21,9 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       priorityClassName: system-node-critical
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       # FRR here establishes the underlay eBGP session to the physical fabric
       # and brings up the node's lo address, both of which galactic-router
       # depends on before it can start — so this must tolerate NotReady the
@@ -110,6 +113,16 @@ spec:
       containers:
         - name: frr
           image: ghcr.io/datum-cloud/fabric-router:latest
+          # Documentation only (hostNetwork: true, so this doesn't change
+          # behavior): the standard BGP port, opened by bgpd itself once
+          # the per-node frr.conf.<nodename> (see fabric-config's
+          # frr-init above) enables it -- nothing here actually declares
+          # or gates it, this just makes it visible without reading FRR's
+          # own config.
+          ports:
+            - name: bgp
+              containerPort: 179
+              protocol: TCP
           lifecycle:
             preStop:
               exec:
