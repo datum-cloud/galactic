@@ -275,6 +275,26 @@ func runCmd(cfg *config.RouterConfig) error {
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
 	}
+
+	// mgr.Start returning nil means ctx is Done (signal-triggered shutdown
+	// or the health server's fatal Serve error above) -- either way, every
+	// GoBGP runtime this node was running is still holding its BGP/EVPN
+	// sessions open at this point, since the manager only stops registered
+	// Runnables and the GoBGP server goroutine is started independently of
+	// ctx (see internal/runtime/gobgp). Without this, the process just
+	// exits and peers only notice via TCP RST or hold-timer expiry --
+	// routes stay in the RIB and traffic blackholes until then. StopAll
+	// drives each runtime's Stop, which cancels its GoBGP server context and
+	// triggers GoBGP's own StopBgp, sending a Cease NOTIFICATION to every
+	// peer so routes are withdrawn immediately instead of on a timer. Use a
+	// fresh context (ctx is already Done) with a bounded timeout so a stuck
+	// runtime can't block shutdown forever.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stopCancel()
+	if err := runtimeMgr.StopAll(stopCtx); err != nil {
+		log.Printf("graceful runtime shutdown: %v", err)
+	}
+
 	// A nil return from mgr.Start means ctx is Done, so it always has a
 	// cause by now: context.Canceled for a signal-triggered shutdown, or
 	// the health server's fatal Serve error from above. Only the second
