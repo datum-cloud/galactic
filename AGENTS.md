@@ -70,7 +70,7 @@ Summary:
 
 - **`config/system/`** — Creates the `galactic-system` namespace both components deploy into. Apply with `kubectl apply -k config/system/`.
 - **`config/cni/`** — Production manifests for the CNI installer DaemonSet, ConfigMap, RBAC, and ServiceAccount. Apply with `kubectl apply -k config/cni/`.
-- **`config/router/`** — Shared RBAC/ServiceAccount plus DaemonSet roles, all running `GALACTIC_ROUTER_ROUTER_MODE=tenant`:
+- **`config/router/`** — Shared RBAC/ServiceAccount plus DaemonSet roles:
   - **`config/router/tenant/`** — the per-node role (`galactic-router`); runs on every node except Kubernetes control-plane nodes and nodes labeled for the route-reflector or gateway roles.
   - **`config/router/tenant-control/`** — the BGP route-reflector role (`galactic-router-control`, `GALACTIC_ROUTER_REFLECTOR=true`); opt-in only, requires nodes labeled `galactic.datumapis.com/node: control` (stays at zero replicas otherwise). `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` is auto-detected from the host's `lo` interface by default; see the comments in `daemonset-patch.yaml` for when to override it.
   - **`config/router/base/`** — the DaemonSet spec shared by both roles above; not applied directly.

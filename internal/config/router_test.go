@@ -54,7 +54,6 @@ func TestRouterConfigDefaults(t *testing.T) {
 
 func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterNodeName, "env-node")
-	t.Setenv(EnvRouterMode, ModeTenant)
 	t.Setenv(EnvRouterReflector, testBoolTrue)
 	t.Setenv(EnvRouterBGPListenPort, "1790")
 	t.Setenv(EnvRouterBGPLocalAddr, "2001:db8::1")
@@ -70,9 +69,6 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 
 	if cfg.NodeName != "env-node" {
 		t.Errorf("NodeName = %q, want %q", cfg.NodeName, "env-node")
-	}
-	if cfg.Mode != ModeTenant {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeTenant)
 	}
 	if !cfg.Reflector {
 		t.Error("Reflector = false, want true")
@@ -114,50 +110,20 @@ func TestRouterConfigValidate(t *testing.T) {
 	}{
 		{
 			name:    "missing node name",
-			envVars: map[string]string{EnvRouterMode: ModeTenant},
+			envVars: map[string]string{},
 			wantErr: "node name is required",
 		},
 		{
-			name:    "missing mode",
-			envVars: map[string]string{EnvRouterNodeName: testRouterNodeName},
-			wantErr: "router mode is required",
-		},
-		{
-			name:    "invalid mode",
-			envVars: map[string]string{EnvRouterNodeName: testRouterNodeName, EnvRouterMode: "invalid"},
-			wantErr: "invalid router mode",
-		},
-		{
-			name: "reflector without valid mode",
-			envVars: map[string]string{
-				EnvRouterNodeName:  testRouterNodeName,
-				EnvRouterMode:      ModeTransit,
-				EnvRouterReflector: testBoolTrue,
-			},
-			wantErr: "route reflector mode requires",
-		},
-		{
-			name: "valid tenant mode",
+			name: "valid node name",
 			envVars: map[string]string{
 				EnvRouterNodeName: testRouterNodeName,
-				EnvRouterMode:     ModeTenant,
 			},
 			wantErr: "",
 		},
 		{
-			name: "valid fabric mode with reflector",
+			name: "valid node name with reflector",
 			envVars: map[string]string{
 				EnvRouterNodeName:  testRouterNodeName,
-				EnvRouterMode:      ModeFabric,
-				EnvRouterReflector: testBoolTrue,
-			},
-			wantErr: "",
-		},
-		{
-			name: "valid tenant mode with reflector",
-			envVars: map[string]string{
-				EnvRouterNodeName:  testRouterNodeName,
-				EnvRouterMode:      ModeTenant,
 				EnvRouterReflector: testBoolTrue,
 			},
 			wantErr: "",
@@ -166,7 +132,6 @@ func TestRouterConfigValidate(t *testing.T) {
 			name: "invalid bgp listen port",
 			envVars: map[string]string{
 				EnvRouterNodeName:      testRouterNodeName,
-				EnvRouterMode:          ModeTenant,
 				EnvRouterBGPListenPort: "0",
 			},
 			wantErr: "bgp listen port must be between",
@@ -175,7 +140,6 @@ func TestRouterConfigValidate(t *testing.T) {
 			name: "outbound-only bgp listen port",
 			envVars: map[string]string{
 				EnvRouterNodeName:      testRouterNodeName,
-				EnvRouterMode:          ModeTenant,
 				EnvRouterBGPListenPort: "-1",
 			},
 			wantErr: "",
@@ -184,7 +148,6 @@ func TestRouterConfigValidate(t *testing.T) {
 			name: "invalid metrics port",
 			envVars: map[string]string{
 				EnvRouterNodeName:    testRouterNodeName,
-				EnvRouterMode:        ModeTenant,
 				EnvRouterMetricsPort: "0",
 			},
 			wantErr: "metrics port must be between",
@@ -193,7 +156,6 @@ func TestRouterConfigValidate(t *testing.T) {
 			name: "invalid grpc health port",
 			envVars: map[string]string{
 				EnvRouterNodeName:       testRouterNodeName,
-				EnvRouterMode:           ModeTenant,
 				EnvRouterGRPCHealthPort: "0",
 			},
 			wantErr: "grpc health port must be between",
@@ -202,7 +164,6 @@ func TestRouterConfigValidate(t *testing.T) {
 			name: "invalid webhook port",
 			envVars: map[string]string{
 				EnvRouterNodeName:    testRouterNodeName,
-				EnvRouterMode:        ModeTenant,
 				EnvRouterWebhookPort: "0",
 			},
 			wantErr: "webhook port must be between",

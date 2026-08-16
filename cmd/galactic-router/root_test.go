@@ -21,7 +21,6 @@ func testCmd(t *testing.T) *cobra.Command {
 	t.Helper()
 	cmd := &cobra.Command{Use: testCmdUse}
 	cmd.Flags().StringP("node-name", "n", "", "Kubernetes node name (required)")
-	cmd.Flags().StringP("mode", "m", "", "Operating mode")
 	cmd.Flags().Bool("reflector", false, "Enable route reflector mode")
 	cmd.Flags().IntP("bgp-listen-port", "p", config.DefaultRouterBGPListenPort, "BGP listen port")
 	cmd.Flags().StringP("bgp-local-address", "", "", "BGP local address")
@@ -56,13 +55,12 @@ func TestRequiredFlags(t *testing.T) {
 	cmd := testCmd(t)
 	cfg.BindFlags(cmd.Flags())
 	if err := cfg.Validate(); err == nil {
-		t.Error("Validate() with empty node-name and mode returned nil error")
+		t.Error("Validate() with empty node-name returned nil error")
 	}
 }
 
 func TestEnvVarDefaults(t *testing.T) {
 	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 
 	cfg := config.NewRouterConfig()
 	cmd := testCmd(t)
@@ -72,21 +70,8 @@ func TestEnvVarDefaults(t *testing.T) {
 	}
 }
 
-func TestInvalidMode(t *testing.T) {
-	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, "invalid")
-
-	cfg := config.NewRouterConfig()
-	cmd := testCmd(t)
-	cfg.BindFlags(cmd.Flags())
-	if err := cfg.Validate(); err == nil {
-		t.Error("Validate() with invalid mode returned nil error")
-	}
-}
-
 func TestBGPListenPortMinusOne(t *testing.T) {
 	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 	t.Setenv(config.EnvRouterBGPListenPort, "-1")
 
 	cfg := config.NewRouterConfig()
@@ -99,7 +84,6 @@ func TestBGPListenPortMinusOne(t *testing.T) {
 
 func TestBGPListenPortOverflow(t *testing.T) {
 	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 	t.Setenv(config.EnvRouterBGPListenPort, "70000")
 
 	cfg := config.NewRouterConfig()
@@ -119,56 +103,8 @@ func TestNodeNameRequired(t *testing.T) {
 	}
 }
 
-func TestModeRequired(t *testing.T) {
-	t.Setenv(config.EnvRouterNodeName, "test-node")
-
-	cfg := config.NewRouterConfig()
-	cmd := testCmd(t)
-	cfg.BindFlags(cmd.Flags())
-	if err := cfg.Validate(); err == nil {
-		t.Error("Validate() with empty mode returned nil error")
-	}
-}
-
-func TestValidModes(t *testing.T) {
-	for _, mode := range []string{config.ModeTransit, config.ModeFabric, config.ModeTenant} {
-		t.Run(mode, func(t *testing.T) {
-			t.Setenv(config.EnvRouterNodeName, "test-node")
-			t.Setenv(config.EnvRouterMode, mode)
-
-			cfg := config.NewRouterConfig()
-			cmd := testCmd(t)
-			cfg.BindFlags(cmd.Flags())
-
-			if cfg.Mode != mode {
-				t.Errorf("Mode = %q, want %q", cfg.Mode, mode)
-			}
-			if err := cfg.Validate(); err != nil {
-				t.Errorf("Validate() with mode %q: %v", mode, err)
-			}
-		})
-	}
-}
-
-func TestReflectorInvalidMode(t *testing.T) {
-	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTransit)
-
-	cfg := config.NewRouterConfig()
-	cmd := testCmd(t)
-	if err := cmd.Flags().Set("reflector", "true"); err != nil {
-		t.Fatalf("set --reflector flag: %v", err)
-	}
-	cfg.BindFlags(cmd.Flags())
-
-	if err := cfg.Validate(); err == nil {
-		t.Error("Validate() with --reflector and --mode=transit returned nil error")
-	}
-}
-
 func TestMetricsPortOverride(t *testing.T) {
 	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 	t.Setenv(config.EnvRouterMetricsPort, "9090")
 
 	cfg := config.NewRouterConfig()
@@ -181,7 +117,6 @@ func TestMetricsPortOverride(t *testing.T) {
 
 func TestGRPCHealthPortOverride(t *testing.T) {
 	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 	t.Setenv(config.EnvRouterGRPCHealthPort, "9091")
 
 	cfg := config.NewRouterConfig()
@@ -192,25 +127,8 @@ func TestGRPCHealthPortOverride(t *testing.T) {
 	}
 }
 
-func TestModeFlagOverridesEnv(t *testing.T) {
-	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeFabric)
-
-	cfg := config.NewRouterConfig()
-	cmd := testCmd(t)
-	if err := cmd.Flags().Set("mode", config.ModeTenant); err != nil {
-		t.Fatalf("set --mode flag: %v", err)
-	}
-	cfg.BindFlags(cmd.Flags())
-
-	if cfg.Mode != config.ModeTenant {
-		t.Errorf("Mode = %q, want %q (flag should override env var)", cfg.Mode, config.ModeTenant)
-	}
-}
-
 func TestGRPCHealthPortFlagOverridesEnv(t *testing.T) {
 	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 	t.Setenv(config.EnvRouterGRPCHealthPort, "9091")
 
 	cfg := config.NewRouterConfig()
@@ -227,7 +145,6 @@ func TestGRPCHealthPortFlagOverridesEnv(t *testing.T) {
 
 func TestWebhookFlagsOverrideEnv(t *testing.T) {
 	t.Setenv(config.EnvRouterNodeName, "test-node")
-	t.Setenv(config.EnvRouterMode, config.ModeTenant)
 	t.Setenv(config.EnvRouterWebhookEnabled, "false")
 	t.Setenv(config.EnvRouterWebhookPort, "9443")
 

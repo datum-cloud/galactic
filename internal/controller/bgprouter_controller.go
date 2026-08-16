@@ -45,7 +45,6 @@ type BGPRouterReconciler struct {
 	RuntimeManager galacticruntime.RuntimeManager
 	Hasher         func(model.DesiredRouter) (string, error)
 	NodeName       string
-	RouterMode     string
 }
 
 // Reconcile reconciles a single BGPRouter.

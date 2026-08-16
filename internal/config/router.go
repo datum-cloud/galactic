@@ -36,7 +36,6 @@ const (
 
 const (
 	EnvRouterNodeName       = "GALACTIC_ROUTER_NODE_NAME"
-	EnvRouterMode           = "GALACTIC_ROUTER_ROUTER_MODE"
 	EnvRouterReflector      = "GALACTIC_ROUTER_REFLECTOR"
 	EnvRouterBGPListenPort  = "GALACTIC_ROUTER_BGP_LISTEN_PORT"
 	EnvRouterBGPLocalAddr   = "GALACTIC_ROUTER_BGP_LOCAL_ADDRESS"
@@ -58,14 +57,6 @@ const (
 	EnvRouterWebhookCertDir = "GALACTIC_ROUTER_WEBHOOK_CERT_DIR"
 )
 
-// --- Router mode constants -------------------------------------------------
-
-const (
-	ModeTransit = "transit"
-	ModeFabric  = "fabric"
-	ModeTenant  = "tenant"
-)
-
 // --- RouterConfig ----------------------------------------------------------
 
 // RouterConfig resolves router configuration with three-tier precedence: CLI
@@ -77,7 +68,6 @@ type RouterConfig struct {
 
 	// Resolved fields.
 	NodeName       string
-	Mode           string
 	Reflector      bool
 	BGPListenPort  int
 	BGPLocalAddr   string
@@ -103,7 +93,6 @@ func NewRouterConfig() *RouterConfig {
 	v.AutomaticEnv()
 
 	v.SetDefault("node_name", "")
-	v.SetDefault("router_mode", "")
 	v.SetDefault("reflector", false)
 	v.SetDefault("bgp_listen_port", DefaultRouterBGPListenPort)
 	v.SetDefault("bgp_local_address", "")
@@ -131,7 +120,6 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		key  string
 	}{
 		{"node-name", "node_name"},
-		{"mode", "router_mode"},
 		{"reflector", "reflector"},
 		{"bgp-listen-port", "bgp_listen_port"},
 		{"bgp-local-address", "bgp_local_address"},
@@ -157,7 +145,6 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 // readFields populates the exported fields from the current Viper state.
 func (c *RouterConfig) readFields() {
 	c.NodeName = c.v.GetString("node_name")
-	c.Mode = c.v.GetString("router_mode")
 	c.Reflector = c.v.GetBool("reflector")
 	c.BGPListenPort = c.v.GetInt("bgp_listen_port")
 	c.BGPLocalAddr = c.v.GetString("bgp_local_address")
@@ -170,23 +157,11 @@ func (c *RouterConfig) readFields() {
 	c.WebhookCertDir = c.v.GetString("webhook_cert_dir")
 }
 
-// Validate checks that the required configuration fields are set and that
-// mode/reflector constraints are satisfied.
+// Validate checks that the required configuration fields are set and within
+// range.
 func (c *RouterConfig) Validate() error {
 	if c.NodeName == "" {
 		return fmt.Errorf("node name is required (use --node-name flag or %s env var)", EnvRouterNodeName)
-	}
-	if c.Mode == "" {
-		return fmt.Errorf("router mode is required (use --mode flag or %s env var)", EnvRouterMode)
-	}
-	switch c.Mode {
-	case ModeTransit, ModeFabric, ModeTenant:
-	default:
-		return fmt.Errorf("invalid router mode %q: must be %s, %s, or %s",
-			c.Mode, ModeTransit, ModeFabric, ModeTenant)
-	}
-	if c.Reflector && c.Mode != ModeFabric && c.Mode != ModeTenant {
-		return fmt.Errorf("route reflector mode requires --mode=%s or --mode=%s", ModeFabric, ModeTenant)
 	}
 	if c.BGPListenPort != -1 && (c.BGPListenPort < 1 || c.BGPListenPort > 65535) {
 		return errors.New("bgp listen port must be between 1 and 65535, or -1 for outbound-only mode")

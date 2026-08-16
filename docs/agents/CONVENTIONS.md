@@ -11,11 +11,11 @@ This document defines the coding standards, naming rules, error handling pattern
 - Module: `go.datum.net/galactic`
 - `cmd/galactic-cni/main.go` — CNI installer entry point; a cobra command (no viper) with `init`/`run` subcommands wrapping `internal/installer.Bootstrap`/`Run` for the DaemonSet. Never itself a CNI plugin.
 - `cmd/galactic-veth/main.go` — CNI plugin entry point; a cobra command (no viper) with the plugin invocation on the root command (calls `cni.RunPlugin()`), no other subcommands
-- `cmd/galactic-router/main.go` / `root.go` — router entry point; `main.go` is a thin wrapper, startup logic (reads `GALACTIC_ROUTER_NODE_NAME`/`GALACTIC_ROUTER_ROUTER_MODE`, starts the controller-runtime manager) lives in `root.go`
+- `cmd/galactic-router/main.go` / `root.go` — router entry point; `main.go` is a thin wrapper, startup logic (reads `GALACTIC_ROUTER_NODE_NAME`, starts the controller-runtime manager) lives in `root.go`
 - `internal/plumbing/` — low-level kernel and network primitives shared between router and CNI (`intf`, `srv6`, `sysctl`, `vrf`)
 - `internal/controller/` — controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Secret, Node, GC); also contains field index registration (`indexer.go`) and CRD status helpers (`status.go`)
 - `internal/reconcile/` — CRD → DesiredRouter translation
-- `internal/runtime/` — RouterRuntime interface; `gobgp/` (tenant mode) and `frr/` (fabric mode stub)
+- `internal/runtime/` — RouterRuntime interface; `gobgp/` (the only backend)
 - `internal/gc/` — orphaned `BGPAdvertisement`/`BGPVRFInstance` CRD and stale kernel VRF cleanup, invoked by the GC controller's ticker
 - `internal/cni/` — CNI plugin (`cmdAdd`/`cmdDel`/`cmdCheck`, split across `ops_add.go`/`ops_del.go`/`ops_check.go`/`bgp.go`); `ipam/`, `route/`, `tap/`, `veth/` subpackages
 - `internal/installer/` — support for `galactic-cni`'s `init`/`run` subcommands (binary staging, conflist/kubeconfig templating, credential refresh, gRPC health server); not a subpackage of `internal/cni`

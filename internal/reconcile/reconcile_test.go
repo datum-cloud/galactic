@@ -5,9 +5,13 @@
 package reconcile
 
 import (
+	"context"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"go.datum.net/galactic/internal/model"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -56,6 +60,99 @@ func TestBuildVRFInstance(t *testing.T) {
 	}
 	if len(got.ExportRouteTargets) != 1 || got.ExportRouteTargets[0] != want.ExportRouteTargets[0] {
 		t.Errorf("buildVRFInstance().ExportRouteTargets = %v, want %v", got.ExportRouteTargets, want.ExportRouteTargets)
+	}
+}
+
+// newTestScheme returns a runtime.Scheme with the BGP API types registered,
+// for constructing a fake.Client in tests.
+func newTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := bgpv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add bgpv1alpha1 to scheme: %v", err)
+	}
+	return scheme
+}
+
+// routerRefIndexer indexes BGPAdvertisement/BGPVRFInstance by
+// .spec.routerRef.name, mirroring internal/controller/indexer.go's
+// BGPAdvByRouterName/BGPVRFInstanceByRouterName registration on the real
+// manager cache — BuildDesiredRouter's client.MatchingFields lookups require
+// it, and the fake client has no cache to register it on implicitly.
+const routerRefIndexer = ".spec.routerRef.name"
+
+func TestBuildDesiredRouter_NodeAndRoleFilter(t *testing.T) {
+	const thisNode = "node-a"
+
+	tests := []struct {
+		name       string
+		targetNode string
+		roles      []bgpv1alpha1.RouterRole
+		wantSkip   bool
+	}{
+		{
+			name:       "skips a router targeting a different node",
+			targetNode: "node-b",
+			roles:      []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+			wantSkip:   true,
+		},
+		{
+			name:       "skips a router with a non-tenant role",
+			targetNode: thisNode,
+			roles:      []bgpv1alpha1.RouterRole{"fabric"},
+			wantSkip:   true,
+		},
+		{
+			name:       "proceeds for a tenant-role router on this node",
+			targetNode: thisNode,
+			roles:      []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
+			wantSkip:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &bgpv1alpha1.BGPRouter{
+				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: "default"},
+				Spec: bgpv1alpha1.BGPRouterSpec{
+					TargetRef: bgpv1alpha1.TargetRef{Name: tc.targetNode},
+					Roles:     tc.roles,
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(newTestScheme(t)).
+				WithIndex(&bgpv1alpha1.BGPAdvertisement{}, routerRefIndexer, func(obj client.Object) []string {
+					adv := obj.(*bgpv1alpha1.BGPAdvertisement)
+					return []string{adv.Spec.RouterRef.Name}
+				}).
+				WithIndex(&bgpv1alpha1.BGPVRFInstance{}, routerRefIndexer, func(obj client.Object) []string {
+					vrf := obj.(*bgpv1alpha1.BGPVRFInstance)
+					if vrf.Spec.RouterRef == nil {
+						return nil
+					}
+					return []string{vrf.Spec.RouterRef.Name}
+				}).
+				Build()
+
+			// localAddress set so the "proceeds" case doesn't also need a
+			// fake Node object just to resolve an EVPN next-hop.
+			r := New(fakeClient, thisNode, "2001:db8::1")
+
+			got, err := r.BuildDesiredRouter(context.Background(), router)
+			if err != nil {
+				t.Fatalf("BuildDesiredRouter() error = %v, want nil", err)
+			}
+			if tc.wantSkip {
+				if got != nil {
+					t.Errorf("BuildDesiredRouter() = %+v, want nil (skip)", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Error("BuildDesiredRouter() = nil, want a non-nil DesiredRouter")
+			}
+		})
 	}
 }
 

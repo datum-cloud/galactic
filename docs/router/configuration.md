@@ -4,21 +4,19 @@
 or a combination of both. CLI flags take precedence over environment variables.
 
 All configuration is managed centrally by the `internal/config` package. The
-`RouterConfig` struct and its constants (`EnvRouterNodeName`, `ModeTenant`,
-etc.) are the single source of truth.
+`RouterConfig` struct and its constants (`EnvRouterNodeName`,
+`EnvRouterReflector`, etc.) are the single source of truth.
 
 ## Quick Reference
 
 Environment variable names are not a naive uppercased guess from the CLI
 flag name — the mapping is defined in `internal/config` (see `RouterConfig`
-and the `EnvRouter*` constants). The most common trip-up: `--mode` is
-`GALACTIC_ROUTER_ROUTER_MODE`, not `GALACTIC_ROUTER_MODE`. Always use the
-exact name from the table below.
+and the `EnvRouter*` constants). Always use the exact name from the table
+below.
 
 | Option | Environment Variable | CLI Flag | Default |
 |---|---|---|---|
 | Node name | `GALACTIC_ROUTER_NODE_NAME` | `--node-name` | _(required)_ |
-| Router mode | `GALACTIC_ROUTER_ROUTER_MODE` | `--mode` | _(required)_ |
 | Route reflector | `GALACTIC_ROUTER_REFLECTOR` | `--reflector` | `false` |
 | BGP listen port | `GALACTIC_ROUTER_BGP_LISTEN_PORT` | `--bgp-listen-port` | `179` |
 | BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | _(auto-detected from `lo`)_ |
@@ -33,7 +31,6 @@ The following options are **required**. If unset, `galactic-router` exits with
 an error:
 
 - `--node-name` (`GALACTIC_ROUTER_NODE_NAME`) — Kubernetes node name where the router runs.
-- `--mode` (`GALACTIC_ROUTER_ROUTER_MODE`) — Router mode: `transit`, `fabric`, or `tenant`.
 
 ## Option Details
 
@@ -45,17 +42,9 @@ used to scope BGP configuration to the correct node.
 **Type:** string
 **Required:** yes
 
-### `--mode` / `GALACTIC_ROUTER_ROUTER_MODE`
-
-The operating mode of this instance. Determines which BGP backend is used:
-
-- `tenant` — uses GoBGP for EVPN path distribution (production mode).
-- `fabric` — uses the FRR stub backend (not yet implemented).
-- `transit` — reserved for future transit mode (not yet implemented).
-
 ### `--reflector` / `GALACTIC_ROUTER_REFLECTOR`
 
-Enable route reflector mode. Only valid when `--mode=fabric` or `--mode=tenant`.
+Enable route reflector mode.
 
 **Type:** boolean
 **Default:** `false`
@@ -83,8 +72,8 @@ value is set and no such address is found on `lo`.
 This detection always runs, even when `--bgp-listen-port`/
 `GALACTIC_ROUTER_BGP_LISTEN_PORT` is `-1` (no inbound listener) —
 `galactic-router` still needs a source address for outbound BGP connections.
-In practice this means every node running `galactic-router` in `tenant` mode
-needs a global-unicast IPv6 address on `lo` before startup, or an explicit
+In practice this means every node running `galactic-router` needs a
+global-unicast IPv6 address on `lo` before startup, or an explicit
 `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`.
 
 **Type:** string
@@ -150,8 +139,6 @@ env:
     valueFrom:
       fieldRef:
         fieldPath: spec.nodeName
-  - name: GALACTIC_ROUTER_ROUTER_MODE
-    value: tenant
   - name: GALACTIC_ROUTER_GC_NAMESPACE
     value: galactic-system
 ```
@@ -165,7 +152,6 @@ command:
   - /galactic-router
 args:
   - --node-name=$(GALACTIC_ROUTER_NODE_NAME)
-  - --mode=tenant
   - --metrics-port=9090
 env:
   - name: GALACTIC_ROUTER_NODE_NAME
@@ -184,14 +170,11 @@ env:
     valueFrom:
       fieldRef:
         fieldPath: spec.nodeName
-  - name: GALACTIC_ROUTER_ROUTER_MODE
-    value: tenant
   - name: GALACTIC_ROUTER_METRICS_PORT
     value: "9090"
 command:
   - /galactic-router
 args:
   - --node-name=$(GALACTIC_ROUTER_NODE_NAME)
-  - --mode=tenant
   - --metrics-port=9100   # overrides GALACTIC_ROUTER_METRICS_PORT env var
 ```
