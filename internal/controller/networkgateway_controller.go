@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -116,6 +117,13 @@ const (
 	// self-address route, or a rule's VIP route. Such a node serves
 	// nothing, so it must not report reasonEngineHealthy (#365).
 	reasonAdvertisementFailed = "AdvertisementFailed"
+
+	// reasonTerminating is the Ready condition reason for a NetworkGateway
+	// that is being deleted, whether observed via a live object still
+	// carrying a DeletionTimestamp or reconstructed for the NotFound case
+	// where the object is already gone (see Reconcile's two
+	// withdrawNodeAdvertisements call sites).
+	reasonTerminating = "Terminating"
 )
 
 // Reconcile reconciles a single NetworkGateway.
@@ -135,17 +143,37 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			// running. Only stop when this node no longer has a
 			// NetworkGateway of its own -- otherwise one node's deletion
 			// tears down every other gateway node's data plane too (#364).
+			//
+			// req.Name is the departed NetworkGateway's own name, which by
+			// this repo's own convention (every NetworkGateway fixture and
+			// deployment overlay) is always that node's node name -- the
+			// same identity applyBGPAdvertisements/publishSelfAddress
+			// already used to name every advertisement it created. This is
+			// the reachable path for #406: without a finalizer on
+			// NetworkGateway (there is none), this reconciler never
+			// observes a live object with a deletion timestamp for a node
+			// that has already left -- the object is simply gone by the
+			// time any process's Get runs, on whichever node's process
+			// happens to handle the event. Withdrawing here, keyed on
+			// req.Name rather than r.NodeName, is what makes that node's
+			// own advertisements go away even though its own process is
+			// the one most likely already gone.
+			withdrawErr := withdrawNodeAdvertisements(ctx, r.Client, req.Namespace, req.Name)
+			if withdrawErr != nil {
+				logger.Error(withdrawErr, "withdraw BGPAdvertisements for departed gateway node", "node", req.Name)
+			}
+
 			stillOwned, checkErr := isGatewayNode(ctx, r.Client, req.Namespace, r.NodeName)
 			if checkErr != nil {
-				return ctrl.Result{}, fmt.Errorf("check for this node's own NetworkGateway: %w", checkErr)
+				return ctrl.Result{}, errors.Join(withdrawErr, fmt.Errorf("check for this node's own NetworkGateway: %w", checkErr))
 			}
 			if stillOwned {
-				return ctrl.Result{}, nil
+				return ctrl.Result{}, withdrawErr
 			}
 			if stopErr := r.Engine.Stop(ctx); stopErr != nil {
 				logger.Error(stopErr, "stop gateway engine for deleted NetworkGateway", "networkGateway", req.NamespacedName)
 			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, withdrawErr
 		}
 		return ctrl.Result{}, fmt.Errorf("get NetworkGateway %s: %w", req.NamespacedName, err)
 	}
@@ -158,6 +186,21 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if !gw.DeletionTimestamp.IsZero() {
+		// Withdrawn before Engine.Stop, not after: the reverse order would
+		// leave a window where this node's forwarding state is already
+		// gone but BGP still advertises it as a valid destination -- the
+		// exact blackhole #406 reports, just moved one step earlier
+		// instead of eliminated. This branch is not known to be reachable
+		// today (NetworkGateway carries no finalizer, so a deletion
+		// ordinarily removes the object before any Get here observes a
+		// live DeletionTimestamp -- see the NotFound branch above, which
+		// is), but it costs nothing to keep it correct in case a finalizer
+		// is added later or another controller races this Get.
+		withdrawErr := withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, gw.Name)
+		if withdrawErr != nil {
+			logger.Error(withdrawErr, "withdraw BGPAdvertisements for terminating NetworkGateway",
+				"networkGateway", req.NamespacedName)
+		}
 		if stopErr := r.Engine.Stop(ctx); stopErr != nil {
 			logger.Error(stopErr, "stop gateway engine for terminating NetworkGateway", "networkGateway", req.NamespacedName)
 		}
@@ -165,13 +208,13 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionFalse,
-			Reason:  "Terminating",
+			Reason:  reasonTerminating,
 			Message: "NetworkGateway is being deleted",
 		})
 		if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
 			logger.Error(updateErr, "update status for terminating NetworkGateway")
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, withdrawErr
 	}
 
 	// Advertisement failures are collected rather than returned on the spot:
@@ -644,4 +687,59 @@ func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName str
 		}
 	}
 	return false, nil
+}
+
+// withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway
+// node nodeName created in namespace: its self-address route (named
+// "<node>-selfaddr" -- see publishSelfAddress) and every per-rule,
+// per-address-family route it advertised (named "<rule>-<node>-v4"/"-v6"
+// -- see applyBGPAdvertisements).
+//
+// This is issue #367's teardown fix in reverse. That fix
+// (networkRuleLabel, networkrule_controller.go's reconcileDelete)
+// withdraws every advertisement a *rule* caused, no matter which node
+// created it, discovered by List + label selector rather than
+// reconstructed names because the namespace's *current* gateway-node
+// membership no longer includes a node that has since left. The same
+// blind spot exists here in the other direction: a rule's own
+// advertisement is name-qualified by the node that created it, but
+// nothing lists "every rule this node ever advertised" the way
+// networkRuleLabel lists "every node that ever advertised this rule" --
+// especially once the rule itself has been deleted and left no object to
+// enumerate backwards from. Selecting by NAME rather than by a new label
+// sidesteps that: it needs no rule object, live or deleted, and no label
+// backfill pass from a node that is gone by the time this runs -- the
+// exact self-healing gap issue #406's own "label backfill" note flags for
+// networkRuleLabel would otherwise repeat here for a brand new label.
+//
+// Called with the departing node's own identity, not r.NodeName: the
+// caller may be running on any surviving gateway node's process (every
+// gateway node's process reconciles every NetworkGateway in the
+// namespace, see Reconcile's NotFound branch), most likely because the
+// departing node's own process is already gone -- that is exactly why
+// its NetworkGateway object got deleted in the first place. Concurrent
+// callers across surviving nodes racing this same sweep for the same
+// departed node is expected and harmless: every delete here is
+// idempotent (not-found is not an error).
+func withdrawNodeAdvertisements(ctx context.Context, c client.Client, namespace, nodeName string) error {
+	advList := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := c.List(ctx, advList, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list BGPAdvertisements for departed gateway node %s: %w", nodeName, err)
+	}
+
+	selfAddrName := nodeName + "-selfaddr"
+	v4Suffix := "-" + nodeName + "-v4"
+	v6Suffix := "-" + nodeName + "-v6"
+
+	var errs []error
+	for i := range advList.Items {
+		adv := &advList.Items[i]
+		if adv.Name != selfAddrName && !strings.HasSuffix(adv.Name, v4Suffix) && !strings.HasSuffix(adv.Name, v6Suffix) {
+			continue
+		}
+		if err := c.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("withdraw BGPAdvertisement %s: %w", adv.Name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
