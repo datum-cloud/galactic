@@ -129,45 +129,72 @@
 //     Outer next header must be 41 (the same plain IPv6-in-IPv6 wire
 //     format every other cross-node SRv6 packet in this codebase uses --
 //     a tenant VRF's default route needs zero new encap format). Strip
-//     the outer header (reuse strip_outer_header verbatim), look up
-//     egress_conn_table by the forward key (proto, tenant_arg,
-//     backend_addr:backend_port -> dest_addr:dest_port). A miss on a TCP
-//     SYN or any UDP packet allocates a masq_port via the same
+//     the outer header (reuse strip_outer_header verbatim), then dispatch
+//     on the *inner* packet's own next header: TCP/UDP goes to
+//     handle_egress_forward_l4 (the original SYN/any-UDP allocation logic,
+//     unchanged); an ICMPv6 Echo Request goes to handle_egress_forward_icmp6
+//     (galactic#404) -- the Identifier field stands in for the port
+//     egress_conn_table is keyed by, the same technique Linux's own
+//     nf_conntrack ICMP tracker uses, since ICMPv6 echo has no real ports.
+//     Anything else is dropped (DROP_REASON_MALFORMED_EGRESS_FORWARD) --
+//     this address is claimed the same as every other branch here.
+//
+//     Both l4 and icmp6 sub-branches share the same allocation shape: a
+//     miss on a fresh flow (a TCP SYN, any UDP packet, or any Echo
+//     Request) allocates a masq_port/masq_identifier via the same
 //     linear-probe/BPF_NOEXIST technique handle_forward's own SNAT-port
 //     claim uses, against the reverse key (proto, dest_addr:dest_port ->
 //     masq_addr:masq_port) -- tenant_arg is fixed at 0 in that reverse
 //     row, since masq_addr:masq_port is already globally unique by
 //     construction (the claim itself guarantees it) and needs no tenant
-//     dimension. SNAT saddr to masq_addr:masq_port, fix the L4 checksum,
-//     and XDP_TX the *inner* packet back out this same interface
-//     unwrapped -- no outer header pushed. This is the one genuinely new
-//     tail shape in this file: every other branch either pushes an outer
-//     header (handle_forward) or has already stripped one before
-//     rewriting (handle_return); this one strips one and sends the
-//     revealed inner packet on as a plain IPv6 frame toward the real
-//     internet.
+//     dimension. SNAT saddr (and, for ICMPv6, the Identifier) to
+//     masq_addr:masq_port, fix the checksum, and XDP_TX the *inner*
+//     packet back out this same interface unwrapped -- no outer header
+//     pushed. This is the one genuinely new tail shape in this file:
+//     every other branch either pushes an outer header (handle_forward)
+//     or has already stripped one before rewriting (handle_return); this
+//     one strips one and sends the revealed inner packet on as a plain
+//     IPv6 frame toward the real internet.
 //
 //  5. EGRESS RETURN BRANCH (#865): if the outer destination matches this
 //     node's own configured masq_addr (egress_config_table) -- a plain
 //     address compare, no nexthdr==41 requirement, since this arrives as
 //     an ordinary internet-originated IPv6 packet, not an SRv6-encapsulated
-//     one -- parse the L4 header and look up egress_conn_table by the
-//     reverse key (proto, dest_addr:dest_port -> masq_addr:masq_port); no
-//     tenant_arg needed in this direction, masq_addr:masq_port is already
-//     unique per flow by construction. A miss drops (claimed address, no
-//     pass-through -- same fail-closed convention every other
-//     claimed-address branch in this file already uses; this includes any
-//     non-TCP/UDP protocol arriving addressed to masq_addr, e.g. ICMPv6,
-//     which this program does not special-case and drops rather than
-//     XDP_PASS, the same choice already made for gw_addr's own return
-//     branch). A hit DNATs daddr to backend_addr:backend_port (source
-//     address/port untouched -- a destination-only rewrite, unlike
-//     Full-NAT's four-field rewrite), fixes the checksum, and pushes a
-//     fresh 40-byte outer SRv6 header (reusing push_outer_header verbatim)
-//     sourced from this node's own gw_addr (gw_config_table -- the same
-//     "this node, as an SRv6 speaker" identity handle_forward's own push
-//     already uses) and addressed to backend_usid, then XDP_TX -- the
-//     return-trip mirror of handle_egress_forward().
+//     one -- dispatch on next header. TCP/UDP looks up egress_conn_table
+//     by the reverse key (proto, dest_addr:dest_port -> masq_addr:masq_port)
+//     as before; no tenant_arg needed in this direction, masq_addr:masq_port
+//     is already unique per flow by construction. A miss drops (claimed
+//     address, no pass-through -- same fail-closed convention every other
+//     claimed-address branch in this file already uses).
+//
+//     ICMPv6 (galactic#404) is no longer a blanket drop: an Echo Reply is
+//     looked up the same way an Echo Request allocated its flow (Identifier
+//     as the reverse key's pseudo-port) and un-masqueraded DNAT-style,
+//     restoring both the destination address and the original Identifier
+//     the tenant itself sent. Destination Unreachable/Packet Too Big/Time
+//     Exceeded/Parameter Problem (RFC 4443 error messages) embed the IPv6
+//     header and at least the first 8 bytes of the transport header of the
+//     packet that triggered them -- for a packet this program itself SNAT'd,
+//     that is masq_addr:masq_port -> dest_addr:dest_port, exactly
+//     egress_conn_table's existing reverse key read one layer deeper. Path
+//     MTU discovery rides on Packet Too Big specifically: dropping these
+//     (the pre-#404 behavior) is what stalled large transfers instead of
+//     letting them adapt. A recognized ICMPv6 message with no matching
+//     egress_conn_table row drops (DROP_REASON_NO_EGRESS_ICMP_CONN, kept
+//     distinct from the TCP/UDP path's own DROP_REASON_NO_EGRESS_RETURN_CONN
+//     so operators can tell them apart from drop counters alone). Any other
+//     ICMPv6 type, or any other protocol entirely (Neighbor Discovery, an
+//     Echo Request targeting masq_addr directly, ...) is not a reply to any
+//     tenant flow this program tracks -- XDP_PASS, not XDP_DROP, handing it
+//     to the normal kernel stack instead of claiming and dropping it.
+//
+//     Every translated case (TCP/UDP, Echo Reply, and each ICMPv6 error
+//     type) fixes its checksum and pushes a fresh 40-byte outer SRv6 header
+//     (reusing push_outer_header verbatim) sourced from this node's own
+//     gw_addr (gw_config_table -- the same "this node, as an SRv6 speaker"
+//     identity handle_forward's own push already uses) and addressed to
+//     backend_usid, then XDP_TX -- the return-trip mirror of the forward
+//     branch above.
 //
 // A real eBPF verifier gotcha carried over from gwprog's own header
 // comment: the backend-selection index (hash % backend_count, then
@@ -242,7 +269,22 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 // pushed packets with zero changes on that end.
 #define EDGE_IPPROTO_IPV6 41
 
+// EDGE_IPPROTO_ICMPV6 (58) is the next-header value for every ICMPv6
+// message the egress return/forward branches special-case (galactic#404) --
+// see struct edge_icmp6hdr/edge_icmp6_error_hdr/edge_icmp6_echo_hdr below.
+#define EDGE_IPPROTO_ICMPV6 58
+
 #define EDGE_TCP_FLAG_SYN 0x02
+
+// ICMPv6 message types this program reads (RFC 4443). The four error
+// types (1-4) share struct edge_icmp6_error_hdr's shape; the two echo
+// types share struct edge_icmp6_echo_hdr's.
+#define EDGE_ICMPV6_DEST_UNREACH   1
+#define EDGE_ICMPV6_PACKET_TOO_BIG 2
+#define EDGE_ICMPV6_TIME_EXCEEDED  3
+#define EDGE_ICMPV6_PARAM_PROBLEM  4
+#define EDGE_ICMPV6_ECHO_REQUEST   128
+#define EDGE_ICMPV6_ECHO_REPLY     129
 
 // ---------------------------------------------------------------------
 // Minimal, self-contained header structs -- byte-exact to the wire
@@ -290,6 +332,46 @@ struct edge_udphdr {
 	__be16 dest;
 	__be16 len;
 	__be16 check;
+} __attribute__((packed));
+
+// struct edge_icmp6hdr is the common 4-byte prefix every ICMPv6 message
+// starts with (RFC 4443 §2.1) -- used only to read type/code before
+// dispatching to one of the two more specific shapes below (galactic#404).
+struct edge_icmp6hdr {
+	__u8 type;
+	__u8 code;
+	__be16 check;
+} __attribute__((packed));
+
+// struct edge_icmp6_error_hdr is the 8-byte header shape Destination
+// Unreachable/Packet Too Big/Time Exceeded/Parameter Problem (RFC 4443 §3,
+// types 1-4) all share: type, code, checksum, then 4 bytes whose meaning
+// varies by type (unused for 1/3, MTU for 2, pointer for 4) that this
+// program never reads. What follows is "as much of the invoking packet as
+// possible," guaranteed to include at least the embedded IPv6 header's
+// first 48 bytes (RFC 4443 §2.4(c)) -- the full 40-byte IPv6 header plus
+// the first 8 bytes of whatever transport header follows, which is where
+// both TCP and UDP keep their two 16-bit port fields (see
+// parse_embedded_ports, deliberately not parse_l4 -- that guarantee falls
+// short of a full struct edge_tcphdr).
+struct edge_icmp6_error_hdr {
+	__u8 type;
+	__u8 code;
+	__be16 check;
+	__u8 unused[4];
+} __attribute__((packed));
+
+// struct edge_icmp6_echo_hdr is the Echo Request/Reply header (RFC 4443
+// §4). identifier stands in for the port egress_conn_table is keyed by --
+// the standard NAT66/NAT64 technique for a protocol with no real ports
+// (Linux's own nf_conntrack ICMP tracker does the same) -- see
+// handle_egress_forward_icmp6/handle_egress_return_icmp6_echo.
+struct edge_icmp6_echo_hdr {
+	__u8 type;
+	__u8 code;
+	__be16 check;
+	__be16 identifier;
+	__be16 sequence;
 } __attribute__((packed));
 
 // ---------------------------------------------------------------------
@@ -438,6 +520,13 @@ struct egress_conn_key {
 // arbitrary internet destination, and the masquerade address. tenant_arg
 // is carried here too (alongside the reverse row, where it is always 0)
 // so both directions share one struct shape.
+//
+// For an ICMPv6 Echo flow (proto == EDGE_IPPROTO_ICMPV6, galactic#404),
+// backend_port/dest_port/masq_port hold the Echo Identifier instead of a
+// real port -- a deliberate reuse rather than dedicated identifier fields,
+// the same "a field held equal old/new contributes zero diff" generic
+// reuse fix_l4_checksum's own call sites already lean on elsewhere in this
+// file (see handle_egress_forward_icmp6/handle_egress_return_icmp6_echo).
 struct egress_conn_value {
 	__u16 tenant_arg;
 	__u8 backend_addr[16];
@@ -483,7 +572,19 @@ enum edge_drop_reason {
 	DROP_REASON_EGRESS_PAT_EXHAUSTED     = 12,
 	DROP_REASON_MALFORMED_EGRESS_RETURN  = 13,
 	DROP_REASON_NO_EGRESS_RETURN_CONN    = 14,
-	DROP_REASON_COUNT                    = 15,
+	// ICMPv6 egress drop reasons (galactic#404) -- see
+	// handle_egress_forward_icmp6/handle_egress_return_icmp6. Kept distinct
+	// from the TCP/UDP-specific reasons above rather than reused: an
+	// operator reading drop counters should be able to tell "this ICMPv6
+	// message didn't parse" apart from "it parsed fine but matched no
+	// flow," and apart from the TCP/UDP path's own equivalents -- the
+	// original review comment on #381 flagged exactly this ambiguity
+	// (DROP_REASON_MALFORMED_EGRESS_RETURN previously double-booked as
+	// both "malformed" and "well-formed but not TCP/UDP," a protocol-policy
+	// decision mislabeled as a parse failure).
+	DROP_REASON_MALFORMED_EGRESS_ICMP = 15,
+	DROP_REASON_NO_EGRESS_ICMP_CONN   = 16,
+	DROP_REASON_COUNT                 = 17,
 };
 
 // ---------------------------------------------------------------------
@@ -699,6 +800,24 @@ static EDGE_ALWAYS_INLINE int parse_l4(__u8 proto, void *l4, void *data_end, str
 		return 0;
 	}
 	return -1;
+}
+
+// parse_embedded_ports reads the two 16-bit port fields both edge_tcphdr
+// and edge_udphdr start with, bounds-checking only those 4 bytes --
+// deliberately not parse_l4, whose full-struct bounds check (a complete
+// struct edge_tcphdr, 20 bytes) would reject a validly-minimal ICMPv6
+// error message's embedded TCP header: RFC 4443 guarantees only the first
+// 8 bytes of the invoking transport header, and both TCP's and UDP's
+// source/dest port fields sit in the first 4 of those, well within that
+// minimum (galactic#404's handle_egress_return_icmp6_error).
+static EDGE_ALWAYS_INLINE int parse_embedded_ports(void *l4, void *data_end, __be16 *sport, __be16 *dport)
+{
+	__be16 *ports = l4;
+	if ((void *) (ports + 2) > data_end)
+		return -1;
+	*sport = ports[0];
+	*dport = ports[1];
+	return 0;
 }
 
 // fix_l4_checksum applies the combined address+port checksum delta for a
@@ -1064,60 +1183,15 @@ static EDGE_ALWAYS_INLINE int handle_return(struct xdp_md *ctx, struct edge_ip6h
 // Egress branch (masquerade) (datum-cloud/enhancements#865).
 // ---------------------------------------------------------------------
 
-// handle_egress_forward is triggered when the outer destination's locator
-// matches this node's own configured egress_sid and outer nexthdr == 41 --
-// a fresh (or already-established) outbound flow from a tenant VPC backend
-// Pod toward an arbitrary internet destination. tenant_arg is the uFMT
-// Argument value already extracted from the packet's own destination
-// address by the caller (edge_nat), before this function strips the outer
-// header that address lives on.
-static EDGE_ALWAYS_INLINE int handle_egress_forward(struct xdp_md *ctx, struct edge_ip6hdr *outer,
-						      __u16 tenant_arg, void *data_end)
+// handle_egress_forward_l4 handles the TCP/UDP shape of a fresh (or
+// already-established) egress flow -- factored out of handle_egress_forward
+// unchanged (galactic#404 split this out to make room for
+// handle_egress_forward_icmp6 as a sibling, not to change this path's own
+// behavior).
+static EDGE_ALWAYS_INLINE int handle_egress_forward_l4(struct xdp_md *ctx, struct edge_ethhdr *eth,
+							 struct edge_ip6hdr *inner, __u16 tenant_arg,
+							 const __u8 backend_usid[16], void *data_end)
 {
-	if (outer->nexthdr != EDGE_IPPROTO_IPV6) {
-		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
-		return XDP_DROP;
-	}
-
-	// The outer source is the originating worker node's own SRv6 address
-	// -- the same node that encapsulated this packet via its tenant VRF's
-	// default route toward egress_sid (internal/plumbing/srv6.
-	// RouteEgressAdd's SEG6 encap route, design plan §4.4). Captured here,
-	// before strip_outer_header discards the outer header entirely, and
-	// remembered in egress_conn_value.backend_usid so the eventual reply
-	// (handle_egress_return) knows which node to push a return SRv6
-	// header toward -- there is no rule_table-equivalent policy entry for
-	// egress (design plan §3.2), so this wire-derived value is the only
-	// source of that address Phase B has.
-	//
-	// ASSUMPTION FLAGGED FOR REVIEW: this relies on the kernel's SEG6
-	// encap route always selecting the node's own uSID address as the
-	// pushed outer source, the same way it does for every other cross-
-	// node SRv6 packet in this codebase. That has not been independently
-	// verified against RouteEgressAdd's actual netlink-level source-
-	// address-selection behavior as part of this phase -- worth
-	// confirming before Phase D's e2e proof relies on it.
-	__u8 backend_usid[16];
-	__builtin_memcpy(backend_usid, outer->saddr, 16);
-
-	struct edge_ethhdr *eth;
-	if (strip_outer_header(ctx, &eth) != 0) {
-		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
-		return XDP_DROP;
-	}
-
-	data_end = (void *) (long) ctx->data_end;
-
-	struct edge_ip6hdr *inner = (void *) (eth + 1);
-	if ((void *) (inner + 1) > data_end) {
-		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
-		return XDP_DROP;
-	}
-	if (inner->nexthdr != EDGE_IPPROTO_TCP && inner->nexthdr != EDGE_IPPROTO_UDP) {
-		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
-		return XDP_DROP;
-	}
-
 	struct l4_view l4v;
 	if (parse_l4(inner->nexthdr, (void *) (inner + 1), data_end, &l4v) != 0) {
 		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
@@ -1220,22 +1294,204 @@ static EDGE_ALWAYS_INLINE int handle_egress_forward(struct xdp_md *ctx, struct e
 	return XDP_TX;
 }
 
-// handle_egress_return is triggered when the outer destination matches this
-// node's own configured masq_addr -- an ordinary internet-originated IPv6
-// packet (no SRv6 encapsulation), the reply half of a flow
-// handle_egress_forward already established.
-static EDGE_ALWAYS_INLINE int handle_egress_return(struct xdp_md *ctx, struct edge_ip6hdr *ip6, void *data_end)
+// handle_egress_forward_icmp6 handles a tenant backend's own ICMPv6 Echo
+// Request leaving via egress_sid -- the forward half of the ping round
+// trip handle_egress_return_icmp6_echo completes on the way back
+// (galactic#404). Any other ICMPv6 type from a tenant backend (Echo
+// Reply, Router Solicitation, Neighbor Discovery, ...) has no defined
+// masquerade behavior in this design and is dropped, not passed through --
+// this address (egress_sid) is claimed the same as every other branch in
+// this file.
+static EDGE_ALWAYS_INLINE int handle_egress_forward_icmp6(struct xdp_md *ctx, struct edge_ethhdr *eth,
+							    struct edge_ip6hdr *inner, __u16 tenant_arg,
+							    const __u8 backend_usid[16], void *data_end)
 {
-	// Claimed address past this point (masq_addr): any protocol other
-	// than TCP/UDP -- e.g. ICMPv6 -- is dropped rather than passed
-	// through to the normal kernel stack, the same fail-closed choice
-	// already made for gw_addr's own return branch (this file's header
-	// comment, point 2).
-	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP) {
-		count_drop(DROP_REASON_MALFORMED_EGRESS_RETURN);
+	struct edge_icmp6_echo_hdr *echo = (void *) (inner + 1);
+	if ((void *) (echo + 1) > data_end) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_ICMP);
+		return XDP_DROP;
+	}
+	if (echo->type != EDGE_ICMPV6_ECHO_REQUEST) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_ICMP);
 		return XDP_DROP;
 	}
 
+	// Forward key: identifier stands in for both sport/dport (struct
+	// egress_conn_value's own comment) -- everything else mirrors
+	// handle_egress_forward_l4's forward key exactly.
+	struct egress_conn_key fwd_key;
+	__builtin_memset(&fwd_key, 0, sizeof(fwd_key));
+	fwd_key.proto = EDGE_IPPROTO_ICMPV6;
+	__builtin_memcpy(fwd_key.saddr, inner->saddr, 16);
+	fwd_key.sport = echo->identifier;
+	__builtin_memcpy(fwd_key.daddr, inner->daddr, 16);
+	fwd_key.dport = echo->identifier;
+	fwd_key.tenant_arg = tenant_arg;
+
+	struct egress_conn_value *existing = bpf_map_lookup_elem(&egress_conn_table, &fwd_key);
+	struct egress_conn_value cv;
+
+	if (existing) {
+		__builtin_memcpy(&cv, existing, sizeof(cv));
+	} else {
+		// Every Echo Request may start a new flow -- there is no
+		// SYN-equivalent concept for ICMP, the same "any UDP packet
+		// may start a new flow" reasoning handle_egress_forward_l4
+		// already applies to UDP.
+		__u32 cfg_key = 0;
+		struct egress_config *ecfg = bpf_map_lookup_elem(&egress_config_table, &cfg_key);
+		if (!ecfg) {
+			count_drop(DROP_REASON_NO_EGRESS_ICMP_CONN);
+			return XDP_DROP;
+		}
+
+		__builtin_memset(&cv, 0, sizeof(cv));
+		cv.tenant_arg = tenant_arg;
+		__builtin_memcpy(cv.backend_addr, inner->saddr, 16);
+		cv.backend_port = echo->identifier; // the tenant's own original identifier
+		__builtin_memcpy(cv.backend_usid, backend_usid, 16);
+		__builtin_memcpy(cv.dest_addr, inner->daddr, 16);
+		cv.dest_port = echo->identifier;
+		__builtin_memcpy(cv.masq_addr, ecfg->masq_addr, 16);
+		cv.proto = EDGE_IPPROTO_ICMPV6;
+
+		// Identifier-claim probe: the same bounded linear-probe/
+		// BPF_NOEXIST technique handle_egress_forward_l4's masq_port
+		// claim uses, over the same numeric range, just keyed by
+		// identifier instead of port -- two different backend Pods
+		// (or the same Pod's two concurrent pings) can legitimately
+		// pick the same identifier value, and masq_addr has only one
+		// address to share, so the identifier must be re-mapped
+		// exactly like a SNAT port would be.
+		__u32 base = fnv1a_flow(inner->saddr, echo->identifier);
+		int claimed = 0;
+
+		#pragma unroll
+		for (int i = 0; i < EDGE_PAT_PROBE_LIMIT; i++) {
+			__u16 candidate = EDGE_PAT_PORT_BASE + ((base + (__u32) i) % EDGE_PAT_PORT_RANGE);
+			cv.masq_port = __builtin_bswap16(candidate);
+
+			struct egress_conn_key rev_key;
+			__builtin_memset(&rev_key, 0, sizeof(rev_key));
+			rev_key.proto = EDGE_IPPROTO_ICMPV6;
+			__builtin_memcpy(rev_key.saddr, inner->daddr, 16);
+			rev_key.sport = cv.masq_port;
+			__builtin_memcpy(rev_key.daddr, ecfg->masq_addr, 16);
+			rev_key.dport = cv.masq_port;
+			// tenant_arg left at 0 in the reverse row -- see struct
+			// egress_conn_key's comment.
+
+			if (bpf_map_update_elem(&egress_conn_table, &rev_key, &cv, BPF_NOEXIST) == 0) {
+				claimed = 1;
+				break;
+			}
+		}
+
+		if (!claimed) {
+			count_drop(DROP_REASON_EGRESS_PAT_EXHAUSTED);
+			return XDP_DROP;
+		}
+
+		bpf_map_update_elem(&egress_conn_table, &fwd_key, &cv, BPF_ANY);
+	}
+
+	// Masquerade both the source address and the identifier -- mirroring
+	// handle_egress_forward_l4's SNAT-only rewrite exactly, with
+	// identifier standing in for port throughout. fix_l4_checksum is a
+	// generic address+word-pair checksum-diff helper, not a Full-NAT-
+	// specific one, so passing 0 for the unused dport-shaped word slot on
+	// both sides (contributing zero diff) is safe -- the same technique
+	// handle_egress_forward_l4's own SNAT-only comment documents.
+	__u8 old_saddr[16];
+	__builtin_memcpy(old_saddr, inner->saddr, 16);
+	__be16 old_identifier = echo->identifier;
+
+	fix_l4_checksum(&echo->check, old_saddr, inner->daddr, old_identifier, 0,
+			cv.masq_addr, inner->daddr, cv.masq_port, 0);
+
+	__builtin_memcpy(inner->saddr, cv.masq_addr, 16);
+	echo->identifier = cv.masq_port;
+
+	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, cv.masq_addr, cv.dest_addr,
+						 __builtin_bswap16(inner->payload_len) + (__u16) sizeof(*inner), eth);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc);
+		return XDP_DROP;
+	}
+
+	return XDP_TX;
+}
+
+// handle_egress_forward is triggered when the outer destination's locator
+// matches this node's own configured egress_sid and outer nexthdr == 41 --
+// a fresh (or already-established) outbound flow from a tenant VPC backend
+// Pod toward an arbitrary internet destination. tenant_arg is the uFMT
+// Argument value already extracted from the packet's own destination
+// address by the caller (edge_nat), before this function strips the outer
+// header that address lives on. Strips the outer header, resolves the
+// inner packet's own next header, and dispatches to handle_egress_forward_l4
+// (TCP/UDP, the original logic) or handle_egress_forward_icmp6 (Echo
+// Request, galactic#404) -- anything else drops, this address is claimed.
+static EDGE_ALWAYS_INLINE int handle_egress_forward(struct xdp_md *ctx, struct edge_ip6hdr *outer,
+						      __u16 tenant_arg, void *data_end)
+{
+	if (outer->nexthdr != EDGE_IPPROTO_IPV6) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	// The outer source is the originating worker node's own SRv6 address
+	// -- the same node that encapsulated this packet via its tenant VRF's
+	// default route toward egress_sid (internal/plumbing/srv6.
+	// RouteEgressAdd's SEG6 encap route, design plan §4.4). Captured here,
+	// before strip_outer_header discards the outer header entirely, and
+	// remembered in egress_conn_value.backend_usid so the eventual reply
+	// (handle_egress_return) knows which node to push a return SRv6
+	// header toward -- there is no rule_table-equivalent policy entry for
+	// egress (design plan §3.2), so this wire-derived value is the only
+	// source of that address Phase B has.
+	//
+	// ASSUMPTION FLAGGED FOR REVIEW: this relies on the kernel's SEG6
+	// encap route always selecting the node's own uSID address as the
+	// pushed outer source, the same way it does for every other cross-
+	// node SRv6 packet in this codebase. That has not been independently
+	// verified against RouteEgressAdd's actual netlink-level source-
+	// address-selection behavior as part of this phase -- worth
+	// confirming before Phase D's e2e proof relies on it.
+	__u8 backend_usid[16];
+	__builtin_memcpy(backend_usid, outer->saddr, 16);
+
+	struct edge_ethhdr *eth;
+	if (strip_outer_header(ctx, &eth) != 0) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	data_end = (void *) (long) ctx->data_end;
+
+	struct edge_ip6hdr *inner = (void *) (eth + 1);
+	if ((void *) (inner + 1) > data_end) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	if (inner->nexthdr == EDGE_IPPROTO_ICMPV6)
+		return handle_egress_forward_icmp6(ctx, eth, inner, tenant_arg, backend_usid, data_end);
+
+	if (inner->nexthdr != EDGE_IPPROTO_TCP && inner->nexthdr != EDGE_IPPROTO_UDP) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_FORWARD);
+		return XDP_DROP;
+	}
+
+	return handle_egress_forward_l4(ctx, eth, inner, tenant_arg, backend_usid, data_end);
+}
+
+// handle_egress_return_l4 handles the TCP/UDP shape of an egress reply --
+// factored out of handle_egress_return unchanged (galactic#404 split this
+// out to make room for the ICMPv6 siblings below, not to change this
+// path's own behavior).
+static EDGE_ALWAYS_INLINE int handle_egress_return_l4(struct xdp_md *ctx, struct edge_ip6hdr *ip6, void *data_end)
+{
 	struct l4_view l4v;
 	if (parse_l4(ip6->nexthdr, (void *) (ip6 + 1), data_end, &l4v) != 0) {
 		count_drop(DROP_REASON_MALFORMED_EGRESS_RETURN);
@@ -1283,6 +1539,208 @@ static EDGE_ALWAYS_INLINE int handle_egress_return(struct xdp_md *ctx, struct ed
 		return XDP_DROP;
 
 	return XDP_TX;
+}
+
+// handle_egress_return_icmp6_echo handles an ICMPv6 Echo Reply addressed
+// to masq_addr -- the reply half of the ping round trip
+// handle_egress_forward_icmp6 started (galactic#404). Looks up
+// egress_conn_table by identifier (the same pseudo-port key the forward
+// allocation wrote) and un-masquerades both the destination address and
+// the identifier DNAT-style -- restoring the identifier is the part easy
+// to miss: leaving it at the masqueraded value would let the address
+// rewrite succeed while the tenant's own ping process still doesn't
+// recognize the reply, since the identifier it observes would not be the
+// one it originally sent.
+static EDGE_ALWAYS_INLINE int handle_egress_return_icmp6_echo(struct xdp_md *ctx, struct edge_ip6hdr *ip6, void *data_end)
+{
+	struct edge_icmp6_echo_hdr *echo = (void *) (ip6 + 1);
+	if ((void *) (echo + 1) > data_end) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_ICMP);
+		return XDP_DROP;
+	}
+
+	struct egress_conn_key rev_key;
+	__builtin_memset(&rev_key, 0, sizeof(rev_key));
+	rev_key.proto = EDGE_IPPROTO_ICMPV6;
+	__builtin_memcpy(rev_key.saddr, ip6->saddr, 16);
+	rev_key.sport = echo->identifier;
+	__builtin_memcpy(rev_key.daddr, ip6->daddr, 16);
+	rev_key.dport = echo->identifier;
+
+	struct egress_conn_value *cv = bpf_map_lookup_elem(&egress_conn_table, &rev_key);
+	if (!cv) {
+		count_drop(DROP_REASON_NO_EGRESS_ICMP_CONN);
+		return XDP_DROP;
+	}
+
+	// Two fields change: destination address (masq_addr -> backend_addr)
+	// and identifier (the masqueraded value -> cv->backend_port, the
+	// tenant's own original identifier) -- source address is untouched,
+	// the same DNAT-only shape handle_egress_return_l4 applies to ports,
+	// just for ICMP's identifier field instead.
+	__u8 old_daddr[16];
+	__builtin_memcpy(old_daddr, ip6->daddr, 16);
+	__be16 old_identifier = echo->identifier;
+
+	fix_l4_checksum(&echo->check, ip6->saddr, old_daddr, old_identifier, 0,
+			ip6->saddr, cv->backend_addr, cv->backend_port, 0);
+
+	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
+	echo->identifier = cv->backend_port;
+
+	__u32 cfg_key = 0;
+	struct gw_config *cfg = bpf_map_lookup_elem(&gw_config_table, &cfg_key);
+	if (!cfg) {
+		count_drop(DROP_REASON_NO_EGRESS_ICMP_CONN);
+		return XDP_DROP;
+	}
+
+	__be16 inner_payload_len = ip6->payload_len;
+
+	if (push_outer_header(ctx, cfg->gw_addr, cv->backend_usid, inner_payload_len) != 0)
+		return XDP_DROP;
+
+	return XDP_TX;
+}
+
+// handle_egress_return_icmp6_error handles Destination Unreachable/Packet
+// Too Big/Time Exceeded/Parameter Problem addressed to masq_addr
+// (galactic#404) -- the piece with actual teeth, since Packet Too Big is
+// how path MTU discovery reaches a tenant. The embedded original datagram
+// -- masq_addr:masq_port -> dest_addr:dest_port, exactly the packet
+// handle_egress_forward_l4 last sent -- carries everything needed to key
+// egress_conn_table's existing reverse row; no new map, no new key shape.
+//
+// Deliberately uses parse_embedded_ports, not parse_l4: RFC 4443
+// guarantees only the first 8 bytes of the invoking transport header, and
+// parse_l4's full-struct bounds check (20 bytes for TCP) would reject a
+// validly-minimal error message the port-only read here does not need to
+// reject.
+static EDGE_ALWAYS_INLINE int handle_egress_return_icmp6_error(struct xdp_md *ctx, struct edge_ip6hdr *ip6, void *data_end)
+{
+	struct edge_icmp6_error_hdr *err = (void *) (ip6 + 1);
+	struct edge_ip6hdr *embedded = (void *) (err + 1);
+	if ((void *) (embedded + 1) > data_end) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_ICMP);
+		return XDP_DROP;
+	}
+	if (embedded->nexthdr != EDGE_IPPROTO_TCP && embedded->nexthdr != EDGE_IPPROTO_UDP) {
+		// The invoking packet wasn't one this program itself sent
+		// (handle_egress_forward only ever emits TCP/UDP or ICMPv6
+		// Echo Request) -- not attributable to a tenant flow.
+		count_drop(DROP_REASON_MALFORMED_EGRESS_ICMP);
+		return XDP_DROP;
+	}
+
+	__be16 embedded_sport, embedded_dport;
+	if (parse_embedded_ports((void *) (embedded + 1), data_end, &embedded_sport, &embedded_dport) != 0) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_ICMP);
+		return XDP_DROP;
+	}
+
+	// The embedded packet is masq_addr:masq_port -> dest_addr:dest_port --
+	// exactly the packet handle_egress_forward_l4 last sent -- so this is
+	// the *same reverse key* a direct TCP/UDP reply is looked up by, just
+	// read one layer deeper.
+	struct egress_conn_key rev_key;
+	__builtin_memset(&rev_key, 0, sizeof(rev_key));
+	rev_key.proto = embedded->nexthdr;
+	__builtin_memcpy(rev_key.saddr, embedded->daddr, 16);
+	rev_key.sport = embedded_dport;
+	__builtin_memcpy(rev_key.daddr, embedded->saddr, 16);
+	rev_key.dport = embedded_sport;
+
+	struct egress_conn_value *cv = bpf_map_lookup_elem(&egress_conn_table, &rev_key);
+	if (!cv) {
+		count_drop(DROP_REASON_NO_EGRESS_ICMP_CONN);
+		return XDP_DROP;
+	}
+
+	// Two rewrites land on the same checksum (ICMPv6's own, which covers
+	// the whole message including the embedded bytes verbatim -- the
+	// embedded packet's own stale L4 checksum is untouched and never
+	// independently re-validated by anyone downstream): the outer
+	// packet's destination (masq_addr -> backend_addr, so it routes to
+	// the right worker node) and the embedded packet's own source
+	// address/port (masq_addr:masq_port -> backend_addr:backend_port),
+	// so the tenant's IP stack recognizes this error as belonging to a
+	// socket it actually opened. Both old values are masq_addr/masq_port
+	// by construction (this program's own earlier SNAT), so this is
+	// genuinely two separate memory locations converging on one value
+	// change apiece -- fix_l4_checksum's four word-slots don't have to
+	// mean "one address's source/dest" here, just "two old values, two
+	// new values, diffed together" (the same generic reuse its other
+	// call sites in this file already lean on).
+	__u8 old_outer_daddr[16], old_embedded_saddr[16];
+	__builtin_memcpy(old_outer_daddr, ip6->daddr, 16);
+	__builtin_memcpy(old_embedded_saddr, embedded->saddr, 16);
+
+	fix_l4_checksum(&err->check, old_outer_daddr, old_embedded_saddr, 0, embedded_sport,
+			cv->backend_addr, cv->backend_addr, 0, cv->backend_port);
+
+	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
+	__builtin_memcpy(embedded->saddr, cv->backend_addr, 16);
+	__be16 *embedded_ports = (void *) (embedded + 1);
+	embedded_ports[0] = cv->backend_port;
+
+	__u32 cfg_key = 0;
+	struct gw_config *cfg = bpf_map_lookup_elem(&gw_config_table, &cfg_key);
+	if (!cfg) {
+		count_drop(DROP_REASON_NO_EGRESS_ICMP_CONN);
+		return XDP_DROP;
+	}
+
+	__be16 inner_payload_len = ip6->payload_len;
+
+	if (push_outer_header(ctx, cfg->gw_addr, cv->backend_usid, inner_payload_len) != 0)
+		return XDP_DROP;
+
+	return XDP_TX;
+}
+
+// handle_egress_return_icmp6 reads the common 4-byte ICMPv6 prefix and
+// dispatches by type (galactic#404): Echo Reply and the four RFC 4443
+// error types translate back to the originating tenant; anything else
+// (Router Advertisement, Neighbor Solicitation/Advertisement, an Echo
+// Request targeting masq_addr directly, ...) is not a reply to any tenant
+// flow this program tracks -- XDP_PASS, not XDP_DROP, handing it to the
+// normal kernel stack instead of claiming and dropping it.
+static EDGE_ALWAYS_INLINE int handle_egress_return_icmp6(struct xdp_md *ctx, struct edge_ip6hdr *ip6, void *data_end)
+{
+	struct edge_icmp6hdr *icmp6 = (void *) (ip6 + 1);
+	if ((void *) (icmp6 + 1) > data_end) {
+		count_drop(DROP_REASON_MALFORMED_EGRESS_ICMP);
+		return XDP_DROP;
+	}
+
+	if (icmp6->type == EDGE_ICMPV6_ECHO_REPLY)
+		return handle_egress_return_icmp6_echo(ctx, ip6, data_end);
+
+	if (icmp6->type == EDGE_ICMPV6_DEST_UNREACH || icmp6->type == EDGE_ICMPV6_PACKET_TOO_BIG ||
+	    icmp6->type == EDGE_ICMPV6_TIME_EXCEEDED || icmp6->type == EDGE_ICMPV6_PARAM_PROBLEM)
+		return handle_egress_return_icmp6_error(ctx, ip6, data_end);
+
+	return XDP_PASS;
+}
+
+// handle_egress_return is triggered when the outer destination matches this
+// node's own configured masq_addr -- an ordinary internet-originated IPv6
+// packet (no SRv6 encapsulation), the reply half of a flow
+// handle_egress_forward already established. Dispatches on next header:
+// TCP/UDP to handle_egress_return_l4 (the original logic), ICMPv6 to
+// handle_egress_return_icmp6 (galactic#404); any other protocol is not
+// this program's to translate -- XDP_PASS, mirroring step 1's own
+// can't-fully-parse-or-match fallthrough, just decided per-protocol here
+// since this address is otherwise claimed.
+static EDGE_ALWAYS_INLINE int handle_egress_return(struct xdp_md *ctx, struct edge_ip6hdr *ip6, void *data_end)
+{
+	if (ip6->nexthdr == EDGE_IPPROTO_ICMPV6)
+		return handle_egress_return_icmp6(ctx, ip6, data_end);
+
+	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP)
+		return XDP_PASS;
+
+	return handle_egress_return_l4(ctx, ip6, data_end);
 }
 
 // ---------------------------------------------------------------------
