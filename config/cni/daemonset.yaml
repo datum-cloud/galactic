@@ -9,6 +9,10 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: galactic-cni
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -16,6 +20,14 @@ spec:
     spec:
       serviceAccountName: galactic-cni
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # galactic-cni is more fundamental than any other node component: if
+      # evicted under node pressure, no pod (including the CNI's own peers)
+      # can schedule on this node at all.
+      priorityClassName: system-node-critical
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       tolerations:
         - operator: Exists
       # Only worker nodes run VPC pods; galactic-cni has nothing to do on
@@ -50,7 +62,10 @@ spec:
                   fieldPath: spec.nodeName
           securityContext:
             runAsUser: 0
+            capabilities:
+              drop: ["ALL"]
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
           resources:
             requests:
               cpu: 10m
@@ -72,6 +87,19 @@ spec:
           # placeholder, not a published tag.
           image: ghcr.io/datum-cloud/galactic-cni:latest
           command: ["/galactic-cni", "run"]
+          # Documentation only: hostNetwork: true means these are the
+          # process's actual listen ports on the node, not something
+          # Kubernetes publishes -- containerPort here doesn't change
+          # behavior, it just makes both ports (--grpc-health-port/
+          # --metrics-port defaults) visible to `kubectl describe pod`
+          # instead of only the gRPC one showing up via the probes below.
+          ports:
+            - name: grpc-health
+              containerPort: 5180
+              protocol: TCP
+            - name: metrics
+              containerPort: 8082
+              protocol: TCP
           # --- PRIVILEGE EXPANSION (Milestone 3.1 of
           # .local/implementation-plan-ebpf-xdp-usid-datapath.md) ---
           # This container previously ran with allowPrivilegeEscalation:
@@ -89,10 +117,12 @@ spec:
           securityContext:
             runAsUser: 0
             capabilities:
+              drop: ["ALL"]
               add:
                 - BPF
                 - NET_ADMIN
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
           resources:
             requests:
               cpu: 5m
@@ -109,6 +139,18 @@ spec:
               mountPath: /host/var/log/galactic
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+          # BPF map creation under load (image pull + verifier work on a
+          # slow node) can outrun readinessProbe/livenessProbe's short
+          # initialDelaySeconds, risking a liveness-triggered restart loop
+          # before the process finishes initializing. startupProbe reuses
+          # the same gRPC health check with a much longer failureThreshold
+          # so liveness doesn't start counting until this succeeds once.
+          startupProbe:
+            grpc:
+              port: 5180
+              service: ebpf-datapath
+            periodSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             grpc:
               port: 5180

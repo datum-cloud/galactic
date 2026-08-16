@@ -9,6 +9,10 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: galactic-gateway
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -36,6 +40,14 @@ spec:
       # bindings grant the union of what each container needs.
       serviceAccountName: galactic-gateway
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Loss of galactic-gateway blackholes edge traffic through this
+      # node, so the scheduler/kubelet must never preempt it for ordinary
+      # workloads under node pressure.
+      priorityClassName: system-node-critical
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       tolerations:
         - operator: Exists
       containers:
@@ -67,14 +79,19 @@ spec:
             - name: GALACTIC_ROUTER_GC_NAMESPACE
               value: galactic-system
             - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              # Same as config/router/tenant/daemonset-patch.yaml: -1
+              # disables the inbound BGP listener, so there's no BGP
+              # containerPort to declare on this container either -- this
+              # role only dials out to iBGP peers.
               value: "-1"
-            # Talos nodes permanently bind 127.0.0.1:5000 for the built-in
-            # /sbin/dashboard; since this DaemonSet runs hostNetwork: true,
-            # the default gRPC health port (5000) always collides on Talos
-            # — see docs/router/configuration.md. This pod's galactic-gateway
-            # container shares the same network namespace (hostNetwork:
-            # true), so its own grpc-health port (below) must also differ
-            # from this one, not just from 5000.
+            # 5179 is also the binary's own default now (it used to be
+            # 5000, which permanently collided with Talos's built-in
+            # /sbin/dashboard on 127.0.0.1:5000 under hostNetwork: true --
+            # see docs/router/configuration.md). Set explicitly here
+            # anyway so it can't silently drift, and — more importantly —
+            # this pod's galactic-gateway container shares the same
+            # network namespace (hostNetwork: true), so its own
+            # grpc-health port (below) must always differ from this one.
             - name: GALACTIC_ROUTER_GRPC_HEALTH_PORT
               value: "5179"
           ports:
@@ -84,6 +101,13 @@ spec:
             - name: grpc-health
               containerPort: 5179
               protocol: TCP
+          # See config/router/base/daemonset.yaml: same GoBGP cold-start
+          # rationale for startupProbe.
+          startupProbe:
+            grpc:
+              port: 5179
+            periodSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             grpc:
               port: 5179
@@ -97,9 +121,11 @@ spec:
           securityContext:
             runAsUser: 0
             capabilities:
+              drop: ["ALL"]
               add:
                 - NET_ADMIN
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
           resources:
             requests:
               cpu: 50m
@@ -149,6 +175,14 @@ spec:
             - name: grpc-health
               containerPort: 5181
               protocol: TCP
+          # The eBPF XDP loader (map creation/attach) has the same
+          # slow-cold-start shape as galactic-cni's — see that manifest's
+          # startupProbe comment.
+          startupProbe:
+            grpc:
+              port: 5181
+            periodSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             grpc:
               port: 5181
@@ -176,11 +210,13 @@ spec:
           securityContext:
             runAsUser: 0
             capabilities:
+              drop: ["ALL"]
               add:
                 - NET_ADMIN
                 - BPF
                 - PERFMON
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
           resources:
             requests:
               cpu: 50m

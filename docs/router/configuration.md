@@ -23,7 +23,7 @@ exact name from the table below.
 | BGP listen port | `GALACTIC_ROUTER_BGP_LISTEN_PORT` | `--bgp-listen-port` | `179` |
 | BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | _(auto-detected from `lo`)_ |
 | Metrics port | `GALACTIC_ROUTER_METRICS_PORT` | `--metrics-port` | `8080` |
-| gRPC health port | `GALACTIC_ROUTER_GRPC_HEALTH_PORT` | `--grpc-health-port` | `5000` |
+| gRPC health port | `GALACTIC_ROUTER_GRPC_HEALTH_PORT` | `--grpc-health-port` | `5179` |
 | Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE` | `--gc-namespace` | `galactic-system` |
 | Orphan-cleanup interval | `GALACTIC_ROUTER_GC_INTERVAL` | `--gc-interval` | `5m` |
 
@@ -105,15 +105,17 @@ TCP port for the gRPC health check server. Used by Kubernetes liveness and
 readiness probes.
 
 **Type:** integer
-**Default:** `5000`
+**Default:** `5179`
 **Valid values:** `1`–`65535`
 
-> **Talos:** `/sbin/dashboard` permanently binds `127.0.0.1:5000` on every
-> Talos node. Since `galactic-router` runs with `hostNetwork: true`, the
-> default `5000` always collides on Talos-based clusters. The shipped
-> `config/router/base/daemonset.yaml` sets this to `5179` for exactly this
-> reason; if you run `galactic-router` outside those manifests on Talos, set
-> it to something other than `5000` yourself.
+> **Why not 5000:** the default used to be `5000`, one of the most
+> overloaded dev ports in existence (macOS AirPlay Receiver, Flask's dev
+> server, Docker Registry) -- and on Talos specifically, `/sbin/dashboard`
+> permanently binds `127.0.0.1:5000` on every node. Since `galactic-router`
+> runs with `hostNetwork: true`, that always collided on Talos-based
+> clusters. Every shipped manifest already set this to `5179` to work
+> around it, so the default now matches what actually gets deployed instead
+> of being a landmine for anything run outside those manifests.
 
 ### `--gc-namespace` / `GALACTIC_ROUTER_GC_NAMESPACE`
 

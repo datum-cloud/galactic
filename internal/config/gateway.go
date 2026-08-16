@@ -18,9 +18,8 @@ import (
 const (
 	// DefaultGatewayMetricsPort/DefaultGatewayGRPCHealthPort deliberately
 	// differ from DefaultRouterMetricsPort (8080) and
-	// DefaultRouterGRPCHealthPort (5000, overridden to 5179 on Talos by
-	// config/router/base/daemonset.yaml) and from galactic-cni's
-	// credential-refresh grpc-health port (5180,
+	// DefaultRouterGRPCHealthPort (5179) and from galactic-cni's
+	// credential-refresh ports (grpc-health 5180, metrics 8082,
 	// config/cni/daemonset.yaml): galactic-gateway is deployed as a
 	// second container in the same hostNetwork: true pod as
 	// galactic-router, so every port it binds is on the same network

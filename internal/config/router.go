@@ -16,9 +16,19 @@ import (
 // --- Router defaults -------------------------------------------------------
 
 const (
-	DefaultRouterBGPListenPort  = 179
-	DefaultRouterMetricsPort    = 8080
-	DefaultRouterGRPCHealthPort = 5000
+	DefaultRouterBGPListenPort = 179
+	DefaultRouterMetricsPort   = 8080
+	// DefaultRouterGRPCHealthPort was 5000 until every deployed manifest
+	// had to override it anyway: 5000 is one of the most overloaded dev
+	// ports in existence (macOS AirPlay Receiver, Flask's dev server,
+	// Docker Registry), and on Talos specifically /sbin/dashboard
+	// permanently binds 127.0.0.1:5000 -- see docs/router/configuration.md.
+	// 5179 is what every DaemonSet (config/router/base,
+	// config/gateway/base) already sets via
+	// GALACTIC_ROUTER_GRPC_HEALTH_PORT, so this just makes the
+	// out-of-the-box default match reality instead of being a landmine
+	// for anything run outside those manifests.
+	DefaultRouterGRPCHealthPort = 5179
 	DefaultRouterGCNamespace    = "galactic-system"
 	DefaultRouterGCInterval     = 5 * time.Minute
 

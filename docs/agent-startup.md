@@ -9,7 +9,7 @@ sequenceDiagram
     Router->>Router: validate config (--node-name, --mode: transit/fabric/tenant, ...)
     Router->>Router: select RuntimeFactory: tenant→GoBGP, fabric→FRR stub, transit→error (unsupported)
     Router->>Kubernetes: build controller-runtime manager (metrics on :8080, no HTTP health)
-    Router->>Router: start gRPC health server (:5000, SERVING immediately)
+    Router->>Router: start gRPC health server (:5179, SERVING immediately)
     Router->>Kubernetes: RBAC pre-flight — SelfSubjectAccessReview per watched resource (logs if watch denied)
     Router->>Kubernetes: register field indexes (BGPPeer×2, BGPPolicy, BGPAdvertisement, BGPVRFInstance, BGPRouter)
     Router->>Kubernetes: register controllers — BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Secret, Node, GC

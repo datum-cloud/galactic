@@ -68,7 +68,14 @@ func newRunCommand() *cobra.Command {
 		},
 	}
 	runCmd.Flags().IntVar(&grpcHealthPort, "grpc-health-port", 5180, "gRPC health check port")
-	runCmd.Flags().IntVar(&metricsPort, "metrics-port", 9091, "Prometheus metrics HTTP port")
+	// 8082, not 9091: Prometheus's own default-port-allocations registry
+	// reserves 9090-9093 for Prometheus/Pushgateway/Alertmanager and 9100+
+	// for named exporters (9100 itself is node_exporter, near-universal on
+	// real hosts) -- squatting on either would risk a real collision on a
+	// hostNetwork: true node. 8082 continues galactic's own internal
+	// metrics-port convention instead (galactic-router: 8080,
+	// galactic-gateway: 8081).
+	runCmd.Flags().IntVar(&metricsPort, "metrics-port", 8082, "Prometheus metrics HTTP port")
 	return runCmd
 }
 

@@ -144,7 +144,7 @@ lives in `root.go`'s `runCmd`:
    an error ("not yet supported").
 3. Build controller-runtime manager (metrics on configurable port, default `:8080`;
    no HTTP health endpoint).
-4. Start gRPC health server on a configurable port (default `:5000`).
+4. Start gRPC health server on a configurable port (default `:5179`).
 5. RBAC pre-flight: `checkWatchPermissions` (in `main.go`) issues a
    `SelfSubjectAccessReview` for every watched resource type and logs an actionable
    error if watch RBAC is missing (informer caches would otherwise silently never sync).
@@ -178,17 +178,20 @@ sibling container instead.
 | `GALACTIC_ROUTER_BGP_LISTEN_PORT`   | No       | `179`             | BGP TCP listen port; `-1` disables inbound connections (outbound-only)  |
 | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | No       | —                 | Source address for outgoing BGP TCP connections (numbered underlay use) |
 | `GALACTIC_ROUTER_METRICS_PORT`      | No       | `8080`            | controller-runtime Prometheus metrics port                              |
-| `GALACTIC_ROUTER_GRPC_HEALTH_PORT`  | No       | `5000`            | gRPC health check port (liveness/readiness probes)                      |
+| `GALACTIC_ROUTER_GRPC_HEALTH_PORT`  | No       | `5179`            | gRPC health check port (liveness/readiness probes)                      |
 | `GALACTIC_ROUTER_GC_NAMESPACE`      | No       | `galactic-system` | Namespace the GC controller scans for orphaned CRDs                     |
 | `GALACTIC_ROUTER_GC_INTERVAL`       | No       | `5m`              | GC controller sweep interval                                            |
 
 See [docs/router/configuration.md](../router/configuration.md) for the full reference, including CLI flags and precedence.
 
-On a gateway-role node, `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` and
-`GALACTIC_ROUTER_GRPC_HEALTH_PORT=5179` are set by
-`config/gateway/base/daemonset.yaml` specifically to avoid colliding with
-the co-located `galactic-gateway` container's own ports on the same
-`hostNetwork: true` pod — see
+On a gateway-role node, `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` is set by
+`config/gateway/base/daemonset.yaml` — the tenant-BGP container only dials
+out to iBGP peers there, same as the plain tenant role.
+`GALACTIC_ROUTER_GRPC_HEALTH_PORT=5179` is set explicitly too, even though
+it now matches the binary's own default, so it doesn't silently start
+colliding with the co-located `galactic-gateway` container's own health
+port on the same `hostNetwork: true` pod if either default ever changes —
+see
 [ARCHITECTURE-GATEWAY.md#configuration](ARCHITECTURE-GATEWAY.md#configuration).
 
 ---
@@ -222,7 +225,7 @@ the co-located `galactic-gateway` container's own ports on the same
 | `github.com/spf13/cobra`         | v1.10.2               | CLI command/flag handling                                                                                                                                                       |
 | `github.com/spf13/viper`         | v1.21.0               | Config resolution (flags/env/defaults) — unlike the CNI-chain binaries (see [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)), which resolve config themselves and don't import viper |
 | `github.com/vishvananda/netlink` | pinned pseudo-version | Linux netlink: VRF, SRv6 routes (GC's kernel-state sweep)                                                                                                                       |
-| `google.golang.org/grpc`         | v1.82.0               | gRPC health server (default `:5000`)                                                                                                                                            |
+| `google.golang.org/grpc`         | v1.82.0               | gRPC health server (default `:5179`)                                                                                                                                            |
 | `k8s.io/api`, `k8s.io/client-go` | v0.36.0               | Kubernetes client, Node/Secret API types                                                                                                                                        |
 
 ---
@@ -236,7 +239,7 @@ the co-located `galactic-gateway` container's own ports on the same
 - **Hash-based no-op suppression.** SHA-256 over the sorted `DesiredRouter` prevents redundant GoBGP Apply calls on every CRD event.
 - **RuntimeFactory pattern.** `--mode=tenant` (`GALACTIC_ROUTER_ROUTER_MODE=tenant`) selects GoBGP; `--mode=fabric` selects the FRR stub; `--mode=transit` is accepted by validation but returns an error at startup (not yet implemented). The mode is selected at startup; no controller changes are needed to add a new mode.
 - **DEL is intentionally minimal everywhere in the CNI chain; GC reclaims shared state asynchronously.** See [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md#key-design-decisions) for the CNI-side half of this decision. `galactic-router`'s GC controller (ticker-driven, default every 5m) reclaims orphaned CRDs, stale kernel VRFs, and stale eBPF entries once no live container still references them.
-- **gRPC health, configurable port.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on a configurable port (default `5000`). No HTTP health endpoint. `galactic-gateway` follows the identical convention on its own port — see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md).
+- **gRPC health, configurable port.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on a configurable port (default `5179`). No HTTP health endpoint. `galactic-gateway` follows the identical convention on its own port — see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md).
 - **`galactic-router` carries no gateway-role code.** The edge XDP NAT+LB gateway used to be a `galactic-router` mode; it was split into its own `galactic-gateway` binary specifically so a crash on either side no longer takes the other down with it — see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) for the full rationale and design.
 
 ---

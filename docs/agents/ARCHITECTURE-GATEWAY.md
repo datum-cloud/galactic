@@ -296,8 +296,8 @@ degraded.
 
 The metrics/gRPC-health port defaults (`8081`/`5181`) deliberately differ
 from every other `galactic-*` process's own defaults
-(`galactic-router`'s `8080`/`5000`, overridden to `5179` on gateway nodes;
-`galactic-cni`'s credential-refresh health port `5180`) because
+(`galactic-router`'s `8080`/`5179`; `galactic-cni`'s credential-refresh
+health port `5180`, metrics port `8082`) because
 `galactic-gateway` runs as a second container in the same
 `hostNetwork: true` pod as `galactic-router` — every port it binds shares
 that node's network namespace with every other `galactic-*` process already

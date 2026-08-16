@@ -9,6 +9,10 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: galactic-router
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -16,6 +20,14 @@ spec:
     spec:
       serviceAccountName: galactic-router
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Loss of galactic-router blackholes every VPC route through this
+      # node, so the scheduler/kubelet must never preempt it for ordinary
+      # workloads under node pressure.
+      priorityClassName: system-node-critical
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       tolerations:
         - operator: Exists
       containers:
@@ -39,10 +51,12 @@ spec:
               value: tenant
             - name: GALACTIC_ROUTER_GC_NAMESPACE
               value: galactic-system
-            # Talos nodes permanently bind 127.0.0.1:5000 for the built-in
-            # /sbin/dashboard; since this DaemonSet runs hostNetwork: true,
-            # the default gRPC health port (5000) always collides on Talos.
-            # See docs/router/configuration.md for details.
+            # 5179 is also the binary's own default (it used to be 5000,
+            # which permanently collided with Talos's built-in
+            # /sbin/dashboard on 127.0.0.1:5000 under hostNetwork: true --
+            # see docs/router/configuration.md). Set explicitly here
+            # anyway, matching this manifest's convention elsewhere, so it
+            # can't silently drift if the binary's default ever changes.
             - name: GALACTIC_ROUTER_GRPC_HEALTH_PORT
               value: "5179"
           ports:
@@ -52,6 +66,24 @@ spec:
             - name: grpc-health
               containerPort: 5179
               protocol: TCP
+          # No BGP containerPort here: GALACTIC_ROUTER_BGP_LISTEN_PORT
+          # isn't set at this (never-applied-directly) base level at all,
+          # and its real value is role-dependent -- see
+          # ../tenant-control/daemonset-patch.yaml (1790, the one role
+          # that actually listens) and ../tenant/daemonset-patch.yaml
+          # (-1, disabled). Declaring one here would just be wrong for
+          # whichever role doesn't match it.
+          # GoBGP's cold start (peer session setup, RIB population) can
+          # outrun readinessProbe/livenessProbe's short initialDelaySeconds
+          # on a slow node, risking a liveness-triggered restart loop before
+          # the process finishes initializing. startupProbe reuses the same
+          # gRPC health check with a much longer failureThreshold so
+          # liveness doesn't start counting until this succeeds once.
+          startupProbe:
+            grpc:
+              port: 5179
+            periodSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             grpc:
               port: 5179
@@ -65,9 +97,11 @@ spec:
           securityContext:
             runAsUser: 0
             capabilities:
+              drop: ["ALL"]
               add:
                 - NET_ADMIN
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
           resources:
             requests:
               cpu: 50m
