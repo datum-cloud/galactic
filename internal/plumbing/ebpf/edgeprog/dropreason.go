@@ -33,7 +33,17 @@ const (
 	DropReasonMalformedEgressReturn  uint32 = 13
 	DropReasonNoEgressReturnConn     uint32 = 14
 
-	DropReasonCount uint32 = 15
+	// ICMPv6 egress drop reasons (galactic#404) -- see edgenat.c's
+	// handle_egress_forward_icmp6/handle_egress_return_icmp6. Kept
+	// distinct from the TCP/UDP-specific reasons above (and from each
+	// other) so an operator reading drop counters can tell "this ICMPv6
+	// message didn't parse" apart from "it parsed fine but matched no
+	// flow" -- see edgenat.c's enum edge_drop_reason for the full
+	// rationale, including the #381 review comment this closes.
+	DropReasonMalformedEgressICMP uint32 = 15
+	DropReasonNoEgressICMPConn    uint32 = 16
+
+	DropReasonCount uint32 = 17
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
@@ -55,4 +65,6 @@ var DropReasonNames = map[uint32]string{
 	DropReasonEgressPATExhausted:     "egress_pat_exhausted",
 	DropReasonMalformedEgressReturn:  "malformed_egress_return",
 	DropReasonNoEgressReturnConn:     "no_egress_return_conn",
+	DropReasonMalformedEgressICMP:    "malformed_egress_icmp",
+	DropReasonNoEgressICMPConn:       "no_egress_icmp_conn",
 }
