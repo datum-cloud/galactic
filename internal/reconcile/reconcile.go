@@ -36,19 +36,17 @@ const legacySRv6SIDAnnotation = "galactic.datum.net/srv6-sid"
 type Reconciler struct {
 	client       client.Client
 	nodeName     string
-	routerMode   string
 	localAddress string
 }
 
-// New returns a Reconciler for the given node, router mode, and local BGP address.
+// New returns a Reconciler for the given node and local BGP address.
 // localAddress, when non-empty, is used as the EVPN next-hop instead of the
 // node's first IPv6 InternalIP — required when the node InternalIP is not
 // reachable via the SRv6 transit mesh (e.g. Kind/ContainerLab Docker bridge).
-func New(c client.Client, nodeName, routerMode, localAddress string) *Reconciler {
+func New(c client.Client, nodeName, localAddress string) *Reconciler {
 	return &Reconciler{
 		client:       c,
 		nodeName:     nodeName,
-		routerMode:   routerMode,
 		localAddress: localAddress,
 	}
 }
@@ -64,9 +62,11 @@ func (r *Reconciler) BuildDesiredRouter(
 		return nil, nil
 	}
 
-	// Role check.
-	wantRole := bgpv1alpha1.RouterRole(r.routerMode)
-	if !slices.Contains(router.Spec.Roles, wantRole) {
+	// Role check. galactic-router only ever runs the tenant role; a router
+	// carrying a different role (e.g. fabric, transit — both exist in the
+	// external RouterRole enum but have no implementation here) is safely
+	// skipped rather than reconciled against the GoBGP runtime.
+	if !slices.Contains(router.Spec.Roles, bgpv1alpha1.RouterRoleTenant) {
 		return nil, nil
 	}
 	if len(router.Spec.Roles) > 1 {

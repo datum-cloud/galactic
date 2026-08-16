@@ -75,8 +75,7 @@ galactic/
 │   ├── reconcile/           # CRD → DesiredRouter translation (node/role checks,
 │   │                        #   secret resolution, IPv6 next-hop from Node)
 │   ├── runtime/             # RouterRuntime interface + RuntimeManager
-│   │   ├── gobgp/           # GoBGP RouterRuntime (tenant mode)
-│   │   └── frr/             # FRR RouterRuntime stub (fabric mode)
+│   │   └── gobgp/           # GoBGP RouterRuntime (the only backend)
 │   ├── model/               # DesiredRouter and family; re-exports BGP API enums
 │   ├── hash/                # SHA-256 change detection over DesiredRouter
 │   ├── metadata/            # Build-time version info (Version, GitCommit, etc.)
@@ -115,8 +114,7 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 | ------------------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `internal/controller`    | `galactic-router`                          | controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Secret, Node, GC — not NetworkGateway/NetworkRule, see the note above); field index registration; CRD status helpers |
 | `internal/reconcile`     | `galactic-router`                          | CRD → DesiredRouter translation                                                                                                                                                                                       |
-| `internal/runtime/gobgp` | `galactic-router`                          | Embedded GoBGP server (`--mode=tenant`)                                                                                                                                                                               |
-| `internal/runtime/frr`   | `galactic-router`                          | FRR stub (`--mode=fabric`) — returns "not implemented" for every method                                                                                                                                               |
+| `internal/runtime/gobgp` | `galactic-router`                          | Embedded GoBGP server (the only backend)                                                                                                                                                                              |
 | `internal/model`         | `galactic-router`                          | Internal BGP model types                                                                                                                                                                                              |
 | `internal/hash`          | `galactic-router`                          | Change detection                                                                                                                                                                                                      |
 | `internal/metadata`      | every binary in the repo                   | Build-time version info stamped via `-ldflags`                                                                                                                                                                        |
@@ -134,14 +132,13 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 `main.go` is a 3-line wrapper around `newRootCommand().Execute()`; all startup logic
 lives in `root.go`'s `runCmd`:
 
-1. Validate config (`--node-name` and `--mode` required; `--mode` must be `transit`,
-   `fabric`, or `tenant`). Env vars: `GALACTIC_ROUTER_NODE_NAME`,
-   `GALACTIC_ROUTER_ROUTER_MODE`, plus optional `GALACTIC_ROUTER_BGP_LISTEN_PORT`,
+1. Validate config (`--node-name` required). Env vars: `GALACTIC_ROUTER_NODE_NAME`,
+   plus optional `GALACTIC_ROUTER_BGP_LISTEN_PORT`,
    `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`, `GALACTIC_ROUTER_METRICS_PORT`,
    `GALACTIC_ROUTER_GRPC_HEALTH_PORT`, `GALACTIC_ROUTER_GC_NAMESPACE`,
    `GALACTIC_ROUTER_GC_INTERVAL`, `GALACTIC_ROUTER_REFLECTOR`.
-2. Select `RuntimeFactory`: `tenant` → GoBGP, `fabric` → FRR stub, `transit` → returns
-   an error ("not yet supported").
+2. Create the `RuntimeFactory`: an unconditional `gobgp.NewRuntimeFactory(...)` call —
+   GoBGP is the only backend, so there is no mode-based selection to make.
 3. Build controller-runtime manager (metrics on configurable port, default `:9179`;
    no HTTP health endpoint).
 4. Start gRPC health server on a configurable port (default `:5179`).
@@ -173,8 +170,7 @@ sibling container instead.
 | Variable                            | Required | Default           | Description                                                             |
 | ----------------------------------- | -------- | ----------------- | ----------------------------------------------------------------------- |
 | `GALACTIC_ROUTER_NODE_NAME`         | Yes      | —                 | Kubernetes node name; filters which BGPRouter CRDs this instance owns   |
-| `GALACTIC_ROUTER_ROUTER_MODE`       | Yes      | —                 | `transit` (unsupported stub), `fabric` (FRR stub), or `tenant` (GoBGP)  |
-| `GALACTIC_ROUTER_REFLECTOR`         | No       | `false`           | Enable route reflector mode; only valid for `fabric`/`tenant`           |
+| `GALACTIC_ROUTER_REFLECTOR`         | No       | `false`           | Enable route reflector mode                                            |
 | `GALACTIC_ROUTER_BGP_LISTEN_PORT`   | No       | `179`             | BGP TCP listen port; `-1` disables inbound connections (outbound-only)  |
 | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | No       | —                 | Source address for outgoing BGP TCP connections (numbered underlay use) |
 | `GALACTIC_ROUTER_METRICS_PORT`      | No       | `9179`            | controller-runtime Prometheus metrics port                              |
@@ -203,7 +199,6 @@ co-located `galactic-gateway` container's own health port on the same
 | `internal/reconcile`     | galactic-router                          | Translates BGPRouter + related CRDs into `model.DesiredRouter`; enforces node/role filtering, timer validation, AFI validation                                   | No                |
 | `internal/runtime`       | galactic-router                          | `RouterRuntime` interface; `RuntimeManager` (keyed map of live runtimes, double-checked lock create)                                                             | Yes (runtime map) |
 | `internal/runtime/gobgp` | galactic-router                          | Embeds GoBGP v4; lazy-starts on first Apply; handles peer/VRF/EVPN-path/policy add/update/delete; tracks established timestamps                                  | Yes (per-router)  |
-| `internal/runtime/frr`   | galactic-router                          | FRR stub — returns "not implemented" for every method                                                                                                            | No                |
 | `internal/model`         | galactic-router                          | `DesiredRouter`, `DesiredPeer`, `DesiredAdvertisement`, `DesiredPolicy`, `DesiredVRFInstance`, `RuntimeStatus`; re-exports BGP API enums                         | No                |
 | `internal/hash`          | galactic-router                          | SHA-256 fingerprint of `DesiredRouter` for no-op suppression                                                                                                     | No                |
 | `internal/metadata`      | every binary                             | Build-time vars (`Version`, `GitCommit`, `GitTreeState`, `BuildDate`) stamped via `-ldflags`                                                                     | No                |
@@ -218,7 +213,7 @@ co-located `galactic-gateway` container's own health port on the same
 
 | Dependency                       | Version               | Purpose                                                                                                                                                                         |
 | -------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `github.com/osrg/gobgp/v4`       | v4.7.0                | Embedded BGP server (tenant mode)                                                                                                                                               |
+| `github.com/osrg/gobgp/v4`       | v4.7.0                | Embedded BGP server                                                                                                                                                              |
 | `go.datum.net/network`           | bumped frequently     | BGP CRD API types (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance)                                                                                             |
 | `sigs.k8s.io/controller-runtime` | v0.24.1               | Full manager + reconciler framework: manager, field indexes, eight registered controllers (see Entry Points)                                                                    |
 | `github.com/spf13/cobra`         | v1.10.2               | CLI command/flag handling                                                                                                                                                       |
@@ -231,12 +226,12 @@ co-located `galactic-gateway` container's own health port on the same
 
 ## Key Design Decisions
 
-- **GoBGP embedded, lazy-started.** GoBGP runs in-process (`--mode=tenant` only) and starts only when the first `BGPRouter` is reconciled for that router; `Apply` re-runs on every subsequent reconcile too (subject to hash-based no-op suppression), re-applying peers/VRFs/EVPN/policies each time. `listenPort` defaults to `179`; `-1` (outbound-only) is an operator choice for specific deployments, not the codebase default. ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
+- **GoBGP embedded, lazy-started.** GoBGP runs in-process and starts only when the first `BGPRouter` is reconciled for that router; `Apply` re-runs on every subsequent reconcile too (subject to hash-based no-op suppression), re-applying peers/VRFs/EVPN/policies each time. `listenPort` defaults to `179`; `-1` (outbound-only) is an operator choice for specific deployments, not the codebase default. ASN or RouterID changes trigger a full `Reconfigure` (fresh `BgpServer` — `StopBgp` is not called because it permanently terminates the v4 Serve loop).
 - **Overlay BGP port.** galactic-router peers connect outbound on port `1790` by default (configurable per-peer via `BGPPeer.spec.remotePort`). Port `179` is occupied by the underlay FRR `bgpd` on every node, so the overlay uses a non-conflicting port. The `BGPPeer` CRD defaults `remotePort` to `179` (the IANA BGP port); galactic-router overrides this to `1790` when the field is unset, so existing CRDs without an explicit value continue to work. Set `remotePort: 179` explicitly when peering with external BGP speakers that listen on the standard port.
 - **VRF/route-target model via BGPVRFInstance.** `galactic-bgp` (the CNI chain, see [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)) creates a `BGPVRFInstance` (RouteDistinguisher + import/export Route Targets, all set to the derived RT) before the `BGPAdvertisement`; `galactic-router`'s GoBGP runtime applies VRFs (`applyVRFs`) before originating EVPN paths (`applyEVPN`). `galactic-gateway`'s own `BGPAdvertisement`s (VIP/self-address routes, see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)) leave VRFID/Function unset entirely — they carry no SRv6 decap behavior of their own.
 - **CRD-driven config, no sidecar gRPC.** `galactic-router` watches BGP CRDs directly via controller-runtime. `galactic-bgp` writes `BGPVRFInstance`/`BGPAdvertisement` CRDs; the router reconciler picks them up. No in-node gRPC calls between any of the CNI-chain binaries and `galactic-router`.
 - **Hash-based no-op suppression.** SHA-256 over the sorted `DesiredRouter` prevents redundant GoBGP Apply calls on every CRD event.
-- **RuntimeFactory pattern.** `--mode=tenant` (`GALACTIC_ROUTER_ROUTER_MODE=tenant`) selects GoBGP; `--mode=fabric` selects the FRR stub; `--mode=transit` is accepted by validation but returns an error at startup (not yet implemented). The mode is selected at startup; no controller changes are needed to add a new mode.
+- **RuntimeFactory pattern.** `galactic-router` always builds a `gobgp.NewRuntimeFactory(...)` at startup — GoBGP is the only backend. A `RuntimeFactory` is a plain function value (`func(types.NamespacedName) (RouterRuntime, error)`), so a future backend still only needs a new factory function and a call-site change here, not a controller change.
 - **DEL is intentionally minimal everywhere in the CNI chain; GC reclaims shared state asynchronously.** See [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md#key-design-decisions) for the CNI-side half of this decision. `galactic-router`'s GC controller (ticker-driven, default every 5m) reclaims orphaned CRDs, stale kernel VRFs, and stale eBPF entries once no live container still references them.
 - **gRPC health, configurable port.** Liveness and readiness probes use the gRPC health protocol (`google.golang.org/grpc/health`) on a configurable port (default `5179`). No HTTP health endpoint. `galactic-gateway` follows the identical convention on its own port — see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md).
 - **`galactic-router` carries no gateway-role code.** The edge XDP NAT+LB gateway used to be a `galactic-router` mode; it was split into its own `galactic-gateway` binary specifically so a crash on either side no longer takes the other down with it — see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) for the full rationale and design.
@@ -247,7 +242,7 @@ co-located `galactic-gateway` container's own health port on the same
 
 | Layer   | Command          | Framework        | Scope                                                                                                                                                                                                                    |
 | ------- | ---------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Unit    | `task test:unit` | `go test -race`  | `internal/plumbing/srv6`, `internal/gc`, `internal/reconcile`, `internal/controller` (BGP-family reconcilers), `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial), `internal/runtime/frr` |
+| Unit    | `task test:unit` | `go test -race`  | `internal/plumbing/srv6`, `internal/gc`, `internal/reconcile`, `internal/controller` (BGP-family reconcilers), `internal/plumbing/intf`, `internal/metadata`, `internal/runtime/gobgp` (partial) |
 | E2E     | `task test:e2e`  | Kind + `go test` | Full BGPRouter lifecycle coverage for `galactic-router` comes from this Kind cluster's separate reconciler tests, run alongside the CNI e2e suite described in [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md#testing).       |
 | CI full | `task ci`        | all of the above | lint → build → test:unit → test:e2e                                                                                                                                                                                      |
 
@@ -281,7 +276,6 @@ own publish/image details.
 
 - **GoBGP RIB is ephemeral.** All BGP state is in-process memory. On restart, sessions and paths must be re-established from CRD state; controller-runtime's reconcile loop handles this automatically.
 - **EVPN Type 5 is implemented, not deferred.** `internal/runtime/gobgp/paths.go`'s `buildEVPNPaths` builds real `EVPNIPPrefixRoute` NLRIs, deriving the Route Distinguisher from `routerID + ":0"` (not from the CRD). The `BGPVRFInstance` CRD carries its own explicit `RouteDistinguisher` and import/export Route Targets (see Key Design Decisions above), applied via `internal/runtime/gobgp/runtime.go`'s `applyVRFs`. There is no `ErrMissingRouteDistinguisher` or similar rejection path in the current code.
-- **`--mode=transit` is unimplemented.** Accepted by CLI/env validation, but `runCmd` returns an error at startup ("mode=transit is not yet supported").
 - **No binary's `cmdDel` tears down shared kernel/CRD state.** See [ARCHITECTURE-CNI.md#known-constraints](ARCHITECTURE-CNI.md#known-constraints) for the CNI-side half; this reconciler's GC controller (`internal/gc`) is the asynchronous cleanup path for all of it.
 
 ---
@@ -306,7 +300,6 @@ own publish/image details.
 **Stable vs. frequently changed:**
 - Stable: `internal/plumbing/` (pure kernel primitives), `internal/model/types.go`, `internal/runtime/runtime.go` (interface)
 - Active: `internal/controller/` (status conditions, watch graph), `internal/runtime/gobgp/` (EVPN path construction), `internal/reconcile/` (validation rules), `internal/gc/` (GC rules)
-- Stub / incomplete: `internal/runtime/frr/` (returns "not implemented" everywhere), `--mode=transit` (rejected at startup)
 
 **Non-obvious patterns:**
 - `BGPPeer` and `BGPPolicy` reconcilers do not call Apply themselves — they enqueue their owning `BGPRouter`, which is the only reconciler that calls `RuntimeManager.Apply`. This means touching any associated resource triggers a full router reconcile.

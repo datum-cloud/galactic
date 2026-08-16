@@ -47,8 +47,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: GALACTIC_ROUTER_ROUTER_MODE
-              value: tenant
             - name: GALACTIC_ROUTER_GC_NAMESPACE
               value: galactic-system
             # 5179 is also the binary's own default. Set explicitly here

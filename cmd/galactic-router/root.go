@@ -32,7 +32,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/loaddr"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
-	"go.datum.net/galactic/internal/runtime/frr"
 	"go.datum.net/galactic/internal/runtime/gobgp"
 	networkwebhook "go.datum.net/galactic/internal/webhook"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -66,7 +65,6 @@ func resolveBGPLocalAddress(explicit string, detect func() (string, error)) (str
 // the provided config and initializes the BGP runtime.
 func runCmd(cfg *config.RouterConfig) error {
 	nodeName := cfg.NodeName
-	mode := cfg.Mode
 	bgpListenPort := cfg.BGPListenPort
 	metricsPort := cfg.MetricsPort
 	grpcHealthPort := cfg.GRPCHealthPort
@@ -76,15 +74,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		return err
 	}
 
-	var factory galacticruntime.RuntimeFactory
-	switch mode {
-	case config.ModeTenant:
-		factory = gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr)
-	case config.ModeFabric:
-		factory = frr.NewRuntimeFactory()
-	case config.ModeTransit:
-		return errors.New("mode=transit is not yet supported")
-	}
+	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr)
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
@@ -174,7 +164,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	runtimeMgr := galacticruntime.NewRuntimeManager(factory)
 
 	// Create reconciler.
-	rec := reconcile.New(mgr.GetClient(), nodeName, mode, bgpLocalAddr)
+	rec := reconcile.New(mgr.GetClient(), nodeName, bgpLocalAddr)
 
 	// Register BGPRouter controller.
 	if err := (&controller.BGPRouterReconciler{
@@ -184,7 +174,6 @@ func runCmd(cfg *config.RouterConfig) error {
 		RuntimeManager: runtimeMgr,
 		Hasher:         hash.DesiredRouter,
 		NodeName:       nodeName,
-		RouterMode:     mode,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup BGPRouter controller: %w", err)
 	}
@@ -333,10 +322,7 @@ func newRootCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringP("node-name", "n", "", "Kubernetes node name (required)")
-	cmd.Flags().StringP("mode", "m", "",
-		"Operating mode: '"+config.ModeTransit+"', '"+config.ModeFabric+"', or '"+config.ModeTenant+"' (required)")
-	cmd.Flags().Bool("reflector", false,
-		"Enable route reflector mode (requires --mode="+config.ModeFabric+" or --mode="+config.ModeTenant+")")
+	cmd.Flags().Bool("reflector", false, "Enable route reflector mode")
 	cmd.Flags().IntP("bgp-listen-port", "p", config.DefaultRouterBGPListenPort,
 		"BGP listen port")
 	cmd.Flags().StringP("bgp-local-address", "",
