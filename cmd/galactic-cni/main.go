@@ -68,7 +68,8 @@ func newRunCommand() *cobra.Command {
 		},
 	}
 	runCmd.Flags().IntVar(&grpcHealthPort, "grpc-health-port", 5180, "gRPC health check port")
-	runCmd.Flags().IntVar(&metricsPort, "metrics-port", 9091, "Prometheus metrics HTTP port")
+	// 9180 sits next to galactic-router's own metrics port (9179).
+	runCmd.Flags().IntVar(&metricsPort, "metrics-port", 9180, "Prometheus metrics HTTP port")
 	return runCmd
 }
 

@@ -34,4 +34,8 @@ spec:
         - name: galactic-router
           env:
             - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              # Tenant nodes only dial *out* to iBGP peers (the reflector,
+              # see ../tenant-control/daemonset-patch.yaml); -1 disables
+              # the inbound listener entirely, so no BGP containerPort
+              # belongs on this patch -- there's no port here to document.
               value: "-1"
