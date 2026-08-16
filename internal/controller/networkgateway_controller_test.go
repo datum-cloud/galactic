@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -129,17 +130,19 @@ func newTestRouter() *bgpv1alpha1.BGPRouter {
 	}
 }
 
-// gatewayReadyCondition returns node's NetworkGateway Ready condition,
-// failing the test if the object or the condition is missing.
-func gatewayReadyCondition(t *testing.T, c client.Client, node string) *metav1.Condition {
+// gatewayReadyCondition returns testNodeGWA's NetworkGateway Ready
+// condition, failing the test if the object or the condition is missing.
+// Every caller reconciles testNodeGWA's own gateway, so this takes no node
+// parameter of its own.
+func gatewayReadyCondition(t *testing.T, c client.Client) *metav1.Condition {
 	t.Helper()
 	gw := &bgpv1alpha1.NetworkGateway{}
-	if err := c.Get(context.Background(), testRuleKey(node), gw); err != nil {
-		t.Fatalf("get NetworkGateway %s: %v", node, err)
+	if err := c.Get(context.Background(), testRuleKey(testNodeGWA), gw); err != nil {
+		t.Fatalf("get NetworkGateway %s: %v", testNodeGWA, err)
 	}
 	cond := meta.FindStatusCondition(gw.Status.Conditions, bgpv1alpha1.ConditionTypeReady)
 	if cond == nil {
-		t.Fatalf("NetworkGateway %s has no %s condition", node, bgpv1alpha1.ConditionTypeReady)
+		t.Fatalf("NetworkGateway %s has no %s condition", testNodeGWA, bgpv1alpha1.ConditionTypeReady)
 	}
 	return cond
 }
@@ -528,7 +531,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 		t.Errorf("Reconcile error = %v, want it to wrap %v", err, errAdvertisementWrite)
 	}
 
-	cond := gatewayReadyCondition(t, fakeClient, testNodeGWA)
+	cond := gatewayReadyCondition(t, fakeClient)
 	if cond.Status != metav1.ConditionFalse {
 		t.Errorf("Ready status = %s, want %s", cond.Status, metav1.ConditionFalse)
 	}
@@ -570,7 +573,7 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 		t.Fatalf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
 	}
 
-	cond := gatewayReadyCondition(t, fakeClient, testNodeGWA)
+	cond := gatewayReadyCondition(t, fakeClient)
 	if cond.Status != metav1.ConditionTrue {
 		t.Errorf("Ready status = %s, want %s", cond.Status, metav1.ConditionTrue)
 	}
@@ -605,10 +608,111 @@ func TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure(t *testing.T) {
 		t.Errorf("Reconcile error = %v, want it to wrap %v", err, errOrphanSweep)
 	}
 
-	cond := gatewayReadyCondition(t, fakeClient, testNodeGWA)
+	cond := gatewayReadyCondition(t, fakeClient)
 	if cond.Reason != reasonEngineHealthy {
 		t.Errorf("Ready reason = %q, want %q (status is written before the sweep runs)",
 			cond.Reason, reasonEngineHealthy)
+	}
+}
+
+// newAdvertisement returns a minimal BGPAdvertisement fixture, named and
+// namespaced only -- withdrawNodeAdvertisements matches purely on Name, so
+// nothing else about the object matters for these tests.
+func newAdvertisement(name string) *bgpv1alpha1.BGPAdvertisement {
+	return &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
+	}
+}
+
+// TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode
+// is the regression test for #406: gw-b's NetworkGateway is deleted while
+// gw-b's own BGPAdvertisements (its self-address route and its per-rule
+// routes) are still around. gw-a's process -- the only one left to react,
+// since gw-b's own process is presumably already gone -- must withdraw
+// every one of them on the NotFound reconcile it receives for gw-b's
+// deletion, without touching gw-a's own advertisements for the same rule.
+func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA) // gw-a's own gateway; still exists
+
+	selfAddr := newAdvertisement(testNodeGWB + "-selfaddr")
+	ruleV4 := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v4")
+	ruleV6 := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v6")
+	otherRuleV4 := newAdvertisement("other-rule-" + testNodeGWB + "-v4")
+	survivorAdv := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v4")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA, selfAddr, ruleV4, ruleV6, otherRuleV4, survivorAdv).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+
+	// gw-b's NetworkGateway was deleted (it never existed in this fixture
+	// -- only its NamespacedName is needed to reconstruct the NotFound
+	// reconcile gw-a's own process would receive for it, exactly like
+	// TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway).
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWB)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	ctx := context.Background()
+	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{selfAddr, ruleV4, ruleV6, otherRuleV4} {
+		err := fakeClient.Get(ctx, testRuleKey(gone.Name), &bgpv1alpha1.BGPAdvertisement{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("BGPAdvertisement %s still exists (err=%v), want withdrawn with gw-b", gone.Name, err)
+		}
+	}
+	if err := fakeClient.Get(ctx, testRuleKey(survivorAdv.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("gw-a's own BGPAdvertisement %s was removed: %v", survivorAdv.Name, err)
+	}
+}
+
+// TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion covers
+// the DeletionTimestamp-set branch (Reconcile observes its own
+// NetworkGateway still present but terminating). Not known to be
+// reachable in production today -- NetworkGateway carries no finalizer, so
+// this branch would only fire if one is added later or another controller
+// races the Get -- but it must stay correct regardless, and a finalizer is
+// the only way the fake client (matching real apiserver behavior) keeps a
+// deleted object visible with its DeletionTimestamp set at all.
+func TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+	gwA.Finalizers = []string{"test.datum.net/hold-for-deletion"}
+	now := metav1.Now()
+	gwA.DeletionTimestamp = &now
+
+	selfAddr := newAdvertisement(testNodeGWA + "-selfaddr")
+	ruleV4 := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v4")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA, selfAddr, ruleV4).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	if !engine.stopped {
+		t.Error("engine.Stop was not called for a terminating NetworkGateway")
+	}
+	ctx := context.Background()
+	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{selfAddr, ruleV4} {
+		err := fakeClient.Get(ctx, testRuleKey(gone.Name), &bgpv1alpha1.BGPAdvertisement{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("BGPAdvertisement %s still exists (err=%v), want withdrawn on own deletion", gone.Name, err)
+		}
+	}
+	cond := gatewayReadyCondition(t, fakeClient)
+	if cond.Reason != reasonTerminating {
+		t.Errorf("Ready reason = %q, want %q", cond.Reason, reasonTerminating)
 	}
 }
 
