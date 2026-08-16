@@ -27,6 +27,11 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    # Without an explicit cap, a hung step (e.g. apt-get stalling against a
+    # flaky mirror -- observed hanging the whole job against GitHub's
+    # default 360-minute job timeout) blocks the PR for hours instead of
+    # failing fast; every job below gets the same treatment.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -50,6 +55,7 @@ jobs:
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -97,6 +103,7 @@ jobs:
   test-unit-root:
     name: Unit Tests (root)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -153,6 +160,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -185,6 +193,7 @@ jobs:
     name: E2E Tests
     runs-on: ubuntu-latest
     needs: [lint, test-unit, test-unit-root, build]
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
