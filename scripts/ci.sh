@@ -71,7 +71,7 @@ case "$COMMAND" in
 
     echo "--- Mounting bpffs on Kind node(s)"
     # The eBPF uSID datapath pins its maps under /sys/fs/bpf/galactic (see
-    # internal/plumbing/ebpf/attach.PinDir). config/cni/daemonset.yaml's
+    # internal/plumbing/ebpf/attach.PinDir). config/galactic-cni/daemonset.yaml's
     # bpf-fs hostPath volume comment spells out why this can't be created
     # from inside a pod's own mount namespace: bpffs must already be
     # mounted at this path by the node itself. A real node's OS/kubelet
@@ -99,8 +99,8 @@ case "$COMMAND" in
     done
 
     echo "--- Applying galactic-system namespace and CNI RBAC"
-    kubectl apply -k config/system
-    kubectl apply -f config/cni/serviceaccount.yaml -f config/cni/rbac.yaml
+    kubectl apply -k config/galactic-system
+    kubectl apply -f config/galactic-cni/serviceaccount.yaml -f config/galactic-cni/rbac.yaml
     kubectl config set-context --current --namespace=galactic-system
 
     echo "--- Creating BGPRouter fixture for the e2e node"

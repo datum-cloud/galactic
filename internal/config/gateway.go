@@ -20,7 +20,7 @@ const (
 	// differ from DefaultRouterMetricsPort (9179) and
 	// DefaultRouterGRPCHealthPort (5179) and from galactic-cni's
 	// credential-refresh ports (grpc-health 5180, metrics 9180,
-	// config/cni/daemonset.yaml): galactic-gateway is deployed as a
+	// config/galactic-cni/daemonset.yaml): galactic-gateway is deployed as a
 	// second container in the same hostNetwork: true pod as
 	// galactic-router, so every port it binds is on the same network
 	// namespace as every other galactic-* process already running on

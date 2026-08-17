@@ -121,7 +121,7 @@ cluster to confirm:
 
 - **Conflist chaining.** `vmtap-cni` ships with a `patch-conflist` subcommand
   (`internal/vmtap.RunPatchLoop`, wired into
-  [`config/vmtap/daemonset.yaml`](../../config/vmtap/daemonset.yaml)) that
+  [`config/vmtap-cni/daemonset.yaml`](../../config/vmtap-cni/daemonset.yaml)) that
   polls for a `*cilium*.conflist` file and appends a `{"type": "vmtap-cni"}`
   entry to it if missing. This is a best-effort convergence loop, **not** a
   verified solution — it does not guarantee the patch lands before Cilium
@@ -129,7 +129,7 @@ cluster to confirm:
   remove its own entry on uninstall (manually edit Cilium's conflist back
   out if needed).
 - **Pod-level trigger signal.** Which pods get this conflist entry at all
-  (RuntimeClass vs. annotation) is not decided; `config/vmtap/daemonset.yaml`
+  (RuntimeClass vs. annotation) is not decided; `config/vmtap-cni/daemonset.yaml`
   currently gates the whole DaemonSet on a placeholder node label
   (`galactic.datumapis.com/node: kraftlet`) that does not exist anywhere else
   in this repo.

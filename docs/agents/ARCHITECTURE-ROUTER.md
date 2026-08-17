@@ -153,10 +153,10 @@ lives in `root.go`'s `runCmd`:
 8. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
 This is identical whether the pod is running in the plain `tenant` role
-(`config/router/tenant/`), the route-reflector role
-(`config/router/tenant-control/`), or as the tenant-BGP container co-located
+(`config/galactic-router/tenant/`), the route-reflector role
+(`config/galactic-router/tenant-control/`), or as the tenant-BGP container co-located
 with `galactic-gateway` on a gateway-role node
-(`config/gateway/base/daemonset.yaml`) — `galactic-router` carries no
+(`config/galactic-gateway/base/daemonset.yaml`) — `galactic-router` carries no
 gateway-role code path of its own at all; see
 [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) for what runs in the
 sibling container instead.
@@ -181,7 +181,7 @@ sibling container instead.
 See [docs/router/configuration.md](../router/configuration.md) for the full reference, including CLI flags and precedence.
 
 On a gateway-role node, `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` is set by
-`config/gateway/base/daemonset.yaml` — the tenant-BGP container only dials
+`config/galactic-gateway/base/daemonset.yaml` — the tenant-BGP container only dials
 out to iBGP peers there, same as the plain tenant role.
 `GALACTIC_ROUTER_GRPC_HEALTH_PORT=5179` is set explicitly too, matching
 the binary's own default, so it can't silently start colliding with the
@@ -263,12 +263,12 @@ gateway) — it is not duplicated per architecture doc; see
 [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md#cicd) for each binary's
 own publish/image details.
 
-**Publish pipeline:** `.github/workflows/publish.yaml`, modeled on the `compute` repo's. Runs on every push and on published releases, via reusable `datum-cloud/actions` workflows: `publish-galactic-cni-image`, `publish-galactic-router-image`, and `publish-galactic-gateway-image` each build and push their own image (`ghcr.io/datum-cloud/galactic-cni`, `ghcr.io/datum-cloud/galactic-router`, `ghcr.io/datum-cloud/galactic-gateway`), and `publish-kustomize-bundles` (which `needs` all three image jobs) pushes `config/` as an OCI Kustomize bundle (`ghcr.io/datum-cloud/galactic-kustomize`), using the `images` input (`datum-cloud/actions` v1.20.0+) to stamp each job's real published tag into `config/cni`, `config/router/base`, and `config/gateway/base` respectively (the last of these getting both the router and gateway tags, since that base runs both images in one pod) — the bundle ships with matching versioned image references, not `:latest`. This replaced the old single-image `.github/workflows/release.yaml` (removed — see history below) with per-binary images, matching the split `deploy/containerlab/` already used for local dev.
+**Publish pipeline:** `.github/workflows/publish.yaml`, modeled on the `compute` repo's. Runs on every push and on published releases, via reusable `datum-cloud/actions` workflows: `publish-galactic-cni-image`, `publish-galactic-router-image`, and `publish-galactic-gateway-image` each build and push their own image (`ghcr.io/datum-cloud/galactic-cni`, `ghcr.io/datum-cloud/galactic-router`, `ghcr.io/datum-cloud/galactic-gateway`), and `publish-kustomize-bundles` (which `needs` all three image jobs) pushes `config/` as an OCI Kustomize bundle (`ghcr.io/datum-cloud/galactic-kustomize`), using the `images` input (`datum-cloud/actions` v1.20.0+) to stamp each job's real published tag into `config/galactic-cni`, `config/galactic-router/base`, and `config/galactic-gateway/base` respectively (the last of these getting both the router and gateway tags, since that base runs both images in one pod) — the bundle ships with matching versioned image references, not `:latest`. This replaced the old single-image `.github/workflows/release.yaml` (removed — see history below) with per-binary images, matching the split `deploy/containerlab/` already used for local dev.
 
 **Container image:**
 - `containers/galactic-router/Dockerfile` — golang builder → `gcr.io/distroless/static:nonroot`, `ENTRYPOINT ["/galactic-router"]`. No shell or CLI tools: `galactic-router` drives VRF/SRv6/route/BGP state entirely through the netlink and GoBGP Go libraries, never shells out. Pushed by `publish.yaml` as `ghcr.io/datum-cloud/galactic-router`.
 
-**History:** the original `.github/workflows/release.yaml` built and pushed a single `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` image from a shared `containers/galactic/Dockerfile`, but that image only ever built `galactic-cni` while `config/router/base/daemonset.yaml` ran `command: [/galactic-router]` against it — the image advertised a binary it never built. Both were removed. `publish.yaml` and the per-binary Dockerfiles fix this by building each binary into its own image, so `config/cni/daemonset.yaml` and `config/router/base/daemonset.yaml` now reference `ghcr.io/datum-cloud/galactic-cni:latest` and `ghcr.io/datum-cloud/galactic-router:latest` respectively — matching images, matching binaries. `galactic-gateway` (see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)) was split out of `galactic-router` later still, following the same one-binary-one-image precedent.
+**History:** the original `.github/workflows/release.yaml` built and pushed a single `ghcr.io/datum-cloud/galactic:{version,major.minor,major,sha}` image from a shared `containers/galactic/Dockerfile`, but that image only ever built `galactic-cni` while `config/galactic-router/base/daemonset.yaml` ran `command: [/galactic-router]` against it — the image advertised a binary it never built. Both were removed. `publish.yaml` and the per-binary Dockerfiles fix this by building each binary into its own image, so `config/galactic-cni/daemonset.yaml` and `config/galactic-router/base/daemonset.yaml` now reference `ghcr.io/datum-cloud/galactic-cni:latest` and `ghcr.io/datum-cloud/galactic-router:latest` respectively — matching images, matching binaries. `galactic-gateway` (see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)) was split out of `galactic-router` later still, following the same one-binary-one-image precedent.
 
 ---
 

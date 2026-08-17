@@ -154,7 +154,7 @@ topology:
     # (doesn't affect the links below, which are wired to the container
     # before the rename happens). No blackhole route in `exec`: unlike
     # iad-worker, these nodes never run galactic-veth's usid.c decap
-    # program at all (config/cni's DaemonSet only targets the edge role),
+    # program at all (config/galactic-cni's DaemonSet only targets the edge role),
     # so the blackhole-route workaround it needs doesn't apply here.
     iad-worker3:
       kind: ext-container
@@ -250,7 +250,7 @@ topology:
     - endpoints: ["iad-worker2:eth1", "tr3:eth4"]
 
     # Gateway node uplinks (edge XDP NAT+LB DaemonSet; see
-    # config/gateway/base/ and deploy/containerlab/resources/
+    # config/galactic-gateway/base/ and deploy/containerlab/resources/
     # galactic-gateway/). tr3 (iad's transit router) already
     # consumed eth1/eth2/eth3 for the TR mesh and eth4/eth5 for
     # iad-worker/iad-worker2, so these take the next free ports. BGP

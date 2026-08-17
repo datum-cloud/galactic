@@ -13,12 +13,11 @@ rules:
   # periodically removes orphaned CRDs left behind when CNI DEL never fires
   # (e.g. a force-terminated container). No create/update/patch on either
   # base resource: galactic-cni already owns creating/updating both
-  # (config/cni/rbac.yaml) via galactic-bgp, and this binary's own
+  # (config/galactic-cni/rbac.yaml) via galactic-bgp, and this binary's own
   # reconcilers only read them and write their /status subresource (see
-  # the rule below) — create/update/patch on bgpadvertisements was only
-  # ever needed by NetworkGatewayReconciler/NetworkRuleReconciler, which no
-  # longer live in this binary (see config/gateway/rbac.yaml for their
-  # replacement RBAC).
+  # the rule below). NetworkGatewayReconciler/NetworkRuleReconciler need
+  # create/update/patch on bgpadvertisements, but that's galactic-gateway's
+  # ClusterRole (config/galactic-gateway/rbac.yaml), not this one.
   - apiGroups: ["network.datumapis.com"]
     resources:
       - bgpadvertisements

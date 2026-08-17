@@ -75,7 +75,7 @@ func newRootCommand() *cobra.Command {
 // newPatchConflistCommand runs the conflist-chaining installer step: see
 // vmtap.RunPatchLoop for why this loops instead of running once. It is
 // meant to run as a long-lived container (not an init container) in the
-// vmtap-cni DaemonSet — see config/vmtap/daemonset.yaml.
+// vmtap-cni DaemonSet — see config/vmtap-cni/daemonset.yaml.
 func newPatchConflistCommand() *cobra.Command {
 	var (
 		cniNetDir    string

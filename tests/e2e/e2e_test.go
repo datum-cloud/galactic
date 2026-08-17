@@ -189,13 +189,13 @@ func TestCNITapInterface(t *testing.T) {
 	// separate image is needed here. Run as the galactic-cni ServiceAccount:
 	// galactic-tap's own ADD unconditionally builds an in-cluster k8s
 	// client for its chain-completeness check and NAD-annotation step
-	// (config/cni/rbac.yaml grants it), even though both steps no-op here
+	// (config/galactic-cni/rbac.yaml grants it), even though both steps no-op here
 	// (no CNI_ARGS, so nadpatch.ParsePodNamespace resolves an empty
 	// namespace and nadpatch.VerifyChainComplete/AnnotateNAD both treat
 	// that as nothing to check/patch). hostNetwork
 	// is required too, so the VRF/tap interfaces this test creates land in
 	// the same netns production's own hostNetwork DaemonSet would use. The
-	// bpf-fs hostPath volume mirrors config/cni/daemonset.yaml's own bpf-fs
+	// bpf-fs hostPath volume mirrors config/galactic-cni/daemonset.yaml's own bpf-fs
 	// mount: this test chains galactic-bgp (testChainedGalacticBGP below),
 	// which registers the eBPF uSID datapath, and its maps can only be
 	// pinned under attach.PinDir if the node's real bpffs (mounted onto the
@@ -234,7 +234,7 @@ func TestCNITapInterface(t *testing.T) {
 	// any more), so CNI ADD requires this node's locator_table/
 	// function_table/vrf_table maps to already be pinned under
 	// attach.PinDir. In production that's done ahead of time by the CNI
-	// DaemonSet's long-running "credential-refresh" container (config/cni/
+	// DaemonSet's long-running "credential-refresh" container (config/galactic-cni/
 	// daemonset.yaml, `/galactic-cni run`); this test runs its own pod
 	// instead of relying on that DaemonSet, so it must start the same
 	// control daemon itself before exercising CNI ADD below. Required for

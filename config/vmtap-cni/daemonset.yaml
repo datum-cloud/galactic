@@ -54,7 +54,7 @@ spec:
       initContainers:
         - name: install-cni-bin
           # ":latest" is a placeholder only, matching the convention in
-          # config/cni/daemonset.yaml — no such tag is ever pushed to GHCR.
+          # config/galactic-cni/daemonset.yaml — no such tag is ever pushed to GHCR.
           # vmtap-cni ships inside the galactic-cni image (see
           # containers/galactic-cni/Dockerfile) rather than a separate one.
           image: ghcr.io/datum-cloud/galactic-cni:latest

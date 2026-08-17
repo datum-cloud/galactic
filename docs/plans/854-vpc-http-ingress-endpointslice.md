@@ -27,9 +27,9 @@ Galactic-cni has already been split into a chained-plugin architecture (commits 
 | EndpointSlice validate (CHECK) | `galactic-bgp` | `internal/cnibgp/ops_check.go` | after BGPAdvertisement Get (`ops_check.go:64-68`) |
 | Naming/annotation vocabulary | both | `internal/cni/crdnames` | already the shared cross-plugin vocab package |
 | Pod-name parsing | `galactic-bgp` (new dependency) | `internal/cni/nadpatch` | sibling to existing `ParsePodNamespace` (`nadpatch.go:40-48`) |
-| RBAC (publish/delete) | `galactic-bgp`'s SA | `config/cni/rbac.yaml` | shares the `galactic-cni` SA (`daemonset.yaml:17`) — confirmed |
+| RBAC (publish/delete) | `galactic-bgp`'s SA | `config/galactic-cni/rbac.yaml` | shares the `galactic-cni` SA (`daemonset.yaml:17`) — confirmed |
 | GC backstop | `galactic-router` | `internal/gc/gc.go`, `internal/controller/gc_controller.go` | extend `RemoveOrphanedCRDs` (`gc.go:189-231`), not the CNI's eBPF sweep |
-| GC RBAC | `galactic-router`'s SA | `config/router/rbac.yaml` | mirror existing `bgpadvertisements` delete grant (`rbac.yaml:15-19`) |
+| GC RBAC | `galactic-router`'s SA | `config/galactic-router/rbac.yaml` | mirror existing `bgpadvertisements` delete grant (`rbac.yaml:15-19`) |
 
 ## 3. Work items, in dependency order
 
@@ -67,11 +67,11 @@ Object carries, per pod:
 
 ### Phase 7 — RBAC
 
-Add `discovery.k8s.io`/`endpointslices` (get, list, create, update, patch, delete) to `config/cni/rbac.yaml`. Confirmed: `config/cni/daemonset.yaml:17` sets a single `serviceAccountName: galactic-cni` for the whole pod — CNI chain plugins aren't separate pods/containers, they're binaries the kubelet execs on the host, all reading the kubeconfig the installer wrote from this one SA. `galactic-bgp` shares it, so this grant is the only RBAC change needed on the CNI side.
+Add `discovery.k8s.io`/`endpointslices` (get, list, create, update, patch, delete) to `config/galactic-cni/rbac.yaml`. Confirmed: `config/galactic-cni/daemonset.yaml:17` sets a single `serviceAccountName: galactic-cni` for the whole pod — CNI chain plugins aren't separate pods/containers, they're binaries the kubelet execs on the host, all reading the kubeconfig the installer wrote from this one SA. `galactic-bgp` shares it, so this grant is the only RBAC change needed on the CNI side.
 
 ### Phase 8 — GC backstop
 
-EndpointSlice cleanup only needs k8s API access — no kernel/eBPF state — so it belongs in **galactic-router's `GCReconciler`** (ticker-driven, `cmd/galactic-router/root.go:212-231`), not the CNI's separate eBPF sweep (`internal/installer`'s `SweepEBPFVRFTable`, which exists specifically because that state is only reachable from inside the CNI's `run` container — see the precedent comment at `gc.go:326-348`). Recommend deleting the stale EndpointSlice as a side effect of the existing `RemoveOrphanedCRDs` pass (`gc.go:189-231`), keyed by the same per-pod netns-liveness signal already computed for BGPAdvertisement orphan detection (`gc.go:497-510`) — a pod's EndpointSlice is stale under exactly the same condition its BGPAdvertisement is. Add `discovery.k8s.io`/`endpointslices` (get, list, watch, delete) to `config/router/rbac.yaml`, mirroring the existing delete grant already carved out there specifically for this GC reconciler (`rbac.yaml:15-19`).
+EndpointSlice cleanup only needs k8s API access — no kernel/eBPF state — so it belongs in **galactic-router's `GCReconciler`** (ticker-driven, `cmd/galactic-router/root.go:212-231`), not the CNI's separate eBPF sweep (`internal/installer`'s `SweepEBPFVRFTable`, which exists specifically because that state is only reachable from inside the CNI's `run` container — see the precedent comment at `gc.go:326-348`). Recommend deleting the stale EndpointSlice as a side effect of the existing `RemoveOrphanedCRDs` pass (`gc.go:189-231`), keyed by the same per-pod netns-liveness signal already computed for BGPAdvertisement orphan detection (`gc.go:497-510`) — a pod's EndpointSlice is stale under exactly the same condition its BGPAdvertisement is. Add `discovery.k8s.io`/`endpointslices` (get, list, watch, delete) to `config/galactic-router/rbac.yaml`, mirroring the existing delete grant already carved out there specifically for this GC reconciler (`rbac.yaml:15-19`).
 
 ### Phase 9 — Config & docs
 
@@ -94,5 +94,5 @@ No new CNI config fields — `vpc`/`vpcAttachment`/`namespace` already exist on 
 
 1. **Dual-stack shape — resolved: IPv6-only.** `EndpointSlice.AddressType` is singular per object (unlike the custom `BGPAdvertisement` CRD, which packs both families into one object today, e.g. `docs/cni/configuration.md`'s dual-stack example). This issue publishes a single `AddressType: IPv6` `EndpointSlice` per pod, carrying the pod's ULA `/96` address; a dual-stack pod's IPv4 address is not published. IPv4 VPC backends for HTTP ingress are out of scope here — consistent with the tenant addressing design being IPv6-primary and every example in the ingress design doc using ULA addresses. Publishing an IPv4 `EndpointSlice` alongside it, if ever needed, would be a follow-up issue, not an implicit extension of this one.
 2. **Discovery label for the extension server — resolved.** No backing `Service` object, so no `kubernetes.io/service-name` label to key off (deliberately, per the design doc's "not synthesize a second EndpointSlice" point). **Decision: a new label, `galactic.datum.net/tenant-id`, carrying the same value as the `TenantIdentifier(vpc, vpcAttachment)` annotation.** galactic-cni sets this unilaterally as part of Phase 1/4 — it doesn't require the extension server to exist first, but it is the contract that component's future watch/index logic needs to consume. Worth flagging to whoever picks up that work so they don't invent a different key independently.
-3. **`galactic-bgp`'s ServiceAccount — resolved.** Single shared `galactic-cni` SA confirmed via `config/cni/daemonset.yaml:17`; Phase 7 needs no split.
+3. **`galactic-bgp`'s ServiceAccount — resolved.** Single shared `galactic-cni` SA confirmed via `config/galactic-cni/daemonset.yaml:17`; Phase 7 needs no split.
 4. **Rollback semantics if EndpointSlice publish fails after BGPAdvertisement already succeeded — resolved.** `publishBGPState`'s writes are all `CreateOrUpdate` keyed by deterministic names; a failure just fails `cmdAdd`, kubelet retries, and the retry's `CreateOrUpdate` calls land on the same already-created objects rather than duplicating them. GC (Phase 8) covers the case where the pod never comes up at all. No new rollback code needed.

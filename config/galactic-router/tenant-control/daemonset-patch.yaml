@@ -45,7 +45,7 @@ spec:
           # behavior): the reflector role is the one place galactic-router
           # actually listens for inbound BGP -- tenant nodes (see
           # ../tenant/daemonset-patch.yaml) and the router container in
-          # config/gateway/base/daemonset.yaml both set
+          # config/galactic-gateway/base/daemonset.yaml both set
           # GALACTIC_ROUTER_BGP_LISTEN_PORT=-1 and open no BGP port at all,
           # so this entry only belongs on this patch, not the shared base.
           ports:

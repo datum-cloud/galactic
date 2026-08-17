@@ -7,7 +7,7 @@ spec:
     spec:
       # kubernetes.io/hostname pins this DaemonSet instance to exactly one
       # node: GALACTIC_GATEWAY_SRV6_ADDRESS below must be unique per
-      # gateway node (see config/gateway/base/kustomization.yaml's doc
+      # gateway node (see config/galactic-gateway/base/kustomization.yaml's doc
       # comment), so galactic-gateway1/galactic-gateway2 are two separate
       # DaemonSets rather than one DaemonSet matching both gateway-labeled
       # nodes with identical env.

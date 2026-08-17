@@ -117,7 +117,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -o galactic-route cmd/galactic-route/main.go
 
 # Build vmtap-cni. It ships in this image rather than one of its own so the
-# vmtap DaemonSet (config/vmtap/) can reference the same published
+# vmtap DaemonSet (config/vmtap-cni/) can reference the same published
 # ghcr.io/datum-cloud/galactic-cni image instead of a second, separately
 # published image.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

@@ -100,9 +100,9 @@ tasks:
       - task: load-image
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker-control}
       # iad-gateway1/2 need fabric-router (the underlay eBGP session the
-      # gateway XDP datapath's uplink depends on -- see config/fabric/'s
+      # gateway XDP datapath's uplink depends on -- see config/fabric-router/'s
       # affinity, extended to the gateway role), galactic-router (tenant
-      # BGP only, one container in config/gateway/base's two-container
+      # BGP only, one container in config/galactic-gateway/base's two-container
       # pod), and galactic-gateway (the edge XDP NAT+LB engine, the other
       # container in that pod), but NOT galactic-cni: they never run the
       # CNI DaemonSet at all (it only

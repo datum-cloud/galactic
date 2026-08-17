@@ -75,14 +75,14 @@ jobs:
       bundle-name: ghcr.io/datum-cloud/galactic-kustomize
       bundle-path: config
       images: |
-        - { path: config/cni, name: ghcr.io/datum-cloud/galactic-cni, tag: "${{ needs.publish-galactic-cni-image.outputs.tag }}" }
-        - { path: config/router/base, name: ghcr.io/datum-cloud/galactic-router, tag: "${{ needs.publish-galactic-router-image.outputs.tag }}" }
-        # config/gateway/base's DaemonSet has two containers (galactic-router
-        # + galactic-gateway) -- the config/router/base entry above only
+        - { path: config/galactic-cni, name: ghcr.io/datum-cloud/galactic-cni, tag: "${{ needs.publish-galactic-cni-image.outputs.tag }}" }
+        - { path: config/galactic-router/base, name: ghcr.io/datum-cloud/galactic-router, tag: "${{ needs.publish-galactic-router-image.outputs.tag }}" }
+        # config/galactic-gateway/base's DaemonSet has two containers (galactic-router
+        # + galactic-gateway) -- the config/galactic-router/base entry above only
         # stamps images within that path's own tree, not
-        # config/gateway/base's, so galactic-router's image needs its own
+        # config/galactic-gateway/base's, so galactic-router's image needs its own
         # entry here too, in addition to galactic-gateway's.
-        - { path: config/gateway/base, name: ghcr.io/datum-cloud/galactic-router, tag: "${{ needs.publish-galactic-router-image.outputs.tag }}" }
-        - { path: config/gateway/base, name: ghcr.io/datum-cloud/galactic-gateway, tag: "${{ needs.publish-galactic-gateway-image.outputs.tag }}" }
-        - { path: config/fabric, name: ghcr.io/datum-cloud/fabric-router, tag: "${{ needs.publish-fabric-router-image.outputs.tag }}" }
+        - { path: config/galactic-gateway/base, name: ghcr.io/datum-cloud/galactic-router, tag: "${{ needs.publish-galactic-router-image.outputs.tag }}" }
+        - { path: config/galactic-gateway/base, name: ghcr.io/datum-cloud/galactic-gateway, tag: "${{ needs.publish-galactic-gateway-image.outputs.tag }}" }
+        - { path: config/fabric-router, name: ghcr.io/datum-cloud/fabric-router, tag: "${{ needs.publish-fabric-router-image.outputs.tag }}" }
     secrets: inherit

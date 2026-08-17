@@ -100,20 +100,15 @@ spec:
             - name: metrics
               containerPort: 9180
               protocol: TCP
-          # --- PRIVILEGE EXPANSION (Milestone 3.1 of
-          # .local/implementation-plan-ebpf-xdp-usid-datapath.md) ---
-          # This container previously ran with allowPrivilegeEscalation:
-          # false, no added capabilities, and no bpffs mount, because it
-          # only refreshed credentials and served gRPC health. It now also
-          # hosts the eBPF/TC-BPF uSID datapath's load/attach/pin control
-          # daemon (design plan .local/plan-ebpf-xdp-usid-datapath.md §5.4
-          # option (a), §9 "Privileges" -- deliberately not a footnote,
-          # per that section). BPF/NET_ADMIN below and the bpf-fs
-          # volumeMount are required unconditionally by the binary's BPF
-          # loader dependencies: the datapath is unconditional (Run's own
-          # doc comment calls it "the only forwarding path") -- there is
-          # no flag left to gate this grant behind, so it takes effect on
-          # every node running this manifest.
+          # This container hosts the eBPF/TC-BPF uSID datapath's
+          # load/attach/pin control daemon (design plan
+          # .local/plan-ebpf-xdp-usid-datapath.md §5.4 option (a), §9
+          # "Privileges"). BPF/NET_ADMIN below and the bpf-fs volumeMount
+          # are required unconditionally by the binary's BPF loader
+          # dependencies: the datapath is unconditional (Run's own doc
+          # comment calls it "the only forwarding path") -- there is no
+          # flag to gate this grant behind, so it takes effect on every
+          # node running this manifest.
           securityContext:
             runAsUser: 0
             capabilities:

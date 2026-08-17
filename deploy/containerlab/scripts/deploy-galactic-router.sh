@@ -8,24 +8,24 @@ source "${SCRIPT_DIR}/lib.sh"
 
 # The router DaemonSet base and the production tenant/tenant-control
 # overlays (node affinity keeping each role on the right nodes) live in
-# config/router/{base,tenant,tenant-control}/ (shared with production;
+# config/galactic-router/{base,tenant,tenant-control}/ (shared with production;
 # the shared RBAC/ServiceAccount aren't needed here).
 # resources/galactic-router/base/ and resources/galactic-control/iad/
 # build on the copied tenant/tenant-control overlays and patch in only the
 # lab-only image and env vars. Dirs are copied onto the node at deploy time
 # nested under each consuming overlay's own root (kustomize requires resources
 # in or below the overlay root) rather than duplicated in the repo.
-GALACTIC_ROUTER_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/router/base" && pwd)
-GALACTIC_ROUTER_TENANT_DIR=$(cd "${SCRIPT_DIR}/../../../config/router/tenant" && pwd)
-GALACTIC_ROUTER_TENANT_CONTROL_DIR=$(cd "${SCRIPT_DIR}/../../../config/router/tenant-control" && pwd)
-# config/gateway/base is the edge XDP NAT+LB gateway's own two-container
+GALACTIC_ROUTER_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/base" && pwd)
+GALACTIC_ROUTER_TENANT_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/tenant" && pwd)
+GALACTIC_ROUTER_TENANT_CONTROL_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/tenant-control" && pwd)
+# config/galactic-gateway/base is the edge XDP NAT+LB gateway's own two-container
 # pod base (galactic-router + galactic-gateway) -- self-contained, unlike
-# config/router/{tenant,tenant-control}, so no matching
-# config/router/base copy is needed alongside it the way copy_router_config/
+# config/galactic-router/{tenant,tenant-control}, so no matching
+# config/galactic-router/base copy is needed alongside it the way copy_router_config/
 # copy_router_control_config need one.
-GALACTIC_GATEWAY_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/gateway/base" && pwd)
+GALACTIC_GATEWAY_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-gateway/base" && pwd)
 
-# copy_router_config NODE copies config/router/{base,tenant} onto NODE,
+# copy_router_config NODE copies config/galactic-router/{base,tenant} onto NODE,
 # nested under resources/galactic-router/base/ so the overlay's "../base"
 # resource reference resolves. rm -rf first: like deploy-cni.sh's
 # GALACTIC_CNI_DIR copy, docker cp nests SRC inside an already-existing
@@ -40,7 +40,7 @@ copy_router_config() {
   docker cp "${GALACTIC_ROUTER_TENANT_DIR}" "${node}:/galactic/resources/galactic-router/base/tenant"
 }
 
-# copy_router_control_config NODE copies config/router/{base,tenant-control}
+# copy_router_control_config NODE copies config/galactic-router/{base,tenant-control}
 # onto NODE, nested under resources/galactic-control/iad/ so the
 # tenant-control overlay's "../base" resource reference resolves. Its node
 # affinity (route-reflector role, control node only) applies as-is; the
@@ -53,7 +53,7 @@ copy_router_control_config() {
   docker cp "${GALACTIC_ROUTER_TENANT_CONTROL_DIR}" "${node}:/galactic/resources/galactic-control/iad/tenant-control"
 }
 
-# copy_router_gateway_config NODE copies config/gateway/base onto NODE,
+# copy_router_gateway_config NODE copies config/galactic-gateway/base onto NODE,
 # nested under resources/galactic-gateway/base/ so that overlay's
 # "gateway" resource reference resolves. Each per-node overlay
 # (iad-gateway1/, iad-gateway2/) references ../base, so this is only
@@ -94,16 +94,16 @@ apply_k "${node}" /galactic/resources/galactic-control/iad/
 
 # iad's gateway-role canary: two dedicated nodes, iad-gateway1/
 # iad-gateway2, each running its own two-container
-# pod instance (config/gateway/base's per-node-unique
-# GALACTIC_GATEWAY_SRV6_ADDRESS -- see config/gateway/base/kustomization.
+# pod instance (config/galactic-gateway/base's per-node-unique
+# GALACTIC_GATEWAY_SRV6_ADDRESS -- see config/galactic-gateway/base/kustomization.
 # yaml's doc comment). galactic-gateway's own ServiceAccount/ClusterRole
-# (config/gateway/{serviceaccount,rbac}.yaml, already copied onto this
+# (config/galactic-gateway/{serviceaccount,rbac}.yaml, already copied onto this
 # node by deploy-system.sh's copy_config) must be applied once before the
 # per-node overlays below, same as galactic-cni/galactic-router's RBAC is
 # applied by deploy-system.sh itself rather than by this script.
 echo "Applying galactic-gateway RBAC to ${node}..."
-apply_f "${node}" /galactic/config/gateway/serviceaccount.yaml
-apply_f "${node}" /galactic/config/gateway/rbac.yaml
+apply_f "${node}" /galactic/config/galactic-gateway/serviceaccount.yaml
+apply_f "${node}" /galactic/config/galactic-gateway/rbac.yaml
 
 echo "Applying galactic-gateway/iad to ${node}..."
 docker exec "${node}" rm -rf /galactic/resources/galactic-gateway

@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-# config/fabric/ (shared with production) is a single DaemonSet whose
+# config/fabric-router/ (shared with production) is a single DaemonSet whose
 # affinity allows the edge, control, and gateway node labels.
 # resources/fabric-router/base/ and resources/fabric-control/iad/ each
 # build on a copy of it and patch in the lab-only image/imagePullPolicy
@@ -19,9 +19,9 @@ source "${SCRIPT_DIR}/lib.sh"
 # nested under each consuming overlay's own root so its "fabric" resource
 # reference resolves (kustomize requires resources in or below the
 # overlay root).
-FABRIC_DIR=$(cd "${SCRIPT_DIR}/../../../config/fabric" && pwd)
+FABRIC_DIR=$(cd "${SCRIPT_DIR}/../../../config/fabric-router" && pwd)
 
-# copy_fabric_config NODE copies config/fabric/ onto NODE, nested under
+# copy_fabric_config NODE copies config/fabric-router/ onto NODE, nested under
 # resources/fabric-router/base/ so the base overlay's "fabric" resource
 # reference resolves.
 copy_fabric_config() {
@@ -29,7 +29,7 @@ copy_fabric_config() {
   docker cp "${FABRIC_DIR}" "${node}:/galactic/resources/fabric-router/base/fabric"
 }
 
-# copy_fabric_control_config NODE copies config/fabric/ onto NODE, nested
+# copy_fabric_control_config NODE copies config/fabric-router/ onto NODE, nested
 # under resources/fabric-control/iad/ so that overlay's "fabric"
 # resource reference resolves.
 copy_fabric_control_config() {
