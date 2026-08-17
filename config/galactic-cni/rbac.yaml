@@ -15,7 +15,7 @@ rules:
   - apiGroups: ["k8s.cni.cncf.io"]
     resources:
       - network-attachment-definitions
-    verbs: ["patch"]
+    verbs: ["get", "patch"]
   - apiGroups: [""]
     resources:
       - nodes
