@@ -21,6 +21,10 @@ GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../../config/cni" && pwd)
 CILIUM_VERSION="v0.18.8"
 MULTUS_VERSION="v4.2.3"
 
+# Must match the podSubnet in node_files/{dfw,sjc,iad}/config.yaml.
+CILIUM_POD_CIDR_V6="fd00:100::/48"
+CILIUM_POD_CIDR_V6_MASK_SIZE=64
+
 ARCH=amd64
 if [ "$(uname -m)" = "aarch64" ]; then ARCH=arm64; fi
 
@@ -61,8 +65,8 @@ for site in dfw sjc iad; do
       --set ipv4.enabled=false \
       --set ipv6.enabled=true \
       --set ipam.mode=cluster-pool \
-      --set ipam.operator.clusterPoolIPv6PodCIDRList='{fd00:100::/48}' \
-      --set ipam.operator.clusterPoolIPv6MaskSize=64 \
+      --set ipam.operator.clusterPoolIPv6PodCIDRList='{${CILIUM_POD_CIDR_V6}}' \
+      --set ipam.operator.clusterPoolIPv6MaskSize=${CILIUM_POD_CIDR_V6_MASK_SIZE} \
       --set cni.exclusive=false \
       --set kubeProxyReplacement=true \
       --set tunnelProtocol=vxlan \
