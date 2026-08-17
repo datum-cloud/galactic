@@ -11,12 +11,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-# The configmap/daemonset base lives in config/cni/ (shared with
+# The configmap/daemonset base lives in config/galactic-cni/ (shared with
 # production); resources/galactic-cni/kustomization.yaml patches in the
 # lab-only image. It's copied into resources/galactic-cni/base/ on the
 # node at deploy time (kustomize requires resources in or below the overlay
 # root) rather than duplicated in the repo.
-GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../../config/cni" && pwd)
+GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-cni" && pwd)
 
 CILIUM_VERSION="v0.18.8"
 MULTUS_VERSION="v4.2.3"
@@ -68,7 +68,7 @@ for site in dfw sjc iad; do
   # (nesting SRC's basename underneath it) instead of overwriting it,
   # which would break kustomize's "../base" resource reference — so
   # rm -rf first and only docker cp into paths that don't yet exist:
-  # copy_to lands resources/galactic-cni/ fresh, then the config/cni/
+  # copy_to lands resources/galactic-cni/ fresh, then the config/galactic-cni/
   # copy targets "base", a leaf copy_to didn't create. A rerun without
   # the rm -rf would otherwise silently keep serving the prior copy from
   # underneath the new nested directory.

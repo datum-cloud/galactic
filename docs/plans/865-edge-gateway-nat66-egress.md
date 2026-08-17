@@ -89,7 +89,7 @@ The natural new type is a companion to `NetworkRule`: e.g. `NetworkEgressPolicy`
 
 ### 4.3 `NetworkGatewayReconciler` (`internal/controller/networkgateway_controller.go`)
 
-- Extend `publishSelfAddress`'s pattern to also publish `status.EgressAddress` (operator-supplied via a new config field, same "not yet computed, no in-cluster derivation mechanism" caveat `SRv6Address`'s own doc comment already carries) and advertise it as a `/128` L2VPN/EVPN Type-5 IP-Prefix route, the same shape `publishSelfAddress` already builds for `SRv6Address`. Unlike `SRv6Address` (learned by every other Galactic node over the internal iBGP/EVPN mesh), `EgressAddress` additionally needs to be reachable from the actual internet — an eBGP/uplink-peering concern entirely outside this repo (likely `config/fabric`'s FRR underlay, or a dedicated transit peer), called out here as an infra dependency this plan does not solve.
+- Extend `publishSelfAddress`'s pattern to also publish `status.EgressAddress` (operator-supplied via a new config field, same "not yet computed, no in-cluster derivation mechanism" caveat `SRv6Address`'s own doc comment already carries) and advertise it as a `/128` L2VPN/EVPN Type-5 IP-Prefix route, the same shape `publishSelfAddress` already builds for `SRv6Address`. Unlike `SRv6Address` (learned by every other Galactic node over the internal iBGP/EVPN mesh), `EgressAddress` additionally needs to be reachable from the actual internet — an eBGP/uplink-peering concern entirely outside this repo (likely `config/fabric-router`'s FRR underlay, or a dedicated transit peer), called out here as an infra dependency this plan does not solve.
 - A new watch/reconcile input on `NetworkEgressPolicy`, structurally mirroring the existing `NetworkRule` list-and-assemble loop, resolving this node's own `egress_sid` the same way `SRv6Address` is resolved today: supplied via operator config (`GALACTIC_GATEWAY_EGRESS_SID`), not computed in-cluster — the same deferral `publishSelfAddress`'s doc comment already documents for Argument 0, now needed for a second reserved Argument value too.
 
 ### 4.4 Default-route plumbing — the piece with no current owner
@@ -110,7 +110,7 @@ Ingress uses `AssignPrimaryNode` (`hash(vpcRef) % gateway-node-count`) under an 
 ## 5. Config / manifest changes
 
 - `internal/config/gateway.go`: new fields/env vars `GALACTIC_GATEWAY_EGRESS_ADDRESS` (masquerade public source IP) and `GALACTIC_GATEWAY_EGRESS_SID`. Both optional — unlike `PublicInterface`/`SRv6Address`, a gateway node not offering egress is a valid deployment, so `Validate` should only require the pair together, not unconditionally.
-- `config/gateway/base/daemonset.yaml`: extend the existing "these two values are deployment-specific, the per-node overlay must set them" comment block to cover the two new ones; still left unset at the base level.
+- `config/galactic-gateway/base/daemonset.yaml`: extend the existing "these two values are deployment-specific, the per-node overlay must set them" comment block to cover the two new ones; still left unset at the base level.
 - `deploy/containerlab/resources/galactic-router-gateway/`: extend the `iad-gateway1`/`iad-gateway2` worked example with real values once picked, for local dev/e2e proof.
 
 ## 6. Testing

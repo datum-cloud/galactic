@@ -1,4 +1,4 @@
-# iad-gateway2's instantiation of config/gateway/base — the sibling of
+# iad-gateway2's instantiation of config/galactic-gateway/base — the sibling of
 # ../iad-gateway1/; see that dir's kustomization.yaml for the shared doc
 # comment on why this role needs one instance per gateway node.
 namespace: galactic-system

@@ -28,31 +28,23 @@ spec:
       # and brings up the node's lo address, both of which galactic-router
       # depends on before it can start — so this must tolerate NotReady the
       # same way a CNI plugin does, or it never gets scheduled early enough.
-      # It must also tolerate the route-reflector role's own
-      # galactic.datumapis.com/node=control:NoSchedule taint and the edge
-      # XDP NAT+LB gateway role's own galactic.datumapis.com/node=gateway:
-      # NoSchedule taint -- the affinity below already targets both labels,
-      # but without these tolerations the matching taint silently keeps
-      # this DaemonSet off the node entirely, so the route reflector's lo
-      # address (and BGP_LOCAL_ADDRESS auto-detection) or the gateway
-      # node's underlay session never comes up and galactic-router-control/
-      # galactic-gateway crashloops forever.
+      # Blanket-tolerate all taints, same as every other DaemonSet in
+      # config/ (galactic-cni, galactic-router, galactic-gateway,
+      # vmtap-cni). Placement is controlled entirely by the node affinity
+      # below (edge/control/gateway roles) — tolerations don't need to be
+      # scoped, and scoping them risks silently blocking fabric-router if
+      # an unenumerated taint (a new role taint, a maintenance taint, etc.)
+      # ever lands on an eligible node: the route reflector's lo address
+      # (and BGP_LOCAL_ADDRESS auto-detection) or the gateway node's
+      # underlay session would never come up and galactic-router-control/
+      # galactic-gateway would crashloop forever per their dependency on
+      # this DaemonSet.
       tolerations:
-        - key: node.kubernetes.io/not-ready
-          operator: Exists
-          effect: NoSchedule
-        - key: galactic.datumapis.com/node
-          operator: Equal
-          value: control
-          effect: NoSchedule
-        - key: galactic.datumapis.com/node
-          operator: Equal
-          value: gateway
-          effect: NoSchedule
+        - operator: Exists
       # Opt-in only, same as galactic-cni and galactic-router: runs on every
       # node labeled for regular tenant traffic, the galactic-router
       # route-reflector role, or the edge XDP NAT+LB gateway role
-      # (config/gateway/base/, a separate galactic-gateway binary), since
+      # (config/galactic-gateway/base/, a separate galactic-gateway binary), since
       # all three need underlay connectivity -- the gateway role's own XDP
       # datapath attaches to
       # this same interface (see internal/gateway's doc.go) and depends on

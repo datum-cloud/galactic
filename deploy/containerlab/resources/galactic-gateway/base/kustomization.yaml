@@ -1,10 +1,10 @@
 # Mirrors resources/galactic-router/base/'s pattern exactly, pointed at
-# config/gateway/base instead of config/router/base: "gateway" is copied
+# config/galactic-gateway/base instead of config/galactic-router/base: "gateway" is copied
 # onto the node at deploy time (see scripts/deploy-galactic-router.sh's
 # copy_router_gateway_config), nested here so this kustomization's
 # "gateway" resource reference resolves. Unlike resources/galactic-router/
-# base/'s "tenant" resource, config/gateway/base is self-contained (its own
-# full two-container DaemonSet spec, not a patch onto config/router/base),
+# base/'s "tenant" resource, config/galactic-gateway/base is self-contained (its own
+# full two-container DaemonSet spec, not a patch onto config/galactic-router/base),
 # so there is no separate "base" resource to nest alongside it here.
 resources:
   - gateway

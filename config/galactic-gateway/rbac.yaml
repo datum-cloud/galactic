@@ -1,9 +1,5 @@
-# The edge XDP NAT+LB gateway control plane's own RBAC — split out of
-# config/router/rbac.yaml's single ClusterRole, which used to grant one
-# galactic-router identity both the BGP-family CRD verbs and
-# networkgateways/networkrules verbs because both reconciler sets lived in
-# the same binary. They no longer do: this ClusterRole covers only what
-# NetworkGatewayReconciler/NetworkRuleReconciler
+# The edge XDP NAT+LB gateway control plane's own RBAC. This ClusterRole
+# covers only what NetworkGatewayReconciler/NetworkRuleReconciler
 # (internal/controller/networkgateway_controller.go,
 # internal/controller/networkrule_controller.go) actually touch.
 #
@@ -17,16 +13,12 @@
 #
 # One Kubernetes Pod has exactly one ServiceAccount identity, so the
 # two-container gateway pod (galactic-router + galactic-gateway,
-# config/gateway/base/daemonset.yaml) cannot literally run one container
+# config/galactic-gateway/base/daemonset.yaml) cannot literally run one container
 # per ServiceAccount the way two separate DaemonSets could. The
 # ClusterRoleBinding below therefore binds the galactic-gateway
-# ServiceAccount to *both* this ClusterRole and the (now BGP-only)
-# galactic-router ClusterRole from config/router/rbac.yaml — the smallest
-# deviation from a literal per-container RBAC split that Kubernetes allows.
-# This is still a strict improvement over today: every *other* (non-gateway)
-# node's galactic-router ServiceAccount loses networkgateways/networkrules/
-# bgpadvertisements-write access entirely, rather than every galactic-router
-# pod in the cluster carrying it as today's single shared ClusterRole does.
+# ServiceAccount to *both* this ClusterRole and the BGP-only galactic-router
+# ClusterRole from config/galactic-router/rbac.yaml — the smallest deviation
+# from a literal per-container RBAC split that Kubernetes allows.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -70,10 +62,10 @@ subjects:
     namespace: galactic-system
 ---
 # See this file's header comment: the galactic-gateway ServiceAccount also
-# needs the (trimmed, BGP-only) galactic-router ClusterRole, since the
+# needs the BGP-only galactic-router ClusterRole, since the
 # galactic-router container co-located in the same two-container pod
-# (config/gateway/base/daemonset.yaml) runs under this same pod-level
-# identity. Requires config/router/rbac.yaml to be applied too — true of
+# (config/galactic-gateway/base/daemonset.yaml) runs under this same pod-level
+# identity. Requires config/galactic-router/rbac.yaml to be applied too — true of
 # every gateway node deployment already, since a bare galactic-gateway
 # container with no co-located galactic-router container advertising this
 # node's tenant BGP session is not a supported configuration.

@@ -142,7 +142,7 @@ This finds every advertisement ever created for the rule regardless of
 whether the node that created it is still registered, closing the gap
 directly — no dependency on node membership at all during teardown.
 
-No RBAC change: `config/gateway/rbac.yaml` already grants `list` on
+No RBAC change: `config/galactic-gateway/rbac.yaml` already grants `list` on
 `bgpadvertisements` to this ServiceAccount (`galactic-gateway` ClusterRole,
 full CRUD comment already covers create+delete for this exact code path).
 

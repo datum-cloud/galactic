@@ -422,7 +422,7 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 // this directly on its own ticker instead -- see that package's doc
 // comment for the full reasoning. The RBAC galactic-cni's ServiceAccount
 // already has (get/list bgprouters; get/list/...  bgpvrfinstances, see
-// config/cni/rbac.yaml) is exactly what this function needs, so no
+// config/galactic-cni/rbac.yaml) is exactly what this function needs, so no
 // permission change was required to place it there.
 //
 // A pin directory this process can't confirm exists -- either genuinely

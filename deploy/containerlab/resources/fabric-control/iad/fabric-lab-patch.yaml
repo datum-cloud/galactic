@@ -5,7 +5,7 @@ metadata:
 spec:
   template:
     spec:
-      # Narrower than config/fabric/'s default (edge or control): this is
+      # Narrower than config/fabric-router/'s default (edge or control): this is
       # the control-node-only fabric pod (iad-worker-control), which needs
       # its own frr.conf distinct from iad's regular per-worker fabric
       # (resources/fabric-router/iad/) — so this overlay sticks to control

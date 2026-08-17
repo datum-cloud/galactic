@@ -92,16 +92,16 @@ galactic/
 │   │       └── kustomization.yaml
 │   └── fabric/               # (not gateway-specific, but fabric-router must also
 │                              #   run on gateway-role nodes — see ARCHITECTURE-CNI.md
-│                              #   and root CLAUDE.md's config/fabric/ note)
+│                              #   and root CLAUDE.md's config/fabric-router/ note)
 ├── deploy/containerlab/resources/
 │   └── galactic-gateway/   # Worked two-node example — see below
 └── containers/
     └── galactic-gateway/    # galactic-gateway production image
 ```
 
-`config/gateway/base/` is **not** included in `config/gateway/`'s own
+`config/galactic-gateway/base/` is **not** included in `config/galactic-gateway/`'s own
 kustomization and is **not** applied as-is — the same exemption
-`config/fabric/` documents in root `AGENTS.md`, for the same reason:
+`config/fabric-router/` documents in root `AGENTS.md`, for the same reason:
 `GALACTIC_GATEWAY_SRV6_ADDRESS` must be unique per gateway node and has no
 generic default (see [publishSelfAddress](#status-and-self-address-publish)
 below). It's designed to be instantiated once per gateway node by a further
@@ -309,7 +309,7 @@ pod's port table:
 | `galactic-router` (this pod's tenant-BGP side) | `9179`  | `5179`      |
 | `galactic-gateway`                             | `8081`  | `5181`      |
 
-### Two-container pod (`config/gateway/base/daemonset.yaml`)
+### Two-container pod (`config/galactic-gateway/base/daemonset.yaml`)
 
 One `ServiceAccount` (`galactic-gateway`) for both containers — a
 Kubernetes Pod has exactly one ServiceAccount identity, not a design
@@ -332,12 +332,12 @@ silently pinning to a plain directory) for `edgeattach.PinDir`
 
 ### RBAC
 
-`config/gateway/rbac.yaml`'s `ClusterRole` covers exactly what
+`config/galactic-gateway/rbac.yaml`'s `ClusterRole` covers exactly what
 `NetworkGatewayReconciler`/`NetworkRuleReconciler` touch:
 `networkgateways`/`networkrules` (+ `/status`) read-write,
 `bgpadvertisements` full CRUD, `bgprouters` read-only (for
 `usidresolver.go` — see above). This was split out of
-`config/router/rbac.yaml`'s single `ClusterRole`, which used to grant one
+`config/galactic-router/rbac.yaml`'s single `ClusterRole`, which used to grant one
 `galactic-router` identity both the BGP-family CRD verbs and
 `networkgateways`/`networkrules` verbs when both reconciler sets lived in
 the same binary — every *other* (non-gateway) node's `galactic-router`
@@ -346,9 +346,9 @@ ServiceAccount now loses that access entirely, rather than every
 
 Because one Pod has one ServiceAccount, the `galactic-gateway`
 ServiceAccount is bound to *both* this `ClusterRole` and the (trimmed,
-BGP-only) `galactic-router` `ClusterRole` from `config/router/rbac.yaml` —
+BGP-only) `galactic-router` `ClusterRole` from `config/galactic-router/rbac.yaml` —
 the smallest deviation from a literal per-container RBAC split Kubernetes
-allows. `config/router/rbac.yaml` must be applied for any gateway node
+allows. `config/galactic-router/rbac.yaml` must be applied for any gateway node
 deployment (a bare `galactic-gateway` container with no co-located
 `galactic-router` container advertising the node's tenant BGP session is
 not a supported configuration).
@@ -425,7 +425,7 @@ tier structure.
 **Publish pipeline:** `.github/workflows/publish.yaml`'s
 `publish-galactic-gateway-image` job builds and pushes
 `ghcr.io/datum-cloud/galactic-gateway`; `publish-kustomize-bundles` stamps
-that tag (alongside the `galactic-router` tag) into `config/gateway/base`,
+that tag (alongside the `galactic-router` tag) into `config/galactic-gateway/base`,
 since that base's DaemonSet runs both images in one pod.
 
 **Container image:**

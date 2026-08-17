@@ -1,4 +1,4 @@
-# iad-gateway1's instantiation of config/gateway/base (see that dir's
+# iad-gateway1's instantiation of config/galactic-gateway/base (see that dir's
 # kustomization.yaml doc comment for why this role needs one instance per
 # gateway node rather than one shared DaemonSet). iad-gateway2/ is the
 # sibling instantiation.
