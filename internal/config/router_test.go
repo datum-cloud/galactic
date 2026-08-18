@@ -53,7 +53,7 @@ func TestRouterConfigDefaults(t *testing.T) {
 }
 
 func TestRouterConfigEnvOverride(t *testing.T) {
-	t.Setenv(EnvRouterNodeName, "env-node")
+	t.Setenv(EnvRouterNodeName, testEnvNode)
 	t.Setenv(EnvRouterReflector, testBoolTrue)
 	t.Setenv(EnvRouterBGPListenPort, "1790")
 	t.Setenv(EnvRouterBGPLocalAddr, "2001:db8::1")
@@ -67,8 +67,8 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 
 	cfg := NewRouterConfig()
 
-	if cfg.NodeName != "env-node" {
-		t.Errorf("NodeName = %q, want %q", cfg.NodeName, "env-node")
+	if cfg.NodeName != testEnvNode {
+		t.Errorf("NodeName = %q, want %q", cfg.NodeName, testEnvNode)
 	}
 	if !cfg.Reflector {
 		t.Error("Reflector = false, want true")
@@ -109,9 +109,9 @@ func TestRouterConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "missing node name",
+			name:    testCaseMissingNodeName,
 			envVars: map[string]string{},
-			wantErr: "node name is required",
+			wantErr: testErrNodeNameRequired,
 		},
 		{
 			name: "valid node name",
@@ -145,20 +145,20 @@ func TestRouterConfigValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
-			name: "invalid metrics port",
+			name: testCaseInvalidMetricsPort,
 			envVars: map[string]string{
 				EnvRouterNodeName:    testRouterNodeName,
 				EnvRouterMetricsPort: "0",
 			},
-			wantErr: "metrics port must be between",
+			wantErr: testErrMetricsPortRange,
 		},
 		{
-			name: "invalid grpc health port",
+			name: testCaseInvalidGRPCHealthPort,
 			envVars: map[string]string{
 				EnvRouterNodeName:       testRouterNodeName,
 				EnvRouterGRPCHealthPort: "0",
 			},
-			wantErr: "grpc health port must be between",
+			wantErr: testErrGRPCHealthPortRange,
 		},
 		{
 			name: "invalid webhook port",

@@ -29,6 +29,33 @@ const (
 	LogLevelError   = "error"
 )
 
+// --- Shared CLI flag names --------------------------------------------
+
+// FlagNodeName/FlagMetricsPort/FlagGRPCHealthPort are the CLI flag name
+// strings every per-binary Config's BindFlags bindings table
+// (RouterConfig, GatewayConfig, NAT66Config) binds verbatim -- pulled out
+// to shared constants rather than left as three near-identical literal
+// copies (one per binary), which is exactly what golangci-lint's goconst
+// flags once a third copy exists.
+const (
+	FlagNodeName       = "node-name"
+	FlagMetricsPort    = "metrics-port"
+	FlagGRPCHealthPort = "grpc-health-port"
+)
+
+// --- Shared Viper key names ---------------------------------------------
+
+// KeyNodeName/KeyMetricsPort/KeyGRPCHealthPort are the Viper key strings
+// every per-binary Config's SetDefault/BindFlags/readFields trio uses for
+// the same three fields FlagNodeName/FlagMetricsPort/FlagGRPCHealthPort
+// bind -- pulled out for the same goconst-across-three-near-identical-
+// binaries reason as the Flag* constants above.
+const (
+	KeyNodeName       = "node_name"
+	KeyMetricsPort    = "metrics_port"
+	KeyGRPCHealthPort = "grpc_health_port"
+)
+
 // --- Shared helpers --------------------------------------------------------
 
 // NormalizeLogLevel maps common log level aliases to canonical values.
