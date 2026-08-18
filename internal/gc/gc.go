@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os"
 	"regexp"
@@ -17,8 +18,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/nptv6map"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/nptv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -46,7 +49,10 @@ type CleanupResult struct {
 	// from OrphanedVRFsRemoved's kernel VRF *interfaces* above (Milestone
 	// 7.3).
 	EBPFVRFEntriesRemoved int
-	Errors                int
+	// EBPFNPTv6EntriesRemoved counts stale eBPF uSID datapath nptv6_table
+	// map entries removed by SweepEBPFNPTv6Table.
+	EBPFNPTv6EntriesRemoved int
+	Errors                  int
 }
 
 // vrfNameRegex matches the deterministic VRF interface name pattern used by
@@ -533,6 +539,147 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	}
 
 	return result
+}
+
+// SweepEBPFNPTv6Table registers/reconciles the eBPF uSID datapath's
+// nptv6_table map (internal/plumbing/ebpf/nptv6map) against every live
+// BGPVRFInstance CRD's own Spec.NPTv6 field, owned by nodeName's
+// BGPRouter(s).
+//
+// Unlike SweepEBPFVRFTable (whose vrf_table registration happens at CNI ADD
+// time via internal/cnibgp's registerEBPFDatapath, and this function only
+// reconciles stale entries away), this function is nptv6_table's *only*
+// writer: nothing registers an NPTv6 mapping at CNI ADD time at all (the CNI
+// ADD path has no per-attachment notion of NPTv6 -- it is a per-VRF, not
+// per-attachment, config field). Every currently-live mapping is therefore
+// (re-)registered here, on the same tick that also reconciles stale ones
+// away -- see internal/plumbing/ebpf/nptv6map/doc.go's "no Generation/
+// monotonic-clock kernel field" section for why a single, sequential writer
+// (this function, never raced by a second writer) makes that safe without
+// vrf_table's own kernel-persisted generation field.
+//
+// Runs from the same place as SweepEBPFVRFTable
+// (internal/installer.Run's ebpfGCSweepTicker), for the identical reason:
+// the pinned nptv6_table map only exists inside that container -- see
+// SweepEBPFVRFTable's own doc comment for the full reasoning (galactic-router's
+// own DaemonSet has no /sys/fs/bpf mount or CAP_BPF, so the BGPVRFInstance
+// controller-runtime reconciler cannot open this map directly regardless of
+// how it validates the CRD's own NPTv6 field).
+func SweepEBPFNPTv6Table(ctx context.Context, k8s client.Client, namespace, nodeName, pinDir string) CleanupResult {
+	result := CleanupResult{}
+
+	if _, statErr := os.Stat(pinDir); statErr != nil {
+		return result
+	}
+
+	table, closer, err := nptv6map.OpenPinned(pinDir)
+	if err != nil {
+		slog.Error("GC: failed to open pinned eBPF nptv6_table for sweep", "pinDir", pinDir, "err", err)
+		result.Errors++
+		return result
+	}
+	defer func() { _ = closer.Close() }()
+
+	// Capture the cutoff *before* listing BGPVRFInstance CRDs and
+	// (re-)registering their live mappings below -- every entry this same
+	// call registers therefore stamps a generation >= cutoff, and Reconcile
+	// keeps it regardless (it is also always in live directly). See
+	// nptv6map/doc.go for why this table has no second writer to race.
+	cutoff := table.Generation()
+
+	routers, err := routersForNode(ctx, k8s, namespace, nodeName)
+	if err != nil {
+		slog.Error("GC: failed to list BGPRouters for eBPF nptv6_table sweep", "err", err)
+		result.Errors++
+		return result
+	}
+	if len(routers) == 0 {
+		// See SweepEBPFVRFTable's own identical guard for why zero routers
+		// found is treated as "skip this tick," not "genuinely nothing is
+		// live."
+		slog.Warn("GC: no BGPRouter found for node during eBPF nptv6_table sweep, skipping reconcile this tick",
+			"nodeName", nodeName)
+		return result
+	}
+
+	vrfInstList := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(ctx, vrfInstList, client.InNamespace(namespace)); err != nil {
+		slog.Error("GC: failed to list BGPVRFInstances for eBPF nptv6_table sweep", "err", err)
+		result.Errors++
+		return result
+	}
+
+	live := make(map[nptv6map.NPTv6Key]struct{}, len(vrfInstList.Items))
+	for _, inst := range vrfInstList.Items {
+		if inst.Spec.RouterRef == nil || inst.Spec.NPTv6 == nil {
+			continue
+		}
+		router, ok := routers[inst.Spec.RouterRef.Name]
+		if !ok {
+			continue // not one of this node's routers
+		}
+		if router.Spec.SRv6Locator == "" {
+			continue // this router has no eBPF-relevant locator configured
+		}
+		prefix, err := netip.ParsePrefix(router.Spec.SRv6Locator)
+		if err != nil {
+			slog.Warn("GC: skipping BGPVRFInstance with unparseable router locator during eBPF nptv6_table sweep",
+				"vrfInstance", inst.Name, "router", router.Name, "locator", router.Spec.SRv6Locator, "err", err)
+			continue
+		}
+		block, err := uformat.Block(prefix.Addr())
+		if err != nil {
+			slog.Warn("GC: skipping BGPVRFInstance with invalid router locator during eBPF nptv6_table sweep",
+				"vrfInstance", inst.Name, "router", router.Name, "locator", router.Spec.SRv6Locator, "err", err)
+			continue
+		}
+		if inst.Spec.VRFID < int32(uformat.ArgumentMin) || inst.Spec.VRFID > int32(uformat.ArgumentMax) {
+			slog.Warn("GC: skipping BGPVRFInstance with out-of-range VRFID during eBPF nptv6_table sweep",
+				"vrfInstance", inst.Name, "vrfID", inst.Spec.VRFID)
+			continue
+		}
+		argument := uint16(inst.Spec.VRFID)
+
+		mapping, err := buildNPTv6Mapping(inst.Spec.NPTv6)
+		if err != nil {
+			slog.Warn("GC: skipping BGPVRFInstance with invalid NPTv6 mapping during eBPF nptv6_table sweep",
+				"vrfInstance", inst.Name, "err", err)
+			continue
+		}
+		if err := table.Register(block, argument, mapping); err != nil {
+			slog.Error("GC: failed to register eBPF nptv6_table entry", "vrfInstance", inst.Name, "err", err)
+			result.Errors++
+			continue
+		}
+		live[nptv6map.NPTv6Key{Block: block, Argument: argument}] = struct{}{}
+	}
+
+	removed, err := table.Reconcile(live, cutoff)
+	for _, e := range removed {
+		slog.Info("GC: removed stale eBPF nptv6_table entry", "block", e.Block, "argument", e.Argument)
+	}
+	result.EBPFNPTv6EntriesRemoved = len(removed)
+	if err != nil {
+		slog.Error("GC: errors while reconciling eBPF nptv6_table", "err", err)
+		result.Errors++
+	}
+
+	return result
+}
+
+// buildNPTv6Mapping converts a BGPVRFInstanceSpec's NPTv6 field (validated
+// only as parseable CIDRs here; nptv6.Mapping.Adjustment/Register perform
+// the fuller RFC 6296 range validation) into an internal/plumbing/nptv6.Mapping.
+func buildNPTv6Mapping(spec *bgpv1alpha1.NPTv6Spec) (nptv6.Mapping, error) {
+	_, ula, err := net.ParseCIDR(spec.ULAPrefix)
+	if err != nil {
+		return nptv6.Mapping{}, fmt.Errorf("parse ulaPrefix %q: %w", spec.ULAPrefix, err)
+	}
+	_, pub, err := net.ParseCIDR(spec.PublicPrefix)
+	if err != nil {
+		return nptv6.Mapping{}, fmt.Errorf("parse publicPrefix %q: %w", spec.PublicPrefix, err)
+	}
+	return nptv6.Mapping{ULAPrefix: ula, PublicPrefix: pub}, nil
 }
 
 // RunGC performs a full garbage collection pass: removes orphaned BGP CRDs

@@ -454,8 +454,9 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 //     internal/plumbing/ebpf/attach.Health -- exit criterion "health check
 //     fails correctly when the program is unloaded".
 //  7. Periodically sweeps stale vrf_table entries via gc.SweepEBPFVRFTable
-//     (design plan §5.3; Milestone 7.3). This runs from here, not from
-//     galactic-router's existing GC controller
+//     (design plan §5.3; Milestone 7.3), and registers/reconciles
+//     nptv6_table entries via gc.SweepEBPFNPTv6Table. Both run from here,
+//     not from galactic-router's existing GC controller
 //     (internal/controller/gc_controller.go), because the pinned maps
 //     only exist inside this container -- see gc.SweepEBPFVRFTable's own
 //     doc comment for the full reasoning.
@@ -602,6 +603,17 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			if result.EBPFVRFEntriesRemoved > 0 || result.Errors > 0 {
 				slog.Info("eBPF vrf_table GC sweep complete",
 					"removed", result.EBPFVRFEntriesRemoved, "errors", result.Errors)
+			}
+
+			// nptv6_table's own sweep: unlike vrf_table above, this is the
+			// map's *only* writer (see gc.SweepEBPFNPTv6Table's own doc
+			// comment) -- it both registers every currently-live NPTv6
+			// mapping and reconciles stale ones away on every tick.
+			nptv6Result := gc.SweepEBPFNPTv6Table(
+				ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
+			if nptv6Result.EBPFNPTv6EntriesRemoved > 0 || nptv6Result.Errors > 0 {
+				slog.Info("eBPF nptv6_table GC sweep complete",
+					"removed", nptv6Result.EBPFNPTv6EntriesRemoved, "errors", nptv6Result.Errors)
 			}
 		}
 	}

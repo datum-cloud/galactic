@@ -23,6 +23,7 @@ import (
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"go.datum.net/galactic/internal/model"
+	"go.datum.net/galactic/internal/plumbing/nptv6"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -36,6 +37,10 @@ const annotationConfigHash = "galactic.datum.net/config-hash"
 // GoBGP session state. BGP FSM transitions are not Kubernetes events, so a
 // periodic requeue is required to keep BGPPeer status current.
 const peerStatusRequeue = 30 * time.Second
+
+// reasonAccepted is the shared condition Reason used across this
+// reconciler's Accepted-condition updates below.
+const reasonAccepted = "Accepted"
 
 // BGPRouterReconciler reconciles BGPRouter resources.
 type BGPRouterReconciler struct {
@@ -350,7 +355,7 @@ func (r *BGPRouterReconciler) updateAdvertisementStatuses(
 		setAdvertisementCondition(advCopy, metav1.Condition{
 			Type:    ConditionReady,
 			Status:  metav1.ConditionTrue,
-			Reason:  "Accepted",
+			Reason:  reasonAccepted,
 			Message: "Advertisement accepted",
 		})
 		if updateErr := r.Status().Update(ctx, advCopy); updateErr != nil {
@@ -411,12 +416,49 @@ func (r *BGPRouterReconciler) updateVRFInstanceStatuses(ctx context.Context, rou
 		setVRFInstanceCondition(vrfCopy, metav1.Condition{
 			Type:    ConditionReady,
 			Status:  metav1.ConditionTrue,
-			Reason:  "Accepted",
+			Reason:  reasonAccepted,
 			Message: "VRF instance accepted",
 		})
+		if vrfCopy.Spec.NPTv6 != nil {
+			setVRFInstanceCondition(vrfCopy, nptv6ConfiguredCondition(vrfCopy.Spec.NPTv6))
+		}
 		if updateErr := r.Status().Update(ctx, vrfCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPVRFInstance status", "vrf", vrf.Name)
 		}
+	}
+}
+
+// nptv6ConfiguredCondition validates spec (parseable CIDRs, matching prefix
+// lengths, and a supported prefix length — internal/plumbing/nptv6.Mapping's
+// own rules) and returns the ConditionNPTv6Configured condition reporting
+// the result. This reconciler has no access to the eBPF datapath's
+// nptv6_table map at all (galactic-router's DaemonSet has no /sys/fs/bpf
+// mount or CAP_BPF — see gc.SweepEBPFNPTv6Table's doc comment), so this
+// condition reflects spec validity only, never live kernel state.
+func nptv6ConfiguredCondition(spec *bgpv1alpha1.NPTv6Spec) metav1.Condition {
+	_, ula, err := net.ParseCIDR(spec.ULAPrefix)
+	if err != nil {
+		return metav1.Condition{
+			Type: ConditionNPTv6Configured, Status: metav1.ConditionFalse,
+			Reason: "InvalidULAPrefix", Message: err.Error(),
+		}
+	}
+	_, pub, err := net.ParseCIDR(spec.PublicPrefix)
+	if err != nil {
+		return metav1.Condition{
+			Type: ConditionNPTv6Configured, Status: metav1.ConditionFalse,
+			Reason: "InvalidPublicPrefix", Message: err.Error(),
+		}
+	}
+	if _, err := (nptv6.Mapping{ULAPrefix: ula, PublicPrefix: pub}).Adjustment(); err != nil {
+		return metav1.Condition{
+			Type: ConditionNPTv6Configured, Status: metav1.ConditionFalse,
+			Reason: "InvalidMapping", Message: err.Error(),
+		}
+	}
+	return metav1.Condition{
+		Type: ConditionNPTv6Configured, Status: metav1.ConditionTrue,
+		Reason: reasonAccepted, Message: "NPTv6 mapping is valid",
 	}
 }
 
