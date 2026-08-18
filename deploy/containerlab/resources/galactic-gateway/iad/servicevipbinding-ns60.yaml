@@ -1,0 +1,33 @@
+# Sample ServiceVIPBinding for ns60's backend, alongside networkrule-ns60.yaml
+# (same VIP/backend pair -- see that file's own comment for the address
+# provenance). ns60's nginx Deployment (resources/tenants/ns60/) has no
+# node pin of its own beyond excluding control-plane nodes, and lands on
+# iad-worker in practice (the only untainted, non-route-reflector,
+# non-gateway-role worker in the iad cluster -- iad-worker2/
+# iad-worker-control is the route reflector and iad-gateway1/iad-gateway2
+# are tainted gateway-role nodes; confirm the live pod's actual node with
+# `kubectl get pod -n ns60 -o wide` the same way that file's comment
+# already documents for the backend address itself).
+#
+# egressKind: veth, since ns60's backend is a plain container Deployment
+# (veth attach, not a tap/VM backend) -- see ServiceVIPBinding's own doc
+# comment for the veth/tap fork. backendAddress/backendPort are omitted:
+# per that same doc comment, both are ignored for the veth kind (a veth
+# binding's backend answers on vipAddress itself once bound, via
+# internal/plumbing/vip's galactic-vip0 dummy-interface bind) -- they
+# exist on the spec only for the tap case, where there is no fixture in
+# this lab yet (see the redesign plan's §8, "no tap/VM fixture exists in
+# this lab at all").
+apiVersion: network.datumapis.com/v1alpha1
+kind: ServiceVIPBinding
+metadata:
+  name: ns60-web-iad-worker
+  namespace: galactic-system
+spec:
+  targetRef:
+    kind: Node
+    name: iad-worker
+  vipAddress: 2001:db8:6060::1
+  port: 80
+  protocol: tcp
+  egressKind: veth

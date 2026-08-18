@@ -1,0 +1,16 @@
+# sjc's instantiation of ../base as this site's NAT66 shard, reusing the
+# already-existing sjc-worker node (see node-patch.yaml and ../README.md)
+# rather than a new dedicated "nat66"-labeled node. Mirrors
+# resources/galactic-router/sjc/'s per-site pattern (no rename needed the
+# way resources/galactic-gateway/iad-gateway{1,2}/ require: dfw/iad/sjc
+# are three separate clusters, so "galactic-nat66" never collides with
+# itself the way two DaemonSets in the same iad cluster would).
+namespace: galactic-system
+resources:
+  - ../base
+  - nat66shard.yaml
+patches:
+  - path: node-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-nat66

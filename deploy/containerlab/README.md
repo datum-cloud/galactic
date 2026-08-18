@@ -41,9 +41,15 @@ two-container pod, `galactic-router` + `galactic-gateway`).
 They never run `galactic-cni` (config/galactic-cni's affinity is edge-only) or a route-reflector.
 **Underlay BGP peering on their `tr3` uplinks is now wired** (`node_files/tr3/frr.conf`,
 plus two `BGPPeer` objects in `resources/galactic-control/iad/` for the route reflector side)
-and the full fabric converges, but real end-to-end ingress traffic through the datapath still
-doesn't reach a backend in this topology — it currently stops on a veth-specific `XDP_TX`
-behavior in this lab environment, not a code bug; see `resources/galactic-gateway/`.
+and the full fabric converges. Real end-to-end ingress traffic through the datapath is not yet
+live-validated here — this used to be attributed to a generic veth `XDP_TX` behavior, but
+root-causing found two stacked issues: IPv6 forwarding sysctls weren't enabled (now fixed,
+`sysctl.ConfigureFIBLookupUplinkSysctls`), and veth's native `XDP_TX` fast path stays invisible
+to tcpdump/AF_PACKET unless the peer interface also runs an XDP program — a genuine veth/kernel
+characteristic of this lab's veth-pair uplink simulation, not a code bug and not a production
+concern. See the redesign plan's
+[§8](../../docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md#8-containerlab-validation) and
+`resources/galactic-gateway/`.
 
 `dfw`, `iad`, and `sjc` are the three Kind cluster names — not separate ContainerLab
 topology nodes. Each cluster's `control-plane`/`worker` nodes above are its members.
