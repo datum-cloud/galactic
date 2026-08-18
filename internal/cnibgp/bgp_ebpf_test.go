@@ -187,6 +187,31 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	if len(fnEntries) != 1 {
 		t.Errorf("function_table entries = %+v, want exactly 1", fnEntries)
 	}
+
+	// Regression guard for a real bug found live: usid_egress was compiled
+	// and loaded (attach.Load pins it, alongside every map) but nothing
+	// ever attached it anywhere -- confirmed live via `tc filter show`
+	// against a real backend's own host-side veth showing no filter at
+	// all, on either direction. This is why every reply a DSR/veth
+	// backend ever sent silently kept its own real address instead of the
+	// VIP a client actually connected to, and no forward-path validation
+	// this redesign ran ever caught it. Asserts registerEBPFDatapath's
+	// own attachUsidEgress call actually put a filter on this attachment's
+	// host interface's ingress hook, not just that it returned no error.
+	filters, err := netlink.FilterList(hostLinkObj, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		t.Fatalf("FilterList(ingress) on host interface: %v", err)
+	}
+	var foundEgressFilter bool
+	for _, f := range filters {
+		if bpfFilter, ok := f.(*netlink.BpfFilter); ok && bpfFilter.Name == "galactic_usid_egress" {
+			foundEgressFilter = true
+		}
+	}
+	if !foundEgressFilter {
+		t.Errorf("no galactic_usid_egress tc filter found on host interface %q ingress hook -- "+
+			"registerEBPFDatapath must attach usid_egress there", intf.GenerateInterfaceNameHost(vpc, testAttachment))
+	}
 }
 
 // TestRegisterEBPFDatapath_SecondAttachmentSharesEntry covers the whole

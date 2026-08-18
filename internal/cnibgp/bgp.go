@@ -35,11 +35,13 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/vishvananda/netlink"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,6 +53,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -606,7 +609,50 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
 
+	// Attach usid_egress to this attachment's own host-side interface --
+	// see attachUsidEgress's own doc comment for why this was, until now,
+	// entirely missing: it's a real, previously-undiscovered gap, not
+	// specific to NAT66 at all, in every veth/tap ServiceVIPBinding's own
+	// reply path.
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	if err := attachUsidEgress(pinDir, hostName); err != nil {
+		return false, fmt.Errorf("attach eBPF usid_egress to host interface %q: %w", hostName, err)
+	}
+
 	return true, nil
+}
+
+// attachUsidEgress loads usid_egress from its own pin (attach.Load pins it
+// there, alongside every usid_ingress map, specifically so a short-lived
+// process like this one can reach it -- see that function's own doc
+// comment) and attaches it to ifaceName's TC ingress hook.
+//
+// This was a real, previously-undiscovered gap: usid_egress has existed
+// since the DSR/Maglev redesign's component 0.1/2 work (NPTv6 and tap-VIP
+// substitution's outbound-direction translation), but nothing anywhere in
+// this codebase ever called attach.AttachEgress (or any equivalent) to
+// actually put it on an interface -- confirmed live via `tc filter show`
+// on a real backend's own host-side veth: no filter at all, on either
+// direction. Every fix this redesign made to the *forward* path (client
+// -> VIP -> backend) worked and was validated without ever exercising
+// this gap, because none of them depended on the *reply* leaving with its
+// source address translated back -- only once the forward path, the
+// NAT66 egress route, and everything else were all working at once did a
+// real end-to-end curl's TCP handshake finally depend on it, and stall
+// with the reply silently discarded by the client (its source address
+// never got translated from the backend's real address back to the VIP).
+//
+// Idempotent (attach.AttachEgress's own FilterReplace semantics) and safe
+// to call on every attachment ADD, the same way every other registration
+// in this function already is.
+func attachUsidEgress(pinDir, ifaceName string) error {
+	program, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.UsidEgressPinName), nil)
+	if err != nil {
+		return fmt.Errorf("load pinned usid_egress program: %w", err)
+	}
+	defer func() { _ = program.Close() }()
+
+	return attach.AttachEgress(program, ifaceName)
 }
 
 // installNAT66EgressRoute installs (or refreshes) vrfTableID's default
