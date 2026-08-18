@@ -120,6 +120,52 @@ func TestTenantIdentifierDoesNotMatchBGPAdvertisementName(t *testing.T) {
 	}
 }
 
+func TestParseTenantIdentifier(t *testing.T) {
+	tests := []struct {
+		name           string
+		id             string
+		wantVPC        string
+		wantAttachment string
+		wantOK         bool
+	}{
+		{"simple", "abc-def", testVPC, testAttachment, true},
+		{"base62 vpc", "0000000jU-00G", testVPCBase62, "00G", true},
+		{"no separator", "abcdef", "", "", false},
+		{"empty vpc", "-def", "", "", false},
+		{"empty attachment", "abc-", "", "", false},
+		{"empty string", "", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVPC, gotAttachment, gotOK := ParseTenantIdentifier(tt.id)
+			if gotOK != tt.wantOK || gotVPC != tt.wantVPC || gotAttachment != tt.wantAttachment {
+				t.Errorf("ParseTenantIdentifier(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tt.id, gotVPC, gotAttachment, gotOK, tt.wantVPC, tt.wantAttachment, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestParseTenantIdentifierRoundTrip verifies ParseTenantIdentifier inverts
+// TenantIdentifier for arbitrary base62 (vpc, vpcAttachment) pairs — the
+// property #855's ingress sidecar reconciler actually relies on.
+func TestParseTenantIdentifierRoundTrip(t *testing.T) {
+	tests := []struct{ vpc, attachment string }{
+		{testVPC, testAttachment},
+		{testVPCBase62, "00G"},
+		{"0", "0"},
+		{"Zz9", "aB0"},
+	}
+	for _, tt := range tests {
+		id := TenantIdentifier(tt.vpc, tt.attachment)
+		gotVPC, gotAttachment, ok := ParseTenantIdentifier(id)
+		if !ok || gotVPC != tt.vpc || gotAttachment != tt.attachment {
+			t.Errorf("ParseTenantIdentifier(TenantIdentifier(%q, %q)) = (%q, %q, %v), want (%q, %q, true)",
+				tt.vpc, tt.attachment, gotVPC, gotAttachment, ok, tt.vpc, tt.attachment)
+		}
+	}
+}
+
 func TestEndpointSliceName(t *testing.T) {
 	tests := []string{"my-pod", "web-0", "vm-workload-abc123"}
 	for _, podName := range tests {
