@@ -53,7 +53,8 @@ var (
 )
 
 // VIPTranslationTable is the interface ServiceVIPBindingReconciler drives
-// for EgressKindTap bindings, satisfied by *vipxlatmap.VipXlatTable in
+// for both EgressKindVeth and EgressKindTap bindings (see
+// registerVIPTranslation), satisfied by *vipxlatmap.VipXlatTable in
 // production and a fake in tests -- the same interface-seam pattern
 // GatewayEngine (networkgateway_controller.go) provides for *gateway.Engine.
 type VIPTranslationTable interface {
@@ -69,27 +70,53 @@ type VIPTranslationTable interface {
 // this node (spec.targetRef.name == NodeName) -- the backend-side half of
 // the DSR/Maglev gateway redesign (see ServiceVIPBinding's own doc
 // comment). It branches on Spec.EgressKind exactly like usid.c's own
-// vrf_table egress_kind field does:
+// vrf_table egress_kind field does, but both branches now converge on the
+// same delivery mechanism:
 //
-//   - EgressKindVeth calls internal/plumbing/vip.Bind/Unbind/Verify.
 //   - EgressKindTap calls VIPTranslationTable's Register/Unregister methods
 //     (vip_xlat_table's two independent rows -- see
 //     internal/plumbing/ebpf/vipxlatmap's package doc comment), after
 //     resolving this node's own uSID Block and the tenant VRF's Argument
-//     via resolveTapVIPContext.
+//     via resolveVIPBindingContext.
+//   - EgressKindVeth does the *same* vip_xlat_table registration (see
+//     registerVIPTranslation), plus internal/plumbing/vip.Bind/Unbind/Verify.
 //
-// VIPTranslationTable is nil-safe for veth-only tests/deployments (e.g. a
-// node with no eBPF uSID datapath loaded at all): a nil table only matters
-// once a tap-kind binding is actually reconciled, at which point it fails
-// with a clear, actionable error rather than a nil-pointer panic.
+// # Why veth needs vip_xlat_table too, not just vip.Bind
+//
+// vip.Bind only assigns the VIP to a plain dummy interface in the node's
+// *root* network namespace -- not enslaved to any tenant VRF (see
+// internal/plumbing/vip's own doc comment). But a DSR-forwarded ingress
+// packet is decapsulated by usid_ingress and delivered into the owning
+// tenant's *own* VRF routing table, which has no route to an address that
+// only exists on a root-namespace interface outside that VRF entirely.
+// Found live in containerlab: a NetworkRule's VIP reported fully
+// Advertised/Ready, the edge datapath's own metrics showed it matching and
+// forwarding every packet with zero drops, and the connection still never
+// completed -- traced to exactly this: iad-worker's own vrf60 routing
+// table had a route for the backend pod's real address but none at all for
+// the VIP. vip_xlat_table's ingress row rewrites the packet's destination
+// from VIP to the backend's real, already-routed address *before* that VRF
+// lookup happens (usid.c's own comment on this step: "translate the inner
+// packet's destination before the FIB lookup ... so the lookup resolves
+// against the tenant's real, routed address") -- exactly the missing
+// piece, and usid_ingress applies it unconditionally whenever a matching
+// vip_xlat_table row exists, regardless of egress_kind; only the control
+// plane was ever kind-gated. vip.Bind is kept alongside it for veth (not
+// replaced): it still gives the node itself a locally-verifiable answer on
+// the VIP (see vip.Verify), which registerVIPTranslation alone would not.
+//
+// VIPTranslationTable is nil-safe for tests that never reconcile a live
+// binding: a nil table only matters once one actually is, at which point
+// it fails with a clear, actionable error rather than a nil-pointer panic.
 type ServiceVIPBindingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
 	NodeName string
 
-	// VIPTranslationTable is the tap-branch's kernel-map handle. See the
-	// type doc comment above for its nil-safety contract.
+	// VIPTranslationTable is the kernel-map handle both EgressKindVeth and
+	// EgressKindTap now drive (see the type doc comment above). See its own
+	// nil-safety contract there.
 	VIPTranslationTable VIPTranslationTable
 }
 
@@ -157,8 +184,10 @@ func (r *ServiceVIPBindingReconciler) reconcileBind(ctx context.Context, binding
 	return nil
 }
 
-// applyBind performs the actual veth bind or tap registration for binding,
-// branching on Spec.EgressKind.
+// applyBind performs the actual veth or tap binding for binding, branching
+// on Spec.EgressKind. Both kinds now register the same vip_xlat_table rows
+// (see registerVIPTranslation and the type doc comment above); veth
+// additionally does the root-namespace vip.Bind/Verify.
 func (r *ServiceVIPBindingReconciler) applyBind(ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding) error {
 	switch binding.Spec.EgressKind {
 	case bgpv1alpha1.ServiceVIPBindingEgressKindVeth:
@@ -172,21 +201,25 @@ func (r *ServiceVIPBindingReconciler) applyBind(ctx context.Context, binding *bg
 		if err := vipVerifyFn(vipAddr); err != nil {
 			return fmt.Errorf("vip.Verify: %w", err)
 		}
-		return nil
+		return r.registerVIPTranslation(ctx, binding)
 	case bgpv1alpha1.ServiceVIPBindingEgressKindTap:
-		return r.applyTapBind(ctx, binding)
+		return r.registerVIPTranslation(ctx, binding)
 	default:
 		return fmt.Errorf("unknown egressKind %q", binding.Spec.EgressKind)
 	}
 }
 
-// applyTapBind registers both vip_xlat_table rows (ingress and egress) for
-// a tap-kind binding, after resolving this node's own uSID Block and the
-// owning tenant VRF's Argument (resolveTapVIPContext).
-func (r *ServiceVIPBindingReconciler) applyTapBind(ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding) error {
+// registerVIPTranslation registers both vip_xlat_table rows (ingress and
+// egress) for binding, after resolving this node's own uSID Block and the
+// owning tenant VRF's Argument (resolveVIPBindingContext). Shared by both
+// EgressKindVeth and EgressKindTap -- see ServiceVIPBindingReconciler's own
+// doc comment for why veth needs this too, not just tap.
+func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
+	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
+) error {
 	if r.VIPTranslationTable == nil {
-		return errors.New("vip_xlat_table is not available on this node (eBPF uSID datapath not loaded); " +
-			"cannot bind a tap-kind ServiceVIPBinding")
+		return fmt.Errorf("vip_xlat_table is not available on this node (eBPF uSID datapath not loaded); "+
+			"cannot bind a %s-kind ServiceVIPBinding", binding.Spec.EgressKind)
 	}
 
 	vipAddr := net.ParseIP(binding.Spec.VIPAddress)
@@ -195,7 +228,8 @@ func (r *ServiceVIPBindingReconciler) applyTapBind(ctx context.Context, binding 
 	}
 	backendAddr := net.ParseIP(binding.Spec.BackendAddress)
 	if backendAddr == nil {
-		return fmt.Errorf("invalid backendAddress %q (required for egressKind tap)", binding.Spec.BackendAddress)
+		return fmt.Errorf("invalid backendAddress %q (required for both egressKind veth and tap)",
+			binding.Spec.BackendAddress)
 	}
 	backendAddrIP, err := netip.ParseAddr(binding.Spec.BackendAddress)
 	if err != nil {
@@ -207,9 +241,9 @@ func (r *ServiceVIPBindingReconciler) applyTapBind(ctx context.Context, binding 
 		return err
 	}
 
-	block, argument, err := resolveTapVIPContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
+	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
 	if err != nil {
-		return fmt.Errorf("resolve VRF context for tap VIP binding: %w", err)
+		return fmt.Errorf("resolve VRF context for VIP binding: %w", err)
 	}
 
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
@@ -252,36 +286,49 @@ func (r *ServiceVIPBindingReconciler) reconcileDelete(
 	return ctrl.Result{}, nil
 }
 
-// applyUnbind performs the actual veth unbind or tap unregistration for
-// binding, branching on Spec.EgressKind.
+// applyUnbind performs the actual veth or tap unbind for binding, branching
+// on Spec.EgressKind. Both kinds now unregister the same vip_xlat_table
+// rows (see unregisterVIPTranslation); veth additionally does the
+// root-namespace vip.Unbind. For veth, both are attempted even if one
+// fails, and any errors are joined -- mirroring unregisterVIPTranslation's
+// own "attempt every candidate even if one fails" convention -- so a
+// failure in one mechanism never silently skips tearing down the other.
 func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding) error {
 	switch binding.Spec.EgressKind {
 	case bgpv1alpha1.ServiceVIPBindingEgressKindVeth:
-		vipAddr := net.ParseIP(binding.Spec.VIPAddress)
-		if vipAddr == nil {
-			return nil // already-invalid address; nothing meaningful to unbind
+		var errs []error
+		if err := r.unregisterVIPTranslation(ctx, binding); err != nil {
+			errs = append(errs, err)
 		}
-		return vipUnbindFn(vipAddr)
+		if vipAddr := net.ParseIP(binding.Spec.VIPAddress); vipAddr != nil {
+			if err := vipUnbindFn(vipAddr); err != nil {
+				errs = append(errs, err)
+			}
+		} // else: already-invalid address; nothing meaningful for vip.Unbind to do
+		return errors.Join(errs...)
 	case bgpv1alpha1.ServiceVIPBindingEgressKindTap:
-		if r.VIPTranslationTable == nil {
-			return errors.New(
-				"vip_xlat_table is not available on this node; cannot unregister a tap-kind ServiceVIPBinding")
-		}
-		return r.applyTapUnbind(ctx, binding)
+		return r.unregisterVIPTranslation(ctx, binding)
 	default:
 		return nil
 	}
 }
 
-// applyTapUnbind removes both vip_xlat_table rows for a tap-kind binding.
-// Both directions are attempted even if resolving the VRF context or the
-// first Unregister call fails, and any errors are joined together --
-// mirroring usidmap.VRFTable.Reconcile's own "attempt every candidate even
-// if one fails" convention -- so a partial failure never silently leaves
-// the other row behind unregistered.
-func (r *ServiceVIPBindingReconciler) applyTapUnbind(
+// unregisterVIPTranslation removes both vip_xlat_table rows for binding.
+// Shared by both EgressKindVeth and EgressKindTap -- see
+// ServiceVIPBindingReconciler's own doc comment. Both directions are
+// attempted even if resolving the VRF context or the first Unregister call
+// fails, and any errors are joined together -- mirroring
+// usidmap.VRFTable.Reconcile's own "attempt every candidate even if one
+// fails" convention -- so a partial failure never silently leaves the
+// other row behind unregistered.
+func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
+	if r.VIPTranslationTable == nil {
+		return fmt.Errorf("vip_xlat_table is not available on this node; cannot unregister a %s-kind ServiceVIPBinding",
+			binding.Spec.EgressKind)
+	}
+
 	proto, err := ipProtocolNumber(binding.Spec.Protocol)
 	if err != nil {
 		return err
@@ -292,9 +339,9 @@ func (r *ServiceVIPBindingReconciler) applyTapUnbind(
 		return fmt.Errorf("parse backendAddress %q: %w", binding.Spec.BackendAddress, err)
 	}
 
-	block, argument, err := resolveTapVIPContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
+	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
 	if err != nil {
-		return fmt.Errorf("resolve VRF context for tap VIP unbind: %w", err)
+		return fmt.Errorf("resolve VRF context for VIP unbind: %w", err)
 	}
 
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
@@ -324,7 +371,7 @@ func ipProtocolNumber(proto bgpv1alpha1.NetworkRuleProtocol) (uint8, error) {
 	}
 }
 
-// resolveTapVIPContext resolves this node's own uSID Block (from its
+// resolveVIPBindingContext resolves this node's own uSID Block (from its
 // BGPRouter's SRv6Locator) and the owning tenant VRF's Argument (from the
 // BGPVRFInstance whose VRFID is associated with a BGPAdvertisement whose
 // advertised prefix contains backendAddr) -- the (block, argument) pair
@@ -365,7 +412,7 @@ func ipProtocolNumber(proto bgpv1alpha1.NetworkRuleProtocol) (uint8, error) {
 // object), replace this address-containment heuristic with a direct
 // lookup -- see crdnames.BGPVRFInstanceName(vpc, nodeName) for the
 // deterministic name that lookup would use.
-func resolveTapVIPContext(
+func resolveVIPBindingContext(
 	ctx context.Context, c client.Client, namespace, nodeName string, backendAddr netip.Addr,
 ) (block uint64, argument uint16, err error) {
 	idx, err := buildBackendSIDIndex(ctx, c, namespace)
@@ -440,7 +487,7 @@ func resolveTapVIPContext(
 		return 0, 0, fmt.Errorf(
 			"ambiguous VRF ownership for backend address %s on node %q: %d candidate VRFIDs %v all advertise a "+
 				"containing prefix, and ServiceVIPBinding carries no VPCRef/VRFRef to disambiguate "+
-				"(see resolveTapVIPContext's doc comment); refusing to guess",
+				"(see resolveVIPBindingContext's doc comment); refusing to guess",
 			backendAddr, nodeName, len(matches), matches)
 	}
 }

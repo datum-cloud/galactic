@@ -2,12 +2,23 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package vip manages loopback-style VIP binding on backend nodes — the
-// backend-side half of the DSR/Maglev gateway redesign's veth/container
-// case (design plan §0.1, §1): a backend node binds a service VIP to its
-// own dedicated dummy interface so the backend can answer a client
-// directly, without the reply ever passing back through galactic-gateway.
-// Requires CAP_NET_ADMIN, mirroring internal/plumbing/vrf.
+// Package vip manages loopback-style VIP binding on backend nodes -- one
+// half of the DSR/Maglev gateway redesign's veth/container case (design
+// plan §0.1, §1): a backend node binds a service VIP to its own dedicated
+// dummy interface, letting the node itself verifiably answer on that
+// address (see Verify) without the reply ever passing back through
+// galactic-gateway. Requires CAP_NET_ADMIN, mirroring internal/plumbing/vrf.
+//
+// This alone does not deliver anything to a VRF-isolated backend pod,
+// though: the dummy interface lives in the node's root network namespace,
+// not enslaved to any tenant VRF, and a DSR-forwarded ingress packet is
+// decapsulated straight into the owning tenant's own VRF routing table --
+// which has no route to an address that only exists outside it. The other
+// half, internal/plumbing/ebpf/vipxlatmap's vip_xlat_table translation
+// (originally built for the tap case only), now also runs for veth for
+// exactly this reason -- see
+// internal/controller.ServiceVIPBindingReconciler's own doc comment for
+// the live containerlab finding that surfaced this gap.
 package vip
 
 import (

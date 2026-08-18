@@ -147,13 +147,26 @@ func TestServiceVIPBindingReconciler_NotMineIsIgnored(t *testing.T) {
 	}
 }
 
+// newVethTestBinding returns a veth-kind ServiceVIPBinding targeting
+// testComputeNodeName with BackendAddress overridden to testBackendAddr --
+// veth now needs vip_xlat_table registration too (see
+// ServiceVIPBindingReconciler's own doc comment), which requires a backend
+// address resolvable against newBackendFixtures' advertised prefix, the
+// same fixtures the tap tests already use.
+func newVethTestBinding() *bgpv1alpha1.ServiceVIPBinding {
+	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindVeth, testComputeNodeName)
+	binding.Spec.BackendAddress = testBackendAddr
+	return binding
+}
+
 func TestServiceVIPBindingReconciler_VethBindSuccess(t *testing.T) {
 	scheme := newRuleTestScheme(t)
-	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindVeth, testVIPBindingNode)
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	binding := newVethTestBinding()
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
-		WithObjects(binding).
+		WithObjects(router, adv, vrf, binding).
 		Build()
 
 	var boundAddr net.IP
@@ -163,13 +176,21 @@ func TestServiceVIPBindingReconciler_VethBindSuccess(t *testing.T) {
 		func(net.IP) error { return nil },
 	)
 
-	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testVIPBindingNode}
+	table := &fakeVIPTable{}
+	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
 
 	if boundAddr == nil || !boundAddr.Equal(net.ParseIP(testVIPBindingVIPAddr)) {
 		t.Errorf("vip.Bind called with %v, want %s", boundAddr, testVIPBindingVIPAddr)
+	}
+	// The actual fix: veth must ALSO register vip_xlat_table rows, not just
+	// vip.Bind -- see ServiceVIPBindingReconciler's own doc comment for why
+	// vip.Bind alone never delivered anything to a VRF-isolated backend pod.
+	if len(table.ingressCalls) != 1 || len(table.egressCalls) != 1 {
+		t.Fatalf("ingressCalls=%d egressCalls=%d, want 1 each (veth must register vip_xlat_table too)",
+			len(table.ingressCalls), len(table.egressCalls))
 	}
 
 	got := &bgpv1alpha1.ServiceVIPBinding{}
@@ -184,9 +205,35 @@ func TestServiceVIPBindingReconciler_VethBindSuccess(t *testing.T) {
 	}
 }
 
+// TestServiceVIPBindingReconciler_VethNilTableFails mirrors
+// TestServiceVIPBindingReconciler_TapNilTableFails: veth now needs
+// VIPTranslationTable too, not just for tap.
+func TestServiceVIPBindingReconciler_VethNilTableFails(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	binding := newVethTestBinding()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
+		WithObjects(router, adv, vrf, binding).
+		Build()
+
+	stubVIPFns(t,
+		func(net.IP) error { return nil },
+		func(net.IP) error { return nil },
+		func(net.IP) error { return nil },
+	)
+
+	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName} // no VIPTranslationTable
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err == nil {
+		t.Fatal("Reconcile: expected an error binding a veth-kind ServiceVIPBinding with no VIPTranslationTable")
+	}
+}
+
 func TestServiceVIPBindingReconciler_VethUnbindOnDelete(t *testing.T) {
 	scheme := newRuleTestScheme(t)
-	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindVeth, testVIPBindingNode)
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	binding := newVethTestBinding()
 	controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
 	now := metav1.Now()
 	binding.DeletionTimestamp = &now
@@ -194,7 +241,7 @@ func TestServiceVIPBindingReconciler_VethUnbindOnDelete(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
-		WithObjects(binding).
+		WithObjects(router, adv, vrf, binding).
 		Build()
 
 	var unboundAddr net.IP
@@ -204,13 +251,18 @@ func TestServiceVIPBindingReconciler_VethUnbindOnDelete(t *testing.T) {
 		func(net.IP) error { return nil },
 	)
 
-	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testVIPBindingNode}
+	table := &fakeVIPTable{}
+	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
 
 	if unboundAddr == nil || !unboundAddr.Equal(net.ParseIP(testVIPBindingVIPAddr)) {
 		t.Errorf("vip.Unbind called with %v, want %s", unboundAddr, testVIPBindingVIPAddr)
+	}
+	if len(table.unregIngress) != 1 || len(table.unregEgress) != 1 {
+		t.Fatalf("unregIngress=%d unregEgress=%d, want 1 each (veth must unregister vip_xlat_table too)",
+			len(table.unregIngress), len(table.unregEgress))
 	}
 
 	// Removing the last finalizer from an object that already carries a
@@ -228,10 +280,12 @@ func TestServiceVIPBindingReconciler_VethUnbindOnDelete(t *testing.T) {
 // "finalizer add/remove ordering" requirement: a failing unbind/unregister
 // must never let the finalizer be removed, so the object stays present
 // (blocking deletion, and retried) rather than silently leaking host/kernel
-// state.
+// state. VIPTranslationTable is a working fake here so only vip.Unbind's
+// own failure is under test.
 func TestServiceVIPBindingReconciler_FinalizerKeptWhenUnbindFails(t *testing.T) {
 	scheme := newRuleTestScheme(t)
-	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindVeth, testVIPBindingNode)
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	binding := newVethTestBinding()
 	controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
 	now := metav1.Now()
 	binding.DeletionTimestamp = &now
@@ -239,7 +293,7 @@ func TestServiceVIPBindingReconciler_FinalizerKeptWhenUnbindFails(t *testing.T) 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
-		WithObjects(binding).
+		WithObjects(router, adv, vrf, binding).
 		Build()
 
 	stubVIPFns(t,
@@ -248,7 +302,8 @@ func TestServiceVIPBindingReconciler_FinalizerKeptWhenUnbindFails(t *testing.T) 
 		func(net.IP) error { return nil },
 	)
 
-	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testVIPBindingNode}
+	table := &fakeVIPTable{}
+	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err == nil {
 		t.Fatal("Reconcile: expected an error when vip.Unbind fails")
 	}
@@ -356,15 +411,15 @@ func TestServiceVIPBindingReconciler_TapNilTableFails(t *testing.T) {
 	}
 }
 
-func TestResolveTapVIPContext_Success(t *testing.T) {
+func TestResolveVIPBindingContext_Success(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, adv, vrf).Build()
 
-	block, argument, err := resolveTapVIPContext(
+	block, argument, err := resolveVIPBindingContext(
 		context.Background(), fakeClient, testNamespace, testComputeNodeName, netip.MustParseAddr(testBackendAddr))
 	if err != nil {
-		t.Fatalf("resolveTapVIPContext: unexpected error: %v", err)
+		t.Fatalf("resolveVIPBindingContext: unexpected error: %v", err)
 	}
 	if argument != uint16(testBackendVRFID) {
 		t.Errorf("argument = %d, want %d", argument, testBackendVRFID)
@@ -374,22 +429,22 @@ func TestResolveTapVIPContext_Success(t *testing.T) {
 	}
 }
 
-func TestResolveTapVIPContext_NoMatchingVRF(t *testing.T) {
+func TestResolveVIPBindingContext_NoMatchingVRF(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, adv, vrf).Build()
 
-	if _, _, err := resolveTapVIPContext(
+	if _, _, err := resolveVIPBindingContext(
 		context.Background(), fakeClient, testNamespace, testComputeNodeName, netip.MustParseAddr("192.0.2.1")); err == nil {
-		t.Fatal("resolveTapVIPContext: expected an error for an address with no matching advertised prefix")
+		t.Fatal("resolveVIPBindingContext: expected an error for an address with no matching advertised prefix")
 	}
 }
 
-// TestResolveTapVIPContext_AmbiguousFailsClosed covers the documented
+// TestResolveVIPBindingContext_AmbiguousFailsClosed covers the documented
 // ambiguity: two local BGPVRFInstances on the same node both advertise a
 // prefix containing the same backend address (e.g. two tenants using the
-// same ULA range) -- resolveTapVIPContext must fail rather than guess.
-func TestResolveTapVIPContext_AmbiguousFailsClosed(t *testing.T) {
+// same ULA range) -- resolveVIPBindingContext must fail rather than guess.
+func TestResolveVIPBindingContext_AmbiguousFailsClosed(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
 
@@ -417,9 +472,9 @@ func TestResolveTapVIPContext_AmbiguousFailsClosed(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, adv, vrf, adv2, vrf2).Build()
 
-	_, _, err := resolveTapVIPContext(
+	_, _, err := resolveVIPBindingContext(
 		context.Background(), fakeClient, testNamespace, testComputeNodeName, netip.MustParseAddr(testBackendAddr))
 	if err == nil {
-		t.Fatal("resolveTapVIPContext: expected a fail-closed error for ambiguous VRF ownership")
+		t.Fatal("resolveVIPBindingContext: expected a fail-closed error for ambiguous VRF ownership")
 	}
 }
