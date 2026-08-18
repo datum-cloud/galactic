@@ -242,46 +242,54 @@ func EgressDefaultRouteDel(tableID uint32) error {
 }
 
 // ResolveNodeSourceAddress resolves this node's own SRv6/underlay-facing
-// source address: the primary global IPv6 address on whichever interface
-// currently carries the kernel's own main-table IPv6 default route.
+// source address: the primary global IPv6 address on the same
+// interface(s) usid_ingress/usid_egress themselves are attached to
+// (attach.ResolveInterfaces).
 //
 // This is the address usid_egress's egress-routing extension writes into
 // every outer header it pushes (via egressroutemap.NodeSourceAddress) --
 // the TC-BPF replacement's own analog of a property the kernel-native
 // SEG6 lwtunnel mechanism gave for free, via ordinary IPv6
-// source-address-selection: confirmed live, `ip -6 route get <SID>`
-// reported `src 2001:db8:1:10::2` (this node's own fabric-facing
-// address) for every SEG6-encapsulated route this package ever installed,
-// with no explicit `src` ever configured anywhere in this codebase.
-// Deriving it the same way here -- from the node's own live routing
-// state, not a new piece of required operator configuration -- keeps
-// that same "just works, no new config" property for the TC-BPF
-// mechanism, at the one-time cost of running this resolution once at
-// datapath registration rather than getting it for free per-route.
+// source-address-selection (RTA_PREFSRC): confirmed live, `ip -6 route get
+// <SID>` reported `src 2001:db8:1:10::2` (this node's own fabric-facing
+// eth1 address) for every SEG6-encapsulated route this package ever
+// installed, with no explicit `src` ever configured anywhere in this
+// codebase.
+//
+// Deliberately reuses attach.ResolveInterfaces rather than re-deriving
+// "the fabric interface" via its own separate heuristic (an earlier
+// version of this function guessed from the main-table IPv6 default
+// route's own interface): found live, that guess is simply wrong on this
+// lab's own topology (and, in general, on any node where the default
+// route belongs to the cluster/pod network, not the SRv6 underlay) --
+// eth0 (the container network) carries the default route, while eth1
+// (the real fabric interface, attached to `GALACTIC_CNI_EBPF_INTERFACES`
+// or, in its absence, this same package's own auto-detected default-route
+// interface) does not. attach.ResolveInterfaces is the datapath's own,
+// already-correct answer to "which interface is the fabric one" -- reusing
+// it here guarantees this function can never disagree with wherever
+// usid_egress itself is actually attached.
 func ResolveNodeSourceAddress() (net.IP, error) {
-	defaultDst := &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
-	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
-		&netlink.Route{Dst: defaultDst, Table: unix.RT_TABLE_MAIN},
-		netlink.RT_FILTER_DST|netlink.RT_FILTER_TABLE)
+	names, err := attach.ResolveInterfaces()
 	if err != nil {
-		return nil, fmt.Errorf("list main-table IPv6 default route: %w", err)
+		return nil, fmt.Errorf("resolve SRv6/underlay-facing interface: %w", err)
 	}
-	if len(routes) == 0 {
-		return nil, errors.New("no main-table IPv6 default route found -- can't determine this node's own source address")
+	if len(names) == 0 {
+		return nil, errors.New("attach.ResolveInterfaces returned no interfaces")
 	}
 
-	link, err := netlink.LinkByIndex(routes[0].LinkIndex)
+	link, err := netlink.LinkByName(names[0])
 	if err != nil {
-		return nil, fmt.Errorf("resolve default route's own link (ifindex %d): %w", routes[0].LinkIndex, err)
+		return nil, fmt.Errorf("look up interface %q: %w", names[0], err)
 	}
 	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
 	if err != nil {
-		return nil, fmt.Errorf("list addresses on %s: %w", link.Attrs().Name, err)
+		return nil, fmt.Errorf("list addresses on %s: %w", names[0], err)
 	}
 	for _, a := range addrs {
 		if a.Scope == unix.RT_SCOPE_UNIVERSE && !a.IP.IsUnspecified() {
 			return a.IP, nil
 		}
 	}
-	return nil, fmt.Errorf("no global-scope IPv6 address found on %s (default-route interface)", link.Attrs().Name)
+	return nil, fmt.Errorf("no global-scope IPv6 address found on %s (the SRv6/underlay-facing interface)", names[0])
 }

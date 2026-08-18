@@ -225,19 +225,6 @@ static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const vo
 #define USID_TCP_CSUM_OFFSET 16
 #define USID_UDP_CSUM_OFFSET 6
 
-// USID_RT_TABLE_MAIN is RT_TABLE_MAIN (uapi/linux/rtnetlink.h), reproduced
-// as a plain constant for the same reason every other ABI value in this
-// file is: it never changes, and pulling in rtnetlink.h for one integer
-// would add a real header dependency. usid_egress's own egress-routing
-// extension uses this to force its bpf_fib_lookup() for a resolved SID's
-// L2 next-hop to run against the main table specifically (via
-// BPF_FIB_LOOKUP_TBID) regardless of which VRF-enslaved interface this
-// program happens to be attached to -- the SID itself is always reachable
-// via the underlay/main table, the same table
-// internal/plumbing/srv6.resolveNextHop's netlink.RouteGet call already
-// resolves it against today, never the tenant VRF's own table.
-#define USID_RT_TABLE_MAIN 254
-
 // USID_EGRESS_HOP_LIMIT is the hop limit usid_egress writes into the outer
 // IPv6 header it pushes for a resolved egress route -- a fixed, reasonable
 // default (matching this lab's/most Linux hosts' own default unicast hop
@@ -574,17 +561,33 @@ struct egress_route_key {
 
 // struct egress_route_value is egress_route_table's value: the resolved
 // SRv6 SID (or NAT66 shard SID, for a default-route entry) to
-// encapsulate toward. Deliberately just the address -- no precomputed
-// link/next-hop/L2 fields, unlike the netlink-route mechanism this
-// replaces (RouteEgressAdd's own resolveNextHop, run once at route-install
-// time): usid_egress instead runs a fresh bpf_fib_lookup() per packet
-// against sid (see that call site's own comment), which is both simpler
-// (Go's writer needs no next-hop resolution logic of its own at all, only
-// the SID) and self-healing (a next-hop/neighbor change on the underlay
-// takes effect on the very next packet, not only the next time Go
-// re-resolves and rewrites this entry).
+// encapsulate toward, plus the fully precomputed link/L2 information
+// needed to actually deliver that encapsulated packet.
+//
+// An earlier version of this struct carried only sid, on the theory that
+// usid_egress could resolve link_ifindex/dmac/smac itself, fresh, via a
+// per-packet bpf_fib_lookup() -- both simpler for the Go side (no
+// next-hop resolution logic of its own) and self-healing (a next-hop
+// change on the underlay takes effect on the very next packet). That
+// theory doesn't hold: confirmed live, bpf_fib_lookup() called from
+// usid_egress's own attach point (the tenant's own VRF-enslaved veth)
+// unconditionally returns BPF_FIB_LKUP_RET_BLACKHOLE for a main-table
+// destination that resolves just fine via `ip -6 route get` outside BPF --
+// tried with/without BPF_FIB_LOOKUP_TBID, with/without BPF_FIB_LOOKUP_DIRECT,
+// and with fib_params.ifindex set to both skb->ifindex and a neutral
+// non-VRF-enslaved ifindex; all four combinations blackholed identically.
+// This is the kernel's own VRF/l3mdev isolation boundary asserting itself
+// against the *attaching* skb's real device, independent of any
+// bpf_fib_lookup parameter -- not something tunable from inside this
+// program at all. The Go control plane must resolve link/L2 information
+// the same way the netlink-route mechanism this replaces always did
+// (RouteEgressAdd's own resolveNextHop, run once at route-install time),
+// and store it here -- see egressroutemap.EgressRouteTable.Register.
 struct egress_route_value {
 	__u8 sid[16];
+	__u32 link_ifindex;
+	__u8 dmac[6];
+	__u8 smac[6];
 } __attribute__((packed));
 
 // ---------------------------------------------------------------------
@@ -623,14 +626,18 @@ enum drop_reason {
 	// reason rather than folded into an unrelated one so it's visible if
 	// it ever does.
 	DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED = 12,
-	// The outer header was pushed, but resolving the egress link/L2
-	// next-hop for the matched SID failed (no route, no neighbor entry,
-	// MTU exceeded, etc.) -- the in-kernel equivalent of what
-	// srv6.resolveNextHop's "no route to gateway" error meant for the
-	// netlink-route mechanism this replaces.
+	// Unused: an earlier version of usid_egress's egress-routing
+	// extension ran its own per-packet bpf_fib_lookup() to resolve the
+	// matched SID's link/L2 next-hop, and this counted that call
+	// failing. That approach doesn't work at all from this program's own
+	// attach point (see struct egress_route_value's own comment for why
+	// -- a real kernel VRF/l3mdev isolation boundary, not a parameter
+	// bug) and was replaced with Go-side precomputation
+	// (egressroutemap.EgressRouteTable.Register), which has nothing left
+	// to fail in the same way at packet-processing time. Kept
+	// undeleted rather than renumbering every index after it.
 	DROP_REASON_EGRESS_ROUTE_FIB_LOOKUP_FAILED = 13,
-	// FIB lookup for the SID succeeded but the redirect out the
-	// resolved physical interface itself failed.
+	// The redirect out the resolved physical interface failed.
 	DROP_REASON_EGRESS_ROUTE_REDIRECT_FAILED = 14,
 	__DROP_REASON_MAX,
 };
@@ -1476,6 +1483,29 @@ int usid_egress(struct __sk_buff *skb)
 			}
 		}
 
+		// Multicast (ff00::/8) and link-local (fe80::/10) destinations
+		// must never be matched against egress_route_table, no matter
+		// how broad a registered entry is (in particular
+		// EgressDefaultRouteAdd's own ::/0 default, which -- being a
+		// literal catch-all -- otherwise matches these exactly like any
+		// other destination). Found live: a tenant pod's own Neighbor
+		// Discovery traffic for resolving its *own default gateway's*
+		// link-layer address (an NS targeting a solicited-node
+		// multicast address) was being caught by the ::/0 default entry
+		// and redirected toward a NAT66 shard SID instead of ever
+		// reaching the normal kernel/host-side NDP handling that must
+		// answer it -- the container's own gateway neighbor entry went
+		// to FAILED and every packet through it silently died with a
+		// locally-synthesized "Destination unreachable", never sending
+		// anything at all, let alone anything usid_egress's own drop
+		// counters could see. The kernel's own routing has an equivalent
+		// carve-out by construction (link-local/multicast destinations
+		// are always handled by dedicated local-scope routing, never an
+		// application's own default route); this replicates it here,
+		// since nothing else in this program's own routing model does.
+		if (ip6->daddr[0] == 0xFF || (ip6->daddr[0] == 0xFE && (ip6->daddr[1] & 0xC0) == 0x80))
+			return TC_ACT_UNSPEC;
+
 		route_family = USID_EGRESS_ROUTE_FAMILY_INET6;
 		__builtin_memcpy(dst_addr, ip6->daddr, 16);
 	} else {
@@ -1577,39 +1607,32 @@ int usid_egress(struct __sk_buff *skb)
 	__builtin_memcpy(outer->daddr, rv->sid, 16);
 	new_eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
 
-	// Resolve the resolved SID's own L2 next-hop and real egress
-	// interface fresh, per packet -- see struct egress_route_value's own
-	// comment for why this program does this instead of the Go control
-	// plane precomputing and storing it. BPF_FIB_LOOKUP_TBID +
-	// USID_RT_TABLE_MAIN pins this to the main table regardless of which
-	// VRF-enslaved interface this program is attached to (see
-	// USID_RT_TABLE_MAIN's own comment).
-	struct bpf_fib_lookup fib_params;
-
-	__builtin_memset(&fib_params, 0, sizeof(fib_params));
-	fib_params.family = USID_AF_INET6;
-	__builtin_memcpy(fib_params.ipv6_src, src, sizeof(fib_params.ipv6_src));
-	__builtin_memcpy(fib_params.ipv6_dst, rv->sid, sizeof(fib_params.ipv6_dst));
-	fib_params.tot_len = (__u16) sizeof(struct usid_ip6hdr) + inner_len;
-	fib_params.tbid = USID_RT_TABLE_MAIN;
-
-	long fib_rc = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params),
-				      BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID);
-
-	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
-		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_FIB_LOOKUP_FAILED, vrf);
-		return TC_ACT_SHOT;
-	}
-
-	__builtin_memcpy(new_eth->h_dest, fib_params.dmac, sizeof(new_eth->h_dest));
-	__builtin_memcpy(new_eth->h_source, fib_params.smac, sizeof(new_eth->h_source));
+	// L2 (dmac/smac) and the real egress interface all come straight from
+	// rv -- resolved once by the Go control plane at Register time, not
+	// via a runtime bpf_fib_lookup() here. This is a deliberate departure
+	// from usid_ingress's own step 8 (which *does* call bpf_fib_lookup()
+	// per packet): confirmed live, bpf_fib_lookup() called from this
+	// program's own attach point (the tenant's own VRF-enslaved veth)
+	// unconditionally returns BPF_FIB_LKUP_RET_BLACKHOLE for a
+	// main-table destination -- tried with BPF_FIB_LOOKUP_TBID, without
+	// it, with BPF_FIB_LOOKUP_DIRECT, without it, and with fib_params.ifindex
+	// set to both skb->ifindex and a neutral non-VRF-enslaved ifindex,
+	// all four combinations identically blackholed a destination `ip -6
+	// route get` resolves just fine outside BPF. This is the kernel's own
+	// VRF/l3mdev isolation boundary asserting itself against the
+	// *attaching* skb's real device (skb->dev), independent of anything
+	// bpf_fib_lookup's own params can override -- not a parameter bug.
+	// usid_ingress never hits this because its own attach point (the
+	// physical uplink) was never VRF-enslaved to begin with.
+	__builtin_memcpy(new_eth->h_dest, rv->dmac, sizeof(new_eth->h_dest));
+	__builtin_memcpy(new_eth->h_source, rv->smac, sizeof(new_eth->h_source));
 
 	// Same-netns redirect: this program's attach point (the tenant's own
 	// host-side veth) and the resolved physical uplink both live in the
 	// root/host netns, unlike usid_ingress's step 9 veth-mode branch
 	// (which crosses into a *different* netns and needs
 	// bpf_redirect_peer for exactly that reason).
-	long redirect_rc = bpf_redirect(fib_params.ifindex, 0);
+	long redirect_rc = bpf_redirect(rv->link_ifindex, 0);
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
 		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_REDIRECT_FAILED, vrf);

@@ -13,6 +13,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 )
@@ -485,19 +486,31 @@ func TestEgressDefaultRouteAdd_InstallsDefaultEntryForFirstShard(t *testing.T) {
 	}
 }
 
-// TestResolveNodeSourceAddress_ReturnsDefaultRouteInterfaceAddress proves
+// TestResolveNodeSourceAddress_ReturnsInterfaceAddress proves
 // ResolveNodeSourceAddress finds the primary global IPv6 address on
-// whichever interface carries the main-table IPv6 default route --
-// exactly the address the kernel's own source-address-selection rules
+// whichever interface attach.ResolveInterfaces names -- exactly the
+// address the kernel's own source-address-selection rules (RTA_PREFSRC)
 // picked automatically for the SEG6 lwtunnel mechanism this replaces (see
 // this function's own doc comment).
-func TestResolveNodeSourceAddress_ReturnsDefaultRouteInterfaceAddress(t *testing.T) {
+//
+// Uses config.EnvCNIEBPFInterfaces to pin attach.ResolveInterfaces at a
+// specific interface, rather than relying on a real default route --
+// found live in containerlab that guessing from the main-table default
+// route (an earlier version of this function's own approach) picks the
+// wrong interface entirely whenever the default route belongs to the
+// container/pod network rather than the SRv6 underlay (eth0 vs eth1 in
+// that lab's own topology), which is exactly the scenario this test's
+// own setup reproduces: ifaceName here deliberately has no default route
+// through it at all.
+func TestResolveNodeSourceAddress_ReturnsInterfaceAddress(t *testing.T) {
 	requireRoot(t)
 
 	const (
 		ifaceName = "srv6srctest0"
 		ifaceAddr = "2001:db8:7::2/64"
 	)
+
+	t.Setenv(config.EnvCNIEBPFInterfaces, ifaceName)
 
 	nsObj, err := ns.TempNetNS()
 	if err != nil {
@@ -517,13 +530,9 @@ func TestResolveNodeSourceAddress_ReturnsDefaultRouteInterfaceAddress(t *testing
 		if err != nil {
 			return fmt.Errorf("parse addr: %w", err)
 		}
-		if err := netlink.AddrAdd(dummy, addr); err != nil {
-			return fmt.Errorf("add addr: %w", err)
-		}
-		return netlink.RouteReplace(&netlink.Route{
-			LinkIndex: dummy.Attrs().Index,
-			Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
-		})
+		return netlink.AddrAdd(dummy, addr)
+		// Deliberately no default route added through this interface --
+		// see this test's own doc comment.
 	})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
@@ -545,14 +554,18 @@ func TestResolveNodeSourceAddress_ReturnsDefaultRouteInterfaceAddress(t *testing
 	}
 }
 
-// TestResolveNodeSourceAddress_NoDefaultRouteFailsLoudly covers the
-// no-main-table-default-route case (e.g. this function called before the
-// underlay eBGP session has converged) -- must fail with an actionable
-// error, not silently return an unspecified/nil address that
-// node_src_addr_table's own "all-zero means not configured" convention
-// would otherwise treat as a legitimate value.
-func TestResolveNodeSourceAddress_NoDefaultRouteFailsLoudly(t *testing.T) {
+// TestResolveNodeSourceAddress_UnresolvableInterfaceFailsLoudly covers
+// attach.ResolveInterfaces itself failing (e.g. the configured interface
+// doesn't exist, or -- with no override set -- no default IPv6 route
+// exists yet to auto-detect from, such as before the underlay eBGP
+// session has converged) -- must fail with an actionable error, not
+// silently return an unspecified/nil address that node_src_addr_table's
+// own "all-zero means not configured" convention would otherwise treat
+// as a legitimate value.
+func TestResolveNodeSourceAddress_UnresolvableInterfaceFailsLoudly(t *testing.T) {
 	requireRoot(t)
+
+	t.Setenv(config.EnvCNIEBPFInterfaces, "srv6srctest-does-not-exist")
 
 	nsObj, err := ns.TempNetNS()
 	if err != nil {
@@ -565,6 +578,6 @@ func TestResolveNodeSourceAddress_NoDefaultRouteFailsLoudly(t *testing.T) {
 		return doErr
 	})
 	if err == nil {
-		t.Error("ResolveNodeSourceAddress() = nil error in a netns with no default route, want an error")
+		t.Error("ResolveNodeSourceAddress() = nil error for a nonexistent interface, want an error")
 	}
 }

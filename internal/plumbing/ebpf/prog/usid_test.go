@@ -1344,7 +1344,12 @@ func TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader(t *testing.T) {
 	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
 	dst := netip.MustParseAddr("2001:db8:ffff::1")
 	key := egressRouteKey(tableID, egressRouteFamilyINET6, dst, 128)
-	if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{Sid: sid.As16()}); err != nil {
+	dmac := [6]byte{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}
+	smac := [6]byte{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}
+	const linkIfindex = 1 // loopback always exists; redirect delivery itself is a live-cluster concern, see below
+	if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{
+		Sid: sid.As16(), LinkIfindex: linkIfindex, Dmac: dmac, Smac: smac,
+	}); err != nil {
 		t.Fatalf("populate egress_route_table: %v", err)
 	}
 
@@ -1353,28 +1358,40 @@ func TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader(t *testing.T) {
 	if err := objs.NodeSrcAddrTable.Put(uint32(0), nodeSrcBytes); err != nil {
 		t.Fatalf("populate node_src_addr_table: %v", err)
 	}
-
 	src := netip.MustParseAddr("fd20:70::1")
 	pkt := buildPacketWithV6Addrs(t, dst, src, src, dst)
 
+	// Unlike usid_ingress's own FIB-lookup-dependent step 8/9 (which
+	// BPF_PROG_TEST_RUN cannot fully exercise without a real route/
+	// interface), usid_egress's egress-routing extension no longer does
+	// any per-packet FIB lookup at all -- dmac/smac/link_ifindex all come
+	// straight from the matched egress_route_table entry (see that
+	// struct's own doc comment in usid.c for why) -- so this test can
+	// assert a full, real TC_ACT_REDIRECT success end to end.
 	ret, out, err := objs.UsidEgress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
-	if ret != tcActShot {
-		t.Fatalf("verdict = %d, want TC_ACT_SHOT (%d) (main-table fib_lookup against a fabricated SID must fail)",
-			ret, tcActShot)
-	}
-	if got := sumPerCPU(t, objs.DropReasons, DropReasonEgressRouteFibLookupFailed); got != 1 {
-		t.Errorf("drop_reasons[egress_route_fib_lookup_failed] = %d, want 1 (route must match, reach fib_lookup)", got)
+	if ret != tcActRedirect {
+		t.Fatalf("verdict = %d, want TC_ACT_REDIRECT (%d)", ret, tcActRedirect)
 	}
 	if got := sumPerCPU(t, objs.DropReasons, DropReasonEgressRouteEncapFailed); got != 0 {
 		t.Errorf("drop_reasons[egress_route_encap_failed] = %d, want 0 -- the header push itself must have succeeded", got)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonEgressRouteRedirectFailed); got != 0 {
+		t.Errorf("drop_reasons[egress_route_redirect_failed] = %d, want 0", got)
 	}
 
 	if len(out) != len(pkt)+ip6HeaderLen {
 		t.Fatalf("output packet length = %d, want %d (original %d + one pushed IPv6 header)",
 			len(out), len(pkt)+ip6HeaderLen, len(pkt))
+	}
+
+	if string(out[0:6]) != string(dmac[:]) {
+		t.Errorf("pushed outer h_dest = % x, want %x (egress_route_table's own dmac)", out[0:6], dmac)
+	}
+	if string(out[6:12]) != string(smac[:]) {
+		t.Errorf("pushed outer h_source = % x, want %x (egress_route_table's own smac)", out[6:12], smac)
 	}
 
 	outer := out[ethHeaderLen : ethHeaderLen+ip6HeaderLen]
@@ -1417,7 +1434,12 @@ func TestUsidEgress_RouteHitIPv4InnerUsesIPIPNextHeader(t *testing.T) {
 	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
 	dst := netip.MustParseAddr("172.40.10.2")
 	key := egressRouteKey(tableID, egressRouteFamilyINET4, dst, 32)
-	if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{Sid: sid.As16()}); err != nil {
+	dmac := [6]byte{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}
+	smac := [6]byte{0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}
+	const linkIfindex = 1
+	if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{
+		Sid: sid.As16(), LinkIfindex: linkIfindex, Dmac: dmac, Smac: smac,
+	}); err != nil {
 		t.Fatalf("populate egress_route_table: %v", err)
 	}
 
@@ -1436,17 +1458,16 @@ func TestUsidEgress_RouteHitIPv4InnerUsesIPIPNextHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
-	if ret != tcActShot {
-		t.Fatalf("verdict = %d, want TC_ACT_SHOT (%d) (main-table fib_lookup against a fabricated SID must fail)",
-			ret, tcActShot)
-	}
-	if got := sumPerCPU(t, objs.DropReasons, DropReasonEgressRouteFibLookupFailed); got != 1 {
-		t.Errorf("drop_reasons[egress_route_fib_lookup_failed] = %d, want 1 (route must match, reach fib_lookup)", got)
+	if ret != tcActRedirect {
+		t.Fatalf("verdict = %d, want TC_ACT_REDIRECT (%d)", ret, tcActRedirect)
 	}
 
 	if len(out) != len(v4pkt)+ip6HeaderLen {
 		t.Fatalf("output packet length = %d, want %d (original %d + one pushed IPv6 header)",
 			len(out), len(v4pkt)+ip6HeaderLen, len(v4pkt))
+	}
+	if string(out[0:6]) != string(dmac[:]) {
+		t.Errorf("pushed outer h_dest = % x, want %x (egress_route_table's own dmac)", out[0:6], dmac)
 	}
 	outer := out[ethHeaderLen : ethHeaderLen+ip6HeaderLen]
 	if gotNextHdr := outer[6]; gotNextHdr != 4 {
@@ -1491,5 +1512,67 @@ func TestUsidEgress_NoNodeSourceAddressFailsOpen(t *testing.T) {
 	}
 	if string(out) != string(pkt) {
 		t.Errorf("packet mutated with no node_src_addr_table entry:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+// TestUsidEgress_LinkLocalAndMulticastDestinationsNeverMatchEgressRoute is
+// the regression test for a real bug found live: a registered ::/0
+// default entry (EgressDefaultRouteAdd's own NAT66 default route) is a
+// literal catch-all, and without this exclusion it also matches
+// link-local and multicast destinations -- including a tenant pod's own
+// Neighbor Discovery traffic for resolving its *own default gateway's*
+// link-layer address. That NS packet got redirected toward a NAT66 shard
+// SID instead of ever reaching the normal host-side NDP handling that
+// must answer it, so the container's own gateway neighbor entry went to
+// FAILED and every packet through it died silently with a
+// locally-synthesized "Destination unreachable" -- confirmed live in
+// containerlab, and invisible to every one of this program's own drop
+// counters, since the packet was never dropped by this program at all,
+// just misrouted.
+func TestUsidEgress_LinkLocalAndMulticastDestinationsNeverMatchEgressRoute(t *testing.T) {
+	requireRoot(t)
+
+	const tableID = 12
+	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+	src := netip.MustParseAddr("fd20:70::1")
+
+	tests := []struct {
+		name string
+		dst  netip.Addr
+	}{
+		{name: "link-local unicast", dst: netip.MustParseAddr("fe80::1")},
+		{name: "solicited-node multicast (a real NS target)", dst: netip.MustParseAddr("ff02::1:ff00:1")},
+		{name: "all-nodes multicast", dst: netip.MustParseAddr("ff02::1")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := loadObjects(t)
+			setUpEgressRouteAttachment(t, objs, 0xaabbcc, 0x600, tableID)
+
+			// A ::/0 default entry -- the exact shape
+			// EgressDefaultRouteAdd installs -- so this test proves the
+			// exclusion, not just "no route happened to match."
+			if err := objs.EgressRouteTable.Put(
+				egressRouteKey(tableID, egressRouteFamilyINET6, netip.IPv6Unspecified(), 0),
+				UsidEgressRouteValue{Sid: sid.As16()},
+			); err != nil {
+				t.Fatalf("populate egress_route_table default entry: %v", err)
+			}
+			if err := objs.NodeSrcAddrTable.Put(uint32(0), netip.MustParseAddr("2001:db8:1:10::2").As16()); err != nil {
+				t.Fatalf("populate node_src_addr_table: %v", err)
+			}
+
+			pkt := buildPacketWithV6Addrs(t, tt.dst, src, src, tt.dst)
+			ret, out, err := objs.UsidEgress.Test(pkt)
+			if err != nil {
+				t.Fatalf("program test-run: %v", err)
+			}
+			if ret != tcActUnspec {
+				t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d) -- must never be claimed by the default route", ret, tcActUnspec)
+			}
+			if string(out) != string(pkt) {
+				t.Errorf("packet mutated for excluded destination %s:\n in: % x\nout: % x", tt.dst, pkt, out)
+			}
+		})
 	}
 }
