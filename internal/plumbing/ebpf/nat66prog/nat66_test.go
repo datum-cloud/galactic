@@ -344,6 +344,22 @@ func TestNat66Ingress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 		t.Errorf("outer saddr = %x, want %x (this shard's own shard_sid)", gotOuterSaddr, shardSID.As16())
 	}
 
+	// Regression guard for the two real bugs found via live-kernel
+	// investigation (see edgedsr.c's identical push_outer_header fixes):
+	// version nibble must be 6, and payload_len must cover the inner
+	// packet's own IPv6 header (40 bytes) plus its own payload, not just
+	// the payload alone.
+	if gotVersion := out[ethLen] >> 4; gotVersion != 6 {
+		t.Errorf("outer header IPv6 version = %d, want 6", gotVersion)
+	}
+	const replyPayloadLen = len("reply")
+	gotOuterPayloadLen := binary.BigEndian.Uint16(out[ethLen+4 : ethLen+6])
+	wantOuterPayloadLen := uint16(ip6Len + udpLen + replyPayloadLen)
+	if gotOuterPayloadLen != wantOuterPayloadLen {
+		t.Errorf("outer header payload_len = %d, want %d (inner ip6 header + inner UDP + payload)",
+			gotOuterPayloadLen, wantOuterPayloadLen)
+	}
+
 	const innerDaddrOffset = ethLen + ip6Len + 24
 	const innerUDPOffset = ethLen + ip6Len + ip6Len
 	var gotInnerDaddr [16]byte

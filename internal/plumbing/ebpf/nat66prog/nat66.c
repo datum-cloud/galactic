@@ -416,7 +416,13 @@ static NAT66_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 
 	struct nat66_ethhdr *eth = data;
 	struct nat66_ip6hdr *outer = (void *) (eth + 1);
 
+	// vtc_flow[0]'s high nibble is the IPv6 version field -- see
+	// edgedsr.c's identical fix (push_outer_header) for the full story:
+	// a real, previously uncaught bug inherited from the removed
+	// edgenat.c, found via live-kernel investigation, not
+	// BPF_PROG_TEST_RUN (which never validates this field).
 	__builtin_memset(outer->vtc_flow, 0, sizeof(outer->vtc_flow));
+	outer->vtc_flow[0] = 0x60;
 	outer->payload_len = inner_payload_len_plus_ip6hdr;
 	outer->nexthdr = NAT66_IPPROTO_IPV6;
 	outer->hop_limit = 64;
@@ -587,7 +593,13 @@ static NAT66_ALWAYS_INLINE int handle_return(struct xdp_md *ctx, struct nat66_ip
 	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
 	*l4v.dport_ptr = cv->backend_port;
 
-	__be16 inner_payload_len = ip6->payload_len;
+	// Must include the inner IPv6 header's own 40 bytes, not just its
+	// payload -- see edgedsr.c's identical fix (its handle_forward call
+	// site) for the full story: a real, previously uncaught bug
+	// inherited from the removed edgenat.c, found via live-kernel
+	// investigation, not BPF_PROG_TEST_RUN.
+	__be16 inner_payload_len_plus_ip6hdr =
+		__builtin_bswap16((__u16) sizeof(struct nat66_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 
 	// Outer source is this shard's own SRv6-reachable identity
 	// (shard_sid), not any field of cv -- the tenant's worker node
@@ -595,7 +607,7 @@ static NAT66_ALWAYS_INLINE int handle_return(struct xdp_md *ctx, struct nat66_ip
 	// does not care about (or validate) the encap source, but it must
 	// still be a real, this-node address, not the internet peer's own
 	// address cv->dest_addr holds.
-	if (push_outer_header(ctx, cfg->shard_sid, cv->backend_usid, inner_payload_len) != 0)
+	if (push_outer_header(ctx, cfg->shard_sid, cv->backend_usid, inner_payload_len_plus_ip6hdr) != 0)
 		return XDP_DROP;
 
 	return XDP_TX;
