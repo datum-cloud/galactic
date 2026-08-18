@@ -15,25 +15,22 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// bpfFuncXDPAdjustHead and bpfFuncCsumDiff are the raw BPF_FUNC_* helper IDs
-// from the kernel UAPI's enum bpf_func_id (include/uapi/linux/bpf.h). These
-// numeric IDs are stable ABI once a helper is introduced -- unlike
+// bpfFuncXDPAdjustHead is the raw BPF_FUNC_xdp_adjust_head helper ID from
+// the kernel UAPI's enum bpf_func_id (include/uapi/linux/bpf.h). This
+// numeric ID is stable ABI once a helper is introduced -- unlike
 // preflight's tbid check, no BTF struct-field probe is possible for "does
 // this helper exist," so features.HaveProgramHelper (the same
 // creation-attempt technique preflight's own SchedCLS/HashMap checks use,
 // just applied to a specific helper rather than a program/map type) is the
 // house convention here instead of a version-string heuristic.
 //
-// github.com/cilium/ebpf v0.22.0's asm package does not export named
-// constants for every helper (BuiltinFunc constants are resolved per
-// platform via BuiltinFuncForPlatform for helpers the library hasn't
-// special-cased) -- these two are cited directly against the raw enum
-// values confirmed empirically on this repo's target kernel
-// (7.1.3-200.fc44.x86_64) during this design's Phase 0 spike.
-const (
-	bpfFuncXDPAdjustHead asm.BuiltinFunc = 44
-	bpfFuncCsumDiff      asm.BuiltinFunc = 28
-)
+// github.com/cilium/ebpf v0.22.0's asm package does not export a named
+// constant for this helper (BuiltinFunc constants are resolved per platform
+// via BuiltinFuncForPlatform for helpers the library hasn't
+// special-cased) -- cited directly against the raw enum value confirmed
+// empirically on this repo's target kernel (7.1.3-200.fc44.x86_64) during
+// this design's Phase 0 spike.
+const bpfFuncXDPAdjustHead asm.BuiltinFunc = 44
 
 // KernelProber is the real, kernel-backed [Prober] implementation used in
 // production. It probes the actual running kernel via
@@ -81,18 +78,6 @@ func (k *KernelProber) HashMap() error {
 	return nil
 }
 
-// LRUHashMap implements [Prober] by attempting to create a minimal
-// BPF_MAP_TYPE_LRU_HASH map.
-func (k *KernelProber) LRUHashMap() error {
-	if err := ensureMemlockRemoved(); err != nil {
-		return err
-	}
-	if err := features.HaveMapType(ebpf.LRUHash); err != nil {
-		return fmt.Errorf("kernel rejects BPF_MAP_TYPE_LRU_HASH: %w", err)
-	}
-	return nil
-}
-
 // BTF implements [Prober] by attempting to load the running kernel's own
 // BTF (typically /sys/kernel/btf/vmlinux).
 func (k *KernelProber) BTF() error {
@@ -110,18 +95,6 @@ func (k *KernelProber) XDPAdjustHead() error {
 	}
 	if err := features.HaveProgramHelper(ebpf.XDP, bpfFuncXDPAdjustHead); err != nil {
 		return fmt.Errorf("kernel's XDP programs reject bpf_xdp_adjust_head: %w", err)
-	}
-	return nil
-}
-
-// XDPCsumDiff implements [Prober] by attempting to load a minimal XDP
-// program that calls bpf_csum_diff.
-func (k *KernelProber) XDPCsumDiff() error {
-	if err := ensureMemlockRemoved(); err != nil {
-		return err
-	}
-	if err := features.HaveProgramHelper(ebpf.XDP, bpfFuncCsumDiff); err != nil {
-		return fmt.Errorf("kernel's XDP programs reject bpf_csum_diff: %w", err)
 	}
 	return nil
 }

@@ -16,37 +16,37 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 )
 
-// fakeRuleTable is an in-memory edgemap.Table, the same technique
-// internal/plumbing/ebpf/edgemap/ruletable_test.go's identical fake uses
+// fakeVIPTable is an in-memory edgemap.Table, the same technique
+// internal/plumbing/ebpf/edgemap/viptable_test.go's identical fake uses
 // (unexported there, so not reusable across package boundaries --
-// reimplemented here rather than promoted, to keep that package's own
-// test surface unchanged; same convention
+// reimplemented here rather than promoted, to keep that package's own test
+// surface unchanged; same convention
 // internal/plumbing/ebpf/metrics/faketable_test.go documents for its own
 // duplicate).
-type fakeRuleTable struct {
-	entries map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleValue
+type fakeVIPTable struct {
+	entries map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipValue
 }
 
-func newFakeRuleTable() *fakeRuleTable {
-	return &fakeRuleTable{entries: make(map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleValue)}
+func newFakeVIPTable() *fakeVIPTable {
+	return &fakeVIPTable{entries: make(map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipValue)}
 }
 
-func (f *fakeRuleTable) Put(key, value any) error {
-	f.entries[key.(edgeprog.EdgenatRuleKey)] = value.(edgeprog.EdgenatRuleValue)
+func (f *fakeVIPTable) Put(key, value any) error {
+	f.entries[key.(edgeprog.EdgedsrVipKey)] = value.(edgeprog.EdgedsrVipValue)
 	return nil
 }
 
-func (f *fakeRuleTable) Lookup(key, valueOut any) error {
-	v, ok := f.entries[key.(edgeprog.EdgenatRuleKey)]
+func (f *fakeVIPTable) Lookup(key, valueOut any) error {
+	v, ok := f.entries[key.(edgeprog.EdgedsrVipKey)]
 	if !ok {
 		return ebpf.ErrKeyNotExist
 	}
-	*valueOut.(*edgeprog.EdgenatRuleValue) = v
+	*valueOut.(*edgeprog.EdgedsrVipValue) = v
 	return nil
 }
 
-func (f *fakeRuleTable) Delete(key any) error {
-	k := key.(edgeprog.EdgenatRuleKey)
+func (f *fakeVIPTable) Delete(key any) error {
+	k := key.(edgeprog.EdgedsrVipKey)
 	if _, ok := f.entries[k]; !ok {
 		return ebpf.ErrKeyNotExist
 	}
@@ -54,63 +54,62 @@ func (f *fakeRuleTable) Delete(key any) error {
 	return nil
 }
 
-func (f *fakeRuleTable) Iterate() edgemap.Iterator {
-	keys := make([]edgeprog.EdgenatRuleKey, 0, len(f.entries))
+func (f *fakeVIPTable) Iterate() edgemap.Iterator {
+	keys := make([]edgeprog.EdgedsrVipKey, 0, len(f.entries))
 	for k := range f.entries {
 		keys = append(keys, k)
 	}
-	return &fakeRuleIterator{table: f, keys: keys}
+	return &fakeVIPIterator{table: f, keys: keys}
 }
 
-type fakeRuleIterator struct {
-	table *fakeRuleTable
-	keys  []edgeprog.EdgenatRuleKey
+type fakeVIPIterator struct {
+	table *fakeVIPTable
+	keys  []edgeprog.EdgedsrVipKey
 	i     int
 }
 
-func (it *fakeRuleIterator) Next(keyOut, valueOut any) bool {
+func (it *fakeVIPIterator) Next(keyOut, valueOut any) bool {
 	if it.i >= len(it.keys) {
 		return false
 	}
 	k := it.keys[it.i]
 	it.i++
-	*keyOut.(*edgeprog.EdgenatRuleKey) = k
-	*valueOut.(*edgeprog.EdgenatRuleValue) = it.table.entries[k]
+	*keyOut.(*edgeprog.EdgedsrVipKey) = k
+	*valueOut.(*edgeprog.EdgedsrVipValue) = it.table.entries[k]
 	return true
 }
 
-func (it *fakeRuleIterator) Err() error { return nil }
+func (it *fakeVIPIterator) Err() error { return nil }
 
-var _ edgemap.Table = (*fakeRuleTable)(nil)
+var _ edgemap.Table = (*fakeVIPTable)(nil)
 
 // fakeStatsTable is an in-memory edgemap.Table standing in for
-// rule_stats_table (issue #361's split-out counters map) -- same
-// technique as fakeRuleTable, but keyed/valued for
-// edgeprog.EdgenatRuleStatsValue.
+// vip_stats_table (issue #361's split-out counters map) -- same technique
+// as fakeVIPTable, but keyed/valued for edgeprog.EdgedsrVipStatsValue.
 type fakeStatsTable struct {
-	entries map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue
+	entries map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipStatsValue
 }
 
 func newFakeStatsTable() *fakeStatsTable {
-	return &fakeStatsTable{entries: make(map[edgeprog.EdgenatRuleKey]edgeprog.EdgenatRuleStatsValue)}
+	return &fakeStatsTable{entries: make(map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipStatsValue)}
 }
 
 func (f *fakeStatsTable) Put(key, value any) error {
-	f.entries[key.(edgeprog.EdgenatRuleKey)] = value.(edgeprog.EdgenatRuleStatsValue)
+	f.entries[key.(edgeprog.EdgedsrVipKey)] = value.(edgeprog.EdgedsrVipStatsValue)
 	return nil
 }
 
 func (f *fakeStatsTable) Lookup(key, valueOut any) error {
-	v, ok := f.entries[key.(edgeprog.EdgenatRuleKey)]
+	v, ok := f.entries[key.(edgeprog.EdgedsrVipKey)]
 	if !ok {
 		return ebpf.ErrKeyNotExist
 	}
-	*valueOut.(*edgeprog.EdgenatRuleStatsValue) = v
+	*valueOut.(*edgeprog.EdgedsrVipStatsValue) = v
 	return nil
 }
 
 func (f *fakeStatsTable) Delete(key any) error {
-	k := key.(edgeprog.EdgenatRuleKey)
+	k := key.(edgeprog.EdgedsrVipKey)
 	if _, ok := f.entries[k]; !ok {
 		return ebpf.ErrKeyNotExist
 	}
@@ -119,7 +118,7 @@ func (f *fakeStatsTable) Delete(key any) error {
 }
 
 func (f *fakeStatsTable) Iterate() edgemap.Iterator {
-	keys := make([]edgeprog.EdgenatRuleKey, 0, len(f.entries))
+	keys := make([]edgeprog.EdgedsrVipKey, 0, len(f.entries))
 	for k := range f.entries {
 		keys = append(keys, k)
 	}
@@ -128,7 +127,7 @@ func (f *fakeStatsTable) Iterate() edgemap.Iterator {
 
 type fakeStatsIterator struct {
 	table *fakeStatsTable
-	keys  []edgeprog.EdgenatRuleKey
+	keys  []edgeprog.EdgedsrVipKey
 	i     int
 }
 
@@ -138,42 +137,14 @@ func (it *fakeStatsIterator) Next(keyOut, valueOut any) bool {
 	}
 	k := it.keys[it.i]
 	it.i++
-	*keyOut.(*edgeprog.EdgenatRuleKey) = k
-	*valueOut.(*edgeprog.EdgenatRuleStatsValue) = it.table.entries[k]
+	*keyOut.(*edgeprog.EdgedsrVipKey) = k
+	*valueOut.(*edgeprog.EdgedsrVipStatsValue) = it.table.entries[k]
 	return true
 }
 
 func (it *fakeStatsIterator) Err() error { return nil }
 
 var _ edgemap.Table = (*fakeStatsTable)(nil)
-
-// fakeConnTable is an in-memory ConnCounter for tests -- Collector only
-// ever needs to count entries, so this just yields count zero-value rows.
-type fakeConnTable struct {
-	count int
-}
-
-func (f fakeConnTable) Iterate() edgemap.Iterator {
-	return &fakeConnIterator{remaining: f.count}
-}
-
-type fakeConnIterator struct {
-	remaining int
-}
-
-func (it *fakeConnIterator) Next(keyOut, valueOut any) bool {
-	if it.remaining <= 0 {
-		return false
-	}
-	it.remaining--
-	*keyOut.(*edgeprog.EdgenatConnKey) = edgeprog.EdgenatConnKey{}
-	*valueOut.(*edgeprog.EdgenatConnValue) = edgeprog.EdgenatConnValue{}
-	return true
-}
-
-func (it *fakeConnIterator) Err() error { return nil }
-
-var _ ConnCounter = fakeConnTable{}
 
 // fakeDropReasons is an in-memory DropReasonsReader for tests -- same
 // shape as internal/plumbing/ebpf/metrics's identical fake.
@@ -278,27 +249,27 @@ func findMetric(
 }
 
 func TestCollector_CollectsRuleCounters(t *testing.T) {
-	table := newFakeRuleTable()
+	table := newFakeVIPTable()
 	statsTable := newFakeStatsTable()
-	rt := edgemap.NewRuleTable(table, statsTable)
-	key := edgemap.RuleKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
+	vt := edgemap.NewVIPTable(table, statsTable)
+	key := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
 	backend := edgemap.Backend{
 		Addr: mustAddr(t, "fd00:10:1::20"),
 		Port: 8443,
 		USID: mustAddr(t, "2001:db8:2::1"),
 	}
-	if err := rt.Register(key, []edgemap.Backend{backend}); err != nil {
+	if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
 	// Simulate datapath-accumulated counters directly on the fake stats
-	// table's backing map, the way edgenat.c's __sync_fetch_and_add calls
-	// into rule_stats_table would in the real kernel map. LastSeenNs is
+	// table's backing map, the way edgedsr.c's __sync_fetch_and_add calls
+	// into vip_stats_table would in the real kernel map. LastSeenNs is
 	// set behind "now" (the fake table's own clock, read via
-	// rt.Generation() below) by exactly 5s.
-	now := rt.Generation()
+	// vt.Generation() below) by exactly 5s.
+	now := vt.Generation()
 	for k := range table.entries {
-		statsTable.entries[k] = edgeprog.EdgenatRuleStatsValue{
+		statsTable.entries[k] = edgeprog.EdgedsrVipStatsValue{
 			Packets:        10,
 			Bytes:          2000,
 			DroppedPackets: 1,
@@ -306,7 +277,7 @@ func TestCollector_CollectsRuleCounters(t *testing.T) {
 		}
 	}
 
-	c := NewCollector(rt, fakeConnTable{count: 3}, 100, fakeDropReasons{})
+	c := NewCollector(vt, fakeDropReasons{})
 	metrics := collect(t, c)
 
 	packets := findMetric(t, metrics, rulePacketsDesc, "vip", "2001:db8:1::10")
@@ -342,16 +313,16 @@ func TestCollector_CollectsRuleCounters(t *testing.T) {
 }
 
 func TestCollector_OmitsSecondsSinceLastPacketWhenNeverSeen(t *testing.T) {
-	table := newFakeRuleTable()
-	rt := edgemap.NewRuleTable(table, newFakeStatsTable())
-	key := edgemap.RuleKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
-	if err := rt.Register(key, []edgemap.Backend{{
+	table := newFakeVIPTable()
+	vt := edgemap.NewVIPTable(table, newFakeStatsTable())
+	key := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
+	if err := vt.Register(key, []edgemap.Backend{{
 		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
-	}}); err != nil {
+	}}, [edgemap.MaglevTableSize]byte{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	c := NewCollector(rt, fakeConnTable{count: 0}, 100, fakeDropReasons{})
+	c := NewCollector(vt, fakeDropReasons{})
 	metrics := collect(t, c)
 
 	// 4 metrics per rule (packets/bytes/dropped/backends) when
@@ -369,56 +340,18 @@ func TestCollector_OmitsSecondsSinceLastPacketWhenNeverSeen(t *testing.T) {
 
 func TestCollector_CollectsDropsByReason(t *testing.T) {
 	drops := fakeDropReasons{
-		edgeprog.DropReasonNoBackends:   3,
-		edgeprog.DropReasonPATExhausted: 7,
+		edgeprog.DropReasonEmptyBackendList: 3,
+		edgeprog.DropReasonFibLookupFailed:  7,
 	}
-	c := NewCollector(edgemap.NewRuleTable(newFakeRuleTable(), newFakeStatsTable()), fakeConnTable{}, 100, drops)
+	c := NewCollector(edgemap.NewVIPTable(newFakeVIPTable(), newFakeStatsTable()), drops)
 	metrics := collect(t, c)
 
-	noBackends := findMetric(t, metrics, dropsDesc, "reason", "no_backends")
-	if got := metricValue(noBackends); got != 3 {
-		t.Errorf("drops_total{reason=no_backends} = %v, want 3", got)
+	emptyBackends := findMetric(t, metrics, dropsDesc, "reason", "empty_backend_list")
+	if got := metricValue(emptyBackends); got != 3 {
+		t.Errorf("drops_total{reason=empty_backend_list} = %v, want 3", got)
 	}
-	patExhausted := findMetric(t, metrics, dropsDesc, "reason", "pat_exhausted")
-	if got := metricValue(patExhausted); got != 7 {
-		t.Errorf("drops_total{reason=pat_exhausted} = %v, want 7", got)
-	}
-}
-
-func TestCollector_ConnTableEntriesAndUtilization(t *testing.T) {
-	rt := edgemap.NewRuleTable(newFakeRuleTable(), newFakeStatsTable())
-	c := NewCollector(rt, fakeConnTable{count: 25}, 100, fakeDropReasons{})
-	metrics := collect(t, c)
-
-	entries := findMetric(t, metrics, connTableEntriesDesc, "", "")
-	if got := metricValue(entries); got != 25 {
-		t.Errorf("conn_table_entries = %v, want 25", got)
-	}
-
-	util := findMetric(t, metrics, connTableUtilizationDesc, "", "")
-	if got := metricValue(util); got != 0.25 {
-		t.Errorf("conn_table_utilization_ratio = %v, want 0.25 (25/100)", got)
-	}
-}
-
-// TestCollector_ZeroConnMaxOmitsUtilization verifies connMax == 0 (e.g. a
-// caller that never set it) skips the utilization gauge entirely rather
-// than emitting a divide-by-zero NaN/Inf series -- conn_table_entries
-// itself is still reported.
-func TestCollector_ZeroConnMaxOmitsUtilization(t *testing.T) {
-	rt := edgemap.NewRuleTable(newFakeRuleTable(), newFakeStatsTable())
-	c := NewCollector(rt, fakeConnTable{count: 5}, 0, fakeDropReasons{})
-	metrics := collect(t, c)
-
-	entries := findMetric(t, metrics, connTableEntriesDesc, "", "")
-	if got := metricValue(entries); got != 5 {
-		t.Errorf("conn_table_entries = %v, want 5", got)
-	}
-
-	for _, m := range metrics {
-		if m.desc == connTableUtilizationDesc {
-			t.Errorf("conn_table_utilization_ratio must be entirely absent when connMax is 0, got %v",
-				metricValue(m.pb))
-		}
+	fibFailed := findMetric(t, metrics, dropsDesc, "reason", "fib_lookup_failed")
+	if got := metricValue(fibFailed); got != 7 {
+		t.Errorf("drops_total{reason=fib_lookup_failed} = %v, want 7", got)
 	}
 }

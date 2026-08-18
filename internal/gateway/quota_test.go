@@ -76,7 +76,7 @@ func TestNodeQuotaEnforcer_DeniesOverNodeWideEntryLimit(t *testing.T) {
 		t.Fatalf("CheckAndReserve: unexpected error: %v", err)
 	}
 	if ok {
-		t.Fatal("CheckAndReserve: want false, node-wide rule_table capacity is exhausted")
+		t.Fatal("CheckAndReserve: want false, node-wide vip_table capacity is exhausted")
 	}
 }
 

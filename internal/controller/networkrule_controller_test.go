@@ -151,7 +151,7 @@ func testRuleKey(name string) types.NamespacedName {
 	return types.NamespacedName{Namespace: testNamespace, Name: name}
 }
 
-func TestNetworkRuleReconciler_AssignsPrimaryNodeOnce(t *testing.T) {
+func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	gwB := newTestGateway(testNodeGWB)
@@ -174,18 +174,16 @@ func TestNetworkRuleReconciler_AssignsPrimaryNodeOnce(t *testing.T) {
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
-	if got.Status.PrimaryNode == "" {
-		t.Fatal("PrimaryNode was not assigned")
-	}
 	if !controllerutil.ContainsFinalizer(got, networkRuleFinalizer) {
 		t.Fatal("finalizer was not added")
 	}
 	if !meta.IsStatusConditionTrue(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
 		t.Fatal("Accepted condition was not set to True once gateway nodes exist")
 	}
-	firstAssignment := got.Status.PrimaryNode
 
-	// Reconcile again after the pool changes -- assignment must not flip.
+	// Reconcile again after the gateway pool changes -- under DSR's anycast
+	// model there is no primary/secondary assignment to flip, but Accepted
+	// must stay True and reconciling must remain a no-op/idempotent.
 	gwC := newTestGateway("gw-c")
 	if err := fakeClient.Create(context.Background(), gwC); err != nil {
 		t.Fatalf("create gw-c: %v", err)
@@ -197,62 +195,27 @@ func TestNetworkRuleReconciler_AssignsPrimaryNodeOnce(t *testing.T) {
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, got2); err != nil {
 		t.Fatalf("get rule after second reconcile: %v", err)
 	}
-	if got2.Status.PrimaryNode != firstAssignment {
-		t.Fatalf("PrimaryNode changed across reconciles: %q -> %q", firstAssignment, got2.Status.PrimaryNode)
+	if !meta.IsStatusConditionTrue(got2.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
+		t.Fatal("Accepted condition did not remain True across a second reconcile")
 	}
 }
 
-// TestNetworkRuleReconciler_BackfillsAcceptedWhenPrimaryNodeAlreadySet covers
-// the case assignPrimaryNode's own doc comment calls out: a rule whose
-// PrimaryNode was already assigned by an earlier reconcile (e.g. one that
-// predates the Accepted fix, or simply a routine re-reconcile) must still
-// get Accepted=True, not be skipped forever because PrimaryNode is already
-// non-empty.
-func TestNetworkRuleReconciler_BackfillsAcceptedWhenPrimaryNodeAlreadySet(t *testing.T) {
-	scheme := newRuleTestScheme(t)
-	gwA := newTestGateway(testNodeGWA)
-	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	rule.Status.PrimaryNode = testNodeGWA
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
-		WithObjects(gwA, rule).
-		Build()
-
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
-	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
-	if _, err := r.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("Reconcile: unexpected error: %v", err)
-	}
-
-	got := &bgpv1alpha1.NetworkRule{}
-	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
-		t.Fatalf("get rule: %v", err)
-	}
-	if got.Status.PrimaryNode != testNodeGWA {
-		t.Fatalf("PrimaryNode changed on backfill reconcile: got %q", got.Status.PrimaryNode)
-	}
-	if !meta.IsStatusConditionTrue(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
-		t.Fatal("Accepted condition was not backfilled for a rule with a pre-existing PrimaryNode")
-	}
-}
-
-// TestNetworkRuleReconciler_AssignPrimaryNode_AcceptedFalseWithNoGatewayNodes
-// covers the converse of the above directly against assignPrimaryNode: with
-// no NetworkGateway registered in the namespace, Accepted must be False, not
-// merely absent, so NetworkGatewayReconciler's IsStatusConditionTrue gate
-// and any status consumer both see an explicit, not-yet-eligible signal.
+// TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
+// covers the converse of the above directly against updateAcceptedCondition:
+// with no NetworkGateway registered in the namespace, Accepted must be
+// False, not merely absent, so NetworkGatewayReconciler's
+// IsStatusConditionTrue gate and any status consumer both see an explicit,
+// not-yet-eligible signal.
 //
 // This bypasses Reconcile/isGatewayNode deliberately: isGatewayNode derives
 // "is this node a gateway" from the very same NetworkGateway list
-// assignPrimaryNode's own zero-nodes branch checks, so with zero
+// updateAcceptedCondition's own zero-nodes branch checks, so with zero
 // NetworkGateways registered anywhere, Reconcile would never reach
-// assignPrimaryNode in the first place -- the branch under test here is
-// exercised directly, the way it would be reached by a genuine
+// updateAcceptedCondition in the first place -- the branch under test here
+// is exercised directly, the way it would be reached by a genuine
 // list-changed-between-calls race rather than through the reconciler's
 // normal entrypoint.
-func TestNetworkRuleReconciler_AssignPrimaryNode_AcceptedFalseWithNoGatewayNodes(t *testing.T) {
+func TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
@@ -263,16 +226,13 @@ func TestNetworkRuleReconciler_AssignPrimaryNode_AcceptedFalseWithNoGatewayNodes
 		Build()
 
 	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
-	if err := r.assignPrimaryNode(context.Background(), rule); err != nil {
-		t.Fatalf("assignPrimaryNode: unexpected error: %v", err)
+	if err := r.updateAcceptedCondition(context.Background(), rule); err != nil {
+		t.Fatalf("updateAcceptedCondition: unexpected error: %v", err)
 	}
 
 	got := &bgpv1alpha1.NetworkRule{}
 	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleName), got); err != nil {
 		t.Fatalf("get rule: %v", err)
-	}
-	if got.Status.PrimaryNode != "" {
-		t.Fatal("PrimaryNode must not be assigned with no gateway nodes registered")
 	}
 	cond := meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted)
 	if cond == nil {
@@ -303,10 +263,10 @@ func TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T)
 	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 
 	// No NetworkGateway exists yet, so this is the zero-nodes branch (see
-	// TestNetworkRuleReconciler_AssignPrimaryNode_AcceptedFalseWithNoGatewayNodes
+	// TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
 	// for why it is reached directly rather than through Reconcile).
-	if err := r.assignPrimaryNode(ctx, rule); err != nil {
-		t.Fatalf("assignPrimaryNode: unexpected error: %v", err)
+	if err := r.updateAcceptedCondition(ctx, rule); err != nil {
+		t.Fatalf("updateAcceptedCondition: unexpected error: %v", err)
 	}
 	parked := &bgpv1alpha1.NetworkRule{}
 	if err := fakeClient.Get(ctx, testRuleKey(testRuleName), parked); err != nil {
@@ -349,9 +309,6 @@ func TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T)
 	if !meta.IsStatusConditionTrue(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
 		t.Fatal("Accepted was not flipped to True after a gateway node registered")
 	}
-	if got.Status.PrimaryNode != testNodeGWA {
-		t.Fatalf("PrimaryNode = %q, want %q", got.Status.PrimaryNode, testNodeGWA)
-	}
 }
 
 func TestNetworkRuleReconciler_NoOpOnNonGatewayNode(t *testing.T) {
@@ -376,8 +333,8 @@ func TestNetworkRuleReconciler_NoOpOnNonGatewayNode(t *testing.T) {
 	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
-	if got.Status.PrimaryNode != "" {
-		t.Fatal("non-gateway node reconciler must not assign primary_node")
+	if meta.IsStatusConditionTrue(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
+		t.Fatal("non-gateway node reconciler must not update the Accepted condition")
 	}
 	if controllerutil.ContainsFinalizer(got, networkRuleFinalizer) {
 		t.Fatal("non-gateway node reconciler must not add the finalizer")

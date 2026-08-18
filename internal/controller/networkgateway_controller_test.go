@@ -212,34 +212,35 @@ func TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway(t *testing.
 	}
 }
 
-func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedAssignedRules(t *testing.T) {
+// TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules covers
+// DSR's anycast model directly: every accepted, non-deleting NetworkRule in
+// the namespace goes into desired state, with no primary/secondary
+// distinction to gate on (an earlier, Full-NAT-era version of this test,
+// "...ForAcceptedAssignedRules", also required status.primaryNode to be
+// set -- that field and the active-passive model it implemented no longer
+// exist; every gateway node in a PoP now serves every accepted rule
+// identically).
+func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	gwB := newTestGateway(testNodeGWB)
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
-	// secondary-on-a resolves the identical backend address under a
-	// different tenant (vpc-2) -- its own BGPAdvertisement/BGPVRFInstance,
-	// same shared physical router, proving the two rules' backend
-	// resolutions don't need (or get) cross-tenant help from one another.
+	// ruleB resolves the identical backend address under a different
+	// tenant (vpc-2) -- its own BGPAdvertisement/BGPVRFInstance, same
+	// shared physical router, proving the two rules' backend resolutions
+	// don't need (or get) cross-tenant help from one another.
 	_, backendAdv2, backendVRF2 := newBackendFixtures("vpc-2")
 
-	primary := newTestRule("primary-on-a", "vpc-1", testVIP)
-	primary.Status.PrimaryNode = testNodeGWA
-	acceptRule(primary)
+	ruleA := newTestRule("rule-a", "vpc-1", testVIP)
+	acceptRule(ruleA)
 
-	secondary := newTestRule("secondary-on-a", "vpc-2", "203.0.113.6")
-	secondary.Status.PrimaryNode = testNodeGWB
-	acceptRule(secondary)
-
-	unassigned := newTestRule("unassigned", "vpc-3", "203.0.113.7")
-	// No PrimaryNode, no Accepted condition -- must be excluded.
+	ruleB := newTestRule("rule-b", "vpc-2", "203.0.113.6")
+	acceptRule(ruleB)
 
 	notAccepted := newTestRule("not-accepted", "vpc-4", "203.0.113.8")
-	notAccepted.Status.PrimaryNode = testNodeGWA
 	// No Accepted condition set -- must be excluded.
 
 	deleting := newTestRule("deleting", "vpc-5", "203.0.113.9")
-	deleting.Status.PrimaryNode = testNodeGWA
 	acceptRule(deleting)
 	deleting.Finalizers = []string{networkRuleFinalizer}
 	now := metav1.Now()
@@ -248,7 +249,7 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedAssignedRules(t *
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
 		WithObjects(gwA, gwB, backendRouter, backendAdv, backendVRF, backendAdv2, backendVRF2,
-			primary, secondary, unassigned, notAccepted, deleting).
+			ruleA, ruleB, notAccepted, deleting).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -263,30 +264,15 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedAssignedRules(t *
 		t.Fatalf("engine.Reconcile called %d times, want 1", engine.reconciled)
 	}
 	if len(engine.lastDesired.Rules) != 2 {
-		t.Fatalf("desired rules = %d, want 2 (primary-on-a, secondary-on-a); got %+v",
+		t.Fatalf("desired rules = %d, want 2 (rule-a, rule-b); got %+v",
 			len(engine.lastDesired.Rules), engine.lastDesired.Rules)
 	}
 
-	primaryDR, ok := engine.lastDesired.Rules[testNamespace+"/primary-on-a"]
-	if !ok {
-		t.Fatal("primary-on-a missing from desired state")
+	if _, ok := engine.lastDesired.Rules[testNamespace+"/rule-a"]; !ok {
+		t.Error("rule-a missing from desired state")
 	}
-	if primaryDR.LocalPref != gateway.PrimaryLocalPref {
-		t.Errorf("primary-on-a LocalPref = %d, want %d", primaryDR.LocalPref, gateway.PrimaryLocalPref)
-	}
-	if !primaryDR.IsPrimary {
-		t.Error("primary-on-a IsPrimary = false, want true")
-	}
-
-	secondaryDR, ok := engine.lastDesired.Rules[testNamespace+"/secondary-on-a"]
-	if !ok {
-		t.Fatal("secondary-on-a missing from desired state")
-	}
-	if secondaryDR.LocalPref != gateway.SecondaryLocalPref {
-		t.Errorf("secondary-on-a LocalPref = %d, want %d", secondaryDR.LocalPref, gateway.SecondaryLocalPref)
-	}
-	if secondaryDR.IsPrimary {
-		t.Error("secondary-on-a IsPrimary = true, want false")
+	if _, ok := engine.lastDesired.Rules[testNamespace+"/rule-b"]; !ok {
+		t.Error("rule-b missing from desired state")
 	}
 
 	if len(engine.orphansCutoffs) != 1 {
@@ -305,7 +291,7 @@ func TestNetworkGatewayReconciler_ExcludesRuleWithUnresolvableBackend(t *testing
 	// No backend router/advertisement fixtures: testBackendAddr resolves
 	// against nothing.
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	rule.Status.PrimaryNode = testNodeGWA
+
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
@@ -331,7 +317,7 @@ func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *te
 	gwA := newTestGateway(testNodeGWA)
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	rule.Status.PrimaryNode = testNodeGWA
+
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
@@ -358,14 +344,20 @@ func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *te
 	}
 }
 
-func TestNetworkGatewayReconciler_CreatesBGPAdvertisementWithComputedLocalPref(t *testing.T) {
+// TestNetworkGatewayReconciler_CreatesBGPAdvertisement covers the anycast
+// BGPAdvertisement shape directly: no LocalPreference is set at all (an
+// earlier, Full-NAT-era version of this test,
+// "...WithComputedLocalPref", asserted a computed primary/secondary
+// preference value here — that model no longer exists; every gateway
+// node's route is equally preferred by construction, see
+// networkgateway_controller.go's applyBGPAdvertisements doc comment).
+func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	gwB := newTestGateway(testNodeGWB)
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	rule.Status.PrimaryNode = testNodeGWB // this node (gw-a) is secondary
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
@@ -391,10 +383,9 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisementWithComputedLocalPref(t
 	if adv.Spec.AddressFamily.AFI != bgpv1alpha1.AFIL2VPN || adv.Spec.AddressFamily.SAFI != bgpv1alpha1.SAFIEVPN {
 		t.Errorf("AddressFamily = %+v, want l2vpn/evpn", adv.Spec.AddressFamily)
 	}
-	wantPref := int32(gateway.SecondaryLocalPref)
-	if adv.Spec.LocalPreference == nil || *adv.Spec.LocalPreference != wantPref {
-		t.Errorf("LocalPreference = %v, want %d (gw-a is secondary for this rule)",
-			adv.Spec.LocalPreference, wantPref)
+	if adv.Spec.LocalPreference != nil {
+		t.Errorf("LocalPreference = %v, want nil (every gateway node's route is equally preferred under DSR)",
+			*adv.Spec.LocalPreference)
 	}
 	if len(adv.Spec.Prefixes) != 1 || adv.Spec.Prefixes[0] != testVIPPrefix {
 		t.Errorf("Prefixes = %v, want [%s]", adv.Spec.Prefixes, testVIPPrefix)
@@ -416,7 +407,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	rule.Status.PrimaryNode = testNodeGWA
+
 	acceptRule(rule)
 
 	preexisting := &bgpv1alpha1.BGPAdvertisement{
@@ -450,52 +441,6 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	}
 }
 
-// TestNetworkGatewayReconciler_PublishesSelfAddress verifies
-// publishSelfAddress writes status.sRv6Address and creates a plain (no
-// VRFID/Function) BGPAdvertisement for it once a BGPRouter targets this
-// node -- see that method's doc comment for why it publishes an
-// already-configured value rather than computing one.
-func TestNetworkGatewayReconciler_PublishesSelfAddress(t *testing.T) {
-	scheme := newRuleTestScheme(t)
-	const selfAddr = "2001:db8:ffff::1"
-	gw := newTestGateway(testNodeGWA)
-	router := newTestRouter()
-
-	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gw, router).
-		Build()
-
-	engine := newFakeGatewayEngine()
-	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
-	r.SRv6Address = selfAddr
-	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
-
-	if _, err := r.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("Reconcile: unexpected error: %v", err)
-	}
-
-	gotGW := &bgpv1alpha1.NetworkGateway{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA), gotGW); err != nil {
-		t.Fatalf("get NetworkGateway: %v", err)
-	}
-	if gotGW.Status.SRv6Address != selfAddr {
-		t.Errorf("Status.SRv6Address = %q, want %q", gotGW.Status.SRv6Address, selfAddr)
-	}
-
-	adv := &bgpv1alpha1.BGPAdvertisement{}
-	if err := fakeClient.Get(context.Background(), testRuleKey(testNodeGWA+"-selfaddr"), adv); err != nil {
-		t.Fatalf("get self-address BGPAdvertisement: %v", err)
-	}
-	if len(adv.Spec.Prefixes) != 1 || adv.Spec.Prefixes[0] != bgpv1alpha1.Prefix(selfAddr+"/128") {
-		t.Errorf("Prefixes = %v, want [%s/128]", adv.Spec.Prefixes, selfAddr)
-	}
-	if adv.Spec.VRFID != nil || adv.Spec.Function != nil {
-		t.Errorf("self-address advertisement must carry no VRFID/Function, got VRFID=%v Function=%v",
-			adv.Spec.VRFID, adv.Spec.Function)
-	}
-}
-
 // TestNetworkGatewayReconciler_AdvertisementFailureSurfaces is the
 // regression test for #365: BGPAdvertisement write failures used to be
 // logged and dropped, so a node that had advertised nothing still reported
@@ -507,7 +452,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	rule.Status.PrimaryNode = testNodeGWA
+
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
@@ -558,7 +503,7 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	rule.Status.PrimaryNode = testNodeGWA
+
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
@@ -632,16 +577,18 @@ func newAdvertisement(name string) *bgpv1alpha1.BGPAdvertisement {
 
 // TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode
 // is the regression test for #406: gw-b's NetworkGateway is deleted while
-// gw-b's own BGPAdvertisements (its self-address route and its per-rule
-// routes) are still around. gw-a's process -- the only one left to react,
-// since gw-b's own process is presumably already gone -- must withdraw
-// every one of them on the NotFound reconcile it receives for gw-b's
-// deletion, without touching gw-a's own advertisements for the same rule.
+// gw-b's own per-rule BGPAdvertisement routes are still around (an
+// earlier, Full-NAT-era version of this test also seeded a self-address
+// route -- DSR's anycast model has no self-address to advertise at all, so
+// that fixture no longer applies here). gw-a's process -- the only one
+// left to react, since gw-b's own process is presumably already gone --
+// must withdraw every one of them on the NotFound reconcile it receives
+// for gw-b's deletion, without touching gw-a's own advertisements for the
+// same rule.
 func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA) // gw-a's own gateway; still exists
 
-	selfAddr := newAdvertisement(testNodeGWB + "-selfaddr")
 	ruleV4 := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v4")
 	ruleV6 := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v6")
 	otherRuleV4 := newAdvertisement("other-rule-" + testNodeGWB + "-v4")
@@ -649,7 +596,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, selfAddr, ruleV4, ruleV6, otherRuleV4, survivorAdv).
+		WithObjects(gwA, ruleV4, ruleV6, otherRuleV4, survivorAdv).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -665,7 +612,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(
 	}
 
 	ctx := context.Background()
-	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{selfAddr, ruleV4, ruleV6, otherRuleV4} {
+	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{ruleV4, ruleV6, otherRuleV4} {
 		err := fakeClient.Get(ctx, testRuleKey(gone.Name), &bgpv1alpha1.BGPAdvertisement{})
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("BGPAdvertisement %s still exists (err=%v), want withdrawn with gw-b", gone.Name, err)
@@ -691,12 +638,11 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion(t *testin
 	now := metav1.Now()
 	gwA.DeletionTimestamp = &now
 
-	selfAddr := newAdvertisement(testNodeGWA + "-selfaddr")
 	ruleV4 := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, selfAddr, ruleV4).
+		WithObjects(gwA, ruleV4).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -710,7 +656,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion(t *testin
 		t.Error("engine.Stop was not called for a terminating NetworkGateway")
 	}
 	ctx := context.Background()
-	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{selfAddr, ruleV4} {
+	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{ruleV4} {
 		err := fakeClient.Get(ctx, testRuleKey(gone.Name), &bgpv1alpha1.BGPAdvertisement{})
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("BGPAdvertisement %s still exists (err=%v), want withdrawn on own deletion", gone.Name, err)

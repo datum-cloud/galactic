@@ -108,8 +108,8 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		t.Fatalf("setup veth interface: %v", err)
 	}
 
-	ruleKey := edgeprog.EdgenatRuleKey{Proto: 6, Port: 80}
-	ruleValue := edgeprog.EdgenatRuleValue{BackendCount: 1, Generation: 42}
+	vipKey := edgeprog.EdgedsrVipKey{Proto: 6, Port: 80}
+	vipValue := edgeprog.EdgedsrVipValue{BackendCount: 1, Generation: 42}
 
 	// --- pre-restart: first load, attach, and populate a map entry. ---
 	var firstLink interface{ Close() error }
@@ -120,14 +120,14 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		l, err := Attach(objs.EdgeNat, ifaceName)
+		l, err := Attach(objs.EdgeLb, ifaceName)
 		if err != nil {
 			return fmt.Errorf("attach: %w", err)
 		}
 		firstLink = l
 
-		if err := objs.RuleTable.Put(ruleKey, ruleValue); err != nil {
-			return fmt.Errorf("populate rule_table: %w", err)
+		if err := objs.VipTable.Put(vipKey, vipValue); err != nil {
+			return fmt.Errorf("populate vip_table: %w", err)
 		}
 		return nil
 	})
@@ -151,18 +151,18 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		l, err := Attach(objs.EdgeNat, ifaceName)
+		l, err := Attach(objs.EdgeLb, ifaceName)
 		if err != nil {
 			return fmt.Errorf("re-attach after restart: %w", err)
 		}
 		defer func() { _ = l.Close() }()
 
-		var got edgeprog.EdgenatRuleValue
-		if err := objs.RuleTable.Lookup(ruleKey, &got); err != nil {
-			return fmt.Errorf("lookup rule_table entry after restart: %w", err)
+		var got edgeprog.EdgedsrVipValue
+		if err := objs.VipTable.Lookup(vipKey, &got); err != nil {
+			return fmt.Errorf("lookup vip_table entry after restart: %w", err)
 		}
 		if got.BackendCount != 1 || got.Generation != 42 {
-			return fmt.Errorf("rule_table entry after restart = %+v, want BackendCount=1 Generation=42", got)
+			return fmt.Errorf("vip_table entry after restart = %+v, want BackendCount=1 Generation=42", got)
 		}
 		return nil
 	})
