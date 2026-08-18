@@ -1007,6 +1007,107 @@ func TestUsidIngress_VIPXlatRewritesAddrPortAndChecksum(t *testing.T) {
 	}
 }
 
+// TestUsidIngress_VIPXlatSurvivesIdenticalPortEgressRow is the kernel-level
+// regression test for the bug found live in containerlab: a binding that
+// keeps the *same* port number on both the VIP and the backend (ns60's own
+// binding uses port 80 both ways) used to collapse the ingress and egress
+// rows into one map entry, since (block, argument, proto, port) alone was
+// the whole key -- struct vip_xlat_key's Direction field is what now keeps
+// them distinct. This test populates *both* rows at the identical port (as
+// vip_xlat.go's RegisterIngress/RegisterEgress genuinely would for such a
+// binding) and proves usid_ingress still resolves its own (Direction =
+// USID_VIP_XLAT_DIR_INGRESS) row correctly rather than reading back the
+// coexisting egress row's value.
+func TestUsidIngress_VIPXlatSurvivesIdenticalPortEgressRow(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x654}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	const bogusVRFTableID = 0x2C2C2C
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: bogusVRFTableID}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+
+	vip := netip.MustParseAddr("2001:db8:6060::1")
+	backend := netip.MustParseAddr("fd20:60:ff03::100:0")
+	const port = 80 // deliberately identical on both sides, unlike the test above
+
+	ingressKey := UsidVipXlatKey{
+		Block: usid.block, Argument: usid.argument, Proto: 17, /* UDP */
+		Direction: usidVIPXlatDirIngress, Port: bswap16(port),
+	}
+	if err := objs.VipXlatTable.Put(ingressKey, UsidVipXlatValue{
+		Addr: backend.As16(), Port: bswap16(port),
+	}); err != nil {
+		t.Fatalf("populate vip_xlat_table (ingress row): %v", err)
+	}
+	// The coexisting egress row RegisterEgress would also write for this
+	// same binding -- same (block, argument, proto, port), opposite
+	// direction and value. If Direction didn't distinguish them, this Put
+	// would have overwritten the ingress row above.
+	egressKey := UsidVipXlatKey{
+		Block: usid.block, Argument: usid.argument, Proto: 17,
+		Direction: usidVIPXlatDirEgress, Port: bswap16(port),
+	}
+	if err := objs.VipXlatTable.Put(egressKey, UsidVipXlatValue{
+		Addr: vip.As16(), Port: bswap16(port),
+	}); err != nil {
+		t.Fatalf("populate vip_xlat_table (egress row): %v", err)
+	}
+
+	innerSrc := netip.MustParseAddr("2001:db8:ffff::1")
+	const clientPort = 54321
+	payload := []byte("hello")
+
+	udp := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint16(udp[0:2], clientPort)
+	binary.BigEndian.PutUint16(udp[2:4], port)
+	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
+	copy(udp[8:], payload)
+	origCsum := udp6Checksum(innerSrc.As16(), vip.As16(), udp)
+	binary.BigEndian.PutUint16(udp[6:8], origCsum)
+
+	pkt := buildPacketWithUDPInner(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), innerSrc, vip, udp)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Fatalf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+
+	const daddrOffset = ethHeaderLen + 24
+	const udpOffset = ethHeaderLen + ip6HeaderLen
+	var gotDaddr [16]byte
+	copy(gotDaddr[:], out[daddrOffset:daddrOffset+16])
+	if wantDaddr := backend.As16(); gotDaddr != wantDaddr {
+		t.Errorf("daddr after vip_xlat = %x, want %x (backend address) -- got the egress row's value instead, "+
+			"meaning Direction failed to keep the two rows apart", gotDaddr, wantDaddr)
+	}
+	gotDstPort := binary.BigEndian.Uint16(out[udpOffset+2 : udpOffset+4])
+	if gotDstPort != port {
+		t.Errorf("UDP dest port after vip_xlat = %d, want %d", gotDstPort, port)
+	}
+}
+
+// usidVIPXlatDirIngress/usidVIPXlatDirEgress mirror usid.c's
+// USID_VIP_XLAT_DIR_INGRESS/USID_VIP_XLAT_DIR_EGRESS -- bpf2go generates no
+// symbol for a #define, so tests that need to populate vip_xlat_table with
+// an explicit direction (anything beyond the ingress-direction default a
+// zero-value UsidVipXlatKey already produces) name the raw values here
+// once, rather than each hard-coding a bare 0/1.
+const (
+	usidVIPXlatDirIngress = 0
+	usidVIPXlatDirEgress  = 1
+)
+
 // bswap16 is netip.Addr-adjacent test glue: UsidVipXlatKey/Value's Port
 // fields are __be16 (network/big-endian) on the C side; bpf2go generates
 // them as a plain uint16 Go field with no automatic byte-swap, so tests

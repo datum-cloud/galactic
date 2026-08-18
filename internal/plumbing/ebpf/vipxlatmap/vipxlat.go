@@ -4,12 +4,20 @@
 
 // Package vipxlatmap implements the read/write API for the eBPF uSID
 // datapath's vip_xlat_table map (usid.c's struct vip_xlat_key/
-// vip_xlat_value) -- the DSR/Maglev redesign's tap-backend VIP-boundary
-// substitution (design plan §0.1, §2). It is the ServiceVIPBinding
-// reconciler's (internal/controller/servicevipbinding_controller.go)
-// EgressKindTap counterpart to internal/plumbing/vip's veth-branch
-// Bind/Unbind/Verify, mirroring internal/plumbing/ebpf/usidmap's own
-// Register/Unregister/Get/List/Reconcile shape for vrf_table.
+// vip_xlat_value) -- the DSR/Maglev redesign's VIP-boundary substitution
+// (design plan §0.1, §2), originally built for the tap-backend case but
+// now driven by ServiceVIPBindingReconciler
+// (internal/controller/servicevipbinding_controller.go) for EgressKindVeth
+// too: a decapsulated ingress packet is delivered into the owning
+// tenant's own VRF routing table, which has no route to a veth binding's
+// address on internal/plumbing/vip's root-namespace dummy interface --
+// found live in containerlab (see ServiceVIPBindingReconciler's own doc
+// comment) -- and this package's ingress row, run unconditionally by
+// usid_ingress whenever a matching entry exists, rewrites the destination
+// to the backend's real, already-routed address before that VRF lookup
+// happens, closing exactly that gap. Mirrors
+// internal/plumbing/ebpf/usidmap's own Register/Unregister/Get/List/
+// Reconcile shape for vrf_table.
 //
 // # Two independent rows per binding
 //
@@ -179,12 +187,31 @@ func addrTo16(addr net.IP) ([16]byte, error) {
 	return a.As16(), nil
 }
 
+// directionIngress/directionEgress mirror usid.c's
+// USID_VIP_XLAT_DIR_INGRESS/USID_VIP_XLAT_DIR_EGRESS -- the byte value the
+// kernel key's Direction field must carry so usid_ingress's and
+// usid_egress's own, direction-fixed key constructions ever find the row
+// each is looking for. Needed because (block, argument, proto, port) alone
+// is not always unique: a binding that keeps the same port number on both
+// the VIP and the backend (an unremarkable, common case, not a rare one --
+// found live in containerlab, ns60's binding uses port 80 both ways) would
+// otherwise collapse the ingress and egress rows into the same map entry,
+// silently losing whichever was registered first. This package's own
+// exported API stays direction-implicit (RegisterIngress/RegisterEgress/
+// UnregisterIngress/UnregisterEgress/GetIngress/GetEgress each hard-code
+// the direction their own name implies) -- only the kernel key construction
+// below needs the actual byte value.
+const (
+	directionIngress = uint8(0)
+	directionEgress  = uint8(1)
+)
+
 // register is the shared primitive RegisterIngress/RegisterEgress build
 // their (key, value) pair around. keyPort is the port this row's kernel key
 // is composed with (direction-dependent -- see the package doc comment);
 // valAddr/valPort are the rewrite target this row substitutes in.
 func (t *VipXlatTable) register(
-	block uint64, argument uint16, proto uint8, keyPort uint16, valAddr net.IP, valPort uint16,
+	direction uint8, block uint64, argument uint16, proto uint8, keyPort uint16, valAddr net.IP, valPort uint16,
 ) error {
 	if err := uformat.ValidateBlock(block); err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: %w", err)
@@ -207,10 +234,11 @@ func (t *VipXlatTable) register(
 	}
 
 	key := prog.UsidVipXlatKey{
-		Block:    block,
-		Argument: argument,
-		Proto:    proto,
-		Port:     hostToNetwork16(keyPort),
+		Block:     block,
+		Argument:  argument,
+		Proto:     proto,
+		Direction: direction,
+		Port:      hostToNetwork16(keyPort),
 	}
 	value := prog.UsidVipXlatValue{
 		Addr: rawAddr,
@@ -248,7 +276,7 @@ func (t *VipXlatTable) RegisterIngress(
 	if _, err := addrTo16(vipAddr); err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register ingress: vip address: %w", err)
 	}
-	return t.register(block, argument, proto, vipPort, backendAddr, backendPort)
+	return t.register(directionIngress, block, argument, proto, vipPort, backendAddr, backendPort)
 }
 
 // RegisterEgress writes vip_xlat_table's egress-direction row for one
@@ -265,18 +293,19 @@ func (t *VipXlatTable) RegisterEgress(
 	if _, err := addrTo16(backendAddr); err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register egress: backend address: %w", err)
 	}
-	return t.register(block, argument, proto, backendPort, vipAddr, vipPort)
+	return t.register(directionEgress, block, argument, proto, backendPort, vipAddr, vipPort)
 }
 
-// unregister removes the vip_xlat_table entry keyed by (block, argument,
-// proto, port), if present. Not an error if already absent, mirroring
-// usidmap.VRFTable.Unregister's identical idempotency contract.
-func (t *VipXlatTable) unregister(block uint64, argument uint16, proto uint8, port uint16) error {
+// unregister removes the vip_xlat_table entry keyed by (direction, block,
+// argument, proto, port), if present. Not an error if already absent,
+// mirroring usidmap.VRFTable.Unregister's identical idempotency contract.
+func (t *VipXlatTable) unregister(direction uint8, block uint64, argument uint16, proto uint8, port uint16) error {
 	key := prog.UsidVipXlatKey{
-		Block:    block,
-		Argument: argument,
-		Proto:    proto,
-		Port:     hostToNetwork16(port),
+		Block:     block,
+		Argument:  argument,
+		Proto:     proto,
+		Direction: direction,
+		Port:      hostToNetwork16(port),
 	}
 	if err := t.table.Delete(key); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -294,13 +323,13 @@ func (t *VipXlatTable) unregister(block uint64, argument uint16, proto uint8, po
 // UnregisterIngress removes the ingress-direction row RegisterIngress
 // would have written for (block, argument, proto, vipPort).
 func (t *VipXlatTable) UnregisterIngress(block uint64, argument uint16, proto uint8, vipPort uint16) error {
-	return t.unregister(block, argument, proto, vipPort)
+	return t.unregister(directionIngress, block, argument, proto, vipPort)
 }
 
 // UnregisterEgress removes the egress-direction row RegisterEgress would
 // have written for (block, argument, proto, backendPort).
 func (t *VipXlatTable) UnregisterEgress(block uint64, argument uint16, proto uint8, backendPort uint16) error {
-	return t.unregister(block, argument, proto, backendPort)
+	return t.unregister(directionEgress, block, argument, proto, backendPort)
 }
 
 // decodeEntry converts a raw kernel key/value pair into an Entry, attaching
@@ -327,16 +356,30 @@ func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXl
 	}
 }
 
-// Get reads the vip_xlat_table entry for (block, argument, proto, port),
-// reporting whether it exists. port is whichever key a caller wants to
-// inspect -- the VIP port for an ingress-direction row, or the backend port
-// for an egress-direction row.
-func (t *VipXlatTable) Get(block uint64, argument uint16, proto uint8, port uint16) (Entry, bool, error) {
+// GetIngress reads the ingress-direction vip_xlat_table entry for (block,
+// argument, proto, vipPort) -- the row RegisterIngress would have written --
+// reporting whether it exists.
+func (t *VipXlatTable) GetIngress(block uint64, argument uint16, proto uint8, vipPort uint16) (Entry, bool, error) {
+	return t.get(directionIngress, block, argument, proto, vipPort)
+}
+
+// GetEgress reads the egress-direction vip_xlat_table entry for (block,
+// argument, proto, backendPort) -- the row RegisterEgress would have
+// written -- reporting whether it exists.
+func (t *VipXlatTable) GetEgress(block uint64, argument uint16, proto uint8, backendPort uint16) (Entry, bool, error) {
+	return t.get(directionEgress, block, argument, proto, backendPort)
+}
+
+// get is GetIngress/GetEgress's shared primitive.
+func (t *VipXlatTable) get(
+	direction uint8, block uint64, argument uint16, proto uint8, port uint16,
+) (Entry, bool, error) {
 	key := prog.UsidVipXlatKey{
-		Block:    block,
-		Argument: argument,
-		Proto:    proto,
-		Port:     hostToNetwork16(port),
+		Block:     block,
+		Argument:  argument,
+		Proto:     proto,
+		Direction: direction,
+		Port:      hostToNetwork16(port),
 	}
 	var value prog.UsidVipXlatValue
 	if err := t.table.Lookup(key, &value); err != nil {
@@ -401,8 +444,17 @@ func (t *VipXlatTable) Reconcile(live map[Key]struct{}, cutoff uint64) (removed 
 		if e.Generation >= cutoff {
 			continue
 		}
-		if err := t.unregister(e.Block, e.Argument, e.Proto, e.Port); err != nil {
-			errs = append(errs, fmt.Errorf("vipxlatmap: vip_xlat_table: reconcile: delete stale entry %+v: %w", e.Key, err))
+		// Key carries no Direction (List's own doc comment: a raw entry
+		// alone can't tell an ingress row from an egress row) -- try both;
+		// unregister is a no-op for whichever direction was never actually
+		// registered at this exact (block, argument, proto, port), so this
+		// never deletes anything that didn't already match e.
+		delErr := errors.Join(
+			t.unregister(directionIngress, e.Block, e.Argument, e.Proto, e.Port),
+			t.unregister(directionEgress, e.Block, e.Argument, e.Proto, e.Port),
+		)
+		if delErr != nil {
+			errs = append(errs, fmt.Errorf("vipxlatmap: vip_xlat_table: reconcile: delete stale entry %+v: %w", e.Key, delErr))
 			continue
 		}
 		removed = append(removed, e)
