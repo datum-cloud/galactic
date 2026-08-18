@@ -88,12 +88,13 @@ tasks:
       - task: build:binaries
 
   build:ebpf:
-    desc: Regenerate the eBPF uSID and edge gateway NAT/LB datapaths (requires clang)
+    desc: Regenerate the eBPF uSID, edge gateway DSR, and NAT66 datapaths (requires clang)
     run: once
     deps: [require-clang]
     cmds:
       - go generate ./internal/plumbing/ebpf/prog/...
       - go generate ./internal/plumbing/ebpf/edgeprog/...
+      - go generate ./internal/plumbing/ebpf/nat66prog/...
 
   require-clang:
     internal: true
@@ -141,6 +142,7 @@ tasks:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-route ./cmd/galactic-route
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-router ./cmd/galactic-router
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-gateway ./cmd/galactic-gateway
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-nat66 ./cmd/galactic-nat66
       - go build -ldflags "{{.LDFLAGS}}" -o bin/vmtap-cni ./cmd/vmtap-cni
       - GOBIN={{.LOCALBIN}} go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1
 
