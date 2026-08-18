@@ -54,6 +54,7 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -619,7 +620,55 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("attach eBPF usid_egress to host interface %q: %w", hostName, err)
 	}
 
+	// Registers this node's own SRv6 source address into
+	// node_src_addr_table -- see registerNodeSourceAddress's own doc
+	// comment. A per-node constant, not per-attachment, but idempotent
+	// and cheap enough (one netlink route/address query, one map write)
+	// to simply redo on every attachment ADD, the same way every other
+	// registration in this function already is, rather than adding a
+	// separate once-per-node lifecycle hook.
+	//
+	// Deliberately non-fatal to this ADD, unlike every other registration
+	// step above: ResolveNodeSourceAddress needs a converged main-table
+	// IPv6 default route, which a node can genuinely, transiently lack
+	// early in its own boot sequence (before the underlay eBGP session
+	// comes up) -- failing every pod attach on the whole node until that
+	// converges would be a real availability regression from today's
+	// behavior, where a missing egress route only ever failed traffic to
+	// the *specific* destination that needed it, never CNI ADD itself.
+	// usid_egress's own "not yet configured" check already fails open
+	// (TC_ACT_UNSPEC) for exactly this gap; a later attachment's ADD (or
+	// this same one's next retry) succeeds here once the route exists.
+	if err := registerNodeSourceAddress(pinDir); err != nil {
+		slog.Warn("ADD: could not register this node's own SRv6 source address; "+
+			"egress routing will fail open until this succeeds", "err", err)
+	}
+
 	return true, nil
+}
+
+// registerNodeSourceAddress resolves this node's own SRv6/underlay-facing
+// source address (srv6.ResolveNodeSourceAddress) and writes it into
+// node_src_addr_table (egressroutemap.NodeSourceAddress) -- the value
+// usid_egress's egress-routing extension stamps into every outer header
+// it pushes (docs/plans/tc-bpf-egress-srv6-encap.md). Without this, every
+// egress_route_table hit fails open (TC_ACT_UNSPEC) rather than
+// encapsulating at all -- see usid.c's own "not yet configured" check on
+// this map -- so this must succeed before EgressDefaultRouteAdd/
+// RouteEgressAdd's own installed entries can ever actually carry traffic.
+// See this function's own call site for why a failure here doesn't fail
+// the whole CNI ADD.
+func registerNodeSourceAddress(pinDir string) error {
+	addr, err := srv6.ResolveNodeSourceAddress()
+	if err != nil {
+		return fmt.Errorf("resolve node source address: %w", err)
+	}
+	nodeSrc, closer, err := egressroutemap.OpenPinnedNodeSourceAddress(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned node_src_addr_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	return nodeSrc.Set(addr)
 }
 
 // attachUsidEgress loads usid_egress from its own pin (attach.Load pins it
