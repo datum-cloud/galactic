@@ -175,3 +175,202 @@ func TestRouteEgressAdd_InstallsForBothPrefixFamilies(t *testing.T) {
 		})
 	}
 }
+
+// TestRouteMainAddRejectsUnspecifiedGateway mirrors
+// TestRouteEgressAddRejectsUnspecifiedGateway for RouteMainAdd's identical
+// guard.
+func TestRouteMainAddRejectsUnspecifiedGateway(t *testing.T) {
+	_, prefix, err := net.ParseCIDR("2001:db8:6060::1/128")
+	if err != nil {
+		t.Fatalf("ParseCIDR: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		gateway net.IP
+	}{
+		{name: "nil gateway", gateway: nil},
+		{name: "IPv4 zero", gateway: net.IPv4zero},
+		{name: "IPv6 zero", gateway: net.IPv6unspecified},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := RouteMainAdd(prefix, tt.gateway, 0); err == nil {
+				t.Errorf("RouteMainAdd(%v) = nil error, want an error rejecting the unusable gateway", tt.gateway)
+			}
+		})
+	}
+}
+
+// TestRouteMainAdd_InstallsPlainRouteNoEncap installs a RouteMainAdd route
+// against a real kernel routing table and asserts it lands as a plain
+// gateway route with no SEG6 (or any other) encapsulation attached --
+// the entire point of RouteMainAdd over RouteEgressAdd (see its own doc
+// comment). Also exercises RouteMainDel as the add/delete round trip.
+func TestRouteMainAdd_InstallsPlainRouteNoEncap(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		ifaceName = "srv6mtest0"
+		ifaceAddr = "2001:db8:2::1/64"
+		gateway   = "2001:db8:2::2" // on-link next-hop, no encap SID involved
+		vipPrefix = "2001:db8:6060::1/128"
+		table     = 0 // main table -- see matchTableID's own doc comment
+	)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		return netlink.AddrAdd(dummy, addr)
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	_, prefix, err := net.ParseCIDR(vipPrefix)
+	if err != nil {
+		t.Fatalf("ParseCIDR(%q): %v", vipPrefix, err)
+	}
+	gw := net.ParseIP(gateway)
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return RouteMainAdd(prefix, gw, table)
+	})
+	if err != nil {
+		t.Fatalf("RouteMainAdd(%s) = %v, want success", vipPrefix, err)
+	}
+
+	var installed *netlink.Route
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for i := range routes {
+			if routes[i].Dst != nil && routes[i].Dst.String() == prefix.String() {
+				installed = &routes[i]
+				return nil
+			}
+		}
+		return fmt.Errorf("no route to %s found in table %d", prefix, table)
+	})
+	if err != nil {
+		t.Fatalf("verify installed route: %v", err)
+	}
+	if installed.Encap != nil {
+		t.Errorf("installed route for %s has Encap %+v, want no encapsulation at all", vipPrefix, installed.Encap)
+	}
+	if installed.Gw == nil || !installed.Gw.Equal(gw) {
+		t.Errorf("installed route for %s has Gw %v, want %v", vipPrefix, installed.Gw, gw)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return RouteMainDel(prefix, table)
+	})
+	if err != nil {
+		t.Fatalf("RouteMainDel(%s) = %v, want success", vipPrefix, err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for i := range routes {
+			if routes[i].Dst != nil && routes[i].Dst.String() == prefix.String() {
+				return fmt.Errorf("route to %s still present in table %d after RouteMainDel", prefix, table)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify deleted route: %v", err)
+	}
+}
+
+// TestRouteMainAdd_ResolvesIndirectGateway is the regression test for the
+// bug found live in containerlab: RouteMainAdd originally passed gateway
+// straight through as a route's plain Gw with no LinkIndex, which fails
+// with "no route to host" whenever gateway is only reachable via its own
+// separate route rather than being on-link itself -- exactly the shape of
+// a real EVPN path's BGP next-hop (reached through a link-local next-hop,
+// not directly on the receiving node's own subnet). RouteEgressAdd already
+// handled this via netlink.RouteGet (see resolveNextHop); RouteMainAdd
+// initially didn't. Mirrors TestRouteEgressAdd_InstallsForBothPrefixFamilies'
+// own multi-hop setup.
+func TestRouteMainAdd_ResolvesIndirectGateway(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		ifaceName     = "srv6mtest1"
+		ifaceAddr     = "2001:db8:3::1/64"
+		gatewayRoute  = "2001:db8:9::9/128" // reachable via ifaceAddr's subnet
+		onLinkNextHop = "2001:db8:3::2"     // on-link next-hop for gatewayRoute
+		gateway       = "2001:db8:9::9"     // NOT on-link -- reached indirectly
+		vipPrefix     = "2001:db8:6060::1/128"
+		table         = 0
+	)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		if err := netlink.AddrAdd(dummy, addr); err != nil {
+			return fmt.Errorf("add addr: %w", err)
+		}
+		_, gwDst, err := net.ParseCIDR(gatewayRoute)
+		if err != nil {
+			return fmt.Errorf("parse gateway route: %w", err)
+		}
+		return netlink.RouteAdd(&netlink.Route{
+			LinkIndex: dummy.Attrs().Index,
+			Dst:       gwDst,
+			Gw:        net.ParseIP(onLinkNextHop),
+		})
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	_, prefix, err := net.ParseCIDR(vipPrefix)
+	if err != nil {
+		t.Fatalf("ParseCIDR(%q): %v", vipPrefix, err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return RouteMainAdd(prefix, net.ParseIP(gateway), table)
+	})
+	if err != nil {
+		t.Fatalf("RouteMainAdd(%s) via indirect gateway %s = %v, want success", vipPrefix, gateway, err)
+	}
+}

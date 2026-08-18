@@ -106,17 +106,24 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 		return
 	}
 
-	tableID, ok := r.matchTableID(path.Attrs)
+	install, ok := r.matchTableID(path.Attrs)
 	if !ok {
 		return
 	}
+	tableID := install.tableID
 
 	prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
 
 	if path.Withdrawal {
-		slog.Info(logPrefix+": withdrawing route", "prefix", prefix, "table", tableID)
-		if delErr := srv6.RouteEgressDel(prefix, tableID); delErr != nil {
-			slog.Error(logPrefix+": RouteEgressDel failed", "prefix", prefix, "table", tableID, "err", delErr)
+		slog.Info(logPrefix+": withdrawing route", "prefix", prefix, "table", tableID, "plain", install.plain)
+		var delErr error
+		if install.plain {
+			delErr = srv6.RouteMainDel(prefix, tableID)
+		} else {
+			delErr = srv6.RouteEgressDel(prefix, tableID)
+		}
+		if delErr != nil {
+			slog.Error(logPrefix+": route delete failed", "prefix", prefix, "table", tableID, "err", delErr)
 		}
 		return
 	}
@@ -137,32 +144,77 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 		}
 	}
 
-	slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID)
-	if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
-		slog.Error(logPrefix+": RouteEgressAdd failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
+	slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID, "plain", install.plain)
+	var addErr error
+	if install.plain {
+		addErr = srv6.RouteMainAdd(prefix, gw, tableID)
+	} else {
+		addErr = srv6.RouteEgressAdd(prefix, gw, tableID)
+	}
+	if addErr != nil {
+		slog.Error(logPrefix+": route install failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
 	}
 }
 
-// matchTableID looks up the kernel VRF table that imports one of the
-// extended communities on attrs, via the RT index maintained by applyVRFs.
-// It returns false if no configured VRF imports any route target on the
-// path. This is an O(1)-per-community lookup, not an O(#VRFs) scan, so it
-// stays cheap even with thousands of VRFs on the node.
-func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (uint32, bool) {
+// routeInstall is matchTableID's result: which kernel table processEVPNPath
+// should install path's route into, and which of srv6's two installers to
+// use -- RouteEgressAdd's SEG6 encap (a VRF-scoped tenant path, whose gw
+// always resolves to a real uSID decap SID) or RouteMainAdd's plain
+// next-hop route (plain is true; see RouteMainAdd's own doc comment for
+// why an RT-less path needs this instead).
+type routeInstall struct {
+	tableID uint32
+	plain   bool
+}
+
+// matchTableID resolves how to install one EVPN Type 5 path's route.
+//
+// A path carrying at least one Route Target extended community is a
+// tenant VRF route: matchTableID looks up the kernel VRF table that
+// imports one of those RTs, via the RT index maintained by applyVRFs, and
+// returns false if no VRF configured on this node imports any RT on the
+// path (a VRF this node doesn't participate in -- correctly skipped, not
+// installed anywhere). This is an O(1)-per-community lookup, not an
+// O(#VRFs) scan, so it stays cheap even with thousands of VRFs on the node.
+//
+// A path carrying no Route Target community at all is not VRF-scoped by
+// construction (buildEVPNPaths in paths.go only attaches the extended
+// communities attribute "if len(rts) > 0") -- e.g.
+// NetworkGatewayReconciler's anycast ingress-VIP advertisements, which
+// leave VRFID/Function unset for exactly this reason (that reconciler's
+// own package doc comment). Such a path is installed into the kernel's
+// main routing table (table ID 0, which both the kernel and this
+// vishvananda/netlink call resolve to RT_TABLE_MAIN when left unset) via
+// RouteMainAdd's plain routing, not RouteEgressAdd's SEG6 encap -- see that
+// function's own doc comment for why. This previously silently dropped
+// every anycast VIP path on every node in the mesh (found live: a
+// containerlab NetworkGateway/NetworkRule canary's VIP was never reachable
+// from any other site, even once BGP itself and the DSR/Maglev datapath
+// were both working correctly) -- gated on the absence of any RT
+// altogether, not merely a lookup miss, so a genuine unrecognized-VRF path
+// still correctly falls through to false above rather than being installed
+// into main by accident.
+func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeInstall, bool) {
 	r.rtIndexMu.RLock()
 	defer r.rtIndexMu.RUnlock()
+
+	var sawRouteTarget bool
 	for _, attr := range attrs {
 		ec, ok := attr.(*bgp.PathAttributeExtendedCommunities)
 		if !ok {
 			continue
 		}
 		for _, community := range ec.Value {
+			sawRouteTarget = true
 			if tableID, ok := r.rtIndex[community.String()]; ok {
-				return tableID, true
+				return routeInstall{tableID: tableID}, true
 			}
 		}
 	}
-	return 0, false
+	if !sawRouteTarget {
+		return routeInstall{plain: true}, true
+	}
+	return routeInstall{}, false
 }
 
 // vrfTableID resolves the kernel VRF table ID for a VRF named "{vpc}-{node}"
