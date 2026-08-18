@@ -200,34 +200,44 @@ func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
 // (matching RouteEgressAdd's own guard, enforced by
 // egressroutemap.EgressRouteTable.Register).
 //
-// Unlike the netlink-route mechanism this replaces, EgressDefaultRouteAdd
-// no longer needs to skip a shard SID it cannot yet resolve a route to
-// (a real, previously-necessary case: a tenant node that is *also* one of
-// the configured shards itself, this lab's own "reuse the site workers as
-// shards" layout, can never resolve a route to its *own* advertised SID --
-// GoBGP, like every BGP implementation, never reflects a self-originated
-// path back into that same node's received-path processing). That
-// resolvability check existed only because the old mechanism needed a
-// concrete link/next-hop *at install time* (resolveNextHop); this one
-// doesn't -- usid_egress's own bpf_fib_lookup resolves the chosen SID
-// fresh, per packet, so an unreachable shard now simply fails that
-// per-packet lookup (DROP_REASON_EGRESS_ROUTE_FIB_LOOKUP_FAILED) instead
-// of ever needing to be detected here.
+// EgressDefaultRouteAdd still needs to skip a shard SID it cannot yet
+// resolve a route+neighbor for, and only fail if every one does: a real,
+// necessary case found live -- a tenant node that is *also* one of the
+// configured shards itself (this lab's own "reuse the site workers as
+// shards" layout) can never resolve a route to its *own* advertised SID,
+// since GoBGP, like every BGP implementation, never reflects a
+// self-originated path back into that same node's received-path
+// processing. egressroutemap.EgressRouteTable.Register resolves
+// link/L2 information at registration time (see its own doc comment for
+// why), so this same resolvability constraint that applied to the
+// netlink-route mechanism's own resolveNextHop applies again here,
+// unlike an intermediate version of this function that (incorrectly)
+// assumed it no longer would.
 func EgressDefaultRouteAdd(tableID uint32, shardSIDs []net.IP) error {
 	if len(shardSIDs) == 0 {
 		return nil
-	}
-	// Checked here, before ever touching bpffs -- see RouteEgressAdd's
-	// identical guard for why.
-	if sid := shardSIDs[0]; sid == nil || sid.IsUnspecified() {
-		return fmt.Errorf("refusing to install NAT66 default route: shard SID %s is not a usable SRv6 SID", sid)
 	}
 	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {
 		return fmt.Errorf("srv6: EgressDefaultRouteAdd: %w", err)
 	}
 	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
-	return table.Register(tableID, egressroutemap.DefaultPrefix, shardSIDs[0])
+
+	var unresolved []error
+	for _, sid := range shardSIDs {
+		// Checked here, before ever touching bpffs -- see RouteEgressAdd's
+		// identical guard for why.
+		if sid == nil || sid.IsUnspecified() {
+			return fmt.Errorf("refusing to install NAT66 default route: shard SID %s is not a usable SRv6 SID", sid)
+		}
+		if err := table.Register(tableID, egressroutemap.DefaultPrefix, sid); err != nil {
+			unresolved = append(unresolved, fmt.Errorf("shard %s: %w", sid, err))
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("no NAT66 shard SID is resolvable yet, out of %d configured: %w",
+		len(shardSIDs), errors.Join(unresolved...))
 }
 
 // EgressDefaultRouteDel removes egress_route_table's default (::/0) entry

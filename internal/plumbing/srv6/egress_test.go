@@ -62,6 +62,65 @@ func setUpTestPinDir(t *testing.T) string {
 	return testPinDir
 }
 
+// setUpResolvableSID creates a fresh test netns with a dummy interface
+// (ifaceName/ifaceAddr) that has an on-link route to sid and a static,
+// already-resolved neighbor entry for it -- everything
+// egressroutemap.EgressRouteTable.Register's own resolveLinkAndL2 needs
+// to succeed (a route via netlink.RouteGet, then a matching neighbor
+// cache entry with a real hardware address), the same two-part
+// requirement srv6.RouteEgressAdd's own pre-TC-BPF resolveNextHop had
+// for exactly the same reason (see that function's own doc comment).
+// Returns the netns so callers can run RouteEgressAdd/EgressDefaultRouteAdd
+// inside it via nsObj.Do.
+func setUpResolvableSID(t *testing.T, ifaceName, ifaceAddr, sid string) ns.NetNS {
+	t.Helper()
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	t.Cleanup(func() { _ = nsObj.Close() })
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		if err := netlink.AddrAdd(dummy, addr); err != nil {
+			return fmt.Errorf("add addr: %w", err)
+		}
+		_, sidDst, err := net.ParseCIDR(sid + "/128")
+		if err != nil {
+			return fmt.Errorf("parse sid %q: %w", sid, err)
+		}
+		if err := netlink.RouteAdd(&netlink.Route{LinkIndex: dummy.Attrs().Index, Dst: sidDst}); err != nil {
+			return fmt.Errorf("add on-link route for sid %q: %w", sid, err)
+		}
+		neigh := &netlink.Neigh{
+			LinkIndex:    dummy.Attrs().Index,
+			Family:       netlink.FAMILY_V6,
+			State:        netlink.NUD_PERMANENT,
+			IP:           net.ParseIP(sid),
+			HardwareAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		}
+		if err := netlink.NeighAdd(neigh); err != nil {
+			return fmt.Errorf("add static neighbor entry for sid %q: %w", sid, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setUpResolvableSID: %v", err)
+	}
+	return nsObj
+}
+
 // TestRouteEgressAddRejectsUnspecifiedGateway verifies that RouteEgressAdd
 // refuses to install an egress_route_table entry when it isn't handed a
 // real SRv6 SID. This is the defense-in-depth backstop for the bug where a
@@ -114,8 +173,14 @@ func TestRouteEgressAdd_InstallsForBothPrefixFamilies(t *testing.T) {
 	requireRoot(t)
 	testPinDir := setUpTestPinDir(t)
 
-	const table = 100
-	sid := net.ParseIP("2001:db8:9::9")
+	const (
+		ifaceName = "srv6egtest0"
+		ifaceAddr = "2001:db8:1::1/64"
+		sid       = "2001:db8:9::9"
+		table     = 100
+	)
+
+	nsObj := setUpResolvableSID(t, ifaceName, ifaceAddr, sid)
 
 	// Family/address-byte-layout correctness within the key itself is
 	// covered by egressroutemap's own
@@ -138,7 +203,10 @@ func TestRouteEgressAdd_InstallsForBothPrefixFamilies(t *testing.T) {
 				t.Fatalf("ParseCIDR(%q): %v", tt.prefix, err)
 			}
 
-			if err := RouteEgressAdd(prefix, sid, table); err != nil {
+			err = nsObj.Do(func(_ ns.NetNS) error {
+				return RouteEgressAdd(prefix, net.ParseIP(sid), table)
+			})
+			if err != nil {
 				t.Fatalf("RouteEgressAdd(%s) = %v, want success", tt.prefix, err)
 			}
 
@@ -155,7 +223,7 @@ func TestRouteEgressAdd_InstallsForBothPrefixFamilies(t *testing.T) {
 			if !ok {
 				t.Fatalf("installed entry not found for %s", tt.prefix)
 			}
-			if !gotSID.Equal(sid) {
+			if !gotSID.Equal(net.ParseIP(sid)) {
 				t.Errorf("installed sid = %s, want %s", gotSID, sid)
 			}
 		})
@@ -170,14 +238,23 @@ func TestRouteEgressDel_RemovesInstalledEntry(t *testing.T) {
 	requireRoot(t)
 	testPinDir := setUpTestPinDir(t)
 
-	const table = 101
+	const (
+		ifaceName = "srv6egtest1"
+		ifaceAddr = "2001:db8:2::1/64"
+		sid       = "2001:db8:9::9"
+		table     = 101
+	)
 	_, prefix, err := net.ParseCIDR("fd20:10:ff03::/96")
 	if err != nil {
 		t.Fatalf("ParseCIDR: %v", err)
 	}
-	sid := net.ParseIP("2001:db8:9::9")
 
-	if err := RouteEgressAdd(prefix, sid, table); err != nil {
+	nsObj := setUpResolvableSID(t, ifaceName, ifaceAddr, sid)
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return RouteEgressAdd(prefix, net.ParseIP(sid), table)
+	})
+	if err != nil {
 		t.Fatalf("RouteEgressAdd: %v", err)
 	}
 	if err := RouteEgressDel(prefix, table); err != nil {
@@ -450,12 +527,23 @@ func TestEgressDefaultRouteAdd_InstallsDefaultEntryForFirstShard(t *testing.T) {
 	requireRoot(t)
 	testPinDir := setUpTestPinDir(t)
 
-	const table = 42
-	shardSID1 := net.ParseIP("2001:db8:ff01:1:e001::")
-	shardSID2 := net.ParseIP("2001:db8:ff03:1:e001::")
-	shardSIDs := []net.IP{shardSID1, shardSID2}
+	const (
+		ifaceName = "srv6egtest2"
+		ifaceAddr = "2001:db8:4::1/64"
+		shardSID1 = "2001:db8:ff01:1:e001::"
+		shardSID2 = "2001:db8:ff03:1:e001::"
+		table     = 42
+	)
+	nsObj := setUpResolvableSID(t, ifaceName, ifaceAddr, shardSID1)
+	// shardSID2 is deliberately left unresolvable (no route/neighbor for
+	// it at all): this test's own job is proving the first *resolvable*
+	// shard wins, not that every configured shard must resolve.
+	shardSIDs := []net.IP{net.ParseIP(shardSID1), net.ParseIP(shardSID2)}
 
-	if err := EgressDefaultRouteAdd(table, shardSIDs); err != nil {
+	err := nsObj.Do(func(_ ns.NetNS) error {
+		return EgressDefaultRouteAdd(table, shardSIDs)
+	})
+	if err != nil {
 		t.Fatalf("EgressDefaultRouteAdd(%v) = %v, want success", shardSIDs, err)
 	}
 
@@ -472,7 +560,7 @@ func TestEgressDefaultRouteAdd_InstallsDefaultEntryForFirstShard(t *testing.T) {
 	if !ok {
 		t.Fatal("no default entry installed")
 	}
-	if !gotSID.Equal(shardSID1) {
+	if !gotSID.Equal(net.ParseIP(shardSID1)) {
 		t.Errorf("installed default entry sid = %s, want %s (the first configured shard)", gotSID, shardSID1)
 	}
 
