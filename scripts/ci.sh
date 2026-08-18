@@ -136,7 +136,14 @@ spec:
 EOF
 
     echo "--- Building image: $IMG"
-    docker build -t "$IMG" -f containers/galactic-cni/Dockerfile .
+    # --build-context network=../network satisfies go.mod's local `replace
+    # go.datum.net/network => ../network` (see that line's own comment)
+    # inside the Dockerfile's "network" build stage -- see
+    # containers/galactic-cni/Dockerfile's own comment on that stage for
+    # the full mechanism. Harmless to pass once that replace directive is
+    # eventually removed, since the stage goes unused by go.mod at that
+    # point regardless of what's passed here.
+    docker build --build-context network=../network -t "$IMG" -f containers/galactic-cni/Dockerfile .
 
     echo "--- Loading image into cluster"
     kind load docker-image "$IMG" --name "$CLUSTER_NAME"

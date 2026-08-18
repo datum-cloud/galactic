@@ -33,20 +33,30 @@ tasks:
     cmds:
       - docker build --network=host --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
+  # --build-context network=../../../network satisfies go.mod's local
+  # `replace go.datum.net/network => ../network` (see that line's own
+  # comment) inside each Dockerfile's "network" build stage -- see
+  # containers/galactic-{router,gateway,cni}/Dockerfile's own comment on
+  # that stage for the full mechanism. ../../../network is this Taskfile's
+  # own cwd (deploy/containerlab) relative to the network repo checked out
+  # as galactic's sibling; harmless to pass even once that replace
+  # directive is eventually removed, since the Dockerfile's "network"
+  # stage is unused by go.mod at that point regardless of what's passed
+  # here.
   "build:galactic-router":
     desc: Build the galactic-router container image
     cmds:
-      - docker build --network=host -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
 
   "build:galactic-gateway":
     desc: Build the galactic-gateway container image
     cmds:
-      - docker build --network=host -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
 
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
     cmds:
-      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
   deploy:
     desc: Build images and deploy the full lab end-to-end
