@@ -1,0 +1,11 @@
+# The single-container NAT66 shard pod's shared base -- see
+# ../kustomization.yaml for why this isn't applied as-is: this is meant to
+# be instantiated once per shard node by a further overlay that pins it to
+# one node (kubernetes.io/hostname) and sets that node's own
+# GALACTIC_NAT66_UPLINK_INTERFACE/_SHARD_SID/_SHARD_PUB_ADDR values,
+# mirroring config/galactic-gateway/base/kustomization.yaml's identical
+# per-node overlay pattern (see
+# deploy/containerlab/resources/galactic-gateway/ for a worked example of
+# that pattern applied to a sibling component).
+resources:
+  - daemonset.yaml

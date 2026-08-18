@@ -1,0 +1,43 @@
+# The sharded NAT66 egress datapath's own RBAC. This ClusterRole covers
+# only what NAT66ShardReconciler (internal/controller/nat66shard_controller.go)
+# actually touches.
+#
+# Unlike galactic-gateway's own RBAC (config/galactic-gateway/rbac.yaml),
+# this binary reads no other CRD at all: NAT66ShardReconciler's own doc
+# comment describes it as deliberately much simpler than
+# NetworkGatewayReconciler -- no rule/backend desired-state assembly, no
+# BGPRouter/BGPAdvertisement lookup, no BGPAdvertisement wiring. It only
+# gets/lists/watches its own NAT66Shard object and updates its status.
+#
+# networkegresspolicies is deliberately NOT granted here: NAT66ShardReconciler
+# never reads or writes that CRD (it belongs to the earlier, now-superseded
+# #865 egress-policy stack this sharded-NAT66 design replaces), so granting
+# it would be scope creep past what this binary's own reconciler actually
+# does -- see this ClusterRole's own principle of granting exactly what is
+# used, not what a future phase might use.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-nat66
+rules:
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - nat66shards
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - nat66shards/status
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: galactic-nat66
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: galactic-nat66
+subjects:
+  - kind: ServiceAccount
+    name: galactic-nat66
+    namespace: galactic-system
