@@ -5,6 +5,7 @@
 package srv6
 
 import (
+	"errors"
 	"fmt"
 	"net"
 
@@ -192,6 +193,115 @@ func RouteMainAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
 	return netlink.RouteDel(&netlink.Route{
 		Dst:   prefix,
+		Table: int(tableID),
+	})
+}
+
+// defaultRoutePrefix is the IPv6 default route (::/0) EgressDefaultRouteAdd
+// installs -- the catch-all a tenant VRF falls back to once every more
+// specific route (intra-VPC peers via RouteEgressAdd, anycast VIPs via
+// RouteMainAdd) has already missed.
+var defaultRoutePrefix = &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
+
+// EgressDefaultRouteAdd installs a multipath IPv6 default route (::/0) in
+// routing table tableID, SEG6-encapsulating toward every address in
+// shardSIDs -- one nexthop per shard, equally weighted. This is the
+// missing half of the design plan's §3 sharded NAT66 tier: nat66.c's own
+// shard-receive side has always been able to decap and NAT a packet
+// addressed to its own shard_sid, but nothing ever produced such a packet
+// -- no code anywhere installed a default route in a tenant VRF at all,
+// so a backend with no more specific destination simply had no route out
+// (confirmed live: "no route to host" from vrf60's own table). This closes
+// that gap the same way RouteEgressAdd closes it for a specific intra-VPC
+// destination, just fanned out across every live shard instead of one
+// fixed gateway.
+//
+// Shard selection here is deliberately NOT internal/maglev, unlike the
+// design plan §3.2's original text ("shard assignment is chosen via a
+// maglev.Table built over (tenant VRFID, backend addr:port, dest
+// addr:port)"). That per-flow, in-datapath hash was never actually
+// implemented (internal/maglev is only ever called from the ingress LB's
+// own backend-selection ring), and building an equivalent TC-BPF hash
+// stage here would be a second, much larger new eBPF component. Linux's
+// own ECMP multipath hashing over these nexthops already gives near-even
+// load spread across shards without any new datapath code, and modern
+// kernels' resilient nexthop groups (RTA_NH_ID hash-policy "resilient")
+// give the same bounded-disruption-on-membership-change
+// property Maglev was chosen for in the first place -- but this function
+// installs plain multipath nexthops, not a resilient nexthop group,
+// since building/managing a named nexthop group is extra bookkeeping this
+// phase doesn't need: correctness (a route exists, traffic flows) matters
+// more here than minimizing reshuffled flows on a shard add/remove, which
+// is why the design plan's own §5 already treats shard-set-change
+// disruption as a property to prove, not a hard requirement gating this
+// mechanism's existence. Revisit with a real nexthop group if/when that
+// bound is actually needed.
+//
+// shardSIDs must be non-empty -- EgressDefaultRouteAdd installs nothing
+// and returns nil when it is, the same "nothing configured yet, not an
+// error" stance GALACTIC_CNI_NAT66_SHARD_SIDS's own doc comment takes. An
+// unspecified/nil entry is a real misconfiguration and fails loudly
+// (matching RouteEgressAdd/RouteMainAdd's own guard), but a *reachable*
+// shard SID that resolveNextHop simply cannot resolve *yet* is silently
+// skipped, not fatal to the whole call: found live on a tenant node that
+// is *also* one of the configured shards itself (this lab's own "reuse
+// the site workers as shards" layout, design plan §8) -- GoBGP, like
+// every other BGP implementation, never reflects a node's own
+// locally-originated advertisement back into that same node's received-path
+// processing, so a shard's own node can *never* resolve a route to its
+// own SID, only to every other shard's. Aborting the entire multipath
+// route over that one permanently-unresolvable nexthop would have meant
+// no default route at all on every shard node -- exactly the nodes most
+// likely to actually run tenant workloads in this lab. The route this
+// function installs simply has one fewer nexthop on a shard's own node;
+// EgressDefaultRouteAdd only fails outright when *every* configured SID
+// is unresolvable, since a route with zero nexthops is not a route worth
+// installing at all.
+func EgressDefaultRouteAdd(tableID uint32, shardSIDs []net.IP) error {
+	if len(shardSIDs) == 0 {
+		return nil
+	}
+
+	nexthops := make([]*netlink.NexthopInfo, 0, len(shardSIDs))
+	var unresolved []error
+	for _, sid := range shardSIDs {
+		if sid == nil || sid.IsUnspecified() {
+			return fmt.Errorf("refusing to install NAT66 default route: shard SID %s is not a usable SRv6 SID", sid)
+		}
+		linkIndex, nextHop, err := resolveNextHop(sid)
+		if err != nil {
+			unresolved = append(unresolved, fmt.Errorf("shard %s: %w", sid, err))
+			continue
+		}
+		nh := &netlink.NexthopInfo{
+			LinkIndex: linkIndex,
+			Encap:     &netlink.SEG6Encap{Mode: seg6IptunModeEncapRed, Segments: []net.IP{sid}},
+		}
+		if len(nextHop) > 0 {
+			nh.Gw = nextHop
+		} else {
+			nh.Gw = sid
+		}
+		nexthops = append(nexthops, nh)
+	}
+
+	if len(nexthops) == 0 {
+		return fmt.Errorf("no NAT66 shard SID is resolvable yet, out of %d configured: %w",
+			len(shardSIDs), errors.Join(unresolved...))
+	}
+
+	return netlink.RouteReplace(&netlink.Route{
+		Dst:       defaultRoutePrefix,
+		Table:     int(tableID),
+		MultiPath: nexthops,
+	})
+}
+
+// EgressDefaultRouteDel removes the NAT66 default route (::/0) from routing
+// table tableID -- EgressDefaultRouteAdd's counterpart.
+func EgressDefaultRouteDel(tableID uint32) error {
+	return netlink.RouteDel(&netlink.Route{
+		Dst:   defaultRoutePrefix,
 		Table: int(tableID),
 	})
 }

@@ -373,14 +373,26 @@ func buildDesiredRule(
 }
 
 // routerNameForNode returns the name of the BGPRouter whose targetRef.name
-// matches this node, or "" if none exists yet.
+// matches this node, or "" if none exists yet. Thin wrapper around the
+// package-level routerNameForNode, kept as a method so existing call sites
+// and tests don't need to change.
 func (r *NetworkGatewayReconciler) routerNameForNode(ctx context.Context, namespace string) (string, error) {
+	return routerNameForNode(ctx, r.Client, namespace, r.NodeName)
+}
+
+// routerNameForNode returns the name of the BGPRouter whose targetRef.name
+// matches nodeName, or "" if none exists yet. Extracted as a free function
+// (originally a NetworkGatewayReconciler method only) so
+// NAT66ShardReconciler's own shard-SID advertisement (nat66shard_controller.go)
+// can resolve the same "which BGPRouter is mine" lookup without either
+// duplicating it or reaching into a sibling reconciler's method set.
+func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName string) (string, error) {
 	list := &bgpv1alpha1.BGPRouterList{}
-	if err := r.List(ctx, list,
+	if err := c.List(ctx, list,
 		client.InNamespace(namespace),
-		client.MatchingFields{BGPRouterByTargetName: r.NodeName},
+		client.MatchingFields{BGPRouterByTargetName: nodeName},
 	); err != nil {
-		return "", fmt.Errorf("list BGPRouters for node %s: %w", r.NodeName, err)
+		return "", fmt.Errorf("list BGPRouters for node %s: %w", nodeName, err)
 	}
 	if len(list.Items) == 0 {
 		return "", nil

@@ -180,11 +180,12 @@ func parseConf(data []byte) (*PluginConf, error) {
 	}
 
 	cniConfig.Resolve(&config.ConflistValues{
-		NodeName:   hostConf.NodeName,
-		Kubeconfig: hostConf.Kubeconfig,
-		Namespace:  hostConf.Namespace,
-		LogFile:    hostConf.LogFile,
-		LogLevel:   hostConf.LogLevel,
+		NodeName:       hostConf.NodeName,
+		Kubeconfig:     hostConf.Kubeconfig,
+		Namespace:      hostConf.Namespace,
+		LogFile:        hostConf.LogFile,
+		LogLevel:       hostConf.LogLevel,
+		NAT66ShardSIDs: hostConf.NAT66ShardSIDs,
 	})
 
 	if cniConfig.NodeName == "" {

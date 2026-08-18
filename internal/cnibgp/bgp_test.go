@@ -924,3 +924,54 @@ func TestRetryK8sOpsExhaustsDeadline(t *testing.T) {
 		t.Errorf("expected 'unavailable' in error, got %v", err)
 	}
 }
+
+func TestParseShardSIDs_Empty(t *testing.T) {
+	sids, err := parseShardSIDs("")
+	if err != nil {
+		t.Fatalf("parseShardSIDs(\"\") error = %v, want nil", err)
+	}
+	if len(sids) != 0 {
+		t.Errorf("parseShardSIDs(\"\") = %v, want empty", sids)
+	}
+}
+
+func TestParseShardSIDs_TrimsWhitespaceAndSkipsBlankEntries(t *testing.T) {
+	sids, err := parseShardSIDs(" 2001:db8:ff01:1:e001:: , 2001:db8:ff03:1:e001::, ,")
+	if err != nil {
+		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+	}
+	want := []string{"2001:db8:ff01:1:e001::", "2001:db8:ff03:1:e001::"}
+	if len(sids) != len(want) {
+		t.Fatalf("parseShardSIDs() = %v, want %v", sids, want)
+	}
+	for i, w := range want {
+		if sids[i].String() != w {
+			t.Errorf("parseShardSIDs()[%d] = %v, want %s", i, sids[i], w)
+		}
+	}
+}
+
+func TestParseShardSIDs_InvalidEntryFailsLoudly(t *testing.T) {
+	if _, err := parseShardSIDs("2001:db8:ff01:1:e001::,not-an-ip"); err == nil {
+		t.Error("parseShardSIDs() error = nil, want an error for the invalid entry")
+	}
+}
+
+// TestInstallNAT66EgressRoute_NilCNIConfigIsANoop is the regression test
+// for a real panic found live: several tests in this package (and, before
+// this guard, installNAT66EgressRoute itself) call registerEBPFDatapath
+// directly without ever calling InitCNIConfig first, leaving the
+// package-level cniConfig nil -- exactly the state ops_del_test.go's own
+// helper already works around for a different call path. Production never
+// hits this (cmd/galactic-bgp's main.go always calls InitCNIConfig before
+// any cmdAdd can run), but a nil cniConfig here must be treated as "no
+// shard configured yet," not a nil pointer dereference.
+func TestInstallNAT66EgressRoute_NilCNIConfigIsANoop(t *testing.T) {
+	original := cniConfig
+	cniConfig = nil
+	defer func() { cniConfig = original }()
+
+	if err := installNAT66EgressRoute(1); err != nil {
+		t.Errorf("installNAT66EgressRoute(1) = %v, want nil with cniConfig == nil", err)
+	}
+}
