@@ -41,10 +41,10 @@ internal/plumbing/ebpf/prog/usid_bpfel.go
 internal/plumbing/ebpf/prog/usid_bpfel.o
 internal/plumbing/ebpf/prog/usid_bpfeb.go
 internal/plumbing/ebpf/prog/usid_bpfeb.o
-internal/plumbing/ebpf/edgeprog/edgenat_bpfel.go
-internal/plumbing/ebpf/edgeprog/edgenat_bpfel.o
-internal/plumbing/ebpf/edgeprog/edgenat_bpfeb.go
-internal/plumbing/ebpf/edgeprog/edgenat_bpfeb.o
+internal/plumbing/ebpf/edgeprog/edgedsr_bpfel.go
+internal/plumbing/ebpf/edgeprog/edgedsr_bpfel.o
+internal/plumbing/ebpf/edgeprog/edgedsr_bpfeb.go
+internal/plumbing/ebpf/edgeprog/edgedsr_bpfeb.o
 
 # ============================================================
 # Kubernetes / controller-runtime / kubebuilder
