@@ -12,7 +12,10 @@
 // so none of those need to import each other just to agree on a name.
 package crdnames
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // AnnotationAllocatedSubnetIPv6 is the BGPAdvertisement annotation key prefix
 // holding the allocated IPv6 pod subnet CIDR (the /96) for a container ID.
@@ -107,4 +110,19 @@ func BGPVRFInstanceName(vpc, nodeName string) string {
 // cluster, so the (vpc, vpcAttachment) pair is a reliable 1:1 key.
 func BGPAdvertisementName(vpc, vpcAttachment string) string {
 	return fmt.Sprintf("%s-%s", vpc, vpcAttachment)
+}
+
+// vipNameReplacer sanitizes an IP address for use inside a Kubernetes
+// object name (RFC 1123 DNS subdomain: lowercase alphanumeric, '-', '.'
+// only) -- ':' (every IPv6 address) and '.' (every IPv4 address, and the
+// zone-id separator on a link-local IPv6 address) are not valid there.
+var vipNameReplacer = strings.NewReplacer(":", "-", ".", "-")
+
+// ServiceVIPBindingName returns the deterministic name for a
+// ServiceVIPBinding: one binding per (node, VIP, protocol, port) tuple.
+// Prefixed by nodeName (always alphanumeric) rather than the sanitized
+// address directly, so an IPv6 address's leading "::" never produces a
+// name starting with '-' (invalid for a Kubernetes object name).
+func ServiceVIPBindingName(nodeName, vip string, port int32, proto string) string {
+	return fmt.Sprintf("%s-%s-%s-%d", nodeName, vipNameReplacer.Replace(vip), proto, port)
 }

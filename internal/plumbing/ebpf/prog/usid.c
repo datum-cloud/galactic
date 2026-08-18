@@ -126,6 +126,11 @@
 #define __type(name, val) typeof(val) *name
 #define USID_ALWAYS_INLINE inline __attribute__((always_inline))
 
+// USID_OFFSETOF reproduces <stddef.h>'s offsetof -- not otherwise available,
+// since this file deliberately includes no headers beyond <linux/bpf.h>
+// (see the file header comment).
+#define USID_OFFSETOF(type, member) ((__u32) (unsigned long) &((type *) 0)->member)
+
 // ---------------------------------------------------------------------
 // BPF helper function declarations. Only the helpers this program calls
 // are declared, using the enum bpf_func_id constants from the system's
@@ -161,6 +166,24 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 
+// vip_xlat_table's rewrite (unlike nptv6_table's, see struct
+// vip_xlat_value's comment) is a genuine address+port substitution with no
+// checksum-neutral shortcut, so it needs the real incremental L4 checksum
+// update every stateful NAT uses -- available here because both
+// usid_ingress and usid_egress are TC-BPF (a real struct __sk_buff),
+// unlike edgenat.c's XDP context, which is exactly why that program needs
+// the heavier bpf_csum_diff approach instead.
+static long (*bpf_l4_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to,
+				    __u64 flags) = (void *) BPF_FUNC_l4_csum_replace;
+static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const void *from, __u32 len,
+				    __u64 flags) = (void *) BPF_FUNC_skb_store_bytes;
+
+// BPF_F_PSEUDO_HDR/BPF_F_MARK_MANGLED_0 (uapi/linux/bpf.h) reproduced as
+// plain constants for the same reason the TC_ACT_*/USID_AF_INET* constants
+// above are -- avoiding a second header dependency for a couple of flags.
+#define USID_BPF_F_PSEUDO_HDR (1U << 4)
+#define USID_BPF_F_MARK_MANGLED_0 (1U << 5)
+
 // ---------------------------------------------------------------------
 // TC verdicts (uapi/linux/pkt_cls.h) -- reproduced as plain constants to
 // avoid pulling in that header's transitive netlink dependencies for three
@@ -190,6 +213,33 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 #define USID_IPPROTO_IPIP 4
 #define USID_IPPROTO_IPV6 41
 
+// Transport protocol numbers, needed by the DSR/Maglev redesign's
+// vip_xlat_table lookup (both TCP and UDP headers place source/destination
+// port at the identical offset -- struct usid_l4ports below -- so no
+// separate struct is needed per protocol for the fields this file touches).
+#define USID_IPPROTO_TCP 6
+#define USID_IPPROTO_UDP 17
+
+// TCP checksum field offset (bytes 16-17 of a TCP header); UDP's is at
+// bytes 6-7. Used only by apply_vip_xlat's bpf_l4_csum_replace calls.
+#define USID_TCP_CSUM_OFFSET 16
+#define USID_UDP_CSUM_OFFSET 6
+
+// USID_L3_OFFSET is the fixed byte offset of the L3 (IPv6) header from
+// skb->data -- always sizeof(struct usid_ethhdr), a compile-time constant.
+// apply_vip_xlat's csum_off/addr_off/port_off arguments must be this kind
+// of compile-time-constant-derived offset, not a runtime pointer
+// subtraction: bpf_skb_store_bytes (inside apply_vip_xlat) invalidates the
+// verifier's tracked bounds on every previously-derived packet pointer,
+// and a scalar computed by subtracting two packet pointers loses precise
+// range tracking across that call boundary, which then fails the bounds
+// check on the *next* direct packet dereference after the call --
+// confirmed empirically via BPF_PROG_TEST_RUN (the verifier rejected the
+// pointer-subtraction version with "R5 min value is outside of the
+// allowed memory range"). A literal constant offset sidesteps the problem
+// entirely rather than working around it.
+#define USID_L3_OFFSET (sizeof(struct usid_ethhdr))
+
 // ---------------------------------------------------------------------
 // Minimal, self-contained header structs. Byte-exact to the real wire
 // formats; hand-rolled (rather than <linux/if_ether.h>/<linux/ip.h>/
@@ -214,6 +264,17 @@ struct usid_ip6hdr {
 	__u8 hop_limit;
 	__u8 saddr[16];
 	__u8 daddr[16];
+} __attribute__((packed));
+
+// struct usid_l4ports mirrors the first 4 bytes shared by a TCP and a UDP
+// header (source port, destination port) -- the only L4 fields
+// vip_xlat_table's rewrite touches directly; the checksum field itself is
+// updated via bpf_l4_csum_replace, never read/written as a struct field
+// here (its offset differs between TCP/UDP -- see USID_TCP_CSUM_OFFSET/
+// USID_UDP_CSUM_OFFSET above).
+struct usid_l4ports {
+	__be16 source;
+	__be16 dest;
 } __attribute__((packed));
 
 struct usid_iphdr {
@@ -315,6 +376,81 @@ struct vrf_value {
 	__u64 dropped_packets;
 };
 
+// ---------------------------------------------------------------------
+// DSR/Maglev redesign additions (design plan §0.1, §2): per-VRF stateless
+// NPTv6 (RFC 6296) and the tap-backend VIP-boundary substitution. Both are
+// consulted from two places: usid_ingress (this file, below -- inbound,
+// after step 7's strip, before step 8's FIB lookup, using the (block,
+// argument) already resolved locally by steps 2-6) and usid_egress (this
+// file, below -- outbound, on a tenant's own not-yet-encapsulated reply,
+// intercepted per-attachment before the kernel's SEG6 encap route ever
+// runs -- see usid_egress's own header comment for why that attach point,
+// not "TC egress of the shared physical uplink", is the only place that
+// can resolve the sending VRF unambiguously).
+// ---------------------------------------------------------------------
+
+// struct ifindex_vrf_value is ifindex_vrf_table's value: the (Block,
+// Argument) the attachment on this ifindex belongs to. usid_egress runs
+// per-attachment on plain, not-yet-encapsulated tenant traffic -- it has no
+// outer uSID destination to decode (block,argument) from the way
+// usid_ingress does -- so this is written once per attachment (alongside
+// the existing vrf_table.Register call, which already has both values) at
+// CNI ADD time, keyed by the attachment's own host-side veth/tap ifindex,
+// and removed at CNI DEL.
+struct ifindex_vrf_value {
+	__u64 block;
+	__u16 argument;
+};
+
+// struct nptv6_value is nptv6_table's value: one VRF's RFC 6296 mapping,
+// mirroring internal/plumbing/nptv6.Mapping/Adjustment on the control-plane
+// side -- see that package's doc comment for the checksum-neutral math this
+// applies. ula_prefix/public_prefix are zero-padded beyond prefix_len,
+// exactly like internal/plumbing/nptv6.prefixChecksum assumes. adjustment
+// is the precomputed RFC 6296 §3.6 value (Mapping.Adjustment), stored in
+// ordinary host-endian layout like every other non-wire-format field in
+// this file -- unlike vip_xlat_value's addr/port fields below, this value
+// is never copied directly onto the wire, so no explicit byte-order
+// convention is needed here.
+struct nptv6_value {
+	__u8 ula_prefix[16];
+	__u8 public_prefix[16];
+	__u8 prefix_len;
+	__u16 adjustment;
+};
+
+// struct vip_xlat_key keys vip_xlat_table: (block, argument) identify the
+// tenant VRF (same composition as vrf_table's own key, kept as separate
+// fields here rather than pre-folded, since a struct key -- unlike
+// vrf_table's plain __u64 -- has room to also carry proto/port). port's
+// meaning is direction-dependent: the *ingress*-direction lookup (in
+// usid_ingress) keys on the packet's own destination port, i.e. the VIP
+// port a client dialed; the *egress*-direction lookup (in usid_egress)
+// keys on the packet's own source port, i.e. the backend's real port --
+// each ServiceVIPBinding writes one row under each key (vip_xlat.go),
+// since the two directions substitute in opposite directions and are
+// looked up via different fields of the same packet.
+struct vip_xlat_key {
+	__u64 block;
+	__u16 argument;
+	__u8 proto;
+	__u8 pad;
+	__be16 port;
+};
+
+// struct vip_xlat_value is vip_xlat_table's value: unlike nptv6_value, this
+// is a genuine address+port rewrite with no reserved "elsewhere" bits to
+// absorb a checksum-neutral adjustment into (a real substitution, not a
+// prefix-preserving one) -- applying it needs bpf_l4_csum_replace, not a
+// plain word add/subtract. addr/port are stored in on-wire byte order
+// (network order for port; the 16 address bytes are already wire-order by
+// construction) since both are copied and diffed directly against packet
+// bytes.
+struct vip_xlat_value {
+	__u8 addr[16];
+	__be16 port;
+};
+
 // enum drop_reason indexes drop_reasons (design plan §4.4's fourth map,
 // observability only).
 enum drop_reason {
@@ -400,6 +536,35 @@ struct {
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
 
+// ifindex_vrf_table: see struct ifindex_vrf_value's comment above. Sized
+// generously above vrf_table's own 8192 -- one row per *attachment*
+// (potentially several veths/taps per VRF), not one row per VRF.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32); // ifindex
+	__type(value, struct ifindex_vrf_value);
+} ifindex_vrf_table SEC(".maps");
+
+// nptv6_table: one row per VRF with NPTv6 configured, keyed identically to
+// vrf_table (block<<12|argument) -- both usid_ingress (which already has
+// this key locally) and usid_egress (via ifindex_vrf_table above) resolve
+// it the same way.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192);
+	__type(key, __u64);
+	__type(value, struct nptv6_value);
+} nptv6_table SEC(".maps");
+
+// vip_xlat_table: see struct vip_xlat_key's comment above.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192);
+	__type(key, struct vip_xlat_key);
+	__type(value, struct vip_xlat_value);
+} vip_xlat_table SEC(".maps");
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
@@ -432,6 +597,129 @@ static USID_ALWAYS_INLINE __u64 read_be64(const __u8 *p)
 	return ((__u64) p[0] << 56) | ((__u64) p[1] << 48) | ((__u64) p[2] << 40) |
 	       ((__u64) p[3] << 32) | ((__u64) p[4] << 24) | ((__u64) p[5] << 16) |
 	       ((__u64) p[6] << 8) | (__u64) p[7];
+}
+
+// apply_nptv6 rewrites addr's first v->prefix_len bits to the destination
+// prefix's own bits (public_prefix if outbound, ula_prefix otherwise), then
+// adds (outbound) or subtracts (!outbound) v->adjustment into the fixed
+// word at byte offset 6 (bits 48-63) -- see internal/plumbing/nptv6's
+// identical algorithm and doc comment. No checksum helper call is needed:
+// this is the entire point of RFC 6296's construction -- the adjustment
+// already offsets the prefix change's own contribution to addr's
+// 1's-complement checksum, so the packet's existing L4 checksum stays
+// valid untouched.
+static USID_ALWAYS_INLINE void apply_nptv6(__u8 *addr, const struct nptv6_value *v, int outbound)
+{
+	const __u8 *new_prefix = outbound ? v->public_prefix : v->ula_prefix;
+	__u8 full_bytes = v->prefix_len / 8;
+	__u8 rem_bits = v->prefix_len % 8;
+
+#pragma unroll
+	for (int i = 0; i < 6; i++) { // prefix_len is always <= 48 (6 bytes); see nptv6.prefixLen.
+		if (i < full_bytes) {
+			addr[i] = new_prefix[i];
+		} else if (i == full_bytes && rem_bits != 0) {
+			__u8 mask = (__u8) (0xFF << (8 - rem_bits));
+
+			addr[i] = (__u8) ((new_prefix[i] & mask) | (addr[i] & ~mask));
+		}
+	}
+
+	__be16 *word = (__be16 *) &addr[6];
+	__u16 cur = __builtin_bswap16(*word);
+	__u32 sum = outbound ? ((__u32) cur + v->adjustment) : ((__u32) cur + (__u16) ~v->adjustment);
+
+	if (sum >> 16)
+		sum = (sum & 0xFFFF) + (sum >> 16);
+	*word = __builtin_bswap16((__u16) sum);
+}
+
+// apply_vip_xlat rewrites the packet's addr_off/port_off fields (16-byte
+// address, 2-byte port) to new_val's own address/port, fixing up the L4
+// checksum at csum_off via three incremental bpf_l4_csum_replace calls (the
+// 16-byte address in two 8-byte halves, both BPF_F_PSEUDO_HDR since address
+// is a pseudo-header field; the port directly, no PSEUDO_HDR, since port is
+// a real L4 header field) -- unlike apply_nptv6, this is a genuine
+// substitution (see struct vip_xlat_value's comment), so there is no
+// checksum-neutral shortcut available. is_udp preserves a zero UDP checksum
+// (meaning "no checksum", RFC 768) as zero rather than "fixing" it into a
+// spurious nonzero value (BPF_F_MARK_MANGLED_0) -- TCP has no such
+// zero-means-disabled convention, so that flag is only ever passed for UDP.
+//
+// Validated against a real kernel via BPF_PROG_TEST_RUN
+// (TestUsidIngress_VIPXlatRewritesAddrPortAndChecksum): a synthetic UDP
+// packet's destination address/port are rewritten and the resulting
+// checksum matches an independent full recompute, not just "the verifier
+// accepted it" -- an earlier draft's 8-byte-at-a-time csum_replace calls
+// failed at runtime with EINVAL (BPF_F_HDR_FIELD_MASK only supports 2/4-byte
+// fields, confirmed against net/core/filter.c), and a second draft's
+// interleaved packet-pointer reads between helper calls failed verification
+// outright (bpf_l4_csum_replace/bpf_skb_store_bytes both invalidate
+// previously-derived packet pointers) -- both fixed, see this function's own
+// structure below. What remains unvalidated is real traffic through a real
+// tap/VM attachment (no such containerlab fixture exists yet -- design plan
+// §8); this function's own byte-level correctness is no longer speculative.
+static USID_ALWAYS_INLINE long apply_vip_xlat(struct __sk_buff *skb, __u32 addr_off, __u32 port_off,
+					       __u32 csum_off, __u8 proto, const __u8 *old_addr,
+					       __be16 old_port, const struct vip_xlat_value *new_val)
+{
+	// bpf_l4_csum_replace's BPF_F_HDR_FIELD_MASK only accepts field sizes
+	// 2 or 4 (net/core/filter.c's switch on flags & BPF_F_HDR_FIELD_MASK
+	// has no `case 8` at all) -- an 8-byte-at-a-time replace, this
+	// function's first working draft, unconditionally fails with EINVAL.
+	// The 16-byte address is therefore updated as four 4-byte words, not
+	// two 8-byte halves. Confirmed empirically via BPF_PROG_TEST_RUN.
+	//
+	// Every packet/map read this function needs happens *before* the
+	// first helper call, into plain scalar locals, and every
+	// bpf_l4_csum_replace/bpf_skb_store_bytes call below only ever
+	// touches those locals afterward -- bpf_l4_csum_replace and
+	// bpf_skb_store_bytes are both on the verifier's
+	// bpf_helper_changes_pkt_data() list (same reason usid_ingress's own
+	// steps re-read data/data_end after bpf_skb_adjust_room/
+	// bpf_skb_change_proto): calling one invalidates every
+	// previously-derived *packet* pointer -- old_addr included, since
+	// it's a live pointer into this same packet, not a copy -- and a
+	// later helper call's own argument evaluation dereferencing it again
+	// is rejected outright ("invalid mem access"). This isn't merely
+	// tidier code; interleaving reads and calls as the first draft did
+	// is rejected by the verifier, confirmed empirically.
+	__u32 from_w[4], to_w[4];
+#pragma unroll
+	for (int i = 0; i < 4; i++) {
+		__builtin_memcpy(&from_w[i], old_addr + i * 4, 4);
+		__builtin_memcpy(&to_w[i], new_val->addr + i * 4, 4);
+	}
+	// old_port/new_val->port are passed as-is (no byte-swap): unlike
+	// apply_nptv6's arithmetic on a word (which needs host-order values
+	// to add/subtract), bpf_l4_csum_replace's from/to are a raw
+	// "what used to be there, what's there now" pair in the same
+	// wire-order representation the address words above already use.
+	__be16 new_port = new_val->port;
+
+	__u64 flags = USID_BPF_F_PSEUDO_HDR | 4;
+	__u32 is_udp = proto == USID_IPPROTO_UDP;
+	__u64 csum_flags = flags | (is_udp ? USID_BPF_F_MARK_MANGLED_0 : 0);
+
+#pragma unroll
+	for (int i = 0; i < 4; i++) {
+		if (bpf_l4_csum_replace(skb, csum_off, (__u64) from_w[i], (__u64) to_w[i], csum_flags))
+			return -1;
+	}
+	if (bpf_l4_csum_replace(skb, csum_off, (__u64) old_port,
+				 (__u64) new_port, 2 | (is_udp ? USID_BPF_F_MARK_MANGLED_0 : 0)))
+		return -1;
+
+	// Store from the same from_w/to_w/new_port locals snapshotted above,
+	// not new_val directly -- new_val is a map-value pointer, not a
+	// packet pointer, so it isn't subject to the same invalidation rule,
+	// but using the locals already in hand removes any doubt rather than
+	// relying on that distinction holding.
+	if (bpf_skb_store_bytes(skb, addr_off, to_w, 16, 0))
+		return -1;
+	if (bpf_skb_store_bytes(skb, port_off, &new_port, 2, 0))
+		return -1;
+	return 0;
 }
 
 // ---------------------------------------------------------------------
@@ -690,6 +978,75 @@ int usid_ingress(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		}
 
+		// DSR/Maglev redesign (design plan §2, §0.1): translate the
+		// inner packet's *destination* before the FIB lookup below, so
+		// the lookup resolves against the tenant's real, routed
+		// address -- not the public/VIP address an external
+		// client/gateway actually addressed the packet to. Both
+		// lookups key on (block, argument), already resolved locally
+		// by steps 2-6 above -- no new per-packet identity resolution
+		// needed on this (ingress/decap) side.
+		struct nptv6_value *npt = bpf_map_lookup_elem(&nptv6_table, &vrf_key);
+
+		if (npt)
+			apply_nptv6(inner6->daddr, npt, 0 /* inbound: public -> ULA */);
+
+		// Component 0.1's tap-VIP substitution needs the inner L4
+		// destination port to key vip_xlat_table -- read it now
+		// (TCP/UDP only; anything else has no port to substitute on
+		// and is left alone) before the strip-relative offsets below
+		// are computed. This is inner6->nexthdr (the freshly-stripped
+		// *inner* header's own next-header field), deliberately not
+		// the outer ip6->nexthdr checked above -- that field only
+		// ever names IPIP(4)/IPv6-in-IPv6(41) (the outer encap
+		// format), never the inner packet's own L4 protocol; ip6 is
+		// also no longer a valid pointer here regardless; the strip
+		// above (bpf_skb_adjust_room/bpf_skb_change_proto) can
+		// relocate the underlying buffer, invalidating every pointer
+		// derived before it, and the verifier enforces this.
+		if (inner6->nexthdr == USID_IPPROTO_TCP || inner6->nexthdr == USID_IPPROTO_UDP) {
+			struct usid_l4ports *ports = (void *) (inner6 + 1);
+
+			if ((void *) (ports + 1) <= data_end) {
+				struct vip_xlat_key vkey = {
+					.block = block, .argument = argument,
+					.proto = inner6->nexthdr, .port = ports->dest,
+				};
+				struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
+
+				if (vv) {
+					// USID_L3_OFFSET, not a runtime pointer
+					// subtraction -- see its own comment for why.
+					__u32 csum_off = USID_L3_OFFSET + (inner6->nexthdr == USID_IPPROTO_TCP
+									     ? sizeof(struct usid_ip6hdr) + USID_TCP_CSUM_OFFSET
+									     : sizeof(struct usid_ip6hdr) + USID_UDP_CSUM_OFFSET);
+					__u32 addr_off = USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, daddr);
+					__u32 port_off = USID_L3_OFFSET + (__u32) sizeof(struct usid_ip6hdr) +
+							  USID_OFFSETOF(struct usid_l4ports, dest);
+
+					if (apply_vip_xlat(skb, addr_off, port_off, csum_off, inner6->nexthdr,
+							    inner6->daddr, ports->dest, vv)) {
+						count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+						return TC_ACT_SHOT;
+					}
+					// apply_vip_xlat's bpf_skb_store_bytes calls
+					// invalidate every previously-derived packet
+					// pointer -- re-read data/data_end and
+					// re-derive inner6 the same fixed-offset way
+					// it was originally computed (new_eth+1), not
+					// via the now-stale pointer.
+					data = (void *) (long) skb->data;
+					data_end = (void *) (long) skb->data_end;
+					new_eth = data;
+					inner6 = (void *) (new_eth + 1);
+					if ((void *) (inner6 + 1) > data_end) {
+						count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+						return TC_ACT_SHOT;
+					}
+				}
+			}
+		}
+
 		fib_params.family = USID_AF_INET6;
 		__builtin_memcpy(fib_params.ipv6_src, inner6->saddr, sizeof(fib_params.ipv6_src));
 		__builtin_memcpy(fib_params.ipv6_dst, inner6->daddr, sizeof(fib_params.ipv6_dst));
@@ -786,6 +1143,110 @@ int usid_ingress(struct __sk_buff *skb)
 	}
 
 	return redirect_rc;
+}
+
+// usid_egress (design plan §0.1, §2) is usid_ingress's outbound companion:
+// a tenant's own reply/outbound traffic needs the reverse NPTv6 rewrite
+// (ULA -> public, on the packet's *source*) and/or the reverse tap-VIP
+// substitution (real addr:port -> VIP addr:port, also on *source*) before
+// it reaches the kernel's SEG6 encap route.
+//
+// Attach point, and why it is NOT the shared physical/fabric-facing
+// interface usid_ingress attaches to: by the time a tenant's outbound
+// packet reaches that interface, internal/plumbing/srv6.RouteEgressAdd's
+// own per-VRF-table SEG6 encap route has already pushed the outer SRv6
+// header -- and that outer header's *destination* names the *remote*
+// peer's own (Block, Argument), not the local sending VRF's. There is
+// nothing at that shared attach point to key a per-sender-VRF lookup on
+// without decoding the inner packet's own (potentially colliding across
+// tenants, per the same reasoning usidresolver.go's tenant-ownership fix
+// already closed for a different lookup) ULA source address.
+//
+// Correct attach point: TC *ingress* of the tenant's own host-side veth (or
+// tap, for a VM), the exact interface usid_ingress's own step 9 already
+// redirects packets *to* -- the standard "from-container" interception
+// point (mirroring e.g. Cilium's own per-endpoint egress hook). At that
+// point the packet is still a plain, unencapsulated, per-attachment
+// (so VRF-unambiguous) tenant packet -- (block, argument) is resolved via
+// ifindex_vrf_table (keyed on skb->ifindex, this interface's own identity),
+// not decoded from packet content at all.
+//
+// This program never "claims" a packet the way usid_ingress does: an
+// attachment with no NPTv6 mapping and no active ServiceVIPBinding is
+// common and expected (most VRFs/backends need neither), so a miss on
+// either lookup below is not an error -- just pass the packet through
+// unmodified (TC_ACT_UNSPEC) to the kernel's normal routing/SEG6-encap
+// path.
+SEC("tc")
+int usid_egress(struct __sk_buff *skb)
+{
+	if (bpf_skb_pull_data(skb, 0))
+		return TC_ACT_UNSPEC;
+
+	void *data = (void *) (long) skb->data;
+	void *data_end = (void *) (long) skb->data_end;
+
+	struct usid_ethhdr *eth = data;
+
+	if ((void *) (eth + 1) > data_end)
+		return TC_ACT_UNSPEC;
+
+	// IPv6 only (component 2/0.1 are both IPv6-only by design) -- an IPv4
+	// VPC's own outbound traffic has nothing to translate here and passes
+	// through unmodified, same as any packet this program has no mapping
+	// for.
+	if (eth->h_proto != __builtin_bswap16(USID_ETH_P_IPV6))
+		return TC_ACT_UNSPEC;
+
+	struct usid_ip6hdr *ip6 = (void *) (eth + 1);
+
+	if ((void *) (ip6 + 1) > data_end)
+		return TC_ACT_UNSPEC;
+
+	__u32 ifindex = skb->ifindex;
+	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
+
+	if (!iv)
+		return TC_ACT_UNSPEC; // no attachment registered on this ifindex at all
+
+	__u64 vrf_key = (iv->block << 12) | iv->argument;
+
+	struct nptv6_value *npt = bpf_map_lookup_elem(&nptv6_table, &vrf_key);
+
+	if (npt)
+		apply_nptv6(ip6->saddr, npt, 1 /* outbound: ULA -> public */);
+
+	if (ip6->nexthdr == USID_IPPROTO_TCP || ip6->nexthdr == USID_IPPROTO_UDP) {
+		struct usid_l4ports *ports = (void *) (ip6 + 1);
+
+		if ((void *) (ports + 1) <= data_end) {
+			struct vip_xlat_key vkey = {
+				.block = iv->block, .argument = iv->argument,
+				.proto = ip6->nexthdr, .port = ports->source,
+			};
+			struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
+
+			if (vv) {
+				__u32 csum_off = USID_L3_OFFSET + (ip6->nexthdr == USID_IPPROTO_TCP
+								     ? sizeof(struct usid_ip6hdr) + USID_TCP_CSUM_OFFSET
+								     : sizeof(struct usid_ip6hdr) + USID_UDP_CSUM_OFFSET);
+				__u32 addr_off = USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, saddr);
+				__u32 port_off = USID_L3_OFFSET + (__u32) sizeof(struct usid_ip6hdr) +
+						  USID_OFFSETOF(struct usid_l4ports, source);
+
+				// A checksum/store failure here is not this
+				// program's packet to drop -- unlike
+				// usid_ingress, egress traffic that fails a
+				// rewrite still has a normal, valid path
+				// through the kernel stack if simply left
+				// alone; only the rewrite itself is abandoned.
+				apply_vip_xlat(skb, addr_off, port_off, csum_off, ip6->nexthdr, ip6->saddr,
+						ports->source, vv);
+			}
+		}
+	}
+
+	return TC_ACT_UNSPEC;
 }
 
 char __license[] SEC("license") = "GPL";

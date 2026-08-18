@@ -5,6 +5,7 @@
 package prog
 
 import (
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"os"
@@ -755,5 +756,320 @@ func TestUsidIngress_VRFTableKeyIncludesBlock(t *testing.T) {
 	if vrfVal.Packets != 0 {
 		t.Errorf("block A's vrf_table packets = %d, want 0 -- Block B's packet must not match Block A's entry",
 			vrfVal.Packets)
+	}
+}
+
+// buildPacketWithV6Addrs is buildPacketWithInner's sibling for tests that
+// need to control the *inner* packet's own source/destination (the DSR
+// redesign's NPTv6/vip_xlat tests below) -- innerV6's own hardcoded
+// addresses aren't enough there.
+func buildPacketWithV6Addrs(t *testing.T, outerDst, outerSrc, innerSrc, innerDst netip.Addr) []byte {
+	t.Helper()
+
+	pkt := make([]byte, 0, ethHeaderLen+ip6HeaderLen+ip6HeaderLen+4)
+	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
+	pkt = append(pkt, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB)
+	pkt = append(pkt, 0x86, 0xDD)
+
+	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00)
+	pkt = append(pkt, 0x00, 0x00)
+	pkt = append(pkt, 41) // nexthdr = IPv6-in-IPv6
+	pkt = append(pkt, 64)
+	srcBytes := outerSrc.As16()
+	pkt = append(pkt, srcBytes[:]...)
+	dstBytes := outerDst.As16()
+	pkt = append(pkt, dstBytes[:]...)
+
+	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00)
+	pkt = append(pkt, 0x00, 0x00)
+	pkt = append(pkt, 59) // nexthdr = no next header (plain address test, no L4)
+	pkt = append(pkt, 64)
+	innerSrcBytes := innerSrc.As16()
+	pkt = append(pkt, innerSrcBytes[:]...)
+	innerDstBytes := innerDst.As16()
+	pkt = append(pkt, innerDstBytes[:]...)
+
+	return pkt
+}
+
+// nptv6Prefix48 packs prefix's first 48 bits into a 16-byte, zero-padded
+// array -- the wire layout UsidNptv6Value.UlaPrefix/PublicPrefix expect,
+// matching internal/plumbing/nptv6.prefixChecksum's identical assumption.
+func nptv6Prefix48(t *testing.T, prefix string) [16]byte {
+	t.Helper()
+	addr, err := netip.ParseAddr(prefix)
+	if err != nil {
+		t.Fatalf("ParseAddr(%q): %v", prefix, err)
+	}
+	return addr.As16()
+}
+
+// TestUsidIngress_NPTv6TranslatesDestinationBeforeFIBLookup covers the DSR
+// redesign's component 2 (design plan §2): an inner packet's destination
+// must be translated from the tenant's PublicPrefix back to its own
+// ULAPrefix *before* the FIB lookup (step 8), using the same RFC 6296 §3.6
+// worked example internal/plumbing/nptv6's own test vector pins
+// (FD01:0203:0405::/48 <-> 2001:0DB8:0001::/48, adjustment 0xD54F) --
+// cross-validating the C and Go implementations of the identical algorithm
+// against the identical published numbers. As in
+// TestUsidIngress_VRFTableMatchReachesFIBLookup, the FIB lookup itself
+// still fails (no real route for the bogus VRF table id), but reaching
+// DROP_REASON_FIB_LOOKUP_FAILED -- and, more directly, the translated
+// destination bytes actually present in the returned packet -- can only
+// happen if the translation ran first.
+func TestUsidIngress_NPTv6TranslatesDestinationBeforeFIBLookup(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x321}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	const bogusVRFTableID = 0x2B2B2B
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: bogusVRFTableID}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+	if err := objs.Nptv6Table.Put(usid.vrfKey(), UsidNptv6Value{
+		UlaPrefix:    nptv6Prefix48(t, "fd01:203:405::"),
+		PublicPrefix: nptv6Prefix48(t, "2001:db8:1::"),
+		PrefixLen:    48,
+		Adjustment:   0xD54F,
+	}); err != nil {
+		t.Fatalf("populate nptv6_table: %v", err)
+	}
+
+	// Inner destination is the tenant's PUBLIC address -- specifically the
+	// RFC 6296 §3.6 worked example's own *forward*-translated address
+	// (2001:0DB8:0001:D550::1234, itself FD01:0203:0405:0001::1234's
+	// public form), so this test's expected reverse-translated ULA result
+	// is the RFC's own published number, not an arbitrarily chosen public
+	// address whose "expected" ULA would have to be independently derived
+	// (subnet words aren't equal across the translation, only offset by
+	// the adjustment -- picking a public subnet word with no known-correct
+	// ULA counterpart would make this test's own expectation the thing
+	// that needs proving).
+	innerDst := netip.MustParseAddr("2001:db8:1:d550::1234")
+	innerSrc := netip.MustParseAddr("2001:db8:ffff::1")
+	pkt := buildPacketWithV6Addrs(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), innerSrc, innerDst)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Fatalf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonFibLookupFailed); got != 1 {
+		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (nptv6 lookup must not have short-circuited processing)", got)
+	}
+
+	// Post-strip layout: eth(14) + inner ip6 header, daddr at bytes
+	// 14+24..14+40 (vtc_flow(4)+payload_len(2)+nexthdr(1)+hop_limit(1)+
+	// saddr(16) = 24 bytes precede daddr).
+	const daddrOffset = ethHeaderLen + 24
+	if len(out) < daddrOffset+16 {
+		t.Fatalf("output packet too short (%d bytes) to contain a translated daddr", len(out))
+	}
+	wantDaddr := netip.MustParseAddr("fd01:203:405:1::1234").As16() // == FD01:0203:0405:0001::1234
+	var gotDaddr [16]byte
+	copy(gotDaddr[:], out[daddrOffset:daddrOffset+16])
+	if gotDaddr != wantDaddr {
+		t.Errorf("inner daddr after NPTv6 translation = %x, want %x (RFC 6296 §3.6 worked example)",
+			gotDaddr, wantDaddr)
+	}
+
+	// The inner source (not covered by this VRF's translation direction)
+	// must be left completely unmodified.
+	const saddrOffset = ethHeaderLen + 8
+	wantSaddr := innerSrc.As16()
+	var gotSaddr [16]byte
+	copy(gotSaddr[:], out[saddrOffset:saddrOffset+16])
+	if gotSaddr != wantSaddr {
+		t.Errorf("inner saddr changed unexpectedly: got %x, want %x", gotSaddr, wantSaddr)
+	}
+}
+
+// udp6Checksum computes RFC 2460 §8.1's IPv6 UDP checksum from scratch
+// (1's-complement sum of the pseudo-header + UDP header + payload, then
+// complemented) -- an independent reference implementation used only to
+// verify apply_vip_xlat's *incremental* bpf_l4_csum_replace update landed
+// on the identical final value a full recompute would, not to exercise
+// anything in usid.c itself.
+func udp6Checksum(src, dst [16]byte, udpHeaderAndPayload []byte) uint16 {
+	var sum uint32
+	add16 := func(b []byte) {
+		for i := 0; i+1 < len(b); i += 2 {
+			sum += uint32(binary.BigEndian.Uint16(b[i : i+2]))
+		}
+		if len(b)%2 == 1 {
+			sum += uint32(b[len(b)-1]) << 8
+		}
+	}
+	add16(src[:])
+	add16(dst[:])
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(udpHeaderAndPayload)))
+	add16(lenBuf[:])
+	sum += uint32(17) // next header = UDP, the other 3 pseudo-header bytes are zero
+	add16(udpHeaderAndPayload)
+	for sum>>16 != 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+
+// TestUsidIngress_VIPXlatRewritesAddrPortAndChecksum covers the DSR
+// redesign's component 0.1 tap-VIP substitution (design plan §0.1): an
+// inner UDP packet destined to VIPAddress:VIPPort must be rewritten to
+// BackendAddress:BackendPort *and* have a checksum that verifies against
+// an independent full recompute -- proving apply_vip_xlat's incremental
+// bpf_l4_csum_replace calls, not just the address/port bytes themselves,
+// are correct. This is the one rewrite in usid.c with no other test
+// coverage anywhere in this repo (no tap/VM containerlab fixture exists
+// yet -- design plan §8) and the residual-risk note in apply_vip_xlat's
+// own doc comment refers to; this test is the first real evidence for it.
+func TestUsidIngress_VIPXlatRewritesAddrPortAndChecksum(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x654}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	const bogusVRFTableID = 0x2C2C2C
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: bogusVRFTableID}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+
+	vip := netip.MustParseAddr("2001:db8:5:5::100")
+	backend := netip.MustParseAddr("fd20:60::5:5")
+	const vipPort, backendPort = 8080, 30080
+
+	key := UsidVipXlatKey{Block: usid.block, Argument: usid.argument, Proto: 17 /* UDP */, Port: bswap16(vipPort)}
+	if err := objs.VipXlatTable.Put(key, UsidVipXlatValue{
+		Addr: backend.As16(), Port: bswap16(backendPort),
+	}); err != nil {
+		t.Fatalf("populate vip_xlat_table: %v", err)
+	}
+
+	innerSrc := netip.MustParseAddr("2001:db8:ffff::1")
+	const clientPort = 54321
+	payload := []byte("hello")
+
+	udp := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint16(udp[0:2], clientPort)
+	binary.BigEndian.PutUint16(udp[2:4], vipPort)
+	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
+	copy(udp[8:], payload)
+	origCsum := udp6Checksum(innerSrc.As16(), vip.As16(), udp)
+	binary.BigEndian.PutUint16(udp[6:8], origCsum)
+
+	pkt := buildPacketWithUDPInner(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), innerSrc, vip, udp)
+
+	ret, out, err := objs.UsidIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Fatalf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonFibLookupFailed); got != 1 {
+		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (vip_xlat lookup must not have short-circuited)", got)
+	}
+
+	const daddrOffset = ethHeaderLen + 24
+	const udpOffset = ethHeaderLen + ip6HeaderLen
+	var gotDaddr [16]byte
+	copy(gotDaddr[:], out[daddrOffset:daddrOffset+16])
+	if wantDaddr := backend.As16(); gotDaddr != wantDaddr {
+		t.Errorf("daddr after vip_xlat = %x, want %x (backend address)", gotDaddr, wantDaddr)
+	}
+	gotDstPort := binary.BigEndian.Uint16(out[udpOffset+2 : udpOffset+4])
+	if gotDstPort != backendPort {
+		t.Errorf("UDP dest port after vip_xlat = %d, want %d", gotDstPort, backendPort)
+	}
+
+	gotUDP := out[udpOffset : udpOffset+len(udp)]
+	gotCsum := binary.BigEndian.Uint16(gotUDP[6:8])
+	udpZeroCsum := append([]byte{}, gotUDP...)
+	udpZeroCsum[6], udpZeroCsum[7] = 0, 0
+	wantCsum := udp6Checksum(innerSrc.As16(), backend.As16(), udpZeroCsum)
+	if gotCsum != wantCsum {
+		t.Errorf("UDP checksum after vip_xlat = %#04x, want %#04x (independent full recompute over the "+
+			"post-rewrite addr/port) -- apply_vip_xlat's incremental bpf_l4_csum_replace calls produced "+
+			"the wrong result", gotCsum, wantCsum)
+	}
+}
+
+// bswap16 is netip.Addr-adjacent test glue: UsidVipXlatKey/Value's Port
+// fields are __be16 (network/big-endian) on the C side; bpf2go generates
+// them as a plain uint16 Go field with no automatic byte-swap, so tests
+// populating those maps must swap explicitly, matching what usid.c's own
+// __builtin_bswap16 calls do to wire-format port values throughout.
+func bswap16(v uint16) uint16 { return v<<8 | v>>8 }
+
+// buildPacketWithUDPInner is buildPacketWithV6Addrs's sibling for the
+// vip_xlat test above: same outer/inner IPv6 headers, but nexthdr=17 (UDP)
+// and udp (a complete, already-checksummed UDP header+payload) appended
+// after the inner IPv6 header instead of nothing.
+func buildPacketWithUDPInner(t *testing.T, outerDst, outerSrc, innerSrc, innerDst netip.Addr, udp []byte) []byte {
+	t.Helper()
+
+	pkt := make([]byte, 0, ethHeaderLen+ip6HeaderLen+ip6HeaderLen+len(udp))
+	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
+	pkt = append(pkt, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB)
+	pkt = append(pkt, 0x86, 0xDD)
+
+	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00)
+	pkt = append(pkt, 0x00, 0x00)
+	pkt = append(pkt, 41) // outer nexthdr = IPv6-in-IPv6
+	pkt = append(pkt, 64)
+	outerSrcBytes := outerSrc.As16()
+	pkt = append(pkt, outerSrcBytes[:]...)
+	outerDstBytes := outerDst.As16()
+	pkt = append(pkt, outerDstBytes[:]...)
+
+	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00)
+	payloadLen := uint16(len(udp))
+	pkt = append(pkt, byte(payloadLen>>8), byte(payloadLen))
+	pkt = append(pkt, 17) // inner nexthdr = UDP
+	pkt = append(pkt, 64)
+	innerSrcBytes := innerSrc.As16()
+	pkt = append(pkt, innerSrcBytes[:]...)
+	innerDstBytes := innerDst.As16()
+	pkt = append(pkt, innerDstBytes[:]...)
+	pkt = append(pkt, udp...)
+
+	return pkt
+}
+
+// TestUsidEgress_NoMappingPassesThroughUnmodified covers usid_egress's
+// common case (design plan §0.1, §2): most attachments have neither an
+// NPTv6 mapping nor an active tap-VIP substitution, and this program must
+// never touch their traffic -- TC_ACT_UNSPEC, byte-for-byte unmodified,
+// same fail-open contract usid_ingress's own locator-miss path has.
+func TestUsidEgress_NoMappingPassesThroughUnmodified(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	pkt := buildPacketWithV6Addrs(t,
+		netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2"),
+		netip.MustParseAddr("fd20:60::1"), netip.MustParseAddr("2001:db8:ffff::1"))
+
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActUnspec {
+		t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d)", ret, tcActUnspec)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated with no ifindex_vrf_table entry:\n in: % x\nout: % x", pkt, out)
 	}
 }
