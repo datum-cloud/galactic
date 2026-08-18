@@ -253,7 +253,29 @@ static NAT66_ALWAYS_INLINE int addr6_eq(const __u8 a[16], const __u8 b[16])
 // locator_matches checks only the top 64 bits (Block(48)+Node-ID(16)) of
 // daddr against this shard's own shard_sid -- the same "is this mine"
 // granularity internal/plumbing/ebpf/prog/usid.c's own locator_table
-// match uses, since the Argument nibble below it varies per tenant.
+// match uses, since the Argument nibble below it varies per tenant (see
+// this file's own header comment: the Argument nibble is read afterward,
+// in handle_forward, as the requesting tenant's own VRFID -- it is
+// deliberately not part of "is this addressed to me" at all).
+//
+// This 64-bit granularity requires shard_sid's own (Block, Node-ID) to be
+// reserved and disjoint from every *other* uSID identity sharing this
+// node's uplink -- in particular, a shard's own Node-ID must differ from
+// the Node-ID any co-located tenant-delivery BGPRouter on this same node
+// already uses (see GALACTIC_NAT66_SHARD_SID's own deployment-side doc
+// comment, e.g. deploy/containerlab/resources/galactic-nat66/*/node-patch.yaml).
+// Confirmed live: an earlier lab config reused a co-located tenant
+// worker's own real Node-ID for that same node's shard placeholder SID,
+// which meant ordinary tenant ingress traffic addressed to that node's
+// real delivery uSID (same Block+Node-ID, nexthdr also 41 since
+// SEG6_IPTUN_MODE_ENCAP_RED uses that for every IPv6-inner packet, tenant
+// delivery included) was silently hijacked here, before it ever reached
+// usid_ingress's own TC hook -- not a bug in this 64-bit match itself
+// (widening it to a full 128-bit compare was tried and reverted: it broke
+// the correct, intentional case of two different tenants' egress packets
+// legitimately sharing this exact shard_sid with two different Argument
+// values), but an address-allocation conflict this function has no way
+// to detect on its own.
 static NAT66_ALWAYS_INLINE int locator_matches(const __u8 daddr[16], const __u8 shard_sid[16])
 {
 	for (int i = 0; i < 8; i++) {
