@@ -17,19 +17,22 @@ package prog
 // constants directly rather than keeping its own copy -- if usid.c's enum
 // drop_reason ever changes, update both this file and usid_test.go.
 const (
-	DropReasonUnknownFunction     uint32 = 0
-	DropReasonUnknownArgument     uint32 = 1
-	DropReasonMalformedInner      uint32 = 2
-	DropReasonUnknownInnerVer     uint32 = 3
-	DropReasonStripFailed         uint32 = 4
-	DropReasonFibLookupFailed     uint32 = 5
-	DropReasonRedirectFailed      uint32 = 6
-	DropReasonFibNoNeigh          uint32 = 7
-	DropReasonFibUnreachable      uint32 = 8
-	DropReasonFibFragNeeded       uint32 = 9
-	DropReasonUnexpectedNextHdr   uint32 = 10
-	DropReasonUnsupportedBehavior uint32 = 11
-	DropReasonCount               uint32 = 12
+	DropReasonUnknownFunction            uint32 = 0
+	DropReasonUnknownArgument            uint32 = 1
+	DropReasonMalformedInner             uint32 = 2
+	DropReasonUnknownInnerVer            uint32 = 3
+	DropReasonStripFailed                uint32 = 4
+	DropReasonFibLookupFailed            uint32 = 5
+	DropReasonRedirectFailed             uint32 = 6
+	DropReasonFibNoNeigh                 uint32 = 7
+	DropReasonFibUnreachable             uint32 = 8
+	DropReasonFibFragNeeded              uint32 = 9
+	DropReasonUnexpectedNextHdr          uint32 = 10
+	DropReasonUnsupportedBehavior        uint32 = 11
+	DropReasonEgressRouteEncapFailed     uint32 = 12
+	DropReasonEgressRouteFibLookupFailed uint32 = 13
+	DropReasonEgressRouteRedirectFailed  uint32 = 14
+	DropReasonCount                      uint32 = 15
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
@@ -37,16 +40,19 @@ const (
 // 4) and any other external representation from usid.c's C identifier
 // spelling.
 var DropReasonNames = map[uint32]string{
-	DropReasonUnknownFunction:     "unknown_function",
-	DropReasonUnknownArgument:     "unknown_argument",
-	DropReasonMalformedInner:      "malformed_inner",
-	DropReasonUnknownInnerVer:     "unknown_inner_version",
-	DropReasonStripFailed:         "strip_failed",
-	DropReasonFibLookupFailed:     "fib_lookup_failed",
-	DropReasonRedirectFailed:      "redirect_failed",
-	DropReasonFibNoNeigh:          "fib_no_neigh",
-	DropReasonFibUnreachable:      "fib_unreachable",
-	DropReasonFibFragNeeded:       "fib_frag_needed",
-	DropReasonUnexpectedNextHdr:   "unexpected_nexthdr",
-	DropReasonUnsupportedBehavior: "unsupported_behavior",
+	DropReasonUnknownFunction:            "unknown_function",
+	DropReasonUnknownArgument:            "unknown_argument",
+	DropReasonMalformedInner:             "malformed_inner",
+	DropReasonUnknownInnerVer:            "unknown_inner_version",
+	DropReasonStripFailed:                "strip_failed",
+	DropReasonFibLookupFailed:            "fib_lookup_failed",
+	DropReasonRedirectFailed:             "redirect_failed",
+	DropReasonFibNoNeigh:                 "fib_no_neigh",
+	DropReasonFibUnreachable:             "fib_unreachable",
+	DropReasonFibFragNeeded:              "fib_frag_needed",
+	DropReasonUnexpectedNextHdr:          "unexpected_nexthdr",
+	DropReasonUnsupportedBehavior:        "unsupported_behavior",
+	DropReasonEgressRouteEncapFailed:     "egress_route_encap_failed",
+	DropReasonEgressRouteFibLookupFailed: "egress_route_fib_lookup_failed",
+	DropReasonEgressRouteRedirectFailed:  "egress_route_redirect_failed",
 }

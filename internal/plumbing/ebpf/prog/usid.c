@@ -225,6 +225,28 @@ static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const vo
 #define USID_TCP_CSUM_OFFSET 16
 #define USID_UDP_CSUM_OFFSET 6
 
+// USID_RT_TABLE_MAIN is RT_TABLE_MAIN (uapi/linux/rtnetlink.h), reproduced
+// as a plain constant for the same reason every other ABI value in this
+// file is: it never changes, and pulling in rtnetlink.h for one integer
+// would add a real header dependency. usid_egress's own egress-routing
+// extension uses this to force its bpf_fib_lookup() for a resolved SID's
+// L2 next-hop to run against the main table specifically (via
+// BPF_FIB_LOOKUP_TBID) regardless of which VRF-enslaved interface this
+// program happens to be attached to -- the SID itself is always reachable
+// via the underlay/main table, the same table
+// internal/plumbing/srv6.resolveNextHop's netlink.RouteGet call already
+// resolves it against today, never the tenant VRF's own table.
+#define USID_RT_TABLE_MAIN 254
+
+// USID_EGRESS_HOP_LIMIT is the hop limit usid_egress writes into the outer
+// IPv6 header it pushes for a resolved egress route -- a fixed, reasonable
+// default (matching this lab's/most Linux hosts' own default unicast hop
+// limit), not read from the inner packet's own hop limit: the outer
+// header's hop count only needs to survive the underlay's own hop count
+// (a handful of hops in every topology this program runs on), not mirror
+// whatever budget the inner packet's original sender picked.
+#define USID_EGRESS_HOP_LIMIT 64
+
 // USID_L3_OFFSET is the fixed byte offset of the L3 (IPv6) header from
 // skb->data -- always sizeof(struct usid_ethhdr), a compile-time constant.
 // apply_vip_xlat's csum_off/addr_off/port_off arguments must be this kind
@@ -482,6 +504,91 @@ struct vip_xlat_value {
 	__be16 port;
 };
 
+// ---------------------------------------------------------------------
+// TC-BPF egress-routing extension (docs/plans/tc-bpf-egress-srv6-encap.md):
+// replaces internal/plumbing/srv6's kernel-native SEG6 lwtunnel route
+// encapsulation (RouteEgressAdd/EgressDefaultRouteAdd) with an in-program
+// header push, closing CVE-2026-31668 (seg6 lwtunnel shares one dst_cache
+// per route between its input and output resolution paths, and reuses a
+// stale cached result across different routing contexts -- the upstream
+// fix's own writeup names VRF table separation, this codebase's own
+// per-tenant-VRF architecture, as a trigger). See that plan document for
+// the full mechanism and its own §3's explanation of why this is a plain
+// tunnel-header prepend, not a general SRH pusher: every existing call
+// site installs exactly one segment, and SEG6_IPTUN_MODE_ENCAP_RED
+// already omits the SRH entirely for that case (usid_ingress's own
+// decap side already requires and depends on exactly this shape).
+// ---------------------------------------------------------------------
+
+// struct egress_route_key is egress_route_table's LPM_TRIE key. Keyed on
+// the Linux VRF table id (table_id), not (block, argument): every one of
+// RouteEgressAdd/EgressDefaultRouteAdd/RouteMainAdd's own Go-side callers
+// (internal/runtime/gobgp/monitor.go, internal/cnibgp/bgp.go) already has
+// the Linux table id in hand -- that is the identity BGP path processing
+// and NAT66 shard-SID resolution are already scoped by -- and none of them
+// otherwise need to resolve a uSID (block, argument) identity at all. This
+// program itself has no direct route from its own per-attachment identity
+// (ifindex_vrf_table's block/argument) to a Linux table id either, so it
+// takes one extra vrf_table lookup (already keyed by the vrf_key this
+// program computes for the NPTv6/vip_xlat lookups above) to read
+// vrf->vrf_table_id, rather than teaching ifindex_vrf_table or
+// egress_route_table a second, redundant identity scheme.
+//
+// family disambiguates an IPv4 VPC prefix from an IPv6 one sharing the
+// same leading bytes when addr's low bytes happen to coincide (e.g. an
+// IPv4 /24 stored zero-extended into addr's first 4 bytes could otherwise
+// collide with an IPv6 prefix whose own first 4 bytes are identical by
+// coincidence) -- placed inside the LPM-matched region (never past
+// table_id, always matched in full) specifically so this can never happen:
+// two entries can only ever compare equal on their address bits once
+// table_id and family already match exactly.
+//
+// prefixlen is bits, not bytes, per LPM_TRIE's own convention -- always at
+// least 40 (the fixed table_id(32)+family(8) portion, matching
+// EgressDefaultRouteAdd's own ::/0 entries) and up to 40+128=168 for a
+// full IPv6 host route or 40+32=72 for a full IPv4 host route.
+//
+// __attribute__((packed)), unlike vrf_value/nptv6_value/vip_xlat_value
+// above: an LPM_TRIE's matching semantics only ever compare the first
+// prefixlen *bits*, so (unlike vip_xlat_key's HASH-map full-key-equality
+// requirement, which forced that struct's own explicit pad2 field)
+// trailing compiler-inserted padding here would never affect a lookup's
+// correctness either way -- packed is used anyway to make the exact byte
+// layout this comment's own bit-offset reasoning depends on unambiguous,
+// rather than relying on it holding incidentally.
+struct egress_route_key {
+	__u32 prefixlen;
+	__u32 table_id;
+	__u8 family;
+	__u8 addr[16];
+} __attribute__((packed));
+
+// USID_EGRESS_ROUTE_FAMILY_INET6/INET4 are egress_route_key.family's two
+// values -- deliberately not reusing USID_AF_INET/USID_AF_INET6 (which are
+// the kernel's real AF_INET/AF_INET6 values, sized and spaced for a
+// different purpose, struct bpf_fib_lookup.family) for a field whose only
+// job is disambiguating two prefixes within this one map, not naming a
+// real address family to any kernel API.
+#define USID_EGRESS_ROUTE_FAMILY_INET6 0
+#define USID_EGRESS_ROUTE_FAMILY_INET4 1
+
+// struct egress_route_value is egress_route_table's value: the resolved
+// SRv6 SID (or NAT66 shard SID, for a default-route entry) to
+// encapsulate toward. Deliberately just the address -- no precomputed
+// link/next-hop/L2 fields, unlike the netlink-route mechanism this
+// replaces (RouteEgressAdd's own resolveNextHop, run once at route-install
+// time): usid_egress instead runs a fresh bpf_fib_lookup() per packet
+// against sid (see that call site's own comment), which is both simpler
+// (Go's writer needs no next-hop resolution logic of its own at all, only
+// the SID) and self-healing (a next-hop/neighbor change on the underlay
+// takes effect on the very next packet, not only the next time Go
+// re-resolves and rewrites this entry).
+struct egress_route_value {
+	__u8 sid[16];
+} __attribute__((packed));
+
+// ---------------------------------------------------------------------
+
 // enum drop_reason indexes drop_reasons (design plan §4.4's fourth map,
 // observability only).
 enum drop_reason {
@@ -507,6 +614,24 @@ enum drop_reason {
 	// future L2 path this program doesn't implement) -- step 4, see its
 	// comment above.
 	DROP_REASON_UNSUPPORTED_BEHAVIOR = 11,
+	// usid_egress's own egress-routing extension (docs/plans/
+	// tc-bpf-egress-srv6-encap.md): egress_route_table matched (a route
+	// was configured for this destination) but bpf_skb_adjust_room
+	// failed to grow room for the new outer header -- essentially never
+	// expected to fire (the same helper's shrink direction is
+	// unconditionally trusted by usid_ingress above), kept as its own
+	// reason rather than folded into an unrelated one so it's visible if
+	// it ever does.
+	DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED = 12,
+	// The outer header was pushed, but resolving the egress link/L2
+	// next-hop for the matched SID failed (no route, no neighbor entry,
+	// MTU exceeded, etc.) -- the in-kernel equivalent of what
+	// srv6.resolveNextHop's "no route to gateway" error meant for the
+	// netlink-route mechanism this replaces.
+	DROP_REASON_EGRESS_ROUTE_FIB_LOOKUP_FAILED = 13,
+	// FIB lookup for the SID succeeded but the redirect out the
+	// resolved physical interface itself failed.
+	DROP_REASON_EGRESS_ROUTE_REDIRECT_FAILED = 14,
 	__DROP_REASON_MAX,
 };
 
@@ -595,6 +720,46 @@ struct {
 	__type(key, struct vip_xlat_key);
 	__type(value, struct vip_xlat_value);
 } vip_xlat_table SEC(".maps");
+
+// egress_route_table: see struct egress_route_key's comment above. The
+// first (and, as of this writing, only) BPF_MAP_TYPE_LPM_TRIE in this
+// file -- everything above is deliberately BPF_MAP_TYPE_HASH (uSID
+// decode is always a fixed-width exact match, per R1/R2), but egress
+// routing is inherently a longest-prefix-match problem (an intra-VPC
+// peer's specific prefix must win over a tenant VRF's own ::/0 default),
+// exactly what locator_table/function_table/vrf_table's own doc comment
+// says this format never needs -- that reasoning is scoped to uSID
+// decode, not to this unrelated map. BPF_F_NO_PREALLOC is required by the
+// kernel for this map type (lpm_trie_alloc rejects any other map_flags
+// value outright), not an optional tuning choice.
+//
+// Sized well above vrf_table's own 8192: this map holds routes, not VRFs
+// -- one VRF can have several intra-VPC-peer entries (RouteEgressAdd) plus
+// one default (EgressDefaultRouteAdd), so entries-per-VRF is not 1:1 the
+// way locator_table/vrf_table's own sizing reasoning assumes.
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 32768);
+	__type(key, struct egress_route_key);
+	__type(value, struct egress_route_value);
+} egress_route_table SEC(".maps");
+
+// node_src_addr_table: this node's own SRv6/underlay-facing source
+// address, the single value usid_egress's egress-routing extension writes
+// into the outer IPv6 header it pushes -- a per-node constant, not
+// per-VRF/per-route, hence the single-entry BPF_MAP_TYPE_ARRAY rather than
+// folding it into egress_route_value (which would mean every route entry
+// redundantly carrying the same 16 bytes, and Go's writer needing to know
+// this node's own address just to register an unrelated destination
+// route). Populated once, at CNI datapath registration time (mirroring
+// attachUsidEgress's own once-per-node lifecycle), not per CNI ADD/DEL.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u8[16]);
+} node_src_addr_table SEC(".maps");
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -1180,19 +1345,21 @@ int usid_ingress(struct __sk_buff *skb)
 // usid_egress (design plan §0.1, §2) is usid_ingress's outbound companion:
 // a tenant's own reply/outbound traffic needs the reverse NPTv6 rewrite
 // (ULA -> public, on the packet's *source*) and/or the reverse tap-VIP
-// substitution (real addr:port -> VIP addr:port, also on *source*) before
-// it reaches the kernel's SEG6 encap route.
+// substitution (real addr:port -> VIP addr:port, also on *source*), and
+// (docs/plans/tc-bpf-egress-srv6-encap.md) the tenant VRF's own egress
+// SRv6 encapsulation, before the packet leaves this node at all.
 //
 // Attach point, and why it is NOT the shared physical/fabric-facing
-// interface usid_ingress attaches to: by the time a tenant's outbound
-// packet reaches that interface, internal/plumbing/srv6.RouteEgressAdd's
-// own per-VRF-table SEG6 encap route has already pushed the outer SRv6
-// header -- and that outer header's *destination* names the *remote*
-// peer's own (Block, Argument), not the local sending VRF's. There is
-// nothing at that shared attach point to key a per-sender-VRF lookup on
-// without decoding the inner packet's own (potentially colliding across
-// tenants, per the same reasoning usidresolver.go's tenant-ownership fix
-// already closed for a different lookup) ULA source address.
+// interface usid_ingress attaches to: this program's whole job (both its
+// original NPTv6/VIP-xlat responsibilities and its egress-routing
+// extension below) is to run *before* anything has yet decided how to
+// route this packet onward -- once a packet reaches the physical uplink,
+// that decision has already been made and the SID this program itself now
+// resolves would have to be un-done and re-done. There is also nothing at
+// that shared attach point to key a per-sender-VRF lookup on without
+// decoding the inner packet's own (potentially colliding across tenants,
+// per the same reasoning usidresolver.go's tenant-ownership fix already
+// closed for a different lookup) ULA source address.
 //
 // Correct attach point: TC *ingress* of the tenant's own host-side veth (or
 // tap, for a VM), the exact interface usid_ingress's own step 9 already
@@ -1203,12 +1370,17 @@ int usid_ingress(struct __sk_buff *skb)
 // ifindex_vrf_table (keyed on skb->ifindex, this interface's own identity),
 // not decoded from packet content at all.
 //
-// This program never "claims" a packet the way usid_ingress does: an
-// attachment with no NPTv6 mapping and no active ServiceVIPBinding is
-// common and expected (most VRFs/backends need neither), so a miss on
-// either lookup below is not an error -- just pass the packet through
-// unmodified (TC_ACT_UNSPEC) to the kernel's normal routing/SEG6-encap
-// path.
+// This program never "claims" a packet the way usid_ingress does for its
+// NPTv6/VIP-xlat responsibilities: an attachment with no NPTv6 mapping and
+// no active ServiceVIPBinding is common and expected (most VRFs/backends
+// need neither), so a miss on either lookup is not an error. The
+// egress-routing extension below is different: once egress_route_table
+// has a matching entry, this program *is* that packet's only path off
+// this node (the kernel-native SEG6 route this extension replaces is
+// being removed, not left as a fallback -- see the design plan's own §5
+// migration-ordering note for why it's still safe to leave both mechanisms
+// briefly installed together during rollout), so a failure past that
+// point is a drop, not a pass-through.
 SEC("tc")
 int usid_egress(struct __sk_buff *skb)
 {
@@ -1223,16 +1395,17 @@ int usid_egress(struct __sk_buff *skb)
 	if ((void *) (eth + 1) > data_end)
 		return TC_ACT_UNSPEC;
 
-	// IPv6 only (component 2/0.1 are both IPv6-only by design) -- an IPv4
-	// VPC's own outbound traffic has nothing to translate here and passes
-	// through unmodified, same as any packet this program has no mapping
-	// for.
-	if (eth->h_proto != __builtin_bswap16(USID_ETH_P_IPV6))
-		return TC_ACT_UNSPEC;
+	// NPTv6/VIP-xlat remain IPv6-only by design (component 2/0.1); the
+	// egress-routing extension below does not share that restriction --
+	// RouteEgressAdd/EgressDefaultRouteAdd have always supported IPv4 VPC
+	// prefixes egressing over this IPv6-only underlay (egress.go's own
+	// Via-attribute handling) -- so an IPv4 packet still needs to reach
+	// that logic even though it skips the two IPv6-only rewrites above.
+	// Anything that's neither passes through unmodified, same as any
+	// packet this program has no mapping for.
+	__be16 h_proto = eth->h_proto;
 
-	struct usid_ip6hdr *ip6 = (void *) (eth + 1);
-
-	if ((void *) (ip6 + 1) > data_end)
+	if (h_proto != __builtin_bswap16(USID_ETH_P_IPV6) && h_proto != __builtin_bswap16(USID_ETH_P_IP))
 		return TC_ACT_UNSPEC;
 
 	__u32 ifindex = skb->ifindex;
@@ -1243,43 +1416,207 @@ int usid_egress(struct __sk_buff *skb)
 
 	__u64 vrf_key = (iv->block << 12) | iv->argument;
 
-	struct nptv6_value *npt = bpf_map_lookup_elem(&nptv6_table, &vrf_key);
+	__u8 route_family;
+	__u8 dst_addr[16];
 
-	if (npt)
-		apply_nptv6(ip6->saddr, npt, 1 /* outbound: ULA -> public */);
+	__builtin_memset(dst_addr, 0, sizeof(dst_addr));
 
-	if (ip6->nexthdr == USID_IPPROTO_TCP || ip6->nexthdr == USID_IPPROTO_UDP) {
-		struct usid_l4ports *ports = (void *) (ip6 + 1);
+	if (h_proto == __builtin_bswap16(USID_ETH_P_IPV6)) {
+		struct usid_ip6hdr *ip6 = (void *) (eth + 1);
 
-		if ((void *) (ports + 1) <= data_end) {
-			struct vip_xlat_key vkey = {
-				.block = iv->block, .argument = iv->argument,
-				.proto = ip6->nexthdr, .port = ports->source,
-				.direction = USID_VIP_XLAT_DIR_EGRESS,
-			};
-			struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
+		if ((void *) (ip6 + 1) > data_end)
+			return TC_ACT_UNSPEC;
 
-			if (vv) {
-				__u32 csum_off = USID_L3_OFFSET + (ip6->nexthdr == USID_IPPROTO_TCP
-								     ? sizeof(struct usid_ip6hdr) + USID_TCP_CSUM_OFFSET
-								     : sizeof(struct usid_ip6hdr) + USID_UDP_CSUM_OFFSET);
-				__u32 addr_off = USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, saddr);
-				__u32 port_off = USID_L3_OFFSET + (__u32) sizeof(struct usid_ip6hdr) +
-						  USID_OFFSETOF(struct usid_l4ports, source);
+		struct nptv6_value *npt = bpf_map_lookup_elem(&nptv6_table, &vrf_key);
 
-				// A checksum/store failure here is not this
-				// program's packet to drop -- unlike
-				// usid_ingress, egress traffic that fails a
-				// rewrite still has a normal, valid path
-				// through the kernel stack if simply left
-				// alone; only the rewrite itself is abandoned.
-				apply_vip_xlat(skb, addr_off, port_off, csum_off, ip6->nexthdr, ip6->saddr,
-						ports->source, vv);
+		if (npt)
+			apply_nptv6(ip6->saddr, npt, 1 /* outbound: ULA -> public */);
+
+		if (ip6->nexthdr == USID_IPPROTO_TCP || ip6->nexthdr == USID_IPPROTO_UDP) {
+			struct usid_l4ports *ports = (void *) (ip6 + 1);
+
+			if ((void *) (ports + 1) <= data_end) {
+				struct vip_xlat_key vkey = {
+					.block = iv->block, .argument = iv->argument,
+					.proto = ip6->nexthdr, .port = ports->source,
+					.direction = USID_VIP_XLAT_DIR_EGRESS,
+				};
+				struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
+
+				if (vv) {
+					__u32 csum_off = USID_L3_OFFSET + (ip6->nexthdr == USID_IPPROTO_TCP
+									     ? sizeof(struct usid_ip6hdr) + USID_TCP_CSUM_OFFSET
+									     : sizeof(struct usid_ip6hdr) + USID_UDP_CSUM_OFFSET);
+					__u32 addr_off = USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, saddr);
+					__u32 port_off = USID_L3_OFFSET + (__u32) sizeof(struct usid_ip6hdr) +
+							  USID_OFFSETOF(struct usid_l4ports, source);
+
+					// A checksum/store failure here is not
+					// this program's packet to drop --
+					// only the rewrite itself is
+					// abandoned; the egress-routing
+					// extension below still runs.
+					apply_vip_xlat(skb, addr_off, port_off, csum_off, ip6->nexthdr, ip6->saddr,
+							ports->source, vv);
+
+					// apply_vip_xlat's bpf_skb_store_bytes
+					// calls invalidate every
+					// previously-derived packet pointer --
+					// re-derive before reading ip6->daddr
+					// below.
+					data = (void *) (long) skb->data;
+					data_end = (void *) (long) skb->data_end;
+					eth = data;
+					if ((void *) (eth + 1) > data_end)
+						return TC_ACT_SHOT;
+					ip6 = (void *) (eth + 1);
+					if ((void *) (ip6 + 1) > data_end)
+						return TC_ACT_SHOT;
+				}
 			}
 		}
+
+		route_family = USID_EGRESS_ROUTE_FAMILY_INET6;
+		__builtin_memcpy(dst_addr, ip6->daddr, 16);
+	} else {
+		struct usid_iphdr *ip4 = (void *) (eth + 1);
+
+		if ((void *) (ip4 + 1) > data_end)
+			return TC_ACT_UNSPEC;
+
+		route_family = USID_EGRESS_ROUTE_FAMILY_INET4;
+		__builtin_memcpy(dst_addr, ip4->daddr, sizeof(ip4->daddr));
 	}
 
-	return TC_ACT_UNSPEC;
+	// Resolve this attachment's Linux VRF table id via vrf_table --
+	// already populated identically to ifindex_vrf_table at CNI ADD
+	// time -- see struct egress_route_key's own comment for why this,
+	// not (block, argument), is egress_route_table's key.
+	struct vrf_value *vrf = bpf_map_lookup_elem(&vrf_table, &vrf_key);
+
+	if (!vrf)
+		return TC_ACT_UNSPEC; // attachment registered but its vrf_table entry isn't -- shouldn't happen; fail open
+
+	struct egress_route_key rkey;
+
+	__builtin_memset(&rkey, 0, sizeof(rkey));
+	rkey.table_id = vrf->vrf_table_id;
+	rkey.family = route_family;
+	__builtin_memcpy(rkey.addr, dst_addr, sizeof(rkey.addr));
+	rkey.prefixlen = 8 * (sizeof(rkey.table_id) + sizeof(rkey.family)) +
+			 (route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 128 : 32);
+
+	struct egress_route_value *rv = bpf_map_lookup_elem(&egress_route_table, &rkey);
+
+	if (!rv)
+		return TC_ACT_UNSPEC; // no configured route for this destination -- defer to the kernel (still-installed netlink route during migration, or genuinely none)
+
+	// node_src_addr_table is BPF_MAP_TYPE_ARRAY, not BPF_MAP_TYPE_HASH:
+	// every one of its (here, exactly one) slots always exists from map
+	// creation onward, pre-zeroed -- bpf_map_lookup_elem on an in-range
+	// array index can never itself signal "not configured yet" the way a
+	// HASH map miss (a null return) can. An all-zero address is
+	// otherwise never a legitimate value here (the unspecified address
+	// convention internal/plumbing/srv6's own RouteEgressAdd/RouteMainAdd
+	// already use for "not a usable address"), so it's checked
+	// explicitly below as this map's own "not yet configured" signal.
+	__u32 src_key = 0;
+	__u8 *src = bpf_map_lookup_elem(&node_src_addr_table, &src_key);
+
+	if (!src)
+		return TC_ACT_UNSPEC; // array map, so this is unreachable in practice -- kept as a defensive null check anyway
+
+	__u8 src_or = 0;
+
+#pragma unroll
+	for (int i = 0; i < 16; i++)
+		src_or |= src[i];
+
+	if (src_or == 0)
+		return TC_ACT_UNSPEC; // this node's own source address isn't registered yet -- fail open rather than encapsulate with an all-zero source
+
+	// Push room for a new outer IPv6 header. Positive len_diff grows
+	// room (usid_ingress's own strip, above, is this same call with a
+	// negative len_diff) -- BPF_ADJ_ROOM_MAC keeps the Ethernet header
+	// at the very front and opens the new space directly after it,
+	// exactly where the outer header being pushed here belongs.
+	if (bpf_skb_adjust_room(skb, (__s32) sizeof(struct usid_ip6hdr), BPF_ADJ_ROOM_MAC, 0)) {
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	data = (void *) (long) skb->data;
+	data_end = (void *) (long) skb->data_end;
+
+	struct usid_ethhdr *new_eth = data;
+
+	if ((void *) (new_eth + 1) > data_end) {
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	struct usid_ip6hdr *outer = (void *) (new_eth + 1);
+
+	if ((void *) (outer + 1) > data_end) {
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	__builtin_memset(outer->vtc_flow, 0, sizeof(outer->vtc_flow));
+	outer->vtc_flow[0] = 0x60; // version 6, traffic class/flow label left zero
+	// skb->len is now the full grown frame (Ethernet + new outer header +
+	// original inner packet); the inner payload length this header's own
+	// payload_len must carry is that minus the Ethernet and outer-header
+	// bytes just added.
+	__u16 inner_len = (__u16) (skb->len - (__u32) sizeof(struct usid_ethhdr) - (__u32) sizeof(struct usid_ip6hdr));
+
+	outer->payload_len = __builtin_bswap16(inner_len);
+	outer->nexthdr = (route_family == USID_EGRESS_ROUTE_FAMILY_INET6) ? USID_IPPROTO_IPV6 : USID_IPPROTO_IPIP;
+	outer->hop_limit = USID_EGRESS_HOP_LIMIT;
+	__builtin_memcpy(outer->saddr, src, 16);
+	__builtin_memcpy(outer->daddr, rv->sid, 16);
+	new_eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
+
+	// Resolve the resolved SID's own L2 next-hop and real egress
+	// interface fresh, per packet -- see struct egress_route_value's own
+	// comment for why this program does this instead of the Go control
+	// plane precomputing and storing it. BPF_FIB_LOOKUP_TBID +
+	// USID_RT_TABLE_MAIN pins this to the main table regardless of which
+	// VRF-enslaved interface this program is attached to (see
+	// USID_RT_TABLE_MAIN's own comment).
+	struct bpf_fib_lookup fib_params;
+
+	__builtin_memset(&fib_params, 0, sizeof(fib_params));
+	fib_params.family = USID_AF_INET6;
+	__builtin_memcpy(fib_params.ipv6_src, src, sizeof(fib_params.ipv6_src));
+	__builtin_memcpy(fib_params.ipv6_dst, rv->sid, sizeof(fib_params.ipv6_dst));
+	fib_params.tot_len = (__u16) sizeof(struct usid_ip6hdr) + inner_len;
+	fib_params.tbid = USID_RT_TABLE_MAIN;
+
+	long fib_rc = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params),
+				      BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID);
+
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_FIB_LOOKUP_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	__builtin_memcpy(new_eth->h_dest, fib_params.dmac, sizeof(new_eth->h_dest));
+	__builtin_memcpy(new_eth->h_source, fib_params.smac, sizeof(new_eth->h_source));
+
+	// Same-netns redirect: this program's attach point (the tenant's own
+	// host-side veth) and the resolved physical uplink both live in the
+	// root/host netns, unlike usid_ingress's step 9 veth-mode branch
+	// (which crosses into a *different* netns and needs
+	// bpf_redirect_peer for exactly that reason).
+	long redirect_rc = bpf_redirect(fib_params.ifindex, 0);
+
+	if (redirect_rc != TC_ACT_REDIRECT) {
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_REDIRECT_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	return redirect_rc;
 }
 
 char __license[] SEC("license") = "GPL";

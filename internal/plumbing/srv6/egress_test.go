@@ -424,14 +424,17 @@ func TestEgressDefaultRouteAddRejectsUnspecifiedShardSID(t *testing.T) {
 	}
 }
 
-// TestEgressDefaultRouteAdd_InstallsMultipathAcrossShards proves the
-// installed ::/0 route fans out across every configured shard SID as a
-// separate SEG6-encapsulating nexthop, and that EgressDefaultRouteDel
-// removes it cleanly -- the mechanism that finally gives a tenant VRF
-// somewhere to send a packet with no more specific route, closing the gap
-// nat66.c's own shard-receive side was always able to answer but nothing
-// ever fed traffic into (see this function's own doc comment).
-func TestEgressDefaultRouteAdd_InstallsMultipathAcrossShards(t *testing.T) {
+// TestEgressDefaultRouteAdd_InstallsSinglePathToFirstResolvableShard
+// proves the installed ::/0 route is a single SEG6-encapsulating nexthop
+// toward the first resolvable configured shard SID (not a kernel
+// multipath route fanned out across all of them -- an earlier version of
+// this function did exactly that, and it triggered a real, confirmed
+// kernel routing loop: see EgressDefaultRouteAdd's own doc comment), and
+// that EgressDefaultRouteDel removes it cleanly -- the mechanism that
+// finally gives a tenant VRF somewhere to send a packet with no more
+// specific route, closing the gap nat66.c's own shard-receive side was
+// always able to answer but nothing ever fed traffic into.
+func TestEgressDefaultRouteAdd_InstallsSinglePathToFirstResolvableShard(t *testing.T) {
 	requireRoot(t)
 
 	const (
@@ -511,19 +514,18 @@ func TestEgressDefaultRouteAdd_InstallsMultipathAcrossShards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify installed route: %v", err)
 	}
-	if len(installed.MultiPath) != len(shardSIDs) {
-		t.Fatalf("installed default route has %d nexthops, want %d", len(installed.MultiPath), len(shardSIDs))
+	if len(installed.MultiPath) != 0 {
+		t.Fatalf("installed default route has %d MultiPath nexthops, want 0 (single-path route)", len(installed.MultiPath))
+	}
+	if installed.Encap == nil {
+		t.Fatalf("installed default route has no Encap, want a SEG6 encap toward %s", shardSID1)
 	}
 
-	// Per-nexthop RTA_ENCAP within RTA_MULTIPATH round-trips through the
-	// kernel correctly (confirmed live against `ip -6 route show`) but the
-	// vendored netlink library's own RouteListFiltered doesn't decode it
-	// back into NexthopInfo.Encap -- every nexthop above reads back
-	// Encap == nil regardless of what was actually installed. Shell out to
-	// `ip -6 route` (real ground truth, the same tool this session's own
-	// live containerlab diagnostics already trusted over library/tcpdump
-	// artifacts) rather than asserting against a field this library can't
-	// populate.
+	// Shell out to `ip -6 route` (real ground truth, the same tool this
+	// session's own live containerlab diagnostics already trusted over
+	// library/tcpdump artifacts) to confirm which shard SID the single
+	// nexthop actually encapsulates toward: the first resolvable one in
+	// shardSIDs order (shardSID1), never shardSID2.
 	var out []byte
 	err = nsObj.Do(func(_ ns.NetNS) error {
 		var cmdErr error
@@ -535,11 +537,13 @@ func TestEgressDefaultRouteAdd_InstallsMultipathAcrossShards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ip -6 route show table %d: %v (%s)", table, err, out)
 	}
-	for _, sid := range shardSIDs {
-		want := "encap seg6 mode encap.red segs 1 [ " + sid.String() + " ]"
-		if !strings.Contains(string(out), want) {
-			t.Errorf("ip -6 route show table %d = %q, want a nexthop containing %q", table, out, want)
-		}
+	want := "encap seg6 mode encap.red segs 1 [ " + shardSID1 + " ]"
+	if !strings.Contains(string(out), want) {
+		t.Errorf("ip -6 route show table %d = %q, want a nexthop containing %q", table, out, want)
+	}
+	if strings.Contains(string(out), shardSID2) {
+		t.Errorf("ip -6 route show table %d = %q, want no nexthop toward the second shard %q (single-path only)",
+			table, out, shardSID2)
 	}
 
 	err = nsObj.Do(func(_ ns.NetNS) error {
@@ -573,15 +577,16 @@ func TestEgressDefaultRouteAdd_InstallsMultipathAcrossShards(t *testing.T) {
 // same node's own received-path processing -- see this function's own
 // doc comment), so any tenant node that is also a configured shard
 // (this lab's own "reuse the site workers as shards" layout) always has
-// exactly one permanently-unresolvable entry in shardSIDs. The original
-// implementation aborted the entire multipath route on the first
-// unresolvable nexthop, which meant *no default route at all* on every
-// shard node -- confirmed live: dfw-worker's own tenant pods failed CNI
-// ADD outright with "no route to gateway 2001:db8:ff01:1:e001:: (dfw's
-// own shard SID): invalid argument" even though sjc's and iad's shard
-// SIDs resolved fine from that same node. This test proves a mix of one
-// resolvable and one unresolvable shard SID still installs a route (with
-// only the resolvable one as a nexthop), not an error.
+// exactly one permanently-unresolvable entry in shardSIDs. An earlier
+// implementation aborted outright on the first unresolvable nexthop,
+// which meant *no default route at all* on every shard node -- confirmed
+// live: dfw-worker's own tenant pods failed CNI ADD outright with "no
+// route to gateway 2001:db8:ff01:1:e001:: (dfw's own shard SID): invalid
+// argument" even though sjc's and iad's shard SIDs resolved fine from
+// that same node. This test proves a mix of one resolvable and one
+// unresolvable shard SID still installs a route (skipping the
+// unresolvable one and using the resolvable one as the single nexthop),
+// not an error.
 func TestEgressDefaultRouteAdd_SkipsUnresolvableShardButSucceeds(t *testing.T) {
 	requireRoot(t)
 
