@@ -430,12 +430,26 @@ struct nptv6_value {
 // each ServiceVIPBinding writes one row under each key (vip_xlat.go),
 // since the two directions substitute in opposite directions and are
 // looked up via different fields of the same packet.
+//
+// pad2 exists only to eliminate the struct's own trailing alignment
+// padding: block's __u64 alignment rounds this struct up to 16 bytes, but
+// block+argument+proto+pad+port only account for 14 of them, leaving 2
+// bytes of compiler-inserted tail padding no initializer touches. C99
+// zero-initializes an *omitted named member* (like pad, above) but says
+// nothing about true structural padding, and clang's BPF backend does not
+// zero it -- bpf_map_lookup_elem() then reads all 16 key bytes and the
+// verifier rejects the two never-written ones as "invalid read from
+// stack" (caught live via a real containerlab deploy, both vkey
+// initializers below only ever set block/argument/proto/port). Naming the
+// last 2 bytes as a real member makes them a normal omitted-member zero,
+// not padding.
 struct vip_xlat_key {
 	__u64 block;
 	__u16 argument;
 	__u8 proto;
 	__u8 pad;
 	__be16 port;
+	__u16 pad2;
 };
 
 // struct vip_xlat_value is vip_xlat_table's value: unlike nptv6_value, this
