@@ -11,6 +11,7 @@ import (
 	"net/netip"
 
 	"github.com/cilium/ebpf"
+	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -107,15 +108,75 @@ func sidTo16(sid net.IP) ([16]byte, error) {
 	return a.As16(), nil
 }
 
+// resolveLinkAndL2Fn is a package-level override point so tests can
+// substitute a fake resolver instead of touching the real host network
+// stack -- the same pattern internal/plumbing/ebpf/attach's own
+// routeListFn/linkByIndexFn vars establish, needed here because Register
+// otherwise always calls the real netlink functions below regardless of
+// whether the usidmap.Table it was given is itself a fake.
+var resolveLinkAndL2Fn = resolveLinkAndL2
+
+// resolveLinkAndL2 resolves sid's real, immediate next-hop -- the exact
+// link plus the concrete L2 (destination and source MAC) address a
+// packet must carry to actually reach it -- via netlink.RouteGet and the
+// kernel's own already-populated neighbor cache.
+//
+// This mirrors srv6.resolveNextHop's own job (and, for the exact same
+// reason: IPv6 route installation/resolution does not recurse through an
+// indirect gateway on its own), but cannot simply call it: this package
+// is already imported by internal/plumbing/srv6 (for pinDir/
+// attach.ResolveInterfaces), so the reverse import would be a cycle.
+// Resolving the L2 addresses too, not just the link/next-hop, is new
+// here relative to that function -- see struct egress_route_value's own
+// doc comment in usid.c for why usid_egress needs them precomputed
+// rather than resolving them itself at packet-processing time.
+func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, err error) {
+	routes, err := netlink.RouteGet(sid)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("no route to %s: %w", sid, err)
+	}
+	if len(routes) == 0 {
+		return 0, nil, nil, fmt.Errorf("no route to %s", sid)
+	}
+	linkIndex = routes[0].LinkIndex
+	nextHop := routes[0].Gw
+	if nextHop == nil {
+		nextHop = sid // gateway itself is on-link
+	}
+
+	link, err := netlink.LinkByIndex(linkIndex)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("look up link %d: %w", linkIndex, err)
+	}
+	smac = link.Attrs().HardwareAddr
+
+	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_V6)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("list neighbors on link %d: %w", linkIndex, err)
+	}
+	for _, n := range neighs {
+		if n.IP.Equal(nextHop) && len(n.HardwareAddr) == 6 {
+			return linkIndex, n.HardwareAddr, smac, nil
+		}
+	}
+	return 0, nil, nil, fmt.Errorf("no resolved neighbor entry for %s on link %d (next-hop for sid %s)",
+		nextHop, linkIndex, sid)
+}
+
 // Register installs (or replaces) egress_route_table's entry for prefix
 // in Linux VRF table tableID, encapsulating toward sid -- the TC-BPF
 // replacement for srv6.RouteEgressAdd (a specific prefix) and
 // srv6.EgressDefaultRouteAdd (prefix == DefaultPrefix).
 //
-// Unlike RouteEgressAdd/EgressDefaultRouteAdd, this never needs to
-// resolve sid's own link/next-hop (no srv6.resolveNextHop equivalent):
-// usid_egress's own bpf_fib_lookup() resolves that fresh, per packet --
-// see struct egress_route_value's doc comment in usid.c for why.
+// Resolves sid's own link and L2 (dmac/smac) information at registration
+// time via resolveLinkAndL2, storing all of it in the installed entry --
+// see struct egress_route_value's own doc comment in usid.c for why
+// usid_egress cannot resolve this itself, at packet-processing time, the
+// way it originally did. This means Register can fail the same way
+// srv6.RouteEgressAdd's own pre-TC-BPF implementation could (no route yet,
+// no resolved neighbor yet) -- callers that iterate multiple candidate
+// SIDs (e.g. EgressDefaultRouteAdd's own shard-SID list) must expect and
+// tolerate that.
 func (t *EgressRouteTable) Register(tableID uint32, prefix *net.IPNet, sid net.IP) error {
 	key, err := buildKey(tableID, prefix)
 	if err != nil {
@@ -125,7 +186,15 @@ func (t *EgressRouteTable) Register(tableID uint32, prefix *net.IPNet, sid net.I
 	if err != nil {
 		return fmt.Errorf("egressroutemap: egress_route_table: register: %w", err)
 	}
-	value := prog.UsidEgressRouteValue{Sid: rawSID}
+	linkIndex, dmac, smac, err := resolveLinkAndL2Fn(sid)
+	if err != nil {
+		return fmt.Errorf("egressroutemap: egress_route_table: register: resolve link/L2 for sid %s: %w", sid, err)
+	}
+
+	value := prog.UsidEgressRouteValue{Sid: rawSID, LinkIfindex: uint32(linkIndex)}
+	copy(value.Dmac[:], dmac)
+	copy(value.Smac[:], smac)
+
 	if err := t.table.Put(key, value); err != nil {
 		return fmt.Errorf("egressroutemap: egress_route_table: register table=%d prefix=%s: %w", tableID, prefix, err)
 	}

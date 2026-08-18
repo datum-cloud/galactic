@@ -21,7 +21,33 @@ func mustCIDR(t *testing.T, s string) *net.IPNet {
 	return n
 }
 
+// fakeLinkIndex/fakeDmac/fakeSmac are the fixed values
+// stubResolveLinkAndL2 always returns, for tests that don't care about
+// the specific resolved link/L2 content -- only that Register reaches
+// the point of storing *something* for them.
+const fakeLinkIndex = 42
+
+var (
+	fakeDmac = net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}
+	fakeSmac = net.HardwareAddr{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}
+)
+
+// stubResolveLinkAndL2 replaces resolveLinkAndL2Fn for the duration of
+// the calling test, so Register's tests exercise the map read/write
+// logic this package owns without depending on real kernel routing
+// state -- see resolveLinkAndL2Fn's own doc comment for why Register
+// can't simply be tested against a fake usidmap.Table alone.
+func stubResolveLinkAndL2(t *testing.T) {
+	t.Helper()
+	prev := resolveLinkAndL2Fn
+	resolveLinkAndL2Fn = func(net.IP) (int, net.HardwareAddr, net.HardwareAddr, error) {
+		return fakeLinkIndex, fakeDmac, fakeSmac, nil
+	}
+	t.Cleanup(func() { resolveLinkAndL2Fn = prev })
+}
+
 func TestEgressRouteTable_RegisterThenLookupRoundTrips(t *testing.T) {
+	stubResolveLinkAndL2(t)
 	tbl := NewEgressRouteTable(newFakeTable())
 	prefix := mustCIDR(t, "2001:db8:ffff::/96")
 	sid := net.ParseIP("2001:db8:ff01:1:e001::")
@@ -44,9 +70,19 @@ func TestEgressRouteTable_RegisterThenLookupRoundTrips(t *testing.T) {
 			t.Fatalf("stored sid = % x, want % x", got.Sid, want)
 		}
 	}
+	if got.LinkIfindex != fakeLinkIndex {
+		t.Errorf("stored link_ifindex = %d, want %d", got.LinkIfindex, fakeLinkIndex)
+	}
+	if string(got.Dmac[:]) != string(fakeDmac) {
+		t.Errorf("stored dmac = % x, want % x", got.Dmac, fakeDmac)
+	}
+	if string(got.Smac[:]) != string(fakeSmac) {
+		t.Errorf("stored smac = % x, want % x", got.Smac, fakeSmac)
+	}
 }
 
 func TestEgressRouteTable_RegisterDefaultPrefixUsesZeroPrefixBits(t *testing.T) {
+	stubResolveLinkAndL2(t)
 	tbl := NewEgressRouteTable(newFakeTable())
 	sid := net.ParseIP("2001:db8:ff01:9:e001::")
 
@@ -129,6 +165,7 @@ func TestEgressRouteTable_UnregisterAbsentEntryIsANoop(t *testing.T) {
 }
 
 func TestEgressRouteTable_RegisterThenUnregisterRemovesEntry(t *testing.T) {
+	stubResolveLinkAndL2(t)
 	tbl := NewEgressRouteTable(newFakeTable())
 	prefix := mustCIDR(t, "2001:db8:ffff::/96")
 	sid := net.ParseIP("2001:db8:ff01:1:e001::")
@@ -155,6 +192,7 @@ func TestEgressRouteTable_SameTableIDDifferentFamilyDoNotCollide(t *testing.T) {
 	// two entries can never compare equal on address bits alone once
 	// table_id+family already differ -- see struct egress_route_key's
 	// own doc comment in usid.c.
+	stubResolveLinkAndL2(t)
 	tbl := NewEgressRouteTable(newFakeTable())
 	v6 := mustCIDR(t, "::/0")
 	v4 := &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
