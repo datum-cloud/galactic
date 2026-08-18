@@ -102,12 +102,33 @@ func setVRFInstanceCondition(vrf *bgpv1alpha1.BGPVRFInstance, condition metav1.C
 	meta.SetStatusCondition(&vrf.Status.Conditions, condition)
 }
 
+// ConditionNPTv6Configured reports whether a BGPVRFInstance's own
+// Spec.NPTv6 field (when set) parses into a valid RFC 6296 mapping —
+// locally defined here (rather than added to the network module's own
+// vrf_types.go, which this workstream does not own) since generic
+// Conditions is exactly the extension point BGPVRFInstanceStatus already
+// exposes for this. It reflects config validity only, not live eBPF
+// datapath state: the process that actually registers/reconciles
+// nptv6_table entries (gc.SweepEBPFNPTv6Table, run from
+// internal/installer.Run inside the CNI "run" container) has no access
+// back to this CRD's status from there — see that function's own doc
+// comment for why eBPF map access is confined to that container.
+const ConditionNPTv6Configured = "NPTv6Configured"
+
 // setGatewayCondition sets or updates a condition on NetworkGateway.
 // ConditionTypeReady (reused from peer_types.go, not redeclared) is the
 // only condition type NetworkGateway currently uses.
 func setGatewayCondition(gw *bgpv1alpha1.NetworkGateway, condition metav1.Condition) {
 	condition.ObservedGeneration = gw.Generation
 	meta.SetStatusCondition(&gw.Status.Conditions, condition)
+}
+
+// setBindingCondition sets or updates a condition on ServiceVIPBinding.
+// bgpv1alpha1.ConditionTypeBound (vipbinding_types.go) is the only
+// condition type ServiceVIPBinding uses.
+func setBindingCondition(binding *bgpv1alpha1.ServiceVIPBinding, condition metav1.Condition) {
+	condition.ObservedGeneration = binding.Generation
+	meta.SetStatusCondition(&binding.Status.Conditions, condition)
 }
 
 // setRuleCondition sets or updates a condition on NetworkRule.
@@ -118,4 +139,13 @@ func setGatewayCondition(gw *bgpv1alpha1.NetworkGateway, condition metav1.Condit
 func setRuleCondition(rule *bgpv1alpha1.NetworkRule, condition metav1.Condition) {
 	condition.ObservedGeneration = rule.Generation
 	meta.SetStatusCondition(&rule.Status.Conditions, condition)
+}
+
+// setNAT66ShardCondition sets or updates a condition on NAT66Shard.
+// ConditionTypeReady (reused from peer_types.go, not redeclared) is the
+// only condition type NAT66Shard currently uses — mirrors
+// setGatewayCondition's identical shape for NetworkGateway.
+func setNAT66ShardCondition(shard *bgpv1alpha1.NAT66Shard, condition metav1.Condition) {
+	condition.ObservedGeneration = shard.Generation
+	meta.SetStatusCondition(&shard.Status.Conditions, condition)
 }
