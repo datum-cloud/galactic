@@ -11,8 +11,12 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ipam"
+	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 func cmdDel(args *skel.CmdArgs) error {
@@ -71,6 +75,16 @@ func cmdDel(args *skel.CmdArgs) error {
 			"err", err, "containerID", args.ContainerID, "netns", args.Netns)
 	}
 
+	// Unregister this attachment's own ifindex_vrf_table entry (Milestone
+	// 7.1's ifindex_vrf_table addition), right before the host interface
+	// itself is destroyed below. Like the veth pair, this row is genuinely
+	// private to this one attachment's own ifindex — no sibling pod can
+	// ever share it — so it belongs in the same "no ADD-race to defer to GC
+	// for" category as veth.Delete just below, not the shared VRF/BGP CRD
+	// cleanup deferred further down. Best-effort/log-only, matching every
+	// other step in this function: DEL must always succeed regardless.
+	unregisterIfindexVRFEntry(vpc, vpcAtt, args.ContainerID)
+
 	// Delete this attachment's own host/guest veth pair. Unlike the VRF and
 	// BGP CRDs below, the veth pair is genuinely private to this attachment
 	// (see resourceTracker.cleanup's doc comment) — no sibling pod can ever
@@ -98,4 +112,38 @@ func cmdDel(args *skel.CmdArgs) error {
 	_ = types.PrintResult(result, pluginConf.CNIVersion)
 
 	return nil
+}
+
+// unregisterIfindexVRFEntry removes this attachment's own ifindex_vrf_table
+// entry (internal/plumbing/ebpf/ifindexvrfmap), if one exists. The host
+// interface's ifindex is resolved by its deterministic name
+// (intf.GenerateInterfaceNameHost, the same name registerEBPFDatapath
+// resolved it by at ADD time — internal/cnibgp/bgp.go), *before*
+// veth.Delete tears the interface down, since there is nothing left to
+// resolve an ifindex from afterward. Every failure here (interface already
+// gone, pinned map not present because the eBPF datapath isn't enabled,
+// etc.) is logged and swallowed, matching every other step in cmdDel: DEL
+// must always succeed.
+func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	link, err := netlink.LinkByName(hostName)
+	if err != nil {
+		// Nothing to unregister if the host interface is already gone (a
+		// prior DEL attempt may have already run this step, or ADD never
+		// got far enough to create it).
+		return
+	}
+
+	table, closer, err := ifindexvrfmap.OpenPinned(attach.PinDir)
+	if err != nil {
+		// No pinned map to clean up — eBPF datapath not enabled, or the
+		// "run" container hasn't finished loading it yet. Not an error.
+		return
+	}
+	defer func() { _ = closer.Close() }()
+
+	if err := table.Unregister(uint32(link.Attrs().Index)); err != nil {
+		slog.Warn("DEL: failed to unregister eBPF ifindex_vrf_table entry", "err", err,
+			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
+	}
 }

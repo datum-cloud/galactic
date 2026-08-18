@@ -5,11 +5,27 @@
 // Package cnibgp implements galactic-bgp, the SRv6/BGP/eBPF publish plugin
 // in the galactic CNI chain. It is chain-invoked (per CNI conflist order)
 // after the master plugin (galactic-veth or galactic-tap), not called
-// as a library — it has zero kernel-interface dependency: every address it
-// advertises comes from prevResult (see prevresult.go), never from a
-// runtime call into the interface it doesn't own. Host-interface gateway
-// configuration lives in internal/hostgw instead, called directly by
-// the master plugins, for exactly this reason.
+// as a library — it has zero kernel-interface *configuration* dependency:
+// every address it advertises comes from prevResult (see prevresult.go),
+// never from a runtime call into the interface it doesn't own.
+// Host-interface gateway configuration lives in internal/hostgw instead,
+// called directly by the master plugins, for exactly this reason.
+//
+// One narrow, deliberate exception: registerEBPFDatapath (bgp.go) resolves
+// this attachment's own host-side interface's ifindex via a read-only
+// netlink.LinkByName lookup, to key its ifindex_vrf_table registration
+// (internal/plumbing/ebpf/ifindexvrfmap) on it. This is not a configuration
+// call — it neither creates, moves, nor mutates the interface the master
+// plugin already built, only reads its already-assigned kernel identity —
+// and the interface's name is fully deterministic
+// (intf.GenerateInterfaceNameHost(vpc, vpcAttachment), the same helper the
+// master plugin itself used to create it), so no prevResult plumbing is
+// needed to learn it. Kept here rather than threaded back through
+// prevResult because the (Block, Argument) values ifindex_vrf_table's row
+// pairs with are only known at this call site (registerEBPFDatapath is
+// where vrf_table's own registration for this same attachment already
+// happens), mirroring the design note's own point-6 guidance to key
+// ifindex_vrf_table at that exact call site.
 package cnibgp
 
 import (
@@ -24,6 +40,7 @@ import (
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
+	"github.com/vishvananda/netlink"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,8 +49,10 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -439,7 +458,9 @@ func publishBGPState(
 		// they'd describe is shared by every attachment on this VPC/node,
 		// same as the BGPVRFInstance above — see resourceTracker.cleanup's
 		// doc comment for why a failed ADD must never unregister it.
-		if _, err := registerEBPFDatapath(bgp, cfg.vpc, cfg.ifaceType, uint16(vrfID), ebpfPinDir); err != nil {
+		if _, err := registerEBPFDatapath(
+			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir,
+		); err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
 
@@ -503,7 +524,7 @@ func publishBGPState(
 // intentionally not set up for this attachment. Any other failure is
 // returned as an error.
 func registerEBPFDatapath(
-	bgp bgpConfig, vpc, ifaceType string, argument uint16, pinDir string,
+	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string,
 ) (registered bool, err error) {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return false, nil
@@ -533,6 +554,15 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
 	}
 
+	// The host-side interface's own ifindex, needed to key this
+	// attachment's ifindex_vrf_table row below — see this package's own
+	// doc comment for why this one read-only netlink call is an accepted
+	// exception to galactic-bgp's otherwise prevResult-only design.
+	hostIfindex, err := hostInterfaceIndex(vpc, vpcAttachment)
+	if err != nil {
+		return false, fmt.Errorf("resolve host interface ifindex for eBPF registration: %w", err)
+	}
+
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
 		return false, fmt.Errorf("open pinned eBPF uSID maps: %w", err)
@@ -549,7 +579,31 @@ func registerEBPFDatapath(
 	if err := registry.VRF.Register(block, argument, vrfTableID, egressKind); err != nil {
 		return false, fmt.Errorf("register eBPF vrf_table entry: %w", err)
 	}
+
+	ifindexTable, ifindexCloser, err := ifindexvrfmap.OpenPinned(pinDir)
+	if err != nil {
+		return false, fmt.Errorf("open pinned eBPF ifindex_vrf_table: %w", err)
+	}
+	defer func() { _ = ifindexCloser.Close() }()
+	if err := ifindexTable.Register(hostIfindex, block, argument); err != nil {
+		return false, fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
+	}
+
 	return true, nil
+}
+
+// hostInterfaceIndex resolves this attachment's own host-side veth/tap
+// interface's kernel ifindex, by name -- the same deterministic name
+// (intf.GenerateInterfaceNameHost) the master plugin (internal/cni or
+// internal/cnitap) already used to create it, so no value needs threading
+// through prevResult to find it again here.
+func hostInterfaceIndex(vpc, vpcAttachment string) (uint32, error) {
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	link, err := netlink.LinkByName(hostName)
+	if err != nil {
+		return 0, fmt.Errorf("look up host interface %q: %w", hostName, err)
+	}
+	return uint32(link.Attrs().Index), nil
 }
 
 // egressKindForInterfaceType maps a "veth"/"tap" interface type string to the

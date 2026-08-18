@@ -89,12 +89,30 @@ spec:
               port: 5179
             initialDelaySeconds: 5
             periodSeconds: 10
+          # BPF (added alongside the pre-existing NET_ADMIN) and the bpf-fs
+          # volumeMount below are new plumbing for the DSR/Maglev redesign's
+          # ServiceVIPBindingReconciler (internal/controller/
+          # servicevipbinding_controller.go): its EgressKindTap branch opens
+          # a second handle onto vip_xlat_table, a map the eBPF uSID
+          # datapath already pinned elsewhere on this node (galactic-cni's
+          # own DaemonSet, config/galactic-cni/daemonset.yaml, loads and
+          # attaches that program; this container never does) --
+          # internal/plumbing/ebpf/vipxlatmap.OpenPinnedVipXlatTable's own
+          # doc comment has the full reasoning. Neither grant is
+          # unconditional the way galactic-cni's is (that DaemonSet's own
+          # comment: "the datapath is unconditional... there is no flag to
+          # gate this grant behind") -- a node with no tap-kind
+          # ServiceVIPBinding ever scheduled to it simply never exercises
+          # this path, but the grant/mount must still be present up front
+          # since ServiceVIPBindingReconciler.SetupWithManager always
+          # attempts to open the pin at startup (see root.go's runCmd).
           securityContext:
             runAsUser: 0
             capabilities:
               drop: ["ALL"]
               add:
                 - NET_ADMIN
+                - BPF
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
           resources:
@@ -112,8 +130,22 @@ spec:
             - name: netns
               mountPath: /var/run/netns
               readOnly: true
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
       volumes:
         - name: netns
           hostPath:
             path: /var/run/netns
             type: DirectoryOrCreate
+        - name: bpf-fs
+          # The host's bpffs mount, same convention/tradeoff
+          # config/galactic-cni/daemonset.yaml's own bpf-fs volume already
+          # documents in full (mirrored here rather than repeated verbatim):
+          # `Directory` (not DirectoryOrCreate) because bpffs must already
+          # be mounted at this path by the host/kubelet node setup, and this
+          # container gets read/write visibility into every other pinned
+          # BPF object under it, not just vip_xlat_table -- an accepted,
+          # largely inherent tradeoff of bpffs pinning on this platform.
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
