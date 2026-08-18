@@ -56,8 +56,15 @@ behavior doesn't apply, and XDP's throughput advantage is exactly why that datap
 (3) `vip_xlat_table`'s veth-kind delivery gap and its identical-VIP/backend-port key
 collision, both fixed in galactic. See the redesign plan's
 [§8](../../docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md#8-containerlab-validation) for
-the full account, including the still-open, unrelated NAT66/default-egress gap this validation
-surfaced but did not fix, and `resources/galactic-gateway/`.
+the full account, and `resources/galactic-gateway/`.
+
+The NAT66/default-egress gap that validation surfaced (no tenant VRF had
+any route out at all) is now closed: `task deploy:galactic-nat66` stands
+up the sharded NAT66 tier on the three existing site workers as shards
+(`resources/galactic-nat66/`), and every CNI ADD now installs a default
+route toward those shards' advertised SIDs
+(`internal/plumbing/srv6.EgressDefaultRouteAdd`, `internal/cnibgp`) --
+see `resources/galactic-nat66/README.md` for the full mechanism.
 
 `dfw`, `iad`, and `sjc` are the three Kind cluster names — not separate ContainerLab
 topology nodes. Each cluster's `control-plane`/`worker` nodes above are its members.

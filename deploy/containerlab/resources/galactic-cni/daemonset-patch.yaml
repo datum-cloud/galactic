@@ -9,6 +9,19 @@ spec:
         - name: install-cni
           image: galactic-cni:latest
           imagePullPolicy: Never
+          env:
+            # Fabric-wide NAT66 shard membership list (design plan §3,
+            # internal/plumbing/srv6.EgressDefaultRouteAdd's own doc
+            # comment) -- the same three shard SIDs
+            # resources/galactic-nat66/{dfw,sjc,iad}/node-patch.yaml
+            # configure each shard with, shared identically across every
+            # site here since this list is currently operator-supplied,
+            # not learned in-cluster (see EnvCNINAT66ShardSIDs's own doc
+            # comment). Written into the static conflist by
+            # internal/installer.Bootstrap (this init container), read
+            # back by internal/cnibgp at every CNI ADD.
+            - name: GALACTIC_CNI_NAT66_SHARD_SIDS
+              value: "2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::,2001:db8:ff03:9:e001::"
       containers:
         - name: credential-refresh
           image: galactic-cni:latest
