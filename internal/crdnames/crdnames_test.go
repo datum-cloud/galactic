@@ -36,12 +36,21 @@ func TestServiceVIPBindingName(t *testing.T) {
 	}
 }
 
-// testVPCBase62 is base62 for 1234, padded as an interface name carries it.
-const testVPCBase62 = "0000000jU"
+// testVPC, testVPCBase62, and testAttachment are shared across this file's
+// table-driven tests — the same (vpc, attachment)-shaped fixtures recur
+// across BGPVRFInstanceName/BGPAdvertisementName/TenantIdentifier. Only the
+// first two go through nameSegment's hex encoding (they end up in a
+// Kubernetes object name, which must be a lowercase RFC 1123 subdomain);
+// TenantIdentifier deliberately doesn't — see its own doc comment.
+const (
+	testVPC        = "abc"
+	testVPCBase62  = "0000000jU"
+	testAttachment = "def"
+)
 
 func TestBGPVRFInstanceName(t *testing.T) {
 	tests := []struct{ vpc, nodeName, want string }{
-		{"abc", "worker-1", "98de-worker-1"},
+		{testVPC, "worker-1", "98de-worker-1"},
 		{testVPCBase62, "dfw-worker", "4d2-dfw-worker"},
 	}
 	for _, tt := range tests {
@@ -57,7 +66,7 @@ func TestBGPVRFInstanceName(t *testing.T) {
 // the identical BGPVRFInstance name — the whole point of keying this by
 // (vpc, node) instead of (vpc, vpcAttachment).
 func TestBGPVRFInstanceNameSharedAcrossAttachments(t *testing.T) {
-	const vpc, nodeName = "abc", "dfw-worker"
+	const vpc, nodeName = testVPC, "dfw-worker"
 	first := BGPVRFInstanceName(vpc, nodeName)
 	second := BGPVRFInstanceName(vpc, nodeName)
 	if first != second {
@@ -68,13 +77,53 @@ func TestBGPVRFInstanceNameSharedAcrossAttachments(t *testing.T) {
 
 func TestBGPAdvertisementName(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
-		{"abc", "def", "98de-c6a7"},
+		{testVPC, testAttachment, "98de-c6a7"},
 		{testVPCBase62, "00G", "4d2-2a"},
 	}
 	for _, tt := range tests {
 		got := BGPAdvertisementName(tt.vpc, tt.attachment)
 		if got != tt.want {
 			t.Errorf("BGPAdvertisementName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
+		}
+	}
+}
+
+func TestTenantIdentifier(t *testing.T) {
+	tests := []struct{ vpc, attachment, want string }{
+		{testVPC, testAttachment, "abc-def"},
+		{testVPCBase62, "00G", "0000000jU-00G"},
+	}
+	for _, tt := range tests {
+		got := TenantIdentifier(tt.vpc, tt.attachment)
+		if got != tt.want {
+			t.Errorf("TenantIdentifier(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
+		}
+	}
+}
+
+// TestTenantIdentifierDoesNotMatchBGPAdvertisementName documents a
+// deliberate divergence: the two used to format a (vpc, attachment) pair
+// identically, back when neither went through nameSegment's hex encoding.
+// That's no longer true for BGPAdvertisementName (a Kubernetes object name,
+// which must be a lowercase RFC 1123 subdomain), but TenantIdentifier (a
+// label/annotation *value*, which permits uppercase) deliberately stays
+// unencoded — see its own doc comment for why a plain string split
+// recovering the original vpc depends on that.
+func TestTenantIdentifierDoesNotMatchBGPAdvertisementName(t *testing.T) {
+	const vpc, attachment = testVPC, testAttachment
+	if got, other := TenantIdentifier(vpc, attachment), BGPAdvertisementName(vpc, attachment); got == other {
+		t.Errorf("TenantIdentifier(%q, %q) = %q unexpectedly matches BGPAdvertisementName() -- "+
+			"if nameSegment's encoding changed to make these equal again, TenantIdentifier's "+
+			"raw-value recoverability guarantee needs re-verifying, not just this test updating",
+			vpc, attachment, got)
+	}
+}
+
+func TestEndpointSliceName(t *testing.T) {
+	tests := []string{"my-pod", "web-0", "vm-workload-abc123"}
+	for _, podName := range tests {
+		if got := EndpointSliceName(podName); got != podName {
+			t.Errorf("EndpointSliceName(%q) = %q, want %q", podName, got, podName)
 		}
 	}
 }

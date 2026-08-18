@@ -5,7 +5,7 @@
 > (VRF, veth/tap, SRv6 uSID datapath registration) and writes
 > `BGPAdvertisement`/`BGPVRFInstance` CRDs for `galactic-router` to pick up.
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-18_
 
 This document covers the CNI side of Galactic only. See
 [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) for the BGP/EVPN control
@@ -23,7 +23,13 @@ When a pod or VM is attached to a VPC, a chain of CNI plugins creates the
 required kernel state (VRF, veth pair or tap device, host-side routes) and
 writes a `BGPAdvertisement` CRD. `galactic-router` (see
 [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)) watches that CRD and
-injects the EVPN path into the node-local GoBGP server.
+injects the EVPN path into the node-local GoBGP server. `galactic-bgp` also
+publishes a per-pod `discoveryv1.EndpointSlice` (when the attachment has an
+IPv6 address to carry) — the mechanism the HTTP-ingress extension server
+discovers VPC backends through; see
+[docs/plans/854-vpc-http-ingress-endpointslice.md](../plans/854-vpc-http-ingress-endpointslice.md)
+and [docs/cni/configuration.md](../cni/configuration.md)'s "EndpointSlice
+publish" section.
 
 The CNI attach side is a **chain of small binaries**, not one monolithic
 plugin: a master plugin (`galactic-veth` for containers, `galactic-tap` for
@@ -414,15 +420,15 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `internal/cni`             | galactic-veth                                                        | Veth master plugin: `cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`; PluginConf parsing; NAD annotation; host-device delegation; delegates kernel work to plumbing                                                     | No                                    |
 | `internal/hostconf`        | every CNI-chain binary                                               | Shared `HostConf` schema + static-conflist loader, plus API-based node-name auto-detect                                                                                                                         | No                                    |
 | `internal/hostgw`          | galactic-veth, galactic-tap                                          | Host-side gateway address/route configuration for a VPC attachment's allocated IPAM addresses                                                                                                                   | No                                    |
-| `internal/crdnames`        | galactic-veth, galactic-bgp                                          | Deterministic `BGPVRFInstance`/`BGPAdvertisement` CRD name + annotation-key derivation (also read by `galactic-router`'s GC — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md))                             | No                                    |
-| `internal/nadpatch`        | galactic-veth, galactic-tap                                          | NAD annotation patch (host interface name) + pod-namespace parsing from `CNI_ARGS`                                                                                                                              | No                                    |
+| `internal/crdnames`        | galactic-veth, galactic-bgp                                          | Deterministic `BGPVRFInstance`/`BGPAdvertisement`/EndpointSlice CRD name + annotation/label-key derivation (also read by `galactic-router`'s GC — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md))         | No                                    |
+| `internal/nadpatch`        | galactic-veth, galactic-tap, galactic-bgp                            | NAD annotation patch (host interface name) + pod-name/pod-namespace parsing from `CNI_ARGS`                                                                                                                     | No                                    |
 | `internal/cni/ipam`        | galactic-ipam                                                        | IPv6/IPv4 pool allocators + static IP allocator; on-disk marker-file persistence (flock-guarded, keyed by containerID)                                                                                          | Yes (pool allocations + marker files) |
 | `internal/cni/route`       | galactic-route                                                       | Host-side static route add/delete via netlink                                                                                                                                                                   | No                                    |
 | `internal/cni/tap`         | galactic-tap                                                         | Tap interface create/delete for VM workloads (Kata, Firecracker, kraftlet/Unikraft)                                                                                                                             | No                                    |
 | `internal/cni/veth`        | galactic-veth                                                        | veth pair create/delete                                                                                                                                                                                         | No                                    |
 | `internal/cnitap`          | galactic-tap                                                         | Tap master plugin (mirrors `internal/cni`; no host-device delegation, no guest netns)                                                                                                                           | No                                    |
 | `internal/cniipam`         | galactic-ipam                                                        | CNI IPAM delegation protocol (`cmdAdd`/`cmdDel`/`cmdCheck`/`cmdStatus`); explicit `"ipam"`-block contract; no k8s dependency                                                                                    | No                                    |
-| `internal/cnibgp`          | galactic-bgp                                                         | BGP/SRv6/eBPF publish: SID/Argument allocation + collision detection, `registerEBPFDatapath`/`unregisterEBPFDatapath`, `BGPVRFInstance`/`BGPAdvertisement` CRUD with retry; learns everything from `prevResult` | No                                    |
+| `internal/cnibgp`          | galactic-bgp                                                         | BGP/SRv6/eBPF publish: SID/Argument allocation + collision detection, `registerEBPFDatapath`/`unregisterEBPFDatapath`, `BGPVRFInstance`/`BGPAdvertisement` CRUD with retry, per-pod EndpointSlice publish/delete/CHECK for HTTP-ingress backend discovery (`endpointslice.go`); learns everything from `prevResult` | No                                    |
 | `internal/cniroute`        | galactic-route                                                       | Termination-route plugin: installs/rolls-back VRF-table routes; no k8s dependency                                                                                                                               | No                                    |
 | `internal/vmtap`           | vmtap-cni                                                            | Patches Cilium's own chain conflist to add a tap-interface stage for VM workloads                                                                                                                               | No                                    |
 | `internal/installer`       | galactic-cni                                                         | DaemonSet `init`/`run` support: binary staging (every chain binary), node-identity check, conflist/kubeconfig templating, credential refresh ticker, log rotation, eBPF datapath lifecycle, gRPC health server  | No                                    |

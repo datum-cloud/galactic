@@ -102,6 +102,14 @@ type publishResult struct {
 	// for why that distinction, not "CreateOrUpdate succeeded" alone, is
 	// what makes rollback-deletion safe.
 	vrfInstanceCreated bool
+	// sid is the computed SRv6 uSID for this attachment (see
+	// internal/plumbing/srv6.ComputeSID), valid (netip.Addr.IsValid()) only
+	// when this node's BGPRouter has SRv6Locator/nodeID configured — the
+	// same condition registerEBPFDatapath's own skip case checks. Consumed
+	// by the EndpointSlice publish step (endpointslice.go), which runs as
+	// its own step after publishBGPState returns, not folded into its retry
+	// closure — see Phase 4's rollback-risk note in the #854 plan for why.
+	sid netip.Addr
 }
 
 // isTransientError reports whether err is a transient failure that may
@@ -467,6 +475,19 @@ func publishBGPState(
 		// registerEBPFDatapath's own doc comment for why.
 		prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
 
+		// Reuses registerEBPFDatapath's own "SRv6 not configured, skip
+		// silently" sentinel: if this node's router has no
+		// srv6Locator/nodeID configured, there's nothing to publish, so
+		// leave result.sid at its zero value (IsValid() == false) rather
+		// than computing a SID for an attachment that has no SRv6 endpoint.
+		if bgp.srv6Locator != "" && bgp.nodeID != 0 {
+			sid, err := srv6.ComputeSID(bgp.srv6Locator, bgp.nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
+			if err != nil {
+				return fmt.Errorf("compute SRv6 uSID: %w", err)
+			}
+			result.sid = sid
+		}
+
 		// The return values aren't tracked for rollback: the vrf_table entry
 		// they'd describe is shared by every attachment on this VPC/node,
 		// same as the BGPVRFInstance above — see resourceTracker.cleanup's
@@ -484,7 +505,7 @@ func publishBGPState(
 			},
 		}
 		var mergedPrefixes []string
-		_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
+		advOp, err := controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
 			if adv.Annotations == nil {
 				adv.Annotations = make(map[string]string)
 			}
@@ -519,9 +540,19 @@ func publishBGPState(
 		if err != nil {
 			return fmt.Errorf("apply BGPAdvertisement: %w", err)
 		}
-		result.advertisementCreated = true
+		// Gated on OperationResultCreated, mirroring vrfInstanceCreated's
+		// existing pattern exactly: a BGPAdvertisement is reused (updated,
+		// not created) across pod churn on the same vpcAttachment, so
+		// marking it created on every successful write — including a mere
+		// update of an already-live sibling's CRD — would let
+		// resourceTracker.cleanup delete a BGPAdvertisement still backing a
+		// different, live container's route if a later ADD step fails. See
+		// the #854 plan's Phase 4 rollback-risk note.
+		if advOp == controllerutil.OperationResultCreated {
+			result.advertisementCreated = true
+		}
 		slog.Debug("BGP: BGPAdvertisement applied", "name", adv.Name, "namespace", namespace,
-			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID)
+			"prefixes", mergedPrefixes, "addedPrefixes", prefixes, "containerID", args.ContainerID, "operation", advOp)
 
 		slog.Info("ADD: BGP state published", "containerID", args.ContainerID,
 			"vpc", cfg.vpc, "vpcAttachment", cfg.vpcAttachment)
