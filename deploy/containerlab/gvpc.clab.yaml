@@ -254,19 +254,30 @@ topology:
     # galactic-gateway/). tr3 (iad's transit router) already
     # consumed eth1/eth2/eth3 for the TR mesh and eth4/eth5 for
     # iad-worker/iad-worker2, so these take the next free ports. BGP
-    # peering on these links is now configured (node_files/tr3/frr.conf,
-    # plus two BGPPeer objects in resources/galactic-control/iad/ for the
-    # route reflector side) and the fabric fully converges over them, but
-    # real end-to-end ingress traffic through the datapath is not yet
-    # live-validated here -- two stacked issues, not the generic
-    # veth-specific XDP_TX behavior this comment used to attribute it
-    # to: (1) IPv6 forwarding sysctls weren't enabled (now fixed,
-    # sysctl.ConfigureFIBLookupUplinkSysctls), and (2) veth's native
-    # XDP_TX fast path stays invisible to tcpdump/AF_PACKET unless the
-    # peer interface also runs an XDP program -- a genuine veth/kernel
-    # characteristic of this lab's veth-pair uplink simulation, not a
-    # code bug and not a production concern. See the redesign plan's
-    # §8 (docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md).
+    # peering on these links is configured (node_files/tr3/frr.conf, plus
+    # two BGPPeer objects in resources/galactic-control/iad/ for the route
+    # reflector side), the fabric converges over them, and real
+    # end-to-end ingress traffic through the datapath is now
+    # live-validated (docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md's
+    # §8) -- three stacked issues found and fixed along the way, not one:
+    # (1) IPv6 forwarding sysctls weren't enabled (fixed,
+    # sysctl.ConfigureFIBLookupUplinkSysctls); (2) veth's native XDP_TX
+    # fast path does not deliver a frame to the peer interface's normal
+    # receive stack at all unless the peer *also* runs an XDP program --
+    # confirmed live via a real destination-side packet counter, not just
+    # tcpdump invisibility (a stronger finding than this comment used to
+    # carry: "invisible to tcpdump, no delivery impact" was wrong, not
+    # merely imprecise) -- worked around for this lab specifically by
+    # `task deploy:lab-xdp-passthrough` loading a trivial pass-through XDP
+    # program on tr3's eth6/eth7 (node_files/common/xdp-passthrough.c),
+    # rather than converting edgedsr.c's own production datapath from XDP
+    # to TC, since a real gateway's public uplink is a physical NIC where
+    # this veth-specific behavior doesn't apply and native XDP_TX's
+    # throughput advantage is exactly why that datapath uses XDP at all;
+    # (3) `vip_xlat_table`'s veth-kind delivery gap and its identical-port
+    # key collision, both fixed in galactic (see that redesign plan's §8
+    # for the full account, including the still-separate, still-open
+    # NAT66/default-egress gap this validation surfaced but did not fix).
     #
     # mtu: 1500 on both ends, unlike every other link in this topology
     # (which gets containerlab's jumbo-frame veth default, ~9500) --

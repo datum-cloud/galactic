@@ -50,6 +50,11 @@ internal/plumbing/ebpf/nat66prog/nat66_bpfel.o
 internal/plumbing/ebpf/nat66prog/nat66_bpfeb.go
 internal/plumbing/ebpf/nat66prog/nat66_bpfeb.o
 
+# Same convention as above, for the containerlab-only pass-through XDP
+# program (deploy/containerlab/Taskfile.yaml's build:lab-xdp-passthrough,
+# node_files/common/xdp-passthrough.c's own doc comment).
+deploy/containerlab/node_files/common/xdp-passthrough.o
+
 # ============================================================
 # Kubernetes / controller-runtime / kubebuilder
 # ============================================================

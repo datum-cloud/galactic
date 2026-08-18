@@ -39,17 +39,25 @@ dedicated nodes, same idea as `iad-worker-control`'s taint: no tenant pods land 
 DaemonSets with a blanket toleration (`fabric-router`, `galactic-gateway1`/`-gateway2` — each a
 two-container pod, `galactic-router` + `galactic-gateway`).
 They never run `galactic-cni` (config/galactic-cni's affinity is edge-only) or a route-reflector.
-**Underlay BGP peering on their `tr3` uplinks is now wired** (`node_files/tr3/frr.conf`,
+**Underlay BGP peering on their `tr3` uplinks is wired** (`node_files/tr3/frr.conf`,
 plus two `BGPPeer` objects in `resources/galactic-control/iad/` for the route reflector side)
-and the full fabric converges. Real end-to-end ingress traffic through the datapath is not yet
-live-validated here — this used to be attributed to a generic veth `XDP_TX` behavior, but
-root-causing found two stacked issues: IPv6 forwarding sysctls weren't enabled (now fixed,
-`sysctl.ConfigureFIBLookupUplinkSysctls`), and veth's native `XDP_TX` fast path stays invisible
-to tcpdump/AF_PACKET unless the peer interface also runs an XDP program — a genuine veth/kernel
-characteristic of this lab's veth-pair uplink simulation, not a code bug and not a production
-concern. See the redesign plan's
-[§8](../../docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md#8-containerlab-validation) and
-`resources/galactic-gateway/`.
+and the full fabric converges. Real end-to-end ingress traffic through the datapath is now
+**live-validated** — three stacked issues were found and fixed along the way, not one: (1)
+IPv6 forwarding sysctls weren't enabled (fixed, `sysctl.ConfigureFIBLookupUplinkSysctls`);
+(2) veth's native `XDP_TX` fast path does not deliver a frame to the peer interface's normal
+receive stack at all unless the peer *also* runs an XDP program — confirmed live via a real
+destination-side packet counter, not just `tcpdump` invisibility (stronger than this section
+used to claim: "invisible to `tcpdump`, no delivery impact" was wrong, not merely imprecise).
+Worked around for this lab specifically, not by converting `edgedsr.c`'s production datapath
+from XDP to TC (a real gateway's public uplink is a physical NIC, where this veth-specific
+behavior doesn't apply, and XDP's throughput advantage is exactly why that datapath uses it):
+`task deploy:lab-xdp-passthrough` loads a trivial pass-through XDP program on `tr3`'s
+`eth6`/`eth7` (`node_files/common/xdp-passthrough.c`), already wired into `task deploy`.
+(3) `vip_xlat_table`'s veth-kind delivery gap and its identical-VIP/backend-port key
+collision, both fixed in galactic. See the redesign plan's
+[§8](../../docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md#8-containerlab-validation) for
+the full account, including the still-open, unrelated NAT66/default-egress gap this validation
+surfaced but did not fix, and `resources/galactic-gateway/`.
 
 `dfw`, `iad`, and `sjc` are the three Kind cluster names — not separate ContainerLab
 topology nodes. Each cluster's `control-plane`/`worker` nodes above are its members.
