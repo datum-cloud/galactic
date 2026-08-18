@@ -45,6 +45,10 @@ internal/plumbing/ebpf/edgeprog/edgedsr_bpfel.go
 internal/plumbing/ebpf/edgeprog/edgedsr_bpfel.o
 internal/plumbing/ebpf/edgeprog/edgedsr_bpfeb.go
 internal/plumbing/ebpf/edgeprog/edgedsr_bpfeb.o
+internal/plumbing/ebpf/nat66prog/nat66_bpfel.go
+internal/plumbing/ebpf/nat66prog/nat66_bpfel.o
+internal/plumbing/ebpf/nat66prog/nat66_bpfeb.go
+internal/plumbing/ebpf/nat66prog/nat66_bpfeb.o
 
 # ============================================================
 # Kubernetes / controller-runtime / kubebuilder
