@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"go.datum.net/galactic/internal/crdnames"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -52,6 +53,13 @@ const (
 	// testTargetRefKind is the TargetRef.Kind used by every fixture in
 	// this test package -- extracted to a constant per goconst.
 	testTargetRefKind = "Node"
+
+	// testBackendRouterID and testRouteTargetValue are shared placeholder
+	// values for BGPRouter.Spec.RouterID / BGPVRFInstance route targets
+	// across this file's and usidresolver_test.go's fixtures -- extracted
+	// to constants per goconst.
+	testBackendRouterID  = "1.1.1.2"
+	testRouteTargetValue = "65000:1"
 )
 
 func newRuleTestScheme(t *testing.T) *runtime.Scheme {
@@ -86,12 +94,23 @@ func newTestRule(name, vpcRef string, vips ...string) *bgpv1alpha1.NetworkRule {
 	}
 }
 
-// newBackendFixtures returns the BGPRouter/BGPAdvertisement pair that
-// resolves testBackendAddr (newTestRule's default backend) to a real SRv6
-// uSID via usidresolver.go's containment matching — without these, every
-// rule newTestRule builds fails buildDesiredRule and is silently excluded
-// from desired state.
-func newBackendFixtures() (*bgpv1alpha1.BGPRouter, *bgpv1alpha1.BGPAdvertisement) {
+// newBackendFixtures returns the BGPRouter/BGPAdvertisement/BGPVRFInstance
+// triple that resolves testBackendAddr (newTestRule's default backend) to a
+// real SRv6 uSID via usidresolver.go's containment-plus-tenant-ownership
+// matching — without these, every rule newTestRule builds for vpcRef fails
+// buildDesiredRule and is silently excluded from desired state.
+//
+// The BGPVRFInstance is what verifyTenantOwnership checks a candidate
+// BGPAdvertisement against: its name is crdnames.BGPVRFInstanceName(vpcRef,
+// testComputeNodeName), the exact deterministic name galactic-bgp would
+// have written for this VPC on this node, and its VRFID must equal the
+// advertisement's own VRFID for the match to be trusted. Two calls with
+// different vpcRef values produce independently-named advertisements and
+// VRF instances (crdnames.BGPAdvertisementName includes vpcRef), so callers
+// resolving more than one VPC in the same fake client never collide.
+func newBackendFixtures(
+	vpcRef string,
+) (*bgpv1alpha1.BGPRouter, *bgpv1alpha1.BGPAdvertisement, *bgpv1alpha1.BGPVRFInstance) {
 	vrfID := int32(testBackendVRFID)
 	function := bgpv1alpha1.SRv6FunctionEndDT46
 	router := &bgpv1alpha1.BGPRouter{
@@ -99,14 +118,14 @@ func newBackendFixtures() (*bgpv1alpha1.BGPRouter, *bgpv1alpha1.BGPAdvertisement
 		Spec: bgpv1alpha1.BGPRouterSpec{
 			TargetRef:   bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testComputeNodeName},
 			LocalASN:    65000,
-			RouterID:    "1.1.1.2",
+			RouterID:    testBackendRouterID,
 			Roles:       []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			SRv6Locator: testBackendLocator,
 			NodeID:      testBackendNodeID,
 		},
 	}
 	adv := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "backend-adv"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: crdnames.BGPAdvertisementName(vpcRef, "attach-1")},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: testBackendRouterName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
@@ -115,7 +134,17 @@ func newBackendFixtures() (*bgpv1alpha1.BGPRouter, *bgpv1alpha1.BGPAdvertisement
 			Function:      &function,
 		},
 	}
-	return router, adv
+	vrfInstanceName := crdnames.BGPVRFInstanceName(vpcRef, testComputeNodeName)
+	vrfInstance := &bgpv1alpha1.BGPVRFInstance{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: vrfInstanceName},
+		Spec: bgpv1alpha1.BGPVRFInstanceSpec{
+			RouterTarget:       bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: testBackendRouterName}},
+			VRFID:              vrfID,
+			ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: testRouteTargetValue}},
+			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: testRouteTargetValue}},
+		},
+	}
+	return router, adv, vrfInstance
 }
 
 func testRuleKey(name string) types.NamespacedName {

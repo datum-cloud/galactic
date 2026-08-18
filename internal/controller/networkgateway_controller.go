@@ -462,7 +462,7 @@ func buildDesiredRule(
 		if err != nil {
 			return gateway.DesiredRule{}, fmt.Errorf("invalid backend address %q: %w", b.Address, err)
 		}
-		usid, err := sidIndex.resolveUSID(addr)
+		usid, err := sidIndex.resolveUSID(addr, rule.Spec.VPCRef)
 		if err != nil {
 			return gateway.DesiredRule{}, fmt.Errorf("resolve backend %s: %w", addr, err)
 		}
