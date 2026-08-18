@@ -104,3 +104,5 @@ require (
 )
 
 tool github.com/cilium/ebpf/cmd/bpf2go
+
+replace go.datum.net/network => ../network
