@@ -44,11 +44,15 @@ case "$COMMAND" in
 
     if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
       echo "--- Loading kernel modules required by galactic"
-      sudo apt-get update -qq
+      # -o Acquire::Retries/::*::Timeout: bare `apt-get update` has no
+      # per-request timeout, so a stalled mirror connection hangs until the
+      # job's own timeout-minutes kills it -- see ci.yaml's identical flags
+      # on this same install for the incident that motivated them (#425).
+      sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -qq
       # Pin to the running kernel so modprobe finds the modules. The unversioned
       # meta-package may pull a newer kernel's modules than the one the runner is
       # actually executing, which causes modprobe to fail.
-      sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+      sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
     fi
     sudo modprobe vrf
 
