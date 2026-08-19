@@ -49,9 +49,9 @@ func TestVRFConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "invalid metrics port",
+			name:    testCaseInvalidMetricsPort,
 			envVars: map[string]string{EnvVRFMetricsPort: "0"},
-			wantErr: "metrics port must be between",
+			wantErr: testErrMetricsPortRange,
 		},
 		{
 			name:    "non-positive grace period",

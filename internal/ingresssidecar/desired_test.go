@@ -13,11 +13,14 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 )
 
-func readySlice(namespace, name, tenantID, sid, addr string) *discoveryv1.EndpointSlice {
+// readySlice always builds its EndpointSlice as testPodName in the "ns"
+// namespace -- every caller across this package's tests uses that same
+// fixture identity, so there's no name/namespace parameter to vary.
+func readySlice(tenantID, sid, addr string) *discoveryv1.EndpointSlice {
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
+			Namespace: "ns",
+			Name:      testPodName,
 			Labels:    map[string]string{crdnames.LabelTenantID: tenantID},
 			Annotations: map[string]string{
 				crdnames.AnnotationTenantID: tenantID,
@@ -43,7 +46,7 @@ func TestBuildDesiredRouteNotSelected(t *testing.T) {
 }
 
 func TestBuildDesiredRouteNoSIDYet(t *testing.T) {
-	slice := readySlice("ns", "pod-a", "vpc1-att1", "", "fd00::1")
+	slice := readySlice("vpc1-att1", "", "fd00::1")
 	got, err := BuildDesiredRoute(slice)
 	if err != nil || got != nil {
 		t.Fatalf("BuildDesiredRoute(no SID) = (%v, %v), want (nil, nil)", got, err)
@@ -51,7 +54,7 @@ func TestBuildDesiredRouteNoSIDYet(t *testing.T) {
 }
 
 func TestBuildDesiredRouteHappyPath(t *testing.T) {
-	slice := readySlice("ns", "pod-a", "vpc1-att1", "fd00:1234::1", "fd00::abcd")
+	slice := readySlice("vpc1-att1", "fd00:1234::1", "fd00::abcd")
 	got, err := BuildDesiredRoute(slice)
 	if err != nil {
 		t.Fatalf("BuildDesiredRoute: unexpected error: %v", err)
@@ -59,8 +62,8 @@ func TestBuildDesiredRouteHappyPath(t *testing.T) {
 	if got == nil {
 		t.Fatal("BuildDesiredRoute returned nil, want a DesiredRoute")
 	}
-	if got.VPC != "vpc1" {
-		t.Errorf("VPC = %q, want %q", got.VPC, "vpc1")
+	if got.VPC != testVPC1 {
+		t.Errorf("VPC = %q, want %q", got.VPC, testVPC1)
 	}
 	if got.Prefix.String() != "fd00::abcd/128" {
 		t.Errorf("Prefix = %q, want %q", got.Prefix.String(), "fd00::abcd/128")
@@ -71,7 +74,7 @@ func TestBuildDesiredRouteHappyPath(t *testing.T) {
 }
 
 func TestBuildDesiredRouteMalformedTenantID(t *testing.T) {
-	slice := readySlice("ns", "pod-a", "notenantsep", "fd00:1234::1", "fd00::abcd")
+	slice := readySlice("notenantsep", "fd00:1234::1", "fd00::abcd")
 	got, err := BuildDesiredRoute(slice)
 	if err == nil || got != nil {
 		t.Fatalf("BuildDesiredRoute(malformed tenant id) = (%v, %v), want (nil, error)", got, err)
@@ -79,7 +82,7 @@ func TestBuildDesiredRouteMalformedTenantID(t *testing.T) {
 }
 
 func TestBuildDesiredRouteInvalidSID(t *testing.T) {
-	slice := readySlice("ns", "pod-a", "vpc1-att1", "not-an-ip", "fd00::abcd")
+	slice := readySlice("vpc1-att1", "not-an-ip", "fd00::abcd")
 	got, err := BuildDesiredRoute(slice)
 	if err == nil || got != nil {
 		t.Fatalf("BuildDesiredRoute(invalid SID) = (%v, %v), want (nil, error)", got, err)
@@ -87,7 +90,7 @@ func TestBuildDesiredRouteInvalidSID(t *testing.T) {
 }
 
 func TestBuildDesiredRouteWrongAddressType(t *testing.T) {
-	slice := readySlice("ns", "pod-a", "vpc1-att1", "fd00:1234::1", "10.0.0.1")
+	slice := readySlice("vpc1-att1", "fd00:1234::1", "10.0.0.1")
 	slice.AddressType = discoveryv1.AddressTypeIPv4
 	got, err := BuildDesiredRoute(slice)
 	if err == nil || got != nil {
@@ -96,7 +99,7 @@ func TestBuildDesiredRouteWrongAddressType(t *testing.T) {
 }
 
 func TestBuildDesiredRouteNoEndpointAddress(t *testing.T) {
-	slice := readySlice("ns", "pod-a", "vpc1-att1", "fd00:1234::1", "")
+	slice := readySlice("vpc1-att1", "fd00:1234::1", "")
 	slice.Endpoints[0].Addresses = nil
 	got, err := BuildDesiredRoute(slice)
 	if err == nil || got != nil {

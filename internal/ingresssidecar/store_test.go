@@ -22,6 +22,13 @@ func mustPrefix(t *testing.T, s string) *net.IPNet {
 
 const testGrace = 10 * time.Second
 
+// testVPC1 and testPodName are the fixture VPC/pod-name values shared
+// across this package's tests.
+const (
+	testVPC1    = "vpc1"
+	testPodName = "pod-a"
+)
+
 // TestStoreRouteAndVRFAppear verifies a pod's first appearance creates both
 // its VRF (per §1: one per VPC) and its own route.
 func TestStoreRouteAndVRFAppear(t *testing.T) {
@@ -29,7 +36,7 @@ func TestStoreRouteAndVRFAppear(t *testing.T) {
 	backend := newFakeBackend()
 	store := NewStore(backend, testGrace, nil)
 
-	desired := &DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
 		t.Fatalf("SetDesired: %v", err)
 	}
@@ -51,8 +58,8 @@ func TestStoreSecondAttachmentSharesVRF(t *testing.T) {
 	backend := newFakeBackend()
 	store := NewStore(backend, testGrace, nil)
 
-	first := &DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
-	second := &DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::2"), SID: net.ParseIP("fd00:99::2")}
+	first := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	second := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::2"), SID: net.ParseIP("fd00:99::2")}
 
 	if err := store.SetDesired(ctx, "ns/pod-a", first); err != nil {
 		t.Fatalf("SetDesired(pod-a): %v", err)
@@ -89,7 +96,7 @@ func TestStoreRouteTeardownGrace(t *testing.T) {
 	backend := newFakeBackend()
 	store := NewStore(backend, testGrace, nil)
 
-	desired := &DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
 		t.Fatalf("SetDesired: %v", err)
 	}
@@ -128,7 +135,7 @@ func TestStoreVRFOutlivesRouteGrace(t *testing.T) {
 	backend := newFakeBackend()
 	store := NewStore(backend, testGrace, nil)
 
-	desired := &DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
 		t.Fatalf("SetDesired: %v", err)
 	}
@@ -155,7 +162,7 @@ func TestStoreReactivationCancelsTeardown(t *testing.T) {
 	backend := newFakeBackend()
 	store := NewStore(backend, testGrace, nil)
 
-	desired := &DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
 		t.Fatalf("SetDesired: %v", err)
 	}
@@ -185,7 +192,7 @@ func TestStoreInventorySeedsOrphan(t *testing.T) {
 	store := NewStore(backend, testGrace, nil)
 
 	prefix := mustPrefix(t, "fd00::1")
-	backend.seedRoute("vpc1", 5, prefix, net.ParseIP("fd00:99::1"))
+	backend.seedRoute(testVPC1, 5, prefix, net.ParseIP("fd00:99::1"))
 
 	if err := store.Inventory(ctx, time.Now()); err != nil {
 		t.Fatalf("Inventory: %v", err)
@@ -218,7 +225,7 @@ func TestStoreInventorySkipsKnownRoute(t *testing.T) {
 	store := NewStore(backend, testGrace, nil)
 
 	prefix := mustPrefix(t, "fd00::1")
-	desired := &DesiredRoute{VPC: "vpc1", Prefix: prefix, SID: net.ParseIP("fd00:99::1")}
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: prefix, SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
 		t.Fatalf("SetDesired: %v", err)
 	}
@@ -246,7 +253,7 @@ func TestStoreEnsureVRFErrorNotTracked(t *testing.T) {
 	backend.failEnsureVRF = errTest
 	store := NewStore(backend, testGrace, nil)
 
-	desired := &DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err == nil {
 		t.Fatal("SetDesired: want error, got nil")
 	}

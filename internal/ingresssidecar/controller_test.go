@@ -33,7 +33,7 @@ func newTestScheme(t *testing.T) *runtime.Scheme {
 // an existing, well-formed EndpointSlice installs its VRF and route.
 func TestReconcilerAppliesDesiredRoute(t *testing.T) {
 	scheme := newTestScheme(t)
-	slice := readySlice("ns", "pod-a", "vpc1-att1", "fd00:1234::1", "fd00::abcd")
+	slice := readySlice("vpc1-att1", "fd00:1234::1", "fd00::abcd")
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
@@ -41,7 +41,7 @@ func TestReconcilerAppliesDesiredRoute(t *testing.T) {
 	r := &Reconciler{Client: c, Store: store}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "pod-a"},
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: testPodName},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -64,12 +64,12 @@ func TestReconcilerDeletedSliceStartsGrace(t *testing.T) {
 	backend := newFakeBackend()
 	store := NewStore(backend, testGrace, nil)
 	if err := store.SetDesired(context.Background(), "ns/pod-a",
-		&DesiredRoute{VPC: "vpc1", Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}); err != nil {
+		&DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}); err != nil {
 		t.Fatalf("seed SetDesired: %v", err)
 	}
 	r := &Reconciler{Client: c, Store: store}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "pod-a"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: testPodName}}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestReconcilerMalformedSliceDoesNotError(t *testing.T) {
 	scheme := newTestScheme(t)
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns", Name: "pod-a",
+			Namespace: "ns", Name: testPodName,
 			Labels:      map[string]string{crdnames.LabelTenantID: "novalidseparator"},
 			Annotations: map[string]string{crdnames.AnnotationTenantID: "novalidseparator"},
 		},
@@ -99,7 +99,7 @@ func TestReconcilerMalformedSliceDoesNotError(t *testing.T) {
 	r := &Reconciler{Client: c, Store: store}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "pod-a"},
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: testPodName},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile: want nil error for malformed-but-selected slice, got %v", err)

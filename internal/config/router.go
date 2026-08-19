@@ -167,7 +167,7 @@ func (c *RouterConfig) Validate() error {
 		return errors.New("bgp listen port must be between 1 and 65535, or -1 for outbound-only mode")
 	}
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
-		return errors.New("metrics port must be between 1 and 65535")
+		return errors.New(errMetricsPortRange)
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")

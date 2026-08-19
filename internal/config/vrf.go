@@ -82,7 +82,7 @@ func NewVRFConfig() *VRFConfig {
 	v.SetEnvPrefix("GALACTIC_VRF")
 	v.AutomaticEnv()
 
-	v.SetDefault("metrics_port", DefaultVRFMetricsPort)
+	v.SetDefault(keyMetricsPort, DefaultVRFMetricsPort)
 	v.SetDefault("teardown_grace_period", DefaultVRFTeardownGracePeriod.String())
 	v.SetDefault("sweep_interval", DefaultVRFSweepInterval.String())
 
@@ -101,7 +101,7 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		flag string
 		key  string
 	}{
-		{"metrics-port", "metrics_port"},
+		{flagMetricsPort, keyMetricsPort},
 		{"teardown-grace-period", "teardown_grace_period"},
 		{"sweep-interval", "sweep_interval"},
 	}
@@ -118,7 +118,7 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 
 // readFields populates the exported fields from the current Viper state.
 func (c *VRFConfig) readFields() {
-	c.MetricsPort = c.v.GetInt("metrics_port")
+	c.MetricsPort = c.v.GetInt(keyMetricsPort)
 	c.TeardownGracePeriod = c.v.GetDuration("teardown_grace_period")
 	c.SweepInterval = c.v.GetDuration("sweep_interval")
 }
@@ -126,7 +126,7 @@ func (c *VRFConfig) readFields() {
 // Validate checks that the resolved configuration is usable.
 func (c *VRFConfig) Validate() error {
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
-		return errors.New("metrics port must be between 1 and 65535")
+		return errors.New(errMetricsPortRange)
 	}
 	if c.TeardownGracePeriod <= 0 {
 		return errors.New("teardown grace period must be positive")

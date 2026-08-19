@@ -47,6 +47,13 @@ const (
 	testVPCBase62        = "0000000jU"
 	testAttachment       = "def"
 	testAttachmentBase62 = "00G"
+
+	// testTenantID and testTenantIDBase62 are the already-joined
+	// (vpc, attachment) identifiers for the pairs above -- shared across
+	// the table-driven tests that need the formatted form rather than the
+	// two raw parts.
+	testTenantID       = testVPC + "-" + testAttachment
+	testTenantIDBase62 = testVPCBase62 + "-" + testAttachmentBase62
 )
 
 func TestBGPVRFInstanceName(t *testing.T) {
@@ -91,8 +98,8 @@ func TestBGPAdvertisementName(t *testing.T) {
 
 func TestTenantIdentifier(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
-		{testVPC, testAttachment, "abc-def"},
-		{testVPCBase62, testAttachmentBase62, "0000000jU-00G"},
+		{testVPC, testAttachment, testTenantID},
+		{testVPCBase62, testAttachmentBase62, testTenantIDBase62},
 	}
 	for _, tt := range tests {
 		got := TenantIdentifier(tt.vpc, tt.attachment)
@@ -128,8 +135,8 @@ func TestParseTenantIdentifier(t *testing.T) {
 		wantAttachment string
 		wantOK         bool
 	}{
-		{"simple", "abc-def", testVPC, testAttachment, true},
-		{"base62 vpc", "0000000jU-00G", testVPCBase62, "00G", true},
+		{"simple", testTenantID, testVPC, testAttachment, true},
+		{"base62 vpc", testTenantIDBase62, testVPCBase62, testAttachmentBase62, true},
 		{"no separator", "abcdef", "", "", false},
 		{"empty vpc", "-def", "", "", false},
 		{"empty attachment", "abc-", "", "", false},
@@ -152,7 +159,7 @@ func TestParseTenantIdentifier(t *testing.T) {
 func TestParseTenantIdentifierRoundTrip(t *testing.T) {
 	tests := []struct{ vpc, attachment string }{
 		{testVPC, testAttachment},
-		{testVPCBase62, "00G"},
+		{testVPCBase62, testAttachmentBase62},
 		{"0", "0"},
 		{"Zz9", "aB0"},
 	}
