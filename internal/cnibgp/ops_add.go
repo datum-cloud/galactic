@@ -95,12 +95,19 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// EndpointSlice to carry either way.
 	if ipamResult != nil && ipamResult.IPv6Subnet != nil {
 		podName := nadpatch.ParsePodName(args.Args)
-		if podName == "" {
-			return fmt.Errorf("publish EndpointSlice: no K8S_POD_NAME in CNI_ARGS %q", args.Args)
+		// The EndpointSlice is created in the pod's own namespace, per
+		// docs/cni/configuration.md's "EndpointSlice publish" section —
+		// distinct from `namespace` above, which is where the BGP CRDs
+		// live (defaults to galactic-system) and is very often a
+		// different namespace from the workload pod's own.
+		podNamespace := nadpatch.ParsePodNamespace(args.Args)
+		if podName == "" || podNamespace == "" {
+			return fmt.Errorf(
+				"publish EndpointSlice: no K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS %q", args.Args)
 		}
 		esCtx, esCancel := context.WithTimeout(context.Background(), cniTimeout)
 		esErr := publishEndpointSlice(
-			esCtx, k8sClient, namespace, podName, pluginConf.VPC, pluginConf.VPCAttachment,
+			esCtx, k8sClient, podNamespace, podName, pluginConf.VPC, pluginConf.VPCAttachment,
 			ipamResult.IPv6Subnet.IP, result.sid,
 		)
 		esCancel()

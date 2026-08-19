@@ -40,7 +40,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 	t.Run("missing EndpointSlice is an error", func(t *testing.T) {
 		k8s := fakeClient()
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want an error when the EndpointSlice does not exist")
 		}
@@ -60,7 +60,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 		k8s := fakeClient(slice)
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want an address-mismatch error")
 		}
@@ -83,7 +83,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 		k8s := fakeClient(slice)
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want a tenant-id mismatch error")
 		}
@@ -106,7 +106,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 		k8s := fakeClient(slice)
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
 		if err != nil {
 			t.Fatalf("checkEndpointSlice() = %v, want nil", err)
 		}
@@ -137,7 +137,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		k8s := fakeClient(router, slice)
 
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, mustParseAddr(t), true, vrfID)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), true, vrfID)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want a SID-mismatch error")
 		}
@@ -176,7 +176,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		k8s := fakeClient(router, slice)
 
 		if err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, mustParseAddr(t), true, vrfID,
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), true, vrfID,
 		); err != nil {
 			t.Fatalf("checkEndpointSlice() = %v, want nil", err)
 		}
@@ -200,7 +200,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		k8s := fakeClient(router, slice)
 
 		if err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, mustParseAddr(t), true, vrfID,
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), true, vrfID,
 		); err != nil {
 			t.Fatalf("checkEndpointSlice() = %v, want nil", err)
 		}

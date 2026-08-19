@@ -78,10 +78,14 @@ func cmdCheck(args *skel.CmdArgs) error {
 		errs = append(errs, fmt.Errorf("infer from prevResult: %w", prevErr))
 	} else if ipamResult != nil && ipamResult.IPv6Subnet != nil {
 		podName := nadpatch.ParsePodName(args.Args)
-		if podName == "" {
-			errs = append(errs, errors.New("EndpointSlice: no K8S_POD_NAME in CNI_ARGS"))
+		// The EndpointSlice lives in the pod's own namespace (see ops_add.go's
+		// cmdAdd), not pluginConf.Namespace — that's only where the BGP CRDs
+		// checked above live.
+		podNamespace := nadpatch.ParsePodNamespace(args.Args)
+		if podName == "" || podNamespace == "" {
+			errs = append(errs, errors.New("EndpointSlice: no K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS"))
 		} else if err := checkEndpointSlice(
-			ctx, k8s, pluginConf, podName, ipamResult.IPv6Subnet.IP, vrfErr == nil, vrfInst.Spec.VRFID,
+			ctx, k8s, pluginConf, podName, podNamespace, ipamResult.IPv6Subnet.IP, vrfErr == nil, vrfInst.Spec.VRFID,
 		); err != nil {
 			errs = append(errs, err)
 		}
@@ -191,14 +195,17 @@ func checkEBPFEntry(ctx context.Context, k8s client.Client, pluginConf *PluginCo
 // BGPVRFInstance lookup in cmdCheck above failed, in which case the SID
 // can't be recomputed and its annotation is not checked — matches
 // registerEBPFDatapath/checkEBPFEntry's own "can't check what we can't
-// compute" convention.
+// compute" convention. podNamespace is the pod's own namespace (parsed from
+// CNI_ARGS) — where cmdAdd created the EndpointSlice — distinct from
+// pluginConf.Namespace, which the BGPRouter lookup below still uses since
+// that's where the BGP CRDs live.
 func checkEndpointSlice(
-	ctx context.Context, k8s client.Client, pluginConf *PluginConf, podName string,
+	ctx context.Context, k8s client.Client, pluginConf *PluginConf, podName, podNamespace string,
 	addr net.IP, vrfIDKnown bool, vrfID int32,
 ) error {
 	name := crdnames.EndpointSliceName(podName)
 	slice := &discoveryv1.EndpointSlice{}
-	if err := k8s.Get(ctx, client.ObjectKey{Name: name, Namespace: pluginConf.Namespace}, slice); err != nil {
+	if err := k8s.Get(ctx, client.ObjectKey{Name: name, Namespace: podNamespace}, slice); err != nil {
 		return fmt.Errorf("EndpointSlice %s: %w", name, err)
 	}
 

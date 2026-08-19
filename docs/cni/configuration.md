@@ -338,6 +338,13 @@ EndpointSlice carries:
 CHECK verifies the EndpointSlice still exists with the expected address and
 annotations.
 
+Both the pod's name and its namespace are parsed from `K8S_POD_NAME`/
+`K8S_POD_NAMESPACE` in `CNI_ARGS` (`internal/nadpatch.ParsePodName`/
+`ParsePodNamespace`) — Multus always sets both for a real pod-scoped
+invocation, but a standalone/manual invocation (e.g. one that skips the CNI
+runtime, as some `tests/e2e` cases do) must set `CNI_ARGS` itself or ADD
+fails outright and CHECK reports an error.
+
 ## Example Configurations
 
 Every example below is a full conflist (a `NetworkAttachmentDefinition`'s

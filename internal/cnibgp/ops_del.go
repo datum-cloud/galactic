@@ -48,7 +48,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	slog.Info("DEL: skipping shared resource cleanup (handled by GC)", "containerID", args.ContainerID,
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 
-	deleteEndpointSliceBestEffort(args, pluginConf.Namespace)
+	deleteEndpointSliceBestEffort(args)
 
 	result := &type100.Result{}
 	_ = types.PrintResult(result, pluginConf.CNIVersion)
@@ -57,10 +57,14 @@ func cmdDel(args *skel.CmdArgs) error {
 
 // deleteEndpointSliceBestEffort deletes this pod's EndpointSlice, logging
 // (never failing DEL) on any error — see cmdDel's own doc comment for why.
-func deleteEndpointSliceBestEffort(args *skel.CmdArgs, namespace string) {
+// The EndpointSlice lives in the pod's own namespace (parsed from CNI_ARGS
+// below, same as podName), not pluginConf.Namespace — that's only where the
+// BGP CRDs live, and cmdDel deliberately leaves those alone (see above).
+func deleteEndpointSliceBestEffort(args *skel.CmdArgs) {
 	podName := nadpatch.ParsePodName(args.Args)
-	if podName == "" {
-		slog.Debug("DEL: no K8S_POD_NAME in CNI_ARGS, nothing to delete",
+	podNamespace := nadpatch.ParsePodNamespace(args.Args)
+	if podName == "" || podNamespace == "" {
+		slog.Debug("DEL: no K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS, nothing to delete",
 			"containerID", args.ContainerID, "cniArgs", args.Args)
 		return
 	}
@@ -74,10 +78,10 @@ func deleteEndpointSliceBestEffort(args *skel.CmdArgs, namespace string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
-	if err := deleteEndpointSlice(ctx, k8sClient, namespace, podName); err != nil {
+	if err := deleteEndpointSlice(ctx, k8sClient, podNamespace, podName); err != nil {
 		slog.Error("DEL: failed to delete EndpointSlice, cleanup deferred to GC",
-			"err", err, "containerID", args.ContainerID, "podName", podName, "namespace", namespace)
+			"err", err, "containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)
 		return
 	}
-	slog.Info("DEL: EndpointSlice deleted", "containerID", args.ContainerID, "podName", podName, "namespace", namespace)
+	slog.Info("DEL: EndpointSlice deleted", "containerID", args.ContainerID, "podName", podName, "namespace", podNamespace)
 }
