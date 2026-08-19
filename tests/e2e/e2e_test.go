@@ -388,6 +388,15 @@ func testChainedGalacticBGP(t *testing.T, podName string, tapResult map[string]a
   "prevResult": %s
 }`, vpc, vpcAttachment, prevResultJSON)
 
+	// galactic-bgp's EndpointSlice publish (ops_add.go) Gets the owning Pod
+	// by name+namespace out of K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS —
+	// exactly what a real kubelet-driven invocation always sets for every
+	// pod-scoped CNI call, via Multus. This chained-plugin test invokes the
+	// binary directly rather than through the CNI runtime, so it has to set
+	// CNI_ARGS itself; podName is this test's own workload pod (created
+	// above), so its namespace is asked of the API rather than assumed.
+	podNamespace := podNamespaceOf(t, podName)
+
 	// Reuses the same netns/containerID/ifname galactic-tap's own step
 	// (above) already set up: a real chained plugin sees the identical
 	// values across every plugin invoked for one CNI ADD.
@@ -397,6 +406,7 @@ CNI_COMMAND=$1 \
 CNI_CONTAINERID=e2e-tap-001 \
 CNI_IFNAME=eth0 \
 CNI_PATH=/ \
+CNI_ARGS="K8S_POD_NAME=` + podName + `;K8S_POD_NAMESPACE=` + podNamespace + `" \
 NODE_NAME=` + nodeName() + ` \
 	/galactic-bgp < /tmp/cni-bgp.json
 `
@@ -480,6 +490,20 @@ func nodeName() string {
 		return v
 	}
 	return "kind-worker"
+}
+
+// podNamespaceOf returns the namespace of an already-created pod, by
+// asking the API rather than assuming it — this suite never passes
+// --namespace to kubectl, so the pod actually landed in whatever namespace
+// the ambient kubectl context defaults to (scripts/ci.sh points that at
+// galactic-system, but nothing here should hard-code that).
+func podNamespaceOf(t *testing.T, podName string) string {
+	t.Helper()
+	out, err := kubectl(t.Context(), "get", "pod", podName, "-o", "jsonpath={.metadata.namespace}")
+	if err != nil {
+		t.Fatalf("get namespace of pod %s: %v\n%s", podName, err, out)
+	}
+	return out
 }
 
 // kubectl runs kubectl with the given arguments and returns combined output.
