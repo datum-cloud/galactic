@@ -259,7 +259,16 @@ func (erroringIterator) Err() error         { return errors.New("simulated map i
 func TestCollector_VRFListErrorReportsInvalidMetric(t *testing.T) {
 	c := NewCollector(usidmap.NewVRFTable(erroringTable{}), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{})
 
-	ch := make(chan prometheus.Metric, 16)
+	// 256, not a count sized to exactly this test's own metrics: Collect
+	// sends synchronously and this channel isn't drained concurrently
+	// (the receive loop below only starts after Collect returns), so a
+	// buffer sized to exactly today's drop-reason count silently
+	// deadlocks the next time that count grows -- confirmed live, this
+	// hung for the full 10-minute go test default timeout the moment
+	// usid.c's own drop_reason enum gained a 16th entry. Matches this
+	// same file's other Collect-into-a-channel test (line ~31) already
+	// using 256 for the identical reason.
+	ch := make(chan prometheus.Metric, 256)
 	c.Collect(ch)
 	close(ch)
 

@@ -669,3 +669,136 @@ func TestResolveNodeSourceAddress_UnresolvableInterfaceFailsLoudly(t *testing.T)
 		t.Error("ResolveNodeSourceAddress() = nil error for a nonexistent interface, want an error")
 	}
 }
+
+// TestResolvePublicUplink_ReturnsInterfaceIndexAndNeighborMAC covers the
+// happy path: given a resolvable fabric-uplink interface with exactly one
+// resolved IPv6 neighbor (this codebase's own topology never has more
+// than one on a point-to-point uplink -- see ResolvePublicUplink's own
+// doc comment), it must return that interface's own index, the
+// neighbor's MAC as dmac, and the interface's own MAC as smac.
+func TestResolvePublicUplink_ReturnsInterfaceIndexAndNeighborMAC(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		ifaceName = "srv6puptest0"
+		ifaceAddr = "2001:db8:8::2/64"
+		neighAddr = "2001:db8:8::1"
+	)
+	neighMAC := net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}
+
+	t.Setenv(config.EnvCNIEBPFInterfaces, ifaceName)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	var wantIndex int
+	var wantSmac net.HardwareAddr
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		if err := netlink.AddrAdd(dummy, addr); err != nil {
+			return fmt.Errorf("add addr: %w", err)
+		}
+		link, err := netlink.LinkByName(ifaceName)
+		if err != nil {
+			return fmt.Errorf("look up link: %w", err)
+		}
+		wantIndex = link.Attrs().Index
+		wantSmac = link.Attrs().HardwareAddr
+		return netlink.NeighAdd(&netlink.Neigh{
+			LinkIndex:    wantIndex,
+			Family:       netlink.FAMILY_V6,
+			State:        netlink.NUD_PERMANENT,
+			IP:           net.ParseIP(neighAddr),
+			HardwareAddr: neighMAC,
+		})
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	var gotIndex int
+	var gotDmac, gotSmac net.HardwareAddr
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		var doErr error
+		gotIndex, gotDmac, gotSmac, doErr = ResolvePublicUplink()
+		return doErr
+	})
+	if err != nil {
+		t.Fatalf("ResolvePublicUplink: %v", err)
+	}
+
+	if gotIndex != wantIndex {
+		t.Errorf("ResolvePublicUplink() linkIndex = %d, want %d", gotIndex, wantIndex)
+	}
+	if gotDmac.String() != neighMAC.String() {
+		t.Errorf("ResolvePublicUplink() dmac = %s, want %s (the resolved neighbor's own MAC)", gotDmac, neighMAC)
+	}
+	if gotSmac.String() != wantSmac.String() {
+		t.Errorf("ResolvePublicUplink() smac = %s, want %s (the interface's own MAC)", gotSmac, wantSmac)
+	}
+}
+
+// TestResolvePublicUplink_NoResolvedNeighborFailsLoudly covers the
+// underlay-not-converged-yet case: the interface exists and is
+// resolvable, but has no neighbor entry with a resolved link-layer
+// address yet (e.g. this node just booted, before the underlay's own
+// neighbor discovery has completed) -- must fail with an actionable
+// error, not silently return a zero linkIndex/nil dmac/smac that
+// public_uplink_table's own "link_ifindex == 0 means not configured"
+// convention would otherwise treat as ambiguous with a genuine miss.
+func TestResolvePublicUplink_NoResolvedNeighborFailsLoudly(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		ifaceName = "srv6puptest1"
+		ifaceAddr = "2001:db8:9::2/64"
+	)
+
+	t.Setenv(config.EnvCNIEBPFInterfaces, ifaceName)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		return netlink.AddrAdd(dummy, addr)
+		// Deliberately no neighbor added -- see this test's own doc comment.
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		_, _, _, doErr := ResolvePublicUplink()
+		return doErr
+	})
+	if err == nil {
+		t.Error("ResolvePublicUplink() = nil error with no resolved neighbor, want an error")
+	}
+}

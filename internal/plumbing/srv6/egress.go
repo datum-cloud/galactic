@@ -303,3 +303,62 @@ func ResolveNodeSourceAddress() (net.IP, error) {
 	}
 	return nil, fmt.Errorf("no global-scope IPv6 address found on %s (the SRv6/underlay-facing interface)", names[0])
 }
+
+// ResolvePublicUplink resolves this node's own fabric-uplink interface's
+// real, physical next hop -- the link index plus the concrete L2
+// (destination and source MAC) address a DSR backend's VIP-sourced reply
+// must be redirected toward (egressroutemap.PublicUplink), unconditionally,
+// regardless of that reply's own real destination. See struct
+// public_uplink_value's own doc comment in usid.c for the full mechanism.
+//
+// Deliberately reuses attach.ResolveInterfaces, the same as
+// ResolveNodeSourceAddress just above and for the identical reason: this
+// can never disagree with wherever usid_ingress/usid_egress are actually
+// attached. Every fabric uplink in this codebase's own topology (a
+// physical NIC on real hardware; a point-to-point veth to a transit
+// router in this repo's own containerlab lab) has exactly one real
+// neighbor, so -- unlike resolveLinkAndL2's own per-SID resolution,
+// which needs netlink.RouteGet to pick the right neighbor out of a link
+// with more than one -- this just takes whichever IPv6 neighbor entry on
+// that interface already has a resolved link-layer address, with no
+// destination-specific route lookup at all: there is only ever one
+// candidate to find.
+func ResolvePublicUplink() (linkIndex int, dmac, smac net.HardwareAddr, err error) {
+	names, err := attach.ResolveInterfaces()
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("resolve SRv6/underlay-facing interface: %w", err)
+	}
+	if len(names) == 0 {
+		return 0, nil, nil, errors.New("attach.ResolveInterfaces returned no interfaces")
+	}
+
+	link, err := netlink.LinkByName(names[0])
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("look up interface %q: %w", names[0], err)
+	}
+	smac = link.Attrs().HardwareAddr
+	linkIndex = link.Attrs().Index
+
+	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_V6)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("list neighbors on %s: %w", names[0], err)
+	}
+	for _, n := range neighs {
+		// Every IPv6-enabled interface auto-populates a permanent,
+		// already-"resolved" multicast neighbor entry of its own (for its
+		// solicited-node/all-nodes group membership, MAC prefix 33:33::),
+		// regardless of whether any real unicast next hop has ever been
+		// discovered -- confirmed live, this is exactly what an earlier
+		// version of this loop (accepting any entry with a 6-byte
+		// HardwareAddr) matched first, on an interface with no genuine
+		// neighbor at all. n.IP.IsMulticast() excludes it; a real
+		// point-to-point uplink's only remaining entry is its one actual
+		// neighbor.
+		if len(n.HardwareAddr) == 6 && n.IP != nil && !n.IP.IsMulticast() {
+			return linkIndex, n.HardwareAddr, smac, nil
+		}
+	}
+	return 0, nil, nil, fmt.Errorf(
+		"no resolved neighbor found on %s (the SRv6/underlay-facing interface) -- the underlay hasn't converged yet",
+		names[0])
+}

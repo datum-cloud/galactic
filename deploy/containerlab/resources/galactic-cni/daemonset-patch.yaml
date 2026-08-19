@@ -22,6 +22,27 @@ spec:
             # back by internal/cnibgp at every CNI ADD.
             - name: GALACTIC_CNI_NAT66_SHARD_SIDS
               value: "2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::,2001:db8:ff03:9:e001::"
+            # Every lab node is dual-homed: eth0 carries the IPv6 default
+            # route but only reaches the Kind/ContainerLab management
+            # bridge, while eth1 is the dedicated point-to-point link to
+            # the transit fabric that actual SRv6-encapsulated VPC traffic
+            # arrives/departs on -- see credential-refresh's own identical
+            # env var below for the full history of why this override
+            # exists at all. This init container needs its own copy, not
+            # just credential-refresh's: internal/installer.Bootstrap
+            # (this container) is what resolves and writes it into the
+            # static conflist's own "ebpf_interfaces" field for
+            # internal/cnibgp to read back on every CNI ADD (mirroring
+            # NAT66_SHARD_SIDS just above) -- found live, without it here,
+            # Bootstrap's own resolution fell back to the same broken
+            # eth0 auto-detection this override exists to fix, producing
+            # a wrong-but-plausible srv6.ResolvePublicUplink/
+            # ResolveNodeSourceAddress result for every CNI ADD with no
+            # error at all (this env var being set only on
+            # credential-refresh, a separate container in the same pod,
+            # never propagates to this one).
+            - name: GALACTIC_CNI_EBPF_INTERFACES
+              value: eth1
       containers:
         - name: credential-refresh
           image: galactic-cni:latest

@@ -79,6 +79,13 @@ type CNIConfig struct {
 	// (internal/cnibgp splits and validates it) since this package has no
 	// IP-address type of its own to return.
 	NAT66ShardSIDs string
+
+	// EBPFInterfaces is the raw, comma-separated interface list -- see
+	// EnvCNIEBPFInterfaces' own doc comment and hostconf.HostConf.
+	// EBPFInterfaces' identical one for why this needs the same env >
+	// conflist > default resolution as NAT66ShardSIDs above, not just a
+	// plain os.Getenv at the call site.
+	EBPFInterfaces string
 }
 
 // NewCNIConfig creates a new CNI config resolver. Callers should invoke this
@@ -91,7 +98,7 @@ func NewCNIConfig() *CNIConfig {
 // by any matching environment variables. The conflist values act as the
 // "middle tier" between env vars and compiled-in defaults.
 func (c *CNIConfig) Resolve(conflist *ConflistValues) {
-	var cnflistNode, cnflistKube, cnflistNS, cnflistLog, cnflistLevel, cnflistShardSIDs string
+	var cnflistNode, cnflistKube, cnflistNS, cnflistLog, cnflistLevel, cnflistShardSIDs, cnflistEBPFIfaces string
 	if conflist != nil {
 		cnflistNode = conflist.NodeName
 		cnflistKube = conflist.Kubeconfig
@@ -99,6 +106,7 @@ func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 		cnflistLog = conflist.LogFile
 		cnflistLevel = conflist.LogLevel
 		cnflistShardSIDs = conflist.NAT66ShardSIDs
+		cnflistEBPFIfaces = conflist.EBPFInterfaces
 	}
 
 	// NodeName: env > conflist > legacy fallback > (no default)
@@ -126,6 +134,12 @@ func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 	// shard configured", not an error; see EnvCNINAT66ShardSIDs's doc
 	// comment).
 	c.NAT66ShardSIDs = resolveEnv(EnvCNINAT66ShardSIDs, cnflistShardSIDs, "")
+
+	// EBPFInterfaces: env > conflist > (no default -- empty means "fall
+	// back to attach.ResolveInterfaces' own auto-detection," the
+	// pre-existing behavior, not an error; see EnvCNIEBPFInterfaces' own
+	// doc comment).
+	c.EBPFInterfaces = resolveEnv(EnvCNIEBPFInterfaces, cnflistEBPFIfaces, "")
 }
 
 // ConflistValues holds the raw values read from the CNI conflist file.
@@ -137,4 +151,5 @@ type ConflistValues struct {
 	LogFile        string
 	LogLevel       string
 	NAT66ShardSIDs string
+	EBPFInterfaces string
 }

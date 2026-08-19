@@ -86,6 +86,24 @@ func TestResolveNAT66ShardSIDs(t *testing.T) {
 	}
 }
 
+// TestResolveEBPFInterfaces covers the env-override path only (the
+// auto-detected fallback -- attach.ResolveInterfaces' own default IPv6
+// route heuristic -- depends on this test host's own routing table, so
+// asserting an exact interface name there would be environment-dependent
+// rather than a property of this function itself). GALACTIC_CNI_EBPF_INTERFACES
+// set here is exactly what internal/cnibgp's own config.go bridges back
+// into a downstream CNI plugin process's raw env, per hostconf.HostConf.
+// EBPFInterfaces' own doc comment -- this test is what makes that value
+// deterministic and correct in the first place, resolved once from this
+// init container's own real pod env.
+func TestResolveEBPFInterfaces(t *testing.T) {
+	const want = "eth1,eth2"
+	t.Setenv(config.EnvCNIEBPFInterfaces, want)
+	if got := resolveEBPFInterfaces(); got != want {
+		t.Errorf("resolveEBPFInterfaces() = %q, want %q", got, want)
+	}
+}
+
 // assertBinaryCopied verifies that the binary at path exists and contains
 // wantContent, factored out of TestBootstrap to keep its own cyclomatic
 // complexity within golangci-lint's gocyclo budget.
@@ -187,6 +205,8 @@ func TestBootstrap(t *testing.T) {
 		}
 		const wantShardSIDs = "2001:db8:ff01:1:e001::,2001:db8:ff03:1:e001::"
 		t.Setenv(config.EnvCNINAT66ShardSIDs, wantShardSIDs)
+		const wantEBPFIfaces = "eth1"
+		t.Setenv(config.EnvCNIEBPFInterfaces, wantEBPFIfaces)
 
 		err := Bootstrap(context.Background(), "test-node")
 		if err != nil {
@@ -222,6 +242,9 @@ func TestBootstrap(t *testing.T) {
 		}
 		if conflist.NAT66ShardSIDs != wantShardSIDs {
 			t.Errorf("expected nat66_shard_sids %s, got %s", wantShardSIDs, conflist.NAT66ShardSIDs)
+		}
+		if conflist.EBPFInterfaces != wantEBPFIfaces {
+			t.Errorf("expected ebpf_interfaces %s, got %s", wantEBPFIfaces, conflist.EBPFInterfaces)
 		}
 
 		// Verify kubeconfig written

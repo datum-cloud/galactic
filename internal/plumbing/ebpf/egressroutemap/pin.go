@@ -47,3 +47,16 @@ func OpenPinnedNodeSourceAddress(pinDir string) (*NodeSourceAddress, io.Closer, 
 	}
 	return &NodeSourceAddress{table: usidmap.KernelTable{Map: m}}, m, nil
 }
+
+// OpenPinnedPublicUplink opens public_uplink_table from its pinned path
+// under pinDir and returns a *PublicUplink wrapping it. See
+// OpenPinnedEgressRouteTable's own comment for the pinning convention and
+// close-lifetime contract.
+func OpenPinnedPublicUplink(pinDir string) (*PublicUplink, io.Closer, error) {
+	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapPublicUplinkTable), nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("egressroutemap: open pinned map %q under %q: %w",
+			prog.UsidMapPublicUplinkTable, pinDir, err)
+	}
+	return &PublicUplink{table: usidmap.KernelTable{Map: m}}, m, nil
+}

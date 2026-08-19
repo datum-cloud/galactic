@@ -273,20 +273,37 @@ func TestNAT66ShardReconciler_EmptyConfiguredValuesLeaveStatusUntouched(t *testi
 	}
 }
 
-// newTestNAT66Router returns a BGPRouter targeting nodeName, resolved
-// through the BGPRouterByTargetName index newIndexedClientBuilder (shared
-// with networkgateway_controller_test.go) registers.
-func newTestNAT66Router(nodeName, routerName string) *bgpv1alpha1.BGPRouter {
+// testNAT66RouterName is the deterministic name every newTestNAT66Router
+// fixture below uses -- no test needs a second, differently-named
+// BGPRouter, so this is a plain constant rather than a parameter.
+const testNAT66RouterName = "node-a-router"
+
+// newTestNAT66Router returns a BGPRouter named testNAT66RouterName,
+// targeting testNAT66NodeA, resolved through the BGPRouterByTargetName
+// index newIndexedClientBuilder (shared with
+// networkgateway_controller_test.go) registers. Every call site below
+// reconciles against testNAT66NodeA, so unlike newNAT66Shard/
+// newNAT66Reconciler (which do vary their own node-related argument
+// across tests, e.g. TestNAT66ShardReconciler_SkipsShardForAnotherNode),
+// this takes no arguments at all.
+func newTestNAT66Router() *bgpv1alpha1.BGPRouter {
 	return &bgpv1alpha1.BGPRouter{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNAT66Namespace, Name: routerName},
-		Spec:       bgpv1alpha1.BGPRouterSpec{TargetRef: bgpv1alpha1.TargetRef{Kind: "Node", Name: nodeName}},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNAT66Namespace, Name: testNAT66RouterName},
+		Spec:       bgpv1alpha1.BGPRouterSpec{TargetRef: bgpv1alpha1.TargetRef{Kind: "Node", Name: testNAT66NodeA}},
 	}
 }
 
-func TestNAT66ShardReconciler_CreatesAdvertisementWhenSIDAndRouterPresent(t *testing.T) {
+// TestNAT66ShardReconciler_CreatesAdvertisementForBothSIDAndAddress covers
+// the 2026-08-19 fix: the shard's advertisement must carry ShardAddress
+// (the return leg -- see shardAdvertisementPrefixes' own doc comment) as
+// well as ShardSID (the forward leg), not just the latter -- a real TCP
+// connection through NAT66 never completed while only ShardSID was
+// advertised, since no route back to ShardAddress existed anywhere else
+// on the fabric.
+func TestNAT66ShardReconciler_CreatesAdvertisementForBothSIDAndAddress(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	shard := newNAT66Shard(testNAT66NodeA)
-	router := newTestNAT66Router(testNAT66NodeA, "node-a-router")
+	router := newTestNAT66Router()
 	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
@@ -308,9 +325,73 @@ func TestNAT66ShardReconciler_CreatesAdvertisementWhenSIDAndRouterPresent(t *tes
 	if adv.Spec.AddressFamily.AFI != bgpv1alpha1.AFIL2VPN || adv.Spec.AddressFamily.SAFI != bgpv1alpha1.SAFIEVPN {
 		t.Errorf("Spec.AddressFamily = %+v, want l2vpn/evpn", adv.Spec.AddressFamily)
 	}
-	wantPrefix := bgpv1alpha1.Prefix(testNAT66ShardSIDVal + "/128")
+	wantPrefixes := []bgpv1alpha1.Prefix{
+		bgpv1alpha1.Prefix(testNAT66ShardSIDVal + "/128"),
+		bgpv1alpha1.Prefix(testNAT66ShardAddr + "/128"),
+	}
+	if len(adv.Spec.Prefixes) != len(wantPrefixes) {
+		t.Fatalf("Spec.Prefixes = %+v, want %+v", adv.Spec.Prefixes, wantPrefixes)
+	}
+	for i, want := range wantPrefixes {
+		if adv.Spec.Prefixes[i] != want {
+			t.Errorf("Spec.Prefixes[%d] = %s, want %s", i, adv.Spec.Prefixes[i], want)
+		}
+	}
+}
+
+// TestNAT66ShardReconciler_AdvertisesShardAddressAloneWhenSIDUnset covers
+// shardAdvertisementPrefixes' "either may be independently unset" claim
+// from the other direction: with no ShardSID configured at all (an
+// operator mid-rollout, or a shard that only participates in the return
+// leg), ShardAddress alone must still be advertised -- the old
+// implementation's `if shard.Status.ShardSID == "" { return nil }` guard
+// would have skipped this entirely.
+func TestNAT66ShardReconciler_AdvertisesShardAddressAloneWhenSIDUnset(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newNAT66Shard(testNAT66NodeA)
+	router := newTestNAT66Router()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
+	r := newNAT66Reconciler(nat66ReconcilerParams{
+		client: c, scheme: scheme, nodeName: testNAT66NodeA,
+		addr: testNAT66ShardAddr, sid: "", datapath: &fakeDatapathHealth{attached: true},
+	})
+
+	if _, err := r.Reconcile(context.Background(), reconcileReq(testNAT66ShardName)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	advKey := client.ObjectKey{Namespace: testNAT66Namespace, Name: shardAdvertisementName(testNAT66ShardName)}
+	if err := c.Get(context.Background(), advKey, adv); err != nil {
+		t.Fatalf("get shard BGPAdvertisement: %v", err)
+	}
+	wantPrefix := bgpv1alpha1.Prefix(testNAT66ShardAddr + "/128")
 	if len(adv.Spec.Prefixes) != 1 || adv.Spec.Prefixes[0] != wantPrefix {
 		t.Errorf("Spec.Prefixes = %+v, want [%s]", adv.Spec.Prefixes, wantPrefix)
+	}
+}
+
+// TestNAT66ShardReconciler_SkipsAdvertisementWhenNeitherSIDNorAddressSet
+// covers shardAdvertisementPrefixes' all-empty case: no advertisement at
+// all, not an error, when an operator hasn't configured either value yet.
+func TestNAT66ShardReconciler_SkipsAdvertisementWhenNeitherSIDNorAddressSet(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newNAT66Shard(testNAT66NodeA)
+	router := newTestNAT66Router()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
+	r := newNAT66Reconciler(nat66ReconcilerParams{
+		client: c, scheme: scheme, nodeName: testNAT66NodeA,
+		addr: "", sid: "", datapath: &fakeDatapathHealth{attached: true},
+	})
+
+	if _, err := r.Reconcile(context.Background(), reconcileReq(testNAT66ShardName)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	advKey := client.ObjectKey{Namespace: testNAT66Namespace, Name: shardAdvertisementName(testNAT66ShardName)}
+	if err := c.Get(context.Background(), advKey, adv); err == nil {
+		t.Fatalf("BGPAdvertisement %v unexpectedly created with neither ShardSID nor ShardAddress configured", advKey)
 	}
 }
 
@@ -338,7 +419,7 @@ func TestNAT66ShardReconciler_WithdrawsAdvertisementOnDelete(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	shard := newNAT66Shard(testNAT66NodeA)
 	shard.Finalizers = []string{"test.datum.net/keep"} // required for the fake client to accept a deletion timestamp
-	router := newTestNAT66Router(testNAT66NodeA, "node-a-router")
+	router := newTestNAT66Router()
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNAT66Namespace,
@@ -377,7 +458,7 @@ func TestNAT66ShardReconciler_WithdrawsAdvertisementWhenShardObjectAlreadyGone(t
 	// still withdraw the advertisement it created (see the Reconcile
 	// NotFound branch's own doc comment for why no finalizer is used).
 	scheme := nat66TestScheme(t)
-	router := newTestNAT66Router(testNAT66NodeA, "node-a-router")
+	router := newTestNAT66Router()
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNAT66Namespace,

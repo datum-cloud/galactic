@@ -81,6 +81,72 @@ func TestEgressRouteTable_RegisterThenLookupRoundTrips(t *testing.T) {
 	}
 }
 
+// TestEgressRouteTable_RegisterPassThroughStoresAllZeroValue covers
+// RegisterPassThrough's own contract: unlike Register, it needs no SID
+// and performs no link/L2 resolution (resolveLinkAndL2Fn is deliberately
+// left unstubbed here -- a call into it would panic against a nil real
+// resolver, so this test doubles as proof RegisterPassThrough never
+// reaches it), and the entry it installs must be the exact all-zero
+// value usid_egress's own link_ifindex==0 sentinel check
+// (struct egress_route_value's doc comment in usid.c) expects.
+func TestEgressRouteTable_RegisterPassThroughStoresAllZeroValue(t *testing.T) {
+	tbl := NewEgressRouteTable(newFakeTable())
+	prefix := mustCIDR(t, "fd20:30:ff02::/96")
+
+	if err := tbl.RegisterPassThrough(3, prefix); err != nil {
+		t.Fatalf("RegisterPassThrough(%v) = %v, want success", prefix, err)
+	}
+
+	sid, ok, err := tbl.Lookup(3, prefix)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !ok {
+		t.Fatal("Lookup after RegisterPassThrough reported no entry, want one")
+	}
+	if !sid.Equal(net.IPv6zero) {
+		t.Errorf("stored sid = %s, want the all-zero pass-through sentinel", sid)
+	}
+
+	key, err := buildKey(3, prefix)
+	if err != nil {
+		t.Fatalf("buildKey: %v", err)
+	}
+	var got prog.UsidEgressRouteValue
+	if err := tbl.table.Lookup(key, &got); err != nil {
+		t.Fatalf("lookup installed entry: %v", err)
+	}
+	if got.LinkIfindex != 0 {
+		t.Errorf("stored link_ifindex = %d, want 0 (the pass-through sentinel)", got.LinkIfindex)
+	}
+	var zeroMAC [6]byte
+	if got.Dmac != zeroMAC || got.Smac != zeroMAC {
+		t.Errorf("stored dmac/smac = % x / % x, want all-zero", got.Dmac, got.Smac)
+	}
+}
+
+// TestEgressRouteTable_RegisterPassThroughThenUnregisterRemovesEntry
+// covers Unregister's own doc comment: it's a generic delete-by-key, so
+// it must remove a pass-through entry exactly as it does any other.
+func TestEgressRouteTable_RegisterPassThroughThenUnregisterRemovesEntry(t *testing.T) {
+	tbl := NewEgressRouteTable(newFakeTable())
+	prefix := mustCIDR(t, "fd20:30:ff02::/96")
+
+	if err := tbl.RegisterPassThrough(3, prefix); err != nil {
+		t.Fatalf("RegisterPassThrough(%v) = %v, want success", prefix, err)
+	}
+	if err := tbl.Unregister(3, prefix); err != nil {
+		t.Fatalf("Unregister(%v) = %v, want success", prefix, err)
+	}
+	_, ok, err := tbl.Lookup(3, prefix)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if ok {
+		t.Error("entry still present after Unregister, want removed")
+	}
+}
+
 func TestEgressRouteTable_RegisterDefaultPrefixUsesZeroPrefixBits(t *testing.T) {
 	stubResolveLinkAndL2(t)
 	tbl := NewEgressRouteTable(newFakeTable())
@@ -254,5 +320,63 @@ func TestNodeSourceAddress_SetRejectsUnspecifiedAddress(t *testing.T) {
 	n := &NodeSourceAddress{table: newFakeTable()}
 	if err := n.Set(net.IPv6unspecified); err == nil {
 		t.Error("Set(::) = nil error, want an error -- usid_egress treats an all-zero entry as \"not configured\"")
+	}
+}
+
+func TestPublicUplink_SetThenGetRoundTrips(t *testing.T) {
+	p := &PublicUplink{table: newFakeTable()}
+	dmac := net.HardwareAddr{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}
+	smac := net.HardwareAddr{0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}
+
+	if err := p.Set(7, dmac, smac); err != nil {
+		t.Fatalf("Set(7, %v, %v) = %v, want success", dmac, smac, err)
+	}
+	gotIndex, gotDmac, gotSmac, ok, err := p.Get()
+	if err != nil {
+		t.Fatalf("Get() = %v, want success", err)
+	}
+	if !ok {
+		t.Fatal("Get() ok = false, want true after Set")
+	}
+	if gotIndex != 7 {
+		t.Errorf("Get() linkIndex = %d, want 7", gotIndex)
+	}
+	if gotDmac.String() != dmac.String() {
+		t.Errorf("Get() dmac = %s, want %s", gotDmac, dmac)
+	}
+	if gotSmac.String() != smac.String() {
+		t.Errorf("Get() smac = %s, want %s", gotSmac, smac)
+	}
+}
+
+func TestPublicUplink_GetBeforeSetReportsNotOK(t *testing.T) {
+	p := &PublicUplink{table: newFakeTable()}
+	_, _, _, ok, err := p.Get()
+	if err != nil {
+		t.Fatalf("Get() = %v, want success", err)
+	}
+	if ok {
+		t.Error("Get() ok = true before any Set, want false")
+	}
+}
+
+func TestPublicUplink_SetRejectsZeroLinkIndex(t *testing.T) {
+	p := &PublicUplink{table: newFakeTable()}
+	dmac := net.HardwareAddr{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}
+	smac := net.HardwareAddr{0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}
+	if err := p.Set(0, dmac, smac); err == nil {
+		t.Error("Set(0, ...) = nil error, want an error -- usid_egress treats link_ifindex == 0 as \"not configured\"")
+	}
+}
+
+func TestPublicUplink_SetRejectsWrongLengthMAC(t *testing.T) {
+	p := &PublicUplink{table: newFakeTable()}
+	valid := net.HardwareAddr{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}
+	short := net.HardwareAddr{0xCC, 0xCC, 0xCC}
+	if err := p.Set(7, short, valid); err == nil {
+		t.Error("Set with a 3-byte dmac = nil error, want an error")
+	}
+	if err := p.Set(7, valid, short); err == nil {
+		t.Error("Set with a 3-byte smac = nil error, want an error")
 	}
 }

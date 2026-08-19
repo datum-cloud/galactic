@@ -210,6 +210,34 @@ func resolveNAT66ShardSIDs() string {
 	return os.Getenv(config.EnvCNINAT66ShardSIDs)
 }
 
+// resolveEBPFInterfaces resolves the eBPF datapath's own interface list
+// (attach.ResolveInterfaces -- env override if GALACTIC_CNI_EBPF_INTERFACES
+// is set, auto-detected from the default IPv6 route otherwise) and joins
+// it for storage in the static conflist (HostConf.EBPFInterfaces), the
+// same "resolve once, in this init container's own real pod env, so a
+// per-pod CNI plugin invocation never has to" pattern
+// resolveNAT66ShardSIDs's own doc comment describes -- see that field's
+// doc comment in internal/hostconf for why a CNI plugin's own
+// auto-detection is unreliable in a way this container's isn't.
+//
+// A resolution failure here (e.g. no default IPv6 route yet and no env
+// override) is not fatal to Bootstrap: it writes an empty string, the
+// same "not yet known, caller falls back to its own auto-detection"
+// state the conflist field already has before this function existed at
+// all -- no worse than today, and self-heals whenever install-cni next
+// runs (a Bootstrap re-run, e.g. this DaemonSet pod restarting) with a
+// converged default route.
+func resolveEBPFInterfaces() string {
+	names, err := attach.ResolveInterfaces()
+	if err != nil {
+		slog.Warn("Could not resolve eBPF datapath interface(s) for the static conflist; "+
+			"CNI plugin invocations will fall back to their own auto-detection until this succeeds",
+			"err", err)
+		return ""
+	}
+	return strings.Join(names, ",")
+}
+
 // Bootstrap runs the CNI installation init container tasks:
 // 1. Copies binaries to the host.
 // 2. Performs a one-shot dual-stack node identity check.
@@ -319,6 +347,7 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	// 4. Write static conflist to /host/etc/cni/net.d/10-galactic.conflist
 	logLevel := resolveLogLevel()
 	nat66ShardSIDs := resolveNAT66ShardSIDs()
+	ebpfInterfaces := resolveEBPFInterfaces()
 	conflistContent := fmt.Sprintf(`{
   "cniVersion": "1.0.0",
   "name": "galactic",
@@ -330,11 +359,13 @@ func Bootstrap(ctx context.Context, nodeName string) error {
       "namespace": %q,
       "log_file": %q,
       "log_level": %q,
-      "nat66_shard_sids": %q
+      "nat66_shard_sids": %q,
+      "ebpf_interfaces": %q
     }
   ]
 }
-`, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel, nat66ShardSIDs)
+`, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel,
+		nat66ShardSIDs, ebpfInterfaces)
 
 	if err := atomicWriteFile(HostConflist, []byte(conflistContent), 0644); err != nil {
 		return fmt.Errorf("write conflist file: %w", err)

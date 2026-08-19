@@ -32,7 +32,8 @@ const (
 	DropReasonEgressRouteEncapFailed     uint32 = 12
 	DropReasonEgressRouteFibLookupFailed uint32 = 13
 	DropReasonEgressRouteRedirectFailed  uint32 = 14
-	DropReasonCount                      uint32 = 15
+	DropReasonPublicUplinkRedirectFailed uint32 = 15
+	DropReasonCount                      uint32 = 16
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
@@ -55,4 +56,5 @@ var DropReasonNames = map[uint32]string{
 	DropReasonEgressRouteEncapFailed:     "egress_route_encap_failed",
 	DropReasonEgressRouteFibLookupFailed: "egress_route_fib_lookup_failed",
 	DropReasonEgressRouteRedirectFailed:  "egress_route_redirect_failed",
+	DropReasonPublicUplinkRedirectFailed: "public_uplink_redirect_failed",
 }
