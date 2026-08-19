@@ -134,9 +134,13 @@ jobs:
         # same fix and same reasoning as scripts/ci.sh's e2etest case,
         # which needs this for the same underlying reason (SEG6Local
         # END.DT46's VRFTABLE flag) and already does this exact install.
+        #
+        # -o Acquire::Retries/::*::Timeout: see install-ebpf-deps' own
+        # identical flags -- without them this step hung the whole job
+        # against a stalled mirror until timeout-minutes killed it (#425).
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -qq
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
           sudo modprobe vrf
 
       - name: Install eBPF build dependencies
