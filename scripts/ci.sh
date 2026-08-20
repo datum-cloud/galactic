@@ -140,10 +140,17 @@ EOF
     # go.datum.net/network => ../network` (see that line's own comment)
     # inside the Dockerfile's "network" build stage -- see
     # containers/galactic-cni/Dockerfile's own comment on that stage for
-    # the full mechanism. Harmless to pass once that replace directive is
-    # eventually removed, since the stage goes unused by go.mod at that
-    # point regardless of what's passed here.
-    docker build --build-context network=../network -t "$IMG" -f containers/galactic-cni/Dockerfile .
+    # the full mechanism. Only passed when ../network actually exists:
+    # docker eagerly stats every --build-context path before looking at
+    # the Dockerfile at all, so passing it unconditionally broke CI's
+    # single-repo checkout (no sibling ../network there) even with no
+    # replace directive active -- it's the *Dockerfile* stage that's
+    # harmless to leave unused, not this flag.
+    BUILD_ARGS=()
+    if [ -d ../network ]; then
+      BUILD_ARGS+=(--build-context "network=../network")
+    fi
+    docker build "${BUILD_ARGS[@]}" -t "$IMG" -f containers/galactic-cni/Dockerfile .
 
     echo "--- Loading image into cluster"
     kind load docker-image "$IMG" --name "$CLUSTER_NAME"
