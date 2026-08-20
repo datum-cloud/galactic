@@ -13,8 +13,12 @@
 package crdnames
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 // AnnotationAllocatedSubnetIPv6 is the BGPAdvertisement annotation key prefix
@@ -92,6 +96,25 @@ func NetNSKey(containerID string) string {
 	return fmt.Sprintf("%s.%s", AnnotationNetNS, truncate(containerID))
 }
 
+// nameSegmentHashLen is the number of hex characters kept from the SHA-256 fallback.
+const nameSegmentHashLen = 12
+
+// nameSegment renders a base62 identifier as the lowercase hex value it encodes, since
+// metadata.name must be a lowercase RFC 1123 subdomain and base62 turns uppercase at 36.
+// Input that is not valid base62 is hashed under an "x" prefix no hex encoding can produce.
+func nameSegment(id string) string {
+	if encoded, err := intf.Base62ToHex(id); err == nil && encoded != "" {
+		return encoded
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "x" + hex.EncodeToString(sum[:])[:nameSegmentHashLen]
+}
+
+// VPCSegment returns the leading segment every BGP CRD name starts with for a base62 VPC.
+func VPCSegment(vpc string) string {
+	return nameSegment(vpc)
+}
+
 // BGPVRFInstanceName returns the deterministic name for a BGPVRFInstance.
 // Unlike BGPAdvertisementName, this is keyed by (vpc, node) rather than
 // (vpc, vpcAttachment): the underlying kernel VRF is shared by every
@@ -102,14 +125,15 @@ func NetNSKey(containerID string) string {
 // all — the kernel side never does, since interface names only need to be
 // unique within one host's own namespace.
 func BGPVRFInstanceName(vpc, nodeName string) string {
-	return fmt.Sprintf("%s-%s", vpc, nodeName)
+	return fmt.Sprintf("%s-%s", VPCSegment(vpc), nodeName)
 }
 
 // BGPAdvertisementName returns the deterministic name for a
 // BGPAdvertisement. Each VPCAttachment is unique per interface across the
-// cluster, so the (vpc, vpcAttachment) pair is a reliable 1:1 key.
+// cluster, so the (vpc, vpcAttachment) pair is a reliable 1:1 key. Both segments
+// are encoded by nameSegment, the VPC one identically to BGPVRFInstanceName.
 func BGPAdvertisementName(vpc, vpcAttachment string) string {
-	return fmt.Sprintf("%s-%s", vpc, vpcAttachment)
+	return fmt.Sprintf("%s-%s", VPCSegment(vpc), nameSegment(vpcAttachment))
 }
 
 // vipNameReplacer sanitizes an IP address for use inside a Kubernetes

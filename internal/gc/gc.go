@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/nptv6map"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -131,6 +132,35 @@ func vpcFromName(name string) string {
 	return vpc
 }
 
+// vpcKeys returns every form a VPC may appear as in a CRD name: the value
+// itself, plus its encoded form (crdnames.VPCSegment). CRD names written
+// before the encoding change carry the raw base62 VPC, which is also what a
+// kernel VRF name yields, so both have to join for as long as either exists.
+func vpcKeys(vpc string) []string {
+	encoded := crdnames.VPCSegment(vpc)
+	if encoded == vpc {
+		return []string{vpc}
+	}
+	return []string{vpc, encoded}
+}
+
+// addVPC records every key form of vpc in set.
+func addVPC(set map[string]struct{}, vpc string) {
+	for _, key := range vpcKeys(vpc) {
+		set[key] = struct{}{}
+	}
+}
+
+// vpcInSet reports whether any key form of vpc is present in set.
+func vpcInSet(set map[string]struct{}, vpc string) bool {
+	for _, key := range vpcKeys(vpc) {
+		if _, ok := set[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // CollectOrphanedCRDs scans BGPAdvertisement and BGPVRFInstance CRDs owned by
 // nodeName's BGPRouter(s) in the given namespace and returns those whose
 // associated container(s)/attachment(s) no longer exist on this node.
@@ -180,7 +210,7 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 			// No netns annotations — skip (might be legacy or manually
 			// created). We cannot determine if it is orphaned, so its VPC
 			// must be treated as surviving.
-			vpcSurvives[vpc] = struct{}{}
+			addVPC(vpcSurvives, vpc)
 			continue
 		}
 
@@ -194,7 +224,7 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 		if liveContainerID != "" {
 			// At least one container that attached to this
 			// vpc/vpcAttachment is still alive — not orphaned.
-			vpcSurvives[vpc] = struct{}{}
+			addVPC(vpcSurvives, vpc)
 			continue
 		}
 
@@ -230,7 +260,7 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 		if _, ownedByThisNode := routerNames[inst.Spec.RouterRef.Name]; !ownedByThisNode {
 			continue
 		}
-		if _, survives := vpcSurvives[vpcFromName(inst.Name)]; survives {
+		if vpcInSet(vpcSurvives, vpcFromName(inst.Name)) {
 			continue
 		}
 		orphaned = append(orphaned, OrphanedCRD{
@@ -332,7 +362,7 @@ func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, node
 		if _, ownedByThisNode := routerNames[adv.Spec.RouterRef.Name]; !ownedByThisNode {
 			continue
 		}
-		activeVPCs[vpcFromName(adv.Name)] = struct{}{}
+		addVPC(activeVPCs, vpcFromName(adv.Name))
 	}
 
 	var orphaned []string
@@ -343,7 +373,7 @@ func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, node
 			continue
 		}
 
-		if _, exists := activeVPCs[vpc]; !exists {
+		if !vpcInSet(activeVPCs, vpc) {
 			orphaned = append(orphaned, v.Name)
 		}
 	}
