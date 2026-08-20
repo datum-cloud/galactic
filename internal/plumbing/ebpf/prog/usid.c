@@ -583,6 +583,23 @@ struct egress_route_key {
 // the same way the netlink-route mechanism this replaces always did
 // (RouteEgressAdd's own resolveNextHop, run once at route-install time),
 // and store it here -- see egressroutemap.EgressRouteTable.Register.
+//
+// link_ifindex == 0 is a reserved sentinel meaning "local pass-through":
+// this entry exists in the trie purely to win the LPM lookup over a
+// shorter, less specific entry (in practice, always a tenant VRF's own
+// ::/0 NAT66 default), not to encapsulate anything -- usid_egress checks
+// for it and returns TC_ACT_UNSPEC (defer to the kernel) before doing any
+// of the encap work below, the same way it already special-cases
+// multicast/link-local destinations. 0 is never a legitimate Linux
+// ifindex (the kernel reserves it for "no interface", same convention
+// netlink itself uses), so it collides with no real registration.
+// Installed by egressroutemap.EgressRouteTable.RegisterPassThrough for
+// every attachment's own IPAM-assigned prefix, at CNI ADD time -- see
+// that function's own doc comment for why: two attachments sharing one
+// VRF on the same node have a kernel connected route between them that
+// this program's own ::/0 default entry would otherwise hijack, exactly
+// like the multicast/link-local bug below, just for ordinary unicast
+// intra-VRF peers instead of NDP.
 struct egress_route_value {
 	__u8 sid[16];
 	__u32 link_ifindex;
@@ -639,6 +656,12 @@ enum drop_reason {
 	DROP_REASON_EGRESS_ROUTE_FIB_LOOKUP_FAILED = 13,
 	// The redirect out the resolved physical interface failed.
 	DROP_REASON_EGRESS_ROUTE_REDIRECT_FAILED = 14,
+	// usid_egress's own VIP-sourced-reply redirect (struct
+	// public_uplink_value's own doc comment): public_uplink_table
+	// matched (it's always populated once the node has converged, this
+	// is a real registration miss or a redirect failure) but the
+	// redirect to the resolved fabric-uplink interface failed.
+	DROP_REASON_PUBLIC_UPLINK_REDIRECT_FAILED = 15,
 	__DROP_REASON_MAX,
 };
 
@@ -767,6 +790,58 @@ struct {
 	__type(key, __u32);
 	__type(value, __u8[16]);
 } node_src_addr_table SEC(".maps");
+
+// struct public_uplink_value is public_uplink_table's value: this node's
+// own fabric-uplink interface's real, physical next hop -- the link
+// index to redirect out plus the L2 (destination and source MAC)
+// addressing needed to actually reach it. Resolved once, Go-side
+// (egressroutemap.PublicUplink.Set), the same "resolve at registration
+// time, redirect blindly at packet time" pattern egress_route_value
+// itself already uses and for the identical reason: a live
+// bpf_fib_lookup() from this program's own attach point (the tenant's
+// own VRF-enslaved veth) unconditionally blackholes (see
+// egress_route_value's own doc comment), so there is no way to resolve
+// this fresh, per packet, from inside usid_egress at all.
+//
+// Used by usid_egress's own VIP-sourced-reply handling, below: once
+// apply_vip_xlat has rewritten a packet's source address from a DSR
+// backend's real address to its own ServiceVIPBinding's VIP -- a real,
+// globally-routable, BGP-advertised address, needing no further
+// translation -- that packet must never reach egress_route_table's own
+// LPM lookup (whose only entries, in a VRF with NAT66 configured, would
+// otherwise treat it as an ordinary ULA-sourced tenant packet and
+// wrongly re-SNAT it through a NAT66 shard: found live, a real curl
+// through a DSR-served VIP timed out because of exactly this -- the
+// reply reached the client with the wrong source address and was
+// silently discarded as unrecognized). Instead, it's redirected here,
+// unconditionally, regardless of its own real destination: the single
+// physical (or, in this lab, ContainerLab-simulated point-to-point)
+// neighbor one hop off this node's own fabric interface is always the
+// correct next hop for a plainly-routable packet, the same property a
+// real host's own default gateway has -- from there, ordinary BGP
+// routing (once a genuine external client's own reachability is wired
+// up -- docs/plans/405-service-vip-route-provider.md, a separate,
+// orthogonal gap) takes over exactly like it would for any other host
+// on the network.
+struct public_uplink_value {
+	__u32 link_ifindex;
+	__u8 dmac[6];
+	__u8 smac[6];
+};
+
+// public_uplink_table: see struct public_uplink_value's own doc comment.
+// Single-entry BPF_MAP_TYPE_ARRAY, matching node_src_addr_table's
+// identical per-node-constant lifecycle and key convention (key 0,
+// always present once populated) -- a separate map, not folded into
+// node_src_addr_table, since the value shape is entirely different
+// (link/L2 info here vs. a plain address there) and the two are read at
+// different points in usid_egress for different reasons.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct public_uplink_value);
+} public_uplink_table SEC(".maps");
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -1479,6 +1554,44 @@ int usid_egress(struct __sk_buff *skb)
 					ip6 = (void *) (eth + 1);
 					if ((void *) (ip6 + 1) > data_end)
 						return TC_ACT_SHOT;
+
+					// This packet's source is now a DSR backend's
+					// own ServiceVIPBinding VIP, not its real address
+					// -- see public_uplink_table's own doc comment for
+					// why it must be redirected there immediately,
+					// unconditionally, rather than ever reaching
+					// egress_route_table's lookup below (found live:
+					// without this, a VRF with NAT66 configured wrongly
+					// re-SNATs an already-correctly-VIP-addressed reply
+					// through a NAT66 shard, and the real client
+					// silently discards it as unrecognized). No
+					// count_claimed_drop on failure here (unlike the
+					// egress_route_table redirect failure path below)
+					// -- vrf_table's own per-VRF vrf_value isn't
+					// resolved yet at this point in the function, and
+					// this failure path is expected to essentially
+					// never fire in practice, the same as that one.
+					__u32 pu_key = 0;
+					struct public_uplink_value *pu = bpf_map_lookup_elem(&public_uplink_table, &pu_key);
+
+					if (pu && pu->link_ifindex != 0) {
+						__builtin_memcpy(eth->h_dest, pu->dmac, sizeof(eth->h_dest));
+						__builtin_memcpy(eth->h_source, pu->smac, sizeof(eth->h_source));
+
+						long redirect_rc = bpf_redirect(pu->link_ifindex, 0);
+
+						if (redirect_rc != TC_ACT_REDIRECT) {
+							count_drop(DROP_REASON_PUBLIC_UPLINK_REDIRECT_FAILED);
+							return TC_ACT_SHOT;
+						}
+						return redirect_rc;
+					}
+					// public_uplink_table not configured yet (this
+					// node hasn't converged) -- fall through to the
+					// pre-existing behavior below rather than dropping
+					// outright; egress_route_table's own NAT66 default
+					// may still misroute this reply, but that's no
+					// worse than before this redirect existed.
 				}
 			}
 		}
@@ -1540,6 +1653,14 @@ int usid_egress(struct __sk_buff *skb)
 
 	if (!rv)
 		return TC_ACT_UNSPEC; // no configured route for this destination -- defer to the kernel (still-installed netlink route during migration, or genuinely none)
+
+	// A local pass-through entry (struct egress_route_value's own comment
+	// above) -- it exists only to out-match a shorter default entry via
+	// LPM, not to be encapsulated toward. Defer to the kernel exactly like
+	// a genuine miss above, before touching node_src_addr_table or doing
+	// any encap work below.
+	if (rv->link_ifindex == 0)
+		return TC_ACT_UNSPEC;
 
 	// node_src_addr_table is BPF_MAP_TYPE_ARRAY, not BPF_MAP_TYPE_HASH:
 	// every one of its (here, exactly one) slots always exists from map

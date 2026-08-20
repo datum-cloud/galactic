@@ -14,6 +14,11 @@ interface eth1
  ipv6 address 2001:db8:1:33::2/64
 !
 
+# VIP aggregate -- see frr.conf.iad-gateway1's identical comment (§5's
+# "External VIP announcement mechanism" gap in the redesign plan).
+# Originated identically by both gateway nodes, DSR anycast-style.
+ipv6 route 2001:db8:6060::/48 Null0
+
 router bgp 65000
  bgp router-id 10.255.255.6
  no bgp default ipv4-unicast
@@ -26,6 +31,8 @@ router bgp 65000
   neighbor 2001:db8:1:33::1 allowas-in 1
   # /128, not /48 -- see frr.conf.iad-gateway1's identical comment.
   network fc00:0:a::1/128
+  # VIP aggregate -- see this file's top-of-interface-eth1 comment.
+  network 2001:db8:6060::/48
  exit-address-family
 
 ipv6 forwarding

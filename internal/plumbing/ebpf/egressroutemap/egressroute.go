@@ -201,6 +201,40 @@ func (t *EgressRouteTable) Register(tableID uint32, prefix *net.IPNet, sid net.I
 	return nil
 }
 
+// RegisterPassThrough installs (or replaces) egress_route_table's entry
+// for prefix in Linux VRF table tableID as a local pass-through: unlike
+// Register, this never encapsulates -- it exists purely so this exact
+// prefix wins the LPM lookup over a shorter, less specific entry (in
+// practice, always the tenant VRF's own ::/0 NAT66 default installed by
+// Register(tableID, DefaultPrefix, ...)), and usid_egress recognizes it
+// via link_ifindex == 0 (struct egress_route_value's own doc comment in
+// usid.c) and defers to the kernel instead of redirecting.
+//
+// Callers register their own attachment's IPAM-assigned prefix here, at
+// CNI ADD time, for every VRF that prefix lives in. Without this, two
+// attachments sharing one VRF on the same node -- with a perfectly good
+// kernel connected route already routing between them -- have that
+// traffic silently hijacked by the VRF's own ::/0 default and redirected
+// toward a NAT66 shard SID instead of ever being delivered locally: found
+// live in containerlab's ns30 fixture (two attachments, one VPC, one
+// node), the same class of bug as the multicast/link-local carve-out in
+// usid_egress, just for ordinary same-VRF unicast peers instead of NDP.
+//
+// No sid/link/L2 resolution happens here (contrast Register) -- a
+// pass-through entry carries no SID and is never encapsulated toward, so
+// there is nothing to resolve.
+func (t *EgressRouteTable) RegisterPassThrough(tableID uint32, prefix *net.IPNet) error {
+	key, err := buildKey(tableID, prefix)
+	if err != nil {
+		return fmt.Errorf("egressroutemap: egress_route_table: register pass-through: %w", err)
+	}
+	if err := t.table.Put(key, prog.UsidEgressRouteValue{}); err != nil {
+		return fmt.Errorf("egressroutemap: egress_route_table: register pass-through table=%d prefix=%s: %w",
+			tableID, prefix, err)
+	}
+	return nil
+}
+
 // Lookup reads egress_route_table's entry for (tableID, prefix) -- the
 // exact entry Register would have installed for that pair -- reporting
 // whether it exists. Note this is an exact-match lookup on the same key
@@ -295,4 +329,68 @@ func (n *NodeSourceAddress) Get() (addr net.IP, ok bool, err error) {
 		return nil, false, nil
 	}
 	return net.IP(raw[:]), true, nil
+}
+
+// PublicUplink is the read/write API for public_uplink_table -- this
+// node's own fabric-uplink interface's real, physical next hop.
+// usid_egress redirects a DSR backend's VIP-sourced reply here
+// unconditionally, immediately after apply_vip_xlat rewrites its source,
+// bypassing egress_route_table's own NAT66 default entirely -- see
+// struct public_uplink_value's own doc comment in usid.c for the full
+// mechanism and the real bug (a DSR reply silently re-SNAT'd through a
+// NAT66 shard, the client discarding it as unrecognized) this closes.
+type PublicUplink struct {
+	table usidmap.Table
+}
+
+// publicUplinkKey is public_uplink_table's only valid key --
+// BPF_MAP_TYPE_ARRAY, one entry, matching node_src_addr_table's identical
+// convention.
+const publicUplinkKey = uint32(0)
+
+// Set writes this node's own fabric-uplink next hop: linkIndex is the
+// interface to redirect out, dmac/smac the Ethernet addressing needed to
+// actually reach that next hop (both exactly 6 bytes). Called once, at
+// CNI datapath registration time, the same lifecycle as
+// NodeSourceAddress.Set.
+//
+// linkIndex == 0 is rejected: usid_egress treats it as "not configured
+// yet" and fails open (falling through to egress_route_table) rather
+// than redirect out a nonexistent interface -- see this map's own
+// link_ifindex == 0 sentinel convention (also used, for an unrelated
+// purpose, by egress_route_table's own pass-through entries).
+func (p *PublicUplink) Set(linkIndex int, dmac, smac net.HardwareAddr) error {
+	if linkIndex == 0 {
+		return errors.New("egressroutemap: public_uplink_table: set: linkIndex must not be 0")
+	}
+	if len(dmac) != 6 || len(smac) != 6 {
+		return fmt.Errorf("egressroutemap: public_uplink_table: set: dmac and smac must both be 6 bytes, got %d and %d",
+			len(dmac), len(smac))
+	}
+	value := prog.UsidPublicUplinkValue{LinkIfindex: uint32(linkIndex)}
+	copy(value.Dmac[:], dmac)
+	copy(value.Smac[:], smac)
+	if err := p.table.Put(publicUplinkKey, value); err != nil {
+		return fmt.Errorf("egressroutemap: public_uplink_table: set: %w", err)
+	}
+	return nil
+}
+
+// Get reads this node's own currently-registered fabric-uplink next hop,
+// reporting whether one has ever been Set (an unset/link_ifindex==0
+// entry -- see Set's own comment -- reports ok=false).
+func (p *PublicUplink) Get() (linkIndex int, dmac, smac net.HardwareAddr, ok bool, err error) {
+	var value prog.UsidPublicUplinkValue
+	if err := p.table.Lookup(publicUplinkKey, &value); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, nil, nil, false, nil
+		}
+		return 0, nil, nil, false, fmt.Errorf("egressroutemap: public_uplink_table: get: %w", err)
+	}
+	if value.LinkIfindex == 0 {
+		return 0, nil, nil, false, nil
+	}
+	dmac = append(net.HardwareAddr{}, value.Dmac[:]...)
+	smac = append(net.HardwareAddr{}, value.Smac[:]...)
+	return int(value.LinkIfindex), dmac, smac, true, nil
 }

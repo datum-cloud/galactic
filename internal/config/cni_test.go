@@ -125,6 +125,43 @@ func TestCNIConfigNAT66ShardSIDs(t *testing.T) {
 	}
 }
 
+func TestCNIConfigEBPFInterfaces(t *testing.T) {
+	const (
+		conflistIfaces = "eth1"
+		envIfaces      = "eth1,eth2"
+	)
+
+	// Default: empty, not an error -- "fall back to
+	// attach.ResolveInterfaces' own auto-detection" is the pre-existing
+	// behavior, same stance as NAT66ShardSIDs' own default above.
+	cfg := NewCNIConfig()
+	cfg.Resolve(&ConflistValues{})
+	if cfg.EBPFInterfaces != "" {
+		t.Errorf("EBPFInterfaces = %q, want empty by default", cfg.EBPFInterfaces)
+	}
+
+	// Conflist value flows through -- internal/installer.Bootstrap's own
+	// resolveEBPFInterfaces writes this, since a CNI plugin's own exec
+	// environment never carries GALACTIC_CNI_EBPF_INTERFACES (see
+	// hostconf.HostConf.EBPFInterfaces' own doc comment).
+	cfg = NewCNIConfig()
+	cfg.Resolve(&ConflistValues{EBPFInterfaces: conflistIfaces})
+	if cfg.EBPFInterfaces != conflistIfaces {
+		t.Errorf("EBPFInterfaces = %q, want %q (conflist)", cfg.EBPFInterfaces, conflistIfaces)
+	}
+
+	// Env var overrides the conflist value -- an operator setting
+	// GALACTIC_CNI_EBPF_INTERFACES directly on this exec environment
+	// (unlike a DaemonSet container's own env, which a CNI plugin never
+	// inherits) must still win.
+	t.Setenv(EnvCNIEBPFInterfaces, envIfaces)
+	cfg = NewCNIConfig()
+	cfg.Resolve(&ConflistValues{EBPFInterfaces: conflistIfaces})
+	if cfg.EBPFInterfaces != envIfaces {
+		t.Errorf("EBPFInterfaces = %q, want %q (env override)", cfg.EBPFInterfaces, envIfaces)
+	}
+}
+
 func TestCNIConfigNodeNameLegacyFallback(t *testing.T) {
 	t.Setenv(EnvNodeNameLegacy, "legacy-node")
 

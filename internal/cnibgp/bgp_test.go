@@ -33,12 +33,13 @@ import (
 )
 
 const (
-	testVPC        = "abc"
-	testAttachment = "def"
-	testRouterName = "overlay-router"
-	testRD65000_1  = "65000:1"
-	testVPCHex1234 = "0000000004d2" // decimal 1234
-	testNetns      = "/proc/1/ns/net"
+	testVPC         = "abc"
+	testAttachment  = "def"
+	testContainerID = "test-container"
+	testRouterName  = "overlay-router"
+	testRD65000_1   = "65000:1"
+	testVPCHex1234  = "0000000004d2" // decimal 1234
+	testNetns       = "/proc/1/ns/net"
 
 	testUnrelatedAnnotationKey = "some.other/annotation"
 	testLiveNetnsPath          = "/proc/live/ns/net"

@@ -17,7 +17,7 @@ import (
 // the CNI spec's DEL idempotency requirement.
 func TestCmdDelIdempotent(t *testing.T) {
 	args := &skel.CmdArgs{
-		ContainerID: "test-container",
+		ContainerID: testContainerID,
 		StdinData:   []byte("not valid json"),
 	}
 
@@ -48,7 +48,7 @@ func TestCmdDelParsesConfigForLogging(t *testing.T) {
 		testVPC, testAttachment,
 	)
 	args := &skel.CmdArgs{
-		ContainerID: "test-container",
+		ContainerID: testContainerID,
 		StdinData:   []byte(conf),
 	}
 

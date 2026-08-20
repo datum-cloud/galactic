@@ -186,6 +186,7 @@ func parseConf(data []byte) (*PluginConf, error) {
 		LogFile:        hostConf.LogFile,
 		LogLevel:       hostConf.LogLevel,
 		NAT66ShardSIDs: hostConf.NAT66ShardSIDs,
+		EBPFInterfaces: hostConf.EBPFInterfaces,
 	})
 
 	if cniConfig.NodeName == "" {
@@ -199,6 +200,25 @@ func parseConf(data []byte) (*PluginConf, error) {
 		return nil, &types.Error{Code: 4, Msg: "node name is required (or set GALACTIC_CNI_NODE_NAME)"}
 	}
 	_ = os.Setenv("KUBECONFIG", cniConfig.Kubeconfig)
+
+	// Bridges the conflist-resolved interface list into the raw env var
+	// attach.ResolveInterfaces itself checks, exactly the same
+	// "downstream library reads via plain os.Getenv" reason the
+	// KUBECONFIG bridge just above exists for. Without this, every
+	// srv6.ResolveNodeSourceAddress/ResolvePublicUplink call this
+	// process makes (registerNodeSourceAddress/registerPublicUplink,
+	// bgp.go) falls back to attach.ResolveInterfaces' own
+	// default-IPv6-route auto-detection -- wrong on any node where that
+	// route's interface isn't the fabric one (found live: this exact gap
+	// produced a plausible-but-wrong public_uplink_table entry with no
+	// error at all). Only sets it when the process's own environment
+	// doesn't already carry it, so an operator who genuinely does set
+	// GALACTIC_CNI_EBPF_INTERFACES on this exec environment directly
+	// (unlike this lab, which only sets it on the DaemonSet container's
+	// own env, never on a CNI plugin's) is never overridden.
+	if os.Getenv(config.EnvCNIEBPFInterfaces) == "" && cniConfig.EBPFInterfaces != "" {
+		_ = os.Setenv(config.EnvCNIEBPFInterfaces, cniConfig.EBPFInterfaces)
+	}
 
 	namespace := conf.Namespace
 	if namespace == "" {

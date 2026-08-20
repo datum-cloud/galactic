@@ -14,6 +14,37 @@ interface eth1
  ipv6 address 2001:db8:1:32::2/64
 !
 
+# Aggregate covering resources/galactic-gateway/iad/networkrule-ns60.yaml's
+# anycast ingress VIP (2001:db8:6060::1) -- closes the "External VIP
+# announcement mechanism" gap this redesign explicitly left open (see
+# docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md §5). The VIP's own
+# reachability is carried purely as an EVPN Type 5 path within
+# galactic-router's iBGP mesh (internal/controller/networkgateway_controller.go),
+# which the plain-IPv6-unicast transit fabric (tr1-tr4) never sees at all --
+# and remote galactic-router nodes that DO learn that EVPN path install it as
+# a plain (non-SRv6) kernel route (no VRFID/Function on this advertisement,
+# so resolveSRv6SID never attaches a Prefix-SID -- internal/reconcile/
+# reconcile.go's resolveSRv6SID, internal/runtime/gobgp/monitor.go's
+# processEVPNPath) that keeps the VIP as the packet's literal destination the
+# whole way out. Without a matching route on tr1-tr4 for that literal
+# destination, a client on a different site (or the fabric itself, e.g.
+# tr4) has nowhere to forward it -- confirmed live: BGP RIB miss on tr3 and
+# tr4 both, and empty tcpdump captures on iad-gateway1/tr3/iad-worker when
+# curling from dfw-worker, before this aggregate existed.
+#
+# Both iad-gateway1 and iad-gateway2 originate this identically (like their
+# EVPN advertisements -- DSR's anycast model, no primary/secondary), giving
+# tr3 two equal-cost paths; Maglev's consistent-hash ring on the receiving
+# node, not this route, decides which gateway actually answers a flow.
+#
+# This IS accepted by every transit router's inbound FILTER_PREFIX route-map
+# despite being a /48 -- live-verified in this exact lab (tr3/tr1/tr4 all
+# learn and re-advertise it). That appears to contradict this file's own
+# "denies anything <=/48" comment below for fc00:0:9::/48; the real cause of
+# that earlier failure evidently wasn't prefix length. Worth re-examining,
+# but not blocking this fix.
+ipv6 route 2001:db8:6060::/48 Null0
+
 router bgp 65000
  bgp router-id 10.255.255.5
  no bgp default ipv4-unicast
@@ -37,6 +68,8 @@ router bgp 65000
   # stuck in Active forever -- caught only once this link's underlay
   # eBGP was actually brought up live (see node_files/tr3/frr.conf).
   network fc00:0:9::1/128
+  # VIP aggregate -- see this file's top-of-interface-eth1 comment.
+  network 2001:db8:6060::/48
  exit-address-family
 
 ipv6 forwarding

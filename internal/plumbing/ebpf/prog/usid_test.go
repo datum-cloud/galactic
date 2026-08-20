@@ -1212,6 +1212,54 @@ func buildPlainIPv4Packet(t *testing.T, src, dst netip.Addr) []byte {
 	return pkt
 }
 
+// buildPlainV6PacketWithL4Ports builds a minimal Ethernet+IPv6+TCP frame
+// (a full 20-byte TCP header, zero payload) with h_proto = ETH_P_IPV6
+// and a single (non-tunneled) IPv6 header -- the shape usid_egress's own
+// vip_xlat egress-direction lookup needs (it reads the packet's own
+// source port directly after the one IPv6 header it parses).
+// buildPacketWithV6Addrs can't serve this: its own outer header is
+// hardcoded to nexthdr=41 (IPv6-in-IPv6, matching a usid_ingress decap
+// test's needs), so usid_egress's own `ip6->nexthdr == TCP || UDP`
+// vip_xlat gate never fires for any packet it builds. A full 20-byte TCP
+// header, not just the 4-byte source/dest port pair, is required here:
+// apply_vip_xlat's own bpf_l4_csum_replace calls read/write the TCP
+// checksum field at a fixed offset (USID_TCP_CSUM_OFFSET = 16) relative
+// to the L4 header's start, and fail (silently, by this function's own
+// design -- see usid_egress's own comment at its call site) if that
+// offset falls outside the packet's bounds, which a 4-byte packet would.
+// proto is currently always 6 (TCP) at this file's only two call sites,
+// but is still a parameter, matching buildPlainIPv4Packet's own shape,
+// rather than a hardcoded assumption baked into the function body.
+func buildPlainV6PacketWithL4Ports(t *testing.T, src, dst netip.Addr, proto uint8, srcPort, dstPort uint16) []byte {
+	t.Helper()
+	if proto != 6 {
+		t.Fatalf("buildPlainV6PacketWithL4Ports: proto %d unsupported, only TCP(6)'s 20-byte header is built", proto)
+	}
+	const tcpHeaderLen = 20
+
+	pkt := make([]byte, 0, ethHeaderLen+ip6HeaderLen+tcpHeaderLen)
+	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
+	pkt = append(pkt, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB)
+	pkt = append(pkt, 0x86, 0xDD)
+
+	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00)
+	pkt = append(pkt, byte(tcpHeaderLen>>8), byte(tcpHeaderLen))
+	pkt = append(pkt, proto)
+	pkt = append(pkt, 64)
+	srcBytes := src.As16()
+	pkt = append(pkt, srcBytes[:]...)
+	dstBytes := dst.As16()
+	pkt = append(pkt, dstBytes[:]...)
+
+	tcp := make([]byte, tcpHeaderLen)
+	binary.BigEndian.PutUint16(tcp[0:2], srcPort)
+	binary.BigEndian.PutUint16(tcp[2:4], dstPort)
+	tcp[12] = 5 << 4 // data offset: 5 32-bit words, no options
+	pkt = append(pkt, tcp...)
+
+	return pkt
+}
+
 // egressRouteFamilyINET6/egressRouteFamilyINET4 mirror usid.c's
 // USID_EGRESS_ROUTE_FAMILY_INET6/USID_EGRESS_ROUTE_FAMILY_INET4 -- see
 // usidVIPXlatDirIngress/usidVIPXlatDirEgress's identical comment above for
@@ -1314,6 +1362,64 @@ func TestUsidEgress_RouteMissPassesThroughUnmodified(t *testing.T) {
 	}
 	if string(out) != string(pkt) {
 		t.Errorf("packet mutated on an egress_route_table miss:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+// TestUsidEgress_PassThroughEntryDefersToKernel covers the local
+// pass-through sentinel (egressroutemap.EgressRouteTable.RegisterPassThrough,
+// struct egress_route_value's own link_ifindex==0 doc comment): unlike
+// TestUsidEgress_RouteMissPassesThroughUnmodified above, this is a genuine
+// LPM *hit* -- a real entry exists for this exact destination, more
+// specific than the VRF's own ::/0 default also populated here -- but
+// that entry carries no link_ifindex, so usid_egress must still defer to
+// the kernel byte-for-byte unmodified, not encapsulate toward the
+// all-zero SID a real hit would otherwise push. This is exactly the
+// containerlab ns30 scenario: two attachments sharing one VRF on one
+// node, where the destination is a sibling attachment's own
+// kernel-connected prefix, not a NAT66 shard.
+func TestUsidEgress_PassThroughEntryDefersToKernel(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const tableID uint32 = 7
+	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, tableID)
+
+	dst := netip.MustParseAddr("fd20:30:ff02::100:0")
+	realSID := netip.MustParseAddr("2001:db8:ff02:9::")
+
+	// The VRF's own ::/0 default -- a real, encapsulating entry. Present
+	// specifically so this test proves the pass-through entry's longer
+	// prefix wins the LPM lookup over it, not merely that an empty trie
+	// defers to the kernel (TestUsidEgress_RouteMissPassesThroughUnmodified
+	// already covers that simpler case).
+	if err := objs.EgressRouteTable.Put(
+		egressRouteKey(tableID, egressRouteFamilyINET6, netip.IPv6Unspecified(), 0),
+		UsidEgressRouteValue{Sid: realSID.As16()},
+	); err != nil {
+		t.Fatalf("populate egress_route_table default entry: %v", err)
+	}
+	// The sibling attachment's own /96, registered pass-through: an
+	// all-zero value, link_ifindex included.
+	if err := objs.EgressRouteTable.Put(
+		egressRouteKey(tableID, egressRouteFamilyINET6, dst, 96),
+		UsidEgressRouteValue{},
+	); err != nil {
+		t.Fatalf("populate egress_route_table pass-through entry: %v", err)
+	}
+
+	pkt := buildPacketWithV6Addrs(t,
+		netip.MustParseAddr("fd20:30:ff01::100:0"), dst,
+		netip.MustParseAddr("fd20:30:ff01::100:0"), dst)
+
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActUnspec {
+		t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d) -- a pass-through hit must defer to the kernel", ret, tcActUnspec)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated on a pass-through entry hit:\n in: % x\nout: % x", pkt, out)
 	}
 }
 
@@ -1512,6 +1618,111 @@ func TestUsidEgress_NoNodeSourceAddressFailsOpen(t *testing.T) {
 	}
 	if string(out) != string(pkt) {
 		t.Errorf("packet mutated with no node_src_addr_table entry:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+// TestUsidEgress_VIPSourcedReplyRedirectsToPublicUplinkNotNAT66 is the
+// regression test for a real bug found live, running a genuine curl
+// through a DSR-served ServiceVIPBinding: a DSR backend's reply, once
+// apply_vip_xlat has rewritten its source from the backend's own real
+// address to the VIP, was still falling through to egress_route_table's
+// own ::/0 NAT66 default (present in any VRF with a NAT66 shard
+// configured, which is every VRF on a node with NAT66ShardSIDs set) and
+// getting wrongly re-encapsulated/SNAT'd toward a NAT66 shard instead of
+// being delivered toward the real client at all -- confirmed live via
+// nat66_conn_table gaining a brand-new forward-flow entry keyed
+// saddr=<the VIP>, exactly as if the VIP were a tenant backend
+// originating a fresh outbound connection. public_uplink_table's
+// existence (and usid_egress checking it immediately after a vip_xlat
+// egress-row hit, before ever reaching egress_route_table) is the fix.
+//
+// A conflicting, real, encapsulating ::/0 entry is populated in
+// egress_route_table specifically so this test proves the VIP-sourced
+// redirect wins outright (the packet is never even evaluated against
+// it, since it returns immediately) -- not merely that public_uplink_table
+// happens to be checked first with no NAT66 default present to compete
+// with at all.
+func TestUsidEgress_VIPSourcedReplyRedirectsToPublicUplinkNotNAT66(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const tableID = 13
+	block, argument := uint64(0xFEEDFA), uint16(0x500)
+	setUpEgressRouteAttachment(t, objs, block, argument, tableID)
+
+	// The VRF's own ::/0 NAT66 default -- present so this test proves the
+	// VIP-sourced redirect below preempts it entirely, the same
+	// "conflicting real entry" methodology
+	// TestUsidEgress_PassThroughEntryDefersToKernel already uses for the
+	// analogous same-VRF-peer case.
+	shardSID := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+	if err := objs.EgressRouteTable.Put(
+		egressRouteKey(tableID, egressRouteFamilyINET6, netip.IPv6Unspecified(), 0),
+		UsidEgressRouteValue{Sid: shardSID.As16()},
+	); err != nil {
+		t.Fatalf("populate egress_route_table default entry: %v", err)
+	}
+
+	backendReal := netip.MustParseAddr("fd20:60:ff03::100:0")
+	vip := netip.MustParseAddr("2001:db8:6060::1")
+	client := netip.MustParseAddr("2001:db8:0:13::1") // an arbitrary, real external client
+	const backendPort, clientPort = 80, 43210
+
+	vipXlatKey := UsidVipXlatKey{
+		Block: block, Argument: argument, Proto: 6, // TCP
+		Direction: usidVIPXlatDirEgress, Port: bswap16(backendPort),
+	}
+	if err := objs.VipXlatTable.Put(vipXlatKey, UsidVipXlatValue{
+		Addr: vip.As16(), Port: bswap16(backendPort),
+	}); err != nil {
+		t.Fatalf("populate vip_xlat_table (egress row): %v", err)
+	}
+
+	dmac := [6]byte{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}
+	smac := [6]byte{0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}
+	const linkIfindex = 1 // loopback always exists; real delivery is a live-cluster concern
+	if err := objs.PublicUplinkTable.Put(uint32(0), UsidPublicUplinkValue{
+		LinkIfindex: linkIfindex, Dmac: dmac, Smac: smac,
+	}); err != nil {
+		t.Fatalf("populate public_uplink_table: %v", err)
+	}
+
+	pkt := buildPlainV6PacketWithL4Ports(t, backendReal, client, 6 /* TCP */, backendPort, clientPort)
+
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActRedirect {
+		t.Fatalf("verdict = %d, want TC_ACT_REDIRECT (%d) -- a VIP-sourced reply must redirect to the "+
+			"public uplink, not fall through to egress_route_table", ret, tcActRedirect)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonPublicUplinkRedirectFailed); got != 0 {
+		t.Errorf("drop_reasons[public_uplink_redirect_failed] = %d, want 0", got)
+	}
+
+	// No header push for this path (unlike an egress_route_table hit,
+	// this is a plain L2 rewrite-and-redirect, not an SRv6 encap) --
+	// length must be unchanged.
+	if len(out) != len(pkt) {
+		t.Fatalf("output packet length = %d, want %d (unchanged -- no encap header pushed)", len(out), len(pkt))
+	}
+	if string(out[0:6]) != string(dmac[:]) {
+		t.Errorf("h_dest = % x, want %x (public_uplink_table's own dmac)", out[0:6], dmac)
+	}
+	if string(out[6:12]) != string(smac[:]) {
+		t.Errorf("h_source = % x, want %x (public_uplink_table's own smac)", out[6:12], smac)
+	}
+
+	const saddrOffset = ethHeaderLen + 8
+	const daddrOffset = ethHeaderLen + 24
+	gotSrc, _ := netip.AddrFromSlice(out[saddrOffset : saddrOffset+16])
+	if gotSrc != vip {
+		t.Errorf("saddr after redirect = %s, want %s (apply_vip_xlat's own rewrite, still intact)", gotSrc, vip)
+	}
+	gotDst, _ := netip.AddrFromSlice(out[daddrOffset : daddrOffset+16])
+	if gotDst != client {
+		t.Errorf("daddr after redirect = %s, want %s (the real client, untouched)", gotDst, client)
 	}
 }
 

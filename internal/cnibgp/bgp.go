@@ -461,12 +461,18 @@ func publishBGPState(
 			return err
 		}
 
+		// Computed here, ahead of registerEBPFDatapath below, so this
+		// attachment's own prefix(es) can be registered as local
+		// pass-through egress_route_table entries — see
+		// registerEBPFDatapath's own doc comment for why.
+		prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
+
 		// The return values aren't tracked for rollback: the vrf_table entry
 		// they'd describe is shared by every attachment on this VPC/node,
 		// same as the BGPVRFInstance above — see resourceTracker.cleanup's
 		// doc comment for why a failed ADD must never unregister it.
 		if _, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir,
+			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, prefixes,
 		); err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
@@ -477,7 +483,6 @@ func publishBGPState(
 				Namespace: namespace,
 			},
 		}
-		prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
 		var mergedPrefixes []string
 		_, err = controllerutil.CreateOrUpdate(ctx, k8s, adv, func() error {
 			if adv.Annotations == nil {
@@ -530,8 +535,26 @@ func publishBGPState(
 // this router has no srv6Locator/nodeID configured at all — SRv6 is
 // intentionally not set up for this attachment. Any other failure is
 // returned as an error.
+//
+// prefixes is this attachment's own IPAM-derived prefix(es)
+// (ipamAdvertisementPrefixes' first return value, computed by the caller
+// ahead of this call) — each is registered as a local pass-through
+// egress_route_table entry (registerLocalEgressRoutes) in this VPC's
+// VRF, so this attachment's own prefix always wins the LPM lookup over a shorter
+// entry (in practice, the VRF's own ::/0 NAT66 default installed just
+// above by installNAT66EgressRoute). Without this, a sibling attachment
+// sharing this same VRF on this node — with a perfectly good kernel
+// connected route already routing between them — has that traffic
+// silently hijacked by the ::/0 default and redirected toward a NAT66
+// shard SID instead of ever being delivered locally: found live in
+// containerlab's ns30 fixture (two attachments, one VPC, one node), the
+// same class of bug as usid_egress's own multicast/link-local carve-out,
+// just for ordinary same-VRF unicast peers instead of NDP. nil/empty is
+// valid (an attachment with no "ipam" block at all, e.g. a
+// self-addressing tap workload — see ipamAdvertisementPrefixes' own doc
+// comment) and simply registers nothing.
 func registerEBPFDatapath(
-	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string,
+	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string, prefixes []string,
 ) (registered bool, err error) {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return false, nil
@@ -573,6 +596,10 @@ func registerEBPFDatapath(
 	// given conflist happens to include galactic-route.
 	if err := installNAT66EgressRoute(vrfTableID); err != nil {
 		return false, fmt.Errorf("install NAT66 default egress route: %w", err)
+	}
+
+	if err := registerLocalEgressRoutes(pinDir, vrfTableID, prefixes); err != nil {
+		return false, fmt.Errorf("register local pass-through egress route: %w", err)
 	}
 
 	// The host-side interface's own ifindex, needed to key this
@@ -644,6 +671,22 @@ func registerEBPFDatapath(
 			"egress routing will fail open until this succeeds", "err", err)
 	}
 
+	// Registers this node's own fabric-uplink next hop into
+	// public_uplink_table -- see registerPublicUplink's own doc comment.
+	// Same per-node-constant, redo-on-every-ADD, non-fatal-on-failure
+	// shape as registerNodeSourceAddress just above, and for the
+	// identical reason: ResolvePublicUplink needs a converged underlay
+	// neighbor, which a node can transiently lack early in its own boot
+	// sequence. usid_egress's own "not configured yet" check on this map
+	// (link_ifindex == 0, absent entirely) already fails open (falling
+	// through to egress_route_table, the pre-existing behavior) for
+	// exactly this gap.
+	if err := registerPublicUplink(pinDir); err != nil {
+		slog.Warn("ADD: could not register this node's own public uplink; "+
+			"a DSR backend's VIP-sourced reply traffic will fail open to egress_route_table until this succeeds",
+			"err", err)
+	}
+
 	return true, nil
 }
 
@@ -669,6 +712,34 @@ func registerNodeSourceAddress(pinDir string) error {
 	}
 	defer func() { _ = closer.Close() }()
 	return nodeSrc.Set(addr)
+}
+
+// registerPublicUplink resolves this node's own fabric-uplink interface's
+// real next hop (srv6.ResolvePublicUplink) and writes it into
+// public_uplink_table (egressroutemap.PublicUplink) -- the value
+// usid_egress redirects a DSR backend's VIP-sourced reply toward,
+// unconditionally, immediately after apply_vip_xlat rewrites that
+// reply's source address, bypassing egress_route_table's own NAT66
+// default entirely. Without this, a DSR-served ServiceVIPBinding whose
+// backend lives in a VRF with a NAT66 default configured (any VRF on a
+// node with NAT66ShardSIDs set, i.e. every VRF today) has its reply
+// wrongly re-SNAT'd through a NAT66 shard instead of ever reaching the
+// real client -- found live, confirmed via nat66_conn_table gaining a
+// fresh forward-flow entry keyed on the VIP as if it were an ordinary
+// tenant backend originating a new outbound connection. See this
+// function's own call site for why a failure here doesn't fail the
+// whole CNI ADD.
+func registerPublicUplink(pinDir string) error {
+	linkIndex, dmac, smac, err := srv6.ResolvePublicUplink()
+	if err != nil {
+		return fmt.Errorf("resolve public uplink: %w", err)
+	}
+	uplink, closer, err := egressroutemap.OpenPinnedPublicUplink(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned public_uplink_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	return uplink.Set(linkIndex, dmac, smac)
 }
 
 // attachUsidEgress loads usid_egress from its own pin (attach.Load pins it
@@ -702,6 +773,55 @@ func attachUsidEgress(pinDir, ifaceName string) error {
 	defer func() { _ = program.Close() }()
 
 	return attach.AttachEgress(program, ifaceName)
+}
+
+// registerLocalEgressRoutes registers each of prefixes as a local
+// pass-through egress_route_table entry in Linux VRF table vrfTableID --
+// see registerEBPFDatapath's own doc comment for why this attachment's
+// own prefix needs one. Idempotent (a plain map Put under the hood) and
+// safe to call on every attachment ADD, including a repeat ADD for the
+// same attachment or a sibling attachment re-registering an unrelated
+// prefix in the same VRF.
+//
+// Opens egress_route_table directly via egressroutemap, keyed on the
+// caller's own pinDir -- unlike installNAT66EgressRoute below, this
+// deliberately does not go through srv6's RouteEgressAdd/
+// EgressDefaultRouteAdd wrappers, which resolve their own pinned-map
+// directory from a package-level var defaulting to attach.PinDir rather
+// than accepting one as a parameter: fine for those (always called with
+// the real production bpffs mount), but wrong here, where
+// registerEBPFDatapath is explicitly designed to run against an
+// arbitrary pinDir (see its own usidmap.OpenPinnedRegistry/
+// ifindexvrfmap.OpenPinned calls) -- mirrors registerNodeSourceAddress's
+// identical choice, just below, for the same reason.
+//
+// prefixes are the exact CIDR strings ipamAdvertisementPrefixes already
+// produces for this attachment's own BGPAdvertisement (an IPv6 subnet
+// and/or an IPv4 host route) -- a parse failure here would mean that
+// function produced something unparseable, which would already have
+// failed the BGPAdvertisement CreateOrUpdate below with a bad prefix, so
+// treating it as a hard error here rather than skipping it silently
+// keeps both paths equally strict.
+func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []string) error {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned egress_route_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	for _, p := range prefixes {
+		_, prefix, err := net.ParseCIDR(p)
+		if err != nil {
+			return fmt.Errorf("parse prefix %q: %w", p, err)
+		}
+		if err := table.RegisterPassThrough(vrfTableID, prefix); err != nil {
+			return fmt.Errorf("register local pass-through route for %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // installNAT66EgressRoute installs (or refreshes) vrfTableID's default

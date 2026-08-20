@@ -6,6 +6,7 @@ package cnibgp
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -49,7 +51,7 @@ func blockFromLocator(locator string) (uint64, error) {
 func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "", nodeID: 0}
 	registered, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
+		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist", nil)
 	if err != nil {
 		t.Errorf("registerEBPFDatapath with unconfigured BGPRouter = %v, want nil (no-op)", err)
 	}
@@ -66,7 +68,7 @@ func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "2001:db8:1::/48", nodeID: 0x10001} // wraps to uint16(1) if narrowed unchecked
 	registered, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist")
+		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist", nil)
 	if err == nil {
 		t.Fatal("registerEBPFDatapath with nodeID=0x10001 = nil error, want an out-of-range rejection")
 	}
@@ -116,7 +118,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
-	registered, err := registerEBPFDatapath(cfg, vpc, testAttachment, ifaceTypeVeth, uint16(vrfID), pinDir)
+	registered, err := registerEBPFDatapath(cfg, vpc, testAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, nil)
 	if err != nil {
 		t.Fatalf("registerEBPFDatapath: %v", err)
 	}
@@ -236,6 +238,9 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 	const (
 		firstAttachment  = testAttachment
 		secondAttachment = "def2"
+
+		firstPrefix  = "fd20:30:ff01::/96"
+		secondPrefix = "fd20:30:ff02::/96"
 	)
 
 	if err := vrf.Add(vpc); err != nil {
@@ -261,12 +266,16 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
-	if _, err := registerEBPFDatapath(cfg, vpc, firstAttachment, ifaceTypeVeth, uint16(vrfID), pinDir); err != nil {
+	if _, err := registerEBPFDatapath(
+		cfg, vpc, firstAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, []string{firstPrefix},
+	); err != nil {
 		t.Fatalf("first attachment's registerEBPFDatapath: %v", err)
 	}
 	// A second attachment on the same VPC/node resolves the same Argument
 	// (allocateArgument's idempotent lookup) and re-registers the same key.
-	registered, err := registerEBPFDatapath(cfg, vpc, secondAttachment, ifaceTypeVeth, uint16(vrfID), pinDir)
+	registered, err := registerEBPFDatapath(
+		cfg, vpc, secondAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, []string{secondPrefix},
+	)
 	if err != nil {
 		t.Fatalf("second attachment's registerEBPFDatapath: %v", err)
 	}
@@ -287,5 +296,38 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("vrf_table entries after two attachments share one VPC = %+v, want exactly 1 (shared, not duplicated)",
 			entries)
+	}
+
+	// Regression guard for the ns30 bug: two attachments sharing one VRF
+	// on one node must each get a local pass-through egress_route_table
+	// entry for their own prefix (registerEBPFDatapath's own doc
+	// comment) -- without it, a VRF-wide ::/0 NAT66 default entry would
+	// LPM-match and hijack traffic between them even though the kernel
+	// already has a perfectly good connected route.
+	vrfTableID, err := vrf.TableID(vpc)
+	if err != nil {
+		t.Fatalf("vrf.TableID: %v", err)
+	}
+	egressRouteTable, egressCloser, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
+	if err != nil {
+		t.Fatalf("OpenPinnedEgressRouteTable: %v", err)
+	}
+	defer func() { _ = egressCloser.Close() }()
+	for _, prefixStr := range []string{firstPrefix, secondPrefix} {
+		_, prefix, err := net.ParseCIDR(prefixStr)
+		if err != nil {
+			t.Fatalf("ParseCIDR(%q): %v", prefixStr, err)
+		}
+		sid, ok, err := egressRouteTable.Lookup(vrfTableID, prefix)
+		if err != nil {
+			t.Fatalf("egress_route_table lookup for %s: %v", prefixStr, err)
+		}
+		if !ok {
+			t.Errorf("no local pass-through egress_route_table entry for %s in table %d", prefixStr, vrfTableID)
+			continue
+		}
+		if !sid.Equal(net.IPv6zero) {
+			t.Errorf("egress_route_table entry for %s = sid %s, want the all-zero pass-through sentinel", prefixStr, sid)
+		}
 	}
 }

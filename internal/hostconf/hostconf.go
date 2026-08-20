@@ -70,6 +70,25 @@ type HostConf struct {
 	// internal/cnibgp the same way every other field here is: a CNI
 	// plugin's exec environment carries none of this on its own.
 	NAT66ShardSIDs string `json:"nat66_shard_sids,omitempty"`
+
+	// EBPFInterfaces is the comma-separated interface list
+	// config.EnvCNIEBPFInterfaces would otherwise carry -- see that env
+	// var's own doc comment. Written by internal/installer.Bootstrap
+	// from its own env/auto-detection (an init container sharing its
+	// pod's env with the long-running "run" container, which is why
+	// attach.ResolveInterfaces' env-var override already works
+	// correctly there today), for exactly the same reason NAT66ShardSIDs
+	// above is: internal/cnibgp -- invoked per-pod by the CNI runtime,
+	// not a long-lived process with configurable env -- never sees
+	// GALACTIC_CNI_EBPF_INTERFACES on its own, and silently falls back
+	// to attach.ResolveInterfaces' own auto-detection instead, which is
+	// wrong on any node where the interface actually carrying the
+	// default IPv6 route (e.g. Cilium's own uplink) isn't the fabric
+	// interface -- found live, this exact gap produced a plausible but
+	// wrong public_uplink_table entry (internal/plumbing/ebpf/prog/
+	// usid.c's DSR-reply redirect) that had nothing to do with that
+	// mechanism's own correctness.
+	EBPFInterfaces string `json:"ebpf_interfaces,omitempty"`
 }
 
 // conflistEnvelope matches standard CNI conflist JSON structure.
