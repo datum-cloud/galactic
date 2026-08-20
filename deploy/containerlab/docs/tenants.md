@@ -12,7 +12,7 @@ interface the pod's `eth0` rather than an additional `net1` — there is no
 `k8s.v1.cni.cncf.io/networks` annotation in play here), which invokes the
 galactic CNI plugin chain: `galactic-veth` creates a VRF and veth pair, then
 `galactic-bgp` registers the attachment against the eBPF uSID datapath and
-writes a `BGPAdvertisement` CRD (see [docs/cni-cmd-sequence.md](../../../docs/cni-cmd-sequence.md)
+writes a `BGPAdvertisement` CRD (see [docs/cni-cmd-sequence.md](../../../docs/cni/cni-cmd-sequence.md)
 for the full per-binary ADD sequence). The `galactic-router` controller then
 advertises each pod's EVPN route to the route reflector, distributing
 reachability across sites.

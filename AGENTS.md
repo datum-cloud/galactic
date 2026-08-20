@@ -88,4 +88,4 @@ Summary:
 5. Read `internal/plumbing/intf/intf.go` to understand SRv6 endpoint encoding, interface naming, and base62↔hex conversion.
 6. Explore `internal/plumbing/` for shared kernel and network primitives (VRF, sysctl, interface naming, SRv6).
 7. Read `internal/gateway/engine.go` and `internal/controller/networkgateway_controller.go` to understand the edge XDP NAT+LB gateway's convergence loop and Active-Active BGP placement model. See [ARCHITECTURE-GATEWAY.md](docs/agents/ARCHITECTURE-GATEWAY.md).
-8. See `docs/cni-cmd-sequence.md` and `docs/agent-startup.md` for Mermaid sequence diagrams of the CNI attach path and router startup. `docs/cni/configuration.md` and `docs/router/configuration.md` document CNI config fields and router environment variables.
+8. See `docs/cni/cni-cmd-sequence.md`, `docs/cni/gc-cmd-sequence.md`, and `docs/agent-startup.md` for Mermaid sequence diagrams of the CNI attach path, garbage collection, and router startup, respectively. `docs/cni/configuration.md` and `docs/router/configuration.md` document CNI config fields and router environment variables.

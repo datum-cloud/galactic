@@ -53,7 +53,7 @@ inside the master plugin. A real-world attachment's conflist has this shape:
 
 Every binary's own JSON stanza carries only the fields that binary itself
 reads (`vpc`/`vpcattachment` are duplicated across every stanza; nothing
-else is). See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the
+else is). See [docs/cni-cmd-sequence.md](cni-cmd-sequence.md) for the
 full ADD/DEL sequence across all three stages.
 
 ## Runtime Configuration

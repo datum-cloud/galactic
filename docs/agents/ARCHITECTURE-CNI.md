@@ -161,7 +161,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (veth ADD, tap ADD, shared DEL), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries.
+See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (one unified ADD diagram covering both the veth and tap master-plugin paths, one DEL diagram covering the whole chain), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries.
 
 ---
 
@@ -181,10 +181,14 @@ See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full CNI ADD/DEL 
 | `internal/plumbing/vrf`    | every CNI-chain binary                                                   | Linux VRF create/delete/lookup                                                                                                            |
 | `internal/plumbing/sysctl` | `galactic-veth`, `galactic-tap`                                          | Interface sysctl helpers                                                                                                                  |
 
-`internal/gc` (in `galactic-router`) is the counterpart that reclaims
-orphaned CRD/VRF/eBPF-entry state this chain's DEL paths deliberately leave
-behind — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) and Known
-Constraints below.
+`internal/gc` is the counterpart that reclaims orphaned CRD/VRF/eBPF-entry
+state this chain's DEL paths deliberately leave behind — its orphaned-CRD
+and kernel-VRF sweep runs inside `galactic-router` (see
+[ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)), while its eBPF
+`vrf_table` sweep runs inside this component's own `galactic-cni` `run`
+container instead, since the pinned map only exists there. See
+[docs/gc-cmd-sequence.md](../cni/gc-cmd-sequence.md) for both sweeps' sequence
+diagrams and Known Constraints below.
 
 ---
 
@@ -240,7 +244,7 @@ present) delegates IPAM and configures the host gateway — it prints its own
 CNI result and returns; BGP/SRv6/eBPF publish is `galactic-bgp`'s job,
 invoked next by the CNI runtime per conflist order, not by this process.
 
-See [docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) for the full ADD/DEL sequence.
+See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full ADD/DEL sequence.
 
 ### `cmd/galactic-tap/main.go` — tap master plugin
 
@@ -391,7 +395,7 @@ interfaces or IPs of their own. This means the master's own printed result is
 the runtime's authoritative CNI result for the whole chain; a successful ADD
 response does not by itself guarantee `galactic-bgp` has even run yet, let
 alone that the `BGPAdvertisement`/`BGPVRFInstance` CRDs exist (see
-[docs/cni-cmd-sequence.md](../cni-cmd-sequence.md)).
+[docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md)).
 
 On DEL, every binary's result contains only `cniVersion` (empty result). Each
 binary's own DEL only cleans up what it itself created *and* is safe to
@@ -399,7 +403,7 @@ release immediately for that specific container — IPAM deallocation
 (`galactic-ipam`, via its own on-disk marker file) and the guest-netns
 flush/host-device DEL (`galactic-veth` only). It does not attempt to unwind
 any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
-[docs/cni-cmd-sequence.md](../cni-cmd-sequence.md) and Known Constraints below.
+[docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) and Known Constraints below.
 
 ---
 
@@ -458,7 +462,7 @@ auto-detect directly (see Configuration above).
 - **Base62 interface names.** Kernel interface names use the format `G{9-char-vpc-base62}{3-char-att-base62}{suffix}` (suffix: `V` = VRF, `H` = host veth/tap, `G` = guest veth pre-move), fitting in the 15-character kernel limit. The hex form is used for BGP route targets; base62 for kernel interfaces.
 - **VRF/route-target model via BGPVRFInstance.** `galactic-bgp` creates a `BGPVRFInstance` (RouteDistinguisher + import/export Route Targets, all set to the derived RT) before the `BGPAdvertisement`; `galactic-router`'s GoBGP runtime applies VRFs before originating EVPN paths.
 - **CRD-driven config, no sidecar gRPC.** `galactic-bgp` writes `BGPVRFInstance`/`BGPAdvertisement` CRDs directly via a bare controller-runtime client; `galactic-router`'s reconciler picks them up. No in-node gRPC calls between any of the CNI-chain binaries and `galactic-router`.
-- **DEL is intentionally minimal everywhere in the CNI chain; GC reclaims shared state asynchronously.** Every binary's own `cmdDel` only cleans up what it itself created *and* is safe to release immediately per-container (IPAM deallocation via `galactic-ipam`'s own on-disk marker file; guest-netns flush/host-device DEL in `galactic-veth`). None of them delete the VRF, veth/tap, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — those are keyed by `(vpc, vpcAttachment)` and may be shared/reused by another pod/VM (deleting them in DEL would race with a concurrent ADD during restarts). `galactic-router`'s GC controller (see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)) reclaims orphaned CRDs, stale kernel VRFs, and stale eBPF entries once no live container still references them.
+- **DEL is intentionally minimal everywhere in the CNI chain; GC reclaims shared state asynchronously.** Every binary's own `cmdDel` only cleans up what it itself created *and* is safe to release immediately per-container: IPAM deallocation via `galactic-ipam`'s own on-disk marker file; guest-netns flush/host-device DEL in `galactic-veth`; and, in both `galactic-veth`/`galactic-tap`, deleting this attachment's own host/guest veth pair or tap device outright, since that interface is private to one attachment and no sibling pod/VM can ever depend on it. None of them delete the VRF, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — those are keyed by `(vpc, vpcAttachment)` or `(vpc, node)` and may be shared/reused by another pod/VM (deleting them in DEL would race with a concurrent ADD during restarts). `galactic-router`'s GC controller (see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)) reclaims orphaned CRDs, stale kernel VRFs, and stale eBPF entries once no live container still references them — see [docs/cni/gc-cmd-sequence.md](../cni/gc-cmd-sequence.md) for why the host veth/tap interface has no GC path of its own at all.
 - **`galactic-cni`'s install DaemonSet is a Go installer, not a shell script.** See Known Constraints below.
 
 ---
@@ -490,7 +494,7 @@ auto-detect directly (see Configuration above).
 
 ## Known Constraints
 
-- **No binary's `cmdDel` tears down shared kernel/CRD state.** By design (see Key Design Decisions above) — cleanup of VRF, veth/tap, routes, the eBPF `vrf_table` entry, and BGP CRDs is deferred to `galactic-router`'s asynchronous GC controller, not performed synchronously in any chain binary's `cmdDel`.
+- **No binary's `cmdDel` tears down shared kernel/CRD state.** By design (see Key Design Decisions above) — cleanup of the VRF, routes, the eBPF `vrf_table` entry, and BGP CRDs is deferred to `galactic-router`'s asynchronous GC controller, not performed synchronously in any chain binary's `cmdDel`. The per-attachment host veth/tap interface is the one exception: it is private, not shared, so `cmdDel` deletes it directly instead of deferring it.
 - **`internal/plumbing/vrf` and `internal/cni/route` have no unit tests.** `vrf` requires `CAP_NET_ADMIN` and a real kernel; `route` (wrapped by `internal/cniroute`, which does have its own tests) was never backfilled with tests of its own when the CNI plugin-chain split moved its caller out of `internal/cni`. `internal/plumbing/intf` is fully unit-testable (pure functions only). Kernel-path coverage otherwise comes from the e2e suite (`task test:e2e`).
 - **The e2e suite doesn't cover `galactic-route` or `galactic-bgp`.** `TestCNITapInterface` (`tests/e2e/e2e_test.go`) only drives `galactic-tap`'s own ADD — verifying BGP/SRv6/eBPF publish end-to-end would need a `BGPRouter` CRD fixture and additional RBAC the test doesn't set up. This gap predates the CNI plugin-chain split too: the monolithic `galactic-cni` this replaced was never e2e-verified past its own CNI result shape either.
 - **`vmtap-cni`/`internal/vmtap`** (a separate, Cilium-chain-conflist-patching binary for VM tap interfaces, unrelated to the `galactic-veth`/`galactic-tap`/`galactic-ipam`/`galactic-bgp`/`galactic-route` chain) has its own doc at `docs/vmtap-cni/configuration.md` — cross-referenced from [Repository Layout](#repository-layout) and the [Module / Package Reference](#module--package-reference) table above, but not otherwise elaborated on in this document.
@@ -524,5 +528,5 @@ auto-detect directly (see Configuration above).
 **Non-obvious patterns:**
 - The master plugin's ADD result is the runtime's authoritative CNI result for the whole chain — `galactic-route`/`galactic-bgp` (chained after it) both pass `prevResult` straight through unchanged. A successful ADD response does not by itself guarantee `galactic-bgp` has even run yet, let alone that the BGP CRDs exist. What it does guarantee: the master plugin (`galactic-veth`/`galactic-tap`) fetches its own attachment's `NetworkAttachmentDefinition` before creating any kernel state and fails ADD if `galactic-bgp` is missing from its conflist's `plugins` list (`internal/hostconf.VerifyChainIncludes`, `internal/nadpatch.VerifyChainComplete`) — a stale/hand-edited conflist that drops the entry entirely can no longer attach successfully with no path to its VPC ([#331](https://github.com/datum-cloud/galactic/issues/331)). This is presence-only, not position-aware: it does not confirm `galactic-bgp` actually ran, only that the conflist names it.
 - `types.PluginConf.PrevResult` (from `containernetworking/cni/pkg/types`) has JSON tag `"-"` and is **never populated** by plain `json.Unmarshal`; only the sibling `RawPrevResult map[string]interface{}` field actually receives the previous plugin's result. A pre-existing quirk of that library, not specific to this codebase — every CNI-chain package that reads prevResult (`internal/cni/ops_check.go`, `internal/cnibgp/prevresult.go`, `internal/cniroute/ops_add.go`) reads `RawPrevResult` for this reason.
-- No binary's `cmdDel` deletes the VRF, veth/tap, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — each binary's own DEL only handles its own per-container bookkeeping (IPAM deallocation, guest-netns/host-device cleanup). Shared-resource cleanup is entirely the GC controller's job (`internal/gc`, part of `galactic-router` — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)), to avoid racing a concurrent ADD during pod restarts.
+- No binary's `cmdDel` deletes the VRF, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — each binary's own DEL only handles its own per-container bookkeeping (IPAM deallocation, guest-netns/host-device cleanup, and deleting this attachment's own private host veth/tap interface outright). Shared-resource cleanup is entirely the GC controller's job (`internal/gc`, part of `galactic-router` — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)), to avoid racing a concurrent ADD during pod restarts.
 - Production images are published by `.github/workflows/publish.yaml` as separate per-binary images, not one shared image — see CI/CD above. `galactic-cni`'s own image carries all five CNI-chain binaries plus `vmtap-cni`/`host-device`, not just `galactic-cni` itself.
