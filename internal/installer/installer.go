@@ -201,6 +201,15 @@ func resolveLogLevel() string {
 	return config.NormalizeLogLevel(os.Getenv(config.EnvLogLevel))
 }
 
+// resolveNAT66ShardSIDs reads GALACTIC_CNI_NAT66_SHARD_SIDS, the fabric-wide
+// NAT66 shard membership list -- see that env var's own doc comment. Unlike
+// resolveLogLevel's fallback, an unset/empty value has no default to
+// normalize to: it means no shard is configured yet, and is written into
+// the conflist verbatim (empty), not substituted for anything.
+func resolveNAT66ShardSIDs() string {
+	return os.Getenv(config.EnvCNINAT66ShardSIDs)
+}
+
 // Bootstrap runs the CNI installation init container tasks:
 // 1. Copies binaries to the host.
 // 2. Performs a one-shot dual-stack node identity check.
@@ -309,6 +318,7 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 
 	// 4. Write static conflist to /host/etc/cni/net.d/10-galactic.conflist
 	logLevel := resolveLogLevel()
+	nat66ShardSIDs := resolveNAT66ShardSIDs()
 	conflistContent := fmt.Sprintf(`{
   "cniVersion": "1.0.0",
   "name": "galactic",
@@ -319,11 +329,12 @@ func Bootstrap(ctx context.Context, nodeName string) error {
       "kubeconfig": %q,
       "namespace": %q,
       "log_file": %q,
-      "log_level": %q
+      "log_level": %q,
+      "nat66_shard_sids": %q
     }
   ]
 }
-`, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel)
+`, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel, nat66ShardSIDs)
 
 	if err := atomicWriteFile(HostConflist, []byte(conflistContent), 0644); err != nil {
 		return fmt.Errorf("write conflist file: %w", err)

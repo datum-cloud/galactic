@@ -2,12 +2,16 @@
 # only what NAT66ShardReconciler (internal/controller/nat66shard_controller.go)
 # actually touches.
 #
-# Unlike galactic-gateway's own RBAC (config/galactic-gateway/rbac.yaml),
-# this binary reads no other CRD at all: NAT66ShardReconciler's own doc
-# comment describes it as deliberately much simpler than
-# NetworkGatewayReconciler -- no rule/backend desired-state assembly, no
-# BGPRouter/BGPAdvertisement lookup, no BGPAdvertisement wiring. It only
-# gets/lists/watches its own NAT66Shard object and updates its status.
+# bgprouters (get/list/watch) plus full CRUD on bgpadvertisements are
+# included even though this binary runs no BGP client of its own:
+# NAT66ShardReconciler.applyShardAdvertisement looks up this node's own
+# BGPRouter and creates/updates/deletes the /128 BGPAdvertisement that
+# makes Status.ShardSID actually reachable fabric-wide -- exactly the
+# same shape config/galactic-gateway/rbac.yaml already grants
+# NetworkGatewayReconciler for its own VIP advertisements, and exactly
+# what NAT66ShardStatus.ShardSID's own doc comment in datum-cloud/network
+# promises ("advertised into BGP... so every other node learns a kernel
+# SEG6 route toward it").
 #
 # networkegresspolicies is deliberately NOT granted here: NAT66ShardReconciler
 # never reads or writes that CRD (it belongs to the earlier, now-superseded
@@ -28,6 +32,14 @@ rules:
     resources:
       - nat66shards/status
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - bgpadvertisements
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - bgprouters
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

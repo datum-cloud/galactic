@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -47,12 +48,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -554,6 +557,20 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
 	}
 
+	// Installs (or refreshes) this VRF's NAT66 default egress route --
+	// see installNAT66EgressRoute's own doc comment. A second, deliberate
+	// exception to this package's doc comment's "zero kernel-interface
+	// configuration dependency" claim, alongside registerEBPFDatapath's
+	// existing ifindex_vrf_table registration: unlike that one, this
+	// mutates a real kernel route, not just an eBPF map, but the
+	// alternative (routing table setup) plugin in this chain
+	// (internal/cniroute/galactic-route) is optional, and this route must
+	// exist whenever any shard is configured, regardless of whether a
+	// given conflist happens to include galactic-route.
+	if err := installNAT66EgressRoute(vrfTableID); err != nil {
+		return false, fmt.Errorf("install NAT66 default egress route: %w", err)
+	}
+
 	// The host-side interface's own ifindex, needed to key this
 	// attachment's ifindex_vrf_table row below — see this package's own
 	// doc comment for why this one read-only netlink call is an accepted
@@ -590,6 +607,66 @@ func registerEBPFDatapath(
 	}
 
 	return true, nil
+}
+
+// installNAT66EgressRoute installs (or refreshes) vrfTableID's default
+// egress route toward every configured NAT66 shard -- see
+// config.EnvCNINAT66ShardSIDs's own doc comment for where the shard list
+// comes from, and srv6.EgressDefaultRouteAdd's own doc comment for why
+// this is a multipath route rather than a per-flow hash. Idempotent
+// (RouteReplace under the hood) and safe to call on every attachment ADD
+// sharing this VRF, the same way vrf.Add itself already is.
+//
+// An operator who hasn't configured any shard yet (the common case before
+// this mechanism is rolled out to a given fabric) sees no error at all:
+// parseShardSIDs returns an empty, nil-error slice for an empty string,
+// and srv6.EgressDefaultRouteAdd itself no-ops on an empty list. A
+// misconfigured shard SID (invalid address, or one with no reachable
+// route yet -- e.g. this node came up before NAT66ShardReconciler's own
+// BGPAdvertisement had propagated) fails this attachment's ADD outright
+// rather than silently leaving the VRF with no egress at all.
+func installNAT66EgressRoute(vrfTableID uint32) error {
+	// cniConfig is nil unless something has already called InitCNIConfig
+	// (cmd/galactic-bgp's main.go, before any cmdAdd can run) or a test set
+	// it up directly -- several existing unit tests in this package call
+	// registerEBPFDatapath straight through without either, mirroring
+	// ops_del_test.go's own cniConfig-may-be-nil stance. Treated the same
+	// as "no shard configured yet," not a panic.
+	if cniConfig == nil {
+		return nil
+	}
+	shardSIDs, err := parseShardSIDs(cniConfig.NAT66ShardSIDs)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", config.EnvCNINAT66ShardSIDs, err)
+	}
+	if len(shardSIDs) == 0 {
+		return nil
+	}
+	return srv6.EgressDefaultRouteAdd(vrfTableID, shardSIDs)
+}
+
+// parseShardSIDs splits a comma-separated NAT66 shard SID list (as
+// resolved into config.CNIConfig.NAT66ShardSIDs) into IP addresses,
+// trimming whitespace around each entry and skipping blank ones -- so a
+// trailing comma or stray space in the operator-supplied env var/conflist
+// value doesn't fail every attachment ADD in the cluster. An entry that
+// survives trimming but still isn't a valid IP address is a real
+// misconfiguration and fails loudly rather than silently dropping one
+// shard from the list.
+func parseShardSIDs(raw string) ([]net.IP, error) {
+	var sids []net.IP
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		sid := net.ParseIP(part)
+		if sid == nil {
+			return nil, fmt.Errorf("invalid NAT66 shard SID %q", part)
+		}
+		sids = append(sids, sid)
+	}
+	return sids, nil
 }
 
 // hostInterfaceIndex resolves this attachment's own host-side veth/tap

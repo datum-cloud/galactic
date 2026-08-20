@@ -96,6 +96,35 @@ func TestCNIConfigEnvOverride(t *testing.T) {
 	}
 }
 
+func TestCNIConfigNAT66ShardSIDs(t *testing.T) {
+	const (
+		conflistSIDs = "2001:db8:ff01:1:e001::"
+		envSIDs      = "2001:db8:ff01:1:e001::,2001:db8:ff03:1:e001::"
+	)
+
+	// Default: empty, not an error -- "no shard configured yet" is normal.
+	cfg := NewCNIConfig()
+	cfg.Resolve(&ConflistValues{})
+	if cfg.NAT66ShardSIDs != "" {
+		t.Errorf("NAT66ShardSIDs = %q, want empty by default", cfg.NAT66ShardSIDs)
+	}
+
+	// Conflist value flows through.
+	cfg = NewCNIConfig()
+	cfg.Resolve(&ConflistValues{NAT66ShardSIDs: conflistSIDs})
+	if cfg.NAT66ShardSIDs != conflistSIDs {
+		t.Errorf("NAT66ShardSIDs = %q, want %q (conflist)", cfg.NAT66ShardSIDs, conflistSIDs)
+	}
+
+	// Env var overrides the conflist value.
+	t.Setenv(EnvCNINAT66ShardSIDs, envSIDs)
+	cfg = NewCNIConfig()
+	cfg.Resolve(&ConflistValues{NAT66ShardSIDs: conflistSIDs})
+	if cfg.NAT66ShardSIDs != envSIDs {
+		t.Errorf("NAT66ShardSIDs = %q, want %q (env override)", cfg.NAT66ShardSIDs, envSIDs)
+	}
+}
+
 func TestCNIConfigNodeNameLegacyFallback(t *testing.T) {
 	t.Setenv(EnvNodeNameLegacy, "legacy-node")
 

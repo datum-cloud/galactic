@@ -101,6 +101,29 @@ func runCmd(cfg *config.NAT66Config) error {
 		grpcSrv.GracefulStop()
 	}()
 
+	// Register the one field index NAT66ShardReconciler.applyShardAdvertisement
+	// (nat66shard_controller.go) needs: BGPRouterByTargetName, to find the
+	// BGPRouter it advertises its shard SID through -- an index, not a
+	// real API field, so it only resolves if something on this process's
+	// own manager registered it first.
+	//
+	// Deliberately controller.RegisterBGPRouterTargetIndex, not the full
+	// controller.RegisterIndexes cmd/galactic-router and cmd/galactic-gateway
+	// call for their own managers: RegisterIndexes touches BGPPeer/
+	// BGPPolicy/BGPAdvertisement/BGPVRFInstance/BGPRouter, and
+	// controller-runtime's cache starts a live informer for every type any
+	// IndexField call touches immediately, regardless of whether this
+	// binary's own reconciler ever reads it again. Calling the full
+	// function here failed live at manager startup with "bgppolicies...is
+	// forbidden ... at the cluster scope": config/galactic-nat66/rbac.yaml
+	// only grants nat66shards/bgpadvertisements/bgprouters, on purpose (see
+	// that file's own "grant exactly what is used" principle) -- the
+	// narrower function keeps that principle intact instead of widening
+	// this binary's RBAC to match a function it doesn't need in full.
+	if err := controller.RegisterBGPRouterTargetIndex(ctx, mgr); err != nil {
+		return fmt.Errorf("register field indexes: %w", err)
+	}
+
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 

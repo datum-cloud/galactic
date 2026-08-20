@@ -40,16 +40,22 @@ network_crds=(
   network.datumapis.com_bgppeers.yaml
   network.datumapis.com_bgppolicies.yaml
   network.datumapis.com_bgprouters.yaml
-  network.datumapis.com_bgpvrfinstances.yaml
   network.datumapis.com_networkgateways.yaml
   network.datumapis.com_networkrules.yaml
 )
 
-# ServiceVIPBinding is the DSR/Maglev redesign's own CRD (design plan §1),
-# added on network's local feat/dsr-maglev-crds branch alongside this
-# repo's feat/dsr-maglev-gateway -- never pushed, so it doesn't exist at
-# NETWORK_SHA on GitHub the way network_crds above does. Missing this
-# breaks two different things, discovered live in this lab: (1)
+# ServiceVIPBinding and NAT66Shard are the DSR/Maglev redesign's own CRDs
+# (design plan §1/§3), added on network's local feat/dsr-maglev-crds
+# branch alongside this repo's feat/dsr-maglev-gateway -- never pushed, so
+# neither exists at NETWORK_SHA on GitHub the way network_crds above does.
+# BGPVRFInstance moved here too for the same reason, even though it *does*
+# exist at NETWORK_SHA: that pre-redesign schema predates NPTv6Spec being
+# added to BGPVRFInstanceSpec (design plan §2) -- fetching it from GitHub
+# would install a real CRD with no nptv6 field at all, silently dropping
+# every NPTv6 config an operator applies rather than erroring loudly.
+#
+# Missing ServiceVIPBinding specifically breaks two different things,
+# discovered live in this lab: (1)
 # resources/galactic-gateway/iad/servicevipbinding-ns60.yaml fails
 # deploy-galactic-router.sh's apply_k of that directory with kubectl's
 # "ensure CRDs are installed first" (the DaemonSet/BGP resources in the
@@ -62,7 +68,9 @@ network_crds=(
 # every site, matching network_crds' own blanket per-site loop, for that
 # second reason -- (1) alone would only need iad.
 network_crds_local=(
+  network.datumapis.com_bgpvrfinstances.yaml
   network.datumapis.com_servicevipbindings.yaml
+  network.datumapis.com_nat66shards.yaml
 )
 
 cloud_crds=(
@@ -95,6 +103,8 @@ for site in dfw sjc iad; do
   apply_f "${node}" /galactic/config/galactic-cni/rbac.yaml
   apply_f "${node}" /galactic/config/galactic-router/serviceaccount.yaml
   apply_f "${node}" /galactic/config/galactic-router/rbac.yaml
+  apply_f "${node}" /galactic/config/galactic-nat66/serviceaccount.yaml
+  apply_f "${node}" /galactic/config/galactic-nat66/rbac.yaml
 done
 
 echo "Done."

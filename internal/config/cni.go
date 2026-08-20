@@ -37,6 +37,28 @@ const (
 	// deployment's Cilium install needs this filter at a different
 	// priority to run in the intended order relative to Cilium's own.
 	EnvCNIEBPFFilterPriority = "GALACTIC_CNI_EBPF_FILTER_PRIORITY"
+
+	// EnvCNINAT66ShardSIDs is a comma-separated list of every live
+	// galactic-nat66 shard's Status.ShardSID (see NAT66ShardStatus's own
+	// doc comment in datum-cloud/network) -- the fabric-wide membership
+	// list internal/plumbing/srv6.EgressDefaultRouteAdd needs to install a
+	// tenant VRF's default egress route across every shard, since no
+	// single Kubernetes CRD is visible across this multi-cluster fabric's
+	// separate clusters/API servers the way BGP itself is (see that
+	// function's own doc comment for why membership is operator-supplied
+	// rather than learned from the BGP RIB in this phase). Same
+	// "operator-supplied, no in-cluster derivation yet" status as
+	// GALACTIC_GATEWAY_SRV6_ADDRESS and NAT66ShardStatus.ShardAddress/SID
+	// themselves. galactic-cni's own installer resolves this once at
+	// startup (its own real pod env, unlike a CNI plugin's minimal exec
+	// environment) and writes it into the static per-node conflist
+	// (HostConf.NAT66ShardSIDs) so internal/cnibgp -- invoked per-pod by
+	// the CNI runtime, not a long-lived process with configurable env --
+	// can read it the same way it reads NodeName/Namespace/etc. Unset or
+	// empty means no shard configured yet: a VRF gets no default route,
+	// the same "no egress capability" behavior as before this mechanism
+	// existed, not an error.
+	EnvCNINAT66ShardSIDs = "GALACTIC_CNI_NAT66_SHARD_SIDS"
 )
 
 // --- CNIConfig -------------------------------------------------------------
@@ -51,6 +73,12 @@ type CNIConfig struct {
 	Namespace  string
 	LogFile    string
 	LogLevel   string
+
+	// NAT66ShardSIDs is the raw, comma-separated NAT66 shard SID list --
+	// see EnvCNINAT66ShardSIDs's own doc comment. Left unparsed here
+	// (internal/cnibgp splits and validates it) since this package has no
+	// IP-address type of its own to return.
+	NAT66ShardSIDs string
 }
 
 // NewCNIConfig creates a new CNI config resolver. Callers should invoke this
@@ -63,13 +91,14 @@ func NewCNIConfig() *CNIConfig {
 // by any matching environment variables. The conflist values act as the
 // "middle tier" between env vars and compiled-in defaults.
 func (c *CNIConfig) Resolve(conflist *ConflistValues) {
-	var cnflistNode, cnflistKube, cnflistNS, cnflistLog, cnflistLevel string
+	var cnflistNode, cnflistKube, cnflistNS, cnflistLog, cnflistLevel, cnflistShardSIDs string
 	if conflist != nil {
 		cnflistNode = conflist.NodeName
 		cnflistKube = conflist.Kubeconfig
 		cnflistNS = conflist.Namespace
 		cnflistLog = conflist.LogFile
 		cnflistLevel = conflist.LogLevel
+		cnflistShardSIDs = conflist.NAT66ShardSIDs
 	}
 
 	// NodeName: env > conflist > legacy fallback > (no default)
@@ -92,14 +121,20 @@ func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 
 	// LogLevel: env > conflist > default
 	c.LogLevel = resolveEnv(EnvLogLevel, cnflistLevel, DefaultLogLevel)
+
+	// NAT66ShardSIDs: env > conflist > (no default -- empty means "no
+	// shard configured", not an error; see EnvCNINAT66ShardSIDs's doc
+	// comment).
+	c.NAT66ShardSIDs = resolveEnv(EnvCNINAT66ShardSIDs, cnflistShardSIDs, "")
 }
 
 // ConflistValues holds the raw values read from the CNI conflist file.
 // Passed to CNIConfig.Resolve() as the middle tier between env vars and defaults.
 type ConflistValues struct {
-	NodeName   string
-	Kubeconfig string
-	Namespace  string
-	LogFile    string
-	LogLevel   string
+	NodeName       string
+	Kubeconfig     string
+	Namespace      string
+	LogFile        string
+	LogLevel       string
+	NAT66ShardSIDs string
 }

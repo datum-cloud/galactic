@@ -32,7 +32,9 @@ const (
 	networkAPIGroup   = "network.datumapis.com"
 	networkAPIVersion = "v1alpha1"
 
-	resourceNAT66Shards = "nat66shards"
+	resourceNAT66Shards       = "nat66shards"
+	resourceBGPAdvertisements = "bgpadvertisements"
+	resourceBGPRouters        = "bgprouters"
 )
 
 func main() {
@@ -42,16 +44,20 @@ func main() {
 	}
 }
 
-// checkWatchPermissions issues a SelfSubjectAccessReview for nat66shards,
-// checking the watch verb. If the review denies the request the informer
-// cache will never sync and NAT66ShardReconciler will be silently
-// blocked; this logs a clear, actionable message at startup so the
-// problem is immediately obvious. Mirrors cmd/galactic-gateway/main.go's
-// identically-named function, scoped to this binary's own single
-// resource: unlike galactic-gateway's NetworkGatewayReconciler,
-// NAT66ShardReconciler reads no other CRD (no BGPRouter/BGPAdvertisement
-// lookup -- see internal/controller/nat66shard_controller.go's own doc
-// comment for why this reconciler is deliberately much simpler).
+// checkWatchPermissions issues a SelfSubjectAccessReview for each resource
+// NAT66ShardReconciler now touches, checking the watch verb. If a review
+// denies the request the informer cache will never sync and the
+// reconciler will be silently blocked; this logs a clear, actionable
+// message at startup so the problem is immediately obvious. Mirrors
+// cmd/galactic-gateway/main.go's identically-named function.
+//
+// bgprouters/bgpadvertisements are new here: NAT66ShardReconciler's own
+// doc comment used to describe this binary as reading no other CRD at
+// all, but applyShardAdvertisement (nat66shard_controller.go) now looks
+// up this node's BGPRouter and creates/updates/deletes a BGPAdvertisement
+// for Status.ShardSID -- the same RBAC surface
+// cmd/galactic-gateway/main.go's own checkWatchPermissions already checks
+// for NetworkGatewayReconciler's identical pattern.
 func checkWatchPermissions(mgr ctrl.Manager) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {
@@ -64,23 +70,35 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 
 	logger := ctrl.Log.WithName("rbac-preflight")
 
-	review := &authorizationv1.SelfSubjectAccessReview{
-		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
-			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Verb:     "watch",
-				Group:    networkAPIGroup,
-				Version:  networkAPIVersion,
-				Resource: resourceNAT66Shards,
+	resources := []struct {
+		group    string
+		version  string
+		resource string
+	}{
+		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNAT66Shards},
+		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPAdvertisements},
+		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
+	}
+
+	for _, r := range resources {
+		review := &authorizationv1.SelfSubjectAccessReview{
+			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+				ResourceAttributes: &authorizationv1.ResourceAttributes{
+					Verb:     "watch",
+					Group:    r.group,
+					Version:  r.version,
+					Resource: r.resource,
+				},
 			},
-		},
+		}
+		if err := c.Create(ctx, review); err != nil {
+			logger.Error(err, "RBAC pre-flight: failed to submit access review for "+r.resource, "verb", "watch")
+			continue
+		}
+		if review.Status.Allowed {
+			continue
+		}
+		logger.Error(nil, "missing watch RBAC for "+r.resource,
+			"verb", "watch", "detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
 	}
-	if err := c.Create(ctx, review); err != nil {
-		logger.Error(err, "RBAC pre-flight: failed to submit access review for "+resourceNAT66Shards, "verb", "watch")
-		return
-	}
-	if review.Status.Allowed {
-		return
-	}
-	logger.Error(nil, "missing watch RBAC for "+resourceNAT66Shards,
-		"verb", "watch", "detail", "informer cache will not sync; add resource to ServiceAccount ClusterRole and restart")
 }

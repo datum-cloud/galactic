@@ -262,9 +262,43 @@ instance**, never sharing a ring with the LB's own.
 
 ### 3.2 Shard placement (outbound / translation leg)
 
-A new flow's shard assignment is chosen via a `maglev.Table` built over
-`(tenant VRFID, backend addr:port, dest addr:port)` — load-distributed,
-minimally disrupted when a shard node is added/removed.
+**Updated 2026-08-18 — implemented, diverged from the text below.** The
+original plan called for a new flow's shard assignment to be chosen via a
+`maglev.Table` built over `(tenant VRFID, backend addr:port, dest
+addr:port)` — load-distributed, minimally disrupted when a shard node is
+added/removed. That per-flow, in-datapath hash was never actually built:
+`internal/maglev` is only ever called from the ingress LB's own
+backend-selection ring, and building an equivalent TC-BPF hash stage for
+shard placement would have been a second, much larger new eBPF component
+on top of everything else this redesign already added.
+
+What's actually implemented instead: `internal/plumbing/srv6.EgressDefaultRouteAdd`
+installs a plain Linux multipath `::/0` route in the tenant VRF's own
+table, SEG6-encapsulating toward every live shard's SID as a separate,
+equally-weighted nexthop — no new eBPF code, no per-flow hash. Linux's own
+ECMP multipath hashing over these nexthops gives near-even load spread
+across shards, and modern kernels' resilient nexthop groups give the same
+bounded-disruption-on-membership-change property Maglev was chosen for in
+the first place (this function installs plain multipath nexthops, not a
+resilient group, since correctness mattered more than that specific bound
+for this phase — see the function's own doc comment). Called from
+`internal/cnibgp` at every CNI ADD, gated on a fabric-wide, operator-supplied
+shard SID list (`GALACTIC_CNI_NAT66_SHARD_SIDS`,
+`internal/config.EnvCNINAT66ShardSIDs`) — the same "no in-cluster
+derivation yet" phase-1 stance this plan already takes for
+`GALACTIC_GATEWAY_SRV6_ADDRESS` and the shard addresses themselves (§3.3).
+
+Each shard's own reachability -- required before any node's
+`EgressDefaultRouteAdd` can resolve a next-hop to it -- comes from
+`NAT66ShardReconciler` (`internal/controller/nat66shard_controller.go`)
+creating a plain, RT-less `/128` `BGPAdvertisement` for
+`Status.ShardSID`, exactly the shape `NetworkGatewayReconciler` already
+uses for its own VIP advertisements, imported into every receiving node's
+main table via the existing RT-less-EVPN path
+(`internal/runtime/gobgp/monitor.go`'s `matchTableID`/`RouteMainAdd`,
+added earlier in this same redesign for the anycast VIP case). This was
+the one piece `NAT66ShardStatus.ShardSID`'s own doc comment in
+datum-cloud/network already promised but no code delivered until now.
 
 ### 3.3 Return-leg routing — self-routing by construction
 
@@ -456,18 +490,22 @@ canary, found and fixed three separate, stacked issues:
    (commits `a0e1677`, `d76e799`), with regression tests at both the Go
    and kernel-verifier level.
 
-**Still not a full end-to-end success, for a fourth, separate,
-already-known reason:** with all three of the above fixed, `iad-worker`'s
-own datapath counters proved the *entire forward chain* works (gateway
-match → Maglev backend select → `XDP_TX` redirect → SRv6 transit →
-backend uSID decap → `vip_xlat_table` translation → VRF delivery). A full
-client-facing `curl` still doesn't complete, because the tenant VRF
-(`vrf60`) has no egress route at all -- not a DSR/gateway bug, but the
-pre-existing, already-tracked gap that `resources/galactic-nat66/`'s
-sharded egress tier (§3 above) was built but deliberately never wired
-into this lab's `gvpc.clab.yaml`/`Taskfile.yaml` bring-up (see that
-directory's own `README.md`). No tenant pod in this lab can reply to any
-external address today, independent of this redesign's own correctness.
+**Fourth gap, found the same pass, now closed (2026-08-18).** With all
+three of the above fixed, `iad-worker`'s own datapath counters proved the
+*entire forward chain* works (gateway match → Maglev backend select →
+`XDP_TX` redirect → SRv6 transit → backend uSID decap → `vip_xlat_table`
+translation → VRF delivery). A full client-facing `curl` still didn't
+complete, because the tenant VRF (`vrf60`) had no egress route at all --
+not a DSR/gateway bug, but a genuine, previously-unbuilt gap: nothing
+anywhere installed a default route in a tenant VRF, and nothing advertised
+a NAT66 shard's own SID, so `resources/galactic-nat66/`'s sharded egress
+tier (§3 above) had a receiving side (`nat66.c`) with nothing ever feeding
+it traffic. Closed by implementing §3.2's updated mechanism
+(`srv6.EgressDefaultRouteAdd` + `NAT66ShardReconciler`'s shard-SID
+advertisement) and wiring `resources/galactic-nat66/` into this lab's
+`Taskfile.yaml` (`task deploy:galactic-nat66`, part of the main `task
+deploy` chain) -- see that directory's own `README.md` for the full
+bring-up mechanism and `verify:nat66-sharding` for validation.
 
 **Bonus find while chasing the above with a strict external observer
 (tcpdump) instead of just `BPF_PROG_TEST_RUN`:** two real,

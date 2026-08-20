@@ -21,6 +21,12 @@ const (
 	xdpTx   = 3
 
 	ipprotoUDP = 17
+
+	// encappedSrcPort/encappedDstPort are the backend's own source port
+	// and the tenant flow's destination port in every buildEncappedUDPPacket
+	// fixture below -- see that function's own doc comment.
+	encappedSrcPort = 40000
+	encappedDstPort = 443
 )
 
 func requireRoot(t *testing.T) {
@@ -132,11 +138,16 @@ func udp6Checksum(src, dst [16]byte, udpHeaderAndPayload []byte) uint16 {
 // IPv6-in-IPv6 outer header (SEG6_IPTUN_MODE_ENCAP_RED's wire format,
 // matching internal/plumbing/srv6/egress.go's RouteEgressAdd) -- the shape
 // a tenant's own outbound egress packet actually arrives in.
+//
+// srcPort/dstPort are always encappedSrcPort/encappedDstPort across every
+// caller in this file (unparam) -- not parameterized further since no
+// test here needs different backend-side ports.
 func buildEncappedUDPPacket(t *testing.T, outerDst, outerSrc, innerSrc, innerDst netip.Addr,
-	srcPort, dstPort uint16, payload []byte,
+	payload []byte,
 ) []byte {
 	t.Helper()
-	inner := buildUDPPacket(t, innerDst, innerSrc, srcPort, dstPort, payload)[ethLen:] // drop the inner's own eth header
+	// drop the inner packet's own eth header
+	inner := buildUDPPacket(t, innerDst, innerSrc, encappedSrcPort, encappedDstPort, payload)[ethLen:]
 
 	pkt := make([]byte, 0, ethLen+ip6Len+len(inner))
 	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
@@ -205,7 +216,7 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	backendAddr := netip.MustParseAddr("fd20:60::5")
 	backendUSID := netip.MustParseAddr("fc00:3:4::a1b2")
 	destAddr := netip.MustParseAddr("2001:db8:9998::1")
-	const backendPort, destPort = 40000, 443
+	const destPort = 443
 
 	// The Argument nibble (bits 69-80 of shardSID, this uSID's low bits)
 	// carries the requesting tenant's VRFID -- 0x123 here, arbitrary but
@@ -216,7 +227,7 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 
 	payload := []byte("egress payload")
 	pkt := buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg), backendUSID,
-		backendAddr, destAddr, backendPort, destPort, payload)
+		backendAddr, destAddr, payload)
 
 	ret, out, err := objs.Nat66Ingress.Test(pkt)
 	if err != nil {
@@ -267,7 +278,7 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	// property that makes a flow's translation stable for its whole
 	// lifetime.
 	pkt2 := buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg), backendUSID,
-		backendAddr, destAddr, backendPort, destPort, []byte("second packet"))
+		backendAddr, destAddr, []byte("second packet"))
 	_, out2, err := objs.Nat66Ingress.Test(pkt2)
 	if err != nil {
 		t.Fatalf("program test-run (2nd packet): %v", err)
@@ -275,6 +286,56 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	gotSrcPort2 := binary.BigEndian.Uint16(out2[udpOffset : udpOffset+2])
 	if gotSrcPort2 != gotSrcPort {
 		t.Errorf("masquerade port changed across packets on the same flow: %d then %d", gotSrcPort, gotSrcPort2)
+	}
+}
+
+// TestNat66Ingress_DifferentNodeIDPassesThrough proves locator_matches'
+// deliberate 64-bit (Block+Node-ID) granularity does NOT accidentally
+// widen to a full 128-bit match: two uSIDs sharing shard_sid's Block but
+// not its Node-ID must never be treated as this shard's own traffic,
+// regardless of what the low 64 bits (Function+Argument) happen to
+// contain. This is the actual boundary a real deployment must keep
+// disjoint -- see locator_matches' own doc comment for the live
+// incident (a shard reusing its co-located tenant node's own Node-ID)
+// this same 64-bit match cannot, by itself, detect or prevent; this test
+// only proves the match's own stated granularity is what's implemented,
+// not a fix for that allocation-level constraint.
+func TestNat66Ingress_DifferentNodeIDPassesThrough(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	shardSID := netip.MustParseAddr("fc00:1:2::1")
+	shardPub := netip.MustParseAddr("2001:db8:9999::1")
+	if err := objs.ShardConfigTable.Put(uint32(0), Nat66ShardConfig{
+		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(),
+	}); err != nil {
+		t.Fatalf("populate shard_config_table: %v", err)
+	}
+
+	// Same Block (bytes 0-5) as shardSID, but a different Node-ID (bytes
+	// 6-7) -- a different node's own uSID space entirely, sharing only
+	// the site's locator.
+	otherUSID := shardSID.As16()
+	otherUSID[6] = 0x00
+	otherUSID[7] = 0x09
+
+	backendAddr := netip.MustParseAddr("fd20:60::5")
+	backendUSID := netip.MustParseAddr("fc00:3:4::a1b2")
+	destAddr := netip.MustParseAddr("2001:db8:9998::1")
+
+	pkt := buildEncappedUDPPacket(t, netip.AddrFrom16(otherUSID), backendUSID,
+		backendAddr, destAddr, []byte("a different node's own uSID space"))
+
+	ret, out, err := objs.Nat66Ingress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpPass {
+		t.Fatalf("verdict = %d, want XDP_PASS (%d) -- this is a different Node-ID, not this shard's own traffic",
+			ret, xdpPass)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated on a Node-ID mismatch:\n in: % x\nout: % x", pkt, out)
 	}
 }
 
@@ -306,7 +367,7 @@ func TestNat66Ingress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	// First, run a forward packet to populate conn_table (both rows) and
 	// learn the allocated masquerade port.
 	fwdPkt := buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg), backendUSID,
-		backendAddr, destAddr, backendPort, destPort, []byte("out"))
+		backendAddr, destAddr, []byte("out"))
 	_, fwdOut, err := objs.Nat66Ingress.Test(fwdPkt)
 	if err != nil {
 		t.Fatalf("forward program test-run: %v", err)

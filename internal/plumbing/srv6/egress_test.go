@@ -5,14 +5,28 @@
 package srv6
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 )
+
+// testCaseIPv6Zero names the shared "IPv6 zero" test-table-case fixture
+// used across RouteEgressAdd/RouteMainAdd/EgressDefaultRouteAdd's own
+// unspecified-gateway/SID rejection tests (goconst).
+const testCaseIPv6Zero = "IPv6 zero"
+
+// defaultRoutePrefixString is the string form of defaultRoutePrefix
+// (::/0), shared by every EgressDefaultRouteAdd/Del test below that needs
+// to recognize the installed default route by its Dst field (goconst).
+const defaultRoutePrefixString = "::/0"
 
 func requireRoot(t *testing.T) {
 	t.Helper()
@@ -41,7 +55,7 @@ func TestRouteEgressAddRejectsUnspecifiedGateway(t *testing.T) {
 		{name: "nil gateway", gateway: nil},
 		{name: "IPv4 zero", gateway: net.IPv4zero},
 		{name: "IPv4-mapped IPv6 zero (::ffff:0.0.0.0)", gateway: net.ParseIP("0.0.0.0").To16()},
-		{name: "IPv6 zero", gateway: net.IPv6unspecified},
+		{name: testCaseIPv6Zero, gateway: net.IPv6unspecified},
 	}
 
 	for _, tt := range tests {
@@ -191,7 +205,7 @@ func TestRouteMainAddRejectsUnspecifiedGateway(t *testing.T) {
 	}{
 		{name: "nil gateway", gateway: nil},
 		{name: "IPv4 zero", gateway: net.IPv4zero},
-		{name: "IPv6 zero", gateway: net.IPv6unspecified},
+		{name: testCaseIPv6Zero, gateway: net.IPv6unspecified},
 	}
 
 	for _, tt := range tests {
@@ -372,5 +386,293 @@ func TestRouteMainAdd_ResolvesIndirectGateway(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("RouteMainAdd(%s) via indirect gateway %s = %v, want success", vipPrefix, gateway, err)
+	}
+}
+
+// TestEgressDefaultRouteAdd_EmptyShardListIsANoop covers the "no shard
+// configured yet" case config.EnvCNINAT66ShardSIDs's own doc comment
+// describes as normal, not an error -- no root needed since nothing ever
+// reaches netlink.
+func TestEgressDefaultRouteAdd_EmptyShardListIsANoop(t *testing.T) {
+	if err := EgressDefaultRouteAdd(1, nil); err != nil {
+		t.Errorf("EgressDefaultRouteAdd(nil) = %v, want nil for an empty shard list", err)
+	}
+	if err := EgressDefaultRouteAdd(1, []net.IP{}); err != nil {
+		t.Errorf("EgressDefaultRouteAdd([]) = %v, want nil for an empty shard list", err)
+	}
+}
+
+// TestEgressDefaultRouteAddRejectsUnspecifiedShardSID mirrors
+// TestRouteEgressAddRejectsUnspecifiedGateway/TestRouteMainAddRejectsUnspecifiedGateway:
+// a shard SID that is nil or the unspecified address would otherwise
+// install a route to nowhere.
+func TestEgressDefaultRouteAddRejectsUnspecifiedShardSID(t *testing.T) {
+	tests := []struct {
+		name string
+		sids []net.IP
+	}{
+		{name: "nil shard SID", sids: []net.IP{nil}},
+		{name: testCaseIPv6Zero, sids: []net.IP{net.IPv6unspecified}},
+		{name: "one good, one unspecified", sids: []net.IP{net.ParseIP("2001:db8:ff01::1"), net.IPv6unspecified}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := EgressDefaultRouteAdd(1, tt.sids); err == nil {
+				t.Errorf("EgressDefaultRouteAdd(%v) = nil error, want an error rejecting the unusable shard SID", tt.sids)
+			}
+		})
+	}
+}
+
+// TestEgressDefaultRouteAdd_InstallsMultipathAcrossShards proves the
+// installed ::/0 route fans out across every configured shard SID as a
+// separate SEG6-encapsulating nexthop, and that EgressDefaultRouteDel
+// removes it cleanly -- the mechanism that finally gives a tenant VRF
+// somewhere to send a packet with no more specific route, closing the gap
+// nat66.c's own shard-receive side was always able to answer but nothing
+// ever fed traffic into (see this function's own doc comment).
+func TestEgressDefaultRouteAdd_InstallsMultipathAcrossShards(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		ifaceName = "srv6mtest2"
+		ifaceAddr = "2001:db8:4::1/64"
+		shardSID1 = "2001:db8:ff01:1:e001::"
+		shardSID2 = "2001:db8:ff03:1:e001::"
+		table     = 42
+	)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		if err := netlink.AddrAdd(dummy, addr); err != nil {
+			return fmt.Errorf("add addr: %w", err)
+		}
+		// resolveNextHop (via netlink.RouteGet) needs a real route to each
+		// shard SID before EgressDefaultRouteAdd can resolve it -- neither
+		// SID is naturally on-link over ifaceAddr's own /64, so each gets
+		// an explicit on-link /128 host route, mirroring how a real
+		// fabric's own SRv6 locator routes would already exist by the
+		// time this function ever runs (see RouteMainAdd's identical
+		// ordering dependency on RouteMainAdd's own doc comment).
+		for _, sid := range []string{shardSID1, shardSID2} {
+			_, sidDst, err := net.ParseCIDR(sid + "/128")
+			if err != nil {
+				return fmt.Errorf("parse shard SID %q: %w", sid, err)
+			}
+			if err := netlink.RouteAdd(&netlink.Route{LinkIndex: dummy.Attrs().Index, Dst: sidDst}); err != nil {
+				return fmt.Errorf("add on-link route for shard SID %q: %w", sid, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	shardSIDs := []net.IP{net.ParseIP(shardSID1), net.ParseIP(shardSID2)}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return EgressDefaultRouteAdd(table, shardSIDs)
+	})
+	if err != nil {
+		t.Fatalf("EgressDefaultRouteAdd(%v) = %v, want success", shardSIDs, err)
+	}
+
+	var installed *netlink.Route
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for i := range routes {
+			if routes[i].Dst != nil && routes[i].Dst.String() == defaultRoutePrefixString {
+				installed = &routes[i]
+				return nil
+			}
+		}
+		return fmt.Errorf("no default route found in table %d", table)
+	})
+	if err != nil {
+		t.Fatalf("verify installed route: %v", err)
+	}
+	if len(installed.MultiPath) != len(shardSIDs) {
+		t.Fatalf("installed default route has %d nexthops, want %d", len(installed.MultiPath), len(shardSIDs))
+	}
+
+	// Per-nexthop RTA_ENCAP within RTA_MULTIPATH round-trips through the
+	// kernel correctly (confirmed live against `ip -6 route show`) but the
+	// vendored netlink library's own RouteListFiltered doesn't decode it
+	// back into NexthopInfo.Encap -- every nexthop above reads back
+	// Encap == nil regardless of what was actually installed. Shell out to
+	// `ip -6 route` (real ground truth, the same tool this session's own
+	// live containerlab diagnostics already trusted over library/tcpdump
+	// artifacts) rather than asserting against a field this library can't
+	// populate.
+	var out []byte
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		var cmdErr error
+		out, cmdErr = exec.CommandContext(
+			context.Background(), "ip", "-6", "route", "show", "table", strconv.Itoa(table),
+		).CombinedOutput()
+		return cmdErr
+	})
+	if err != nil {
+		t.Fatalf("ip -6 route show table %d: %v (%s)", table, err, out)
+	}
+	for _, sid := range shardSIDs {
+		want := "encap seg6 mode encap.red segs 1 [ " + sid.String() + " ]"
+		if !strings.Contains(string(out), want) {
+			t.Errorf("ip -6 route show table %d = %q, want a nexthop containing %q", table, out, want)
+		}
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return EgressDefaultRouteDel(table)
+	})
+	if err != nil {
+		t.Fatalf("EgressDefaultRouteDel(%d) = %v, want success", table, err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for i := range routes {
+			if routes[i].Dst != nil && routes[i].Dst.String() == defaultRoutePrefixString {
+				return fmt.Errorf("default route still present in table %d after EgressDefaultRouteDel", table)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verify deleted route: %v", err)
+	}
+}
+
+// TestEgressDefaultRouteAdd_SkipsUnresolvableShardButSucceeds is the
+// regression test for a real bug found live: a shard node can never
+// resolve a route to its *own* advertised SID (GoBGP, like every BGP
+// implementation, never reflects a self-originated path back into that
+// same node's own received-path processing -- see this function's own
+// doc comment), so any tenant node that is also a configured shard
+// (this lab's own "reuse the site workers as shards" layout) always has
+// exactly one permanently-unresolvable entry in shardSIDs. The original
+// implementation aborted the entire multipath route on the first
+// unresolvable nexthop, which meant *no default route at all* on every
+// shard node -- confirmed live: dfw-worker's own tenant pods failed CNI
+// ADD outright with "no route to gateway 2001:db8:ff01:1:e001:: (dfw's
+// own shard SID): invalid argument" even though sjc's and iad's shard
+// SIDs resolved fine from that same node. This test proves a mix of one
+// resolvable and one unresolvable shard SID still installs a route (with
+// only the resolvable one as a nexthop), not an error.
+func TestEgressDefaultRouteAdd_SkipsUnresolvableShardButSucceeds(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		ifaceName       = "srv6mtest3"
+		ifaceAddr       = "2001:db8:5::1/64"
+		resolvableSID   = "2001:db8:ff02:1:e001::"
+		unresolvableSID = "2001:db8:ff01:1:e001::" // no route ever installed for this one
+		table           = 43
+	)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("add dummy link: %w", err)
+		}
+		if err := netlink.LinkSetUp(dummy); err != nil {
+			return fmt.Errorf("set link up: %w", err)
+		}
+		addr, err := netlink.ParseAddr(ifaceAddr)
+		if err != nil {
+			return fmt.Errorf("parse addr: %w", err)
+		}
+		if err := netlink.AddrAdd(dummy, addr); err != nil {
+			return fmt.Errorf("add addr: %w", err)
+		}
+		_, sidDst, err := net.ParseCIDR(resolvableSID + "/128")
+		if err != nil {
+			return fmt.Errorf("parse shard SID: %w", err)
+		}
+		return netlink.RouteAdd(&netlink.Route{LinkIndex: dummy.Attrs().Index, Dst: sidDst})
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	shardSIDs := []net.IP{net.ParseIP(unresolvableSID), net.ParseIP(resolvableSID)}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return EgressDefaultRouteAdd(table, shardSIDs)
+	})
+	if err != nil {
+		t.Fatalf("EgressDefaultRouteAdd(%v) = %v, want success with the resolvable shard used", shardSIDs, err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for i := range routes {
+			if routes[i].Dst == nil || routes[i].Dst.String() == defaultRoutePrefixString {
+				// The kernel/netlink read path collapses a single-nexthop
+				// RTA_MULTIPATH route back into plain Gw/Encap fields, not
+				// a one-element MultiPath slice (confirmed live against
+				// `ip -6 route show`, which does report the SEG6 encap
+				// correctly either way) -- count either shape as "one
+				// nexthop", matching what this shard-count assertion
+				// actually cares about.
+				nexthops := len(routes[i].MultiPath)
+				if nexthops == 0 && routes[i].Gw != nil && routes[i].Encap != nil {
+					nexthops = 1
+				}
+				if nexthops != 1 {
+					return fmt.Errorf("installed default route has %d nexthops, want exactly 1 (the resolvable shard)",
+						nexthops)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("no default route found in table %d", table)
+	})
+	if err != nil {
+		t.Fatalf("verify installed route: %v", err)
+	}
+}
+
+// TestEgressDefaultRouteAdd_AllShardsUnresolvableFails is
+// TestEgressDefaultRouteAdd_SkipsUnresolvableShardButSucceeds's negative
+// counterpart: when *every* configured shard SID is unresolvable, there
+// is nothing to install a route with at all, and this must fail loudly
+// rather than silently install a route with zero nexthops.
+func TestEgressDefaultRouteAdd_AllShardsUnresolvableFails(t *testing.T) {
+	shardSIDs := []net.IP{net.ParseIP("2001:db8:ff01:1:e001::"), net.ParseIP("2001:db8:ff02:1:e001::")}
+	if err := EgressDefaultRouteAdd(44, shardSIDs); err == nil {
+		t.Errorf("EgressDefaultRouteAdd(%v) = nil error, want an error when no shard SID is resolvable", shardSIDs)
 	}
 }

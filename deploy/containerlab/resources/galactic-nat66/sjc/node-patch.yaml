@@ -48,31 +48,42 @@ spec:
               value: eth1
             # uFMT 48+16 uSID over sjc's own locator (2001:db8:ff02::/48,
             # see resources/galactic-router/sjc/bgprouter.yaml's
-            # srv6Locator), nodeID=1 -- reusing sjc-worker's own already-
-            # registered node identity (its BGPRouter's nodeID) rather
-            # than minting a new one, since this shard runs on that exact
-            # physical node, not a separate dedicated node the way
-            # iad-gateway1/iad-gateway2 are. Function=End.DT46 (0xE),
-            # matching resources/galactic-gateway/iad-gateway1/
-            # node-patch.yaml's convention, even though this address is
-            # never actually looked up through function_table/vrf_table
-            # the way a real uSID is -- NAT66ShardStatus.ShardSID's own
-            # doc comment says it's advertised as a plain /128
-            # node-reachability route "no VRFID/Function" -- the uFMT
-            # encoding here is only to keep the address inside sjc's
-            # locator block without colliding with any real tenant VRF
-            # SID. Argument=1, NOT 0: sjc has no other node sharing this
-            # locator, so 0 would not literally collide here either, but
-            # 1 is used on all three shards for one consistent,
-            # easy-to-audit convention across sites (see
-            # resources/galactic-nat66/iad/node-patch.yaml's fuller
-            # rationale, where the distinction actually matters). This is
+            # srv6Locator), nodeID=9 -- a dedicated Node-ID reserved for
+            # this shard, deliberately NOT sjc-worker's own real nodeID=1
+            # (an earlier version of this file reused it, on the theory
+            # that this shard "runs on that exact physical node, not a
+            # separate dedicated node"). That reuse was a real bug, found
+            # live: internal/plumbing/ebpf/nat66prog/nat66.c's own
+            # locator_matches only checks the top 64 bits (Block+Node-ID)
+            # of a packet's outer destination against shard_sid -- see
+            # that function's own doc comment -- so reusing sjc-worker's
+            # Node-ID meant this shard's XDP program silently hijacked
+            # *every* ordinary tenant ingress packet addressed to
+            # sjc-worker's own real delivery uSIDs (same Block+Node-ID,
+            # nexthdr also 41) before usid_ingress's TC hook ever saw
+            # them. Physical co-location (which node this pod is
+            # scheduled to) and uSID identity (which Node-ID a shard's own
+            # address claims) are independent; nodeID=9 is free at this
+            # site (sjc-worker is the only BGPRouter on this locator,
+            # nodeID=1 -- see resources/galactic-router/sjc/bgprouter.yaml).
+            # Function=End.DT46 (0xE), matching resources/galactic-gateway/
+            # iad-gateway1/node-patch.yaml's convention, even though this
+            # address is never actually looked up through
+            # function_table/vrf_table the way a real uSID is --
+            # NAT66ShardStatus.ShardSID's own doc comment says it's
+            # advertised as a plain /128 node-reachability route "no
+            # VRFID/Function" -- the uFMT encoding here only keeps the
+            # address inside sjc's locator block. Argument=1 is otherwise
+            # unremarkable now that Node-ID alone already guarantees no
+            # collision -- kept for continuity with the other two sites'
+            # identical choice (see resources/galactic-nat66/iad/
+            # node-patch.yaml's fuller rationale on the Node-ID fix), still
             # a lab-only placeholder needing real allocation logic (the
             # same gap GALACTIC_GATEWAY_SRV6_ADDRESS and
             # EnvNAT66ShardSID's own doc comment both flag today) before
             # production.
             - name: GALACTIC_NAT66_SHARD_SID
-              value: "2001:db8:ff02:1:e001::"
+              value: "2001:db8:ff02:9:e001::"
             # Lab-only placeholder masquerade source address, same
             # "operator-supplied, no in-cluster derivation yet" status as
             # GALACTIC_GATEWAY_SRV6_ADDRESS (see

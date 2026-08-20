@@ -14,7 +14,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -83,7 +82,7 @@ func reconcileReq(name string) ctrl.Request {
 
 func TestNAT66ShardReconciler_NotFoundIsANoop(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	c := newIndexedClientBuilder(scheme).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
 		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: true},
@@ -97,7 +96,7 @@ func TestNAT66ShardReconciler_NotFoundIsANoop(t *testing.T) {
 func TestNAT66ShardReconciler_SkipsShardForAnotherNode(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	shard := newNAT66Shard(testNAT66NodeB)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
 		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: true},
@@ -124,7 +123,7 @@ func TestNAT66ShardReconciler_SkipsShardForAnotherNode(t *testing.T) {
 func TestNAT66ShardReconciler_PublishesStatusWhenAttached(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	shard := newNAT66Shard(testNAT66NodeA)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
 		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: true},
@@ -163,7 +162,7 @@ func TestNAT66ShardReconciler_PublishesStatusWhenAttached(t *testing.T) {
 func TestNAT66ShardReconciler_ReadyFalseWhenNotAttached(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	shard := newNAT66Shard(testNAT66NodeA)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
 		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: false},
@@ -193,7 +192,7 @@ func TestNAT66ShardReconciler_ReadyFalseWhenNotAttached(t *testing.T) {
 func TestNAT66ShardReconciler_NilDatapathIsNotAttached(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	shard := newNAT66Shard(testNAT66NodeA)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
 		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: nil,
@@ -220,7 +219,7 @@ func TestNAT66ShardReconciler_DeletingShardIsANoop(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	shard := newNAT66Shard(testNAT66NodeA)
 	shard.Finalizers = []string{"test.datum.net/keep"} // required for the fake client to accept a deletion timestamp
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 
 	if err := c.Delete(context.Background(), shard); err != nil {
 		t.Fatalf("delete shard: %v", err)
@@ -248,7 +247,7 @@ func TestNAT66ShardReconciler_EmptyConfiguredValuesLeaveStatusUntouched(t *testi
 	shard := newNAT66Shard(testNAT66NodeA)
 	shard.Status.ShardAddress = testNAT66ShardAddr
 	shard.Status.ShardSID = testNAT66ShardSIDVal
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 
 	// A reconciler started with empty ShardAddress/ShardSID (shouldn't
 	// happen in production -- config.NAT66Config.Validate requires both --
@@ -271,5 +270,137 @@ func TestNAT66ShardReconciler_EmptyConfiguredValuesLeaveStatusUntouched(t *testi
 	}
 	if got.Status.ShardSID != testNAT66ShardSIDVal {
 		t.Errorf("Status.ShardSID = %q, want untouched %q", got.Status.ShardSID, testNAT66ShardSIDVal)
+	}
+}
+
+// newTestNAT66Router returns a BGPRouter targeting nodeName, resolved
+// through the BGPRouterByTargetName index newIndexedClientBuilder (shared
+// with networkgateway_controller_test.go) registers.
+func newTestNAT66Router(nodeName, routerName string) *bgpv1alpha1.BGPRouter {
+	return &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNAT66Namespace, Name: routerName},
+		Spec:       bgpv1alpha1.BGPRouterSpec{TargetRef: bgpv1alpha1.TargetRef{Kind: "Node", Name: nodeName}},
+	}
+}
+
+func TestNAT66ShardReconciler_CreatesAdvertisementWhenSIDAndRouterPresent(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newNAT66Shard(testNAT66NodeA)
+	router := newTestNAT66Router(testNAT66NodeA, "node-a-router")
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
+	r := newNAT66Reconciler(nat66ReconcilerParams{
+		client: c, scheme: scheme, nodeName: testNAT66NodeA,
+		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: true},
+	})
+
+	if _, err := r.Reconcile(context.Background(), reconcileReq(testNAT66ShardName)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	advKey := client.ObjectKey{Namespace: testNAT66Namespace, Name: shardAdvertisementName(testNAT66ShardName)}
+	if err := c.Get(context.Background(), advKey, adv); err != nil {
+		t.Fatalf("get shard BGPAdvertisement: %v", err)
+	}
+	if adv.Spec.RouterRef.Name != router.Name {
+		t.Errorf("Spec.RouterRef.Name = %q, want %q", adv.Spec.RouterRef.Name, router.Name)
+	}
+	if adv.Spec.AddressFamily.AFI != bgpv1alpha1.AFIL2VPN || adv.Spec.AddressFamily.SAFI != bgpv1alpha1.SAFIEVPN {
+		t.Errorf("Spec.AddressFamily = %+v, want l2vpn/evpn", adv.Spec.AddressFamily)
+	}
+	wantPrefix := bgpv1alpha1.Prefix(testNAT66ShardSIDVal + "/128")
+	if len(adv.Spec.Prefixes) != 1 || adv.Spec.Prefixes[0] != wantPrefix {
+		t.Errorf("Spec.Prefixes = %+v, want [%s]", adv.Spec.Prefixes, wantPrefix)
+	}
+}
+
+func TestNAT66ShardReconciler_SkipsAdvertisementWithoutRouter(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newNAT66Shard(testNAT66NodeA)
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	r := newNAT66Reconciler(nat66ReconcilerParams{
+		client: c, scheme: scheme, nodeName: testNAT66NodeA,
+		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: true},
+	})
+
+	if _, err := r.Reconcile(context.Background(), reconcileReq(testNAT66ShardName)); err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil even with no BGPRouter for this node yet", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	advKey := client.ObjectKey{Namespace: testNAT66Namespace, Name: shardAdvertisementName(testNAT66ShardName)}
+	if err := c.Get(context.Background(), advKey, adv); err == nil {
+		t.Fatalf("BGPAdvertisement %v unexpectedly created with no BGPRouter for this node", advKey)
+	}
+}
+
+func TestNAT66ShardReconciler_WithdrawsAdvertisementOnDelete(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newNAT66Shard(testNAT66NodeA)
+	shard.Finalizers = []string{"test.datum.net/keep"} // required for the fake client to accept a deletion timestamp
+	router := newTestNAT66Router(testNAT66NodeA, "node-a-router")
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNAT66Namespace,
+			Name:      shardAdvertisementName(testNAT66ShardName),
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: router.Name},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(testNAT66ShardSIDVal + "/128")},
+		},
+	}
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router, adv).WithStatusSubresource(shard).Build()
+
+	if err := c.Delete(context.Background(), shard); err != nil {
+		t.Fatalf("delete shard: %v", err)
+	}
+
+	r := newNAT66Reconciler(nat66ReconcilerParams{
+		client: c, scheme: scheme, nodeName: testNAT66NodeA,
+		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: true},
+	})
+	if _, err := r.Reconcile(context.Background(), reconcileReq(testNAT66ShardName)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	got := &bgpv1alpha1.BGPAdvertisement{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(adv), got); err == nil {
+		t.Fatalf("BGPAdvertisement %v still exists after deleting its NAT66Shard", client.ObjectKeyFromObject(adv))
+	}
+}
+
+func TestNAT66ShardReconciler_WithdrawsAdvertisementWhenShardObjectAlreadyGone(t *testing.T) {
+	// Mirrors NetworkGatewayReconciler's own req.Name-keyed withdrawal in
+	// its NotFound branch: this reconciler never observes a live shard
+	// object at all here, only the deletion event's req.Name, and must
+	// still withdraw the advertisement it created (see the Reconcile
+	// NotFound branch's own doc comment for why no finalizer is used).
+	scheme := nat66TestScheme(t)
+	router := newTestNAT66Router(testNAT66NodeA, "node-a-router")
+	adv := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNAT66Namespace,
+			Name:      shardAdvertisementName(testNAT66ShardName),
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: router.Name},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(testNAT66ShardSIDVal + "/128")},
+		},
+	}
+	c := newIndexedClientBuilder(scheme).WithObjects(router, adv).Build()
+	r := newNAT66Reconciler(nat66ReconcilerParams{
+		client: c, scheme: scheme, nodeName: testNAT66NodeA,
+		addr: testNAT66ShardAddr, sid: testNAT66ShardSIDVal, datapath: &fakeDatapathHealth{attached: true},
+	})
+
+	if _, err := r.Reconcile(context.Background(), reconcileReq(testNAT66ShardName)); err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for a NotFound shard object", err)
+	}
+
+	got := &bgpv1alpha1.BGPAdvertisement{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(adv), got); err == nil {
+		t.Fatalf("BGPAdvertisement %v still exists after its NAT66Shard object disappeared", client.ObjectKeyFromObject(adv))
 	}
 }

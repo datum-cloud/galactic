@@ -63,6 +63,13 @@ type HostConf struct {
 	Namespace  string `json:"namespace"`
 	LogFile    string `json:"log_file"`
 	LogLevel   string `json:"log_level,omitempty"`
+
+	// NAT66ShardSIDs is the comma-separated NAT66 shard SID list --
+	// see config.EnvCNINAT66ShardSIDs's own doc comment. Written by
+	// internal/installer.Bootstrap from its own env, read by
+	// internal/cnibgp the same way every other field here is: a CNI
+	// plugin's exec environment carries none of this on its own.
+	NAT66ShardSIDs string `json:"nat66_shard_sids,omitempty"`
 }
 
 // conflistEnvelope matches standard CNI conflist JSON structure.

@@ -72,6 +72,20 @@ func TestResolveLogLevel(t *testing.T) {
 	}
 }
 
+func TestResolveNAT66ShardSIDs(t *testing.T) {
+	// Unset: no default to normalize to, unlike resolveLogLevel -- empty
+	// means "no shard configured yet," written into the conflist verbatim.
+	if got := resolveNAT66ShardSIDs(); got != "" {
+		t.Errorf("resolveNAT66ShardSIDs() = %q, want empty when unset", got)
+	}
+
+	const want = "2001:db8:ff01:1:e001::,2001:db8:ff03:1:e001::"
+	t.Setenv(config.EnvCNINAT66ShardSIDs, want)
+	if got := resolveNAT66ShardSIDs(); got != want {
+		t.Errorf("resolveNAT66ShardSIDs() = %q, want %q", got, want)
+	}
+}
+
 // assertBinaryCopied verifies that the binary at path exists and contains
 // wantContent, factored out of TestBootstrap to keep its own cyclomatic
 // complexity within golangci-lint's gocyclo budget.
@@ -171,6 +185,8 @@ func TestBootstrap(t *testing.T) {
 			}
 			return nil, nil
 		}
+		const wantShardSIDs = "2001:db8:ff01:1:e001::,2001:db8:ff03:1:e001::"
+		t.Setenv(config.EnvCNINAT66ShardSIDs, wantShardSIDs)
 
 		err := Bootstrap(context.Background(), "test-node")
 		if err != nil {
@@ -203,6 +219,9 @@ func TestBootstrap(t *testing.T) {
 		}
 		if conflist.LogLevel != config.DefaultLogLevel {
 			t.Errorf("expected log_level %s, got %s", config.DefaultLogLevel, conflist.LogLevel)
+		}
+		if conflist.NAT66ShardSIDs != wantShardSIDs {
+			t.Errorf("expected nat66_shard_sids %s, got %s", wantShardSIDs, conflist.NAT66ShardSIDs)
 		}
 
 		// Verify kubeconfig written

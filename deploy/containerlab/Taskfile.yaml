@@ -22,6 +22,7 @@ tasks:
       - "build:galactic-router"
       - "build:galactic-gateway"
       - "build:galactic-cni"
+      - "build:galactic-nat66"
 
   "build:node":
     desc: Build the Kind node image
@@ -58,6 +59,11 @@ tasks:
     cmds:
       - docker build --network=host --build-context network=../../../network -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
+  "build:galactic-nat66":
+    desc: Build the galactic-nat66 sharded egress datapath image
+    cmds:
+      - docker build --network=host --build-context network=../../../network -t galactic-nat66:latest -f ../../containers/galactic-nat66/Dockerfile ../..
+
   deploy:
     desc: Build images and deploy the full lab end-to-end
     deps: [build, host-setup]
@@ -71,6 +77,7 @@ tasks:
       - task: "deploy:cni"
       - task: "deploy:fabric"
       - task: "deploy:galactic-router"
+      - task: "deploy:galactic-nat66"
       - task: "deploy:scenarios"
 
   "deploy:clusters":
@@ -194,6 +201,12 @@ tasks:
         vars: {IMAGE: galactic-cni:latest, NODE: sjc-worker}
       - task: load-image
         vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-nat66:latest, NODE: iad-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-nat66:latest, NODE: sjc-worker}
+      - task: load-image
+        vars: {IMAGE: galactic-nat66:latest, NODE: dfw-worker}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -238,6 +251,11 @@ tasks:
     cmds:
       - ./scripts/deploy-galactic-router.sh
 
+  "deploy:galactic-nat66":
+    desc: Install the sharded NAT66 egress DaemonSet and NAT66Shard objects
+    cmds:
+      - ./scripts/deploy-galactic-nat66.sh
+
   "deploy:scenarios":
     desc: Deploy all VPC test scenarios
     cmds:
@@ -281,6 +299,7 @@ tasks:
       - task: "verify:srv6"
       - task: "verify:evpn"
       - task: "verify:gateway"
+      - task: "verify:nat66-sharding"
       - task: "verify:scenarios"
 
   "verify:bgp-transit":
@@ -338,6 +357,16 @@ tasks:
     cmds:
       - docker exec iad-control-plane kubectl get networkgateways,networkrules -n galactic-system
       - docker exec iad-control-plane kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
+
+  "verify:nat66-sharding":
+    desc: Verify each site's NAT66Shard is Ready and its shard SID is advertised
+    cmds:
+      - |
+        for site in dfw sjc iad; do
+          echo "--- ${site} ---"
+          docker exec ${site}-control-plane kubectl get nat66shards -n galactic-system -o wide
+          docker exec ${site}-control-plane kubectl get bgpadvertisements -n galactic-system
+        done
 
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios
