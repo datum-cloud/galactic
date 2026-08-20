@@ -40,7 +40,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 	t.Run("missing EndpointSlice is an error", func(t *testing.T) {
 		k8s := fakeClient()
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), bgpConfig{}, 0)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want an error when the EndpointSlice does not exist")
 		}
@@ -60,7 +60,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 		k8s := fakeClient(slice)
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), bgpConfig{}, 0)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want an address-mismatch error")
 		}
@@ -83,7 +83,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 		k8s := fakeClient(slice)
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), bgpConfig{}, 0)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want a tenant-id mismatch error")
 		}
@@ -92,7 +92,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 	})
 
-	t.Run("everything matches, vrfIDKnown false: SID not checked", func(t *testing.T) {
+	t.Run("everything matches, bgp not known: SID not checked", func(t *testing.T) {
 		slice := &discoveryv1.EndpointSlice{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      testPodName,
@@ -106,13 +106,13 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 		k8s := fakeClient(slice)
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), false, 0)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), bgpConfig{}, 0)
 		if err != nil {
 			t.Fatalf("checkEndpointSlice() = %v, want nil", err)
 		}
 	})
 
-	t.Run("vrfIDKnown true, SRv6 configured: SID mismatch is an error", func(t *testing.T) {
+	t.Run("bgp known, SRv6 configured: SID mismatch is an error", func(t *testing.T) {
 		const (
 			locator = "fd00:10::/48"
 			srvNode = 7
@@ -137,7 +137,8 @@ func TestCheckEndpointSlice(t *testing.T) {
 		k8s := fakeClient(router, slice)
 
 		err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), true, vrfID)
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t),
+			bgpConfig{srv6Locator: locator, nodeID: srvNode}, vrfID)
 		if err == nil {
 			t.Fatal("checkEndpointSlice() = nil, want a SID-mismatch error")
 		}
@@ -146,7 +147,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		}
 	})
 
-	t.Run("vrfIDKnown true, SRv6 configured: matching SID passes", func(t *testing.T) {
+	t.Run("bgp known, SRv6 configured: matching SID passes", func(t *testing.T) {
 		const (
 			locator = "fd00:10::/48"
 			srvNode = 7
@@ -176,13 +177,14 @@ func TestCheckEndpointSlice(t *testing.T) {
 		k8s := fakeClient(router, slice)
 
 		if err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), true, vrfID,
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t),
+			bgpConfig{srv6Locator: locator, nodeID: srvNode}, vrfID,
 		); err != nil {
 			t.Fatalf("checkEndpointSlice() = %v, want nil", err)
 		}
 	})
 
-	t.Run("vrfIDKnown true, SRv6 not configured: SID not checked", func(t *testing.T) {
+	t.Run("bgp known, SRv6 not configured: SID not checked", func(t *testing.T) {
 		const vrfID = int32(1234)
 		router := routerForNode(testRouterName, nodeName, testPodNamespace, 65000)
 
@@ -200,7 +202,7 @@ func TestCheckEndpointSlice(t *testing.T) {
 		k8s := fakeClient(router, slice)
 
 		if err := checkEndpointSlice(
-			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), true, vrfID,
+			context.Background(), k8s, testPluginConf(), testPodName, testPodNamespace, mustParseAddr(t), bgpConfig{}, vrfID,
 		); err != nil {
 			t.Fatalf("checkEndpointSlice() = %v, want nil", err)
 		}

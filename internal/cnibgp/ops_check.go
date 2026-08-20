@@ -64,6 +64,19 @@ func cmdCheck(args *skel.CmdArgs) error {
 		errs = append(errs, fmt.Errorf("BGPVRFInstance %s: %w", vrfName, vrfErr))
 	}
 
+	// checkEndpointSlice's SID check and checkEBPFEntry below both need
+	// this node's BGPRouter (keyed by cniConfig.NodeName/pluginConf.Namespace)
+	// once the BGPVRFInstance lookup above succeeded; look it up here once
+	// and hand the result to both instead of each fetching it independently.
+	var bgp bgpConfig
+	if vrfErr == nil {
+		var bgpErr error
+		bgp, bgpErr = lookupBGPRouter(ctx, k8s, cniConfig.NodeName, pluginConf.Namespace)
+		if bgpErr != nil {
+			errs = append(errs, fmt.Errorf("look up BGPRouter: %w", bgpErr))
+		}
+	}
+
 	adv := &bgpv1alpha1.BGPAdvertisement{}
 	advName := crdnames.BGPAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment)
 	if err := k8s.Get(ctx, client.ObjectKey{Name: advName, Namespace: pluginConf.Namespace}, adv); err != nil {
@@ -85,7 +98,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 		if podName == "" || podNamespace == "" {
 			errs = append(errs, errors.New("EndpointSlice: no K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS"))
 		} else if err := checkEndpointSlice(
-			ctx, k8s, pluginConf, podName, podNamespace, ipamResult.IPv6Subnet.IP, vrfErr == nil, vrfInst.Spec.VRFID,
+			ctx, k8s, pluginConf, podName, podNamespace, ipamResult.IPv6Subnet.IP, bgp, vrfInst.Spec.VRFID,
 		); err != nil {
 			errs = append(errs, err)
 		}
@@ -96,7 +109,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	// on) and this node's router actually has SRv6 configured — matches
 	// registerEBPFDatapath's own no-op case.
 	if vrfErr == nil {
-		if err := checkEBPFEntry(ctx, k8s, pluginConf, uint16(vrfInst.Spec.VRFID)); err != nil {
+		if err := checkEBPFEntry(pluginConf, uint16(vrfInst.Spec.VRFID), bgp); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -122,12 +135,10 @@ func cmdCheck(args *skel.CmdArgs) error {
 // still reporting the attachment healthy. Returns nil (not an error) when
 // this node's router has no SRv6Locator/nodeID configured — SRv6 was
 // intentionally never set up for this attachment, matching
-// registerEBPFDatapath's own no-op case.
-func checkEBPFEntry(ctx context.Context, k8s client.Client, pluginConf *PluginConf, argument uint16) error {
-	bgp, err := lookupBGPRouter(ctx, k8s, cniConfig.NodeName, pluginConf.Namespace)
-	if err != nil {
-		return fmt.Errorf("look up BGPRouter: %w", err)
-	}
+// registerEBPFDatapath's own no-op case. bgp is this node's BGPRouter,
+// looked up once by the caller (cmdCheck) and shared with checkEndpointSlice
+// rather than each fetching it independently.
+func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig) error {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return nil
 	}
@@ -191,17 +202,18 @@ func checkEBPFEntry(ctx context.Context, k8s client.Client, pluginConf *PluginCo
 // checkEndpointSlice verifies the per-pod EndpointSlice cmdAdd published
 // (endpointslice.go) is still in place: it exists, carries the pod's
 // current address, and its tenant-id/SID label and annotations match
-// freshly recomputed expected values. vrfIDKnown is false when the
-// BGPVRFInstance lookup in cmdCheck above failed, in which case the SID
-// can't be recomputed and its annotation is not checked — matches
+// freshly recomputed expected values. bgp is this node's BGPRouter, looked
+// up once by the caller (cmdCheck) and shared with checkEBPFEntry rather
+// than fetched here independently; a zero-value bgp (as when the
+// BGPVRFInstance lookup in cmdCheck above failed) means the SID can't be
+// recomputed, so its annotation is not checked — matches
 // registerEBPFDatapath/checkEBPFEntry's own "can't check what we can't
 // compute" convention. podNamespace is the pod's own namespace (parsed from
 // CNI_ARGS) — where cmdAdd created the EndpointSlice — distinct from
-// pluginConf.Namespace, which the BGPRouter lookup below still uses since
-// that's where the BGP CRDs live.
+// pluginConf.Namespace, which is only where the BGP CRDs live.
 func checkEndpointSlice(
 	ctx context.Context, k8s client.Client, pluginConf *PluginConf, podName, podNamespace string,
-	addr net.IP, vrfIDKnown bool, vrfID int32,
+	addr net.IP, bgp bgpConfig, vrfID int32,
 ) error {
 	name := crdnames.EndpointSliceName(podName)
 	slice := &discoveryv1.EndpointSlice{}
@@ -230,18 +242,13 @@ func checkEndpointSlice(
 			"EndpointSlice %s annotation %s = %q, want %q", name, crdnames.AnnotationTenantID, got, wantTenantID))
 	}
 
-	if vrfIDKnown {
-		bgp, err := lookupBGPRouter(ctx, k8s, cniConfig.NodeName, pluginConf.Namespace)
+	if bgp.srv6Locator != "" && bgp.nodeID != 0 {
+		sid, err := srv6.ComputeSID(bgp.srv6Locator, bgp.nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("look up BGPRouter for EndpointSlice SID check: %w", err))
-		} else if bgp.srv6Locator != "" && bgp.nodeID != 0 {
-			sid, err := srv6.ComputeSID(bgp.srv6Locator, bgp.nodeID, vrfID, bgpv1alpha1.SRv6FunctionEndDT46)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("compute expected SRv6 uSID for EndpointSlice check: %w", err))
-			} else if got := slice.Annotations[crdnames.AnnotationSID]; got != sid.String() {
-				errs = append(errs, fmt.Errorf(
-					"EndpointSlice %s annotation %s = %q, want %q", name, crdnames.AnnotationSID, got, sid.String()))
-			}
+			errs = append(errs, fmt.Errorf("compute expected SRv6 uSID for EndpointSlice check: %w", err))
+		} else if got := slice.Annotations[crdnames.AnnotationSID]; got != sid.String() {
+			errs = append(errs, fmt.Errorf(
+				"EndpointSlice %s annotation %s = %q, want %q", name, crdnames.AnnotationSID, got, sid.String()))
 		}
 	}
 
