@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
@@ -449,11 +450,13 @@ func withNetNSExistsFn(t *testing.T, fn func(string) bool) {
 // withTempPinDir points the package-level ebpfPinDir var (see cnibgp.go's
 // doc comment) at a throwaway bpffs directory for the duration of the test,
 // loading the eBPF datapath's pinned maps into it first (simulating the run
-// container having already loaded the datapath) and adding this VPC's real
-// kernel VRF — the same two preconditions bgp_ebpf_test.go's own
-// requireRoot-gated tests set up before calling registerEBPFDatapath
-// directly. Restores ebpfPinDir and tears both down on cleanup. Callers
-// must call requireRoot(t) first.
+// container having already loaded the datapath), adding this VPC's real
+// kernel VRF, and creating the testVPC/testAttachment host veth pair —
+// the same three preconditions bgp_ebpf_test.go's own requireRoot-gated
+// tests set up before calling registerEBPFDatapath directly; the veth pair
+// is what registerEBPFDatapath's own hostInterfaceIndex/attachUsidEgress
+// calls resolve by name. Restores ebpfPinDir and tears all three down on
+// cleanup. Callers must call requireRoot(t) first.
 func withTempPinDir(t *testing.T) {
 	t.Helper()
 
@@ -461,6 +464,11 @@ func withTempPinDir(t *testing.T) {
 		t.Fatalf("vrf.Add: %v", err)
 	}
 	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
+
+	if err := veth.Add(testVPC, testAttachment, 1500); err != nil {
+		t.Fatalf("veth.Add: %v", err)
+	}
+	t.Cleanup(func() { _ = veth.Delete(testVPC, testAttachment) })
 
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
 	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
