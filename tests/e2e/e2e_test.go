@@ -399,7 +399,14 @@ func testChainedGalacticBGP(t *testing.T, podName string, tapResult map[string]a
 
 	// Reuses the same netns/containerID/ifname galactic-tap's own step
 	// (above) already set up: a real chained plugin sees the identical
-	// values across every plugin invoked for one CNI ADD.
+	// values across every plugin invoked for one CNI ADD. Unlike the tap
+	// step, this one does set CNI_ARGS: the tap config carries an
+	// ipv6_subnet, so ADD's ipamResult.IPv6Subnet is non-nil and cmdAdd
+	// takes the EndpointSlice-publish branch, which requires
+	// nadpatch.ParsePodName(args.Args) to resolve a real K8S_POD_NAME —
+	// Multus always sets this on a real invocation, so this mirrors that
+	// rather than exercising a standalone/manual-chain invocation the way
+	// the tap step above deliberately does for AnnotateNAD/VerifyChainComplete.
 	bgpScript := `#!/bin/sh
 CNI_NETNS=/var/run/netns/e2e-tap-ns \
 CNI_COMMAND=$1 \
