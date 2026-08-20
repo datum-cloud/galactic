@@ -182,8 +182,6 @@ github.com/vishvananda/netns v0.0.5 h1:DfiHV+j8bA32MFM7bfEunvT8IAqQ/NzSJHtcmW5zd
 github.com/vishvananda/netns v0.0.5/go.mod h1:SpkAiCQRtJ6TvvxPnOSyH3BMl6unz3xZlaprSwhNNJM=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
-go.datum.net/network v0.0.0-20260812184454-6e8a6c4cbd40 h1:83gROUl0ziuMzB4sBP3OTwpMr1A7nQPkcVFwoZoY77c=
-go.datum.net/network v0.0.0-20260812184454-6e8a6c4cbd40/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
 go.datum.net/network v0.0.0-20260814001919-96677d648672 h1:Kl1+MHxos5yH7tH6TqvzTmYTi39VsEX2K7zYi7/rm58=
 go.datum.net/network v0.0.0-20260814001919-96677d648672/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
