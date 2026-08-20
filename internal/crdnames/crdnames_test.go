@@ -9,6 +9,31 @@ import (
 	"testing"
 )
 
+func TestServiceVIPBindingName(t *testing.T) {
+	tests := []struct {
+		name                 string
+		nodeName, vip, proto string
+		port                 int32
+		want                 string
+	}{
+		{"IPv6", "iad-worker", "2001:db8::1", "tcp", 443, "iad-worker-2001-db8--1-tcp-443"},
+		{"IPv4", "iad-worker", "203.0.113.5", "udp", 53, "iad-worker-203-0-113-5-udp-53"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ServiceVIPBindingName(tt.nodeName, tt.vip, tt.port, tt.proto)
+			if got != tt.want {
+				t.Errorf("ServiceVIPBindingName(%q, %q, %d, %q) = %q, want %q",
+					tt.nodeName, tt.vip, tt.port, tt.proto, got, tt.want)
+			}
+			if strings.HasPrefix(got, "-") {
+				t.Errorf("ServiceVIPBindingName(%q, %q, %d, %q) = %q starts with '-' (invalid k8s name)",
+					tt.nodeName, tt.vip, tt.port, tt.proto, got)
+			}
+		})
+	}
+}
+
 func TestBGPVRFInstanceName(t *testing.T) {
 	tests := []struct{ vpc, nodeName, want string }{
 		{"abc", "worker-1", "abc-worker-1"},
