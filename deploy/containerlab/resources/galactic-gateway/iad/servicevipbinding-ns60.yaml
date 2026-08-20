@@ -11,13 +11,15 @@
 #
 # egressKind: veth, since ns60's backend is a plain container Deployment
 # (veth attach, not a tap/VM backend) -- see ServiceVIPBinding's own doc
-# comment for the veth/tap fork. backendAddress/backendPort are omitted:
-# per that same doc comment, both are ignored for the veth kind (a veth
-# binding's backend answers on vipAddress itself once bound, via
-# internal/plumbing/vip's galactic-vip0 dummy-interface bind) -- they
-# exist on the spec only for the tap case, where there is no fixture in
-# this lab yet (see the redesign plan's §8, "no tap/VM fixture exists in
-# this lab at all").
+# comment for the veth/tap fork. backendAddress/backendPort now match
+# networkrule-ns60.yaml's own backend entry exactly (fd20:60:ff03::100:0:80)
+# -- required for veth too, not just tap: a decapsulated ingress packet is
+# delivered into vpc60's own VRF routing table, which has no route to
+# vipAddress at all (only bound on the node's own root-namespace
+# galactic-vip0 interface, outside that VRF) -- found live in this exact
+# lab. galactic's ServiceVIPBindingReconciler now registers the same
+# vip_xlat_table substitution tap already used, closing that gap; see its
+# own doc comment for the full story.
 apiVersion: network.datumapis.com/v1alpha1
 kind: ServiceVIPBinding
 metadata:
@@ -30,4 +32,6 @@ spec:
   vipAddress: 2001:db8:6060::1
   port: 80
   protocol: tcp
+  backendAddress: fd20:60:ff03::100:0
+  backendPort: 80
   egressKind: veth

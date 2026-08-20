@@ -77,12 +77,9 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 	if gateway == nil || gateway.IsUnspecified() {
 		return fmt.Errorf("refusing to install seg6 encap route for %s: gateway %s is not a usable SRv6 SID", prefix, gateway)
 	}
-	routes, err := netlink.RouteGet(gateway)
+	linkIndex, nextHop, err := resolveNextHop(gateway)
 	if err != nil {
-		return fmt.Errorf("no route to gateway %s: %w", gateway, err)
-	}
-	if len(routes) == 0 {
-		return fmt.Errorf("no route to gateway %s", gateway)
+		return err
 	}
 	encap := &netlink.SEG6Encap{
 		Mode:     seg6IptunModeEncapRed,
@@ -92,9 +89,9 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 		Dst:       prefix,
 		Table:     int(tableID),
 		Encap:     encap,
-		LinkIndex: routes[0].LinkIndex,
+		LinkIndex: linkIndex,
 	}
-	if nextHop := routes[0].Gw; len(nextHop) > 0 {
+	if len(nextHop) > 0 {
 		if prefix.IP.To4() != nil {
 			// IPv4 VPC prefix, IPv6 next-hop: cross-family, must use Via.
 			route.Via = &netlink.Via{AddrFamily: netlink.FAMILY_V6, Addr: nextHop}
@@ -106,11 +103,95 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 	return netlink.RouteReplace(route)
 }
 
+// resolveNextHop resolves gateway's real, immediate next-hop -- the exact
+// link plus (unless gateway is itself on-link) the concrete address the
+// kernel would actually forward through right now -- via netlink.RouteGet.
+//
+// This flattening matters because IPv6 route installation does not recurse
+// through an indirect gateway on its own: passing gateway straight through
+// as a route's Gw with no LinkIndex set fails with "no route to host"
+// whenever gateway is only reachable via its own separate route (e.g.
+// through a link-local next-hop) rather than being on-link itself --
+// confirmed empirically live in containerlab, where every BGP next-hop
+// used as a plain gateway (RouteMainAdd, below) is exactly this indirect
+// shape. Both RouteEgressAdd and RouteMainAdd need gateway flattened into
+// one concrete hop before installing anything, for the same reason.
+func resolveNextHop(gateway net.IP) (linkIndex int, nextHop net.IP, err error) {
+	routes, err := netlink.RouteGet(gateway)
+	if err != nil {
+		return 0, nil, fmt.Errorf("no route to gateway %s: %w", gateway, err)
+	}
+	if len(routes) == 0 {
+		return 0, nil, fmt.Errorf("no route to gateway %s", gateway)
+	}
+	return routes[0].LinkIndex, routes[0].Gw, nil
+}
+
 // RouteEgressDel removes the SEG6 encap route for prefix from routing table tableID.
 func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
 	return netlink.RouteDel(&netlink.Route{
 		Dst:   prefix,
 		Table: int(tableID),
 		Encap: &netlink.SEG6Encap{},
+	})
+}
+
+// RouteMainAdd installs a plain route for prefix in routing table tableID,
+// forwarding to gateway via ordinary recursive next-hop resolution -- no
+// SEG6 encapsulation, unlike RouteEgressAdd.
+//
+// This exists for EVPN Type 5 paths that carry no Route Target extended
+// community at all (see matchTableID in internal/runtime/gobgp/monitor.go):
+// NetworkGatewayReconciler's anycast ingress-VIP advertisements are the one
+// case today, deliberately left VRFID/Function-less because they name no
+// tenant VRF (that reconciler's own package doc comment). Their EVPN path
+// therefore carries no Prefix-SID either, so gateway here is always the
+// path's plain BGP next-hop -- a real, already fabric-reachable node
+// address (how else could this path's own BGP session exist), not a uSID
+// decap SID. Wrapping the packet in another SEG6/IPv6-in-IPv6 header toward
+// that address the way RouteEgressAdd does for a tenant VRF prefix would
+// only make it undeliverable: nothing there is listening for that
+// encapsulation the way usid_ingress listens for a real uSID SID's traffic.
+// Ordinary recursive forwarding is what an anycast route actually needs.
+//
+// gateway must be a real address for the same reason RouteEgressAdd
+// requires one: an unspecified gateway would silently blackhole prefix
+// behind a route to nowhere.
+func RouteMainAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
+	if gateway == nil || gateway.IsUnspecified() {
+		return fmt.Errorf("refusing to install route for %s: gateway %s is not a usable next-hop", prefix, gateway)
+	}
+	linkIndex, nextHop, err := resolveNextHop(gateway)
+	if err != nil {
+		return err
+	}
+	route := &netlink.Route{
+		Dst:       prefix,
+		Table:     int(tableID),
+		LinkIndex: linkIndex,
+	}
+	if len(nextHop) > 0 {
+		if prefix.IP.To4() != nil {
+			route.Via = &netlink.Via{AddrFamily: netlink.FAMILY_V6, Addr: nextHop}
+		} else {
+			route.Gw = nextHop
+		}
+	} else {
+		// gateway itself is on-link (RouteGet found no further next-hop of
+		// its own) -- unlike RouteEgressAdd's SEG6 encap case, where the
+		// segment list alone already fully specifies the destination, a
+		// plain route needs an explicit gateway here or the kernel would
+		// treat prefix itself as directly reachable on this link.
+		route.Gw = gateway
+	}
+	return netlink.RouteReplace(route)
+}
+
+// RouteMainDel removes the plain route for prefix from routing table
+// tableID -- RouteMainAdd's counterpart, mirroring RouteEgressDel.
+func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
+	return netlink.RouteDel(&netlink.Route{
+		Dst:   prefix,
+		Table: int(tableID),
 	})
 }

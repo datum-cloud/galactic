@@ -35,8 +35,11 @@ const (
 	BGPRouterByTargetName = ".spec.targetRef.name"
 )
 
-// RegisterIndexes registers all field indexes required by galactic-router controllers.
-// It must be called before starting the manager.
+// RegisterIndexes registers all field indexes required by galactic-router's
+// and galactic-gateway's controllers (e.g. NetworkGatewayReconciler's own
+// BGPRouterByTargetName lookup) against mgr's cache. Each binary runs its
+// own separate manager/cache, so this must be called once per process --
+// it must be called before starting the manager.
 func RegisterIndexes(ctx context.Context, mgr ctrl.Manager) error {
 	cache := mgr.GetCache()
 

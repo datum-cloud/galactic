@@ -16,6 +16,17 @@ source "${SCRIPT_DIR}/lib.sh"
 NETWORK_SHA=$(awk '$1 == "go.datum.net/network" {print $2}' "${SCRIPT_DIR}/../../../go.mod" | sed 's/.*-//')
 NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
 
+# go.mod's own local `replace go.datum.net/network => ../network` (see that
+# line's comment) resolves from the galactic repo root, i.e. one level
+# above SCRIPT_DIR's ../../.. -- same relative path the containerlab
+# Taskfile's --build-context network=../../../network and scripts/ci.sh's
+# --build-context network=../network use for the identical reason (both
+# from their own, different, working directories). Used below for CRDs
+# that exist only on that local, unpublished branch (network_crds_local) --
+# NETWORK_CRD_URL above can't serve them since GitHub only has the SHA
+# go.mod's require line pins, which predates them.
+NETWORK_LOCAL_CRD_DIR="${SCRIPT_DIR}/../../../../network/config/crd"
+
 # VPC/VPCAttachment CRDs come from the separate companion VPC operator,
 # datum-cloud/cloud. Nothing in this repo's Go code imports it (the CNI
 # plugin only reads VPC/VPCAttachment identifiers as plain JSON fields off
@@ -34,6 +45,26 @@ network_crds=(
   network.datumapis.com_networkrules.yaml
 )
 
+# ServiceVIPBinding is the DSR/Maglev redesign's own CRD (design plan §1),
+# added on network's local feat/dsr-maglev-crds branch alongside this
+# repo's feat/dsr-maglev-gateway -- never pushed, so it doesn't exist at
+# NETWORK_SHA on GitHub the way network_crds above does. Missing this
+# breaks two different things, discovered live in this lab: (1)
+# resources/galactic-gateway/iad/servicevipbinding-ns60.yaml fails
+# deploy-galactic-router.sh's apply_k of that directory with kubectl's
+# "ensure CRDs are installed first" (the DaemonSet/BGP resources in the
+# same kustomization still get applied, but the script's overall exit
+# code still goes non-zero); (2), the more serious one -- galactic-router's
+# manager registers a ServiceVIPBinding watch unconditionally, on every
+# site, so without this CRD it crash-loops everywhere on "failed to wait
+# for servicevipbinding caches to sync ... timed out" and never starts any
+# controller at all, not just the ones this redesign added. Installed on
+# every site, matching network_crds' own blanket per-site loop, for that
+# second reason -- (1) alone would only need iad.
+network_crds_local=(
+  network.datumapis.com_servicevipbindings.yaml
+)
+
 cloud_crds=(
   cloud.datumapis.com_vpcs.yaml
   cloud.datumapis.com_vpcattachments.yaml
@@ -50,6 +81,9 @@ for site in dfw sjc iad; do
   # hiccups (rate-limits, cold CDN cache) instead of failing the deploy.
   for crd in "${network_crds[@]}"; do
     curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "${NETWORK_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
+  done
+  for crd in "${network_crds_local[@]}"; do
+    docker exec -i "${node}" kubectl apply -f - < "${NETWORK_LOCAL_CRD_DIR}/${crd}"
   done
   for crd in "${cloud_crds[@]}"; do
     curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "${CLOUD_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -

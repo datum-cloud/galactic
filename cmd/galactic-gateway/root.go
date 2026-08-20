@@ -105,6 +105,19 @@ func runCmd(cfg *config.GatewayConfig) error {
 		grpcSrv.GracefulStop()
 	}()
 
+	// Register field indexes. NetworkGatewayReconciler.resolveBGPRouterForNode
+	// (networkgateway_controller.go) lists BGPRouters by BGPRouterByTargetName
+	// -- an index, not a real API field, so it only resolves if something on
+	// this process's own manager registered it first. cmd/galactic-router
+	// registers it via the same call for its own, separate manager; galactic-
+	// gateway is a distinct binary/process/manager and never did, so every
+	// NetworkGateway reconcile here failed outright ("Index with name
+	// field:.spec.targetRef.name does not exist") until this call was added --
+	// found via a live containerlab deploy's own reconciler error loop.
+	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
+		return fmt.Errorf("register field indexes: %w", err)
+	}
+
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 

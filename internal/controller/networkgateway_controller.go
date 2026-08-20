@@ -515,6 +515,38 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return ruleToGatewayRequests(ctx, r.Client, obj)
 			}),
 		).
+		// buildBackendSIDIndex (via buildDesiredRule) resolves each rule's
+		// backend uSID from BGPRouter/BGPAdvertisement/BGPVRFInstance, but
+		// none of those were ever watched -- only NetworkRule/NetworkGateway
+		// themselves. A backend whose owning BGPAdvertisement doesn't exist
+		// yet at reconcile time (a real, observed startup race: this
+		// reconciler's own initial reconcile can run before
+		// NetworkRuleReconciler/galactic-router have created and
+		// re-reconciled it) permanently fails that rule with "no
+		// BGPAdvertisement owned by VPC ... found" -- buildDesiredRule's
+		// error is logged and the rule is skipped, not requeued, and
+		// nothing the reconciler *does* watch ever changes afterward, so
+		// the rule stays broken until something unrelated (a NetworkRule
+		// edit, a pod restart) happens to trigger another reconcile. These
+		// three watches close that gap the same way NetworkRule's own
+		// watch does: broadcast to every NetworkGateway in the namespace,
+		// since any of them could be the one whose backend resolution was
+		// waiting on this exact object.
+		Watches(&bgpv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "BGPRouter", obj.GetName())
+			}),
+		).
+		Watches(&bgpv1alpha1.BGPAdvertisement{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "BGPAdvertisement", obj.GetName())
+			}),
+		).
+		Watches(&bgpv1alpha1.BGPVRFInstance{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "BGPVRFInstance", obj.GetName())
+			}),
+		).
 		Named("networkgateway").
 		Complete(r)
 }
@@ -531,11 +563,22 @@ func ruleToGatewayRequests(ctx context.Context, c client.Client, obj client.Obje
 	if !ok {
 		return nil
 	}
+	return broadcastToGatewayRequests(ctx, c, rule.Namespace, "NetworkRule", rule.Name)
+}
+
+// broadcastToGatewayRequests lists every NetworkGateway in namespace and
+// returns a reconcile request for each — the shared primitive
+// ruleToGatewayRequests and SetupWithManager's BGPRouter/BGPAdvertisement/
+// BGPVRFInstance watches all build on. sourceKind/sourceName are for the
+// list-failure log line only.
+func broadcastToGatewayRequests(
+	ctx context.Context, c client.Client, namespace, sourceKind, sourceName string,
+) []ctrlreconcile.Request {
 	logger := log.FromContext(ctx)
 
 	gwList := &bgpv1alpha1.NetworkGatewayList{}
-	if err := c.List(ctx, gwList, client.InNamespace(rule.Namespace)); err != nil {
-		logger.Error(err, "list NetworkGateways for NetworkRule change", "networkRule", rule.Name)
+	if err := c.List(ctx, gwList, client.InNamespace(namespace)); err != nil {
+		logger.Error(err, "list NetworkGateways for change", "sourceKind", sourceKind, "sourceName", sourceName)
 		return nil
 	}
 	reqs := make([]ctrlreconcile.Request, 0, len(gwList.Items))

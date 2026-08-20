@@ -403,13 +403,14 @@ grounded in what actually exists, not a green-field lab design. **Not yet
 done** — the two items below are the concrete remaining work before this
 redesign can claim containerlab validation beyond manifests:
 
-**Known blocker, root-caused during implementation — two stacked
-issues, not one.** The lab's own `README.md` used to describe "real
-end-to-end ingress traffic through the datapath still doesn't reach a
-backend in this topology — it currently stops on a veth-specific
+**Known blocker, root-caused and fixed during implementation — three
+stacked issues, not one.** The lab's own `README.md` used to describe
+"real end-to-end ingress traffic through the datapath still doesn't reach
+a backend in this topology — it currently stops on a veth-specific
 `XDP_TX` behavior," attributed to the lab environment generically.
-Live-kernel investigation found it is actually two separate, stacked
-issues:
+Live-kernel investigation, and a full end-to-end validation run
+(2026-08-18) that finally drove real traffic through ns60's gateway
+canary, found and fixed three separate, stacked issues:
 
 1. **IPv6 forwarding sysctls not enabled** — `bpf_fib_lookup()` (used
    identically by `edgedsr.c`'s and `nat66.c`'s `push_outer_header`)
@@ -420,17 +421,53 @@ issues:
    `net.ipv6.conf.<iface>.forwarding` and `net.ipv6.conf.all.forwarding`
    (empirically confirmed both are required together) from both
    `cmd/galactic-gateway` and `cmd/galactic-nat66` startup.
-2. **veth's native `XDP_TX` fast path is invisible to normal observation
-   unless the peer also runs an XDP program.** A frame `XDP_TX`'d on one
-   veth leg is only promoted into the peer's normal receive stack
-   (visible to tcpdump/AF_PACKET) if the peer interface *also* has an
-   XDP program attached — otherwise delivery uses a raw fast-path queue
-   nothing but another XDP program on that peer can see. **Not fixable
-   in this datapath's own code** — a genuine veth/kernel characteristic
-   that doesn't apply to a real physical NIC uplink in production, only
-   to this lab's veth-pair simulation of one. Document as a lab-only
-   caveat when this section's live-traffic validation is actually run,
-   not carried forward as an unexplained blocker.
+2. **veth's native `XDP_TX` fast path does not deliver a frame to the
+   peer interface's normal receive stack at all, not merely invisibly,
+   unless the peer also runs an XDP program.** This corrects the
+   original diagnosis above: it was believed (based on `tcpdump`
+   observation alone) that the frame still arrived, just unobserved.
+   Confirmed live via the destination node's own eBPF datapath packet
+   counter (not `tcpdump`): with no peer XDP program, the counter stayed
+   at exactly zero through every attempt; attaching one made it move
+   immediately. **Not fixable in this datapath's own code** — a genuine
+   veth/kernel characteristic that doesn't apply to a real physical NIC
+   uplink in production (where `edgedsr.c`'s `XDP_TX`-back-out-the-same-
+   interface pattern is exactly how real production XDP-based DSR load
+   balancers, e.g. Katran, are built) — but it *is* fixable, and fixed,
+   at the lab level: `task deploy:lab-xdp-passthrough`
+   (`deploy/containerlab/Taskfile.yaml`, wired into `task deploy`) loads
+   a trivial pass-through XDP program
+   (`node_files/common/xdp-passthrough.c`) on `tr3`'s `eth6`/`eth7` --
+   the links facing `iad-gateway1`/`iad-gateway2`'s public interfaces --
+   making that veth pair behave the way a real NIC already does, rather
+   than converting `edgedsr.c` itself to TC and giving up XDP's
+   throughput advantage in production to work around a testing-only
+   artifact. `usid_ingress`/`usid_egress` (`usid.c`) never hit this at
+   all: they're already `SEC("tc")`, not XDP, which is exactly why
+   ordinary tenant traffic (ns10/ns20/etc.) always worked fine.
+3. **`vip_xlat_table`'s veth-kind delivery gap, and a key collision that
+   fix immediately exposed.** `vip.Bind` alone never delivered anything
+   to a VRF-isolated backend pod (it only binds the VIP outside any
+   tenant VRF); fixing that by having veth also use `vip_xlat_table`'s
+   substitution (previously tap-only) then exposed a second bug -- the
+   map's key couldn't distinguish an ingress row from an egress row when
+   the VIP port and backend port coincide (ns60's own binding: port 80
+   both ways). Both fixed on `feat/dsr-maglev-gateway`
+   (commits `a0e1677`, `d76e799`), with regression tests at both the Go
+   and kernel-verifier level.
+
+**Still not a full end-to-end success, for a fourth, separate,
+already-known reason:** with all three of the above fixed, `iad-worker`'s
+own datapath counters proved the *entire forward chain* works (gateway
+match → Maglev backend select → `XDP_TX` redirect → SRv6 transit →
+backend uSID decap → `vip_xlat_table` translation → VRF delivery). A full
+client-facing `curl` still doesn't complete, because the tenant VRF
+(`vrf60`) has no egress route at all -- not a DSR/gateway bug, but the
+pre-existing, already-tracked gap that `resources/galactic-nat66/`'s
+sharded egress tier (§3 above) was built but deliberately never wired
+into this lab's `gvpc.clab.yaml`/`Taskfile.yaml` bring-up (see that
+directory's own `README.md`). No tenant pod in this lab can reply to any
+external address today, independent of this redesign's own correctness.
 
 **Bonus find while chasing the above with a strict external observer
 (tcpdump) instead of just `BPF_PROG_TEST_RUN`:** two real,

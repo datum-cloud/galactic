@@ -430,12 +430,43 @@ struct nptv6_value {
 // each ServiceVIPBinding writes one row under each key (vip_xlat.go),
 // since the two directions substitute in opposite directions and are
 // looked up via different fields of the same packet.
+//
+// direction disambiguates those two rows when their ports coincide -- a
+// common, unremarkable case (e.g. a binding that keeps port 80 on both the
+// VIP and the backend), not a rare one, and one this struct originally had
+// no way to handle: (block, argument, proto, port) alone collapses the
+// ingress row (keyed on the VIP port) and the egress row (keyed on the
+// backend port) into the *same* map entry whenever those two ports match,
+// so registering the second row silently overwrote the first -- found live
+// in containerlab, where ns60's binding uses port 80 both ways and the
+// ingress row (VIP -> backend) never survived RegisterEgress's later
+// write, leaving every packet correctly matched by the edge gateway but
+// silently undeliverable at the backend. usid_ingress always sets
+// direction to USID_VIP_XLAT_DIR_INGRESS on the key it builds;
+// usid_egress always sets USID_VIP_XLAT_DIR_EGRESS -- see vipxlatmap.go's
+// mirroring register()/unregister() split for the control-plane side.
+//
+// The trailing pad2 exists only to eliminate the struct's own compiler-
+// inserted alignment padding: block's __u64 alignment rounds this struct
+// up to 16 bytes, but block+argument+proto+direction+port only account for
+// 14 of them, leaving 2 bytes no initializer touches. C99 zero-initializes
+// an *omitted named member* (like direction, when a caller doesn't set it)
+// but says nothing about true structural padding, and clang's BPF backend
+// does not zero it -- bpf_map_lookup_elem() then reads all 16 key bytes
+// and the verifier rejects the two never-written ones as "invalid read
+// from stack" (caught live via a real containerlab deploy). Naming the
+// last 2 bytes as a real member makes them a normal omitted-member zero,
+// not padding.
+#define USID_VIP_XLAT_DIR_INGRESS 0
+#define USID_VIP_XLAT_DIR_EGRESS 1
+
 struct vip_xlat_key {
 	__u64 block;
 	__u16 argument;
 	__u8 proto;
-	__u8 pad;
+	__u8 direction;
 	__be16 port;
+	__u16 pad2;
 };
 
 // struct vip_xlat_value is vip_xlat_table's value: unlike nptv6_value, this
@@ -1011,6 +1042,7 @@ int usid_ingress(struct __sk_buff *skb)
 				struct vip_xlat_key vkey = {
 					.block = block, .argument = argument,
 					.proto = inner6->nexthdr, .port = ports->dest,
+					.direction = USID_VIP_XLAT_DIR_INGRESS,
 				};
 				struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
 
@@ -1223,6 +1255,7 @@ int usid_egress(struct __sk_buff *skb)
 			struct vip_xlat_key vkey = {
 				.block = iv->block, .argument = iv->argument,
 				.proto = ip6->nexthdr, .port = ports->source,
+				.direction = USID_VIP_XLAT_DIR_EGRESS,
 			};
 			struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
 

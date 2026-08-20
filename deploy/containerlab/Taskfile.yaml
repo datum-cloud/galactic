@@ -33,20 +33,30 @@ tasks:
     cmds:
       - docker build --network=host --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
+  # --build-context network=../../../network satisfies go.mod's local
+  # `replace go.datum.net/network => ../network` (see that line's own
+  # comment) inside each Dockerfile's "network" build stage -- see
+  # containers/galactic-{router,gateway,cni}/Dockerfile's own comment on
+  # that stage for the full mechanism. ../../../network is this Taskfile's
+  # own cwd (deploy/containerlab) relative to the network repo checked out
+  # as galactic's sibling; harmless to pass even once that replace
+  # directive is eventually removed, since the Dockerfile's "network"
+  # stage is unused by go.mod at that point regardless of what's passed
+  # here.
   "build:galactic-router":
     desc: Build the galactic-router container image
     cmds:
-      - docker build --network=host -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
 
   "build:galactic-gateway":
     desc: Build the galactic-gateway container image
     cmds:
-      - docker build --network=host -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
 
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
     cmds:
-      - docker build --network=host -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
   deploy:
     desc: Build images and deploy the full lab end-to-end
@@ -54,6 +64,7 @@ tasks:
     cmds:
       - task: "deploy:clusters"
       - task: "deploy:topology"
+      - task: "deploy:lab-xdp-passthrough"
       - task: "deploy:rename-control"
       - task: "deploy:images"
       - task: "deploy:system"
@@ -83,6 +94,50 @@ tasks:
       - docker rename iad-worker2 iad-worker-control
       - docker rename iad-worker3 iad-gateway1
       - docker rename iad-worker4 iad-gateway2
+
+  require-clang:
+    internal: true
+    run: once
+    cmds:
+      - |
+        if ! command -v clang >/dev/null 2>&1; then
+          echo "ERROR: clang not found on PATH." >&2
+          echo "node_files/common/xdp-passthrough.o is compiled from" >&2
+          echo "xdp-passthrough.c via clang -target bpf, not committed to" >&2
+          echo "git (matching this repo's own bpf2go-output convention) --" >&2
+          echo "clang is required to deploy this lab. Install, e.g.:" >&2
+          echo "  Fedora/RHEL: sudo dnf install clang llvm" >&2
+          echo "  Debian/Ubuntu: sudo apt install clang llvm" >&2
+          exit 1
+        fi
+
+  "build:lab-xdp-passthrough":
+    desc: Compile the lab-only pass-through XDP program (see node_files/common/xdp-passthrough.c)
+    deps: [require-clang]
+    cmds:
+      - clang -O2 -g -target bpf -c node_files/common/xdp-passthrough.c -o node_files/common/xdp-passthrough.o
+
+  "deploy:lab-xdp-passthrough":
+    desc: >-
+      Load the pass-through XDP program on tr3's gateway-facing links
+      (eth6/eth7) -- makes those veth links behave like a real gateway's
+      physical NIC uplink for edgedsr.c's XDP_TX redirect (see
+      xdp-passthrough.c's own doc comment). Idempotent: `ip link set ...
+      xdp obj` replaces whatever program (if any) is already attached.
+    deps: [build:lab-xdp-passthrough]
+    vars:
+      # tr3 is a real containerlab-managed node (kind: linux), unlike the
+      # Kind-cluster nodes elsewhere in this Taskfile (kind: ext-container,
+      # which keep their bare Kind-assigned names) -- containerlab prefixes
+      # its own nodes' container names with "clab-{{.LAB}}-".
+      TR3_CONTAINER: "clab-{{.LAB}}-tr3"
+    cmds:
+      - docker cp node_files/common/xdp-passthrough.o {{.TR3_CONTAINER}}:/xdp-passthrough.o
+      # -force: without it, `ip link set ... xdp obj` errors "XDP program
+      # already attached" on any re-run instead of replacing it (verified
+      # live) -- needed for this task to actually be idempotent.
+      - docker exec {{.TR3_CONTAINER}} ip -force link set dev eth6 xdp obj /xdp-passthrough.o sec xdp
+      - docker exec {{.TR3_CONTAINER}} ip -force link set dev eth7 xdp obj /xdp-passthrough.o sec xdp
 
   "load-image":
     internal: true

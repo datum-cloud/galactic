@@ -1,3 +1,16 @@
+# "network" is an empty stage by default -- overridden with a real
+# go.datum.net/network checkout via `docker build --build-context
+# network=<path-to-network-repo> ...` whenever go.mod carries a local
+# `replace go.datum.net/network => ../network` directive (this repo's own
+# convention for developing against unpublished network CRD changes before
+# they're tagged -- see go.mod's own comment on that line). Copied to
+# /network below, exactly matching what that relative replace path resolves
+# to from /workspace/go.mod inside this build. Harmless when no such
+# replace directive exists and no override is passed: go.mod then has
+# nothing under /network to resolve, so an empty directory there is never
+# read.
+FROM scratch AS network
+
 # Build the galactic-gateway binary
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
@@ -13,6 +26,10 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
+# Local cross-repo development: satisfies go.mod's `replace
+# go.datum.net/network => ../network`, when present -- see the "network"
+# stage's own comment above for where this comes from.
+COPY --from=network / /network
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download

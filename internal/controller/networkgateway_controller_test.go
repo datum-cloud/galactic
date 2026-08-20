@@ -668,6 +668,64 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion(t *testin
 	}
 }
 
+// TestBroadcastToGatewayRequests_ListsEveryGatewayInNamespace covers the
+// primitive SetupWithManager's BGPRouter/BGPAdvertisement/BGPVRFInstance
+// watches build on (added to close a real startup race: buildBackendSIDIndex
+// resolving a rule's backend before its owning BGPAdvertisement existed
+// permanently failed that rule, since none of BGPRouter/BGPAdvertisement/
+// BGPVRFInstance were watched before -- only a later, unrelated reconcile
+// trigger happened to paper over it). One request per NetworkGateway in the
+// given namespace, none for a different namespace.
+func TestBroadcastToGatewayRequests_ListsEveryGatewayInNamespace(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+	gwB := newTestGateway(testNodeGWB)
+	otherNS := &bgpv1alpha1.NetworkGateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "other-ns", Name: "gw-c"},
+		Spec:       bgpv1alpha1.NetworkGatewaySpec{TargetRef: bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: "gw-c"}},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gwA, gwB, otherNS).Build()
+
+	reqs := broadcastToGatewayRequests(context.Background(), fakeClient, testNamespace, "BGPAdvertisement", "some-adv")
+
+	if len(reqs) != 2 {
+		t.Fatalf("got %d requests, want 2 (one per NetworkGateway in %q, none from other-ns)", len(reqs), testNamespace)
+	}
+	got := map[string]bool{}
+	for _, r := range reqs {
+		if r.Namespace != testNamespace {
+			t.Errorf("request namespace = %q, want %q", r.Namespace, testNamespace)
+		}
+		got[r.Name] = true
+	}
+	if !got[testNodeGWA] || !got[testNodeGWB] {
+		t.Errorf("requests = %v, want both %q and %q", reqs, testNodeGWA, testNodeGWB)
+	}
+}
+
+func TestRuleToGatewayRequests_UsesRuleNamespace(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gw := newTestGateway(testNodeGWA)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gw).Build()
+	rule := newTestRule(testRuleName, testVPCRef, testVIP)
+
+	reqs := ruleToGatewayRequests(context.Background(), fakeClient, rule)
+
+	if len(reqs) != 1 || reqs[0].Name != testNodeGWA {
+		t.Errorf("reqs = %v, want exactly one request for %q", reqs, testNodeGWA)
+	}
+}
+
+// TestRuleToGatewayRequests_WrongTypeReturnsNil covers
+// EnqueueRequestsFromMapFunc's contract: the map function is only ever
+// called with the watched type, but a defensive type assertion (rather
+// than a panic-inducing cast) is what makes that safe to rely on.
+func TestRuleToGatewayRequests_WrongTypeReturnsNil(t *testing.T) {
+	if reqs := ruleToGatewayRequests(context.Background(), nil, &bgpv1alpha1.NetworkGateway{}); reqs != nil {
+		t.Errorf("reqs = %v, want nil for a non-NetworkRule object", reqs)
+	}
+}
+
 func TestPrefixesByFamily(t *testing.T) {
 	vips := []netip.Addr{netip.MustParseAddr(testVIP), netip.MustParseAddr("2001:db8::1")}
 	v4, v6 := prefixesByFamily(vips)

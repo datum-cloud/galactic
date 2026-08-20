@@ -29,7 +29,7 @@ func TestVipXlatTable_RegisterIngressAndGet(t *testing.T) {
 		t.Fatalf("RegisterIngress: unexpected error: %v", err)
 	}
 
-	entry, ok, err := vt.Get(testBlock, 0x654, ProtoUDP, vipPort)
+	entry, ok, err := vt.GetIngress(testBlock, 0x654, ProtoUDP, vipPort)
 	if err != nil {
 		t.Fatalf("Get: unexpected error: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestVipXlatTable_RegisterEgressAndGet(t *testing.T) {
 		t.Fatalf("RegisterEgress: unexpected error: %v", err)
 	}
 
-	entry, ok, err := vt.Get(testBlock, 0x654, ProtoTCP, backendPort)
+	entry, ok, err := vt.GetEgress(testBlock, 0x654, ProtoTCP, backendPort)
 	if err != nil {
 		t.Fatalf("Get: unexpected error: %v", err)
 	}
@@ -104,11 +104,11 @@ func TestVipXlatTable_IngressAndEgressRowsAreSwapped(t *testing.T) {
 		t.Fatalf("table has %d entries after both registrations, want %d (two independent rows)", got, want)
 	}
 
-	ingress, ok, err := vt.Get(testBlock, 0x1, ProtoTCP, vipPort)
+	ingress, ok, err := vt.GetIngress(testBlock, 0x1, ProtoTCP, vipPort)
 	if err != nil || !ok {
 		t.Fatalf("Get(ingress key): ok=%v err=%v", ok, err)
 	}
-	egress, ok, err := vt.Get(testBlock, 0x1, ProtoTCP, backendPort)
+	egress, ok, err := vt.GetEgress(testBlock, 0x1, ProtoTCP, backendPort)
 	if err != nil || !ok {
 		t.Fatalf("Get(egress key): ok=%v err=%v", ok, err)
 	}
@@ -133,10 +133,69 @@ func TestVipXlatTable_IngressAndEgressRowsAreSwapped(t *testing.T) {
 	}
 }
 
+// TestVipXlatTable_IngressAndEgressSurviveIdenticalPort is the regression
+// test for the bug found live in containerlab: a binding that keeps the
+// *same* port number on both the VIP and the backend (an unremarkable,
+// common case -- e.g. ns60's own binding uses port 80 both ways) used to
+// collapse into a single map entry, since (block, argument, proto, port)
+// alone was the whole key and both rows share that exact tuple when the
+// ports coincide. RegisterEgress's write silently overwrote
+// RegisterIngress's row, so a client's request matched and forwarded fine
+// at the edge gateway (metrics showed zero drops) but was never
+// deliverable at the backend at all. struct vip_xlat_key's new Direction
+// field is what keeps these two rows distinct even here.
+func TestVipXlatTable_IngressAndEgressSurviveIdenticalPort(t *testing.T) {
+	vt, ft := newTestTable(constClock(1))
+
+	vip := net.ParseIP("2001:db8:6060::1")
+	backend := net.ParseIP("fd20:60:ff03::100:0")
+	const port = 80 // deliberately identical on both sides
+
+	if err := vt.RegisterIngress(testBlock, 0x1, ProtoTCP, vip, port, backend, port); err != nil {
+		t.Fatalf("RegisterIngress: unexpected error: %v", err)
+	}
+	if err := vt.RegisterEgress(testBlock, 0x1, ProtoTCP, backend, port, vip, port); err != nil {
+		t.Fatalf("RegisterEgress: unexpected error: %v", err)
+	}
+
+	if got, want := ft.len(), 2; got != want {
+		t.Fatalf("table has %d entries after both registrations with identical ports, want %d "+
+			"(RegisterEgress must not overwrite RegisterIngress's row)", ft.len(), want)
+	}
+
+	ingress, ok, err := vt.GetIngress(testBlock, 0x1, ProtoTCP, port)
+	if err != nil || !ok {
+		t.Fatalf("GetIngress: ok=%v err=%v, want the row RegisterIngress wrote to still be present", ok, err)
+	}
+	if !ingress.Addr.Equal(backend) || ingress.RewritePort != port {
+		t.Errorf("ingress row value = %s:%d, want %s:%d (backend) -- got the egress row's value instead, "+
+			"meaning it was overwritten", ingress.Addr, ingress.RewritePort, backend, port)
+	}
+
+	egress, ok, err := vt.GetEgress(testBlock, 0x1, ProtoTCP, port)
+	if err != nil || !ok {
+		t.Fatalf("GetEgress: ok=%v err=%v, want the row RegisterEgress wrote to still be present", ok, err)
+	}
+	if !egress.Addr.Equal(vip) || egress.RewritePort != port {
+		t.Errorf("egress row value = %s:%d, want %s:%d (VIP)", egress.Addr, egress.RewritePort, vip, port)
+	}
+
+	// Unregistering one direction must not remove the other.
+	if err := vt.UnregisterIngress(testBlock, 0x1, ProtoTCP, port); err != nil {
+		t.Fatalf("UnregisterIngress: unexpected error: %v", err)
+	}
+	if got, want := ft.len(), 1; got != want {
+		t.Fatalf("table has %d entries after UnregisterIngress, want %d (the egress row must survive)", got, want)
+	}
+	if _, ok, err := vt.GetEgress(testBlock, 0x1, ProtoTCP, port); err != nil || !ok {
+		t.Errorf("GetEgress after UnregisterIngress: ok=%v err=%v, want the egress row to still be present", ok, err)
+	}
+}
+
 func TestVipXlatTable_GetMissingEntry(t *testing.T) {
 	vt, _ := newTestTable(constClock(1))
 
-	_, ok, err := vt.Get(testBlock, 0x1, ProtoTCP, 443)
+	_, ok, err := vt.GetIngress(testBlock, 0x1, ProtoTCP, 443)
 	if err != nil {
 		t.Fatalf("Get: unexpected error: %v", err)
 	}
