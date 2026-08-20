@@ -25,5 +25,12 @@ runs:
     - name: Install clang/llvm/linux-libc-dev
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y clang-18 llvm-18 linux-libc-dev
+        # -o Acquire::Retries/::*::Timeout: bare `apt-get update` has no
+        # per-request timeout, so a stalled connection to GitHub's default
+        # regional mirror (azure.archive.ubuntu.com has been observed
+        # hanging outright) blocks until the job's own timeout-minutes
+        # finally kills it -- burning the whole budget on jobs #424/#425
+        # both hit. These bound each attempt and retry instead, so a bad
+        # mirror fails in seconds rather than minutes.
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y clang-18 llvm-18 linux-libc-dev

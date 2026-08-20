@@ -216,7 +216,12 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedAssignedRules(t *
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	gwB := newTestGateway(testNodeGWB)
-	backendRouter, backendAdv := newBackendFixtures()
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	// secondary-on-a resolves the identical backend address under a
+	// different tenant (vpc-2) -- its own BGPAdvertisement/BGPVRFInstance,
+	// same shared physical router, proving the two rules' backend
+	// resolutions don't need (or get) cross-tenant help from one another.
+	_, backendAdv2, backendVRF2 := newBackendFixtures("vpc-2")
 
 	primary := newTestRule("primary-on-a", "vpc-1", testVIP)
 	primary.Status.PrimaryNode = testNodeGWA
@@ -242,7 +247,8 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedAssignedRules(t *
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, gwB, backendRouter, backendAdv, primary, secondary, unassigned, notAccepted, deleting).
+		WithObjects(gwA, gwB, backendRouter, backendAdv, backendVRF, backendAdv2, backendVRF2,
+			primary, secondary, unassigned, notAccepted, deleting).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -323,14 +329,14 @@ func TestNetworkGatewayReconciler_ExcludesRuleWithUnresolvableBackend(t *testing
 func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
-	backendRouter, backendAdv := newBackendFixtures()
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Status.PrimaryNode = testNodeGWA
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, backendRouter, backendAdv, rule).
+		WithObjects(gwA, backendRouter, backendAdv, backendVRF, rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -356,7 +362,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisementWithComputedLocalPref(t
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
 	gwB := newTestGateway(testNodeGWB)
-	backendRouter, backendAdv := newBackendFixtures()
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Status.PrimaryNode = testNodeGWB // this node (gw-a) is secondary
@@ -364,7 +370,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisementWithComputedLocalPref(t
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, gwB, router, backendRouter, backendAdv, rule).
+		WithObjects(gwA, gwB, router, backendRouter, backendAdv, backendVRF, rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -407,7 +413,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisementWithComputedLocalPref(t
 func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
-	backendRouter, backendAdv := newBackendFixtures()
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Status.PrimaryNode = testNodeGWA
@@ -424,7 +430,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, router, backendRouter, backendAdv, rule, preexisting).
+		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule, preexisting).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -498,7 +504,7 @@ func TestNetworkGatewayReconciler_PublishesSelfAddress(t *testing.T) {
 func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
-	backendRouter, backendAdv := newBackendFixtures()
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Status.PrimaryNode = testNodeGWA
@@ -506,7 +512,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, router, backendRouter, backendAdv, rule).
+		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(
 				ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption,
@@ -549,7 +555,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
-	backendRouter, backendAdv := newBackendFixtures()
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	rule.Status.PrimaryNode = testNodeGWA
@@ -557,7 +563,7 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
-		WithObjects(gwA, router, backendRouter, backendAdv, rule).
+		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
