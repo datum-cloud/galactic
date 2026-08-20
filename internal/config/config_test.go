@@ -12,6 +12,7 @@ import "testing"
 // substring -- see config.go's identical "shared CLI flag names"
 // rationale for the production-code half of this pattern.
 const (
+	testCaseValidConfig           = "valid config"
 	testCaseMissingNodeName       = "missing node name"
 	testErrNodeNameRequired       = "node name is required"
 	testCaseInvalidMetricsPort    = "invalid metrics port"

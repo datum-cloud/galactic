@@ -72,7 +72,7 @@ func TestVRFConfigValidate(t *testing.T) {
 			wantErr: "sweep interval must not be greater than",
 		},
 		{
-			name:    "valid config",
+			name:    testCaseValidConfig,
 			envVars: map[string]string{},
 			wantErr: "",
 		},
