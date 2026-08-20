@@ -1,0 +1,17 @@
+# Sample NAT66Shard for sjc-worker, this cluster's own shard node --
+# alongside node-patch.yaml the same way resources/galactic-gateway/
+# iad-gateway1/networkgateway.yaml sits alongside its own node-patch.yaml.
+# Status is left empty: NAT66ShardReconciler (running inside the
+# galactic-nat66 process on sjc-worker itself, per node-patch.yaml's
+# GALACTIC_NAT66_SHARD_SID/_SHARD_PUB_ADDR) fills in
+# status.shardAddress/status.shardSID from its own config at startup --
+# this object only needs to exist and target the right node.
+apiVersion: network.datumapis.com/v1alpha1
+kind: NAT66Shard
+metadata:
+  name: sjc-worker-nat66
+  namespace: galactic-system
+spec:
+  targetRef:
+    kind: Node
+    name: sjc-worker

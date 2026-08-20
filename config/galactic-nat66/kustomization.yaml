@@ -1,0 +1,21 @@
+# The sharded NAT66 egress datapath control plane. Unlike
+# config/galactic-router/'s equivalent kustomization.yaml, this
+# deliberately does NOT include base/: base/daemonset.yaml's
+# galactic-nat66 container has no generic default for
+# GALACTIC_NAT66_UPLINK_INTERFACE/_SHARD_SID/_SHARD_PUB_ADDR (all three
+# required -- config.NAT66Config.Validate -- and the shard SID/public
+# address must be unique per shard node), so applying it as shipped here
+# would produce a crash-looping container. config/galactic-gateway/ and
+# config/fabric-router/ have the same exemption for the same reason.
+#
+# serviceaccount.yaml/rbac.yaml have no such per-node uniqueness problem --
+# they're safe and idempotent to apply cluster-wide regardless of how many
+# NAT66 shard nodes exist or which ones -- so this kustomization covers
+# only those two. Apply with `kubectl apply -k config/galactic-nat66/`,
+# once, before applying any per-node overlay of ../base. This whole
+# directory is deliberately NOT part of the root config/kustomization.yaml's
+# default resource list: this role is not "batteries included" cluster
+# bring-up.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml

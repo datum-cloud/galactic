@@ -2,7 +2,15 @@
 
 - **Issue:** [datum-cloud/enhancements#865](https://github.com/datum-cloud/enhancements/issues/865) — "NAT66 (NPTv6) for VPC Peering and External Attachments on Galactic VPC" (title predates a body rewrite; the current body describes stateful ULA→GUA NAT66, matching this plan — see §0 for why that's *not* the NPTv6 the title still names).
 - **Builds on:** the edge XDP NAT+LB gateway's existing ingress design (`internal/gateway/doc.go`, `internal/plumbing/ebpf/edgeprog/doc.go`, the design plan those two doc comments cite).
-- **Status:** planning only — no implementation started.
+- **Status:** **superseded — abandon, not implement.** The Full-NAT edge
+  gateway this plan builds on (`edgenat.c`, `internal/gateway`'s
+  primary/secondary Active-Active model) has been replaced by a DSR
+  Maglev L4LB with no egress personality of its own; stateful NAT66 moves
+  to its own standalone sharded tier instead. See
+  [`dsr-maglev-nptv6-nat66-gateway-redesign.md`](dsr-maglev-nptv6-nat66-gateway-redesign.md)
+  §6 for the full disposition (verdict: abandon this stack's datapath
+  design, not salvage it) and §3 for the tier that replaces it. This
+  document is kept for historical context only — do not build against it.
 
 ## 0. Terminology
 

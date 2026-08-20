@@ -249,7 +249,7 @@ topology:
     - endpoints: ["iad-worker:eth1", "tr3:eth5"]
     - endpoints: ["iad-worker2:eth1", "tr3:eth4"]
 
-    # Gateway node uplinks (edge XDP NAT+LB DaemonSet; see
+    # Gateway node uplinks (edge XDP Maglev/DSR DaemonSet; see
     # config/galactic-gateway/base/ and deploy/containerlab/resources/
     # galactic-gateway/). tr3 (iad's transit router) already
     # consumed eth1/eth2/eth3 for the TR mesh and eth4/eth5 for
@@ -257,9 +257,16 @@ topology:
     # peering on these links is now configured (node_files/tr3/frr.conf,
     # plus two BGPPeer objects in resources/galactic-control/iad/ for the
     # route reflector side) and the fabric fully converges over them, but
-    # real end-to-end ingress traffic through the datapath still doesn't
-    # reach a backend -- a veth-specific XDP_TX behavior in this lab
-    # environment, not a code bug.
+    # real end-to-end ingress traffic through the datapath is not yet
+    # live-validated here -- two stacked issues, not the generic
+    # veth-specific XDP_TX behavior this comment used to attribute it
+    # to: (1) IPv6 forwarding sysctls weren't enabled (now fixed,
+    # sysctl.ConfigureFIBLookupUplinkSysctls), and (2) veth's native
+    # XDP_TX fast path stays invisible to tcpdump/AF_PACKET unless the
+    # peer interface also runs an XDP program -- a genuine veth/kernel
+    # characteristic of this lab's veth-pair uplink simulation, not a
+    # code bug and not a production concern. See the redesign plan's
+    # §8 (docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md).
     #
     # mtu: 1500 on both ends, unlike every other link in this topology
     # (which gets containerlab's jumbo-frame veth default, ~9500) --

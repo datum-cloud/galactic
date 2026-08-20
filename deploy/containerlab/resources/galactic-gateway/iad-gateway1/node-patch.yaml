@@ -31,8 +31,9 @@ spec:
           env:
             # eth1 is this lab's dedicated transit-fabric-facing uplink on
             # every node (see resources/galactic-cni/daemonset-patch.yaml's
-            # comment) -- the same interface edgenat's XDP program attaches
-            # to for both underlay BGP and (once wired) ingress traffic.
+            # comment) -- the same interface edgedsr.c's edge_lb XDP
+            # program attaches to for both underlay BGP and ingress
+            # traffic.
             - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
               value: eth1
             # uFMT 48+16 uSID over this PoP's shared locator
@@ -43,10 +44,15 @@ spec:
             # comment), Argument=0 (reserved, PR #740). Computed via
             # internal/plumbing/ebpf/uformat.Encode directly, bypassing
             # srv6.ComputeSID's argument==0 guard (that guard exists for
-            # tenant-VRF SID derivation specifically -- see
-            # internal/controller/networkgateway_controller.go's
-            # publishSelfAddress doc comment for why this value is
-            # supplied statically rather than computed by that
-            # reconciler today).
+            # tenant-VRF SID derivation specifically). This is this
+            # node's own plain SRv6-reachable address, used only as the
+            # DSR datapath's outer-header encap source
+            # (edgedsr.c's encap_config_table) -- never a NAT/SNAT
+            # source and never compared against anything on a receive
+            # path (see internal/config/gateway.go's
+            # EnvGatewaySRv6Address doc comment). No in-cluster
+            # mechanism yet derives this automatically, so it is
+            # supplied statically per node here rather than computed by
+            # a reconciler.
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
               value: "2001:db8:ff03:2:e000::"

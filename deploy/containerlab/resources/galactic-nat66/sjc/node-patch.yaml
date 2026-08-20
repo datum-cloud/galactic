@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-nat66
+spec:
+  template:
+    spec:
+      # config/galactic-nat66/base/daemonset.yaml's own affinity requires
+      # galactic.datumapis.com/node: nat66 -- a dedicated node role this
+      # lab has never introduced (see AGENTS.md's "Node labels" note:
+      # every site worker here is labeled galactic.datumapis.com/node:
+      # edge). Per the redesign plan's own §8 suggestion, this lab reuses
+      # sjc-worker itself as a shard rather than adding a new dedicated
+      # nat66-labeled node, so this patch replaces the whole affinity
+      # block to match sjc-worker's real "edge" label plus a
+      # kubernetes.io/hostname pin -- otherwise the base's own affinity
+      # would never match any node in this cluster and the DaemonSet
+      # would sit at zero replicas forever. GALACTIC_NAT66_SHARD_SID/
+      # _SHARD_PUB_ADDR below must be unique per shard node (see
+      # config/galactic-nat66/kustomization.yaml's doc comment), so
+      # dfw/iad/sjc are three separate per-node overlays rather than one
+      # overlay matching all three site workers with identical env --
+      # mirrors resources/galactic-gateway/iad-gateway1/'s identical
+      # per-node-overlay rationale.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - edge
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - sjc-worker
+      containers:
+        - name: galactic-nat66
+          env:
+            # eth1 is this lab's dedicated transit-fabric-facing uplink on
+            # every node (see resources/galactic-cni/daemonset-patch.yaml's
+            # comment) -- the same interface internal/plumbing/ebpf/
+            # nat66prog's XDP program attaches to.
+            - name: GALACTIC_NAT66_UPLINK_INTERFACE
+              value: eth1
+            # uFMT 48+16 uSID over sjc's own locator (2001:db8:ff02::/48,
+            # see resources/galactic-router/sjc/bgprouter.yaml's
+            # srv6Locator), nodeID=1 -- reusing sjc-worker's own already-
+            # registered node identity (its BGPRouter's nodeID) rather
+            # than minting a new one, since this shard runs on that exact
+            # physical node, not a separate dedicated node the way
+            # iad-gateway1/iad-gateway2 are. Function=End.DT46 (0xE),
+            # matching resources/galactic-gateway/iad-gateway1/
+            # node-patch.yaml's convention, even though this address is
+            # never actually looked up through function_table/vrf_table
+            # the way a real uSID is -- NAT66ShardStatus.ShardSID's own
+            # doc comment says it's advertised as a plain /128
+            # node-reachability route "no VRFID/Function" -- the uFMT
+            # encoding here is only to keep the address inside sjc's
+            # locator block without colliding with any real tenant VRF
+            # SID. Argument=1, NOT 0: sjc has no other node sharing this
+            # locator, so 0 would not literally collide here either, but
+            # 1 is used on all three shards for one consistent,
+            # easy-to-audit convention across sites (see
+            # resources/galactic-nat66/iad/node-patch.yaml's fuller
+            # rationale, where the distinction actually matters). This is
+            # a lab-only placeholder needing real allocation logic (the
+            # same gap GALACTIC_GATEWAY_SRV6_ADDRESS and
+            # EnvNAT66ShardSID's own doc comment both flag today) before
+            # production.
+            - name: GALACTIC_NAT66_SHARD_SID
+              value: "2001:db8:ff02:1:e001::"
+            # Lab-only placeholder masquerade source address, same
+            # "operator-supplied, no in-cluster derivation yet" status as
+            # GALACTIC_GATEWAY_SRV6_ADDRESS (see
+            # internal/config/gateway.go's doc comment). 2001:db8:9966::/32
+            # is a new documentation-range (RFC 3849) block reserved here
+            # for NAT66 shard public addresses specifically, picked to
+            # avoid colliding with any address already in use elsewhere
+            # in this topology (transit mesh: 2001:db8:0:*::/64 and
+            # 2001:db8:1:*::/64; SRv6 locators: 2001:db8:ff0X::/48; the
+            # ns60 ingress VIP: 2001:db8:6060::1) -- "9966" as a mnemonic
+            # for "NAT66". ::3 here is sjc's shard (shard 3 of 3).
+            - name: GALACTIC_NAT66_SHARD_PUB_ADDR
+              value: "2001:db8:9966:3::1"

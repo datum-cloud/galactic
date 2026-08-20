@@ -1,0 +1,17 @@
+# Lab-only image override, same idea as resources/galactic-gateway/base/
+# router-lab-patch.yaml: Kind loads locally-built images by tag, so the
+# real ghcr.io/datum-cloud/galactic-nat66:<version> reference
+# config/galactic-nat66/base/daemonset.yaml ships is swapped for the
+# locally-tagged image with imagePullPolicy: Never so the kubelet never
+# tries to pull it from GHCR.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-nat66
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-nat66
+          image: galactic-nat66:latest
+          imagePullPolicy: Never

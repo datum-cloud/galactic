@@ -1,0 +1,23 @@
+# Mirrors resources/galactic-gateway/base/'s pattern exactly, pointed at
+# config/galactic-nat66/base instead of config/galactic-gateway/base: "nat66"
+# is meant to be copied onto the node at deploy time by a
+# copy_nat66_config-style helper (see scripts/deploy-galactic-router.sh's
+# copy_router_gateway_config for the equivalent, already-written gateway
+# helper), nested here so this kustomization's "nat66" resource reference
+# resolves. That helper does not exist yet -- this whole directory is not
+# wired into any deploy script or Taskfile target (see ../README.md) -- so
+# applying this kustomization today requires manually copying
+# config/galactic-nat66/base's contents to
+# resources/galactic-nat66/base/nat66/ first (or docker cp'ing it, same
+# idea copy_router_gateway_config automates for galactic-gateway).
+# config/galactic-nat66/base is self-contained (its own full
+# single-container DaemonSet spec, not a patch onto some other config/
+# base), so there is no separate "base" resource to nest alongside it here
+# -- same as config/galactic-gateway/base's own equivalent note.
+resources:
+  - nat66
+patches:
+  - path: nat66-lab-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-nat66
