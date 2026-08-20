@@ -129,13 +129,15 @@ func runCmd(cfg *config.GatewayConfig) error {
 	gwTelemetry.MustRegister(ctrlmetrics.Registry)
 	gwEngine := gateway.NewEngine(gwDatapath, gwQuota, gwTelemetry)
 
-	// Register NetworkGateway controller (edge XDP NAT+LB gateway engine).
+	// Register NetworkGateway controller (edge Maglev/DSR gateway engine).
+	// No SRv6Address to pass here anymore: DSR rewrites nothing, so a
+	// gateway node has no SNAT source of its own to publish (see
+	// controller.NetworkGatewayReconciler's package doc comment).
 	if err := (&controller.NetworkGatewayReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Engine:      gwEngine,
-		NodeName:    nodeName,
-		SRv6Address: cfg.SRv6Address,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Engine:   gwEngine,
+		NodeName: nodeName,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -201,7 +203,7 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringP("gateway-public-interface", "", "",
 		"Public/underlay-facing uplink interface for the edge NAT+LB gateway datapath (required)")
 	cmd.Flags().StringP("gateway-srv6-address", "", "",
-		"This gateway node's own SRv6-reachable address, used as the Full-NAT SNAT source (required)")
+		"This gateway node's own SRv6-reachable address, used as the Maglev/DSR encap source (required)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

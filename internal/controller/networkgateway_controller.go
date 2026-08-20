@@ -58,52 +58,37 @@ type GatewayEngine interface {
 // "does real reconcile work" pattern — NetworkGateway is the node-scoped
 // root object, exactly like BGPRouter.
 //
-// It does four things per reconcile:
+// It does three things per reconcile:
 //
-//  1. Publishes SRv6Address into status and advertises it into BGP (a
-//     plain /128 host prefix, no VRFID/Function — see
-//     publishSelfAddress's doc comment for why computing it dynamically
-//     from this node's own BGPRouter at the reserved uSID Argument 0, as
-//     the NetworkGateway CRD's own doc comment describes as the eventual
-//     design, is deliberately deferred rather than half-built here).
-//  2. Assembles a gateway.EngineState from every accepted, non-deleting
-//     NetworkRule in this namespace (both primary- and secondary-assigned —
-//     the Active-Active BGP model requires every gateway node in a PoP to
-//     serve every rule, see gateway.LocalPreference), resolving each
-//     backend's SRv6 uSID via buildBackendSIDIndex, and converges Engine
-//     toward it.
-//  3. Reconciles a BGPAdvertisement per rule per VIP address family, with
-//     Spec.LocalPreference computed by gateway.LocalPreference. This reuses
-//     the BGP API's existing l2vpn/evpn Type-5 IP-Prefix advertisement path
-//     end-to-end unmodified: internal/reconcile/reconcile.go's
-//     BuildDesiredRouter already passes BGPAdvertisement.Spec.LocalPreference
-//     straight through to model.DesiredAdvertisement.LocalPreference, and
-//     internal/runtime/gobgp/paths.go's buildEVPNPaths already attaches it
-//     as a BGP LOCAL_PREF path attribute — no changes were needed in either
-//     file. (Plain ipv4/ipv6-unicast BGPAdvertisements are accepted by
-//     internal/reconcile/reconcile.go's validateAFI but are never actually
-//     originated by internal/runtime/gobgp/runtime.go's Apply — only
-//     l2vpn/evpn advertisements reach applyEVPN — which is why these
-//     advertisements are built as l2vpn/evpn rather than plain unicast.)
-//     VRFID/Function are left unset: these advertisements need no SRv6
-//     decap behavior of their own (deriveRD falls back to "routerID:0"),
-//     they exist purely to distribute "which gateway node currently holds
-//     this VIP, at what preference" over the existing iBGP/EVPN mesh.
-//  4. Runs Engine.ReconcileOrphans for crash recovery.
+//  1. Assembles a gateway.EngineState from every accepted, non-deleting
+//     NetworkRule in this namespace — under DSR's anycast model (design
+//     plan §0) every gateway node in a PoP serves every accepted rule
+//     identically, with no primary/secondary distinction to gate on (an
+//     earlier, Full-NAT-era version of this reconciler excluded rules with
+//     no status.primaryNode assigned; that field and the active-passive
+//     model it implemented no longer exist) — resolving each backend's
+//     SRv6 uSID via buildBackendSIDIndex, and converges Engine toward it.
+//  2. Reconciles a BGPAdvertisement per rule per VIP address family. This
+//     reuses the BGP API's existing l2vpn/evpn Type-5 IP-Prefix
+//     advertisement path end-to-end unmodified. VRFID/Function are left
+//     unset: these advertisements need no SRv6 decap behavior of their
+//     own (deriveRD falls back to "routerID:0", a different RD per
+//     originating node — see the go/no-go anycast spike,
+//     internal/runtime/gobgp/anycast_spike_test.go — which is exactly
+//     what lets every gateway node's identical-prefix advertisement
+//     survive as an independent, non-competing route rather than one
+//     silently replacing another). No LocalPreference is set: unlike the
+//     removed Full-NAT design's primary/secondary local-pref split, every
+//     gateway node's route is equally preferred by construction — RD
+//     independence, not BGP preference, is what keeps every node's route
+//     alive over the iBGP/EVPN mesh.
+//  3. Runs Engine.ReconcileOrphans for crash recovery.
 type NetworkGatewayReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Engine GatewayEngine
 
 	NodeName string
-
-	// SRv6Address is this node's own SRv6-reachable address, used as the
-	// Full-NAT SNAT source (config.GatewayConfig.SRv6Address, already the
-	// address the running datapath was configured with — see
-	// cmd/galactic-gateway/gateway.go's setupGatewayDatapath). This
-	// reconciler publishes it, it does not compute it; see
-	// publishSelfAddress's doc comment.
-	SRv6Address string
 }
 
 const (
@@ -224,10 +209,6 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// with backoff instead of leaving a node that advertised nothing
 	// claiming EngineHealthy (#365).
 	var advErrs []error
-	if err := r.publishSelfAddress(ctx, gw); err != nil {
-		logger.Error(err, "publish gateway self-address", "networkGateway", req.NamespacedName)
-		advErrs = append(advErrs, fmt.Errorf("publish self-address: %w", err))
-	}
 
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
 	// cutoff must be captured before desired's NetworkRule CRDs are listed.
@@ -265,15 +246,11 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			// doc comment on why the two aren't cross-node-synchronized).
 			continue
 		}
-		if rule.Status.PrimaryNode == "" {
-			continue // not yet assigned by NetworkRuleReconciler
-		}
 		if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
 			continue // admission has not (yet) accepted this rule
 		}
 
-		localPref := gateway.LocalPreference(r.NodeName, rule.Status.PrimaryNode)
-		dr, err := buildDesiredRule(rule, sidIndex, localPref)
+		dr, err := buildDesiredRule(rule, sidIndex)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
 			continue
@@ -353,99 +330,12 @@ func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Conditi
 	}
 }
 
-// publishSelfAddress sets gw.Status.SRv6Address to r.SRv6Address and
-// ensures a BGPAdvertisement exists distributing it as a /128 host route.
-//
-// The NetworkGateway CRD's own doc comment describes SRv6Address as
-// eventually computed by "the engine" from this node's own BGPRouter
-// locator/node-ID at the reserved uSID Argument 0 (uformat.go's
-// ArgumentMin=0x001 — Argument 0 is reserved specifically so it is never
-// registered into any tenant's vrf_table). That computation is genuinely
-// new: srv6.ComputeSID unconditionally rejects argument==0 (it exists to
-// serve tenant-VRF SID derivation, where 0 must never be assigned), so
-// deriving the Argument-0 address requires a second, narrower encode path
-// bypassing that guard — real work this phase intentionally does not
-// build. Today SRv6Address is instead supplied via operator config
-// (config.GatewayConfig.SRv6Address) and is the exact value
-// cmd/galactic-gateway/gateway.go's setupGatewayDatapath already wrote into
-// the running datapath's gw_config_table; this method's only job is to
-// publish that already-authoritative value into the CRD and into BGP, so
-// there is exactly one source of truth rather than two that could drift.
-//
-// This advertisement carries no VRFID/Function, unlike a backend Pod's own
-// advertisement: SRv6Address is not reached via a per-tenant VRF decap at
-// all (see the CRD doc comment's "must never be registered into any
-// tenant VRF" guarantee) — it is a plain node-reachability route, the same
-// shape as any other host's own loopback prefix.
-func (r *NetworkGatewayReconciler) publishSelfAddress(ctx context.Context, gw *bgpv1alpha1.NetworkGateway) error {
-	if r.SRv6Address == "" {
-		return nil // this galactic-router process is not gateway-role
-	}
-
-	routerName, err := r.routerNameForNode(ctx, gw.Namespace)
-	if err != nil {
-		return fmt.Errorf("resolve BGPRouter for node %s: %w", r.NodeName, err)
-	}
-
-	if gw.Status.SRv6Address != r.SRv6Address {
-		// Updated in place, not through a copy: Reconcile writes the Ready
-		// condition from this same object afterwards, and a copy would leave
-		// it holding a stale resourceVersion — losing that write to a
-		// conflict on exactly the pass whose outcome matters most (#365).
-		gw.Status.SRv6Address = r.SRv6Address
-		if err := r.Status().Update(ctx, gw); err != nil {
-			return fmt.Errorf("update NetworkGateway status.sRv6Address: %w", err)
-		}
-	}
-
-	if routerName == "" {
-		return nil // nothing to advertise into yet
-	}
-
-	addr, err := netip.ParseAddr(r.SRv6Address)
-	if err != nil {
-		return fmt.Errorf("parse gateway SRv6 address %q: %w", r.SRv6Address, err)
-	}
-	prefix := netip.PrefixFrom(addr, addr.BitLen())
-
-	name := gw.Name + "-selfaddr"
-	adv := &bgpv1alpha1.BGPAdvertisement{}
-	key := types.NamespacedName{Namespace: gw.Namespace, Name: name}
-	getErr := r.Get(ctx, key, adv)
-	switch {
-	case apierrors.IsNotFound(getErr):
-		adv = &bgpv1alpha1.BGPAdvertisement{
-			ObjectMeta: metav1.ObjectMeta{Namespace: gw.Namespace, Name: name},
-			Spec: bgpv1alpha1.BGPAdvertisementSpec{
-				RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
-				AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-				Prefixes:      []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())},
-			},
-		}
-		if createErr := r.Create(ctx, adv); createErr != nil {
-			return fmt.Errorf("create self-address BGPAdvertisement %s: %w", name, createErr)
-		}
-		return nil
-	case getErr != nil:
-		return fmt.Errorf("get self-address BGPAdvertisement %s: %w", name, getErr)
-	}
-
-	advCopy := adv.DeepCopy()
-	advCopy.Spec.RouterRef = bgpv1alpha1.RouterRef{Name: routerName}
-	advCopy.Spec.AddressFamily = bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}
-	advCopy.Spec.Prefixes = []bgpv1alpha1.Prefix{bgpv1alpha1.Prefix(prefix.String())}
-	if updateErr := r.Update(ctx, advCopy); updateErr != nil {
-		return fmt.Errorf("update self-address BGPAdvertisement %s: %w", name, updateErr)
-	}
-	return nil
-}
-
 // buildDesiredRule converts rule into a gateway.DesiredRule, resolving each
 // backend's SRv6 uSID via sidIndex (design plan decision #5) — there is no
 // kernel VRF/FIB dependency here at all (decision #4), unlike an earlier,
 // rejected design's identically-named function.
 func buildDesiredRule(
-	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex, localPref uint32,
+	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
 ) (gateway.DesiredRule, error) {
 	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
 	for _, v := range rule.Spec.VIPAddresses {
@@ -477,10 +367,8 @@ func buildDesiredRule(
 		VIPAddresses:     vips,
 		Protocol:         string(rule.Spec.Protocol),
 		//nolint:gosec // rule.Spec.Port is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleSpec.Port)
-		Port:      uint16(rule.Spec.Port),
-		Backends:  backends,
-		LocalPref: localPref,
-		IsPrimary: localPref == gateway.PrimaryLocalPref,
+		Port:     uint16(rule.Spec.Port),
+		Backends: backends,
 	}, nil
 }
 
@@ -503,15 +391,21 @@ func (r *NetworkGatewayReconciler) routerNameForNode(ctx context.Context, namesp
 // applyBGPAdvertisements reconciles the BGPAdvertisement object(s) for a
 // single rule — one per non-empty VIP address family, name-qualified by
 // r.NodeName. The node qualifier is required, not cosmetic: this reconciler
-// runs once per gateway node (Active-Active — every gateway node advertises
-// every rule it holds, at its own local preference, see this file's package
-// doc comment), so without it every gateway node in a namespace would
-// compute the exact same name for the same rule and race to create/update a
-// single shared object — confirmed live the first time a rule's primary
-// node differed from the first node to reconcile it: the second node's
-// Create failed with AlreadyExists on every pass, forever, and only the
-// first node's advertisement (and therefore only its BGP path) ever
-// existed.
+// runs once per gateway node, and under DSR's anycast model every gateway
+// node advertises every accepted rule it holds identically (see this file's
+// package doc comment) — without the node qualifier, every gateway node in
+// a namespace would compute the exact same name for the same rule and race
+// to create/update a single shared object, the same AlreadyExists failure
+// mode the removed Full-NAT/primary-secondary design already hit live.
+//
+// No LocalPreference is set on these advertisements: unlike that removed
+// design (which split PrimaryLocalPref/SecondaryLocalPref to pick one
+// "best" node), every gateway node's route here is equally preferred by
+// construction — each one gets its own distinct Route Distinguisher
+// (paths.go's deriveRD, RFC 4364 §4.3.2), which is what keeps every node's
+// advertisement alive as an independent, non-competing route rather than
+// BGP collapsing them to a single best path (see the go/no-go anycast
+// spike, internal/runtime/gobgp/anycast_spike_test.go).
 //
 // Every object created or touched here is also labeled with
 // networkRuleLabel (backfilled on existing objects too), which is what lets
@@ -523,7 +417,6 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired gateway.DesiredRule, routerName string,
 ) error {
 	v4Prefixes, v6Prefixes := prefixesByFamily(desired.VIPAddresses)
-	localPref := int32(desired.LocalPref) //nolint:gosec // LocalPreference is bounded to {50,100}
 
 	groups := []struct {
 		suffix   string
@@ -564,10 +457,9 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 					Labels:    map[string]string{networkRuleLabel: rule.Name},
 				},
 				Spec: bgpv1alpha1.BGPAdvertisementSpec{
-					RouterRef:       bgpv1alpha1.RouterRef{Name: routerName},
-					AddressFamily:   bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-					Prefixes:        prefixes,
-					LocalPreference: &localPref,
+					RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
+					AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+					Prefixes:      prefixes,
 				},
 			}
 			if createErr := r.Create(ctx, adv); createErr != nil && firstErr == nil {
@@ -593,7 +485,6 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 		advCopy.Spec.RouterRef = bgpv1alpha1.RouterRef{Name: routerName}
 		advCopy.Spec.AddressFamily = bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}
 		advCopy.Spec.Prefixes = prefixes
-		advCopy.Spec.LocalPreference = &localPref
 		if updateErr := r.Update(ctx, advCopy); updateErr != nil && firstErr == nil {
 			firstErr = fmt.Errorf("update BGPAdvertisement %s: %w", name, updateErr)
 		}
@@ -690,10 +581,14 @@ func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName str
 }
 
 // withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway
-// node nodeName created in namespace: its self-address route (named
-// "<node>-selfaddr" -- see publishSelfAddress) and every per-rule,
-// per-address-family route it advertised (named "<rule>-<node>-v4"/"-v6"
-// -- see applyBGPAdvertisements).
+// node nodeName created in namespace: every per-rule, per-address-family
+// route it advertised (named "<rule>-<node>-v4"/"-v6" -- see
+// applyBGPAdvertisements). An earlier, Full-NAT-era version of this
+// function also withdrew a "<node>-selfaddr" self-address route
+// (publishSelfAddress); DSR's anycast model has no self-address to
+// publish at all (no gateway node rewrites addresses, so none needs its
+// own reachable SNAT source advertised — see this file's package doc
+// comment), so that name pattern no longer applies here.
 //
 // This is issue #367's teardown fix in reverse. That fix
 // (networkRuleLabel, networkrule_controller.go's reconcileDelete)
@@ -727,14 +622,13 @@ func withdrawNodeAdvertisements(ctx context.Context, c client.Client, namespace,
 		return fmt.Errorf("list BGPAdvertisements for departed gateway node %s: %w", nodeName, err)
 	}
 
-	selfAddrName := nodeName + "-selfaddr"
 	v4Suffix := "-" + nodeName + "-v4"
 	v6Suffix := "-" + nodeName + "-v6"
 
 	var errs []error
 	for i := range advList.Items {
 		adv := &advList.Items[i]
-		if adv.Name != selfAddrName && !strings.HasSuffix(adv.Name, v4Suffix) && !strings.HasSuffix(adv.Name, v6Suffix) {
+		if !strings.HasSuffix(adv.Name, v4Suffix) && !strings.HasSuffix(adv.Name, v6Suffix) {
 			continue
 		}
 		if err := c.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {

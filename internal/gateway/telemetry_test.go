@@ -43,39 +43,15 @@ func labelValue(m *dto.Metric, name string) string {
 	return ""
 }
 
-func TestPrometheusTelemetryEmitter_RuleAppliedRecordsPrimary(t *testing.T) {
+// TestPrometheusTelemetryEmitter_RuleAppliedAndRemovedDoNotPanic covers the
+// no-op RuleApplied/RuleRemoved hooks -- DSR's anycast model leaves no
+// per-rule placement fact to record (see telemetry.go's doc comment), so
+// these are only exercised for interface conformance and to guard against
+// a future accidental panic.
+func TestPrometheusTelemetryEmitter_RuleAppliedAndRemovedDoNotPanic(t *testing.T) {
 	e := NewPrometheusTelemetryEmitter()
-	e.RuleApplied(context.Background(), DesiredRule{Key: testRuleKeyR1, IsPrimary: true})
-	e.RuleApplied(context.Background(), DesiredRule{Key: testRuleKeyR2, IsPrimary: false})
-
-	metrics := collect(t, e.rulePrimary)
-	if len(metrics) != 2 {
-		t.Fatalf("got %d metrics, want 2", len(metrics))
-	}
-	for _, m := range metrics {
-		switch labelValue(m, "rule") {
-		case testRuleKeyR1:
-			if m.GetGauge().GetValue() != 1 {
-				t.Errorf("ns/r1 is_primary = %v, want 1", m.GetGauge().GetValue())
-			}
-		case testRuleKeyR2:
-			if m.GetGauge().GetValue() != 0 {
-				t.Errorf("ns/r2 is_primary = %v, want 0", m.GetGauge().GetValue())
-			}
-		default:
-			t.Errorf("unexpected rule label %q", labelValue(m, "rule"))
-		}
-	}
-}
-
-func TestPrometheusTelemetryEmitter_RuleRemovedDeletesSeries(t *testing.T) {
-	e := NewPrometheusTelemetryEmitter()
-	e.RuleApplied(context.Background(), DesiredRule{Key: testRuleKeyR1, IsPrimary: true})
+	e.RuleApplied(context.Background(), DesiredRule{Key: testRuleKeyR1})
 	e.RuleRemoved(context.Background(), testRuleKeyR1)
-
-	if metrics := collect(t, e.rulePrimary); len(metrics) != 0 {
-		t.Errorf("got %d metrics after RuleRemoved, want 0", len(metrics))
-	}
 }
 
 func TestPrometheusTelemetryEmitter_DropObservedIncrementsCounter(t *testing.T) {

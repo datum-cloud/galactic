@@ -6,60 +6,62 @@ package gateway
 
 import "context"
 
-// Datapath is the engine's interface onto the actual NAT/load-balancing
-// dataplane for one DesiredRule. GoBGP, via galactic-router's existing
-// embedding, owns all BGP speaking (the design plan's Active-Active BGP
-// model); no BGP speaker lives in this interface's implementations at
-// all.
+// Datapath is the engine's interface onto the actual Maglev/DSR
+// load-balancing dataplane for one DesiredRule. GoBGP, via
+// galactic-router's existing embedding, owns all BGP speaking; no BGP
+// speaker lives in this interface's implementations at all. Unlike this
+// engine's Full-NAT predecessor, there is no Active-Active BGP
+// primary/secondary model here either — DSR's anycast model means every
+// gateway node advertises and serves every rule identically (see doc.go).
 //
 // KernelDatapath (kerneldatapath.go) is the real implementation, backed by
-// internal/plumbing/ebpf/edgemap's RuleTable API onto a loaded
-// internal/plumbing/ebpf/edgeprog.EdgenatObjects. Unlike an earlier,
+// internal/plumbing/ebpf/edgemap's VIPTable API onto a loaded
+// internal/plumbing/ebpf/edgeprog.EdgedsrObjects. Unlike an earlier,
 // rejected design's identically-named interface, there is no
 // lpmOverrides parameter here at all: that existed solely to work around a
 // LoxiLB-internal routing-engine self-collision bug, and this design has
 // no internal routing engine of its own for a return packet to collide
-// with (see doc.go). NoopDatapath remains available for tests and any
-// caller not yet wired to a loaded, attached edgeprog program.
+// with (DSR never sees a return packet at all — see doc.go). NoopDatapath
+// remains available for tests and any caller not yet wired to a loaded,
+// attached edgeprog program.
 type Datapath interface {
-	// ApplyRule programs (or reprograms) rule's ingress DNAT/LB state.
+	// ApplyRule programs (or reprograms) rule's ingress Maglev/DSR
+	// load-balancing state.
 	ApplyRule(ctx context.Context, rule DesiredRule) error
 
-	// RemoveRule tears down rule_table state for the rule identified by
+	// RemoveRule tears down vip_table state for the rule identified by
 	// key. The caller (the future NetworkRule controller) must withdraw
 	// the rule's BGP route before calling this, never after — removing
-	// NAT state first while the route is still advertised risks
-	// blackholing in-flight flows through a translation that no longer
-	// exists.
+	// load-balancing state first while the route is still advertised
+	// risks blackholing in-flight flows that would otherwise still
+	// resolve to a live backend.
 	RemoveRule(ctx context.Context, key string) error
 
 	// Generation returns a snapshot of the datapath's own monotonic
 	// clock, for crash-recovery purposes. Callers intending to call
 	// ReconcileOrphans must capture this immediately *before* listing the
 	// NetworkRule CRDs that become that call's live set — see
-	// internal/plumbing/ebpf/edgemap's RuleTable.Generation doc comment
+	// internal/plumbing/ebpf/edgemap's VIPTable.Generation doc comment
 	// for why the ordering matters.
 	Generation() uint64
 
-	// ReconcileOrphans removes rule_table state whose owning rule is
+	// ReconcileOrphans removes vip_table state whose owning rule is
 	// absent from live and was written before cutoff — the datapath-level
 	// half of Engine.ReconcileOrphans (recovery.go).
 	ReconcileOrphans(ctx context.Context, live []DesiredRule, cutoff uint64) error
 }
 
-// QuotaEnforcer is the engine's interface onto per-tenant conntrack/NAT
-// table quota enforcement, called once per rule per convergence pass so a
-// misbehaving tenant's traffic can be capped before it exhausts shared
-// conntrack/eBPF map capacity on its assigned gateway node.
+// QuotaEnforcer is the engine's interface onto per-tenant vip_table quota
+// enforcement, called once per rule per convergence pass so a misbehaving
+// tenant's rules can be capped before they exhaust shared eBPF map capacity
+// on its assigned gateway node.
 //
-// NodeQuotaEnforcer (quota.go) is the real (Phase E) implementation: a
-// coarse, node-level admission cap (max rules per tenant, max total
-// rule_table entries), not per-flow/conntrack rate limiting — see that
-// type's doc comment for why the latter needs live traffic data to
-// calibrate sensible thresholds against, which this repo does not have
-// yet (the design plan's Phase D was authored as manifests only, not
-// exercised against a live cluster). NoopQuotaEnforcer remains available
-// for tests and always reports quota as available.
+// NodeQuotaEnforcer (quota.go) is the real implementation: a coarse,
+// node-level admission cap (max rules per tenant, max total vip_table
+// entries), not per-flow rate limiting — see that type's doc comment for
+// why the latter needs live traffic data to calibrate sensible thresholds
+// against, which this repo does not have yet. NoopQuotaEnforcer remains
+// available for tests and always reports quota as available.
 type QuotaEnforcer interface {
 	// CheckAndReserve reports whether rule is within its per-tenant quota
 	// and, if so, reserves the resources ApplyRule is about to consume.
@@ -70,14 +72,12 @@ type QuotaEnforcer interface {
 	Release(ctx context.Context, key string) error
 }
 
-// TelemetryEmitter is the engine's interface onto telemetry for
-// conntrack/NAT entry counts, drop counters, and primary/secondary BGP
-// advertisement state per VIP.
+// TelemetryEmitter is the engine's interface onto telemetry for events only
+// knowable at Engine's own call sites — currently, rule applications
+// rejected before ever reaching the datapath (e.g. QuotaEnforcer denials).
 //
-// PrometheusTelemetryEmitter (telemetry.go) is the real (Phase E)
-// implementation, covering only what these call sites uniquely know
-// (primary/secondary placement, control-plane-level rejections) --
-// rule_table's own per-packet counters are exposed separately by
+// PrometheusTelemetryEmitter (telemetry.go) is the real implementation --
+// vip_table's own per-packet counters are exposed separately by
 // internal/plumbing/ebpf/edgemetrics's pull-based Collector; see both
 // types' doc comments for the full split. NoopTelemetryEmitter remains
 // available for tests and drops every call on the floor.

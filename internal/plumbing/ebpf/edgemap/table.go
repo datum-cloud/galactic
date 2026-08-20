@@ -50,7 +50,7 @@ type Iterator interface {
 }
 
 // KernelTable adapts a real, loaded *ebpf.Map -- e.g.
-// edgeprog.EdgenatObjects.RuleTable, once loaded by
+// edgeprog.EdgedsrObjects.VipTable, once loaded by
 // internal/plumbing/ebpf/edgeattach -- to the Table interface every table
 // type in this package is written against.
 type KernelTable struct {

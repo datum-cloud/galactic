@@ -48,15 +48,6 @@ func TestKernelProber_HashMap(t *testing.T) {
 	}
 }
 
-// TestKernelProber_LRUHashMap exercises [KernelProber.LRUHashMap].
-func TestKernelProber_LRUHashMap(t *testing.T) {
-	requireRoot(t)
-	k := NewKernelProber()
-	if err := k.LRUHashMap(); err != nil {
-		t.Errorf("KernelProber.LRUHashMap() = %v, want nil", err)
-	}
-}
-
 // TestKernelProber_XDPAdjustHead exercises [KernelProber.XDPAdjustHead]
 // against the real running kernel -- this is the same helper the Phase 0
 // spike confirmed by hand (compiling a minimal program and attaching it to
@@ -67,16 +58,6 @@ func TestKernelProber_XDPAdjustHead(t *testing.T) {
 	k := NewKernelProber()
 	if err := k.XDPAdjustHead(); err != nil {
 		t.Errorf("KernelProber.XDPAdjustHead() = %v, want nil (confirmed working via a live spike on this kernel)", err)
-	}
-}
-
-// TestKernelProber_XDPCsumDiff exercises [KernelProber.XDPCsumDiff]
-// against the real running kernel.
-func TestKernelProber_XDPCsumDiff(t *testing.T) {
-	requireRoot(t)
-	k := NewKernelProber()
-	if err := k.XDPCsumDiff(); err != nil {
-		t.Errorf("KernelProber.XDPCsumDiff() = %v, want nil (confirmed working via a live spike on this kernel)", err)
 	}
 }
 

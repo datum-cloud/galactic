@@ -102,31 +102,35 @@ func (r *NetworkRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	if err := r.assignPrimaryNode(ctx, rule); err != nil {
-		return ctrl.Result{}, fmt.Errorf("assign primary node for NetworkRule %s: %w", req.NamespacedName, err)
+	if err := r.updateAcceptedCondition(ctx, rule); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update Accepted condition for NetworkRule %s: %w", req.NamespacedName, err)
 	}
 
 	return ctrl.Result{}, nil
 }
 
-// assignPrimaryNode sets rule.Status.PrimaryNode exactly once — if it is
-// already set, assigning it again is skipped (see gateway.AssignPrimaryNode's
-// doc comment for why silently recomputing it would be a correctness bug,
-// not just a wasted computation) — and also ensures the Accepted condition
-// is set once gateway nodes exist for this namespace.
+// updateAcceptedCondition ensures the Accepted condition is set once
+// gateway nodes exist for this namespace. An earlier, Full-NAT-era version
+// of this method (assignPrimaryNode) also computed and pinned
+// status.primaryNode exactly once, via gateway.AssignPrimaryNode — DSR's
+// anycast model has no primary/secondary node to assign at all (every
+// gateway node serves every accepted rule identically, see
+// networkgateway_controller.go's package doc comment), so that field and
+// function no longer exist; this method keeps only the half of the old
+// logic that's still meaningful.
 //
-// That second half is what networkrule_webhook.go's authorize doc comment
-// promises happens here: "the Accepted condition on the NetworkRule itself
-// is set by the future NetworkRule controller once the object has passed
+// This is what networkrule_webhook.go's authorize doc comment promises
+// happens here: "the Accepted condition on the NetworkRule itself is set
+// by the future NetworkRule controller once the object has passed
 // admission and been persisted" (a validating webhook can't write to the
 // status of a request it hasn't admitted yet). Without it,
 // NetworkGatewayReconciler's own Accepted gate on its rule-gathering loop
-// would exclude every rule from every gateway node's rule_table and never
+// would exclude every rule from every gateway node's vip_table and never
 // create its BGPAdvertisement, forever — since no
 // ValidatingWebhookConfiguration is deployed in this repo to set it any
 // other way (config/webhook/ doesn't exist yet -- see the NetworkRule
 // admission webhook's own known-gap note).
-func (r *NetworkRuleReconciler) assignPrimaryNode(ctx context.Context, rule *bgpv1alpha1.NetworkRule) error {
+func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rule *bgpv1alpha1.NetworkRule) error {
 	nodes, err := gatewayNodeNames(ctx, r.Client, rule.Namespace)
 	if err != nil {
 		return err
@@ -148,35 +152,15 @@ func (r *NetworkRuleReconciler) assignPrimaryNode(ctx context.Context, rule *bgp
 		return r.Status().Update(ctx, ruleCopy)
 	}
 
-	changed := false
-	if rule.Status.PrimaryNode == "" {
-		primary, err := gateway.AssignPrimaryNode(rule.Spec.VPCRef, nodes)
-		if err != nil {
-			return fmt.Errorf("assign primary node: %w", err)
-		}
-		ruleCopy.Status.PrimaryNode = primary
-		ruleCopy.Status.ObservedGeneration = rule.Generation
-		changed = true
-	}
-
-	// Gated on IsStatusConditionTrue, not on "PrimaryNode was just assigned
-	// above", so a rule whose PrimaryNode was already set on an earlier
-	// reconcile (e.g. one that predates this fix) still gets Accepted=True
-	// here instead of being skipped forever by the early per-field checks
-	// above.
-	if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
-		setRuleCondition(ruleCopy, metav1.Condition{
-			Type:    bgpv1alpha1.ConditionTypeAccepted,
-			Status:  metav1.ConditionTrue,
-			Reason:  "GatewayNodesRegistered",
-			Message: "gateway nodes are registered for this namespace",
-		})
-		changed = true
-	}
-
-	if !changed {
+	if meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
 		return nil
 	}
+	setRuleCondition(ruleCopy, metav1.Condition{
+		Type:    bgpv1alpha1.ConditionTypeAccepted,
+		Status:  metav1.ConditionTrue,
+		Reason:  "GatewayNodesRegistered",
+		Message: "gateway nodes are registered for this namespace",
+	})
 	return r.Status().Update(ctx, ruleCopy)
 }
 

@@ -38,7 +38,7 @@ var preflightCheckFn = edgepreflight.Check
 // internal/plumbing/ebpf/attach.Load's identical doc comment for the full
 // rationale (schema-mismatch recreation, pin-by-name semantics) -- not
 // repeated here, since it applies unchanged.
-func Load(pinDir string) (*edgeprog.EdgenatObjects, error) {
+func Load(pinDir string) (*edgeprog.EdgedsrObjects, error) {
 	if err := preflightCheckFn(); err != nil {
 		return nil, fmt.Errorf(
 			"edgeattach: kernel preflight check failed, refusing to load the edge gateway datapath: %w", err)
@@ -50,27 +50,27 @@ func Load(pinDir string) (*edgeprog.EdgenatObjects, error) {
 		return nil, fmt.Errorf("edgeattach: create bpf map pin directory %q: %w", pinDir, err)
 	}
 
-	spec, err := edgeprog.LoadEdgenat()
+	spec, err := edgeprog.LoadEdgedsr()
 	if err != nil {
-		return nil, fmt.Errorf("edgeattach: load compiled edgenat collection spec: %w", err)
+		return nil, fmt.Errorf("edgeattach: load compiled edgedsr collection spec: %w", err)
 	}
 	for _, m := range spec.Maps {
 		m.Pinning = ebpf.PinByName
 	}
 
-	var loaded edgeprog.EdgenatObjects
+	var loaded edgeprog.EdgedsrObjects
 	opts := &ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: pinDir}}
 	loadErr := spec.LoadAndAssign(&loaded, opts)
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
 		// Every map here is control-plane-owned and reconstructable
-		// (edgemap.RuleTable.Register repopulates rule_table from live
-		// NetworkRule CRDs; rule_stats_table and conn_table are both
-		// pure caches the datapath itself repopulates from live traffic
-		// -- see edgenat.c's struct rule_stats_value doc comment for why
-		// rule_stats_table exists separately from rule_table;
-		// gw_config_table is a single entry the caller rewrites on every
-		// Engine reconcile) -- a stale pin from an older, incompatible
-		// map layout is safe to recreate rather than fatal.
+		// (edgemap.VIPTable.Register repopulates vip_table from live
+		// NetworkRule CRDs; vip_stats_table is a pure cache the datapath
+		// itself repopulates from live traffic -- see edgedsr.c's struct
+		// vip_stats_value doc comment for why vip_stats_table exists
+		// separately from vip_table; encap_config_table is a single entry
+		// internal/gateway.NewKernelDatapath rewrites once at process
+		// startup) -- a stale pin from an older, incompatible map layout
+		// is safe to recreate rather than fatal.
 		slog.Warn("edgeattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate on the next NetworkRule reconcile)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
@@ -81,9 +81,9 @@ func Load(pinDir string) (*edgeprog.EdgenatObjects, error) {
 	if loadErr != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(loadErr, &ve) {
-			return nil, fmt.Errorf("edgeattach: verifier rejected edge_nat program:\n%w", ve)
+			return nil, fmt.Errorf("edgeattach: verifier rejected edge_lb program:\n%w", ve)
 		}
-		return nil, fmt.Errorf("edgeattach: load and pin edgenat objects: %w", loadErr)
+		return nil, fmt.Errorf("edgeattach: load and pin edgedsr objects: %w", loadErr)
 	}
 	return &loaded, nil
 }
@@ -110,7 +110,7 @@ func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	return errors.Join(errs...)
 }
 
-// Attach attaches program (edgeprog.EdgenatObjects.EdgeNat) to ifaceName's
+// Attach attaches program (edgeprog.EdgedsrObjects.EdgeLb) to ifaceName's
 // XDP hook in native (driver) mode, returning the resulting link.Link for
 // the caller to hold open and Close on shutdown -- see doc.go for why
 // native mode is required, not merely preferred, and why no pinning or

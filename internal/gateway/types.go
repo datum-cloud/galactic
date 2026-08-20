@@ -4,7 +4,10 @@
 
 package gateway
 
-import "net/netip"
+import (
+	"fmt"
+	"net/netip"
+)
 
 // DesiredBackend is a single backend endpoint a rule load-balances to,
 // mirroring network.datumapis.com/v1alpha1's NetworkRuleBackend plus one
@@ -20,12 +23,27 @@ type DesiredBackend struct {
 	USID    netip.Addr
 }
 
+// Key implements internal/maglev.Backend. address:port (the backend's own
+// Pod address and port) is the chosen convention: it is stable across
+// reconciles for the life of the backend, unique within one rule's backend
+// set (two backends sharing an address:port would be indistinguishable
+// targets anyway), and does not change if the backend's USID changes
+// (its owning worker node's SRv6 path moving does not make it a
+// *different* backend for Maglev's consistent-hash purposes). See
+// kerneldatapath.go's buildMaglevTable for how this is used.
+func (b DesiredBackend) Key() string {
+	return fmt.Sprintf("%s:%d", b.Address, b.Port)
+}
+
 // DesiredRule is the engine's internal representation of one NetworkRule,
 // assembled by the future NetworkGateway/NetworkRule controllers from the
-// NetworkRule CRD plus the node's own primary/secondary role for it.
-// Unlike an earlier, rejected design's identically-named type,
-// there is no VNI or VRFTableID here at all: this engine has no VRF/
-// Geneve dependency (see doc.go).
+// NetworkRule CRD. Unlike an earlier, rejected design's identically-named
+// type, there is no VNI or VRFTableID here at all: this engine has no VRF/
+// Geneve dependency (see doc.go). Unlike this engine's own Full-NAT
+// predecessor, there is no primary/secondary placement field here either —
+// DSR's anycast model means every gateway node serves every rule
+// identically, with no BGP local-preference distinction to carry (see
+// doc.go).
 type DesiredRule struct {
 	// Key uniquely identifies the rule (namespace/name of the source
 	// NetworkRule), used as the map key in Engine's convergence pass.
@@ -47,25 +65,13 @@ type DesiredRule struct {
 	Protocol string
 	Port     uint16
 	Backends []DesiredBackend
-
-	// LocalPreference is the BGP local-preference this node should
-	// advertise this rule's VIPs at: PrimaryLocalPref if this node is the
-	// rule's primary_node, SecondaryLocalPref otherwise (localpref.go).
-	// Both nodes always advertise — this field only affects preference,
-	// never presence.
-	LocalPref uint32
-
-	// IsPrimary mirrors LocalPref == PrimaryLocalPref, kept as a separate
-	// bool for callers (e.g. status reporting, telemetry) that want the
-	// role without re-deriving it from the numeric preference.
-	IsPrimary bool
 }
 
 // EngineState is the full desired state for one gateway node's Engine,
 // assembled by the NetworkGateway controller from every accepted
-// NetworkRule in the node's PoP (both primary- and secondary-assigned —
-// active-active means both gateway nodes serve every rule, see
-// localpref.go).
+// NetworkRule in the node's PoP — every gateway node in the PoP serves
+// every rule identically under DSR's anycast model, so there is no
+// primary/secondary subset to distinguish here.
 type EngineState struct {
 	// Rules is keyed by DesiredRule.Key.
 	Rules map[string]DesiredRule

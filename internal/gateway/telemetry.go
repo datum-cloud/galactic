@@ -17,23 +17,21 @@ const telemetryNamespace = "galactic_edge"
 const labelRule = "rule"
 
 // PrometheusTelemetryEmitter is a real (not stubbed) TelemetryEmitter,
-// covering exactly the two things only knowable at Engine's own call
-// sites -- not re-derivable from a live scrape of rule_table/conn_table
-// state, which internal/plumbing/ebpf/edgemetrics's Collector already
-// exposes separately (packets/bytes/dropped_packets/last_seen_ns per
-// rule, same pull-at-scrape-time pattern as
-// internal/plumbing/ebpf/metrics's Collector for the SRv6 uSID datapath):
+// covering the one thing only knowable at Engine's own call sites -- not
+// re-derivable from a live scrape of vip_table state, which
+// internal/plumbing/ebpf/edgemetrics's Collector already exposes separately
+// (packets/bytes/dropped_packets/last_seen_ns per rule, same
+// pull-at-scrape-time pattern as internal/plumbing/ebpf/metrics's Collector
+// for the SRv6 uSID datapath): rule applications rejected before ever
+// reaching the datapath (e.g. QuotaEnforcer denials). These never touch
+// vip_table at all, so vip_table's own DroppedPackets counter (a strictly
+// datapath-level, per-packet count) cannot see them.
 //
-//  1. Which gateway node is currently primary vs. secondary for a rule's
-//     VIPs (DesiredRule.IsPrimary) -- an Active-Active BGP placement
-//     decision this engine's own control plane made, not something the
-//     datapath's own counters carry.
-//  2. Rule applications rejected before ever reaching the datapath (e.g.
-//     QuotaEnforcer denials) -- these never touch rule_table at all, so
-//     rule_table's own DroppedPackets counter (a strictly datapath-level,
-//     per-packet count) cannot see them.
+// Unlike this engine's Full-NAT predecessor, there is no primary/secondary
+// placement gauge here: DSR's anycast model means every gateway node
+// serves every rule identically, so there is no per-rule placement state
+// left to report (see doc.go).
 type PrometheusTelemetryEmitter struct {
-	rulePrimary       *prometheus.GaugeVec
 	controlPlaneDrops *prometheus.CounterVec
 }
 
@@ -41,13 +39,6 @@ type PrometheusTelemetryEmitter struct {
 // PrometheusTelemetryEmitter. Call MustRegister once at process startup.
 func NewPrometheusTelemetryEmitter() *PrometheusTelemetryEmitter {
 	return &PrometheusTelemetryEmitter{
-		rulePrimary: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: telemetryNamespace,
-			Subsystem: labelRule,
-			Name:      "is_primary",
-			Help: "1 if this gateway node is the active-active primary (higher BGP local-pref) for " +
-				"this rule's VIPs, 0 if secondary. Absent entirely once the rule is removed.",
-		}, []string{labelRule}),
 		controlPlaneDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: telemetryNamespace,
 			Name:      "control_plane_drops_total",
@@ -64,24 +55,18 @@ func NewPrometheusTelemetryEmitter() *PrometheusTelemetryEmitter {
 // at startup, same convention as internal/plumbing/ebpf/metrics's
 // EventCounters.MustRegister.
 func (e *PrometheusTelemetryEmitter) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(e.rulePrimary, e.controlPlaneDrops)
+	reg.MustRegister(e.controlPlaneDrops)
 }
 
-// RuleApplied records rule's current primary/secondary placement.
-func (e *PrometheusTelemetryEmitter) RuleApplied(_ context.Context, rule DesiredRule) {
-	v := 0.0
-	if rule.IsPrimary {
-		v = 1
-	}
-	e.rulePrimary.WithLabelValues(rule.Key).Set(v)
-}
+// RuleApplied is a no-op: unlike this engine's Full-NAT predecessor, there
+// is no per-rule primary/secondary placement fact left to record here (see
+// this type's doc comment). Kept as a method (rather than removed) to
+// satisfy the TelemetryEmitter interface, and as the natural place for any
+// future call-site-only fact this engine learns.
+func (e *PrometheusTelemetryEmitter) RuleApplied(context.Context, DesiredRule) {}
 
-// RuleRemoved deletes key's is_primary series -- a removed rule has no
-// primary/secondary state to report, and leaving a stale series behind
-// would misreport it as still (say) secondary forever.
-func (e *PrometheusTelemetryEmitter) RuleRemoved(_ context.Context, key string) {
-	e.rulePrimary.DeleteLabelValues(key)
-}
+// RuleRemoved is a no-op, for the same reason as RuleApplied.
+func (e *PrometheusTelemetryEmitter) RuleRemoved(context.Context, string) {}
 
 // DropObserved records a control-plane-level rejection for key, labeled by
 // reason (e.g. "quota_exceeded" -- see Engine.applyRuleLocked).

@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package edgepreflight implements the startup kernel-capability check for
-// internal/plumbing/ebpf/edgeprog's XDP ingress NAT+LB gateway datapath.
+// internal/plumbing/ebpf/edgeprog's XDP Maglev/DSR load-balancing gateway
+// datapath.
 //
 // This is a sibling of internal/plumbing/ebpf/preflight, not an extension
 // of it: that package's Prober interface is scoped specifically to the
@@ -17,29 +18,28 @@
 // genuinely different capabilities:
 //
 //   - BPF_PROG_TYPE_XDP itself.
-//   - bpf_xdp_adjust_head -- edgenat.c grows the packet by 40 bytes on the
-//     forward/DNAT path (room for the pushed outer IPv6 header) and shrinks
-//     it back by 40 on the return/decap path. This helper has no
-//     __sk_buff-based equivalent usid.c's preflight needed to check for.
-//   - bpf_csum_diff -- edgenat.c's checksum fixups after mutating an
-//     address/port covered by the L4 pseudo-header. gwprog's earlier,
-//     rejected Geneve-based design used bpf_l4_csum_replace/
-//     bpf_l3_csum_replace instead, but those are __sk_buff-only helpers,
-//     unavailable to an XDP program's xdp_md context -- bpf_csum_diff is
-//     the XDP-safe replacement, and its availability is not implied by
-//     BPF_PROG_TYPE_XDP support alone.
-//   - BPF_MAP_TYPE_LRU_HASH -- conn_table is this type (self-evicting
-//     under pressure, matching gwprog's own conn_table convention); rule_table
-//     is plain BPF_MAP_TYPE_HASH, already covered by preflight's HashMap
-//     check conceptually but probed again here independently so this
-//     package has no runtime dependency on the other one.
+//   - bpf_xdp_adjust_head -- edgedsr.c grows the packet by 40 bytes to make
+//     room for the pushed outer SRv6 header on every claimed-VIP packet.
+//     This helper has no __sk_buff-based equivalent usid.c's preflight
+//     needed to check for.
+//   - BPF_MAP_TYPE_HASH -- vip_table and vip_stats_table are both this
+//     type; already covered by preflight's HashMap check conceptually but
+//     probed again here independently so this package has no runtime
+//     dependency on the other one.
 //   - Kernel BTF, for the same CO-RE-adjacent reason usid.c's preflight
-//     requires it: edgenat.c is compiled with -g and bpf2go's generated
-//     Go bindings for rule_value/rule_stats_value/conn_value/backend
-//     depend on the running kernel accepting BTF-annotated map value
-//     types.
+//     requires it: edgedsr.c is compiled with -g and bpf2go's generated Go
+//     bindings for vip_value/vip_stats_value/backend/encap_config depend
+//     on the running kernel accepting BTF-annotated map value types.
 //
-// Deliberately NOT checked here: whether a specific interface's driver
+// Deliberately NOT checked here, unlike this package's Full-NAT edgenat.c
+// predecessor: BPF_MAP_TYPE_LRU_HASH (that was conn_table's type; DSR has
+// no conn_table at all, see edgedsr.c's own header comment) and
+// bpf_csum_diff (Full-NAT needed it to fix up checksums after DNAT/SNAT;
+// DSR forwards every packet completely unmodified, so its own checksum is
+// already correct and this program never touches one). Removed as a direct
+// consequence of the DSR/Maglev rewrite, not carried forward unexamined.
+//
+// Also deliberately NOT checked here: whether a specific interface's driver
 // supports *native* (driver-mode) XDP attach, as opposed to generic
 // (SKB-mode) attach. That is a per-interface, per-driver property (the
 // design's own spike found the geneve driver lacks it entirely, while a
@@ -67,28 +67,18 @@ type Prober interface {
 	// XDP reports whether the running kernel supports BPF_PROG_TYPE_XDP.
 	XDP() error
 
-	// LRUHashMap reports whether the running kernel supports
-	// BPF_MAP_TYPE_LRU_HASH (edgenat.c's conn_table).
-	LRUHashMap() error
-
 	// HashMap reports whether the running kernel supports
-	// BPF_MAP_TYPE_HASH (edgenat.c's rule_table).
+	// BPF_MAP_TYPE_HASH (edgedsr.c's vip_table/vip_stats_table).
 	HashMap() error
 
 	// BTF reports whether the running kernel exposes BTF type information,
-	// required for edgenat.c's bpf2go-generated map value types to load.
+	// required for edgedsr.c's bpf2go-generated map value types to load.
 	BTF() error
 
 	// XDPAdjustHead reports whether this kernel's XDP programs can call
-	// bpf_xdp_adjust_head -- required to grow/shrink the packet for the
-	// pushed/stripped outer SRv6 header.
+	// bpf_xdp_adjust_head -- required to grow the packet for the pushed
+	// outer SRv6 header.
 	XDPAdjustHead() error
-
-	// XDPCsumDiff reports whether this kernel's XDP programs can call
-	// bpf_csum_diff -- the XDP-safe checksum-fixup helper (unlike
-	// bpf_l4_csum_replace/bpf_l3_csum_replace, which require __sk_buff and
-	// are unavailable to an XDP program).
-	XDPCsumDiff() error
 }
 
 // capabilityCheck names one required capability, binds it to its probe
@@ -105,34 +95,22 @@ func capabilityChecks(p Prober) []capabilityCheck {
 		{
 			name: "BPF_PROG_TYPE_XDP",
 			fn:   p.XDP,
-			why:  "the edge gateway's ingress NAT+LB program attaches as an XDP program, not TC-BPF",
+			why:  "the edge gateway's Maglev/DSR load-balancing program attaches as an XDP program, not TC-BPF",
 		},
 		{
 			name: "BPF_MAP_TYPE_HASH",
 			fn:   p.HashMap,
-			why:  "rule_table (VIP+port -> backend) is BPF_MAP_TYPE_HASH",
-		},
-		{
-			name: "BPF_MAP_TYPE_LRU_HASH",
-			fn:   p.LRUHashMap,
-			why:  "conn_table is BPF_MAP_TYPE_LRU_HASH so it self-evicts under pressure instead of failing closed",
+			why:  "vip_table (VIP+port -> backend set) and vip_stats_table are both BPF_MAP_TYPE_HASH",
 		},
 		{
 			name: "kernel BTF",
 			fn:   p.BTF,
-			why:  "edgenat.c is compiled with -g and its generated map value types require kernel BTF to load",
+			why:  "edgedsr.c is compiled with -g and its generated map value types require kernel BTF to load",
 		},
 		{
 			name: "bpf_xdp_adjust_head",
 			fn:   p.XDPAdjustHead,
-			why: "the forward path grows the packet by 40 bytes for the pushed outer SRv6 header, and the " +
-				"return path shrinks it back by 40 to strip it",
-		},
-		{
-			name: "bpf_csum_diff",
-			fn:   p.XDPCsumDiff,
-			why: "checksum fixups after DNAT/SNAT must use this XDP-safe helper -- bpf_l4_csum_replace and " +
-				"bpf_l3_csum_replace require __sk_buff and are unavailable to an XDP program",
+			why:  "every claimed-VIP packet grows by 40 bytes for the pushed outer SRv6 header",
 		},
 	}
 }

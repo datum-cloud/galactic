@@ -12,7 +12,7 @@ import (
 )
 
 // Default limits for NodeQuotaEnforcer. Both are coarse, node-level
-// admission caps, not bandwidth or conntrack rate limits -- see that
+// admission caps, not bandwidth or per-flow rate limits -- see that
 // type's doc comment for why the latter is deliberately out of scope
 // here.
 const (
@@ -20,17 +20,17 @@ const (
 	// VPCRef may have registered on one gateway node at once. A
 	// NetworkRule may carry up to 8 VIPAddresses (network.datumapis.com/
 	// v1alpha1's NetworkRuleSpec.VIPAddresses MaxItems), so this also
-	// bounds one tenant's worst-case rule_table footprint to
+	// bounds one tenant's worst-case vip_table footprint to
 	// DefaultMaxRulesPerTenant*8 entries.
 	DefaultMaxRulesPerTenant = 64
 
 	// DefaultMaxRuleTableEntries is the node-wide ceiling across every
-	// tenant, defaulting to edgemap.MaxRuleTableEntries (rule_table's own
+	// tenant, defaulting to edgemap.MaxVIPTableEntries (vip_table's own
 	// map capacity) -- once desired state would fill the map,
 	// bpf_map_update_elem starts failing mid-reconcile with no clean way
 	// to roll back a partial apply, so this must be enforced before
 	// ApplyRule is ever called, at CheckAndReserve time.
-	DefaultMaxRuleTableEntries = edgemap.MaxRuleTableEntries
+	DefaultMaxRuleTableEntries = edgemap.MaxVIPTableEntries
 )
 
 // NodeQuotaEnforcer is a real (not stubbed) QuotaEnforcer implementation,
@@ -39,26 +39,23 @@ const (
 //
 //  1. MaxRulesPerTenant: no single VPCRef may register more than this many
 //     NetworkRules on this gateway node at once.
-//  2. MaxRuleTableEntries: the total rule_table rows every tenant's rules
+//  2. MaxRuleTableEntries: the total vip_table rows every tenant's rules
 //     would occupy together (one row per VIPAddress, see
-//     kerneldatapath.go's ruleKeysForRule) may not exceed rule_table's own
+//     kerneldatapath.go's vipKeysForRule) may not exceed vip_table's own
 //     fixed map capacity.
 //
-// What this deliberately does NOT do: per-flow or per-tenant conntrack
-// (conn_table) rate limiting. conn_table's key carries no tenant
-// dimension (design plan decision #1 — a VIP is globally unique, so
-// conn_table doesn't need one either), so there is no cheap way to
-// attribute an individual flow back to a tenant without adding a field
-// that changes the packet-path key layout; and a meaningful bandwidth/
-// packet-rate quota needs a time-windowed rate, not the cumulative,
-// never-reset Packets/Bytes counters rule_table carries (a long-lived,
-// healthy, popular rule will always eventually cross any static
-// cumulative threshold — that isn't misbehavior, that's success). Real
-// rate-based enforcement needs live traffic data to calibrate sensible
-// thresholds against, which is exactly what the design plan's Phase D
-// (validated live, not just manifests) was meant to provide before this
-// phase built on top of it — see docs/agents/ARCHITECTURE-GATEWAY.md and the
-// design plan's own Phase E note. This type is the enforceable subset
+// What this deliberately does NOT do: per-flow or per-tenant packet/byte
+// rate limiting. vip_table's key carries no tenant dimension (a VIP is
+// globally unique, so it doesn't need one either), so there is no cheap
+// way to attribute an individual flow back to a tenant without adding a
+// field that changes the packet-path key layout; and a meaningful
+// bandwidth/packet-rate quota needs a time-windowed rate, not the
+// cumulative, never-reset Packets/Bytes counters vip_table carries (a
+// long-lived, healthy, popular rule will always eventually cross any
+// static cumulative threshold — that isn't misbehavior, that's success).
+// Real rate-based enforcement needs live traffic data to calibrate
+// sensible thresholds against, which this repo does not have yet — see
+// docs/agents/ARCHITECTURE-GATEWAY.md. This type is the enforceable subset
 // buildable without that data.
 type NodeQuotaEnforcer struct {
 	mu sync.Mutex
@@ -67,9 +64,9 @@ type NodeQuotaEnforcer struct {
 	maxRuleTableEntries int
 
 	// tenantRuleCount/totalEntries are the enforcer's own bookkeeping of
-	// what it has reserved — not read back from rule_table itself, so
+	// what it has reserved — not read back from vip_table itself, so
 	// CheckAndReserve/Release stay correct even before ApplyRule has run
-	// (a new rule has no rule_table row yet to read counters from).
+	// (a new rule has no vip_table row yet to read counters from).
 	tenantRuleCount map[string]int
 	ruleTenant      map[string]string
 	ruleEntries     map[string]int
@@ -90,7 +87,7 @@ func NewNodeQuotaEnforcer(maxRulesPerTenant, maxRuleTableEntries int) *NodeQuota
 }
 
 // CheckAndReserve reports whether rule fits within both limits and, if so,
-// reserves its rule_table footprint. Idempotent for a rule.Key already
+// reserves its vip_table footprint. Idempotent for a rule.Key already
 // reserved: re-checking (or changing) an already-active rule's VIP count
 // never double-counts it against either limit — required because
 // Engine.Reconcile calls this for every desired rule on every reconcile
