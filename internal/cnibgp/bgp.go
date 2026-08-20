@@ -35,11 +35,13 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/vishvananda/netlink"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,6 +53,8 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -606,7 +610,98 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
 
+	// Attach usid_egress to this attachment's own host-side interface --
+	// see attachUsidEgress's own doc comment for why this was, until now,
+	// entirely missing: it's a real, previously-undiscovered gap, not
+	// specific to NAT66 at all, in every veth/tap ServiceVIPBinding's own
+	// reply path.
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	if err := attachUsidEgress(pinDir, hostName); err != nil {
+		return false, fmt.Errorf("attach eBPF usid_egress to host interface %q: %w", hostName, err)
+	}
+
+	// Registers this node's own SRv6 source address into
+	// node_src_addr_table -- see registerNodeSourceAddress's own doc
+	// comment. A per-node constant, not per-attachment, but idempotent
+	// and cheap enough (one netlink route/address query, one map write)
+	// to simply redo on every attachment ADD, the same way every other
+	// registration in this function already is, rather than adding a
+	// separate once-per-node lifecycle hook.
+	//
+	// Deliberately non-fatal to this ADD, unlike every other registration
+	// step above: ResolveNodeSourceAddress needs a converged main-table
+	// IPv6 default route, which a node can genuinely, transiently lack
+	// early in its own boot sequence (before the underlay eBGP session
+	// comes up) -- failing every pod attach on the whole node until that
+	// converges would be a real availability regression from today's
+	// behavior, where a missing egress route only ever failed traffic to
+	// the *specific* destination that needed it, never CNI ADD itself.
+	// usid_egress's own "not yet configured" check already fails open
+	// (TC_ACT_UNSPEC) for exactly this gap; a later attachment's ADD (or
+	// this same one's next retry) succeeds here once the route exists.
+	if err := registerNodeSourceAddress(pinDir); err != nil {
+		slog.Warn("ADD: could not register this node's own SRv6 source address; "+
+			"egress routing will fail open until this succeeds", "err", err)
+	}
+
 	return true, nil
+}
+
+// registerNodeSourceAddress resolves this node's own SRv6/underlay-facing
+// source address (srv6.ResolveNodeSourceAddress) and writes it into
+// node_src_addr_table (egressroutemap.NodeSourceAddress) -- the value
+// usid_egress's egress-routing extension stamps into every outer header
+// it pushes (docs/plans/tc-bpf-egress-srv6-encap.md). Without this, every
+// egress_route_table hit fails open (TC_ACT_UNSPEC) rather than
+// encapsulating at all -- see usid.c's own "not yet configured" check on
+// this map -- so this must succeed before EgressDefaultRouteAdd/
+// RouteEgressAdd's own installed entries can ever actually carry traffic.
+// See this function's own call site for why a failure here doesn't fail
+// the whole CNI ADD.
+func registerNodeSourceAddress(pinDir string) error {
+	addr, err := srv6.ResolveNodeSourceAddress()
+	if err != nil {
+		return fmt.Errorf("resolve node source address: %w", err)
+	}
+	nodeSrc, closer, err := egressroutemap.OpenPinnedNodeSourceAddress(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned node_src_addr_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	return nodeSrc.Set(addr)
+}
+
+// attachUsidEgress loads usid_egress from its own pin (attach.Load pins it
+// there, alongside every usid_ingress map, specifically so a short-lived
+// process like this one can reach it -- see that function's own doc
+// comment) and attaches it to ifaceName's TC ingress hook.
+//
+// This was a real, previously-undiscovered gap: usid_egress has existed
+// since the DSR/Maglev redesign's component 0.1/2 work (NPTv6 and tap-VIP
+// substitution's outbound-direction translation), but nothing anywhere in
+// this codebase ever called attach.AttachEgress (or any equivalent) to
+// actually put it on an interface -- confirmed live via `tc filter show`
+// on a real backend's own host-side veth: no filter at all, on either
+// direction. Every fix this redesign made to the *forward* path (client
+// -> VIP -> backend) worked and was validated without ever exercising
+// this gap, because none of them depended on the *reply* leaving with its
+// source address translated back -- only once the forward path, the
+// NAT66 egress route, and everything else were all working at once did a
+// real end-to-end curl's TCP handshake finally depend on it, and stall
+// with the reply silently discarded by the client (its source address
+// never got translated from the backend's real address back to the VIP).
+//
+// Idempotent (attach.AttachEgress's own FilterReplace semantics) and safe
+// to call on every attachment ADD, the same way every other registration
+// in this function already is.
+func attachUsidEgress(pinDir, ifaceName string) error {
+	program, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.UsidEgressPinName), nil)
+	if err != nil {
+		return fmt.Errorf("load pinned usid_egress program: %w", err)
+	}
+	defer func() { _ = program.Close() }()
+
+	return attach.AttachEgress(program, ifaceName)
 }
 
 // installNAT66EgressRoute installs (or refreshes) vrfTableID's default

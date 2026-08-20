@@ -1174,3 +1174,405 @@ func TestUsidEgress_NoMappingPassesThroughUnmodified(t *testing.T) {
 		t.Errorf("packet mutated with no ifindex_vrf_table entry:\n in: % x\nout: % x", pkt, out)
 	}
 }
+
+// ipv4HeaderLen is struct usid_iphdr's fixed size (usid.c) -- this file's
+// test packets never carry IPv4 options, so the header is always exactly
+// this long, mirroring ip6HeaderLen's identical role for usid_ip6hdr.
+const ipv4HeaderLen = 20
+
+// buildPlainIPv4Packet builds a minimal Ethernet+IPv4 frame (header only,
+// no payload) with h_proto = ETH_P_IP -- the shape usid_egress's
+// egress-routing extension parses directly for an IPv4 VPC's own outbound
+// traffic (dst.Egress -- unlike buildPacket/buildPacketWithV6Addrs, no
+// outer/inner nesting: this program is not decapsulating anything).
+func buildPlainIPv4Packet(t *testing.T, src, dst netip.Addr) []byte {
+	t.Helper()
+	if !src.Is4() || !dst.Is4() {
+		t.Fatalf("buildPlainIPv4Packet: src=%s dst=%s must both be IPv4", src, dst)
+	}
+
+	pkt := make([]byte, 0, ethHeaderLen+ipv4HeaderLen)
+	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
+	pkt = append(pkt, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB)
+	pkt = append(pkt, 0x08, 0x00) // h_proto = ETH_P_IP
+
+	pkt = append(pkt, 0x45, 0x00) // ver_ihl=4/5, tos=0
+	totLen := uint16(ipv4HeaderLen)
+	pkt = append(pkt, byte(totLen>>8), byte(totLen))
+	pkt = append(pkt, 0x00, 0x00) // id
+	pkt = append(pkt, 0x00, 0x00) // frag_off
+	pkt = append(pkt, 64)         // ttl
+	pkt = append(pkt, 59)         // protocol = no next header (plain address test, no L4)
+	pkt = append(pkt, 0x00, 0x00) // checksum (unvalidated by usid_egress)
+	srcBytes := src.As4()
+	pkt = append(pkt, srcBytes[:]...)
+	dstBytes := dst.As4()
+	pkt = append(pkt, dstBytes[:]...)
+
+	return pkt
+}
+
+// egressRouteFamilyINET6/egressRouteFamilyINET4 mirror usid.c's
+// USID_EGRESS_ROUTE_FAMILY_INET6/USID_EGRESS_ROUTE_FAMILY_INET4 -- see
+// usidVIPXlatDirIngress/usidVIPXlatDirEgress's identical comment above for
+// why bpf2go generates no symbol for a #define.
+const (
+	egressRouteFamilyINET6 = 0
+	egressRouteFamilyINET4 = 1
+)
+
+// egressRouteKey builds the LPM key usid_egress's egress-routing extension
+// computes for a full (prefixlen == address width) host route -- the only
+// shape these tests need, matching how egress.go's own
+// RouteEgressAdd/EgressDefaultRouteAdd style callers register either a
+// specific host/prefix route or, for the default, prefixlen 0 (the "no
+// address bits, always matches" case a table_id+family-only key already
+// models -- see hostPrefixBits' own doc comment).
+// addr's own byte layout depends on family: usid.c's egress-routing
+// extension memsets rkey.addr to zero, then memcpy's *only* the raw
+// 4-byte IPv4 destination (ip4->daddr) into its first 4 bytes for an
+// INET4 route, or the full 16-byte IPv6 destination for an INET6 one --
+// never the IPv4-mapped-IPv6 (::ffff:a.b.c.d) convention netip.Addr.As16
+// produces for a v4 address, which would place those same 4 bytes at
+// offset 12, not 0. Found by a real test failure (an early draft of this
+// helper called addr.As16() unconditionally): the IPv4 test below matched
+// nothing at all -- registered under one 16-byte pattern, looked up
+// against a different one -- until traced back here.
+func egressRouteKey(tableID uint32, family uint8, addr netip.Addr, prefixBits int) UsidEgressRouteKey {
+	var a [16]byte
+	if family == egressRouteFamilyINET4 {
+		v4 := addr.As4()
+		copy(a[:4], v4[:])
+	} else {
+		a = addr.As16()
+	}
+	return UsidEgressRouteKey{
+		Prefixlen: uint32(8*(4+1) + prefixBits),
+		TableId:   tableID,
+		Family:    family,
+		Addr:      a,
+	}
+}
+
+// setUpEgressRouteAttachment registers the two per-attachment lookups
+// usid_egress's egress-routing extension needs before it can ever reach
+// egress_route_table at all: ifindex_vrf_table (this ifindex belongs to
+// block/argument) and vrf_table (that (block, argument) resolves to
+// tableID) -- mirroring what internal/cnibgp's registerEBPFDatapath and
+// the CNI's own vrf_table.Register call already do together at CNI ADD
+// time (usid.c's own struct egress_route_key comment explains why both
+// are needed to get from an ifindex to a Linux table id).
+//
+// Always registers under ifindex 1 -- the default skb->ifindex value
+// Program.Test leaves in place when no explicit context is supplied
+// (confirmed empirically: it matches lo, not 0), the same value every
+// call site below is testing against, so it's hardcoded here rather than
+// taken as a parameter every caller would pass identically anyway.
+func setUpEgressRouteAttachment(t *testing.T, objs *UsidObjects, block uint64, argument uint16, tableID uint32) {
+	t.Helper()
+	const ifindex uint32 = 1
+	if err := objs.IfindexVrfTable.Put(ifindex, UsidIfindexVrfValue{Block: block, Argument: argument}); err != nil {
+		t.Fatalf("populate ifindex_vrf_table: %v", err)
+	}
+	vrfKey, err := uformat.NewVRFKey(block, argument)
+	if err != nil {
+		t.Fatalf("NewVRFKey: %v", err)
+	}
+	if err := objs.VrfTable.Put(uint64(vrfKey), UsidVrfValue{VrfTableId: tableID}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+}
+
+// TestUsidEgress_RouteMissPassesThroughUnmodified covers the common case
+// once egress_route_table exists as a concept at all: an attachment fully
+// registered (ifindex_vrf_table + vrf_table both present, exactly as a
+// real CNI ADD leaves them) but with no egress_route_table entry covering
+// this packet's destination -- e.g. a VRF with no NAT66 default route
+// configured and no intra-VPC peer route for this particular prefix
+// (yet), or (design plan §5's migration-ordering note) an attachment
+// still relying on the kernel-native SEG6 route this extension replaces
+// during rollout. Must defer to the kernel (TC_ACT_UNSPEC, byte-for-byte
+// unmodified), not drop -- there may still be a valid path via the
+// still-installed netlink route, or genuinely none, either of which is
+// the kernel's call to make, not this program's.
+func TestUsidEgress_RouteMissPassesThroughUnmodified(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, 7)
+
+	pkt := buildPacketWithV6Addrs(t,
+		netip.MustParseAddr("2001:db8:ffff::1"), netip.MustParseAddr("fd20:70::1"),
+		netip.MustParseAddr("fd20:70::1"), netip.MustParseAddr("2001:db8:ffff::1"))
+
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActUnspec {
+		t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d)", ret, tcActUnspec)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated on an egress_route_table miss:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+// TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader covers the core new
+// mechanism (docs/plans/tc-bpf-egress-srv6-encap.md): an egress_route_table
+// hit must push a new 40-byte outer IPv6 header (nexthdr=41,
+// IPv6-in-IPv6, matching usid_ingress's own decap-side expectation) in
+// front of the original packet, addressed to the matched SID, before
+// attempting delivery.
+//
+// The FIB lookup for that SID's own L2 next-hop still fails here, the
+// same limitation TestUsidIngress_VRFTableMatchReachesFIBLookup already
+// documents for the decap side: BPF_PROG_TEST_RUN has no real routing
+// table to succeed against, only whatever the test host's own main table
+// happens to contain, which never has a route to a fabricated SID address
+// -- confirming this far (header pushed with the right bytes, main-table
+// FIB lookup genuinely attempted and genuinely failing, not short-circuited
+// by an earlier drop) is what a BPF_PROG_TEST_RUN-based test can prove;
+// real delivery is a live-cluster (ContainerLab) concern, same as
+// usid_ingress's own redirect path.
+func TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const tableID = 8
+	setUpEgressRouteAttachment(t, objs, 0x123456, 0x200, tableID)
+
+	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+	dst := netip.MustParseAddr("2001:db8:ffff::1")
+	key := egressRouteKey(tableID, egressRouteFamilyINET6, dst, 128)
+	dmac := [6]byte{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}
+	smac := [6]byte{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}
+	const linkIfindex = 1 // loopback always exists; redirect delivery itself is a live-cluster concern, see below
+	if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{
+		Sid: sid.As16(), LinkIfindex: linkIfindex, Dmac: dmac, Smac: smac,
+	}); err != nil {
+		t.Fatalf("populate egress_route_table: %v", err)
+	}
+
+	nodeSrc := netip.MustParseAddr("2001:db8:1:10::2")
+	nodeSrcBytes := nodeSrc.As16()
+	if err := objs.NodeSrcAddrTable.Put(uint32(0), nodeSrcBytes); err != nil {
+		t.Fatalf("populate node_src_addr_table: %v", err)
+	}
+	src := netip.MustParseAddr("fd20:70::1")
+	pkt := buildPacketWithV6Addrs(t, dst, src, src, dst)
+
+	// Unlike usid_ingress's own FIB-lookup-dependent step 8/9 (which
+	// BPF_PROG_TEST_RUN cannot fully exercise without a real route/
+	// interface), usid_egress's egress-routing extension no longer does
+	// any per-packet FIB lookup at all -- dmac/smac/link_ifindex all come
+	// straight from the matched egress_route_table entry (see that
+	// struct's own doc comment in usid.c for why) -- so this test can
+	// assert a full, real TC_ACT_REDIRECT success end to end.
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActRedirect {
+		t.Fatalf("verdict = %d, want TC_ACT_REDIRECT (%d)", ret, tcActRedirect)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonEgressRouteEncapFailed); got != 0 {
+		t.Errorf("drop_reasons[egress_route_encap_failed] = %d, want 0 -- the header push itself must have succeeded", got)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonEgressRouteRedirectFailed); got != 0 {
+		t.Errorf("drop_reasons[egress_route_redirect_failed] = %d, want 0", got)
+	}
+
+	if len(out) != len(pkt)+ip6HeaderLen {
+		t.Fatalf("output packet length = %d, want %d (original %d + one pushed IPv6 header)",
+			len(out), len(pkt)+ip6HeaderLen, len(pkt))
+	}
+
+	if string(out[0:6]) != string(dmac[:]) {
+		t.Errorf("pushed outer h_dest = % x, want %x (egress_route_table's own dmac)", out[0:6], dmac)
+	}
+	if string(out[6:12]) != string(smac[:]) {
+		t.Errorf("pushed outer h_source = % x, want %x (egress_route_table's own smac)", out[6:12], smac)
+	}
+
+	outer := out[ethHeaderLen : ethHeaderLen+ip6HeaderLen]
+	if outer[0]>>4 != 6 {
+		t.Errorf("pushed outer header version nibble = %d, want 6", outer[0]>>4)
+	}
+	if gotNextHdr := outer[6]; gotNextHdr != 41 {
+		t.Errorf("pushed outer header nexthdr = %d, want 41 (IPv6-in-IPv6, matching usid_ingress's decap side)", gotNextHdr)
+	}
+	gotSrc, _ := netip.AddrFromSlice(outer[8:24])
+	if gotSrc != nodeSrc {
+		t.Errorf("pushed outer header src = %s, want %s (node_src_addr_table's own entry)", gotSrc, nodeSrc)
+	}
+	gotDst, _ := netip.AddrFromSlice(outer[24:40])
+	if gotDst != sid {
+		t.Errorf("pushed outer header dst = %s, want %s (the matched egress_route_table SID)", gotDst, sid)
+	}
+
+	// The original packet must survive completely unmodified, immediately
+	// after the new outer header.
+	if string(out[ethHeaderLen+ip6HeaderLen:]) != string(pkt[ethHeaderLen:]) {
+		t.Errorf("original packet content not preserved after the pushed outer header:\n want: % x\n  got: % x",
+			pkt[ethHeaderLen:], out[ethHeaderLen+ip6HeaderLen:])
+	}
+}
+
+// TestUsidEgress_RouteHitIPv4InnerUsesIPIPNextHeader covers the dual-stack
+// half of the same mechanism: RouteEgressAdd/EgressDefaultRouteAdd have
+// always supported IPv4 VPC prefixes egressing over this IPv6-only
+// underlay, unlike this program's own NPTv6/vip_xlat rewrites (IPv6-only
+// by design) -- so an IPv4 packet must still reach the egress-routing
+// extension and get encapsulated, with nexthdr=4 (IPIP) rather than 41.
+func TestUsidEgress_RouteHitIPv4InnerUsesIPIPNextHeader(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const tableID = 9
+	setUpEgressRouteAttachment(t, objs, 0x654321, 0x300, tableID)
+
+	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+	dst := netip.MustParseAddr("172.40.10.2")
+	key := egressRouteKey(tableID, egressRouteFamilyINET4, dst, 32)
+	dmac := [6]byte{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}
+	smac := [6]byte{0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}
+	const linkIfindex = 1
+	if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{
+		Sid: sid.As16(), LinkIfindex: linkIfindex, Dmac: dmac, Smac: smac,
+	}); err != nil {
+		t.Fatalf("populate egress_route_table: %v", err)
+	}
+
+	nodeSrc := netip.MustParseAddr("2001:db8:1:10::2")
+	if err := objs.NodeSrcAddrTable.Put(uint32(0), nodeSrc.As16()); err != nil {
+		t.Fatalf("populate node_src_addr_table: %v", err)
+	}
+
+	// usid_egress parses the packet's own single IPv6/IPv4 header
+	// directly (it is not itself decapsulating anything, unlike
+	// usid_ingress) -- build a plain Ethernet+IPv4 frame the same way
+	// buildPacketWithV6Addrs builds a plain Ethernet+IPv6 one.
+	v4pkt := buildPlainIPv4Packet(t, netip.MustParseAddr("10.0.0.1"), dst)
+
+	ret, out, err := objs.UsidEgress.Test(v4pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActRedirect {
+		t.Fatalf("verdict = %d, want TC_ACT_REDIRECT (%d)", ret, tcActRedirect)
+	}
+
+	if len(out) != len(v4pkt)+ip6HeaderLen {
+		t.Fatalf("output packet length = %d, want %d (original %d + one pushed IPv6 header)",
+			len(out), len(v4pkt)+ip6HeaderLen, len(v4pkt))
+	}
+	if string(out[0:6]) != string(dmac[:]) {
+		t.Errorf("pushed outer h_dest = % x, want %x (egress_route_table's own dmac)", out[0:6], dmac)
+	}
+	outer := out[ethHeaderLen : ethHeaderLen+ip6HeaderLen]
+	if gotNextHdr := outer[6]; gotNextHdr != 4 {
+		t.Errorf("pushed outer header nexthdr = %d, want 4 (IPIP, inner packet is IPv4)", gotNextHdr)
+	}
+	gotDst, _ := netip.AddrFromSlice(outer[24:40])
+	if gotDst != sid {
+		t.Errorf("pushed outer header dst = %s, want %s (the matched egress_route_table SID)", gotDst, sid)
+	}
+}
+
+// TestUsidEgress_NoNodeSourceAddressFailsOpen covers node_src_addr_table
+// not yet being populated (a real, expected transient state: this
+// program can be attached and egress_route_table populated slightly
+// before internal/cnibgp's registerEBPFDatapath gets around to writing
+// this node's own source address) -- must fail open (TC_ACT_UNSPEC,
+// unmodified) rather than encapsulate with a garbage all-zero source.
+func TestUsidEgress_NoNodeSourceAddressFailsOpen(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const tableID = 10
+	setUpEgressRouteAttachment(t, objs, 0x789abc, 0x400, tableID)
+
+	dst := netip.MustParseAddr("2001:db8:ffff::2")
+	key := egressRouteKey(tableID, egressRouteFamilyINET6, dst, 128)
+	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+	if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{Sid: sid.As16()}); err != nil {
+		t.Fatalf("populate egress_route_table: %v", err)
+	}
+	// node_src_addr_table deliberately left empty.
+
+	src := netip.MustParseAddr("fd20:70::1")
+	pkt := buildPacketWithV6Addrs(t, dst, src, src, dst)
+
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActUnspec {
+		t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d)", ret, tcActUnspec)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated with no node_src_addr_table entry:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+// TestUsidEgress_LinkLocalAndMulticastDestinationsNeverMatchEgressRoute is
+// the regression test for a real bug found live: a registered ::/0
+// default entry (EgressDefaultRouteAdd's own NAT66 default route) is a
+// literal catch-all, and without this exclusion it also matches
+// link-local and multicast destinations -- including a tenant pod's own
+// Neighbor Discovery traffic for resolving its *own default gateway's*
+// link-layer address. That NS packet got redirected toward a NAT66 shard
+// SID instead of ever reaching the normal host-side NDP handling that
+// must answer it, so the container's own gateway neighbor entry went to
+// FAILED and every packet through it died silently with a
+// locally-synthesized "Destination unreachable" -- confirmed live in
+// containerlab, and invisible to every one of this program's own drop
+// counters, since the packet was never dropped by this program at all,
+// just misrouted.
+func TestUsidEgress_LinkLocalAndMulticastDestinationsNeverMatchEgressRoute(t *testing.T) {
+	requireRoot(t)
+
+	const tableID = 12
+	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+	src := netip.MustParseAddr("fd20:70::1")
+
+	tests := []struct {
+		name string
+		dst  netip.Addr
+	}{
+		{name: "link-local unicast", dst: netip.MustParseAddr("fe80::1")},
+		{name: "solicited-node multicast (a real NS target)", dst: netip.MustParseAddr("ff02::1:ff00:1")},
+		{name: "all-nodes multicast", dst: netip.MustParseAddr("ff02::1")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := loadObjects(t)
+			setUpEgressRouteAttachment(t, objs, 0xaabbcc, 0x600, tableID)
+
+			// A ::/0 default entry -- the exact shape
+			// EgressDefaultRouteAdd installs -- so this test proves the
+			// exclusion, not just "no route happened to match."
+			if err := objs.EgressRouteTable.Put(
+				egressRouteKey(tableID, egressRouteFamilyINET6, netip.IPv6Unspecified(), 0),
+				UsidEgressRouteValue{Sid: sid.As16()},
+			); err != nil {
+				t.Fatalf("populate egress_route_table default entry: %v", err)
+			}
+			if err := objs.NodeSrcAddrTable.Put(uint32(0), netip.MustParseAddr("2001:db8:1:10::2").As16()); err != nil {
+				t.Fatalf("populate node_src_addr_table: %v", err)
+			}
+
+			pkt := buildPacketWithV6Addrs(t, tt.dst, src, src, tt.dst)
+			ret, out, err := objs.UsidEgress.Test(pkt)
+			if err != nil {
+				t.Fatalf("program test-run: %v", err)
+			}
+			if ret != tcActUnspec {
+				t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d) -- must never be claimed by the default route", ret, tcActUnspec)
+			}
+			if string(out) != string(pkt) {
+				t.Errorf("packet mutated for excluded destination %s:\n in: % x\nout: % x", tt.dst, pkt, out)
+			}
+		})
+	}
+}

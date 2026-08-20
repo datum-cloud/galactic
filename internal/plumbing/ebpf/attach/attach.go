@@ -180,8 +180,34 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		return nil, err
 	}
 
+	// Pin usid_egress too, alongside the maps above -- unlike usid_ingress
+	// (attached once per node, by this same long-running process, to a
+	// known interface name from a static env var), usid_egress attaches
+	// per-attachment, at CNI ADD time, to an interface that doesn't exist
+	// until that ADD creates it -- internal/cnibgp, a short-lived process
+	// with no other handle on this collection, needs to load this exact
+	// program by its pin to attach it. A stale pin from a previous
+	// process's Load is removed and replaced unconditionally: unlike a
+	// map, a program has no persistent state to preserve across the
+	// swap, so there's no reuse-vs-recreate decision to make the way
+	// unpinIncompatibleMaps has to make for maps.
+	egressPinPath := filepath.Join(pinDir, UsidEgressPinName)
+	if rmErr := os.Remove(egressPinPath); rmErr != nil && !os.IsNotExist(rmErr) {
+		err = fmt.Errorf("attach: remove stale usid_egress pin: %w", rmErr)
+		return nil, err
+	}
+	if pinErr := loaded.UsidEgress.Pin(egressPinPath); pinErr != nil {
+		err = fmt.Errorf("attach: pin usid_egress program: %w", pinErr)
+		return nil, err
+	}
+
 	return &loaded, nil
 }
+
+// UsidEgressPinName is the bpffs filename usid_egress is pinned under,
+// alongside (but distinct from, so it can never collide with) every map
+// name under the same pinDir.
+const UsidEgressPinName = "usid_egress_prog"
 
 // unpinIncompatibleMaps removes the on-disk pin for every map spec.Maps
 // names, if one exists under pinDir -- called after LoadAndAssign fails
@@ -231,19 +257,44 @@ func Attach(program *ebpf.Program, ifaceNames []string) error {
 
 	var errs []error
 	for _, name := range ifaceNames {
-		if err := attachOne(program, name); err != nil {
+		if err := attachOne(program, name, filterName); err != nil {
 			errs = append(errs, fmt.Errorf("interface %q: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// attachOne attaches program to one interface's ingress hook. It is the
-// single internal choke point every attach path in this package goes
-// through (Attach's loop below, and Watch's netlink-driven reconcile in
-// watch.go), so instrumenting it here with attachHook (hooks.go, Milestone
-// 4) observes every attach attempt regardless of caller.
-func attachOne(program *ebpf.Program, name string) (err error) {
+// egressFilterName identifies usid_egress's own TC-BPF ingress filter,
+// mirroring filterName's identical "so a re-attach replaces the same
+// filter instead of stacking a duplicate" role for usid_ingress -- kept
+// as its own distinct constant even though the two programs never
+// target the same interface in practice (usid_ingress: the shared
+// uplink; usid_egress: each tenant's own host-side veth/tap).
+const egressFilterName = "galactic_usid_egress"
+
+// AttachEgress attaches program (usid_egress, loaded via its own pin --
+// see Load's own doc comment for why) to ifaceName's ingress hook: the
+// tenant's own host-side veth/tap interface, per usid_egress's own doc
+// comment in usid.c for why that -- not the shared uplink usid_ingress
+// uses -- is the correct attach point. Thin wrapper around the same
+// attachOne/FilterReplace idempotency Attach already provides, just
+// under egressFilterName and for exactly one interface at a time (each
+// internal/cnibgp CNI ADD attaches its own single attachment's interface,
+// never a batch).
+func AttachEgress(program *ebpf.Program, ifaceName string) error {
+	if program == nil {
+		return errors.New("attach: program is nil")
+	}
+	return attachOne(program, ifaceName, egressFilterName)
+}
+
+// attachOne attaches program to one interface's ingress hook under the
+// given tc filter name. It is the single internal choke point every
+// attach path in this package goes through (Attach's loop above,
+// AttachEgress above, and Watch's netlink-driven reconcile in watch.go),
+// so instrumenting it here with attachHook (hooks.go, Milestone 4)
+// observes every attach attempt regardless of caller.
+func attachOne(program *ebpf.Program, name, tcFilterName string) (err error) {
 	defer func() { attachHook(name, err) }()
 
 	link, err := netlink.LinkByName(name)
@@ -266,7 +317,7 @@ func attachOne(program *ebpf.Program, name string) (err error) {
 			Priority:  filterPriorityFn(),
 		},
 		Fd:           program.FD(),
-		Name:         filterName,
+		Name:         tcFilterName,
 		DirectAction: true,
 	}
 	if err = netlink.FilterReplace(filter); err != nil {

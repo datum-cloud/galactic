@@ -10,98 +10,60 @@ import (
 	"net"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 )
 
-// seg6IptunModeEncapRed is SEG6_IPTUN_MODE_ENCAP_RED from the kernel UAPI
-// (include/uapi/linux/seg6_iptunnel.h's mode enum: INLINE=0, ENCAP=1,
-// L2ENCAP=2, ENCAP_RED=3, L2ENCAP_RED=4). The vendored
-// github.com/vishvananda/netlink/nl package only exports INLINE(0)/ENCAP(1)
-// -- it has never picked up the kernel's later reduced-mode values -- but
-// netlink.SEG6Encap.Mode is a plain int forwarded verbatim to the kernel via
-// nl.EncodeSEG6Encap with no validation, so the numeric value can be used
-// directly without patching or forking that dependency.
-//
-// "Reduced" encap matters here because it changes the wire format for the
-// single-segment case this function always installs (Segments always has
-// exactly one entry, the resolved SID). Confirmed empirically against this
-// SID/lab's kernel and iproute2 (ip -6 route add ... encap seg6 mode
-// encap.red segs <sid> ..., captured on the wire both for an IPv6 inner
-// packet and, matching this codebase's actual IPv4-VPC-over-IPv6-underlay
-// case, an IPv4 inner packet): SEG6_IPTUN_MODE_ENCAP (the previous value
-// here) always prepends a full Segment Routing Header (RFC 8754, outer
-// Next Header = 43/Routing), even for one segment. SEG6_IPTUN_MODE_ENCAP_RED
-// omits the SRH entirely for a single segment -- the one segment is already
-// fully expressed by the outer destination address, so there is nothing
-// left for an SRH to carry -- leaving the outer Next Header set directly to
-// the inner packet's own protocol (4/IPIP or 41/IPv6-in-IPv6).
-//
-// That distinction is why cross-node pod traffic was silently black-holed:
-// internal/plumbing/ebpf/prog/usid.c's galactic_usid_ingress TC-BPF program
-// (the sole ingress/decap path since the legacy seg6local route model was
-// removed) requires the outer Next Header to name the inner packet's AF
-// directly (IPIP=4 or IPv6-in-IPv6=41) and unconditionally drops anything
-// else -- including a Routing Header -- as DROP_REASON_UNEXPECTED_NEXTHDR.
-// Every packet this function's previous SEG6_IPTUN_MODE_ENCAP route
-// produced hit exactly that drop on arrival at the destination node.
-const seg6IptunModeEncapRed = 3
+// pinDir is the bpffs directory RouteEgressAdd/RouteEgressDel/
+// EgressDefaultRouteAdd/EgressDefaultRouteDel open egress_route_table
+// from -- a package var defaulting to attach.PinDir (the same seam
+// internal/cnibgp/cnibgp.go's own ebpfPinDir var provides), overridable in
+// this package's own tests so they don't depend on a real bpffs mount or
+// root privileges the way a live pinned-map integration test would.
+var pinDir = attach.PinDir
 
-// RouteEgressAdd installs a SEG6 encap route for prefix into routing table
-// tableID, encapsulating to the given SRv6 SID (gateway). The outgoing
-// interface and L3 next-hop are resolved from the kernel's routing table for
-// gateway so the encapsulated outer packet can be L2-resolved on egress.
+// RouteEgressAdd installs an egress_route_table entry for prefix in Linux
+// VRF table tableID, encapsulating toward the given SRv6 SID (gateway) --
+// the TC-BPF replacement for what used to be a kernel-native SEG6 encap
+// route (netlink.SEG6Encap). See docs/plans/tc-bpf-egress-srv6-encap.md
+// for why: that kernel mechanism is confirmed broken by CVE-2026-31668
+// under this codebase's own per-tenant-VRF architecture (seg6 lwtunnel's
+// dst_cache reused blindly across the input/output resolution paths'
+// differing routing contexts), not fixable by any change to how this
+// package calls it.
 //
 // gateway must be a real SRv6 SID: an unspecified address (0.0.0.0 or ::,
 // including its IPv4-mapped ::ffff:0.0.0.0 form) means the caller never
 // resolved a real destination SID — installing it anyway would silently
 // blackhole traffic to prefix behind a route to nowhere, which is exactly
 // what happened before this check existed (an EVPN path with no usable SID
-// attribute was fed straight through). Fail loudly instead.
+// attribute was fed straight through). Fail loudly instead --
+// egressroutemap.EgressRouteTable.Register itself already enforces this.
 //
-// The resolved next-hop is attached via RTA_VIA (netlink.Route.Via) only
-// when prefix's family differs from the next-hop's — SRv6 SIDs are
-// IPv6-only in this architecture, so that's exactly the IPv4 VPC prefix
-// case (egressing over an IPv6 SRv6 underlay), where the plain Gw field
-// can't be used: Gw requires its address to share Dst's family and the
-// kernel rejects the mismatch outright, while Via carries a next-hop of a
-// different family than Dst by design.
-//
-// For an IPv6 VPC prefix, though, the next-hop already shares Dst's family,
-// and Via must NOT be used: unlike iproute2's `via` keyword, which silently
-// downgrades to a plain RTA_GATEWAY whenever the given address turns out to
-// share Dst's family, this netlink library sends whatever attribute the
-// caller set verbatim — RTA_VIA with a same-family address is rejected by
-// the kernel with EINVAL. Confirmed empirically: this function unconditionally
-// using Via previously blackholed every IPv6 VPC prefix's egress route
-// (RouteEgressAdd failing with "invalid argument"), while the IPv4 case,
-// which does need Via, worked fine.
+// Unlike the netlink-route mechanism this replaces, this function no
+// longer resolves gateway's own link/next-hop at install time
+// (resolveNextHop, below, is no longer called from here): usid_egress's
+// own bpf_fib_lookup() resolves that fresh, per packet -- see
+// egress_route_value's doc comment in usid.c for why that's both simpler
+// and self-healing.
 func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
+	// Checked here, before ever touching bpffs, not left solely to
+	// egressroutemap.EgressRouteTable.Register's own identical guard: a
+	// caller passing a bad gateway shouldn't need a real pinned map (or
+	// root) on hand just to get the right error back -- matching this
+	// function's own pre-TC-BPF behavior, which failed this same check
+	// before its first netlink call.
 	if gateway == nil || gateway.IsUnspecified() {
-		return fmt.Errorf("refusing to install seg6 encap route for %s: gateway %s is not a usable SRv6 SID", prefix, gateway)
+		return fmt.Errorf("refusing to install egress route for %s: gateway %s is not a usable SRv6 SID", prefix, gateway)
 	}
-	linkIndex, nextHop, err := resolveNextHop(gateway)
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("srv6: RouteEgressAdd: %w", err)
 	}
-	encap := &netlink.SEG6Encap{
-		Mode:     seg6IptunModeEncapRed,
-		Segments: []net.IP{gateway},
-	}
-	route := &netlink.Route{
-		Dst:       prefix,
-		Table:     int(tableID),
-		Encap:     encap,
-		LinkIndex: linkIndex,
-	}
-	if len(nextHop) > 0 {
-		if prefix.IP.To4() != nil {
-			// IPv4 VPC prefix, IPv6 next-hop: cross-family, must use Via.
-			route.Via = &netlink.Via{AddrFamily: netlink.FAMILY_V6, Addr: nextHop}
-		} else {
-			// IPv6 VPC prefix: next-hop shares Dst's family, use Gw.
-			route.Gw = nextHop
-		}
-	}
-	return netlink.RouteReplace(route)
+	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+	return table.Register(tableID, prefix, gateway)
 }
 
 // resolveNextHop resolves gateway's real, immediate next-hop -- the exact
@@ -115,8 +77,12 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 // through a link-local next-hop) rather than being on-link itself --
 // confirmed empirically live in containerlab, where every BGP next-hop
 // used as a plain gateway (RouteMainAdd, below) is exactly this indirect
-// shape. Both RouteEgressAdd and RouteMainAdd need gateway flattened into
-// one concrete hop before installing anything, for the same reason.
+// shape.
+//
+// Only RouteMainAdd calls this today: RouteEgressAdd/EgressDefaultRouteAdd
+// used to (their own SEG6 encap routes needed the identical flattening),
+// but no longer do -- usid_egress's own per-packet bpf_fib_lookup replaces
+// that resolution entirely for both (see RouteEgressAdd's own doc comment).
 func resolveNextHop(gateway net.IP) (linkIndex int, nextHop net.IP, err error) {
 	routes, err := netlink.RouteGet(gateway)
 	if err != nil {
@@ -128,18 +94,24 @@ func resolveNextHop(gateway net.IP) (linkIndex int, nextHop net.IP, err error) {
 	return routes[0].LinkIndex, routes[0].Gw, nil
 }
 
-// RouteEgressDel removes the SEG6 encap route for prefix from routing table tableID.
+// RouteEgressDel removes the egress_route_table entry for prefix from
+// Linux VRF table tableID -- RouteEgressAdd's counterpart.
 func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
-	return netlink.RouteDel(&netlink.Route{
-		Dst:   prefix,
-		Table: int(tableID),
-		Encap: &netlink.SEG6Encap{},
-	})
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
+	if err != nil {
+		return fmt.Errorf("srv6: RouteEgressDel: %w", err)
+	}
+	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+	return table.Unregister(tableID, prefix)
 }
 
 // RouteMainAdd installs a plain route for prefix in routing table tableID,
 // forwarding to gateway via ordinary recursive next-hop resolution -- no
-// SEG6 encapsulation, unlike RouteEgressAdd.
+// SEG6 encapsulation, unlike RouteEgressAdd, and untouched by the
+// TC-BPF migration RouteEgressAdd/EgressDefaultRouteAdd underwent above:
+// this function never called netlink.SEG6Encap in the first place, so it
+// was never exposed to CVE-2026-31668 at all (see its own doc comment
+// below for why an anycast route specifically must not be SEG6-wrapped).
 //
 // This exists for EVPN Type 5 paths that carry no Route Target extended
 // community at all (see matchTableID in internal/runtime/gobgp/monitor.go):
@@ -197,111 +169,137 @@ func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
 	})
 }
 
-// defaultRoutePrefix is the IPv6 default route (::/0) EgressDefaultRouteAdd
-// installs -- the catch-all a tenant VRF falls back to once every more
-// specific route (intra-VPC peers via RouteEgressAdd, anycast VIPs via
-// RouteMainAdd) has already missed.
-var defaultRoutePrefix = &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
-
-// EgressDefaultRouteAdd installs a multipath IPv6 default route (::/0) in
-// routing table tableID, SEG6-encapsulating toward every address in
-// shardSIDs -- one nexthop per shard, equally weighted. This is the
-// missing half of the design plan's §3 sharded NAT66 tier: nat66.c's own
-// shard-receive side has always been able to decap and NAT a packet
-// addressed to its own shard_sid, but nothing ever produced such a packet
-// -- no code anywhere installed a default route in a tenant VRF at all,
-// so a backend with no more specific destination simply had no route out
-// (confirmed live: "no route to host" from vrf60's own table). This closes
-// that gap the same way RouteEgressAdd closes it for a specific intra-VPC
-// destination, just fanned out across every live shard instead of one
-// fixed gateway.
+// EgressDefaultRouteAdd installs egress_route_table's default (::/0)
+// entry for Linux VRF table tableID, encapsulating toward the first
+// usable address in shardSIDs -- the TC-BPF replacement for what used to
+// be a kernel-native SEG6 encap default route (see RouteEgressAdd's own
+// doc comment for why). This is the missing half of the design plan's §3
+// sharded NAT66 tier: nat66.c's own shard-receive side has always been
+// able to decap and NAT a packet addressed to its own shard_sid, but
+// nothing ever produced such a packet -- no code anywhere installed a
+// default route in a tenant VRF at all, so a backend with no more
+// specific destination simply had no route out (confirmed live: "no
+// route to host" from vrf60's own table). This closes that gap the same
+// way RouteEgressAdd closes it for a specific intra-VPC destination.
 //
-// Shard selection here is deliberately NOT internal/maglev, unlike the
-// design plan §3.2's original text ("shard assignment is chosen via a
-// maglev.Table built over (tenant VRFID, backend addr:port, dest
-// addr:port)"). That per-flow, in-datapath hash was never actually
-// implemented (internal/maglev is only ever called from the ingress LB's
-// own backend-selection ring), and building an equivalent TC-BPF hash
-// stage here would be a second, much larger new eBPF component. Linux's
-// own ECMP multipath hashing over these nexthops already gives near-even
-// load spread across shards without any new datapath code, and modern
-// kernels' resilient nexthop groups (RTA_NH_ID hash-policy "resilient")
-// give the same bounded-disruption-on-membership-change
-// property Maglev was chosen for in the first place -- but this function
-// installs plain multipath nexthops, not a resilient nexthop group,
-// since building/managing a named nexthop group is extra bookkeeping this
-// phase doesn't need: correctness (a route exists, traffic flows) matters
-// more here than minimizing reshuffled flows on a shard add/remove, which
-// is why the design plan's own §5 already treats shard-set-change
-// disruption as a property to prove, not a hard requirement gating this
-// mechanism's existence. Revisit with a real nexthop group if/when that
-// bound is actually needed.
+// Picking only the first usable shard, rather than spreading load across
+// all of them, is a deliberate simplification: design plan §3.2's own
+// per-flow hash (internal/maglev, or an earlier version of this
+// function's own kernel-ECMP-multipath approximation of it) was never a
+// hard requirement -- §3.5 treats shard-set-change disruption as a
+// property to prove, not one gating this mechanism's existence at all --
+// and correctness (a route exists, traffic flows) matters more here than
+// shard load distribution. Revisit with a real selection mechanism (a
+// second, larger LPM/hash map in usid.c, or per-flow hashing inside
+// usid_egress itself) if per-shard load spreading is ever needed.
 //
 // shardSIDs must be non-empty -- EgressDefaultRouteAdd installs nothing
 // and returns nil when it is, the same "nothing configured yet, not an
 // error" stance GALACTIC_CNI_NAT66_SHARD_SIDS's own doc comment takes. An
 // unspecified/nil entry is a real misconfiguration and fails loudly
-// (matching RouteEgressAdd/RouteMainAdd's own guard), but a *reachable*
-// shard SID that resolveNextHop simply cannot resolve *yet* is silently
-// skipped, not fatal to the whole call: found live on a tenant node that
-// is *also* one of the configured shards itself (this lab's own "reuse
-// the site workers as shards" layout, design plan §8) -- GoBGP, like
-// every other BGP implementation, never reflects a node's own
-// locally-originated advertisement back into that same node's received-path
-// processing, so a shard's own node can *never* resolve a route to its
-// own SID, only to every other shard's. Aborting the entire multipath
-// route over that one permanently-unresolvable nexthop would have meant
-// no default route at all on every shard node -- exactly the nodes most
-// likely to actually run tenant workloads in this lab. The route this
-// function installs simply has one fewer nexthop on a shard's own node;
-// EgressDefaultRouteAdd only fails outright when *every* configured SID
-// is unresolvable, since a route with zero nexthops is not a route worth
-// installing at all.
+// (matching RouteEgressAdd's own guard, enforced by
+// egressroutemap.EgressRouteTable.Register).
+//
+// EgressDefaultRouteAdd still needs to skip a shard SID it cannot yet
+// resolve a route+neighbor for, and only fail if every one does: a real,
+// necessary case found live -- a tenant node that is *also* one of the
+// configured shards itself (this lab's own "reuse the site workers as
+// shards" layout) can never resolve a route to its *own* advertised SID,
+// since GoBGP, like every BGP implementation, never reflects a
+// self-originated path back into that same node's received-path
+// processing. egressroutemap.EgressRouteTable.Register resolves
+// link/L2 information at registration time (see its own doc comment for
+// why), so this same resolvability constraint that applied to the
+// netlink-route mechanism's own resolveNextHop applies again here,
+// unlike an intermediate version of this function that (incorrectly)
+// assumed it no longer would.
 func EgressDefaultRouteAdd(tableID uint32, shardSIDs []net.IP) error {
 	if len(shardSIDs) == 0 {
 		return nil
 	}
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
+	if err != nil {
+		return fmt.Errorf("srv6: EgressDefaultRouteAdd: %w", err)
+	}
+	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
 
-	nexthops := make([]*netlink.NexthopInfo, 0, len(shardSIDs))
 	var unresolved []error
 	for _, sid := range shardSIDs {
+		// Checked here, before ever touching bpffs -- see RouteEgressAdd's
+		// identical guard for why.
 		if sid == nil || sid.IsUnspecified() {
 			return fmt.Errorf("refusing to install NAT66 default route: shard SID %s is not a usable SRv6 SID", sid)
 		}
-		linkIndex, nextHop, err := resolveNextHop(sid)
-		if err != nil {
+		if err := table.Register(tableID, egressroutemap.DefaultPrefix, sid); err != nil {
 			unresolved = append(unresolved, fmt.Errorf("shard %s: %w", sid, err))
 			continue
 		}
-		nh := &netlink.NexthopInfo{
-			LinkIndex: linkIndex,
-			Encap:     &netlink.SEG6Encap{Mode: seg6IptunModeEncapRed, Segments: []net.IP{sid}},
-		}
-		if len(nextHop) > 0 {
-			nh.Gw = nextHop
-		} else {
-			nh.Gw = sid
-		}
-		nexthops = append(nexthops, nh)
+		return nil
 	}
-
-	if len(nexthops) == 0 {
-		return fmt.Errorf("no NAT66 shard SID is resolvable yet, out of %d configured: %w",
-			len(shardSIDs), errors.Join(unresolved...))
-	}
-
-	return netlink.RouteReplace(&netlink.Route{
-		Dst:       defaultRoutePrefix,
-		Table:     int(tableID),
-		MultiPath: nexthops,
-	})
+	return fmt.Errorf("no NAT66 shard SID is resolvable yet, out of %d configured: %w",
+		len(shardSIDs), errors.Join(unresolved...))
 }
 
-// EgressDefaultRouteDel removes the NAT66 default route (::/0) from routing
-// table tableID -- EgressDefaultRouteAdd's counterpart.
+// EgressDefaultRouteDel removes egress_route_table's default (::/0) entry
+// for Linux VRF table tableID -- EgressDefaultRouteAdd's counterpart.
 func EgressDefaultRouteDel(tableID uint32) error {
-	return netlink.RouteDel(&netlink.Route{
-		Dst:   defaultRoutePrefix,
-		Table: int(tableID),
-	})
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
+	if err != nil {
+		return fmt.Errorf("srv6: EgressDefaultRouteDel: %w", err)
+	}
+	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+	return table.Unregister(tableID, egressroutemap.DefaultPrefix)
+}
+
+// ResolveNodeSourceAddress resolves this node's own SRv6/underlay-facing
+// source address: the primary global IPv6 address on the same
+// interface(s) usid_ingress/usid_egress themselves are attached to
+// (attach.ResolveInterfaces).
+//
+// This is the address usid_egress's egress-routing extension writes into
+// every outer header it pushes (via egressroutemap.NodeSourceAddress) --
+// the TC-BPF replacement's own analog of a property the kernel-native
+// SEG6 lwtunnel mechanism gave for free, via ordinary IPv6
+// source-address-selection (RTA_PREFSRC): confirmed live, `ip -6 route get
+// <SID>` reported `src 2001:db8:1:10::2` (this node's own fabric-facing
+// eth1 address) for every SEG6-encapsulated route this package ever
+// installed, with no explicit `src` ever configured anywhere in this
+// codebase.
+//
+// Deliberately reuses attach.ResolveInterfaces rather than re-deriving
+// "the fabric interface" via its own separate heuristic (an earlier
+// version of this function guessed from the main-table IPv6 default
+// route's own interface): found live, that guess is simply wrong on this
+// lab's own topology (and, in general, on any node where the default
+// route belongs to the cluster/pod network, not the SRv6 underlay) --
+// eth0 (the container network) carries the default route, while eth1
+// (the real fabric interface, attached to `GALACTIC_CNI_EBPF_INTERFACES`
+// or, in its absence, this same package's own auto-detected default-route
+// interface) does not. attach.ResolveInterfaces is the datapath's own,
+// already-correct answer to "which interface is the fabric one" -- reusing
+// it here guarantees this function can never disagree with wherever
+// usid_egress itself is actually attached.
+func ResolveNodeSourceAddress() (net.IP, error) {
+	names, err := attach.ResolveInterfaces()
+	if err != nil {
+		return nil, fmt.Errorf("resolve SRv6/underlay-facing interface: %w", err)
+	}
+	if len(names) == 0 {
+		return nil, errors.New("attach.ResolveInterfaces returned no interfaces")
+	}
+
+	link, err := netlink.LinkByName(names[0])
+	if err != nil {
+		return nil, fmt.Errorf("look up interface %q: %w", names[0], err)
+	}
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+	if err != nil {
+		return nil, fmt.Errorf("list addresses on %s: %w", names[0], err)
+	}
+	for _, a := range addrs {
+		if a.Scope == unix.RT_SCOPE_UNIVERSE && !a.IP.IsUnspecified() {
+			return a.IP, nil
+		}
+	}
+	return nil, fmt.Errorf("no global-scope IPv6 address found on %s (the SRv6/underlay-facing interface)", names[0])
 }
