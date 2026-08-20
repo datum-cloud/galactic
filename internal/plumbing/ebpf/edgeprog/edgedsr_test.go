@@ -5,6 +5,7 @@
 package edgeprog
 
 import (
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"os"
@@ -223,6 +224,23 @@ func TestEdgeLB_ForwardsPacketUnmodifiedToBackend(t *testing.T) {
 	copy(gotOuterSaddr[:], out[ethLen+8:ethLen+24])
 	if wantOuterSaddr := encapSrc.As16(); gotOuterSaddr != wantOuterSaddr {
 		t.Errorf("outer saddr = %x, want %x (this node's own encap_src)", gotOuterSaddr, wantOuterSaddr)
+	}
+
+	// The outer header must be valid IPv6 on the wire: version nibble ==
+	// 6, and payload_len covering the *entire* inner packet (its own
+	// 40-byte IPv6 header plus its own payload), not just the inner
+	// payload alone. Both were real bugs found via live-kernel
+	// investigation (a synthetic BPF_PROG_TEST_RUN packet doesn't care,
+	// but a real receiver parsing this as wire-format IPv6 does) --
+	// regression-guarded here so they can't silently return.
+	if gotVersion := out[ethLen] >> 4; gotVersion != 6 {
+		t.Errorf("outer header IPv6 version = %d, want 6", gotVersion)
+	}
+	gotOuterPayloadLen := binary.BigEndian.Uint16(out[ethLen+4 : ethLen+6])
+	wantOuterPayloadLen := uint16(ip6Len + udpLen + len(payload))
+	if gotOuterPayloadLen != wantOuterPayloadLen {
+		t.Errorf("outer header payload_len = %d, want %d (inner ip6 header + inner payload)",
+			gotOuterPayloadLen, wantOuterPayloadLen)
 	}
 
 	const innerOffset = ethLen + ip6Len

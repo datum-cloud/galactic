@@ -29,6 +29,8 @@ import (
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/hash"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/loaddr"
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
@@ -155,6 +157,36 @@ func runCmd(cfg *config.RouterConfig) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
+	// Open this node's own vip_xlat_table handle for
+	// ServiceVIPBindingReconciler's EgressKindTap branch. This is new
+	// plumbing (docs/agents/ARCHITECTURE-ROUTER.md's "For Claude" table
+	// pre-dates it): galactic-router has never before needed to reach any
+	// of the eBPF uSID datapath's maps -- that program is loaded/attached
+	// once, elsewhere, by galactic-cni/internal/plumbing/ebpf/attach; this
+	// only opens a *second* handle onto the map it already pinned, the
+	// exact pattern internal/plumbing/ebpf/usidmap.OpenPinnedRegistry
+	// already established for the short-lived galactic-cni plugin binary.
+	// Unlike that binary, galactic-router is long-lived, so the returned
+	// closer is deferred to process shutdown rather than closed
+	// immediately -- it never affects the pinned map's own lifetime.
+	//
+	// A missing pin (e.g. this node's eBPF uSID datapath hasn't loaded
+	// yet, or never will -- a route-reflector/control-role node has no
+	// CNI attach point at all) is not fatal: it only matters once a
+	// tap-kind ServiceVIPBinding is actually reconciled on this node, at
+	// which point ServiceVIPBindingReconciler.applyTapBind reports a
+	// clear, actionable error instead of silently no-op'ing. Every
+	// EgressKindVeth binding works regardless.
+	var vipTranslationTable controller.VIPTranslationTable
+	vipXlatTable, vipXlatCloser, vipXlatErr := vipxlatmap.OpenPinnedVipXlatTable(attach.PinDir)
+	if vipXlatErr != nil {
+		ctrl.Log.Error(vipXlatErr, "vip_xlat_table not available on this node; "+
+			"tap-kind ServiceVIPBinding objects will fail to bind until the eBPF uSID datapath is loaded")
+	} else {
+		vipTranslationTable = vipXlatTable
+		defer vipXlatCloser.Close() //nolint:errcheck // best-effort close of our own fd at shutdown
+	}
+
 	// Register field indexes.
 	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
 		return fmt.Errorf("register field indexes: %w", err)
@@ -224,6 +256,16 @@ func runCmd(cfg *config.RouterConfig) error {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup Node controller: %w", err)
+	}
+
+	// Register ServiceVIPBinding controller.
+	if err := (&controller.ServiceVIPBindingReconciler{
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		NodeName:            nodeName,
+		VIPTranslationTable: vipTranslationTable,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
 	}
 
 	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
@@ -349,5 +391,7 @@ func newRootCommand() *cobra.Command {
 		"Directory containing the webhook server's TLS cert/key; defaults to controller-runtime's own default")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
+
+	cmd.AddCommand(newVIPCommand())
 	return cmd
 }

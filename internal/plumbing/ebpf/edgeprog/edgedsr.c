@@ -384,7 +384,20 @@ static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 s
 	struct edge_ethhdr *eth = data;
 	struct edge_ip6hdr *outer = (void *) (eth + 1);
 
+	// vtc_flow's first nibble is the IPv6 version field -- must be 6, not
+	// left at a zeroed default. Found via live-kernel investigation (not
+	// BPF_PROG_TEST_RUN, which never validates this): a real receiver
+	// downstream of this push (e.g. tcpdump on a veth peer) parses this
+	// pushed header as "invalid IPv6, version 0 != 6" -- a real,
+	// previously uncaught bug (inherited unchanged from the removed
+	// edgenat.c's identical push_outer_header), not specific to DSR.
+	// usid_ingress's own decap doesn't validate the version nibble at all
+	// (it reads fields at fixed offsets unconditionally), so this was
+	// invisible on that specific receive path -- but any version-checking
+	// intermediate hop or receiver would legitimately reject every packet
+	// this datapath ever pushed.
 	__builtin_memset(outer->vtc_flow, 0, sizeof(outer->vtc_flow));
+	outer->vtc_flow[0] = 0x60;
 	outer->payload_len = inner_payload_len_plus_ip6hdr;
 	outer->nexthdr = EDGE_IPPROTO_IPV6;
 	outer->hop_limit = 64;
@@ -499,9 +512,26 @@ int edge_lb(struct xdp_md *ctx)
 	// entire premise (design plan §0): no DNAT, no SNAT, no checksum
 	// touch, the client's own packet travels inside untouched all the way
 	// to the backend, which replies to the client directly.
-	__be16 inner_payload_len = ip6->payload_len;
+	//
+	// push_outer_header's own parameter name says "plus ip6hdr": the
+	// outer header's payload_len must cover the *entire* inner packet,
+	// including the inner IPv6 header itself (40 bytes), not just the
+	// inner UDP/TCP payload ip6->payload_len alone names. A previous
+	// version of this call site passed ip6->payload_len directly,
+	// undercounting the outer header's declared length by exactly 40
+	// bytes on every packet -- found via live-kernel investigation (a
+	// real receiver, e.g. tcpdump on a veth peer, parsed the result as
+	// "length 24 < 40 (invalid)"), inherited unchanged from the removed
+	// edgenat.c's identical bug. usid_ingress's own decap doesn't
+	// validate payload_len at all (fixed-offset reads only), so this was
+	// invisible on that specific receive path, same as the version-nibble
+	// bug this file's other recent fix addresses -- but any
+	// length-validating intermediate hop or receiver would have rejected
+	// every packet this datapath ever pushed.
+	__be16 inner_payload_len_plus_ip6hdr =
+		__builtin_bswap16((__u16) sizeof(struct edge_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 
-	if (push_outer_header(ctx, cfg->encap_src, b->usid, inner_payload_len) != 0)
+	if (push_outer_header(ctx, cfg->encap_src, b->usid, inner_payload_len_plus_ip6hdr) != 0)
 		return XDP_DROP;
 
 	return XDP_TX;

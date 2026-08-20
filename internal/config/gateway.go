@@ -45,10 +45,13 @@ const (
 	// to support — see GatewayConfig.Validate.
 	EnvGatewayPublicInterface = "GALACTIC_GATEWAY_PUBLIC_INTERFACE"
 
-	// EnvGatewaySRv6Address is this gateway node's own SRv6-reachable
-	// address (network.datumapis.com/v1alpha1's NetworkGatewayStatus.
-	// SRv6Address), used as the Full-NAT SNAT source for every ingress
-	// flow this node translates. Required — see EnvGatewayPublicInterface.
+	// EnvGatewaySRv6Address is this gateway node's own plain
+	// SRv6-reachable address, used as the outer-header encap source for
+	// every packet this node's DSR datapath forwards (edgedsr.c's
+	// encap_config_table) — never a NAT/SNAT source and never compared
+	// against anything on a receive path, unlike the removed Full-NAT
+	// design's identically-named field. Required — see
+	// EnvGatewayPublicInterface.
 	EnvGatewaySRv6Address = "GALACTIC_GATEWAY_SRV6_ADDRESS"
 )
 
@@ -67,7 +70,7 @@ type GatewayConfig struct {
 	MetricsPort    int
 	GRPCHealthPort int
 
-	// PublicInterface/SRv6Address configure the edge NAT+LB gateway
+	// PublicInterface/SRv6Address configure the edge Maglev/DSR gateway
 	// datapath -- see EnvGatewayPublicInterface's doc comment. Both
 	// required; GatewayConfig.Validate rejects either being empty.
 	PublicInterface string
@@ -83,9 +86,9 @@ func NewGatewayConfig() *GatewayConfig {
 	v.SetEnvPrefix("GALACTIC_GATEWAY")
 	v.AutomaticEnv()
 
-	v.SetDefault("node_name", "")
-	v.SetDefault("metrics_port", DefaultGatewayMetricsPort)
-	v.SetDefault("grpc_health_port", DefaultGatewayGRPCHealthPort)
+	v.SetDefault(KeyNodeName, "")
+	v.SetDefault(KeyMetricsPort, DefaultGatewayMetricsPort)
+	v.SetDefault(KeyGRPCHealthPort, DefaultGatewayGRPCHealthPort)
 	v.SetDefault("public_interface", "")
 	v.SetDefault("srv6_address", "")
 
@@ -104,9 +107,9 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		flag string
 		key  string
 	}{
-		{"node-name", "node_name"},
-		{"metrics-port", "metrics_port"},
-		{"grpc-health-port", "grpc_health_port"},
+		{FlagNodeName, KeyNodeName},
+		{FlagMetricsPort, KeyMetricsPort},
+		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"gateway-public-interface", "public_interface"},
 		{"gateway-srv6-address", "srv6_address"},
 	}
@@ -123,9 +126,9 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 
 // readFields populates the exported fields from the current Viper state.
 func (c *GatewayConfig) readFields() {
-	c.NodeName = c.v.GetString("node_name")
-	c.MetricsPort = c.v.GetInt("metrics_port")
-	c.GRPCHealthPort = c.v.GetInt("grpc_health_port")
+	c.NodeName = c.v.GetString(KeyNodeName)
+	c.MetricsPort = c.v.GetInt(KeyMetricsPort)
+	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.PublicInterface = c.v.GetString("public_interface")
 	c.SRv6Address = c.v.GetString("srv6_address")
 }

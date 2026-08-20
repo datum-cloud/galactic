@@ -92,12 +92,12 @@ func NewRouterConfig() *RouterConfig {
 	v.SetEnvPrefix("GALACTIC_ROUTER")
 	v.AutomaticEnv()
 
-	v.SetDefault("node_name", "")
+	v.SetDefault(KeyNodeName, "")
 	v.SetDefault("reflector", false)
 	v.SetDefault("bgp_listen_port", DefaultRouterBGPListenPort)
 	v.SetDefault("bgp_local_address", "")
-	v.SetDefault("metrics_port", DefaultRouterMetricsPort)
-	v.SetDefault("grpc_health_port", DefaultRouterGRPCHealthPort)
+	v.SetDefault(KeyMetricsPort, DefaultRouterMetricsPort)
+	v.SetDefault(KeyGRPCHealthPort, DefaultRouterGRPCHealthPort)
 	v.SetDefault("gc_namespace", DefaultRouterGCNamespace)
 	v.SetDefault("gc_interval", DefaultRouterGCInterval.String())
 	v.SetDefault("webhook_enabled", false)
@@ -119,12 +119,12 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		flag string
 		key  string
 	}{
-		{"node-name", "node_name"},
+		{FlagNodeName, KeyNodeName},
 		{"reflector", "reflector"},
 		{"bgp-listen-port", "bgp_listen_port"},
 		{"bgp-local-address", "bgp_local_address"},
-		{"metrics-port", "metrics_port"},
-		{"grpc-health-port", "grpc_health_port"},
+		{FlagMetricsPort, KeyMetricsPort},
+		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"gc-namespace", "gc_namespace"},
 		{"gc-interval", "gc_interval"},
 		{"webhook-enabled", "webhook_enabled"},
@@ -144,12 +144,12 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 
 // readFields populates the exported fields from the current Viper state.
 func (c *RouterConfig) readFields() {
-	c.NodeName = c.v.GetString("node_name")
+	c.NodeName = c.v.GetString(KeyNodeName)
 	c.Reflector = c.v.GetBool("reflector")
 	c.BGPListenPort = c.v.GetInt("bgp_listen_port")
 	c.BGPLocalAddr = c.v.GetString("bgp_local_address")
-	c.MetricsPort = c.v.GetInt("metrics_port")
-	c.GRPCHealthPort = c.v.GetInt("grpc_health_port")
+	c.MetricsPort = c.v.GetInt(KeyMetricsPort)
+	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.GCNamespace = c.v.GetString("gc_namespace")
 	c.GCInterval = c.v.GetDuration("gc_interval")
 	c.WebhookEnabled = c.v.GetBool("webhook_enabled")

@@ -20,13 +20,14 @@ const (
 	bgpAPIGroup   = "network.datumapis.com"
 	bgpAPIVersion = "v1alpha1"
 
-	resourceBGPRouters        = "bgprouters"
-	resourceBGPPeers          = "bgppeers"
-	resourceBGPAdvertisements = "bgpadvertisements"
-	resourceBGPPolicies       = "bgppolicies"
-	resourceBGPVRFInstances   = "bgpvrfinstances"
-	resourceSecrets           = "secrets"
-	resourceNodes             = "nodes"
+	resourceBGPRouters         = "bgprouters"
+	resourceBGPPeers           = "bgppeers"
+	resourceBGPAdvertisements  = "bgpadvertisements"
+	resourceBGPPolicies        = "bgppolicies"
+	resourceBGPVRFInstances    = "bgpvrfinstances"
+	resourceServiceVIPBindings = "servicevipbindings"
+	resourceSecrets            = "secrets"
+	resourceNodes              = "nodes"
 )
 
 func main() {
@@ -64,6 +65,7 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPAdvertisements},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPPolicies},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPVRFInstances},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceVIPBindings},
 		{version: "v1", resource: resourceSecrets},
 		{version: "v1", resource: resourceNodes},
 	}

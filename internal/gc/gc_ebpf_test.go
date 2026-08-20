@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/nptv6map"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -225,4 +226,104 @@ func blockFromLocator(t *testing.T, locator string) (uint64, error) {
 		return 0, err
 	}
 	return uformat.Block(prefix.Addr())
+}
+
+// TestSweepEBPFNPTv6Table_MissingPinDirIsNoOp mirrors
+// TestSweepEBPFVRFTable_MissingPinDirIsNoOp for the nptv6_table sweep.
+func TestSweepEBPFNPTv6Table_MissingPinDirIsNoOp(t *testing.T) {
+	k8s := fake.NewClientBuilder().WithScheme(gcTestScheme(t)).Build()
+	result := SweepEBPFNPTv6Table(context.Background(), k8s, "default", "node-a", "/sys/fs/bpf/galactic-does-not-exist")
+	if result.Errors != 0 || result.EBPFNPTv6EntriesRemoved != 0 {
+		t.Errorf("result = %+v, want a zero-value result (no-op)", result)
+	}
+}
+
+// TestSweepEBPFNPTv6Table_RegistersLiveRemovesStale is nptv6_table's own
+// exit criterion, mirroring TestSweepEBPFVRFTable_RemovesStaleKeepsLive:
+// unlike vrf_table, this function is nptv6_table's *only* writer (see its
+// own doc comment), so it must both register a live BGPVRFInstance's own
+// NPTv6 mapping AND remove a stale one whose CRD is absent, in the same
+// call.
+func TestSweepEBPFNPTv6Table_RegistersLiveRemovesStale(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		namespace  = "default"
+		nodeName   = "node-a"
+		routerName = "router-a"
+		locator    = "2001:db8:1::/48"
+		liveVRFID  = int32(10)
+		staleVRFID = int32(20)
+	)
+
+	router := &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Name: routerName, Namespace: namespace},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: "Node", Name: nodeName},
+			LocalASN:    65000,
+			SRv6Locator: locator,
+			NodeID:      5,
+		},
+	}
+	liveInst := &bgpv1alpha1.BGPVRFInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "live-vrf", Namespace: namespace},
+		Spec: bgpv1alpha1.BGPVRFInstanceSpec{
+			RouterTarget:       bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: routerName}},
+			VRFID:              liveVRFID,
+			ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: testRouteTarget}},
+			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: testRouteTarget}},
+			NPTv6: &bgpv1alpha1.NPTv6Spec{
+				ULAPrefix:    "fd00:1::/48",
+				PublicPrefix: "2001:db8:2::/48",
+			},
+		},
+	}
+	// staleVRFID's BGPVRFInstance is deliberately NOT created -- only
+	// live-vrf exists in the fake client; its nptv6_table row is seeded
+	// directly below to simulate one left behind by a deleted CRD.
+	k8s := fake.NewClientBuilder().WithScheme(gcTestScheme(t)).WithObjects(router, liveInst).Build()
+
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-gcsweep-nptv6-test-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	loaderObjs, err := attach.Load(pinDir)
+	if err != nil {
+		t.Fatalf("attach.Load: %v", err)
+	}
+	t.Cleanup(func() { _ = loaderObjs.Close() })
+
+	table, closer, err := nptv6map.OpenPinned(pinDir)
+	if err != nil {
+		t.Fatalf("nptv6map.OpenPinned: %v", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	block, err := blockFromLocator(t, locator)
+	if err != nil {
+		t.Fatalf("derive block: %v", err)
+	}
+	staleArgument := uint16(staleVRFID)
+	staleMapping, err := buildNPTv6Mapping(&bgpv1alpha1.NPTv6Spec{
+		ULAPrefix: "fd00:9::/48", PublicPrefix: "2001:db8:9::/48",
+	})
+	if err != nil {
+		t.Fatalf("buildNPTv6Mapping: %v", err)
+	}
+	if err := table.Register(block, staleArgument, staleMapping); err != nil {
+		t.Fatalf("seed stale entry: %v", err)
+	}
+
+	result := SweepEBPFNPTv6Table(context.Background(), k8s, namespace, nodeName, pinDir)
+	if result.Errors != 0 {
+		t.Errorf("result.Errors = %d, want 0", result.Errors)
+	}
+	if result.EBPFNPTv6EntriesRemoved != 1 {
+		t.Errorf("result.EBPFNPTv6EntriesRemoved = %d, want 1", result.EBPFNPTv6EntriesRemoved)
+	}
+
+	if _, ok, err := table.Get(block, uint16(liveVRFID)); err != nil || !ok {
+		t.Errorf("live entry after sweep: ok=%v err=%v, want ok=true (must be registered)", ok, err)
+	}
+	if _, ok, err := table.Get(block, staleArgument); err != nil || ok {
+		t.Errorf("stale entry after sweep: ok=%v err=%v, want ok=false (must be removed)", ok, err)
+	}
 }

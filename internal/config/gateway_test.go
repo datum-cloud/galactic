@@ -34,7 +34,7 @@ func TestGatewayConfigDefaults(t *testing.T) {
 }
 
 func TestGatewayConfigEnvOverride(t *testing.T) {
-	t.Setenv(EnvGatewayNodeName, "env-node")
+	t.Setenv(EnvGatewayNodeName, testEnvNode)
 	t.Setenv(EnvGatewayMetricsPort, "9090")
 	t.Setenv(EnvGatewayGRPCHealthPort, "9091")
 	t.Setenv(EnvGatewayPublicInterface, testGatewayIface)
@@ -42,8 +42,8 @@ func TestGatewayConfigEnvOverride(t *testing.T) {
 
 	cfg := NewGatewayConfig()
 
-	if cfg.NodeName != "env-node" {
-		t.Errorf("NodeName = %q, want %q", cfg.NodeName, "env-node")
+	if cfg.NodeName != testEnvNode {
+		t.Errorf("NodeName = %q, want %q", cfg.NodeName, testEnvNode)
 	}
 	if cfg.MetricsPort != 9090 {
 		t.Errorf("MetricsPort = %d, want 9090", cfg.MetricsPort)
@@ -66,9 +66,9 @@ func TestGatewayConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "missing node name",
+			name:    testCaseMissingNodeName,
 			envVars: map[string]string{EnvGatewayPublicInterface: testGatewayIface, EnvGatewaySRv6Address: testGatewaySRv6},
-			wantErr: "node name is required",
+			wantErr: testErrNodeNameRequired,
 		},
 		{
 			name:    "missing public interface",
@@ -98,29 +98,29 @@ func TestGatewayConfigValidate(t *testing.T) {
 			envVars: map[string]string{
 				EnvGatewayNodeName:        testGatewayNodeName,
 				EnvGatewayPublicInterface: testGatewayIface,
-				EnvGatewaySRv6Address:     "203.0.113.1",
+				EnvGatewaySRv6Address:     testIPv4Addr,
 			},
-			wantErr: "must be a native IPv6 address",
+			wantErr: testErrMustBeNativeIPv6,
 		},
 		{
-			name: "invalid metrics port",
+			name: testCaseInvalidMetricsPort,
 			envVars: map[string]string{
 				EnvGatewayNodeName:        testGatewayNodeName,
 				EnvGatewayPublicInterface: testGatewayIface,
 				EnvGatewaySRv6Address:     testGatewaySRv6,
 				EnvGatewayMetricsPort:     "0",
 			},
-			wantErr: "metrics port must be between",
+			wantErr: testErrMetricsPortRange,
 		},
 		{
-			name: "invalid grpc health port",
+			name: testCaseInvalidGRPCHealthPort,
 			envVars: map[string]string{
 				EnvGatewayNodeName:        testGatewayNodeName,
 				EnvGatewayPublicInterface: testGatewayIface,
 				EnvGatewaySRv6Address:     testGatewaySRv6,
 				EnvGatewayGRPCHealthPort:  "0",
 			},
-			wantErr: "grpc health port must be between",
+			wantErr: testErrGRPCHealthPortRange,
 		},
 		{
 			name: "valid config",

@@ -23,6 +23,16 @@ rules:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "watch", "delete"]
+  # servicevipbindings needs update/patch on the base resource (not just
+  # delete, unlike bgpadvertisements/bgpvrfinstances above):
+  # ServiceVIPBindingReconciler adds/removes its own teardown finalizer via
+  # a Patch call on the object itself (mirroring NetworkRuleReconciler's
+  # identical finalizer pattern on NetworkRule, config/galactic-gateway/
+  # rbac.yaml), not just its /status subresource.
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - servicevipbindings
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
       - bgprouters/status
@@ -30,6 +40,7 @@ rules:
       - bgpadvertisements/status
       - bgppolicies/status
       - bgpvrfinstances/status
+      - servicevipbindings/status
     verbs: ["get", "update", "patch"]
   - apiGroups: [""]
     resources:
