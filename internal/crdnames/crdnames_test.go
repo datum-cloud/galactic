@@ -47,6 +47,13 @@ const (
 	testVPCBase62        = "0000000jU"
 	testAttachment       = "def"
 	testAttachmentBase62 = "00G"
+
+	// testTenantID and testTenantIDBase62 are the already-joined
+	// (vpc, attachment) identifiers for the pairs above -- shared across
+	// the table-driven tests that need the formatted form rather than the
+	// two raw parts.
+	testTenantID       = testVPC + "-" + testAttachment
+	testTenantIDBase62 = testVPCBase62 + "-" + testAttachmentBase62
 )
 
 func TestBGPVRFInstanceName(t *testing.T) {
@@ -91,8 +98,8 @@ func TestBGPAdvertisementName(t *testing.T) {
 
 func TestTenantIdentifier(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
-		{testVPC, testAttachment, "abc-def"},
-		{testVPCBase62, testAttachmentBase62, "0000000jU-00G"},
+		{testVPC, testAttachment, testTenantID},
+		{testVPCBase62, testAttachmentBase62, testTenantIDBase62},
 	}
 	for _, tt := range tests {
 		got := TenantIdentifier(tt.vpc, tt.attachment)
@@ -117,6 +124,52 @@ func TestTenantIdentifierDoesNotMatchBGPAdvertisementName(t *testing.T) {
 			"if nameSegment's encoding changed to make these equal again, TenantIdentifier's "+
 			"raw-value recoverability guarantee needs re-verifying, not just this test updating",
 			vpc, attachment, got)
+	}
+}
+
+func TestParseTenantIdentifier(t *testing.T) {
+	tests := []struct {
+		name           string
+		id             string
+		wantVPC        string
+		wantAttachment string
+		wantOK         bool
+	}{
+		{"simple", testTenantID, testVPC, testAttachment, true},
+		{"base62 vpc", testTenantIDBase62, testVPCBase62, testAttachmentBase62, true},
+		{"no separator", "abcdef", "", "", false},
+		{"empty vpc", "-def", "", "", false},
+		{"empty attachment", "abc-", "", "", false},
+		{"empty string", "", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVPC, gotAttachment, gotOK := ParseTenantIdentifier(tt.id)
+			if gotOK != tt.wantOK || gotVPC != tt.wantVPC || gotAttachment != tt.wantAttachment {
+				t.Errorf("ParseTenantIdentifier(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tt.id, gotVPC, gotAttachment, gotOK, tt.wantVPC, tt.wantAttachment, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestParseTenantIdentifierRoundTrip verifies ParseTenantIdentifier inverts
+// TenantIdentifier for arbitrary base62 (vpc, vpcAttachment) pairs — the
+// property #855's ingress sidecar reconciler actually relies on.
+func TestParseTenantIdentifierRoundTrip(t *testing.T) {
+	tests := []struct{ vpc, attachment string }{
+		{testVPC, testAttachment},
+		{testVPCBase62, testAttachmentBase62},
+		{"0", "0"},
+		{"Zz9", "aB0"},
+	}
+	for _, tt := range tests {
+		id := TenantIdentifier(tt.vpc, tt.attachment)
+		gotVPC, gotAttachment, ok := ParseTenantIdentifier(id)
+		if !ok || gotVPC != tt.vpc || gotAttachment != tt.attachment {
+			t.Errorf("ParseTenantIdentifier(TenantIdentifier(%q, %q)) = (%q, %q, %v), want (%q, %q, true)",
+				tt.vpc, tt.attachment, gotVPC, gotAttachment, ok, tt.vpc, tt.attachment)
+		}
 	}
 }
 

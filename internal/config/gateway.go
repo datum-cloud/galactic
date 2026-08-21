@@ -160,7 +160,7 @@ func (c *GatewayConfig) Validate() error {
 		return fmt.Errorf("SRv6 address %q must be a native IPv6 address, not IPv4", c.SRv6Address)
 	}
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
-		return errors.New("metrics port must be between 1 and 65535")
+		return errors.New(errMetricsPortRange)
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")

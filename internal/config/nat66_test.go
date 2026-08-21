@@ -164,7 +164,7 @@ func TestNAT66ConfigValidate(t *testing.T) {
 			wantErr: testErrGRPCHealthPortRange,
 		},
 		{
-			name: "valid config",
+			name: testCaseValidConfig,
 			envVars: map[string]string{
 				EnvNAT66NodeName:        testNAT66NodeName,
 				EnvNAT66UplinkInterface: testNAT66Iface,

@@ -27,6 +27,19 @@ const (
 	LogLevelWarn    = "warn"
 	LogLevelWarning = "warning"
 	LogLevelError   = "error"
+
+	// flagMetricsPort is the CLI flag name shared by RouterConfig,
+	// GatewayConfig, and VRFConfig's BindFlags -- each binds it to the same
+	// keyMetricsPort Viper key.
+	flagMetricsPort = "metrics-port"
+
+	// keyMetricsPort is the Viper key each component's MetricsPort field
+	// resolves from (SetDefault/BindFlags/GetInt).
+	keyMetricsPort = "metrics_port"
+
+	// errMetricsPortRange is the out-of-range validation message shared by
+	// RouterConfig, GatewayConfig, and VRFConfig's Validate.
+	errMetricsPortRange = "metrics port must be between 1 and 65535"
 )
 
 // --- Shared CLI flag names --------------------------------------------

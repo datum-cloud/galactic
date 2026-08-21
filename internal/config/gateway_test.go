@@ -123,7 +123,7 @@ func TestGatewayConfigValidate(t *testing.T) {
 			wantErr: testErrGRPCHealthPortRange,
 		},
 		{
-			name: "valid config",
+			name: testCaseValidConfig,
 			envVars: map[string]string{
 				EnvGatewayNodeName:        testGatewayNodeName,
 				EnvGatewayPublicInterface: testGatewayIface,

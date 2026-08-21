@@ -196,3 +196,29 @@ func TenantIdentifier(vpc, vpcAttachment string) string {
 func EndpointSliceName(podName string) string {
 	return podName
 }
+
+// ParseTenantIdentifier splits a TenantIdentifier(vpc, vpcAttachment) value
+// back into its vpc and vpcAttachment components. This is the ingress
+// sidecar's (#855) only way to recover vpc — the value the kernel-side VRF
+// primitives are actually keyed by, per docs/plans/855-ingress-sidecar-vpc-
+// backend-connectivity.md §1/§2 — since neither LabelTenantID nor
+// AnnotationTenantID carries vpc on its own, only the combined identifier.
+//
+// The split is unambiguous: both components are non-empty base62 strings
+// ([0-9a-zA-Z], see internal/cnimaster.IsValidBase62) and base62 never
+// contains "-", so vpc can never itself contain the separator
+// TenantIdentifier joins the two halves with. This is a stronger guarantee
+// than internal/gc's vpcFromVRFName has to work with — that one recovers vpc
+// from a zero-padded, lossy kernel interface name and has to tolerate
+// stripping leading zeros; this recovers it from the same unpadded string
+// TenantIdentifier itself produced, so there is nothing lossy to correct
+// for.
+//
+// Returns ok=false if id contains no "-" or either resulting half is empty.
+func ParseTenantIdentifier(id string) (vpc, vpcAttachment string, ok bool) {
+	vpc, vpcAttachment, found := strings.Cut(id, "-")
+	if !found || vpc == "" || vpcAttachment == "" {
+		return "", "", false
+	}
+	return vpc, vpcAttachment, true
+}
