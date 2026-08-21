@@ -9,10 +9,20 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: galactic-router
+  # Like config/fabric-router/daemonset.yaml, this is a BGP speaker whose
+  # gRPC health probe (below) only reflects "the process is up" --
+  # cmd/galactic-router/root.go sets SERVING unconditionally right after
+  # the server starts, never tied to iBGP session/route state -- so
+  # RollingUpdate would advance to the next node on exactly the wrong
+  # signal. A restart implicitly withdraws routes (no BGP graceful restart
+  # support in internal/runtime/gobgp), and for the tenant-control
+  # (route-reflector) role every tenant node's iBGP session pivots through
+  # this one pod, so an automatic rollout there is a fleet-wide route flap,
+  # not a single-node one -- worse than fabric-router's per-node blast
+  # radius. OnDelete puts pod recreation under explicit, node-by-node
+  # control instead.
   updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
+    type: OnDelete
   template:
     metadata:
       labels:

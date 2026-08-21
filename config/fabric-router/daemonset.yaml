@@ -9,10 +9,27 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: fabric-router
+  # Unlike every other DaemonSet in config/ (galactic-cni, galactic-router,
+  # galactic-gateway, vmtap-cni), this one owns the eBGP session to the
+  # physical fabric switch, not an in-cluster control-plane relationship.
+  # Bouncing FRR here drops the node's only underlay path, so every overlay
+  # SRv6/EVPN path riding on it blackholes until the eBGP session
+  # re-establishes and reconverges -- and galactic-router-control/
+  # galactic-gateway crash-loop per the toleration comment below if it
+  # doesn't come back. The startupProbe/livenessProbe below only check that
+  # zebra/bgpd answer vtysh (the daemon is alive), not that the eBGP
+  # session to the fabric peer has reconverged, so a RollingUpdate would
+  # let the DaemonSet controller advance to the next node on that same
+  # shallow signal -- too early for a component this foundational.
+  # OnDelete puts pod recreation under explicit control (a human or a
+  # future automated rollout runbook, one node at a time, verifying
+  # reconvergence in between) instead of the controller auto-advancing.
+  # This also matches how fabric-config changes already work today: there's
+  # no checksum annotation on the pod template, so editing the fabric-config
+  # ConfigMap doesn't trigger a rollout either -- both config and image
+  # updates require a deliberate pod bounce.
   updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
+    type: OnDelete
   template:
     metadata:
       labels:
