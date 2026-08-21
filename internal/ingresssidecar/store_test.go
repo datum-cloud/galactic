@@ -22,11 +22,16 @@ func mustPrefix(t *testing.T, s string) *net.IPNet {
 
 const testGrace = 10 * time.Second
 
-// testVPC1 and testPodName are the fixture VPC/pod-name values shared
-// across this package's tests.
+// testVPC1, testPodName, and testMalformedTenantID are fixture values
+// shared across this package's tests.
 const (
 	testVPC1    = "vpc1"
 	testPodName = "pod-a"
+	// testMalformedTenantID has no "-" separator, so
+	// crdnames.ParseTenantIdentifier rejects it -- used by both
+	// controller_test.go and seed_test.go to build a selected-but-
+	// malformed EndpointSlice fixture.
+	testMalformedTenantID = "novalidseparator"
 )
 
 // TestStoreRouteAndVRFAppear verifies a pod's first appearance creates both

@@ -82,9 +82,8 @@ func hasTenantLabel(obj client.Object) bool {
 // condition over potentially many routes, not a single watched object's own
 // transition). Mirrors cmd/galactic-router's GC ticker goroutine in shape.
 //
-// Callers must not start this until the manager's informer cache has
-// synced and Store.Inventory has run — see Store.Inventory's own doc
-// comment.
+// Callers must not start this until SeedFromAPI and Store.Inventory have
+// both run — see Store.Inventory's own doc comment.
 func RunSweeper(ctx context.Context, store *Store, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

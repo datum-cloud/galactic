@@ -35,8 +35,8 @@ const (
 
 // runCmd contains the application startup logic: it registers
 // internal/ingresssidecar's Reconciler against a cluster-scoped
-// EndpointSlice watch, then runs its startup inventory and periodic sweep
-// once the manager's caches have synced. There is no BGP runtime, CRD
+// EndpointSlice watch, then seeds Store from the live API state and runs
+// its startup inventory and periodic sweep. There is no BGP runtime, CRD
 // scheme beyond clientgoscheme's built-in discoveryv1 registration, or
 // per-node identity of any kind here — see internal/config.VRFConfig's own
 // doc comment for why.
@@ -73,15 +73,20 @@ func runCmd(cfg *config.VRFConfig) error {
 		return fmt.Errorf("setup EndpointSlice controller: %w", err)
 	}
 
-	// Startup inventory + periodic sweep, gated on the manager's caches
-	// having synced -- see Store.Inventory's own doc comment for why: every
-	// EndpointSlice that exists at boot must have already gone through its
-	// own initial Reconcile (and therefore SetDesired) before Inventory or
-	// Sweep ever run, or a live VPC/pod could be misjudged as orphaned.
-	// Mirrors cmd/galactic-router's own GC-ticker startup goroutine.
+	// Startup seed + inventory + periodic sweep. Every EndpointSlice that
+	// exists at boot must be visible to Store *before* Inventory or Sweep
+	// ever run, or a live VPC/pod could be misjudged as orphaned -- see
+	// ingresssidecar.SeedFromAPI's own doc comment for why that can no
+	// longer be mgr.GetCache().WaitForCacheSync's job: a synced cache only
+	// guarantees the informer's initial List landed in the cache, not that
+	// the controller's own Reconcile has drained the workqueue that same
+	// List fed, so on a busy node at boot the two could race. SeedFromAPI
+	// uses mgr.GetAPIReader(), the manager's uncached reader, so it
+	// doesn't depend on cache/workqueue timing at all. Mirrors
+	// cmd/galactic-router's own GC-ticker startup goroutine.
 	go func() {
-		if !mgr.GetCache().WaitForCacheSync(ctx) {
-			log.Printf("startup inventory: cache sync failed, skipping")
+		if err := ingresssidecar.SeedFromAPI(ctx, mgr.GetAPIReader(), store); err != nil {
+			log.Printf("startup seed: %v", err)
 			return
 		}
 		if err := store.Inventory(ctx, time.Now()); err != nil {

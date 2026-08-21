@@ -88,8 +88,8 @@ func TestReconcilerMalformedSliceDoesNotError(t *testing.T) {
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "ns", Name: testPodName,
-			Labels:      map[string]string{crdnames.LabelTenantID: "novalidseparator"},
-			Annotations: map[string]string{crdnames.AnnotationTenantID: "novalidseparator"},
+			Labels:      map[string]string{crdnames.LabelTenantID: testMalformedTenantID},
+			Annotations: map[string]string{crdnames.AnnotationTenantID: testMalformedTenantID},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()

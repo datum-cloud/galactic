@@ -217,19 +217,19 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 // currently-installed seg6 routes) already present on the host at process
 // start — §9 item 2 of the plan's startup-reconcile-safety decision.
 //
-// Call this once, after the manager's caches have synced (so every
-// EndpointSlice existing at boot has already been through SetDesired via
-// the controller's own initial reconcile pass — see Reconciler) but before
+// Call this once, after every EndpointSlice existing at boot has already
+// been through SetDesired — see SeedFromAPI, which callers must run first
+// for exactly that reason (its own doc comment covers why
+// mgr.GetCache().WaitForCacheSync alone isn't sufficient here) — but before
 // the first Sweep runs. A VPC/route already known by that point is left
-// alone: a live EndpointSlice's reconcile beat Inventory here, so its
-// absentSince is already clear. Anything Inventory itself has to seed is,
-// by construction, missing that reconcile — either a VPC/pod truly orphaned
-// while this sidecar was down, or one whose EndpointSlice hasn't reconciled
-// yet for some other reason — so it's seeded with an ordinary grace period
-// starting now rather than torn down on sight (giving a slightly late
-// EndpointSlice reconcile a chance to reclaim it) and rather than kept
-// alive forever (the pre-#377-revision failure mode this decision exists to
-// avoid).
+// alone: SeedFromAPI's call already claimed it, so its absentSince is
+// already clear. Anything Inventory itself has to seed is, by construction,
+// missing that claim — either a VPC/pod truly orphaned while this sidecar
+// was down, or one whose EndpointSlice is itself gone/unready for some
+// other reason — so it's seeded with an ordinary grace period starting now
+// rather than torn down on sight (giving a slightly late EndpointSlice
+// update a chance to reclaim it) and rather than kept alive forever (the
+// pre-#377-revision failure mode this decision exists to avoid).
 func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 	infos, err := s.backend.ListVRFs()
 	if err != nil {
