@@ -19,10 +19,15 @@ spec:
         app.kubernetes.io/name: galactic-gateway
     spec:
       # Dedicated gateway-role nodes only, opt-in, matching every other
-      # role's pattern (config/galactic-router/tenant, config/galactic-router/tenant-control).
-      # Excludes control-plane outright for the same reason those do. See
-      # ../kustomization.yaml for why this base is meant to be instantiated
-      # once per gateway node rather than applied as-is.
+      # role's pattern (config/galactic-router/overlays/default, config/galactic-router/overlays/rr).
+      # "edge" here means the actual network edge -- the ingress/egress
+      # boundary this gateway sits on -- not galactic-router's per-node
+      # role, which is galactic.datumapis.com/node=compute (see
+      # config/galactic-router/overlays/default/daemonset-patch.yaml's own
+      # comment on that naming). Excludes control-plane outright for the
+      # same reason those do. See ../kustomization.yaml for why this base
+      # is meant to be instantiated once per gateway node rather than
+      # applied as-is.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -33,7 +38,7 @@ spec:
                   - key: galactic.datumapis.com/node
                     operator: In
                     values:
-                      - gateway
+                      - edge
       # See ../rbac.yaml's header comment: one ServiceAccount for both
       # containers is a Kubernetes constraint (a Pod has exactly one
       # ServiceAccount identity), not a design choice — its ClusterRole
@@ -52,11 +57,11 @@ spec:
         - operator: Exists
       containers:
         # Tenant BGP only: galactic-router has no gateway-role flags/env.
-        # Identical to config/galactic-router/tenant's
+        # Identical to config/galactic-router/base's
         # own container spec; duplicated here (rather than patched from
         # config/galactic-router/base) because this pod additionally needs a second
         # container, a distinct grpc-health port, and a scoped-down
-        # securityContext the shared tenant/tenant-control roles don't need
+        # securityContext the shared default/rr roles don't need
         # to think about.
         - name: galactic-router
           # ":latest" is a placeholder only: no such tag is ever pushed to
@@ -77,7 +82,7 @@ spec:
             - name: GALACTIC_ROUTER_GC_NAMESPACE
               value: galactic-system
             - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
-              # Same as config/galactic-router/tenant/daemonset-patch.yaml: -1
+              # Same as config/galactic-router/overlays/default/daemonset-patch.yaml: -1
               # disables the inbound BGP listener, so there's no BGP
               # containerPort to declare on this container either -- this
               # role only dials out to iBGP peers.

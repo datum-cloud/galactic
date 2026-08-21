@@ -3,9 +3,9 @@
 # provenance). ns60's nginx Deployment (resources/tenants/ns60/) has no
 # node pin of its own beyond excluding control-plane nodes, and lands on
 # iad-worker in practice (the only untainted, non-route-reflector,
-# non-gateway-role worker in the iad cluster -- iad-worker2/
-# iad-worker-control is the route reflector and iad-gateway1/iad-gateway2
-# are tainted gateway-role nodes; confirm the live pod's actual node with
+# non-edge-role worker in the iad cluster -- iad-worker2/
+# iad-worker-rr is the route reflector and iad-gateway1/iad-gateway2
+# are tainted edge-role (galactic.datumapis.com/node=edge) nodes; confirm the live pod's actual node with
 # `kubectl get pod -n ns60 -o wide` the same way that file's comment
 # already documents for the backend address itself).
 #

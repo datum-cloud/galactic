@@ -1,5 +1,5 @@
 resources:
-  - tenant
+  - overlays/default
 patches:
   - path: router-lab-patch.yaml
     target:

@@ -9,7 +9,7 @@ spec:
       # node: GALACTIC_GATEWAY_SRV6_ADDRESS below must be unique per
       # gateway node (see config/galactic-gateway/base/kustomization.yaml's doc
       # comment), so galactic-gateway1/galactic-gateway2 are two separate
-      # DaemonSets rather than one DaemonSet matching both gateway-labeled
+      # DaemonSets rather than one DaemonSet matching both edge-labeled
       # nodes with identical env.
       affinity:
         nodeAffinity:
@@ -21,7 +21,7 @@ spec:
                   - key: galactic.datumapis.com/node
                     operator: In
                     values:
-                      - gateway
+                      - edge
                   - key: kubernetes.io/hostname
                     operator: In
                     values:

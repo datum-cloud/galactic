@@ -1,6 +1,6 @@
 namespace: galactic-system
 resources:
-  - tenant-control
+  - overlays/rr
   - bgprouter.yaml
   - bgppeer-dfw.yaml
   - bgppeer-iad.yaml

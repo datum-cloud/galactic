@@ -6,37 +6,20 @@ spec:
   template:
     spec:
       # config/galactic-nat66/base/daemonset.yaml's own affinity requires
-      # galactic.datumapis.com/node: nat66 -- a dedicated node role this
-      # lab has never introduced (see AGENTS.md's "Node labels" note:
-      # every site worker here is labeled galactic.datumapis.com/node:
-      # edge). Per the redesign plan's own §8 suggestion, this lab reuses
-      # dfw-worker itself as a shard rather than adding a new dedicated
-      # nat66-labeled node, so this patch replaces the whole affinity
-      # block to match dfw-worker's real "edge" label plus a
-      # kubernetes.io/hostname pin -- otherwise the base's own affinity
-      # would never match any node in this cluster and the DaemonSet
-      # would sit at zero replicas forever. GALACTIC_NAT66_SHARD_SID/
+      # galactic.datumapis.com/node: compute -- dfw-worker
+      # (node_files/dfw/config.yaml) carries it, reusing that existing
+      # compute worker as this site's shard rather than introducing a
+      # dedicated node, per the redesign plan's own §8 suggestion. No
+      # affinity override needed here: dfw-worker is the only node in
+      # this cluster carrying that label, so the base's own affinity
+      # already resolves to exactly it -- unlike
+      # resources/galactic-gateway/iad-gateway1/, which needs a
+      # kubernetes.io/hostname pin because iad has *two* edge-labeled
+      # nodes needing different per-node env. GALACTIC_NAT66_SHARD_SID/
       # _SHARD_PUB_ADDR below must be unique per shard node (see
       # config/galactic-nat66/kustomization.yaml's doc comment), so
       # dfw/iad/sjc are three separate per-node overlays rather than one
-      # overlay matching all three site workers with identical env --
-      # mirrors resources/galactic-gateway/iad-gateway1/'s identical
-      # per-node-overlay rationale.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
-                    operator: In
-                    values:
-                      - edge
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - dfw-worker
+      # overlay matching all three site workers with identical env.
       containers:
         - name: galactic-nat66
           env:

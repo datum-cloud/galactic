@@ -5,26 +5,28 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/node: compute
+      galactic.datumapis.com/fabric: "true"
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datumapis.com/node: control
+      galactic.datumapis.com/galactic-route-reflector: "true"
+      galactic.datumapis.com/fabric: "true"
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
         nodeRegistration:
-          name: iad-worker-control
+          name: iad-worker-rr
           taints:
-            - key: galactic.datumapis.com/node
-              value: control
+            - key: galactic.datumapis.com/galactic-route-reflector
+              value: "true"
               effect: NoSchedule
   # Dedicated edge XDP NAT+LB gateway nodes -- canary for
   # config/galactic-gateway/base/. Two nodes, active-active, matching the design's
   # own topology requirement (see
   # internal/gateway/doc.go): a single gateway node would still work but
   # would never actually exercise the primary/secondary BGP local-pref
-  # failover path. Tainted the same way the control role is above, to
+  # failover path. Tainted the same way the route-reflector node is above, to
   # keep ordinary tenant pods (resources/tenants/*/base/pod.yaml's
   # netshoot Deployments) off these dedicated nodes -- only DaemonSets
   # with a blanket toleration (config/galactic-router/base/daemonset.yaml,
@@ -32,7 +34,8 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datumapis.com/node: gateway
+      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/fabric: "true"
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
@@ -40,12 +43,13 @@ nodes:
           name: iad-gateway1
           taints:
             - key: galactic.datumapis.com/node
-              value: gateway
+              value: edge
               effect: NoSchedule
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datumapis.com/node: gateway
+      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/fabric: "true"
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
@@ -53,7 +57,7 @@ nodes:
           name: iad-gateway2
           taints:
             - key: galactic.datumapis.com/node
-              value: gateway
+              value: edge
               effect: NoSchedule
 networking:
   ipFamily: ipv6

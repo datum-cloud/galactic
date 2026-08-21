@@ -29,7 +29,7 @@ done
 # one worker, so both pods landing on the same node is the subject of the test,
 # not an incidental detail. Nothing in the fixture pins them together — iad has
 # a second worker, and only the route-reflector NoSchedule taint on
-# iad-worker-control keeps the pair on iad-worker — so if that taint goes away
+# iad-worker-rr keeps the pair on iad-worker — so if that taint goes away
 # the pings below would still pass over the cross-node path and quietly stop
 # testing what ns40 is named for. Assert it instead.
 SCHED0=$(pod_scheduling_node "${NODE}" "${NS}" "${PODS[0]}")

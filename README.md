@@ -32,18 +32,18 @@ See the [galactic DevContainer](./.devcontainer/galactic/) for development envir
 
 ### Production Deployment
 
-Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace (labeled `pod-security.kubernetes.io/enforce: privileged` — every DaemonSet here needs it, for hostPath volumes, hostNetwork, and elevated capabilities), the `galactic-cni` DaemonSet, and both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/node: control`):
+Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace (labeled `pod-security.kubernetes.io/enforce: privileged` — every DaemonSet here needs it, for hostPath volumes, hostNetwork, and elevated capabilities), the `galactic-cni` DaemonSet, and both `galactic-router` roles — the default per-node role (`galactic-router`, runs everywhere except control-plane nodes) and `rr` (`galactic-router-rr`, the BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/galactic-route-reflector: "true"`):
 
 ```bash
 kubectl apply -k config/
 ```
 
-Each component can also be applied on its own, e.g. `kubectl apply -k config/galactic-router` for just the router (both roles) or `kubectl apply -k config/galactic-router/tenant` for just the per-node role.
+Each component can also be applied on its own, e.g. `kubectl apply -k config/galactic-router` for just the router (both roles) or `kubectl apply -k config/galactic-router/overlays/default` for just the default per-node role.
 
 Two components are **not** part of `kubectl apply -k config/` and must be applied separately, each with its own per-node prerequisite:
 
 - **`config/fabric-router/`** — the FRR underlay eBGP DaemonSet `galactic-router` depends on.
-- **`config/galactic-gateway/`** — the edge XDP NAT+LB gateway control plane (`galactic-router` + `galactic-gateway` running together on dedicated gateway-role nodes). `kubectl apply -k config/galactic-gateway/` only installs the shared, cluster-safe ServiceAccount/RBAC; `config/galactic-gateway/base/` itself is a template meant to be instantiated once per gateway node by a further overlay (see `deploy/containerlab/resources/galactic-gateway/` for a worked example) — apply that overlay per node instead of `base/` directly.
+- **`config/galactic-gateway/`** — the edge XDP NAT+LB gateway control plane (`galactic-router` + `galactic-gateway` running together on dedicated `galactic.datumapis.com/node: edge` nodes). `kubectl apply -k config/galactic-gateway/` only installs the shared, cluster-safe ServiceAccount/RBAC; `config/galactic-gateway/base/` itself is a template meant to be instantiated once per gateway node by a further overlay (see `deploy/containerlab/resources/galactic-gateway/` for a worked example) — apply that overlay per node instead of `base/` directly.
 
 ```bash
 kubectl apply -k config/fabric-router/
@@ -61,7 +61,7 @@ kubectl apply -k config/galactic-gateway/
   cd config/fabric-router && kustomize edit set image ghcr.io/datum-cloud/fabric-router=ghcr.io/datum-cloud/fabric-router:<resolved-tag>
   ```
 
-- **`config/fabric-router/`: per-node `frr.conf`.** Unlike every other component under `config/`, `config/fabric-router/daemonset.yaml` has no generic default config — the underlay eBGP session (interface addresses, remote-AS, etc.) is different for every physical node, and this DaemonSet's `nodeAffinity` (`galactic.datumapis.com/node` `In` `[edge, control]`) can legitimately match more than one node per cluster. Before applying `config/fabric-router/`, create a `fabric-config` ConfigMap in the `galactic-system` namespace with one `frr.conf.<nodename>` key per matching node (`<nodename>` is the Kubernetes node name, e.g. `frr.conf.worker-1`) — `frr-init` picks the right key at pod start via the pod's `NODE_NAME` downward-API env var. The other two files FRR needs, `daemons` and `vtysh.conf`, are already baked into the `fabric-router` image (see `containers/fabric-router/Dockerfile`); include them in the ConfigMap too only if you need to override the image defaults. `deploy/containerlab/resources/fabric/{dfw,iad,sjc}/frr.conf` are worked examples from the lab, not something you can apply as-is.
+- **`config/fabric-router/`: per-node `frr.conf`.** Unlike every other component under `config/`, `config/fabric-router/daemonset.yaml` has no generic default config — the underlay eBGP session (interface addresses, remote-AS, etc.) is different for every physical node, and this DaemonSet's `nodeAffinity` (`galactic.datumapis.com/fabric` `Exists`) can legitimately match more than one node per cluster. Before applying `config/fabric-router/`, create a `fabric-config` ConfigMap in the `galactic-system` namespace with one `frr.conf.<nodename>` key per matching node (`<nodename>` is the Kubernetes node name, e.g. `frr.conf.worker-1`) — `frr-init` picks the right key at pod start via the pod's `NODE_NAME` downward-API env var. The other two files FRR needs, `daemons` and `vtysh.conf`, are already baked into the `fabric-router` image (see `containers/fabric-router/Dockerfile`); include them in the ConfigMap too only if you need to override the image defaults. `deploy/containerlab/resources/fabric/{dfw,iad,sjc}/frr.conf` are worked examples from the lab, not something you can apply as-is.
 
 - **`config/fabric-router/` and `config/galactic-router/`: rolling out updates is manual.** Both `config/fabric-router/daemonset.yaml` and `config/galactic-router/base/daemonset.yaml` use `updateStrategy: OnDelete` — a `kubectl apply` (new image tag, or a spec change) will not restart any pod on its own. This is deliberate for both: each is a BGP speaker whose liveness/health probe only reflects "the process is up," not "the BGP session has reconverged," so `RollingUpdate` would advance to the next node on exactly the wrong signal — see the comment above `updateStrategy` in each manifest for the full reasoning. To actually roll out a change, delete pods one at a time and confirm the new pod's session(s) have reconverged before moving to the next node, e.g. for `fabric-router`:
 
@@ -75,14 +75,14 @@ kubectl apply -k config/galactic-gateway/
 
   A ConfigMap edit to `fabric-config` behaves the same way today regardless of `updateStrategy` — there's no checksum annotation wiring pod restarts to ConfigMap changes, so a config change also requires this same manual, node-by-node pod bounce to take effect.
 
-- **`config/galactic-router/`: rollout order — reflector last, one tenant at a time.** For `tenant-control` (the route reflector), every `tenant` node's iBGP session pivots through that one pod, so bouncing it is a fleet-wide route flap, not a single-node one — roll it only after all `tenant` nodes are already on the new version, and confirm every client has re-peered before considering the rollout done. For `tenant`, a bounce only withdraws that one node's own advertised prefixes, so it's safe to go node-by-node as with `fabric-router`. Check session state via the `BGPPeer` CRD's `STATE` column rather than `vtysh` (there's no `vtysh` in this binary — `galactic-router` reports session state itself):
+- **`config/galactic-router/`: rollout order — `rr` last, one compute node at a time.** For `rr`, every compute node's iBGP session pivots through that one pod, so bouncing it is a fleet-wide route flap, not a single-node one — roll it only after all compute nodes are already on the new version, and confirm every client has re-peered before considering the rollout done. For the default role, a bounce only withdraws that one node's own advertised prefixes, so it's safe to go node-by-node as with `fabric-router`. Check session state via the `BGPPeer` CRD's `STATE` column rather than `vtysh` (there's no `vtysh` in this binary — `galactic-router` reports session state itself):
 
   ```bash
-  kubectl -n galactic-system get pods -l app.kubernetes.io/name=galactic-router-tenant -o wide
+  kubectl -n galactic-system get pods -l app.kubernetes.io/name=galactic-router -o wide
   kubectl -n galactic-system delete pod <galactic-router-pod-on-one-node>
   # wait for the new pod to be Ready, then confirm its BGPPeer CRDs are back to STATE=Established
   kubectl get bgppeer
-  # repeat for the next tenant node, then only last roll galactic-router-control the same way
+  # repeat for the next compute node, then only last roll galactic-router-rr the same way
   ```
 
 - **`config/galactic-gateway/`: per-node public interface and SRv6 address.** `config/galactic-gateway/base/daemonset.yaml`'s `galactic-gateway` container requires `GALACTIC_GATEWAY_PUBLIC_INTERFACE` and `GALACTIC_GATEWAY_SRV6_ADDRESS` — the latter must be unique per gateway node and has no generic default (there's no in-cluster mechanism yet that derives it automatically; see `publishSelfAddress`'s doc comment in `internal/controller/networkgateway_controller.go`). Applying `base/` as shipped, without pinning both per node, produces a crash-looping container. Instantiate `base/` via a further overlay that pins it to one node (`kubernetes.io/hostname`) and sets that node's values — see `deploy/containerlab/resources/galactic-gateway/` for a worked two-node example.

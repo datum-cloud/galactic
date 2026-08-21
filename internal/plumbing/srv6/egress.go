@@ -202,7 +202,7 @@ func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
 //
 // EgressDefaultRouteAdd still needs to skip a shard SID it cannot yet
 // resolve a route+neighbor for, and only fail if every one does: a real,
-// necessary case found live -- a tenant node that is *also* one of the
+// necessary case found live -- a compute node that is *also* one of the
 // configured shards itself (this lab's own "reuse the site workers as
 // shards" layout) can never resolve a route to its *own* advertised SID,
 // since GoBGP, like every BGP implementation, never reflects a

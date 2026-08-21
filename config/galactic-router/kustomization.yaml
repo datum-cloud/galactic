@@ -1,5 +1,17 @@
+# base/ is a role-agnostic template, not meant to be applied on its own --
+# overlays/default/ and overlays/rr/ each independently build their own
+# isolated kustomize nested build on top of base/ and patch it into their
+# own role. A top-level patches: entry here (rather than a dedicated
+# overlay) was tried and reverted: Kustomize's patches[].target.name is
+# matched unanchored-regex-style against the fully-accumulated resource
+# set, so even an anchored "^galactic-router$" here still cross-contaminated
+# rr's already-nameSuffix'd "galactic-router-rr" DaemonSet, silently
+# overwriting its own overrides. Scoping each role's patch inside its own
+# nested kustomization build (matching before any nameSuffix is applied,
+# and before the parent ever sees more than one DaemonSet) is the only
+# reliable way to keep the two roles' patches from colliding.
 resources:
   - serviceaccount.yaml
   - rbac.yaml
-  - tenant
-  - tenant-control
+  - overlays/default
+  - overlays/rr

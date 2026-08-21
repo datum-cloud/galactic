@@ -23,12 +23,13 @@ const (
 	// (5180/9180), and galactic-gateway's (5181/8081 -- see
 	// internal/config/gateway.go's own doc comment for why that pair
 	// isn't a clean continuation of the 517x/917x pattern). galactic-nat66
-	// is deployed on its own dedicated, hostNetwork: true shard nodes
-	// (config/galactic-nat66/base/daemonset.yaml) -- disjoint from
-	// galactic-gateway's own gateway-role nodes -- but a node's role
-	// labels are not mutually exclusive by construction, so these still
-	// avoid every value already claimed above rather than assuming no
-	// overlap will ever happen.
+	// runs hostNetwork: true on every galactic.datumapis.com/node=compute
+	// node (config/galactic-nat66/base/daemonset.yaml) -- the same nodes
+	// as galactic-router's default role and galactic-cni, disjoint from
+	// galactic-gateway's own edge-role nodes -- but a node's role labels
+	// are not mutually exclusive by construction, so these still avoid
+	// every value already claimed above rather than assuming no overlap
+	// will ever happen.
 	DefaultNAT66MetricsPort    = 9182
 	DefaultNAT66GRPCHealthPort = 5182
 )

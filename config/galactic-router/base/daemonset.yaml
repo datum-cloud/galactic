@@ -15,12 +15,11 @@ spec:
   # the server starts, never tied to iBGP session/route state -- so
   # RollingUpdate would advance to the next node on exactly the wrong
   # signal. A restart implicitly withdraws routes (no BGP graceful restart
-  # support in internal/runtime/gobgp), and for the tenant-control
-  # (route-reflector) role every tenant node's iBGP session pivots through
-  # this one pod, so an automatic rollout there is a fleet-wide route flap,
-  # not a single-node one -- worse than fabric-router's per-node blast
-  # radius. OnDelete puts pod recreation under explicit, node-by-node
-  # control instead.
+  # support in internal/runtime/gobgp), and for the rr role every compute
+  # node's iBGP session pivots through this one pod, so an automatic
+  # rollout there is a fleet-wide route flap, not a single-node one --
+  # worse than fabric-router's per-node blast radius. OnDelete puts pod
+  # recreation under explicit, node-by-node control instead.
   updateStrategy:
     type: OnDelete
   template:
@@ -31,6 +30,18 @@ spec:
       serviceAccountName: galactic-router
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      # This base is role-agnostic on purpose -- no affinity, no BGP
+      # listen port -- so it's not meant to be applied on its own (its
+      # blanket toleration below plus no affinity would schedule it onto
+      # every node, control-plane included). ../overlays/default/ patches in
+      # the default per-node role's affinity + GALACTIC_ROUTER_BGP_LISTEN_PORT
+      # (see ../overlays/default/daemonset-patch.yaml); ../overlays/rr/
+      # independently patches this same, unmodified base into the separate
+      # route-reflector role.
+      # Neither overlay derives from the other -- both patch this file
+      # independently, each in its own isolated kustomize build, rather
+      # than via a shared patches: entry one level up -- see
+      # ../kustomization.yaml's own comment for why that's unsafe here.
       # Loss of galactic-router blackholes every VPC route through this
       # node, so the scheduler/kubelet must never preempt it for ordinary
       # workloads under node pressure.
@@ -71,13 +82,12 @@ spec:
             - name: grpc-health
               containerPort: 5179
               protocol: TCP
-          # No BGP containerPort here: GALACTIC_ROUTER_BGP_LISTEN_PORT
-          # isn't set at this (never-applied-directly) base level at all,
-          # and its real value is role-dependent -- see
-          # ../tenant-control/daemonset-patch.yaml (1790, the one role
-          # that actually listens) and ../tenant/daemonset-patch.yaml
-          # (-1, disabled). Declaring one here would just be wrong for
-          # whichever role doesn't match it.
+          # No BGP containerPort or GALACTIC_ROUTER_BGP_LISTEN_PORT here:
+          # this base is role-agnostic, and the right value is role-dependent
+          # -- see ../overlays/default/daemonset-patch.yaml (-1, disabled) and
+          # ../overlays/rr/daemonset-patch.yaml (1790, the one role that actually
+          # listens). Declaring one here would just be wrong for whichever
+          # role doesn't match it.
           # GoBGP's cold start (peer session setup, RIB population) can
           # outrun readinessProbe/livenessProbe's short initialDelaySeconds
           # on a slow node, risking a liveness-triggered restart loop before
