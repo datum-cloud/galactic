@@ -25,8 +25,7 @@ const (
 
  The tap master plugin in the galactic CNI chain, for VM-based workloads
  (Kata, Firecracker, kraftlet/Unikraft) attaching directly to a galactic VPC
- network. Unrelated to vmtap-cni, which is chained after Cilium's own CNI
- plugin for a different purpose entirely (see its own doc comment).
+ network.
 
  Find more information at: https://www.datum.net/docs`
 )

@@ -10,7 +10,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: fabric-router
   # Unlike every other DaemonSet in config/ (galactic-cni, galactic-router,
-  # galactic-gateway, vmtap-cni), this one owns the eBGP session to the
+  # galactic-gateway), this one owns the eBGP session to the
   # physical fabric switch, not an in-cluster control-plane relationship.
   # Bouncing FRR here drops the node's only underlay path, so every overlay
   # SRv6/EVPN path riding on it blackholes until the eBGP session
@@ -46,8 +46,8 @@ spec:
       # depends on before it can start — so this must tolerate NotReady the
       # same way a CNI plugin does, or it never gets scheduled early enough.
       # Blanket-tolerate all taints, same as every other DaemonSet in
-      # config/ (galactic-cni, galactic-router, galactic-gateway,
-      # vmtap-cni). Placement is controlled entirely by the node affinity
+      # config/ (galactic-cni, galactic-router, galactic-gateway).
+      # Placement is controlled entirely by the node affinity
       # below (edge/control/gateway roles) — tolerations don't need to be
       # scoped, and scoping them risks silently blocking fabric-router if
       # an unenumerated taint (a new role taint, a maintenance taint, etc.)
