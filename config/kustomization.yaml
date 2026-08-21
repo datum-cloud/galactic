@@ -2,4 +2,3 @@ resources:
   - galactic-system
   - galactic-cni
   - galactic-router
-  - vmtap-cni

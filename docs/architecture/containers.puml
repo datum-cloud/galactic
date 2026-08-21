@@ -9,7 +9,7 @@ Person(tenant, "Tenant / Developer", "Deploys pods/VMs; authors NetworkRule spec
 Person_Ext(client, "External Client")
 
 System_Boundary(galactic, "Galactic") {
-    Container(cnichain, "galactic-veth CNI chain", "Go binaries: galactic-cni (installer), galactic-veth/galactic-tap (master plugins), galactic-ipam, galactic-bgp, galactic-route, vmtap-cni", "Wires pods/VMs into VPC networks: VRF, veth/tap, IPAM, SRv6 registration; writes BGP CRDs")
+    Container(cnichain, "galactic-veth CNI chain", "Go binaries: galactic-cni (installer), galactic-veth/galactic-tap (master plugins), galactic-ipam, galactic-bgp, galactic-route", "Wires pods/VMs into VPC networks: VRF, veth/tap, IPAM, SRv6 registration; writes BGP CRDs")
     Container(usidbpf, "SRv6 uSID datapath", "TC-BPF (cilium/ebpf)", "Kernel decap/encap for VPC traffic; loaded by galactic-cni, map entries registered by galactic-bgp")
 
     Container(router, "galactic-router", "Go, controller-runtime", "Reconciles BGPRouter/BGPPeer/BGPAdvertisement/BGPPolicy/BGPVRFInstance CRDs; runs orphaned-CRD/VRF GC")

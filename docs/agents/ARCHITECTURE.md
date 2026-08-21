@@ -11,7 +11,7 @@ gateway-role nodes), each with its own architecture document:
 
 | Document                                           | Covers                                                                                                                                             |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)         | The CNI attach chain — `galactic-cni` (installer), `galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`, `galactic-route`, `vmtap-cni` |
+| [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)         | The CNI attach chain — `galactic-cni` (installer), `galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`, `galactic-route` |
 | [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)   | The BGP/EVPN control plane — `galactic-router`                                                                                                     |
 | [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) | The edge XDP NAT+LB gateway — `galactic-gateway`, `NetworkGateway`/`NetworkRule`                                                                   |
 

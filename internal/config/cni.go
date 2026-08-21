@@ -32,10 +32,9 @@ const (
 	// own tc/bpf programs on the same native device ingress hook these
 	// interfaces use, and this package's priority-1 default has not been
 	// validated against every Cilium version/datapath mode for a
-	// collision -- see the same class of caveat internal/vmtap/config.go
-	// documents for its own filter_priority knob. Override here if a
-	// deployment's Cilium install needs this filter at a different
-	// priority to run in the intended order relative to Cilium's own.
+	// collision. Override here if a deployment's Cilium install needs
+	// this filter at a different priority to run in the intended order
+	// relative to Cilium's own.
 	EnvCNIEBPFFilterPriority = "GALACTIC_CNI_EBPF_FILTER_PRIORITY"
 
 	// EnvCNINAT66ShardSIDs is a comma-separated list of every live

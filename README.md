@@ -32,7 +32,7 @@ See the [galactic DevContainer](./.devcontainer/galactic/) for development envir
 
 ### Production Deployment
 
-Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace (labeled `pod-security.kubernetes.io/enforce: privileged` — every DaemonSet here needs it, for hostPath volumes, hostNetwork, and elevated capabilities), the `galactic-cni` DaemonSet, both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/node: control`) — and the `vmtap-cni` DaemonSet (a second, standalone CNI plugin that gives Unikraft microVMs managed by `kraftlet` access to the pod's Cilium-assigned identity; see [`docs/vmtap-cni/configuration.md`](./docs/vmtap-cni/configuration.md)):
+Manifests for a real cluster live under [`config/`](./config/), composed with [Kustomize](https://kustomize.io). One command deploys the `galactic-system` namespace (labeled `pod-security.kubernetes.io/enforce: privileged` — every DaemonSet here needs it, for hostPath volumes, hostNetwork, and elevated capabilities), the `galactic-cni` DaemonSet, and both `galactic-router` roles — `tenant` (per-node, runs everywhere except control-plane nodes) and `tenant-control` (BGP route reflector, opt-in — stays at zero replicas until nodes are labeled `galactic.datumapis.com/node: control`):
 
 ```bash
 kubectl apply -k config/
@@ -122,7 +122,7 @@ task          # list available tasks
 
 ```bash
 task build           # produces bin/{galactic-cni,galactic-veth,galactic-tap,galactic-ipam,
-                     # galactic-bgp,galactic-route,galactic-router,galactic-gateway,vmtap-cni}
+                     # galactic-bgp,galactic-route,galactic-router,galactic-gateway}
 task lint            # golangci-lint + yamlfmt; lint-fix applies safe auto-fixes
 task ci              # full pipeline: lint → build → test:unit → test:e2e
 ```

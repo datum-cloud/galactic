@@ -133,20 +133,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
     -o galactic-route cmd/galactic-route/main.go
 
-# Build vmtap-cni. It ships in this image rather than one of its own so the
-# vmtap DaemonSet (config/vmtap-cni/) can reference the same published
-# ghcr.io/datum-cloud/galactic-cni image instead of a second, separately
-# published image.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
-    -ldflags "-s -w \
-      -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
-      -X go.datum.net/galactic/internal/metadata.GitCommit=${GIT_COMMIT} \
-      -X go.datum.net/galactic/internal/metadata.GitTreeState=${GIT_TREE_STATE} \
-      -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
-      -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
-      -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
-    -o vmtap-cni cmd/vmtap-cni/main.go
-
 # Build the host-device CNI plugin binary, used by galactic-veth to move
 # the veth endpoint into the container network namespace. GOBIN can't be set
 # for a cross-compiled `go install` (the toolchain rejects it outright when
@@ -172,7 +158,6 @@ COPY --from=builder /workspace/galactic-tap /galactic-tap
 COPY --from=builder /workspace/galactic-ipam /galactic-ipam
 COPY --from=builder /workspace/galactic-bgp /galactic-bgp
 COPY --from=builder /workspace/galactic-route /galactic-route
-COPY --from=builder /workspace/vmtap-cni /vmtap-cni
 COPY --from=builder /workspace/host-device /host-device
 COPY --from=builder /var/run/galactic-cni /var/run/galactic-cni
 
@@ -189,7 +174,6 @@ COPY --from=production /galactic-tap /galactic-tap
 COPY --from=production /galactic-ipam /galactic-ipam
 COPY --from=production /galactic-bgp /galactic-bgp
 COPY --from=production /galactic-route /galactic-route
-COPY --from=production /vmtap-cni /vmtap-cni
 COPY --from=production /host-device /host-device
 COPY --from=production /var/run/galactic-cni /var/run/galactic-cni
 
