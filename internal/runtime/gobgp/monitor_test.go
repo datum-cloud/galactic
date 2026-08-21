@@ -5,6 +5,7 @@
 package gobgp
 
 import (
+	"strings"
 	"testing"
 
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
@@ -94,5 +95,50 @@ func TestMatchTableID_NoExtendedCommunitiesAttributeAtAll(t *testing.T) {
 	}
 	if !got.plain || got.tableID != 0 {
 		t.Errorf("routeInstall = %+v, want {tableID:0 plain:true}", got)
+	}
+}
+
+// TestVRFTableID_DecodesHexSegmentBackToBase62 is a regression test for the
+// bug documented in the "vrfTableID hex/base62 mismatch" note: the CRD name
+// carries the VPC hex-encoded (crdnames.BGPVRFInstanceName/VPCSegment), but
+// the kernel VRF interface is named from the raw base62 VPC
+// (intf.GenerateInterfaceNameVRF). Feeding the hex segment straight into
+// vrfpkg.TableID built the wrong interface name entirely — "3e" (hex for
+// base62 "10") looked up "G00000003eV" instead of the real "G000000010V".
+// There's no VRF interface in the test sandbox for either name, so this
+// asserts on the interface name vrfpkg.TableID reports missing rather than
+// on a successful lookup.
+func TestVRFTableID_DecodesHexSegmentBackToBase62(t *testing.T) {
+	_, err := vrfTableID("3e-dfw-worker")
+	if err == nil {
+		t.Fatalf("vrfTableID() error = nil, want a 'VRF ID not found' error (no such kernel VRF in test env)")
+	}
+	if !strings.Contains(err.Error(), "G000000010V") {
+		t.Errorf("vrfTableID() error = %q, want it to reference the base62-decoded interface name G000000010V", err)
+	}
+	if strings.Contains(err.Error(), "G00000003eV") {
+		t.Errorf("vrfTableID() error = %q, looked up the raw hex segment as an interface name instead of decoding it", err)
+	}
+}
+
+// TestVRFTableID_HashFallbackSegmentErrors covers the SHA-256 hash fallback
+// form (crdnames.nameSegment's "x..." prefix, used for VPCs that don't
+// cleanly hex-encode) — intf.HexToBase62 can't decode it back to a real
+// interface name, so vrfTableID must fail fast on the decode rather than
+// attempt a kernel lookup with a garbage name.
+func TestVRFTableID_HashFallbackSegmentErrors(t *testing.T) {
+	_, err := vrfTableID("x0123456789ab-dfw-worker")
+	if err == nil {
+		t.Fatalf("vrfTableID() error = nil, want a base62-decode error for a hash-fallback segment")
+	}
+}
+
+// TestVRFTableID_NoDashErrors covers the pre-existing malformed-input guard:
+// a VRF name with no '-' at all can't be split into a VPC segment and a
+// node name.
+func TestVRFTableID_NoDashErrors(t *testing.T) {
+	_, err := vrfTableID("nodash")
+	if err == nil {
+		t.Fatalf("vrfTableID(\"nodash\") error = nil, want a \"does not contain '-'\" error")
 	}
 }

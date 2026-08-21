@@ -19,6 +19,7 @@ import (
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	vrfpkg "go.datum.net/galactic/internal/plumbing/vrf"
 )
@@ -217,20 +218,29 @@ func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeIn
 	return routeInstall{}, false
 }
 
-// vrfTableID resolves the kernel VRF table ID for a VRF named "{vpc}-{node}"
-// in base62 — see crdnames.BGPVRFInstanceName. The kernel VRF itself is
-// keyed by vpc alone (it's shared by every attachment on this VPC on this
-// node — vrfpkg.TableID needs no node component, since interface names only
-// need to be unique within one host's own namespace), so only the segment
-// before the first '-' matters here; node can itself contain '-' (e.g.
-// "dfw-worker-control"), which is why this splits into exactly 2 parts
-// instead of parsing node back out too.
+// vrfTableID resolves the kernel VRF table ID for a VRF named "{vpc}-{node}",
+// where vpc is hex-encoded per crdnames.BGPVRFInstanceName/VPCSegment. The
+// kernel VRF itself is keyed by the base62 vpc alone (it's shared by every
+// attachment on this VPC on this node — vrfpkg.TableID needs no node
+// component, since interface names only need to be unique within one host's
+// own namespace), so only the segment before the first '-' matters here;
+// node can itself contain '-' (e.g. "dfw-worker-control"), which is why this
+// splits into exactly 2 parts instead of parsing node back out too. The hex
+// segment has to be decoded back to base62 before it can be used to build
+// the kernel interface name — intf.HexToBase62 naturally errors out on the
+// SHA-256 hash fallback form (crdnames.nameSegment's "x..." prefix, for VPCs
+// that don't cleanly hex-encode), which is correct here too: that form was
+// never recoverable to a real interface name in the first place.
 func vrfTableID(vrfName string) (uint32, error) {
 	parts := strings.SplitN(vrfName, "-", 2)
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("VRF name %q does not contain '-'", vrfName)
 	}
-	return vrfpkg.TableID(parts[0])
+	vpc, err := intf.HexToBase62(parts[0])
+	if err != nil {
+		return 0, fmt.Errorf("VRF name %q: could not decode VPC segment %q back to base62: %w", vrfName, parts[0], err)
+	}
+	return vrfpkg.TableID(vpc)
 }
 
 // evpnMpReachNexthop returns the MpReachNLRI next-hop address string from path
