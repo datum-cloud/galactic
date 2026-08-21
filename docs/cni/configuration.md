@@ -338,6 +338,47 @@ what addresses were allocated entirely from `prevResult` (the accumulated
 result of every preceding plugin in the chain), never from its own config or
 a kernel call.
 
+### EndpointSlice publish (HTTP ingress backend discovery)
+
+Alongside the `BGPVRFInstance`/`BGPAdvertisement` CRDs, `galactic-bgp`
+publishes one `discoveryv1.EndpointSlice` per pod — named after the pod, in
+the pod's own namespace — whenever the attachment has an IPv6 address to
+carry (i.e. `ipam` is configured on the master plugin's stanza; a tap/VM
+attachment with no `ipam` block, same as a veth attachment with none, has
+nothing to publish and is skipped, not an error). This is the mechanism the
+HTTP ingress extension server (datum-cloud/enhancements#854/#796) discovers
+VPC backends through — no backing `Service` object exists to key a
+Service-generated `EndpointSlice` off of.
+
+IPv6-only: a dual-stack pod's IPv4 address is not published. The
+EndpointSlice carries:
+
+- `spec.endpoints[].addresses`: the pod's allocated IPv6 address.
+- Label `galactic.datum.net/tenant-id`: `TenantIdentifier(vpc, vpcattachment)`
+  — the discovery mechanism (annotations aren't selectable in a k8s
+  `List`/`Watch`).
+- Annotation `galactic.datum.net/tenant-id`: the same value, for
+  human-readable detail.
+- Annotation `galactic.datum.net/srv6-sid`: the computed SRv6 uSID
+  (`internal/plumbing/srv6.ComputeSID`) routing to this pod's VRF — absent
+  when this node's `BGPRouter` has no `srv6Locator`/`nodeID` configured.
+- `metadata.ownerReferences`: the owning Pod, so the Kubernetes garbage
+  collector reclaims it if this plugin's own DEL is never run (a
+  force-deleted pod). CNI DEL deletes it explicitly and unconditionally on
+  the normal path — unlike the BGP CRDs, an EndpointSlice is 1:1 with
+  exactly one pod and is never shared with a sibling attachment, so DEL
+  deleting it immediately is safe.
+
+CHECK verifies the EndpointSlice still exists with the expected address and
+annotations.
+
+Both the pod's name and its namespace are parsed from `K8S_POD_NAME`/
+`K8S_POD_NAMESPACE` in `CNI_ARGS` (`internal/nadpatch.ParsePodName`/
+`ParsePodNamespace`) — Multus always sets both for a real pod-scoped
+invocation, but a standalone/manual invocation (e.g. one that skips the CNI
+runtime, as some `tests/e2e` cases do) must set `CNI_ARGS` itself or ADD
+fails outright and CHECK reports an error.
+
 ## Example Configurations
 
 Every example below is a full conflist (a `NetworkAttachmentDefinition`'s

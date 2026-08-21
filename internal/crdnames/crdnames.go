@@ -62,6 +62,26 @@ const AnnotationNoAddressing = "galactic.datum.net/no-addressing"
 // callers and tests share one spelling.
 const AnnotationNoAddressingValue = "true"
 
+// AnnotationSID is the per-pod EndpointSlice annotation key holding the
+// computed SRv6 uSID (see internal/plumbing/srv6.ComputeSID) that routes
+// traffic to this pod's VRF — human-readable detail, matching the
+// annotation-based pattern used elsewhere in this package. Not present when
+// this node's BGPRouter has no SRv6Locator/nodeID configured (see
+// registerEBPFDatapath's own skip case in internal/cnibgp/bgp.go).
+const AnnotationSID = "galactic.datum.net/srv6-sid"
+
+// LabelTenantID is the per-pod EndpointSlice label carrying the same value
+// as TenantIdentifier(vpc, vpcAttachment) — the discovery mechanism the HTTP
+// ingress extension server watches/indexes on to find the EndpointSlices for
+// a given VPC attachment. A label, not only an annotation, because
+// annotations aren't selectable in a k8s List/Watch call.
+const LabelTenantID = "galactic.datum.net/tenant-id"
+
+// AnnotationTenantID is the per-pod EndpointSlice annotation carrying the
+// same TenantIdentifier(vpc, vpcAttachment) value as LabelTenantID —
+// human-readable detail alongside the label that actually drives discovery.
+const AnnotationTenantID = LabelTenantID
+
 // containerIDLen is the number of characters used from a container ID in
 // annotation keys. Kubernetes limits the name part of an annotation key to
 // 63 bytes. The longest prefix sharing this constant is
@@ -149,4 +169,30 @@ var vipNameReplacer = strings.NewReplacer(":", "-", ".", "-")
 // name starting with '-' (invalid for a Kubernetes object name).
 func ServiceVIPBindingName(nodeName, vip string, port int32, proto string) string {
 	return fmt.Sprintf("%s-%s-%s-%d", nodeName, vipNameReplacer.Replace(vip), proto, port)
+}
+
+// TenantIdentifier returns the deterministic value used to identify a VPC
+// attachment across the EndpointSlice discovery surface (LabelTenantID/
+// AnnotationTenantID) — a plain (vpc, vpcAttachment) join, deliberately
+// *not* run through nameSegment like BGPVRFInstanceName/BGPAdvertisementName
+// are. Those two build a Kubernetes object *name*, which must be a
+// lowercase RFC 1123 subdomain and so needs nameSegment's hex-safe encoding;
+// this builds a label/annotation *value*, which permits uppercase and has
+// no such constraint. Staying unencoded matters for a second reason: a
+// consumer recovering the original vpc from this value only has to split on
+// the first "-", which works because vpc/vpcAttachment are both base62
+// ([0-9a-zA-Z]) and therefore never contain that separator themselves —
+// nameSegment's hex encoding would make that split unrecoverable back to
+// the original vpc.
+func TenantIdentifier(vpc, vpcAttachment string) string {
+	return fmt.Sprintf("%s-%s", vpc, vpcAttachment)
+}
+
+// EndpointSliceName returns the deterministic name for the per-pod
+// discoveryv1.EndpointSlice published by galactic-bgp — a trivial
+// passthrough of the pod's own name (EndpointSlices are 1:1 with a pod, one
+// per namespace), centralized here like every other name in this package so
+// callers never spell the convention out themselves.
+func EndpointSliceName(podName string) string {
+	return podName
 }

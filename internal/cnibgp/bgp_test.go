@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,10 +26,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/srv6"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -442,6 +447,42 @@ func withNetNSExistsFn(t *testing.T, fn func(string) bool) {
 	t.Cleanup(func() { netNSExistsFn = orig })
 }
 
+// withTempPinDir points the package-level ebpfPinDir var (see cnibgp.go's
+// doc comment) at a throwaway bpffs directory for the duration of the test,
+// loading the eBPF datapath's pinned maps into it first (simulating the run
+// container having already loaded the datapath), adding this VPC's real
+// kernel VRF, and creating the testVPC/testAttachment host veth pair —
+// the same three preconditions bgp_ebpf_test.go's own requireRoot-gated
+// tests set up before calling registerEBPFDatapath directly; the veth pair
+// is what registerEBPFDatapath's own hostInterfaceIndex/attachUsidEgress
+// calls resolve by name. Restores ebpfPinDir and tears all three down on
+// cleanup. Callers must call requireRoot(t) first.
+func withTempPinDir(t *testing.T) {
+	t.Helper()
+
+	if err := vrf.Add(testVPC); err != nil {
+		t.Fatalf("vrf.Add: %v", err)
+	}
+	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
+
+	if err := veth.Add(testVPC, testAttachment, 1500); err != nil {
+		t.Fatalf("veth.Add: %v", err)
+	}
+	t.Cleanup(func() { _ = veth.Delete(testVPC, testAttachment) })
+
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	loaderObjs, err := attach.Load(pinDir)
+	if err != nil {
+		t.Fatalf("attach.Load: %v", err)
+	}
+	t.Cleanup(func() { _ = loaderObjs.Close() })
+
+	orig := ebpfPinDir
+	ebpfPinDir = pinDir
+	t.Cleanup(func() { ebpfPinDir = orig })
+}
+
 func TestPruneDeadContainerAnnotationsRemovesDeadSibling(t *testing.T) {
 	const subnet = "fd00:40:ff01::100:0/96"
 	live := map[string]bool{testLiveNetnsPath: true, testDeadNetnsPath: false}
@@ -630,6 +671,140 @@ func TestPublishBGPStateIPAMClearsNoAddressing(t *testing.T) {
 		t.Errorf("annotations = %v, want %s cleared once an allocation exists",
 			got.Annotations, crdnames.AnnotationNoAddressing)
 	}
+}
+
+// TestPublishBGPStateSIDNotComputedWhenSRv6Unconfigured verifies that
+// result.sid stays at its zero value (IsValid() == false) when this node's
+// BGPRouter has no SRv6Locator/nodeID configured — the same "SRv6 not
+// configured, skip silently" sentinel registerEBPFDatapath's own no-op case
+// establishes. routerForNode leaves SRv6Locator/NodeID unset, matching that
+// case, so this test needs no root privileges (registerEBPFDatapath itself
+// never opens a pinned eBPF map here).
+func TestPublishBGPStateSIDNotComputedWhenSRv6Unconfigured(t *testing.T) {
+	const (
+		nodeName  = "node1"
+		namespace = "default"
+	)
+	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
+
+	router := routerForNode(testRouterName, nodeName, namespace, 65000)
+	k8s := fakeClient(router)
+
+	ipv6Subnet := mustParseCIDR(t, "fd00:40:ff01::100:0/96")
+	ipamResult := &cniipam.IPAMResult{IPv6Subnet: ipv6Subnet}
+	cfg := publishConfig{vpc: testVPC, vpcAttachment: testAttachment, ifaceType: ifaceTypeVeth}
+	args := &skel.CmdArgs{ContainerID: "unconfigured-srv6-container", Netns: testNetns}
+
+	result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, testVPCHex1234, k8s)
+	if err != nil {
+		t.Fatalf("publishBGPState: unexpected error: %v", err)
+	}
+	if result.sid.IsValid() {
+		t.Errorf("result.sid = %v, want the zero value when SRv6 is not configured", result.sid)
+	}
+}
+
+// TestPublishBGPStateComputesSIDWhenSRv6Configured verifies result.sid is
+// computed via srv6.ComputeSID once vrfID is allocated, matching what an
+// independent call with the same (locator, nodeID, vrfID, function) tuple
+// would produce. Requires root: once SRv6Locator/NodeID are configured, the
+// same code path also calls registerEBPFDatapath, which opens real pinned
+// eBPF maps (see bgp_ebpf_test.go's own requireRoot-gated tests).
+func TestPublishBGPStateComputesSIDWhenSRv6Configured(t *testing.T) {
+	requireRoot(t)
+	withTempPinDir(t)
+
+	const (
+		nodeName    = "node1"
+		namespace   = "default"
+		srv6Locator = "fd00:10::/48"
+		nodeID      = 7
+	)
+	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
+
+	router := routerForNode(testRouterName, nodeName, namespace, 65000)
+	router.Spec.SRv6Locator = srv6Locator
+	router.Spec.NodeID = nodeID
+	k8s := fakeClient(router)
+
+	ipv6Subnet := mustParseCIDR(t, "fd00:40:ff01::100:0/96")
+	ipamResult := &cniipam.IPAMResult{IPv6Subnet: ipv6Subnet}
+	cfg := publishConfig{vpc: testVPC, vpcAttachment: testAttachment, ifaceType: ifaceTypeVeth}
+	args := &skel.CmdArgs{ContainerID: "configured-srv6-container", Netns: testNetns}
+
+	result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, testVPCHex1234, k8s)
+	if err != nil {
+		t.Fatalf("publishBGPState: unexpected error: %v", err)
+	}
+	if !result.sid.IsValid() {
+		t.Fatal("result.sid is invalid, want a computed SID when SRv6 is configured")
+	}
+
+	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
+	if err := k8s.List(context.Background(), vrfList, client.InNamespace(namespace)); err != nil {
+		t.Fatalf("list BGPVRFInstances: %v", err)
+	}
+	if len(vrfList.Items) != 1 {
+		t.Fatalf("BGPVRFInstances = %d, want exactly 1", len(vrfList.Items))
+	}
+	want, err := srv6.ComputeSID(srv6Locator, nodeID, vrfList.Items[0].Spec.VRFID, bgpv1alpha1.SRv6FunctionEndDT46)
+	if err != nil {
+		t.Fatalf("srv6.ComputeSID: %v", err)
+	}
+	if result.sid != want {
+		t.Errorf("result.sid = %v, want %v", result.sid, want)
+	}
+}
+
+// TestPublishBGPStateAdvertisementCreatedGatedOnCreate verifies the fix for
+// the #854 plan's Phase 4 rollback-risk callout: result.advertisementCreated
+// is true only when this call's own CreateOrUpdate genuinely created the
+// BGPAdvertisement, not when it merely updated one a sibling attachment's
+// earlier ADD already created — mirroring vrfInstanceCreated's existing
+// gating exactly. Without this, resourceTracker.cleanup could delete a
+// BGPAdvertisement still backing a live sibling's route on an unrelated
+// later failure.
+func TestPublishBGPStateAdvertisementCreatedGatedOnCreate(t *testing.T) {
+	const (
+		nodeName  = "node1"
+		namespace = "default"
+	)
+	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
+
+	router := routerForNode(testRouterName, nodeName, namespace, 65000)
+	ipv6Subnet := mustParseCIDR(t, "fd00:40:ff01::100:0/96")
+	ipamResult := &cniipam.IPAMResult{IPv6Subnet: ipv6Subnet}
+	cfg := publishConfig{vpc: testVPC, vpcAttachment: testAttachment, ifaceType: ifaceTypeVeth}
+
+	t.Run("first attachment: genuine create", func(t *testing.T) {
+		k8s := fakeClient(router)
+		args := &skel.CmdArgs{ContainerID: "first-container", Netns: testNetns}
+
+		result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, testVPCHex1234, k8s)
+		if err != nil {
+			t.Fatalf("publishBGPState: unexpected error: %v", err)
+		}
+		if !result.advertisementCreated {
+			t.Error("advertisementCreated = false, want true for a genuine create")
+		}
+	})
+
+	t.Run("sibling attachment reusing an already-live BGPAdvertisement: update only", func(t *testing.T) {
+		advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+		existing := &bgpv1alpha1.BGPAdvertisement{
+			ObjectMeta: metav1.ObjectMeta{Name: advName, Namespace: namespace},
+		}
+		k8s := fakeClient(router, existing)
+		args := &skel.CmdArgs{ContainerID: "second-container", Netns: testNetns}
+
+		result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, testVPCHex1234, k8s)
+		if err != nil {
+			t.Fatalf("publishBGPState: unexpected error: %v", err)
+		}
+		if result.advertisementCreated {
+			t.Error("advertisementCreated = true, want false when the BGPAdvertisement already existed (update only)")
+		}
+	})
 }
 
 // ---- buildAdvertisementSpec -------------------------------------------------

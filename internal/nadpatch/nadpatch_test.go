@@ -51,6 +51,37 @@ func TestParsePodNamespace(t *testing.T) {
 	}
 }
 
+func TestParsePodName(t *testing.T) {
+	tests := []struct {
+		name     string
+		cniArgs  string
+		expected string
+	}{
+		{name: "empty string", cniArgs: "", expected: ""},
+		{name: "name only", cniArgs: "K8S_POD_NAME=my-pod", expected: "my-pod"},
+		{
+			name:     "full multus args",
+			cniArgs:  "K8S_POD_NAME=my-pod;K8S_POD_NAMESPACE=galactic-system;K8S_POD_INFRA_CONTAINER_ID=abc123",
+			expected: "my-pod",
+		},
+		{
+			name:     "name not present",
+			cniArgs:  "K8S_POD_NAMESPACE=galactic-system;K8S_POD_INFRA_CONTAINER_ID=abc123",
+			expected: "",
+		},
+		{name: "name with hyphens", cniArgs: "K8S_POD_NAME=my-custom-pod-0", expected: "my-custom-pod-0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParsePodName(tc.cniArgs)
+			if got != tc.expected {
+				t.Errorf("ParsePodName(%q) = %q, want %q", tc.cniArgs, got, tc.expected)
+			}
+		})
+	}
+}
+
 func TestAnnotateNAD(t *testing.T) {
 	const (
 		nadName      = "test-net"

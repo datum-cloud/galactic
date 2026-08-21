@@ -20,6 +20,22 @@ rules:
     resources:
       - nodes
     verbs: ["get"]
+  # discovery.k8s.io/endpointslices: galactic-bgp's per-pod EndpointSlice
+  # publish (ADD), delete (DEL), and CHECK — see internal/cnibgp/
+  # endpointslice.go and docs/plans/854-vpc-http-ingress-endpointslice.md.
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # pods (get only): to look up the owning Pod's UID and set it as the
+  # EndpointSlice's ownerReference, so the k8s garbage collector reclaims
+  # a force-deleted/never-DEL'd pod's EndpointSlice as a backstop (Phase 8
+  # of the #854 plan) -- no create/update/delete needed, this SA never
+  # writes a Pod.
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

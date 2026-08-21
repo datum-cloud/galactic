@@ -12,6 +12,7 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 
+	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
@@ -82,6 +83,37 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	tracker.publishResult = result
 	if err != nil {
 		return err
+	}
+
+	// EndpointSlice publish is a separate step after publishBGPState
+	// succeeds, not folded into its retry closure — see the #854 plan's
+	// Phase 4 rollback-risk note. ipamResult == nil or carrying no IPv6
+	// address is the same "no address to publish" skip
+	// registerEBPFDatapath's own SRv6-not-configured case already
+	// establishes: not an error, and not tap/VM-specific (see Open Decision
+	// 5) — an attachment with no IPv6 allocation has nothing for an
+	// EndpointSlice to carry either way.
+	if ipamResult != nil && ipamResult.IPv6Subnet != nil {
+		podName := nadpatch.ParsePodName(args.Args)
+		// The EndpointSlice is created in the pod's own namespace, per
+		// docs/cni/configuration.md's "EndpointSlice publish" section —
+		// distinct from `namespace` above, which is where the BGP CRDs
+		// live (defaults to galactic-system) and is very often a
+		// different namespace from the workload pod's own.
+		podNamespace := nadpatch.ParsePodNamespace(args.Args)
+		if podName == "" || podNamespace == "" {
+			return fmt.Errorf(
+				"publish EndpointSlice: no K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS %q", args.Args)
+		}
+		esCtx, esCancel := context.WithTimeout(context.Background(), cniTimeout)
+		esErr := publishEndpointSlice(
+			esCtx, k8sClient, podNamespace, podName, pluginConf.VPC, pluginConf.VPCAttachment,
+			ipamResult.IPv6Subnet.IP, result.sid,
+		)
+		esCancel()
+		if esErr != nil {
+			return fmt.Errorf("publish EndpointSlice: %w", esErr)
+		}
 	}
 
 	// Pass prevResult through unchanged: this plugin adds no new interfaces

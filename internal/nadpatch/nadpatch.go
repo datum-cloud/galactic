@@ -49,6 +49,20 @@ func ParsePodNamespace(cniArgs string) string {
 	return ""
 }
 
+// ParsePodName extracts the K8S_POD_NAME value from the CNI_ARGS
+// environment variable string passed as args.Args by Multus. Returns an
+// empty string when the value is not present (e.g. standalone CNI
+// invocation), same convention as ParsePodNamespace.
+func ParsePodName(cniArgs string) string {
+	for _, part := range strings.Split(cniArgs, ";") {
+		key, value, ok := strings.Cut(part, "=")
+		if ok && key == "K8S_POD_NAME" {
+			return value
+		}
+	}
+	return ""
+}
+
 // AnnotateNAD patches the NetworkAttachmentDefinition with the host
 // interface name. The NAD is expected to already exist (created by the
 // external VPC operator before the CNI is invoked), so a not-found response
