@@ -223,27 +223,61 @@ is decided entirely by which of the fields below are present.
 | Field              | Required | Type        | Description                                                                                                                                                                                                                                                                        |
 | ------------------ | -------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `type`             | **Yes**  | `string`    | Names the delegated CNI IPAM binary. Always `"galactic-ipam"` today.                                                                                                                                                                                                               |
-| `static_ip`        | No       | `string`    | A single IPv6 address to assign. Presence selects the static allocation path (below); mutually exclusive in practice with the subnet fields.                                                                                                                                       |
+| `addresses`        | No       | `[]Address` | Addresses decided outside `galactic-ipam` (`address`, `gateway`). Presence selects the [addresses path](#ipam-addresses) below, which assigns exactly these — both families, prefix length preserved — and allocates, stores and releases nothing. Rejected if combined with `static_ip`/`ipv6_subnet`/`ipv4_subnet`. |
+| `static_ip`        | No       | `string`    | A single IPv6 address to assign, with a `/64` mask and no IPv4. The legacy single-address path, superseded by `addresses`; mutually exclusive in practice with the subnet fields.                                                                                                  |
 | `ipv6_subnet`      | No       | `string`    | Region IPv6 pool CIDR; endpoints allocate a `/96` from it by default.                                                                                                                                                                                                              |
 | `ipv4_subnet`      | No       | `string`    | Site IPv4 pool CIDR; endpoints allocate a `/32` host address from it.                                                                                                                                                                                                              |
 | `address_families` | No       | `[]string`  | Restricts allocation to the listed families, narrowing whichever of `ipv6_subnet`/`ipv4_subnet` are configured on this attachment (never widens beyond them). Omit for no restriction — allocate from every pool configured. Rejects a config that excludes every configured pool. |
-| `routes`           | No       | `[]Route`   | Declared on the `IPAM` struct (`dst`, `gw`) but not read by any current allocation path — vestigial.                                                                                                                                                                               |
-| `addresses`        | No       | `[]Address` | Declared on the `IPAM` struct (`address`) but not read by any current allocation path — vestigial.                                                                                                                                                                                 |
+| `routes`           | No       | `[]Route`   | Declared on the `IPAM` struct (`dst`, `gw`) but not read by any current allocation path — vestigial. Every path publishes a default route per configured family instead.                                                                                                           |
 
 Whether IPAM runs at all is decided **solely** by `"ipam"` block presence in
 the master plugin's own stanza — no environment variable can trigger or
 suppress that (see [`GALACTIC_IPAM_ENABLE_LOCAL_IPAM`](#galactic_ipam_enable_local_ipam)
 above, which only fills a default when the block is present but
-under-specified). Once delegated to, `static_ip` presence selects the static
-path; otherwise `ipv6_subnet`/`ipv4_subnet` (either alone, or both) select the
-pool path. See `internal/cniipam`'s package doc comment for the full explicit
-contract.
+under-specified). Once delegated to, `addresses` presence selects the
+addresses path; otherwise `static_ip` presence selects the static path;
+otherwise `ipv6_subnet`/`ipv4_subnet` (either alone, or both) select the pool
+path. Mixing `addresses` with any of the others is a config error, not a
+precedence question. See `internal/cniipam`'s package doc comment for the full
+explicit contract.
+
+### IPAM `addresses`
+
+The path for addresses this attachment did not choose. Datum's networking
+layer decides an interface's addresses before the workload is scheduled — an
+IPv6 endpoint block (typically a `/96`), optionally an IPv4 `/32`, each with a
+gateway — and this path configures exactly those:
+
+- **Prefix length is preserved as given.** A `/96` stays a `/96`; nothing is
+  re-masked. This is the difference from `static_ip`, which forces `/64`.
+- **Both families.** At most one address per family, either alone or both.
+- **Gateways are honoured** per address, and must be the same family as the
+  address they accompany.
+- **Nothing is allocated and nothing is persisted**, so no pool CIDR is
+  involved and `address_families` has no effect (as with `static_ip`).
+
+Each entry takes:
+
+| Field     | Required | Type     | Description                                                                                             |
+| --------- | -------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `address` | **Yes**  | `string` | The address in CIDR form. An explicit prefix length is required. An IPv4 entry must be a `/32` — the data plane models an IPv4 endpoint as a host route. |
+| `gateway` | No       | `string` | Next-hop for this address's family. Need not be inside the address's own prefix.                        |
+
+`galactic-ipam` keeps no record of these addresses — the system that decided
+them is their source of truth. As with `static_ip`, they are validated once at
+ADD and never stored, so DEL has nothing to release and CHECK always passes
+(there is nothing on-node for a delegated IPAM plugin to verify: the master
+plugin owns interface configuration, and on the tap path the guest configures
+itself). A retried ADD is idempotent because nothing is written. Only the pool
+path writes allocation state to `internal/cni/ipam.DefaultLockDir`.
 
 ### IPAM `static_ip`
 
 Validates and assigns a single IPv6 address with a `/64` mask. No IPv4 address
 is ever allocated alongside it — static IPAM is a single fixed address, not a
-dual-stack pool.
+dual-stack pool. Use [`addresses`](#ipam-addresses) instead for an address
+decided upstream: it preserves the prefix length it was given and supports
+both families.
 
 ### Pool IPAM via `ipv6_subnet`/`ipv4_subnet`
 
@@ -402,6 +436,39 @@ the IPv6 `/96` and IPv4 `/32` prefixes.
 
 `ipv4_subnet` alone opts the config into pool IPAM with no IPv6 allocation at
 all; the resulting `BGPAdvertisement` carries only the IPv4 `/32` prefix.
+
+### Pre-decided dual-stack addresses (`addresses`)
+
+The shape a `NetworkAttachmentDefinition` takes when the platform has already
+allocated this interface's addresses:
+
+```json
+{
+  "cniVersion": "1.0.0",
+  "name": "vpc60",
+  "plugins": [
+    {
+      "type": "galactic-tap",
+      "vpc": "60",
+      "vpcattachment": "60",
+      "namespace": "galactic-system",
+      "ipam": {
+        "type": "galactic-ipam",
+        "addresses": [
+          { "address": "fd20:60:ff03:0:1::/96", "gateway": "fd20:60:ff03::1" },
+          { "address": "203.0.113.17/32", "gateway": "203.0.113.1" }
+        ]
+      }
+    },
+    { "type": "galactic-bgp", "vpc": "60", "vpcattachment": "60", "namespace": "galactic-system" }
+  ]
+}
+```
+
+The guest is configured with `fd20:60:ff03:0:1::/96` and `203.0.113.17/32` —
+the exact prefixes given, not a re-derived `/64` and not a pool allocation —
+and the resulting `BGPAdvertisement` carries both. Drop either entry for a
+single-family attachment.
 
 ### Static IP configuration
 

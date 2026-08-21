@@ -227,3 +227,67 @@ func TestParseStatusConf(t *testing.T) {
 		t.Error("expected error for missing cniVersion, got nil")
 	}
 }
+
+// addressesJSON is the dual-stack addresses block used by the cases below.
+const addressesJSON = `"addresses":[` +
+	`{"address":"fd20:60:ff03:0:1::/96","gateway":"fd20:60:ff03::1"},` +
+	`{"address":"203.0.113.17/32","gateway":"203.0.113.1"}]`
+
+func TestParseConfAddresses(t *testing.T) {
+	conf, err := parseConf([]byte(confJSON(fmt.Sprintf(`"type":%q,%s`, testIPAMType, addressesJSON))))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(conf.IPAM.Addresses) != 2 {
+		t.Fatalf("Addresses = %v, want both families", conf.IPAM.Addresses)
+	}
+	if conf.IPAM.IPv6Subnet != "" || conf.IPAM.IPv4Subnet != "" {
+		t.Errorf("IPv6Subnet/IPv4Subnet = %q/%q, want both empty (the addresses path allocates nothing)",
+			conf.IPAM.IPv6Subnet, conf.IPAM.IPv4Subnet)
+	}
+}
+
+// TestParseConfAddressesDefaultFillerDoesNotApply guards against the local
+// IPAM default pool being filled in behind a config that already carries its
+// own addresses.
+func TestParseConfAddressesDefaultFillerDoesNotApply(t *testing.T) {
+	t.Setenv("GALACTIC_IPAM_ENABLE_LOCAL_IPAM", "true")
+
+	conf, err := parseConf([]byte(confJSON(fmt.Sprintf(`"type":%q,%s`, testIPAMType, addressesJSON))))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conf.IPAM.IPv6Subnet != "" {
+		t.Errorf("IPv6Subnet = %q, want empty", conf.IPAM.IPv6Subnet)
+	}
+}
+
+// TestParseConfAddressesWithAddressFamilies covers address_families being
+// meaningless here rather than rejecting the config: these addresses were
+// decided upstream and are carried as given.
+func TestParseConfAddressesWithAddressFamilies(t *testing.T) {
+	body := fmt.Sprintf(`"type":%q,%s,"address_families":["ipv6"]`, testIPAMType, addressesJSON)
+	if _, err := parseConf([]byte(confJSON(body))); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseConfAddressesRejectsMixedModes(t *testing.T) {
+	tests := []struct{ name, extra string }{
+		{"WithStaticIP", `"static_ip":"fd00:1::1"`},
+		{"WithIPv6Subnet", fmt.Sprintf(`"ipv6_subnet":%q`, testIPv6SubnetCIDR)},
+		{"WithIPv4Subnet", fmt.Sprintf(`"ipv4_subnet":%q`, testIPv4SubnetCIDR)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := fmt.Sprintf(`"type":%q,%s,%s`, testIPAMType, addressesJSON, tt.extra)
+			_, err := parseConf([]byte(confJSON(body)))
+			if err == nil {
+				t.Fatal("expected a config error combining ipam.addresses with another mode, got nil")
+			}
+			if !strings.Contains(err.Error(), "ipam.addresses cannot be combined") {
+				t.Errorf("error = %v, want the mixed-mode rejection", err)
+			}
+		})
+	}
+}

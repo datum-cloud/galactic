@@ -7,6 +7,7 @@ package cniipam
 import (
 	"fmt"
 	"net"
+	"os"
 	"testing"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -159,5 +160,148 @@ func TestCheckAllocationUnknownContainer(t *testing.T) {
 	errs := checkAllocation("no-such-container", conf)
 	if len(errs) != 2 {
 		t.Fatalf("checkAllocation for unknown container = %v, want 2 errors (one per family)", errs)
+	}
+}
+
+const (
+	testEndpointIPv6 = "fd20:60:ff03:0:1::/96"
+	testGatewayIPv6  = "fd20:60:ff03::1"
+	testEndpointIPv4 = "203.0.113.17/32"
+	testGatewayIPv4  = "203.0.113.1"
+)
+
+func dualStackAddresses() *IPAM {
+	return &IPAM{
+		Type: testIPAMType,
+		Addresses: []Address{
+			{Address: testEndpointIPv6, Gateway: testGatewayIPv6},
+			{Address: testEndpointIPv4, Gateway: testGatewayIPv4},
+		},
+	}
+}
+
+// TestAllocateAddressesPreservesPrefixLength is the whole point of this path:
+// an endpoint block decided upstream as a /96 must stay a /96, where the
+// legacy static_ip path forced a /64.
+func TestAllocateAddressesPreservesPrefixLength(t *testing.T) {
+	withTempLockDir(t)
+	res, err := allocate(&skel.CmdArgs{ContainerID: testContainerID}, &IPAM{
+		Type:      testIPAMType,
+		Addresses: []Address{{Address: testEndpointIPv6, Gateway: testGatewayIPv6}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := res.IPv6Subnet.String(); got != testEndpointIPv6 {
+		t.Errorf("IPv6Subnet = %q, want %q", got, testEndpointIPv6)
+	}
+	if !res.IPv6Gateway.Equal(net.ParseIP(testGatewayIPv6)) {
+		t.Errorf("IPv6Gateway = %v, want %s", res.IPv6Gateway, testGatewayIPv6)
+	}
+	if res.IPv4Address != nil {
+		t.Errorf("IPv4Address = %v, want nil for an IPv6-only addresses config", res.IPv4Address)
+	}
+	if len(res.Routes) != 1 {
+		t.Errorf("Routes = %v, want only the IPv6 default route", res.Routes)
+	}
+}
+
+func TestAllocateAddressesDualStack(t *testing.T) {
+	withTempLockDir(t)
+	res, err := allocate(&skel.CmdArgs{ContainerID: testContainerID}, dualStackAddresses())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := res.IPv6Subnet.String(); got != testEndpointIPv6 {
+		t.Errorf("IPv6Subnet = %q, want %q", got, testEndpointIPv6)
+	}
+	if !res.IPv4Address.Equal(net.ParseIP("203.0.113.17")) {
+		t.Errorf("IPv4Address = %v, want 203.0.113.17", res.IPv4Address)
+	}
+	if !res.IPv4Gateway.Equal(net.ParseIP(testGatewayIPv4)) {
+		t.Errorf("IPv4Gateway = %v, want %s", res.IPv4Gateway, testGatewayIPv4)
+	}
+	if len(res.Routes) != 2 {
+		t.Errorf("Routes = %v, want one default route per family", res.Routes)
+	}
+}
+
+func TestAllocateAddressesIPv4Only(t *testing.T) {
+	withTempLockDir(t)
+	res, err := allocate(&skel.CmdArgs{ContainerID: testContainerID}, &IPAM{
+		Type:      testIPAMType,
+		Addresses: []Address{{Address: testEndpointIPv4, Gateway: testGatewayIPv4}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IPv6Subnet != nil {
+		t.Errorf("IPv6Subnet = %v, want nil for an IPv4-only addresses config", res.IPv6Subnet)
+	}
+	if res.IPv4Address == nil || !res.IPv4Address.Equal(net.ParseIP("203.0.113.17")) {
+		t.Errorf("IPv4Address = %v, want 203.0.113.17", res.IPv4Address)
+	}
+}
+
+// TestAllocateAddressesRetriedADDIsIdempotent covers a runtime retrying ADD
+// for the same container: nothing is persisted, so every attempt returns the
+// same assignment.
+func TestAllocateAddressesRetriedADDIsIdempotent(t *testing.T) {
+	withTempLockDir(t)
+	args := &skel.CmdArgs{ContainerID: testContainerID}
+	first, err := allocate(args, dualStackAddresses())
+	if err != nil {
+		t.Fatalf("first ADD: %v", err)
+	}
+	second, err := allocate(args, dualStackAddresses())
+	if err != nil {
+		t.Fatalf("retried ADD: %v", err)
+	}
+	if first.IPv6Subnet.String() != second.IPv6Subnet.String() || !first.IPv4Address.Equal(second.IPv4Address) {
+		t.Errorf("retried ADD returned %v/%v, want the first attempt's %v/%v",
+			second.IPv6Subnet, second.IPv4Address, first.IPv6Subnet, first.IPv4Address)
+	}
+	if entries, err := os.ReadDir(lockDir); err != nil || len(entries) != 0 {
+		t.Errorf("lock dir holds %v (err %v), want nothing persisted for pre-decided addresses", entries, err)
+	}
+}
+
+// TestAddressesDeallocateAndCheckAreNoops matches the static_ip path: nothing
+// was allocated, so DEL has nothing to release and CHECK has nothing to
+// verify.
+func TestAddressesDeallocateAndCheckAreNoops(t *testing.T) {
+	withTempLockDir(t)
+	conf := dualStackAddresses()
+	if _, err := allocate(&skel.CmdArgs{ContainerID: testContainerID}, conf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deallocate(testContainerID, conf)
+
+	if errs := checkAllocation(testContainerID, conf); len(errs) > 0 {
+		t.Errorf("checkAllocation = %v, want nil (nothing is stored to check)", errs)
+	}
+}
+
+func TestParseAddressesRejectsBadConfigs(t *testing.T) {
+	tests := []struct {
+		name      string
+		addresses []Address
+	}{
+		{"no prefix length", []Address{{Address: "fd20:60:ff03::5"}}},
+		{"unparseable address", []Address{{Address: "not-an-address/96"}}},
+		{"IPv4 that is not a /32", []Address{{Address: "203.0.113.0/24"}}},
+		{"two IPv6 addresses", []Address{{Address: testEndpointIPv6}, {Address: "fd20:60:ff03:0:2::/96"}}},
+		{"two IPv4 addresses", []Address{{Address: testEndpointIPv4}, {Address: "203.0.113.18/32"}}},
+		{"gateway of the wrong family", []Address{{Address: testEndpointIPv6, Gateway: testGatewayIPv4}}},
+		{"unparseable gateway", []Address{{Address: testEndpointIPv6, Gateway: "nope"}}},
+		{"empty", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseAddresses(tt.addresses); err == nil {
+				t.Errorf("parseAddresses(%v) = nil error, want a config error", tt.addresses)
+			}
+		})
 	}
 }
