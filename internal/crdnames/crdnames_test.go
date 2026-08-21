@@ -43,9 +43,10 @@ func TestServiceVIPBindingName(t *testing.T) {
 // Kubernetes object name, which must be a lowercase RFC 1123 subdomain);
 // TenantIdentifier deliberately doesn't — see its own doc comment.
 const (
-	testVPC        = "abc"
-	testVPCBase62  = "0000000jU"
-	testAttachment = "def"
+	testVPC              = "abc"
+	testVPCBase62        = "0000000jU"
+	testAttachment       = "def"
+	testAttachmentBase62 = "00G"
 )
 
 func TestBGPVRFInstanceName(t *testing.T) {
@@ -78,7 +79,7 @@ func TestBGPVRFInstanceNameSharedAcrossAttachments(t *testing.T) {
 func TestBGPAdvertisementName(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
 		{testVPC, testAttachment, "98de-c6a7"},
-		{testVPCBase62, "00G", "4d2-2a"},
+		{testVPCBase62, testAttachmentBase62, "4d2-2a"},
 	}
 	for _, tt := range tests {
 		got := BGPAdvertisementName(tt.vpc, tt.attachment)
@@ -91,7 +92,7 @@ func TestBGPAdvertisementName(t *testing.T) {
 func TestTenantIdentifier(t *testing.T) {
 	tests := []struct{ vpc, attachment, want string }{
 		{testVPC, testAttachment, "abc-def"},
-		{testVPCBase62, "00G", "0000000jU-00G"},
+		{testVPCBase62, testAttachmentBase62, "0000000jU-00G"},
 	}
 	for _, tt := range tests {
 		got := TenantIdentifier(tt.vpc, tt.attachment)
