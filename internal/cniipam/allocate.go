@@ -25,14 +25,55 @@ const localIPAMDefaultPool = "fd00:10:ff01::/64"
 // touch the real production path.
 var lockDir = ipam.DefaultLockDir
 
-// allocate allocates addresses for the given container according to conf's
-// mode: presence of StaticIP selects the static path; otherwise the pool
-// path (either family alone, or both).
+// allocate assigns addresses for the given container according to conf's
+// mode: presence of Addresses selects the pre-decided addresses path,
+// presence of StaticIP the legacy static path; otherwise the pool path
+// (either family alone, or both).
 func allocate(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
-	if conf.StaticIP != "" {
+	switch {
+	case len(conf.Addresses) > 0:
+		return allocateAddresses(args, conf)
+	case conf.StaticIP != "":
 		return allocateStatic(args, conf)
+	default:
+		return allocatePool(args, conf)
 	}
-	return allocatePool(args, conf)
+}
+
+// allocateAddresses assigns the addresses the config already carries, exactly
+// as given — prefix length included, both families, gateways honored. Nothing
+// is allocated and nothing is persisted: the addresses belong to whoever
+// decided them.
+func allocateAddresses(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
+	parsed, err := parseAddresses(conf.Addresses)
+	if err != nil {
+		return nil, err
+	}
+
+	slog.Debug("IPAM: assigned pre-decided addresses", "containerID", args.ContainerID,
+		"ipv6Subnet", parsed.ipv6, "ipv6Gateway", parsed.ipv6Gateway,
+		"ipv4Address", parsed.ipv4, "ipv4Gateway", parsed.ipv4Gateway)
+
+	return &IPAMResult{
+		IPv6Subnet:  parsed.ipv6,
+		IPv6Gateway: parsed.ipv6Gateway,
+		IPv4Address: parsed.ipv4,
+		IPv4Gateway: parsed.ipv4Gateway,
+		Routes:      defaultRoutes(parsed.ipv6 != nil, parsed.ipv4 != nil),
+	}, nil
+}
+
+// defaultRoutes returns the per-family default route each configured family
+// gets, the same set the pool path publishes.
+func defaultRoutes(ipv6, ipv4 bool) []*net.IPNet {
+	var routes []*net.IPNet
+	if ipv6 {
+		routes = append(routes, &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)})
+	}
+	if ipv4 {
+		routes = append(routes, &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)})
+	}
+	return routes
 }
 
 // allocateStatic validates and returns the pre-assigned static IPv6 address
@@ -73,13 +114,7 @@ func allocatePool(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 		return nil, fmt.Errorf("allocate dual-stack addresses: %w", err)
 	}
 
-	var routes []*net.IPNet
-	if res.IPv6Subnet != nil {
-		routes = append(routes, &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)})
-	}
-	if res.IPv4Address != nil {
-		routes = append(routes, &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)})
-	}
+	routes := defaultRoutes(res.IPv6Subnet != nil, res.IPv4Address != nil)
 
 	slog.Debug("IPAM: allocated", "containerID", args.ContainerID,
 		"ipv6Subnet", res.IPv6Subnet, "ipv6Gateway", res.IPv6Gateway,
@@ -119,6 +154,11 @@ func effectiveIPv6Subnet(conf *IPAM) string {
 // other — each call is independent and silently no-ops if nothing is
 // found.
 func deallocate(containerID string, conf *IPAM) {
+	if len(conf.Addresses) > 0 {
+		// Externally decided addresses were never allocated here, so there is nothing to release.
+		return
+	}
+
 	if conf.StaticIP != "" {
 		// Static allocations don't need deallocation.
 		return
@@ -146,13 +186,13 @@ func deallocate(containerID string, conf *IPAM) {
 }
 
 // checkAllocation verifies that containerID still holds an allocation
-// against every family conf configures — used by CHECK. A static
-// allocation has nothing persisted to check (it's validated once, at ADD,
-// and never stored), so it always passes. Returns one error per
-// missing/unreachable family; nil means every configured family checked
-// out.
+// against every family conf configures — used by CHECK. An externally
+// decided address (addresses, static_ip) has nothing persisted to check
+// (it's validated once, at ADD, and never stored), so it always passes.
+// Returns one error per missing/unreachable family; nil means every
+// configured family checked out.
 func checkAllocation(containerID string, conf *IPAM) []error {
-	if conf.StaticIP != "" {
+	if len(conf.Addresses) > 0 || conf.StaticIP != "" {
 		return nil
 	}
 

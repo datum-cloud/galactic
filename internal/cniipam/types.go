@@ -11,18 +11,32 @@
 // "ipam" block is present at all — no environment variable or sibling
 // config field can trigger or suppress that decision (that's the master's
 // own call, made before this package is ever invoked). Once delegated to,
-// mode selection is entirely this package's own: presence of
-// ipam.static_ip selects the static single-address path; otherwise
-// ipam.ipv6_subnet/ipv4_subnet (either family alone, or both) select the
-// pool path. GALACTIC_IPAM_ENABLE_LOCAL_IPAM only fills in a default IPv6
-// pool CIDR when the ipam block is present but specifies neither
-// static_ip nor a subnet — it can no longer manufacture an ipam block out
+// mode selection is entirely this package's own, decided by which fields
+// are present and rejected as a config error if they disagree:
+//
+//   - ipam.addresses — the addresses were decided upstream (Datum's
+//     networking layer allocates an IPv6 endpoint block, typically a /96,
+//     optionally an IPv4 /32, each with a gateway). Nothing is allocated:
+//     every address is assigned exactly as given, prefix length included,
+//     for both families, and nothing is persisted. Cannot be combined with
+//     the fields below.
+//   - ipam.static_ip — the legacy single-address path: one IPv6 address,
+//     assigned with a /64, no IPv4. Superseded by ipam.addresses.
+//   - ipam.ipv6_subnet/ipv4_subnet (either family alone, or both) — the
+//     pool path: this package chooses the address.
+//
+// GALACTIC_IPAM_ENABLE_LOCAL_IPAM only fills in a default IPv6
+// pool CIDR when the ipam block is present but specifies no addresses, no
+// static_ip and no subnet — it can no longer manufacture an ipam block out
 // of thin air the way its GALACTIC_CNI_ENABLE_LOCAL_IPAM predecessor did.
 //
 // Allocation state persists in on-disk marker files (internal/cni/ipam),
 // keyed by containerID, so this package never needs a Kubernetes client
 // at all: DEL looks its own allocation up locally instead of reading it
-// back from a BGPAdvertisement CRD annotation galactic-bgp wrote.
+// back from a BGPAdvertisement CRD annotation galactic-bgp wrote. Only the
+// pool path persists anything: an address decided elsewhere (addresses,
+// static_ip) is validated at ADD and never stored, so DEL has nothing to
+// release and CHECK nothing to verify.
 package cniipam
 
 import (
@@ -41,7 +55,9 @@ type IPAM struct {
 	// pkg/ipam.ExecAdd/ExecDel read this to know which binary to exec), not
 	// a mode selector. Mode is decided from which of the fields below are
 	// present instead — see the package doc comment.
-	Type       string `json:"type"`
+	Type string `json:"type"`
+	// StaticIP is the legacy single-address path: one IPv6 address, no
+	// prefix length of its own, no IPv4. Addresses supersedes it.
 	StaticIP   string `json:"static_ip,omitempty"`
 	IPv6Subnet string `json:"ipv6_subnet,omitempty"`
 	IPv4Subnet string `json:"ipv4_subnet,omitempty"`
@@ -52,11 +68,15 @@ type IPAM struct {
 	// pools are already configured — it can't widen allocation to a family
 	// with no pool CIDR set. Empty means no restriction (allocate from every
 	// configured pool, same as if this field didn't exist). Meaningless for
-	// the static_ip path, which allocates a single fixed IPv6 address
-	// regardless of this field.
-	AddressFamilies []string  `json:"address_families,omitempty"`
-	Routes          []Route   `json:"routes,omitempty"`
-	Addresses       []Address `json:"addresses,omitempty"`
+	// the static_ip and addresses paths, which carry exactly what they were
+	// given regardless of this field.
+	AddressFamilies []string `json:"address_families,omitempty"`
+	// Routes is declared but not read by any allocation path.
+	Routes []Route `json:"routes,omitempty"`
+	// Addresses carries addresses decided outside galactic-ipam. Presence
+	// selects the addresses path, which assigns exactly these -- both
+	// families, prefix lengths preserved -- rather than allocating anything.
+	Addresses []Address `json:"addresses,omitempty"`
 }
 
 // Route describes a static route to install.
@@ -65,9 +85,11 @@ type Route struct {
 	GW  string `json:"gw,omitempty"`
 }
 
-// Address describes a static IP address assignment.
+// Address is one pre-decided address in CIDR form (an explicit prefix length
+// is required) with the gateway reachability through it depends on.
 type Address struct {
 	Address string `json:"address"`
+	Gateway string `json:"gateway,omitempty"`
 }
 
 // IPAMResult holds the allocation details a master plugin uses to build

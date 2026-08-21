@@ -79,3 +79,27 @@ func TestCmdCheckStaticAlwaysPasses(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestCmdAddCmdDelCmdCheckRoundTripAddresses exercises the delegation
+// protocol end to end for pre-decided addresses. Unlike the pool path, CHECK
+// still passes after DEL: nothing was allocated, so there is no record whose
+// absence could fail.
+func TestCmdAddCmdDelCmdCheckRoundTripAddresses(t *testing.T) {
+	withTempLockDir(t)
+
+	conf := confJSON(fmt.Sprintf(`"type":%q,%s`, testIPAMType, addressesJSON))
+	args := &skel.CmdArgs{ContainerID: testContainerID, StdinData: []byte(conf)}
+
+	if err := cmdAdd(args); err != nil {
+		t.Fatalf("cmdAdd: unexpected error: %v", err)
+	}
+	if err := cmdCheck(args); err != nil {
+		t.Fatalf("cmdCheck after cmdAdd: unexpected error: %v", err)
+	}
+	if err := cmdDel(args); err != nil {
+		t.Fatalf("cmdDel: unexpected error: %v", err)
+	}
+	if err := cmdCheck(args); err != nil {
+		t.Fatalf("cmdCheck after cmdDel: unexpected error: %v", err)
+	}
+}
