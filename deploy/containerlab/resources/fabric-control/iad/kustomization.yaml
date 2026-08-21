@@ -25,4 +25,4 @@ patches:
 configMapGenerator:
   - name: fabric-config
     files:
-      - frr.conf.iad-worker-control=frr.conf
+      - frr.conf.iad-worker-rr=frr.conf

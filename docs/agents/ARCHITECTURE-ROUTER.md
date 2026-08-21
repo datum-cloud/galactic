@@ -89,11 +89,16 @@ galactic/
 │       └── vrf/
 ├── config/
 │   └── router/              # Shared RBAC/ServiceAccount, plus:
-│       ├── base/             #   common DaemonSet spec
-│       ├── tenant/            #   per-node role: base + node affinity excluding control-plane
-│       │                     #     and tenant-control nodes
-│       └── tenant-control/    #   route-reflector role: base + GALACTIC_ROUTER_REFLECTOR=true,
-│                              #     opt-in via the galactic.datumapis.com/node=control node label
+│       ├── base/             #   role-agnostic DaemonSet spec; not applied directly
+│       └── overlays/
+│           ├── default/       #   the default per-node role: patches ../../base with node
+│           │                 #     affinity excluding control-plane nodes, opt-in via
+│           │                 #     galactic.datumapis.com/node=compute -- no
+│           │                 #     role-specific name/label of its own
+│           └── rr/            #   route-reflector role: independently patches ../../base with
+│                              #     GALACTIC_ROUTER_REFLECTOR=true, nameSuffix -rr, opt-in via
+│                              #     the galactic.datumapis.com/galactic-route-reflector label
+│                              #     (not a galactic.datumapis.com/node value)
 └── containers/
     └── galactic-router/     # galactic-router production image
 ```
@@ -152,9 +157,9 @@ lives in `root.go`'s `runCmd`:
    that waits for cache sync, then runs on `--gc-interval`, default 5m).
 8. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
-This is identical whether the pod is running in the plain `tenant` role
-(`config/galactic-router/tenant/`), the route-reflector role
-(`config/galactic-router/tenant-control/`), or as the tenant-BGP container co-located
+This is identical whether the pod is running in the plain default role
+(`config/galactic-router/overlays/default/`), the route-reflector role
+(`config/galactic-router/overlays/rr/`), or as the tenant-BGP container co-located
 with `galactic-gateway` on a gateway-role node
 (`config/galactic-gateway/base/daemonset.yaml`) — `galactic-router` carries no
 gateway-role code path of its own at all; see
@@ -182,7 +187,7 @@ See [docs/router/configuration.md](../router/configuration.md) for the full refe
 
 On a gateway-role node, `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` is set by
 `config/galactic-gateway/base/daemonset.yaml` — the tenant-BGP container only dials
-out to iBGP peers there, same as the plain tenant role.
+out to iBGP peers there, same as the plain default role.
 `GALACTIC_ROUTER_GRPC_HEALTH_PORT=5179` is set explicitly too, matching
 the binary's own default, so it can't silently start colliding with the
 co-located `galactic-gateway` container's own health port on the same

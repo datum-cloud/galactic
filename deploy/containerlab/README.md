@@ -14,31 +14,31 @@ over iBGP to the route reflector on iad-control.
                        │  ╱          ╲  │
                       (mesh)        (mesh)
                                     tr3 ──eth5── iad-worker
-                                    tr3 ──eth4── iad-worker-control
+                                    tr3 ──eth4── iad-worker-rr
                                     tr3 ──eth6── iad-gateway1
                                     tr3 ──eth7── iad-gateway2
 ```
 
 ### Node roles
 
-| Node                                                     | Kind          | Role                                                  |
-|----------------------------------------------------------|---------------|-------------------------------------------------------|
-| `dfw-control-plane`                                      | ext-container | Kind control-plane; runs Cilium, Multus               |
-| `dfw-worker`                                             | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
-| `iad-control-plane`                                      | ext-container | Kind control-plane; runs Cilium, Multus               |
-| `iad-worker`                                             | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
-| `iad-worker2` (renamed `iad-worker-control` post-deploy) | ext-container | Kind worker; runs FRR PE + galactic-router RR         |
-| `iad-worker3` (renamed `iad-gateway1` post-deploy)       | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
-| `iad-worker4` (renamed `iad-gateway2` post-deploy)       | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
-| `sjc-control-plane`                                      | ext-container | Kind control-plane; runs Cilium, Multus               |
-| `sjc-worker`                                             | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
-| `tr1`–`tr4`                                              | linux (FRR)   | iBGP full mesh, AS 65100                              |
+| Node                                                | Kind          | Role                                                  |
+|-----------------------------------------------------|---------------|-------------------------------------------------------|
+| `dfw-control-plane`                                 | ext-container | Kind control-plane; runs Cilium, Multus               |
+| `dfw-worker`                                        | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
+| `iad-control-plane`                                 | ext-container | Kind control-plane; runs Cilium, Multus               |
+| `iad-worker`                                        | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
+| `iad-worker2` (renamed `iad-worker-rr` post-deploy) | ext-container | Kind worker; runs FRR PE + galactic-router RR         |
+| `iad-worker3` (renamed `iad-gateway1` post-deploy)  | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
+| `iad-worker4` (renamed `iad-gateway2` post-deploy)  | ext-container | Kind worker; edge XDP NAT+LB gateway canary (Phase D) |
+| `sjc-control-plane`                                 | ext-container | Kind control-plane; runs Cilium, Multus               |
+| `sjc-worker`                                        | ext-container | Kind worker; runs FRR PE + galactic-router PE         |
+| `tr1`–`tr4`                                         | linux (FRR)   | iBGP full mesh, AS 65100                              |
 
-`iad-gateway1`/`iad-gateway2` are tainted (`galactic.datumapis.com/node=gateway:NoSchedule`)
-dedicated nodes, same idea as `iad-worker-control`'s taint: no tenant pods land there, only
+`iad-gateway1`/`iad-gateway2` are tainted (`galactic.datumapis.com/node=edge:NoSchedule`)
+dedicated nodes, same idea as `iad-worker-rr`'s taint: no tenant pods land there, only
 DaemonSets with a blanket toleration (`fabric-router`, `galactic-gateway1`/`-gateway2` — each a
 two-container pod, `galactic-router` + `galactic-gateway`).
-They never run `galactic-cni` (config/galactic-cni's affinity is edge-only) or a route-reflector.
+They never run `galactic-cni` (config/galactic-cni's affinity is compute-only) or a route-reflector.
 **Underlay BGP peering on their `tr3` uplinks is wired** (`node_files/tr3/frr.conf`,
 plus two `BGPPeer` objects in `resources/galactic-control/iad/` for the route reflector side)
 and the full fabric converges. Real end-to-end ingress traffic through the datapath is now
@@ -86,7 +86,7 @@ AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant 
 - The transit mesh carries IPv6 unicast (SRv6 locator prefixes and loopbacks) via iBGP within AS 65100.
 - FRR PE nodes originate their per-node SRv6 locator block (`2001:db8:ffXX:100::/56`) and BGP peering loopback (`fc00:0:X::1/128`) toward the transit layer via eBGP over numbered IPv6 links — never the site's full `/48` uSID Block or loopback pool, which would create an anycast ambiguity once a second worker joins a site.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
-- galactic-router instances on dfw/iad/sjc workers peer with iad-worker-control over iBGP (AS 65000) for `l2vpn-evpn` routes. GoBGP runs with outbound-only mode (`listenPort=-1`); all BGP sessions are initiated outbound.
+- galactic-router instances on dfw/iad/sjc workers peer with iad-worker-rr over iBGP (AS 65000) for `l2vpn-evpn` routes. GoBGP runs with outbound-only mode (`listenPort=-1`); all BGP sessions are initiated outbound.
 
 ## Addressing
 
@@ -101,25 +101,25 @@ AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant 
 
 ### TR–TR point-to-point links (numbered)
 
-| Link    | Subnet              |
-|---------|---------------------|
-| tr1–tr2 | 2001:db8:0:12::/64  |
-| tr1–tr3 | 2001:db8:0:13::/64  |
-| tr1–tr4 | 2001:db8:0:14::/64  |
-| tr2–tr3 | 2001:db8:0:23::/64  |
-| tr2–tr4 | 2001:db8:0:24::/64  |
-| tr3–tr4 | 2001:db8:0:34::/64  |
+| Link    | Subnet             |
+|---------|--------------------|
+| tr1–tr2 | 2001:db8:0:12::/64 |
+| tr1–tr3 | 2001:db8:0:13::/64 |
+| tr1–tr4 | 2001:db8:0:14::/64 |
+| tr2–tr3 | 2001:db8:0:23::/64 |
+| tr2–tr4 | 2001:db8:0:24::/64 |
+| tr3–tr4 | 2001:db8:0:34::/64 |
 
 ### Worker–TR links (numbered, eBGP)
 
-| Link                     | Subnet             | TR address       | Worker address   |
-|--------------------------|--------------------|------------------|------------------|
-| dfw-worker – tr1         | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 |
-| sjc-worker – tr2         | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 |
-| iad-worker – tr3         | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 |
-| iad-worker-control – tr3 | 2001:db8:1:31::/64 | 2001:db8:1:31::1 | 2001:db8:1:31::2 |
-| iad-gateway1 – tr3       | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 |
-| iad-gateway2 – tr3       | 2001:db8:1:33::/64 | 2001:db8:1:33::1 | 2001:db8:1:33::2 |
+| Link                | Subnet             | TR address       | Worker address   |
+|---------------------|--------------------|------------------|------------------|
+| dfw-worker – tr1    | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 |
+| sjc-worker – tr2    | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 |
+| iad-worker – tr3    | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 |
+| iad-worker-rr – tr3 | 2001:db8:1:31::/64 | 2001:db8:1:31::1 | 2001:db8:1:31::2 |
+| iad-gateway1 – tr3  | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 |
+| iad-gateway2 – tr3  | 2001:db8:1:33::/64 | 2001:db8:1:33::1 | 2001:db8:1:33::2 |
 
 ### Cluster SRv6 addressing
 
@@ -132,9 +132,9 @@ a matching seg6local route installed, for any current or future VPC — not just
 the ones with a pod running today. The FRR fabric DaemonSet advertises the same
 `/56` into the transit mesh via a static Null0 route + BGP `network` statement.
 
-Each site's tenant node advertises its own `/56` SRv6 locator block into the
+Each site's compute node advertises its own `/56` SRv6 locator block into the
 fabric — never the site's full `/48` uSID Block, which would create an
-anycast ambiguity the instant a second tenant node joins a site. The test VPC
+anycast ambiguity the instant a second compute node joins a site. The test VPC
 `ns10` (see [docs/tenants.md](docs/tenants.md)) gets a host address within its node's
 block (illustrative only — the exact hextet depends on allocation order; see
 docs/tenants.md's [SRv6 USID Argument allocation](docs/tenants.md#srv6-usid-argument-allocation)):
@@ -169,17 +169,17 @@ supplied statically through `GALACTIC_GATEWAY_SRV6_ADDRESS` (originally
 
 ### Management network (fc00:10::/64)
 
-| Node                                       | Address      |
-|--------------------------------------------|--------------|
-| dfw-control-plane                          | fc00:10::102 |
-| dfw-worker                                 | fc00:10::103 |
-| sjc-control-plane                          | fc00:10::122 |
-| sjc-worker                                 | fc00:10::123 |
-| iad-control-plane                          | fc00:10::112 |
-| iad-worker                                 | fc00:10::113 |
-| iad-worker2 (renamed `iad-worker-control`) | fc00:10::114 |
-| iad-worker3 (renamed `iad-gateway1`)       | fc00:10::115 |
-| iad-worker4 (renamed `iad-gateway2`)       | fc00:10::116 |
+| Node                                  | Address      |
+|---------------------------------------|--------------|
+| dfw-control-plane                     | fc00:10::102 |
+| dfw-worker                            | fc00:10::103 |
+| sjc-control-plane                     | fc00:10::122 |
+| sjc-worker                            | fc00:10::123 |
+| iad-control-plane                     | fc00:10::112 |
+| iad-worker                            | fc00:10::113 |
+| iad-worker2 (renamed `iad-worker-rr`) | fc00:10::114 |
+| iad-worker3 (renamed `iad-gateway1`)  | fc00:10::115 |
+| iad-worker4 (renamed `iad-gateway2`)  | fc00:10::116 |
 
 ## Lab layout
 
@@ -260,7 +260,7 @@ task deploy
 | `deploy`                 | Build images, apply host sysctls, and deploy the lab                          |
 | `deploy:topology`        | Deploy the ContainerLab topology (transit routers)                            |
 | `deploy:clusters`        | Create the three Kind clusters and export their kubeconfigs                   |
-| `deploy:rename-control`  | Rename `iad-worker2`→`iad-worker-control`, `iad-worker3/4`→`iad-gateway1/2`   |
+| `deploy:rename-control`  | Rename `iad-worker2`→`iad-worker-rr`, `iad-worker3/4`→`iad-gateway1/2`        |
 | `deploy:images`          | Load container images into Kind clusters                                      |
 | `deploy:system`          | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
 | `deploy:cni`             | Install Cilium and Multus, then the galactic-cni DaemonSet                    |
@@ -313,4 +313,4 @@ task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 - Worker–TR links use numbered IPv6 subnets (/64) with eBGP peering.
 - Cilium's iptables rules block BGP by default; the worker bootstrap script
   (`install.sh`) inserts `ip6tables -I INPUT` rules for TCP/179 before Cilium starts.
-- iad-worker-control peers with tr3 as AS 65000, the same AS used by all three clusters.
+- iad-worker-rr peers with tr3 as AS 65000, the same AS used by all three clusters.

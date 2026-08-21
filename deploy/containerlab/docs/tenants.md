@@ -19,12 +19,12 @@ reachability across sites.
 
 They differ only in scope and addressing:
 
-| VPC    | Sites                        | Address families | VRF interface    | Notes |
-|--------|------------------------------|-------------------|-------------------|-------|
-| `ns10` | dfw, sjc, iad (3-site)       | IPv6-only (fd20 ULA) | `G000000010V` | No `ipv4_subnet` at all. |
-| `ns20` | dfw, sjc, iad (3-site)       | Dual-stack (fd20 ULA + IPv4) | `G000000020V` | Both families active; exercises the dual-stack IPAM path. |
-| `ns30` | dfw only, 2 attachments      | IPv6-only (fd20 ULA) | `G000000030V` | Two distinct attachments (`private`/`private-b`, distinct `vpcattachment` values, same `vpc`), each its own single-replica Deployment, both land on `dfw-worker` and share one VRF — same-node connectivity, no cross-site hop. `verify:ns30` asserts the two pods share a node. |
-| `ns40` | iad only, 2 attachments      | IPv4-only | `G000000040V` | Two distinct attachments (`private`/`private-b`), each its own single-replica Deployment, both land on `iad-worker` (not `iad-worker-control`, which is tainted for the route-reflector role) and share one VRF. `verify:ns40` asserts the two pods share a node. |
+| VPC    | Sites                   | Address families             | VRF interface | Notes                                                                                                                                                                                                                                                                            |
+|--------|-------------------------|------------------------------|---------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ns10` | dfw, sjc, iad (3-site)  | IPv6-only (fd20 ULA)         | `G000000010V` | No `ipv4_subnet` at all.                                                                                                                                                                                                                                                         |
+| `ns20` | dfw, sjc, iad (3-site)  | Dual-stack (fd20 ULA + IPv4) | `G000000020V` | Both families active; exercises the dual-stack IPAM path.                                                                                                                                                                                                                        |
+| `ns30` | dfw only, 2 attachments | IPv6-only (fd20 ULA)         | `G000000030V` | Two distinct attachments (`private`/`private-b`, distinct `vpcattachment` values, same `vpc`), each its own single-replica Deployment, both land on `dfw-worker` and share one VRF — same-node connectivity, no cross-site hop. `verify:ns30` asserts the two pods share a node. |
+| `ns40` | iad only, 2 attachments | IPv4-only                    | `G000000040V` | Two distinct attachments (`private`/`private-b`), each its own single-replica Deployment, both land on `iad-worker` (not `iad-worker-rr`, which is tainted for the route-reflector role) and share one VRF. `verify:ns40` asserts the two pods share a node.                     |
 
 The VRF interface name follows `G<vpc, zero-padded to 9>V` on every worker —
 e.g. `ns20` (`vpc="20"`) is `G000000020V`. Unlike the host/guest veth
@@ -50,7 +50,7 @@ collision while still landing both pods in the one shared VRF their common
 
 ### SRv6 USID Argument allocation
 
-Each site's tenant node advertises its own `/56` SRv6 locator block into the
+Each site's compute node advertises its own `/56` SRv6 locator block into the
 fabric. The low hextet of a pod's USID is `(Function << 12) | Argument`
 (`uFMT 48+16`, `internal/plumbing/ebpf/uformat`): `Function` is the constant
 `0xE` (`FunctionEndDT46`) for every plain L3 VRF attachment, and `Argument` is
@@ -73,18 +73,18 @@ docker exec dfw-control-plane kubectl get bgpvrfinstances -A
 
 ## Addressing reference
 
-| Site | VPC    | IPv6 pool (fd20 ULA)  | IPv4 subnet       |
-|------|--------|------------------------|--------------------|
-| dfw  | `ns10` | `fd20:10:ff01::/48`   | none               |
-| sjc  | `ns10` | `fd20:10:ff02::/48`   | none               |
-| iad  | `ns10` | `fd20:10:ff03::/48`   | none               |
-| dfw  | `ns20` | `fd20:20:ff01::/48`   | `172.21.1.0/24`   |
-| sjc  | `ns20` | `fd20:20:ff02::/48`   | `172.21.20.0/24`  |
-| iad  | `ns20` | `fd20:20:ff03::/48`   | `172.21.10.0/24`  |
-| dfw  | `ns30` (`private`)   | `fd20:30:ff01::/48`   | none               |
-| dfw  | `ns30` (`private-b`) | `fd20:30:ff02::/48`   | none               |
-| iad  | `ns40` (`private`)   | none                   | `172.40.10.0/24`  |
-| iad  | `ns40` (`private-b`) | none                   | `172.40.20.0/24`  |
+| Site | VPC                  | IPv6 pool (fd20 ULA) | IPv4 subnet      |
+|------|----------------------|----------------------|------------------|
+| dfw  | `ns10`               | `fd20:10:ff01::/48`  | none             |
+| sjc  | `ns10`               | `fd20:10:ff02::/48`  | none             |
+| iad  | `ns10`               | `fd20:10:ff03::/48`  | none             |
+| dfw  | `ns20`               | `fd20:20:ff01::/48`  | `172.21.1.0/24`  |
+| sjc  | `ns20`               | `fd20:20:ff02::/48`  | `172.21.20.0/24` |
+| iad  | `ns20`               | `fd20:20:ff03::/48`  | `172.21.10.0/24` |
+| dfw  | `ns30` (`private`)   | `fd20:30:ff01::/48`  | none             |
+| dfw  | `ns30` (`private-b`) | `fd20:30:ff02::/48`  | none             |
+| iad  | `ns40` (`private`)   | none                 | `172.40.10.0/24` |
+| iad  | `ns40` (`private-b`) | none                 | `172.40.20.0/24` |
 
 `ns20`'s IPv4 pool (`172.21.0.0/16`) and `ns40`'s (`172.40.0.0/16`) are
 deliberately from distinct `/16` blocks so the two VPCs' addressing never
@@ -144,7 +144,7 @@ For the 3-site VPCs (`ns10`, `ns20`), expect one `Running` pod per
 site. For the single-site VPCs, expect **two** `Running` pods — one per
 attachment (`private`/`private-b`, distinct Deployments) — both on the one
 site's worker (`dfw-worker` for `ns30`, `iad-worker` for `ns40` — not
-`iad-worker-control`, which carries the route-reflector taint).
+`iad-worker-rr`, which carries the route-reflector taint).
 
 ### Inspect a pod's VPC interface
 
@@ -273,16 +273,16 @@ docker exec dfw-worker dmesg | grep galactic
    VPCs (`ns30`/`ns40`), a healthy ping also depends only on this VRF's local
    routes/neighbor table — there's no cross-site EVPN dependency to check.
 
-### Pod scheduled on iad-worker-control instead of iad-worker (ns40)
+### Pod scheduled on iad-worker-rr instead of iad-worker (ns40)
 
 Every test VPC's Deployment uses a `node-role.kubernetes.io/control-plane
-DoesNotExist` affinity, but that doesn't exclude `iad-worker-control` — it's
+DoesNotExist` affinity, but that doesn't exclude `iad-worker-rr` — it's
 a tainted *worker*, not a Kubernetes control-plane node. If an `ns40` pod ends
 up `Pending`, confirm the route-reflector taint is still in place rather than
 assuming the affinity alone keeps pods off it:
 
 ```bash
-docker exec iad-control-plane kubectl describe node iad-worker-control | grep -A2 Taints
+docker exec iad-control-plane kubectl describe node iad-worker-rr | grep -A2 Taints
 ```
 
 If the taint is gone the pods schedule fine but may split across the two

@@ -56,7 +56,7 @@ RT-less-EVPN main-table import path
 (`internal/runtime/gobgp/monitor.go`'s `matchTableID`/`RouteMainAdd`).
 `GALACTIC_CNI_NAT66_SHARD_SIDS` (set identically on every site's
 `galactic-cni` DaemonSet, `resources/galactic-cni/daemonset-patch.yaml`)
-carries the fabric-wide membership list every tenant node needs to build
+carries the fabric-wide membership list every compute node needs to build
 its own default route — operator-supplied in this phase, not learned
 in-cluster; see that env var's own doc comment
 (`internal/config/cni.go`) for why.

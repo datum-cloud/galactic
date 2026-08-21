@@ -45,7 +45,7 @@ const (
 // BGP-family reconciler here at all: NetworkGatewayReconciler/
 // NetworkRuleReconciler need no BGP client of their own — they only
 // create/update/delete BGPAdvertisement CRDs, which the co-located
-// galactic-router (tenant role) picks up via its own
+// galactic-router (default role) picks up via its own
 // BGPAdvertisementReconciler.
 func runCmd(cfg *config.GatewayConfig) error {
 	nodeName := cfg.NodeName

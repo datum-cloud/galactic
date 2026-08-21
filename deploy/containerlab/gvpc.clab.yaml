@@ -149,12 +149,12 @@ topology:
     # matching declaration order in node_files/iad/config.yaml) even though
     # their Kubernetes node names are iad-gateway1/iad-gateway2 (set via
     # that file's kubeadmConfigPatches, same indirection iad-worker2/
-    # iad-worker-control already uses) -- Taskfile.yaml's deploy:rename-*
+    # iad-worker-rr already uses) -- Taskfile.yaml's deploy:rename-*
     # step renames both to match after cluster creation, purely cosmetic
     # (doesn't affect the links below, which are wired to the container
     # before the rename happens). No blackhole route in `exec`: unlike
     # iad-worker, these nodes never run galactic-veth's usid.c decap
-    # program at all (config/galactic-cni's DaemonSet only targets the edge role),
+    # program at all (config/galactic-cni's DaemonSet only targets the compute role),
     # so the blackhole-route workaround it needs doesn't apply here.
     iad-worker3:
       kind: ext-container
@@ -250,7 +250,7 @@ topology:
     # node links below already document in detail: galactic-nat66's own
     # XDP program (nat66attach.go, also native/driver-mode-only) attaches
     # to this exact interface (eth1, shared with the TC-BPF SRv6 uSID
-    # datapath, which has no such restriction), and every tenant worker is
+    # datapath, which has no such restriction), and every compute worker is
     # now also a NAT66 shard (design plan §8's "reuse the three site
     # workers as shards"). Confirmed live: galactic-nat66 crash-looped on
     # dfw-worker/sjc-worker/iad-worker with exactly this ERANGE
@@ -303,7 +303,7 @@ topology:
     #
     # mtu: 1500 on both ends, unlike every other link in this topology
     # (which gets containerlab's jumbo-frame veth default, ~9500) --
-    # required, not cosmetic: galactic-router's edge NAT+LB datapath
+    # required, not cosmetic: galactic-gateway's edge NAT+LB datapath
     # attaches its XDP program to this link's gateway-side interface in
     # native/driver mode (edgeattach.go, XDPDriverMode; generic/SKB mode
     # is deliberately not attempted, see that package's doc comment), and

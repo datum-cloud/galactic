@@ -30,7 +30,7 @@ tasks:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
   "build:fabric-router":
-    desc: Build the fabric-router image (FRR v{{.FRR_VERSION}} + debug tooling)
+    desc: Build the fabric-router image (FRR v{{.FRR_VERSION}})
     cmds:
       - docker build --network=host --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
@@ -60,12 +60,12 @@ tasks:
       - docker build --network=host --build-context network=../../../network -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
   "build:galactic-nat66":
-    desc: Build the galactic-nat66 sharded egress datapath image
+    desc: Build the galactic-nat66 egress datapath image
     cmds:
       - docker build --network=host --build-context network=../../../network -t galactic-nat66:latest -f ../../containers/galactic-nat66/Dockerfile ../..
 
   deploy:
-    desc: Build images and deploy the full lab end-to-end
+    desc: Build images and deploy the full lab
     deps: [build, host-setup]
     cmds:
       - task: "deploy:clusters"
@@ -98,7 +98,7 @@ tasks:
   "deploy:rename-control":
     desc: Rename iad worker nodes
     cmds:
-      - docker rename iad-worker2 iad-worker-control
+      - docker rename iad-worker2 iad-worker-rr
       - docker rename iad-worker3 iad-gateway1
       - docker rename iad-worker4 iad-gateway2
 
@@ -119,18 +119,18 @@ tasks:
         fi
 
   "build:lab-xdp-passthrough":
-    desc: Compile the lab-only pass-through XDP program (see node_files/common/xdp-passthrough.c)
+    desc: Compile the lab-only pass-through XDP program
     deps: [require-clang]
     cmds:
       - clang -O2 -g -target bpf -c node_files/common/xdp-passthrough.c -o node_files/common/xdp-passthrough.o
 
+  # Loads the pass-through XDP program on tr3's gateway-facing links
+  # (eth6/eth7) -- makes those veth links behave like a real gateway's
+  # physical NIC uplink for edgedsr.c's XDP_TX redirect (see
+  # xdp-passthrough.c's own doc comment). Idempotent: `ip link set ...
+  # xdp obj` replaces whatever program (if any) is already attached.
   "deploy:lab-xdp-passthrough":
-    desc: >-
-      Load the pass-through XDP program on tr3's gateway-facing links
-      (eth6/eth7) -- makes those veth links behave like a real gateway's
-      physical NIC uplink for edgedsr.c's XDP_TX redirect (see
-      xdp-passthrough.c's own doc comment). Idempotent: `ip link set ...
-      xdp obj` replaces whatever program (if any) is already attached.
+    desc: Load the pass-through XDP program on tr3
     deps: [build:lab-xdp-passthrough]
     vars:
       # tr3 is a real containerlab-managed node (kind: linux), unlike the
@@ -146,21 +146,23 @@ tasks:
       - docker exec {{.TR3_CONTAINER}} ip -force link set dev eth6 xdp obj /xdp-passthrough.o sec xdp
       - docker exec {{.TR3_CONTAINER}} ip -force link set dev eth7 xdp obj /xdp-passthrough.o sec xdp
 
+  # Uses ctr directly instead of `kind load docker-image`, which is
+  # incompatible with containerd v2.
   "load-image":
     internal: true
-    desc: Load a docker image into a kind node via ctr (workaround for containerd v2 incompatibility)
+    desc: Load a docker image into a kind node via ctr
     requires:
       vars: [IMAGE, NODE]
     cmds:
       - docker save {{.IMAGE}} | docker exec -i {{.NODE}} ctr --namespace k8s.io images import -
 
   "deploy:images":
-    desc: Load all container images into the Kind clusters
+    desc: Load all container images into Kind
     cmds:
       - task: load-image
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker-control}
+        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker-rr}
       # iad-gateway1/2 need fabric-router (the underlay eBGP session the
       # gateway XDP datapath's uplink depends on -- see config/fabric-router/'s
       # affinity, extended to the gateway role), galactic-router (tenant
@@ -168,7 +170,7 @@ tasks:
       # pod), and galactic-gateway (the edge XDP NAT+LB engine, the other
       # container in that pod), but NOT galactic-cni: they never run the
       # CNI DaemonSet at all (it only
-      # targets the edge role).
+      # targets the compute role).
       - task: load-image
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-gateway1}
       - task: load-image
@@ -188,7 +190,7 @@ tasks:
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-worker-control}
+        vars: {IMAGE: galactic-router:latest, NODE: iad-worker-rr}
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: sjc-worker}
       - task: load-image
@@ -196,7 +198,7 @@ tasks:
       - task: load-image
         vars: {IMAGE: galactic-cni:latest, NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker-control}
+        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker-rr}
       - task: load-image
         vars: {IMAGE: galactic-cni:latest, NODE: sjc-worker}
       - task: load-image
@@ -214,7 +216,7 @@ tasks:
       - ./scripts/deploy-system.sh
 
   "deploy:cni":
-    desc: Install Cilium and Multus, then the galactic-cni DaemonSet
+    desc: Install Cilium, Multus, and galactic-cni
     cmds:
       - ./scripts/deploy-cni.sh
 
@@ -227,12 +229,12 @@ tasks:
       - kind delete cluster --name iad || true
 
   inspect:
-    desc: Inspect deployed nodes and management addresses
+    desc: List deployed nodes and mgmt addresses
     cmds:
       - sudo containerlab inspect -t {{.TOPO}}
 
   graph:
-    desc: Generate a draw.io diagram for the current topology
+    desc: Generate a draw.io diagram of the topology
     cmds:
       - sudo containerlab graph -t {{.TOPO}} --drawio --drawio-dir .
 
@@ -247,12 +249,12 @@ tasks:
       - ./scripts/deploy-fabric.sh
 
   "deploy:galactic-router":
-    desc: Install galactic-router DaemonSets and BGP resources
+    desc: Install galactic-router and BGP resources
     cmds:
       - ./scripts/deploy-galactic-router.sh
 
   "deploy:galactic-nat66":
-    desc: Install the sharded NAT66 egress DaemonSet and NAT66Shard objects
+    desc: Install the NAT66 egress DaemonSet and shards
     cmds:
       - ./scripts/deploy-galactic-nat66.sh
 
@@ -271,7 +273,7 @@ tasks:
       - ./scripts/deploy-ns.sh ns10 dfw sjc iad
 
   "deploy:ns20":
-    desc: Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)
+    desc: Deploy ns20 test VPC (dual-stack)
     cmds:
       - ./scripts/deploy-ns.sh ns20 dfw sjc iad
 
@@ -286,7 +288,7 @@ tasks:
       - ./scripts/deploy-ns.sh ns40 iad
 
   "deploy:ns60":
-    desc: Deploy ns60 test VPC, nginx backend for the gateway canary
+    desc: Deploy ns60 test VPC (gateway canary backend)
     cmds:
       - ./scripts/deploy-ns.sh ns60 iad
 
@@ -303,7 +305,7 @@ tasks:
       - task: "verify:scenarios"
 
   "verify:bgp-transit":
-    desc: Verify transit router BGP sessions (iBGP full mesh)
+    desc: Verify transit router BGP sessions
     cmds:
       - |
         for r in tr1 tr2 tr3 tr4; do
@@ -312,7 +314,7 @@ tasks:
         done
 
   "verify:bgp-fabric":
-    desc: Verify fabric BGP sessions on dfw, iad, and sjc workers
+    desc: Verify fabric BGP sessions on all sites
     cmds:
       - |
         docker exec dfw-control-plane \
@@ -332,14 +334,14 @@ tasks:
           -- vtysh -c "show bgp ipv6 unicast summary"
 
   "verify:bgp-peers":
-    desc: Verify galactic-router BGP peer sessions (GoBGP)
+    desc: Verify galactic-router BGP peer sessions
     cmds:
       - docker exec dfw-control-plane kubectl get bgppeers -n galactic-system
       - docker exec sjc-control-plane kubectl get bgppeers -n galactic-system
       - docker exec iad-control-plane kubectl get bgppeers -n galactic-system
 
   "verify:srv6":
-    desc: Verify each site's SRv6 locator prefix on tr1
+    desc: Verify each site's SRv6 locator prefix
     cmds:
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
@@ -359,7 +361,7 @@ tasks:
       - docker exec iad-control-plane kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
 
   "verify:nat66-sharding":
-    desc: Verify each site's NAT66Shard is Ready and its shard SID is advertised
+    desc: Verify each site's NAT66Shard and shard SID
     cmds:
       - |
         for site in dfw sjc iad; do

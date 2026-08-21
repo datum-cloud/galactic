@@ -6,7 +6,7 @@ metadata:
 spec:
   targetRef:
     kind: Node
-    name: iad-worker-control
+    name: iad-worker-rr
   roles:
     - tenant
   localASN: 65000

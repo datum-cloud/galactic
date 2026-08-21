@@ -6,40 +6,25 @@ spec:
   template:
     spec:
       # config/galactic-nat66/base/daemonset.yaml's own affinity requires
-      # galactic.datumapis.com/node: nat66 -- a dedicated node role this
-      # lab has never introduced (see AGENTS.md's "Node labels" note:
-      # every site worker here is labeled galactic.datumapis.com/node:
-      # edge). Per the redesign plan's own §8 suggestion, this lab reuses
-      # iad-worker itself as a shard rather than adding a new dedicated
-      # nat66-labeled node, so this patch replaces the whole affinity
-      # block to match iad-worker's real "edge" label plus a
-      # kubernetes.io/hostname pin -- otherwise the base's own affinity
-      # would never match any node in this cluster and the DaemonSet
-      # would sit at zero replicas forever. iad-worker (worker-index 1)
-      # is the plain tenant worker, not iad-worker2/iad-worker-control
-      # (the route reflector) or iad-gateway1/iad-gateway2 (the tainted
-      # gateway-role nodes) -- see gvpc.clab.yaml and README.md's node
-      # table. GALACTIC_NAT66_SHARD_SID/_SHARD_PUB_ADDR below must be
-      # unique per shard node (see config/galactic-nat66/kustomization.
-      # yaml's doc comment), so dfw/iad/sjc are three separate per-node
-      # overlays rather than one overlay matching all three site workers
-      # with identical env -- mirrors resources/galactic-gateway/
-      # iad-gateway1/'s identical per-node-overlay rationale.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
-                    operator: In
-                    values:
-                      - edge
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - iad-worker
+      # galactic.datumapis.com/node: compute -- iad-worker
+      # (node_files/iad/config.yaml, worker-index 1) carries it, reusing
+      # that existing compute worker as this site's shard rather than
+      # introducing a dedicated node, per the redesign plan's own §8
+      # suggestion. iad-worker2/iad-worker-rr (the route reflector,
+      # galactic.datumapis.com/galactic-route-reflector, not a
+      # galactic.datumapis.com/node value at all) and iad-gateway1/
+      # iad-gateway2 (the tainted galactic.datumapis.com/node=edge nodes,
+      # see gvpc.clab.yaml and README.md's node table) never carry the
+      # compute label, so no affinity override or hostname pin is needed
+      # here: iad-worker is the only node in this cluster carrying it,
+      # and the base's own affinity already resolves to exactly it --
+      # unlike resources/galactic-gateway/iad-gateway1/, which needs a
+      # kubernetes.io/hostname pin because iad has *two* edge-labeled
+      # nodes needing different per-node env. GALACTIC_NAT66_SHARD_SID/
+      # _SHARD_PUB_ADDR below must be unique per shard node (see
+      # config/galactic-nat66/kustomization.yaml's doc comment), so
+      # dfw/iad/sjc are three separate per-node overlays rather than one
+      # overlay matching all three site workers with identical env.
       containers:
         - name: galactic-nat66
           env:
@@ -67,7 +52,7 @@ spec:
             # them. Physical co-location (which node this pod is
             # scheduled to) and uSID identity (which Node-ID a shard's own
             # address claims) are independent; nodeID=9 is free at this
-            # site (iad-worker=1, iad-worker-control=1, iad-gateway1=2,
+            # site (iad-worker=1, iad-worker-rr=1, iad-gateway1=2,
             # iad-gateway2=3 -- see resources/galactic-router/iad/,
             # resources/galactic-control/iad/, and resources/
             # galactic-gateway/iad-gateway{1,2}/'s own bgprouter.yaml

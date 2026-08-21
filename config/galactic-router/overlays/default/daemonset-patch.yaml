@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-router
+spec:
+  template:
+    spec:
+      # This is the default, unqualified per-node role -- it needs no
+      # name/label of its own (../../base/daemonset.yaml's plain "galactic-router"
+      # identity is all it gets) since nothing else needs to select it
+      # apart from the rr (route reflector) role, which independently
+      # patches the same ../../base/ with its own distinct name/label -- see
+      # ../rr/daemonset-patch.yaml. Opt-in via the
+      # galactic.datumapis.com/node=compute label so new node types (GPU,
+      # monitoring, etc.) don't accidentally pick up the role, and
+      # excludes Kubernetes control-plane nodes outright — the base
+      # DaemonSet's blanket toleration would otherwise let it land there
+      # if one ever carried the compute label. "compute" (not "edge") --
+      # galactic-cni and galactic-nat66 opt in via the same label value,
+      # since all three run together on every ordinary tenant-serving
+      # node; "edge" is reserved for galactic-gateway's node label, the
+      # actual network-edge/ingress role (see
+      # config/galactic-gateway/base/daemonset.yaml).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - compute
+      containers:
+        - name: galactic-router
+          env:
+            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              # This role only dials *out* to iBGP peers (the reflector,
+              # see ../rr/daemonset-patch.yaml, still a sibling under
+              # overlays/); -1 disables the inbound
+              # listener entirely, so no BGP containerPort belongs on this
+              # patch -- there's no port here to document.
+              value: "-1"

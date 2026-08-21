@@ -79,7 +79,7 @@ var legacyVRFNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})[A-Za-z0-9]{3}V$`
 // routerNamesForNode returns the names of every BGPRouter in the namespace
 // whose TargetRef points at nodeName. BGPAdvertisement/BGPVRFInstance CRDs
 // are namespace-scoped, not node-scoped — a namespace can hold CRDs created
-// by routers on other nodes (e.g. the tenant and tenant-control roles both
+// by routers on other nodes (e.g. the default and rr roles both
 // watch the same namespace in the containerlab lab), and this node's local
 // kernel/filesystem state (VRFs, /var/run/netns) can only ever confirm or
 // deny liveness for containers that actually ran here. Callers must use this

@@ -296,7 +296,7 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 // regardless of what the low 64 bits (Function+Argument) happen to
 // contain. This is the actual boundary a real deployment must keep
 // disjoint -- see locator_matches' own doc comment for the live
-// incident (a shard reusing its co-located tenant node's own Node-ID)
+// incident (a shard reusing its co-located compute node's own Node-ID)
 // this same 64-bit match cannot, by itself, detect or prevent; this test
 // only proves the match's own stated granularity is what's implemented,
 // not a fix for that allocation-level constraint.

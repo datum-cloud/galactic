@@ -196,7 +196,7 @@ sequenceDiagram
   [docs/cni/cni-cmd-sequence.md](cni-cmd-sequence.md#notes-on-del).
 - **Node scoping matters because CRDs are namespace-, not node-, scoped.**
   `BGPAdvertisement`/`BGPVRFInstance` objects in a namespace can belong to
-  routers on other nodes (e.g. the tenant and tenant-control roles watching
+  routers on other nodes (e.g. the default and rr roles watching
   the same namespace). Every collection pass first filters to only the
   `BGPRouter`s whose `TargetRef.Name` matches this node, and this node's own
   kernel/filesystem state can only ever confirm or deny liveness for

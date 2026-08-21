@@ -14,7 +14,7 @@ spec:
   # physical fabric switch, not an in-cluster control-plane relationship.
   # Bouncing FRR here drops the node's only underlay path, so every overlay
   # SRv6/EVPN path riding on it blackholes until the eBGP session
-  # re-establishes and reconverges -- and galactic-router-control/
+  # re-establishes and reconverges -- and galactic-router-rr/
   # galactic-gateway crash-loop per the toleration comment below if it
   # doesn't come back. The startupProbe/livenessProbe below only check that
   # zebra/bgpd answer vtysh (the daemon is alive), not that the eBGP
@@ -48,26 +48,33 @@ spec:
       # Blanket-tolerate all taints, same as every other DaemonSet in
       # config/ (galactic-cni, galactic-router, galactic-gateway).
       # Placement is controlled entirely by the node affinity
-      # below (edge/control/gateway roles) — tolerations don't need to be
+      # below (the galactic.datumapis.com/fabric label) — tolerations don't need to be
       # scoped, and scoping them risks silently blocking fabric-router if
       # an unenumerated taint (a new role taint, a maintenance taint, etc.)
       # ever lands on an eligible node: the route reflector's lo address
       # (and BGP_LOCAL_ADDRESS auto-detection) or the gateway node's
-      # underlay session would never come up and galactic-router-control/
+      # underlay session would never come up and galactic-router-rr/
       # galactic-gateway would crashloop forever per their dependency on
       # this DaemonSet.
       tolerations:
         - operator: Exists
       # Opt-in only, same as galactic-cni and galactic-router: runs on every
-      # node labeled for regular tenant traffic, the galactic-router
-      # route-reflector role, or the edge XDP NAT+LB gateway role
-      # (config/galactic-gateway/base/, a separate galactic-gateway binary), since
-      # all three need underlay connectivity -- the gateway role's own XDP
-      # datapath attaches to
-      # this same interface (see internal/gateway's doc.go) and depends on
-      # FRR having already brought it up and established the eBGP
-      # underlay session. New node types (GPU, monitoring, etc.) don't
-      # automatically get fabric.
+      # node explicitly labeled galactic.datumapis.com/fabric, a dedicated
+      # boolean-style label independent of galactic.datumapis.com/node's
+      # role value (compute, edge) and of the separate
+      # galactic.datumapis.com/galactic-route-reflector flag -- rather than
+      # enumerating every role that happens to need underlay connectivity
+      # today, this lets any *current or future* role opt in by adding
+      # one label,
+      # with no matching edit ever required here again. (This replaced an
+      # earlier version that did enumerate roles via `In` -- which meant a
+      # role like nat66 was never added to the list and so silently never
+      # got fabric, even though NAT66 shards need underlay BGP to
+      # advertise their own SID just as much as any other role.) The
+      # gateway role's own XDP datapath attaches to this same interface
+      # (see internal/gateway's doc.go) and depends on FRR having already
+      # brought it up and established the eBGP underlay session. New node
+      # types (GPU, monitoring, etc.) don't automatically get fabric.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -75,12 +82,8 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
-                    operator: In
-                    values:
-                      - edge
-                      - control
-                      - gateway
+                  - key: galactic.datumapis.com/fabric
+                    operator: Exists
       initContainers:
         - name: frr-init
           # ":latest" is a placeholder only: no such tag is ever pushed to

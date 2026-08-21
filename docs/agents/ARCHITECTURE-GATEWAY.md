@@ -36,7 +36,7 @@ load-balances into a tenant VPC's backend Pods, without a VRF or tunnel
 dependency and without a per-tenant Geneve device. It is a **separate
 binary from `galactic-router`**, deployed as a second container in the same
 `hostNetwork: true` pod on dedicated gateway-role nodes only
-(`galactic.datumapis.com/node: gateway`), specifically so a crash on either
+(`galactic.datumapis.com/node: edge`), specifically so a crash on either
 side — tenant BGP vs. the XDP-holding gateway engine — no longer takes the
 other down with it. Tenant BGP itself (the embedded GoBGP server, the
 `BGPRouter`/`BGPPeer`/`BGPAdvertisement`/`BGPPolicy`/`BGPVRFInstance`
@@ -424,7 +424,7 @@ binary's own, see [RBAC](#rbac) below).
 
 | Container          | Capabilities                  | Why                                                                                                                                                                                                                                                                                                                          |
 | ------------------ | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic-router`  | `NET_ADMIN`                   | Same as the plain `tenant`/`tenant-control` roles — no BPF/PERFMON, since gateway-specific eBPF is confined to the other container now                                                                                                                                                                                       |
+| `galactic-router`  | `NET_ADMIN`                   | Same as the plain `default`/`rr` roles — no BPF/PERFMON, since gateway-specific eBPF is confined to the other container now                                                                                                                                                                                       |
 | `galactic-gateway` | `NET_ADMIN`, `BPF`, `PERFMON` | `BPF` for the `bpf()` syscalls (program/map creation); `PERFMON` because the verifier only allows pointer+scalar arithmetic on packet data/data_end when the loading process is `perfmon_capable()` — without it, even a `root` container gets "pointer arithmetic ... prohibited for !root" |
 
 Both containers mount host paths: `galactic-router` mounts

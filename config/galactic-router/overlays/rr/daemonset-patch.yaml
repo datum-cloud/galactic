@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-router
+  labels:
+    app.kubernetes.io/name: galactic-router-rr
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-router-rr
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-router-rr
+    spec:
+      # Route-reflector role: opt-in only, requires
+      # galactic.datumapis.com/galactic-route-reflector explicitly set, so
+      # it never double-schedules with the per-worker default DaemonSet
+      # (see ../../base/daemonset.yaml) just because a node happens to
+      # also be galactic.datumapis.com/node=compute. Deliberately *not* a
+      # galactic.datumapis.com/node enum value: that key is single-valued,
+      # so encoding this role there would make it impossible for a node
+      # to be both compute and a route reflector at once -- the same
+      # class of bug fixed for galactic.datumapis.com/nat66 (see
+      # config/galactic-nat66/base/daemonset.yaml's own affinity comment).
+      # A dedicated boolean-style label, independent of whatever
+      # galactic.datumapis.com/node value a node also carries, matches
+      # galactic.datumapis.com/fabric's pattern instead. Also excludes
+      # Kubernetes control-plane nodes outright — the base DaemonSet's
+      # blanket toleration would otherwise let it land there if one ever
+      # carried the galactic-route-reflector label.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/galactic-route-reflector
+                    operator: Exists
+      containers:
+        - name: galactic-router
+          env:
+            - name: GALACTIC_ROUTER_REFLECTOR
+              value: "true"
+            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
+              value: "1790"
+              # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS is auto-detected from the
+              # host's lo interface by default (the stable peering address
+              # other compute routers reflect through). Set it explicitly here
+              # only if lo doesn't carry the desired address on this cluster.
+          # Documentation only (hostNetwork: true, so this doesn't change
+          # behavior): the rr role is the one place galactic-router
+          # actually listens for inbound BGP -- the default role (see
+          # ../../base/daemonset.yaml) and the router container in
+          # config/galactic-gateway/base/daemonset.yaml both set
+          # GALACTIC_ROUTER_BGP_LISTEN_PORT=-1 and open no BGP port at all,
+          # so this entry only belongs on this patch, not the shared base.
+          ports:
+            - name: bgp
+              containerPort: 1790
+              protocol: TCP
