@@ -9,6 +9,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/intf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -292,5 +294,46 @@ func TestVPCFromName(t *testing.T) {
 				t.Errorf("vpcFromName(%q) = %q, want %q", tt.input, got, tt.wantVPC)
 			}
 		})
+	}
+}
+
+// TestVRFNameJoinsCRDNames pins the join CollectOrphanedVRFs makes: the base62
+// VPC recovered from a kernel VRF interface name has to encode to the same
+// segment the BGP CRD names for that VPC start with, whether or not the
+// interface name carried the template's zero padding.
+func TestVRFNameJoinsCRDNames(t *testing.T) {
+	for _, vpc := range []string{"1dLaEmCAp", "0000000jU"} {
+		parsed, ok := vpcFromVRFName(intf.GenerateInterfaceNameVRF(vpc))
+		if !ok {
+			t.Fatalf("vpcFromVRFName(%q) did not match", intf.GenerateInterfaceNameVRF(vpc))
+		}
+		advVPC := vpcFromName(crdnames.BGPAdvertisementName(vpc, "2Bc"))
+		if got := crdnames.VPCSegment(parsed); got != advVPC {
+			t.Errorf("kernel VRF for VPC %q resolves to %q, but its BGPAdvertisements are named after %q", vpc, got, advVPC)
+		}
+	}
+}
+
+// TestVPCKeysJoinLegacyAndCurrentNames covers the upgrade window in which one
+// VPC has CRDs named both before and after the name encoding changed: neither
+// side may look orphaned to the other.
+func TestVPCKeysJoinLegacyAndCurrentNames(t *testing.T) {
+	const vpc = "10" // base62, as a pre-rename CRD name and a kernel VRF name carry it
+	encoded := crdnames.VPCSegment(vpc)
+
+	legacy := map[string]struct{}{}
+	addVPC(legacy, vpc)
+	if !vpcInSet(legacy, encoded) {
+		t.Errorf("a current-named CRD (%q) does not join a pre-rename one (%q)", encoded, vpc)
+	}
+
+	current := map[string]struct{}{}
+	addVPC(current, encoded)
+	if !vpcInSet(current, vpc) {
+		t.Errorf("a pre-rename CRD (%q) does not join a current-named one (%q)", vpc, encoded)
+	}
+
+	if vpcInSet(current, "zz") {
+		t.Errorf("unrelated VPC %q matched the set for %q", "zz", vpc)
 	}
 }
