@@ -12,7 +12,7 @@ jobs:
       contents: read
       packages: write
       attestations: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.21.0
     with:
       image-name: galactic-cni
       dockerfile-path: containers/galactic-cni/Dockerfile
@@ -25,7 +25,7 @@ jobs:
       contents: read
       packages: write
       attestations: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.21.0
     with:
       image-name: galactic-router
       dockerfile-path: containers/galactic-router/Dockerfile
@@ -38,7 +38,7 @@ jobs:
       contents: read
       packages: write
       attestations: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.21.0
     with:
       image-name: galactic-gateway
       dockerfile-path: containers/galactic-gateway/Dockerfile
@@ -51,7 +51,7 @@ jobs:
       contents: read
       packages: write
       attestations: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.20.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.21.0
     with:
       image-name: fabric-router
       dockerfile-path: containers/fabric-router/Dockerfile
@@ -70,7 +70,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.20.0
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.21.0
     with:
       bundle-name: ghcr.io/datum-cloud/galactic-kustomize
       bundle-path: config
