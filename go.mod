@@ -16,10 +16,10 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260803231012-156a440d85e5
-	go.datum.net/network v0.0.0-20260819160013-45d0ff9deaee
+	go.datum.net/network v0.0.0-20260821012412-35ea8d019ad8
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
-	google.golang.org/grpc v1.83.0
+	google.golang.org/grpc v1.83.1
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3
