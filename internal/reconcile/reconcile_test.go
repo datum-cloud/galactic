@@ -81,31 +81,22 @@ func newTestScheme(t *testing.T) *runtime.Scheme {
 // it, and the fake client has no cache to register it on implicitly.
 const routerRefIndexer = ".spec.routerRef.name"
 
-func TestBuildDesiredRouter_NodeAndRoleFilter(t *testing.T) {
+func TestBuildDesiredRouter_NodeFilter(t *testing.T) {
 	const thisNode = "node-a"
 
 	tests := []struct {
 		name       string
 		targetNode string
-		roles      []bgpv1alpha1.RouterRole
 		wantSkip   bool
 	}{
 		{
 			name:       "skips a router targeting a different node",
 			targetNode: "node-b",
-			roles:      []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			wantSkip:   true,
 		},
 		{
-			name:       "skips a router with a non-tenant role",
+			name:       "proceeds for a router targeting this node",
 			targetNode: thisNode,
-			roles:      []bgpv1alpha1.RouterRole{"fabric"},
-			wantSkip:   true,
-		},
-		{
-			name:       "proceeds for a tenant-role router on this node",
-			targetNode: thisNode,
-			roles:      []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			wantSkip:   false,
 		},
 	}
@@ -116,7 +107,6 @@ func TestBuildDesiredRouter_NodeAndRoleFilter(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: "default"},
 				Spec: bgpv1alpha1.BGPRouterSpec{
 					TargetRef: bgpv1alpha1.TargetRef{Name: tc.targetNode},
-					Roles:     tc.roles,
 				},
 			}
 

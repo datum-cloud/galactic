@@ -125,7 +125,6 @@ func newTestRouter() *bgpv1alpha1.BGPRouter {
 			TargetRef: bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testNodeGWA},
 			LocalASN:  65000,
 			RouterID:  "1.1.1.1",
-			Roles:     []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 		},
 	}
 }

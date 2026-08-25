@@ -72,7 +72,7 @@ galactic/
 │   │                        #   (NetworkGatewayReconciler/NetworkRuleReconciler also
 │   │                        #   live in this package but run in galactic-gateway, not
 │   │                        #   galactic-router — see ARCHITECTURE-GATEWAY.md.)
-│   ├── reconcile/           # CRD → DesiredRouter translation (node/role checks,
+│   ├── reconcile/           # CRD → DesiredRouter translation (node targeting,
 │   │                        #   secret resolution, IPv6 next-hop from Node)
 │   ├── runtime/             # RouterRuntime interface + RuntimeManager
 │   │   └── gobgp/           # GoBGP RouterRuntime (the only backend)
@@ -201,7 +201,7 @@ co-located `galactic-gateway` container's own health port on the same
 | Package                  | Binary                                   | Responsibility                                                                                                                                                   | Owns state        |
 | ------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
 | `internal/controller`    | galactic-router                          | controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Node, Secret, GC); field index registration; CRD status helpers | No                |
-| `internal/reconcile`     | galactic-router                          | Translates BGPRouter + related CRDs into `model.DesiredRouter`; enforces node/role filtering, timer validation, AFI validation                                   | No                |
+| `internal/reconcile`     | galactic-router                          | Translates BGPRouter + related CRDs into `model.DesiredRouter`; enforces node targeting, timer validation, AFI validation                                        | No                |
 | `internal/runtime`       | galactic-router                          | `RouterRuntime` interface; `RuntimeManager` (keyed map of live runtimes, double-checked lock create)                                                             | Yes (runtime map) |
 | `internal/runtime/gobgp` | galactic-router                          | Embeds GoBGP v4; lazy-starts on first Apply; handles peer/VRF/EVPN-path/policy add/update/delete; tracks established timestamps                                  | Yes (per-router)  |
 | `internal/model`         | galactic-router                          | `DesiredRouter`, `DesiredPeer`, `DesiredAdvertisement`, `DesiredPolicy`, `DesiredVRFInstance`, `RuntimeStatus`; re-exports BGP API enums                         | No                |

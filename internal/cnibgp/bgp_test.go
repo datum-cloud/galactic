@@ -85,7 +85,6 @@ func routerForNode(name, nodeName, namespace string, asn int64) *bgpv1alpha1.BGP
 			},
 			LocalASN: asn,
 			RouterID: "10.0.0.1",
-			Roles:    []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			AddressFamilies: []bgpv1alpha1.AddressFamily{
 				{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
 			},
