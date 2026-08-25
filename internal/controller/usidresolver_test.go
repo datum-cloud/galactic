@@ -108,7 +108,6 @@ func TestBackendSIDIndex_SkipsRouterWithoutSRv6Config(t *testing.T) {
 			TargetRef: bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testComputeNodeName},
 			LocalASN:  65000,
 			RouterID:  testBackendRouterID,
-			Roles:     []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			// No SRv6Locator/NodeID.
 		},
 	}
@@ -159,7 +158,6 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 			TargetRef:   bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: "node-a"},
 			LocalASN:    65000,
 			RouterID:    "1.1.1.1",
-			Roles:       []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			SRv6Locator: vpcALocator,
 			NodeID:      7,
 		},
@@ -170,7 +168,6 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 			TargetRef:   bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: "node-b"},
 			LocalASN:    65000,
 			RouterID:    testBackendRouterID,
-			Roles:       []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			SRv6Locator: vpcBLocator,
 			NodeID:      8,
 		},

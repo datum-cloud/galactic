@@ -10,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
-	"slices"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
@@ -53,25 +52,13 @@ func New(c client.Client, nodeName, localAddress string) *Reconciler {
 
 // BuildDesiredRouter assembles the full DesiredRouter from BGP CRDs for
 // the given BGPRouter. It returns (nil, nil) if the router should be silently
-// skipped (wrong node or wrong role). It returns (nil, err) on error.
+// skipped (wrong node). It returns (nil, err) on error.
 func (r *Reconciler) BuildDesiredRouter(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 ) (*model.DesiredRouter, error) {
 	// Node check: skip routers that don't target this node.
 	if router.Spec.TargetRef.Name != r.nodeName {
 		return nil, nil
-	}
-
-	// Role check. galactic-router only ever runs the tenant role; a router
-	// carrying a different role (e.g. fabric, transit — both exist in the
-	// external RouterRole enum but have no implementation here) is safely
-	// skipped rather than reconciled against the GoBGP runtime.
-	if !slices.Contains(router.Spec.Roles, bgpv1alpha1.RouterRoleTenant) {
-		return nil, nil
-	}
-	if len(router.Spec.Roles) > 1 {
-		return nil, fmt.Errorf("multi-role routers not supported: router %s/%s has roles %v",
-			router.Namespace, router.Name, router.Spec.Roles)
 	}
 
 	namespace := router.Namespace

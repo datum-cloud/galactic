@@ -119,7 +119,6 @@ func newBackendFixtures(
 			TargetRef:   bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testComputeNodeName},
 			LocalASN:    65000,
 			RouterID:    testBackendRouterID,
-			Roles:       []bgpv1alpha1.RouterRole{bgpv1alpha1.RouterRoleTenant},
 			SRv6Locator: testBackendLocator,
 			NodeID:      testBackendNodeID,
 		},
