@@ -5444,7 +5444,7 @@ SOFTWARE.
 ## go.datum.net/network/api/v1alpha1
 
 * Name: go.datum.net/network/api/v1alpha1
-* Version: v0.0.0-20260812184454-6e8a6c4cbd40
+* Version: v0.0.0-20260821012412-35ea8d019ad8
 * License: AGPL-3.0
 
 ```
@@ -7108,7 +7108,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## google.golang.org/grpc
 
 * Name: google.golang.org/grpc
-* Version: v1.83.0
+* Version: v1.83.1
 * License: Apache-2.0
 
 ```
