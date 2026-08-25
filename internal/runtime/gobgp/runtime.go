@@ -29,6 +29,7 @@ type GoBGPRuntime struct {
 	key          types.NamespacedName
 	server       *Server
 	listenPort   int32
+	reflector    bool
 	localAddress string
 	mu           sync.Mutex
 
@@ -73,14 +74,20 @@ type GoBGPRuntime struct {
 // NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
 // listenPort controls the TCP port GoBGP binds for incoming BGP connections.
 // Pass -1 to disable inbound connections (outbound-only mode).
+// reflector, when true, marks every peer of this runtime instance as an iBGP
+// route-reflector client — this is a distinct, explicit signal from
+// listenPort: whether a node accepts inbound BGP is not the same property as
+// whether it is the fabric-facing route-reflector, even though the two
+// happen to coincide in every overlay that exists today.
 // localAddress, if non-empty, is bound as the source address for outgoing BGP
 // TCP connections (sets Transport.LocalAddress on every peer).
-func NewRuntimeFactory(listenPort int32, localAddress string) runtime.RuntimeFactory {
+func NewRuntimeFactory(listenPort int32, reflector bool, localAddress string) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		return &GoBGPRuntime{
 			key:                   key,
 			server:                newServer(Config{}),
 			listenPort:            listenPort,
+			reflector:             reflector,
 			localAddress:          localAddress,
 			establishedAt:         make(map[string]time.Time),
 			appliedPolicies:       make(map[string]model.BGPPolicyDirection),
@@ -198,7 +205,7 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 	}
 
 	for _, p := range peers {
-		peer := peerFromDesired(p, r.localAddress, r.listenPort > 0)
+		peer := peerFromDesired(p, r.localAddress, r.reflector)
 		addErr := b.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
 		if addErr != nil {
 			if strings.Contains(addErr.Error(), "can't overwrite") {

@@ -44,7 +44,12 @@ used to scope BGP configuration to the correct node.
 
 ### `--reflector` / `GALACTIC_ROUTER_REFLECTOR`
 
-Enable route reflector mode.
+Marks every BGP peer this instance adds as an iBGP route-reflector client
+(GoBGP's `RouteReflectorClient` flag), so this node reflects paths to those
+peers instead of requiring full-mesh iBGP. This is independent of
+`--bgp-listen-port`: accepting inbound BGP connections and acting as the
+fabric-facing route reflector are different properties, even though the
+`rr` overlay happens to set both.
 
 **Type:** boolean
 **Default:** `false`
