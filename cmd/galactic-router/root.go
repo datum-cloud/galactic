@@ -76,7 +76,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		return err
 	}
 
-	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), bgpLocalAddr)
+	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr)
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 

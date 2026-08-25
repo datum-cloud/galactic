@@ -172,16 +172,16 @@ sibling container instead.
 
 ### galactic-router environment variables
 
-| Variable                            | Required | Default           | Description                                                             |
-| ----------------------------------- | -------- | ----------------- | ----------------------------------------------------------------------- |
-| `GALACTIC_ROUTER_NODE_NAME`         | Yes      | —                 | Kubernetes node name; filters which BGPRouter CRDs this instance owns   |
-| `GALACTIC_ROUTER_REFLECTOR`         | No       | `false`           | Enable route reflector mode                                            |
-| `GALACTIC_ROUTER_BGP_LISTEN_PORT`   | No       | `179`             | BGP TCP listen port; `-1` disables inbound connections (outbound-only)  |
-| `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | No       | —                 | Source address for outgoing BGP TCP connections (numbered underlay use) |
-| `GALACTIC_ROUTER_METRICS_PORT`      | No       | `9179`            | controller-runtime Prometheus metrics port                              |
-| `GALACTIC_ROUTER_GRPC_HEALTH_PORT`  | No       | `5179`            | gRPC health check port (liveness/readiness probes)                      |
-| `GALACTIC_ROUTER_GC_NAMESPACE`      | No       | `galactic-system` | Namespace the GC controller scans for orphaned CRDs                     |
-| `GALACTIC_ROUTER_GC_INTERVAL`       | No       | `5m`              | GC controller sweep interval                                            |
+| Variable                            | Required | Default           | Description                                                                                          |
+| ----------------------------------- | -------- | ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `GALACTIC_ROUTER_NODE_NAME`         | Yes      | —                 | Kubernetes node name; filters which BGPRouter CRDs this instance owns                                |
+| `GALACTIC_ROUTER_REFLECTOR`         | No       | `false`           | Marks every peer as an iBGP route-reflector client; independent of `GALACTIC_ROUTER_BGP_LISTEN_PORT` |
+| `GALACTIC_ROUTER_BGP_LISTEN_PORT`   | No       | `179`             | BGP TCP listen port; `-1` disables inbound connections (outbound-only)                               |
+| `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | No       | —                 | Source address for outgoing BGP TCP connections (numbered underlay use)                              |
+| `GALACTIC_ROUTER_METRICS_PORT`      | No       | `9179`            | controller-runtime Prometheus metrics port                                                           |
+| `GALACTIC_ROUTER_GRPC_HEALTH_PORT`  | No       | `5179`            | gRPC health check port (liveness/readiness probes)                                                   |
+| `GALACTIC_ROUTER_GC_NAMESPACE`      | No       | `galactic-system` | Namespace the GC controller scans for orphaned CRDs                                                  |
+| `GALACTIC_ROUTER_GC_INTERVAL`       | No       | `5m`              | GC controller sweep interval                                                                         |
 
 See [docs/router/configuration.md](../router/configuration.md) for the full reference, including CLI flags and precedence.
 

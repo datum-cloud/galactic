@@ -67,7 +67,13 @@ type RouterConfig struct {
 	prefix string
 
 	// Resolved fields.
-	NodeName       string
+	NodeName string
+	// Reflector marks every BGP peer this router instance adds as an iBGP
+	// route-reflector client (GoBGP's RouteReflectorClient flag), so this
+	// node reflects paths to those peers instead of requiring full-mesh
+	// iBGP. This is a distinct signal from BGPListenPort: whether a node
+	// accepts inbound BGP connections is not the same property as whether
+	// it is the fabric-facing route reflector.
 	Reflector      bool
 	BGPListenPort  int
 	BGPLocalAddr   string
