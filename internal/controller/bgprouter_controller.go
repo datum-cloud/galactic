@@ -124,11 +124,22 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Error(statusErr, "get runtime status")
 	}
 
-	// Only skip Apply if the runtime is healthy AND the config is unchanged.
-	// If the runtime is unhealthy (e.g. after a controller restart where GoBGP
-	// was not yet running), we must re-apply to restart GoBGP even if the desired
-	// config hash matches the annotation.
-	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy {
+	// Only skip Apply if the runtime is healthy, the config is unchanged, AND
+	// every desired peer is actually present in the runtime's live peer list.
+	// runtimeStatus.Healthy only reflects "is the GoBGP process up" — it says
+	// nothing about whether GoBGP still holds every desired peer. A peer can
+	// be silently dropped from GoBGP's live state (e.g. a GC cycle deletes
+	// and recreates the BGPVRFInstance/BGPAdvertisement CRs backing it, and
+	// whatever happens during that churn drops the peer) without the desired
+	// config's hash ever changing, since the recreated CRs hash identically
+	// to before. Without this check, the no-op branch below wedges
+	// permanently — Apply() (and its ListPeer/AddPeer diff) never runs again
+	// until something manually busts the config-hash annotation. If the
+	// runtime is unhealthy (e.g. after a controller restart where GoBGP was
+	// not yet running), we must also re-apply to restart GoBGP even if the
+	// desired config hash matches the annotation.
+	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy &&
+		allDesiredPeersPresent(desired.Peers, runtimeStatus) {
 		// True no-op: runtime is healthy with the current config.
 		routerCopy := router.DeepCopy()
 		routerCopy.Status.ObservedGeneration = router.Generation
@@ -497,6 +508,25 @@ func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Named("bgprouter").
 		Complete(r)
+}
+
+// allDesiredPeersPresent reports whether every desired peer appears in the
+// runtime's live peer list, matched by normalized address (see normalizeIP).
+// This is what distinguishes a true no-op reconcile — config unchanged,
+// runtime healthy, AND every peer GoBGP is supposed to hold is actually
+// present — from a runtime that is nominally healthy but has silently lost
+// a peer, which must fall through to Apply() instead of being skipped.
+func allDesiredPeersPresent(peers []model.DesiredPeer, rs model.RuntimeStatus) bool {
+	present := make(map[string]bool, len(rs.Peers))
+	for _, ps := range rs.Peers {
+		present[normalizeIP(ps.Address)] = true
+	}
+	for _, p := range peers {
+		if !present[normalizeIP(p.Address)] {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeIP returns the canonical text form of an IP address,
