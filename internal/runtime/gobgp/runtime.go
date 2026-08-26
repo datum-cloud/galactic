@@ -26,8 +26,12 @@ import (
 
 // GoBGPRuntime implements runtime.RouterRuntime using an embedded GoBGP process.
 type GoBGPRuntime struct {
-	key          types.NamespacedName
-	server       *Server
+	key    types.NamespacedName
+	server *Server
+	// listenPort is the process-wide default TCP port GoBGP binds for
+	// incoming BGP connections (from GALACTIC_ROUTER_BGP_LISTEN_PORT). A
+	// per-router BGPRouter.spec.listenPort, carried as DesiredRouter.ListenPort,
+	// overrides it when set — see applyGlobal.
 	listenPort   int32
 	reflector    bool
 	localAddress string
@@ -35,6 +39,14 @@ type GoBGPRuntime struct {
 
 	lastASN      int64
 	lastRouterID string
+	// lastListenPort is the effective listen port (r.listenPort, overridden by
+	// DesiredRouter.ListenPort when set) applied on the last StartBgp — zero
+	// means "not yet applied," the same unset-sentinel convention lastASN and
+	// lastRouterID use, since a real listen port is never 0 (validated to
+	// -1 or 1-65535 upstream). A change forces a Reconfigure, same as
+	// asnChanged/idChanged, because GoBGP cannot rebind its listen socket on
+	// an already-started BgpServer.
+	lastListenPort int32
 	// establishedAt tracks when each peer last reached the Established state.
 	establishedAt map[string]time.Time
 	// appliedPolicies tracks the direction of each applied policy by name so
@@ -156,11 +168,17 @@ func (r *GoBGPRuntime) startGoBGP(ctx context.Context) (*gobgpserver.BgpServer, 
 }
 
 // applyGlobal starts or reconfigures the BGP global instance and persists
-// the last-seen ASN/RouterID so future changes can be detected.
+// the last-seen ASN/RouterID/ListenPort so future changes can be detected.
 func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer, desired model.DesiredRouter) error {
+	listenPort := r.listenPort
+	if desired.ListenPort != nil {
+		listenPort = *desired.ListenPort
+	}
+
 	asnChanged := r.lastASN != 0 && r.lastASN != desired.LocalASN
 	idChanged := r.lastRouterID != "" && r.lastRouterID != desired.RouterID
-	if asnChanged || idChanged {
+	listenPortChanged := r.lastListenPort != 0 && r.lastListenPort != listenPort
+	if asnChanged || idChanged || listenPortChanged {
 		var recErr error
 		b, recErr = r.server.Reconfigure()
 		if recErr != nil {
@@ -174,7 +192,7 @@ func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer
 		global := &api.Global{
 			Asn:        uint32(desired.LocalASN),
 			RouterId:   desired.RouterID,
-			ListenPort: r.listenPort,
+			ListenPort: listenPort,
 		}
 		for _, af := range desired.AddressFamilies {
 			global.Families = append(global.Families, familyToGlobalInt(af))
@@ -185,6 +203,7 @@ func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer
 	}
 	r.lastASN = desired.LocalASN
 	r.lastRouterID = desired.RouterID
+	r.lastListenPort = listenPort
 	return nil
 }
 

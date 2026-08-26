@@ -57,7 +57,16 @@ fabric-facing route reflector are different properties, even though the
 ### `--bgp-listen-port` / `GALACTIC_ROUTER_BGP_LISTEN_PORT`
 
 TCP port that GoBGP binds for inbound BGP peer connections. Set to `-1` to
-run in outbound-only mode (no inbound BGP listener).
+run in outbound-only mode (no inbound BGP listener). This is the process-wide
+default for every `BGPRouter` this instance reconciles; `BGPRouter.spec.listenPort`
+overrides it per router when set (`internal/reconcile/reconcile.go` carries it
+into `DesiredRouter.ListenPort`, applied in
+`internal/runtime/gobgp/runtime.go`'s `applyGlobal`) — e.g. to let one router on
+an otherwise outbound-only (`-1`) node accept inbound connections without
+switching that node to the `rr` role. Since GoBGP cannot rebind an
+already-started server's listen socket, changing `spec.listenPort` on a live
+router forces the same `Reconfigure` (fresh `BgpServer`) that an ASN or
+RouterID change does.
 
 **Type:** integer
 **Default:** `179`
