@@ -27,7 +27,7 @@ func newTestBgpServer(t *testing.T) *gobgpserver.BgpServer {
 	if err := b.StartBgp(context.Background(), &api.StartBgpRequest{
 		Global: &api.Global{
 			Asn:        65000,
-			RouterId:   "1.2.3.4",
+			RouterId:   testRouterID1,
 			ListenPort: -1,
 		},
 	}); err != nil {
@@ -54,7 +54,7 @@ func TestApplyGlobal_ListenPortOverride(t *testing.T) {
 
 	desired := model.DesiredRouter{
 		LocalASN:   65000,
-		RouterID:   "1.2.3.4",
+		RouterID:   testRouterID1,
 		ListenPort: ptrInt32Test(1790),
 	}
 	if err := rt.Apply(ctx, desired); err != nil {
@@ -88,7 +88,7 @@ func TestApplyGlobal_ListenPortUnsetFallsBackToFactoryDefault(t *testing.T) {
 
 	desired := model.DesiredRouter{
 		LocalASN: 65000,
-		RouterID: "1.2.3.4",
+		RouterID: testRouterID1,
 	}
 	if err := rt.Apply(ctx, desired); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -118,7 +118,7 @@ func TestApplyVRFDerivesRouteDistinguisher(t *testing.T) {
 	}{
 		{
 			name:     "basic vrfID",
-			routerID: "1.2.3.4",
+			routerID: testRouterID1,
 			vrf: model.DesiredVRFInstance{
 				Name:               "vrf-a",
 				VRFID:              42,
