@@ -17,12 +17,19 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
-	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	vrfpkg "go.datum.net/galactic/internal/plumbing/vrf"
 )
+
+// pinDir is the bpffs directory probeEgressRouteWrite opens egress_route_table
+// from -- a package var defaulting to attach.PinDir, the same test seam
+// internal/plumbing/srv6's own pinDir var provides, so this package's tests
+// don't depend on a real bpffs mount or root privileges either.
+var pinDir = attach.PinDir
 
 // startRIBMonitor starts the shared EVPN best-path watcher goroutine once per
 // GoBGPRuntime lifetime, regardless of how many VRFs exist. It installs and
@@ -319,28 +326,44 @@ func addrToNetIP(addr netip.Addr) net.IP {
 	return ip
 }
 
-// probeRouteWrite verifies that the process holds the privileges needed to
-// install kernel routes into tableID. It installs a test host route from the
-// RFC 3849 documentation range (2001:db8::/32) — which can never conflict with
-// real VPC traffic — then immediately removes it. This catches a missing
-// runAsUser:0 or CAP_NET_ADMIN before the first real EVPN best-path event
-// arrives, rather than silently failing minutes later.
-func probeRouteWrite(tableID uint32) error {
-	lo, err := netlink.LinkByName("lo")
+// probeEgressRouteWrite verifies that this process can actually write
+// egress_route_table entries for tableID before applyVRFs trusts this VRF's
+// routing to work at all. It installs a pass-through test entry for a
+// prefix from the RFC 3849 documentation range (2001:db8::/32) — which can
+// never conflict with real VPC traffic — then immediately removes it. A
+// pass-through entry (RegisterPassThrough, not Register) is deliberate:
+// unlike a real route, it needs no SID/next-hop resolution, so this probe
+// only exercises the one thing it exists to check -- the pinned bpffs map's
+// open+write path -- not incidentally depending on some other prefix
+// already having a resolvable neighbor.
+//
+// This replaces an earlier version of this probe that wrote a real kernel
+// route via netlink instead (the same RFC 3849 prefix, same install/remove
+// shape) -- a leftover check from this codebase's pre-TC-BPF design, when
+// RouteEgressAdd really did write kernel SEG6 routes and so really did need
+// CAP_NET_ADMIN. Since the TC-BPF migration (see RouteEgressAdd's own doc
+// comment in internal/plumbing/srv6/egress.go), installing a VRF's routes
+// only ever writes into this pinned eBPF map — never the kernel FIB — so a
+// probe that tests kernel route-write capability instead tests a privilege
+// this path no longer needs, while never actually verifying the one this
+// path does need (a mounted bpffs at pinDir, readable/writable by this
+// process). galactic-router's DaemonSet happens to still grant NET_ADMIN
+// today (for the unrelated RouteMainAdd/anycast path), which is why the
+// old probe kept silently passing rather than ever catching this — but it
+// was verifying the wrong thing the whole time.
+func probeEgressRouteWrite(tableID uint32) error {
+	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {
-		return fmt.Errorf("lookup loopback for probe: %w", err)
+		return fmt.Errorf("open pinned egress_route_table (missing bpffs mount, BPF capability, or root?): %w", err)
 	}
-	_, dst, _ := net.ParseCIDR("2001:db8:ffff:ffff:ffff:ffff:ffff:fffe/128")
-	probe := &netlink.Route{
-		Dst:       dst,
-		Table:     int(tableID),
-		LinkIndex: lo.Attrs().Index,
+	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+
+	_, probe, _ := net.ParseCIDR("2001:db8:ffff:ffff:ffff:ffff:ffff:fffe/128")
+	if err := table.RegisterPassThrough(tableID, probe); err != nil {
+		return fmt.Errorf("egress_route_table write probe: %w", err)
 	}
-	if err := netlink.RouteReplace(probe); err != nil {
-		return fmt.Errorf("route write probe (missing root or CAP_NET_ADMIN?): %w", err)
-	}
-	if err := netlink.RouteDel(probe); err != nil {
-		slog.Warn("probeRouteWrite: failed to remove probe route", "dst", probe.Dst, "err", err)
+	if err := table.Unregister(tableID, probe); err != nil {
+		slog.Warn("probeEgressRouteWrite: failed to remove probe entry", "prefix", probe, "err", err)
 	}
 	return nil
 }

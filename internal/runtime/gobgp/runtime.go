@@ -294,14 +294,15 @@ func (r *GoBGPRuntime) applyVRFs(
 			var err error
 			tableID, err = vrfTableID(v.Name)
 			if err != nil {
-				slog.Error("applyVRFs: failed to resolve kernel VRF table; SEG6 encap routes will not be installed",
+				slog.Error("applyVRFs: failed to resolve kernel VRF table; this VRF's routes will not be installed",
 					"vrf", v.Name, "err", err)
 				continue
 			}
-			if err := probeRouteWrite(tableID); err != nil {
-				slog.Error("applyVRFs: route write probe failed; SEG6 encap routes will not be installed",
+			if err := probeEgressRouteWrite(tableID); err != nil {
+				slog.Error("applyVRFs: egress_route_table write probe failed; this VRF's routes will not be installed",
 					"vrf", v.Name, "err", err,
-					"hint", "set runAsUser: 0 and capabilities.add: [NET_ADMIN] in the container securityContext")
+					"hint", "set runAsUser: 0 and capabilities.add: [BPF] in the container securityContext, "+
+						"and mount bpffs at "+pinDir)
 				continue
 			}
 			r.appliedVRFs[v.Name] = tableID
