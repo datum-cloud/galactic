@@ -38,7 +38,11 @@ func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer) {
 	}
 	r.monitorOnce.Do(func() {
 		slog.Info("startRIBMonitor: launching shared watchEVPNRIB goroutine")
-		go r.watchEVPNRIB(r.srvCtx, b)
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.watchEVPNRIB(r.srvCtx, b)
+		}()
 	})
 }
 
