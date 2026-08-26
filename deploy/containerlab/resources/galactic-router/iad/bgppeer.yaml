@@ -1,11 +1,11 @@
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: iad-worker-tenant-to-rr
+  name: galactic-route-reflector-iad
   namespace: galactic-system
 spec:
   routerRef:
-    name: iad-worker-tenant
+    name: galactic-router
   peerASN: 65000
   address: "fc00:0:8::1"
   remotePort: 1790
