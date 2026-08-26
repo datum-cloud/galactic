@@ -170,3 +170,61 @@ func TestApplyVRFDerivesRouteDistinguisher(t *testing.T) {
 		})
 	}
 }
+
+// TestEqualRTSets verifies the order-independent route-target set comparison
+// applyVRFs uses to detect when an already-registered VRF's import RTs
+// change (e.g. an import policy widens to pick up another VPC/location's
+// RT) — the signal that must trigger a RIB backfill so an already-best-path
+// remote route isn't left undelivered until the next router restart.
+func TestEqualRTSets(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b []string
+		want bool
+	}{
+		{name: "both empty", a: nil, b: nil, want: true},
+		{name: "identical single", a: []string{testRT100}, b: []string{testRT100}, want: true},
+		{
+			name: "same elements, different order",
+			a:    []string{testRT100, testRT200},
+			b:    []string{testRT200, testRT100},
+			want: true,
+		},
+		{
+			name: "widened set (RT added)",
+			a:    []string{testRT100},
+			b:    []string{testRT100, testRT200},
+			want: false,
+		},
+		{
+			name: "narrowed set (RT removed)",
+			a:    []string{testRT100, testRT200},
+			b:    []string{testRT100},
+			want: false,
+		},
+		{
+			name: "same length, disjoint",
+			a:    []string{testRT100},
+			b:    []string{testRT200},
+			want: false,
+		},
+		{
+			name: "duplicate handling",
+			a:    []string{testRT100, testRT100},
+			b:    []string{testRT100},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := equalRTSets(tt.a, tt.b); got != tt.want {
+				t.Errorf("equalRTSets(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+			// Symmetric.
+			if got := equalRTSets(tt.b, tt.a); got != tt.want {
+				t.Errorf("equalRTSets(%v, %v) = %v, want %v (symmetry)", tt.b, tt.a, got, tt.want)
+			}
+		})
+	}
+}
