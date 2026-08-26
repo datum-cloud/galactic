@@ -132,6 +132,7 @@ func (r *Reconciler) BuildDesiredRouter(
 		LocalASN:        router.Spec.LocalASN,
 		RouterID:        router.Spec.RouterID,
 		AddressFamilies: router.Spec.AddressFamilies,
+		ListenPort:      router.Spec.ListenPort,
 		Peers:           peers,
 		VRFInstances:    vrfInstances,
 		Policies:        policies,

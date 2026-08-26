@@ -23,6 +23,7 @@ type sortableRouter struct {
 	LocalASN        int64
 	RouterID        string
 	AddressFamilies []model.AddressFamily
+	ListenPort      *int32
 	Peers           []sortablePeer
 	Advertisements  []sortableAdvertisement
 	Policies        []sortablePolicy
@@ -81,10 +82,11 @@ func DesiredRouter(r model.DesiredRouter) (string, error) {
 
 func toSortable(r model.DesiredRouter) sortableRouter {
 	sr := sortableRouter{
-		Namespace: r.Namespace,
-		Name:      r.Name,
-		LocalASN:  r.LocalASN,
-		RouterID:  r.RouterID,
+		Namespace:  r.Namespace,
+		Name:       r.Name,
+		LocalASN:   r.LocalASN,
+		RouterID:   r.RouterID,
+		ListenPort: r.ListenPort,
 	}
 
 	// Sort address families by AFI+SAFI string.

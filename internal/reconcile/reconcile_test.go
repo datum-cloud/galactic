@@ -146,6 +146,67 @@ func TestBuildDesiredRouter_NodeFilter(t *testing.T) {
 	}
 }
 
+// TestBuildDesiredRouter_ListenPort verifies BGPRouter.spec.listenPort is
+// carried through to DesiredRouter.ListenPort unchanged, including the unset
+// (nil) case — this is the field the runtime treats as a per-router override
+// of its process-wide default listen port (see gobgp.GoBGPRuntime.applyGlobal).
+func TestBuildDesiredRouter_ListenPort(t *testing.T) {
+	const thisNode = "node-a"
+
+	tests := []struct {
+		name       string
+		listenPort *int32
+	}{
+		{name: "unset stays nil", listenPort: nil},
+		{name: "explicit value carries through", listenPort: ptrInt32(1790)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &bgpv1alpha1.BGPRouter{
+				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: "default"},
+				Spec: bgpv1alpha1.BGPRouterSpec{
+					TargetRef:  bgpv1alpha1.TargetRef{Name: thisNode},
+					ListenPort: tc.listenPort,
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(newTestScheme(t)).
+				WithIndex(&bgpv1alpha1.BGPAdvertisement{}, routerRefIndexer, func(obj client.Object) []string {
+					adv := obj.(*bgpv1alpha1.BGPAdvertisement)
+					return []string{adv.Spec.RouterRef.Name}
+				}).
+				WithIndex(&bgpv1alpha1.BGPVRFInstance{}, routerRefIndexer, func(obj client.Object) []string {
+					vrf := obj.(*bgpv1alpha1.BGPVRFInstance)
+					if vrf.Spec.RouterRef == nil {
+						return nil
+					}
+					return []string{vrf.Spec.RouterRef.Name}
+				}).
+				Build()
+
+			r := New(fakeClient, thisNode, "2001:db8::1")
+
+			got, err := r.BuildDesiredRouter(context.Background(), router)
+			if err != nil {
+				t.Fatalf("BuildDesiredRouter() error = %v, want nil", err)
+			}
+			if got == nil {
+				t.Fatal("BuildDesiredRouter() = nil, want a non-nil DesiredRouter")
+			}
+			switch {
+			case tc.listenPort == nil:
+				if got.ListenPort != nil {
+					t.Errorf("DesiredRouter.ListenPort = %v, want nil", *got.ListenPort)
+				}
+			case got.ListenPort == nil || *got.ListenPort != *tc.listenPort:
+				t.Errorf("DesiredRouter.ListenPort = %v, want %v", got.ListenPort, *tc.listenPort)
+			}
+		})
+	}
+}
+
 func TestResolveSRv6SID(t *testing.T) {
 	tests := []struct {
 		name      string

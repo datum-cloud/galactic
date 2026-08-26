@@ -44,10 +44,15 @@ type DesiredRouter struct {
 	LocalASN        int64
 	RouterID        string
 	AddressFamilies []AddressFamily
-	Peers           []DesiredPeer
-	VRFInstances    []DesiredVRFInstance
-	Advertisements  []DesiredAdvertisement
-	Policies        []DesiredPolicy
+	// ListenPort is the per-router override of the TCP port GoBGP binds for
+	// incoming BGP connections, carried from BGPRouter.spec.listenPort. When
+	// nil, the runtime's process-wide default (GALACTIC_ROUTER_BGP_LISTEN_PORT)
+	// applies instead.
+	ListenPort     *int32
+	Peers          []DesiredPeer
+	VRFInstances   []DesiredVRFInstance
+	Advertisements []DesiredAdvertisement
+	Policies       []DesiredPolicy
 }
 
 // DesiredPeer describes a single BGP session to configure.

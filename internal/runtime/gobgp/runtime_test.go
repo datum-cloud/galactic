@@ -11,6 +11,7 @@ import (
 	api "github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
+	"k8s.io/apimachinery/pkg/types"
 
 	"go.datum.net/galactic/internal/model"
 )
@@ -33,6 +34,75 @@ func newTestBgpServer(t *testing.T) *gobgpserver.BgpServer {
 		t.Fatalf("StartBgp() error = %v", err)
 	}
 	return b
+}
+
+// TestApplyGlobal_ListenPortOverride verifies DesiredRouter.ListenPort (carried
+// from BGPRouter.spec.listenPort) overrides the runtime's process-wide default
+// listen port (from GALACTIC_ROUTER_BGP_LISTEN_PORT / NewRuntimeFactory) when
+// set — this is the wiring that was missing entirely before, leaving
+// spec.listenPort a dead CRD field.
+func TestApplyGlobal_ListenPortOverride(t *testing.T) {
+	ctx := context.Background()
+
+	// Factory default is -1 (outbound-only) -- e.g. the default per-node role.
+	factory := NewRuntimeFactory(-1, false, "")
+	rt, err := factory(types.NamespacedName{Namespace: "default", Name: "r1"})
+	if err != nil {
+		t.Fatalf("factory() error = %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Stop(ctx) })
+
+	desired := model.DesiredRouter{
+		LocalASN:   65000,
+		RouterID:   "1.2.3.4",
+		ListenPort: ptrInt32Test(1790),
+	}
+	if err := rt.Apply(ctx, desired); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	gr := rt.(*GoBGPRuntime)
+	b := gr.server.bgp.Load()
+	resp, err := b.GetBgp(ctx, &api.GetBgpRequest{})
+	if err != nil {
+		t.Fatalf("GetBgp() error = %v", err)
+	}
+	if resp.Global.ListenPort != 1790 {
+		t.Errorf("Global.ListenPort = %d, want 1790 (CR override over factory default -1)", resp.Global.ListenPort)
+	}
+}
+
+// TestApplyGlobal_ListenPortUnsetFallsBackToFactoryDefault verifies a
+// DesiredRouter with ListenPort left nil (BGPRouter.spec.listenPort unset)
+// falls back to the runtime's process-wide default, unchanged from before
+// spec.listenPort existed.
+func TestApplyGlobal_ListenPortUnsetFallsBackToFactoryDefault(t *testing.T) {
+	ctx := context.Background()
+
+	factory := NewRuntimeFactory(17901, false, "")
+	rt, err := factory(types.NamespacedName{Namespace: "default", Name: "r1"})
+	if err != nil {
+		t.Fatalf("factory() error = %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Stop(ctx) })
+
+	desired := model.DesiredRouter{
+		LocalASN: 65000,
+		RouterID: "1.2.3.4",
+	}
+	if err := rt.Apply(ctx, desired); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	gr := rt.(*GoBGPRuntime)
+	b := gr.server.bgp.Load()
+	resp, err := b.GetBgp(ctx, &api.GetBgpRequest{})
+	if err != nil {
+		t.Fatalf("GetBgp() error = %v", err)
+	}
+	if resp.Global.ListenPort != 17901 {
+		t.Errorf("Global.ListenPort = %d, want 17901 (factory default, spec.listenPort unset)", resp.Global.ListenPort)
+	}
 }
 
 // TestApplyVRFDerivesRouteDistinguisher verifies applyVRF derives the RFC 4364
