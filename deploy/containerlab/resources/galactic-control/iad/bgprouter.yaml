@@ -1,14 +1,12 @@
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPRouter
 metadata:
-  name: iad-control-tenant
+  name: galactic-control
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
     name: iad-worker-rr
-  roles:
-    - tenant
   localASN: 65000
   routerID: "10.255.255.4"
   srv6Locator: "2001:db8:ff03::/48"
