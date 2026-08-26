@@ -57,6 +57,11 @@ type GoBGPRuntime struct {
 	// they disappear from desired state and so the route-write privilege probe
 	// runs only once per VRF rather than on every reconcile.
 	appliedVRFs map[string]uint32
+	// appliedVRFImportRTs tracks the last-applied import route-target set for
+	// each already-registered VRF, keyed by VRF name, so applyVRFs can detect
+	// when an existing VRF's import RTs change (not just when a VRF is first
+	// registered) and trigger a RIB backfill for it — see applyVRFs.
+	appliedVRFImportRTs map[string][]string
 	// rtIndexMu guards rtIndex, which is read concurrently by the shared EVPN
 	// RIB watcher goroutine.
 	rtIndexMu sync.RWMutex
@@ -113,6 +118,7 @@ func NewRuntimeFactory(listenPort int32, reflector bool, localAddress string) ru
 			establishedAt:         make(map[string]time.Time),
 			appliedPolicies:       make(map[string]model.BGPPolicyDirection),
 			appliedVRFs:           make(map[string]uint32),
+			appliedVRFImportRTs:   make(map[string][]string),
 			rtIndex:               make(map[string]uint32),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 		}, nil
@@ -272,11 +278,12 @@ func (r *GoBGPRuntime) applyVRFs(
 		if _, ok := desired[name]; !ok {
 			deleteVRF(ctx, b, name)
 			delete(r.appliedVRFs, name)
+			delete(r.appliedVRFImportRTs, name)
 		}
 	}
 
 	rtIndex := make(map[string]uint32, len(vrfs))
-	newlyRegistered := false
+	needsBackfill := false
 	for _, v := range vrfs {
 		if err := applyVRF(ctx, b, &v, routerID); err != nil {
 			return fmt.Errorf("apply VRF %s: %w", v.Name, err)
@@ -298,8 +305,19 @@ func (r *GoBGPRuntime) applyVRFs(
 				continue
 			}
 			r.appliedVRFs[v.Name] = tableID
-			newlyRegistered = true
+			needsBackfill = true
+		} else if !equalRTSets(r.appliedVRFImportRTs[v.Name], v.ImportRouteTargets) {
+			// This VRF was already registered, but its import route-target
+			// set has changed (e.g. an import policy widened to pick up
+			// another VPC/location's RT). A remote path matching a
+			// newly-added RT may already be best-path in GoBGP's RIB —
+			// added before this VRF's rtIndex entry existed for that RT —
+			// and watchEVPNRIB only notifies on *future* best-path events,
+			// so it would never be redelivered without a backfill.
+			needsBackfill = true
 		}
+		r.appliedVRFImportRTs[v.Name] = append([]string(nil), v.ImportRouteTargets...)
+
 		for _, rt := range v.ImportRouteTargets {
 			rtIndex[rt] = tableID
 		}
@@ -309,16 +327,38 @@ func (r *GoBGPRuntime) applyVRFs(
 	r.rtIndex = rtIndex
 	r.rtIndexMu.Unlock()
 
-	// A newly registered VRF's route targets may match paths that were
-	// already best-path in GoBGP's RIB before this VRF existed in rtIndex —
+	// A newly registered VRF's route targets, or a route-target set that
+	// changed on an already-registered VRF, may match paths that were
+	// already best-path in GoBGP's RIB before that RT existed in rtIndex —
 	// the shared watcher's WatchBestPath(true) only replays the RIB once, at
 	// its own startup, so it would never redeliver those. Backfill from the
-	// current RIB now that rtIndex includes the new VRF.
-	if newlyRegistered {
+	// current RIB now that rtIndex reflects the change.
+	if needsBackfill {
 		r.backfillEVPNRoutes(b)
 	}
 
 	return nil
+}
+
+// equalRTSets reports whether a and b contain the same route targets,
+// ignoring order — the desired route-target list's order isn't guaranteed
+// stable across reconciles, since it round-trips through a Kubernetes CR
+// spec (BGPVRFInstance.Spec.ImportRouteTargets).
+func equalRTSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, rt := range a {
+		counts[rt]++
+	}
+	for _, rt := range b {
+		counts[rt]--
+		if counts[rt] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // applyEVPN advertises EVPN paths for all relevant advertisements, withdrawing
