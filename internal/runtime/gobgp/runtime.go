@@ -81,6 +81,15 @@ type GoBGPRuntime struct {
 	// started at most once per runtime lifetime; it dispatches to all VRFs via
 	// rtIndex rather than being scoped to one VRF.
 	monitorOnce sync.Once
+	// wg tracks the server.Start and watchEVPNRIB goroutines so Stop can block
+	// until both have actually exited instead of merely cancelling srvCtx and
+	// returning. GoBGP keeps some path-selection state (table.SelectionOptions,
+	// table.UseMultiplePaths) as package-level globals rather than per-server
+	// fields, so a BgpServer that outlives Stop() races the next runtime's
+	// StartBgp in any test (or other in-process caller) that creates more than
+	// one GoBGPRuntime -- this is what the CI race detector caught once this
+	// package's tests started creating more than one GoBGPRuntime per run.
+	wg sync.WaitGroup
 }
 
 // NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
@@ -152,7 +161,9 @@ func (r *GoBGPRuntime) startGoBGP(ctx context.Context) (*gobgpserver.BgpServer, 
 		srvCtx, cancel := context.WithCancel(context.Background())
 		r.serverCtxCancel = cancel
 		r.srvCtx = srvCtx
+		r.wg.Add(1)
 		go func() {
+			defer r.wg.Done()
 			_ = r.server.Start(srvCtx)
 		}()
 
@@ -431,7 +442,11 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 	return status, nil
 }
 
-// Stop shuts down the GoBGP server.
+// Stop shuts down the GoBGP server. It blocks until the embedded server and
+// the shared EVPN RIB watcher have both actually exited (not merely been
+// asked to), so a caller that creates another GoBGPRuntime immediately after
+// Stop returns -- as tests in this package do -- cannot race the outgoing
+// server's GoBGP package-level path-selection state (see the wg field doc).
 func (r *GoBGPRuntime) Stop(_ context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -440,6 +455,7 @@ func (r *GoBGPRuntime) Stop(_ context.Context) error {
 		r.serverCtxCancel()
 		r.serverCtxCancel = nil
 	}
+	r.wg.Wait()
 	return nil
 }
 
