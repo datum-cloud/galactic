@@ -124,8 +124,6 @@ spec:
   targetRef:
     kind: Node
     name: ${E2E_NODE}
-  roles:
-    - tenant
   localASN: 65000
   routerID: "10.0.0.1"
   srv6Locator: "2001:db8:ff01::/48"
