@@ -4,11 +4,12 @@
 # the shared Envoy Gateway fleet's pod (docs/plans/855-ingress-sidecar-vpc-
 # backend-connectivity.md §5/§6), not part of the CNI chain at all.
 #
-# This repo has no wired-up CI publish pipeline for this image yet -- see
-# root CLAUDE.md's CI/CD section and §9 item 3 of the plan (the #856
-# deployment contract is still an open, flagged dependency) -- this
-# Dockerfile exists so the binary is buildable/deployable today, ahead of
-# that decision.
+# Published by .github/workflows/publish.yaml, same reusable
+# datum-cloud/actions publish-docker workflow, tag scheme and
+# linux/amd64,linux/arm64 matrix as every other image here. It has no
+# config/galactic-vrf kustomize base yet, so unlike the others it is not
+# stamped into the galactic-kustomize bundle -- the #856 deployment
+# contract is still an open, flagged dependency (§9 item 3 of the plan).
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -28,6 +29,17 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
+# galactic-vrf reaches internal/plumbing/ebpf/prog transitively (via
+# internal/config -> usidmap/egressroutemap), and that package's bpf2go
+# output (usid_bpfel/eb.go plus their go:embed'd .o's) is not committed to
+# git -- see its doc.go. Regenerate it here, exactly as
+# containers/galactic-cni/Dockerfile does. Only the usid datapath is on
+# this binary's import graph; edgeprog/nat66prog are not.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      clang llvm linux-libc-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN go generate ./internal/plumbing/ebpf/prog/...
+
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
       -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
@@ -36,7 +48,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
       -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
-    -o galactic-vrf cmd/galactic-vrf/main.go
+    -o galactic-vrf ./cmd/galactic-vrf
 
 # Minimal static-Go-binary image, matching containers/galactic-cni/
 # Dockerfile's production-stage pattern -- §6 of the plan. Unlike

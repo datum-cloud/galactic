@@ -58,6 +58,23 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  # galactic-vrf, the #855 ingress sidecar, deliberately has no entry in
+  # publish-kustomize-bundles below: it has no config/galactic-vrf base to
+  # stamp an image into yet (the #856 deployment contract is still open).
+  # Publishing the image is what unblocks that work.
+  publish-galactic-vrf-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.21.0
+    with:
+      image-name: galactic-vrf
+      dockerfile-path: containers/galactic-vrf/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   publish-kustomize-bundles:
     needs:
       [
