@@ -143,6 +143,7 @@ tasks:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-router ./cmd/galactic-router
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-gateway ./cmd/galactic-gateway
       - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-nat66 ./cmd/galactic-nat66
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/galactic-vrf ./cmd/galactic-vrf
       - GOBIN={{.LOCALBIN}} go install github.com/containernetworking/plugins/plugins/main/host-device@v1.9.1
 
   ##
