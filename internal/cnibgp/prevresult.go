@@ -31,7 +31,7 @@ import (
 // plugin controls. A conflist authored with an older cniVersion (e.g.
 // "0.4.0") therefore fails ADD here for every attachment in the chain. This
 // is a real, hard requirement on every conflist in this repo's CNI chain —
-// see docs/cni/configuration.md's cniVersion paragraph — not just an
+// see docs/cni/conflist-reference.md's cniVersion paragraph — not just an
 // implementation detail of this function.
 //
 // galactic-bgp has no kernel-interface access or IPAM knowledge of its own

@@ -292,4 +292,4 @@ pods on one node` error naming the node each pod landed on.
 ## See also
 
 - [docs/verification.md](verification.md) — transit fabric, FRR, and `galactic-router` health checks
-- [docs/cni/configuration.md](../../../docs/cni/configuration.md#pool-ipam-via-ipv6_subnetipv4_subnet) — how `ipv6_subnet`/`ipv4_subnet` drive pool IPAM, including the dual-stack and IPv6-only/IPv4-only cases these VPCs exercise
+- [docs/cni/conflist-reference.md](../../../docs/cni/conflist-reference.md#pool-ipam-via-ipv6_subnetipv4_subnet) — how `ipv6_subnet`/`ipv4_subnet` drive pool IPAM, including the dual-stack and IPv6-only/IPv4-only cases these VPCs exercise
