@@ -134,6 +134,23 @@ spec:
               mountPath: /host/var/log/galactic
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+            # internal/plumbing/radv.DefaultStateDir ("/var/lib/cni/ra") is
+            # read unprefixed by this container's own Run loop
+            # (reconcileRadvActors), unlike HostBinDir/HostConflist/HostEtcDir
+            # above which are all deliberately under /host/... -- radv's
+            # constant is shared with galactic-tap, a separate binary invoked
+            # directly on the host by the kubelet's own CNI exec (never
+            # inside this or any other container), so it has to stay the
+            # real host-absolute path galactic-tap itself sees. Mirrors
+            # bpf-fs below: mount the hostPath at its own literal path
+            # instead of relocating it under /host/. Without this mount,
+            # reconcileRadvActors always lists an empty/missing directory --
+            # every tap attachment galactic-tap records on the host is
+            # invisible to it, so no RunActor ever starts and no guest gets
+            # an RA or a Router Solicitation reply, silently, on every node.
+            - name: radv-state-dir
+              mountPath: /var/lib/cni
+              readOnly: true
           # BPF map creation under load (image pull + verifier work on a
           # slow node) can outrun readinessProbe/livenessProbe's short
           # initialDelaySeconds, risking a liveness-triggered restart loop
@@ -174,6 +191,15 @@ spec:
         - name: galactic-log
           hostPath:
             path: /var/log/galactic
+            type: DirectoryOrCreate
+        # Backs internal/plumbing/radv.DefaultStateDir ("/var/lib/cni/ra") --
+        # see the radv-state-dir volumeMount comment on credential-refresh
+        # above. DirectoryOrCreate, same reasoning as cni-bin-dir/cni-net-dir/
+        # galactic-etc/galactic-log: a node with no tap attachment yet may not
+        # have galactic-tap's /var/lib/cni/ra subdirectory created at all.
+        - name: radv-state-dir
+          hostPath:
+            path: /var/lib/cni
             type: DirectoryOrCreate
         - name: bpf-fs
           # The host's bpffs mount (design plan §4.4/§9: "All maps pinned
