@@ -109,6 +109,13 @@ spec:
           # comment calls it "the only forwarding path") -- there is no
           # flag to gate this grant behind, so it takes effect on every
           # node running this manifest.
+          #
+          # NET_RAW is for internal/plumbing/radv.RunActor: it opens a raw
+          # ICMPv6 socket (mdlayher/ndp's Listen, over ip6:ipv6-icmp) to send
+          # Router Advertisements and receive Router Solicitations on each
+          # tap attachment. Without it, ndp.Listen fails "operation not
+          # permitted" for every attachment on every node -- confirmed live,
+          # continuously retried and continuously failing, on staging infra.
           securityContext:
             runAsUser: 0
             capabilities:
@@ -116,6 +123,7 @@ spec:
               add:
                 - BPF
                 - NET_ADMIN
+                - NET_RAW
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
           resources:
