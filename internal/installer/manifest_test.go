@@ -12,6 +12,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	"sigs.k8s.io/yaml"
+
+	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
 // TestDaemonsetManifest_RunContainerMountsHostConflistDir is a regression
@@ -38,8 +40,60 @@ import (
 // depend on test execution order within the package.
 var hostConflistDefault = HostConflist
 
+// manifestPath is the real, applied-to-a-cluster manifest every test in
+// this file parses -- shared so a path typo can't diverge between tests.
+var manifestPath = filepath.Join("..", "..", "config", "galactic-cni", "daemonset.yaml")
+
 func TestDaemonsetManifest_RunContainerMountsHostConflistDir(t *testing.T) {
-	manifestPath := filepath.Join("..", "..", "config", "galactic-cni", "daemonset.yaml")
+	runContainerName, mountPaths := runContainerMountPaths(t)
+
+	hostConflistDir := filepath.Dir(hostConflistDefault)
+	if !slices.Contains(mountPaths, hostConflistDir) {
+		t.Errorf("container %q in %s does not mount %s (needed to read HostConflist=%s via "+
+			"hostconf.Load; without it the eBPF vrf_table GC sweep and log-rotation host-path "+
+			"lookup silently disable themselves on every node); mounted paths: %v",
+			runContainerName, manifestPath, hostConflistDir, hostConflistDefault, mountPaths)
+	}
+}
+
+// TestDaemonsetManifest_RunContainerMountsRadvStateDir is a regression test
+// for the same class of manifest/code mismatch as
+// TestDaemonsetManifest_RunContainerMountsHostConflistDir above, this time
+// for radv.DefaultStateDir ("/var/lib/cni/ra"): reconcileRadvActors calls
+// radv.ListAttachments(radv.DefaultStateDir) from inside the run container
+// on every radvReconcileTicker tick. That directory is populated by
+// galactic-tap's cmdAdd/cmdDel (internal/cnitap/ops_add.go,
+// internal/cnitap/ops_del.go) -- a separate binary invoked directly on the
+// host by the kubelet's own CNI exec, not inside this or any other
+// container -- so radv.DefaultStateDir is deliberately the real
+// host-absolute path, unlike HostBinDir/HostConflist/HostEtcDir above which
+// are all under /host/... on purpose. Without a volumeMount covering it,
+// the run container always lists an empty/missing directory: every tap
+// attachment galactic-tap ever records is invisible to it, so no RunActor
+// starts and no guest gets an RA or a Router Solicitation reply -- silently,
+// on every node, with nothing in the logs to show for it. This shipped
+// unnoticed the same way HostConflist's own gap did, confirmed live on
+// staging infra.
+func TestDaemonsetManifest_RunContainerMountsRadvStateDir(t *testing.T) {
+	runContainerName, mountPaths := runContainerMountPaths(t)
+
+	radvStateDir := filepath.Dir(radv.DefaultStateDir)
+	if !slices.Contains(mountPaths, radvStateDir) {
+		t.Errorf("container %q in %s does not mount %s (needed to read radv.DefaultStateDir=%s via "+
+			"radv.ListAttachments; without it no tap attachment's Router Advertisement/Solicitation "+
+			"actor ever starts on any node); mounted paths: %v",
+			runContainerName, manifestPath, radvStateDir, radv.DefaultStateDir, mountPaths)
+	}
+}
+
+// runContainerMountPaths parses the real daemonset.yaml (not a copy, so it
+// can't drift from what actually gets applied to a cluster), finds the
+// container that invokes `/galactic-cni run` -- credential-refresh, the one
+// that calls installer.Run -- and returns its name plus every path in its
+// own volumeMounts.
+func runContainerMountPaths(t *testing.T) (string, []string) {
+	t.Helper()
+
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", manifestPath, err)
@@ -50,35 +104,19 @@ func TestDaemonsetManifest_RunContainerMountsHostConflistDir(t *testing.T) {
 		t.Fatalf("unmarshal %s: %v", manifestPath, err)
 	}
 
-	// Find the container that invokes `/galactic-cni run` -- that's the one
-	// that calls hostconf.Load(HostConflist, ...) at runtime.
-	var runContainerName string
-	var mountPaths []string
-	found := false
 	for _, c := range ds.Spec.Template.Spec.Containers {
 		for _, arg := range c.Command {
 			if arg != "run" {
 				continue
 			}
-			runContainerName = c.Name
+			mountPaths := make([]string, 0, len(c.VolumeMounts))
 			for _, vm := range c.VolumeMounts {
 				mountPaths = append(mountPaths, vm.MountPath)
 			}
-			found = true
+			return c.Name, mountPaths
 		}
-		if found {
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("no container in %s runs the installer's \"run\" command", manifestPath)
 	}
 
-	hostConflistDir := filepath.Dir(hostConflistDefault)
-	if !slices.Contains(mountPaths, hostConflistDir) {
-		t.Errorf("container %q in %s does not mount %s (needed to read HostConflist=%s via "+
-			"hostconf.Load; without it the eBPF vrf_table GC sweep and log-rotation host-path "+
-			"lookup silently disable themselves on every node); mounted paths: %v",
-			runContainerName, manifestPath, hostConflistDir, hostConflistDefault, mountPaths)
-	}
+	t.Fatalf("no container in %s runs the installer's \"run\" command", manifestPath)
+	return "", nil
 }
