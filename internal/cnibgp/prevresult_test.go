@@ -138,7 +138,7 @@ func TestInferFromPrevResult_NilRawPrevResult(t *testing.T) {
 
 // TestInferFromPrevResult_RejectsOlderCNIVersion documents (and locks in)
 // the hard cniVersion requirement described in this function's doc comment
-// and docs/cni/configuration.md: type100.NewResult only accepts a Result
+// and docs/cni/conflist-reference.md: type100.NewResult only accepts a Result
 // whose own CNIVersion is exactly "1.0.0" or "1.1.0", and the master
 // plugin's printed Result carries the conflist's cniVersion straight
 // through, so an older value must fail loudly here rather than proceed with

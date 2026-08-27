@@ -250,7 +250,7 @@ func TestCNITapInterface(t *testing.T) {
 	// The "ipam" block's "type" names the delegated binary (galactic-ipam),
 	// not a pool-vs-static mode selector — presence of ipv6_subnet alone
 	// opts this config into pool IPAM (see internal/cniipam's doc comment
-	// and docs/cni/configuration.md).
+	// and docs/cni/conflist-reference.md).
 	cniConf := `{
   "cniVersion": "1.0.0",
   "name": "galactic",
