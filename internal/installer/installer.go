@@ -33,6 +33,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/radv"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -49,6 +50,14 @@ var ebpfHealthCheckInterval = 10 * time.Second
 // own GC controller's documented default period (docs/agents/
 // ARCHITECTURE-ROUTER.md: "ticker-driven, default every 5m").
 var ebpfGCSweepInterval = 5 * time.Minute
+
+// radvNextIntervalFn resolves the delay before Run's next Router
+// Advertisement resend pass (internal/plumbing/radv.NextInterval — a
+// jittered value in [MinRtrAdvInterval, MaxRtrAdvInterval), per RFC 4861
+// §6.2.4). A package-level func var, same override pattern as ebpfStartFn/
+// addrListFn/newK8sClientFn above, so tests can substitute a short fixed
+// delay instead of waiting out a real RFC-sized interval.
+var radvNextIntervalFn = radv.NextInterval
 
 // ebpfHealthServiceName is the gRPC health service name (see
 // grpc_health_v1.HealthServer) reporting the live status of the eBPF uSID
@@ -469,6 +478,40 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	return state, datapath, nil
 }
 
+// cleanupOldBinaryWrapper is Run's cleanupTimer case body, split out solely
+// to keep Run's own cyclomatic complexity within golangci-lint's gocyclo
+// budget -- same reasoning as startEBPFDatapath above; behaviorally this is
+// inlined exactly where it used to live.
+func cleanupOldBinaryWrapper() {
+	oldBinPath := filepath.Join(HostBinDir, "galactic-cni.bin")
+	if _, err := os.Stat(oldBinPath); err == nil {
+		if err := os.Remove(oldBinPath); err != nil {
+			slog.Warn("Failed to clean up old CNI binary wrapper", "path", oldBinPath, "err", err)
+		} else {
+			slog.Info("Stale CNI binary wrapper cleaned up successfully", "path", oldBinPath)
+		}
+	}
+}
+
+// resendRouterAdvertisements is Run's radvTicker case body, split out
+// solely to keep Run's own cyclomatic complexity within golangci-lint's
+// gocyclo budget -- same reasoning as startEBPFDatapath above; behaviorally
+// this is inlined exactly where it used to live. A failure here is never
+// fatal to Run: resending is best-effort maintenance for already-attached
+// VM guests, not a requirement for anything else this process does.
+func resendRouterAdvertisements() {
+	records, err := radv.ListAttachments(radv.DefaultStateDir)
+	if err != nil {
+		slog.Warn("Failed to list router advertisement attachments", "err", err)
+		return
+	}
+	for _, r := range records {
+		if err := radv.SendRouterAdvertisement(r.HostInterface, r.MTU); err != nil {
+			slog.Warn("Failed to resend router advertisement", "err", err, "hostInterface", r.HostInterface)
+		}
+	}
+}
+
 // Run executes the CNI installer main container tasks:
 //  1. Loads/pins/attaches the eBPF/TC-BPF uSID datapath and keeps its
 //     attachment set re-evaluated against netlink link/route change events
@@ -502,6 +545,13 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 //     (internal/controller/gc_controller.go), because the pinned maps
 //     only exist inside this container -- see gc.SweepEBPFVRFTable's own
 //     doc comment for the full reasoning.
+//  8. Periodically resends an IPv6 Router Advertisement (internal/plumbing/
+//     radv) for every tap attachment galactic-tap has recorded
+//     (radv.ListAttachments) since the last tick. This runs from here, not
+//     from galactic-tap's own cmdAdd, because a VM guest's boot almost
+//     always outlives that short-lived process -- see radv's own doc
+//     comment for the full reasoning. Unrelated to, and runs regardless of,
+//     the eBPF datapath above.
 func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
@@ -586,6 +636,18 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	ebpfGCSweepTicker := time.NewTicker(ebpfGCSweepInterval)
 	defer ebpfGCSweepTicker.Stop()
 
+	// Router Advertisement resend for tap-attached VM guests (see
+	// internal/plumbing/radv's own doc comment) -- runs regardless of
+	// whether the eBPF datapath is enabled, since it has nothing to do with
+	// it; harmless no-op ticks whenever no tap attachment currently needs
+	// one (internal/plumbing/radv.ListAttachments returns empty). A Timer,
+	// not a Ticker: RFC 4861 §6.2.4 requires each send to be spaced by a
+	// freshly-jittered interval (radvNextIntervalFn, reset after every
+	// fire below) rather than a fixed period, so routers on the same link
+	// don't synchronize their RAs into bursts.
+	radvTimer := time.NewTimer(radvNextIntervalFn())
+	defer radvTimer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -593,15 +655,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			return nil
 
 		case <-cleanupTimer.C:
-			// Cleanup old wrapper binary '/host/opt/cni/bin/galactic-cni.bin'
-			oldBinPath := filepath.Join(HostBinDir, "galactic-cni.bin")
-			if _, err := os.Stat(oldBinPath); err == nil {
-				if err := os.Remove(oldBinPath); err != nil {
-					slog.Warn("Failed to clean up old CNI binary wrapper", "path", oldBinPath, "err", err)
-				} else {
-					slog.Info("Stale CNI binary wrapper cleaned up successfully", "path", oldBinPath)
-				}
-			}
+			cleanupOldBinaryWrapper()
 
 		case <-refreshTicker.C:
 			// Refresh kubeconfig ServiceAccount token
@@ -657,6 +711,10 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 				slog.Info("eBPF nptv6_table GC sweep complete",
 					"removed", nptv6Result.EBPFNPTv6EntriesRemoved, "errors", nptv6Result.Errors)
 			}
+
+		case <-radvTimer.C:
+			resendRouterAdvertisements()
+			radvTimer.Reset(radvNextIntervalFn())
 		}
 	}
 }

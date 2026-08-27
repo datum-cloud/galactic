@@ -22,6 +22,7 @@ import (
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/radv"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -150,6 +151,17 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	if ipamResult != nil && ipamResult.IPv6Gateway != nil {
 		slog.Debug("ADD: host gateway configured", "name", hostName, "gateway", ipamResult.IPv6Gateway)
+
+		// Record this attachment for periodic Router Advertisement resend
+		// by galactic-cni's long-lived installer daemon, rather than
+		// sending an RA from here: this process exits as soon as ADD
+		// returns, almost always before the VM guest it's attached to has
+		// even booted far enough to be listening for one — see
+		// internal/plumbing/radv's own doc comment.
+		if err := radv.RecordAttachment(radv.DefaultStateDir, hostName, hostMTU); err != nil {
+			slog.Warn("ADD: failed to record attachment for router advertisement (non-fatal)",
+				"err", err, "name", hostName)
+		}
 	}
 
 	result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
