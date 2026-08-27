@@ -22,6 +22,7 @@ import (
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/radv"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -150,6 +151,19 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	if ipamResult != nil && ipamResult.IPv6Gateway != nil {
 		slog.Debug("ADD: host gateway configured", "name", hostName, "gateway", ipamResult.IPv6Gateway)
+
+		// Best-effort: a Unikraft/VM guest has no netns for this plugin to
+		// configure a default route into (see this file's own doc comment),
+		// so send it one over the wire instead. This is a one-shot stopgap —
+		// see internal/plumbing/radv's doc comment for why it doesn't
+		// survive DefaultRouterLifetime — not treated as fatal to ADD since
+		// the attachment itself is otherwise fully up.
+		if err := radv.SendRouterAdvertisement(hostName, hostMTU); err != nil {
+			slog.Warn("ADD: failed to send router advertisement (non-fatal)",
+				"name", hostName, "err", err)
+		} else {
+			slog.Debug("ADD: router advertisement sent", "name", hostName)
+		}
 	}
 
 	result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
