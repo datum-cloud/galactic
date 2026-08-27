@@ -9,7 +9,6 @@ require (
 	github.com/coreos/go-iptables v0.8.0
 	github.com/kenshaw/baseconv v0.1.1
 	github.com/lorenzosaino/go-sysctl v0.3.1
-	github.com/mdlayher/ndp v1.1.0
 	github.com/osrg/gobgp/v4 v4.8.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
