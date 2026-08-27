@@ -62,20 +62,68 @@ var (
 // cap directly because nothing existed to refresh it before then.
 var RouterLifetime = 900 * time.Second
 
-// allNodesMulticast is the RFC 4861 §6.2.3 destination for unsolicited RAs —
-// every host on the link, not just one that solicited.
+// allNodesMulticast is the RFC 4861 §6.2.3 destination for unsolicited RAs
+// and for solicited replies to a solicitation whose source address was
+// unspecified — every host on the link, not just one that solicited.
 var allNodesMulticast = netip.MustParseAddr("ff02::1")
+
+// allRoutersMulticast is the RFC 4861 §4.1 destination a guest sends its
+// Router Solicitations to — an actor (actor.go) joins this group on its tap
+// host interface so its Conn actually receives them; ICMPv6 multicast
+// traffic isn't delivered to a socket that hasn't joined the group it's
+// addressed to.
+var allRoutersMulticast = netip.MustParseAddr("ff02::2")
 
 // NextInterval returns a random delay in [MinRtrAdvInterval,
 // MaxRtrAdvInterval) before the next unsolicited RA should be sent, per RFC
 // 4861 §6.2.4 — routers are required to jitter rather than fire on a fixed
 // clock specifically so that multiple routers on the same link don't
 // synchronize their RAs into bursts. Callers reschedule with a fresh call to
-// this function after every send (see internal/installer's radvTimer),
-// rather than using a fixed-period ticker.
+// this function after every send (see actor.go's resend timer), rather than
+// using a fixed-period ticker.
 func NextInterval() time.Duration {
 	span := MaxRtrAdvInterval - MinRtrAdvInterval
 	return MinRtrAdvInterval + rand.N(span)
+}
+
+// MinDelayBetweenRAs and MaxRADelayTime are RFC 4861 §10's fixed protocol
+// constants governing solicited replies (actor.go): a router MUST NOT send
+// more than one advertisement within MinDelayBetweenRAs of the last one it
+// sent (solicited or not), and MUST wait a random delay in
+// [0, MaxRADelayTime) before replying to a solicitation, so that several
+// solicitations arriving close together don't each provoke an immediate,
+// synchronized reply. Package-level vars (not consts), matching
+// MaxRtrAdvInterval/MinRtrAdvInterval above, so tests can shrink them; unlike
+// those two, the RFC does not intend these to be tunable in production.
+var (
+	MinDelayBetweenRAs = 3 * time.Second
+	MaxRADelayTime     = 500 * time.Millisecond
+)
+
+// nextResponseDelay returns a random delay in [0, MaxRADelayTime) to wait
+// before replying to a Router Solicitation — see MaxRADelayTime's own doc
+// comment.
+func nextResponseDelay() time.Duration {
+	return rand.N(MaxRADelayTime)
+}
+
+// buildAdvertisement constructs the Router Advertisement both the
+// unsolicited resend path and the solicited-reply path (actor.go) send —
+// factored out so the two paths can never drift apart on hop
+// limit/lifetime/options. See SendRouterAdvertisement's doc comment for why
+// there is no Prefix Information option.
+func buildAdvertisement(mtu int, hwAddr net.HardwareAddr) *ndp.RouterAdvertisement {
+	return &ndp.RouterAdvertisement{
+		CurrentHopLimit: 64,
+		RouterLifetime:  RouterLifetime,
+		Options: []ndp.Option{
+			&ndp.LinkLayerAddress{
+				Direction: ndp.Source,
+				Addr:      hwAddr,
+			},
+			ndp.NewMTU(uint32(mtu)),
+		},
+	}
 }
 
 // SendRouterAdvertisement sends a single unsolicited Router Advertisement out
@@ -90,11 +138,14 @@ func NextInterval() time.Duration {
 // The RA carries no Prefix Information option: a tap-attached guest gets its
 // address from IPAM, not IPv6 SLAAC, so the only thing being announced is
 // "this link-local address is your default router" plus the link's MTU —
-// nothing about how to self-assign an address. Callers are expected to
-// invoke this repeatedly, spaced per NextInterval, for as long as the
-// attachment exists (see state.go) rather than relying on one call to be
-// sufficient; a single call at CNI ADD time can race the guest's own boot
-// and land before anything is listening.
+// nothing about how to self-assign an address.
+//
+// This is a standalone, one-shot sender — production use is actor.go's
+// RunActor, which keeps one Conn open per attachment for its whole lifetime
+// (both the periodic resend and Router Solicitation replies) rather than
+// opening and closing a fresh Conn on every send. SendRouterAdvertisement
+// remains for callers that only need a single send with no RS-responsiveness
+// (e.g. a one-off diagnostic).
 func SendRouterAdvertisement(iface string, mtu int) error {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
@@ -109,18 +160,7 @@ func SendRouterAdvertisement(iface string, mtu int) error {
 		_ = conn.Close()
 	}()
 
-	ra := &ndp.RouterAdvertisement{
-		CurrentHopLimit: 64,
-		RouterLifetime:  RouterLifetime,
-		Options: []ndp.Option{
-			&ndp.LinkLayerAddress{
-				Direction: ndp.Source,
-				Addr:      ifi.HardwareAddr,
-			},
-			ndp.NewMTU(uint32(mtu)),
-		},
-	}
-
+	ra := buildAdvertisement(mtu, ifi.HardwareAddr)
 	if err := conn.WriteTo(ra, nil, allNodesMulticast); err != nil {
 		return fmt.Errorf("send router advertisement on %q: %w", iface, err)
 	}

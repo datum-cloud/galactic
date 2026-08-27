@@ -355,15 +355,16 @@ func TestRun(t *testing.T) {
 		return &fakeDatapathCloser{}, []string{"eth0"}, nil, nil
 	}
 
-	// Exercise the radv resend ticker too: a short, fixed override (rather
-	// than a real RFC-sized jittered interval) so it fires several times
-	// during this test's lifetime, against an empty, test-local state dir
-	// (radv.SendRouterAdvertisement is never reached with no attachments
-	// recorded, so this needs no root/real interface -- just confirms the
-	// Timer/Reset wiring in Run doesn't panic or block shutdown).
-	origRadvNextIntervalFn := radvNextIntervalFn
-	t.Cleanup(func() { radvNextIntervalFn = origRadvNextIntervalFn })
-	radvNextIntervalFn = func() time.Duration { return 20 * time.Millisecond }
+	// Exercise the radv reconciler too: a short, fixed override (rather
+	// than waiting out a real multi-minute reconcile interval) so it ticks
+	// several times during this test's lifetime, against an empty,
+	// test-local state dir (radv.RunActor is never started with no
+	// attachments recorded, so this needs no root/real interface -- just
+	// confirms the reconcile/shutdown wiring in Run doesn't panic or block
+	// shutdown).
+	origRadvReconcileInterval := radvReconcileInterval
+	t.Cleanup(func() { radvReconcileInterval = origRadvReconcileInterval })
+	radvReconcileInterval = 20 * time.Millisecond
 
 	origRadvStateDir := radv.DefaultStateDir
 	t.Cleanup(func() { radv.DefaultStateDir = origRadvStateDir })
@@ -650,4 +651,61 @@ func TestRun_EBPFDatapathEnabled_MetricsAndHealthReflectRealDatapath(t *testing.
 		t.Fatalf("re-attach ifaces = %v, want [lo]", ifaces)
 	}
 	checkStatus(t, grpc_health_v1.HealthCheckResponse_SERVING)
+}
+
+// TestReconcileRadvActors_FailedStartupIsRetried covers radvActorFailed's
+// whole reason for existing: an attachment whose radv.RunActor can't even
+// open its Conn (here, because "does-not-exist0" is never a real
+// interface) must not get stuck "running" forever in actors.cancel --
+// reconcileRadvActors is expected to try it again on a later reconcile once
+// radvActorFailed has cleared its entry.
+func TestReconcileRadvActors_FailedStartupIsRetried(t *testing.T) {
+	origRadvStateDir := radv.DefaultStateDir
+	t.Cleanup(func() { radv.DefaultStateDir = origRadvStateDir })
+	radv.DefaultStateDir = t.TempDir()
+
+	const iface = "does-not-exist0"
+	if err := radv.RecordAttachment(radv.DefaultStateDir, iface, 1500); err != nil {
+		t.Fatalf("RecordAttachment: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actors := &radvActorSet{}
+	reconcileRadvActors(ctx, actors)
+
+	if _, ok := actors.cancel[iface]; !ok {
+		t.Fatalf("actors.cancel[%q] missing right after reconcile, want an entry (even if doomed to fail)", iface)
+	}
+
+	select {
+	case failedIface := <-actors.failed:
+		if failedIface != iface {
+			t.Fatalf("actors.failed sent %q, want %q", failedIface, iface)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("actors.failed never received a report for the interface that can't exist")
+	}
+	radvActorFailed(actors, iface)
+
+	if _, ok := actors.cancel[iface]; ok {
+		t.Fatalf("actors.cancel[%q] still present after radvActorFailed, want it cleared so the next reconcile retries",
+			iface)
+	}
+
+	// Retry: reconcile again now that the failed entry is cleared -- same
+	// record is still there, so it should be picked up and fail (and
+	// report) the same way, proving this isn't a one-shot fluke.
+	reconcileRadvActors(ctx, actors)
+	select {
+	case failedIface := <-actors.failed:
+		if failedIface != iface {
+			t.Fatalf("retry: actors.failed sent %q, want %q", failedIface, iface)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry: actors.failed never received a report on the second reconcile")
+	}
+
+	actors.wg.Wait()
 }

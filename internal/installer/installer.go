@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -51,13 +52,15 @@ var ebpfHealthCheckInterval = 10 * time.Second
 // ARCHITECTURE-ROUTER.md: "ticker-driven, default every 5m").
 var ebpfGCSweepInterval = 5 * time.Minute
 
-// radvNextIntervalFn resolves the delay before Run's next Router
-// Advertisement resend pass (internal/plumbing/radv.NextInterval — a
-// jittered value in [MinRtrAdvInterval, MaxRtrAdvInterval), per RFC 4861
-// §6.2.4). A package-level func var, same override pattern as ebpfStartFn/
-// addrListFn/newK8sClientFn above, so tests can substitute a short fixed
-// delay instead of waiting out a real RFC-sized interval.
-var radvNextIntervalFn = radv.NextInterval
+// radvReconcileInterval controls how often Run diffs the currently recorded
+// tap attachments (internal/plumbing/radv.ListAttachments) against the set
+// of running radv.RunActor goroutines, starting one for each newly recorded
+// attachment and canceling one for each attachment that has disappeared. A
+// package-level var, same override pattern as ebpfHealthCheckInterval
+// above. Kept short (unlike the RFC-sized intervals radv.RunActor itself
+// uses) since it only gates how fast a new attachment starts being served
+// at all -- a guest's own boot time dwarfs a couple of seconds either way.
+var radvReconcileInterval = 2 * time.Second
 
 // ebpfHealthServiceName is the gRPC health service name (see
 // grpc_health_v1.HealthServer) reporting the live status of the eBPF uSID
@@ -493,23 +496,102 @@ func cleanupOldBinaryWrapper() {
 	}
 }
 
-// resendRouterAdvertisements is Run's radvTicker case body, split out
-// solely to keep Run's own cyclomatic complexity within golangci-lint's
-// gocyclo budget -- same reasoning as startEBPFDatapath above; behaviorally
-// this is inlined exactly where it used to live. A failure here is never
-// fatal to Run: resending is best-effort maintenance for already-attached
-// VM guests, not a requirement for anything else this process does.
-func resendRouterAdvertisements() {
+// radvActorSet tracks the currently running radv.RunActor goroutines, keyed
+// by host interface name (radv.Record.HostInterface) -- Run's own local
+// state, reconciled against radv.ListAttachments on every
+// radvReconcileTicker tick (see reconcileRadvActors). The zero value is
+// ready to use.
+//
+// cancel is touched only from Run's own goroutine (reconcileRadvActors and
+// the radvActorFailed case below) -- deliberately not guarded by a mutex,
+// since keeping it single-owner is simpler than synchronizing concurrent
+// access from the actor goroutines themselves. Those goroutines instead
+// report a failed startup back onto failed, which Run's select loop drains
+// on its own turn.
+type radvActorSet struct {
+	cancel map[string]context.CancelFunc
+	failed chan string
+	wg     sync.WaitGroup
+}
+
+// reconcileRadvActors is Run's radvReconcileTicker case body -- also called
+// once before the loop starts, so attachments already recorded when this
+// daemon starts (e.g. a restart while VMs are still attached) are served
+// immediately rather than waiting out the first tick. Split into its own
+// function solely to keep Run's own cyclomatic complexity within
+// golangci-lint's gocyclo budget -- same reasoning as startEBPFDatapath
+// above.
+//
+// Starts one radv.RunActor per newly recorded attachment and cancels one
+// for each attachment that has disappeared since the last reconcile. A
+// listing failure here is never fatal to Run -- resending/soliciting is
+// best-effort maintenance for already-attached VM guests, not a
+// requirement for anything else this process does -- so already-running
+// actors are simply left alone until the next tick succeeds. An actor that
+// fails during startup (e.g. a transient interface lookup failure) reports
+// itself on actors.failed instead of silently leaving its map entry stuck
+// "running" forever -- see radvActorFailed.
+func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 	records, err := radv.ListAttachments(radv.DefaultStateDir)
 	if err != nil {
 		slog.Warn("Failed to list router advertisement attachments", "err", err)
 		return
 	}
-	for _, r := range records {
-		if err := radv.SendRouterAdvertisement(r.HostInterface, r.MTU); err != nil {
-			slog.Warn("Failed to resend router advertisement", "err", err, "hostInterface", r.HostInterface)
-		}
+
+	if actors.cancel == nil {
+		actors.cancel = make(map[string]context.CancelFunc)
+		// Buffered generously relative to any realistic node's tap
+		// attachment count, so a run of startup failures can't block an
+		// actor goroutine on this send -- radvActorFailed's own send is
+		// non-blocking besides, so a full channel only delays a retry
+		// rather than deadlocking anything.
+		actors.failed = make(chan string, 256)
 	}
+
+	seen := make(map[string]struct{}, len(records))
+	for _, r := range records {
+		seen[r.HostInterface] = struct{}{}
+		if _, running := actors.cancel[r.HostInterface]; running {
+			continue
+		}
+
+		actorCtx, cancel := context.WithCancel(ctx)
+		actors.cancel[r.HostInterface] = cancel
+		actors.wg.Add(1)
+		go func(iface string, mtu int) {
+			defer actors.wg.Done()
+			if err := radv.RunActor(actorCtx, iface, mtu); err != nil {
+				slog.Warn("Router advertisement actor failed to start, will retry next reconcile",
+					"err", err, "hostInterface", iface)
+				select {
+				case actors.failed <- iface:
+				default:
+					slog.Warn("Router advertisement failed-actor channel full, retry may be delayed",
+						"hostInterface", iface)
+				}
+			}
+		}(r.HostInterface, r.MTU)
+	}
+
+	for iface, cancel := range actors.cancel {
+		if _, ok := seen[iface]; ok {
+			continue
+		}
+		cancel()
+		delete(actors.cancel, iface)
+	}
+}
+
+// radvActorFailed is Run's radvActors.failed case body: an actor that
+// couldn't even start (radv.RunActor returned a non-nil error, meaning it
+// never got past opening its Conn) reported itself here rather than
+// leaving reconcileRadvActors permanently convinced it's still running.
+// Clearing its map entry lets the next reconcile tick see the attachment
+// as unserved again and retry it. A delete on a key already gone (the
+// reconciler noticed the attachment itself disappeared in the meantime) is
+// a safe no-op.
+func radvActorFailed(actors *radvActorSet, iface string) {
+	delete(actors.cancel, iface)
 }
 
 // Run executes the CNI installer main container tasks:
@@ -545,13 +627,15 @@ func resendRouterAdvertisements() {
 //     (internal/controller/gc_controller.go), because the pinned maps
 //     only exist inside this container -- see gc.SweepEBPFVRFTable's own
 //     doc comment for the full reasoning.
-//  8. Periodically resends an IPv6 Router Advertisement (internal/plumbing/
-//     radv) for every tap attachment galactic-tap has recorded
-//     (radv.ListAttachments) since the last tick. This runs from here, not
-//     from galactic-tap's own cmdAdd, because a VM guest's boot almost
-//     always outlives that short-lived process -- see radv's own doc
-//     comment for the full reasoning. Unrelated to, and runs regardless of,
-//     the eBPF datapath above.
+//  8. Runs one internal/plumbing/radv.RunActor goroutine per tap attachment
+//     galactic-tap has recorded (radv.ListAttachments), reconciled against
+//     that list on a short ticker (radvReconcileInterval). Each actor both
+//     resends an IPv6 Router Advertisement on a jittered schedule and
+//     replies to that guest's own Router Solicitations. This runs from
+//     here, not from galactic-tap's own cmdAdd, because a VM guest's boot
+//     almost always outlives that short-lived process -- see radv's own
+//     doc comment for the full reasoning. Unrelated to, and runs
+//     regardless of, the eBPF datapath above.
 func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
@@ -636,17 +720,20 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	ebpfGCSweepTicker := time.NewTicker(ebpfGCSweepInterval)
 	defer ebpfGCSweepTicker.Stop()
 
-	// Router Advertisement resend for tap-attached VM guests (see
+	// Router Advertisement serving for tap-attached VM guests (see
 	// internal/plumbing/radv's own doc comment) -- runs regardless of
 	// whether the eBPF datapath is enabled, since it has nothing to do with
-	// it; harmless no-op ticks whenever no tap attachment currently needs
-	// one (internal/plumbing/radv.ListAttachments returns empty). A Timer,
-	// not a Ticker: RFC 4861 §6.2.4 requires each send to be spaced by a
-	// freshly-jittered interval (radvNextIntervalFn, reset after every
-	// fire below) rather than a fixed period, so routers on the same link
-	// don't synchronize their RAs into bursts.
-	radvTimer := time.NewTimer(radvNextIntervalFn())
-	defer radvTimer.Stop()
+	// it. One radv.RunActor goroutine per currently recorded attachment
+	// (radvActorSet, reconciled on every radvReconcileTicker tick below)
+	// handles both the periodic resend and Router Solicitation replies for
+	// that attachment; reconciled once here too, so attachments already
+	// recorded when this daemon starts don't wait out the first tick.
+	radvActors := &radvActorSet{}
+	reconcileRadvActors(ctx, radvActors)
+	defer radvActors.wg.Wait()
+
+	radvReconcileTicker := time.NewTicker(radvReconcileInterval)
+	defer radvReconcileTicker.Stop()
 
 	for {
 		select {
@@ -712,9 +799,11 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 					"removed", nptv6Result.EBPFNPTv6EntriesRemoved, "errors", nptv6Result.Errors)
 			}
 
-		case <-radvTimer.C:
-			resendRouterAdvertisements()
-			radvTimer.Reset(radvNextIntervalFn())
+		case <-radvReconcileTicker.C:
+			reconcileRadvActors(ctx, radvActors)
+
+		case iface := <-radvActors.failed:
+			radvActorFailed(radvActors, iface)
 		}
 	}
 }
