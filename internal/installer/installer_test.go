@@ -30,6 +30,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
 func requireRoot(t *testing.T) {
@@ -353,6 +354,20 @@ func TestRun(t *testing.T) {
 	ebpfStartFn = func(_ context.Context, _ string) (io.Closer, []string, *attach.Watcher, error) {
 		return &fakeDatapathCloser{}, []string{"eth0"}, nil, nil
 	}
+
+	// Exercise the radv resend ticker too: a short, fixed override (rather
+	// than a real RFC-sized jittered interval) so it fires several times
+	// during this test's lifetime, against an empty, test-local state dir
+	// (radv.SendRouterAdvertisement is never reached with no attachments
+	// recorded, so this needs no root/real interface -- just confirms the
+	// Timer/Reset wiring in Run doesn't panic or block shutdown).
+	origRadvNextIntervalFn := radvNextIntervalFn
+	t.Cleanup(func() { radvNextIntervalFn = origRadvNextIntervalFn })
+	radvNextIntervalFn = func() time.Duration { return 20 * time.Millisecond }
+
+	origRadvStateDir := radv.DefaultStateDir
+	t.Cleanup(func() { radv.DefaultStateDir = origRadvStateDir })
+	radv.DefaultStateDir = filepath.Join(t.TempDir(), "galactic-radv")
 
 	// Set up directories
 	tmpDir := t.TempDir()

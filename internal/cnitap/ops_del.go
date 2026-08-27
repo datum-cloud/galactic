@@ -17,6 +17,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
 // cmdDel mirrors internal/cni's own cmdDel, minus everything guest-netns
@@ -50,6 +51,13 @@ func cmdDel(args *skel.CmdArgs) error {
 	// Resolved and removed *before* tap.Delete tears the interface down,
 	// since there is nothing left to resolve an ifindex from afterward.
 	unregisterIfindexVRFEntry(vpc, vpcAtt, args.ContainerID)
+
+	// Stop galactic-cni's installer daemon from resending Router
+	// Advertisements for this attachment — best-effort and unconditional,
+	// same as tap.Delete below: a missing record (no IPv6 gateway was ever
+	// allocated for this attachment) is not an error, and DEL must stay
+	// idempotent regardless.
+	removeRadvState(vpc, vpcAtt, args.ContainerID)
 
 	// Delete this attachment's own tap device. Unlike the VRF and BGP CRDs
 	// below, the tap device is genuinely private to this attachment (see
@@ -99,6 +107,19 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 
 	if err := table.Unregister(uint32(link.Attrs().Index)); err != nil {
 		slog.Warn("DEL: failed to unregister eBPF ifindex_vrf_table entry", "err", err,
+			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
+	}
+}
+
+// removeRadvState removes this attachment's router-advertisement resend
+// record (internal/plumbing/radv), if any -- mirrors
+// unregisterIfindexVRFEntry above (same reasoning: genuinely private to this
+// one attachment's own host interface, so it belongs alongside tap.Delete
+// rather than the shared VRF/BGP CRD cleanup deferred to GC).
+func removeRadvState(vpc, vpcAttachment, containerID string) {
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	if err := radv.RemoveAttachment(radv.DefaultStateDir, hostName); err != nil {
+		slog.Warn("DEL: failed to remove router advertisement state", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
 	}
 }
