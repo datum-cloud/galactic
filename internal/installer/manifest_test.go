@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 
 	"go.datum.net/galactic/internal/plumbing/radv"
@@ -86,12 +87,65 @@ func TestDaemonsetManifest_RunContainerMountsRadvStateDir(t *testing.T) {
 	}
 }
 
-// runContainerMountPaths parses the real daemonset.yaml (not a copy, so it
-// can't drift from what actually gets applied to a cluster), finds the
-// container that invokes `/galactic-cni run` -- credential-refresh, the one
-// that calls installer.Run -- and returns its name plus every path in its
-// own volumeMounts.
+// TestDaemonsetManifest_RunContainerHasNetRawCapability is a regression test
+// for the capability-side counterpart of
+// TestDaemonsetManifest_RunContainerMountsRadvStateDir above: even once the
+// run container can see a tap attachment's record, radv.RunActor still opens
+// a raw ICMPv6 socket (mdlayher/ndp's Listen, over ip6:ipv6-icmp) to send
+// Router Advertisements and receive Router Solicitations on it. That needs
+// CAP_NET_RAW, which config/galactic-cni/daemonset.yaml's `drop: ["ALL"]`
+// strips along with everything else not explicitly added back. Without it,
+// ndp.Listen fails "operation not permitted" for every attachment, on every
+// node, forever -- radvActorFailed's retry is working exactly as designed
+// (RunActor.go's own doc comment), it just retries into a capability wall
+// every reconcile tick. Confirmed live on staging infra: continuous
+// "Router advertisement actor failed to start, will retry next reconcile"
+// warnings, one set per attachment, never succeeding.
+func TestDaemonsetManifest_RunContainerHasNetRawCapability(t *testing.T) {
+	runContainerName, capabilities := runContainerCapabilities(t)
+
+	const required = "NET_RAW"
+	if !slices.Contains(capabilities, required) {
+		t.Errorf("container %q in %s does not add capability %s (needed by radv.RunActor's "+
+			"raw ICMPv6 socket via ndp.Listen; without it no attachment's actor ever starts on "+
+			"any node); added capabilities: %v", runContainerName, manifestPath, required, capabilities)
+	}
+}
+
+// runContainerMountPaths returns the run container's name and every path in
+// its own volumeMounts.
 func runContainerMountPaths(t *testing.T) (string, []string) {
+	t.Helper()
+
+	c := findRunContainer(t)
+	mountPaths := make([]string, 0, len(c.VolumeMounts))
+	for _, vm := range c.VolumeMounts {
+		mountPaths = append(mountPaths, vm.MountPath)
+	}
+	return c.Name, mountPaths
+}
+
+// runContainerCapabilities returns the run container's name and the
+// capabilities its securityContext adds.
+func runContainerCapabilities(t *testing.T) (string, []string) {
+	t.Helper()
+
+	c := findRunContainer(t)
+	if c.SecurityContext == nil || c.SecurityContext.Capabilities == nil {
+		return c.Name, nil
+	}
+	added := make([]string, 0, len(c.SecurityContext.Capabilities.Add))
+	for _, capName := range c.SecurityContext.Capabilities.Add {
+		added = append(added, string(capName))
+	}
+	return c.Name, added
+}
+
+// findRunContainer parses the real daemonset.yaml (not a copy, so it can't
+// drift from what actually gets applied to a cluster) and returns the
+// container that invokes `/galactic-cni run` -- credential-refresh, the one
+// that calls installer.Run.
+func findRunContainer(t *testing.T) corev1.Container {
 	t.Helper()
 
 	data, err := os.ReadFile(manifestPath)
@@ -106,17 +160,12 @@ func runContainerMountPaths(t *testing.T) (string, []string) {
 
 	for _, c := range ds.Spec.Template.Spec.Containers {
 		for _, arg := range c.Command {
-			if arg != "run" {
-				continue
+			if arg == "run" {
+				return c
 			}
-			mountPaths := make([]string, 0, len(c.VolumeMounts))
-			for _, vm := range c.VolumeMounts {
-				mountPaths = append(mountPaths, vm.MountPath)
-			}
-			return c.Name, mountPaths
 		}
 	}
 
 	t.Fatalf("no container in %s runs the installer's \"run\" command", manifestPath)
-	return "", nil
+	return corev1.Container{}
 }
