@@ -152,10 +152,29 @@ spec:
               readOnly: true
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+            # internal/plumbing/vrf/lock.go's flock serializes VRF table ID
+            # allocation between this container's GC pass (RemoveOrphanedVRFs
+            # -> vrf.Delete) and the galactic-cni plugin's ADD/DEL, which runs
+            # as a bare process directly on the host and locks the real
+            # /var/lib/cni/galactic-vrf path unconditionally -- the lockDir
+            # constant is not configurable. Without this mount,
+            # readOnlyRootFilesystem above sends the container's MkdirAll
+            # against its own throwaway overlay fs, so both the lock and any
+            # VRF orphan GC it guards fail every time. Same well-known
+            # /var/lib/cni root the CNI plugin's IPAM state
+            # (internal/cni/ipam.DefaultLockDir) already lives under, so it
+            # must be a real, writable directory on every node running this
+            # DaemonSet regardless of this mount's presence.
+            - name: cni-state
+              mountPath: /var/lib/cni
       volumes:
         - name: netns
           hostPath:
             path: /var/run/netns
+            type: DirectoryOrCreate
+        - name: cni-state
+          hostPath:
+            path: /var/lib/cni
             type: DirectoryOrCreate
         - name: bpf-fs
           # The host's bpffs mount, same convention/tradeoff

@@ -87,6 +87,22 @@ func parseInterfaceList(v string) []string {
 // -- analogous to the existing GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
 // auto-detection-from-`lo` pattern (internal/plumbing/loaddr), but over
 // routes rather than addresses.
+//
+// Skips wireguard-type links (excludedLinkType): a WireGuard mesh
+// interface can install its own IPv6 default-ish route alongside the real
+// fabric NIC's, and if netlink reports the mesh interface's route first,
+// ResolveNodeSourceAddress would bake the mesh interface's ULA in as this
+// node's SRv6 outer-header source address for every encapsulated packet.
+// That address is never reachable off-node (it's not advertised anywhere
+// outside the WireGuard mesh), so every cross-site SRv6 packet would leave
+// the box correctly SID-routed but with a source no intermediate network
+// would forward on (or a receiving node would recognize as this peer) --
+// silent packet loss with no error on either side. A WireGuard tunnel can
+// never legitimately be "the real fabric NIC" this datapath pushes raw
+// SRv6-encapsulated Ethernet frames onto, so it's excluded categorically
+// rather than by interface name (the specific mesh interface name is
+// deployment-specific; the underlying failure mode -- a tunnel interface
+// racing a real NIC for the default route -- is not).
 func autoDetectInterfaces() ([]string, error) {
 	routes, err := routeListFn()
 	if err != nil {
@@ -106,6 +122,9 @@ func autoDetectInterfaces() ([]string, error) {
 			// detection over one stale/racing route.
 			continue
 		}
+		if link.Type() == excludedLinkType {
+			continue
+		}
 		name := link.Attrs().Name
 		if seen[name] {
 			continue
@@ -121,6 +140,11 @@ func autoDetectInterfaces() ([]string, error) {
 	}
 	return names, nil
 }
+
+// excludedLinkType is the vishvananda/netlink Link.Type() value
+// autoDetectInterfaces never treats as a candidate fabric interface -- see
+// autoDetectInterfaces' own doc comment for why.
+const excludedLinkType = "wireguard"
 
 // isDefaultRoute reports whether r is an IPv6 default route (::/0).
 func isDefaultRoute(r netlink.Route) bool {
