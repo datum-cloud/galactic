@@ -39,7 +39,27 @@ func (f *fakeLink) Type() string {
 	return f.linkType
 }
 
+// stubNonBondLinks configures linkByNameFn/linkListFn so ResolveInterfaces'
+// expandBondSlaves pass is a no-op: every name resolves to a non-bond
+// fakeLink, and there are no other links on the host to enumerate as
+// slaves. Tests that only care about override-parsing or auto-detection
+// behavior (not bond expansion itself) use this so expandBondSlaves' own
+// netlink lookups don't need per-test fixtures.
+func stubNonBondLinks(t *testing.T) {
+	t.Helper()
+	origLinkByNameFn, origLinkListFn := linkByNameFn, linkListFn
+	t.Cleanup(func() {
+		linkByNameFn, linkListFn = origLinkByNameFn, origLinkListFn
+	})
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		return &fakeLink{attrs: netlink.LinkAttrs{Name: name}}, nil
+	}
+	linkListFn = func() ([]netlink.Link, error) { return nil, nil }
+}
+
 func TestResolveInterfaces_EnvOverride(t *testing.T) {
+	stubNonBondLinks(t)
+
 	tests := []struct {
 		name      string
 		envValue  string
@@ -94,6 +114,7 @@ func TestResolveInterfaces_EnvOverride(t *testing.T) {
 
 func TestResolveInterfaces_AutoDetect(t *testing.T) {
 	t.Setenv(config.EnvCNIEBPFInterfaces, "")
+	stubNonBondLinks(t)
 
 	origRouteListFn, origLinkByIndexFn := routeListFn, linkByIndexFn
 	t.Cleanup(func() {
@@ -249,6 +270,186 @@ func TestResolveInterfaces_AutoDetect(t *testing.T) {
 		_, err := ResolveInterfaces()
 		if err == nil {
 			t.Fatal("ResolveInterfaces() error = nil, want the underlying route-list error surfaced")
+		}
+	})
+}
+
+// TestExpandBondSlaves exercises expandBondSlaves directly against a faked
+// netlink view (linkByNameFn/linkListFn), covering the live bug: on a Linux
+// bonding master, RX ingress tc/eBPF classification happens on the slave
+// devices, not the master -- see expandBondSlaves' own doc comment.
+func TestExpandBondSlaves(t *testing.T) {
+	origLinkByNameFn, origLinkListFn := linkByNameFn, linkListFn
+	t.Cleanup(func() {
+		linkByNameFn, linkListFn = origLinkByNameFn, origLinkListFn
+	})
+
+	const (
+		bondName  = "bond0"
+		bondIndex = 10
+		slave1    = "ens1f1np1"
+		slave2    = "ens2f1np1"
+	)
+
+	slave1Link := &fakeLink{attrs: netlink.LinkAttrs{Name: slave1, Index: 11, MasterIndex: bondIndex}}
+	bondLinks := map[string]netlink.Link{
+		testIfaceEth0: &fakeLink{attrs: netlink.LinkAttrs{Name: testIfaceEth0, Index: 2}},
+		bondName:      &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bondLinkType},
+		slave1:        slave1Link, // also named explicitly, in MixedBondAndNonBondDeduped below
+	}
+	allLinks := []netlink.Link{
+		bondLinks[testIfaceEth0],
+		bondLinks[bondName],
+		slave1Link,
+		&fakeLink{attrs: netlink.LinkAttrs{Name: slave2, Index: 12, MasterIndex: bondIndex}},
+		// A link enslaved to some other, unrelated master must never leak in.
+		&fakeLink{attrs: netlink.LinkAttrs{Name: "unrelated-slave", Index: 13, MasterIndex: 999}},
+	}
+
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		if l, ok := bondLinks[name]; ok {
+			return l, nil
+		}
+		return nil, errFixtureNotFound
+	}
+	linkListFn = func() ([]netlink.Link, error) { return allLinks, nil }
+
+	t.Run("NonBondUnchanged", func(t *testing.T) {
+		got, err := expandBondSlaves([]string{testIfaceEth0})
+		if err != nil {
+			t.Fatalf("expandBondSlaves() error = %v", err)
+		}
+		if !equalStringSlices(got, []string{testIfaceEth0}) {
+			t.Errorf("expandBondSlaves() = %v, want [%s] (non-bond interface unchanged)", got, testIfaceEth0)
+		}
+	})
+
+	t.Run("BondExpandsToMasterAndSlaves", func(t *testing.T) {
+		got, err := expandBondSlaves([]string{bondName})
+		if err != nil {
+			t.Fatalf("expandBondSlaves() error = %v", err)
+		}
+		want := []string{bondName, slave1, slave2}
+		if !equalStringSlices(got, want) {
+			t.Errorf("expandBondSlaves() = %v, want %v (master plus both real slaves, unrelated slave excluded)", got, want)
+		}
+	})
+
+	t.Run("MixedBondAndNonBondDeduped", func(t *testing.T) {
+		got, err := expandBondSlaves([]string{testIfaceEth0, bondName, slave1})
+		if err != nil {
+			t.Fatalf("expandBondSlaves() error = %v", err)
+		}
+		want := []string{testIfaceEth0, bondName, slave1, slave2}
+		if !equalStringSlices(got, want) {
+			t.Errorf("expandBondSlaves() = %v, want %v (slave1 named explicitly must not be duplicated)", got, want)
+		}
+	})
+
+	t.Run("UnresolvableInterfacePassedThrough", func(t *testing.T) {
+		// A name that can't be resolved at all (e.g. this init container's
+		// netns can't yet see it) is passed through unchanged rather than
+		// failing the whole call -- ResolveInterfaces' override path has
+		// never required its named interfaces to actually exist on the
+		// host at resolution time (installer_test.go's TestResolveEBPFInterfaces
+		// asserts exactly this for the pre-bond-expansion behavior).
+		const name = "does-not-exist"
+		got, err := expandBondSlaves([]string{name})
+		if err != nil {
+			t.Fatalf("expandBondSlaves() error = %v, want no error (unresolvable name passed through)", err)
+		}
+		if !equalStringSlices(got, []string{name}) {
+			t.Errorf("expandBondSlaves() = %v, want [%s] unchanged", got, name)
+		}
+	})
+
+	t.Run("LinkListErrorPropagated", func(t *testing.T) {
+		origLinkListFn := linkListFn
+		linkListFn = func() ([]netlink.Link, error) { return nil, errFixtureNotFound }
+		defer func() { linkListFn = origLinkListFn }()
+
+		_, err := expandBondSlaves([]string{bondName})
+		if err == nil {
+			t.Fatal("expandBondSlaves() error = nil, want the underlying link-list error surfaced")
+		}
+	})
+}
+
+// TestResolveInterfaces_BondExpansion exercises bond expansion end-to-end
+// through ResolveInterfaces itself, for both the env-override and
+// auto-detect paths -- so an operator naming only a bond master (or a
+// default route resolving to one) gets its slaves attached too, without
+// needing to hand-list them.
+func TestResolveInterfaces_BondExpansion(t *testing.T) {
+	const (
+		bondName  = "bond0"
+		bondIndex = 5
+		slave1    = "ens1f1np1"
+		slave2    = "ens2f1np1"
+	)
+
+	bondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bondLinkType}
+	slaveLinks := []netlink.Link{
+		&fakeLink{attrs: netlink.LinkAttrs{Name: slave1, Index: 6, MasterIndex: bondIndex}},
+		&fakeLink{attrs: netlink.LinkAttrs{Name: slave2, Index: 7, MasterIndex: bondIndex}},
+	}
+	want := []string{bondName, slave1, slave2}
+
+	t.Run("EnvOverride", func(t *testing.T) {
+		t.Setenv(config.EnvCNIEBPFInterfaces, bondName)
+
+		origLinkByNameFn, origLinkListFn := linkByNameFn, linkListFn
+		t.Cleanup(func() { linkByNameFn, linkListFn = origLinkByNameFn, origLinkListFn })
+		linkByNameFn = func(name string) (netlink.Link, error) {
+			if name == bondName {
+				return bondLink, nil
+			}
+			return nil, errFixtureNotFound
+		}
+		linkListFn = func() ([]netlink.Link, error) { return slaveLinks, nil }
+
+		got, err := ResolveInterfaces()
+		if err != nil {
+			t.Fatalf("ResolveInterfaces() error = %v", err)
+		}
+		if !equalStringSlices(got, want) {
+			t.Errorf("ResolveInterfaces() = %v, want %v (override naming only the bond master expands to its slaves)", got, want)
+		}
+	})
+
+	t.Run("AutoDetect", func(t *testing.T) {
+		t.Setenv(config.EnvCNIEBPFInterfaces, "")
+
+		origRouteListFn, origLinkByIndexFn := routeListFn, linkByIndexFn
+		origLinkByNameFn, origLinkListFn := linkByNameFn, linkListFn
+		t.Cleanup(func() {
+			routeListFn, linkByIndexFn = origRouteListFn, origLinkByIndexFn
+			linkByNameFn, linkListFn = origLinkByNameFn, origLinkListFn
+		})
+
+		routeListFn = func() ([]netlink.Route, error) {
+			return []netlink.Route{{LinkIndex: bondIndex, Dst: nil}}, nil
+		}
+		linkByIndexFn = func(index int) (netlink.Link, error) {
+			if index == bondIndex {
+				return bondLink, nil
+			}
+			return nil, errFixtureNotFound
+		}
+		linkByNameFn = func(name string) (netlink.Link, error) {
+			if name == bondName {
+				return bondLink, nil
+			}
+			return nil, errFixtureNotFound
+		}
+		linkListFn = func() ([]netlink.Link, error) { return slaveLinks, nil }
+
+		got, err := ResolveInterfaces()
+		if err != nil {
+			t.Fatalf("ResolveInterfaces() error = %v", err)
+		}
+		if !equalStringSlices(got, want) {
+			t.Errorf("ResolveInterfaces() = %v, want %v (auto-detected bond master expands to its slaves)", got, want)
 		}
 	})
 }
