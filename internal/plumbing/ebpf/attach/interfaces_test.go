@@ -23,13 +23,21 @@ const (
 	testIfaceEth1 = "eth1"
 )
 
-// fakeLink is a minimal netlink.Link implementation for tests.
+// fakeLink is a minimal netlink.Link implementation for tests. linkType
+// defaults to "fake" when unset, so existing fixtures that never set it
+// don't need updating.
 type fakeLink struct {
-	attrs netlink.LinkAttrs
+	attrs    netlink.LinkAttrs
+	linkType string
 }
 
 func (f *fakeLink) Attrs() *netlink.LinkAttrs { return &f.attrs }
-func (f *fakeLink) Type() string              { return "fake" }
+func (f *fakeLink) Type() string {
+	if f.linkType == "" {
+		return "fake"
+	}
+	return f.linkType
+}
 
 func TestResolveInterfaces_EnvOverride(t *testing.T) {
 	tests := []struct {
@@ -162,6 +170,65 @@ func TestResolveInterfaces_AutoDetect(t *testing.T) {
 		}
 		if !equalStringSlices(got, []string{testIfaceEth0}) {
 			t.Errorf("ResolveInterfaces() = %v, want [%s] (unresolvable route skipped)", got, testIfaceEth0)
+		}
+	})
+
+	t.Run("WireguardLinkExcluded", func(t *testing.T) {
+		// A WireGuard mesh interface can install an IPv6 default-ish
+		// route alongside the real fabric NIC's; ResolveInterfaces must
+		// never return a wireguard-type link even when its default
+		// route sorts ahead of a real NIC's.
+		const wireguardIface = "wg-mesh0"
+		wgLinks := map[int]netlink.Link{
+			2: &fakeLink{attrs: netlink.LinkAttrs{Index: 2, Name: wireguardIface}, linkType: "wireguard"},
+			3: &fakeLink{attrs: netlink.LinkAttrs{Index: 3, Name: testIfaceEth0}},
+		}
+		origLinkByIndexFn := linkByIndexFn
+		linkByIndexFn = func(index int) (netlink.Link, error) {
+			if l, ok := wgLinks[index]; ok {
+				return l, nil
+			}
+			return nil, errFixtureNotFound
+		}
+		defer func() { linkByIndexFn = origLinkByIndexFn }()
+
+		routeListFn = func() ([]netlink.Route, error) {
+			return []netlink.Route{
+				{LinkIndex: 2, Dst: nil}, // the mesh interface's default route, reported first
+				{LinkIndex: 3, Dst: nil}, // the real fabric NIC's
+			}, nil
+		}
+		got, err := ResolveInterfaces()
+		if err != nil {
+			t.Fatalf("ResolveInterfaces() error = %v", err)
+		}
+		if !equalStringSlices(got, []string{testIfaceEth0}) {
+			t.Errorf("ResolveInterfaces() = %v, want [%s] (wireguard link excluded)", got, testIfaceEth0)
+		}
+	})
+
+	t.Run("OnlyWireguardLinkIsActionableError", func(t *testing.T) {
+		const wireguardIface = "wg-mesh0"
+		wgLinks := map[int]netlink.Link{
+			2: &fakeLink{attrs: netlink.LinkAttrs{Index: 2, Name: wireguardIface}, linkType: "wireguard"},
+		}
+		origLinkByIndexFn := linkByIndexFn
+		linkByIndexFn = func(index int) (netlink.Link, error) {
+			if l, ok := wgLinks[index]; ok {
+				return l, nil
+			}
+			return nil, errFixtureNotFound
+		}
+		defer func() { linkByIndexFn = origLinkByIndexFn }()
+
+		routeListFn = func() ([]netlink.Route, error) {
+			return []netlink.Route{
+				{LinkIndex: 2, Dst: nil},
+			}, nil
+		}
+		_, err := ResolveInterfaces()
+		if err == nil {
+			t.Fatal("ResolveInterfaces() error = nil, want an error (only candidate is a wireguard link)")
 		}
 	})
 

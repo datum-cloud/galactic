@@ -141,6 +141,16 @@ spec:
             - name: netns
               mountPath: /var/run/netns
               readOnly: true
+            # See config/galactic-router/base/daemonset.yaml's own cni-state
+            # mount comment: this container runs the same GC reconciler
+            # (GALACTIC_ROUTER_GC_NAMESPACE above), so it hits the same
+            # internal/plumbing/vrf/lock.go flock against the real, unmounted
+            # /var/lib/cni/galactic-vrf path -- readOnlyRootFilesystem below
+            # otherwise sends that MkdirAll against this container's own
+            # throwaway overlay fs and the lock (and any VRF orphan GC it
+            # guards) never succeeds.
+            - name: cni-state
+              mountPath: /var/lib/cni
         - name: galactic-gateway
           # See the galactic-router container above: same placeholder-tag
           # caveat.
@@ -236,6 +246,10 @@ spec:
         - name: netns
           hostPath:
             path: /var/run/netns
+            type: DirectoryOrCreate
+        - name: cni-state
+          hostPath:
+            path: /var/lib/cni
             type: DirectoryOrCreate
         - name: bpf-fs
           hostPath:
