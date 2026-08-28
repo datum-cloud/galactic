@@ -168,9 +168,9 @@ spec:
             # intentionally left unset here: the interface name is
             # deployment-specific and the SRv6 address must be unique per
             # gateway node (no in-cluster mechanism yet derives it
-            # automatically — see internal/controller/
-            # networkgateway_controller.go's publishSelfAddress doc
-            # comment). config.GatewayConfig.Validate requires both —
+            # automatically — see internal/config/gateway.go's
+            # EnvGatewaySRv6Address doc comment).
+            # config.GatewayConfig.Validate requires both —
             # applying this base as-is produces a crash-looping container.
             # The deployer's per-node overlay must set both; see
             # deploy/containerlab/resources/galactic-gateway/ for a
