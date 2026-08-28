@@ -86,6 +86,22 @@ type GoBGPRuntime struct {
 	// started at most once per runtime lifetime; it dispatches to all VRFs via
 	// rtIndex rather than being scoped to one VRF.
 	monitorOnce sync.Once
+	// peerMonitorOnce ensures the shared peer FSM transition watcher goroutine
+	// (see peer_monitor.go) is started at most once per runtime lifetime, the
+	// same one-shared-goroutine pattern monitorOnce uses for EVPN best-path.
+	peerMonitorOnce sync.Once
+	// peerStateMu guards lastPeerState. Kept separate from mu (rather than
+	// reusing it) so the peer-event watcher goroutine — which fires
+	// concurrently with Apply/Status — never contends with the lock those
+	// hold for potentially long VRF/policy convergence work.
+	peerStateMu sync.Mutex
+	// lastPeerState tracks each peer's last-observed FSM state, keyed by
+	// neighbor address, so onPeerUpdate can detect an actual transition
+	// instead of logging every re-signal of the same state. This is distinct
+	// from establishedAt below: that one records when a peer first reached
+	// Established for status reporting, this one records the current state
+	// of every peer regardless of what it is, for transition logging.
+	lastPeerState map[string]model.BGPPeerState
 	// wg tracks the server.Start and watchEVPNRIB goroutines so Stop can block
 	// until both have actually exited instead of merely cancelling srvCtx and
 	// returning. GoBGP keeps some path-selection state (table.SelectionOptions,
@@ -116,6 +132,7 @@ func NewRuntimeFactory(listenPort int32, reflector bool, localAddress string) ru
 			reflector:             reflector,
 			localAddress:          localAddress,
 			establishedAt:         make(map[string]time.Time),
+			lastPeerState:         make(map[string]model.BGPPeerState),
 			appliedPolicies:       make(map[string]model.BGPPolicyDirection),
 			appliedVRFs:           make(map[string]uint32),
 			appliedVRFImportRTs:   make(map[string][]string),
@@ -148,6 +165,7 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 	}
 
 	r.startRIBMonitor(b)
+	r.startPeerMonitor(b)
 
 	if err := r.applyEVPN(b, desired.Advertisements, desired.RouterID); err != nil {
 		return err
