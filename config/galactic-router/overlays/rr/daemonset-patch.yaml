@@ -14,21 +14,24 @@ spec:
         app.kubernetes.io/name: galactic-router-rr
     spec:
       # Route-reflector role: opt-in only, requires
-      # galactic.datumapis.com/galactic-route-reflector explicitly set, so
-      # it never double-schedules with the per-worker default DaemonSet
-      # (see ../../base/daemonset.yaml) just because a node happens to
-      # also be galactic.datumapis.com/node=compute. Deliberately *not* a
-      # galactic.datumapis.com/node enum value: that key is single-valued,
-      # so encoding this role there would make it impossible for a node
-      # to be both compute and a route reflector at once -- the same
-      # class of bug fixed for galactic.datumapis.com/nat66 (see
-      # config/galactic-nat66/base/daemonset.yaml's own affinity comment).
-      # A dedicated boolean-style label, independent of whatever
-      # galactic.datumapis.com/node value a node also carries, matches
-      # galactic.datumapis.com/fabric's pattern instead. Also excludes
+      # galactic.datumapis.com/galactic=control, so it never
+      # double-schedules with the plain per-worker default DaemonSet (see
+      # ../default/daemonset-patch.yaml) on the same node --
+      # galactic.datumapis.com/galactic's two values ("router", the plain
+      # role above; "control", this one) are mutually exclusive by
+      # construction, since a label key can only hold one value at a
+      # time, the same reason galactic.datumapis.com/node's "compute"/
+      # "edge" values can't coexist on one node. This node need not (and
+      # must not) also carry galactic.datumapis.com/galactic=router --
+      # galactic-cni (config/galactic-cni/daemonset.yaml) and this same
+      # rr pod are never both scheduled here. Named "control" (not
+      # "route-reflector") to match galactic.datumapis.com/fabric's
+      # parallel "router"/"control" pair (config/fabric-router/
+      # daemonset.yaml) -- one key per family, values as modes, rather
+      # than a second independent boolean flag per family. Also excludes
       # Kubernetes control-plane nodes outright — the base DaemonSet's
       # blanket toleration would otherwise let it land there if one ever
-      # carried the galactic-route-reflector label.
+      # carried this flag.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -36,8 +39,10 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/galactic-route-reflector
-                    operator: Exists
+                  - key: galactic.datumapis.com/galactic
+                    operator: In
+                    values:
+                      - control
       containers:
         - name: galactic-router
           env:

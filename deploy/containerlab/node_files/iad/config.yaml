@@ -6,20 +6,21 @@ nodes:
     labels:
       topology.kubernetes.io/region: iad
       galactic.datumapis.com/node: compute
-      galactic.datumapis.com/fabric: "true"
+      galactic.datumapis.com/galactic: router
+      galactic.datumapis.com/fabric: router
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datumapis.com/galactic-route-reflector: "true"
-      galactic.datumapis.com/fabric: "true"
+      galactic.datumapis.com/galactic: control
+      galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
         nodeRegistration:
           name: iad-worker-rr
           taints:
-            - key: galactic.datumapis.com/galactic-route-reflector
-              value: "true"
+            - key: galactic.datumapis.com/galactic
+              value: control
               effect: NoSchedule
   # Dedicated edge XDP NAT+LB gateway nodes -- canary for
   # config/galactic-gateway/base/. Two nodes, active-active, matching the design's
@@ -29,13 +30,15 @@ nodes:
   # failover path. Tainted the same way the route-reflector node is above, to
   # keep ordinary tenant pods (resources/tenants/*/base/pod.yaml's
   # netshoot Deployments) off these dedicated nodes -- only DaemonSets
-  # with a blanket toleration (config/galactic-router/base/daemonset.yaml,
+  # with a blanket toleration (config/galactic-cni/daemonset.yaml,
+  # config/galactic-router/base/daemonset.yaml,
   # config/fabric-router/daemonset.yaml) tolerate it.
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
       galactic.datumapis.com/node: edge
-      galactic.datumapis.com/fabric: "true"
+      galactic.datumapis.com/galactic: router
+      galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
@@ -49,7 +52,8 @@ nodes:
     labels:
       topology.kubernetes.io/region: iad
       galactic.datumapis.com/node: edge
-      galactic.datumapis.com/fabric: "true"
+      galactic.datumapis.com/galactic: router
+      galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration

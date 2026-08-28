@@ -30,9 +30,19 @@ spec:
           type: RuntimeDefault
       tolerations:
         - operator: Exists
-      # Only worker nodes run VPC pods; galactic-cni has nothing to do on
-      # control-plane nodes. Opt-in only so new node types (GPU, monitoring,
-      # etc.) don't accidentally pick up the CNI.
+      # galactic-cni runs on both compute and edge nodes -- it's the one
+      # per-node component every primary role needs (see
+      # docs/node-labels.md), so it's opt-in via the independent
+      # galactic.datumapis.com/galactic=router flag rather than
+      # galactic.datumapis.com/node's primary-role value, the same reason
+      # galactic-router (config/galactic-router/overlays/default/
+      # daemonset-patch.yaml) keys off the identical flag: enumerating
+      # galactic.datumapis.com/node's values here would need editing again
+      # every time a new primary role is added, exactly the class of bug
+      # galactic.datumapis.com/fabric was already introduced to avoid (see
+      # config/fabric-router/daemonset.yaml's own affinity comment).
+      # Control-plane nodes are excluded outright since galactic-cni has
+      # nothing to do there regardless of this flag.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -40,10 +50,10 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
+                  - key: galactic.datumapis.com/galactic
                     operator: In
                     values:
-                      - compute
+                      - router
       initContainers:
         - name: install-cni
           # ":latest" is a placeholder only: no such tag is ever pushed to

@@ -10,17 +10,20 @@ spec:
       # identity is all it gets) since nothing else needs to select it
       # apart from the rr (route reflector) role, which independently
       # patches the same ../../base/ with its own distinct name/label -- see
-      # ../rr/daemonset-patch.yaml. Opt-in via the
-      # galactic.datumapis.com/node=compute label so new node types (GPU,
-      # monitoring, etc.) don't accidentally pick up the role, and
-      # excludes Kubernetes control-plane nodes outright — the base
-      # DaemonSet's blanket toleration would otherwise let it land there
-      # if one ever carried the compute label. "compute" (not "edge") --
-      # galactic-cni and galactic-nat66 opt in via the same label value,
-      # since all three run together on every ordinary tenant-serving
-      # node; "edge" is reserved for galactic-gateway's node label, the
-      # actual network-edge/ingress role (see
-      # config/galactic-gateway/base/daemonset.yaml).
+      # ../rr/daemonset-patch.yaml. Opt-in via
+      # galactic.datumapis.com/galactic=router, an independent flag rather
+      # than a galactic.datumapis.com/node primary-role value: this plain
+      # (non-reflector) router mode now runs on *both* compute and edge
+      # nodes (galactic-gateway no longer bundles its own galactic-router
+      # container -- see config/galactic-gateway/base/daemonset.yaml), and
+      # galactic-cni opts in via this identical flag (config/galactic-cni/
+      # daemonset.yaml) for the same reason. galactic.datumapis.com/galactic
+      # is mutually exclusive between "router" (this role) and "control"
+      # (../rr/daemonset-patch.yaml) by construction -- a label key can only
+      # hold one value, so a node is never both at once. Excludes
+      # Kubernetes control-plane nodes outright — the base DaemonSet's
+      # blanket toleration would otherwise let it land there if one ever
+      # carried this flag.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -28,10 +31,10 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
+                  - key: galactic.datumapis.com/galactic
                     operator: In
                     values:
-                      - compute
+                      - router
       containers:
         - name: galactic-router
           env:

@@ -1,4 +1,4 @@
-# The two-container gateway pod's shared base — see ../kustomization.yaml
+# The gateway pod's shared base — see ../kustomization.yaml
 # for why this isn't applied as-is: this is meant to be instantiated once
 # per gateway node by a further overlay that pins it to one node
 # (kubernetes.io/hostname) and sets that node's own

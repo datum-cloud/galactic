@@ -36,9 +36,12 @@ over iBGP to the route reflector on iad-control.
 
 `iad-gateway1`/`iad-gateway2` are tainted (`galactic.datumapis.com/node=edge:NoSchedule`)
 dedicated nodes, same idea as `iad-worker-rr`'s taint: no tenant pods land there, only
-DaemonSets with a blanket toleration (`fabric-router`, `galactic-gateway1`/`-gateway2` — each a
-two-container pod, `galactic-router` + `galactic-gateway`).
-They never run `galactic-cni` (config/galactic-cni's affinity is compute-only) or a route-reflector.
+DaemonSets with a blanket toleration (`fabric-router`, `galactic-cni`, plain-mode
+`galactic-router`, and each node's own single-container `galactic-gateway1`/`-gateway2`).
+They never run `galactic-router-rr` (that's `iad-worker-rr` alone) or `galactic-nat66`
+(compute-only) — but unlike the older two-container gateway pod this lab used to run,
+they now run `galactic-cni` and plain-mode `galactic-router` as their own independent
+DaemonSets, same as every compute node (see docs/node-labels.md).
 **Underlay BGP peering on their `tr3` uplinks is wired** (`node_files/tr3/frr.conf`,
 plus two `BGPPeer` objects in `resources/galactic-control/iad/` for the route reflector side)
 and the full fabric converges. Real end-to-end ingress traffic through the datapath is now

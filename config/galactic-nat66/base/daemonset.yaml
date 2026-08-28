@@ -18,24 +18,27 @@ spec:
       labels:
         app.kubernetes.io/name: galactic-nat66
     spec:
-      # galactic-nat66 rides on the same galactic.datumapis.com/node=compute
-      # label as galactic-router's default role and galactic-cni (see
-      # config/galactic-router/overlays/default, config/galactic-cni/
-      # daemonset.yaml) -- every compute node runs all three, NAT66
-      # sharding included, unconditionally. No separate opt-in capability
-      # label: unlike galactic-route-reflector (config/galactic-router/
-      # overlays/rr/daemonset-patch.yaml's own comment) NAT66 isn't a
-      # thing some compute nodes opt out of -- it's simply part of what
-      # "compute" means. A NAT66 shard's own SID/public address must
-      # still be unique per node (see ../kustomization.yaml), which is
-      # why this base is meant to be instantiated once per shard node
-      # rather than applied as-is -- that per-node uniqueness is handled
-      # by the per-node overlay's env vars, not by the scheduling gate
-      # here. Excludes control-plane outright for the same reason the
-      # other roles do.
+      # galactic-nat66 is compute's role-differentiating component --
+      # every compute node runs it unconditionally, no separate opt-in
+      # capability label, the same way galactic-gateway is edge's
+      # role-differentiating component (config/galactic-gateway/base/
+      # daemonset.yaml). NAT66 isn't a thing some compute nodes opt out
+      # of -- it's simply part of what "compute" means. galactic-cni and
+      # galactic-router run here too, but via the separate, independent
+      # galactic.datumapis.com/galactic=router flag every compute *and*
+      # edge node carries (config/galactic-cni/daemonset.yaml,
+      # config/galactic-router/overlays/default/daemonset-patch.yaml) --
+      # not via this label, since those two aren't compute-specific
+      # anymore. A NAT66 shard's own SID/public address must still be
+      # unique per node (see ../kustomization.yaml), which is why this
+      # base is meant to be instantiated once per shard node rather than
+      # applied as-is -- that per-node uniqueness is handled by the
+      # per-node overlay's env vars, not by the scheduling gate here.
+      # Excludes control-plane outright for the same reason the other
+      # roles do.
       #
       # A NAT66 shard advertises its own SID over BGP just like any other
-      # role, so a real shard node also needs galactic.datumapis.com/fabric
+      # role, so a real shard node also needs galactic.datumapis.com/fabric=router
       # set (config/fabric-router/'s own affinity keys off that label,
       # independently of the label here) -- otherwise it never gets the
       # underlay eBGP session and its SID has no fabric to advertise onto.

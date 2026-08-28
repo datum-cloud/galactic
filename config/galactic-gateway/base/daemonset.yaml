@@ -19,15 +19,23 @@ spec:
         app.kubernetes.io/name: galactic-gateway
     spec:
       # Dedicated gateway-role nodes only, opt-in, matching every other
-      # role's pattern (config/galactic-router/overlays/default, config/galactic-router/overlays/rr).
-      # "edge" here means the actual network edge -- the ingress/egress
-      # boundary this gateway sits on -- not galactic-router's per-node
-      # role, which is galactic.datumapis.com/node=compute (see
-      # config/galactic-router/overlays/default/daemonset-patch.yaml's own
-      # comment on that naming). Excludes control-plane outright for the
-      # same reason those do. See ../kustomization.yaml for why this base
-      # is meant to be instantiated once per gateway node rather than
-      # applied as-is.
+      # role's pattern (config/galactic-router/overlays/default,
+      # config/galactic-router/overlays/rr). "edge" here means the actual
+      # network edge -- the ingress/egress boundary this gateway sits on --
+      # not a per-node compute role (see docs/node-labels.md). Excludes
+      # control-plane outright for the same reason those do. See
+      # ../kustomization.yaml for why this base is meant to be
+      # instantiated once per gateway node rather than applied as-is.
+      #
+      # Single-container pod: galactic-router used to run here as a
+      # second container (see git history prior to this file), so a crash
+      # in either binary could take the other's pod down with it despite
+      # them already being separate binaries. galactic-router now runs on
+      # edge nodes as its own standalone DaemonSet instead, opted in via
+      # galactic.datumapis.com/galactic=router alongside this node's
+      # galactic.datumapis.com/node=edge (see config/galactic-router/
+      # overlays/default/daemonset-patch.yaml) -- fully decoupled at the
+      # pod level, not just the binary level.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -39,10 +47,6 @@ spec:
                     operator: In
                     values:
                       - edge
-      # See ../rbac.yaml's header comment: one ServiceAccount for both
-      # containers is a Kubernetes constraint (a Pod has exactly one
-      # ServiceAccount identity), not a design choice — its ClusterRole
-      # bindings grant the union of what each container needs.
       serviceAccountName: galactic-gateway
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -56,104 +60,13 @@ spec:
       tolerations:
         - operator: Exists
       containers:
-        # Tenant BGP only: galactic-router has no gateway-role flags/env.
-        # Identical to config/galactic-router/base's
-        # own container spec; duplicated here (rather than patched from
-        # config/galactic-router/base) because this pod additionally needs a second
-        # container, a distinct grpc-health port, and a scoped-down
-        # securityContext the shared default/rr roles don't need
-        # to think about.
-        - name: galactic-router
-          # ":latest" is a placeholder only: no such tag is ever pushed to
-          # GHCR for either container's image. CI resolves and stamps real
-          # version tags here when it publishes the
-          # ghcr.io/datum-cloud/galactic-kustomize OCI bundle (see
-          # .github/workflows/publish.yaml); applying this manifest
-          # directly from a git checkout will fail to pull either image
-          # unless you override both tags first.
-          image: ghcr.io/datum-cloud/galactic-router:latest
-          command:
-            - /galactic-router
-          env:
-            - name: GALACTIC_ROUTER_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: GALACTIC_ROUTER_GC_NAMESPACE
-              value: galactic-system
-            - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
-              # Same as config/galactic-router/overlays/default/daemonset-patch.yaml: -1
-              # disables the inbound BGP listener, so there's no BGP
-              # containerPort to declare on this container either -- this
-              # role only dials out to iBGP peers.
-              value: "-1"
-            # 5179 is also the binary's own default. Set explicitly here
-            # anyway so it can't silently drift, and — more importantly —
-            # this pod's galactic-gateway container shares the same
-            # network namespace (hostNetwork: true), so its own
-            # grpc-health port (below) must always differ from this one.
-            - name: GALACTIC_ROUTER_GRPC_HEALTH_PORT
-              value: "5179"
-          ports:
-            - name: metrics
-              containerPort: 9179
-              protocol: TCP
-            - name: grpc-health
-              containerPort: 5179
-              protocol: TCP
-          # See config/galactic-router/base/daemonset.yaml: same GoBGP cold-start
-          # rationale for startupProbe.
-          startupProbe:
-            grpc:
-              port: 5179
-            periodSeconds: 5
-            failureThreshold: 30
-          livenessProbe:
-            grpc:
-              port: 5179
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          readinessProbe:
-            grpc:
-              port: 5179
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          securityContext:
-            runAsUser: 0
-            capabilities:
-              drop: ["ALL"]
-              add:
-                - NET_ADMIN
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              memory: 256Mi
-          volumeMounts:
-            # GC (internal/gc) checks whether a container's netns bind-mount
-            # still exists on the host to decide whether shared BGP CRDs/VRFs
-            # are orphaned. Without this mount the container has no
-            # visibility into /var/run/netns at all, so that check always
-            # (and incorrectly) reports every namespace as gone.
-            - name: netns
-              mountPath: /var/run/netns
-              readOnly: true
-            # See config/galactic-router/base/daemonset.yaml's own cni-state
-            # mount comment: this container runs the same GC reconciler
-            # (GALACTIC_ROUTER_GC_NAMESPACE above), so it hits the same
-            # internal/plumbing/vrf/lock.go flock against the real, unmounted
-            # /var/lib/cni/galactic-vrf path -- readOnlyRootFilesystem below
-            # otherwise sends that MkdirAll against this container's own
-            # throwaway overlay fs and the lock (and any VRF orphan GC it
-            # guards) never succeeds.
-            - name: cni-state
-              mountPath: /var/lib/cni
         - name: galactic-gateway
-          # See the galactic-router container above: same placeholder-tag
-          # caveat.
+          # ":latest" is a placeholder only: no such tag is ever pushed to
+          # GHCR. CI resolves and stamps a real version tag here when it
+          # publishes the ghcr.io/datum-cloud/galactic-kustomize OCI bundle
+          # (see .github/workflows/publish.yaml); applying this manifest
+          # directly from a git checkout will fail to pull the image
+          # unless you override the tag first.
           image: ghcr.io/datum-cloud/galactic-gateway:latest
           command:
             - /galactic-gateway
@@ -210,9 +123,6 @@ spec:
           # — without it the verifier falls back to its unprivileged-BPF
           # ruleset and rejects the program with "pointer arithmetic ...
           # prohibited for !root" even though the container runs as root.
-          # BPF/PERFMON are confined to this one container — the only one
-          # that calls into edgeattach; the galactic-router container above
-          # carries neither.
           securityContext:
             runAsUser: 0
             capabilities:
@@ -243,14 +153,6 @@ spec:
             - name: bpf-fs
               mountPath: /sys/fs/bpf
       volumes:
-        - name: netns
-          hostPath:
-            path: /var/run/netns
-            type: DirectoryOrCreate
-        - name: cni-state
-          hostPath:
-            path: /var/lib/cni
-            type: DirectoryOrCreate
         - name: bpf-fs
           hostPath:
             path: /sys/fs/bpf

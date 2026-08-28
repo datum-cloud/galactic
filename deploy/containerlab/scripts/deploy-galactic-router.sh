@@ -20,11 +20,15 @@ source "${SCRIPT_DIR}/lib.sh"
 GALACTIC_ROUTER_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/base" && pwd)
 GALACTIC_ROUTER_DEFAULT_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/default" && pwd)
 GALACTIC_ROUTER_RR_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/rr" && pwd)
-# config/galactic-gateway/base is the edge XDP NAT+LB gateway's own two-container
-# pod base (galactic-router + galactic-gateway) -- self-contained, unlike
+# config/galactic-gateway/base is the edge XDP NAT+LB gateway's own
+# single-container pod base -- self-contained, unlike
 # config/galactic-router/{base,overlays/default,overlays/rr}, so no matching
 # config/galactic-router/base copy is needed alongside it the way copy_router_config/
-# copy_router_control_config need one.
+# copy_router_control_config need one. galactic-router itself reaches
+# iad-gateway1/iad-gateway2 via copy_router_config's own DaemonSet below,
+# whose affinity (galactic.datumapis.com/galactic=router) already matches
+# those nodes' labels (node_files/iad/config.yaml) -- no separate copy or
+# apply step is needed for it here.
 GALACTIC_GATEWAY_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-gateway/base" && pwd)
 
 # copy_router_config NODE copies config/galactic-router/base and
@@ -102,10 +106,12 @@ apply_galactic_router "${node}" iad
 apply_k "${node}" /galactic/resources/galactic-control/iad/
 
 # iad's gateway-role canary: two dedicated nodes, iad-gateway1/
-# iad-gateway2, each running its own two-container
+# iad-gateway2, each running its own single-container galactic-gateway
 # pod instance (config/galactic-gateway/base's per-node-unique
 # GALACTIC_GATEWAY_SRV6_ADDRESS -- see config/galactic-gateway/base/kustomization.
-# yaml's doc comment). galactic-gateway's own ServiceAccount/ClusterRole
+# yaml's doc comment) -- galactic-router already reached these nodes above,
+# as its own independent DaemonSet, before this section ever runs.
+# galactic-gateway's own ServiceAccount/ClusterRole
 # (config/galactic-gateway/{serviceaccount,rbac}.yaml, already copied onto this
 # node by deploy-system.sh's copy_config) must be applied once before the
 # per-node overlays below, same as galactic-cni/galactic-router's RBAC is

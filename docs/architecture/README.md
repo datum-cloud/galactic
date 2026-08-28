@@ -37,10 +37,12 @@ underlay fabric, iBGP peers).
 The three separately-built, separately-deployed applications — the
 `galactic-veth` CNI chain, `galactic-router`, and `galactic-gateway` — plus
 the kernel eBPF datapaths each one drives and the CRDs that connect them.
-`galactic-gateway` is deployed as a second container in the same
-`hostNetwork` pod as `galactic-router` on gateway-role nodes only, which is
-why the diagram shows them co-located but connected by no direct RPC — a
-crash in one does not take down the other.
+`galactic-gateway` is deployed as its own single-container DaemonSet on
+gateway-role (`edge`) nodes; `galactic-router` runs there too, as its own
+independent DaemonSet (the same one that runs on `compute` nodes), not
+co-located in the same pod. The diagram shows them co-located on the node
+but connected by no direct RPC — a crash in one does not take down the
+other.
 
 ![Containers](./containers.png)
 

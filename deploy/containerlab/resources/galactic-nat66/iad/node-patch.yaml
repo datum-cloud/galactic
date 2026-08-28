@@ -10,8 +10,8 @@ spec:
       # (node_files/iad/config.yaml, worker-index 1) carries it, reusing
       # that existing compute worker as this site's shard rather than
       # introducing a dedicated node, per the redesign plan's own §8
-      # suggestion. iad-worker2/iad-worker-rr (the route reflector,
-      # galactic.datumapis.com/galactic-route-reflector, not a
+      # suggestion. iad-worker-rr (the route reflector,
+      # galactic.datumapis.com/galactic=control, not a
       # galactic.datumapis.com/node value at all) and iad-gateway1/
       # iad-gateway2 (the tainted galactic.datumapis.com/node=edge nodes,
       # see gvpc.clab.yaml and README.md's node table) never carry the

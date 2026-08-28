@@ -6,7 +6,8 @@ nodes:
     labels:
       topology.kubernetes.io/region: sjc
       galactic.datumapis.com/node: compute
-      galactic.datumapis.com/fabric: "true"
+      galactic.datumapis.com/galactic: router
+      galactic.datumapis.com/fabric: router
 networking:
   ipFamily: ipv6
   disableDefaultCNI: true
