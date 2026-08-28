@@ -5,10 +5,12 @@
 package egressroutemap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
@@ -16,6 +18,24 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
+
+// neighborResolveTimeout/neighborResolvePollInterval bound how long
+// resolveNeighbor will wait for a solicited neighbor entry to resolve --
+// see that function's own doc comment for why an active solicit is
+// needed at all. Real ND round-trips on the fabric links this runs
+// against are sub-100ms (confirmed live in us-central-1-staging-lab);
+// this budget is generous headroom above that, not an expected steady-
+// state wait.
+const (
+	neighborResolveTimeout      = 2 * time.Second
+	neighborResolvePollInterval = 100 * time.Millisecond
+)
+
+// neighborSolicitDialTimeout bounds solicitNeighbor's own Dial -- a plain
+// UDP dial doesn't block on the network, but this still guards against
+// the pathological case (an unreachable or filtered link) rather than
+// trust that indefinitely.
+const neighborSolicitDialTimeout = 200 * time.Millisecond
 
 // egressRouteFamilyINET6/egressRouteFamilyINET4 mirror usid.c's
 // USID_EGRESS_ROUTE_FAMILY_INET6/USID_EGRESS_ROUTE_FAMILY_INET4 --
@@ -150,17 +170,98 @@ func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, e
 	}
 	smac = link.Attrs().HardwareAddr
 
+	dmac, err = resolveNeighbor(linkIndex, nextHop)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("%w (next-hop for sid %s)", err, sid)
+	}
+	return linkIndex, dmac, smac, nil
+}
+
+// resolveNeighbor returns nextHop's resolved L2 address on linkIndex,
+// actively soliciting the kernel to populate it first if a passive read
+// of the neighbor cache doesn't already have one.
+//
+// A cache read alone is not enough: a brand-new pod netns (or any link
+// that has simply never sent traffic toward nextHop) starts with an
+// empty neighbor cache, and installing an SRv6 egress route generates no
+// traffic of its own that would populate it. Confirmed live in
+// us-central-1-staging-lab: a freshly started gateway pod's egress route
+// for a same-node SID next-hop failed to resolve for its entire uptime
+// -- restarts included -- purely because nothing ever asked the kernel
+// to actually solicit it; a single manual ping resolved it instantly. See
+// solicitNeighbor's own doc comment for how the solicit itself is done.
+func resolveNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
+	if mac, err := lookupNeighbor(linkIndex, nextHop); err != nil {
+		return nil, err
+	} else if mac != nil {
+		return mac, nil
+	}
+
+	solicitNeighbor(nextHop)
+
+	deadline := time.Now().Add(neighborResolveTimeout)
+	for {
+		mac, err := lookupNeighbor(linkIndex, nextHop)
+		if err != nil {
+			return nil, err
+		}
+		if mac != nil {
+			return mac, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("no resolved neighbor entry for %s on link %d after soliciting it", nextHop, linkIndex)
+		}
+		time.Sleep(neighborResolvePollInterval)
+	}
+}
+
+// solicitNeighbor asks the kernel to resolve nextHop's L2 address the
+// same way any ordinary traffic toward it would: by actually sending it
+// a packet. Installing an SRv6 egress route generates no traffic of its
+// own (resolveNeighbor's own doc comment), so nothing else will ever do
+// this on Register's behalf.
+//
+// An administrative netlink.NeighSet(NUD_NONE, NTF_USE) -- the "mark as
+// used, please resolve" signal without ever constructing a real packet --
+// looked like the right tool here (it's the documented kernel mechanism,
+// and the technique Cilium's own neighbor-discovery code uses elsewhere),
+// but did not hold up: verified against a live veth pair with an empty
+// cache, it reliably parks the entry in NUD_INCOMPLETE and never carries
+// it further, while sending the peer an actual packet resolves it in well
+// under a millisecond every time. This is the version that was actually
+// verified to work, not the one that merely looked like it should.
+//
+// The destination port needs no listener and whatever becomes of the
+// datagram past this host's own output path is irrelevant -- constructing
+// and writing it is what drives the kernel to resolve (or refresh)
+// nextHop's neighbor entry before the packet ever reaches the wire, which
+// is the only part this function is here for. Every error from Dial or
+// Write is intentionally ignored: resolveNeighbor's own poll loop is the
+// sole judge of whether this worked.
+func solicitNeighbor(nextHop net.IP) {
+	dialer := &net.Dialer{Timeout: neighborSolicitDialTimeout}
+	conn, err := dialer.DialContext(context.Background(), "udp6", net.JoinHostPort(nextHop.String(), "9"))
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck // best-effort solicit; nothing to react to either way
+	_, _ = conn.Write([]byte{0})
+}
+
+// lookupNeighbor reads linkIndex's current IPv6 neighbor cache for
+// nextHop, without soliciting -- resolveNeighbor's passive fast path,
+// and its own poll step once a solicit is in flight.
+func lookupNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
 	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_V6)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("list neighbors on link %d: %w", linkIndex, err)
+		return nil, fmt.Errorf("list neighbors on link %d: %w", linkIndex, err)
 	}
 	for _, n := range neighs {
 		if n.IP.Equal(nextHop) && len(n.HardwareAddr) == 6 {
-			return linkIndex, n.HardwareAddr, smac, nil
+			return n.HardwareAddr, nil
 		}
 	}
-	return 0, nil, nil, fmt.Errorf("no resolved neighbor entry for %s on link %d (next-hop for sid %s)",
-		nextHop, linkIndex, sid)
+	return nil, nil
 }
 
 // Register installs (or replaces) egress_route_table's entry for prefix
