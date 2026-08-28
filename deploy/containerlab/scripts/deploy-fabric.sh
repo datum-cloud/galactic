@@ -7,9 +7,9 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 # config/fabric-router/ (shared with production) is a single DaemonSet whose
-# affinity allows any node carrying galactic.datumapis.com/fabric,
+# affinity allows any node carrying galactic.datumapis.com/fabric=router,
 # regardless of its galactic.datumapis.com/node value or
-# galactic-route-reflector flag.
+# galactic.datumapis.com/galactic mode.
 # resources/fabric-router/base/ and resources/fabric-control/iad/ each
 # build on a copy of it and patch in the lab-only image/imagePullPolicy
 # plus a narrower affinity (compute+edge / route-reflector-only respectively) —

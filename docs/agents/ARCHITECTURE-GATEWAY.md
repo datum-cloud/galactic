@@ -34,14 +34,18 @@ document to start from for a given task.
 `galactic-gateway` gives external clients a stable VIP:port that
 load-balances into a tenant VPC's backend Pods, without a VRF or tunnel
 dependency and without a per-tenant Geneve device. It is a **separate
-binary from `galactic-router`**, deployed as a second container in the same
-`hostNetwork: true` pod on dedicated gateway-role nodes only
-(`galactic.datumapis.com/node: edge`), specifically so a crash on either
-side — tenant BGP vs. the XDP-holding gateway engine — no longer takes the
-other down with it. Tenant BGP itself (the embedded GoBGP server, the
+binary from `galactic-router`**, deployed as its own single-container,
+`hostNetwork: true` DaemonSet on dedicated gateway-role nodes only
+(`galactic.datumapis.com/node: edge`), so a crash on either side — tenant
+BGP vs. the XDP-holding gateway engine — no longer takes the other down
+with it. `galactic-router` used to run as a second container in this same
+pod; it's now a fully independent DaemonSet instead, opted in via
+`galactic.datumapis.com/galactic: router` on the same `edge` nodes (the
+identical flag `compute` nodes use), not co-located here at all. Tenant BGP
+itself (the embedded GoBGP server, the
 `BGPRouter`/`BGPPeer`/`BGPAdvertisement`/`BGPPolicy`/`BGPVRFInstance`
-reconcilers) still runs in the co-located `galactic-router` container,
-unmodified — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md).
+reconcilers) still runs unmodified in that separate `galactic-router`
+pod — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md).
 
 The load-balancing design itself is **DSR (Direct Server Return) over a
 Maglev consistent-hash ring**, replacing an earlier Full-NAT (DNAT+SNAT)
@@ -181,7 +185,8 @@ the `iad` cluster. Each node's overlay directory (`iad-gateway1/`,
   (`eth1` in this lab) and `GALACTIC_GATEWAY_SRV6_ADDRESS` (a distinct uFMT
   48+16 uSID per node).
 - `bgprouter.yaml`/`bgppeer.yaml` — this node's tenant `BGPRouter`/`BGPPeer`
-  (the co-located `galactic-router` container's own config).
+  (the separate `galactic-router` DaemonSet's own config, running
+  independently on this same node).
 - `networkgateway.yaml` — the `NetworkGateway` object itself (just
   `spec.targetRef.name`, see the [samples](#the-two-crds) above).
 
@@ -388,17 +393,16 @@ degraded.
 The metrics/gRPC-health port defaults (`8081`/`5181`) deliberately differ
 from every other `galactic-*` process's own defaults
 (`galactic-router`'s `9179`/`5179`; `galactic-cni`'s credential-refresh
-health port `5180`, metrics port `9180`) because
-`galactic-gateway` runs as a second container in the same
-`hostNetwork: true` pod as `galactic-router` — every port it binds shares
-that node's network namespace with every other `galactic-*` process already
-running there and must not collide with any of them. See the two-container
-pod's port table:
+health port `5180`, metrics port `9180`) because every `edge` node runs
+`galactic-gateway`, `galactic-router`, and `galactic-cni` as separate
+`hostNetwork: true` DaemonSet pods, all sharing that one node's network
+namespace regardless of pod boundaries — every port any of them binds must
+not collide with any of the others':
 
-| Container                                      | Metrics | gRPC health |
-| ---------------------------------------------- | ------- | ----------- |
-| `galactic-router` (this pod's tenant-BGP side) | `9179`  | `5179`      |
-| `galactic-gateway`                             | `8081`  | `5181`      |
+| Component           | Metrics | gRPC health |
+| -------------------- | ------- | ----------- |
+| `galactic-router`   | `9179`  | `5179`      |
+| `galactic-gateway`  | `8081`  | `5181`      |
 
 ### SRv6 encap-source address
 

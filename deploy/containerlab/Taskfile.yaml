@@ -165,12 +165,12 @@ tasks:
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker-rr}
       # iad-gateway1/2 need fabric-router (the underlay eBGP session the
       # gateway XDP datapath's uplink depends on -- see config/fabric-router/'s
-      # affinity, extended to the gateway role), galactic-router (tenant
-      # BGP only, one container in config/galactic-gateway/base's two-container
-      # pod), and galactic-gateway (the edge XDP NAT+LB engine, the other
-      # container in that pod), but NOT galactic-cni: they never run the
-      # CNI DaemonSet at all (it only
-      # targets the compute role).
+      # affinity, extended to the gateway role), galactic-router (tenant BGP,
+      # its own independent DaemonSet -- see config/galactic-router/overlays/
+      # default/, opted in via galactic.datumapis.com/galactic=router, the
+      # same flag compute nodes carry), galactic-cni (same flag, now also
+      # runs on edge nodes -- see docs/node-labels.md), and galactic-gateway
+      # (the edge XDP NAT+LB engine itself, single-container).
       - task: load-image
         vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-gateway1}
       - task: load-image
@@ -179,6 +179,10 @@ tasks:
         vars: {IMAGE: galactic-router:latest, NODE: iad-gateway1}
       - task: load-image
         vars: {IMAGE: galactic-router:latest, NODE: iad-gateway2}
+      - task: load-image
+        vars: {IMAGE: galactic-cni:latest, NODE: iad-gateway1}
+      - task: load-image
+        vars: {IMAGE: galactic-cni:latest, NODE: iad-gateway2}
       - task: load-image
         vars: {IMAGE: galactic-gateway:latest, NODE: iad-gateway1}
       - task: load-image

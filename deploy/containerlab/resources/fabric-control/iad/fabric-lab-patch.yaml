@@ -5,16 +5,16 @@ metadata:
 spec:
   template:
     spec:
-      # Narrower than config/fabric-router/'s default (galactic.datumapis.com/fabric
-      # Exists, matching any role): this is the route-reflector-node-only
+      # Narrower than config/fabric-router/'s default (galactic.datumapis.com/fabric=router,
+      # matching any role): this is the route-reflector-node-only
       # fabric pod (iad-worker-rr), which needs its own frr.conf distinct
       # from iad's regular per-worker fabric (resources/fabric-router/iad/)
-      # — so this overlay sticks to galactic.datumapis.com/galactic-route-reflector,
-      # or the two would double-schedule onto the same node. Not
-      # galactic.datumapis.com/node: route-reflector -- that's no longer a
-      # node value at all (see config/galactic-router/overlays/rr/
-      # daemonset-patch.yaml's own affinity comment for why route-reflector
-      # is an independent flag instead of a node enum value).
+      # — so this overlay sticks to galactic.datumapis.com/galactic=control,
+      # or the two would double-schedule onto the same node. This matches
+      # against the *other* family's mode value (galactic, not fabric) --
+      # iad-worker-rr is still an ordinary fabric=router underlay
+      # participant, not itself the underlay's own reflector (see
+      # docs/node-labels.md's fabric=control entry, not yet implemented).
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -22,8 +22,10 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/galactic-route-reflector
-                    operator: Exists
+                  - key: galactic.datumapis.com/galactic
+                    operator: In
+                    values:
+                      - control
       initContainers:
         - name: frr-init
           image: fabric-router:latest

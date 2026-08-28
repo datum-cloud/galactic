@@ -152,10 +152,11 @@ topology:
     # iad-worker-rr already uses) -- Taskfile.yaml's deploy:rename-*
     # step renames both to match after cluster creation, purely cosmetic
     # (doesn't affect the links below, which are wired to the container
-    # before the rename happens). No blackhole route in `exec`: unlike
-    # iad-worker, these nodes never run galactic-veth's usid.c decap
-    # program at all (config/galactic-cni's DaemonSet only targets the compute role),
-    # so the blackhole-route workaround it needs doesn't apply here.
+    # before the rename happens). galactic-cni now runs here too (edge
+    # nodes carry galactic.datumapis.com/galactic=router, same as compute
+    # -- see docs/node-labels.md), so these get the same blackhole route as
+    # iad-worker, same site locator (2001:db8:ff03::/48): both nodes run
+    # galactic-veth's usid.c decap program and can compute a matching USID.
     iad-worker3:
       kind: ext-container
       labels:
@@ -173,6 +174,7 @@ topology:
         net.ipv4.ip_forward: "1"
         net.ipv6.conf.all.forwarding: "1"
       exec:
+        - ip -6 route add blackhole 2001:db8:ff03:100::/56 metric 2048
         - /galactic/scripts/install.sh
 
     iad-worker4:
@@ -192,6 +194,7 @@ topology:
         net.ipv4.ip_forward: "1"
         net.ipv6.conf.all.forwarding: "1"
       exec:
+        - ip -6 route add blackhole 2001:db8:ff03:100::/56 metric 2048
         - /galactic/scripts/install.sh
 
     tr1:

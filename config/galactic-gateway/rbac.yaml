@@ -11,14 +11,11 @@
 # uSID. "No BGP client" and "no BGPRouter read access needed" are
 # different claims — only the first is true.
 #
-# One Kubernetes Pod has exactly one ServiceAccount identity, so the
-# two-container gateway pod (galactic-router + galactic-gateway,
-# config/galactic-gateway/base/daemonset.yaml) cannot literally run one container
-# per ServiceAccount the way two separate DaemonSets could. The
-# ClusterRoleBinding below therefore binds the galactic-gateway
-# ServiceAccount to *both* this ClusterRole and the BGP-only galactic-router
-# ClusterRole from config/galactic-router/rbac.yaml — the smallest deviation
-# from a literal per-container RBAC split that Kubernetes allows.
+# galactic-gateway is a single-container pod (config/galactic-gateway/base/
+# daemonset.yaml) -- galactic-router runs alongside it on edge nodes as its
+# own standalone DaemonSet with its own ServiceAccount/ClusterRole
+# (config/galactic-router/rbac.yaml), not co-located in this pod, so this
+# ClusterRole doesn't need to carry any of galactic-router's permissions.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -56,27 +53,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: galactic-gateway
-subjects:
-  - kind: ServiceAccount
-    name: galactic-gateway
-    namespace: galactic-system
----
-# See this file's header comment: the galactic-gateway ServiceAccount also
-# needs the BGP-only galactic-router ClusterRole, since the
-# galactic-router container co-located in the same two-container pod
-# (config/galactic-gateway/base/daemonset.yaml) runs under this same pod-level
-# identity. Requires config/galactic-router/rbac.yaml to be applied too — true of
-# every gateway node deployment already, since a bare galactic-gateway
-# container with no co-located galactic-router container advertising this
-# node's tenant BGP session is not a supported configuration.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: galactic-gateway-router
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: galactic-router
 subjects:
   - kind: ServiceAccount
     name: galactic-gateway

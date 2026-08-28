@@ -4,7 +4,7 @@
 # copy_router_gateway_config), nested here so this kustomization's
 # "gateway" resource reference resolves. Unlike resources/galactic-router/
 # base/'s "tenant" resource, config/galactic-gateway/base is self-contained (its own
-# full two-container DaemonSet spec, not a patch onto config/galactic-router/base),
+# full single-container DaemonSet spec, not a patch onto config/galactic-router/base),
 # so there is no separate "base" resource to nest alongside it here.
 resources:
   - gateway

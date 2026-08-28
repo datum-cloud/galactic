@@ -91,14 +91,15 @@ galactic/
 │   └── router/              # Shared RBAC/ServiceAccount, plus:
 │       ├── base/             #   role-agnostic DaemonSet spec; not applied directly
 │       └── overlays/
-│           ├── default/       #   the default per-node role: patches ../../base with node
-│           │                 #     affinity excluding control-plane nodes, opt-in via
-│           │                 #     galactic.datumapis.com/node=compute -- no
-│           │                 #     role-specific name/label of its own
+│           ├── default/       #   the plain (non-reflector) per-node role: patches ../../base
+│           │                 #     with node affinity excluding control-plane nodes, opt-in via
+│           │                 #     galactic.datumapis.com/galactic=router -- runs on both
+│           │                 #     compute and edge nodes; no role-specific name/label of its own
 │           └── rr/            #   route-reflector role: independently patches ../../base with
 │                              #     GALACTIC_ROUTER_REFLECTOR=true, nameSuffix -rr, opt-in via
-│                              #     the galactic.datumapis.com/galactic-route-reflector label
-│                              #     (not a galactic.datumapis.com/node value)
+│                              #     galactic.datumapis.com/galactic=control (mutually exclusive
+│                              #     with =router on the same node; not a
+│                              #     galactic.datumapis.com/node value)
 └── containers/
     └── galactic-router/     # galactic-router production image
 ```
@@ -157,14 +158,15 @@ lives in `root.go`'s `runCmd`:
    that waits for cache sync, then runs on `--gc-interval`, default 5m).
 8. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
-This is identical whether the pod is running in the plain default role
-(`config/galactic-router/overlays/default/`), the route-reflector role
-(`config/galactic-router/overlays/rr/`), or as the tenant-BGP container co-located
-with `galactic-gateway` on a gateway-role node
-(`config/galactic-gateway/base/daemonset.yaml`) — `galactic-router` carries no
-gateway-role code path of its own at all; see
-[ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) for what runs in the
-sibling container instead.
+This is identical whether the pod is running in the plain role
+(`config/galactic-router/overlays/default/`, opt-in via
+`galactic.datumapis.com/galactic=router` — deployed on both `compute` and
+`edge` nodes) or the route-reflector role (`config/galactic-router/overlays/rr/`,
+`galactic.datumapis.com/galactic=control`) — `galactic-router` carries no
+gateway-role code path of its own at all, and runs as its own independent
+DaemonSet on `edge` nodes rather than co-located inside `galactic-gateway`'s
+pod; see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) for what runs
+there instead.
 
 ---
 
