@@ -5,6 +5,7 @@
 package egressroutemap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -238,7 +239,8 @@ func resolveNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
 // Write is intentionally ignored: resolveNeighbor's own poll loop is the
 // sole judge of whether this worked.
 func solicitNeighbor(nextHop net.IP) {
-	conn, err := net.DialTimeout("udp6", net.JoinHostPort(nextHop.String(), "9"), neighborSolicitDialTimeout)
+	dialer := &net.Dialer{Timeout: neighborSolicitDialTimeout}
+	conn, err := dialer.DialContext(context.Background(), "udp6", net.JoinHostPort(nextHop.String(), "9"))
 	if err != nil {
 		return
 	}

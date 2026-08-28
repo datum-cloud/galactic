@@ -37,7 +37,9 @@ func requireRoot(t *testing.T) {
 // which a dummy link's fabricated NUD_PERMANENT entry never does. This
 // mirrors the exact bug this package's active-solicit fix addresses: a
 // cold, empty neighbor cache on a link with a real, reachable peer.
-func setUpVethPair(t *testing.T, nearIface, nearAddr, farIface, farAddr string) (nearNS ns.NetNS, nearLinkIndex int, farAddrIP net.IP) {
+func setUpVethPair(
+	t *testing.T, nearIface, nearAddr, farIface, farAddr string,
+) (nearNS ns.NetNS, nearLinkIndex int, farAddrIP net.IP) {
 	t.Helper()
 
 	nearNS, err := ns.TempNetNS()
