@@ -44,6 +44,21 @@ rules:
     resources:
       - bgprouters
     verbs: ["get", "list", "watch"]
+  # NetworkGatewayReconciler.SetupWithManager watches BGPVRFInstance
+  # (alongside BGPRouter/BGPAdvertisement above) to re-reconcile every
+  # NetworkGateway in the namespace once a backend's owning VRF/advertisement
+  # data actually exists -- closing a startup race where the reconciler's own
+  # first pass can otherwise run before that data does and never get
+  # retriggered (see internal/controller/networkgateway_controller.go's
+  # SetupWithManager doc comment). That watch was added without this rule,
+  # so the informer it starts had no RBAC to actually list/watch
+  # BGPVRFInstance -- found live as the manager never finishing
+  # WaitForCacheSync (no controller ever started reconciling, silently,
+  # behind a "bgpvrfinstances ... is forbidden" reflector error loop).
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - bgpvrfinstances
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
