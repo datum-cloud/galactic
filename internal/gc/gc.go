@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/vishvananda/netlink"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -319,9 +320,57 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 	return result
 }
 
+// activeVPCsFromEndpointSlices returns every VPC named by an EndpointSlice
+// carrying crdnames.LabelTenantID, cluster-wide — the same label
+// internal/ingresssidecar's own controller watches (hasTenantLabel in
+// internal/ingresssidecar/controller.go) to decide it needs a local VRF for
+// that VPC, entirely independent of any BGPAdvertisement/BGPVRFInstance CRD.
+//
+// SweepEBPFVRFTable already exempts that sidecar's own eBPF vrf_table
+// entries by their reserved uformat.BlockMax block (see that function's own
+// doc comment: "confirmed live in us-central-1-staging-lab, where vrf_table
+// sat permanently empty while ifindex_vrf_table... held the same entries").
+// This is the same exemption at the kernel-VRF-interface layer instead,
+// needed because CollectOrphanedVRFs runs inside galactic-router
+// (cmd/galactic-router), which — deliberately, per SweepEBPFVRFTable's own
+// doc comment on why that sweep runs inside galactic-cni instead — has
+// neither the /sys/fs/bpf hostPath mount nor CAP_BPF to read vrf_table
+// itself. Found live: without this, ensureEgressDatapath's own VRF for a
+// real tenant VPC (created for the sidecar's own outbound routing, sharing
+// that VPC's identifier with — but never advertised by — any real CNI
+// attachment) gets reaped as orphaned on this sweep's very next tick,
+// stranding EnsureRoute with "no VRF interface found" on every subsequent
+// reconcile.
+//
+// Deliberately not scoped to this node, unlike the BGPAdvertisement check
+// above: an EndpointSlice carries no node affinity to filter on, so the
+// conservative direction is to err toward not reaping — a VPC claimed by
+// some other node's ingress sidecar is not this function's call to make,
+// the same way an unrelated node's BGPAdvertisement already isn't allowed
+// to vouch for a *different* node's VRF, just inverted (there, cross-node
+// claims are excluded to avoid a false "still alive"; here, they're
+// included to avoid a false "orphaned").
+func activeVPCsFromEndpointSlices(ctx context.Context, k8s client.Client) (map[string]struct{}, error) {
+	sliceList := &discoveryv1.EndpointSliceList{}
+	if err := k8s.List(ctx, sliceList, client.HasLabels{crdnames.LabelTenantID}); err != nil {
+		return nil, fmt.Errorf("list tenant EndpointSlices: %w", err)
+	}
+
+	vpcs := make(map[string]struct{}, len(sliceList.Items))
+	for _, slice := range sliceList.Items {
+		vpc, _, ok := crdnames.ParseTenantIdentifier(slice.Labels[crdnames.LabelTenantID])
+		if !ok {
+			continue
+		}
+		addVPC(vpcs, vpc)
+	}
+	return vpcs, nil
+}
+
 // CollectOrphanedVRFs scans all VRF interfaces on this node and returns the
 // names of VRFs whose VPC has no surviving BGPAdvertisement CRD owned by
-// nodeName's BGPRouter(s) in the given namespace.
+// nodeName's BGPRouter(s) in the given namespace, and no ingress-sidecar
+// EndpointSlice claiming it either (see activeVPCsFromEndpointSlices).
 //
 // A VRF is considered orphaned when:
 //   - Its interface name matches the Galactic VRF naming pattern — either the
@@ -339,6 +388,10 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 //     namespace may coincidentally reuse the same VPC for their own,
 //     unrelated attachment — only this node's own BGPAdvertisements can
 //     vouch for a local VRF.
+//   - No EndpointSlice claims the VPC either, per
+//     activeVPCsFromEndpointSlices's own doc comment — internal/ingresssidecar
+//     creates and owns its own VRF for a VPC entirely independent of any
+//     BGPAdvertisement, and this sweep has no other way to see that claim.
 func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, nodeName string) ([]string, error) {
 	vrfs, err := vrf.ListVRFLinks()
 	if err != nil {
@@ -363,6 +416,14 @@ func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, node
 			continue
 		}
 		addVPC(activeVPCs, vpcFromName(adv.Name))
+	}
+
+	sidecarVPCs, err := activeVPCsFromEndpointSlices(ctx, k8s)
+	if err != nil {
+		return nil, err
+	}
+	for vpc := range sidecarVPCs {
+		addVPC(activeVPCs, vpc)
 	}
 
 	var orphaned []string

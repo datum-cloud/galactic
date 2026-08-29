@@ -50,6 +50,13 @@ rules:
     resources:
       - nodes
     verbs: ["get", "list", "watch"]
+  # GCReconciler's CollectOrphanedVRFs cross-references tenant EndpointSlices
+  # cluster-wide to avoid reaping a VRF internal/ingresssidecar still owns —
+  # see activeVPCsFromEndpointSlices's own doc comment in internal/gc/gc.go.
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
