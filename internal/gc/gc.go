@@ -558,6 +558,31 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		live[usidmap.VRFKey{Block: block, Argument: argument}] = struct{}{}
 	}
 
+	// internal/ingresssidecar registers its own vrf_table entries under
+	// uformat.BlockMax -- a block deliberately reserved so it can never
+	// collide with a real BGPRouter locator (see that package's
+	// ingressSidecarBlock doc comment) -- and owns their entire lifecycle
+	// itself (ensureEgressDatapath/removeEgressDatapath), independent of
+	// any BGPVRFInstance CRD. Without this, every entry it ever registers
+	// is invisible to the CRD-built live set above and gets reaped as an
+	// orphan on this sweep's very next tick: confirmed live in
+	// us-central-1-staging-lab, where vrf_table sat permanently empty
+	// while ifindex_vrf_table (which this sweep never touches) held the
+	// same entries, silently blackholing that sidecar's own outbound
+	// connections to VPC backends. Preserve every entry in that block
+	// unconditionally, the same way an entry with a live CRD is preserved.
+	existing, err := reg.VRF.List()
+	if err != nil {
+		slog.Error("GC: failed to list eBPF vrf_table for sweep", "err", err)
+		result.Errors++
+		return result
+	}
+	for _, e := range existing {
+		if e.Block == uformat.BlockMax {
+			live[e.VRFKey] = struct{}{}
+		}
+	}
+
 	removed, err := reg.VRF.Reconcile(live, cutoff)
 	for _, e := range removed {
 		slog.Info("GC: removed stale eBPF vrf_table entry", "block", e.Block, "argument", e.Argument)
