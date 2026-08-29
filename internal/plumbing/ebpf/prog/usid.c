@@ -662,6 +662,16 @@ enum drop_reason {
 	// is a real registration miss or a redirect failure) but the
 	// redirect to the resolved fabric-uplink interface failed.
 	DROP_REASON_PUBLIC_UPLINK_REDIRECT_FAILED = 15,
+	// TEMPORARY diagnostic checkpoints for the live us-central-1-staging-lab
+	// bpf_redirect investigation -- not counted drops, just markers of how
+	// far usid_egress's egress-routing extension got. Remove once resolved.
+	DROP_REASON_TRACE_MULTICAST_LL_BAIL = 16,
+	DROP_REASON_TRACE_MISS_VRF = 17,
+	DROP_REASON_TRACE_MISS_ROUTE = 18,
+	DROP_REASON_TRACE_PASSTHROUGH_ENTRY = 19,
+	DROP_REASON_TRACE_ADJUST_ROOM_OK = 20,
+	DROP_REASON_TRACE_REACHED_REDIRECT = 21,
+	DROP_REASON_TRACE_REDIRECT_OK = 22,
 	__DROP_REASON_MAX,
 };
 
@@ -1616,8 +1626,10 @@ int usid_egress(struct __sk_buff *skb)
 		// are always handled by dedicated local-scope routing, never an
 		// application's own default route); this replicates it here,
 		// since nothing else in this program's own routing model does.
-		if (ip6->daddr[0] == 0xFF || (ip6->daddr[0] == 0xFE && (ip6->daddr[1] & 0xC0) == 0x80))
+		if (ip6->daddr[0] == 0xFF || (ip6->daddr[0] == 0xFE && (ip6->daddr[1] & 0xC0) == 0x80)) {
+			count_drop(DROP_REASON_TRACE_MULTICAST_LL_BAIL);
 			return TC_ACT_UNSPEC;
+		}
 
 		route_family = USID_EGRESS_ROUTE_FAMILY_INET6;
 		__builtin_memcpy(dst_addr, ip6->daddr, 16);
@@ -1637,8 +1649,10 @@ int usid_egress(struct __sk_buff *skb)
 	// not (block, argument), is egress_route_table's key.
 	struct vrf_value *vrf = bpf_map_lookup_elem(&vrf_table, &vrf_key);
 
-	if (!vrf)
+	if (!vrf) {
+		count_drop(DROP_REASON_TRACE_MISS_VRF);
 		return TC_ACT_UNSPEC; // attachment registered but its vrf_table entry isn't -- shouldn't happen; fail open
+	}
 
 	struct egress_route_key rkey;
 
@@ -1651,16 +1665,20 @@ int usid_egress(struct __sk_buff *skb)
 
 	struct egress_route_value *rv = bpf_map_lookup_elem(&egress_route_table, &rkey);
 
-	if (!rv)
+	if (!rv) {
+		count_drop(DROP_REASON_TRACE_MISS_ROUTE);
 		return TC_ACT_UNSPEC; // no configured route for this destination -- defer to the kernel (still-installed netlink route during migration, or genuinely none)
+	}
 
 	// A local pass-through entry (struct egress_route_value's own comment
 	// above) -- it exists only to out-match a shorter default entry via
 	// LPM, not to be encapsulated toward. Defer to the kernel exactly like
 	// a genuine miss above, before touching node_src_addr_table or doing
 	// any encap work below.
-	if (rv->link_ifindex == 0)
+	if (rv->link_ifindex == 0) {
+		count_drop(DROP_REASON_TRACE_PASSTHROUGH_ENTRY);
 		return TC_ACT_UNSPEC;
+	}
 
 	// node_src_addr_table is BPF_MAP_TYPE_ARRAY, not BPF_MAP_TYPE_HASH:
 	// every one of its (here, exactly one) slots always exists from map
@@ -1695,6 +1713,7 @@ int usid_egress(struct __sk_buff *skb)
 		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
+	count_drop(DROP_REASON_TRACE_ADJUST_ROOM_OK);
 
 	data = (void *) (long) skb->data;
 	data_end = (void *) (long) skb->data_end;
@@ -1753,6 +1772,7 @@ int usid_egress(struct __sk_buff *skb)
 	// root/host netns, unlike usid_ingress's step 9 veth-mode branch
 	// (which crosses into a *different* netns and needs
 	// bpf_redirect_peer for exactly that reason).
+	count_drop(DROP_REASON_TRACE_REACHED_REDIRECT);
 	long redirect_rc = bpf_redirect(rv->link_ifindex, 0);
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
@@ -1760,6 +1780,7 @@ int usid_egress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	count_drop(DROP_REASON_TRACE_REDIRECT_OK);
 	return redirect_rc;
 }
 
