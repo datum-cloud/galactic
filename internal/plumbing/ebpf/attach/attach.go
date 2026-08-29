@@ -288,45 +288,13 @@ func AttachEgress(program *ebpf.Program, ifaceName string) error {
 	return attachOne(program, ifaceName, egressFilterName, netlink.HANDLE_MIN_INGRESS)
 }
 
-// localEgressFilterName identifies usid_egress's own TC-BPF *egress*-hook
-// filter, as attached by AttachLocalEgress -- kept distinct from
-// egressFilterName (AttachEgress's ingress-hook filter on a tenant's
-// host-side veth) even though the two are never applied to the same
-// interface in practice, matching egressFilterName's own reasoning.
-const localEgressFilterName = "galactic_usid_egress_local"
-
-// AttachLocalEgress attaches program (usid_egress) directly to ifaceName's
-// own TC *egress* hook -- for a caller that already runs inside the netns
-// whose own egress it wants to intercept (internal/ingresssidecar's
-// per-VPC VRF interfaces), as opposed to AttachEgress's ingress-hook trick
-// for the CNI veth-pair case (attaching from the host side, where the
-// tenant's own egress arrives as that veth's ingress).
-//
-// Thin wrapper around the same attachOne/FilterReplace idempotency every
-// other attach path in this package already gets, just under
-// netlink.HANDLE_MIN_EGRESS and localEgressFilterName.
-func AttachLocalEgress(program *ebpf.Program, ifaceName string) error {
-	if program == nil {
-		return errors.New("attach: program is nil")
-	}
-	return attachOne(program, ifaceName, localEgressFilterName, netlink.HANDLE_MIN_EGRESS)
-}
-
-// DetachLocalEgress removes AttachLocalEgress's own TC-BPF egress filter
-// from ifaceName, if present -- AttachLocalEgress's counterpart, mirroring
-// Detach/detachOne's own idempotent "already gone is not an error" stance
-// (including ifaceName no longer existing on the host at all).
-func DetachLocalEgress(ifaceName string) error {
-	return detachOne(ifaceName, localEgressFilterName, netlink.HANDLE_MIN_EGRESS)
-}
-
 // attachOne attaches program to one interface's TC hook (parent -- either
 // netlink.HANDLE_MIN_INGRESS or netlink.HANDLE_MIN_EGRESS) under the given
 // tc filter name. It is the single internal choke point every attach path
-// in this package goes through (Attach's loop above, AttachEgress and
-// AttachLocalEgress above, and Watch's netlink-driven reconcile in
-// watch.go), so instrumenting it here with attachHook (hooks.go, Milestone
-// 4) observes every attach attempt regardless of caller.
+// in this package goes through (Attach's loop above, AttachEgress above,
+// and Watch's netlink-driven reconcile in watch.go), so instrumenting it
+// here with attachHook (hooks.go, Milestone 4) observes every attach
+// attempt regardless of caller.
 func attachOne(program *ebpf.Program, name, tcFilterName string, parent uint32) (err error) {
 	defer func() { attachHook(name, err) }()
 

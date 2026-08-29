@@ -7,6 +7,8 @@ package ingresssidecar
 import (
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 )
 
@@ -41,6 +43,34 @@ func TestArgumentForTableID(t *testing.T) {
 				t.Fatalf("argumentForTableID(%d) = %d, want %d", tc.tableID, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestEgressVethNames covers the two properties ensureEgressDatapath and
+// removeEgressDatapath both depend on to ever find the same pair twice:
+// deterministic (so a later call derives the identical names a former
+// call used) and collision-free across different table ids (so two VPCs
+// sharing this node never contend for the same interface names).
+func TestEgressVethNames(t *testing.T) {
+	inner1, peer1 := egressVethNames(2)
+	inner2, peer2 := egressVethNames(2)
+	if inner1 != inner2 || peer1 != peer2 {
+		t.Fatalf("egressVethNames(2) is not deterministic: (%s,%s) vs (%s,%s)", inner1, peer1, inner2, peer2)
+	}
+	if inner1 == peer1 {
+		t.Fatalf("egressVethNames(2) returned identical inner/peer names %q", inner1)
+	}
+
+	otherInner, otherPeer := egressVethNames(3)
+	if inner1 == otherInner || peer1 == otherPeer {
+		t.Fatalf("egressVethNames collided across table ids: table 2 = (%s,%s), table 3 = (%s,%s)",
+			inner1, peer1, otherInner, otherPeer)
+	}
+
+	for _, name := range []string{inner1, peer1, otherInner, otherPeer} {
+		if len(name) > unix.IFNAMSIZ-1 {
+			t.Errorf("egressVethNames produced %q, %d bytes -- too long for IFNAMSIZ (%d)", name, len(name), unix.IFNAMSIZ)
+		}
 	}
 }
 
