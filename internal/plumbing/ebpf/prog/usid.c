@@ -681,6 +681,16 @@ enum drop_reason {
 	// ifindex_vrf_table miss immediately above, in the function's own
 	// entry sequence.
 	DROP_REASON_TRACE_IFINDEX_MISS = 23,
+	// Full entry-sequence bracketing: usid_egress's own prefix (before
+	// DROP_REASON_TRACE_MULTICAST_LL_BAIL) has four more early-return
+	// paths with no counter at all -- these close every remaining gap so
+	// "nothing incremented" can no longer mean either "never invoked" or
+	// "always took the uninstrumented path".
+	DROP_REASON_TRACE_ENTRY = 24,
+	DROP_REASON_TRACE_PULL_DATA_FAILED = 25,
+	DROP_REASON_TRACE_ETH_BOUNDS_FAILED = 26,
+	DROP_REASON_TRACE_ETHERTYPE_MISMATCH = 27,
+	DROP_REASON_TRACE_IFINDEX_HIT = 28,
 	__DROP_REASON_MAX,
 };
 
@@ -1485,16 +1495,22 @@ int usid_ingress(struct __sk_buff *skb)
 SEC("tc")
 int usid_egress(struct __sk_buff *skb)
 {
-	if (bpf_skb_pull_data(skb, 0))
+	count_drop(DROP_REASON_TRACE_ENTRY);
+
+	if (bpf_skb_pull_data(skb, 0)) {
+		count_drop(DROP_REASON_TRACE_PULL_DATA_FAILED);
 		return TC_ACT_UNSPEC;
+	}
 
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
 
 	struct usid_ethhdr *eth = data;
 
-	if ((void *) (eth + 1) > data_end)
+	if ((void *) (eth + 1) > data_end) {
+		count_drop(DROP_REASON_TRACE_ETH_BOUNDS_FAILED);
 		return TC_ACT_UNSPEC;
+	}
 
 	// NPTv6/VIP-xlat remain IPv6-only by design (component 2/0.1); the
 	// egress-routing extension below does not share that restriction --
@@ -1506,8 +1522,10 @@ int usid_egress(struct __sk_buff *skb)
 	// packet this program has no mapping for.
 	__be16 h_proto = eth->h_proto;
 
-	if (h_proto != __builtin_bswap16(USID_ETH_P_IPV6) && h_proto != __builtin_bswap16(USID_ETH_P_IP))
+	if (h_proto != __builtin_bswap16(USID_ETH_P_IPV6) && h_proto != __builtin_bswap16(USID_ETH_P_IP)) {
+		count_drop(DROP_REASON_TRACE_ETHERTYPE_MISMATCH);
 		return TC_ACT_UNSPEC;
+	}
 
 	__u32 ifindex = skb->ifindex;
 	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
@@ -1516,6 +1534,7 @@ int usid_egress(struct __sk_buff *skb)
 		count_drop(DROP_REASON_TRACE_IFINDEX_MISS);
 		return TC_ACT_UNSPEC; // no attachment registered on this ifindex at all
 	}
+	count_drop(DROP_REASON_TRACE_IFINDEX_HIT);
 
 	__u64 vrf_key = (iv->block << 12) | iv->argument;
 
