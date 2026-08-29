@@ -166,9 +166,6 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 
-// TEMPORARY: diagnostic-only, see the DROP_REASON_TRACE_* comment below.
-static long (*bpf_trace_printk)(const char *fmt, __u32 fmt_size, ...) = (void *) BPF_FUNC_trace_printk;
-
 // vip_xlat_table's rewrite (unlike nptv6_table's, see struct
 // vip_xlat_value's comment) is a genuine address+port substitution with no
 // checksum-neutral shortcut, so it needs the real incremental L4 checksum
@@ -675,6 +672,15 @@ enum drop_reason {
 	DROP_REASON_TRACE_ADJUST_ROOM_OK = 20,
 	DROP_REASON_TRACE_REACHED_REDIRECT = 21,
 	DROP_REASON_TRACE_REDIRECT_OK = 22,
+	// bpf_trace_printk is unavailable to sched_cls programs on this
+	// kernel (verifier: "program of this type cannot use helper
+	// bpf_trace_printk#6", confirmed live) -- this checkpoint exists
+	// because that discovery ruled out adding a print at the one
+	// early-return in usid_egress that DROP_REASON_TRACE_MULTICAST_LL_BAIL
+	// through DROP_REASON_TRACE_REDIRECT_OK don't cover: the
+	// ifindex_vrf_table miss immediately above, in the function's own
+	// entry sequence.
+	DROP_REASON_TRACE_IFINDEX_MISS = 23,
 	__DROP_REASON_MAX,
 };
 
@@ -1506,14 +1512,10 @@ int usid_egress(struct __sk_buff *skb)
 	__u32 ifindex = skb->ifindex;
 	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
 
-	{
-		char fmt[] = "usid_egress: ifindex=%d proto=%x iv=%d\n";
-
-		bpf_trace_printk(fmt, sizeof(fmt), ifindex, (unsigned) h_proto, iv != 0);
-	}
-
-	if (!iv)
+	if (!iv) {
+		count_drop(DROP_REASON_TRACE_IFINDEX_MISS);
 		return TC_ACT_UNSPEC; // no attachment registered on this ifindex at all
+	}
 
 	__u64 vrf_key = (iv->block << 12) | iv->argument;
 
