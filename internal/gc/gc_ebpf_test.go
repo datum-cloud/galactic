@@ -28,6 +28,16 @@ import (
 // bearing on the eBPF vrf_table sweep logic under test.
 const testRouteTarget = "65000:1"
 
+// targetKindNode is BGPRouter's own TargetRef.Kind value, shared by every
+// test fixture's BGPRouter in this file (goconst).
+const targetKindNode = "Node"
+
+// testLocator is the SRv6 locator every test fixture's BGPRouter in this
+// file uses; its exact value has no bearing on the eBPF vrf_table sweep
+// logic under test, only that blockFromLocator can derive a real Block
+// from it (goconst/unparam: every caller wants the same one).
+const testLocator = "2001:db8:1::/48"
+
 func requireRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() != 0 {
@@ -74,7 +84,6 @@ func TestSweepEBPFVRFTable_RemovesStaleKeepsLive(t *testing.T) {
 		namespace  = "default"
 		nodeName   = "node-a"
 		routerName = "router-a"
-		locator    = "2001:db8:1::/48"
 		liveVRFID  = int32(10)
 		staleVRFID = int32(20)
 	)
@@ -82,9 +91,9 @@ func TestSweepEBPFVRFTable_RemovesStaleKeepsLive(t *testing.T) {
 	router := &bgpv1alpha1.BGPRouter{
 		ObjectMeta: metav1.ObjectMeta{Name: routerName, Namespace: namespace},
 		Spec: bgpv1alpha1.BGPRouterSpec{
-			TargetRef:   bgpv1alpha1.TargetRef{Kind: "Node", Name: nodeName},
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: targetKindNode, Name: nodeName},
 			LocalASN:    65000,
-			SRv6Locator: locator,
+			SRv6Locator: testLocator,
 			NodeID:      5,
 		},
 	}
@@ -115,7 +124,7 @@ func TestSweepEBPFVRFTable_RemovesStaleKeepsLive(t *testing.T) {
 	}
 	defer func() { _ = closer.Close() }()
 
-	block, err := blockFromLocator(t, locator)
+	block, err := blockFromLocator(t)
 	if err != nil {
 		t.Fatalf("derive block: %v", err)
 	}
@@ -148,6 +157,84 @@ func TestSweepEBPFVRFTable_RemovesStaleKeepsLive(t *testing.T) {
 	}
 }
 
+// TestSweepEBPFVRFTable_PreservesIngressSidecarReservedBlock reproduces the
+// bug confirmed live in us-central-1-staging-lab: internal/ingresssidecar
+// registers its own vrf_table entries under uformat.BlockMax, a block
+// deliberately reserved so it never collides with a real BGPRouter locator,
+// with no BGPVRFInstance CRD behind it at all -- that sidecar owns their
+// lifecycle itself. Before the fix, every such entry was invisible to this
+// sweep's CRD-built live set and got removed as an orphan on the very next
+// tick, silently blackholing that sidecar's own outbound connections to VPC
+// backends. A genuinely stale entry under an ordinary, non-reserved block
+// must still be removed -- this guards the exemption's scope, not just its
+// existence.
+func TestSweepEBPFVRFTable_PreservesIngressSidecarReservedBlock(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		namespace  = "default"
+		nodeName   = "node-a"
+		routerName = "router-a"
+		staleVRFID = int32(20)
+	)
+
+	router := &bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Name: routerName, Namespace: namespace},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: targetKindNode, Name: nodeName},
+			LocalASN:    65000,
+			SRv6Locator: testLocator,
+			NodeID:      5,
+		},
+	}
+	// No BGPVRFInstance at all -- neither the reserved-block entry nor the
+	// ordinary stale one has any CRD backing it.
+	k8s := fake.NewClientBuilder().WithScheme(gcTestScheme(t)).WithObjects(router).Build()
+
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-gcsweep-reserved-test-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	loaderObjs, err := attach.Load(pinDir)
+	if err != nil {
+		t.Fatalf("attach.Load: %v", err)
+	}
+	t.Cleanup(func() { _ = loaderObjs.Close() })
+
+	reg, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		t.Fatalf("OpenPinnedRegistry: %v", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	ordinaryBlock, err := blockFromLocator(t)
+	if err != nil {
+		t.Fatalf("derive block: %v", err)
+	}
+	const reservedArgument = uint16(2) // matches the demo2loc VRF table id observed live
+	staleArgument := uint16(staleVRFID)
+
+	if err := reg.VRF.Register(uformat.BlockMax, reservedArgument, 0x444444, usidmap.EgressKindVeth); err != nil {
+		t.Fatalf("seed ingress-sidecar reserved-block entry: %v", err)
+	}
+	if err := reg.VRF.Register(ordinaryBlock, staleArgument, 0x555555, usidmap.EgressKindVeth); err != nil {
+		t.Fatalf("seed ordinary stale entry: %v", err)
+	}
+
+	result := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	if result.Errors != 0 {
+		t.Errorf("result.Errors = %d, want 0", result.Errors)
+	}
+	if result.EBPFVRFEntriesRemoved != 1 {
+		t.Errorf("result.EBPFVRFEntriesRemoved = %d, want 1 (only the ordinary stale entry)", result.EBPFVRFEntriesRemoved)
+	}
+
+	if _, ok, err := reg.VRF.Get(uformat.BlockMax, reservedArgument); err != nil || !ok {
+		t.Errorf("reserved-block entry after sweep: ok=%v err=%v, want ok=true (must survive, no CRD needed)", ok, err)
+	}
+	if _, ok, err := reg.VRF.Get(ordinaryBlock, staleArgument); err != nil || ok {
+		t.Errorf("ordinary stale entry after sweep: ok=%v err=%v, want ok=false (still must be removed)", ok, err)
+	}
+}
+
 // TestSweepEBPFVRFTable_NoRoutersForNodeSkipsSweep guards against a
 // regression of the fix where routersForNode returning zero routers (e.g. a
 // transient BGPRouter listing/cache hiccup, or the router being
@@ -162,7 +249,6 @@ func TestSweepEBPFVRFTable_NoRoutersForNodeSkipsSweep(t *testing.T) {
 	const (
 		namespace = "default"
 		nodeName  = "node-a"
-		locator   = "2001:db8:1::/48"
 		vrfID     = int32(10)
 	)
 
@@ -193,7 +279,7 @@ func TestSweepEBPFVRFTable_NoRoutersForNodeSkipsSweep(t *testing.T) {
 	}
 	defer func() { _ = closer.Close() }()
 
-	block, err := blockFromLocator(t, locator)
+	block, err := blockFromLocator(t)
 	if err != nil {
 		t.Fatalf("derive block: %v", err)
 	}
@@ -216,12 +302,14 @@ func TestSweepEBPFVRFTable_NoRoutersForNodeSkipsSweep(t *testing.T) {
 }
 
 // blockFromLocator mirrors registerEBPFDatapath's/SweepEBPFVRFTable's own
-// locator-to-Block derivation, kept local to this test file to avoid
-// importing internal/cni (which would be a layering inversion) just for
-// one helper.
-func blockFromLocator(t *testing.T, locator string) (uint64, error) {
+// locator-to-Block derivation for testLocator, kept local to this test file
+// to avoid importing internal/cni (which would be a layering inversion)
+// just for one helper. No caller in this file ever needs a Block derived
+// from any other locator (unparam), since testLocator's exact value has no
+// bearing on the eBPF vrf_table sweep logic under test.
+func blockFromLocator(t *testing.T) (uint64, error) {
 	t.Helper()
-	prefix, err := netip.ParsePrefix(locator)
+	prefix, err := netip.ParsePrefix(testLocator)
 	if err != nil {
 		return 0, err
 	}
@@ -251,7 +339,6 @@ func TestSweepEBPFNPTv6Table_RegistersLiveRemovesStale(t *testing.T) {
 		namespace  = "default"
 		nodeName   = "node-a"
 		routerName = "router-a"
-		locator    = "2001:db8:1::/48"
 		liveVRFID  = int32(10)
 		staleVRFID = int32(20)
 	)
@@ -259,9 +346,9 @@ func TestSweepEBPFNPTv6Table_RegistersLiveRemovesStale(t *testing.T) {
 	router := &bgpv1alpha1.BGPRouter{
 		ObjectMeta: metav1.ObjectMeta{Name: routerName, Namespace: namespace},
 		Spec: bgpv1alpha1.BGPRouterSpec{
-			TargetRef:   bgpv1alpha1.TargetRef{Kind: "Node", Name: nodeName},
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: targetKindNode, Name: nodeName},
 			LocalASN:    65000,
-			SRv6Locator: locator,
+			SRv6Locator: testLocator,
 			NodeID:      5,
 		},
 	}
@@ -297,7 +384,7 @@ func TestSweepEBPFNPTv6Table_RegistersLiveRemovesStale(t *testing.T) {
 	}
 	defer func() { _ = closer.Close() }()
 
-	block, err := blockFromLocator(t, locator)
+	block, err := blockFromLocator(t)
 	if err != nil {
 		t.Fatalf("derive block: %v", err)
 	}
