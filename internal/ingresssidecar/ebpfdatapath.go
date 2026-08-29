@@ -104,40 +104,133 @@ func vrfLinkForTable(tableID uint32) (*netlink.Vrf, error) {
 	return nil, fmt.Errorf("no VRF interface found for table %d", tableID)
 }
 
+// egressVethNames derives this VPC's own veth pair names from tableID
+// alone -- ensureEgressDatapath/removeEgressDatapath only ever carry a
+// tableID forward, not the vpc string vrf.Add itself was keyed on
+// (vrfLinkForTable's own doc comment). Collision-free the same way
+// vrf.TableID(vpc) already is (that is its whole purpose), and
+// comfortably inside IFNAMSIZ: tableID fits uSID Argument's 12-bit range
+// (argumentForTableID's own check), so at most 4 decimal digits.
+func egressVethNames(tableID uint32) (inner, peer string) {
+	return fmt.Sprintf("ivs%d", tableID), fmt.Sprintf("ivp%d", tableID)
+}
+
+// ensureEgressVeth creates (or finds) the one real interface pair
+// usid_egress actually intercepts this VPC's traffic on: inner enslaved
+// into vrfLink itself, with a default route in vrfLink's own table
+// pointed at it, so every destination this VPC's egress_route_table might
+// ever match has somewhere real to go once the kernel's own vrf_xmit()
+// redoes its route lookup inside that table. peer -- left outside the
+// VRF, in this pod's main netns -- is where usid_egress actually attaches
+// (see ensureEgressDatapath's own doc comment for why the VRF's own
+// egress hook doesn't work for that).
+//
+// Idempotent: LinkAdd against an already-existing name is treated as
+// already-done, and RouteReplace overwrites rather than errors on a
+// second call -- the same "safe on every SetDesired that ensures a VRF"
+// contract every other step in this file already has.
+func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string) (netlink.Link, error) {
+	peerLink, err := netlink.LinkByName(peer)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(err, &notFound) {
+			return nil, fmt.Errorf("look up veth peer %q: %w", peer, err)
+		}
+		veth := &netlink.Veth{
+			LinkAttrs: netlink.LinkAttrs{Name: inner},
+			PeerName:  peer,
+		}
+		if err := netlink.LinkAdd(veth); err != nil {
+			return nil, fmt.Errorf("add veth pair %q/%q: %w", inner, peer, err)
+		}
+		peerLink, err = netlink.LinkByName(peer)
+		if err != nil {
+			return nil, fmt.Errorf("look up newly-created veth peer %q: %w", peer, err)
+		}
+	}
+
+	innerLink, err := netlink.LinkByName(inner)
+	if err != nil {
+		return nil, fmt.Errorf("look up veth inner end %q: %w", inner, err)
+	}
+	if err := netlink.LinkSetMaster(innerLink, vrfLink); err != nil {
+		return nil, fmt.Errorf("enslave %q into VRF %q: %w", inner, vrfLink.Attrs().Name, err)
+	}
+	if err := netlink.LinkSetUp(innerLink); err != nil {
+		return nil, fmt.Errorf("set %q up: %w", inner, err)
+	}
+	if err := netlink.LinkSetUp(peerLink); err != nil {
+		return nil, fmt.Errorf("set %q up: %w", peer, err)
+	}
+
+	// The second, inner hop vrf_xmit() takes once a packet actually
+	// enters this VRF -- a route in the VRF's own table, not the main
+	// table ensureRedirectRoute installs, which otherwise has no route of
+	// its own to anywhere.
+	defaultRoute := &netlink.Route{
+		Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
+		Table:     int(vrfLink.Table),
+		LinkIndex: innerLink.Attrs().Index,
+	}
+	if err := netlink.RouteReplace(defaultRoute); err != nil {
+		return nil, fmt.Errorf("install default route in VRF table %d via %q: %w", vrfLink.Table, inner, err)
+	}
+
+	return peerLink, nil
+}
+
 // ensureEgressDatapath makes usid_egress's own VRF resolution
 // (ifindex_vrf_table -> vrf_table -> Linux VRF table id, usid.c's own
 // doc comment on usid_egress) resolve correctly for vpc's VRF interface,
-// then attaches usid_egress to that interface's own TC *egress* hook
-// (attach.AttachLocalEgress) -- the actual enforcement point that was
-// entirely missing before this file existed: EnsureRoute's
-// egress_route_table entries had nothing anywhere in this pod's netns
-// ever attached to read them.
+// then attaches usid_egress where it actually intercepts that VRF's
+// traffic -- the actual enforcement point that was entirely missing
+// before this file existed: EnsureRoute's egress_route_table entries had
+// nothing anywhere in this pod's netns ever attached to read them.
 //
-// One VRF interface per VPC (vrf.Add's own doc comment) gives this file
-// exactly the ifindex<->VRF 1:1 mapping usid_egress's ifindex_vrf_table
-// lookup assumes -- the same shape internal/cnibgp's own
-// registerEBPFDatapath relies on for a genuine tenant veth/tap attachment,
-// just substituting "one VRF device per VPC sharing this gateway pod" for
-// "one veth per CNI attachment". Attaching on this pod's own shared eth0
-// instead, tempting since that is where cilium ultimately hands the
-// packet off, was considered and rejected: eth0 is shared by every VPC
-// this sidecar serves, and ifindex_vrf_table can only carry one (block,
-// argument) per ifindex -- a single eth0 registration could resolve at
-// most one of this pod's VPCs correctly.
+// This used to attach directly to the VRF interface's own TC *egress*
+// hook (attach.AttachLocalEgress). That looked right -- the VRF is where
+// usid_egress's ifindex_vrf_table lookup needs a 1:1 ifindex<->VRF
+// mapping anyway, the same shape internal/cnibgp's own
+// registerEBPFDatapath relies on for a genuine tenant veth/tap attachment
+// -- but did not hold up: confirmed live in us-central-1-staging-lab via
+// packet capture, a Linux VRF master device's own TC egress hook never
+// actually fires for traffic routed through it, for any tenant, however
+// correctly every map involved is populated. internal/cnibgp's own
+// attachUsidEgress never attaches to a VRF at all; it attaches to a real
+// tenant veth's *ingress* hook from the host side, because that is where
+// the tenant's own egress traffic actually arrives. ensureEgressVeth
+// gives this file the equivalent of that real veth -- enslaved into the
+// VRF so vrf_xmit() has somewhere to send a packet once it resolves
+// there -- and this attaches the exact same way internal/cnibgp already
+// does, on its peer's ingress hook via attach.AttachEgress, not
+// attach.AttachLocalEgress.
 //
-// Idempotent: Register/AttachLocalEgress are both plain overwrite/replace
-// operations, safe to call on every SetDesired that ensures a VRF (a
-// repeat call for an already-provisioned VPC, e.g. after this sidecar's
-// own restart, is a no-op in effect).
+// Attaching on this pod's own shared eth0 instead, tempting since that is
+// where cilium ultimately hands the packet off, was considered and
+// rejected: eth0 is shared by every VPC this sidecar serves, and
+// ifindex_vrf_table can only carry one (block, argument) per ifindex -- a
+// single eth0 registration could resolve at most one of this pod's VPCs
+// correctly.
+//
+// Idempotent: every step here is a plain overwrite/replace operation,
+// safe to call on every SetDesired that ensures a VRF (a repeat call for
+// an already-provisioned VPC, e.g. after this sidecar's own restart, is a
+// no-op in effect).
 func ensureEgressDatapath(tableID uint32) error {
 	argument, err := argumentForTableID(tableID)
 	if err != nil {
 		return err
 	}
 
-	link, err := vrfLinkForTable(tableID)
+	vrfLink, err := vrfLinkForTable(tableID)
 	if err != nil {
 		return err
+	}
+
+	inner, peer := egressVethNames(tableID)
+	peerLink, err := ensureEgressVeth(vrfLink, inner, peer)
+	if err != nil {
+		return fmt.Errorf("ensure egress veth for VRF table %d: %w", tableID, err)
 	}
 
 	registry, closer, err := usidmap.OpenPinnedRegistry(ebpfPinDir)
@@ -163,7 +256,11 @@ func ensureEgressDatapath(tableID uint32) error {
 	}
 	defer func() { _ = ifindexCloser.Close() }()
 
-	if err := ifindexTable.Register(uint32(link.Attrs().Index), ingressSidecarBlock, argument); err != nil {
+	// Keyed by the veth peer's ifindex, not the VRF's own -- see this
+	// function's own doc comment for why usid_egress has to see this
+	// traffic arriving on that interface's ingress hook, not the VRF's
+	// egress.
+	if err := ifindexTable.Register(uint32(peerLink.Attrs().Index), ingressSidecarBlock, argument); err != nil {
 		return fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
 
@@ -173,41 +270,54 @@ func ensureEgressDatapath(tableID uint32) error {
 	}
 	defer func() { _ = program.Close() }()
 
-	if err := attach.AttachLocalEgress(program, link.Attrs().Name); err != nil {
-		return fmt.Errorf("attach usid_egress to VRF interface %q: %w", link.Attrs().Name, err)
+	if err := attach.AttachEgress(program, peerLink.Attrs().Name); err != nil {
+		return fmt.Errorf("attach usid_egress to VRF %d's veth peer %q: %w", tableID, peerLink.Attrs().Name, err)
 	}
 	return nil
 }
 
 // removeEgressDatapath undoes ensureEgressDatapath's own registrations for
 // the VPC whose VRF table is tableID -- called before RemoveVRF deletes
-// the VRF interface itself (backend.go's RemoveVRF), while its ifindex can
-// still be resolved. Best-effort and idempotent, matching every other
-// teardown step in this package (Unregister/DetachLocalEgress are both
+// the VRF interface itself (backend.go's RemoveVRF), while the veth
+// pair's own names can still be derived. Best-effort and idempotent,
+// matching every other teardown step in this package (Unregister is
 // already "absent is not an error"): every step is attempted even if an
 // earlier one failed, and every failure is joined and returned together,
 // rather than a first error aborting the rest of cleanup.
+//
+// No explicit detach call for usid_egress: deleting the veth pair below
+// removes both ends and, with them, every qdisc/filter attached to
+// either -- the same "the interface going away is the detach" contract
+// internal/cnibgp's own teardown already relies on for its real tenant
+// veth (attachUsidEgress's own doc comment has no DetachEgress
+// counterpart at all).
 func removeEgressDatapath(tableID uint32) error {
 	argument, err := argumentForTableID(tableID)
 	if err != nil {
 		return err
 	}
 
+	inner, peer := egressVethNames(tableID)
 	var errs []error
 
-	if link, lerr := vrfLinkForTable(tableID); lerr != nil {
-		errs = append(errs, fmt.Errorf("find VRF interface for table %d: %w", tableID, lerr))
-	} else {
-		if err := attach.DetachLocalEgress(link.Attrs().Name); err != nil {
-			errs = append(errs, fmt.Errorf("detach usid_egress: %w", err))
+	if peerLink, lerr := netlink.LinkByName(peer); lerr != nil {
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(lerr, &notFound) {
+			errs = append(errs, fmt.Errorf("look up veth peer %q: %w", peer, lerr))
 		}
+		// Absent is not an error (idempotent teardown) -- nothing more to
+		// unregister or delete for it below.
+	} else {
 		if ifindexTable, closer, oerr := ifindexvrfmap.OpenPinned(ebpfPinDir); oerr != nil {
 			errs = append(errs, fmt.Errorf("open pinned eBPF ifindex_vrf_table: %w", oerr))
 		} else {
-			if err := ifindexTable.Unregister(uint32(link.Attrs().Index)); err != nil {
+			if err := ifindexTable.Unregister(uint32(peerLink.Attrs().Index)); err != nil {
 				errs = append(errs, fmt.Errorf("unregister eBPF ifindex_vrf_table entry: %w", err))
 			}
 			_ = closer.Close()
+		}
+		if err := netlink.LinkDel(peerLink); err != nil {
+			errs = append(errs, fmt.Errorf("delete veth pair %q/%q: %w", inner, peer, err))
 		}
 	}
 
