@@ -7,6 +7,7 @@ package ingresssidecar
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"time"
@@ -16,9 +17,11 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -225,6 +228,27 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 	}
 }
 
+// ensureNodeSourceAddress registers this node's own SRv6/underlay-facing
+// source address into node_src_addr_table, mirroring
+// internal/cnibgp's own registerNodeSourceAddress -- see
+// ensureEgressDatapath's own call site for why this sidecar cannot rely on
+// that copy alone having already run on this node. Idempotent and cheap
+// (one netlink query, one map write), safe to call on every
+// ensureEgressDatapath the same way srv6.ResolveNodeSourceAddress's own
+// per-node-constant result already tolerates being redone.
+func ensureNodeSourceAddress() error {
+	addr, err := srv6.ResolveNodeSourceAddress()
+	if err != nil {
+		return fmt.Errorf("resolve node source address: %w", err)
+	}
+	nodeSrc, closer, err := egressroutemap.OpenPinnedNodeSourceAddress(ebpfPinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned node_src_addr_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	return nodeSrc.Set(addr)
+}
+
 // ensureEgressDatapath makes usid_egress's own VRF resolution
 // (ifindex_vrf_table -> vrf_table -> Linux VRF table id, usid.c's own
 // doc comment on usid_egress) resolve correctly for vpc's VRF interface,
@@ -263,6 +287,25 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 // an already-provisioned VPC, e.g. after this sidecar's own restart, is a
 // no-op in effect).
 func ensureEgressDatapath(tableID uint32) error {
+	// node_src_addr_table is a per-node singleton, not per-VPC: usid_egress
+	// fails open (TC_ACT_UNSPEC, uncounted) on every encapsulation attempt
+	// until some caller sets it, and internal/cnibgp's own registration
+	// only ever runs as a side effect of a real tenant CNI ADD landing on
+	// this node -- something a node running only this sidecar's synthetic
+	// attachments, with no real tenant CNI attachment at all, never gets.
+	// Confirmed live in us-central-1-staging-lab: an otherwise fully
+	// correct attachment (VRF, veth, ifindex_vrf_table, egress_route_table
+	// all resolving) silently produced no encapsulated traffic at all,
+	// traced to this exact gap. Non-fatal on failure, same as
+	// internal/cnibgp's own call site and for the identical reason --
+	// ResolveNodeSourceAddress needs a converged underlay default route,
+	// which this pod can transiently lack right after this sidecar itself
+	// restarts.
+	if err := ensureNodeSourceAddress(); err != nil {
+		slog.Warn("ensureEgressDatapath: could not register this node's own SRv6 source address; "+
+			"egress routing will fail open until this succeeds", "err", err)
+	}
+
 	argument, err := argumentForTableID(tableID)
 	if err != nil {
 		return err
