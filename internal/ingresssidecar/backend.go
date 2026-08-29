@@ -75,10 +75,26 @@ func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve VRF table ID for vpc %s: %w", vpc, err)
 	}
+	// See ensureEgressDatapath's own doc comment (ebpfdatapath.go): without
+	// this, EnsureRoute's egress_route_table entries below have nothing in
+	// this pod's netns ever attached to read them.
+	if err := ensureEgressDatapath(tableID); err != nil {
+		return 0, fmt.Errorf("attach eBPF egress datapath for vpc %s: %w", vpc, err)
+	}
 	return tableID, nil
 }
 
 func (kernelBackend) RemoveVRF(vpc string) error {
+	tableID, err := vrf.TableID(vpc)
+	if err != nil {
+		return nil // VRF already gone — idempotent, matching vrf.Delete's own stance
+	}
+	// Torn down before vrf.Delete removes the interface below, while its
+	// ifindex can still be resolved — see removeEgressDatapath's own doc
+	// comment.
+	if err := removeEgressDatapath(tableID); err != nil {
+		return fmt.Errorf("detach eBPF egress datapath for vpc %s: %w", vpc, err)
+	}
 	if err := vrf.Delete(vpc); err != nil {
 		return fmt.Errorf("delete VRF for vpc %s: %w", vpc, err)
 	}
@@ -89,10 +105,20 @@ func (kernelBackend) EnsureRoute(prefix *net.IPNet, sid net.IP, tableID uint32) 
 	if err := srv6.RouteEgressAdd(prefix, sid, tableID); err != nil {
 		return fmt.Errorf("install seg6 route for %s: %w", prefix, err)
 	}
+	// See ensureRedirectRoute's own doc comment (ebpfdatapath.go): without
+	// this, nothing ever routes this pod's own outbound traffic for prefix
+	// into the VRF interface egress_route_table's entry above was just
+	// registered against.
+	if err := ensureRedirectRoute(prefix, tableID); err != nil {
+		return fmt.Errorf("install main-table redirect route for %s: %w", prefix, err)
+	}
 	return nil
 }
 
 func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
+	if err := removeRedirectRoute(prefix); err != nil {
+		return fmt.Errorf("remove main-table redirect route for %s: %w", prefix, err)
+	}
 	if err := srv6.RouteEgressDel(prefix, tableID); err != nil {
 		return fmt.Errorf("remove seg6 route for %s: %w", prefix, err)
 	}
