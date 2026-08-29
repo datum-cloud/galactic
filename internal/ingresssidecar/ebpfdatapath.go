@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
@@ -167,16 +168,61 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string) (netlink.Link, e
 	// enters this VRF -- a route in the VRF's own table, not the main
 	// table ensureRedirectRoute installs, which otherwise has no route of
 	// its own to anywhere.
+	//
+	// Routed via the peer's own link-local address, deliberately not a
+	// bare on-link route (LinkIndex alone, no Gw): confirmed live in
+	// us-central-1-staging-lab, an on-link default forces the kernel to
+	// resolve a neighbor for the packet's own final destination before
+	// it ever reaches usid_egress's TC hook at all -- nothing answers
+	// that (there is no real host at an arbitrary destination this VRF's
+	// egress_route_table is about to rewrite), so the kernel gives up
+	// with "destination unreachable" and the packet never reaches the
+	// interface's qdisc, let alone the ingress filter on it. Routing via
+	// a gateway instead means the kernel only ever has to resolve *one*
+	// neighbor -- the peer, always present and always answerable, the
+	// same real ND exchange proven to complete in under a millisecond
+	// earlier in this investigation -- regardless of what the packet's
+	// own destination address is.
+	peerLinkLocal, err := waitForLinkLocalAddr(peerLink)
+	if err != nil {
+		return nil, fmt.Errorf("wait for veth peer %q's own link-local address: %w", peer, err)
+	}
 	defaultRoute := &netlink.Route{
 		Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
 		Table:     int(vrfLink.Table),
 		LinkIndex: innerLink.Attrs().Index,
+		Gw:        peerLinkLocal,
 	}
 	if err := netlink.RouteReplace(defaultRoute); err != nil {
 		return nil, fmt.Errorf("install default route in VRF table %d via %q: %w", vrfLink.Table, inner, err)
 	}
 
 	return peerLink, nil
+}
+
+// waitForLinkLocalAddr returns link's own global-scope-eligible link-local
+// IPv6 address (kernel-assigned via SLAAC/EUI-64 the moment the link comes
+// up), polling briefly since that assignment happens asynchronously to
+// LinkSetUp returning -- confirmed live to normally already be present
+// within the first poll, this bound is headroom, not an expected steady-
+// state wait.
+func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+		if err != nil {
+			return nil, fmt.Errorf("list addresses on %q: %w", link.Attrs().Name, err)
+		}
+		for _, a := range addrs {
+			if a.IP.IsLinkLocalUnicast() {
+				return a.IP, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("%q never acquired a link-local address", link.Attrs().Name)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // ensureEgressDatapath makes usid_egress's own VRF resolution
