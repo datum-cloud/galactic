@@ -166,6 +166,9 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 
+// TEMPORARY: diagnostic-only, see the DROP_REASON_TRACE_* comment below.
+static long (*bpf_trace_printk)(const char *fmt, __u32 fmt_size, ...) = (void *) BPF_FUNC_trace_printk;
+
 // vip_xlat_table's rewrite (unlike nptv6_table's, see struct
 // vip_xlat_value's comment) is a genuine address+port substitution with no
 // checksum-neutral shortcut, so it needs the real incremental L4 checksum
@@ -1502,6 +1505,12 @@ int usid_egress(struct __sk_buff *skb)
 
 	__u32 ifindex = skb->ifindex;
 	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
+
+	{
+		char fmt[] = "usid_egress: ifindex=%d proto=%x iv=%d\n";
+
+		bpf_trace_printk(fmt, sizeof(fmt), ifindex, (unsigned) h_proto, iv != 0);
+	}
 
 	if (!iv)
 		return TC_ACT_UNSPEC; // no attachment registered on this ifindex at all
