@@ -114,7 +114,23 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// NetworkGateway reconcile here failed outright ("Index with name
 	// field:.spec.targetRef.name does not exist") until this call was added --
 	// found via a live containerlab deploy's own reconciler error loop.
-	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
+	//
+	// RegisterBGPRouterTargetIndex, not the full RegisterIndexes: galactic-
+	// gateway's reconcilers (networkgateway_controller.go,
+	// networkrule_controller.go, usidresolver.go) only ever query
+	// BGPRouterByTargetName -- never BGPPeerBySecretName/BGPPeerByRouterName/
+	// BGPPolicyByRouterName/BGPVRFInstanceByRouterName, which RegisterIndexes
+	// also registers. Calling the full RegisterIndexes here was wrong: it
+	// starts a live informer for BGPPeer/BGPPolicy/BGPVRFInstance too
+	// (RegisterIndexes' own doc comment explains why that's eager and
+	// unconditional), and config/galactic-gateway/rbac.yaml's ClusterRole
+	// grants none of those -- found live as a permanently-stuck manager
+	// (every controller blocked forever on WaitForCacheSync, logging nothing
+	// but "bgppeers ... is forbidden" reflector errors) the moment this was
+	// deployed. RegisterBGPRouterTargetIndex is the same narrower function
+	// cmd/galactic-nat66 already uses for exactly this reason -- see its own
+	// doc comment.
+	if err := controller.RegisterBGPRouterTargetIndex(ctx, mgr); err != nil {
 		return fmt.Errorf("register field indexes: %w", err)
 	}
 
