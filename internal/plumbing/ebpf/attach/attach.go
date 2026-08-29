@@ -257,7 +257,7 @@ func Attach(program *ebpf.Program, ifaceNames []string) error {
 
 	var errs []error
 	for _, name := range ifaceNames {
-		if err := attachOne(program, name, filterName); err != nil {
+		if err := attachOne(program, name, filterName, netlink.HANDLE_MIN_INGRESS); err != nil {
 			errs = append(errs, fmt.Errorf("interface %q: %w", name, err))
 		}
 	}
@@ -285,16 +285,49 @@ func AttachEgress(program *ebpf.Program, ifaceName string) error {
 	if program == nil {
 		return errors.New("attach: program is nil")
 	}
-	return attachOne(program, ifaceName, egressFilterName)
+	return attachOne(program, ifaceName, egressFilterName, netlink.HANDLE_MIN_INGRESS)
 }
 
-// attachOne attaches program to one interface's ingress hook under the
-// given tc filter name. It is the single internal choke point every
-// attach path in this package goes through (Attach's loop above,
-// AttachEgress above, and Watch's netlink-driven reconcile in watch.go),
-// so instrumenting it here with attachHook (hooks.go, Milestone 4)
-// observes every attach attempt regardless of caller.
-func attachOne(program *ebpf.Program, name, tcFilterName string) (err error) {
+// localEgressFilterName identifies usid_egress's own TC-BPF *egress*-hook
+// filter, as attached by AttachLocalEgress -- kept distinct from
+// egressFilterName (AttachEgress's ingress-hook filter on a tenant's
+// host-side veth) even though the two are never applied to the same
+// interface in practice, matching egressFilterName's own reasoning.
+const localEgressFilterName = "galactic_usid_egress_local"
+
+// AttachLocalEgress attaches program (usid_egress) directly to ifaceName's
+// own TC *egress* hook -- for a caller that already runs inside the netns
+// whose own egress it wants to intercept (internal/ingresssidecar's
+// per-VPC VRF interfaces), as opposed to AttachEgress's ingress-hook trick
+// for the CNI veth-pair case (attaching from the host side, where the
+// tenant's own egress arrives as that veth's ingress).
+//
+// Thin wrapper around the same attachOne/FilterReplace idempotency every
+// other attach path in this package already gets, just under
+// netlink.HANDLE_MIN_EGRESS and localEgressFilterName.
+func AttachLocalEgress(program *ebpf.Program, ifaceName string) error {
+	if program == nil {
+		return errors.New("attach: program is nil")
+	}
+	return attachOne(program, ifaceName, localEgressFilterName, netlink.HANDLE_MIN_EGRESS)
+}
+
+// DetachLocalEgress removes AttachLocalEgress's own TC-BPF egress filter
+// from ifaceName, if present -- AttachLocalEgress's counterpart, mirroring
+// Detach/detachOne's own idempotent "already gone is not an error" stance
+// (including ifaceName no longer existing on the host at all).
+func DetachLocalEgress(ifaceName string) error {
+	return detachOne(ifaceName, localEgressFilterName, netlink.HANDLE_MIN_EGRESS)
+}
+
+// attachOne attaches program to one interface's TC hook (parent -- either
+// netlink.HANDLE_MIN_INGRESS or netlink.HANDLE_MIN_EGRESS) under the given
+// tc filter name. It is the single internal choke point every attach path
+// in this package goes through (Attach's loop above, AttachEgress and
+// AttachLocalEgress above, and Watch's netlink-driven reconcile in
+// watch.go), so instrumenting it here with attachHook (hooks.go, Milestone
+// 4) observes every attach attempt regardless of caller.
+func attachOne(program *ebpf.Program, name, tcFilterName string, parent uint32) (err error) {
 	defer func() { attachHook(name, err) }()
 
 	link, err := netlink.LinkByName(name)
@@ -311,7 +344,7 @@ func attachOne(program *ebpf.Program, name, tcFilterName string) (err error) {
 	filter := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: link.Attrs().Index,
-			Parent:    netlink.HANDLE_MIN_INGRESS,
+			Parent:    parent,
 			Handle:    netlink.MakeHandle(0, 1),
 			Protocol:  unix.ETH_P_ALL,
 			Priority:  filterPriorityFn(),
@@ -321,7 +354,7 @@ func attachOne(program *ebpf.Program, name, tcFilterName string) (err error) {
 		DirectAction: true,
 	}
 	if err = netlink.FilterReplace(filter); err != nil {
-		err = fmt.Errorf("attach tc-bpf ingress filter: %w", err)
+		err = fmt.Errorf("attach tc-bpf filter: %w", err)
 		return err
 	}
 	return nil
@@ -340,20 +373,22 @@ func attachOne(program *ebpf.Program, name, tcFilterName string) (err error) {
 func Detach(ifaceNames []string) error {
 	var errs []error
 	for _, name := range ifaceNames {
-		if err := detachOne(name); err != nil {
+		if err := detachOne(name, filterName, netlink.HANDLE_MIN_INGRESS); err != nil {
 			errs = append(errs, fmt.Errorf("interface %q: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// detachOne removes this package's own tc filter from one interface's
-// ingress hook, if present. Like attachOne, it is the single internal
-// choke point every detach path in this package goes through (Detach's
-// loop below, called from Watch's netlink-driven reconcile), so
-// instrumenting it here with detachHook (hooks.go, Milestone 4) observes
-// every detach attempt regardless of caller.
-func detachOne(name string) (err error) {
+// detachOne removes one named tc filter (identified by tcFilterName) from
+// one interface's TC hook (parent), if present. Like attachOne, it is the
+// single internal choke point every detach path in this package goes
+// through (Detach's loop above, DetachLocalEgress, and Watch's
+// netlink-driven reconcile), so instrumenting it here with detachHook
+// (hooks.go, Milestone 4) observes every detach attempt regardless of
+// caller. Not an error for the interface to already lack the filter, or to
+// no longer exist on the host at all (netlink.LinkNotFoundError).
+func detachOne(name, tcFilterName string, parent uint32) (err error) {
 	defer func() { detachHook(name, err) }()
 
 	link, err := netlink.LinkByName(name)
@@ -367,18 +402,18 @@ func detachOne(name string) (err error) {
 		return err
 	}
 
-	filters, listErr := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
+	filters, listErr := netlink.FilterList(link, parent)
 	if listErr != nil {
 		err = fmt.Errorf("list filters: %w", listErr)
 		return err
 	}
 	for _, f := range filters {
 		bpfFilter, ok := f.(*netlink.BpfFilter)
-		if !ok || bpfFilter.Name != filterName {
+		if !ok || bpfFilter.Name != tcFilterName {
 			continue
 		}
 		if delErr := netlink.FilterDel(f); delErr != nil {
-			err = fmt.Errorf("delete tc-bpf ingress filter: %w", delErr)
+			err = fmt.Errorf("delete tc-bpf filter: %w", delErr)
 			return err
 		}
 	}

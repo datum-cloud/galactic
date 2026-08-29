@@ -382,7 +382,7 @@ func reconcile(program *ebpf.Program, current, next map[string]struct{}) map[str
 	}
 
 	for name := range next {
-		if err := attachOne(program, name, filterName); err != nil {
+		if err := attachOne(program, name, filterName, netlink.HANDLE_MIN_INGRESS); err != nil {
 			slog.Warn("attach: failed to (re)attach resolved interface, will retry on next re-evaluation",
 				"interface", name, "err", err)
 			delete(result, name)
