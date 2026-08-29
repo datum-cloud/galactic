@@ -17,6 +17,8 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 )
 
+const testTenantNamespace = "ns-tenant"
+
 func TestActiveVPCsFromEndpointSlices(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -26,7 +28,7 @@ func TestActiveVPCsFromEndpointSlices(t *testing.T) {
 	tenantSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "tenant-slice",
-			Namespace: "ns-tenant",
+			Namespace: testTenantNamespace,
 			Labels: map[string]string{
 				crdnames.LabelTenantID: "2-JL",
 			},
@@ -38,7 +40,7 @@ func TestActiveVPCsFromEndpointSlices(t *testing.T) {
 	malformedSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "malformed-slice",
-			Namespace: "ns-tenant",
+			Namespace: testTenantNamespace,
 			Labels: map[string]string{
 				crdnames.LabelTenantID: "malformed",
 			},
@@ -50,7 +52,7 @@ func TestActiveVPCsFromEndpointSlices(t *testing.T) {
 	untaggedSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "untagged-slice",
-			Namespace: "ns-tenant",
+			Namespace: testTenantNamespace,
 		},
 		AddressType: discoveryv1.AddressTypeIPv6,
 	}
@@ -69,7 +71,8 @@ func TestActiveVPCsFromEndpointSlices(t *testing.T) {
 		t.Errorf("activeVPCsFromEndpointSlices() = %v, want VPC %q present", got, "2")
 	}
 	if len(got) != 1 {
-		t.Errorf("activeVPCsFromEndpointSlices() = %v, want exactly one VPC (malformed/untagged slices must not contribute)", got)
+		t.Errorf("activeVPCsFromEndpointSlices() = %v, want exactly one VPC "+
+			"(malformed/untagged slices must not contribute)", got)
 	}
 }
 
