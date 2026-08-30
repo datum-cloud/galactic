@@ -152,10 +152,10 @@ func assertTornDown(
 // TestEnsureEgressDatapath_AttachesToVethPeerNotVRF is this fix's own exit
 // criterion: usid_egress must end up on a real interface's ingress hook
 // that actually sees this VRF's traffic, not the VRF device's own TC
-// egress hook -- confirmed live in us-central-1-staging-lab via packet
-// capture to never fire, for any tenant, however correctly vrf_table and
-// egress_route_table were populated (this file's own doc comment on
-// ensureEgressDatapath has the full account).
+// egress hook -- packet-capture confirmed that hook never fires, for any
+// tenant, however correctly vrf_table and egress_route_table were
+// populated (this file's own doc comment on ensureEgressDatapath has the
+// full account).
 func TestEnsureEgressDatapath_AttachesToVethPeerNotVRF(t *testing.T) {
 	requireRoot(t)
 	setUpTestPinDir(t)

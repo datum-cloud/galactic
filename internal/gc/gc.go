@@ -51,6 +51,10 @@ type CleanupResult struct {
 	// from OrphanedVRFsRemoved's kernel VRF *interfaces* above (Milestone
 	// 7.3).
 	EBPFVRFEntriesRemoved int
+	// EBPFVRFEntriesRegistered counts vrf_table entries SweepEBPFVRFTable
+	// (re-)registered for a live BGPVRFInstance CRD that had no
+	// corresponding vrf_table row -- see its repair-loop doc comment.
+	EBPFVRFEntriesRegistered int
 	// EBPFNPTv6EntriesRemoved counts stale eBPF uSID datapath nptv6_table
 	// map entries removed by SweepEBPFNPTv6Table.
 	EBPFNPTv6EntriesRemoved int
@@ -328,9 +332,10 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 //
 // SweepEBPFVRFTable already exempts that sidecar's own eBPF vrf_table
 // entries by their reserved uformat.BlockMax block (see that function's own
-// doc comment: "confirmed live in us-central-1-staging-lab, where vrf_table
-// sat permanently empty while ifindex_vrf_table... held the same entries").
-// This is the same exemption at the kernel-VRF-interface layer instead,
+// doc comment on the ingress sidecar's BlockMax exemption: without it,
+// every entry the sidecar registers is invisible to the CRD-built live set
+// and gets reaped as an orphan on the very next sweep). This is the same
+// exemption at the kernel-VRF-interface layer instead,
 // needed because CollectOrphanedVRFs runs inside galactic-router
 // (cmd/galactic-router), which — deliberately, per SweepEBPFVRFTable's own
 // doc comment on why that sweep runs inside galactic-cni instead — has
@@ -582,6 +587,12 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	}
 
 	live := make(map[usidmap.VRFKey]struct{}, len(vrfInstList.Items))
+	// liveCRDNames tracks, for every CRD-derived key above, the
+	// BGPVRFInstance name it came from -- the registration-repair step
+	// below needs the name back (to re-derive vrfTableID/egressKind via
+	// resolveVRFKernelState) but Reconcile only needs the key, so this
+	// stays a separate map rather than changing live's value type.
+	liveCRDNames := make(map[usidmap.VRFKey]string, len(vrfInstList.Items))
 	for _, inst := range vrfInstList.Items {
 		if inst.Spec.RouterRef == nil {
 			continue
@@ -615,8 +626,9 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 				"vrfInstance", inst.Name, "vrfID", inst.Spec.VRFID)
 			continue
 		}
-		argument := uint16(inst.Spec.VRFID)
-		live[usidmap.VRFKey{Block: block, Argument: argument}] = struct{}{}
+		key := usidmap.VRFKey{Block: block, Argument: uint16(inst.Spec.VRFID)}
+		live[key] = struct{}{}
+		liveCRDNames[key] = inst.Name
 	}
 
 	// internal/ingresssidecar registers its own vrf_table entries under
@@ -626,22 +638,64 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	// itself (ensureEgressDatapath/removeEgressDatapath), independent of
 	// any BGPVRFInstance CRD. Without this, every entry it ever registers
 	// is invisible to the CRD-built live set above and gets reaped as an
-	// orphan on this sweep's very next tick: confirmed live in
-	// us-central-1-staging-lab, where vrf_table sat permanently empty
-	// while ifindex_vrf_table (which this sweep never touches) held the
-	// same entries, silently blackholing that sidecar's own outbound
-	// connections to VPC backends. Preserve every entry in that block
-	// unconditionally, the same way an entry with a live CRD is preserved.
+	// orphan on this sweep's very next tick: with nothing preserving them,
+	// vrf_table would sit permanently empty for that sidecar's entries
+	// while ifindex_vrf_table (which this sweep never touches) kept
+	// holding the same entries, silently blackholing that sidecar's own
+	// outbound connections to VPC backends. Preserve every entry in that
+	// block unconditionally, the same way an entry with a live CRD is
+	// preserved.
 	existing, err := reg.VRF.List()
 	if err != nil {
 		slog.Error("GC: failed to list eBPF vrf_table for sweep", "err", err)
 		result.Errors++
 		return result
 	}
+	existingKeys := make(map[usidmap.VRFKey]struct{}, len(existing))
 	for _, e := range existing {
+		existingKeys[e.VRFKey] = struct{}{}
 		if e.Block == uformat.BlockMax {
 			live[e.VRFKey] = struct{}{}
 		}
+	}
+
+	// Repair vrf_table entries that a live BGPVRFInstance CRD expects but
+	// vrf_table does not currently have -- most notably attach.Load's own
+	// incompatible-map-schema reload (see its doc comment), which wipes
+	// every pinned map, including vrf_table, and leaves nothing behind for
+	// a *pre-existing* attachment to repopulate from: registerEBPFDatapath
+	// only ever runs once, at CNI ADD time, and nothing re-invokes it for
+	// an attachment that already succeeded. Reconcile above only ever
+	// deletes; this is vrf_table's only self-healing path for an entry
+	// that a live CRD says should exist but doesn't.
+	for key, instName := range liveCRDNames {
+		if _, ok := existingKeys[key]; ok {
+			continue // already present -- Reconcile above is what handles this one
+		}
+		vrfTableID, egressKind, ok, err := resolveVRFKernelState(nodeName, instName)
+		if err != nil {
+			slog.Error("GC: failed to resolve kernel VRF state while repairing eBPF vrf_table entry",
+				"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
+			result.Errors++
+			continue
+		}
+		if !ok {
+			// No matching kernel VRF interface exists right now -- e.g. the
+			// attachment's own teardown is in flight, or the CNI ADD that
+			// will create it hasn't run yet. Nothing to repopulate from;
+			// leave it missing for this tick.
+			continue
+		}
+		if err := reg.VRF.Register(key.Block, key.Argument, vrfTableID, egressKind); err != nil {
+			slog.Error("GC: failed to repair missing eBPF vrf_table entry",
+				"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
+			result.Errors++
+			continue
+		}
+		slog.Info("GC: repaired missing eBPF vrf_table entry",
+			"vrfInstance", instName, "block", key.Block, "argument", key.Argument,
+			"vrfTableID", vrfTableID, "egressKind", egressKind)
+		result.EBPFVRFEntriesRegistered++
 	}
 
 	removed, err := reg.VRF.Reconcile(live, cutoff)
@@ -655,6 +709,92 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	}
 
 	return result
+}
+
+// listVRFLinksFn/listAllLinksFn indirect the two netlink calls
+// resolveVRFKernelState needs, so tests can substitute fabricated
+// *netlink.Vrf/netlink.Link values -- plain structs needing no real kernel
+// VRF interface or CAP_NET_ADMIN -- the same way attach.go's
+// preflightCheckFn lets tests substitute a kernel-touching call it makes.
+var (
+	listVRFLinksFn = vrf.ListVRFLinks
+	listAllLinksFn = netlink.LinkList
+)
+
+// resolveVRFKernelState recovers the (Linux VRF routing table id, egress
+// kind) a live BGPVRFInstance named instName should register in vrf_table,
+// by matching it against a real, currently existing kernel VRF interface.
+// SweepEBPFVRFTable uses this to repair an entry vrf_table is missing for a
+// still-live CRD (see that function's own doc comment on the repair loop).
+//
+// instName alone doesn't carry vrfTableID or egressKind -- BGPVRFInstance's
+// Spec has neither field, only RouterRef/VRFID/route targets -- so this
+// goes the other way: list every real kernel VRF interface (an ordinary,
+// independently-persisted kernel object, unaffected by an eBPF map wipe),
+// and check whether re-deriving its own CRD name -- via
+// crdnames.BGPVRFInstanceName, the exact forward computation the CNI ADD
+// path used to name instName in the first place -- reproduces instName.
+// vpcKeys accepts both the current (nameSegment-encoded) and legacy (raw)
+// CRD name shapes, the same as CollectOrphanedVRFs already does when going
+// in the opposite direction (kernel VRF -> live VPC set).
+//
+// ok is false, not an error, when no matching kernel VRF interface exists
+// right now -- the ordinary case for a BGPVRFInstance whose attachment has
+// already been torn down (there is nothing left to repopulate an entry
+// from; Reconcile's own stale-entry sweep, not this function, is what
+// eventually removes its CRD).
+//
+// The egress kind is read off whichever interface is currently enslaved to
+// the matched VRF: a "tuntap" link (internal/cnitap's tap-mode attachment)
+// yields EgressKindTap, anything else (ordinarily a "veth" link) yields
+// EgressKindVeth -- the same veth/tap distinction registerEBPFDatapath's
+// own egressKindForInterfaceType makes from the CNI config's interface
+// type, just read back from the kernel instead of from that config, which
+// this call site does not have. A VRF with no enslaved interface at all
+// (a narrow, transient window) falls back to EgressKindVeth, vrf_table's
+// own zero value and by far the common case.
+func resolveVRFKernelState(nodeName, instName string) (vrfTableID uint32, egressKind uint32, ok bool, err error) {
+	links, err := listVRFLinksFn()
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("list kernel VRF interfaces: %w", err)
+	}
+
+	var match *netlink.Vrf
+	for _, link := range links {
+		vpc, vpcOK := parseVRFName(link.Name)
+		if !vpcOK {
+			continue
+		}
+		for _, key := range vpcKeys(vpc) {
+			if key+"-"+nodeName == instName {
+				match = link
+				break
+			}
+		}
+		if match != nil {
+			break
+		}
+	}
+	if match == nil {
+		return 0, 0, false, nil
+	}
+
+	kind := usidmap.EgressKindVeth
+	allLinks, err := listAllLinksFn()
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("list kernel interfaces: %w", err)
+	}
+	for _, l := range allLinks {
+		if l.Attrs().MasterIndex != match.Attrs().Index {
+			continue
+		}
+		if l.Type() == "tuntap" {
+			kind = usidmap.EgressKindTap
+		}
+		break
+	}
+
+	return match.Table, kind, true, nil
 }
 
 // SweepEBPFNPTv6Table registers/reconciles the eBPF uSID datapath's

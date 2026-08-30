@@ -173,9 +173,9 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string) (netlink.Link, e
 	// its own to anywhere.
 	//
 	// Routed via the peer's own link-local address, deliberately not a
-	// bare on-link route (LinkIndex alone, no Gw): confirmed live in
-	// us-central-1-staging-lab, an on-link default forces the kernel to
-	// resolve a neighbor for the packet's own final destination before
+	// bare on-link route (LinkIndex alone, no Gw): an on-link default
+	// forces the kernel to resolve a neighbor for the packet's own final
+	// destination before
 	// it ever reaches usid_egress's TC hook at all -- nothing answers
 	// that (there is no real host at an arbitrary destination this VRF's
 	// egress_route_table is about to rewrite), so the kernel gives up
@@ -262,9 +262,9 @@ func ensureNodeSourceAddress() error {
 // usid_egress's ifindex_vrf_table lookup needs a 1:1 ifindex<->VRF
 // mapping anyway, the same shape internal/cnibgp's own
 // registerEBPFDatapath relies on for a genuine tenant veth/tap attachment
-// -- but did not hold up: confirmed live in us-central-1-staging-lab via
-// packet capture, a Linux VRF master device's own TC egress hook never
-// actually fires for traffic routed through it, for any tenant, however
+// -- but did not hold up: packet capture confirmed that a Linux VRF
+// master device's own TC egress hook never actually fires for traffic
+// routed through it, for any tenant, however
 // correctly every map involved is populated. internal/cnibgp's own
 // attachUsidEgress never attaches to a VRF at all; it attaches to a real
 // tenant veth's *ingress* hook from the host side, because that is where
@@ -293,10 +293,10 @@ func ensureEgressDatapath(tableID uint32) error {
 	// only ever runs as a side effect of a real tenant CNI ADD landing on
 	// this node -- something a node running only this sidecar's synthetic
 	// attachments, with no real tenant CNI attachment at all, never gets.
-	// Confirmed live in us-central-1-staging-lab: an otherwise fully
-	// correct attachment (VRF, veth, ifindex_vrf_table, egress_route_table
-	// all resolving) silently produced no encapsulated traffic at all,
-	// traced to this exact gap. Non-fatal on failure, same as
+	// An otherwise fully correct attachment (VRF, veth, ifindex_vrf_table,
+	// egress_route_table all resolving) can therefore silently produce no
+	// encapsulated traffic at all, traced to this exact gap. Non-fatal on
+	// failure, same as
 	// internal/cnibgp's own call site and for the identical reason --
 	// ResolveNodeSourceAddress needs a converged underlay default route,
 	// which this pod can transiently lack right after this sidecar itself

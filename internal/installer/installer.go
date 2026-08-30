@@ -783,10 +783,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 				continue
 			}
 			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
-			if result.EBPFVRFEntriesRemoved > 0 || result.Errors > 0 {
-				slog.Info("eBPF vrf_table GC sweep complete",
-					"removed", result.EBPFVRFEntriesRemoved, "errors", result.Errors)
-			}
+			logEBPFVRFSweepResult(result)
 
 			// nptv6_table's own sweep: unlike vrf_table above, this is the
 			// map's *only* writer (see gc.SweepEBPFNPTv6Table's own doc
@@ -805,6 +802,20 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 		case iface := <-radvActors.failed:
 			radvActorFailed(radvActors, iface)
 		}
+	}
+}
+
+// logEBPFVRFSweepResult logs one gc.SweepEBPFVRFTable tick's result, if
+// there's anything worth logging -- split out of Run's own select loop
+// (rather than inlined there like every other ticker case) purely to keep
+// that branch out of Run's own cyclomatic complexity count, now that this
+// result carries a third field (EBPFVRFEntriesRegistered) alongside the
+// original two.
+func logEBPFVRFSweepResult(result gc.CleanupResult) {
+	if result.EBPFVRFEntriesRemoved > 0 || result.EBPFVRFEntriesRegistered > 0 || result.Errors > 0 {
+		slog.Info("eBPF vrf_table GC sweep complete",
+			"removed", result.EBPFVRFEntriesRemoved, "registered", result.EBPFVRFEntriesRegistered,
+			"errors", result.Errors)
 	}
 }
 
