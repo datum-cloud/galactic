@@ -207,6 +207,9 @@ func (r *Reconciler) gatherPeers(ctx context.Context, router *bgpv1alpha1.BGPRou
 		if peer.Spec.KeepaliveTime != nil {
 			dp.KeepaliveTime = peer.Spec.KeepaliveTime.Duration
 		}
+		if peer.Spec.UpdateSource != nil {
+			dp.UpdateSource = *peer.Spec.UpdateSource
+		}
 
 		// Resolve auth secret.
 		if peer.Spec.AuthSecretRef != nil {

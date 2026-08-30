@@ -65,6 +65,11 @@ type DesiredPeer struct {
 	HoldTime        time.Duration
 	KeepaliveTime   time.Duration
 	AuthPassword    string
+	// UpdateSource is the per-peer override of the TCP source address for this
+	// session, carried from BGPPeer.spec.updateSource. When empty, the
+	// runtime's process-wide default (GALACTIC_ROUTER_BGP_LOCAL_ADDRESS)
+	// applies instead.
+	UpdateSource string
 }
 
 // DesiredVRFInstance describes an L2VPN EVPN VRF to configure on the BGP router.

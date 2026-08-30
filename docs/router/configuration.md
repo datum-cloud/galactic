@@ -90,6 +90,13 @@ In practice this means every node running `galactic-router` needs a
 global-unicast IPv6 address on `lo` before startup, or an explicit
 `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`.
 
+This is the process-wide default, applied to every peer this instance
+configures. `BGPPeer.spec.updateSource` overrides it per peer — needed when
+a single node has to source different sessions from different addresses,
+e.g. most peers over the SRv6 loopback but one peer reached over the node's
+own eth0/bond0 link instead, because the SRv6 underlay doesn't route to that
+peer's site.
+
 **Type:** string
 **Default:** _(auto-detected from `lo`)_
 
