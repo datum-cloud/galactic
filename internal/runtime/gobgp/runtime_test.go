@@ -105,6 +105,70 @@ func TestApplyGlobal_ListenPortUnsetFallsBackToFactoryDefault(t *testing.T) {
 	}
 }
 
+// TestPeerNeedsApply guards the fix for a bug where applyPeers called
+// AddPeer/UpdatePeer for every desired peer on every Apply(), including
+// reconciles where nothing about the peer had changed. GoBGP's UpdatePeer
+// resets the BGP session unconditionally, so that made every peer flap
+// continuously under any watch-triggered reconcile storm (e.g. one caused by
+// the router's own BGPPeer status write) — no session ever stayed
+// Established. peerNeedsApply must say "skip" only when the peer's config is
+// truly unchanged and GoBGP still reports it as configured.
+func TestPeerNeedsApply(t *testing.T) {
+	const addr = "2607:ed40:1ff::1"
+	peer := model.DesiredPeer{
+		Name:       "to-worker",
+		PeerASN:    33438,
+		Address:    addr,
+		RemotePort: 1790,
+		HoldTime:   30,
+	}
+
+	tests := []struct {
+		name    string
+		applied map[string]model.DesiredPeer
+		current map[string]bool
+		peer    model.DesiredPeer
+		want    bool
+	}{
+		{
+			name:    "never applied before",
+			applied: map[string]model.DesiredPeer{},
+			current: map[string]bool{},
+			peer:    peer,
+			want:    true,
+		},
+		{
+			name:    "unchanged and still configured in GoBGP: skip",
+			applied: map[string]model.DesiredPeer{addr: peer},
+			current: map[string]bool{addr: true},
+			peer:    peer,
+			want:    false,
+		},
+		{
+			name:    "config changed since last apply",
+			applied: map[string]model.DesiredPeer{addr: peer},
+			current: map[string]bool{addr: true},
+			peer:    func() model.DesiredPeer { p := peer; p.HoldTime = 90; return p }(),
+			want:    true,
+		},
+		{
+			name:    "applied but silently dropped by GoBGP (e.g. unrelated GC churn)",
+			applied: map[string]model.DesiredPeer{addr: peer},
+			current: map[string]bool{},
+			peer:    peer,
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := peerNeedsApply(tt.applied, tt.current, tt.peer); got != tt.want {
+				t.Errorf("peerNeedsApply() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestApplyVRFDerivesRouteDistinguisher verifies applyVRF derives the RFC 4364
 // Type 1 route distinguisher as "routerID:vrfID" from the routerID parameter
 // and vrf.VRFID, rather than reading a RouteDistinguisher field off the model
