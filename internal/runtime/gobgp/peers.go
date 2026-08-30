@@ -57,7 +57,8 @@ func familyFromModel(af model.AddressFamily) *api.Family {
 }
 
 // peerFromDesired converts a DesiredPeer to a GoBGP api.Peer.
-// localAddress, if non-empty, is set as the TCP source address for the session.
+// localAddress, if non-empty, is the process-wide default TCP source address;
+// p.UpdateSource, if non-empty, overrides it for this peer specifically.
 // routeReflectorMode, when true, marks this peer as an iBGP route-reflector client.
 func peerFromDesired(p model.DesiredPeer, localAddress string, routeReflectorMode bool) *api.Peer {
 	peer := &api.Peer{
@@ -86,14 +87,21 @@ func peerFromDesired(p model.DesiredPeer, localAddress string, routeReflectorMod
 		peer.Conf.AuthPassword = p.AuthPassword
 	}
 
-	// LocalAddress pins the TCP source to the node's SRv6 loopback so the
-	// return path from the RR uses a routed prefix instead of the link address.
-	// RemotePort defaults to 1790 (the overlay BGP port) since port 179 is
-	// occupied by the underlay FRR bgpd on every node.
+	// LocalAddress pins the TCP source to the node's SRv6 loopback by default,
+	// so the return path from the RR uses a routed prefix instead of the link
+	// address. p.UpdateSource overrides this per peer (BGPPeer.spec.updateSource)
+	// for a session that needs to source from somewhere else instead — e.g. a
+	// peer reached over the node's own eth0/bond0 link rather than the SRv6
+	// underlay. RemotePort defaults to 1790 (the overlay BGP port) since port
+	// 179 is occupied by the underlay FRR bgpd on every node.
+	peerLocalAddress := localAddress
+	if p.UpdateSource != "" {
+		peerLocalAddress = p.UpdateSource
+	}
 	peer.Transport = &api.Transport{
 		RemotePort:   uint32(p.RemotePort),
 		PassiveMode:  false,
-		LocalAddress: localAddress,
+		LocalAddress: peerLocalAddress,
 	}
 
 	if routeReflectorMode {

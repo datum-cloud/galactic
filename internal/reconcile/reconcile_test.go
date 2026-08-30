@@ -20,9 +20,12 @@ import (
 const (
 	testLocator   = "2001:db8:ff01::/48"
 	testLegacySID = "2001:db8::1234:5678"
+	testNamespace = "default"
 )
 
 func ptrInt32(v int32) *int32 { return &v }
+
+func ptrString(v string) *string { return &v }
 
 func ptrFunction(fn bgpv1alpha1.SRv6Function) *bgpv1alpha1.SRv6Function { return &fn }
 
@@ -104,7 +107,7 @@ func TestBuildDesiredRouter_NodeFilter(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			router := &bgpv1alpha1.BGPRouter{
-				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: testNamespace},
 				Spec: bgpv1alpha1.BGPRouterSpec{
 					TargetRef: bgpv1alpha1.TargetRef{Name: tc.targetNode},
 				},
@@ -164,7 +167,7 @@ func TestBuildDesiredRouter_ListenPort(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			router := &bgpv1alpha1.BGPRouter{
-				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: testNamespace},
 				Spec: bgpv1alpha1.BGPRouterSpec{
 					TargetRef:  bgpv1alpha1.TargetRef{Name: thisNode},
 					ListenPort: tc.listenPort,
@@ -202,6 +205,85 @@ func TestBuildDesiredRouter_ListenPort(t *testing.T) {
 				}
 			case got.ListenPort == nil || *got.ListenPort != *tc.listenPort:
 				t.Errorf("DesiredRouter.ListenPort = %v, want %v", got.ListenPort, *tc.listenPort)
+			}
+		})
+	}
+}
+
+// TestBuildDesiredRouter_PeerUpdateSource verifies BGPPeer.spec.updateSource
+// is carried through to DesiredPeer.UpdateSource, including the unset (nil)
+// case -- this is the field the runtime treats as a per-peer override of its
+// process-wide default local address (see
+// gobgp.peerFromDesired/TestPeerFromDesired_UpdateSourceOverridesLocalAddress).
+// Regression test for it being silently dropped: BuildDesiredRouter's peer
+// loop mapped every other BGPPeerSpec field into DesiredPeer but never read
+// updateSource at all, so a peer sourced from anywhere but the process
+// default could never actually source from there.
+func TestBuildDesiredRouter_PeerUpdateSource(t *testing.T) {
+	const thisNode = "node-a"
+
+	tests := []struct {
+		name         string
+		updateSource *string
+		want         string
+	}{
+		{name: "unset stays empty", updateSource: nil, want: ""},
+		{name: "explicit value carries through", updateSource: ptrString("2607:f740:100::635"), want: "2607:f740:100::635"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &bgpv1alpha1.BGPRouter{
+				ObjectMeta: metav1.ObjectMeta{Name: "r1", Namespace: testNamespace},
+				Spec: bgpv1alpha1.BGPRouterSpec{
+					TargetRef: bgpv1alpha1.TargetRef{Name: thisNode},
+				},
+			}
+			peer := &bgpv1alpha1.BGPPeer{
+				ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: testNamespace},
+				Spec: bgpv1alpha1.BGPPeerSpec{
+					RouterTarget: bgpv1alpha1.RouterTarget{
+						RouterRef: &bgpv1alpha1.RouterRef{Name: "r1"},
+					},
+					Address: "2001:db8:ff01::1",
+					PeerASN: 65000,
+					AddressFamilies: []bgpv1alpha1.AddressFamily{
+						{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+					},
+					UpdateSource: tc.updateSource,
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(newTestScheme(t)).
+				WithObjects(peer).
+				WithIndex(&bgpv1alpha1.BGPAdvertisement{}, routerRefIndexer, func(obj client.Object) []string {
+					adv := obj.(*bgpv1alpha1.BGPAdvertisement)
+					return []string{adv.Spec.RouterRef.Name}
+				}).
+				WithIndex(&bgpv1alpha1.BGPVRFInstance{}, routerRefIndexer, func(obj client.Object) []string {
+					vrf := obj.(*bgpv1alpha1.BGPVRFInstance)
+					if vrf.Spec.RouterRef == nil {
+						return nil
+					}
+					return []string{vrf.Spec.RouterRef.Name}
+				}).
+				Build()
+
+			r := New(fakeClient, thisNode, "2001:db8::1")
+
+			got, err := r.BuildDesiredRouter(context.Background(), router)
+			if err != nil {
+				t.Fatalf("BuildDesiredRouter() error = %v, want nil", err)
+			}
+			if got == nil {
+				t.Fatal("BuildDesiredRouter() = nil, want a non-nil DesiredRouter")
+			}
+			if len(got.Peers) != 1 {
+				t.Fatalf("DesiredRouter.Peers = %+v, want exactly 1 peer", got.Peers)
+			}
+			if got.Peers[0].UpdateSource != tc.want {
+				t.Errorf("DesiredPeer.UpdateSource = %q, want %q", got.Peers[0].UpdateSource, tc.want)
 			}
 		})
 	}
