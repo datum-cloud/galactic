@@ -95,7 +95,7 @@ func TestResourceTrackerCleanup_NeverUnregistersEBPFEntry(t *testing.T) {
 // BGPVRFInstance case, so the two don't regress into sharing the same
 // on/off switch.
 func TestResourceTrackerCleanup_DeletesOwnAdvertisementOnly(t *testing.T) {
-	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment, testNodeName)
 	existing := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{Name: advName, Namespace: testNamespace},
 	}

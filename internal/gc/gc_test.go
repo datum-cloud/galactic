@@ -307,7 +307,7 @@ func TestVRFNameJoinsCRDNames(t *testing.T) {
 		if !ok {
 			t.Fatalf("vpcFromVRFName(%q) did not match", intf.GenerateInterfaceNameVRF(vpc))
 		}
-		advVPC := vpcFromName(crdnames.BGPAdvertisementName(vpc, "2Bc"))
+		advVPC := vpcFromName(crdnames.BGPAdvertisementName(vpc, "2Bc", "dfw-worker"))
 		if got := crdnames.VPCSegment(parsed); got != advVPC {
 			t.Errorf("kernel VRF for VPC %q resolves to %q, but its BGPAdvertisements are named after %q", vpc, got, advVPC)
 		}

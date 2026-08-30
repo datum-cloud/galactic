@@ -500,7 +500,7 @@ func publishBGPState(
 
 		adv := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      crdnames.BGPAdvertisementName(cfg.vpc, cfg.vpcAttachment),
+				Name:      crdnames.BGPAdvertisementName(cfg.vpc, cfg.vpcAttachment, nodeName),
 				Namespace: namespace,
 			},
 		}

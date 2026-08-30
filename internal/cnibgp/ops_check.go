@@ -78,7 +78,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	}
 
 	adv := &bgpv1alpha1.BGPAdvertisement{}
-	advName := crdnames.BGPAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment)
+	advName := crdnames.BGPAdvertisementName(pluginConf.VPC, pluginConf.VPCAttachment, cniConfig.NodeName)
 	if err := k8s.Get(ctx, client.ObjectKey{Name: advName, Namespace: pluginConf.Namespace}, adv); err != nil {
 		errs = append(errs, fmt.Errorf("BGPAdvertisement %s: %w", advName, err))
 	}
