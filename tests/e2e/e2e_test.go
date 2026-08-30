@@ -366,8 +366,13 @@ func testChainedGalacticBGP(t *testing.T, podName string, tapResult map[string]a
 	t.Helper()
 
 	const vpc, vpcAttachment = "1", "1"
-	vrfCRDName := vpc + "-" + nodeName()    // BGPVRFInstance keyed by (vpc, node)
-	advCRDName := vpc + "-" + vpcAttachment // BGPAdvertisement keyed by (vpc, vpcAttachment)
+	vrfCRDName := vpc + "-" + nodeName() // BGPVRFInstance keyed by (vpc, node)
+	// BGPAdvertisement keyed by (vpc, vpcAttachment, node) -- see
+	// crdnames.BGPAdvertisementName's own doc comment for why node is part
+	// of this key: two nodes attaching to the same VPCAttachment (e.g. a
+	// multi-replica Deployment) must each get their own BGPAdvertisement,
+	// not race to overwrite one shared object.
+	advCRDName := vpc + "-" + vpcAttachment + "-" + nodeName()
 	t.Cleanup(func() {
 		//nolint:errcheck // best-effort cleanup, mirrors deletePod
 		kubectl(context.Background(), "delete", "bgpvrfinstance", vrfCRDName, "--ignore-not-found")
