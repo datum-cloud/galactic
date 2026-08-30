@@ -102,6 +102,15 @@ type GoBGPRuntime struct {
 	// Established for status reporting, this one records the current state
 	// of every peer regardless of what it is, for transition logging.
 	lastPeerState map[string]model.BGPPeerState
+	// appliedPeers tracks the last-applied DesiredPeer per address so
+	// applyPeers can skip re-adding/updating a peer whose config hasn't
+	// actually changed. Without this, applyPeers called AddPeer/UpdatePeer
+	// for every desired peer on every Apply() — including reconciles where
+	// nothing changed — and GoBGP's UpdatePeer resets the session
+	// unconditionally, so a peer could never stay Established: any
+	// watch-triggered reconcile (including one caused by this router's own
+	// BGPPeer status write) tore every session back down before it converged.
+	appliedPeers map[string]model.DesiredPeer
 	// wg tracks the server.Start and watchEVPNRIB goroutines so Stop can block
 	// until both have actually exited instead of merely cancelling srvCtx and
 	// returning. GoBGP keeps some path-selection state (table.SelectionOptions,
@@ -133,6 +142,7 @@ func NewRuntimeFactory(listenPort int32, reflector bool, localAddress string) ru
 			localAddress:          localAddress,
 			establishedAt:         make(map[string]time.Time),
 			lastPeerState:         make(map[string]model.BGPPeerState),
+			appliedPeers:          make(map[string]model.DesiredPeer),
 			appliedPolicies:       make(map[string]model.BGPPolicyDirection),
 			appliedVRFs:           make(map[string]uint32),
 			appliedVRFImportRTs:   make(map[string][]string),
@@ -259,6 +269,10 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 	}
 
 	for _, p := range peers {
+		if !peerNeedsApply(r.appliedPeers, currentPeers, p) {
+			continue
+		}
+
 		peer := peerFromDesired(p, r.localAddress, r.reflector)
 		addErr := b.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
 		if addErr != nil {
@@ -270,14 +284,29 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 				return fmt.Errorf("add peer %s: %w", p.Address, addErr)
 			}
 		}
+		r.appliedPeers[p.Address] = p
 	}
 
 	for addr := range currentPeers {
 		if _, ok := desiredPeers[addr]; !ok {
 			_ = b.DeletePeer(ctx, &api.DeletePeerRequest{Address: addr})
+			delete(r.appliedPeers, addr)
 		}
 	}
 	return nil
+}
+
+// peerNeedsApply reports whether p must be (re-)pushed to GoBGP via
+// AddPeer/UpdatePeer: either it was never applied, its desired config
+// changed since the last apply, or GoBGP no longer reports it as configured
+// (e.g. silently dropped by an unrelated churn elsewhere, such as a GC cycle
+// recreating the BGPVRFInstance/BGPAdvertisement CRs backing it). Any other
+// case is a true no-op — skipping it matters because AddPeer/UpdatePeer
+// reset the BGP session unconditionally, even when the pushed config is
+// identical to what's already running.
+func peerNeedsApply(applied map[string]model.DesiredPeer, current map[string]bool, p model.DesiredPeer) bool {
+	last, ok := applied[p.Address]
+	return !ok || !current[p.Address] || !reflect.DeepEqual(last, p)
 }
 
 // applyVRFs configures every desired VRF instance and removes stale ones. A
