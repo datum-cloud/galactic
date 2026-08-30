@@ -411,6 +411,17 @@ struct ifindex_vrf_value {
 	__u16 argument;
 };
 
+// struct mark_vrf_value is mark_vrf_table's value: the same (Block,
+// Argument) shape as struct ifindex_vrf_value above, keyed by skb->mark
+// instead of skb->ifindex. usid_egress consults mark_vrf_table only as a
+// fallback when ifindex_vrf_table misses -- see mark_vrf_table's own
+// comment below for why a single ifindex can't disambiguate this case the
+// way it does for an ordinary per-attachment veth/tap.
+struct mark_vrf_value {
+	__u64 block;
+	__u16 argument;
+};
+
 // struct nptv6_value is nptv6_table's value: one VRF's RFC 6296 mapping,
 // mirroring internal/plumbing/nptv6.Mapping/Adjustment on the control-plane
 // side -- see that package's doc comment for the checksum-neutral math this
@@ -691,6 +702,11 @@ enum drop_reason {
 	DROP_REASON_TRACE_ETH_BOUNDS_FAILED = 26,
 	DROP_REASON_TRACE_ETHERTYPE_MISMATCH = 27,
 	DROP_REASON_TRACE_IFINDEX_HIT = 28,
+	// mark_vrf_table fallback, only reached once ifindex_vrf_table has
+	// already missed (a shared trunk interface, not an ordinary
+	// per-attachment veth/tap -- see mark_vrf_table's own comment).
+	DROP_REASON_TRACE_MARK_MISS = 29,
+	DROP_REASON_TRACE_MARK_HIT = 30,
 	__DROP_REASON_MAX,
 };
 
@@ -760,6 +776,21 @@ struct {
 	__type(key, __u32); // ifindex
 	__type(value, struct ifindex_vrf_value);
 } ifindex_vrf_table SEC(".maps");
+
+// mark_vrf_table: the SO_MARK/shared-trunk analog of ifindex_vrf_table
+// above. usid_egress consults this only when ifindex_vrf_table misses --
+// i.e. only for traffic arriving on a shared trunk interface (one ifindex
+// serving many VPCs, so ifindex alone can't disambiguate them), never for
+// an ordinary tenant veth/tap, which always has its own ifindex_vrf_table
+// entry and never reaches this fallback. Sized like vrf_table (one row per
+// VPC a node's trunk(s) serve), not like ifindex_vrf_table (one row per
+// attachment).
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192);
+	__type(key, __u32); // skb->mark
+	__type(value, struct mark_vrf_value);
+} mark_vrf_table SEC(".maps");
 
 // nptv6_table: one row per VRF with NPTv6 configured, keyed identically to
 // vrf_table (block<<12|argument) -- both usid_ingress (which already has
@@ -1530,13 +1561,35 @@ int usid_egress(struct __sk_buff *skb)
 	__u32 ifindex = skb->ifindex;
 	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
 
-	if (!iv) {
-		count_drop(DROP_REASON_TRACE_IFINDEX_MISS);
-		return TC_ACT_UNSPEC; // no attachment registered on this ifindex at all
-	}
-	count_drop(DROP_REASON_TRACE_IFINDEX_HIT);
+	__u64 block;
+	__u16 argument;
 
-	__u64 vrf_key = (iv->block << 12) | iv->argument;
+	if (iv) {
+		count_drop(DROP_REASON_TRACE_IFINDEX_HIT);
+		block = iv->block;
+		argument = iv->argument;
+	} else {
+		count_drop(DROP_REASON_TRACE_IFINDEX_MISS);
+
+		// Fallback path: only reached for traffic on an interface with no
+		// ifindex_vrf_table entry at all -- i.e. a shared trunk, whose
+		// peer ifindex is deliberately never registered into
+		// ifindex_vrf_table (mark_vrf_table's own comment above). An
+		// ordinary tenant veth/tap always has an ifindex_vrf_table entry
+		// and never reaches this branch.
+		__u32 mark = skb->mark;
+		struct mark_vrf_value *mv = bpf_map_lookup_elem(&mark_vrf_table, &mark);
+
+		if (!mv) {
+			count_drop(DROP_REASON_TRACE_MARK_MISS);
+			return TC_ACT_UNSPEC; // no attachment registered on this ifindex or mark
+		}
+		count_drop(DROP_REASON_TRACE_MARK_HIT);
+		block = mv->block;
+		argument = mv->argument;
+	}
+
+	__u64 vrf_key = (block << 12) | argument;
 
 	__u8 route_family;
 	__u8 dst_addr[16];
@@ -1559,7 +1612,7 @@ int usid_egress(struct __sk_buff *skb)
 
 			if ((void *) (ports + 1) <= data_end) {
 				struct vip_xlat_key vkey = {
-					.block = iv->block, .argument = iv->argument,
+					.block = block, .argument = argument,
 					.proto = ip6->nexthdr, .port = ports->source,
 					.direction = USID_VIP_XLAT_DIR_EGRESS,
 				};
