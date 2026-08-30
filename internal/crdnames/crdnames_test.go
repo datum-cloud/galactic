@@ -47,6 +47,7 @@ const (
 	testVPCBase62        = "0000000jU"
 	testAttachment       = "def"
 	testAttachmentBase62 = "00G"
+	testNodeName         = "dfw-worker"
 
 	// testTenantID and testTenantIDBase62 are the already-joined
 	// (vpc, attachment) identifiers for the pairs above -- shared across
@@ -59,7 +60,7 @@ const (
 func TestBGPVRFInstanceName(t *testing.T) {
 	tests := []struct{ vpc, nodeName, want string }{
 		{testVPC, "worker-1", "98de-worker-1"},
-		{testVPCBase62, "dfw-worker", "4d2-dfw-worker"},
+		{testVPCBase62, testNodeName, "4d2-" + testNodeName},
 	}
 	for _, tt := range tests {
 		got := BGPVRFInstanceName(tt.vpc, tt.nodeName)
@@ -74,7 +75,7 @@ func TestBGPVRFInstanceName(t *testing.T) {
 // the identical BGPVRFInstance name — the whole point of keying this by
 // (vpc, node) instead of (vpc, vpcAttachment).
 func TestBGPVRFInstanceNameSharedAcrossAttachments(t *testing.T) {
-	const vpc, nodeName = testVPC, "dfw-worker"
+	const vpc, nodeName = testVPC, testNodeName
 	first := BGPVRFInstanceName(vpc, nodeName)
 	second := BGPVRFInstanceName(vpc, nodeName)
 	if first != second {
@@ -86,7 +87,7 @@ func TestBGPVRFInstanceNameSharedAcrossAttachments(t *testing.T) {
 func TestBGPAdvertisementName(t *testing.T) {
 	tests := []struct{ vpc, attachment, nodeName, want string }{
 		{testVPC, testAttachment, "worker-1", "98de-c6a7-worker-1"},
-		{testVPCBase62, testAttachmentBase62, "dfw-worker", "4d2-2a-dfw-worker"},
+		{testVPCBase62, testAttachmentBase62, testNodeName, "4d2-2a-" + testNodeName},
 	}
 	for _, tt := range tests {
 		got := BGPAdvertisementName(tt.vpc, tt.attachment, tt.nodeName)
@@ -246,7 +247,7 @@ func TestCRDNamesAreValidObjectNames(t *testing.T) {
 	// values that produce an uppercase character at all.
 	vpcs := []string{"1dLaEmCAp", testVPCBase62, "A", "zZ", "ZZZZZZZZZ", "10"}
 	attachments := []string{"A", "00G", "ZZZ", "20"}
-	nodes := []string{"dfw-worker", "iad-worker-control-plane"}
+	nodes := []string{testNodeName, "iad-worker-control-plane"}
 
 	for _, vpc := range vpcs {
 		for _, node := range nodes {

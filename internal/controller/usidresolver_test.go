@@ -174,7 +174,10 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 	}
 
 	advA := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: crdnames.BGPAdvertisementName(vpcA, "attach-a", "node-a")},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      crdnames.BGPAdvertisementName(vpcA, "attach-a", "node-a"),
+		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: routerA.Name},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
@@ -184,7 +187,10 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 		},
 	}
 	advB := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: crdnames.BGPAdvertisementName(vpcB, "attach-b", "node-b")},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      crdnames.BGPAdvertisementName(vpcB, "attach-b", "node-b"),
+		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: routerB.Name},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
