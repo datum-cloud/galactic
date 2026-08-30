@@ -159,16 +159,16 @@ func BGPVRFInstanceName(vpc, nodeName string) string {
 // object: each write clobbered the previous node's RouterRef/prefixes
 // wholesale, so only the last writer's node was ever actually advertised —
 // every other node's own attachment silently vanished from BGP the moment
-// a second node's ADD ran. Found live in us-central-1-staging-lab: a
-// second node's attachment to a VPC that already had one elsewhere
-// overwrote the first's BGPAdvertisement, and from that point on BGP
-// advertised only the second node's SID for both — traffic destined for
-// the first node's own local pod got redirected to the second node's own
-// uSID SID instead of ever being delivered locally, and the second node's
-// own egress_route_table registration for its "own" prefix then collided
-// with itself for the same underlying reason (two attachments, one shared
-// key, one winner). This is also why VRF-level address overlap across
-// nodes must be tolerated, not prevented: two nodes are allowed to each
+// a second node's ADD ran: a second node's attachment to a VPC that already
+// had one elsewhere would overwrite the first's BGPAdvertisement, and from
+// that point on BGP would advertise only the second node's SID for both —
+// traffic destined for the first node's own local pod would get redirected
+// to the second node's own uSID SID instead of ever being delivered
+// locally, and the second node's own egress_route_table registration for
+// its "own" prefix would then collide with itself for the same underlying
+// reason (two attachments, one shared key, one winner). This is also why
+// VRF-level address overlap across nodes must be tolerated, not prevented:
+// two nodes are allowed to each
 // have their own local traffic to/from the same VPC, and neither one's
 // BGPAdvertisement is allowed to silently displace the other's.
 //

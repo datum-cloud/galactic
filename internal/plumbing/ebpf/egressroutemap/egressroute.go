@@ -22,10 +22,9 @@ import (
 // neighborResolveTimeout/neighborResolvePollInterval bound how long
 // resolveNeighbor will wait for a solicited neighbor entry to resolve --
 // see that function's own doc comment for why an active solicit is
-// needed at all. Real ND round-trips on the fabric links this runs
-// against are sub-100ms (confirmed live in us-central-1-staging-lab);
-// this budget is generous headroom above that, not an expected steady-
-// state wait.
+// needed at all. Real ND round-trips on a healthy fabric link are
+// sub-100ms; this budget is generous headroom above that, not an
+// expected steady-state wait.
 const (
 	neighborResolveTimeout      = 2 * time.Second
 	neighborResolvePollInterval = 100 * time.Millisecond
@@ -184,11 +183,10 @@ func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, e
 // A cache read alone is not enough: a brand-new pod netns (or any link
 // that has simply never sent traffic toward nextHop) starts with an
 // empty neighbor cache, and installing an SRv6 egress route generates no
-// traffic of its own that would populate it. Confirmed live in
-// us-central-1-staging-lab: a freshly started gateway pod's egress route
-// for a same-node SID next-hop failed to resolve for its entire uptime
-// -- restarts included -- purely because nothing ever asked the kernel
-// to actually solicit it; a single manual ping resolved it instantly. See
+// traffic of its own that would populate it -- a same-node SID next-hop's
+// egress route can otherwise fail to resolve for a gateway pod's entire
+// uptime, restarts included, purely because nothing ever asks the kernel
+// to actually solicit it; a single manual ping resolves it instantly. See
 // solicitNeighbor's own doc comment for how the solicit itself is done.
 func resolveNeighbor(linkIndex int, nextHop net.IP) (net.HardwareAddr, error) {
 	if mac, err := lookupNeighbor(linkIndex, nextHop); err != nil {

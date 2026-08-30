@@ -171,10 +171,10 @@ func setUpVethPairNoFarSide(t *testing.T, nearIface, nearAddr, farIface string) 
 	return nearNS, nearLinkIndex
 }
 
-// TestResolveNeighbor_ActivelySolicitsColdCache reproduces the exact
-// failure confirmed live in us-central-1-staging-lab: a link with a real,
-// reachable peer whose neighbor cache is empty because nothing has ever
-// sent traffic toward it. The pre-fix implementation (a bare
+// TestResolveNeighbor_ActivelySolicitsColdCache reproduces the failure
+// mode this package exists to fix: a link with a real, reachable peer
+// whose neighbor cache is empty because nothing has ever sent traffic
+// toward it. The pre-fix implementation (a bare
 // netlink.NeighList read) fails this every time; so, empirically, does an
 // administrative netlink.NeighSet(NUD_NONE, NTF_USE) solicit with no real
 // packet behind it (see solicitNeighbor's own doc comment) -- only

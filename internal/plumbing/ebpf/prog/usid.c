@@ -662,9 +662,9 @@ enum drop_reason {
 	// is a real registration miss or a redirect failure) but the
 	// redirect to the resolved fabric-uplink interface failed.
 	DROP_REASON_PUBLIC_UPLINK_REDIRECT_FAILED = 15,
-	// TEMPORARY diagnostic checkpoints for the live us-central-1-staging-lab
-	// bpf_redirect investigation -- not counted drops, just markers of how
-	// far usid_egress's egress-routing extension got. Remove once resolved.
+	// TEMPORARY diagnostic checkpoints for an ongoing bpf_redirect
+	// investigation -- not counted drops, just markers of how far
+	// usid_egress's egress-routing extension got. Remove once resolved.
 	DROP_REASON_TRACE_MULTICAST_LL_BAIL = 16,
 	DROP_REASON_TRACE_MISS_VRF = 17,
 	DROP_REASON_TRACE_MISS_ROUTE = 18,

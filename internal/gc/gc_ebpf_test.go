@@ -158,8 +158,8 @@ func TestSweepEBPFVRFTable_RemovesStaleKeepsLive(t *testing.T) {
 }
 
 // TestSweepEBPFVRFTable_PreservesIngressSidecarReservedBlock reproduces the
-// bug confirmed live in us-central-1-staging-lab: internal/ingresssidecar
-// registers its own vrf_table entries under uformat.BlockMax, a block
+// bug this exemption fixes: internal/ingresssidecar registers its own
+// vrf_table entries under uformat.BlockMax, a block
 // deliberately reserved so it never collides with a real BGPRouter locator,
 // with no BGPVRFInstance CRD behind it at all -- that sidecar owns their
 // lifecycle itself. Before the fix, every such entry was invisible to this
