@@ -84,15 +84,32 @@ func TestBGPVRFInstanceNameSharedAcrossAttachments(t *testing.T) {
 }
 
 func TestBGPAdvertisementName(t *testing.T) {
-	tests := []struct{ vpc, attachment, want string }{
-		{testVPC, testAttachment, "98de-c6a7"},
-		{testVPCBase62, testAttachmentBase62, "4d2-2a"},
+	tests := []struct{ vpc, attachment, nodeName, want string }{
+		{testVPC, testAttachment, "worker-1", "98de-c6a7-worker-1"},
+		{testVPCBase62, testAttachmentBase62, "dfw-worker", "4d2-2a-dfw-worker"},
 	}
 	for _, tt := range tests {
-		got := BGPAdvertisementName(tt.vpc, tt.attachment)
+		got := BGPAdvertisementName(tt.vpc, tt.attachment, tt.nodeName)
 		if got != tt.want {
-			t.Errorf("BGPAdvertisementName(%q, %q) = %q, want %q", tt.vpc, tt.attachment, got, tt.want)
+			t.Errorf("BGPAdvertisementName(%q, %q, %q) = %q, want %q", tt.vpc, tt.attachment, tt.nodeName, got, tt.want)
 		}
+	}
+}
+
+// TestBGPAdvertisementNameDistinguishesNodes verifies that the same
+// (vpc, vpcAttachment) pair on two different nodes produces two different
+// BGPAdvertisement names -- the whole point of adding node to this key: a
+// multi-replica Deployment scheduled across nodes shares one VPCAttachment
+// identity, and each replica's own node must get its own BGPAdvertisement
+// rather than the two clobbering each other (see BGPAdvertisementName's own
+// doc comment for the bug this fixes).
+func TestBGPAdvertisementNameDistinguishesNodes(t *testing.T) {
+	const vpc, attachment = testVPC, testAttachment
+	first := BGPAdvertisementName(vpc, attachment, "worker-a")
+	second := BGPAdvertisementName(vpc, attachment, "worker-b")
+	if first == second {
+		t.Errorf("BGPAdvertisementName(%q, %q, ...) produced the same name %q for two different nodes",
+			vpc, attachment, first)
 	}
 }
 
@@ -118,8 +135,8 @@ func TestTenantIdentifier(t *testing.T) {
 // unencoded — see its own doc comment for why a plain string split
 // recovering the original vpc depends on that.
 func TestTenantIdentifierDoesNotMatchBGPAdvertisementName(t *testing.T) {
-	const vpc, attachment = testVPC, testAttachment
-	if got, other := TenantIdentifier(vpc, attachment), BGPAdvertisementName(vpc, attachment); got == other {
+	const vpc, attachment, nodeName = testVPC, testAttachment, "worker-1"
+	if got, other := TenantIdentifier(vpc, attachment), BGPAdvertisementName(vpc, attachment, nodeName); got == other {
 		t.Errorf("TenantIdentifier(%q, %q) = %q unexpectedly matches BGPAdvertisementName() -- "+
 			"if nameSegment's encoding changed to make these equal again, TenantIdentifier's "+
 			"raw-value recoverability guarantee needs re-verifying, not just this test updating",
@@ -236,7 +253,9 @@ func TestCRDNamesAreValidObjectNames(t *testing.T) {
 			assertValidObjectName(t, "BGPVRFInstanceName", BGPVRFInstanceName(vpc, node))
 		}
 		for _, att := range attachments {
-			assertValidObjectName(t, "BGPAdvertisementName", BGPAdvertisementName(vpc, att))
+			for _, node := range nodes {
+				assertValidObjectName(t, "BGPAdvertisementName", BGPAdvertisementName(vpc, att, node))
+			}
 		}
 	}
 }
@@ -271,7 +290,7 @@ func TestNameSegmentDistinguishesCase(t *testing.T) {
 // identically — including when the node name itself contains '-'.
 func TestVPCSegmentSharedByBothNames(t *testing.T) {
 	const vpc, att, node = "1dLaEmCAp", "2Bc", "dfw-worker-control"
-	advVPC, _, _ := strings.Cut(BGPAdvertisementName(vpc, att), "-")
+	advVPC, _, _ := strings.Cut(BGPAdvertisementName(vpc, att, node), "-")
 	vrfVPC, _, _ := strings.Cut(BGPVRFInstanceName(vpc, node), "-")
 	if advVPC != vrfVPC || advVPC != VPCSegment(vpc) {
 		t.Errorf("VPC segments disagree: advertisement %q, VRF instance %q, VPCSegment %q", advVPC, vrfVPC, VPCSegment(vpc))

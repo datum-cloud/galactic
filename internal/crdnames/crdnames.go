@@ -136,24 +136,47 @@ func VPCSegment(vpc string) string {
 }
 
 // BGPVRFInstanceName returns the deterministic name for a BGPVRFInstance.
-// Unlike BGPAdvertisementName, this is keyed by (vpc, node) rather than
-// (vpc, vpcAttachment): the underlying kernel VRF is shared by every
+// This is keyed by (vpc, node): the underlying kernel VRF is shared by every
 // attachment (pod or VM) on this VPC on this node (see internal/plumbing/vrf
 // and internal/plumbing/intf's GenerateInterfaceNameVRF), so every attachment
 // on the same VPC/node must resolve to the same BGPVRFInstance rather than
-// creating its own. This is the one CRD name that needs node identity at
-// all — the kernel side never does, since interface names only need to be
-// unique within one host's own namespace.
+// creating its own.
 func BGPVRFInstanceName(vpc, nodeName string) string {
 	return fmt.Sprintf("%s-%s", VPCSegment(vpc), nodeName)
 }
 
 // BGPAdvertisementName returns the deterministic name for a
-// BGPAdvertisement. Each VPCAttachment is unique per interface across the
-// cluster, so the (vpc, vpcAttachment) pair is a reliable 1:1 key. Both segments
-// are encoded by nameSegment, the VPC one identically to BGPVRFInstanceName.
-func BGPAdvertisementName(vpc, vpcAttachment string) string {
-	return fmt.Sprintf("%s-%s", VPCSegment(vpc), nameSegment(vpcAttachment))
+// BGPAdvertisement. Keyed by (vpc, vpcAttachment, node) -- node included for
+// the same reason BGPVRFInstanceName needs it (see that function's own
+// doc comment): a VPCAttachment identifies one logical attachment, but
+// nothing about that guarantees it is unique per *node* -- a multi-replica
+// Deployment scheduled across several nodes is the ordinary case, not an
+// edge case, and every replica's CNI ADD shares the very same VPCAttachment
+// identity from the CNI config on its own node.
+//
+// Before node was part of this key, every node with a live attachment to
+// the same VPCAttachment raced to CreateOrUpdate the *same* BGPAdvertisement
+// object: each write clobbered the previous node's RouterRef/prefixes
+// wholesale, so only the last writer's node was ever actually advertised —
+// every other node's own attachment silently vanished from BGP the moment
+// a second node's ADD ran. Found live in us-central-1-staging-lab: a
+// second node's attachment to a VPC that already had one elsewhere
+// overwrote the first's BGPAdvertisement, and from that point on BGP
+// advertised only the second node's SID for both — traffic destined for
+// the first node's own local pod got redirected to the second node's own
+// uSID SID instead of ever being delivered locally, and the second node's
+// own egress_route_table registration for its "own" prefix then collided
+// with itself for the same underlying reason (two attachments, one shared
+// key, one winner). This is also why VRF-level address overlap across
+// nodes must be tolerated, not prevented: two nodes are allowed to each
+// have their own local traffic to/from the same VPC, and neither one's
+// BGPAdvertisement is allowed to silently displace the other's.
+//
+// All three segments are encoded by nameSegment (the VPC one identically to
+// BGPVRFInstanceName); node is included raw, unencoded, matching
+// BGPVRFInstanceName's own convention.
+func BGPAdvertisementName(vpc, vpcAttachment, nodeName string) string {
+	return fmt.Sprintf("%s-%s-%s", VPCSegment(vpc), nameSegment(vpcAttachment), nodeName)
 }
 
 // vipNameReplacer sanitizes an IP address for use inside a Kubernetes

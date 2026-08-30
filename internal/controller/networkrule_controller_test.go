@@ -124,7 +124,10 @@ func newBackendFixtures(
 		},
 	}
 	adv := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: crdnames.BGPAdvertisementName(vpcRef, "attach-1")},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      crdnames.BGPAdvertisementName(vpcRef, "attach-1", testComputeNodeName),
+		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: testBackendRouterName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},

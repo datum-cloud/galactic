@@ -92,7 +92,7 @@ func (rt *resourceTracker) cleanup(ctx context.Context) {
 	if rt.advertisementCreated && rt.k8s != nil {
 		adv := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      crdnames.BGPAdvertisementName(rt.vpc, rt.vpcAttachment),
+				Name:      crdnames.BGPAdvertisementName(rt.vpc, rt.vpcAttachment, rt.nodeName),
 				Namespace: rt.namespace,
 			},
 		}

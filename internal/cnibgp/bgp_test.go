@@ -554,7 +554,7 @@ func TestPublishBGPStateReplacedPodDoesNotDuplicatePrefix(t *testing.T) {
 	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
 
 	router := routerForNode(testRouterName, nodeName, namespace, 65000)
-	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment, nodeName)
 	ipv6Subnet := mustParseCIDR(t, "fd00:40:ff01::100:0/96")
 
 	// Simulate the first pod's ADD, whose netns has since gone away, but
@@ -606,7 +606,7 @@ func TestPublishBGPStateNilIPAMMarksNoAddressing(t *testing.T) {
 	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
 
 	router := routerForNode(testRouterName, nodeName, namespace, 65000)
-	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment, nodeName)
 	k8s := fakeClient(router)
 
 	cfg := publishConfig{vpc: testVPC, vpcAttachment: testAttachment, ifaceType: ifaceTypeTap}
@@ -641,7 +641,7 @@ func TestPublishBGPStateIPAMClearsNoAddressing(t *testing.T) {
 	withNetNSExistsFn(t, func(path string) bool { return path == testNetns })
 
 	router := routerForNode(testRouterName, nodeName, namespace, 65000)
-	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+	advName := crdnames.BGPAdvertisementName(testVPC, testAttachment, nodeName)
 	existing := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      advName,
@@ -789,7 +789,7 @@ func TestPublishBGPStateAdvertisementCreatedGatedOnCreate(t *testing.T) {
 	})
 
 	t.Run("sibling attachment reusing an already-live BGPAdvertisement: update only", func(t *testing.T) {
-		advName := crdnames.BGPAdvertisementName(testVPC, testAttachment)
+		advName := crdnames.BGPAdvertisementName(testVPC, testAttachment, nodeName)
 		existing := &bgpv1alpha1.BGPAdvertisement{
 			ObjectMeta: metav1.ObjectMeta{Name: advName, Namespace: namespace},
 		}
