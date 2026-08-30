@@ -96,7 +96,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	if ipamResult != nil && ipamResult.IPv6Subnet != nil {
 		podName := nadpatch.ParsePodName(args.Args)
 		// The EndpointSlice is created in the pod's own namespace, per
-		// docs/cni/configuration.md's "EndpointSlice publish" section —
+		// docs/cni/conflist-reference.md's "EndpointSlice publish" section —
 		// distinct from `namespace` above, which is where the BGP CRDs
 		// live (defaults to galactic-system) and is very often a
 		// different namespace from the workload pod's own.
