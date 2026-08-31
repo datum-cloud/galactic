@@ -16,7 +16,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
-	github.com/vishvananda/netlink v1.3.2-0.20260803231012-156a440d85e5
+	github.com/vishvananda/netlink v1.3.2-0.20260830232854-cf01b55a4a4b
 	go.datum.net/network v0.0.0-20260825185725-392ac243999b
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
