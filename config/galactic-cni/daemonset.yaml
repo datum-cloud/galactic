@@ -35,7 +35,7 @@ spec:
       # docs/node-labels.md), so it's opt-in via the independent
       # galactic.datumapis.com/galactic=router flag rather than
       # galactic.datumapis.com/node's primary-role value, the same reason
-      # galactic-router (config/galactic-router/overlays/default/
+      # galactic-router (config/galactic-router/overlays/router/
       # daemonset-patch.yaml) keys off the identical flag: enumerating
       # galactic.datumapis.com/node's values here would need editing again
       # every time a new primary role is added, exactly the class of bug

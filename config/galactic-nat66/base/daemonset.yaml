@@ -27,7 +27,7 @@ spec:
       # galactic-router run here too, but via the separate, independent
       # galactic.datumapis.com/galactic=router flag every compute *and*
       # edge node carries (config/galactic-cni/daemonset.yaml,
-      # config/galactic-router/overlays/default/daemonset-patch.yaml) --
+      # config/galactic-router/overlays/router/daemonset-patch.yaml) --
       # not via this label, since those two aren't compute-specific
       # anymore. A NAT66 shard's own SID/public address must still be
       # unique per node (see ../kustomization.yaml), which is why this

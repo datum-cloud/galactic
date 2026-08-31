@@ -10,7 +10,7 @@ spec:
       # identity is all it gets) since nothing else needs to select it
       # apart from the rr (route reflector) role, which independently
       # patches the same ../../base/ with its own distinct name/label -- see
-      # ../rr/daemonset-patch.yaml. Opt-in via
+      # ../control/daemonset-patch.yaml. Opt-in via
       # galactic.datumapis.com/galactic=router, an independent flag rather
       # than a galactic.datumapis.com/node primary-role value: this plain
       # (non-reflector) router mode now runs on *both* compute and edge
@@ -19,7 +19,7 @@ spec:
       # galactic-cni opts in via this identical flag (config/galactic-cni/
       # daemonset.yaml) for the same reason. galactic.datumapis.com/galactic
       # is mutually exclusive between "router" (this role) and "control"
-      # (../rr/daemonset-patch.yaml) by construction -- a label key can only
+      # (../control/daemonset-patch.yaml) by construction -- a label key can only
       # hold one value, so a node is never both at once. Excludes
       # Kubernetes control-plane nodes outright — the base DaemonSet's
       # blanket toleration would otherwise let it land there if one ever
@@ -40,7 +40,7 @@ spec:
           env:
             - name: GALACTIC_ROUTER_BGP_LISTEN_PORT
               # This role only dials *out* to iBGP peers (the reflector,
-              # see ../rr/daemonset-patch.yaml, still a sibling under
+              # see ../control/daemonset-patch.yaml, still a sibling under
               # overlays/); -1 disables the inbound
               # listener entirely, so no BGP containerPort belongs on this
               # patch -- there's no port here to document.

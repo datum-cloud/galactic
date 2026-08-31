@@ -1,6 +1,6 @@
 namespace: galactic-system
 resources:
-  - overlays/rr
+  - overlays/control
   - bgprouter.yaml
   - bgppeer-dfw.yaml
   - bgppeer-iad.yaml

@@ -16,7 +16,7 @@ spec:
       # Route-reflector role: opt-in only, requires
       # galactic.datumapis.com/galactic=control, so it never
       # double-schedules with the plain per-worker default DaemonSet (see
-      # ../default/daemonset-patch.yaml) on the same node --
+      # ../router/daemonset-patch.yaml) on the same node --
       # galactic.datumapis.com/galactic's two values ("router", the plain
       # role above; "control", this one) are mutually exclusive by
       # construction, since a label key can only hold one value at a

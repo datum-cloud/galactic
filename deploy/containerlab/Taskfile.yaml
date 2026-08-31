@@ -167,7 +167,7 @@ tasks:
       # gateway XDP datapath's uplink depends on -- see config/fabric-router/'s
       # affinity, extended to the gateway role), galactic-router (tenant BGP,
       # its own independent DaemonSet -- see config/galactic-router/overlays/
-      # default/, opted in via galactic.datumapis.com/galactic=router, the
+      # router/, opted in via galactic.datumapis.com/galactic=router, the
       # same flag compute nodes carry), galactic-cni (same flag, now also
       # runs on edge nodes -- see docs/node-labels.md), and galactic-gateway
       # (the edge XDP NAT+LB engine itself, single-container).

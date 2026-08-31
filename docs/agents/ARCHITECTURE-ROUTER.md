@@ -159,9 +159,9 @@ lives in `root.go`'s `runCmd`:
 8. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
 This is identical whether the pod is running in the plain role
-(`config/galactic-router/overlays/default/`, opt-in via
+(`config/galactic-router/overlays/router/`, opt-in via
 `galactic.datumapis.com/galactic=router` — deployed on both `compute` and
-`edge` nodes) or the route-reflector role (`config/galactic-router/overlays/rr/`,
+`edge` nodes) or the route-reflector role (`config/galactic-router/overlays/control/`,
 `galactic.datumapis.com/galactic=control`) — `galactic-router` carries no
 gateway-role code path of its own at all, and runs as its own independent
 DaemonSet on `edge` nodes rather than co-located inside `galactic-gateway`'s

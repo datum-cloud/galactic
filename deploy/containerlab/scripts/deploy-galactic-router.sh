@@ -8,21 +8,21 @@ source "${SCRIPT_DIR}/lib.sh"
 
 # The router DaemonSet base (config/galactic-router/base/ -- role-agnostic,
 # not applied directly, shared with production) and the production
-# default/rr overlays (config/galactic-router/overlays/{default,rr}/, each
+# router/control overlays (config/galactic-router/overlays/{router,control}/, each
 # independently patching ../../base into its own role) live under
 # config/galactic-router/ (the shared RBAC/ServiceAccount aren't needed
 # here).
 # resources/galactic-router/base/ and resources/galactic-control/iad/
-# build on the copied base/default or base/rr dirs and patch in only the
+# build on the copied base/router or base/control dirs and patch in only the
 # lab-only image and env vars. Dirs are copied onto the node at deploy time
 # nested under each consuming overlay's own root (kustomize requires resources
 # in or below the overlay root) rather than duplicated in the repo.
 GALACTIC_ROUTER_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/base" && pwd)
-GALACTIC_ROUTER_DEFAULT_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/default" && pwd)
-GALACTIC_ROUTER_RR_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/rr" && pwd)
+GALACTIC_ROUTER_DEFAULT_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/router" && pwd)
+GALACTIC_ROUTER_RR_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/control" && pwd)
 # config/galactic-gateway/base is the edge XDP NAT+LB gateway's own
 # single-container pod base -- self-contained, unlike
-# config/galactic-router/{base,overlays/default,overlays/rr}, so no matching
+# config/galactic-router/{base,overlays/router,overlays/control}, so no matching
 # config/galactic-router/base copy is needed alongside it the way copy_router_config/
 # copy_router_control_config need one. galactic-router itself reaches
 # iad-gateway1/iad-gateway2 via copy_router_config's own DaemonSet below,
@@ -32,10 +32,10 @@ GALACTIC_ROUTER_RR_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overl
 GALACTIC_GATEWAY_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-gateway/base" && pwd)
 
 # copy_router_config NODE copies config/galactic-router/base and
-# config/galactic-router/overlays/default onto NODE, nested under
+# config/galactic-router/overlays/router onto NODE, nested under
 # resources/galactic-router/base/ at the *same relative depth* as in
-# config/ (base/base/, base/overlays/default/) -- required because
-# overlays/default/kustomization.yaml's own "../../base" reference is copied
+# config/ (base/base/, base/overlays/router/) -- required because
+# overlays/router/kustomization.yaml's own "../../base" reference is copied
 # verbatim, unmodified, so the local copy has to resolve at the same two
 # levels up or that reference points outside the tree entirely. rm -rf
 # first: like deploy-cni.sh's GALACTIC_CNI_DIR copy, docker cp nests SRC
@@ -48,11 +48,11 @@ copy_router_config() {
   docker exec "${node}" rm -rf /galactic/resources/galactic-router/base/base /galactic/resources/galactic-router/base/overlays
   docker exec "${node}" mkdir -p /galactic/resources/galactic-router/base/overlays
   docker cp "${GALACTIC_ROUTER_BASE_DIR}" "${node}:/galactic/resources/galactic-router/base/base"
-  docker cp "${GALACTIC_ROUTER_DEFAULT_DIR}" "${node}:/galactic/resources/galactic-router/base/overlays/default"
+  docker cp "${GALACTIC_ROUTER_DEFAULT_DIR}" "${node}:/galactic/resources/galactic-router/base/overlays/router"
 }
 
 # copy_router_control_config NODE copies config/galactic-router/base and
-# config/galactic-router/overlays/rr onto NODE, nested under
+# config/galactic-router/overlays/control onto NODE, nested under
 # resources/galactic-control/iad/ at the same relative depth as in
 # config/, for the same reason copy_router_config's comment explains.
 # Its node affinity (route-reflector role, control node only) applies
@@ -63,7 +63,7 @@ copy_router_control_config() {
   docker exec "${node}" rm -rf /galactic/resources/galactic-control/iad/base /galactic/resources/galactic-control/iad/overlays
   docker exec "${node}" mkdir -p /galactic/resources/galactic-control/iad/overlays
   docker cp "${GALACTIC_ROUTER_BASE_DIR}" "${node}:/galactic/resources/galactic-control/iad/base"
-  docker cp "${GALACTIC_ROUTER_RR_DIR}" "${node}:/galactic/resources/galactic-control/iad/overlays/rr"
+  docker cp "${GALACTIC_ROUTER_RR_DIR}" "${node}:/galactic/resources/galactic-control/iad/overlays/control"
 }
 
 # copy_router_gateway_config NODE copies config/galactic-gateway/base onto NODE,
