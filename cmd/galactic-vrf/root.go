@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"time"
 
@@ -85,6 +86,27 @@ func runCmd(cfg *config.VRFConfig) error {
 			ingresssidecar.NewK8sGatewayPublisher(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
 			ingresssidecar.NetlinkGatewayAddressResolver{},
 		)
+
+		// Gateway address *provisioning* is a second, independent opt-in on
+		// top of the publisher above -- see internal/config.VRFConfig's own
+		// GatewayPrefix doc comment for why it needs its own explicit
+		// platform-addressing decision, not a default. Without this, the
+		// publisher above stays permanently idle: NetlinkGatewayAddressResolver
+		// has nothing to find, so PublishGateway never actually fires.
+		if cfg.GatewayPrefix != "" {
+			_, network, err := net.ParseCIDR(cfg.GatewayPrefix)
+			if err != nil {
+				// cfg.Validate() already checked this parses; a failure here
+				// would mean Validate and this call disagree, a real bug --
+				// fail loudly rather than silently run with no provisioning.
+				return fmt.Errorf("parse gateway prefix %q: %w", cfg.GatewayPrefix, err)
+			}
+			ingresssidecar.SetGatewayAddressAssignment(network, cfg.NodeName)
+		} else {
+			log.Printf("no gateway prefix configured (%s) -- "+
+				"return-path gateway address provisioning is disabled; PublishGateway will never fire",
+				config.EnvVRFGatewayPrefix)
+		}
 	} else {
 		log.Printf("no node name configured (%s / legacy NODE_NAME) -- "+
 			"return-path gateway advertisement publishing is disabled", config.EnvVRFNodeName)
@@ -171,6 +193,11 @@ func newRootCommand() *cobra.Command {
 			"enables return-path gateway advertisement publishing when set (env "+config.EnvVRFNodeName+" or legacy NODE_NAME)")
 	cmd.Flags().StringP("namespace", "", config.DefaultNamespace,
 		"Namespace to read BGPRouter/BGPVRFInstance and write BGPAdvertisement CRDs in")
+	cmd.Flags().StringP("gateway-prefix", "", "",
+		"Reserved, byte-aligned IPv6 CIDR (e.g. a /80 or /96) this sidecar derives its own per-VPC "+
+			"return-path gateway address from -- must be address space no tenant IPAM (this repo's own or "+
+			"external) ever allocates from; only takes effect when --node-name is also set (env "+
+			config.EnvVRFGatewayPrefix+")")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

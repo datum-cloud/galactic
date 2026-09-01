@@ -2,7 +2,7 @@
 
 - **Parent:** [datum-cloud/enhancements#796](https://github.com/datum-cloud/enhancements/issues/796) — HTTP Ingress for VPC Networks
 - **Sibling plan:** [docs/plans/855-ingress-sidecar-vpc-backend-connectivity.md](855-ingress-sidecar-vpc-backend-connectivity.md) — the accepted #855 design this plan extends. Read that one first; this doc only covers the gap it left open.
-- **Status:** `GatewayPublisher`/`GatewayAddressResolver` implemented and unit-tested in `internal/ingresssidecar` (`gateway.go`, `gateway_test.go`, `store_gateway_test.go`); wired into `Store` (opt-in, see "Backward compatibility" below) and `cmd/galactic-vrf`. **Address provisioning is explicitly not implemented** — see "Not implemented here."
+- **Status:** `GatewayPublisher`/`GatewayAddressResolver` implemented and unit-tested in `internal/ingresssidecar` (`gateway.go`, `gateway_test.go`, `store_gateway_test.go`); wired into `Store` (opt-in, see "Backward compatibility" below) and `cmd/galactic-vrf`. **Address provisioning is now implemented too** (`gatewayaddress.go`, `DeriveGatewayAddress`/`ensureGatewayAddress`), opt-in on a second, independent env var — see "Address provisioning" below, which supersedes this doc's original "Not implemented here" section.
 
 ## What's broken, and how it was found
 
@@ -35,12 +35,17 @@ Every piece above is inert by default:
 
 No existing deployment of this sidecar is affected by this change until both a node identity is configured *and* something provisions a gateway address per VPC.
 
-## Not implemented here
+## Address provisioning (supersedes "Not implemented here")
 
-**Provisioning the gateway address itself** — creating a veth-style attachment into each VPC this sidecar handles, with its own IPAM allocation, so `NetlinkGatewayAddressResolver` has something to find — is a real, separate gap, deliberately left open:
+This doc originally left address provisioning as an open gap, citing an unresolved IPAM coordination question: "whether the sidecar requests its own allocation the way `galactic-cni` does for a pod, or a fixed reserved slot per VPC subnet, or something else." Investigating that question found the real answer is neither option as originally framed:
 
-- It needs real kernel-level work (interface creation, address assignment) inside Envoy's own netns, which the sibling plan's own §7 already treats as requiring "a real-kernel verification pass... not possible from this sandbox" for the *forward*-path mechanism it does implement — the same constraint applies here, more so, since this is new kernel-facing code rather than a call into already-proven `internal/plumbing` primitives.
-- It needs an IPAM coordination story this plan doesn't have: whether the sidecar requests its own allocation the way `galactic-cni` does for a pod, or a fixed reserved slot per VPC subnet, or something else, is an open design question, not a detail to improvise silently.
-- The live demo/test environment this gap was found in had a manually created veth (`gwatt1`, address `fd20:0:2::4:0:0/96`) standing in for this — evidence the *symptom* is real, not evidence of how provisioning should actually work in production.
+- **A real tenant VPC's address space is not owned by this repo.** `internal/cniipam`'s only *computed* allocation path (`internal/cni/ipam.PoolAllocator`, sequential first-fit over a configured pool CIDR) is used for lab/self-managed deployments; the production addressing scheme (`ipam.addresses`) takes pre-decided addresses from an external system this repo has no visibility into. A live tenant address's own bit layout doesn't match `PoolAllocator`'s own increment logic, confirming this directly rather than by inference from the docs alone. So there is no "reserved slot" inside a VPC's own subnet this repo can prove is safe to claim — the allocator that would need to avoid it isn't code this repo can read.
+- **The fix doesn't need one.** BGP import into a VPC's VRF is driven entirely by Route Target community, computed from the VPC id (`vpcRouteTarget` in `gateway.go`) — never by whether an advertised prefix's address value falls inside any particular subnet. A gateway address only needs to be (a) globally unique and (b) advertised with the correct RT; it never needs to be a member of the tenant's own pool at all.
 
-Filing this as its own follow-up (a sub-issue of #855 or a new #796 sub-issue, matching how #859's health-checking gap was handled) is the right next step, not bundling it into this change.
+`gatewayaddress.go`'s `DeriveGatewayAddress(prefix, vpc, nodeID)` acts on that: `prefix` is a reserved, byte-aligned IPv6 CIDR that is disjoint *by construction* from tenant space (never handed to any IPAM, local or external, as a pool to allocate from), not disjoint by avoidance within it. The host bits are filled deterministically from `sha256(vpcHex + "|" + nodeID)` — collision-safe against another VPC's or another node's own derived address with overwhelming probability, which is sufficient here since nothing else ever contends for a specific value the way a live IPAM allocation call does.
+
+`ensureGatewayAddress`, called from `ensureEgressDatapath` right after `ensureEgressVeth`, assigns the derived address to the same VRF-slave veth (`ivsN`) that function already creates for `usid_egress`'s own attachment — so `NetlinkGatewayAddressResolver` (already implemented, unchanged) finds it with zero further wiring, and IPv6 source-address selection picks it up for the forward path too (closing a second, related symptom found live: with no global address anywhere in the VRF, the kernel fell back to a link-local source for Envoy's own outbound connections into the VPC).
+
+**Opt-in on a second, independent env var (`GALACTIC_VRF_GATEWAY_PREFIX` / `internal/config.VRFConfig.GatewayPrefix`), only takes effect when `NodeName` is also set.** Deliberately no compiled-in default: *which* reserved prefix to use is a real platform-addressing decision — the exact kind of thing this doc's own "Not implemented here" section was right to flag as not-to-improvise-silently — for whoever owns this deployment's IPAM plan to make explicitly, then configure. The code closes the mechanism; picking and rolling out an actual prefix value is a deployment decision, not a code change.
+
+Both `GALACTIC_VRF_NODE_NAME` and `GALACTIC_VRF_GATEWAY_PREFIX` are unset in every deployment today, so this remains fully inert until an operator configures both — no existing behavior changes.

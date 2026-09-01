@@ -6,6 +6,8 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -61,6 +63,14 @@ const (
 	// GALACTIC_GATEWAY_NODE_NAME have none either.
 	EnvVRFNodeName  = "GALACTIC_VRF_NODE_NAME"
 	EnvVRFNamespace = "GALACTIC_VRF_NAMESPACE"
+
+	// EnvVRFGatewayPrefix configures return-path gateway *address
+	// provisioning* (docs/plans/855-return-path-gateway-advertisement.md's
+	// "Not implemented here" gap) -- see GatewayPrefix's own doc comment.
+	// Unset by default, same as EnvVRFNodeName and for the identical
+	// reason: no generic value could ever be right for "which address
+	// space is reserved for this on this platform."
+	EnvVRFGatewayPrefix = "GALACTIC_VRF_GATEWAY_PREFIX"
 )
 
 // --- VRFConfig -----------------------------------------------------------
@@ -102,6 +112,35 @@ type VRFConfig struct {
 	// is enabled -- defaults to DefaultNamespace ("galactic-system"),
 	// matching every other galactic-* binary's own default.
 	Namespace string
+	// GatewayPrefix is a reserved IPv6 CIDR (a byte-aligned mask, e.g. a
+	// /80 or /96) this sidecar derives its own per-VPC return-path gateway
+	// address from (see internal/ingresssidecar.DeriveGatewayAddress) and
+	// assigns to the VRF-slave interface it already creates for
+	// usid_egress (see ensureEgressDatapath's own doc comment) -- closing
+	// docs/plans/855-return-path-gateway-advertisement.md's "Not
+	// implemented here" gap.
+	//
+	// This must be address space nothing else -- not this repo's own
+	// internal/cniipam, not whatever external system allocates a VPC's
+	// real tenant subnets -- ever hands out as a tenant pool. It is
+	// deliberately not derived from, or carved out of, any tenant VPC's
+	// own subnet: that space is owned by an allocator outside this
+	// repo's visibility (confirmed live: a real tenant address's own bit
+	// layout doesn't match this repo's own internal/cni/ipam allocator,
+	// so nothing here can prove a "reserved" sub-range of it is safe),
+	// so the only way to guarantee no collision is a prefix that's
+	// structurally disjoint from all of it, not merely improbable to
+	// collide. "" (the default) leaves gateway-address provisioning
+	// disabled entirely -- the same inert-by-default stance NodeName's own
+	// doc comment describes, and deliberately no compiled-in value: this
+	// is a real platform-addressing decision for whoever owns this
+	// deployment's IPAM plan to make explicitly, not a default to
+	// silently pick here. Only takes effect when NodeName is also set
+	// (GatewayPrefix alone would derive one, unadvertisable address, and
+	// an empty NodeName would make every replica of this sidecar collide
+	// on the identical address for a given VPC -- see
+	// DeriveGatewayAddress's own nodeID parameter).
+	GatewayPrefix string
 }
 
 // NewVRFConfig creates a config resolver with the GALACTIC_VRF env prefix
@@ -137,6 +176,7 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		{"sweep-interval", "sweep_interval"},
 		{"node-name", "node_name"},
 		{"namespace", "namespace"},
+		{"gateway-prefix", "gateway_prefix"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -164,6 +204,7 @@ func (c *VRFConfig) readFields() {
 		// GALACTIC_VRF prefix for AutomaticEnv to match.
 		c.NodeName = os.Getenv(EnvNodeNameLegacy)
 	}
+	c.GatewayPrefix = c.v.GetString("gateway_prefix")
 }
 
 // Validate checks that the resolved configuration is usable.
@@ -179,6 +220,18 @@ func (c *VRFConfig) Validate() error {
 	}
 	if c.SweepInterval > c.TeardownGracePeriod {
 		return errors.New("sweep interval must not be greater than the teardown grace period")
+	}
+	if c.GatewayPrefix != "" {
+		ip, network, err := net.ParseCIDR(c.GatewayPrefix)
+		if err != nil {
+			return fmt.Errorf("gateway prefix %q: %w", c.GatewayPrefix, err)
+		}
+		if ip.To4() != nil {
+			return fmt.Errorf("gateway prefix %q must be an IPv6 CIDR", c.GatewayPrefix)
+		}
+		if ones, _ := network.Mask.Size(); ones%8 != 0 {
+			return fmt.Errorf("gateway prefix %q must be byte-aligned (a multiple of /8)", c.GatewayPrefix)
+		}
 	}
 	return nil
 }
