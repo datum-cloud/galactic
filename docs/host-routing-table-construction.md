@@ -39,10 +39,10 @@ sequenceDiagram
 
     rect rgb(235, 245, 255)
     Note over Switch,Kernel: Phase 1 — node boot: underlay reachability (main table)
-    FRR->>Switch: establish eBGP session (port 179, per this node's frr.conf.<nodename>)
+    FRR->>Switch: establish eBGP session (port 179, per this node's own frr.conf entry)
     Switch-->>FRR: exchange underlay routes
     FRR->>FRR: bgpd redistributes learned routes to zebra
-    FRR->>Kernel: zebra installs underlay routes into RT_TABLE_MAIN; brings up lo/interface addressing
+    FRR->>Kernel: zebra installs underlay routes into RT_TABLE_MAIN, brings up lo/interface addressing
     end
     Note over GoBGP,Kernel: galactic-router's own outbound iBGP dial (port 1790) rides this<br/>reachability — it cannot connect to its peer/RR until this phase converges
 
@@ -64,7 +64,7 @@ sequenceDiagram
     rect rgb(255, 245, 235)
     Note over K8s,Kernel: Phase 3 — EVPN convergence: tenant path vs. RT-less anycast path
     K8s->>GoBGP: BGPVRFInstance reconciled
-    GoBGP->>GoBGP: applyVRFs — register this VRF's Route Target in rtIndex;<br/>probeEgressRouteWrite verifies the pinned eBPF map is writable
+    GoBGP->>GoBGP: applyVRFs — register this VRF's Route Target in rtIndex,<br/>probeEgressRouteWrite verifies the pinned eBPF map is writable
     GoBGP->>GoBGP: applyEVPN — originate local EVPN Type 5 path<br/>(Prefix-SID attribute = this attachment's uSID)
     GoBGP->>Peer: advertise path (iBGP, rides Phase 1's underlay reachability)
     Peer-->>GoBGP: (on every node importing this VPC's RT) receive + reflect best path
