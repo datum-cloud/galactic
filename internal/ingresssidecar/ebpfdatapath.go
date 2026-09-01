@@ -233,11 +233,25 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 // internal/cnibgp's own registerNodeSourceAddress -- see
 // ensureEgressDatapath's own call site for why this sidecar cannot rely on
 // that copy alone having already run on this node. Idempotent and cheap
-// (one netlink query, one map write), safe to call on every
+// (one netlink query or one k8s list, one map write), safe to call on every
 // ensureEgressDatapath the same way srv6.ResolveNodeSourceAddress's own
 // per-node-constant result already tolerates being redone.
+//
+// Prefers a configured NodeSourceAddressResolver (SetNodeSourceAddressResolver)
+// over srv6.ResolveNodeSourceAddress's own local-netns auto-detection --
+// see that interface's own doc comment for why the latter resolves to the
+// wrong address (this pod's own ULA overlay IP, not this node's real one)
+// for every real deployment of this specific sidecar.
 func ensureNodeSourceAddress() error {
-	addr, err := srv6.ResolveNodeSourceAddress()
+	var (
+		addr net.IP
+		err  error
+	)
+	if resolver := getNodeSourceAddressResolver(); resolver != nil {
+		addr, err = resolver.ResolveNodeSourceAddress()
+	} else {
+		addr, err = srv6.ResolveNodeSourceAddress()
+	}
 	if err != nil {
 		return fmt.Errorf("resolve node source address: %w", err)
 	}

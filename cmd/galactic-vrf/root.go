@@ -87,6 +87,19 @@ func runCmd(cfg *config.VRFConfig) error {
 			ingresssidecar.NetlinkGatewayAddressResolver{},
 		)
 
+		// This node's own real, globally-routable underlay source address --
+		// see NodeSourceAddressResolver's own doc comment for why the
+		// default (srv6.ResolveNodeSourceAddress's local-netns
+		// auto-detection) resolves to the wrong address from inside Envoy's
+		// own pod netns, which is where this sidecar always runs. Gated on
+		// cfg.NodeName alone, like the gateway publisher above: both need
+		// this node's own identity, and mgr.GetClient() is fine here for
+		// the identical reason (one read per ensureEgressDatapath call, not
+		// a reconcile hot path).
+		ingresssidecar.SetNodeSourceAddressResolver(
+			ingresssidecar.NewK8sNodeSourceAddressResolver(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
+		)
+
 		// Gateway address *provisioning* is a second, independent opt-in on
 		// top of the publisher above -- see internal/config.VRFConfig's own
 		// GatewayPrefix doc comment for why it needs its own explicit
