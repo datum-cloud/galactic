@@ -1,0 +1,49 @@
+@startuml galactic-cni-components
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title galactic-cni — Component Diagram (the CNI attach chain's six binaries)
+
+Container_Boundary(cni, "galactic-cni CNI chain") {
+    Component(installer, "galactic-cni", "Go, cobra (init/run)", "Stages every chain binary + host-device onto the node; templates the static conflist + kubeconfig; loads/attaches the uSID TC-BPF program; serves gRPC health")
+    Component(veth, "galactic-veth", "Go, CNI plugin", "Container master plugin: VRF + veth pair, NAD annotation, IPAM delegation, host-device delegation, guest netns config")
+    Component(tap, "galactic-tap", "Go, CNI plugin", "VM master plugin: mirrors galactic-veth (VRF + tap device), no guest netns, no host-device")
+    Component(ipam, "galactic-ipam", "Go, CNI IPAM delegate", "Pool/static IPv4+IPv6 allocation; on-disk marker-file persistence keyed by containerID; zero k8s dependency")
+    Component(route, "galactic-route", "Go, CNI plugin", "Optional chain stage: installs termination routes into the VRF table; zero k8s dependency")
+    Component(bgp, "galactic-bgp", "Go, CNI plugin", "Publishes BGPVRFInstance/BGPAdvertisement CRDs + per-pod EndpointSlice; registers uSID eBPF map entries. Learns everything from prevResult alone")
+    Component(hostgw, "hostgw", "Go", "Assigns the gateway address on the attachment's own host interface; installs the pod-subnet route into the VRF table; primes a permanent neighbor entry")
+    Component(kernprim, "vrf / intf / sysctl", "Go, netlink", "Linux VRF create/delete/lookup; base62<->hex interface naming; per-interface sysctls")
+    Component(ebpf, "uSID TC-BPF datapath bindings", "Go, cilium/ebpf", "locator_table/function_table/vrf_table pinned-map read/write; program load/attach/preflight")
+}
+
+Container_Ext(hostdevice, "host-device", "containernetworking/plugins", "Moves the guest veth end into the container netns (galactic-veth only)")
+Container_Ext(crds, "BGP CRDs / NAD", "go.datum.net/network API, k8s.cni.cncf.io", "BGPVRFInstance, BGPAdvertisement, NetworkAttachmentDefinition")
+System_Ext(k8sapi, "Kubernetes API Server")
+System_Ext(runtime_, "Container/VM Runtime", "Invokes the CNI chain per conflist order on ADD/DEL")
+
+Rel(runtime_, veth, "ADD/DEL (stdin config, netns, IfName)", "CNI invocation")
+Rel(runtime_, tap, "ADD/DEL (stdin config, IfName)", "CNI invocation")
+Rel(runtime_, route, "ADD/DEL, chained after master", "CNI invocation")
+Rel(runtime_, bgp, "ADD/DEL, chained last", "CNI invocation")
+
+Rel(veth, kernprim, "vrf.Add(vpc); create/enslave veth pair", "netlink")
+Rel(tap, kernprim, "vrf.Add(vpc); create/enslave tap device", "netlink")
+Rel(veth, ipam, "ExecAdd/ExecDel (if the ipam block is present)", "CNI IPAM delegation")
+Rel(tap, ipam, "ExecAdd/ExecDel (if the ipam block is present)", "CNI IPAM delegation")
+Rel(veth, hostdevice, "ADD/DEL (move guest veth into/out of netns)", "CNI delegation")
+Rel(veth, hostgw, "ConfigureHostGateway(ipamResult, guestMAC)", "in-process call")
+Rel(tap, hostgw, "ConfigureHostGateway(ipamResult, nil)", "in-process call")
+Rel(hostgw, kernprim, "AddrAdd(gateway), RouteAdd(pod subnet) into VRF table, NeighSet", "netlink")
+Rel(veth, crds, "Annotate NAD (host interface name)", "controller-runtime client")
+
+Rel(route, kernprim, "route.Add/Delete: VRF-table termination route", "netlink")
+
+Rel(bgp, crds, "CreateOrUpdate BGPVRFInstance, BGPAdvertisement", "bare controller-runtime client")
+Rel(bgp, ebpf, "registerEBPFDatapath / unregisterEBPFDatapath", "cilium/ebpf")
+
+Rel(installer, ebpf, "Load/attach uSID program; periodic metrics + vrf_table GC sweep", "cilium/ebpf")
+Rel(installer, k8sapi, "Node-identity check (Bootstrap); kubeconfig token refresh (Run)", "client-go")
+Rel(bgp, k8sapi, "Node/BGPRouter lookup", "client-go")
+
+@enduml

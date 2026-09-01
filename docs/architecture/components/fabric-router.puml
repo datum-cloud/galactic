@@ -1,0 +1,35 @@
+@startuml fabric-router-components
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title fabric-router — Component Diagram (the FRR underlay eBGP DaemonSet)
+
+Container_Boundary(fabric, "fabric-router pod (hostNetwork)") {
+    Component(frrinit, "frr-init", "sh, init container", "Copies /etc/frr-defaults + fabric-config's per-node frr.conf.<NODE_NAME> into /etc/frr; creates /run/frr, /var/log/frr")
+    Component(zebra, "zebra", "FRR daemon", "Kernel routing-table manager: installs learned eBGP routes into the kernel FIB; brings up interface/lo addressing")
+    Component(bgpd, "bgpd", "FRR daemon", "eBGP speaker: one session per configured fabric neighbor, port 179")
+    Component(vtysh, "vtysh", "FRR CLI", "Used only by startupProbe/livenessProbe (show version against zebra + bgpd) — proves the daemons answer, not that the eBGP session has reconverged")
+}
+
+ContainerDb_Ext(fabricconfig, "fabric-config", "ConfigMap", "Hand-authored: one frr.conf.<nodename> key per matching node — no generic default")
+System_Ext(fabricswitch, "Physical Fabric Switch", "The underlay eBGP neighbor")
+System_Ext(kmain, "Kernel main routing table", "RT_TABLE_MAIN — node-to-node IP reachability every overlay (iBGP EVPN, uSID datapath, edge XDP) depends on")
+Container_Ext(galrouter, "galactic-router / galactic-router-rr", "Go, controller-runtime", "Depends on this DaemonSet for lo address + underlay reachability before its own iBGP sessions can establish")
+Container_Ext(galgateway, "galactic-gateway", "Go, controller-runtime", "Edge XDP datapath attaches to the same fabric-facing interface FRR brings up here")
+
+Rel(frrinit, fabricconfig, "Reads own node's frr.conf.<NODE_NAME> key", "ConfigMap volume mount")
+Rel(frrinit, zebra, "Writes /etc/frr/frr.conf, daemons, vtysh.conf before daemons start", "shared emptyDir")
+Rel(frrinit, bgpd, "Writes /etc/frr/frr.conf, daemons, vtysh.conf before daemons start", "shared emptyDir")
+
+Rel(bgpd, fabricswitch, "Establishes eBGP session; exchanges underlay routes", "eBGP, port 179")
+Rel(bgpd, zebra, "Redistributes learned eBGP routes", "FRR zapi (in-pod)")
+Rel(zebra, kmain, "Installs/withdraws underlay routes; brings up lo/interface addressing", "netlink")
+
+Rel(vtysh, zebra, "show version (probe only)")
+Rel(vtysh, bgpd, "show version (probe only)")
+
+Rel(galrouter, kmain, "Depends on: outbound iBGP dial reaches its peer via this reachability", "reads only")
+Rel(galgateway, kmain, "Depends on: XDP datapath's own fabric-facing interface must already be up", "reads only")
+
+@enduml

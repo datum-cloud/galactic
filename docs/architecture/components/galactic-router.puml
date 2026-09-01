@@ -1,0 +1,45 @@
+@startuml galactic-router-components
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title galactic-router — Component Diagram (the BGP/EVPN control plane)
+
+Container_Boundary(router, "galactic-router") {
+    Component(controller, "internal/controller", "Go, controller-runtime", "BGPRouter/BGPPeer/BGPAdvertisement/BGPVRFInstance/BGPPolicy/Secret/Node/GC reconcilers; field indexes; CRD status")
+    Component(reconcile, "internal/reconcile", "Go", "Translates BGPRouter + related CRDs into model.DesiredRouter: node targeting, secret resolution, SID computation, validation")
+    Component(gobgpruntime, "internal/runtime/gobgp", "Go, osrg/gobgp v4", "Embedded GoBGP server: peer/VRF/EVPN-path/policy Apply; shared EVPN best-path RIB watcher (monitor.go)")
+    Component(model, "internal/model", "Go", "DesiredRouter / DesiredPeer / DesiredAdvertisement / DesiredVRFInstance types")
+    Component(hash, "internal/hash", "Go", "SHA-256 fingerprint of DesiredRouter; suppresses redundant GoBGP Apply calls")
+    Component(gc, "internal/gc", "Go", "Sweeps orphaned BGPAdvertisement/BGPVRFInstance CRDs, stale kernel VRFs, stale eBPF vrf_table entries")
+    Component(srv6, "internal/plumbing/srv6", "Go, netlink, cilium/ebpf", "ComputeSID for the BGP Prefix-SID attribute; RouteEgressAdd/Del (eBPF egress_route_table); RouteMainAdd/Del (kernel main table)")
+    Component(vrf, "internal/plumbing/vrf", "Go, netlink", "Linux VRF create/delete/lookup — table-ID resolution for GC and the RIB watcher")
+}
+
+Container_Ext(crds, "BGP CRDs", "go.datum.net/network API", "BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance — written by galactic-bgp, see ARCHITECTURE-CNI.md")
+Container_Ext(ebpfmap, "egress_route_table", "pinned eBPF map", "TC-BPF uSID datapath's own VRF-scoped encap-route table (internal/plumbing/ebpf, shared with galactic-cni)")
+System_Ext(kmain, "Kernel main routing table", "RT_TABLE_MAIN — populated by fabric-router's zebra (underlay) and, for RT-less anycast paths, RouteMainAdd")
+System_Ext(peers, "iBGP Peers / Route Reflector", "EVPN AFI/SAFI, port 1790")
+System_Ext(fabric, "fabric-router", "FRR eBGP underlay — provides node-to-node IP reachability the iBGP sessions ride on")
+System_Ext(k8sapi, "Kubernetes API Server")
+
+Rel(controller, crds, "Watches BGP CRDs; updates status", "controller-runtime manager")
+Rel(controller, reconcile, "BuildDesiredRouter on every reconcile")
+Rel(reconcile, model, "Produces")
+Rel(reconcile, srv6, "ComputeSID(srv6Locator, nodeID, VRFID)")
+Rel(controller, gobgpruntime, "RuntimeManager.Apply(DesiredRouter)", "in-process, hash-gated")
+Rel(hash, gobgpruntime, "No-op suppression before Apply")
+Rel(gobgpruntime, peers, "Peers, advertises/receives EVPN Type 5 paths", "iBGP")
+Rel(gobgpruntime, srv6, "processEVPNPath: install/withdraw per best-path change")
+Rel(srv6, ebpfmap, "RouteEgressAdd/Del — VRF-scoped tenant path (has a Route Target)", "cilium/ebpf")
+Rel(srv6, kmain, "RouteMainAdd/Del — RT-less anycast VIP path only", "netlink.RouteReplace")
+Rel(gobgpruntime, vrf, "vrfTableID: resolve kernel VRF table ID for rtIndex")
+Rel(gobgpruntime, fabric, "Outbound BGP TCP dial", "rides fabric-router's underlay reachability")
+
+Rel(gc, crds, "Lists/deletes orphaned CRDs")
+Rel(gc, vrf, "Removes stale kernel VRFs (FlushTable + LinkDel)")
+Rel(gc, ebpfmap, "Sweeps stale vrf_table entries")
+
+Rel(controller, k8sapi, "Full manager + reconcile", "client-go")
+
+@enduml
