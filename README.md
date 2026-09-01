@@ -38,7 +38,7 @@ Manifests for a real cluster live under [`config/`](./config/), composed with [K
 kubectl apply -k config/
 ```
 
-Each component can also be applied on its own, e.g. `kubectl apply -k config/galactic-router` for just the router (both roles) or `kubectl apply -k config/galactic-router/overlays/default` for just the default per-node role.
+Each component can also be applied on its own, e.g. `kubectl apply -k config/galactic-router` for just the router (both roles) or `kubectl apply -k config/galactic-router/overlays/router` for just the default per-node role.
 
 Two components are **not** part of `kubectl apply -k config/` and must be applied separately, each with its own per-node prerequisite:
 

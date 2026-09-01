@@ -154,7 +154,7 @@ Runs `galactic-cni` and `galactic-router` in its plain (non-reflector)
 mode, together, on every `compute` and every `edge` node.
 
 - `config/galactic-cni/daemonset.yaml`
-- `config/galactic-router/overlays/default/daemonset-patch.yaml`
+- `config/galactic-router/overlays/router/daemonset-patch.yaml`
 
 ### `galactic.datumapis.com/galactic=control`
 
@@ -164,7 +164,7 @@ over iBGP. Mutually exclusive with `galactic=router` on the same node (one
 label key, one value) — a route-reflector node never also runs plain-mode
 `galactic-router`, and never runs `galactic-cni` either (a dedicated
 route-reflector node hosts no tenant pods). See
-`config/galactic-router/overlays/rr/daemonset-patch.yaml`.
+`config/galactic-router/overlays/control/daemonset-patch.yaml`.
 
 ### `galactic.datumapis.com/fabric=router`
 

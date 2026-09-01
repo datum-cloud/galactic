@@ -1,5 +1,5 @@
 # base/ is a role-agnostic template, not meant to be applied on its own --
-# overlays/default/ and overlays/rr/ each independently build their own
+# overlays/router/ and overlays/control/ each independently build their own
 # isolated kustomize nested build on top of base/ and patch it into their
 # own role. A top-level patches: entry here (rather than a dedicated
 # overlay) was tried and reverted: Kustomize's patches[].target.name is
@@ -13,5 +13,5 @@
 resources:
   - serviceaccount.yaml
   - rbac.yaml
-  - overlays/default
-  - overlays/rr
+  - overlays/router
+  - overlays/control

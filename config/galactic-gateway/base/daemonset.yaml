@@ -19,8 +19,8 @@ spec:
         app.kubernetes.io/name: galactic-gateway
     spec:
       # Dedicated gateway-role nodes only, opt-in, matching every other
-      # role's pattern (config/galactic-router/overlays/default,
-      # config/galactic-router/overlays/rr). "edge" here means the actual
+      # role's pattern (config/galactic-router/overlays/router,
+      # config/galactic-router/overlays/control). "edge" here means the actual
       # network edge -- the ingress/egress boundary this gateway sits on --
       # not a per-node compute role (see docs/node-labels.md). Excludes
       # control-plane outright for the same reason those do. See
@@ -34,7 +34,7 @@ spec:
       # edge nodes as its own standalone DaemonSet instead, opted in via
       # galactic.datumapis.com/galactic=router alongside this node's
       # galactic.datumapis.com/node=edge (see config/galactic-router/
-      # overlays/default/daemonset-patch.yaml) -- fully decoupled at the
+      # overlays/router/daemonset-patch.yaml) -- fully decoupled at the
       # pod level, not just the binary level.
       affinity:
         nodeAffinity:

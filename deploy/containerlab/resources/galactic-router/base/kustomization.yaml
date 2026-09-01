@@ -1,5 +1,5 @@
 resources:
-  - overlays/default
+  - overlays/router
 patches:
   - path: router-lab-patch.yaml
     target:
