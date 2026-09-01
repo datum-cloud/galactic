@@ -77,8 +77,11 @@ func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
 	}
 	// See ensureEgressDatapath's own doc comment (ebpfdatapath.go): without
 	// this, EnsureRoute's egress_route_table entries below have nothing in
-	// this pod's netns ever attached to read them.
-	if err := ensureEgressDatapath(tableID); err != nil {
+	// this pod's netns ever attached to read them. vpc is threaded through
+	// (not just tableID) so ensureEgressDatapath can also derive and assign
+	// this VPC's own return-path gateway address, when configured -- see
+	// ensureGatewayAddress in gatewayaddress.go.
+	if err := ensureEgressDatapath(vpc, tableID); err != nil {
 		return 0, fmt.Errorf("attach eBPF egress datapath for vpc %s: %w", vpc, err)
 	}
 	return tableID, nil

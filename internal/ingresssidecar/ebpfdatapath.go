@@ -286,7 +286,13 @@ func ensureNodeSourceAddress() error {
 // safe to call on every SetDesired that ensures a VRF (a repeat call for
 // an already-provisioned VPC, e.g. after this sidecar's own restart, is a
 // no-op in effect).
-func ensureEgressDatapath(tableID uint32) error {
+//
+// vpc (added alongside tableID, not derived from it) is used for exactly
+// one thing beyond this doc comment's own long-standing "vpc's VRF
+// interface" description: deriving vpc's own return-path gateway address,
+// when SetGatewayAddressAssignment has configured one -- see
+// ensureGatewayAddress in gatewayaddress.go.
+func ensureEgressDatapath(vpc string, tableID uint32) error {
 	// node_src_addr_table is a per-node singleton, not per-VPC: usid_egress
 	// fails open (TC_ACT_UNSPEC, uncounted) on every encapsulation attempt
 	// until some caller sets it, and internal/cnibgp's own registration
@@ -320,6 +326,16 @@ func ensureEgressDatapath(tableID uint32) error {
 	peerLink, err := ensureEgressVeth(vrfLink, inner, peer)
 	if err != nil {
 		return fmt.Errorf("ensure egress veth for VRF table %d: %w", tableID, err)
+	}
+
+	// Assigns this VPC's own return-path gateway address (if configured,
+	// see SetGatewayAddressAssignment) to inner -- the same VRF-slave veth
+	// just enslaved above. Non-fatal on failure, same stance as
+	// ensureNodeSourceAddress just above: a still-missing gateway address
+	// degrades the return path (or, unconfigured, is simply a no-op), it
+	// does not make the forward path this function exists for any worse.
+	if err := ensureGatewayAddress(vpc, inner); err != nil {
+		slog.Warn("ensureEgressDatapath: could not assign this VPC's own gateway address", "vpc", vpc, "err", err)
 	}
 
 	registry, closer, err := usidmap.OpenPinnedRegistry(ebpfPinDir)
