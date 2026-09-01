@@ -6,6 +6,7 @@ package ingresssidecar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -36,6 +37,12 @@ type vrfState struct {
 	// period — see Sweep). Only once every such route is gone does this
 	// VPC's own teardown grace period start.
 	absentSince time.Time
+	// gatewayPublished is true once this VPC's return-path BGPAdvertisement
+	// has been published (see Store.publishGateway) — set at most once per
+	// VRF lifetime, alongside installed, so a transient resolve/publish
+	// failure retries on the next SetDesired for this VPC rather than being
+	// silently abandoned for the VRF's whole remaining lifetime.
+	gatewayPublished bool
 }
 
 // Store is the in-process desired/applied-state reconciler for this
@@ -55,6 +62,12 @@ type Store struct {
 	grace   time.Duration
 	metrics *Metrics
 
+	// gatewayPublisher and gatewayResolver are both nil by default — see
+	// SetGatewayPublisher's doc comment for what enabling them does and why
+	// leaving them unset is a safe, fully backward-compatible no-op.
+	gatewayPublisher GatewayPublisher
+	gatewayResolver  GatewayAddressResolver
+
 	routes map[string]*routeState
 	vrfs   map[string]*vrfState
 }
@@ -70,6 +83,75 @@ func NewStore(backend Backend, grace time.Duration, metrics *Metrics) *Store {
 		metrics: metrics,
 		routes:  make(map[string]*routeState),
 		vrfs:    make(map[string]*vrfState),
+	}
+}
+
+// SetGatewayPublisher enables this Store to publish (and withdraw) a
+// return-path BGPAdvertisement for each VPC it manages a VRF for — see
+// GatewayPublisher/GatewayAddressResolver's own doc comments for the
+// mechanism and docs/plans/855-return-path-gateway-advertisement.md for why
+// it's needed: without it, a VPC backend's reply traffic has no SRv6 route
+// back to this node, confirmed live by packet capture (see that doc).
+//
+// Both arguments default to nil (the zero Store), which is a fully inert,
+// backward-compatible no-op — every existing deployment of this sidecar
+// today has no gateway address provisioned for resolver to find anyway
+// (see GatewayAddressResolver's own doc comment on what provisioning it
+// still needs), so leaving this unset changes nothing about how Store
+// already behaves. Call this once, before the first SetDesired, from
+// cmd/galactic-vrf's own startup only when both a node identity and a real
+// resolver are actually configured.
+func (s *Store) SetGatewayPublisher(publisher GatewayPublisher, resolver GatewayAddressResolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gatewayPublisher = publisher
+	s.gatewayResolver = resolver
+}
+
+// publishGateway attempts to publish vpc's return-path gateway
+// advertisement once, the first time its VRF is created. Called with s.mu
+// already held (from SetDesired). A resolve failure because nothing has
+// provisioned a gateway address yet (ErrGatewayAddressNotProvisioned) is
+// logged at debug and left for the next SetDesired to retry — not a
+// reconcile error, since most deployments have no such provisioning
+// mechanism at all yet (see SetGatewayPublisher's doc comment). Any other
+// error is logged at warn and also left to retry, rather than failing the
+// route reconcile that triggered it — a missing return path degrades this
+// VPC's ingress traffic, it doesn't make it worse to also install the
+// forward-path route while it's unresolved.
+func (s *Store) publishGateway(ctx context.Context, vpc string, v *vrfState) {
+	if s.gatewayPublisher == nil || s.gatewayResolver == nil || v.gatewayPublished {
+		return
+	}
+	addr, err := s.gatewayResolver.ResolveGatewayAddress(vpc)
+	if err != nil {
+		if errors.Is(err, ErrGatewayAddressNotProvisioned) {
+			slog.Debug("ingresssidecar: no gateway address provisioned yet, will retry", "vpc", vpc, "err", err)
+		} else {
+			slog.Warn("ingresssidecar: resolve gateway address", "vpc", vpc, "err", err)
+		}
+		return
+	}
+	if err := s.gatewayPublisher.PublishGateway(ctx, vpc, addr); err != nil {
+		slog.Warn("ingresssidecar: publish gateway advertisement", "vpc", vpc, "err", err)
+		return
+	}
+	v.gatewayPublished = true
+}
+
+// withdrawGateway is publishGateway's teardown counterpart, called with
+// s.mu already held (from Sweep) once a VPC's VRF is actually about to be
+// removed. Best-effort: a failure here is logged, not propagated — it must
+// never block the kernel-side vrf.Delete that follows it, or a transient
+// k8s API error would leave a VPC's VRF permanently stuck mid-teardown.
+// galactic-router's GC controller reaps a BGPAdvertisement left behind by a
+// failed withdraw the same way it already reaps any other orphaned one.
+func (s *Store) withdrawGateway(ctx context.Context, vpc string, v *vrfState) {
+	if s.gatewayPublisher == nil || !v.gatewayPublished {
+		return
+	}
+	if err := s.gatewayPublisher.WithdrawGateway(ctx, vpc); err != nil {
+		slog.Warn("ingresssidecar: withdraw gateway advertisement", "vpc", vpc, "err", err)
 	}
 }
 
@@ -117,6 +199,7 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 		v.tableID = tableID
 		s.vrfActiveDelta(1)
 	}
+	s.publishGateway(ctx, desired.VPC, v)
 
 	if rerr := s.backend.EnsureRoute(desired.Prefix, desired.SID, v.tableID); rerr != nil {
 		s.countError("ensure_route")
@@ -196,6 +279,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 			continue
 		}
 		if v.installed {
+			s.withdrawGateway(ctx, vpc, v)
 			if err := s.backend.RemoveVRF(vpc); err != nil {
 				s.countError("remove_vrf")
 				slog.Error("ingresssidecar: remove VRF", "vpc", vpc, "error", err)
