@@ -126,6 +126,23 @@ func parseInterfaceList(v string) []string {
 // rather than by interface name (the specific mesh interface name is
 // deployment-specific; the underlying failure mode -- a tunnel interface
 // racing a real NIC for the default route -- is not).
+//
+// Also skips any interface enslaved to a Linux VRF master (excludedMasterType),
+// for the identical reasoning, confirmed live: internal/ingresssidecar's
+// own per-VPC veth pair (ensureEgressDatapath's ivpN/ivsN, enslaved into
+// that VPC's VRF so usid_egress has a real ingress hook to attach to --
+// see that function's own doc comment) picks up a spurious
+// `default via fe80::... dev ivsN table <vrf>` route, almost certainly
+// from IPv6 router-solicitation/advertisement between the veth peers. With
+// six VPCs' VRFs present, that put ivs1 (the lowest VRF table id) ahead of
+// eth0 in this function's own result, so ResolveNodeSourceAddress
+// permanently resolved a link-local-only interface instead of the real
+// fabric NIC -- ensureEgressDatapath's own doc comment confirms the
+// consequence isn't cosmetic: usid_egress fails open (TC_ACT_UNSPEC,
+// uncounted) on every encapsulation attempt until this resolves. A VRF
+// slave -- this sidecar's own internal plumbing or a real tenant
+// attachment either one -- can never legitimately be "the real fabric NIC"
+// any more than a WireGuard mesh interface can.
 func autoDetectInterfaces() ([]string, error) {
 	routes, err := routeListFn()
 	if err != nil {
@@ -148,6 +165,9 @@ func autoDetectInterfaces() ([]string, error) {
 		if link.Type() == excludedLinkType {
 			continue
 		}
+		if isVRFSlave(link) {
+			continue
+		}
 		name := link.Attrs().Name
 		if seen[name] {
 			continue
@@ -168,6 +188,35 @@ func autoDetectInterfaces() ([]string, error) {
 // autoDetectInterfaces never treats as a candidate fabric interface -- see
 // autoDetectInterfaces' own doc comment for why.
 const excludedLinkType = "wireguard"
+
+// excludedMasterType is the vishvananda/netlink Link.Type() value a link's
+// *master* is checked against by isVRFSlave -- see autoDetectInterfaces'
+// own doc comment for why a VRF slave is excluded the same way a
+// WireGuard link is.
+const excludedMasterType = "vrf"
+
+// isVRFSlave reports whether link is enslaved to a Linux VRF master.
+// Resolves the master via linkByIndexFn rather than trusting link's own
+// Type() (a VRF slave is still reported as its real underlying type --
+// "veth", "bond", etc. -- only the separate MasterIndex/master-side
+// SlaveKind marks the enslavement), so this only ever excludes a link that
+// genuinely belongs to a VRF, not every enslaved link (a bond slave, which
+// expandBondSlaves deliberately wants included, is never itself a VRF
+// slave at the same time on any topology this codebase creates).
+func isVRFSlave(link netlink.Link) bool {
+	idx := link.Attrs().MasterIndex
+	if idx <= 0 {
+		return false
+	}
+	master, err := linkByIndexFn(idx)
+	if err != nil {
+		// Master unresolvable isn't actionable here; don't exclude on a
+		// guess -- matches autoDetectInterfaces' own stance on an
+		// unresolvable route target just above.
+		return false
+	}
+	return master.Type() == excludedMasterType
+}
 
 // bondLinkType is the vishvananda/netlink Link.Type() value expandBondSlaves
 // checks for -- see its own doc comment for why.

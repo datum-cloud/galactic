@@ -228,6 +228,51 @@ func TestResolveInterfaces_AutoDetect(t *testing.T) {
 		}
 	})
 
+	t.Run("VRFSlaveExcluded", func(t *testing.T) {
+		// Reproduces the live bug found in internal/ingresssidecar: a VRF
+		// slave (its own per-VPC veth pair, ensureEgressDatapath's
+		// ivpN/ivsN) picked up a spurious default route in its VRF's own
+		// table, sorting ahead of the real fabric NIC's -- see
+		// autoDetectInterfaces' own doc comment. isVRFSlave's fakeLink
+		// still reports its real Type() ("fake" here, "veth" live) --
+		// only its MasterIndex plus the separately-resolved master's own
+		// Type() ("vrf") mark the enslavement, exactly as isVRFSlave
+		// requires.
+		const (
+			vrfSlaveIface = "ivs1"
+			vrfMasterIdx  = 99
+		)
+		vrfLinks := map[int]netlink.Link{
+			2: &fakeLink{attrs: netlink.LinkAttrs{Index: 2, Name: vrfSlaveIface, MasterIndex: vrfMasterIdx}},
+			3: &fakeLink{attrs: netlink.LinkAttrs{Index: 3, Name: testIfaceEth0}},
+			vrfMasterIdx: &fakeLink{
+				attrs: netlink.LinkAttrs{Index: vrfMasterIdx, Name: "G000000002V"}, linkType: excludedMasterType,
+			},
+		}
+		origLinkByIndexFn := linkByIndexFn
+		linkByIndexFn = func(index int) (netlink.Link, error) {
+			if l, ok := vrfLinks[index]; ok {
+				return l, nil
+			}
+			return nil, errFixtureNotFound
+		}
+		defer func() { linkByIndexFn = origLinkByIndexFn }()
+
+		routeListFn = func() ([]netlink.Route, error) {
+			return []netlink.Route{
+				{LinkIndex: 2, Dst: nil}, // the VRF slave's spurious default route, reported first
+				{LinkIndex: 3, Dst: nil}, // the real fabric NIC's
+			}, nil
+		}
+		got, err := ResolveInterfaces()
+		if err != nil {
+			t.Fatalf("ResolveInterfaces() error = %v", err)
+		}
+		if !equalStringSlices(got, []string{testIfaceEth0}) {
+			t.Errorf("ResolveInterfaces() = %v, want [%s] (VRF slave excluded)", got, testIfaceEth0)
+		}
+	})
+
 	t.Run("OnlyWireguardLinkIsActionableError", func(t *testing.T) {
 		const wireguardIface = "wg-mesh0"
 		wgLinks := map[int]netlink.Link{
