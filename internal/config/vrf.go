@@ -6,6 +6,7 @@ package config
 
 import (
 	"errors"
+	"os"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -50,6 +51,16 @@ const (
 	EnvVRFMetricsPort         = "GALACTIC_VRF_METRICS_PORT"
 	EnvVRFTeardownGracePeriod = "GALACTIC_VRF_TEARDOWN_GRACE_PERIOD"
 	EnvVRFSweepInterval       = "GALACTIC_VRF_SWEEP_INTERVAL"
+
+	// EnvVRFNodeName and EnvVRFNamespace configure the return-path gateway
+	// BGPAdvertisement publisher (see NodeName/Namespace's own doc
+	// comments below) -- unset by default, matching every env var above,
+	// but unlike them this pair has no compiled-in default for NodeName:
+	// there is no generic value that could ever be right for "which node
+	// is this", the same reason GALACTIC_ROUTER_NODE_NAME/
+	// GALACTIC_GATEWAY_NODE_NAME have none either.
+	EnvVRFNodeName  = "GALACTIC_VRF_NODE_NAME"
+	EnvVRFNamespace = "GALACTIC_VRF_NAMESPACE"
 )
 
 // --- VRFConfig -----------------------------------------------------------
@@ -59,11 +70,18 @@ const (
 // Create once via NewVRFConfig(), call BindFlags() to layer CLI flags, then
 // read the exported fields.
 //
-// Unlike RouterConfig/GatewayConfig, there is no NodeName field: this
-// sidecar has no CRD identity keyed by node (no BGPRouter TargetRef to
-// match) and no ConfigMap/CRD configuration surface at all -- desired state
-// derives entirely from the EndpointSlice watch (see §1 of the plan's
-// acceptance-criteria table).
+// NodeName/Namespace are the exception to that precedence and to
+// RouterConfig/GatewayConfig's own pattern: this sidecar's *route*
+// reconciliation still has no CRD identity keyed by node and no
+// ConfigMap/CRD configuration surface (desired state derives entirely from
+// the EndpointSlice watch, per §1 of docs/plans/855-ingress-sidecar-vpc-
+// backend-connectivity.md's acceptance-criteria table) -- but publishing
+// this node's own return-path gateway advertisement (docs/plans/855-
+// return-path-gateway-advertisement.md) does need to know which BGPRouter
+// to attribute it to. NodeName's default is "" (feature disabled -- see
+// cmd/galactic-vrf's own startup logic, which only wires up a
+// GatewayPublisher when NodeName is non-empty), not a Validate failure,
+// since most deployments of this sidecar don't set it at all yet.
 type VRFConfig struct {
 	v      *viper.Viper
 	prefix string
@@ -72,6 +90,18 @@ type VRFConfig struct {
 	MetricsPort         int
 	TeardownGracePeriod time.Duration
 	SweepInterval       time.Duration
+	// NodeName is this node's name, as it appears in a BGPRouter's
+	// spec.targetRef.name -- required only to enable the return-path
+	// gateway-advertisement publisher (see this type's own doc comment);
+	// "" leaves that feature disabled. Resolved from EnvVRFNodeName,
+	// falling back to the same EnvNodeNameLegacy ("NODE_NAME") downward-API
+	// convention internal/config.CNIConfig's own NodeName uses.
+	NodeName string
+	// Namespace is where this sidecar reads BGPRouter/BGPVRFInstance and
+	// writes BGPAdvertisement CRDs when the gateway-advertisement publisher
+	// is enabled -- defaults to DefaultNamespace ("galactic-system"),
+	// matching every other galactic-* binary's own default.
+	Namespace string
 }
 
 // NewVRFConfig creates a config resolver with the GALACTIC_VRF env prefix
@@ -85,6 +115,7 @@ func NewVRFConfig() *VRFConfig {
 	v.SetDefault(keyMetricsPort, DefaultVRFMetricsPort)
 	v.SetDefault("teardown_grace_period", DefaultVRFTeardownGracePeriod.String())
 	v.SetDefault("sweep_interval", DefaultVRFSweepInterval.String())
+	v.SetDefault("namespace", DefaultNamespace)
 
 	cfg := &VRFConfig{
 		v:      v,
@@ -104,6 +135,8 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		{flagMetricsPort, keyMetricsPort},
 		{"teardown-grace-period", "teardown_grace_period"},
 		{"sweep-interval", "sweep_interval"},
+		{"node-name", "node_name"},
+		{"namespace", "namespace"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -121,6 +154,16 @@ func (c *VRFConfig) readFields() {
 	c.MetricsPort = c.v.GetInt(keyMetricsPort)
 	c.TeardownGracePeriod = c.v.GetDuration("teardown_grace_period")
 	c.SweepInterval = c.v.GetDuration("sweep_interval")
+	c.Namespace = c.v.GetString("namespace")
+
+	c.NodeName = c.v.GetString("node_name")
+	if c.NodeName == "" {
+		// Same downward-API fallback internal/config.CNIConfig's own
+		// NodeName resolution uses -- a plain os.Getenv, not viper, since
+		// EnvNodeNameLegacy ("NODE_NAME") deliberately carries no
+		// GALACTIC_VRF prefix for AutomaticEnv to match.
+		c.NodeName = os.Getenv(EnvNodeNameLegacy)
+	}
 }
 
 // Validate checks that the resolved configuration is usable.

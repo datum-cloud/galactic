@@ -23,6 +23,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/ingresssidecar"
 	"go.datum.net/galactic/internal/metadata"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 const (
@@ -36,15 +37,18 @@ const (
 // runCmd contains the application startup logic: it registers
 // internal/ingresssidecar's Reconciler against a cluster-scoped
 // EndpointSlice watch, then seeds Store from the live API state and runs
-// its startup inventory and periodic sweep. There is no BGP runtime, CRD
-// scheme beyond clientgoscheme's built-in discoveryv1 registration, or
-// per-node identity of any kind here — see internal/config.VRFConfig's own
-// doc comment for why.
+// its startup inventory and periodic sweep. There is no BGP runtime here —
+// bgpv1alpha1 is registered on the scheme solely so the optional gateway
+// publisher below can read BGPRouter/BGPVRFInstance and write
+// BGPAdvertisement CRDs; see internal/config.VRFConfig's own doc comment
+// for why cfg.NodeName, unlike everything else this binary reads, has no
+// default and leaves that one feature off when unset.
 func runCmd(cfg *config.VRFConfig) error {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -68,6 +72,23 @@ func runCmd(cfg *config.VRFConfig) error {
 
 	backend := ingresssidecar.NewKernelBackend()
 	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, metrics)
+
+	// Return-path gateway-advertisement publishing (docs/plans/855-return-
+	// path-gateway-advertisement.md) is opt-in on cfg.NodeName alone: most
+	// deployments of this sidecar don't set it yet, and leaving it unset
+	// here is exactly the no-op SetGatewayPublisher's own doc comment
+	// describes -- Store behaves identically to before this feature
+	// existed. mgr.GetClient() (the cached client) is fine for this: unlike
+	// the reconcile hot path, publishing only runs once per VRF's lifetime.
+	if cfg.NodeName != "" {
+		store.SetGatewayPublisher(
+			ingresssidecar.NewK8sGatewayPublisher(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
+			ingresssidecar.NetlinkGatewayAddressResolver{},
+		)
+	} else {
+		log.Printf("no node name configured (%s / legacy NODE_NAME) -- "+
+			"return-path gateway advertisement publishing is disabled", config.EnvVRFNodeName)
+	}
 
 	if err := (&ingresssidecar.Reconciler{Store: store}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EndpointSlice controller: %w", err)
@@ -145,6 +166,11 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().DurationP("sweep-interval", "",
 		config.DefaultVRFSweepInterval,
 		"How often to re-check pending teardowns")
+	cmd.Flags().StringP("node-name", "", "",
+		"This node's name, as it appears in a BGPRouter's spec.targetRef.name -- "+
+			"enables return-path gateway advertisement publishing when set (env "+config.EnvVRFNodeName+" or legacy NODE_NAME)")
+	cmd.Flags().StringP("namespace", "", config.DefaultNamespace,
+		"Namespace to read BGPRouter/BGPVRFInstance and write BGPAdvertisement CRDs in")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd
