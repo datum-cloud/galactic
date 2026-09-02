@@ -76,8 +76,6 @@ func runCmd(cfg *config.RouterConfig) error {
 		return err
 	}
 
-	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr)
-
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
@@ -191,6 +189,20 @@ func runCmd(cfg *config.RouterConfig) error {
 	if err := controller.RegisterIndexes(ctx, mgr); err != nil {
 		return fmt.Errorf("register field indexes: %w", err)
 	}
+
+	// BGP peer session-state transitions are detected in real time by each
+	// GoBGPRuntime's own peer-event watcher (internal/runtime/gobgp/peer_monitor.go)
+	// rather than by polling BGPPeer.Status, since a flap that reverts
+	// between two peerStatusRequeue polls would otherwise leave no trace.
+	// PeerStateEventEmitter turns those transitions into Kubernetes Events on
+	// the corresponding BGPPeer; registering it with the manager gives its
+	// worker goroutine the same start/stop lifecycle as every reconciler.
+	peerEventEmitter := controller.NewPeerStateEventEmitter(mgr.GetClient(), mgr.GetEventRecorder(appName))
+	if err := mgr.Add(peerEventEmitter); err != nil {
+		return fmt.Errorf("register peer state event emitter: %w", err)
+	}
+
+	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr, peerEventEmitter)
 
 	// Create runtime manager.
 	runtimeMgr := galacticruntime.NewRuntimeManager(factory)

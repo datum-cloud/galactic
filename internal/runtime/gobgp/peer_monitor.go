@@ -60,7 +60,11 @@ func (r *GoBGPRuntime) watchPeerEvents(ctx context.Context, b *gobgpserver.BgpSe
 
 // onPeerUpdate logs an FSM state transition for a single peer, diffing
 // against lastPeerState so a re-signal of the same state (GoBGP can emit
-// more than one event per state) doesn't produce a duplicate log line.
+// more than one event per state) doesn't produce a duplicate log line. It
+// also notifies r.observer (if set) of the same transition, which
+// PeerStateEventEmitter (internal/controller) uses to raise Kubernetes
+// Events on the corresponding BGPPeer — see docs/plans/router-bgp-peer-
+// session-events.md.
 //
 // PEER_EVENT_END_OF_INIT is skipped: it marks the end of GoBGP's initial
 // peer-list replay to a new watcher, not an FSM transition (mirrors how
@@ -71,7 +75,7 @@ func (r *GoBGPRuntime) watchPeerEvents(ctx context.Context, b *gobgpserver.BgpSe
 // OldState field, but WatchEvent doesn't forward it through this callback)
 // — so lastPeerState is this runtime's own record of "what did we last see
 // for this peer," rather than something GoBGP hands us directly.
-func (r *GoBGPRuntime) onPeerUpdate(ev *apiutil.WatchEventMessage_PeerEvent, _ time.Time) {
+func (r *GoBGPRuntime) onPeerUpdate(ev *apiutil.WatchEventMessage_PeerEvent, ts time.Time) {
 	if ev == nil || ev.Type == apiutil.PEER_EVENT_END_OF_INIT {
 		return
 	}
@@ -99,13 +103,36 @@ func (r *GoBGPRuntime) onPeerUpdate(ev *apiutil.WatchEventMessage_PeerEvent, _ t
 		"from", prev,
 		"to", next,
 	}
-	if next != model.BGPPeerStateEstablished && prev == model.BGPPeerStateEstablished {
+	leavingEstablished := next != model.BGPPeerStateEstablished && prev == model.BGPPeerStateEstablished
+	if leavingEstablished {
 		fields = append(fields,
 			"disconnectReason", ev.Peer.State.DisconnectReason,
 			"disconnectMessage", ev.Peer.State.DisconnectMessage,
 		)
 	}
 	slog.Info("bgp peer state transition", fields...)
+
+	if r.observer == nil {
+		return
+	}
+	change := model.PeerStateChange{
+		RouterKey: r.key,
+		Address:   addr,
+		PeerASN:   int64(ev.Peer.Conf.PeerASN),
+		From:      prev,
+		To:        next,
+		Time:      ts,
+	}
+	if leavingEstablished {
+		// DisconnectReason's zero value (DISCONNECT_REASON_UNSPECIFIED) means
+		// GoBGP didn't attach a reason — leave it unset rather than passing
+		// through the enum's zero-value name.
+		if ev.Peer.State.DisconnectReason != 0 {
+			change.DisconnectReason = ev.Peer.State.DisconnectReason.String()
+		}
+		change.DisconnectMessage = ev.Peer.State.DisconnectMessage
+	}
+	r.observer.ObservePeerStateChange(change)
 }
 
 // bgpFSMStateToModel converts a GoBGP FSM state, as carried by the

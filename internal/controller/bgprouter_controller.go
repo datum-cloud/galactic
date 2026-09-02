@@ -264,45 +264,10 @@ func (r *BGPRouterReconciler) updatePeerStatuses(
 	}
 
 	// Find peers that target this router, either via direct reference or selector.
-	var targetPeers []*bgpv1alpha1.BGPPeer
-
-	// Peers with direct routerRef.name match.
-	peerByRef := &bgpv1alpha1.BGPPeerList{}
-	if err := r.List(ctx, peerByRef,
-		client.InNamespace(router.Namespace),
-		client.MatchingFields{BGPPeerByRouterName: router.Name},
-	); err != nil {
-		logger.Error(err, "list BGPPeers by routerRef for status update")
-	} else {
-		for i := range peerByRef.Items {
-			targetPeers = append(targetPeers, &peerByRef.Items[i])
-		}
-	}
-
-	// Peers with routerSelector: list all peers and evaluate the selector.
-	peerList := &bgpv1alpha1.BGPPeerList{}
-	if err := r.List(ctx, peerList, client.InNamespace(router.Namespace)); err != nil {
-		logger.Error(err, "list BGPPeers for selector status update")
-	} else {
-		for i := range peerList.Items {
-			peer := &peerList.Items[i]
-			// Skip peers already matched by routerRef.
-			if peer.Spec.RouterRef != nil && peer.Spec.RouterRef.Name == router.Name {
-				continue
-			}
-			if peer.Spec.RouterSelector != nil {
-				sel, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
-					MatchLabels:      peer.Spec.RouterSelector.MatchLabels,
-					MatchExpressions: peer.Spec.RouterSelector.MatchExpressions,
-				})
-				if err != nil {
-					continue
-				}
-				if sel.Matches(labels.Set(router.Labels)) {
-					targetPeers = append(targetPeers, peer)
-				}
-			}
-		}
+	targetPeers, err := peersForRouter(ctx, r.Client, router)
+	if err != nil {
+		logger.Error(err, "list BGPPeers for status update")
+		return
 	}
 
 	for _, peer := range targetPeers {
@@ -328,6 +293,59 @@ func (r *BGPRouterReconciler) updatePeerStatuses(
 			logger.Error(updateErr, "update BGPPeer status", "peer", peer.Name)
 		}
 	}
+}
+
+// peersForRouter returns every BGPPeer that targets router, either via a
+// direct routerRef.name reference or a routerSelector matching the router's
+// own labels. Shared by updatePeerStatuses (polled every peerStatusRequeue)
+// and PeerStateEventEmitter (driven in real time by each runtime's own
+// peer-event watcher — see peer_events.go), so both resolve "which BGPPeer
+// does this belong to" the same way.
+func peersForRouter(
+	ctx context.Context, c client.Client, router *bgpv1alpha1.BGPRouter,
+) ([]*bgpv1alpha1.BGPPeer, error) {
+	logger := log.FromContext(ctx)
+
+	var targetPeers []*bgpv1alpha1.BGPPeer
+
+	// Peers with direct routerRef.name match.
+	peerByRef := &bgpv1alpha1.BGPPeerList{}
+	if err := c.List(ctx, peerByRef,
+		client.InNamespace(router.Namespace),
+		client.MatchingFields{BGPPeerByRouterName: router.Name},
+	); err != nil {
+		return nil, fmt.Errorf("list BGPPeers by routerRef: %w", err)
+	}
+	for i := range peerByRef.Items {
+		targetPeers = append(targetPeers, &peerByRef.Items[i])
+	}
+
+	// Peers with routerSelector: list all peers and evaluate the selector.
+	peerList := &bgpv1alpha1.BGPPeerList{}
+	if err := c.List(ctx, peerList, client.InNamespace(router.Namespace)); err != nil {
+		return nil, fmt.Errorf("list BGPPeers for selector match: %w", err)
+	}
+	for i := range peerList.Items {
+		peer := &peerList.Items[i]
+		// Skip peers already matched by routerRef.
+		if peer.Spec.RouterRef != nil && peer.Spec.RouterRef.Name == router.Name {
+			continue
+		}
+		if peer.Spec.RouterSelector != nil {
+			sel, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+				MatchLabels:      peer.Spec.RouterSelector.MatchLabels,
+				MatchExpressions: peer.Spec.RouterSelector.MatchExpressions,
+			})
+			if err != nil {
+				logger.V(1).Info("invalid routerSelector, skipping peer", "peer", peer.Name, "err", err)
+				continue
+			}
+			if sel.Matches(labels.Set(router.Labels)) {
+				targetPeers = append(targetPeers, peer)
+			}
+		}
+	}
+	return targetPeers, nil
 }
 
 // updateAdvertisementStatuses updates BGPAdvertisement status.
