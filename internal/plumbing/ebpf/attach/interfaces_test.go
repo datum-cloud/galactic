@@ -14,6 +14,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/plumbing/bond"
 )
 
 // testIfaceEth0 and testIfaceEth1 are shared interface-name fixtures used
@@ -339,7 +340,7 @@ func TestExpandBondSlaves(t *testing.T) {
 	slave1Link := &fakeLink{attrs: netlink.LinkAttrs{Name: slave1, Index: 11, MasterIndex: bondIndex}}
 	bondLinks := map[string]netlink.Link{
 		testIfaceEth0: &fakeLink{attrs: netlink.LinkAttrs{Name: testIfaceEth0, Index: 2}},
-		bondName:      &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bondLinkType},
+		bondName:      &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bond.LinkType},
 		slave1:        slave1Link, // also named explicitly, in MixedBondAndNonBondDeduped below
 	}
 	allLinks := []netlink.Link{
@@ -433,7 +434,7 @@ func TestResolveInterfaces_BondExpansion(t *testing.T) {
 		slave2    = "ens2f1np1"
 	)
 
-	bondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bondLinkType}
+	bondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bond.LinkType}
 	slaveLinks := []netlink.Link{
 		&fakeLink{attrs: netlink.LinkAttrs{Name: slave1, Index: 6, MasterIndex: bondIndex}},
 		&fakeLink{attrs: netlink.LinkAttrs{Name: slave2, Index: 7, MasterIndex: bondIndex}},

@@ -342,25 +342,35 @@ to resolve backend uSIDs).
 
 ### `cmd/galactic-gateway/gateway.go` — datapath setup
 
-`setupGatewayDatapath` first calls
-`sysctl.ConfigureFIBLookupUplinkSysctls(publicInterface)` — required for
-`bpf_fib_lookup()` (`edgedsr.c`'s `push_outer_header`) to ever succeed on
-this interface: without it the kernel returns
-`BPF_FIB_LKUP_RET_NOT_FWDED` for every lookup, correctly refusing to
-resolve a forwarding route on an interface not configured as a router. This
-was found via live-kernel investigation of a pre-existing containerlab
-veth/XDP_TX blocker — the sysctl gap, not `XDP_TX` itself, was what
-actually prevented every gateway node's `bpf_fib_lookup` from ever
-succeeding in that lab (see [Known Constraints](#known-constraints) below
-for the related, lab-only `XDP_TX` observability quirk this investigation
-also turned up). It then loads `edgeprog.EdgedsrObjects`
-(`edgeattach.Load`), attaches it to `PublicInterface`
-(`edgeattach.Attach` — native XDP driver mode only, no generic/SKB-mode
-fallback), and constructs a `gateway.KernelDatapath` over it, writing this
-node's SRv6 encap-source address into `encap_config_table` once at
-construction time.
+`setupGatewayDatapath` first resolves `PublicInterface` via
+`edgeattach.ResolveTargets`: usually that's just `[PublicInterface]`
+unchanged, but if `PublicInterface` names a Linux bonding master, it
+resolves to that bond's slave interfaces instead — native-mode XDP against
+a bonding master is not reliable (see [Known Constraints](#known-constraints)
+below for the confirmed failure and why it isn't simply "bonding never
+implements `ndo_bpf`"), unlike `internal/plumbing/ebpf/attach`'s TC-BPF
+path, which attaches to both the master and its slaves (see
+[ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md) for that side). It then calls
+`sysctl.ConfigureFIBLookupUplinkSysctls` once per resolved target —
+required for `bpf_fib_lookup()` (`edgedsr.c`'s `push_outer_header`) to
+ever succeed on the interface the XDP program actually runs on: without it
+the kernel returns `BPF_FIB_LKUP_RET_NOT_FWDED` for every lookup,
+correctly refusing to resolve a forwarding route on an interface not
+configured as a router. This was found via live-kernel investigation of a
+pre-existing containerlab veth/XDP_TX blocker — the sysctl gap, not
+`XDP_TX` itself, was what actually prevented every gateway node's
+`bpf_fib_lookup` from ever succeeding in that lab (see
+[Known Constraints](#known-constraints) below for the related, lab-only
+`XDP_TX` observability quirk this investigation also turned up, and for
+why the sysctl targets the resolved bond slave rather than
+`PublicInterface` itself when the two differ). It then loads
+`edgeprog.EdgedsrObjects` (`edgeattach.Load`), attaches it to every
+resolved target (`edgeattach.Attach` — native XDP driver mode only, no
+generic/SKB-mode fallback, one `link.Link` per target), and constructs a
+`gateway.KernelDatapath` over it, writing this node's SRv6 encap-source
+address into `encap_config_table` once at construction time.
 
-The loaded objects and the returned `link.Link` are stashed in a
+The loaded objects and every returned `link.Link` are stashed in a
 package-level `gatewayDatapathKeepAlive` var rather than ever being
 `Close`d — see that var's doc comment for a concrete, previously-live
 incident: `cilium/ebpf`'s program/map/link types register a runtime
@@ -380,7 +390,7 @@ normal while ingress traffic quietly stopped being intercepted at all.
 | Variable                            | Required | Default | Description                                                                                                                                        |
 | ----------------------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GALACTIC_GATEWAY_NODE_NAME`        | Yes      | —       | Kubernetes node name                                                                                                                                |
-| `GALACTIC_GATEWAY_PUBLIC_INTERFACE` | Yes      | —       | Public/underlay-facing uplink interface the XDP program attaches to                                                                                 |
+| `GALACTIC_GATEWAY_PUBLIC_INTERFACE` | Yes      | —       | Public/underlay-facing uplink interface the XDP program attaches to. May name a Linux bonding master (`edgeattach.ResolveTargets` expands it to that bond's slaves — see [Known Constraints](#known-constraints)) |
 | `GALACTIC_GATEWAY_SRV6_ADDRESS`     | Yes      | —       | This node's own plain SRv6-reachable IPv6 address, used as the DSR outer-header encap source (`encap_config_table`) — never a NAT/SNAT source and never compared against anything on a receive path; must be a native IPv6 address (rejected if IPv4 or 4-in-6) |
 | `GALACTIC_GATEWAY_METRICS_PORT`     | No       | `8081`  | Prometheus metrics port                                                                                                                             |
 | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | No       | `5181`  | gRPC health check port                                                                                                                              |
@@ -613,9 +623,9 @@ not a supported configuration).
 
 | Layer           | Command                               | Framework                       | Scope                                                                                                                                                                                                                                                                                                                                    |
 | --------------- | -------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unit            | `task test:unit`                      | `go test -race`                 | `internal/config` (`gateway_test.go`), `internal/controller` (`networkgateway_controller_test.go`, `networkrule_controller_test.go`, `usidresolver_test.go`), `internal/gateway` (`engine_test.go`, `diff_test.go`, `kerneldatapath_test.go`, `quota_test.go`, `recovery_test.go`, `telemetry_test.go`), `internal/maglev` (`table_test.go`), `internal/plumbing/ebpf/edgemap` (`viptable_test.go`, in-memory fake `Table`, no kernel required), `internal/plumbing/ebpf/edgemetrics` (`collector_test.go`), `internal/plumbing/ebpf/edgepreflight` (`preflight_test.go`, `kernel_prober_test.go`) |
+| Unit            | `task test:unit`                      | `go test -race`                 | `internal/config` (`gateway_test.go`), `internal/controller` (`networkgateway_controller_test.go`, `networkrule_controller_test.go`, `usidresolver_test.go`), `internal/gateway` (`engine_test.go`, `diff_test.go`, `kerneldatapath_test.go`, `quota_test.go`, `recovery_test.go`, `telemetry_test.go`), `internal/maglev` (`table_test.go`), `internal/plumbing/bond` (`bond_test.go`, faked `netlink.Link`s, no kernel required — shared bond-master/slave detection used by both this package's `edgeattach.ResolveTargets` and `internal/plumbing/ebpf/attach`'s CNI TC-BPF path), `internal/plumbing/ebpf/edgemap` (`viptable_test.go`, in-memory fake `Table`, no kernel required), `internal/plumbing/ebpf/edgemetrics` (`collector_test.go`), `internal/plumbing/ebpf/edgepreflight` (`preflight_test.go`, `kernel_prober_test.go`); `edgeattach.ResolveTargets` also has its own faked-netlink `TestResolveTargets` (non-bond passthrough, bond-expands-to-slaves-only, no-slaves error) |
 | Kernel-required | `task test:unit` (root/CAP_BPF gated) | `go test` + `BPF_PROG_TEST_RUN` | `internal/plumbing/ebpf/edgeprog/edgedsr_test.go` — exercises the compiled program directly, including the version-nibble/payload_len regression tests; `internal/plumbing/ebpf/edgeattach/attach_test.go`                                                                                                                                |
-| E2E             | —                                     | —                                | **Not yet covered.** `deploy/containerlab/`'s `iad-gateway1`/`iad-gateway2` nodes are a manifests-and-live-pod canary, not a scripted e2e test — see Known Constraints.                                                                                                                                                                    |
+| E2E             | —                                     | —                                | **Not yet covered.** `deploy/containerlab/`'s `iad-gateway1`/`iad-gateway2` nodes are a manifests-and-live-pod canary, not a scripted e2e test — see Known Constraints. No bonded-uplink scenario exists there either, deliberately: `iad-gateway1`/`iad-gateway2`'s uplinks are veth pairs, and (confirmed while adding `TestResolveTargetsAndAttach_RealBondDevice` above) veth slaves accept a native XDP attach on a real bond master directly on at least some kernels, since veth itself supports native XDP and some kernels' bonding driver forwards the attach through to slaves that do — the opposite of the real igb/tg3 failure this whole feature exists for. A containerlab veth-bond scenario would not exercise the bug it would be built to guard against; the root-gated real-bond-device unit test does, without that false sense of coverage. |
 
 ---
 
@@ -654,6 +664,7 @@ since that base's DaemonSet runs both images in one pod.
 - **`GALACTIC_GATEWAY_SRV6_ADDRESS` has no in-cluster derivation mechanism.** It is operator-supplied per gateway node today; nothing in this repo yet computes it automatically from a node's own `BGPRouter` locator/node-ID. See [SRv6 encap-source address](#srv6-encap-source-address) above.
 - **The uSID TC-BPF/XDP FIB-lookup PMTUD gap applies here too.** When `bpf_fib_lookup()` returns `BPF_FIB_LKUP_RET_FRAG_NEEDED`, `edgedsr.c` counts `DROP_REASON_FIB_FRAG_NEEDED` and drops rather than emitting an ICMPv6 Packet Too Big — the same accepted gap `internal/plumbing/ebpf/prog/usid.c` has for the SRv6 uSID datapath (see [ARCHITECTURE-CNI.md#known-constraints](ARCHITECTURE-CNI.md#known-constraints)), not yet scheduled to be closed on either side.
 - **`bpf_fib_lookup()` requires IPv6 forwarding sysctls on the public uplink, not just XDP driver support.** `setupGatewayDatapath` calls `sysctl.ConfigureFIBLookupUplinkSysctls` before attaching the datapath — without `net.ipv6.conf.<iface>.forwarding` and `net.ipv6.conf.all.forwarding` both set, the kernel returns `BPF_FIB_LKUP_RET_NOT_FWDED` for every lookup regardless of anything this program does, which `edgedsr.c`'s own drop-reason accounting cannot distinguish from a generic FIB lookup failure. Found via live-kernel investigation of a pre-existing containerlab veth/XDP_TX blocker: the sysctl gap, not `XDP_TX` itself, was the actual cause. A related, lab-only characteristic the same investigation turned up: native `XDP_TX` on a veth pair only promotes a frame into the peer's normal receive stack (visible to `tcpdump`) if the peer *also* runs an XDP program — otherwise delivery uses a raw fast-path invisible to normal tools. This does not apply to a real physical NIC uplink in production, where there is no "peer's own XDP program" question to begin with.
+- **A bonded public uplink attaches per-slave, with per-slave FIB-lookup sysctls to match.** Native-mode XDP against a Linux bonding master is not reliable: confirmed failing outright with "operation not supported" on a real gateway node (802.3ad over an igb/tg3 slave pair). Not every kernel's bonding driver categorically lacks `ndo_bpf` — some do implement it by forwarding the attach to every slave — but that still requires each slave's own driver to support native XDP itself, which not every NIC driver does (tg3 is a commonly cited example that doesn't), so this codebase never relies on attaching to the master working, on any kernel. `edgeattach.ResolveTargets` expands a bonding-master `GALACTIC_GATEWAY_PUBLIC_INTERFACE` to its slave interfaces (never the master itself — see `internal/plumbing/bond`, shared with `internal/plumbing/ebpf/attach`'s TC-BPF path, which attaches to the master *and* its slaves instead), and `setupGatewayDatapath` attaches to and configures FIB-lookup sysctls on every one of them. This is not cosmetic: `edgedsr.c`'s `push_outer_header` calls `bpf_fib_lookup()` with `ctx->ingress_ifindex` — confirmed against the source, not assumed — which for a native XDP program attached to a bond slave is that slave's own ifindex, not the bond master's, so `net.ipv6.conf.<slave>.forwarding` (not `net.ipv6.conf.<bond-master>.forwarding`) is what the kernel actually checks. A bonding master with no resolvable slaves is a hard startup error, not a silent fallback to attaching the master (which would only risk repeating the same failure). `edgeattach.Attach` is all-or-nothing across every resolved slave in one call — if any single slave's driver can't accept a native XDP attach (a real possibility per the tg3 note above, not independently confirmed against that node specifically), the whole datapath startup fails rather than running in a degraded, missing-that-slave's-traffic state; this has not been exercised against real igb/tg3 hardware, only veth in tests, so whether all of a real bonded pair's slaves actually accept native XDP on the affected class of hardware is still open. One further accepted tradeoff: attaching per-slave rather than to the bond as a whole means a slave failing over (LACP renegotiation, a link flap) is not automatically picked up — there is no Watch-style re-resolution here, matching the rest of this package's "resolved once at startup" design (see `edgeattach`'s package doc comment).
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place, unlike the removed Full-NAT predecessor's `conn_table`, which relied on `BPF_MAP_TYPE_LRU_HASH` self-eviction for the same purpose.
 - **Egress is out of this binary's scope, not unimplemented.** An earlier plan (`docs/plans/865-edge-gateway-nat66-egress.md`) proposed adding a second, egress-masquerading XDP personality to this same program and process; that approach was superseded by a separate, sharded stateful NAT66 tier (`galactic-nat66`, its own binary — see `cmd/galactic-nat66` and `internal/controller/nat66shard_controller.go`) rather than built here. `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.
 

@@ -18,12 +18,14 @@ import (
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
-// gatewayDatapathKeepAlive holds the loaded *edgeprog.EdgedsrObjects and the
-// attached link.Link for the life of this process, once
-// setupGatewayDatapath's attach path succeeds. Neither is Closed anywhere
-// in this file — see setupGatewayDatapath's doc comment for why — but a
-// value that isn't stored somewhere reachable is exactly as good as
-// Closed: cilium/ebpf's *ebpf.Program, *ebpf.Map, and link.Link types all
+// gatewayDatapathKeepAlive holds the loaded *edgeprog.EdgedsrObjects and
+// every attached link.Link (one per public-interface XDP attach target --
+// see setupGatewayDatapath's doc comment on why there can be more than one)
+// for the life of this process, once setupGatewayDatapath's attach path
+// succeeds. Neither is Closed anywhere in this file — see
+// setupGatewayDatapath's doc comment for why — but a value that isn't
+// stored somewhere reachable is exactly as good as Closed: cilium/ebpf's
+// *ebpf.Program, *ebpf.Map, and link.Link types all
 // register a runtime finalizer that closes their underlying fd once the
 // garbage collector determines nothing reachable still points at them,
 // with no error surfaced anywhere when that happens. gateway.KernelDatapath
@@ -47,8 +49,8 @@ import (
 // lives in its own process rather than sharing one with the tenant BGP
 // reconcilers.
 var gatewayDatapathKeepAlive struct {
-	objs *edgeprog.EdgedsrObjects
-	link link.Link
+	objs  *edgeprog.EdgedsrObjects
+	links []link.Link
 }
 
 // setupGatewayDatapath loads and attaches the edge Maglev/DSR eBPF datapath
@@ -60,7 +62,14 @@ var gatewayDatapathKeepAlive struct {
 // rejects either being empty before runCmd ever calls this function, since
 // this binary only exists to run the gateway role.
 //
-// The loaded *edgeprog.EdgedsrObjects and the returned link.Link are
+// publicInterface is usually attached to directly, but if it names a Linux
+// bonding master, edgeattach.ResolveTargets expands it to that bond's slave
+// interfaces instead (native-mode XDP cannot attach to a bonding master at
+// all) -- so this may end up loading and attaching to more than one
+// interface. Every resulting sysctl configuration and XDP attachment
+// targets the same resolved set, not publicInterface itself in that case.
+//
+// The loaded *edgeprog.EdgedsrObjects and every returned link.Link are
 // stashed in gatewayDatapathKeepAlive (see that var's doc comment for why)
 // rather than Closed here: they, and the XDP attachment itself, must
 // survive for the life of this process — same convention as
@@ -84,15 +93,27 @@ func setupGatewayDatapath(
 		return nil, fmt.Errorf("parse gateway SRv6 address %q: %w", srv6Address, err)
 	}
 
+	targets, err := edgeattach.ResolveTargets(publicInterface)
+	if err != nil {
+		return nil, fmt.Errorf("resolve edge gateway public interface %q: %w", publicInterface, err)
+	}
+
 	// Required for bpf_fib_lookup() (edgedsr.c's push_outer_header) to
-	// ever succeed on this interface -- see
-	// ConfigureFIBLookupUplinkSysctls's own doc comment for why (a real,
-	// previously-undiagnosed blocker, not a hypothetical one). Best-effort/
-	// non-fatal, matching this package's own established
+	// ever succeed on the interface the XDP program actually runs on --
+	// see ConfigureFIBLookupUplinkSysctls's own doc comment for why (a
+	// real, previously-undiagnosed blocker, not a hypothetical one).
+	// edgedsr.c looks up ctx->ingress_ifindex, i.e. whichever interface in
+	// targets the packet actually arrived on, so this must be applied to
+	// every resolved target, not publicInterface itself -- once
+	// publicInterface names a bond, its slaves (not the bond master) are
+	// what the kernel actually reports as the ingress interface. Best-
+	// effort/non-fatal, matching this package's own established
 	// sysctl-configuration convention (internal/cni already calls
 	// ConfigureInterfaceSysctls the same way for VRF interfaces).
-	if err := sysctl.ConfigureFIBLookupUplinkSysctls(publicInterface); err != nil {
-		return nil, fmt.Errorf("configure IPv6 forwarding on public interface %q: %w", publicInterface, err)
+	for _, target := range targets {
+		if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
+			return nil, fmt.Errorf("configure IPv6 forwarding on public interface %q: %w", target, err)
+		}
 	}
 
 	objs, err := edgeattach.Load(edgeattach.PinDir)
@@ -100,7 +121,7 @@ func setupGatewayDatapath(
 		return nil, fmt.Errorf("load edge gateway eBPF datapath: %w", err)
 	}
 
-	xdpLink, err := edgeattach.Attach(objs.EdgeLb, publicInterface)
+	xdpLinks, err := edgeattach.Attach(objs.EdgeLb, targets)
 	if err != nil {
 		_ = objs.Close()
 		return nil, fmt.Errorf("attach edge gateway datapath to public interface %q: %w", publicInterface, err)
@@ -108,19 +129,28 @@ func setupGatewayDatapath(
 
 	datapath, err := gateway.NewKernelDatapath(objs, encapSrc)
 	if err != nil {
-		_ = xdpLink.Close()
+		closeAll(xdpLinks)
 		_ = objs.Close()
 		return nil, fmt.Errorf("construct kernel datapath: %w", err)
 	}
 
 	if err := metricsReg.Register(edgemetrics.NewCollectorFromObjects(objs)); err != nil {
-		_ = xdpLink.Close()
+		closeAll(xdpLinks)
 		_ = objs.Close()
 		return nil, fmt.Errorf("register edge gateway metrics collector: %w", err)
 	}
 
 	gatewayDatapathKeepAlive.objs = objs
-	gatewayDatapathKeepAlive.link = xdpLink
+	gatewayDatapathKeepAlive.links = xdpLinks
 
 	return datapath, nil
+}
+
+// closeAll best-effort Closes every link in links, e.g. to unwind a
+// partially-set-up datapath after edgeattach.Attach already succeeded but a
+// later setupGatewayDatapath step failed.
+func closeAll(links []link.Link) {
+	for _, l := range links {
+		_ = l.Close()
+	}
 }
