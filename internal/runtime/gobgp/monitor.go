@@ -8,8 +8,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	vrfpkg "go.datum.net/galactic/internal/plumbing/vrf"
@@ -242,7 +245,35 @@ func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeIn
 // SHA-256 hash fallback form (crdnames.nameSegment's "x..." prefix, for VPCs
 // that don't cleanly hex-encode), which is correct here too: that form was
 // never recoverable to a real interface name in the first place.
-func vrfTableID(vrfName string) (uint32, error) {
+//
+// argument is the same value as the owning BGPVRFInstance's own
+// Spec.VRFID — used only by the vrf_table fallback below, not by the
+// primary netlink lookup.
+//
+// vrfpkg.TableID's own netlink.LinkList() call is scoped to this
+// process's own network namespace — galactic-router runs
+// hostNetwork: true, so that's the host's root netns, correct for a VRF
+// galactic-cni created there directly for a real tenant pod's own CNI
+// attachment. It is structurally blind to a VRF #855's ingress sidecar
+// creates instead, which lives entirely inside Envoy's own pod netns by
+// design (so its own SO_BINDTODEVICE calls resolve there). Confirmed
+// live on us-central-1-staging-lab: a node running only the ingress
+// sidecar for a given VPC — no real tenant CNI attachment for it at all
+// — never has that VRF's interface visible in its own root netns, so the
+// primary lookup fails on every single reconcile, forever; not a race,
+// not something a restart or a longer wait fixes.
+//
+// The fallback below reads vrf_table directly instead of reaching into
+// that other netns: internal/ingresssidecar's own ensureEgressDatapath
+// already writes this exact (block, argument) -> kernel table ID mapping
+// there the moment it creates its own VRF, so usid_ingress's own decap
+// path can find it — the same bpffs-pinned map this process already
+// opens a second handle onto for vip_xlat_table
+// (cmd/galactic-router/root.go). Reading it here needs no new privilege,
+// no cross-namespace setns, and no change to the network repo's own CRD
+// schema: it's the same value, already published by whoever actually
+// created the VRF, through a channel this process already has open.
+func vrfTableID(vrfName string, argument int32) (uint32, error) {
 	parts := strings.SplitN(vrfName, "-", 2)
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("VRF name %q does not contain '-'", vrfName)
@@ -251,7 +282,60 @@ func vrfTableID(vrfName string) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("VRF name %q: could not decode VPC segment %q back to base62: %w", vrfName, parts[0], err)
 	}
-	return vrfpkg.TableID(vpc)
+
+	tableID, localErr := vrfpkg.TableID(vpc)
+	if localErr == nil {
+		return tableID, nil
+	}
+
+	fallbackID, ok, fallbackErr := vrfTableIDFromRegistry(vpc, argument)
+	if fallbackErr != nil {
+		return 0, fmt.Errorf("VRF %q: local netlink lookup failed (%w), and vrf_table fallback also failed: %w",
+			vrfName, localErr, fallbackErr)
+	}
+	if !ok {
+		return 0, fmt.Errorf(
+			"VRF %q: local netlink lookup failed (%w), and no vrf_table entry exists either (vpc=%s argument=%d) "+
+				"— this VRF may not exist on this node yet", vrfName, localErr, vpc, argument)
+	}
+	return fallbackID, nil
+}
+
+// vrfTableIDFromRegistry looks up the kernel VRF table ID (vpc, argument)
+// maps to in vrf_table — see vrfTableID's own doc comment for why this
+// fallback exists. Opens a fresh handle each call via pinDir, the same
+// on-demand-open idiom probeEgressRouteWrite (below) already uses for
+// egress_route_table, rather than keeping a long-lived handle: this only
+// runs on the local-netlink-miss path (once per affected VRF per
+// reconcile that needs it), not a per-packet or per-reconcile hot path
+// for every VRF.
+func vrfTableIDFromRegistry(vpc string, argument int32) (uint32, bool, error) {
+	if argument < 0 || argument > math.MaxUint16 {
+		return 0, false, fmt.Errorf("argument %d out of range for a uint16 uSID Argument", argument)
+	}
+	vpcHex, err := intf.Base62ToHex(vpc)
+	if err != nil {
+		return 0, false, fmt.Errorf("convert vpc %q to hex: %w", vpc, err)
+	}
+	block, err := strconv.ParseUint(vpcHex, 16, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse vpc hex %q: %w", vpcHex, err)
+	}
+
+	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		return 0, false, fmt.Errorf("open pinned vrf_table (missing bpffs mount, BPF capability, or root?): %w", err)
+	}
+	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+
+	entry, ok, err := registry.VRF.Get(block, uint16(argument))
+	if err != nil {
+		return 0, false, fmt.Errorf("vrf_table: get vpc=%s (block=%#x) argument=%#x: %w", vpc, block, argument, err)
+	}
+	if !ok {
+		return 0, false, nil
+	}
+	return entry.VRFTableID, true, nil
 }
 
 // evpnMpReachNexthop returns the MpReachNLRI next-hop address string from path

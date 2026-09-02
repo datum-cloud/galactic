@@ -5,6 +5,7 @@
 package gobgp
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -109,7 +110,7 @@ func TestMatchTableID_NoExtendedCommunitiesAttributeAtAll(t *testing.T) {
 // asserts on the interface name vrfpkg.TableID reports missing rather than
 // on a successful lookup.
 func TestVRFTableID_DecodesHexSegmentBackToBase62(t *testing.T) {
-	_, err := vrfTableID("3e-dfw-worker")
+	_, err := vrfTableID("3e-dfw-worker", 1)
 	if err == nil {
 		t.Fatalf("vrfTableID() error = nil, want a 'VRF ID not found' error (no such kernel VRF in test env)")
 	}
@@ -127,7 +128,7 @@ func TestVRFTableID_DecodesHexSegmentBackToBase62(t *testing.T) {
 // interface name, so vrfTableID must fail fast on the decode rather than
 // attempt a kernel lookup with a garbage name.
 func TestVRFTableID_HashFallbackSegmentErrors(t *testing.T) {
-	_, err := vrfTableID("x0123456789ab-dfw-worker")
+	_, err := vrfTableID("x0123456789ab-dfw-worker", 1)
 	if err == nil {
 		t.Fatalf("vrfTableID() error = nil, want a base62-decode error for a hash-fallback segment")
 	}
@@ -137,8 +138,65 @@ func TestVRFTableID_HashFallbackSegmentErrors(t *testing.T) {
 // a VRF name with no '-' at all can't be split into a VPC segment and a
 // node name.
 func TestVRFTableID_NoDashErrors(t *testing.T) {
-	_, err := vrfTableID("nodash")
+	_, err := vrfTableID("nodash", 1)
 	if err == nil {
 		t.Fatalf("vrfTableID(\"nodash\") error = nil, want a \"does not contain '-'\" error")
+	}
+}
+
+// TestVRFTableID_FallbackErrorMentionsBothAttempts covers the case this
+// fallback exists for: a VRF whose interface genuinely does not exist in
+// this process's own root netns (galactic-router's normal case for a VRF
+// #855's ingress sidecar created instead, inside Envoy's own pod netns —
+// see vrfTableID's own doc comment). With no bpffs mount in this test
+// environment either, both attempts fail, and the combined error must
+// still surface the original local-netlink failure (mentioning the
+// base62-decoded interface name), not just the fallback's own error, so
+// an operator reading the log doesn't lose the first, usually more
+// familiar signal.
+func TestVRFTableID_FallbackErrorMentionsBothAttempts(t *testing.T) {
+	_, err := vrfTableID("3e-dfw-worker", 7)
+	if err == nil {
+		t.Fatal("vrfTableID() error = nil, want an error (no kernel VRF and no pinned vrf_table in the test env)")
+	}
+	if !strings.Contains(err.Error(), "G000000010V") {
+		t.Errorf("vrfTableID() error = %q, want it to still mention the local netlink failure", err)
+	}
+	if !strings.Contains(err.Error(), "vrf_table") {
+		t.Errorf("vrfTableID() error = %q, want it to also mention the vrf_table fallback attempt", err)
+	}
+}
+
+// TestVRFTableIDFromRegistry_RejectsOutOfRangeArgument covers the bounds
+// check on argument: model.DesiredVRFInstance.VRFID is an int32 (RFC 4364
+// route-distinguisher assignment compatibility), but a uSID Argument is
+// only ever 16 bits (uformat.ValidateArgument) — this must reject a value
+// that can't round-trip through uint16 before ever touching a pinned map,
+// rather than silently truncating it into a lookup for the wrong key.
+func TestVRFTableIDFromRegistry_RejectsOutOfRangeArgument(t *testing.T) {
+	for _, argument := range []int32{-1, math.MaxUint16 + 1} {
+		if _, _, err := vrfTableIDFromRegistry("2", argument); err == nil {
+			t.Errorf("vrfTableIDFromRegistry(%d) error = nil, want an out-of-range error", argument)
+		}
+	}
+}
+
+// TestVRFTableIDFromRegistry_MissingPinReturnsError covers the "eBPF uSID
+// datapath not loaded on this node" case (a route-reflector/control-role
+// node, or simply not yet attached) — pinDir points at this test's own
+// temp directory instead of a real bpffs mount, so OpenPinnedRegistry's
+// own open() calls fail exactly as they would against a genuinely absent
+// pin, with no real bpffs mount or root privilege needed to exercise it.
+func TestVRFTableIDFromRegistry_MissingPinReturnsError(t *testing.T) {
+	old := pinDir
+	pinDir = t.TempDir()
+	t.Cleanup(func() { pinDir = old })
+
+	_, _, err := vrfTableIDFromRegistry("2", 1)
+	if err == nil {
+		t.Fatal("vrfTableIDFromRegistry() error = nil, want an error opening a non-existent pinned map")
+	}
+	if !strings.Contains(err.Error(), "vrf_table") {
+		t.Errorf("vrfTableIDFromRegistry() error = %q, want it to name vrf_table", err)
 	}
 }

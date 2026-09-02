@@ -350,7 +350,7 @@ func (r *GoBGPRuntime) applyVRFs(
 		tableID, ok := r.appliedVRFs[v.Name]
 		if !ok {
 			var err error
-			tableID, err = vrfTableID(v.Name)
+			tableID, err = vrfTableID(v.Name, v.VRFID)
 			if err != nil {
 				slog.Error("applyVRFs: failed to resolve kernel VRF table; this VRF's routes will not be installed",
 					"vrf", v.Name, "err", err)
