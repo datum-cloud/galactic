@@ -63,27 +63,9 @@ kubectl apply -k config/galactic-gateway/
 
 - **`config/fabric-router/`: per-node `frr.conf`.** Unlike every other component under `config/`, `config/fabric-router/daemonset.yaml` has no generic default config — the underlay eBGP session (interface addresses, remote-AS, etc.) is different for every physical node, and this DaemonSet's `nodeAffinity` (`galactic.datumapis.com/fabric: router`) can legitimately match more than one node per cluster. Before applying `config/fabric-router/`, create a `fabric-config` ConfigMap in the `galactic-system` namespace with one `frr.conf.<nodename>` key per matching node (`<nodename>` is the Kubernetes node name, e.g. `frr.conf.worker-1`) — `frr-init` picks the right key at pod start via the pod's `NODE_NAME` downward-API env var. The other two files FRR needs, `daemons` and `vtysh.conf`, are already baked into the `fabric-router` image (see `containers/fabric-router/Dockerfile`); include them in the ConfigMap too only if you need to override the image defaults. `deploy/containerlab/resources/fabric/{dfw,iad,sjc}/frr.conf` are worked examples from the lab, not something you can apply as-is.
 
-- **`config/fabric-router/` and `config/galactic-router/`: rolling out updates is manual.** Both `config/fabric-router/daemonset.yaml` and `config/galactic-router/base/daemonset.yaml` use `updateStrategy: OnDelete` — a `kubectl apply` (new image tag, or a spec change) will not restart any pod on its own. This is deliberate for both: each is a BGP speaker whose liveness/health probe only reflects "the process is up," not "the BGP session has reconverged," so `RollingUpdate` would advance to the next node on exactly the wrong signal — see the comment above `updateStrategy` in each manifest for the full reasoning. To actually roll out a change, delete pods one at a time and confirm the new pod's session(s) have reconverged before moving to the next node, e.g. for `fabric-router`:
+- **`config/fabric-router/` and `config/galactic-router/`: rollouts are now automatic (`RollingUpdate`).** Both `config/fabric-router/daemonset.yaml` and `config/galactic-router/base/daemonset.yaml` use the DaemonSet default `updateStrategy` (`RollingUpdate`) rather than `OnDelete`, so a `kubectl apply` (new image tag, or a spec change) will restart pods on its own, one node at a time, gated only by each pod's liveness/health probe — which reflects "the process is up," not "the BGP session has reconverged." Watch session state after any rollout rather than assuming the controller's pacing was safe: for `fabric-router`, `vtysh -c "show bgp summary"` on the new pod; for `galactic-router`, the `BGPPeer` CRD's `STATE` column (`kubectl get bgppeer`) — there's no `vtysh` in that binary, it reports session state itself. For `galactic-router-rr`, every compute node's iBGP session pivots through that one pod, so its rollout is a fleet-wide route flap, not a single-node one; confirm every client has re-peered before considering it done.
 
-  ```bash
-  kubectl -n galactic-system get pods -l app.kubernetes.io/name=fabric-router -o wide
-  kubectl -n galactic-system delete pod <fabric-router-pod-on-one-node>
-  # wait for the new pod to be Ready, then confirm on that node:
-  kubectl -n galactic-system exec <new-pod> -- vtysh -c "show bgp summary"
-  # repeat for the next node only once the above shows the session Established
-  ```
-
-  A ConfigMap edit to `fabric-config` behaves the same way today regardless of `updateStrategy` — there's no checksum annotation wiring pod restarts to ConfigMap changes, so a config change also requires this same manual, node-by-node pod bounce to take effect.
-
-- **`config/galactic-router/`: rollout order — `rr` last, one compute node at a time.** For `rr`, every compute node's iBGP session pivots through that one pod, so bouncing it is a fleet-wide route flap, not a single-node one — roll it only after all compute nodes are already on the new version, and confirm every client has re-peered before considering the rollout done. For the default role, a bounce only withdraws that one node's own advertised prefixes, so it's safe to go node-by-node as with `fabric-router`. Check session state via the `BGPPeer` CRD's `STATE` column rather than `vtysh` (there's no `vtysh` in this binary — `galactic-router` reports session state itself):
-
-  ```bash
-  kubectl -n galactic-system get pods -l app.kubernetes.io/name=galactic-router -o wide
-  kubectl -n galactic-system delete pod <galactic-router-pod-on-one-node>
-  # wait for the new pod to be Ready, then confirm its BGPPeer CRDs are back to STATE=Established
-  kubectl get bgppeer
-  # repeat for the next compute node, then only last roll galactic-router-rr the same way
-  ```
+  A ConfigMap edit to `fabric-config` still does not trigger a rollout — there's no checksum annotation wiring pod restarts to ConfigMap changes — so a config-only change still requires a manual, node-by-node pod bounce to take effect.
 
 - **`config/galactic-gateway/`: per-node public interface and SRv6 address.** `config/galactic-gateway/base/daemonset.yaml`'s `galactic-gateway` container requires `GALACTIC_GATEWAY_PUBLIC_INTERFACE` and `GALACTIC_GATEWAY_SRV6_ADDRESS` — the latter must be unique per gateway node and has no generic default (there's no in-cluster mechanism yet that derives it automatically; see `publishSelfAddress`'s doc comment in `internal/controller/networkgateway_controller.go`). Applying `base/` as shipped, without pinning both per node, produces a crash-looping container. Instantiate `base/` via a further overlay that pins it to one node (`kubernetes.io/hostname`) and sets that node's values — see `deploy/containerlab/resources/galactic-gateway/` for a worked two-node example.
 
