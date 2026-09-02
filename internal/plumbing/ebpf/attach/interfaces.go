@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/plumbing/bond"
 )
 
 // routeListFn and linkByIndexFn are package-level function variables so
@@ -218,10 +219,6 @@ func isVRFSlave(link netlink.Link) bool {
 	return master.Type() == excludedMasterType
 }
 
-// bondLinkType is the vishvananda/netlink Link.Type() value expandBondSlaves
-// checks for -- see its own doc comment for why.
-const bondLinkType = "bond"
-
 // expandBondSlaves expands any bonding-master interface in names to also
 // include its slave interfaces, leaving every non-bond interface unchanged.
 //
@@ -271,39 +268,19 @@ func expandBondSlaves(names []string) ([]string, error) {
 				"leaving it as-is", "interface", name, "err", err)
 			continue
 		}
-		if link.Type() != bondLinkType {
+		if !bond.IsMaster(link) {
 			continue
 		}
 
-		slaves, err := bondSlaveNames(link)
+		links, err := linkListFn()
 		if err != nil {
 			return nil, fmt.Errorf("attach: enumerate slaves of bonding master %q: %w", name, err)
 		}
-		for _, slave := range slaves {
+		for _, slave := range bond.SlaveNames(link, links) {
 			add(slave)
 		}
 	}
 	return out, nil
-}
-
-// bondSlaveNames returns the names of every link enslaved to master (i.e.
-// every link whose MasterIndex, populated from netlink's IFLA_MASTER
-// attribute, equals master's own index), in whatever order linkListFn
-// reports them.
-func bondSlaveNames(master netlink.Link) ([]string, error) {
-	links, err := linkListFn()
-	if err != nil {
-		return nil, err
-	}
-
-	masterIndex := master.Attrs().Index
-	var slaves []string
-	for _, l := range links {
-		if l.Attrs().MasterIndex == masterIndex {
-			slaves = append(slaves, l.Attrs().Name)
-		}
-	}
-	return slaves, nil
 }
 
 // isDefaultRoute reports whether r is an IPv6 default route (::/0).

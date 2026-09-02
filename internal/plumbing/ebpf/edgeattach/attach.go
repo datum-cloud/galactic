@@ -16,8 +16,18 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgepreflight"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
+)
+
+// linkByNameFn and linkListFn are package-level override points, the same
+// pattern internal/plumbing/ebpf/attach uses for its own identically-named
+// vars, so ResolveTargets' tests can substitute a fake netlink view without
+// touching the real host network stack.
+var (
+	linkByNameFn = netlink.LinkByName
+	linkListFn   = netlink.LinkList
 )
 
 // PinDir is the default bpffs directory every edgeprog map is pinned
@@ -110,16 +120,87 @@ func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	return errors.Join(errs...)
 }
 
-// Attach attaches program (edgeprog.EdgedsrObjects.EdgeLb) to ifaceName's
-// XDP hook in native (driver) mode, returning the resulting link.Link for
-// the caller to hold open and Close on shutdown -- see doc.go for why
-// native mode is required, not merely preferred, and why no pinning or
-// Watch-style re-attachment is needed here.
-func Attach(program *ebpf.Program, ifaceName string) (link.Link, error) {
+// ResolveTargets resolves ifaceName to the set of interface names Attach
+// should actually attach the XDP program to.
+//
+// If ifaceName is not a Linux bonding master, the result is just
+// []string{ifaceName} -- the common case. If it is a bonding master, the
+// result is its slave interfaces instead, with ifaceName itself excluded:
+// unlike internal/plumbing/ebpf/attach's TC-BPF path (which attaches to
+// both a bond master and its slaves, since the master still carries the
+// route/tc-filter attachment point), native-mode XDP against a bonding
+// master is not reliable -- confirmed failing outright ("operation not
+// supported") on a real gateway node (802.3ad over an igb/tg3 slave pair).
+// Some kernels' bonding driver does implement ndo_bpf by forwarding the
+// attach to every slave, but that still requires each slave's own driver
+// to support native XDP -- not a given for every NIC driver (tg3 is a
+// commonly cited example that doesn't) -- so attaching to the master
+// remains something this package never relies on working, only to real
+// slaves whose own native XDP support this package can reason about
+// directly. A bonding master with no slaves is an error: silently falling
+// back to attaching nothing (or to the master, which would only risk
+// repeating the failure this function exists to avoid) would leave the
+// gateway datapath running with no ingress attachment at all.
+func ResolveTargets(ifaceName string) ([]string, error) {
+	iface, err := linkByNameFn(ifaceName)
+	if err != nil {
+		return nil, fmt.Errorf("edgeattach: find link %q: %w", ifaceName, err)
+	}
+	if !bond.IsMaster(iface) {
+		return []string{ifaceName}, nil
+	}
+
+	links, err := linkListFn()
+	if err != nil {
+		return nil, fmt.Errorf("edgeattach: enumerate slaves of bonding master %q: %w", ifaceName, err)
+	}
+	slaves := bond.SlaveNames(iface, links)
+	if len(slaves) == 0 {
+		return nil, fmt.Errorf(
+			"edgeattach: bonding master %q has no slave interfaces to attach the XDP program to", ifaceName)
+	}
+	return slaves, nil
+}
+
+// Attach attaches program (edgeprog.EdgedsrObjects.EdgeLb) to every
+// interface in ifaceNames' XDP hook in native (driver) mode, returning the
+// resulting link.Link for each -- in the same order as ifaceNames -- for
+// the caller to hold open and Close on shutdown. Callers resolve ifaceNames
+// via ResolveTargets first, so this is usually a single bond slave or
+// [ifaceName] itself, never the bond master (see ResolveTargets' own doc
+// comment for why); see doc.go for why native mode is required, not merely
+// preferred, and why no pinning or Watch-style re-attachment is needed
+// here.
+//
+// If attaching to one interface fails partway through, every link already
+// attached in this call is Closed before returning the error -- a caller
+// that gets an error here holds no partial attachment to clean up itself.
+func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	if program == nil {
 		return nil, errors.New("edgeattach: program is nil")
 	}
+	if len(ifaceNames) == 0 {
+		return nil, errors.New("edgeattach: no interfaces to attach to")
+	}
 
+	links := make([]link.Link, 0, len(ifaceNames))
+	for _, ifaceName := range ifaceNames {
+		xdpLink, err := attachOne(program, ifaceName)
+		if err != nil {
+			for _, already := range links {
+				_ = already.Close()
+			}
+			return nil, err
+		}
+		links = append(links, xdpLink)
+	}
+	return links, nil
+}
+
+// attachOne attaches program to ifaceName's XDP hook in native (driver)
+// mode -- the single-interface mechanism Attach applies to every name in
+// ifaceNames.
+func attachOne(program *ebpf.Program, ifaceName string) (link.Link, error) {
 	iface, err := netlink.LinkByName(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("edgeattach: find link %q: %w", ifaceName, err)
