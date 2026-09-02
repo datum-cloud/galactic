@@ -26,8 +26,9 @@ const (
 	// and "some address," so a single constant, rather than each test
 	// spelling out the same literal, keeps golangci-lint's goconst happy
 	// without the tests losing anything.
-	testRouterName = "router"
-	testPeerAddr   = "2001:db8::1"
+	testRouterName          = "router"
+	testPeerAddr            = "2001:db8::1"
+	testHoldTimerExpiredMsg = "hold timer expired"
 )
 
 func TestBGPFSMStateToModel(t *testing.T) {
@@ -143,7 +144,7 @@ func TestOnPeerUpdate_DownTransitionIncludesDisconnectReason(t *testing.T) {
 
 	ev := peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_IDLE)
 	ev.Peer.State.DisconnectReason = api.PeerState_DISCONNECT_REASON_HOLD_TIMER_EXPIRED
-	ev.Peer.State.DisconnectMessage = "hold timer expired"
+	ev.Peer.State.DisconnectMessage = testHoldTimerExpiredMsg
 
 	r.onPeerUpdate(ev, time.Time{})
 
@@ -151,7 +152,7 @@ func TestOnPeerUpdate_DownTransitionIncludesDisconnectReason(t *testing.T) {
 	if !strings.Contains(out, "from=Established") || !strings.Contains(out, "to=Idle") {
 		t.Fatalf("expected from=Established to=Idle in log line, got: %s", out)
 	}
-	if !strings.Contains(out, "disconnectReason=") || !strings.Contains(out, "hold timer expired") {
+	if !strings.Contains(out, "disconnectReason=") || !strings.Contains(out, testHoldTimerExpiredMsg) {
 		t.Errorf("expected disconnect reason/message in down-transition log line, got: %s", out)
 	}
 }
@@ -174,4 +175,89 @@ func TestOnPeerUpdate_SkipsEndOfInit(t *testing.T) {
 	if _, seen := r.lastPeerState[testPeerAddr]; seen {
 		t.Errorf("expected lastPeerState to remain untouched by PEER_EVENT_END_OF_INIT")
 	}
+}
+
+// spyObserver is a model.PeerStateObserver that records every call it
+// receives, for asserting onPeerUpdate's observer-notification side effect.
+type spyObserver struct {
+	changes []model.PeerStateChange
+}
+
+func (s *spyObserver) ObservePeerStateChange(change model.PeerStateChange) {
+	s.changes = append(s.changes, change)
+}
+
+// TestOnPeerUpdate_NotifiesObserver covers the real-time-events plumbing
+// (docs/plans/router-bgp-peer-session-events.md): a real transition must
+// reach r.observer with the same from/to/asn data the log line reports.
+func TestOnPeerUpdate_NotifiesObserver(t *testing.T) {
+	captureSlog(t)
+	obs := &spyObserver{}
+	r := &GoBGPRuntime{
+		key:           types.NamespacedName{Namespace: "galactic-system", Name: testRouterName},
+		lastPeerState: make(map[string]model.BGPPeerState),
+		observer:      obs,
+	}
+
+	now := time.Now()
+	r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_ACTIVE), now)
+
+	if len(obs.changes) != 1 {
+		t.Fatalf("observer got %d changes, want 1", len(obs.changes))
+	}
+	got := obs.changes[0]
+	if got.RouterKey != r.key || got.Address != testPeerAddr || got.PeerASN != 65001 {
+		t.Errorf("unexpected change identity: %+v", got)
+	}
+	if got.From != model.BGPPeerStateIdle || got.To != model.BGPPeerStateActive {
+		t.Errorf("change = from %v to %v, want from Idle to Active", got.From, got.To)
+	}
+	if !got.Time.Equal(now) {
+		t.Errorf("change.Time = %v, want %v", got.Time, now)
+	}
+}
+
+// TestOnPeerUpdate_ObserverGetsDisconnectDetailOnlyLeavingEstablished covers
+// two things: the observer receives disconnect detail on a down-transition,
+// and does not on an up-transition (where GoBGP wouldn't set it anyway).
+func TestOnPeerUpdate_ObserverGetsDisconnectDetailOnlyLeavingEstablished(t *testing.T) {
+	captureSlog(t)
+	obs := &spyObserver{}
+	r := &GoBGPRuntime{
+		key:           types.NamespacedName{Name: testRouterName},
+		lastPeerState: map[string]model.BGPPeerState{testPeerAddr: model.BGPPeerStateEstablished},
+		observer:      obs,
+	}
+
+	ev := peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_IDLE)
+	ev.Peer.State.DisconnectReason = api.PeerState_DISCONNECT_REASON_HOLD_TIMER_EXPIRED
+	ev.Peer.State.DisconnectMessage = testHoldTimerExpiredMsg
+
+	r.onPeerUpdate(ev, time.Time{})
+
+	if len(obs.changes) != 1 {
+		t.Fatalf("observer got %d changes, want 1", len(obs.changes))
+	}
+	got := obs.changes[0]
+	if got.From != model.BGPPeerStateEstablished || got.To != model.BGPPeerStateIdle {
+		t.Fatalf("change = from %v to %v, want from Established to Idle", got.From, got.To)
+	}
+	if got.DisconnectMessage != testHoldTimerExpiredMsg {
+		t.Errorf("DisconnectMessage = %q, want %q", got.DisconnectMessage, testHoldTimerExpiredMsg)
+	}
+	if got.DisconnectReason == "" {
+		t.Errorf("expected a non-empty DisconnectReason")
+	}
+}
+
+// TestOnPeerUpdate_NilObserverDoesNotPanic covers the common case: most
+// GoBGPRuntime instances in this package's other tests construct the struct
+// directly without setting observer, so onPeerUpdate must tolerate a nil one.
+func TestOnPeerUpdate_NilObserverDoesNotPanic(t *testing.T) {
+	captureSlog(t)
+	r := &GoBGPRuntime{
+		key:           types.NamespacedName{Name: testRouterName},
+		lastPeerState: make(map[string]model.BGPPeerState),
+	}
+	r.onPeerUpdate(peerEvent(t, apiutil.PEER_EVENT_STATE, bgp.BGP_FSM_ACTIVE), time.Time{})
 }

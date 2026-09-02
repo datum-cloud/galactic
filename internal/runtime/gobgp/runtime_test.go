@@ -45,7 +45,7 @@ func TestApplyGlobal_ListenPortOverride(t *testing.T) {
 	ctx := context.Background()
 
 	// Factory default is -1 (outbound-only) -- e.g. the default per-node role.
-	factory := NewRuntimeFactory(-1, false, "")
+	factory := NewRuntimeFactory(-1, false, "", nil)
 	rt, err := factory(types.NamespacedName{Namespace: "default", Name: "r1"})
 	if err != nil {
 		t.Fatalf("factory() error = %v", err)
@@ -79,7 +79,7 @@ func TestApplyGlobal_ListenPortOverride(t *testing.T) {
 func TestApplyGlobal_ListenPortUnsetFallsBackToFactoryDefault(t *testing.T) {
 	ctx := context.Background()
 
-	factory := NewRuntimeFactory(17901, false, "")
+	factory := NewRuntimeFactory(17901, false, "", nil)
 	rt, err := factory(types.NamespacedName{Namespace: "default", Name: "r1"})
 	if err != nil {
 		t.Fatalf("factory() error = %v", err)

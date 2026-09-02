@@ -60,6 +60,14 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # PeerStateEventEmitter (internal/controller/peer_events.go) raises BGPPeer
+  # session-state-transition Events via the modern events.k8s.io/v1 API
+  # (mgr.GetEventRecorder), not the deprecated core "" Events API the rule
+  # below was originally added for — see docs/plans/router-bgp-peer-session-
+  # events.md.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

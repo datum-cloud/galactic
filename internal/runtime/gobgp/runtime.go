@@ -111,6 +111,11 @@ type GoBGPRuntime struct {
 	// watch-triggered reconcile (including one caused by this router's own
 	// BGPPeer status write) tore every session back down before it converged.
 	appliedPeers map[string]model.DesiredPeer
+	// observer, when non-nil, is notified in real time of every peer FSM
+	// transition onPeerUpdate detects (see peer_monitor.go). May be nil in
+	// tests that construct a GoBGPRuntime directly without going through
+	// NewRuntimeFactory.
+	observer model.PeerStateObserver
 	// wg tracks the server.Start and watchEVPNRIB goroutines so Stop can block
 	// until both have actually exited instead of merely cancelling srvCtx and
 	// returning. GoBGP keeps some path-selection state (table.SelectionOptions,
@@ -132,7 +137,12 @@ type GoBGPRuntime struct {
 // happen to coincide in every overlay that exists today.
 // localAddress, if non-empty, is bound as the source address for outgoing BGP
 // TCP connections (sets Transport.LocalAddress on every peer).
-func NewRuntimeFactory(listenPort int32, reflector bool, localAddress string) runtime.RuntimeFactory {
+// observer, when non-nil, is notified in real time of every peer FSM
+// transition each created runtime detects (see peer_monitor.go); pass nil to
+// disable this (e.g. in tests that don't care about it).
+func NewRuntimeFactory(
+	listenPort int32, reflector bool, localAddress string, observer model.PeerStateObserver,
+) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		return &GoBGPRuntime{
 			key:                   key,
@@ -148,6 +158,7 @@ func NewRuntimeFactory(listenPort int32, reflector bool, localAddress string) ru
 			appliedVRFImportRTs:   make(map[string][]string),
 			rtIndex:               make(map[string]uint32),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
+			observer:              observer,
 		}, nil
 	}
 }
