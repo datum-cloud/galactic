@@ -691,6 +691,37 @@ enum drop_reason {
 	DROP_REASON_TRACE_ETH_BOUNDS_FAILED = 26,
 	DROP_REASON_TRACE_ETHERTYPE_MISMATCH = 27,
 	DROP_REASON_TRACE_IFINDEX_HIT = 28,
+	// TEMPORARY diagnostic checkpoints for usid_ingress's step 8/9, the
+	// mirror of DROP_REASON_TRACE_* above for usid_egress. Remove once
+	// resolved.
+	//
+	// The ingress path has no success counter at all, so a packet that
+	// is claimed at step 6 and then lost has the same signature as one
+	// delivered: the per-vrf_table packets counter moves, no drop
+	// counter moves, and nothing distinguishes the two. Measured on a
+	// live tap attachment: packets=+5 per 5 sent, dropped_packets flat,
+	// and the target tap's own tx_packets flat, so the packet is neither
+	// dropped by this program nor delivered.
+	//
+	// Everything between step 6 and the redirect is already counted, so
+	// what is left is the redirect itself and what the kernel does with
+	// it after this program returns. skb_do_redirect runs post-return
+	// and can discard the packet with nothing here to observe it, which
+	// a zero or otherwise unusable fib_params.ifindex would cause.
+	DROP_REASON_TRACE_ING_REACHED_REDIRECT = 29,
+	DROP_REASON_TRACE_ING_REDIRECT_OK = 30,
+	// Not a counter: SET to the ifindex bpf_fib_lookup resolved, so the
+	// redirect target itself is observable rather than inferred. Read it
+	// as a value, never as a count.
+	DROP_REASON_TRACE_ING_LAST_IFINDEX = 31,
+	// A real drop, not a trace: bpf_fib_lookup returned SUCCESS with an
+	// ifindex that cannot be redirected to. Sitting in the temporary
+	// block rather than with the other FIB reasons at 0-15 only to avoid
+	// renumbering slots 16-30, which the Go mirror's DropReasonCount and
+	// hack/returnpath-lab's name table both key off. It should graduate
+	// into the real block when the temporary slots around it are
+	// removed.
+	DROP_REASON_FIB_NO_IFINDEX = 32,
 	__DROP_REASON_MAX,
 };
 
@@ -882,6 +913,20 @@ static USID_ALWAYS_INLINE void count_drop(__u32 reason)
 
 	if (count)
 		__sync_fetch_and_add(count, 1);
+}
+
+// record_value overwrites a drop_reasons slot instead of incrementing it,
+// for the TEMPORARY diagnostic slots documented as values rather than
+// counts (DROP_REASON_TRACE_ING_LAST_IFINDEX). A counter cannot carry an
+// ifindex, and the alternative -- a second map -- would need its own
+// pinning and control-plane wiring for a slot that exists only until this
+// investigation closes.
+static USID_ALWAYS_INLINE void record_value(__u32 slot, __u64 value)
+{
+	__u64 *cell = bpf_map_lookup_elem(&drop_reasons, &slot);
+
+	if (cell)
+		*cell = value;
 }
 
 // count_claimed_drop is count_drop plus the per-vrf_table-entry
@@ -1415,6 +1460,17 @@ int usid_ingress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	// TEMPORARY (see DROP_REASON_TRACE_ING_REACHED_REDIRECT): record the
+	// resolved redirect target before using it. A lookup that returns
+	// SUCCESS is not required to hand back a usable ifindex, and
+	// redirecting to a zero one is a silent post-return discard.
+	record_value(DROP_REASON_TRACE_ING_LAST_IFINDEX, (__u64) fib_params.ifindex);
+
+	if (fib_params.ifindex <= 0) {
+		count_claimed_drop(DROP_REASON_FIB_NO_IFINDEX, vrf);
+		return TC_ACT_SHOT;
+	}
+
 	__builtin_memcpy(new_eth->h_dest, fib_params.dmac, sizeof(new_eth->h_dest));
 	__builtin_memcpy(new_eth->h_source, fib_params.smac, sizeof(new_eth->h_source));
 
@@ -1440,6 +1496,8 @@ int usid_ingress(struct __sk_buff *skb)
 	// this file's other FIB-lookup tests already document.
 	long redirect_rc;
 
+	count_drop(DROP_REASON_TRACE_ING_REACHED_REDIRECT); // TEMPORARY
+
 	if (vrf->egress_kind == EGRESS_KIND_TAP)
 		redirect_rc = bpf_redirect(fib_params.ifindex, 0);
 	else
@@ -1449,6 +1507,8 @@ int usid_ingress(struct __sk_buff *skb)
 		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
+
+	count_drop(DROP_REASON_TRACE_ING_REDIRECT_OK); // TEMPORARY
 
 	return redirect_rc;
 }
