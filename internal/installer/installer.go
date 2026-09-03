@@ -31,6 +31,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/hostconf"
+	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -809,6 +810,18 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 
 		case <-radvReconcileTicker.C:
 			reconcileRadvActors(ctx, radvActors)
+
+			// Resolve each tap guest's neighbor entry, without which
+			// usid_ingress's own FIB lookup drops every decapsulated packet
+			// bound for it -- see hostgw.EnsureTapGuestNeighbors. On this
+			// ticker, and not once at CNI ADD, for the same reason the radv
+			// actors above run here: a VM guest's boot almost always outlives
+			// the short-lived plugin process that attached it, so there is
+			// nothing to solicit yet at ADD time.
+			if resolved, pending := hostgw.EnsureTapGuestNeighbors(); pending > 0 {
+				slog.Info("Tap guest neighbor resolution incomplete; will retry",
+					"resolved", resolved, "pending", pending)
+			}
 
 		case iface := <-radvActors.failed:
 			radvActorFailed(radvActors, iface)
