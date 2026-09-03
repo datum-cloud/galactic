@@ -709,3 +709,126 @@ func TestAutoDetect_NoUsableRouteStillErrors(t *testing.T) {
 		t.Fatal("ResolveInterfaces() error = nil, want an error")
 	}
 }
+
+// TestResolveInterfaces_VLANOverBondExpansion covers the topology that left
+// a real tenant datapath dead: the fabric carries its locators over a VLAN
+// on a private bond. RX classification happens on the physical slaves, so a
+// filter on the VLAN device never runs for traffic arriving while bonded,
+// exactly as a filter on a bond master never does.
+//
+// Measured on that fabric: with the hook on the VLAN device alone, SRv6
+// packets arrived and not one datapath counter moved. Attaching the parent
+// bond's slaves moved the per-VRF packet counter by exactly the number sent,
+// and detaching them stopped it.
+func TestResolveInterfaces_VLANOverBondExpansion(t *testing.T) {
+	const (
+		vlanName  = "bond1.2010"
+		vlanIndex = 20
+		bondName  = "bond1"
+		bondIndex = 8
+		slave1    = "ens2f0np0"
+		slave2    = "ens1f0np0"
+		nicName   = "eth9"
+		nicVLAN   = "eth9.7"
+	)
+
+	bondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bond.LinkType}
+	vlanLink := &fakeLink{
+		attrs:    netlink.LinkAttrs{Name: vlanName, Index: vlanIndex, ParentIndex: bondIndex},
+		linkType: vlanLinkType,
+	}
+	// A VLAN on a plain NIC, to prove only a bonded parent expands.
+	plainNIC := &fakeLink{attrs: netlink.LinkAttrs{Name: nicName, Index: 30}}
+	vlanOnNIC := &fakeLink{
+		attrs:    netlink.LinkAttrs{Name: nicVLAN, Index: 31, ParentIndex: 30},
+		linkType: vlanLinkType,
+	}
+	allLinks := []netlink.Link{
+		bondLink, vlanLink, plainNIC, vlanOnNIC,
+		&fakeLink{attrs: netlink.LinkAttrs{Name: slave1, Index: 9, MasterIndex: bondIndex}},
+		&fakeLink{attrs: netlink.LinkAttrs{Name: slave2, Index: 10, MasterIndex: bondIndex}},
+	}
+	byName := map[string]netlink.Link{}
+	byIndex := map[int]netlink.Link{}
+	for _, l := range allLinks {
+		byName[l.Attrs().Name] = l
+		byIndex[l.Attrs().Index] = l
+	}
+
+	for _, tt := range []struct {
+		name  string
+		iface string
+		want  []string
+	}{
+		{
+			// The deployed case. The parent's slaves are added, not the
+			// parent: attaching to a bond master is inert for the same
+			// reason, so naming it would achieve nothing.
+			name:  "a VLAN over a bond expands to the parent's slaves",
+			iface: vlanName,
+			want:  []string{vlanName, slave1, slave2},
+		},
+		{
+			name:  "a VLAN over a plain NIC expands to nothing",
+			iface: nicVLAN,
+			want:  []string{nicVLAN},
+		},
+		{
+			name:  "a bond master still expands to its own slaves",
+			iface: bondName,
+			want:  []string{bondName, slave1, slave2},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(config.EnvCNIEBPFInterfaces, tt.iface)
+
+			origByName, origList, origByIndex := linkByNameFn, linkListFn, linkByIndexFn
+			t.Cleanup(func() { linkByNameFn, linkListFn, linkByIndexFn = origByName, origList, origByIndex })
+			linkByNameFn = func(name string) (netlink.Link, error) {
+				if l, ok := byName[name]; ok {
+					return l, nil
+				}
+				return nil, errFixtureNotFound
+			}
+			linkByIndexFn = func(index int) (netlink.Link, error) {
+				if l, ok := byIndex[index]; ok {
+					return l, nil
+				}
+				return nil, errFixtureNotFound
+			}
+			linkListFn = func() ([]netlink.Link, error) { return allLinks, nil }
+
+			got, err := ResolveInterfaces()
+			if err != nil {
+				t.Fatalf("ResolveInterfaces() error = %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("ResolveInterfaces() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestVLANBondMaster_UnresolvableParentIsNotFatal keeps a VLAN whose parent
+// cannot be resolved from failing the whole detection, matching how this
+// package already treats an unresolvable route target or bond master: warn
+// and leave the interface as-is rather than guess.
+func TestVLANBondMaster_UnresolvableParentIsNotFatal(t *testing.T) {
+	origByIndex := linkByIndexFn
+	t.Cleanup(func() { linkByIndexFn = origByIndex })
+	linkByIndexFn = func(int) (netlink.Link, error) { return nil, errFixtureNotFound }
+
+	vlan := &fakeLink{
+		attrs:    netlink.LinkAttrs{Name: "bond1.2010", Index: 20, ParentIndex: 8},
+		linkType: vlanLinkType,
+	}
+	if got := vlanBondMaster(vlan); got != nil {
+		t.Errorf("vlanBondMaster() = %v, want nil", got.Attrs().Name)
+	}
+	// A VLAN with no parent index at all, which netlink reports for a link
+	// whose IFLA_LINK is absent.
+	noParent := &fakeLink{attrs: netlink.LinkAttrs{Name: "vlan0", Index: 21}, linkType: vlanLinkType}
+	if got := vlanBondMaster(noParent); got != nil {
+		t.Errorf("vlanBondMaster(no parent) = %v, want nil", got.Attrs().Name)
+	}
+}

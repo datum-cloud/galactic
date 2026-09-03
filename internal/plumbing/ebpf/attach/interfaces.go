@@ -283,7 +283,9 @@ func isVRFSlave(link netlink.Link) bool {
 }
 
 // expandBondSlaves expands any bonding-master interface in names to also
-// include its slave interfaces, leaving every non-bond interface unchanged.
+// include its slave interfaces, and does the same for a VLAN interface
+// sitting on top of a bond (vlanBondMaster), leaving every other interface
+// unchanged.
 //
 // On a Linux bonding master, RX ingress tc/eBPF classification happens on
 // the slave devices, not the bond master itself -- a well-known kernel
@@ -331,20 +333,80 @@ func expandBondSlaves(names []string) ([]string, error) {
 				"leaving it as-is", "interface", name, "err", err)
 			continue
 		}
-		if !bond.IsMaster(link) {
-			continue
+
+		master := link
+		if !bond.IsMaster(master) {
+			// Not a bond itself. It may still sit on top of one: a VLAN
+			// over a bond has the same problem as the bond master, one
+			// level further up. See vlanBondMaster.
+			master = vlanBondMaster(link)
+			if master == nil {
+				continue
+			}
 		}
 
 		links, err := linkListFn()
 		if err != nil {
-			return nil, fmt.Errorf("attach: enumerate slaves of bonding master %q: %w", name, err)
+			return nil, fmt.Errorf("attach: enumerate slaves of bonding master %q: %w",
+				master.Attrs().Name, err)
 		}
-		for _, slave := range bond.SlaveNames(link, links) {
+		for _, slave := range bond.SlaveNames(master, links) {
 			add(slave)
 		}
 	}
 	return out, nil
 }
+
+// vlanBondMaster returns the bonding master a VLAN interface sits on top of,
+// or nil when link is not a VLAN or its parent is not a bond.
+//
+// A VLAN over a bond inherits the bond master's ingress problem rather than
+// escaping it. RX classification still happens on the physical slaves, so a
+// filter on the VLAN device never runs for traffic that arrives while
+// bonded, exactly as a filter on the bond master never does.
+//
+// Measured on a fabric carrying its locators over a VLAN on a private bond,
+// with the ingress hook attached to the VLAN device: SRv6 packets arrived
+// (pcap on the VLAN device showed them, since the packet tap runs where tc
+// classification does not), the datapath's own counters did not move at all,
+// and nothing was decapsulated. Attaching to the parent bond's slaves moved
+// the per-VRF packet counter by exactly the number of packets sent, and
+// detaching them stopped it again.
+//
+// The parent's own slaves are what gets added, not the parent: attaching to
+// a bond master is inert for the same reason, so naming it would achieve
+// nothing.
+//
+// The tag is not a problem here. These NICs strip it in hardware, so the
+// frame reaching tc on the slave carries ethertype IPv6 with the VLAN id in
+// skb metadata, which is what usid_ingress's Ethernet parse already
+// expects. A deployment whose NICs leave the tag in the packet data would
+// additionally need 802.1Q parsing in the datapath, which it does not have.
+func vlanBondMaster(link netlink.Link) netlink.Link {
+	if link.Type() != vlanLinkType {
+		return nil
+	}
+	idx := link.Attrs().ParentIndex
+	if idx <= 0 {
+		return nil
+	}
+	parent, err := linkByIndexFn(idx)
+	if err != nil {
+		// Unresolvable parent isn't actionable; don't guess, matching this
+		// package's stance on an unresolvable route target and master.
+		slog.Warn("attach: could not resolve a VLAN interface's parent to check whether it's a "+
+			"bonding master", "interface", link.Attrs().Name, "parentIndex", idx, "err", err)
+		return nil
+	}
+	if !bond.IsMaster(parent) {
+		return nil
+	}
+	return parent
+}
+
+// vlanLinkType is the vishvananda/netlink Link.Type() value identifying a
+// VLAN interface, whose parent vlanBondMaster checks for bonding.
+const vlanLinkType = "vlan"
 
 // isDefaultRoute reports whether r is an IPv6 default route (::/0).
 func isDefaultRoute(r netlink.Route) bool {
