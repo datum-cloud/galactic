@@ -722,6 +722,31 @@ enum drop_reason {
 	// into the real block when the temporary slots around it are
 	// removed.
 	DROP_REASON_FIB_NO_IFINDEX = 32,
+	// TEMPORARY, and the ingress mirror of DROP_REASON_TRACE_ENTRY
+	// through DROP_REASON_TRACE_IFINDEX_HIT above, added for the same
+	// reason those were: usid_ingress's own entry sequence has five
+	// exits with no counter at all, so "nothing incremented" cannot
+	// currently distinguish "never invoked" from "always took an
+	// uninstrumented path".
+	//
+	// Two of the five are live hypotheses rather than completeness for
+	// its own sake. ETHERTYPE_MISMATCH is where a VLAN tag left in the
+	// packet data by a NIC that does not strip it would land, silently.
+	// LOCATOR_MISS is where a Block or Node-ID that does not match this
+	// node's own registration would land, equally silently, and it is
+	// the one miss in the lookup chain with no counter (function_table
+	// and vrf_table misses are already DROP_REASON_UNKNOWN_FUNCTION and
+	// DROP_REASON_UNKNOWN_ARGUMENT).
+	//
+	// drop_reasons is a PERCPU_ARRAY, so the unconditional entry counter
+	// is a per-CPU increment with no cross-CPU contention, on a program
+	// that already runs for every packet arriving on the fabric NICs.
+	DROP_REASON_TRACE_ING_ENTRY = 33,
+	DROP_REASON_TRACE_ING_PULL_DATA_FAILED = 34,
+	DROP_REASON_TRACE_ING_ETH_BOUNDS_FAILED = 35,
+	DROP_REASON_TRACE_ING_ETHERTYPE_MISMATCH = 36,
+	DROP_REASON_TRACE_ING_IP6_BOUNDS_FAILED = 37,
+	DROP_REASON_TRACE_ING_LOCATOR_MISS = 38,
 	__DROP_REASON_MAX,
 };
 
@@ -1094,8 +1119,12 @@ int usid_ingress(struct __sk_buff *skb)
 	// filter on this device unmodified (TC_ACT_UNSPEC, not TC_ACT_OK: see
 	// the note below step 2) rather than drop traffic this program hasn't
 	// even determined is a uSID packet yet.
-	if (bpf_skb_pull_data(skb, 0))
+	count_drop(DROP_REASON_TRACE_ING_ENTRY); // TEMPORARY
+
+	if (bpf_skb_pull_data(skb, 0)) {
+		count_drop(DROP_REASON_TRACE_ING_PULL_DATA_FAILED); // TEMPORARY
 		return TC_ACT_UNSPEC;
+	}
 
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
@@ -1105,16 +1134,22 @@ int usid_ingress(struct __sk_buff *skb)
 	// (R6; see the note below step 2).
 	struct usid_ethhdr *eth = data;
 
-	if ((void *) (eth + 1) > data_end)
+	if ((void *) (eth + 1) > data_end) {
+		count_drop(DROP_REASON_TRACE_ING_ETH_BOUNDS_FAILED); // TEMPORARY
 		return TC_ACT_UNSPEC;
+	}
 
-	if (eth->h_proto != __builtin_bswap16(USID_ETH_P_IPV6))
+	if (eth->h_proto != __builtin_bswap16(USID_ETH_P_IPV6)) {
+		count_drop(DROP_REASON_TRACE_ING_ETHERTYPE_MISMATCH); // TEMPORARY
 		return TC_ACT_UNSPEC;
+	}
 
 	struct usid_ip6hdr *ip6 = (void *) (eth + 1);
 
-	if ((void *) (ip6 + 1) > data_end)
+	if ((void *) (ip6 + 1) > data_end) {
+		count_drop(DROP_REASON_TRACE_ING_IP6_BOUNDS_FAILED); // TEMPORARY
 		return TC_ACT_UNSPEC;
+	}
 
 	// Step 2: exact-match the destination address's top 64 bits
 	// (Block(48) + Node-ID(16), read with no shift) against
@@ -1142,8 +1177,10 @@ int usid_ingress(struct __sk_buff *skb)
 
 	struct locator_value *loc = bpf_map_lookup_elem(&locator_table, &locator_key);
 
-	if (!loc)
+	if (!loc) {
+		count_drop(DROP_REASON_TRACE_ING_LOCATOR_MISS); // TEMPORARY
 		return TC_ACT_UNSPEC;
+	}
 
 	__u64 block = locator_key >> 16;
 

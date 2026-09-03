@@ -681,6 +681,12 @@ var traceReasonNames = map[uint32]string{
 	30: "trace_ing_redirect_ok",
 	31: "trace_ing_last_ifindex (VALUE, not a count)",
 	32: "fib_no_ifindex",
+	33: "trace_ing_entry",
+	34: "trace_ing_pull_data_failed",
+	35: "trace_ing_eth_bounds_failed",
+	36: "trace_ing_ethertype_mismatch",
+	37: "trace_ing_ip6_bounds_failed",
+	38: "trace_ing_locator_miss",
 }
 
 // ---------------------------------------------------------------------
