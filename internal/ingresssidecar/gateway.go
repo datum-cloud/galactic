@@ -225,6 +225,48 @@ func allocateGatewayArgument(
 		routerName, uint16(uformat.ArgumentMin), uint16(uformat.ArgumentMax))
 }
 
+// primaryPodInterface is the name Kubernetes gives a pod its own interface
+// under, and so the veth whose peer is this pod's way in from the host.
+const primaryPodInterface = "eth0"
+
+// podEntryPoint returns the ifindex, in the *host's* namespace, of the peer
+// of this pod's primary interface, plus that interface's own hardware
+// address.
+//
+// Read here, and published on the advertisement, because this is the only
+// side that can see it. For a veth the kernel reports the peer's index even
+// when the peer is in another namespace, so both values come out of one
+// ordinary link query with no extra privilege. Reading them from the host
+// instead would mean entering this namespace, which needs CAP_SYS_ADMIN --
+// see crdnames.AnnotationIngressHostIfindex.
+//
+// A missing primary interface is a real error rather than a skip: a pod
+// without one has no way in at all, so publishing a gateway address for it
+// would advertise a return path that cannot be completed.
+// podEntryPointFn is podEntryPoint, indirected so tests can supply a pod
+// that does not exist -- the same override pattern
+// internal/installer's newK8sClientFn and addrListFn use. There is no
+// primary interface in a unit test's own namespace, and the value this
+// reads is a plain kernel attribute rather than logic worth faking a
+// netlink server for.
+var podEntryPointFn = podEntryPoint
+
+func podEntryPoint() (hostIfindex int, mac net.HardwareAddr, err error) {
+	link, err := netlink.LinkByName(primaryPodInterface)
+	if err != nil {
+		return 0, nil, fmt.Errorf("look up this pod's %q interface: %w", primaryPodInterface, err)
+	}
+	attrs := link.Attrs()
+	if attrs.ParentIndex <= 0 {
+		return 0, nil, fmt.Errorf("interface %q reports no peer index, so this pod has no host-side entry point",
+			primaryPodInterface)
+	}
+	if len(attrs.HardwareAddr) == 0 {
+		return 0, nil, fmt.Errorf("interface %q has no hardware address", primaryPodInterface)
+	}
+	return attrs.ParentIndex, attrs.HardwareAddr, nil
+}
+
 // PublishGateway implements GatewayPublisher.
 func (p *k8sGatewayPublisher) PublishGateway(ctx context.Context, vpc string, addr net.IP) error {
 	if addr == nil || addr.IsUnspecified() {
@@ -267,12 +309,28 @@ func (p *k8sGatewayPublisher) PublishGateway(ctx context.Context, vpc string, ad
 		return fmt.Errorf("apply BGPVRFInstance %s: %w", vrfName, err)
 	}
 
+	// The two facts the host side of this return path needs and cannot read
+	// for itself -- see podEntryPoint. Resolved before the advertisement is
+	// written so an advertisement never exists without them: the host keys
+	// its route and neighbor off these, and one published without them
+	// would look like a return path that should work while nothing could
+	// complete it.
+	hostIfindex, mac, err := podEntryPointFn()
+	if err != nil {
+		return fmt.Errorf("resolve this pod's host-side entry point for vpc %s: %w", vpc, err)
+	}
+
 	function := bgpv1alpha1.SRv6FunctionEndDT46
 	advName := crdnames.BGPAdvertisementName(vpc, ingressVPCAttachment, p.nodeName)
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{Name: advName, Namespace: p.namespace},
 	}
 	if _, err := controllerutil.CreateOrUpdate(ctx, p.client, adv, func() error {
+		if adv.Annotations == nil {
+			adv.Annotations = make(map[string]string)
+		}
+		adv.Annotations[crdnames.AnnotationIngressHostIfindex] = strconv.Itoa(hostIfindex)
+		adv.Annotations[crdnames.AnnotationIngressHostMAC] = mac.String()
 		adv.Spec = bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: bgp.routerName},
 			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},

@@ -6,6 +6,7 @@ package ingresssidecar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -53,7 +54,22 @@ func newGatewayTestRouter() *bgpv1alpha1.BGPRouter {
 	}
 }
 
+// stubPodEntryPoint makes podEntryPointFn return a fixed pod entry point
+// for the duration of one test. A unit test's own namespace has no primary
+// interface, so PublishGateway's real read of one cannot succeed here --
+// and what it reads is a plain kernel attribute, not behaviour these tests
+// are about.
+func stubPodEntryPoint(t *testing.T) {
+	t.Helper()
+	prev := podEntryPointFn
+	podEntryPointFn = func() (int, net.HardwareAddr, error) {
+		return 24, net.HardwareAddr{0x9a, 0x91, 0xc0, 0x8d, 0x83, 0xf1}, nil
+	}
+	t.Cleanup(func() { podEntryPointFn = prev })
+}
+
 func TestPublishGateway_CreatesVRFInstanceAndAdvertisement(t *testing.T) {
+	stubPodEntryPoint(t)
 	ctx := context.Background()
 	scheme := gatewayTestScheme(t)
 	router := newGatewayTestRouter()
@@ -100,6 +116,7 @@ func TestPublishGateway_CreatesVRFInstanceAndAdvertisement(t *testing.T) {
 }
 
 func TestPublishGateway_ReusesExistingVRFID(t *testing.T) {
+	stubPodEntryPoint(t)
 	ctx := context.Background()
 	scheme := gatewayTestScheme(t)
 	router := newGatewayTestRouter()
@@ -133,6 +150,7 @@ func TestPublishGateway_ReusesExistingVRFID(t *testing.T) {
 }
 
 func TestPublishGateway_AvoidsCollisionWithOtherVPCOnSameNode(t *testing.T) {
+	stubPodEntryPoint(t)
 	ctx := context.Background()
 	scheme := gatewayTestScheme(t)
 	router := newGatewayTestRouter()
@@ -189,6 +207,7 @@ func TestPublishGateway_RejectsUnspecifiedAddress(t *testing.T) {
 }
 
 func TestWithdrawGateway_DeletesAdvertisementOnlyNotVRFInstance(t *testing.T) {
+	stubPodEntryPoint(t)
 	ctx := context.Background()
 	scheme := gatewayTestScheme(t)
 	router := newGatewayTestRouter()
@@ -295,4 +314,67 @@ func (f *fakeGatewayResolver) ResolveGatewayAddress(vpc string) (net.IP, error) 
 		return addr, nil
 	}
 	return nil, fmt.Errorf("vpc %s: %w", vpc, ErrGatewayAddressNotProvisioned)
+}
+
+// TestPublishGateway_RecordsPodEntryPoint pins the half of this return path
+// that only this side can supply. internal/installer keys its route and
+// permanent neighbor off these two annotations and has no other source for
+// them: reading them itself would mean entering this pod's namespace, which
+// needs a privilege the node agent does not carry. An advertisement without
+// them is one the host silently skips.
+func TestPublishGateway_RecordsPodEntryPoint(t *testing.T) {
+	stubPodEntryPoint(t)
+
+	ctx := context.Background()
+	scheme := gatewayTestScheme(t)
+	router := newGatewayTestRouter()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router).Build()
+	p := NewK8sGatewayPublisher(fakeClient, gatewayTestNode, gatewayTestNamespace)
+
+	if err := p.PublishGateway(ctx, "2", net.ParseIP("fd30:e2e:3a5::1")); err != nil {
+		t.Fatalf("PublishGateway: %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	name := crdnames.BGPAdvertisementName("2", ingressVPCAttachment, gatewayTestNode)
+	if err := fakeClient.Get(ctx,
+		types.NamespacedName{Name: name, Namespace: gatewayTestNamespace}, adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v", name, err)
+	}
+
+	if got := adv.Annotations[crdnames.AnnotationIngressHostIfindex]; got != "24" {
+		t.Errorf("%s = %q, want %q", crdnames.AnnotationIngressHostIfindex, got, "24")
+	}
+	if got := adv.Annotations[crdnames.AnnotationIngressHostMAC]; got != "9a:91:c0:8d:83:f1" {
+		t.Errorf("%s = %q, want %q", crdnames.AnnotationIngressHostMAC, got, "9a:91:c0:8d:83:f1")
+	}
+}
+
+// TestPublishGateway_RefusesWithoutAnEntryPoint covers a pod with no way in.
+// Publishing anyway would advertise a return path into EVPN that no node
+// could complete, and remote nodes would encapsulate replies toward a SID
+// that blackholes them -- worse than not advertising at all.
+func TestPublishGateway_RefusesWithoutAnEntryPoint(t *testing.T) {
+	prev := podEntryPointFn
+	podEntryPointFn = func() (int, net.HardwareAddr, error) {
+		return 0, nil, errors.New("no primary interface")
+	}
+	t.Cleanup(func() { podEntryPointFn = prev })
+
+	ctx := context.Background()
+	scheme := gatewayTestScheme(t)
+	router := newGatewayTestRouter()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router).Build()
+	p := NewK8sGatewayPublisher(fakeClient, gatewayTestNode, gatewayTestNamespace)
+
+	if err := p.PublishGateway(ctx, "2", net.ParseIP("fd30:e2e:3a5::1")); err == nil {
+		t.Fatal("PublishGateway() error = nil, want an error when the pod has no entry point")
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	name := crdnames.BGPAdvertisementName("2", ingressVPCAttachment, gatewayTestNode)
+	err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: gatewayTestNamespace}, adv)
+	if err == nil {
+		t.Error("an advertisement was created despite the pod having no entry point")
+	}
 }
