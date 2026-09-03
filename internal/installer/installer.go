@@ -70,6 +70,15 @@ var radvReconcileInterval = 2 * time.Second
 // a solicit per unresolved guest.
 var tapNeighReconcileInterval = 30 * time.Second
 
+// sidecarReturnReconcileInterval paces ensureSidecarReturnPath. Matched to
+// tapNeighReconcileInterval rather than the credential-refresh ticker
+// because what it installs points at a pod: an Envoy pod restart changes
+// the host-side veth and MAC the return route and neighbor name, and its
+// sidecar creates the VRF holding the gateway address some time after the
+// pod is scheduled. Each pass walks this node's network namespaces, so it
+// is not free enough for radv's cadence.
+var sidecarReturnReconcileInterval = 30 * time.Second
+
 // ebpfHealthServiceName is the gRPC health service name (see
 // grpc_health_v1.HealthServer) reporting the live status of the eBPF uSID
 // datapath specifically, separate from the overall (""), always-serving
@@ -525,6 +534,24 @@ func startTapNeighborSweep(sem chan struct{}) {
 	}
 }
 
+// startSidecarReturnSweep runs one ensureSidecarReturnPath pass off Run's
+// own goroutine, for the same reason startTapNeighborSweep does: a pass
+// enters every network namespace on this node, and a node running a large
+// Envoy fleet must not hold the select loop long enough to starve the
+// credential refresh, GC sweeps and eBPF health check. The semaphore drops
+// a tick rather than queueing it when the previous pass is still running,
+// so a slow pass costs freshness rather than piling up goroutines.
+func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfDatapathState) {
+	select {
+	case sem <- struct{}{}:
+		go func() {
+			defer func() { <-sem }()
+			reconcileSidecarReturnPath(ctx, st)
+		}()
+	default:
+	}
+}
+
 // radvActorSet tracks the currently running radv.RunActor goroutines, keyed
 // by host interface name (radv.Record.HostInterface) -- Run's own local
 // state, reconciled against radv.ListAttachments on every
@@ -772,9 +799,13 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 
 	tapNeighTicker := time.NewTicker(tapNeighReconcileInterval)
 	defer tapNeighTicker.Stop()
+
+	sidecarReturnTicker := time.NewTicker(sidecarReturnReconcileInterval)
+	defer sidecarReturnTicker.Stop()
 	// Size-1 semaphore, so at most one sweep runs at a time and a tick
 	// arriving during one is dropped instead of piling up behind it.
 	tapNeighSem := make(chan struct{}, 1)
+	sidecarReturnSem := make(chan struct{}, 1)
 
 	for {
 		select {
@@ -863,6 +894,15 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// route filter was tightened. The semaphore drops a tick rather
 			// than queueing it when the previous pass is still running.
 			startTapNeighborSweep(tapNeighSem)
+
+		case <-sidecarReturnTicker.C:
+			// Install (and re-assert) the host side of the ingress
+			// sidecar's return path -- the routes, neighbors and uSID map
+			// entries a reply encapsulated toward this node's own SID needs
+			// in order to reach an Envoy pod's per-VPC sidecar VRF. See
+			// sidecarreturn.go's own file comment for why this cannot live
+			// in the sidecar itself.
+			startSidecarReturnSweep(ctx, sidecarReturnSem, ebpfState)
 
 		case iface := <-radvActors.failed:
 			radvActorFailed(radvActors, iface)
