@@ -63,6 +63,13 @@ var ebpfGCSweepInterval = 5 * time.Minute
 // at all -- a guest's own boot time dwarfs a couple of seconds either way.
 var radvReconcileInterval = 2 * time.Second
 
+// tapNeighReconcileInterval paces hostgw.EnsureTapGuestNeighbors. Far slower
+// than radv's own ticker: a resolved neighbor is refreshed by the kernel from
+// the guest's own advertisements, so this only has to notice one that has
+// aged out of the cache or a guest that has newly booted, and each pass costs
+// a solicit per unresolved guest.
+var tapNeighReconcileInterval = 30 * time.Second
+
 // ebpfHealthServiceName is the gRPC health service name (see
 // grpc_health_v1.HealthServer) reporting the live status of the eBPF uSID
 // datapath specifically, separate from the overall (""), always-serving
@@ -497,6 +504,27 @@ func cleanupOldBinaryWrapper() {
 	}
 }
 
+// startTapNeighborSweep runs one hostgw.EnsureTapGuestNeighbors pass off
+// Run's own goroutine, dropping the tick when a previous pass is still in
+// flight. Split out of Run's select for the same reason startEBPFDatapath
+// was: to keep Run inside golangci-lint's gocyclo budget.
+//
+// sem is a size-1 semaphore, so a slow pass delays nothing and never queues
+// a backlog of ticks behind itself.
+func startTapNeighborSweep(sem chan struct{}) {
+	select {
+	case sem <- struct{}{}:
+		go func() {
+			defer func() { <-sem }()
+			if resolved, pending := hostgw.EnsureTapGuestNeighbors(); pending > 0 {
+				slog.Info("Tap guest neighbor resolution incomplete; will retry",
+					"resolved", resolved, "pending", pending)
+			}
+		}()
+	default:
+	}
+}
+
 // radvActorSet tracks the currently running radv.RunActor goroutines, keyed
 // by host interface name (radv.Record.HostInterface) -- Run's own local
 // state, reconciled against radv.ListAttachments on every
@@ -742,6 +770,12 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	radvReconcileTicker := time.NewTicker(radvReconcileInterval)
 	defer radvReconcileTicker.Stop()
 
+	tapNeighTicker := time.NewTicker(tapNeighReconcileInterval)
+	defer tapNeighTicker.Stop()
+	// Size-1 semaphore, so at most one sweep runs at a time and a tick
+	// arriving during one is dropped instead of piling up behind it.
+	tapNeighSem := make(chan struct{}, 1)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -811,17 +845,24 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 		case <-radvReconcileTicker.C:
 			reconcileRadvActors(ctx, radvActors)
 
+		case <-tapNeighTicker.C:
 			// Resolve each tap guest's neighbor entry, without which
 			// usid_ingress's own FIB lookup drops every decapsulated packet
-			// bound for it -- see hostgw.EnsureTapGuestNeighbors. On this
-			// ticker, and not once at CNI ADD, for the same reason the radv
-			// actors above run here: a VM guest's boot almost always outlives
-			// the short-lived plugin process that attached it, so there is
+			// bound for it -- see hostgw.EnsureTapGuestNeighbors. Periodic,
+			// and not once at CNI ADD, for the same reason the radv actors
+			// above run here: a VM guest's boot almost always outlives the
+			// short-lived plugin process that attached it, so there is
 			// nothing to solicit yet at ADD time.
-			if resolved, pending := hostgw.EnsureTapGuestNeighbors(); pending > 0 {
-				slog.Info("Tap guest neighbor resolution incomplete; will retry",
-					"resolved", resolved, "pending", pending)
-			}
+			//
+			// Off this loop's goroutine, and on a ticker of its own rather
+			// than radv's 2s one. Each unresolved guest costs a solicit plus
+			// up to neighResolveTimeout of polling, so a node whose guests
+			// are down would otherwise hold the select loop long past the
+			// next tick and starve the credential refresh, GC sweeps and
+			// eBPF health check with it -- measured at 32s a pass before the
+			// route filter was tightened. The semaphore drops a tick rather
+			// than queueing it when the previous pass is still running.
+			startTapNeighborSweep(tapNeighSem)
 
 		case iface := <-radvActors.failed:
 			radvActorFailed(radvActors, iface)

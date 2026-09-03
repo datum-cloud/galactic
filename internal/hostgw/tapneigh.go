@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -112,6 +113,24 @@ func EnsureTapGuestNeighbors() (resolved, pending int) {
 // back from the pod-subnet routes installPodSubnetRoute installed in the
 // VPC VRF's own table. Both families, since the same NO_NEIGH drop applies
 // to each; only the IPv6 side has been observed in the wild.
+//
+// The filtering is the whole job. A VPC VRF's table carries several routes
+// per tap and only one of them names a guest, so an unfiltered sweep spends
+// its time soliciting addresses that can never answer. Measured on
+// us-central-1-staging-lab with three real guests, it found 32 candidates
+// and blocked for 32 seconds a pass. What the table actually holds:
+//
+//	local fd20:0:2::1 dev <tap> proto kernel metric 0     <- host's own gateway addr
+//	fd20:0:2::1 dev <tap> proto kernel metric 256         <- its connected route
+//	fd20:0:2::3:0:0/96 dev <tap> metric 1024              <- the guest, what we want
+//	anycast fe80:: dev <tap> proto kernel metric 0
+//	fe80::/64 dev <tap> proto kernel metric 256
+//
+// So: only unicast routes this component installed itself. RTPROT_KERNEL
+// excludes everything the kernel derived from an address assignment, which
+// is the gateway address and the link-local pair; RTN_UNICAST excludes the
+// local and anycast entries; and link-local or multicast destinations are
+// skipped outright, since a guest is never addressed by one here.
 func guestAddrsForTap(tableID, tapIndex int) []net.IP {
 	var out []net.IP
 	for _, family := range []int{netlink.FAMILY_V6, netlink.FAMILY_V4} {
@@ -121,10 +140,17 @@ func guestAddrsForTap(tableID, tapIndex int) []net.IP {
 			continue
 		}
 		for _, r := range routes {
-			if r.LinkIndex != tapIndex || r.Dst == nil || r.Dst.IP.IsUnspecified() {
+			if r.LinkIndex != tapIndex || r.Dst == nil {
 				continue
 			}
-			out = append(out, r.Dst.IP)
+			if r.Protocol == unix.RTPROT_KERNEL || r.Type != unix.RTN_UNICAST {
+				continue
+			}
+			ip := r.Dst.IP
+			if ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+				continue
+			}
+			out = append(out, ip)
 		}
 	}
 	return out
