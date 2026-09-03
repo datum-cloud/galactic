@@ -658,6 +658,11 @@ func reportDropReasons(pinDir string) error {
 // prog.DropReasonNames. Read together they say how far usid_egress got:
 // ENTRY -> IFINDEX_HIT -> ADJUST_ROOM_OK -> REACHED_REDIRECT -> REDIRECT_OK
 // is a fully successful encapsulation.
+//
+// Slots 29-32 are the same idea for usid_ingress, which had no success
+// counter at all: ING_REACHED_REDIRECT -> ING_REDIRECT_OK brackets its own
+// step 9. ing_last_ifindex is a value, not a count -- the ifindex
+// bpf_fib_lookup resolved, printed as-is. fib_no_ifindex is a real drop.
 var traceReasonNames = map[uint32]string{
 	16: "trace_multicast_ll_bail",
 	17: "trace_miss_vrf",
@@ -672,6 +677,16 @@ var traceReasonNames = map[uint32]string{
 	26: "trace_eth_bounds_failed",
 	27: "trace_ethertype_mismatch",
 	28: "trace_ifindex_hit",
+	29: "trace_ing_reached_redirect",
+	30: "trace_ing_redirect_ok",
+	31: "trace_ing_last_ifindex (VALUE, not a count)",
+	32: "fib_no_ifindex",
+	33: "trace_ing_entry",
+	34: "trace_ing_pull_data_failed",
+	35: "trace_ing_eth_bounds_failed",
+	36: "trace_ing_ethertype_mismatch",
+	37: "trace_ing_ip6_bounds_failed",
+	38: "trace_ing_locator_miss",
 }
 
 // ---------------------------------------------------------------------
