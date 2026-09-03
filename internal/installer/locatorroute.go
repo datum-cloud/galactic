@@ -6,6 +6,7 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -53,6 +54,13 @@ import (
 // Idempotent (RouteReplace), and safe to call repeatedly: Run invokes it at
 // startup and on its refresh ticker, so a BGPRouter that appears later, or a
 // route flushed out from under us, is picked up without a restart.
+//
+// It also removes the routes it installed for a locator this node no longer
+// owns. RouteReplace alone cannot: a changed Block or Node-ID is a different
+// prefix, so the old route is left behind claiming address space this node
+// has given up, and nothing would ever retract it. Observed after moving a
+// node back to its cluster Block, which left both the new and the old /64
+// local on lo.
 func ensureLocatorLocalRoute(ctx context.Context, k8s client.Client, namespace, nodeName string) error {
 	if k8s == nil || nodeName == "" {
 		return nil // no node identity configured; nothing to resolve against
@@ -81,7 +89,75 @@ func ensureLocatorLocalRoute(ctx context.Context, k8s client.Client, namespace, 
 	if err := netlink.RouteReplace(route); err != nil {
 		return fmt.Errorf("install local route %s dev lo table local: %w", prefix, err)
 	}
+
+	// Deliberately only after a successful install, and only with a valid
+	// desired prefix in hand -- pruning against the zero Prefix would strip
+	// this node's working route every time the BGPRouter is briefly
+	// unreadable during bring-up. A prune failure is not the install
+	// failing: same-node resolution already works, a leftover only
+	// over-claims space, and the refresh ticker retries.
+	if err := pruneStaleLocatorLocalRoutes(lo.Attrs().Index, prefix); err != nil {
+		slog.Warn("Could not remove stale uSID locator local routes; this node still "+
+			"claims a locator prefix it no longer owns", "keep", prefix.String(), "err", err)
+	}
 	return nil
+}
+
+// pruneStaleLocatorLocalRoutes removes every locator local route on lo except
+// keep. See staleLocatorLocalRoute for what it will and will not touch.
+func pruneStaleLocatorLocalRoutes(loIndex int, keep netip.Prefix) error {
+	routes, err := netlink.RouteListFiltered(unix.AF_INET6,
+		&netlink.Route{Table: unix.RT_TABLE_LOCAL, LinkIndex: loIndex},
+		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
+	if err != nil {
+		return fmt.Errorf("list local table routes on lo: %w", err)
+	}
+
+	var errs []error
+	for i := range routes {
+		if !staleLocatorLocalRoute(routes[i], loIndex, keep) {
+			continue
+		}
+		if err := netlink.RouteDel(&routes[i]); err != nil {
+			errs = append(errs, fmt.Errorf("delete %s: %w", routes[i].Dst, err))
+			continue
+		}
+		slog.Info("Removed stale uSID locator local route",
+			"prefix", routes[i].Dst.String(), "keep", keep.String())
+	}
+	return errors.Join(errs...)
+}
+
+// staleLocatorLocalRoute reports whether r is one of ensureLocatorLocalRoute's
+// own routes for a prefix other than keep.
+//
+// The filtering is the whole safety argument, because the local table is
+// mostly the kernel's and deleting from it wrongly would black-hole one of
+// this node's own addresses. Every entry the kernel derives from an assigned
+// address carries RTPROT_KERNEL and is a /128 host route; what this component
+// installs carries neither. So a candidate must be RTN_LOCAL on lo, not
+// RTPROT_KERNEL, and exactly a Block+Node-ID /64 -- the one length
+// ensureLocatorLocalRoute ever writes. A node's own loopback /128, ::1, and
+// anything on another link all fail that.
+func staleLocatorLocalRoute(r netlink.Route, loIndex int, keep netip.Prefix) bool {
+	if r.LinkIndex != loIndex || r.Table != unix.RT_TABLE_LOCAL {
+		return false
+	}
+	if r.Type != unix.RTN_LOCAL || r.Protocol == unix.RTPROT_KERNEL {
+		return false
+	}
+	if r.Dst == nil || r.Dst.IP.To4() != nil {
+		return false
+	}
+	ones, bits := r.Dst.Mask.Size()
+	if bits != 128 || ones != uformat.BlockBits+uformat.NodeIDBits {
+		return false
+	}
+	got, ok := netip.AddrFromSlice(r.Dst.IP)
+	if !ok {
+		return false
+	}
+	return netip.PrefixFrom(got.Unmap(), ones) != keep
 }
 
 // nodeLocatorPrefix returns the Block(48)+Node-ID(16) /64 carved out of this
