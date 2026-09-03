@@ -7,11 +7,13 @@ package attach
 import (
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/bond"
@@ -580,4 +582,130 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestAutoDetect_FabricPeerRoutes covers the gap that left a real tenant
+// datapath silently dead: SRv6 arrives wherever a peer's route to this
+// node's locator points, which is not always the default route's
+// interface. A fabric carrying its locators over a private segment reaches
+// them by a BGP-learned route, and the ingress hook has to be attached
+// there too.
+func TestAutoDetect_FabricPeerRoutes(t *testing.T) {
+	t.Setenv(config.EnvCNIEBPFInterfaces, "")
+	stubNonBondLinks(t)
+
+	origRouteListFn, origLinkByIndexFn := routeListFn, linkByIndexFn
+	t.Cleanup(func() { routeListFn, linkByIndexFn = origRouteListFn, origLinkByIndexFn })
+
+	links := map[int]netlink.Link{
+		2: &fakeLink{attrs: netlink.LinkAttrs{Index: 2, Name: testIfaceEth0}},
+		3: &fakeLink{attrs: netlink.LinkAttrs{Index: 3, Name: testIfaceEth1}},
+		4: &fakeLink{attrs: netlink.LinkAttrs{Index: 4, Name: "lo", Flags: net.FlagLoopback}},
+	}
+	linkByIndexFn = func(index int) (netlink.Link, error) {
+		if l, ok := links[index]; ok {
+			return l, nil
+		}
+		return nil, errFixtureNotFound
+	}
+	bgp := func(idx int) netlink.Route {
+		return netlink.Route{LinkIndex: idx, Dst: &net.IPNet{
+			IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+		}, Protocol: unix.RTPROT_BGP}
+	}
+
+	for _, tt := range []struct {
+		name   string
+		routes []netlink.Route
+		want   []string
+	}{
+		{
+			// The deployed topology: default route on the public NIC, the
+			// peer's locator reached over a private segment.
+			name:   "adds the interface a locator is learned over",
+			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, bgp(3)},
+			want:   []string{testIfaceEth0, testIfaceEth1},
+		},
+		{
+			// The ordering is contractual: ResolveNodeSourceAddress takes
+			// names[0] for the outer source address of every encapsulated
+			// packet, and a private segment's address is not reachable off
+			// that segment. The default-route interface must stay first
+			// even when netlink reports the BGP route before it.
+			name:   "default route stays first regardless of netlink order",
+			routes: []netlink.Route{bgp(3), {LinkIndex: 2, Dst: nil}},
+			want:   []string{testIfaceEth0, testIfaceEth1},
+		},
+		{
+			name:   "a BGP route alone is still a usable fabric interface",
+			routes: []netlink.Route{bgp(3)},
+			want:   []string{testIfaceEth1},
+		},
+		{
+			name:   "one interface carrying both is not duplicated",
+			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, bgp(2)},
+			want:   []string{testIfaceEth0},
+		},
+		{
+			// Measured on every node in the fabric: FRR reports the
+			// aggregate this node originates itself as
+			// "blackhole <prefix> dev lo". Without rejecting it, every such
+			// node nominates lo as a fabric interface.
+			name: "an originated aggregate's blackhole is not a peer path",
+			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, {LinkIndex: 4, Dst: &net.IPNet{
+				IP: net.ParseIP("2607:ed40:1fe::"), Mask: net.CIDRMask(48, 128),
+			}, Protocol: unix.RTPROT_BGP, Type: unix.RTN_BLACKHOLE}},
+			want: []string{testIfaceEth0},
+		},
+		{
+			// Belt and braces for the same case: even a unicast BGP route
+			// reported on loopback must not attach the ingress hook there.
+			name: "loopback is never a fabric interface",
+			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, {LinkIndex: 4, Dst: &net.IPNet{
+				IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+			}, Protocol: unix.RTPROT_BGP}},
+			want: []string{testIfaceEth0},
+		},
+		{
+			// Every EVPN route for a tenant prefix is BGP-learned and points
+			// into a VRF. Attaching to those would put the ingress hook on
+			// tenant plumbing.
+			name: "non-BGP protocols are not fabric signals",
+			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, {LinkIndex: 3, Dst: &net.IPNet{
+				IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+			}, Protocol: unix.RTPROT_KERNEL}},
+			want: []string{testIfaceEth0},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			routeListFn = func() ([]netlink.Route, error) { return tt.routes, nil }
+			got, err := ResolveInterfaces()
+			if err != nil {
+				t.Fatalf("ResolveInterfaces() error = %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("ResolveInterfaces() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAutoDetect_NoUsableRouteStillErrors keeps the failure mode intact:
+// with neither a default nor a BGP-learned route there is nothing to attach
+// to, and callers must get an error rather than an empty set they would
+// treat as success and silently blackhole traffic behind.
+func TestAutoDetect_NoUsableRouteStillErrors(t *testing.T) {
+	t.Setenv(config.EnvCNIEBPFInterfaces, "")
+	stubNonBondLinks(t)
+
+	origRouteListFn := routeListFn
+	t.Cleanup(func() { routeListFn = origRouteListFn })
+	routeListFn = func() ([]netlink.Route, error) {
+		return []netlink.Route{{LinkIndex: 2, Dst: &net.IPNet{
+			IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
+		}, Protocol: unix.RTPROT_STATIC}}, nil
+	}
+	if _, err := ResolveInterfaces(); err == nil {
+		t.Fatal("ResolveInterfaces() error = nil, want an error")
+	}
 }

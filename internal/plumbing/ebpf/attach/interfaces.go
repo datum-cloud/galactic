@@ -7,6 +7,7 @@ package attach
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 
@@ -57,11 +58,13 @@ var (
 // This is the explicit override for multi-homed nodes where auto-detection
 // is ambiguous.
 //
-// Otherwise, the interface(s) carrying the default IPv6 route are
-// auto-detected. Attaching to the wrong (or too few) interfaces fails as
-// silent blackholing of overlay traffic (design plan §4.1), so callers
-// that get an error here must not proceed with a partial or empty
-// interface set.
+// Otherwise the interfaces are auto-detected: those carrying the default
+// IPv6 route, followed by those carrying a BGP-learned route, which is
+// where a fabric peer's SRv6 traffic arrives when the locators travel over
+// a segment the default route does not use (see isFabricPeerRoute).
+// Attaching to the wrong (or too few) interfaces fails as silent
+// blackholing of overlay traffic (design plan §4.1), so callers that get
+// an error here must not proceed with a partial or empty interface set.
 //
 // Either way, the resolved set is then run through expandBondSlaves: any
 // interface that is itself a Linux bonding master is expanded to include
@@ -107,7 +110,8 @@ func parseInterfaceList(v string) []string {
 }
 
 // autoDetectInterfaces returns the deduplicated set of interface names
-// carrying an IPv6 default route (::/0), in the order netlink reports them
+// carrying an IPv6 default route (::/0) or a BGP-learned route, default
+// routes first, and within each group in the order netlink reports them
 // -- analogous to the existing GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
 // auto-detection-from-`lo` pattern (internal/plumbing/loaddr), but over
 // routes rather than addresses.
@@ -152,37 +156,96 @@ func autoDetectInterfaces() ([]string, error) {
 
 	var names []string
 	seen := make(map[string]bool)
-	for _, r := range routes {
-		if !isDefaultRoute(r) || r.LinkIndex <= 0 {
-			continue
+	collect := func(match func(netlink.Route) bool) {
+		for _, r := range routes {
+			if !match(r) || r.LinkIndex <= 0 {
+				continue
+			}
+			link, err := linkByIndexFn(r.LinkIndex)
+			if err != nil {
+				// A route pointing at an interface we can't resolve isn't
+				// actionable here; skip it rather than failing the whole
+				// detection over one stale/racing route.
+				continue
+			}
+			if link.Type() == excludedLinkType {
+				continue
+			}
+			if isVRFSlave(link) {
+				continue
+			}
+			if link.Attrs().Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			name := link.Attrs().Name
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			names = append(names, name)
 		}
-		link, err := linkByIndexFn(r.LinkIndex)
-		if err != nil {
-			// A route pointing at an interface we can't resolve isn't
-			// actionable here; skip it rather than failing the whole
-			// detection over one stale/racing route.
-			continue
-		}
-		if link.Type() == excludedLinkType {
-			continue
-		}
-		if isVRFSlave(link) {
-			continue
-		}
-		name := link.Attrs().Name
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		names = append(names, name)
 	}
+
+	// Default-route interfaces first, and the ordering is contractual, not
+	// cosmetic: ResolveNodeSourceAddress takes names[0] and uses that
+	// interface's global address as the outer source of every packet this
+	// node encapsulates. That has to stay the interface carrying the
+	// default route. A private fabric segment's address is reachable only
+	// from that segment, so promoting it here would give cross-site SRv6
+	// a source no intermediate network forwards on -- the same silent loss
+	// the wireguard exclusion above exists to prevent.
+	collect(isDefaultRoute)
+	collect(isFabricPeerRoute)
 
 	if len(names) == 0 {
 		return nil, fmt.Errorf(
-			"attach: no default IPv6 route found to auto-detect the SRv6/underlay-facing interface; "+
-				"set %s to override", config.EnvCNIEBPFInterfaces)
+			"attach: no default or BGP-learned IPv6 route found to auto-detect the "+
+				"SRv6/underlay-facing interface; set %s to override", config.EnvCNIEBPFInterfaces)
 	}
 	return names, nil
+}
+
+// isFabricPeerRoute reports whether r is a route this node's own routing
+// daemon learned over BGP, making r's interface one where a fabric peer --
+// and so SRv6-encapsulated traffic from it -- can arrive.
+//
+// Default-route detection alone is not enough, and the gap is not
+// theoretical. Encapsulated traffic arrives wherever a peer's route to
+// this node's locator points, which is not necessarily the default route's
+// interface: a fabric can carry its locators over a private segment shared
+// only by the nodes on it, reached by a specific route rather than the
+// default. Measured on such a pair -- iBGP and the locators over a VLAN on
+// a private bond, the default route still on the public NIC -- 10
+// correctly-formed SRv6 packets arrived on the VLAN, the ingress hook was
+// attached only to the public NIC, nothing was decapsulated, and the
+// kernel counted them as Ip6InHdrErrors because a local SID with no
+// seg6local action is all it saw. No error anywhere: the tenant datapath
+// was silently dead.
+//
+// BGP is the signal because a fabric peer is by definition one this node
+// exchanges routes with, so the interface reaching it carries a
+// BGP-learned route whatever addressing the segment uses. It holds for a
+// peer in this node's own uSID Block and for one in a different Block,
+// which a rule keyed on locator address space would not. The exclusions
+// applied to default routes apply here unchanged, and they matter more:
+// EVPN routes for tenant prefixes are BGP-learned too, and every one of
+// them points into a VRF, which isVRFSlave rejects.
+func isFabricPeerRoute(r netlink.Route) bool {
+	if r.Protocol != unix.RTPROT_BGP {
+		return false
+	}
+	// A discard is not a path to anything. FRR installs the locator and
+	// aggregate prefixes this node originates itself as blackholes, and
+	// reports them on lo, so without this every node with an originated
+	// aggregate would nominate lo as a fabric interface. Rejecting the
+	// known non-forwarding types rather than requiring RTN_UNICAST, because
+	// an ordinary unicast route is also reported as RTN_UNSPEC by some
+	// netlink paths and requiring unicast would then match nothing.
+	switch r.Type {
+	case unix.RTN_BLACKHOLE, unix.RTN_UNREACHABLE, unix.RTN_PROHIBIT:
+		return false
+	}
+	return true
 }
 
 // excludedLinkType is the vishvananda/netlink Link.Type() value
