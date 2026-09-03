@@ -24,6 +24,16 @@ import (
 const minVRFID = uint32(1)
 const maxVRFID = uint32(math.MaxUint32 - 1)
 
+// ErrNotFound is returned (wrapped) by TableID when no VRF interface for
+// that VPC exists in *this process's own* network namespace. Callers need
+// this distinguishable from a genuine netlink failure because "absent" is
+// an ordinary, expected condition for some callers rather than an error:
+// galactic-router runs in the host's root netns and legitimately cannot
+// see a VRF #855's ingress sidecar created inside Envoy's own pod netns
+// (see internal/runtime/gobgp's vrfTableID), while a failed
+// netlink.LinkList is a real problem worth surfacing either way.
+var ErrNotFound = errors.New("vrf: no VRF interface for this VPC in this network namespace")
+
 // vrfMu serializes VRF creation/deletion within a single process (e.g.
 // concurrent goroutines in galactic-router's GC). It does not, by itself,
 // protect against two separate CNI ADD/DEL invocations racing on the same
@@ -121,7 +131,10 @@ func Delete(vpc string) error {
 }
 
 // TableID returns the Linux routing table ID for the VRF associated with the
-// given base62-encoded VPC.
+// given base62-encoded VPC. The returned error wraps ErrNotFound when no
+// such interface exists in this process's own network namespace — see that
+// variable's doc comment for why callers may need to treat that case as
+// ordinary rather than as a failure.
 func TableID(vpc string) (uint32, error) {
 	return getVRFIDForInterface(intf.GenerateInterfaceNameVRF(vpc))
 }
@@ -221,5 +234,5 @@ func getVRFIDForInterface(name string) (uint32, error) {
 	if vrf, ok := vrfByName[name]; ok {
 		return vrf.Table, nil
 	}
-	return 0, fmt.Errorf("could not find VRF ID for interface: %s", name)
+	return 0, fmt.Errorf("could not find VRF ID for interface %s: %w", name, ErrNotFound)
 }

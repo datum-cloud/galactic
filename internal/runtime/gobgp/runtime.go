@@ -6,6 +6,7 @@ package gobgp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -350,8 +351,19 @@ func (r *GoBGPRuntime) applyVRFs(
 		tableID, ok := r.appliedVRFs[v.Name]
 		if !ok {
 			var err error
-			tableID, err = vrfTableID(v.Name, v.VRFID)
+			tableID, err = vrfTableID(v.Name)
 			if err != nil {
+				// A VRF whose interface simply isn't in this process's own
+				// netns is the ordinary case for a VPC served only by #855's
+				// ingress sidecar on this node, not a fault -- and there is
+				// nothing for this process to install for it either way (see
+				// vrfTableID's own History note). Skip it quietly rather than
+				// reporting a failure on every reconcile, forever.
+				if errors.Is(err, errVRFNotInThisNetns) {
+					slog.Debug("applyVRFs: skipping VRF whose kernel interface is not in this netns",
+						"vrf", v.Name, "err", err)
+					continue
+				}
 				slog.Error("applyVRFs: failed to resolve kernel VRF table; this VRF's routes will not be installed",
 					"vrf", v.Name, "err", err)
 				continue
