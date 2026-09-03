@@ -653,6 +653,12 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 		}()
 	}
 
+	// This node's own uSID locator has to be locally resolvable before any
+	// same-node SRv6 egress route can be registered -- see
+	// ensureLocatorLocalRoute. Non-fatal, and retried on refreshTicker
+	// below, since the BGPRouter carrying the locator may not exist yet.
+	reconcileLocatorLocalRoute(ctx, ebpfState)
+
 	// Serve Prometheus metrics at the conventional /metrics scrape path.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", m.Handler())
@@ -756,6 +762,11 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			if logFileHostPath != "" {
 				rotateLogFile(logFileHostPath)
 			}
+
+			// Re-assert this node's uSID locator local route: picks up a
+			// BGPRouter created after startup, and restores the route if
+			// something flushed it.
+			reconcileLocatorLocalRoute(ctx, ebpfState)
 
 		case <-ebpfHealthTicker.C:
 			if ebpfState.objs == nil {
