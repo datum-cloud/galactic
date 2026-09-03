@@ -135,6 +135,28 @@ func VPCSegment(vpc string) string {
 	return nameSegment(vpc)
 }
 
+// IngressAttachment is the synthetic vpcAttachment segment the ingress
+// sidecar publishes its own per-VPC gateway address under. A sidecar has no
+// real VPCAttachment -- it is not a tenant workload and no CNI ADD ever runs
+// for it -- but BGPAdvertisementName needs a middle segment, and one fixed
+// value keeps the name deterministic and one-per-(VPC, node).
+//
+// Defined here, in the package that owns every CRD name, rather than in
+// internal/ingresssidecar which writes these advertisements: the host side
+// (internal/installer's sidecar return path) has to *recognize* them, and
+// two independently-maintained copies of the same literal is exactly how
+// that recognition silently stops matching.
+const IngressAttachment = "ingress"
+
+// IngressAdvertisementSegment is the middle name segment of every
+// BGPAdvertisement the ingress sidecar publishes, i.e. what
+// BGPAdvertisementName renders IngressAttachment as. Exported so a reader
+// can identify a sidecar's own gateway advertisement among the ones this
+// node originates, without re-deriving the encoding.
+func IngressAdvertisementSegment() string {
+	return nameSegment(IngressAttachment)
+}
+
 // BGPVRFInstanceName returns the deterministic name for a BGPVRFInstance.
 // This is keyed by (vpc, node): the underlying kernel VRF is shared by every
 // attachment (pod or VM) on this VPC on this node (see internal/plumbing/vrf

@@ -33,7 +33,12 @@ import (
 // CNI-derived attachment's own advertisement for the same (vpc, node),
 // which always shares this sidecar's own BGPVRFInstance (see
 // PublishGateway) but never its BGPAdvertisement.
-const ingressVPCAttachment = "ingress"
+//
+// Aliased to crdnames' own constant rather than repeating the literal: the
+// host side has to recognize the advertisements this writes (see
+// internal/installer's sidecar return path), so both ends must read the
+// same value or the recognition quietly stops matching.
+const ingressVPCAttachment = crdnames.IngressAttachment
 
 // ErrGatewayAddressNotProvisioned is returned by a GatewayAddressResolver
 // when this VPC has no local gateway address to advertise yet. Callers
