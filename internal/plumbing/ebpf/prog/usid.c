@@ -148,6 +148,13 @@ static long (*bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len) = (void *) BP
 static long (*bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff, __u32 mode,
 				    __u64 flags) = (void *) BPF_FUNC_skb_adjust_room;
 
+// Clears the outer transit VLAN off a decapsulated packet -- see its call
+// site (step 7) for why the inner packet must not inherit it, and why a
+// helper is needed rather than zeroing a field: skb->vlan_tci is not
+// writable from BPF, and the tag lives there rather than in packet data
+// whenever the NIC strips it on receive.
+static long (*bpf_skb_vlan_pop)(struct __sk_buff *skb) = (void *) BPF_FUNC_skb_vlan_pop;
+
 // Only used on the IPv4-inner decap path, to retag skb->protocol -- see
 // the long comment at its call site (step 7) for why a helper is needed
 // here at all instead of a plain assignment.
@@ -1341,9 +1348,46 @@ int usid_ingress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	// bpf_skb_change_proto/bpf_skb_adjust_room can both change the
-	// underlying packet buffer: all previously derived data/data_end
-	// pointers are invalidated and must be re-read.
+	// Drop the outer transit VLAN, which the decapsulated inner packet
+	// must not inherit.
+	//
+	// When the uSID packet arrives on a VLAN whose tag the NIC strips
+	// into skb metadata (hardware VLAN offload, the ordinary case), the
+	// tag lives in skb->vlan_tci rather than in packet data, so the
+	// ethertype check at the top of this function sees IPv6 and the
+	// carve above never touches the tag. Stripping the outer IPv6
+	// header therefore leaves the tag attached to a packet it has
+	// nothing to do with: the tag describes the segment the *outer*
+	// packet crossed to reach this node, while the inner packet is
+	// addressed inside a tenant VRF and never belonged to that segment.
+	//
+	// Carrying it forward breaks the redirect in step 9 two ways. A tap
+	// re-inserts a metadata tag into the frame on transmit, so the guest
+	// would receive a tagged frame it has no VLAN interface to accept;
+	// and any other egress program on the resolved interface that
+	// filters by VLAN id sees a tag from a segment that interface is not
+	// on, and is entitled to drop the packet before it is ever
+	// transmitted -- a discard that happens after this program has
+	// already returned TC_ACT_REDIRECT, so no counter here can see it.
+	//
+	// Unconditional and idempotent: with no tag present this is a no-op
+	// returning success, so it needs no guard of its own. It is placed
+	// here, immediately after the carve, so the existing pointer re-read
+	// below covers this helper's invalidation too.
+	//
+	// A failure counts as DROP_REASON_STRIP_FAILED rather than earning a
+	// reason of its own: removing the tag is part of the same carve step
+	// as removing the outer header, and the only way this helper fails
+	// is the allocation the carve above can equally fail on, so the two
+	// share a cause as well as a step.
+	if (bpf_skb_vlan_pop(skb)) {
+		count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	// bpf_skb_change_proto/bpf_skb_adjust_room/bpf_skb_vlan_pop can all
+	// change the underlying packet buffer: all previously derived
+	// data/data_end pointers are invalidated and must be re-read.
 	data = (void *) (long) skb->data;
 	data_end = (void *) (long) skb->data_end;
 
