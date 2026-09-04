@@ -7,6 +7,7 @@ package attach
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -52,7 +53,7 @@ func Health(objs *prog.UsidObjects, ifaces []string) error {
 		checkProgramReachable(objs.UsidIngress),
 		checkMapsReachable(objs),
 		checkAttached(ifaces),
-		checkNotPreempted(ifaces),
+		checkNotPreempted(),
 	)
 }
 
@@ -249,49 +250,89 @@ var programNameFn = func(id ebpf.ProgramID) (string, error) {
 }
 
 // checkNotPreempted confirms nothing runs ahead of this datapath on the
-// interfaces it owns.
+// interfaces it owns exclusively.
 //
 // Being attached is not the same as being reached. This package attaches
 // via clsact, and the kernel runs every tcx program on a hook before any
-// clsact filter on it, so another CNI that attaches tcx to an interface
-// this datapath owns sits permanently in front of it. If that program
-// consumes or drops the packet, usid_ingress is never invoked, and every
-// counter in this datapath reads a clean zero -- there is no drop to see,
-// because from this side nothing arrived.
+// clsact filter on it, so another CNI's tcx program on the same interface
+// decides a packet's fate first. If it consumes or drops the packet,
+// usid_egress is never invoked and every counter here reads a clean zero,
+// because from this side nothing arrived. That is worth a check because it
+// is invisible from every vantage point this codebase otherwise has:
+// diagnosing one instance took kernel kfree_skb tracing, then bpftool to
+// see a tcx link `tc filter show` cannot display, then the other CNI's own
+// drop monitor to name the reason.
 //
-// That is worth a health check rather than a comment because the failure
-// is invisible from every vantage point this codebase has. Diagnosing one
-// instance took kernel kfree_skb tracing to find the drop, bpftool to see
-// a tcx link that `tc filter show` cannot display at all, and the other
-// CNI's own drop monitor to name the reason. A health check states it in
-// one line instead.
+// Scoped to this datapath's own per-attachment interfaces -- the taps and
+// veths carrying usid_egress -- and deliberately not to the shared uplinks
+// usid_ingress attaches to. On an uplink another CNI is expected: it is
+// that CNI's interface too, and this datapath's own receive classification
+// happens on a bond's slaves rather than on the master a cluster CNI
+// attaches to, so a tcx program there is not in the way of anything.
+// Checking uplinks would report every node in a fleet unhealthy over the
+// ordinary arrangement.
 //
-// Written to survive this package moving to tcx itself: what it asserts is
-// that either no tcx program is present (so clsact is first by default) or
-// the first tcx program is this datapath's own. Both readings are correct
-// now and after such a move.
-func checkNotPreempted(ifaces []string) error {
+// Enumerating by filter rather than taking a caller-supplied list: an
+// interface carrying this package's own usid_egress filter is by definition
+// one this datapath owns, so the set defines itself and cannot drift out of
+// step with what is actually attached.
+func checkNotPreempted() error {
+	links, err := linkListFn()
+	if err != nil {
+		return fmt.Errorf("attach: health: list links to check for preemption: %w", err)
+	}
+
 	var errs []error
-	for _, name := range ifaces {
-		if err := checkNotPreemptedOne(name); err != nil {
-			errs = append(errs, fmt.Errorf("attach: health: interface %q: %w", name, err))
+	for _, l := range links {
+		if !hasEgressFilter(l) {
+			continue
+		}
+		if err := checkNotPreemptedOne(l); err != nil {
+			errs = append(errs, fmt.Errorf("attach: health: interface %q: %w", l.Attrs().Name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func checkNotPreemptedOne(name string) error {
-	iface, err := linkByNameFn(name)
+// hasEgressFilter reports whether l carries this package's own usid_egress
+// filter, which is what marks an interface as one this datapath owns.
+func hasEgressFilter(l netlink.Link) bool {
+	filters, err := filterListFn(l, netlink.HANDLE_MIN_INGRESS)
 	if err != nil {
-		return fmt.Errorf("find link: %w", err)
+		return false
 	}
+	for _, f := range filters {
+		if bpfFilter, ok := f.(*netlink.BpfFilter); ok && bpfFilter.Name == egressFilterName {
+			return true
+		}
+	}
+	return false
+}
 
-	ids, err := tcxQueryFn(iface.Attrs().Index)
+// checkNotPreemptedOne reports whether anything precedes this datapath on
+// one owned interface.
+//
+// A failure to look is logged rather than returned. This check is a
+// diagnostic, and its own inability to run says nothing about whether the
+// datapath is carrying traffic, so failing health on it would report the
+// wrong thing. Logged, though, and not swallowed: an earlier version of
+// this returned nil on every error path, which made it impossible to tell
+// a passing check from one that never ran -- it sat inert in production
+// against an interface that genuinely was preempted, and looked identical
+// to healthy.
+func checkNotPreemptedOne(l netlink.Link) error {
+	name := l.Attrs().Name
+
+	ids, err := tcxQueryFn(l.Attrs().Index)
 	if err != nil {
-		// A kernel without BPF_PROG_QUERY for tcx cannot have a tcx
-		// program to be preempted by either, so this is not a datapath
-		// fault. Reporting it as one would make every such node
-		// permanently unhealthy over a condition it cannot have.
+		if errors.Is(err, ebpf.ErrNotSupported) {
+			// A kernel with no tcx cannot have a tcx program to be
+			// preempted by, so there is nothing to report and nothing
+			// to warn about either.
+			return nil
+		}
+		slog.Warn("attach: health: could not check whether another tc program precedes this datapath",
+			"interface", name, "err", err)
 		return nil
 	}
 	if len(ids) == 0 {
@@ -300,14 +341,13 @@ func checkNotPreemptedOne(name string) error {
 
 	first, err := programNameFn(ids[0])
 	if err != nil {
-		// The program is attached but its name is unreadable. Do not
-		// claim preemption on that basis: a false unhealthy here would
-		// point an operator at the wrong thing entirely.
+		slog.Warn("attach: health: a tc program precedes this datapath but could not be identified",
+			"interface", name, "err", err)
 		return nil
 	}
 	if first == prog.UsidProgUsidIngress || first == prog.UsidProgUsidEgress {
 		return nil
 	}
 	return fmt.Errorf("tc program %q runs ahead of this datapath (tcx precedes clsact), "+
-		"so traffic it consumes never reaches usid_ingress", first)
+		"so traffic it consumes never reaches usid_egress", first)
 }
