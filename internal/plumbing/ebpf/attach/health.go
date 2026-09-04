@@ -53,7 +53,6 @@ func Health(objs *prog.UsidObjects, ifaces []string) error {
 		checkProgramReachable(objs.UsidIngress),
 		checkMapsReachable(objs),
 		checkAttached(ifaces),
-		checkNotPreempted(ownProgramIDs(objs)),
 	)
 }
 
@@ -205,6 +204,9 @@ func (h *Handle) Healthy() error {
 		return fmt.Errorf("attach: health: resolve interfaces: %w", err)
 	}
 
+	// Reported, never returned. See reportPreemption.
+	reportPreemption(h.Objs)
+
 	healthErr := Health(h.Objs, ifaces)
 	if healthErr != nil {
 		h.Watcher.Reconcile() // nil-safe no-op if no Watcher is wired up
@@ -278,6 +280,32 @@ func ownProgramIDs(objs *prog.UsidObjects) map[ebpf.ProgramID]struct{} {
 		}
 	}
 	return out
+}
+
+// reportPreemption logs, and deliberately does not return, whatever
+// checkNotPreempted finds.
+//
+// This must never reach the health service. Both the liveness and the
+// readiness probe point at that one service, so anything reported through
+// it restarts this container -- and a restart cannot remove another CNI's
+// program from an interface. Wiring preemption into it produced a
+// permanent crashloop: measured at six restarts in as many minutes on a
+// node with a foreign program deliberately attached, each restart
+// changing nothing about the condition that caused it.
+//
+// Every other check in Health is a condition a restart plausibly fixes,
+// since restarting reloads the programs and re-attaches them. This one is
+// not, so it belongs in the log next to the other things an operator reads
+// rather than in the signal that decides whether this container lives.
+func reportPreemption(objs *prog.UsidObjects) {
+	if objs == nil {
+		return
+	}
+	if err := checkNotPreempted(ownProgramIDs(objs)); err != nil {
+		slog.Warn("attach: health: another tc program runs ahead of this datapath; "+
+			"traffic it consumes never reaches this datapath, and restarting will not change that",
+			"err", err)
+	}
 }
 
 // checkNotPreempted confirms nothing runs ahead of this datapath on the
