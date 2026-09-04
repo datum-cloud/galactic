@@ -323,89 +323,179 @@ func TestHealth_RealDatapath_FlipsAfterAttachIsKilled(t *testing.T) {
 	t.Logf("Health() correctly flipped to unhealthy after objs.Close(): %v", err)
 }
 
+// testForeignProgram is a stand-in for another CNI's tc program, named as
+// one really is so the assertions read like the log line an operator sees.
+const testForeignProgram = "cil_from_netdev"
+
+// preemptTestLink is one owned interface: it carries the usid_egress
+// filter, which is what marks it as this datapath's own.
+func preemptTestLink(name string, index int) netlink.Link {
+	return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name, Index: index}}
+}
+
 // TestCheckNotPreempted covers the condition that makes this datapath
-// silently invisible: another CNI attaching tcx to an interface this one
-// owns. tcx runs ahead of clsact, so such a program decides the packet's
-// fate before usid_ingress is invoked, and this side sees a clean zero
-// rather than a drop.
-//
-// Every case here is about which of those readings is worth calling
-// unhealthy. Reporting one wrongly points an operator at the datapath when
-// the fault is elsewhere, or worse, marks a healthy node down.
+// silently invisible: another CNI's tcx program on an interface this one
+// owns. tcx runs ahead of clsact, so it decides the packet's fate before
+// usid_egress is invoked, and this side sees a clean zero rather than a
+// drop.
 func TestCheckNotPreempted(t *testing.T) {
-	origLinkByName := linkByNameFn
+	origLinkList := linkListFn
+	origFilterList := filterListFn
 	origTCXQuery := tcxQueryFn
 	origProgramName := programNameFn
 	t.Cleanup(func() {
-		linkByNameFn = origLinkByName
+		linkListFn = origLinkList
+		filterListFn = origFilterList
 		tcxQueryFn = origTCXQuery
 		programNameFn = origProgramName
 	})
 
-	dummyLink := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: testIfaceEth0, Index: 7}}
-	linkByNameFn = func(string) (netlink.Link, error) { return dummyLink, nil }
+	owned := preemptTestLink("G000000002abcH", 7)
+	linkListFn = func() ([]netlink.Link, error) { return []netlink.Link{owned}, nil }
+	filterListFn = func(netlink.Link, uint32) ([]netlink.Filter, error) {
+		return []netlink.Filter{&netlink.BpfFilter{Name: egressFilterName}}, nil
+	}
 
 	t.Run("no tcx program means clsact is first", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return nil, nil }
-		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
+		if err := checkNotPreempted(); err != nil {
 			t.Errorf("checkNotPreempted() error = %v, want nil with no tcx program attached", err)
 		}
 	})
 
 	t.Run("a foreign tcx program in front is unhealthy", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{101}, nil }
-		programNameFn = func(ebpf.ProgramID) (string, error) { return "cil_from_netdev", nil }
-		err := checkNotPreempted([]string{testIfaceEth0})
+		programNameFn = func(ebpf.ProgramID) (string, error) { return testForeignProgram, nil }
+		err := checkNotPreempted()
 		if err == nil {
 			t.Fatal("checkNotPreempted() error = nil, want an error for a foreign tcx program")
 		}
-		// The offender's name is the whole diagnostic value: without it an
-		// operator learns only that something is wrong.
-		if !strings.Contains(err.Error(), "cil_from_netdev") {
+		// The offender's name and the interface are the whole diagnostic
+		// value: without them an operator learns only that something is
+		// wrong somewhere.
+		if !strings.Contains(err.Error(), testForeignProgram) {
 			t.Errorf("checkNotPreempted() error = %q, want it to name the preempting program", err)
 		}
-		if !strings.Contains(err.Error(), testIfaceEth0) {
+		if !strings.Contains(err.Error(), "G000000002abcH") {
 			t.Errorf("checkNotPreempted() error = %q, want it to name the interface", err)
 		}
 	})
 
-	// Keeps this correct if this package moves to tcx itself: its own
-	// program running first is the desired end state, not a fault.
+	// Keeps this correct if this package moves to tcx itself, which is the
+	// intended direction: its own program running first is the end state,
+	// not a fault.
 	t.Run("this datapath first in the tcx chain is healthy", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{202, 203}, nil }
 		programNameFn = func(id ebpf.ProgramID) (string, error) {
 			if id == 202 {
-				return prog.UsidProgUsidIngress, nil
+				return prog.UsidProgUsidEgress, nil
 			}
-			return "cil_from_netdev", nil
+			return testForeignProgram, nil
 		}
-		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
+		if err := checkNotPreempted(); err != nil {
 			t.Errorf("checkNotPreempted() error = %v, want nil when this datapath is first", err)
 		}
 	})
+}
 
-	// A kernel with no tcx query support cannot have a tcx program to be
-	// preempted by. Reporting that as a datapath fault would hold such a
-	// node permanently unhealthy over a condition it cannot have.
-	t.Run("query unsupported is not a datapath fault", func(t *testing.T) {
-		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) {
-			return nil, errors.New("simulated: BPF_PROG_QUERY unsupported")
-		}
-		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
-			t.Errorf("checkNotPreempted() error = %v, want nil when the query is unsupported", err)
+// TestCheckNotPreempted_OnlyOwnedInterfaces is the scoping this check got
+// wrong once, and the reason it is worth its own test. A shared uplink
+// carries another CNI's tcx program as a matter of course -- it is that
+// CNI's interface too, and this datapath's receive classification happens
+// on a bond's slaves rather than the master. Checking such an interface
+// reported every node in a fleet unhealthy over the ordinary arrangement.
+//
+// The discriminator is the usid_egress filter: present means this datapath
+// owns the interface exclusively, absent means it does not.
+func TestCheckNotPreempted_OnlyOwnedInterfaces(t *testing.T) {
+	origLinkList := linkListFn
+	origFilterList := filterListFn
+	origTCXQuery := tcxQueryFn
+	origProgramName := programNameFn
+	t.Cleanup(func() {
+		linkListFn = origLinkList
+		filterListFn = origFilterList
+		tcxQueryFn = origTCXQuery
+		programNameFn = origProgramName
+	})
+
+	uplink := preemptTestLink("bond0", 2)
+	linkListFn = func() ([]netlink.Link, error) { return []netlink.Link{uplink}, nil }
+	// An uplink carries usid_ingress, never usid_egress.
+	filterListFn = func(netlink.Link, uint32) ([]netlink.Filter, error) {
+		return []netlink.Filter{&netlink.BpfFilter{Name: filterName}}, nil
+	}
+	tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{101}, nil }
+	programNameFn = func(ebpf.ProgramID) (string, error) { return testForeignProgram, nil }
+
+	if err := checkNotPreempted(); err != nil {
+		t.Errorf("checkNotPreempted() error = %v, want nil: a shared uplink is not this datapath's "+
+			"to own, and another CNI's program there is expected", err)
+	}
+}
+
+// TestCheckNotPreempted_LookupFailuresDoNotFailHealth pins the handling of
+// this check's own inability to run. It is a diagnostic, and a failed query
+// says nothing about whether the datapath is carrying traffic, so health
+// must not turn on it.
+//
+// An earlier version returned nil on every error path, which made a passing
+// check indistinguishable from one that never ran -- and it did never run,
+// sitting inert in production against an interface that genuinely was
+// preempted. These paths now log, which is what makes the difference
+// observable; the assertion here is only that they do not fail health.
+func TestCheckNotPreempted_LookupFailuresDoNotFailHealth(t *testing.T) {
+	origLinkList := linkListFn
+	origFilterList := filterListFn
+	origTCXQuery := tcxQueryFn
+	origProgramName := programNameFn
+	t.Cleanup(func() {
+		linkListFn = origLinkList
+		filterListFn = origFilterList
+		tcxQueryFn = origTCXQuery
+		programNameFn = origProgramName
+	})
+
+	owned := preemptTestLink("G000000002abcH", 7)
+	linkListFn = func() ([]netlink.Link, error) { return []netlink.Link{owned}, nil }
+	filterListFn = func(netlink.Link, uint32) ([]netlink.Filter, error) {
+		return []netlink.Filter{&netlink.BpfFilter{Name: egressFilterName}}, nil
+	}
+
+	t.Run("tcx unsupported", func(t *testing.T) {
+		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return nil, ebpf.ErrNotSupported }
+		if err := checkNotPreempted(); err != nil {
+			t.Errorf("checkNotPreempted() error = %v, want nil on a kernel without tcx", err)
 		}
 	})
 
-	// An attached program whose name cannot be read is not evidence of
-	// preemption by anything in particular, and a guess here would send an
-	// operator after the wrong component.
-	t.Run("unreadable program name does not claim preemption", func(t *testing.T) {
+	t.Run("query fails for another reason", func(t *testing.T) {
+		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) {
+			return nil, errors.New("simulated: query failed")
+		}
+		if err := checkNotPreempted(); err != nil {
+			t.Errorf("checkNotPreempted() error = %v, want nil when the query itself fails", err)
+		}
+	})
+
+	t.Run("program name unreadable", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{404}, nil }
 		programNameFn = func(ebpf.ProgramID) (string, error) {
 			return "", errors.New("simulated: program vanished")
 		}
-		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
+		if err := checkNotPreempted(); err != nil {
 			t.Errorf("checkNotPreempted() error = %v, want nil when the name is unreadable", err)
+		}
+	})
+
+	// Listing links is this check's own precondition, not a per-interface
+	// diagnostic, so unlike the cases above it does surface.
+	t.Run("listing links fails", func(t *testing.T) {
+		linkListFn = func() ([]netlink.Link, error) {
+			return nil, errors.New("simulated: netlink down")
+		}
+		if err := checkNotPreempted(); err == nil {
+			t.Error("checkNotPreempted() error = nil, want an error when links cannot be listed")
 		}
 	})
 }
