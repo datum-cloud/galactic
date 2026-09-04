@@ -358,7 +358,7 @@ func TestCheckNotPreempted(t *testing.T) {
 
 	t.Run("no tcx program means clsact is first", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return nil, nil }
-		if err := checkNotPreempted(); err != nil {
+		if err := checkNotPreempted(nil); err != nil {
 			t.Errorf("checkNotPreempted() error = %v, want nil with no tcx program attached", err)
 		}
 	})
@@ -366,7 +366,7 @@ func TestCheckNotPreempted(t *testing.T) {
 	t.Run("a foreign tcx program in front is unhealthy", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{101}, nil }
 		programNameFn = func(ebpf.ProgramID) (string, error) { return testForeignProgram, nil }
-		err := checkNotPreempted()
+		err := checkNotPreempted(nil)
 		if err == nil {
 			t.Fatal("checkNotPreempted() error = nil, want an error for a foreign tcx program")
 		}
@@ -384,15 +384,16 @@ func TestCheckNotPreempted(t *testing.T) {
 	// Keeps this correct if this package moves to tcx itself, which is the
 	// intended direction: its own program running first is the end state,
 	// not a fault.
+	// Recognized by id, not name: reading a name needs a privilege the node
+	// agent does not hold, so an id comparison is the only one that works
+	// in production.
 	t.Run("this datapath first in the tcx chain is healthy", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{202, 203}, nil }
-		programNameFn = func(id ebpf.ProgramID) (string, error) {
-			if id == 202 {
-				return prog.UsidProgUsidEgress, nil
-			}
-			return testForeignProgram, nil
+		programNameFn = func(ebpf.ProgramID) (string, error) {
+			return "", errors.New("simulated: EPERM, as in production")
 		}
-		if err := checkNotPreempted(); err != nil {
+		own := map[ebpf.ProgramID]struct{}{202: {}}
+		if err := checkNotPreempted(own); err != nil {
 			t.Errorf("checkNotPreempted() error = %v, want nil when this datapath is first", err)
 		}
 	})
@@ -428,7 +429,7 @@ func TestCheckNotPreempted_OnlyOwnedInterfaces(t *testing.T) {
 	tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{101}, nil }
 	programNameFn = func(ebpf.ProgramID) (string, error) { return testForeignProgram, nil }
 
-	if err := checkNotPreempted(); err != nil {
+	if err := checkNotPreempted(nil); err != nil {
 		t.Errorf("checkNotPreempted() error = %v, want nil: a shared uplink is not this datapath's "+
 			"to own, and another CNI's program there is expected", err)
 	}
@@ -464,7 +465,7 @@ func TestCheckNotPreempted_LookupFailuresDoNotFailHealth(t *testing.T) {
 
 	t.Run("tcx unsupported", func(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return nil, ebpf.ErrNotSupported }
-		if err := checkNotPreempted(); err != nil {
+		if err := checkNotPreempted(nil); err != nil {
 			t.Errorf("checkNotPreempted() error = %v, want nil on a kernel without tcx", err)
 		}
 	})
@@ -473,20 +474,14 @@ func TestCheckNotPreempted_LookupFailuresDoNotFailHealth(t *testing.T) {
 		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) {
 			return nil, errors.New("simulated: query failed")
 		}
-		if err := checkNotPreempted(); err != nil {
+		if err := checkNotPreempted(nil); err != nil {
 			t.Errorf("checkNotPreempted() error = %v, want nil when the query itself fails", err)
 		}
 	})
 
-	t.Run("program name unreadable", func(t *testing.T) {
-		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{404}, nil }
-		programNameFn = func(ebpf.ProgramID) (string, error) {
-			return "", errors.New("simulated: program vanished")
-		}
-		if err := checkNotPreempted(); err != nil {
-			t.Errorf("checkNotPreempted() error = %v, want nil when the name is unreadable", err)
-		}
-	})
+	// An unreadable name is deliberately absent here: it must still report,
+	// by id. That is the production case, covered by
+	// TestCheckNotPreempted_ReportsByIDWhenNameIsUnreadable.
 
 	// Listing links is this check's own precondition, not a per-interface
 	// diagnostic, so unlike the cases above it does surface.
@@ -494,8 +489,55 @@ func TestCheckNotPreempted_LookupFailuresDoNotFailHealth(t *testing.T) {
 		linkListFn = func() ([]netlink.Link, error) {
 			return nil, errors.New("simulated: netlink down")
 		}
-		if err := checkNotPreempted(); err == nil {
+		if err := checkNotPreempted(nil); err == nil {
 			t.Error("checkNotPreempted() error = nil, want an error when links cannot be listed")
 		}
 	})
+}
+
+// TestCheckNotPreempted_ReportsByIDWhenNameIsUnreadable is the production
+// case, and the one the first two versions of this check got wrong.
+//
+// Naming a program means opening it by id, and BPF_PROG_GET_FD_BY_ID wants
+// CAP_SYS_ADMIN or CAP_PERFMON. The node agent holds neither, so that call
+// returns EPERM on every real node. Measured with a foreign program
+// deliberately attached to an owned tap: the check logged "could not be
+// identified: get program by id: operation not permitted" every ten
+// seconds and never reported the preemption itself.
+//
+// So the id has to carry the report. It is enough to act on, and unlike a
+// name it needs no privilege at all.
+func TestCheckNotPreempted_ReportsByIDWhenNameIsUnreadable(t *testing.T) {
+	origLinkList := linkListFn
+	origFilterList := filterListFn
+	origTCXQuery := tcxQueryFn
+	origProgramName := programNameFn
+	t.Cleanup(func() {
+		linkListFn = origLinkList
+		filterListFn = origFilterList
+		tcxQueryFn = origTCXQuery
+		programNameFn = origProgramName
+	})
+
+	owned := preemptTestLink("G000000002abcH", 7)
+	linkListFn = func() ([]netlink.Link, error) { return []netlink.Link{owned}, nil }
+	filterListFn = func(netlink.Link, uint32) ([]netlink.Filter, error) {
+		return []netlink.Filter{&netlink.BpfFilter{Name: egressFilterName}}, nil
+	}
+	tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{31401}, nil }
+	programNameFn = func(ebpf.ProgramID) (string, error) {
+		return "", errors.New("get program by id: operation not permitted")
+	}
+
+	err := checkNotPreempted(nil)
+	if err == nil {
+		t.Fatal("checkNotPreempted() error = nil, want a report even though the name is unreadable")
+	}
+	// The id is the actionable part, so it must appear.
+	if !strings.Contains(err.Error(), "31401") {
+		t.Errorf("checkNotPreempted() error = %q, want it to carry the program id", err)
+	}
+	if !strings.Contains(err.Error(), "G000000002abcH") {
+		t.Errorf("checkNotPreempted() error = %q, want it to name the interface", err)
+	}
 }
