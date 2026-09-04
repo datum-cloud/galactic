@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 
@@ -320,4 +321,91 @@ func TestHealth_RealDatapath_FlipsAfterAttachIsKilled(t *testing.T) {
 		t.Errorf("Health() after objs.Close(): error = %v, want it to mention the program/maps are not reachable", err)
 	}
 	t.Logf("Health() correctly flipped to unhealthy after objs.Close(): %v", err)
+}
+
+// TestCheckNotPreempted covers the condition that makes this datapath
+// silently invisible: another CNI attaching tcx to an interface this one
+// owns. tcx runs ahead of clsact, so such a program decides the packet's
+// fate before usid_ingress is invoked, and this side sees a clean zero
+// rather than a drop.
+//
+// Every case here is about which of those readings is worth calling
+// unhealthy. Reporting one wrongly points an operator at the datapath when
+// the fault is elsewhere, or worse, marks a healthy node down.
+func TestCheckNotPreempted(t *testing.T) {
+	origLinkByName := linkByNameFn
+	origTCXQuery := tcxQueryFn
+	origProgramName := programNameFn
+	t.Cleanup(func() {
+		linkByNameFn = origLinkByName
+		tcxQueryFn = origTCXQuery
+		programNameFn = origProgramName
+	})
+
+	dummyLink := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: testIfaceEth0, Index: 7}}
+	linkByNameFn = func(string) (netlink.Link, error) { return dummyLink, nil }
+
+	t.Run("no tcx program means clsact is first", func(t *testing.T) {
+		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return nil, nil }
+		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
+			t.Errorf("checkNotPreempted() error = %v, want nil with no tcx program attached", err)
+		}
+	})
+
+	t.Run("a foreign tcx program in front is unhealthy", func(t *testing.T) {
+		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{101}, nil }
+		programNameFn = func(ebpf.ProgramID) (string, error) { return "cil_from_netdev", nil }
+		err := checkNotPreempted([]string{testIfaceEth0})
+		if err == nil {
+			t.Fatal("checkNotPreempted() error = nil, want an error for a foreign tcx program")
+		}
+		// The offender's name is the whole diagnostic value: without it an
+		// operator learns only that something is wrong.
+		if !strings.Contains(err.Error(), "cil_from_netdev") {
+			t.Errorf("checkNotPreempted() error = %q, want it to name the preempting program", err)
+		}
+		if !strings.Contains(err.Error(), testIfaceEth0) {
+			t.Errorf("checkNotPreempted() error = %q, want it to name the interface", err)
+		}
+	})
+
+	// Keeps this correct if this package moves to tcx itself: its own
+	// program running first is the desired end state, not a fault.
+	t.Run("this datapath first in the tcx chain is healthy", func(t *testing.T) {
+		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{202, 203}, nil }
+		programNameFn = func(id ebpf.ProgramID) (string, error) {
+			if id == 202 {
+				return prog.UsidProgUsidIngress, nil
+			}
+			return "cil_from_netdev", nil
+		}
+		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
+			t.Errorf("checkNotPreempted() error = %v, want nil when this datapath is first", err)
+		}
+	})
+
+	// A kernel with no tcx query support cannot have a tcx program to be
+	// preempted by. Reporting that as a datapath fault would hold such a
+	// node permanently unhealthy over a condition it cannot have.
+	t.Run("query unsupported is not a datapath fault", func(t *testing.T) {
+		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) {
+			return nil, errors.New("simulated: BPF_PROG_QUERY unsupported")
+		}
+		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
+			t.Errorf("checkNotPreempted() error = %v, want nil when the query is unsupported", err)
+		}
+	})
+
+	// An attached program whose name cannot be read is not evidence of
+	// preemption by anything in particular, and a guess here would send an
+	// operator after the wrong component.
+	t.Run("unreadable program name does not claim preemption", func(t *testing.T) {
+		tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return []ebpf.ProgramID{404}, nil }
+		programNameFn = func(ebpf.ProgramID) (string, error) {
+			return "", errors.New("simulated: program vanished")
+		}
+		if err := checkNotPreempted([]string{testIfaceEth0}); err != nil {
+			t.Errorf("checkNotPreempted() error = %v, want nil when the name is unreadable", err)
+		}
+	})
 }

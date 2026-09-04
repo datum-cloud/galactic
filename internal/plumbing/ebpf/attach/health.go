@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -51,6 +52,7 @@ func Health(objs *prog.UsidObjects, ifaces []string) error {
 		checkProgramReachable(objs.UsidIngress),
 		checkMapsReachable(objs),
 		checkAttached(ifaces),
+		checkNotPreempted(ifaces),
 	)
 }
 
@@ -123,12 +125,12 @@ func checkAttached(ifaces []string) error {
 // process-local and not meaningfully comparable against a value returned
 // from a netlink query).
 func checkAttachedOne(name string) error {
-	link, err := linkByNameFn(name)
+	iface, err := linkByNameFn(name)
 	if err != nil {
 		return fmt.Errorf("find link: %w", err)
 	}
 
-	filters, err := filterListFn(link, netlink.HANDLE_MIN_INGRESS)
+	filters, err := filterListFn(iface, netlink.HANDLE_MIN_INGRESS)
 	if err != nil {
 		return fmt.Errorf("list filters: %w", err)
 	}
@@ -211,4 +213,101 @@ func (h *Handle) Healthy() error {
 			"(dead watcher can't self-heal drift)"))
 	}
 	return healthErr
+}
+
+// tcxQueryFn is a package-level override point, matching linkByNameFn and
+// filterListFn above, so checkNotPreempted's tests need neither root nor a
+// live interface with a foreign program on it.
+var tcxQueryFn = func(ifindex int) ([]ebpf.ProgramID, error) {
+	res, err := link.QueryPrograms(link.QueryOptions{
+		Target: ifindex,
+		Attach: ebpf.AttachTCXIngress,
+	})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]ebpf.ProgramID, 0, len(res.Programs))
+	for _, p := range res.Programs {
+		ids = append(ids, p.ID)
+	}
+	return ids, nil
+}
+
+// programNameFn resolves a program id to its kernel program name. Also an
+// override point, for the same reason as tcxQueryFn.
+var programNameFn = func(id ebpf.ProgramID) (string, error) {
+	p, err := ebpf.NewProgramFromID(id)
+	if err != nil {
+		return "", err
+	}
+	defer p.Close() //nolint:errcheck // read-only query, nothing to react to
+	info, err := p.Info()
+	if err != nil {
+		return "", err
+	}
+	return info.Name, nil
+}
+
+// checkNotPreempted confirms nothing runs ahead of this datapath on the
+// interfaces it owns.
+//
+// Being attached is not the same as being reached. This package attaches
+// via clsact, and the kernel runs every tcx program on a hook before any
+// clsact filter on it, so another CNI that attaches tcx to an interface
+// this datapath owns sits permanently in front of it. If that program
+// consumes or drops the packet, usid_ingress is never invoked, and every
+// counter in this datapath reads a clean zero -- there is no drop to see,
+// because from this side nothing arrived.
+//
+// That is worth a health check rather than a comment because the failure
+// is invisible from every vantage point this codebase has. Diagnosing one
+// instance took kernel kfree_skb tracing to find the drop, bpftool to see
+// a tcx link that `tc filter show` cannot display at all, and the other
+// CNI's own drop monitor to name the reason. A health check states it in
+// one line instead.
+//
+// Written to survive this package moving to tcx itself: what it asserts is
+// that either no tcx program is present (so clsact is first by default) or
+// the first tcx program is this datapath's own. Both readings are correct
+// now and after such a move.
+func checkNotPreempted(ifaces []string) error {
+	var errs []error
+	for _, name := range ifaces {
+		if err := checkNotPreemptedOne(name); err != nil {
+			errs = append(errs, fmt.Errorf("attach: health: interface %q: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func checkNotPreemptedOne(name string) error {
+	iface, err := linkByNameFn(name)
+	if err != nil {
+		return fmt.Errorf("find link: %w", err)
+	}
+
+	ids, err := tcxQueryFn(iface.Attrs().Index)
+	if err != nil {
+		// A kernel without BPF_PROG_QUERY for tcx cannot have a tcx
+		// program to be preempted by either, so this is not a datapath
+		// fault. Reporting it as one would make every such node
+		// permanently unhealthy over a condition it cannot have.
+		return nil
+	}
+	if len(ids) == 0 {
+		return nil // nothing in front of clsact
+	}
+
+	first, err := programNameFn(ids[0])
+	if err != nil {
+		// The program is attached but its name is unreadable. Do not
+		// claim preemption on that basis: a false unhealthy here would
+		// point an operator at the wrong thing entirely.
+		return nil
+	}
+	if first == prog.UsidProgUsidIngress || first == prog.UsidProgUsidEgress {
+		return nil
+	}
+	return fmt.Errorf("tc program %q runs ahead of this datapath (tcx precedes clsact), "+
+		"so traffic it consumes never reaches usid_ingress", first)
 }
