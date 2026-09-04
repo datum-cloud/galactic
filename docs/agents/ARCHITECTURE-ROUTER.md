@@ -110,7 +110,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram, [docs/gc-cmd-sequence.md](../cni/gc-cmd-sequence.md) for the GC controller's orphaned CRD/kernel-VRF sweep sequence diagram (plus `galactic-cni`'s companion eBPF `vrf_table` sweep), and [docs/architecture/](../architecture/) for C4 context/container diagrams covering all three Galactic applications.
+See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram, [docs/gc-cmd-sequence.md](../cni/gc-cmd-sequence.md) for the GC controller's orphaned CRD/kernel-VRF sweep sequence diagram (plus `galactic-cni`'s companion eBPF `vrf_table` sweep), [docs/architecture/](../architecture/) for C4 context/container/component diagrams covering all three Galactic applications, and [docs/host-routing-table-construction.md](../host-routing-table-construction.md) for how this binary's own EVPN-triggered route installs (`internal/runtime/gobgp/monitor.go`) fit alongside `fabric-router`'s underlay and `galactic-cni`'s VRF-table routes.
 
 ---
 

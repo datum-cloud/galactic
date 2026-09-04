@@ -46,6 +46,23 @@ other.
 
 ![Containers](./containers.png)
 
+## Level 3 — Component: one diagram per binary
+
+Internals of the three binaries this repo builds — `galactic-cni`'s six-binary
+CNI chain, `galactic-router`'s BGP/EVPN control plane, and `fabric-router`'s
+FRR underlay DaemonSet — each own document going one level deeper than the
+Container diagram above. All three converge on the same theme: how the host's
+Linux kernel routing table (and, for the SRv6 tenant path, the TC-BPF
+datapath's own pinned eBPF map standing in for it) gets built — see
+[docs/host-routing-table-construction.md](../host-routing-table-construction.md)
+for the sequence diagram that ties these three together end to end.
+
+![galactic-cni components](./components/galactic-cni-components.png)
+
+![galactic-router components](./components/galactic-router-components.png)
+
+![fabric-router components](./components/fabric-router-components.png)
+
 ---
 
 ## Source files
@@ -54,3 +71,6 @@ other.
 | ----------------------- | -------------------------------------------------------------- |
 | System Context           | [`context.puml`](./context.puml)                               |
 | Container                | [`containers.puml`](./containers.puml)                          |
+| Component — galactic-cni | [`components/galactic-cni.puml`](./components/galactic-cni.puml) |
+| Component — galactic-router | [`components/galactic-router.puml`](./components/galactic-router.puml) |
+| Component — fabric-router | [`components/fabric-router.puml`](./components/fabric-router.puml) |

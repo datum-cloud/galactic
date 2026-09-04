@@ -162,7 +162,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (one unified ADD diagram covering both the veth and tap master-plugin paths, one DEL diagram covering the whole chain), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries.
+See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (one unified ADD diagram covering both the veth and tap master-plugin paths, one DEL diagram covering the whole chain), [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries, and [docs/host-routing-table-construction.md](../host-routing-table-construction.md) for how this chain's own VRF-table routes fit into the larger picture alongside `fabric-router` and `galactic-router`.
 
 ---
 
