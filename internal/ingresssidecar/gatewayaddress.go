@@ -166,5 +166,48 @@ func ensureGatewayAddress(vpc, inner string) error {
 	if err := netlink.AddrReplace(link, nladdr); err != nil {
 		return fmt.Errorf("assign gateway address %s to %q: %w", addr, inner, err)
 	}
+
+	return ensureGatewayVRFRoute(vpc, addr)
+}
+
+// ensureGatewayVRFRoute pulls traffic for this VPC's gateway address into
+// that VPC's VRF, by routing it at the VRF device in this namespace's main
+// table.
+//
+// Assigning the address above is not enough to receive on it. It lands on a
+// veth enslaved to the VPC's VRF, so it is local only within that VRF's own
+// table -- while a reply arriving from outside, redirected in by
+// usid_ingress on the host, lands on this pod's primary interface, which is
+// in no VRF at all. The input lookup then runs in the main table, finds
+// nothing local for the address, and the packet is dropped without being
+// counted anywhere: Ip6InReceives advances, Ip6InDelivers does not, and
+// neither Ip6InNoRoutes nor Ip6InAddrErrors moves. Measured exactly that
+// way before this existed.
+//
+// A route at the VRF device is the standard way across that boundary: the
+// VRF driver redirects the lookup into its own table, where the address is
+// local, and delivery proceeds. It is the same idiom the pod-subnet routes
+// this sidecar already installs use to reach a VPC at all, applied to the
+// one address the sidecar owns itself rather than to a remote prefix.
+//
+// In the main table deliberately, not the VRF's: a lookup that has already
+// entered the VRF's table finds the address local there and never needs
+// this, so putting it inside would be inert. The main table is where the
+// lookup that currently fails happens.
+func ensureGatewayVRFRoute(vpc string, addr net.IP) error {
+	vrfName := intf.GenerateInterfaceNameVRF(vpc)
+	vrfLink, err := netlink.LinkByName(vrfName)
+	if err != nil {
+		return fmt.Errorf("look up VRF interface %q to route gateway address %s into it: %w",
+			vrfName, addr, err)
+	}
+
+	route := &netlink.Route{
+		Dst:       &net.IPNet{IP: addr, Mask: net.CIDRMask(net.IPv6len*8, net.IPv6len*8)},
+		LinkIndex: vrfLink.Attrs().Index,
+	}
+	if err := netlink.RouteReplace(route); err != nil {
+		return fmt.Errorf("route gateway address %s into VRF %q: %w", addr, vrfName, err)
+	}
 	return nil
 }

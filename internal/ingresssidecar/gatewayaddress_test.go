@@ -151,3 +151,16 @@ func TestEnsureGatewayAddress_NoopWhenDisabled(t *testing.T) {
 		t.Errorf("ensureGatewayAddress with assignment disabled: %v, want nil (no-op)", err)
 	}
 }
+
+// TestEnsureGatewayVRFRoute_AbsentVRFIsAnError pins that this reports a
+// missing VRF rather than silently skipping. The route is what makes the
+// gateway address receivable from outside the VRF, so a caller that treated
+// its absence as success would leave an address assigned, advertised into
+// EVPN, and undeliverable -- the exact failure this route exists to fix,
+// but harder to find because nothing would say so.
+func TestEnsureGatewayVRFRoute_AbsentVRFIsAnError(t *testing.T) {
+	// A VPC with no VRF interface in this test's namespace.
+	if err := ensureGatewayVRFRoute("zzzzz", net.ParseIP("fd30:e2e:3a5::1")); err == nil {
+		t.Error("ensureGatewayVRFRoute() error = nil, want an error when the VPC has no VRF")
+	}
+}
