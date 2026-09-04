@@ -541,3 +541,48 @@ func TestCheckNotPreempted_ReportsByIDWhenNameIsUnreadable(t *testing.T) {
 		t.Errorf("checkNotPreempted() error = %q, want it to name the interface", err)
 	}
 }
+
+// TestHealth_ExcludesPreemption pins the one thing about this check that
+// must not change: it does not reach the health service.
+//
+// Both the liveness and the readiness probe point at that single service,
+// so anything reported through it restarts this container. A restart
+// cannot remove another CNI's program from an interface, so wiring
+// preemption into it produced a permanent crashloop -- measured at six
+// restarts in as many minutes on a node with a foreign program attached,
+// each restart changing nothing about the condition that caused it.
+//
+// Asserted by failing the test if Health runs the tcx query at all. An
+// empty (non-nil) object set is enough to get past Health's own nil guard
+// and into the interface checks, which is where the preemption check used
+// to sit.
+func TestHealth_ExcludesPreemption(t *testing.T) {
+	origLinkByName := linkByNameFn
+	origLinkList := linkListFn
+	origFilterList := filterListFn
+	origTCXQuery := tcxQueryFn
+	t.Cleanup(func() {
+		linkByNameFn = origLinkByName
+		linkListFn = origLinkList
+		filterListFn = origFilterList
+		tcxQueryFn = origTCXQuery
+	})
+
+	owned := preemptTestLink("G000000002abcH", 7)
+	linkByNameFn = func(string) (netlink.Link, error) { return owned, nil }
+	linkListFn = func() ([]netlink.Link, error) { return []netlink.Link{owned}, nil }
+	filterListFn = func(netlink.Link, uint32) ([]netlink.Filter, error) {
+		return []netlink.Filter{
+			&netlink.BpfFilter{Name: filterName},
+			&netlink.BpfFilter{Name: egressFilterName},
+		}, nil
+	}
+	tcxQueryFn = func(int) ([]ebpf.ProgramID, error) {
+		t.Error("Health ran the preemption check; it must never gate the health service, " +
+			"which drives both liveness and readiness")
+		return nil, nil
+	}
+
+	// Errors about nil programs and maps are expected and irrelevant here.
+	_ = Health(&prog.UsidObjects{}, []string{"G000000002abcH"})
+}
