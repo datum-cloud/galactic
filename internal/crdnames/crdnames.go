@@ -41,6 +41,29 @@ const AnnotationAllocatedSubnetIPv4 = "galactic.datum.net/allocated-subnet-ipv4"
 // full key appends a truncated container ID; see NetNSKey.
 const AnnotationNetNS = "galactic.datum.net/netns"
 
+// AnnotationIngressHostIfindex and AnnotationIngressHostMAC are the
+// BGPAdvertisement annotations the ingress sidecar records the two facts
+// about its own pod that the host side of its return path needs, and that
+// only the sidecar can read.
+//
+// A reply for a sidecar gateway address has to be redirected into the pod
+// that holds it, which means the host needs the ifindex of the host-side
+// end of that pod's netns-crossing veth, and the pod-side MAC to address
+// the frame to. Both are trivially readable from inside the pod (the
+// primary interface's peer index and its own hardware address) and not
+// readable from outside it without entering the namespace, which needs
+// CAP_SYS_ADMIN -- a privilege the node agent deliberately does not carry
+// (its container drops ALL and adds only BPF, NET_ADMIN and NET_RAW).
+//
+// So the side that can see them publishes them, rather than the side that
+// cannot being given the privilege to go and look. Recorded on the
+// advertisement the sidecar already creates for this address, keyed the
+// same way, so there is one object describing one return path.
+const (
+	AnnotationIngressHostIfindex = "galactic.datum.net/ingress-host-ifindex"
+	AnnotationIngressHostMAC     = "galactic.datum.net/ingress-host-mac"
+)
+
 // AnnotationNoAddressing marks a BGPAdvertisement whose spec.prefixes is
 // empty by design — the attachment's config carries no "ipam" block, so no
 // address was ever requested for it (a VM managing its own addressing is a

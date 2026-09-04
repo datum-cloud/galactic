@@ -11,11 +11,9 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 
-	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,6 +43,15 @@ import (
 // veth pairs are in the pod's, and a container in that pod cannot install
 // host-netns routes. So the receiving half has to live here, in the host
 // daemon, and this file is it.
+//
+// The split runs the other way too, which is why this reads annotations
+// rather than going to look. Pointing a reply at the right pod needs that
+// pod's host-side veth and MAC, and reading those from here means entering
+// its namespace: setns wants CAP_SYS_ADMIN, and this container drops ALL
+// and adds only BPF, NET_ADMIN and NET_RAW. The sidecar can read both from
+// inside with no privilege at all, so it publishes them on the
+// advertisement it already writes and this side consumes them. Each half
+// does the part it has the rights for.
 //
 // What a decapsulated reply needs, and what this installs per advertised
 // sidecar gateway address:
@@ -103,32 +110,24 @@ func sidecarReturnTableID(vrfID uint16) (uint32, error) {
 	return uint32(sidecarReturnTableBase) + uint32(vrfID), nil
 }
 
-// sidecarEndpoint is one gateway address this node's sidecar has advertised,
-// and the Argument a remote node will have encoded into the SID it
-// encapsulates replies toward.
+// sidecarEndpoint is one gateway address this node's sidecar has advertised:
+// the Argument a remote node will have encoded into the SID it encapsulates
+// replies toward, plus where on this node that pod can be reached.
 type sidecarEndpoint struct {
 	advName string
 	addr    netip.Addr
 	vrfID   uint16
-}
-
-// podNetNS is one network namespace on this node other than our own, with
-// the two things a return path needs from it: which host-side interface
-// crosses into it, and every address reachable inside it.
-type podNetNS struct {
-	path string
-	// hostIfindex is the ifindex, in *this* (host) netns, of the peer of
-	// the netns-crossing veth found inside. That is the interface
-	// bpf_redirect_peer has to target to enter this namespace.
+	// hostIfindex is the ifindex, in this (host) namespace, of the peer of
+	// the pod's primary interface -- what bpf_redirect_peer has to target
+	// to enter that pod. hostMAC is the pod-side end's hardware address.
+	//
+	// Both come from the advertisement's own annotations rather than being
+	// discovered here, because only the sidecar can see them: reading them
+	// from this side means entering the pod's namespace, and setns needs
+	// CAP_SYS_ADMIN, which this container deliberately does not carry. See
+	// crdnames.AnnotationIngressHostIfindex.
 	hostIfindex int
-	// mac is the pod-side end's hardware address, which is what a frame
-	// entering the namespace is addressed to.
-	mac net.HardwareAddr
-	// addrs is every unicast address assigned on any link inside, across
-	// every VRF -- a sidecar's gateway address sits on a veth inside one of
-	// the pod's own VRFs, not on its primary interface, so matching has to
-	// consider all of them.
-	addrs map[netip.Addr]struct{}
+	hostMAC     net.HardwareAddr
 }
 
 // reconcileSidecarReturnPath is Run's non-fatal wrapper, matching
@@ -184,11 +183,6 @@ func ensureSidecarReturnPath(ctx context.Context, k8s client.Client, namespace, 
 		return nil
 	}
 
-	namespaces, err := discoverPodNetNS()
-	if err != nil {
-		return err
-	}
-
 	registry, closer, err := usidmap.OpenPinnedRegistry(attach.PinDir)
 	if err != nil {
 		return fmt.Errorf("open pinned uSID maps for the sidecar return path: %w", err)
@@ -207,7 +201,7 @@ func ensureSidecarReturnPath(ctx context.Context, k8s client.Client, namespace, 
 
 	var errs []error
 	for _, e := range endpoints {
-		if err := installSidecarReturn(registry, namespaces, block, e); err != nil {
+		if err := installSidecarReturn(registry, block, e); err != nil {
 			// Per-endpoint, and never fatal to the sweep: one Envoy pod
 			// still starting up must not stop another VPC's return path
 			// being installed.
@@ -220,20 +214,19 @@ func ensureSidecarReturnPath(ctx context.Context, k8s client.Client, namespace, 
 	return nil
 }
 
-// installSidecarReturn wires up one endpoint: locate the netns holding its
-// gateway address, then install the route, the neighbor, and the vrf_table
-// entry that point at it.
-func installSidecarReturn(
-	registry *usidmap.Registry, namespaces []podNetNS, block uint64, e sidecarEndpoint,
-) error {
-	target := findNetNSForAddr(namespaces, e.addr)
-	if target == nil {
-		// The ordinary not-yet case, and the reason this is a warn-and-retry
-		// reconcile rather than a one-shot: the advertisement outlives any
-		// single Envoy pod, so between a pod restart and its sidecar
-		// re-creating the VRF there is a window where the address it names
-		// exists nowhere on this node.
-		return fmt.Errorf("no network namespace on this node holds gateway address %s yet", e.addr)
+// installSidecarReturn wires up one endpoint: the route, the neighbor, and
+// the vrf_table entry that together point a decapsulated reply at the pod
+// holding that gateway address.
+func installSidecarReturn(registry *usidmap.Registry, block uint64, e sidecarEndpoint) error {
+	// The interface the annotation names has to still exist here. It may
+	// not: the advertisement outlives any single Envoy pod, so between a
+	// pod being replaced and its sidecar re-publishing, this names the veth
+	// of a pod that is gone. Installing against a stale ifindex would put a
+	// route to a tenant address on whatever now holds that index, so this
+	// is checked rather than assumed.
+	if _, err := netlink.LinkByIndex(e.hostIfindex); err != nil {
+		return fmt.Errorf("host-side interface %d for gateway address %s is not present: %w",
+			e.hostIfindex, e.addr, err)
 	}
 
 	table, err := sidecarReturnTableID(e.vrfID)
@@ -241,10 +234,10 @@ func installSidecarReturn(
 		return err
 	}
 
-	if err := ensureSidecarReturnRoute(table, e.addr, target.hostIfindex); err != nil {
+	if err := ensureSidecarReturnRoute(table, e.addr, e.hostIfindex); err != nil {
 		return err
 	}
-	if err := ensureSidecarReturnNeighbor(e.addr, target.hostIfindex, target.mac); err != nil {
+	if err := ensureSidecarReturnNeighbor(e.addr, e.hostIfindex, e.hostMAC); err != nil {
 		return err
 	}
 
@@ -385,18 +378,30 @@ func sidecarGatewayEndpoints(
 		if a.Spec.VRFID == nil {
 			continue
 		}
+		hostIfindex, hostMAC, ok := ingressEntryPointAnnotations(a.Annotations)
+		if !ok {
+			// An advertisement from a sidecar that has not recorded its own
+			// entry point. Skipped rather than errored, and quietly: this is
+			// what an advertisement written by an older sidecar looks like,
+			// and it resolves itself the next time that sidecar republishes.
+			slog.Debug("Sidecar gateway advertisement carries no host-side entry point yet",
+				"advertisement", a.Name)
+			continue
+		}
 		for _, p := range a.Spec.Prefixes {
 			pref, err := netip.ParsePrefix(string(p))
 			if err != nil || !pref.Addr().Is6() || pref.Bits() != pref.Addr().BitLen() {
 				// A gateway address is always a single host route. Anything
 				// else is not something this return path knows how to point
-				// at a namespace.
+				// at a pod.
 				continue
 			}
 			out = append(out, sidecarEndpoint{
-				advName: a.Name,
-				addr:    pref.Addr().Unmap(),
-				vrfID:   uint16(*a.Spec.VRFID),
+				advName:     a.Name,
+				addr:        pref.Addr().Unmap(),
+				vrfID:       uint16(*a.Spec.VRFID),
+				hostIfindex: hostIfindex,
+				hostMAC:     hostMAC,
 			})
 		}
 	}
@@ -447,156 +452,34 @@ func nodeLocatorIdentity(
 	return block, nodeID, true, nil
 }
 
-// discoverPodNetNS enumerates every network namespace on this node other
-// than our own.
+// ingressEntryPointAnnotations reads the host-side ifindex and MAC the
+// sidecar recorded on its own advertisement. ok is false when either is
+// absent or unusable, which the caller treats as "not published yet"
+// rather than as a failure.
 //
-// By enumeration rather than by asking. The sidecar cannot tell us where it
-// is: a netns is only addressable as /proc/<pid>/ns/net, and a pid is not
-// something a container can meaningfully publish about itself for another
-// process to reuse later. The gateway address is the identity that matters
-// anyway, and matching on it is self-validating -- if the address is in a
-// namespace, that is the namespace replies to it belong in.
-//
-// Errors on individual namespaces are skipped rather than returned: a
-// process exiting mid-walk is entirely ordinary, and one unreadable
-// namespace must not hide every other.
-func discoverPodNetNS() ([]podNetNS, error) {
-	self, err := os.Readlink("/proc/self/ns/net")
+// Both are validated rather than trusted. They come from another component
+// via the API server, and they are about to become a route and a permanent
+// neighbor for a tenant address: a zero or negative ifindex, or a malformed
+// hardware address, must not reach netlink.
+func ingressEntryPointAnnotations(annotations map[string]string) (int, net.HardwareAddr, bool) {
+	if annotations == nil {
+		return 0, nil, false
+	}
+	raw, ok := annotations[crdnames.AnnotationIngressHostIfindex]
+	if !ok {
+		return 0, nil, false
+	}
+	ifindex, err := strconv.Atoi(raw)
+	if err != nil || ifindex <= 0 {
+		return 0, nil, false
+	}
+	rawMAC, ok := annotations[crdnames.AnnotationIngressHostMAC]
+	if !ok {
+		return 0, nil, false
+	}
+	mac, err := net.ParseMAC(rawMAC)
 	if err != nil {
-		return nil, fmt.Errorf("read own network namespace: %w", err)
+		return 0, nil, false
 	}
-
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil, fmt.Errorf("enumerate /proc: %w", err)
-	}
-
-	seen := make(map[string]struct{})
-	var out []podNetNS
-	for _, entry := range entries {
-		if _, cerr := strconv.Atoi(entry.Name()); cerr != nil {
-			continue // not a pid
-		}
-		path := "/proc/" + entry.Name() + "/ns/net"
-		target, rerr := os.Readlink(path)
-		if rerr != nil {
-			continue
-		}
-		if target == self {
-			continue // our own namespace: usid_ingress already runs here
-		}
-		if _, dup := seen[target]; dup {
-			continue // another process in a namespace already inspected
-		}
-		seen[target] = struct{}{}
-
-		inspected, ierr := inspectPodNetNS(path)
-		if ierr != nil {
-			slog.Debug("Could not inspect network namespace for the sidecar return path",
-				"path", path, "err", ierr)
-			continue
-		}
-		out = append(out, *inspected)
-	}
-	return out, nil
-}
-
-// inspectPodNetNS reads the one namespace at path: every address inside,
-// and the host-side ifindex plus pod-side MAC of the veth that crosses into
-// it.
-func inspectPodNetNS(path string) (*podNetNS, error) {
-	handle, err := ns.GetNS(path)
-	if err != nil {
-		return nil, fmt.Errorf("open network namespace %s: %w", path, err)
-	}
-	defer handle.Close() //nolint:errcheck // netns close on teardown
-
-	result := &podNetNS{path: path, addrs: make(map[netip.Addr]struct{})}
-	err = handle.Do(func(_ ns.NetNS) error {
-		links, lerr := netlink.LinkList()
-		if lerr != nil {
-			return fmt.Errorf("list links: %w", lerr)
-		}
-		byIndex := make(map[int]netlink.Link, len(links))
-		for _, l := range links {
-			byIndex[l.Attrs().Index] = l
-		}
-		for _, l := range links {
-			attrs := l.Attrs()
-			// Prefer the primary interface when there is one, so a pod with
-			// more than one way in (a Multus secondary, say) resolves to the
-			// same interface on every pass rather than to whichever the
-			// kernel happened to list first.
-			better := result.hostIfindex == 0 || attrs.Name == primaryPodInterface
-			if better && crossingVeth(l, byIndex) {
-				result.hostIfindex = attrs.ParentIndex
-				result.mac = append(net.HardwareAddr(nil), attrs.HardwareAddr...)
-			}
-			addrs, aerr := netlink.AddrList(l, netlink.FAMILY_V6)
-			if aerr != nil {
-				continue
-			}
-			for _, a := range addrs {
-				if got, ok := netip.AddrFromSlice(a.IP); ok {
-					got = got.Unmap()
-					if got.IsGlobalUnicast() {
-						result.addrs[got] = struct{}{}
-					}
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if result.hostIfindex == 0 {
-		return nil, fmt.Errorf("no netns-crossing veth found in %s", path)
-	}
-	return result, nil
-}
-
-// primaryPodInterface is the name Kubernetes gives a pod's own interface,
-// and so the netns-crossing veth to prefer when a pod has more than one.
-const primaryPodInterface = "eth0"
-
-// crossingVeth reports whether link is a veth whose peer is outside this
-// namespace, i.e. the one interface a packet can be redirected in through.
-// byIndex is every link in this same namespace, keyed by ifindex.
-//
-// A pod netns holds two kinds of veth: its primary interface, whose peer is
-// the host-side end, and (for an Envoy pod running the ingress sidecar) a
-// pair per tenant VPC with *both* ends inside this same namespace. Only the
-// first is a way in, and the second must never be mistaken for one.
-//
-// Distinguished by reciprocity, not by whether the peer ifindex resolves
-// here. Ifindices are per-namespace and collide freely across them, so a
-// pod whose primary interface happens to peer with host ifindex 12 while
-// this namespace also has some link 12 would look internal and be skipped,
-// leaving that pod unreachable with nothing to indicate why. A genuine
-// same-namespace pair points back: the peer's own ParentIndex is this
-// link's index. A coincidental collision does not.
-func crossingVeth(link netlink.Link, byIndex map[int]netlink.Link) bool {
-	if _, isVeth := link.(*netlink.Veth); !isVeth {
-		return false
-	}
-	attrs := link.Attrs()
-	peerIndex := attrs.ParentIndex
-	if peerIndex <= 0 {
-		return false
-	}
-	if peer, ok := byIndex[peerIndex]; ok && peer.Attrs().ParentIndex == attrs.Index {
-		return false // a real pair with both ends here: an internal veth
-	}
-	return true
-}
-
-// findNetNSForAddr returns the namespace holding addr, or nil.
-func findNetNSForAddr(namespaces []podNetNS, addr netip.Addr) *podNetNS {
-	for i := range namespaces {
-		if _, ok := namespaces[i].addrs[addr]; ok {
-			return &namespaces[i]
-		}
-	}
-	return nil
+	return ifindex, mac, true
 }

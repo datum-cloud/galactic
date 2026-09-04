@@ -51,6 +51,10 @@ func gatewayAdv(vpc, node, prefix string, vrfID int32) *bgpv1alpha1.BGPAdvertise
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      crdnames.BGPAdvertisementName(vpc, crdnames.IngressAttachment, node),
 			Namespace: testNamespace,
+			Annotations: map[string]string{
+				crdnames.AnnotationIngressHostIfindex: "24",
+				crdnames.AnnotationIngressHostMAC:     "9a:91:c0:8d:83:f1",
+			},
 		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef: bgpv1alpha1.RouterRef{Name: node},
@@ -358,113 +362,127 @@ func TestNodeLocatorIdentity_AbsentIsNotAnError(t *testing.T) {
 	}
 }
 
-// veth builds a veth link the way the kernel reports one, with peer as its
-// ParentIndex.
-func veth(name string, index, peer int) netlink.Link {
-	return &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: name, Index: index, ParentIndex: peer}}
-}
-
-// TestCrossingVeth separates a pod's way in from the ingress sidecar's own
-// internal pairs. Getting this wrong in either direction is silent: treat an
-// internal pair as the way in and every reply is redirected to an interface
-// inside the pod that leads nowhere; treat the real one as internal and the
-// pod looks like it has no entry point at all.
-//
-// The ifindex-collision case is the one worth writing down. Ifindices are
-// per-namespace, so a pod's primary interface can peer with a host ifindex
-// that also exists inside the pod, and a naive "does the peer index resolve
-// here" test would call that internal.
-func TestCrossingVeth(t *testing.T) {
+// TestIngressEntryPointAnnotations covers the values that become a route
+// and a permanent neighbor for a tenant address. They arrive from another
+// component through the API server, so every rejection here is a value that
+// must not reach netlink -- a zero or negative ifindex would name no
+// interface, and a malformed MAC would be written into the neighbor table.
+func TestIngressEntryPointAnnotations(t *testing.T) {
+	const mac = "9a:91:c0:8d:83:f1"
 	for _, tc := range []struct {
-		name  string
-		links []netlink.Link
-		// target is the index into links of the link under test.
-		target int
-		want   bool
+		name        string
+		annotations map[string]string
+		wantOK      bool
+		wantIfindex int
 	}{
 		{
-			// The pod's own interface: peer 24 lives in the host netns and
-			// is absent here.
-			name:   "primary interface peering into the host",
-			links:  []netlink.Link{veth(primaryPodInterface, 23, 24)},
-			target: 0, want: true,
-		},
-		{
-			// A sidecar pair: both ends here, each naming the other.
-			name:   "internal sidecar pair",
-			links:  []netlink.Link{veth("ivp2", 9, 10), veth("ivs2", 10, 9)},
-			target: 0, want: false,
-		},
-		{
-			// The collision: this namespace has a link 12, but link 12 is
-			// not our peer -- it names something else entirely.
-			name: "peer ifindex collides with an unrelated local link",
-			links: []netlink.Link{
-				veth(primaryPodInterface, 23, 12),
-				veth("ivs3", 12, 13),
-				veth("ivp3", 13, 12),
+			name: "both present",
+			annotations: map[string]string{
+				crdnames.AnnotationIngressHostIfindex: "24",
+				crdnames.AnnotationIngressHostMAC:     mac,
 			},
-			target: 0, want: true,
+			wantOK: true, wantIfindex: 24,
+		},
+		// What an advertisement from a sidecar that predates this feature
+		// looks like. Must read as "not published yet", not as a failure.
+		{name: "nil annotations", annotations: nil, wantOK: false},
+		{name: "empty annotations", annotations: map[string]string{}, wantOK: false},
+		{
+			name:        "ifindex only",
+			annotations: map[string]string{crdnames.AnnotationIngressHostIfindex: "24"},
+			wantOK:      false,
 		},
 		{
-			name:   "no peer recorded",
-			links:  []netlink.Link{veth(primaryPodInterface, 23, 0)},
-			target: 0, want: false,
+			name:        "mac only",
+			annotations: map[string]string{crdnames.AnnotationIngressHostMAC: mac},
+			wantOK:      false,
+		},
+		{
+			name: "zero ifindex names no interface",
+			annotations: map[string]string{
+				crdnames.AnnotationIngressHostIfindex: "0",
+				crdnames.AnnotationIngressHostMAC:     mac,
+			},
+			wantOK: false,
+		},
+		{
+			name: "negative ifindex",
+			annotations: map[string]string{
+				crdnames.AnnotationIngressHostIfindex: "-1",
+				crdnames.AnnotationIngressHostMAC:     mac,
+			},
+			wantOK: false,
+		},
+		{
+			name: "unparseable ifindex",
+			annotations: map[string]string{
+				crdnames.AnnotationIngressHostIfindex: "not-a-number",
+				crdnames.AnnotationIngressHostMAC:     mac,
+			},
+			wantOK: false,
+		},
+		{
+			name: "malformed mac",
+			annotations: map[string]string{
+				crdnames.AnnotationIngressHostIfindex: "24",
+				crdnames.AnnotationIngressHostMAC:     "not-a-mac",
+			},
+			wantOK: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			byIndex := make(map[int]netlink.Link, len(tc.links))
-			for _, l := range tc.links {
-				byIndex[l.Attrs().Index] = l
+			ifindex, mac, ok := ingressEntryPointAnnotations(tc.annotations)
+			if ok != tc.wantOK {
+				t.Fatalf("ingressEntryPointAnnotations() ok = %v, want %v", ok, tc.wantOK)
 			}
-			if got := crossingVeth(tc.links[tc.target], byIndex); got != tc.want {
-				t.Errorf("crossingVeth(%s) = %v, want %v",
-					tc.links[tc.target].Attrs().Name, got, tc.want)
+			if !ok {
+				return
 			}
-		})
-	}
-}
-
-// TestCrossingVeth_NonVethIsNeverAWayIn covers the rest of a pod netns. A
-// VRF master and a tap both carry attributes that could look peer-like, and
-// neither is something bpf_redirect_peer can cross.
-func TestCrossingVeth_NonVethIsNeverAWayIn(t *testing.T) {
-	for _, l := range []netlink.Link{
-		&netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "G000000002V", Index: 8, ParentIndex: 99}},
-		&netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "G00000000hH", Index: 9, ParentIndex: 99}},
-		&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "lo", Index: 1}},
-	} {
-		t.Run(l.Attrs().Name, func(t *testing.T) {
-			if crossingVeth(l, map[int]netlink.Link{}) {
-				t.Errorf("crossingVeth(%s, type %T) = true, want false", l.Attrs().Name, l)
+			if ifindex != tc.wantIfindex {
+				t.Errorf("ifindex = %d, want %d", ifindex, tc.wantIfindex)
+			}
+			if len(mac) != 6 {
+				t.Errorf("mac = %v, want a 6-byte hardware address", mac)
 			}
 		})
 	}
 }
 
-// TestFindNetNSForAddr covers the lookup that decides which namespace a
-// reply belongs in. The miss case is the one that matters operationally:
-// between an Envoy pod restarting and its sidecar re-creating the VRF, the
-// advertised address exists in no namespace on this node, and that has to
-// be a retry rather than a wrong answer.
-func TestFindNetNSForAddr(t *testing.T) {
-	want := netip.MustParseAddr(testSidecarAddr)
-	other := netip.MustParseAddr("fd30:e2e:af7::1")
-	namespaces := []podNetNS{
-		{path: "/proc/1/ns/net", hostIfindex: 11, addrs: map[netip.Addr]struct{}{other: {}}},
-		{path: "/proc/2/ns/net", hostIfindex: 22, addrs: map[netip.Addr]struct{}{want: {}}},
-	}
+// TestSidecarGatewayEndpoints_SkipsUnannotated covers the rollout window.
+// A sidecar that has not yet republished leaves an advertisement with no
+// entry point on it; picking it up would mean guessing an interface, so it
+// has to be skipped and retried instead.
+func TestSidecarGatewayEndpoints_SkipsUnannotated(t *testing.T) {
+	adv := gatewayAdv("2", testSidecarNode, testSidecarAddr+"/128", 1)
+	adv.Annotations = nil
 
-	got := findNetNSForAddr(namespaces, want)
-	if got == nil {
-		t.Fatalf("findNetNSForAddr(%s) = nil, want the namespace holding it", want)
+	c := newAdvClient(t, adv)
+	got, err := sidecarGatewayEndpoints(context.Background(), c, testNamespace, testSidecarNode)
+	if err != nil {
+		t.Fatalf("sidecarGatewayEndpoints() error = %v, want nil", err)
 	}
-	if got.hostIfindex != 22 {
-		t.Errorf("findNetNSForAddr(%s) hostIfindex = %d, want 22", want, got.hostIfindex)
+	if len(got) != 0 {
+		t.Errorf("sidecarGatewayEndpoints() = %+v, want none until the entry point is published", got)
 	}
+}
 
-	if got := findNetNSForAddr(namespaces, netip.MustParseAddr("fd30:e2e:dead::1")); got != nil {
-		t.Errorf("findNetNSForAddr(absent) = %+v, want nil", got)
+// TestSidecarGatewayEndpoints_CarriesEntryPoint pins that the endpoint the
+// install step acts on is the one the sidecar published, since that is the
+// only source for it.
+func TestSidecarGatewayEndpoints_CarriesEntryPoint(t *testing.T) {
+	c := newAdvClient(t, gatewayAdv("2", testSidecarNode, testSidecarAddr+"/128", 1))
+	got, err := sidecarGatewayEndpoints(context.Background(), c, testNamespace, testSidecarNode)
+	if err != nil {
+		t.Fatalf("sidecarGatewayEndpoints() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("sidecarGatewayEndpoints() returned %d endpoints, want 1", len(got))
+	}
+	if got[0].hostIfindex != 24 {
+		t.Errorf("hostIfindex = %d, want the annotated 24", got[0].hostIfindex)
+	}
+	if got[0].hostMAC.String() != "9a:91:c0:8d:83:f1" {
+		t.Errorf("hostMAC = %s, want the annotated 9a:91:c0:8d:83:f1", got[0].hostMAC)
 	}
 }
 
