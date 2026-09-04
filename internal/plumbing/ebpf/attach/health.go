@@ -53,7 +53,7 @@ func Health(objs *prog.UsidObjects, ifaces []string) error {
 		checkProgramReachable(objs.UsidIngress),
 		checkMapsReachable(objs),
 		checkAttached(ifaces),
-		checkNotPreempted(),
+		checkNotPreempted(ownProgramIDs(objs)),
 	)
 }
 
@@ -249,6 +249,37 @@ var programNameFn = func(id ebpf.ProgramID) (string, error) {
 	return info.Name, nil
 }
 
+// ownProgramIDs returns the kernel ids of this datapath's own programs, for
+// checkNotPreempted to recognize itself by.
+//
+// By id rather than by name, because reading a name means opening the
+// program by id, and BPF_PROG_GET_FD_BY_ID wants CAP_SYS_ADMIN or
+// CAP_PERFMON. This container carries neither (it drops ALL and adds BPF,
+// NET_ADMIN and NET_RAW), so that call returns EPERM here. An id needs no
+// such privilege: it comes from BPF_OBJ_GET_INFO_BY_FD on a descriptor
+// this process already holds.
+//
+// Getting this wrong is what made the first version of this check useless.
+// It compared names, could not read them, and treated the failure as
+// nothing to report -- so it sat inert on a node that genuinely was
+// preempted.
+func ownProgramIDs(objs *prog.UsidObjects) map[ebpf.ProgramID]struct{} {
+	out := make(map[ebpf.ProgramID]struct{}, 2)
+	for _, p := range []*ebpf.Program{objs.UsidIngress, objs.UsidEgress} {
+		if p == nil {
+			continue
+		}
+		info, err := p.Info()
+		if err != nil {
+			continue
+		}
+		if id, ok := info.ID(); ok {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
 // checkNotPreempted confirms nothing runs ahead of this datapath on the
 // interfaces it owns exclusively.
 //
@@ -276,7 +307,7 @@ var programNameFn = func(id ebpf.ProgramID) (string, error) {
 // interface carrying this package's own usid_egress filter is by definition
 // one this datapath owns, so the set defines itself and cannot drift out of
 // step with what is actually attached.
-func checkNotPreempted() error {
+func checkNotPreempted(own map[ebpf.ProgramID]struct{}) error {
 	links, err := linkListFn()
 	if err != nil {
 		return fmt.Errorf("attach: health: list links to check for preemption: %w", err)
@@ -287,7 +318,7 @@ func checkNotPreempted() error {
 		if !hasEgressFilter(l) {
 			continue
 		}
-		if err := checkNotPreemptedOne(l); err != nil {
+		if err := checkNotPreemptedOne(l, own); err != nil {
 			errs = append(errs, fmt.Errorf("attach: health: interface %q: %w", l.Attrs().Name, err))
 		}
 	}
@@ -312,15 +343,18 @@ func hasEgressFilter(l netlink.Link) bool {
 // checkNotPreemptedOne reports whether anything precedes this datapath on
 // one owned interface.
 //
+// Reported by program id, with a name only when one can be read. The id
+// alone is enough to act on (`bpftool prog show id N` names it), and
+// insisting on the name is what left the first version of this check
+// unable to report anything at all -- see ownProgramIDs.
+//
 // A failure to look is logged rather than returned. This check is a
 // diagnostic, and its own inability to run says nothing about whether the
 // datapath is carrying traffic, so failing health on it would report the
-// wrong thing. Logged, though, and not swallowed: an earlier version of
-// this returned nil on every error path, which made it impossible to tell
-// a passing check from one that never ran -- it sat inert in production
-// against an interface that genuinely was preempted, and looked identical
-// to healthy.
-func checkNotPreemptedOne(l netlink.Link) error {
+// wrong thing. Logged, though, and not swallowed: silence that could mean
+// either "nothing is wrong" or "this never ran" is what allowed an inert
+// check to look identical to a passing one.
+func checkNotPreemptedOne(l netlink.Link, own map[ebpf.ProgramID]struct{}) error {
 	name := l.Attrs().Name
 
 	ids, err := tcxQueryFn(l.Attrs().Index)
@@ -339,15 +373,19 @@ func checkNotPreemptedOne(l netlink.Link) error {
 		return nil // nothing in front of clsact
 	}
 
-	first, err := programNameFn(ids[0])
-	if err != nil {
-		slog.Warn("attach: health: a tc program precedes this datapath but could not be identified",
-			"interface", name, "err", err)
+	first := ids[0]
+	if _, ours := own[first]; ours {
 		return nil
 	}
-	if first == prog.UsidProgUsidIngress || first == prog.UsidProgUsidEgress {
-		return nil
+
+	// Best effort, and expected to fail without CAP_SYS_ADMIN or
+	// CAP_PERFMON. The id carries the report either way.
+	if progName, nerr := programNameFn(first); nerr == nil {
+		return fmt.Errorf("tc program %q (id %d) runs ahead of this datapath "+
+			"(tcx precedes clsact), so traffic it consumes never reaches usid_egress",
+			progName, first)
 	}
-	return fmt.Errorf("tc program %q runs ahead of this datapath (tcx precedes clsact), "+
-		"so traffic it consumes never reaches usid_egress", first)
+	return fmt.Errorf("an unidentified tc program (id %d) runs ahead of this datapath "+
+		"(tcx precedes clsact), so traffic it consumes never reaches usid_egress; "+
+		"run `bpftool prog show id %d` to name it", first, first)
 }
