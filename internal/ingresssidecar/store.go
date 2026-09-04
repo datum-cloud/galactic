@@ -250,14 +250,24 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 		}
 		if r.installed {
 			v, ok := s.vrfs[r.vpc]
-			if !ok {
+			switch {
+			case !ok:
 				slog.Error("ingresssidecar: sweep found route with no tracked VRF", "key", key, "vpc", r.vpc)
-			} else if err := s.backend.RemoveRoute(r.prefix, v.tableID); err != nil {
-				s.countError("remove_route")
-				slog.Error("ingresssidecar: remove route", "key", key, "vpc", r.vpc, "error", err)
-				liveVPCs[r.vpc] = struct{}{} // keep the VPC alive; retry next sweep
-				pendingRoutes++
-				continue
+			case s.prefixClaimedByOtherLocked(key, r.vpc, r.prefix, now):
+				// Hand the kernel route over instead of deleting it -- see
+				// prefixClaimedByOtherLocked's own doc comment. This key is
+				// still forgotten below; only the removal is skipped.
+				slog.Info("ingresssidecar: expired route still claimed by another EndpointSlice, keeping kernel route",
+					"key", key, "vpc", r.vpc, "prefix", r.prefix.String())
+				liveVPCs[r.vpc] = struct{}{}
+			default:
+				if err := s.backend.RemoveRoute(r.prefix, v.tableID); err != nil {
+					s.countError("remove_route")
+					slog.Error("ingresssidecar: remove route", "key", key, "vpc", r.vpc, "error", err)
+					liveVPCs[r.vpc] = struct{}{} // keep the VPC alive; retry next sweep
+					pendingRoutes++
+					continue
+				}
 			}
 			s.routeActiveDelta(-1)
 		}
@@ -348,6 +358,33 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// prefixClaimedByOtherLocked reports whether any route other than
+// excludeKey still claims vpc/prefix and is not itself expiring in this
+// same sweep -- either still desired (zero absentSince) or still inside its
+// own grace period as of now. Callers must hold s.mu.
+//
+// Store tracks routes by EndpointSlice key while the kernel addresses them
+// by prefix+table, so two keys can legitimately name one underlying route:
+// an EndpointSlice republished under a new name has both entries live until
+// the old object is deleted. Removing the kernel route when the first key
+// expires strands the survivor -- its routeState still records installed,
+// so SetDesired no-ops, no backend call ever fails, and nothing reinstalls
+// the route until the process restarts and SeedFromAPI rebuilds it from
+// scratch. SeedFromAPI's own doc comment describes the same prefix-versus-
+// key mismatch for Inventory's synthetic "boot/..." keys; this is that
+// hazard between two real keys.
+func (s *Store) prefixClaimedByOtherLocked(excludeKey, vpc string, prefix *net.IPNet, now time.Time) bool {
+	for key, r := range s.routes {
+		if key == excludeKey || r.vpc != vpc || r.prefix.String() != prefix.String() {
+			continue
+		}
+		if r.absentSince.IsZero() || now.Sub(r.absentSince) < s.grace {
+			return true
+		}
+	}
+	return false
 }
 
 // routeKnownLocked reports whether some already-tracked route shares vpc
