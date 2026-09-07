@@ -2,19 +2,14 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package cnimaster holds logic shared by galactic-veth (internal/cni, the
-// veth master plugin) and galactic-tap (internal/cnitap, the tap master
-// plugin). Both own the same node-level lifecycle — parse the CNI config,
-// resolve node/API settings, create a VRF, patch the pod's NAD, and answer
-// CHECK/STATUS — differing only in which kernel interface primitive they
-// call (veth vs tap) and, for CHECK, whether there's a guest-side netns to
-// inspect (tap never enters one). That interface-specific sliver stays in
-// each package; everything else lives here so a fix only has to happen
-// once.
+// Package cnimaster holds the logic the two master plugins share. Both own the
+// same node-level lifecycle: parse the config, resolve node and API settings,
+// create a VRF, patch the pod's attachment definition, and answer CHECK and
+// STATUS. They differ only in which kernel interface primitive they call and,
+// for CHECK, whether there is a guest namespace to inspect, since tap never
+// enters one. That sliver stays in each package; everything else lives here so a
+// fix happens once.
 //
-// PluginConf is the shared CNI config shape; internal/cni and internal/cnitap
-// each declare their own `type PluginConf = cnimaster.PluginConf` alias
-// (mirroring the existing HostConf alias pattern from internal/hostconf) so
-// call sites in either package keep referring to their own package's
-// PluginConf.
+// PluginConf is the shared config shape, which each master plugin aliases so its
+// own call sites keep referring to their own package's type.
 package cnimaster

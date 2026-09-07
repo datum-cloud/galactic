@@ -10,11 +10,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
 
-// EventCounters are ordinary Prometheus counters for BPF program
-// load/reload events and failures (package doc comment). Unlike Collector
-// (map state read live at scrape time), these are discrete events observed
-// exactly once, at the moment they happen, via
-// internal/plumbing/ebpf/attach's LoadHook/AttachHook callbacks.
+// EventCounters are ordinary Prometheus counters for program load and attach
+// events. Unlike the collector, which reads map state live at scrape time, these
+// are discrete events observed exactly once, when they happen, through the
+// attach package's hooks.
 type EventCounters struct {
 	load   *prometheus.CounterVec
 	attach *prometheus.CounterVec
@@ -39,10 +38,9 @@ func NewEventCounters() *EventCounters {
 	}
 }
 
-// MustRegister registers every counter this type owns against reg. Panics
-// on a duplicate registration, matching prometheus.Registerer.MustRegister's
-// own documented behavior -- callers only ever do this once per process, at
-// startup (see Metrics.New).
+// MustRegister registers every counter this type owns against reg, panicking on
+// a duplicate as the underlying registry does. Callers do this once per process,
+// at startup.
 func (c *EventCounters) MustRegister(reg prometheus.Registerer) {
 	reg.MustRegister(c.load, c.attach)
 }

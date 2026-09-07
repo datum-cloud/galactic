@@ -13,20 +13,17 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
-// Registry bundles the read/write API for all three of the eBPF uSID
-// datapath's control-plane maps, wired against a single loaded
-// *prog.UsidObjects. It exists purely as a convenience constructor for
-// production callers (Milestones 3.1/7.1/7.2/7.3) that otherwise have to
-// wrap each of the three maps in its own KernelTable individually.
+// Registry bundles the read/write API for all three of the uSID datapath's
+// control-plane maps against one loaded object set. A convenience constructor
+// for callers that would otherwise wrap each map individually.
 type Registry struct {
 	VRF      *VRFTable
 	Locator  *LocatorTable
 	Function *FunctionTable
 }
 
-// NewRegistryFromObjects builds a Registry backed by objs's real,
-// kernel-loaded maps (e.g. the *prog.UsidObjects returned by
-// internal/plumbing/ebpf/attach.Load or .Start).
+// NewRegistryFromObjects builds a Registry backed by objs's kernel-loaded
+// maps.
 func NewRegistryFromObjects(objs *prog.UsidObjects) *Registry {
 	return &Registry{
 		VRF:      NewVRFTable(KernelTable{Map: objs.VrfTable}),
@@ -35,12 +32,10 @@ func NewRegistryFromObjects(objs *prog.UsidObjects) *Registry {
 	}
 }
 
-// pinnedMaps is the io.Closer OpenPinnedRegistry returns: closing it closes
-// every *ebpf.Map handle this process itself opened (design plan §5.4 --
-// opening a pinned map hands back a new fd referencing the same
-// kernel-side map object the control daemon already loaded; that fd is
-// this process's own to close, and doing so does not affect the
-// underlying pinned map or any other process's handle to it).
+// pinnedMaps is the closer OpenPinnedRegistry returns. Closing it closes every
+// map handle this process opened: opening a pinned map hands back a new
+// descriptor onto the same kernel object the control daemon loaded, and closing
+// it affects neither the pinned map nor any other process's handle.
 type pinnedMaps []*ebpf.Map
 
 func (p pinnedMaps) Close() error {
@@ -50,15 +45,11 @@ func (p pinnedMaps) Close() error {
 	return nil
 }
 
-// OpenPinnedRegistry opens vrf_table, locator_table, and function_table
-// from their pinned paths under pinDir (internal/plumbing/ebpf/attach.Load
-// pins each map at <pinDir>/<map name>, e.g. <pinDir>/vrf_table) and
-// returns a Registry wrapping them, for a short-lived process -- namely
-// the galactic-cni plugin binary's ADD path (Milestones 7.1/7.2) -- that
-// did not itself load the datapath but needs to read/write its maps. The
-// returned io.Closer must be closed once the caller is done; it does not
-// affect the maps' pinned lifetime (design plan §4.4: maps stay pinned
-// across any single process's open/close cycle).
+// OpenPinnedRegistry opens the three control-plane maps from their pinned paths
+// under pinDir and returns a Registry wrapping them, for a short-lived process
+// that did not itself load the datapath but needs to read and write its maps.
+// The returned closer must be closed when the caller is done; the maps stay
+// pinned across any process's open and close cycle.
 func OpenPinnedRegistry(pinDir string) (*Registry, pinnedMaps, error) {
 	open := func(name string) (*ebpf.Map, error) {
 		m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, name), nil)

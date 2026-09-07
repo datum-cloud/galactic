@@ -21,33 +21,26 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 )
 
-// linkByNameFn and linkListFn are package-level override points, the same
-// pattern internal/plumbing/ebpf/attach uses for its own identically-named
-// vars, so ResolveTargets' tests can substitute a fake netlink view without
-// touching the real host network stack.
+// linkByNameFn and linkListFn are override points, as elsewhere in this
+// codebase, so ResolveTargets' tests can substitute a fake netlink view without
+// touching the host network stack.
 var (
 	linkByNameFn = netlink.LinkByName
 	linkListFn   = netlink.LinkList
 )
 
-// PinDir is the default bpffs directory every edgeprog map is pinned
-// under -- deliberately distinct from internal/plumbing/ebpf/attach.PinDir
-// and internal/plumbing/ebpf/gwattach's own PinDir, so every datapath in
-// this codebase is fully independent under bpffs even where map names
-// don't actually collide.
+// PinDir is the default bpffs directory every edge program map is pinned under,
+// deliberately distinct from the other datapaths' directories so each is fully
+// independent under bpffs even where map names do not collide.
 const PinDir = "/sys/fs/bpf/galactic-edge"
 
-// preflightCheckFn is a package-level override point so tests can force
-// the preflight failure path without touching the real kernel -- same
-// pattern as internal/plumbing/ebpf/attach's identical var.
+// preflightCheckFn is an override point so tests can force the preflight
+// failure path without touching the real kernel.
 var preflightCheckFn = edgepreflight.Check
 
-// Load runs the kernel preflight check and, only if it passes, loads
-// edgeprog's compiled object with every map pinned under pinDir. A map
-// already pinned there from a previous process is reused as-is; see
-// internal/plumbing/ebpf/attach.Load's identical doc comment for the full
-// rationale (schema-mismatch recreation, pin-by-name semantics) -- not
-// repeated here, since it applies unchanged.
+// Load runs the kernel preflight check and, only if it passes, loads the edge
+// program with every map pinned under pinDir. A map already pinned there by a
+// previous process is reused as-is.
 func Load(pinDir string) (*edgeprog.EdgedsrObjects, error) {
 	if err := preflightCheckFn(); err != nil {
 		return nil, fmt.Errorf(
@@ -72,15 +65,12 @@ func Load(pinDir string) (*edgeprog.EdgedsrObjects, error) {
 	opts := &ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: pinDir}}
 	loadErr := spec.LoadAndAssign(&loaded, opts)
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
-		// Every map here is control-plane-owned and reconstructable
-		// (edgemap.VIPTable.Register repopulates vip_table from live
-		// NetworkRule CRDs; vip_stats_table is a pure cache the datapath
-		// itself repopulates from live traffic -- see edgedsr.c's struct
-		// vip_stats_value doc comment for why vip_stats_table exists
-		// separately from vip_table; encap_config_table is a single entry
-		// internal/gateway.NewKernelDatapath rewrites once at process
-		// startup) -- a stale pin from an older, incompatible map layout
-		// is safe to recreate rather than fatal.
+		// Every map here is control-plane-owned and reconstructable: the VIP
+		// table is repopulated from live CRDs, the statistics map is a
+		// pure cache the datapath refills from traffic, and the
+		// encapsulation config is a single entry rewritten at process
+		// startup. A stale pin from an incompatible layout is safe to
+		// recreate rather than fatal.
 		slog.Warn("edgeattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate on the next NetworkRule reconcile)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
@@ -120,26 +110,21 @@ func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	return errors.Join(errs...)
 }
 
-// ResolveTargets resolves ifaceName to the set of interface names Attach
-// should actually attach the XDP program to.
+// ResolveTargets resolves ifaceName to the interface names Attach should
+// actually attach the XDP program to.
 //
-// If ifaceName is not a Linux bonding master, the result is just
-// []string{ifaceName} -- the common case. If it is a bonding master, the
-// result is its slave interfaces instead, with ifaceName itself excluded:
-// unlike internal/plumbing/ebpf/attach's TC-BPF path (which attaches to
-// both a bond master and its slaves, since the master still carries the
-// route/tc-filter attachment point), native-mode XDP against a bonding
-// master is not reliable -- confirmed failing outright ("operation not
-// supported") on a real gateway node (802.3ad over an igb/tg3 slave pair).
-// Some kernels' bonding driver does implement ndo_bpf by forwarding the
-// attach to every slave, but that still requires each slave's own driver
-// to support native XDP -- not a given for every NIC driver (tg3 is a
-// commonly cited example that doesn't) -- so attaching to the master
-// remains something this package never relies on working, only to real
-// slaves whose own native XDP support this package can reason about
-// directly. A bonding master with no slaves is an error: silently falling
-// back to attaching nothing (or to the master, which would only risk
-// repeating the failure this function exists to avoid) would leave the
+// An interface that is not a bonding master resolves to itself, the common
+// case. A bonding master resolves to its slaves instead, with the master
+// excluded: unlike the TC-BPF path, which attaches to both because the master
+// still carries the filter attachment point, native XDP against a bonding
+// master is not reliable and fails outright on real hardware. Some kernels'
+// bonding driver does forward the attach to every slave, but that still
+// requires each slave's driver to support native XDP, which is not a given, so
+// this attaches only to real slaves whose support can be reasoned about
+// directly.
+//
+// A bonding master with no slaves is an error: attaching nothing, or attaching
+// to the master and risking the failure this exists to avoid, would leave the
 // gateway datapath running with no ingress attachment at all.
 func ResolveTargets(ifaceName string) ([]string, error) {
 	iface, err := linkByNameFn(ifaceName)
@@ -162,19 +147,15 @@ func ResolveTargets(ifaceName string) ([]string, error) {
 	return slaves, nil
 }
 
-// Attach attaches program (edgeprog.EdgedsrObjects.EdgeLb) to every
-// interface in ifaceNames' XDP hook in native (driver) mode, returning the
-// resulting link.Link for each -- in the same order as ifaceNames -- for
-// the caller to hold open and Close on shutdown. Callers resolve ifaceNames
-// via ResolveTargets first, so this is usually a single bond slave or
-// [ifaceName] itself, never the bond master (see ResolveTargets' own doc
-// comment for why); see doc.go for why native mode is required, not merely
-// preferred, and why no pinning or Watch-style re-attachment is needed
-// here.
+// Attach attaches program to the XDP hook of every interface in ifaceNames, in
+// native driver mode, returning the resulting link for each in the same order
+// for the caller to hold open and close on shutdown. Callers resolve ifaceNames
+// through ResolveTargets first, so this is usually a single interface and never
+// a bond master.
 //
-// If attaching to one interface fails partway through, every link already
-// attached in this call is Closed before returning the error -- a caller
-// that gets an error here holds no partial attachment to clean up itself.
+// If attaching one interface fails partway through, every link already attached
+// in this call is closed before returning, so a caller that gets an error holds
+// no partial attachment to clean up.
 func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	if program == nil {
 		return nil, errors.New("edgeattach: program is nil")
@@ -197,9 +178,8 @@ func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	return links, nil
 }
 
-// attachOne attaches program to ifaceName's XDP hook in native (driver)
-// mode -- the single-interface mechanism Attach applies to every name in
-// ifaceNames.
+// attachOne attaches program to ifaceName's XDP hook in native driver mode, the
+// single-interface mechanism Attach applies across its list.
 func attachOne(program *ebpf.Program, ifaceName string) (link.Link, error) {
 	iface, err := netlink.LinkByName(ifaceName)
 	if err != nil {

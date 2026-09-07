@@ -16,15 +16,11 @@ import (
 // --- Gateway defaults --------------------------------------------------
 
 const (
-	// DefaultGatewayMetricsPort/DefaultGatewayGRPCHealthPort deliberately
-	// differ from DefaultRouterMetricsPort (9179) and
-	// DefaultRouterGRPCHealthPort (5179) and from galactic-cni's
-	// credential-refresh ports (grpc-health 5180, metrics 9180,
-	// config/galactic-cni/daemonset.yaml): every edge node runs
-	// galactic-gateway, galactic-router, and galactic-cni as separate
-	// hostNetwork: true DaemonSet pods, all sharing that one node's network
-	// namespace regardless of pod boundaries, so every port any of them
-	// binds must not collide with any of the others'.
+	// DefaultGatewayMetricsPort and DefaultGatewayGRPCHealthPort differ from
+	// every other galactic binary's ports. An edge node runs several of them as
+	// separate host-network DaemonSet pods, all sharing that node's network
+	// namespace regardless of pod boundaries, so no port any of them binds may
+	// collide with another's.
 	DefaultGatewayMetricsPort    = 8081
 	DefaultGatewayGRPCHealthPort = 5181
 )
@@ -36,31 +32,24 @@ const (
 	EnvGatewayMetricsPort    = "GALACTIC_GATEWAY_METRICS_PORT"
 	EnvGatewayGRPCHealthPort = "GALACTIC_GATEWAY_GRPC_HEALTH_PORT"
 
-	// EnvGatewayPublicInterface names this node's single public/underlay-
-	// facing uplink interface for the edge NAT+LB gateway datapath
-	// (internal/plumbing/ebpf/edgeprog). Unlike
-	// config.EnvRouterGatewayPublicInterface's predecessor field, this is
-	// required: galactic-gateway only ever runs as the gateway role, so
-	// there is no "not gateway role, return gateway.NoopDatapath{}" case
-	// to support — see GatewayConfig.Validate.
+	// EnvGatewayPublicInterface names this node's underlay-facing uplink for
+	// the edge gateway datapath. Required: this binary only ever runs the
+	// gateway role, so there is no "not this role, skip the datapath" case.
 	EnvGatewayPublicInterface = "GALACTIC_GATEWAY_PUBLIC_INTERFACE"
 
-	// EnvGatewaySRv6Address is this gateway node's own plain
-	// SRv6-reachable address, used as the outer-header encap source for
-	// every packet this node's DSR datapath forwards (edgedsr.c's
-	// encap_config_table) — never a NAT/SNAT source and never compared
-	// against anything on a receive path, unlike the removed Full-NAT
-	// design's identically-named field. Required — see
-	// EnvGatewayPublicInterface.
+	// EnvGatewaySRv6Address is this node's plain SRv6-reachable address, used
+	// as the outer-header source for every packet this datapath forwards. It is
+	// never a translation source and is never compared against anything on a
+	// receive path. Required.
 	EnvGatewaySRv6Address = "GALACTIC_GATEWAY_SRV6_ADDRESS"
 )
 
 // --- GatewayConfig -----------------------------------------------------
 
 // GatewayConfig resolves galactic-gateway configuration with three-tier
-// precedence: CLI flag > env var > compiled-in default. Create once via
-// NewGatewayConfig(), call BindFlags() to layer CLI flags, then read the
-// exported fields.
+// precedence: CLI flag, then environment variable, then compiled-in default.
+// Create one with NewGatewayConfig, call BindFlags to layer CLI flags, then read
+// the exported fields.
 type GatewayConfig struct {
 	v      *viper.Viper
 	prefix string
@@ -70,17 +59,15 @@ type GatewayConfig struct {
 	MetricsPort    int
 	GRPCHealthPort int
 
-	// PublicInterface/SRv6Address configure the edge Maglev/DSR gateway
-	// datapath -- see EnvGatewayPublicInterface's doc comment. Both
-	// required; GatewayConfig.Validate rejects either being empty.
+	// PublicInterface and SRv6Address configure the edge gateway datapath. Both
+	// are required; Validate rejects either being empty.
 	PublicInterface string
 	SRv6Address     string
 }
 
-// NewGatewayConfig creates a gateway config resolver with the
-// GALACTIC_GATEWAY env prefix and AutomaticEnv enabled. Exported fields are
-// populated from env vars and defaults; call BindFlags() to layer CLI
-// overrides.
+// NewGatewayConfig creates a config resolver reading the GALACTIC_GATEWAY
+// environment prefix. Exported fields are populated from the environment and
+// defaults; call BindFlags to layer CLI overrides.
 func NewGatewayConfig() *GatewayConfig {
 	v := viper.New()
 	v.SetEnvPrefix("GALACTIC_GATEWAY")
@@ -151,11 +138,9 @@ func (c *GatewayConfig) Validate() error {
 	if err != nil {
 		return fmt.Errorf("SRv6 address %q is not a valid IP address: %w", c.SRv6Address, err)
 	}
-	// Caught eventually anyway by internal/gateway/kerneldatapath.go's own
-	// identical Is6()/Is4In6() check, but late: only once setupGatewayDatapath
-	// has already loaded and attached the eBPF datapath. Reject it here
-	// instead, at startup, with a message that names the actual problem
-	// rather than surfacing as a deeper, less obvious kernel-datapath error.
+	// The datapath catches the same thing eventually, but only after it has
+	// been loaded and attached. Rejecting it at startup names the actual
+	// problem instead of surfacing as a deeper kernel-datapath error.
 	if !addr.Is6() || addr.Is4In6() {
 		return fmt.Errorf("SRv6 address %q must be a native IPv6 address, not IPv4", c.SRv6Address)
 	}

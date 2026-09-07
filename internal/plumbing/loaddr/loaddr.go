@@ -3,11 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package loaddr detects the BGP local address by reading the global-unicast
-// IPv6 address assigned to the host's `lo` interface. galactic-router runs
-// with hostNetwork: true, so `lo` is the real host loopback, and an
-// underlay/fabric BGP daemon (e.g. FRR) is expected to have already assigned
-// an SRv6 loopback address to it (e.g. fc00:0:2::1/48) before galactic-router
-// starts.
+// IPv6 address on the host's loopback. The router runs with host networking, so
+// that is the real host loopback, and the underlay routing daemon is expected to
+// have assigned an SRv6 loopback address there before the router starts.
 package loaddr
 
 import (
@@ -17,10 +15,9 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// Detect returns the first global-unicast IPv6 address assigned to the `lo`
-// interface, skipping the loopback address (::1) and link-local addresses
-// (fe80::/10). Returns an error if `lo` doesn't exist or has no qualifying
-// address.
+// Detect returns the first global-unicast IPv6 address on the loopback,
+// skipping ::1 and link-local addresses. It returns an error when the interface
+// does not exist or carries no qualifying address.
 func Detect() (string, error) {
 	link, err := netlink.LinkByName("lo")
 	if err != nil {

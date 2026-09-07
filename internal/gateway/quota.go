@@ -11,71 +11,55 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgemap"
 )
 
-// Default limits for NodeQuotaEnforcer. Both are coarse, node-level
-// admission caps, not bandwidth or per-flow rate limits -- see that
-// type's doc comment for why the latter is deliberately out of scope
-// here.
+// Default limits for NodeQuotaEnforcer. Both are coarse, node-level admission
+// caps, not bandwidth or per-flow rate limits.
 const (
-	// DefaultMaxRulesPerTenant bounds how many NetworkRules a single
-	// VPCRef may have registered on one gateway node at once. A
-	// NetworkRule may carry up to 8 VIPAddresses (network.datumapis.com/
-	// v1alpha1's NetworkRuleSpec.VIPAddresses MaxItems), so this also
-	// bounds one tenant's worst-case vip_table footprint to
-	// DefaultMaxRulesPerTenant*8 entries.
+	// DefaultMaxRulesPerTenant bounds how many rules one tenant may have
+	// registered on a gateway node at once. A rule may carry up to eight VIP
+	// addresses, so this also bounds a tenant's worst-case map footprint to
+	// eight times this value.
 	DefaultMaxRulesPerTenant = 64
 
-	// DefaultMaxRuleTableEntries is the node-wide ceiling across every
-	// tenant, defaulting to edgemap.MaxVIPTableEntries (vip_table's own
-	// map capacity) -- once desired state would fill the map,
-	// bpf_map_update_elem starts failing mid-reconcile with no clean way
-	// to roll back a partial apply, so this must be enforced before
-	// ApplyRule is ever called, at CheckAndReserve time.
+	// DefaultMaxRuleTableEntries is the node-wide ceiling across every tenant,
+	// defaulting to the map's own capacity. Once desired state would fill the
+	// map, writes start failing mid-reconcile with no clean way to roll back a
+	// partial apply, so this must be enforced before any rule is applied.
 	DefaultMaxRuleTableEntries = edgemap.MaxVIPTableEntries
 )
 
-// NodeQuotaEnforcer is a real (not stubbed) QuotaEnforcer implementation,
-// enforcing two coarse, node-level admission caps entirely from
-// control-plane state Engine already holds — no eBPF map read required:
+// NodeQuotaEnforcer enforces two coarse, node-level admission caps entirely
+// from control-plane state the engine already holds, with no map read:
 //
-//  1. MaxRulesPerTenant: no single VPCRef may register more than this many
-//     NetworkRules on this gateway node at once.
-//  2. MaxRuleTableEntries: the total vip_table rows every tenant's rules
-//     would occupy together (one row per VIPAddress, see
-//     kerneldatapath.go's vipKeysForRule) may not exceed vip_table's own
-//     fixed map capacity.
+//  1. No single tenant may register more than MaxRulesPerTenant rules on this
+//     node at once.
+//  2. The total map rows every tenant's rules would occupy, one per VIP
+//     address, may not exceed MaxRuleTableEntries.
 //
-// What this deliberately does NOT do: per-flow or per-tenant packet/byte
-// rate limiting. vip_table's key carries no tenant dimension (a VIP is
-// globally unique, so it doesn't need one either), so there is no cheap
-// way to attribute an individual flow back to a tenant without adding a
-// field that changes the packet-path key layout; and a meaningful
-// bandwidth/packet-rate quota needs a time-windowed rate, not the
-// cumulative, never-reset Packets/Bytes counters vip_table carries (a
-// long-lived, healthy, popular rule will always eventually cross any
-// static cumulative threshold — that isn't misbehavior, that's success).
-// Real rate-based enforcement needs live traffic data to calibrate
-// sensible thresholds against, which this repo does not have yet — see
-// docs/agents/ARCHITECTURE-GATEWAY.md. This type is the enforceable subset
-// buildable without that data.
+// It deliberately does no per-flow or per-tenant rate limiting. The map's key
+// carries no tenant dimension, a VIP being globally unique, so attributing a
+// flow back to a tenant would mean changing the packet-path key layout. A
+// meaningful rate quota also needs a time-windowed rate rather than the
+// cumulative, never-reset counters the map carries: a long-lived, popular rule
+// eventually crosses any static cumulative threshold, which is success rather
+// than misbehavior. Calibrating real thresholds needs live traffic data this
+// repo does not have. This is the enforceable subset buildable without it.
 type NodeQuotaEnforcer struct {
 	mu sync.Mutex
 
 	maxRulesPerTenant   int
 	maxRuleTableEntries int
 
-	// tenantRuleCount/totalEntries are the enforcer's own bookkeeping of
-	// what it has reserved — not read back from vip_table itself, so
-	// CheckAndReserve/Release stay correct even before ApplyRule has run
-	// (a new rule has no vip_table row yet to read counters from).
+	// tenantRuleCount and totalEntries are the enforcer's own record of what it
+	// has reserved, not read back from the map, so reserve and release stay
+	// correct before a rule has been applied and has any row to read.
 	tenantRuleCount map[string]int
 	ruleTenant      map[string]string
 	ruleEntries     map[string]int
 	totalEntries    int
 }
 
-// NewNodeQuotaEnforcer returns a NodeQuotaEnforcer with the given limits.
-// Use DefaultMaxRulesPerTenant/DefaultMaxRuleTableEntries for production
-// defaults.
+// NewNodeQuotaEnforcer returns a NodeQuotaEnforcer with the given limits. Use
+// the package defaults in production.
 func NewNodeQuotaEnforcer(maxRulesPerTenant, maxRuleTableEntries int) *NodeQuotaEnforcer {
 	return &NodeQuotaEnforcer{
 		maxRulesPerTenant:   maxRulesPerTenant,
@@ -87,11 +71,10 @@ func NewNodeQuotaEnforcer(maxRulesPerTenant, maxRuleTableEntries int) *NodeQuota
 }
 
 // CheckAndReserve reports whether rule fits within both limits and, if so,
-// reserves its vip_table footprint. Idempotent for a rule.Key already
-// reserved: re-checking (or changing) an already-active rule's VIP count
-// never double-counts it against either limit — required because
-// Engine.Reconcile calls this for every desired rule on every reconcile
-// pass, not just new ones (see Engine.Reconcile's own doc comment).
+// reserves its map footprint. Idempotent for a key already reserved:
+// re-checking, or changing, an active rule's VIP count never double-counts it.
+// That is required because the engine calls this for every desired rule on
+// every pass, not only for new ones.
 func (e *NodeQuotaEnforcer) CheckAndReserve(_ context.Context, rule DesiredRule) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -110,10 +93,9 @@ func (e *NodeQuotaEnforcer) CheckAndReserve(_ context.Context, rule DesiredRule)
 	if !alreadyReserved {
 		tenantCount++
 	} else if prevTenant != rule.VPCRef {
-		// VPCRef changed for an existing rule.Key -- shouldn't happen in
-		// practice (NetworkRuleSpec.VPCRef is not mutated in place by any
-		// caller in this codebase), but guard against under/over-counting
-		// either tenant bucket if it ever does.
+		// The tenant changed for an existing rule key. That should not
+		// happen, no caller mutating a rule's tenant in place, but guard
+		// against miscounting either bucket if it ever does.
 		tenantCount++
 	}
 	if tenantCount > e.maxRulesPerTenant {
@@ -141,9 +123,8 @@ func (e *NodeQuotaEnforcer) CheckAndReserve(_ context.Context, rule DesiredRule)
 	return true, nil
 }
 
-// Release frees the reservation held for key, if any. Not an error if key
-// was never reserved (e.g. CheckAndReserve denied it, or it was never
-// called for this key at all).
+// Release frees the reservation held for key, if any. A key that was never
+// reserved is not an error.
 func (e *NodeQuotaEnforcer) Release(_ context.Context, key string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

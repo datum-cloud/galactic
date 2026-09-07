@@ -37,13 +37,9 @@ const (
  Find more information at: https://www.datum.net/docs`
 )
 
-// runCmd contains the application startup logic: it loads and attaches
-// this shard's NAT66 egress eBPF datapath to its fabric-facing uplink
-// interface and registers the NAT66ShardReconciler that publishes this
-// shard's identity/health. Mirrors cmd/galactic-gateway/root.go's runCmd
-// closely -- see that file's own doc comment for the gRPC health server's
-// NOT_SERVING-until-datapath-attached rationale (#360), which applies
-// unchanged here.
+// runCmd is the application startup: it loads and attaches this shard's NAT66
+// egress datapath to its fabric-facing uplink and registers the reconciler that
+// publishes this shard's identity and health.
 func runCmd(cfg *config.NAT66Config) error {
 	nodeName := cfg.NodeName
 	metricsPort := cfg.MetricsPort
@@ -66,18 +62,15 @@ func runCmd(cfg *config.NAT66Config) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 
-	// ctx's cause distinguishes a normal signal-triggered shutdown from the
-	// health server's own Serve failure below (#360) -- see the cause check
-	// after mgr.Start.
+	// The cause distinguishes a normal signal-triggered shutdown from the
+	// health server's own Serve failure below.
 	ctx, cancel := context.WithCancelCause(ctrl.SetupSignalHandler())
 	defer cancel(nil)
 
-	// Start gRPC health server. grpchealth.NewServer() defaults the ""
-	// overall-health service to SERVING, so that must be overridden to
-	// NOT_SERVING here, explicitly and immediately: otherwise a probe could
-	// see "healthy" for the entire window before the datapath below is even
-	// attached. Only once the datapath is attached does this flip to
-	// SERVING, further down.
+	// The health server defaults its overall service to serving, which must be
+	// overridden to not-serving here, immediately: otherwise a probe sees
+	// healthy for the whole window before the datapath is attached. It flips to
+	// serving further down, once the datapath is attached.
 	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", fmt.Sprintf(":%d", grpcHealthPort))
 	if err != nil {
 		return fmt.Errorf("listen on gRPC health port %d: %w", grpcHealthPort, err)
@@ -87,11 +80,10 @@ func runCmd(cfg *config.NAT66Config) error {
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	go func() {
-		// A Serve failure here is fatal, not merely logged: with no health
-		// server left running and nothing to notice, the process would
-		// otherwise carry on with no health signal at all. Canceling ctx
-		// with this error as its cause carries it out through mgr.Start
-		// below, the same way any other fatal startup error does.
+		// A Serve failure is fatal rather than merely logged: with no health
+		// server left and nothing to notice, the process would carry on
+		// with no health signal at all. Cancelling with this as the cause
+		// carries it out through the manager below.
 		if serveErr := grpcSrv.Serve(lis); serveErr != nil {
 			cancel(fmt.Errorf("gRPC health server: %w", serveErr))
 		}
@@ -101,25 +93,17 @@ func runCmd(cfg *config.NAT66Config) error {
 		grpcSrv.GracefulStop()
 	}()
 
-	// Register the one field index NAT66ShardReconciler.applyShardAdvertisement
-	// (nat66shard_controller.go) needs: BGPRouterByTargetName, to find the
-	// BGPRouter it advertises its shard SID through -- an index, not a
-	// real API field, so it only resolves if something on this process's
-	// own manager registered it first.
+	// Register the one field index the shard reconciler needs, to find the
+	// BGPRouter it advertises through. It is an index rather than a real API
+	// field, so it resolves only if this process's own manager registered it.
 	//
-	// Deliberately controller.RegisterBGPRouterTargetIndex, not the full
-	// controller.RegisterIndexes cmd/galactic-router and cmd/galactic-gateway
-	// call for their own managers: RegisterIndexes touches BGPPeer/
-	// BGPPolicy/BGPAdvertisement/BGPVRFInstance/BGPRouter, and
-	// controller-runtime's cache starts a live informer for every type any
-	// IndexField call touches immediately, regardless of whether this
-	// binary's own reconciler ever reads it again. Calling the full
-	// function here failed live at manager startup with "bgppolicies...is
-	// forbidden ... at the cluster scope": config/galactic-nat66/rbac.yaml
-	// only grants nat66shards/bgpadvertisements/bgprouters, on purpose (see
-	// that file's own "grant exactly what is used" principle) -- the
-	// narrower function keeps that principle intact instead of widening
-	// this binary's RBAC to match a function it doesn't need in full.
+	// Only this one, not the full set the other binaries register: the cache
+	// starts a live informer for every type any index touches, immediately and
+	// regardless of whether this binary ever reads it. Registering them all
+	// fails at manager startup against this binary's role, which deliberately
+	// grants only what it uses. The narrower call keeps that intact instead of
+	// widening the role to match a function this binary does not need in
+	// full.
 	if err := controller.RegisterBGPRouterTargetIndex(ctx, mgr); err != nil {
 		return fmt.Errorf("register field indexes: %w", err)
 	}
@@ -127,16 +111,15 @@ func runCmd(cfg *config.NAT66Config) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
-	// Load and attach the NAT66 egress eBPF datapath. Always loads a real
-	// datapath -- config.NAT66Config.Validate already rejects an empty
-	// UplinkInterface/ShardSID/ShardPubAddr before runCmd is ever reached,
-	// since this binary only exists to run a NAT66 shard.
+	// Load and attach the NAT66 egress datapath. Always a real datapath:
+	// configuration validation rejects an empty uplink, SID, or public address
+	// before this is reached, this binary existing only to run a shard.
 	datapathHealth, err := setupNat66Datapath(cfg.UplinkInterface, cfg.ShardSID, cfg.ShardPubAddr, ctrlmetrics.Registry)
 	if err != nil {
 		return fmt.Errorf("setup NAT66 egress eBPF datapath: %w", err)
 	}
-	// Only now is the datapath attached -- report serving from here on, not
-	// from process start (#360).
+	// Only now is the datapath attached. Report serving from here on, not from
+	// process start.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	// Register NAT66Shard controller.
@@ -154,10 +137,9 @@ func runCmd(cfg *config.NAT66Config) error {
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
 	}
-	// mgr.Start only returns nil once ctx is Done, and by then ctx always
-	// has a cause: either context.Canceled (an ordinary signal-triggered
-	// shutdown) or the gRPC health server's own fatal Serve error from
-	// above. Only the latter should fail the process.
+	// The manager returns nil only once the context is done, and by then it
+	// always has a cause: cancellation for an ordinary shutdown, or the health
+	// server's fatal error above. Only the latter should fail the process.
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
 		return cause
 	}

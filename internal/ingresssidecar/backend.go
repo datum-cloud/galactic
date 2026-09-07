@@ -17,29 +17,24 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// Backend is the kernel-facing interface Store converges VRF and SRv6
-// egress-route state against. kernelBackend (below) wires it to
-// internal/plumbing/vrf and internal/plumbing/srv6 directly — the same
-// primitives galactic-cni's own pod-attachment path uses; see §2 of the
-// plan for why this is "not new kernel-programming work." Tests use a fake.
+// Backend is the kernel-facing interface Store converges VRF and SRv6 egress
+// route state against. kernelBackend wires it to the same primitives the CNI
+// pod-attachment path uses; tests use a fake.
 type Backend interface {
 	// EnsureVRF creates (idempotently) the per-VPC Linux VRF device and
 	// returns its kernel routing table ID.
 	EnsureVRF(vpc string) (tableID uint32, err error)
-	// RemoveVRF tears down the per-VPC VRF device. Callers must only call
-	// this once no route for this VPC remains live or in its own grace
-	// period — see vrf.Delete's own doc comment on why deleting out from
-	// under a still-live sibling breaks it.
+	// RemoveVRF tears down the per-VPC VRF device. Callers must only call it
+	// once no route for this VPC remains live or in its grace period, since
+	// deleting out from under a live sibling breaks it.
 	RemoveVRF(vpc string) error
-	// EnsureRoute installs (idempotently — see srv6.RouteEgressAdd's use of
-	// netlink.RouteReplace) the seg6 ENCAP_RED route for prefix, toward
-	// sid, in tableID.
+	// EnsureRoute idempotently installs the encapsulating route for prefix,
+	// toward sid, in tableID.
 	EnsureRoute(prefix *net.IPNet, sid net.IP, tableID uint32) error
 	// RemoveRoute removes the route EnsureRoute installed.
 	RemoveRoute(prefix *net.IPNet, tableID uint32) error
-	// ListVRFs returns every Galactic per-VPC VRF device currently present
-	// on the host, resolved back to its owning VPC — the startup-inventory
-	// step (§9 item 2 of the plan; see Store.Inventory).
+	// ListVRFs returns every per-VPC VRF device present on the host, resolved
+	// back to its owning VPC, for the startup inventory.
 	ListVRFs() ([]VRFInfo, error)
 	// ListRoutes returns every seg6-encapsulated route currently installed
 	// in tableID — the route half of the same startup-inventory step.
@@ -62,9 +57,8 @@ type RouteInfo struct {
 // kernelBackend is the production Backend.
 type kernelBackend struct{}
 
-// NewKernelBackend returns the production Backend, wired to real kernel
-// state via internal/plumbing/vrf and internal/plumbing/srv6. Requires
-// CAP_NET_ADMIN — see §6 of the plan.
+// NewKernelBackend returns the production Backend, wired to real kernel state.
+// Requires CAP_NET_ADMIN.
 func NewKernelBackend() Backend { return kernelBackend{} }
 
 func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
@@ -75,12 +69,10 @@ func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve VRF table ID for vpc %s: %w", vpc, err)
 	}
-	// See ensureEgressDatapath's own doc comment (ebpfdatapath.go): without
-	// this, EnsureRoute's egress_route_table entries below have nothing in
-	// this pod's netns ever attached to read them. vpc is threaded through
-	// (not just tableID) so ensureEgressDatapath can also derive and assign
-	// this VPC's own return-path gateway address, when configured -- see
-	// ensureGatewayAddress in gatewayaddress.go.
+	// Without this, the egress route entries below have nothing attached in
+	// this pod's namespace to read them. vpc is threaded through, not just
+	// tableID, so this can also derive and assign the VPC's return-path gateway
+	// address when one is configured.
 	if err := ensureEgressDatapath(vpc, tableID); err != nil {
 		return 0, fmt.Errorf("attach eBPF egress datapath for vpc %s: %w", vpc, err)
 	}
@@ -92,9 +84,8 @@ func (kernelBackend) RemoveVRF(vpc string) error {
 	if err != nil {
 		return nil // VRF already gone — idempotent, matching vrf.Delete's own stance
 	}
-	// Torn down before vrf.Delete removes the interface below, while its
-	// ifindex can still be resolved — see removeEgressDatapath's own doc
-	// comment.
+	// Torn down before the interface is removed below, while its ifindex can
+	// still be resolved.
 	if err := removeEgressDatapath(tableID); err != nil {
 		return fmt.Errorf("detach eBPF egress datapath for vpc %s: %w", vpc, err)
 	}
@@ -108,10 +99,8 @@ func (kernelBackend) EnsureRoute(prefix *net.IPNet, sid net.IP, tableID uint32) 
 	if err := srv6.RouteEgressAdd(prefix, sid, tableID); err != nil {
 		return fmt.Errorf("install seg6 route for %s: %w", prefix, err)
 	}
-	// See ensureRedirectRoute's own doc comment (ebpfdatapath.go): without
-	// this, nothing ever routes this pod's own outbound traffic for prefix
-	// into the VRF interface egress_route_table's entry above was just
-	// registered against.
+	// Without this, nothing routes this pod's outbound traffic for prefix into
+	// the VRF interface the entry above was just registered against.
 	if err := ensureRedirectRoute(prefix, tableID); err != nil {
 		return fmt.Errorf("install main-table redirect route for %s: %w", prefix, err)
 	}
@@ -128,14 +117,12 @@ func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
 	return nil
 }
 
-// vrfNameRegex matches the interface name intf.GenerateInterfaceNameVRF
-// produces for a VPC ("G%09sV" — 'G', 9 zero-padded base62 characters,
-// 'V'). Mirrors internal/gc's identically-purposed, unexported
-// vrfNameRegex; duplicated rather than imported since that package doesn't
-// export it, with the same zero-pad-stripping caveat its parseVRFName
-// documents (a vpc value that legitimately begins with '0' round-trips
-// lossily through the padded interface name — an existing, accepted
-// limitation this doesn't newly introduce).
+// vrfNameRegex matches the interface name generated for a VPC: a leading
+// letter, nine zero-padded base62 characters, and a trailing letter.
+//
+// Duplicated from the garbage collector rather than imported, that package not
+// exporting it, and carrying the same caveat: a VPC value legitimately
+// beginning with "0" round-trips lossily through the padded name.
 var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})V$`)
 
 func (kernelBackend) ListVRFs() ([]VRFInfo, error) {

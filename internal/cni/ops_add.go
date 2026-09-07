@@ -22,23 +22,18 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// cmdAdd uses a named return (err) so that the deferred selective rollback
-// below always observes the real failure — see the doc comment on the
-// original version of this function for why a named return matters here;
-// still true with fewer branches. galactic-veth's own ADD ends by printing
-// its own result and returning: BGP/SRv6/eBPF publish is galactic-bgp's
-// job, invoked next by the CNI runtime per conflist order, not by this
-// process.
+// cmdAdd uses a named return so the deferred selective rollback always observes
+// the real failure. It ends by printing its own result: BGP and eBPF publishing
+// is the next plugin's job, invoked by the runtime per conflist order.
 func cmdAdd(args *skel.CmdArgs) (err error) {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
 		return err
 	}
 
-	// Validate prevResult structure when present. The preceding plugin in the
-	// CNI chain should have produced a result with at least one interface or IP
-	// assignment. A nil or structurally broken prevResult indicates a mis-
-	// configured chain that galactic-veth should not silently ignore.
+	// Validate a previous result when present. The preceding plugin should have
+	// produced one with at least one interface or address; a structurally broken
+	// one means a misconfigured chain this plugin should not silently ignore.
 	if pluginConf.PrevResult != nil {
 		if err := cnimaster.ValidatePrevResultAdd(pluginConf.PrevResult); err != nil {
 			return &types.Error{Code: 6, Msg: fmt.Sprintf("prevResult validation in ADD: %v", err)}
@@ -57,11 +52,11 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment,
 		"namespace", namespace, "nodeName", nodeName)
 
-	// Chain-completeness check, before any kernel state is created: a
-	// conflist missing galactic-bgp would otherwise attach successfully
-	// with no BGP/SRv6 path to its VPC (issue #331). k8sClient/podNamespace
-	// are created here rather than at the NAD-annotation site below so a
-	// stale conflist fails ADD with nothing to roll back yet.
+	// Chain-completeness check, before any kernel state is created: a conflist
+	// missing the BGP plugin would otherwise attach successfully with no path
+	// to its VPC. The client and namespace are resolved here rather than at the
+	// annotation site below, so a stale conflist fails ADD with nothing to roll
+	// back yet.
 	k8sClient, err := cnimaster.NewK8sClient()
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
@@ -80,11 +75,9 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
 	}
-	// Record IPAM delegation intent up front, before configureIPAM (called
-	// from buildVethResult below) ever runs — see resourceTracker's
-	// ipamDelegated doc comment for why rollback needs this set
-	// unconditionally on "ipam" block presence, not just after a
-	// successful ExecAdd.
+	// Record the delegation intent up front, before allocation runs. Rollback
+	// needs it set on the ipam block's presence alone, not only after a
+	// successful delegated add.
 	if pluginConf.IPAM != nil {
 		tracker.ipamDelegated = true
 		tracker.ipamType = pluginConf.IPAM.Type
@@ -118,10 +111,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	hostMTU := hostLink.Attrs().MTU
 	slog.Debug("ADD: host interface ready", "name", hostName, "mac", hostMac, "mtu", hostMTU)
 
-	// Annotate the NAD with the host interface name. The NAD must already
-	// exist (created by the external VPC operator); a missing or otherwise
-	// unpatchable NAD is a hard failure. Reuses the k8sClient/podNamespace
-	// resolved above for the chain-completeness check.
+	// Annotate the attachment definition with the host interface name. It must
+	// already exist, created by the external VPC operator, so a missing or
+	// unpatchable one is a hard failure. Reuses the client and namespace
+	// resolved above.
 	nadCtx, nadCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
 	defer nadCancel()
 	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {

@@ -44,10 +44,8 @@ type DesiredRouter struct {
 	LocalASN        int64
 	RouterID        string
 	AddressFamilies []AddressFamily
-	// ListenPort is the per-router override of the TCP port GoBGP binds for
-	// incoming BGP connections, carried from BGPRouter.spec.listenPort. When
-	// nil, the runtime's process-wide default (GALACTIC_ROUTER_BGP_LISTEN_PORT)
-	// applies instead.
+	// ListenPort overrides, per router, the TCP port GoBGP binds for incoming
+	// connections. Nil means the process-wide default applies.
 	ListenPort     *int32
 	Peers          []DesiredPeer
 	VRFInstances   []DesiredVRFInstance
@@ -65,19 +63,16 @@ type DesiredPeer struct {
 	HoldTime        time.Duration
 	KeepaliveTime   time.Duration
 	AuthPassword    string
-	// UpdateSource is the per-peer override of the TCP source address for this
-	// session, carried from BGPPeer.spec.updateSource. When empty, the
-	// runtime's process-wide default (GALACTIC_ROUTER_BGP_LOCAL_ADDRESS)
-	// applies instead.
+	// UpdateSource overrides, per peer, the TCP source address for this session.
+	// Empty means the process-wide default applies.
 	UpdateSource string
 }
 
 // DesiredVRFInstance describes an L2VPN EVPN VRF to configure on the BGP router.
 type DesiredVRFInstance struct {
 	Name string
-	// VRFID is the 16-bit PoP-local VRF identifier (BGPVRFInstanceSpec.VRFID).
-	// The runtime derives the RFC 4364 Type 1 route distinguisher from it as
-	// "routerID:vrfID".
+	// VRFID is the 16-bit PoP-local VRF identifier. The runtime derives the route
+	// distinguisher from it as "routerID:vrfID".
 	VRFID              int32
 	ImportRouteTargets []string
 	ExportRouteTargets []string
@@ -93,17 +88,16 @@ type DesiredAdvertisement struct {
 	// NextHop is the BGP next-hop address placed in MpReachNLRI (node's transit-reachable
 	// IPv6 address). Required when AddressFamily is l2vpn/evpn.
 	NextHop string
-	// SRv6SID, when set, is placed in a BGP Prefix-SID path attribute (RFC 9252
-	// SRv6 L3 Service TLV) rather than NextHop or the EVPN route's own Gateway
-	// IP field — that field can't carry an IPv6 SID for an IPv4 prefix, since
-	// RFC 9136 requires it to share the prefix's own address family. Must be
-	// the End.DT46 SID for this VPC attachment so that receiving nodes install
-	// a seg6 encap route targeting the correct SRv6 decap instruction.
+	// SRv6SID, when set, goes in a BGP Prefix-SID path attribute rather than the
+	// next hop or the EVPN route's own gateway field, which cannot carry an IPv6
+	// SID for an IPv4 prefix, having to share the prefix's address family. It
+	// must be the End.DT46 SID for this attachment, so receiving nodes install
+	// an encapsulating route targeting the right decap instruction.
 	SRv6SID string
-	// VRFID is the 16-bit PoP-local VRF identifier carried from the BGPAdvertisement
-	// spec. The runtime derives the per-VRF route distinguisher as "routerID:vrfID" so
-	// that advertisements from different VRFs on the same router produce distinct NLRIs.
-	// When nil, the legacy "routerID:0" fallback is used.
+	// VRFID is the 16-bit PoP-local VRF identifier from the advertisement. The
+	// runtime derives the per-VRF route distinguisher from it, so advertisements
+	// from different VRFs on one router produce distinct NLRIs. Nil falls back
+	// to "routerID:0".
 	VRFID *int32
 }
 

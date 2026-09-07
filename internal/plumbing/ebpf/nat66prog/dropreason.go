@@ -4,12 +4,10 @@
 
 package nat66prog
 
-// Drop reason indices into the drop_reasons map (nat66.c's `enum
-// nat66_drop_reason`), exported for callers outside this package --
-// mirroring internal/plumbing/ebpf/edgeprog/dropreason.go and
-// internal/plumbing/ebpf/prog/dropreason.go's identical rationale:
-// bpf2go's -type flag cannot generate a Go type for a C enum that is only
-// ever used as a literal constant.
+// Drop reason indices into the drop_reasons map, mirroring the datapath's own
+// enum and exported for callers outside this package. Hand-kept in sync with the
+// C source, because the generator cannot produce a Go type for an enum used only
+// as a literal constant.
 const (
 	DropReasonNat66NoReturnConn     uint32 = 0
 	DropReasonNat66MalformedReturn  uint32 = 1

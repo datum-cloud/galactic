@@ -17,9 +17,8 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
-// IfindexVRFEntry is one fully decoded ifindex_vrf_table row, decoupled from
-// prog.UsidIfindexVrfValue's cilium/ebpf/BTF-generated field layout --
-// mirrors usidmap.VRFEntry's own reasoning.
+// IfindexVRFEntry is one decoded ifindex_vrf_table row, kept separate from the
+// generated kernel layout.
 type IfindexVRFEntry struct {
 	Ifindex uint32
 	Block   uint64
@@ -27,9 +26,9 @@ type IfindexVRFEntry struct {
 	// Argument is the 12-bit uSID Argument this ifindex's VRF resolves to.
 	Argument uint16
 
-	// Generation is this process's own in-memory bookkeeping of when this
-	// entry was last (re-)registered -- see doc.go and nptv6map's own doc
-	// comment for why this is not kernel-persisted.
+	// Generation is this process's in-memory record of when this entry was last
+	// registered. See the package doc comment for why it is not
+	// kernel-persisted.
 	Generation uint64
 }
 
@@ -42,22 +41,17 @@ type IfindexVRFTable struct {
 	generation map[uint32]uint64
 }
 
-// NewIfindexVRFTable wraps table as an IfindexVRFTable. Production callers
-// pass a usidmap.KernelTable wrapping a loaded *prog.UsidObjects's
-// IfindexVrfTable map (or OpenPinned, below); tests pass a fake
-// usidmap.Table.
+// NewIfindexVRFTable wraps table as an IfindexVRFTable. Production callers pass
+// a kernel table over the loaded map, or use OpenPinned; tests pass a fake.
 func NewIfindexVRFTable(table usidmap.Table) *IfindexVRFTable {
 	return &IfindexVRFTable{table: table, clock: monotonicNow, generation: make(map[uint32]uint64)}
 }
 
 // OpenPinned opens ifindex_vrf_table from its pinned path under pinDir and
-// returns an IfindexVRFTable wrapping it, mirroring
-// usidmap.OpenPinnedRegistry -- for a process (internal/cnibgp's
-// registerEBPFDatapath, internal/cni's and internal/cnitap's cmdDel) that
-// did not itself load the datapath but needs to read/write this one map.
-// The returned *ebpf.Map is also this table's own io.Closer and must be
-// closed once the caller is done; it does not affect the map's pinned
-// lifetime.
+// returns a table wrapping it, for a process that did not itself load the
+// datapath but needs to read or write this one map. The returned map is also the
+// table's closer and must be closed when the caller is done, which does not
+// affect its pinned lifetime.
 func OpenPinned(pinDir string) (*IfindexVRFTable, *ebpf.Map, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapIfindexVrfTable), nil)
 	if err != nil {
@@ -71,10 +65,9 @@ func (t *IfindexVRFTable) Generation() uint64 {
 	return t.clock()
 }
 
-// Register writes (or overwrites) the ifindex_vrf_table entry for ifindex,
-// mapping it to (block, argument). Like nptv6map.NPTv6Table.Register, this
-// carries no counters and is always a plain overwrite -- there is no
-// read-modify-write step.
+// Register writes, or overwrites, the ifindex_vrf_table entry for ifindex,
+// mapping it to (block, argument). It carries no counters, so every call is a
+// plain overwrite with no read-modify-write step.
 func (t *IfindexVRFTable) Register(ifindex uint32, block uint64, argument uint16) error {
 	if err := uformat.ValidateBlock(block); err != nil {
 		return fmt.Errorf("ifindexvrfmap: ifindex_vrf_table: register ifindex=%d: %w", ifindex, err)
@@ -94,10 +87,9 @@ func (t *IfindexVRFTable) Register(ifindex uint32, block uint64, argument uint16
 	return nil
 }
 
-// Unregister removes the ifindex_vrf_table entry for ifindex, if present.
-// Not an error to unregister an already-absent entry -- DEL is idempotent
-// per the CNI spec, and every caller of this (internal/cni's and
-// internal/cnitap's cmdDel) treats every cleanup step as best-effort.
+// Unregister removes the ifindex_vrf_table entry for ifindex if present. An
+// already-absent entry is not an error: DEL is idempotent per the CNI spec, and
+// every caller treats cleanup as best-effort.
 func (t *IfindexVRFTable) Unregister(ifindex uint32) error {
 	if err := t.table.Delete(ifindex); err != nil {
 		if !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -141,12 +133,10 @@ func (t *IfindexVRFTable) List() ([]IfindexVRFEntry, error) {
 	return entries, nil
 }
 
-// Reconcile brings ifindex_vrf_table into agreement with live -- the
-// caller's current set of ifindexes that should have an entry -- removing
-// every entry whose key is absent from live, except an entry whose
-// Generation is >= cutoff. Mirrors usidmap.VRFTable.Reconcile's exact
-// semantics; see doc.go for why this is not wired into any production
-// sweep for this table today.
+// Reconcile brings ifindex_vrf_table into agreement with live, the caller's
+// current set of ifindexes that should have an entry, removing every entry whose
+// key is absent except one whose generation is at or above cutoff. See the
+// package doc comment for why no production sweep uses it today.
 func (t *IfindexVRFTable) Reconcile(live map[uint32]struct{}, cutoff uint64) (removed []IfindexVRFEntry, err error) {
 	entries, err := t.List()
 	if err != nil {

@@ -14,23 +14,19 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 )
 
-// Behavior values for function_table's value field, mirroring usid.c's
-// `enum function_behavior` (BEHAVIOR_END_DT46/BEHAVIOR_END_DT2). These are
-// hand-kept in sync with usid.c because bpf2go's -type flag cannot
-// generate a Go type for a C enum that is only ever used as a literal
-// constant, never as a variable/field the compiler retains distinct BTF
-// for (see prog/doc.go's go:generate comment, and prog/usid_test.go's own
-// hand-kept drop_reason constants for the identical reason).
+// Behavior values for function_table's value field, mirroring the datapath's own
+// enum. They are hand-kept in sync because the generator cannot produce a Go
+// type for a C enum used only as a literal constant, never as a field the
+// compiler retains distinct type information for.
 const (
 	BehaviorEndDT46 uint32 = 1
 	BehaviorEndDT2  uint32 = 2
 )
 
-// behaviorForFunction returns the function_table Behavior value
-// corresponding to function, so FunctionTable.Register's caller supplies
-// only (block, function) -- never a Behavior directly -- making a
-// mismatched Function/Behavior pair (e.g. Function 0xE stored against
-// BEHAVIOR_END_DT2) structurally impossible to register through this API.
+// behaviorForFunction returns the Behavior value corresponding to function, so a
+// caller supplies only the block and function and never a Behavior directly.
+// That makes a mismatched pair structurally impossible to register through this
+// API.
 func behaviorForFunction(function uint8) (uint32, error) {
 	switch function {
 	case uformat.FunctionEndDT46:
@@ -55,17 +51,16 @@ type FunctionTable struct {
 	table Table
 }
 
-// NewFunctionTable wraps table as a FunctionTable. Production callers pass
-// a KernelTable wrapping a loaded *prog.UsidObjects's FunctionTable map (or
-// use NewRegistryFromObjects); tests pass a fake Table.
+// NewFunctionTable wraps table as a FunctionTable. Production callers pass a
+// kernel table over the loaded map, or use the registry constructor; tests pass
+// a fake.
 func NewFunctionTable(table Table) *FunctionTable {
 	return &FunctionTable{table: table}
 }
 
-// Register writes (or overwrites) the function_table entry for (block,
-// function), storing the Behavior value behaviorForFunction derives from
-// function -- one entry per (active uSID Block x defined Function), per
-// design plan §4.4.
+// Register writes, or overwrites, the function_table entry for (block,
+// function), storing the Behavior derived from function. There is one entry per
+// active Block and defined Function.
 func (t *FunctionTable) Register(block uint64, function uint8) error {
 	if err := uformat.ValidateBlock(block); err != nil {
 		return fmt.Errorf("usidmap: function_table: register block=%#x function=%#x: %w", block, function, err)
@@ -123,10 +118,8 @@ func (t *FunctionTable) Get(block uint64, function uint8) (FunctionEntry, bool, 
 	return FunctionEntry{Block: block, Function: function, Behavior: value.Behavior}, true, nil
 }
 
-// List returns every entry currently in function_table, in unspecified
-// order. Because function_table's key (Block<<4|Function, see
-// uformat.NewFunctionKey) folds Block and Function together, List decodes
-// both back out of each raw key.
+// List returns every entry in function_table, in unspecified order. The raw key
+// folds Block and Function together, so List decodes both back out of it.
 func (t *FunctionTable) List() ([]FunctionEntry, error) {
 	var (
 		entries []FunctionEntry

@@ -15,22 +15,18 @@ import (
 
 const metricsNamespace = "galactic_nat66"
 
-// nat66Collector is a prometheus.Collector reading this shard's live eBPF
-// map state at every scrape: drops by reason (drop_reasons) and the
-// current nat66_conn_table occupancy -- mirroring
-// internal/plumbing/ebpf/edgemetrics.Collector's pull-based-collector
-// shape (reading live at scrape time rather than incrementally-updated
-// Gauges), scoped down to what nat66map actually exposes read access to
-// (see that package's doc comment for why nat66_conn_table is
-// observability-only: it is entirely datapath-owned).
+// nat66Collector reads this shard's live map state at every scrape: drops by
+// reason and the current connection-table occupancy. It is a pull-based
+// collector like the other datapaths', scoped to what the map layer exposes read
+// access to, the connection table being entirely datapath-owned and so
+// observability-only.
 type nat66Collector struct {
 	connTable   *nat66map.ConnTable
 	dropReasons nat66map.DropReasonsReader
 }
 
-// newNat66Collector builds a nat66Collector reading directly from a
-// loaded *nat66prog.Nat66Objects's Nat66ConnTable/DropReasons maps -- the
-// object internal/plumbing/ebpf/nat66attach.Load returns.
+// newNat66Collector builds a collector reading directly from a loaded object
+// set's maps.
 func newNat66Collector(objs *nat66prog.Nat66Objects) *nat66Collector {
 	return &nat66Collector{
 		connTable:   nat66map.NewConnTable(nat66map.KernelTable{Map: objs.Nat66ConnTable}),

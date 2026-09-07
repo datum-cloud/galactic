@@ -39,53 +39,41 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// ebpfHealthCheckInterval controls how often Run polls
-// internal/plumbing/ebpf/attach.Health once the eBPF datapath is running.
-// A package-level var (not a const) so tests can shrink it, the same
-// override pattern internal/plumbing/ebpf/attach/watch.go's
-// debounceInterval already uses.
+// ebpfHealthCheckInterval controls how often Run polls attach.Health once the
+// eBPF datapath is running. A var, not a const, so tests can shrink it.
 var ebpfHealthCheckInterval = 10 * time.Second
 
-// ebpfGCSweepInterval controls how often Run calls gc.SweepEBPFVRFTable
-// once the eBPF datapath is running. A package-level var, same override
-// pattern as ebpfHealthCheckInterval above -- matches galactic-router's
-// own GC controller's documented default period (docs/agents/
-// ARCHITECTURE-ROUTER.md: "ticker-driven, default every 5m").
+// ebpfGCSweepInterval controls how often Run runs the eBPF map GC sweeps once
+// the datapath is running. Matches galactic-router's own GC controller
+// period.
 var ebpfGCSweepInterval = 5 * time.Minute
 
-// radvReconcileInterval controls how often Run diffs the currently recorded
-// tap attachments (internal/plumbing/radv.ListAttachments) against the set
-// of running radv.RunActor goroutines, starting one for each newly recorded
-// attachment and canceling one for each attachment that has disappeared. A
-// package-level var, same override pattern as ebpfHealthCheckInterval
-// above. Kept short (unlike the RFC-sized intervals radv.RunActor itself
-// uses) since it only gates how fast a new attachment starts being served
-// at all -- a guest's own boot time dwarfs a couple of seconds either way.
+// radvReconcileInterval controls how often Run diffs the recorded tap
+// attachments against the running radv.RunActor goroutines, starting one for
+// each new attachment and canceling one for each that has gone. Kept short,
+// unlike the RFC-sized intervals the actors themselves use, because it only
+// gates how fast a new attachment starts being served, and a guest's boot time
+// dwarfs a few seconds.
 var radvReconcileInterval = 2 * time.Second
 
 // tapNeighReconcileInterval paces hostgw.EnsureTapGuestNeighbors. Far slower
-// than radv's own ticker: a resolved neighbor is refreshed by the kernel from
-// the guest's own advertisements, so this only has to notice one that has
-// aged out of the cache or a guest that has newly booted, and each pass costs
-// a solicit per unresolved guest.
+// than radv's ticker: the kernel refreshes a resolved neighbor from the guest's
+// own advertisements, so a pass only has to notice one that aged out or a guest
+// that just booted, and each pass costs a solicit per unresolved guest.
 var tapNeighReconcileInterval = 30 * time.Second
 
-// sidecarReturnReconcileInterval paces ensureSidecarReturnPath. Matched to
-// tapNeighReconcileInterval rather than the credential-refresh ticker
-// because what it installs points at a pod: an Envoy pod restart changes
-// the host-side veth and MAC the return route and neighbor name, and its
-// sidecar creates the VRF holding the gateway address some time after the
-// pod is scheduled. Each pass walks this node's network namespaces, so it
-// is not free enough for radv's cadence.
+// sidecarReturnReconcileInterval paces ensureSidecarReturnPath. Slower than
+// radv's ticker because each pass walks this node's network namespaces, and
+// faster than the credential refresh because what it installs points at a pod:
+// an Envoy restart changes the host-side veth and MAC the return route names,
+// and the sidecar creates the VRF holding the gateway address some time after
+// the pod is scheduled.
 var sidecarReturnReconcileInterval = 30 * time.Second
 
-// ebpfHealthServiceName is the gRPC health service name (see
-// grpc_health_v1.HealthServer) reporting the live status of the eBPF uSID
-// datapath specifically, separate from the overall (""), always-serving
-// status the credential-refresh/log-rotation loop reports -- so a BPF
-// datapath degradation (e.g. something external detaches the tc filter)
-// doesn't get conflated with, or masked by, the rest of this container's
-// unrelated responsibilities.
+// ebpfHealthServiceName is the gRPC health service name reporting the eBPF
+// uSID datapath's status, kept separate from the overall ("") always-serving
+// status so a datapath degradation is neither conflated with nor masked by this
+// container's unrelated responsibilities.
 const ebpfHealthServiceName = "ebpf-datapath"
 
 var (
@@ -134,10 +122,10 @@ func atomicWriteFile(destPath string, content []byte, mode os.FileMode) error {
 	return nil
 }
 
-// atomicCopyFile streams a file from srcPath to destPath atomically. It
-// copies via io.Copy rather than reading the whole source into memory
-// first, since binaries copied here (e.g. galactic-veth itself) run tens of
-// megabytes and the installer runs under a tight memory limit.
+// atomicCopyFile streams the file at srcPath to destPath atomically, creating
+// it with mode. It streams rather than buffering the whole source, since the
+// binaries copied here run to tens of megabytes and the installer has a tight
+// memory limit.
 func atomicCopyFile(srcPath, destPath string, mode os.FileMode) error {
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -181,11 +169,9 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	_ = clientgoscheme.AddToScheme(scheme)
-	// bgpv1alpha1 registration is required for gc.SweepEBPFVRFTable's
-	// BGPRouter/BGPVRFInstance List calls (Milestone 7.3) -- newK8sClientFn
-	// below is shared with Bootstrap's plain Node lookup, which doesn't
-	// need it, but the client itself must know about every kind either
-	// caller lists.
+	// Registered for the BGPRouter and BGPVRFInstance lists the eBPF map
+	// sweeps make. The client is shared with Bootstrap's plain Node lookup,
+	// which does not need it, but must know every kind either caller lists.
 	_ = bgpv1alpha1.AddToScheme(scheme)
 }
 
@@ -202,24 +188,19 @@ var addrListFn = func(family int) ([]netlink.Addr, error) {
 	return netlink.AddrList(nil, family)
 }
 
-// ebpfStartFn loads, pins, and attaches the eBPF/TC-BPF uSID datapath, then
-// keeps its resolved interface set re-evaluated against netlink link/route
-// change events for the life of ctx (design plan
-// .local/plan-ebpf-xdp-usid-datapath.md §4.1, §4.4, §5.4; Milestones 3.1
-// and 3.2 of .local/implementation-plan-ebpf-xdp-usid-datapath.md). It is a
-// package-level override point -- like addrListFn and newK8sClientFn above
-// -- so tests can exercise Run's wiring without needing root, a real kernel
-// BPF stack, or a live network interface. The returned io.Closer is
-// internal/plumbing/ebpf/attach.StartWatching's *prog.UsidObjects in
-// production; Run keeps it open for the process lifetime and Closes it on
-// shutdown (see the attach package doc comment for why that does not
-// disrupt already-attached forwarding). Canceling ctx stops the background
-// netlink watch loop but does not, by itself, close the returned object.
+// ebpfStartFn loads, pins, and attaches the eBPF uSID datapath, then keeps its
+// resolved interface set re-evaluated against netlink link and route events for
+// the life of ctx. pinDir is the bpffs directory to pin into.
 //
-// The returned *attach.Watcher is Run's handle onto that background watch
-// loop -- wired into the ebpfHealthTicker case below so a failed health
-// check can nudge an out-of-band reconcile, and a watch loop that has
-// died is itself reported as unhealthy (ecv's review of #283).
+// It is a package-level override point so tests can exercise Run's wiring
+// without root, a kernel BPF stack, or a live interface. The returned io.Closer
+// is the loaded objects; Run holds it for the process lifetime and closes it on
+// shutdown, which does not disrupt already-attached forwarding. Canceling ctx
+// stops the watch loop but does not close the object.
+//
+// The returned *attach.Watcher is Run's handle on that watch loop, so a failed
+// health check can nudge an out-of-band reconcile and a watch loop that has
+// died is itself reported unhealthy.
 var ebpfStartFn = func(ctx context.Context, pinDir string) (io.Closer, []string, *attach.Watcher, error) {
 	return attach.StartWatching(ctx, pinDir)
 }
@@ -230,32 +211,23 @@ func resolveLogLevel() string {
 	return config.NormalizeLogLevel(os.Getenv(config.EnvLogLevel))
 }
 
-// resolveNAT66ShardSIDs reads GALACTIC_CNI_NAT66_SHARD_SIDS, the fabric-wide
-// NAT66 shard membership list -- see that env var's own doc comment. Unlike
-// resolveLogLevel's fallback, an unset/empty value has no default to
-// normalize to: it means no shard is configured yet, and is written into
-// the conflist verbatim (empty), not substituted for anything.
+// resolveNAT66ShardSIDs reads the fabric-wide NAT66 shard membership list from
+// the environment. An unset or empty value means no shard is configured yet and
+// is written into the conflist verbatim, with no default substituted.
 func resolveNAT66ShardSIDs() string {
 	return os.Getenv(config.EnvCNINAT66ShardSIDs)
 }
 
-// resolveEBPFInterfaces resolves the eBPF datapath's own interface list
-// (attach.ResolveInterfaces -- env override if GALACTIC_CNI_EBPF_INTERFACES
-// is set, auto-detected from the default IPv6 route otherwise) and joins
-// it for storage in the static conflist (HostConf.EBPFInterfaces), the
-// same "resolve once, in this init container's own real pod env, so a
-// per-pod CNI plugin invocation never has to" pattern
-// resolveNAT66ShardSIDs's own doc comment describes -- see that field's
-// doc comment in internal/hostconf for why a CNI plugin's own
-// auto-detection is unreliable in a way this container's isn't.
+// resolveEBPFInterfaces resolves the eBPF datapath's interface list, from the
+// environment override if set and auto-detected from the default IPv6 route
+// otherwise, and joins it for storage in the static conflist. Resolving it here,
+// in this container's real pod environment, saves every per-pod CNI invocation
+// from repeating an auto-detection that is less reliable there.
 //
-// A resolution failure here (e.g. no default IPv6 route yet and no env
-// override) is not fatal to Bootstrap: it writes an empty string, the
-// same "not yet known, caller falls back to its own auto-detection"
-// state the conflist field already has before this function existed at
-// all -- no worse than today, and self-heals whenever install-cni next
-// runs (a Bootstrap re-run, e.g. this DaemonSet pod restarting) with a
-// converged default route.
+// A resolution failure, such as no default IPv6 route and no override, is not
+// fatal: it writes an empty string, the same "not yet known, fall back to your
+// own detection" state the field already has, and self-heals the next time this
+// container runs with a converged route.
 func resolveEBPFInterfaces() string {
 	names, err := attach.ResolveInterfaces()
 	if err != nil {
@@ -267,10 +239,9 @@ func resolveEBPFInterfaces() string {
 	return strings.Join(names, ",")
 }
 
-// Bootstrap runs the CNI installation init container tasks:
-// 1. Copies binaries to the host.
-// 2. Performs a one-shot dual-stack node identity check.
-// 3. Templates the static conflist and initial kubeconfig.
+// Bootstrap runs the CNI installation init container tasks: it copies the
+// binaries to the host, performs a one-shot dual-stack node identity check, and
+// templates the static conflist and initial kubeconfig.
 func Bootstrap(ctx context.Context, nodeName string) error {
 	if nodeName == "" {
 		return errors.New("node name is required (or set GALACTIC_CNI_NODE_NAME)")
@@ -278,10 +249,9 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 
 	slog.Info("Starting CNI installer bootstrap", "nodeName", nodeName)
 
-	// 1. Copy the CNI plugin chain's binaries to the host. Every binary in
-	// the chain ships in this same image and is staged here by this one
-	// init container, regardless of which master plugin(s) a given node's
-	// workloads actually use.
+	// Copy the CNI plugin chain's binaries to the host. Every binary in the
+	// chain ships in this image and is staged by this one init container,
+	// whichever master plugin a node's workloads use.
 	if err := os.MkdirAll(HostBinDir, 0755); err != nil {
 		return fmt.Errorf("create host CNI bin dir: %w", err)
 	}
@@ -442,8 +412,7 @@ users:
 }
 
 // ebpfDatapathState bundles what startEBPFDatapath resolves for Run to use
-// afterward (health polling, metrics, the GC sweep) -- a named type purely
-// to avoid a many-value return signature.
+// afterward: health polling, metrics, and the GC sweeps.
 type ebpfDatapathState struct {
 	objs      *prog.UsidObjects
 	ifaces    []string
@@ -453,13 +422,13 @@ type ebpfDatapathState struct {
 	nodeName  string
 }
 
-// startEBPFDatapath is Run's eBPF-datapath startup path, split out solely
-// to keep Run's own cyclomatic complexity within golangci-lint's gocyclo
-// budget -- behaviorally this is inlined exactly where it used to live. A
-// failure here (including a failed kernel preflight check, design plan §6)
-// is fatal: Run returns an error rather than falling back to a partial or
-// unsafe datapath state -- this is the only forwarding path, there is no
-// legacy path to fall back to.
+// startEBPFDatapath loads and attaches the eBPF datapath and returns the state
+// Run needs to poll and sweep it, plus the closer Run holds for the process
+// lifetime. Split out of Run to keep it within the gocyclo budget.
+//
+// A failure, including a failed kernel preflight check, is fatal. This is the
+// only forwarding path, so there is no partial or legacy state to fall back
+// to.
 func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathState, io.Closer, error) {
 	attach.SetHooks(m.Events.Hooks())
 
@@ -471,10 +440,9 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 
 	state := ebpfDatapathState{ifaces: ifaces, watcher: watcher}
 
-	// ebpfStartFn's io.Closer is *prog.UsidObjects in production (test
-	// fakes stand in a plain mock closer, which correctly leaves
-	// metrics/health/GC wiring inert below -- see installer_test.go's
-	// fakeDatapathCloser).
+	// The closer is the loaded objects in production. A test fake stands in a
+	// plain mock closer, which correctly leaves the metrics, health, and GC
+	// wiring below inert.
 	if objs, ok := datapath.(*prog.UsidObjects); ok {
 		state.objs = objs
 		if err := m.RegisterDatapathCollector(objs); err != nil {
@@ -482,11 +450,10 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 		}
 	}
 
-	// Best-effort setup for the eBPF vrf_table GC sweep (Milestone 7.3).
-	// A failure here is not fatal to Run -- unlike the datapath start
-	// above, GC is a background maintenance task, not a hard requirement
-	// for the datapath to forward traffic -- it just means this node's
-	// sweep ticker stays inert until the next restart.
+	// Best-effort setup for the eBPF map GC sweeps. Unlike the datapath start
+	// above, a failure is not fatal: GC is background maintenance, not a
+	// requirement for forwarding, so the sweep ticker just stays inert until
+	// the next restart.
 	if hostConf, err := hostconf.Load(HostConflist, hostconf.PluginType); err != nil {
 		slog.Warn("eBPF vrf_table GC sweep disabled: failed to load host conf", "err", err)
 	} else if k8sClient, err := newK8sClientFn(); err != nil {
@@ -498,10 +465,8 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	return state, datapath, nil
 }
 
-// cleanupOldBinaryWrapper is Run's cleanupTimer case body, split out solely
-// to keep Run's own cyclomatic complexity within golangci-lint's gocyclo
-// budget -- same reasoning as startEBPFDatapath above; behaviorally this is
-// inlined exactly where it used to live.
+// cleanupOldBinaryWrapper removes the stale .bin wrapper file. Split out of
+// Run's select to keep it within the gocyclo budget.
 func cleanupOldBinaryWrapper() {
 	oldBinPath := filepath.Join(HostBinDir, "galactic-cni.bin")
 	if _, err := os.Stat(oldBinPath); err == nil {
@@ -513,13 +478,12 @@ func cleanupOldBinaryWrapper() {
 	}
 }
 
-// startTapNeighborSweep runs one hostgw.EnsureTapGuestNeighbors pass off
-// Run's own goroutine, dropping the tick when a previous pass is still in
-// flight. Split out of Run's select for the same reason startEBPFDatapath
-// was: to keep Run inside golangci-lint's gocyclo budget.
+// startTapNeighborSweep runs one hostgw.EnsureTapGuestNeighbors pass off Run's
+// goroutine, so a slow pass cannot hold the select loop.
 //
-// sem is a size-1 semaphore, so a slow pass delays nothing and never queues
-// a backlog of ticks behind itself.
+// sem is a size-1 semaphore: a tick arriving while a pass is still in flight is
+// dropped rather than queued, so freshness suffers instead of a backlog
+// building.
 func startTapNeighborSweep(sem chan struct{}) {
 	select {
 	case sem <- struct{}{}:
@@ -535,12 +499,12 @@ func startTapNeighborSweep(sem chan struct{}) {
 }
 
 // startSidecarReturnSweep runs one ensureSidecarReturnPath pass off Run's
-// own goroutine, for the same reason startTapNeighborSweep does: a pass
-// enters every network namespace on this node, and a node running a large
-// Envoy fleet must not hold the select loop long enough to starve the
-// credential refresh, GC sweeps and eBPF health check. The semaphore drops
-// a tick rather than queueing it when the previous pass is still running,
-// so a slow pass costs freshness rather than piling up goroutines.
+// goroutine. A pass enters every network namespace on this node, so on a node
+// running a large Envoy fleet it would otherwise starve the credential refresh,
+// GC sweeps, and health check.
+//
+// sem is a size-1 semaphore, dropping a tick rather than queueing it when the
+// previous pass is still running.
 func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfDatapathState) {
 	select {
 	case sem <- struct{}{}:
@@ -552,41 +516,29 @@ func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfData
 	}
 }
 
-// radvActorSet tracks the currently running radv.RunActor goroutines, keyed
-// by host interface name (radv.Record.HostInterface) -- Run's own local
-// state, reconciled against radv.ListAttachments on every
-// radvReconcileTicker tick (see reconcileRadvActors). The zero value is
-// ready to use.
+// radvActorSet tracks the running radv.RunActor goroutines, keyed by host
+// interface name. It is Run's local state, reconciled against the recorded
+// attachments on every tick. The zero value is ready to use.
 //
-// cancel is touched only from Run's own goroutine (reconcileRadvActors and
-// the radvActorFailed case below) -- deliberately not guarded by a mutex,
-// since keeping it single-owner is simpler than synchronizing concurrent
-// access from the actor goroutines themselves. Those goroutines instead
-// report a failed startup back onto failed, which Run's select loop drains
-// on its own turn.
+// cancel is touched only from Run's own goroutine and is deliberately
+// unguarded, since single ownership is simpler than synchronizing with the
+// actor goroutines. Those goroutines report a failed startup on failed
+// instead, which Run's select drains on its own turn.
 type radvActorSet struct {
 	cancel map[string]context.CancelFunc
 	failed chan string
 	wg     sync.WaitGroup
 }
 
-// reconcileRadvActors is Run's radvReconcileTicker case body -- also called
-// once before the loop starts, so attachments already recorded when this
-// daemon starts (e.g. a restart while VMs are still attached) are served
-// immediately rather than waiting out the first tick. Split into its own
-// function solely to keep Run's own cyclomatic complexity within
-// golangci-lint's gocyclo budget -- same reasoning as startEBPFDatapath
-// above.
+// reconcileRadvActors starts one radv.RunActor per newly recorded tap
+// attachment and cancels one for each attachment that has disappeared. It is
+// also called once before Run's loop starts, so attachments already recorded
+// when this daemon starts are served immediately.
 //
-// Starts one radv.RunActor per newly recorded attachment and cancels one
-// for each attachment that has disappeared since the last reconcile. A
-// listing failure here is never fatal to Run -- resending/soliciting is
-// best-effort maintenance for already-attached VM guests, not a
-// requirement for anything else this process does -- so already-running
-// actors are simply left alone until the next tick succeeds. An actor that
-// fails during startup (e.g. a transient interface lookup failure) reports
-// itself on actors.failed instead of silently leaving its map entry stuck
-// "running" forever -- see radvActorFailed.
+// A listing failure is never fatal. Resending and soliciting is best-effort
+// maintenance for already-attached guests, so running actors are left alone
+// until a tick succeeds. An actor that fails during startup reports itself on
+// actors.failed rather than leaving its map entry stuck as running.
 func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 	records, err := radv.ListAttachments(radv.DefaultStateDir)
 	if err != nil {
@@ -596,11 +548,10 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 
 	if actors.cancel == nil {
 		actors.cancel = make(map[string]context.CancelFunc)
-		// Buffered generously relative to any realistic node's tap
-		// attachment count, so a run of startup failures can't block an
-		// actor goroutine on this send -- radvActorFailed's own send is
-		// non-blocking besides, so a full channel only delays a retry
-		// rather than deadlocking anything.
+		// Buffered well past any realistic node's attachment count, so a run
+		// of startup failures cannot block an actor goroutine on this send.
+		// radvActorFailed sends non-blocking anyway, so a full channel only
+		// delays a retry.
 		actors.failed = make(chan string, 256)
 	}
 
@@ -638,60 +589,39 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 	}
 }
 
-// radvActorFailed is Run's radvActors.failed case body: an actor that
-// couldn't even start (radv.RunActor returned a non-nil error, meaning it
-// never got past opening its Conn) reported itself here rather than
-// leaving reconcileRadvActors permanently convinced it's still running.
-// Clearing its map entry lets the next reconcile tick see the attachment
-// as unserved again and retry it. A delete on a key already gone (the
-// reconciler noticed the attachment itself disappeared in the meantime) is
-// a safe no-op.
+// radvActorFailed clears the map entry for an actor that could not start, so
+// the next reconcile sees the attachment as unserved and retries it. Without
+// it, reconcileRadvActors would stay convinced the actor is running. Deleting a
+// key that is already gone, because the attachment itself disappeared, is a
+// safe no-op.
 func radvActorFailed(actors *radvActorSet, iface string) {
 	delete(actors.cancel, iface)
 }
 
 // Run executes the CNI installer main container tasks:
-//  1. Loads/pins/attaches the eBPF/TC-BPF uSID datapath and keeps its
-//     attachment set re-evaluated against netlink link/route change events
-//     for the life of ctx (design plan §4.1, §4.4, §5.4; Milestones 3.1
-//     and 3.2 of .local/implementation-plan-ebpf-xdp-usid-datapath.md) --
-//     the only forwarding path. A failure here (including a failed kernel
-//     preflight check, design plan §6) is fatal: Run returns an error
-//     rather than falling back to a partial or unsafe datapath state.
-//     Once running, the netlink-driven re-attachment loop logs and retries
-//     its own failures rather than propagating them back into Run -- see
-//     internal/plumbing/ebpf/attach.Watch's doc comment. Datapath
-//     load/attach/detach events are counted via
-//     internal/plumbing/ebpf/metrics's EventCounters (Milestone 4), and
-//     live vrf_table/locator_table/drop_reasons state is exposed through
-//     the same metrics endpoint.
+//  1. Loads, pins, and attaches the eBPF uSID datapath and keeps its attachment
+//     set re-evaluated against netlink events for the life of ctx. This is the
+//     only forwarding path, so a failure here, including a failed kernel
+//     preflight check, is fatal. Once running, the re-attachment loop logs and
+//     retries its own failures instead of propagating them back into Run.
+//     Load, attach, and detach events are counted, and live map state is
+//     exposed on the same metrics endpoint.
 //  2. Serves Prometheus metrics on metricsPort.
-//  3. Sets up log rotation periodically.
-//  4. Starts a simple ServiceAccount token refresh ticker.
-//  5. Deferred cleanup of stale .bin wrapper file.
-//  6. Starts the gRPC health check server -- the overall ("") service
-//     always reports SERVING once the process is up (credential
-//     refresh/log rotation have no meaningful "unhealthy" state of their
-//     own); a separate ebpfHealthServiceName ("ebpf-datapath") service is
-//     polled on a ticker and reports the live result of
-//     internal/plumbing/ebpf/attach.Health -- exit criterion "health check
-//     fails correctly when the program is unloaded".
-//  7. Periodically sweeps stale vrf_table entries via gc.SweepEBPFVRFTable
-//     (design plan §5.3; Milestone 7.3), and registers/reconciles
-//     nptv6_table entries via gc.SweepEBPFNPTv6Table. Both run from here,
-//     not from galactic-router's existing GC controller
-//     (internal/controller/gc_controller.go), because the pinned maps
-//     only exist inside this container -- see gc.SweepEBPFVRFTable's own
-//     doc comment for the full reasoning.
-//  8. Runs one internal/plumbing/radv.RunActor goroutine per tap attachment
-//     galactic-tap has recorded (radv.ListAttachments), reconciled against
-//     that list on a short ticker (radvReconcileInterval). Each actor both
-//     resends an IPv6 Router Advertisement on a jittered schedule and
-//     replies to that guest's own Router Solicitations. This runs from
-//     here, not from galactic-tap's own cmdAdd, because a VM guest's boot
-//     almost always outlives that short-lived process -- see radv's own
-//     doc comment for the full reasoning. Unrelated to, and runs
-//     regardless of, the eBPF datapath above.
+//  3. Rotates logs periodically.
+//  4. Refreshes the ServiceAccount token on a ticker.
+//  5. Cleans up the stale .bin wrapper file.
+//  6. Serves gRPC health on grpcHealthPort. The overall ("") service always
+//     reports SERVING once the process is up, since credential refresh and log
+//     rotation have no meaningful unhealthy state; a separate
+//     ebpfHealthServiceName service reports the polled result of attach.Health.
+//  7. Sweeps stale vrf_table entries and reconciles nptv6_table entries on a
+//     ticker. Both run here rather than in galactic-router's GC controller
+//     because the pinned maps exist only inside this container.
+//  8. Runs one radv.RunActor per recorded tap attachment, reconciled on a short
+//     ticker. Each actor resends Router Advertisements on a jittered schedule
+//     and replies to that guest's solicitations. This runs here, not from
+//     galactic-tap's cmdAdd, because a guest's boot outlives that short-lived
+//     process. It is independent of the eBPF datapath and runs regardless.
 func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
@@ -709,10 +639,9 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 		}()
 	}
 
-	// This node's own uSID locator has to be locally resolvable before any
-	// same-node SRv6 egress route can be registered -- see
-	// ensureLocatorLocalRoute. Non-fatal, and retried on refreshTicker
-	// below, since the BGPRouter carrying the locator may not exist yet.
+	// This node's uSID locator must be locally resolvable before any same-node
+	// SRv6 egress route can be registered. Non-fatal and retried below, since
+	// the BGPRouter carrying the locator may not exist yet.
 	reconcileLocatorLocalRoute(ctx, ebpfState)
 
 	// Serve Prometheus metrics at the conventional /metrics scrape path.
@@ -768,28 +697,22 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	cleanupTimer := time.NewTimer(2 * time.Minute)
 	defer cleanupTimer.Stop()
 
-	// eBPF datapath health poll -- only meaningful once datapathObjs is
-	// set (eBPF datapath enabled and actually running); otherwise this
-	// fires harmlessly and does nothing every tick.
+	// Health poll, meaningful only once the datapath is running; otherwise it
+	// fires harmlessly and does nothing.
 	ebpfHealthTicker := time.NewTicker(ebpfHealthCheckInterval)
 	defer ebpfHealthTicker.Stop()
 	var ebpfLastHealthy = true // matches the initial SetServingStatus(SERVING) above
 
-	// eBPF vrf_table GC sweep (Milestone 7.3) -- only meaningful once
-	// gcK8sClient is set (eBPF datapath enabled and host conf/k8s client
-	// setup above succeeded); otherwise this fires harmlessly and does
-	// nothing every tick, same as the health poll above.
+	// eBPF map GC sweep, meaningful only once the Kubernetes client is set;
+	// otherwise it fires harmlessly, like the health poll above.
 	ebpfGCSweepTicker := time.NewTicker(ebpfGCSweepInterval)
 	defer ebpfGCSweepTicker.Stop()
 
-	// Router Advertisement serving for tap-attached VM guests (see
-	// internal/plumbing/radv's own doc comment) -- runs regardless of
-	// whether the eBPF datapath is enabled, since it has nothing to do with
-	// it. One radv.RunActor goroutine per currently recorded attachment
-	// (radvActorSet, reconciled on every radvReconcileTicker tick below)
-	// handles both the periodic resend and Router Solicitation replies for
-	// that attachment; reconciled once here too, so attachments already
-	// recorded when this daemon starts don't wait out the first tick.
+	// Router Advertisement serving for tap-attached guests, independent of the
+	// eBPF datapath. One actor per recorded attachment handles both the
+	// periodic resend and solicitation replies. Reconciled once here as well
+	// as on the ticker, so attachments already recorded at startup do not wait
+	// out the first tick.
 	radvActors := &radvActorSet{}
 	reconcileRadvActors(ctx, radvActors)
 	defer radvActors.wg.Wait()
@@ -829,9 +752,9 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 				rotateLogFile(logFileHostPath)
 			}
 
-			// Re-assert this node's uSID locator local route: picks up a
-			// BGPRouter created after startup, and restores the route if
-			// something flushed it.
+			// Re-assert the locator local route: this picks up a BGPRouter
+			// created after startup and restores the route if it was
+			// flushed.
 			reconcileLocatorLocalRoute(ctx, ebpfState)
 
 		case <-ebpfHealthTicker.C:
@@ -862,10 +785,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
 			logEBPFVRFSweepResult(result)
 
-			// nptv6_table's own sweep: unlike vrf_table above, this is the
-			// map's *only* writer (see gc.SweepEBPFNPTv6Table's own doc
-			// comment) -- it both registers every currently-live NPTv6
-			// mapping and reconciles stale ones away on every tick.
+			// nptv6_table's sweep is its map's only writer, so it registers
+			// every live mapping as well as reaping stale ones.
 			nptv6Result := gc.SweepEBPFNPTv6Table(
 				ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
 			if nptv6Result.EBPFNPTv6EntriesRemoved > 0 || nptv6Result.Errors > 0 {
@@ -877,31 +798,25 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			reconcileRadvActors(ctx, radvActors)
 
 		case <-tapNeighTicker.C:
-			// Resolve each tap guest's neighbor entry, without which
-			// usid_ingress's own FIB lookup drops every decapsulated packet
-			// bound for it -- see hostgw.EnsureTapGuestNeighbors. Periodic,
-			// and not once at CNI ADD, for the same reason the radv actors
-			// above run here: a VM guest's boot almost always outlives the
-			// short-lived plugin process that attached it, so there is
-			// nothing to solicit yet at ADD time.
+			// Resolve each tap guest's neighbor entry, without which the
+			// datapath's FIB lookup drops every decapsulated packet bound for
+			// it. Periodic rather than once at CNI ADD, for the same reason
+			// the radv actors run here: a guest's boot outlives the
+			// short-lived plugin process, so there is nothing to solicit yet
+			// at ADD time.
 			//
-			// Off this loop's goroutine, and on a ticker of its own rather
-			// than radv's 2s one. Each unresolved guest costs a solicit plus
-			// up to neighResolveTimeout of polling, so a node whose guests
-			// are down would otherwise hold the select loop long past the
-			// next tick and starve the credential refresh, GC sweeps and
-			// eBPF health check with it -- measured at 32s a pass before the
-			// route filter was tightened. The semaphore drops a tick rather
-			// than queueing it when the previous pass is still running.
+			// Off this goroutine and on its own slower ticker. Each
+			// unresolved guest costs a solicit plus polling, so a node whose
+			// guests are down would hold the select loop past the next tick
+			// and starve the credential refresh, GC sweeps, and health check
+			// with it.
 			startTapNeighborSweep(tapNeighSem)
 
 		case <-sidecarReturnTicker.C:
-			// Install (and re-assert) the host side of the ingress
-			// sidecar's return path -- the routes, neighbors and uSID map
-			// entries a reply encapsulated toward this node's own SID needs
-			// in order to reach an Envoy pod's per-VPC sidecar VRF. See
-			// sidecarreturn.go's own file comment for why this cannot live
-			// in the sidecar itself.
+			// Install and re-assert the host side of the ingress sidecar's
+			// return path: the routes, neighbors, and uSID map entries a
+			// reply encapsulated toward this node's SID needs to reach an
+			// Envoy pod's per-VPC sidecar VRF.
 			startSidecarReturnSweep(ctx, sidecarReturnSem, ebpfState)
 
 		case iface := <-radvActors.failed:
@@ -910,12 +825,9 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	}
 }
 
-// logEBPFVRFSweepResult logs one gc.SweepEBPFVRFTable tick's result, if
-// there's anything worth logging -- split out of Run's own select loop
-// (rather than inlined there like every other ticker case) purely to keep
-// that branch out of Run's own cyclomatic complexity count, now that this
-// result carries a third field (EBPFVRFEntriesRegistered) alongside the
-// original two.
+// logEBPFVRFSweepResult logs one vrf_table sweep result when there is anything
+// worth logging. Split out of Run's select to keep it within the gocyclo
+// budget.
 func logEBPFVRFSweepResult(result gc.CleanupResult) {
 	if result.EBPFVRFEntriesRemoved > 0 || result.EBPFVRFEntriesRegistered > 0 || result.Errors > 0 {
 		slog.Info("eBPF vrf_table GC sweep complete",

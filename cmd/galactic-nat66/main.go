@@ -2,20 +2,15 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command galactic-nat66 is one shard of the sharded, stateful NAT66
-// egress tier of the Galactic data plane. It loads and attaches
-// internal/plumbing/ebpf/nat66prog's XDP program to this shard's own
-// fabric-facing uplink interface and registers the NAT66ShardReconciler
-// that publishes this shard's operator-configured identity
-// (Status.ShardAddress/Status.ShardSID) and Ready condition.
+// Command galactic-nat66 is one shard of the sharded, stateful NAT66 egress tier
+// of the Galactic data plane. It loads and attaches the NAT66 XDP program to
+// this shard's fabric-facing uplink and registers the reconciler that publishes
+// this shard's operator-configured identity and Ready condition.
 //
-// This binary is deliberately its own standalone datapath, not a
-// personality bolted onto galactic-gateway: tenant egress traffic
-// (backend -> arbitrary internet destination) is a different traffic
-// pattern from ingress (fixed VIP, fixed backend pool) and needs its own
-// placement ring, own state, own self-routing return path -- see
-// nat66prog's own doc comment and nat66.c's header comment for the full
-// design.
+// It is deliberately its own standalone datapath rather than a personality on
+// the edge gateway: tenant egress toward an arbitrary internet destination is a
+// different pattern from ingress toward a fixed VIP and backend pool, and needs
+// its own placement ring, state, and return path.
 package main
 
 import (
@@ -44,20 +39,13 @@ func main() {
 	}
 }
 
-// checkWatchPermissions issues a SelfSubjectAccessReview for each resource
-// NAT66ShardReconciler now touches, checking the watch verb. If a review
-// denies the request the informer cache will never sync and the
-// reconciler will be silently blocked; this logs a clear, actionable
-// message at startup so the problem is immediately obvious. Mirrors
-// cmd/galactic-gateway/main.go's identically-named function.
+// checkWatchPermissions issues an access review for each resource the shard
+// reconciler touches, checking the watch verb. A denial means the informer cache
+// never syncs and the reconciler is silently blocked, so this logs a clear,
+// actionable message at startup instead.
 //
-// bgprouters/bgpadvertisements are new here: NAT66ShardReconciler's own
-// doc comment used to describe this binary as reading no other CRD at
-// all, but applyShardAdvertisement (nat66shard_controller.go) now looks
-// up this node's BGPRouter and creates/updates/deletes a BGPAdvertisement
-// for Status.ShardSID -- the same RBAC surface
-// cmd/galactic-gateway/main.go's own checkWatchPermissions already checks
-// for NetworkGatewayReconciler's identical pattern.
+// It covers the routers and advertisements the shard advertisement path reads
+// and writes, not just the shard resource itself.
 func checkWatchPermissions(mgr ctrl.Manager) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {

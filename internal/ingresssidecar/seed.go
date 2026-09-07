@@ -17,34 +17,26 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 )
 
-// SeedFromAPI lists every EndpointSlice this sidecar selects on directly
-// from reader and applies each one's desired route to store synchronously,
-// via the same SetDesired path Reconciler itself uses.
+// SeedFromAPI lists every EndpointSlice this sidecar selects on, directly from
+// reader, and applies each one's desired route to store synchronously, through
+// the same path the reconciler uses.
 //
-// Call this once at startup, before Store.Inventory, passing
-// mgr.GetAPIReader() as reader — the manager's uncached reader, which talks
-// straight to the API server and is safe to use before mgr.Start. That
-// matters because it's what lets this run without depending on the
-// manager's informer cache or controller workqueue at all: Store.Inventory
-// used to be gated on mgr.GetCache().WaitForCacheSync(ctx) alone, on the
-// assumption that a synced cache implied every pre-existing EndpointSlice
-// had already gone through the controller's own Reconcile (and therefore
-// SetDesired). That assumption is false — WaitForCacheSync only guarantees
-// the informer's initial List landed in the cache; it says nothing about
-// whether the workqueue that same initial List fed into has been drained
-// by the controller's Reconcile loop yet. On a busy node at boot those two
-// things race: Inventory could observe a live pod's kernel route as
-// orphaned (routeKnownLocked found no tracked state for it yet) and seed it
-// under a synthetic "boot/..." key with its own grace period, independently
-// of the real key the delayed Reconcile eventually creates -- and once that
-// synthetic entry's grace elapsed, Sweep would delete the underlying kernel
-// route (routes are addressed by prefix+table, not by Store's map key) out
-// from under the still-live pod. SeedFromAPI closes that race by making
-// every live EndpointSlice's desired route visible to Store before
-// Inventory ever runs, independent of cache/queue timing entirely.
-// SetDesired is idempotent (EnsureVRF/EnsureRoute no-op once installed), so
-// the controller's own later, now-redundant Reconcile of the same objects
-// is harmless.
+// Call it once at startup, before the store's inventory pass, passing the
+// manager's uncached reader: that talks straight to the API server and is safe
+// to use before the manager starts.
+//
+// That is what removes the dependency on cache and workqueue timing. Waiting for
+// the cache to sync is not enough on its own: it guarantees the informer's
+// initial list landed in the cache, and says nothing about whether the workqueue
+// that list fed has been drained by the reconcile loop. On a busy node at boot
+// those race, and inventory can see a live pod's kernel route as orphaned,
+// seeding it under a synthetic key with its own grace period, independently of
+// the real key the delayed reconcile eventually creates. Once that synthetic
+// entry's grace elapses, the sweep deletes the underlying route, addressed by
+// prefix and table rather than by store key, out from under the live pod.
+//
+// Seeding first closes that race. Applying desired state is idempotent, so the
+// reconciler's later, now-redundant pass over the same objects is harmless.
 func SeedFromAPI(ctx context.Context, reader client.Reader, store *Store) error {
 	req, err := labels.NewRequirement(crdnames.LabelTenantID, selection.Exists, nil)
 	if err != nil {

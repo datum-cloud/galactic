@@ -16,44 +16,25 @@ import (
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
-// gatewayAssignmentMu guards gatewayPrefix/gatewayNodeID -- the same
-// package-level-var-as-configuration-seam pattern internal/plumbing/srv6's
-// own pinDir and this package's own ebpfPinDir already use, chosen over
-// threading a new parameter through Backend/kernelBackend's existing
-// signatures (see SetGatewayAddressAssignment's own doc comment for why).
+// gatewayAssignmentMu guards gatewayPrefix and gatewayNodeID.
 var (
 	gatewayAssignmentMu sync.Mutex
 	gatewayPrefix       *net.IPNet
 	gatewayNodeID       string
 )
 
-// SetGatewayAddressAssignment enables ensureEgressDatapath to assign this
-// node's own deterministic return-path gateway address (see
-// DeriveGatewayAddress) to the VRF-slave veth it already creates for
-// usid_egress, for every VPC this sidecar subsequently reconciles a VRF
-// for. nodeID must be stable and unique per node (cmd/galactic-vrf passes
-// its own cfg.NodeName, the same identity GatewayPublisher already
-// attributes its BGPAdvertisements to) -- see DeriveGatewayAddress's own
-// doc comment for why an empty or shared nodeID would make every replica
-// of this sidecar collide on the identical address for a given VPC.
+// SetGatewayAddressAssignment enables assignment of this node's return-path
+// gateway address to the VRF-slave veth created for usid_egress, for every VPC
+// this sidecar reconciles a VRF for.
 //
-// prefix == nil (the default, never called) leaves address assignment
-// disabled entirely: ensureEgressDatapath's own call site no-ops, and
-// NetlinkGatewayAddressResolver keeps returning
-// ErrGatewayAddressNotProvisioned exactly as it does today -- this is
-// purely additive to the existing opt-in GatewayPublisher wiring, not a
-// replacement for it; both must be configured for the return path to
-// actually work end to end.
+// prefix is the reserved CIDR addresses are derived inside; nil disables
+// assignment, leaving NetlinkGatewayAddressResolver returning
+// ErrGatewayAddressNotProvisioned. nodeID must be stable and unique per node:
+// it is hashed into the address, so an empty or shared value makes every
+// replica derive the same address for a given VPC.
 //
-// A package-level setter rather than a new Backend/kernelBackend
-// constructor parameter: ensureEgressDatapath(vpc, tableID) is an
-// unexported function called from exactly one production site
-// (kernelBackend.EnsureVRF) with no vpc-scoped Backend state to carry this
-// through today, and adding a stateful field to kernelBackend (currently
-// the empty struct{} NewKernelBackend returns) to thread one optional,
-// process-wide value through every EnsureVRF call is more invasive than
-// this seam, for a value that is genuinely process-global (one node, one
-// prefix, one identity) exactly like ebpfPinDir already is.
+// The value is process-global (one node, one prefix, one identity) rather than
+// Backend state, so it is set here rather than threaded through EnsureVRF.
 func SetGatewayAddressAssignment(prefix *net.IPNet, nodeID string) {
 	gatewayAssignmentMu.Lock()
 	defer gatewayAssignmentMu.Unlock()
@@ -61,42 +42,31 @@ func SetGatewayAddressAssignment(prefix *net.IPNet, nodeID string) {
 	gatewayNodeID = nodeID
 }
 
-// gatewayAddressAssignment returns the currently configured prefix/nodeID
-// pair -- prefix == nil means disabled. Callers must not mutate the
-// returned *net.IPNet.
+// gatewayAddressAssignment returns the configured prefix and nodeID. A nil
+// prefix means assignment is disabled. Callers must not mutate the returned
+// *net.IPNet.
 func gatewayAddressAssignment() (*net.IPNet, string) {
 	gatewayAssignmentMu.Lock()
 	defer gatewayAssignmentMu.Unlock()
 	return gatewayPrefix, gatewayNodeID
 }
 
-// DeriveGatewayAddress deterministically computes this node's own
-// return-path gateway address for vpc inside prefix, a reserved,
-// byte-aligned IPv6 CIDR that is disjoint by construction from any tenant
-// address space -- see internal/config.VRFConfig's GatewayPrefix doc
-// comment for why it must never be carved out of, or derived from, a real
-// tenant VPC's own subnet: that space is allocated by a system this repo
-// has no visibility into (confirmed live: a real tenant address's own bit
-// layout does not match this repo's own internal/cni/ipam allocator), so
-// the only structural collision-safety guarantee available here is a
-// prefix that no tenant IPAM -- this repo's own or the external one --
-// is ever handed as a pool to allocate from in the first place.
+// DeriveGatewayAddress computes this node's return-path gateway address for
+// vpc inside prefix. The result depends only on its inputs, so any component
+// holding (prefix, vpc, nodeID) derives the same address without coordinating.
 //
-// The host bits (everything after prefix's own mask) are filled from
-// sha256(vpcHex + "|" + nodeID), truncated to fit -- collision-safe against
-// another VPC's own derived address, or another node's own address for the
-// same VPC, with overwhelming probability for any realistic (vpc, nodeID)
-// cardinality (a birthday bound over the mask's own free bit width), not
-// deterministically unique the way galactic-ipam's on-disk-marker
-// allocator is. That's an acceptable tradeoff here specifically because
-// nothing else ever contends for a specific value the way a live IPAM
-// allocation call does -- there is no "already claimed by someone else"
-// state to race against, only two independent hashes landing on the same
+// prefix must be a byte-aligned IPv6 CIDR with host bits left over, and must
+// be disjoint from every tenant VPC subnet. Tenant space is allocated by a
+// system outside this repo, so a prefix that no IPAM is ever handed as a pool
+// is the only collision guarantee available. vpc is base62-encoded; nodeID is
+// any caller-stable per-node identity. Returns the full 128-bit address, or an
+// error if prefix is unusable or vpc is not valid base62.
+//
+// Host bits come from sha256(vpcHex + "|" + nodeID) truncated to fit, so the
+// address is collision-safe with high probability rather than unique by
+// construction. Nothing contends for a specific value here, so there is no
+// "already claimed" state to race against, only two hashes landing on the same
 // bytes.
-//
-// vpc is base62-encoded (the same form crdnames/gateway.go's own
-// vpcRouteTarget already takes); nodeID is any caller-stable per-node
-// identity string (SetGatewayAddressAssignment's own doc comment).
 func DeriveGatewayAddress(prefix *net.IPNet, vpc, nodeID string) (net.IP, error) {
 	vpcHex, err := intf.Base62ToHex(vpc)
 	if err != nil {
@@ -130,19 +100,13 @@ func DeriveGatewayAddress(prefix *net.IPNet, vpc, nodeID string) (net.IP, error)
 	return addr, nil
 }
 
-// ensureGatewayAddress assigns this node's derived gateway address for vpc
-// (DeriveGatewayAddress) to the named interface -- ensureEgressDatapath's
-// own VRF-slave veth (ensureEgressVeth's inner end), already enslaved into
-// vpc's VRF for usid_egress's own attachment. Doing so is what lets
-// NetlinkGatewayAddressResolver (gateway.go) find a global-scope address
-// there with no further wiring: it already scans every interface enslaved
-// to a VPC's VRF for exactly this.
+// ensureGatewayAddress assigns vpc's derived gateway address to inner, the
+// VRF-slave veth end already enslaved into vpc's VRF. Placing it there is what
+// lets NetlinkGatewayAddressResolver find it, since that scans interfaces
+// enslaved to a VPC's VRF for a global-scope address.
 //
-// No-ops (returns nil) when address assignment isn't configured
-// (SetGatewayAddressAssignment never called) -- callers must treat that
-// identically to success, matching ensureNodeSourceAddress's own
-// non-fatal-on-not-yet-available stance just above it in
-// ensureEgressDatapath.
+// Returns nil when assignment is not configured. Callers must treat that as
+// success.
 func ensureGatewayAddress(vpc, inner string) error {
 	prefix, nodeID := gatewayAddressAssignment()
 	if prefix == nil {
@@ -159,9 +123,8 @@ func ensureGatewayAddress(vpc, inner string) error {
 		return fmt.Errorf("look up %q: %w", inner, err)
 	}
 
-	// /128, matching exactly what GatewayPublisher.PublishGateway
-	// advertises (gateway.go's own addr.String()+"/128") -- a host route,
-	// not a claim on prefix's own subnet as a whole.
+	// A host route, matching what GatewayPublisher.PublishGateway advertises,
+	// rather than a claim on the whole prefix.
 	nladdr := &netlink.Addr{IPNet: &net.IPNet{IP: addr, Mask: net.CIDRMask(net.IPv6len*8, net.IPv6len*8)}}
 	if err := netlink.AddrReplace(link, nladdr); err != nil {
 		return fmt.Errorf("assign gateway address %s to %q: %w", addr, inner, err)
@@ -170,30 +133,20 @@ func ensureGatewayAddress(vpc, inner string) error {
 	return ensureGatewayVRFRoute(vpc, addr)
 }
 
-// ensureGatewayVRFRoute pulls traffic for this VPC's gateway address into
-// that VPC's VRF, by routing it at the VRF device in this namespace's main
-// table.
+// ensureGatewayVRFRoute pulls traffic for vpc's gateway address into that
+// VPC's VRF, by routing addr at the VRF device in the main table.
 //
-// Assigning the address above is not enough to receive on it. It lands on a
-// veth enslaved to the VPC's VRF, so it is local only within that VRF's own
-// table -- while a reply arriving from outside, redirected in by
-// usid_ingress on the host, lands on this pod's primary interface, which is
-// in no VRF at all. The input lookup then runs in the main table, finds
-// nothing local for the address, and the packet is dropped without being
-// counted anywhere: Ip6InReceives advances, Ip6InDelivers does not, and
-// neither Ip6InNoRoutes nor Ip6InAddrErrors moves. Measured exactly that
-// way before this existed.
+// Assigning the address is not enough to receive on it. It lands on a veth
+// enslaved to the VPC's VRF, so it is local only within that VRF's table,
+// while a reply redirected in by usid_ingress arrives on the pod's primary
+// interface, which is in no VRF. The input lookup then runs in the main table,
+// finds nothing local, and drops the packet silently: Ip6InReceives advances,
+// Ip6InDelivers does not, and no error counter moves.
 //
-// A route at the VRF device is the standard way across that boundary: the
-// VRF driver redirects the lookup into its own table, where the address is
-// local, and delivery proceeds. It is the same idiom the pod-subnet routes
-// this sidecar already installs use to reach a VPC at all, applied to the
-// one address the sidecar owns itself rather than to a remote prefix.
-//
-// In the main table deliberately, not the VRF's: a lookup that has already
-// entered the VRF's table finds the address local there and never needs
-// this, so putting it inside would be inert. The main table is where the
-// lookup that currently fails happens.
+// A route at the VRF device makes the VRF driver redirect the lookup into its
+// own table, where the address is local. It belongs in the main table, not the
+// VRF's: a lookup that already entered the VRF table finds the address without
+// it.
 func ensureGatewayVRFRoute(vpc string, addr net.IP) error {
 	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 	vrfLink, err := netlink.LinkByName(vrfName)

@@ -4,73 +4,50 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// nat66.c implements the XDP datapath for one shard of galactic-nat66's
-// sharded, stateful NAT66 egress tier (design plan §3) -- a component
-// deliberately kept off galactic-gateway's own ingress datapath (edgedsr.c)
-// entirely: tenant egress (backend -> arbitrary internet destination) is a
-// different traffic pattern from ingress (fixed VIP, fixed backend pool)
-// and gets its own placement ring, own state, own self-routing return
-// path, with no shared map or hash ring between the two tiers.
+// nat66.c implements the XDP datapath for one shard of the sharded, stateful
+// NAT66 egress tier. It is deliberately separate from the gateway's ingress
+// datapath: tenant egress toward an arbitrary internet destination is a
+// different traffic pattern from ingress toward a fixed VIP and backend pool,
+// and gets its own placement ring, state, and return path, sharing no map or
+// hash ring with the other tier.
 //
-// This shard's own identity is two addresses (shard_config_table):
-// shard_sid, a real SRv6 uSID (uFMT 48+16, same encoding
-// internal/plumbing/ebpf/prog/usid.c's own decap already uses) other nodes'
-// tenant-VRF default routes encapsulate toward, with the Argument nibble
-// carrying the *requesting tenant's own VRFID* -- reusing the existing
-// per-node Argument-allocation mechanism rather than inventing a second
-// one, and giving this program tenant isolation for free, the same way
-// usid_ingress's own vrf_table lookup does; and shard_pub_addr, a plain
-// publicly-routable address used as the masquerade source for every flow
-// this shard NATs -- ordinary unicast routing delivers a reply to
-// shard_pub_addr back to this exact shard with no hashing or cross-shard
-// lookup needed on the return path at all (design plan §3.3's "the
-// destination address already names the owner").
+// A shard's identity is two addresses. shard_sid is a real SRv6 uSID that other
+// nodes' tenant-VRF default routes encapsulate toward, with the Argument
+// carrying the requesting tenant's VRFID: that reuses the existing per-node
+// Argument allocation rather than inventing a second one, and gives this
+// program tenant isolation the same way the ingress datapath's vrf_table lookup
+// does. shard_pub_addr is a publicly routable address used as the masquerade
+// source for every flow this shard translates, so ordinary unicast routing
+// returns a reply to this exact shard with no hashing or cross-shard lookup on
+// the return path.
 //
-// Packet path -- one program, dispatched on the outer IPv6 destination:
+// One program, dispatched on the outer IPv6 destination:
 //
-//  1. Parse the outer Ethernet + IPv6 header (bounds-checked). Not IPv6 --
+//  1. Parse the outer Ethernet and IPv6 header, bounds-checked. Not IPv6:
 //     XDP_PASS.
-//  2. daddr == shard_pub_addr: this is a reply arriving from the internet,
-//     addressed to a masquerade source this shard itself allocated --
-//     handle_return(): reverse nat66_conn_table lookup by the packet's own
-//     (proto, dest-facing tuple), un-SNAT back to the tenant backend's own
-//     view, and re-encapsulate toward that backend's worker node via SRv6
-//     (the same push_outer_header push/FIB-lookup mechanic
-//     internal/plumbing/ebpf/edgeprog/edgedsr.c already uses for its own
-//     encap -- copied here for the identical reason edgedsr.c's own header
-//     comment gives for copying it from edgenat.c: proven, unchanging
-//     mechanism, not worth threading through a shared header neither file
-//     otherwise needs). No matching conn_table row -- drop (this address
-//     is claimed).
-//  3. Outer daddr's top 64 bits (Block+Node-ID) match this shard's own
-//     shard_sid, and nexthdr is 41 (IPv6-in-IPv6, no SRH) -- this is a
-//     tenant's own outbound egress packet, encapsulated the same way any
-//     other cross-node SRv6 destination is (RouteEgressAdd's own
-//     SEG6_IPTUN_MODE_ENCAP_RED wire format). handle_forward(): strip the
-//     outer header, read the Argument nibble as this flow's tenant_arg
-//     (isolation key -- two tenants' colliding backend ULA addresses never
-//     share a nat66_conn_table row, because tenant_arg is part of the
-//     forward key), allocate (or reuse) a masquerade port via the same
-//     probe-then-BPF_NOEXIST-claim technique
-//     internal/plumbing/ebpf/edgeprog/edgedsr.c's Full-NAT predecessor
-//     used for SNAT-port allocation, SNAT the source to
-//     shard_pub_addr:allocated_port, fix the checksum via bpf_csum_diff
-//     (this is XDP, no __sk_buff, so bpf_l4_csum_replace is unavailable --
-//     same constraint edgenat.c's own header comment documents), and
-//     XDP_PASS: once SNAT'd to a real public address, this is an ordinary
-//     internet-routable packet needing no further SRv6 handling -- the
-//     kernel's own default route takes it from here, so this program does
-//     not do its own bpf_fib_lookup for the general-internet leg the way
-//     it does for the encap-back-to-tenant leg in handle_return.
-//  4. Anything else -- XDP_PASS (not this shard's traffic at all).
+//  2. Destination equal to shard_pub_addr is a reply from the internet
+//     addressed to a masquerade source this shard allocated. Look up the
+//     connection table in reverse, undo the translation back to the tenant
+//     backend's view, and re-encapsulate toward that backend's worker node. No
+//     matching row is a drop, this address being claimed.
+//  3. Destination whose top 64 bits match shard_sid, with an IPv6-in-IPv6 next
+//     header and no routing header, is a tenant's outbound packet encapsulated
+//     the way any cross-node SRv6 destination is. Strip the outer header, read
+//     the Argument as this flow's tenant key so two tenants' colliding backend
+//     addresses never share a row, allocate or reuse a masquerade port,
+//     translate the source to shard_pub_addr and that port, fix the checksum
+//     with a checksum diff, since XDP has no sk_buff and the incremental helper
+//     is unavailable, and XDP_PASS. Once translated to a public address this is
+//     an ordinary internet-routable packet and the kernel's default route takes
+//     it from there, so no FIB lookup of this program's own is needed on that
+//     leg.
+//  4. Anything else: XDP_PASS.
 //
-// No tenant-identity check beyond the Argument nibble itself: a forged
-// Argument only misdirects the forger's *own* isolation bucket, never a
-// legitimate tenant's, but this program trusts that only legitimate
-// SRv6-fabric-internal traffic ever reaches it at all -- the same
-// trust-boundary/anti-spoofing question the design plan's §5 already
-// flags as needing its own security pass before real traffic, not
-// something this file's own logic resolves.
+// There is no tenant-identity check beyond the Argument itself. A forged
+// Argument misdirects only the forger's own isolation bucket, never a
+// legitimate tenant's, but this program trusts that only fabric-internal
+// traffic reaches it at all. The trust boundary is a separate security
+// question, not something this file resolves.
 #include <linux/bpf.h>
 
 #define SEC(name) __attribute__((section(name), used))
@@ -78,12 +55,10 @@
 #define __type(name, val) typeof(val) *name
 #define NAT66_ALWAYS_INLINE inline __attribute__((always_inline))
 
-// NAT66_BARRIER_VAR: same verifier bounds-narrowing gotcha as
-// edgedsr.c/edgenat.c's EDGE_BARRIER_VAR -- see either file's header
-// comment. Reused here under this file's own naming convention rather
-// than importing a macro from either (each file is deliberately
-// self-contained, one external header dependency, per this codebase's
-// established convention).
+// NAT66_BARRIER_VAR handles the same verifier bounds-narrowing behavior the
+// other datapath files document under their own names. Each file is
+// self-contained with one external header dependency, so the macro is repeated
+// rather than imported.
 #define NAT66_BARRIER_VAR(var) asm volatile("" : "=r"(var) : "0"(var))
 
 // ---------------------------------------------------------------------
@@ -114,8 +89,7 @@ static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 pl
 #define NAT66_PAT_PORT_RANGE 28000
 
 // ---------------------------------------------------------------------
-// Minimal, self-contained header structs -- byte-exact to the wire
-// formats, matching usid.c/edgedsr.c's own convention.
+// Minimal, self-contained header structs, byte-exact to the wire formats.
 // ---------------------------------------------------------------------
 
 struct nat66_ethhdr {
@@ -156,16 +130,13 @@ struct nat66_udphdr {
 // Map key/value types.
 // ---------------------------------------------------------------------
 
-// struct conn_key: the forward row is keyed by the tenant backend's
-// own facing tuple (proto, tenant_arg, backend_addr:backend_port ->
-// dest_addr:dest_port) -- tenant_arg (this flow's VRFID, read from the
-// SRv6 Argument nibble) is part of the key specifically so two tenants
-// presenting the identical backend ULA never collide on this row, the
-// same reasoning component 2 (NPTv6)'s VRFID-keyed nptv6_table already
-// uses. The reverse row is keyed by (proto, tenant_arg=0,
-// dest_addr:dest_port -> shard_pub_addr:masq_port) -- tenant_arg is
-// unused/zero there, since shard_pub_addr:masq_port is already globally
-// unique by construction (this shard allocated it, from its own address).
+// struct conn_key. The forward row is keyed by the tenant backend's facing
+// tuple, with tenant_arg, this flow's VRFID read from the SRv6 Argument, part
+// of the key so two tenants presenting the same backend address never collide.
+// The reverse row is keyed by the internet peer's tuple against
+// shard_pub_addr and the masquerade port, with tenant_arg zero: that pair is
+// already globally unique, this shard having allocated it from its own
+// address.
 struct conn_key {
 	__u8 proto;
 	__u8 pad[1];
@@ -250,32 +221,23 @@ static NAT66_ALWAYS_INLINE int addr6_eq(const __u8 a[16], const __u8 b[16])
 	return 1;
 }
 
-// locator_matches checks only the top 64 bits (Block(48)+Node-ID(16)) of
-// daddr against this shard's own shard_sid -- the same "is this mine"
-// granularity internal/plumbing/ebpf/prog/usid.c's own locator_table
-// match uses, since the Argument nibble below it varies per tenant (see
-// this file's own header comment: the Argument nibble is read afterward,
-// in handle_forward, as the requesting tenant's own VRFID -- it is
-// deliberately not part of "is this addressed to me" at all).
+// locator_matches checks only the top 64 bits of daddr against this shard's
+// shard_sid, the same "is this mine" granularity the ingress datapath's locator
+// match uses. The Argument below it varies per tenant and is read afterward, so
+// it is deliberately not part of the question.
 //
-// This 64-bit granularity requires shard_sid's own (Block, Node-ID) to be
-// reserved and disjoint from every *other* uSID identity sharing this
-// node's uplink -- in particular, a shard's own Node-ID must differ from
-// the Node-ID any co-located tenant-delivery BGPRouter on this same node
-// already uses (see GALACTIC_NAT66_SHARD_SID's own deployment-side doc
-// comment, e.g. deploy/containerlab/resources/galactic-nat66/*/node-patch.yaml).
-// Confirmed live: an earlier lab config reused a co-located tenant
-// worker's own real Node-ID for that same node's shard placeholder SID,
-// which meant ordinary tenant ingress traffic addressed to that node's
-// real delivery uSID (same Block+Node-ID, nexthdr also 41 since
-// SEG6_IPTUN_MODE_ENCAP_RED uses that for every IPv6-inner packet, tenant
-// delivery included) was silently hijacked here, before it ever reached
-// usid_ingress's own TC hook -- not a bug in this 64-bit match itself
-// (widening it to a full 128-bit compare was tried and reverted: it broke
-// the correct, intentional case of two different tenants' egress packets
-// legitimately sharing this exact shard_sid with two different Argument
-// values), but an address-allocation conflict this function has no way
-// to detect on its own.
+// That granularity requires shard_sid's Block and Node-ID to be reserved and
+// disjoint from every other uSID identity sharing this node's uplink. In
+// particular, a shard's Node-ID must differ from the one any co-located
+// tenant-delivery BGPRouter on the same node uses. Reusing it means ordinary
+// tenant ingress traffic addressed to that node's real delivery uSID, which
+// shares the Block and Node-ID and also carries an IPv6-in-IPv6 next header, is
+// silently hijacked here before reaching the ingress hook.
+//
+// That is an address-allocation conflict this function cannot detect, not a
+// flaw in the 64-bit match. Widening to a full 128-bit compare breaks the
+// intended case of two tenants' egress packets sharing this shard_sid with
+// different Argument values.
 static NAT66_ALWAYS_INLINE int locator_matches(const __u8 daddr[16], const __u8 shard_sid[16])
 {
 	for (int i = 0; i < 8; i++) {
@@ -285,10 +247,8 @@ static NAT66_ALWAYS_INLINE int locator_matches(const __u8 daddr[16], const __u8 
 	return 1;
 }
 
-// read_argument extracts the 12-bit Argument nibble from a uFMT 48+16
-// address at bits 69-80 (daddr bytes 8-9) -- identical bit positions and
-// composition to internal/plumbing/ebpf/uformat's Go-side encoding and
-// usid.c's own step 5 read.
+// read_argument extracts the 12-bit Argument from a uFMT 48+16 address at bits
+// 69-80, the same bit positions the Go encoding and the ingress datapath use.
 static NAT66_ALWAYS_INLINE __u16 read_argument(const __u8 daddr[16])
 {
 	return ((__u16) (daddr[8] & 0x0F) << 8) | daddr[9];
@@ -317,10 +277,8 @@ static NAT66_ALWAYS_INLINE __be16 csum_fold_add(__be16 check, __s64 diff)
 	return (__be16) ~((__u16) sum);
 }
 
-// struct l4_view mirrors edgenat.c's identical type and identical
-// rationale (see that file's own doc comment): direct, already-typed
-// pointers to the L4 fields a rewrite needs, resolved exactly once,
-// adjacent to the bounds check that proves them safe.
+// struct l4_view holds already-typed pointers to the L4 fields a rewrite needs,
+// resolved exactly once, adjacent to the bounds check that proves them safe.
 struct l4_view {
 	__be16 sport;
 	__be16 dport;
@@ -356,13 +314,10 @@ static NAT66_ALWAYS_INLINE int parse_l4(__u8 proto, void *l4, void *data_end, st
 	return -1;
 }
 
-// fix_l4_checksum applies the combined address+port checksum delta for a
-// masquerade rewrite (one address, one port changed; the peer's own
-// address/port are unchanged) -- edgenat.c's identical fix_l4_checksum
-// covered a full 4-tuple rewrite (both addresses, both ports); this one is
-// simplified to the 2-field case NAT66 masquerade actually needs, still
-// via the same bpf_csum_diff technique (XDP has no __sk_buff, so
-// bpf_l4_csum_replace is unavailable).
+// fix_l4_checksum applies the combined address and port checksum delta for a
+// masquerade rewrite, where one address and one port change and the peer's are
+// unchanged. It uses a checksum diff because XDP has no sk_buff and the
+// incremental L4 helper is unavailable.
 static NAT66_ALWAYS_INLINE void fix_l4_checksum(__be16 *check_ptr, const __u8 old_addr[16], __be16 old_port,
 						 const __u8 new_addr[16], __be16 new_port)
 {
@@ -416,10 +371,9 @@ static NAT66_ALWAYS_INLINE void count_fib_drop(long fib_rc)
 		count_drop(DROP_REASON_NAT66_FIB_LOOKUP_FAILED);
 }
 
-// push_outer_header: identical mechanism to edgedsr.c/edgenat.c's own
-// function of the same name -- see either's header comment for the full
-// byte-level rationale. Copied, not shared, per this codebase's existing
-// convention (each program's surrounding types are independently defined).
+// push_outer_header uses the same mechanism as the other datapath programs'
+// function of the same name. Copied rather than shared, since each program
+// defines its own surrounding header structs.
 static NAT66_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16], const __u8 dst[16],
 						  __be16 inner_payload_len_plus_ip6hdr)
 {
@@ -438,11 +392,9 @@ static NAT66_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 
 	struct nat66_ethhdr *eth = data;
 	struct nat66_ip6hdr *outer = (void *) (eth + 1);
 
-	// vtc_flow[0]'s high nibble is the IPv6 version field -- see
-	// edgedsr.c's identical fix (push_outer_header) for the full story:
-	// a real, previously uncaught bug inherited from the removed
-	// edgenat.c, found via live-kernel investigation, not
-	// BPF_PROG_TEST_RUN (which never validates this field).
+	// The high nibble of vtc_flow[0] is the IPv6 version and must be set: a
+	// zeroed default produces a header receivers parse as invalid IPv6, which a
+	// synthetic program run never validates.
 	__builtin_memset(outer->vtc_flow, 0, sizeof(outer->vtc_flow));
 	outer->vtc_flow[0] = 0x60;
 	outer->payload_len = inner_payload_len_plus_ip6hdr;
@@ -477,23 +429,19 @@ static NAT66_ALWAYS_INLINE int strip_outer_header(struct xdp_md *ctx, struct nat
 	return 0;
 }
 
-// handle_forward: a tenant's own outbound egress packet, SRv6-encapsulated
-// toward this shard. Strips the outer header, resolves tenant_arg from the
-// Argument nibble, allocates (or reuses) a masquerade port, SNATs the
-// source, and passes the now-plain-internet-routable packet to the
-// kernel's own routing (XDP_PASS) -- see this file's header comment for
-// why no FIB lookup of its own is needed on this leg.
+// handle_forward processes a tenant's outbound packet encapsulated toward this
+// shard. It strips the outer header, resolves the tenant key from the Argument,
+// allocates or reuses a masquerade port, translates the source, and hands the
+// now internet-routable packet to the kernel's routing.
 static NAT66_ALWAYS_INLINE int handle_forward(struct xdp_md *ctx, struct nat66_ip6hdr *outer,
 					       struct shard_config *cfg)
 {
 	__u16 tenant_arg = read_argument(outer->daddr);
-	// outer->saddr (the tenant's own worker-node uSID, needed below to
-	// build the reply's own re-encap destination) must be captured now,
-	// into a plain local array -- strip_outer_header calls
-	// bpf_xdp_adjust_head twice, which invalidates every packet pointer
-	// derived before it, `outer` included; reading outer->saddr *after*
-	// the strip is a stale-pointer access the verifier rejects (confirmed
-	// empirically: "R9 invalid mem access 'scalar'" without this).
+	// The tenant's worker-node uSID, needed below to build the reply's
+	// re-encapsulation destination, must be captured into a local now. Stripping
+	// the outer header adjusts the packet head twice, which invalidates every
+	// pointer derived before it, so reading it afterward is a stale access the
+	// verifier rejects.
 	__u8 tenant_usid[16];
 	__builtin_memcpy(tenant_usid, outer->saddr, 16);
 
@@ -615,20 +563,17 @@ static NAT66_ALWAYS_INLINE int handle_return(struct xdp_md *ctx, struct nat66_ip
 	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
 	*l4v.dport_ptr = cv->backend_port;
 
-	// Must include the inner IPv6 header's own 40 bytes, not just its
-	// payload -- see edgedsr.c's identical fix (its handle_forward call
-	// site) for the full story: a real, previously uncaught bug
-	// inherited from the removed edgenat.c, found via live-kernel
-	// investigation, not BPF_PROG_TEST_RUN.
+	// Must include the inner IPv6 header's own 40 bytes, not just its payload.
+	// Passing the inner payload length alone undercounts the outer header's
+	// declared length on every packet, which a validating receiver rejects.
 	__be16 inner_payload_len_plus_ip6hdr =
 		__builtin_bswap16((__u16) sizeof(struct nat66_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 
-	// Outer source is this shard's own SRv6-reachable identity
-	// (shard_sid), not any field of cv -- the tenant's worker node
-	// decaps this exactly like any other cross-node SRv6 packet, and
-	// does not care about (or validate) the encap source, but it must
-	// still be a real, this-node address, not the internet peer's own
-	// address cv->dest_addr holds.
+	// The outer source is this shard's own SRv6-reachable identity, not any
+	// field of the connection row. The tenant's worker node decapsulates this
+	// like any cross-node SRv6 packet and does not validate the encapsulation
+	// source, but it must still be a real address on this node rather than the
+	// internet peer's.
 	if (push_outer_header(ctx, cfg->shard_sid, cv->backend_usid, inner_payload_len_plus_ip6hdr) != 0)
 		return XDP_DROP;
 

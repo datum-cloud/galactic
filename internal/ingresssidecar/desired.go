@@ -13,10 +13,9 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 )
 
-// IsSelected reports whether slice carries the label this sidecar watches
-// EndpointSlices through — presence of crdnames.LabelTenantID, per §3 of
-// the plan ("select by label presence, group by its value"). Used both as
-// the controller's watch predicate and by BuildDesiredRoute.
+// IsSelected reports whether slice carries the tenant label this sidecar watches
+// EndpointSlices through. Used both as the controller's watch predicate and by
+// BuildDesiredRoute.
 func IsSelected(slice *discoveryv1.EndpointSlice) bool {
 	if slice == nil {
 		return false
@@ -25,20 +24,18 @@ func IsSelected(slice *discoveryv1.EndpointSlice) bool {
 	return ok
 }
 
-// BuildDesiredRoute translates one EndpointSlice into the DesiredRoute this
-// sidecar should converge toward.
+// BuildDesiredRoute translates one EndpointSlice into the route this sidecar
+// should converge toward.
 //
-// Returns (nil, nil) — "nothing to do, not an error" — when slice isn't one
-// this sidecar owns (IsSelected is false) or hasn't picked up its SID
-// annotation yet: crdnames.AnnotationSID is only set once the pod's hosting
-// node's BGPRouter has SRv6Locator/NodeID configured (see that constant's
-// own doc comment), so a freshly-published EndpointSlice can legitimately
-// have the tenant label but no SID yet, pending a later update.
+// It returns nil with a nil error, meaning nothing to do rather than an error,
+// when the slice is not one this sidecar owns or has not picked up its SID
+// annotation yet. That annotation appears only once the pod's node has a locator
+// and node ID configured, so a freshly published slice can legitimately carry
+// the tenant label and no SID, pending a later update.
 //
-// Returns (nil, err) for a slice that IS selected but malformed in a way
-// that indicates a real problem worth logging — a bad tenant identifier, an
-// unparseable SID/address, or an unsupported (non-IPv6) AddressType, which
-// per §3 should never occur for these backends.
+// It returns an error for a slice that is selected but malformed in a way worth
+// logging: a bad tenant identifier, an unparseable SID or address, or a
+// non-IPv6 address type, which should never occur for these backends.
 func BuildDesiredRoute(slice *discoveryv1.EndpointSlice) (*DesiredRoute, error) {
 	if !IsSelected(slice) {
 		return nil, nil

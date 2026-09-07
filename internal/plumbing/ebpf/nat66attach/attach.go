@@ -19,20 +19,15 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
 )
 
-// PinDir is the default bpffs directory every nat66prog map is pinned
-// under -- deliberately distinct from every other datapath's own PinDir
-// in this codebase (internal/plumbing/ebpf/attach.PinDir,
-// internal/plumbing/ebpf/edgeattach.PinDir), so this datapath is fully
-// independent under bpffs even where map names don't actually collide.
+// PinDir is the default bpffs directory every NAT66 map is pinned under,
+// deliberately distinct from every other datapath's, so each is fully
+// independent under bpffs even where map names do not collide.
 const PinDir = "/sys/fs/bpf/galactic-nat66"
 
-// Load loads nat66prog's compiled object with every map pinned under
-// pinDir. A map already pinned there from a previous process is reused
-// as-is; see internal/plumbing/ebpf/edgeattach.Load's identical doc
-// comment for the full rationale (schema-mismatch recreation, pin-by-name
-// semantics) -- not repeated here, since it applies unchanged. See doc.go
-// for why, unlike edgeattach.Load, there is no kernel preflight check
-// here.
+// Load loads the compiled NAT66 object with every map pinned under pinDir. A
+// map already pinned there by a previous process is reused as-is. See the
+// package doc comment for why, unlike its sibling, there is no kernel preflight
+// check here.
 func Load(pinDir string) (*nat66prog.Nat66Objects, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("nat66attach: remove memlock rlimit: %w", err)
@@ -53,13 +48,11 @@ func Load(pinDir string) (*nat66prog.Nat66Objects, error) {
 	opts := &ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: pinDir}}
 	loadErr := spec.LoadAndAssign(&loaded, opts)
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
-		// Every map here is either control-plane-owned and reconstructable
-		// (shard_config_table is rewritten once at process startup by
-		// cmd/galactic-nat66's setupNat66Datapath) or datapath-owned and
-		// self-managed (nat66_conn_table is an LRU that self-evicts;
-		// drop_reasons is a pure counter array) -- a stale pin from an
-		// older, incompatible map layout is safe to recreate rather than
-		// fatal.
+		// Every map here is either control-plane-owned and reconstructable,
+		// the shard config being rewritten at process startup, or
+		// datapath-owned and self-managing, the connection table being an
+		// LRU that self-evicts and the drop counters a pure array. A stale
+		// pin from an incompatible layout is safe to recreate.
 		slog.Warn("nat66attach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate at next startup)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
@@ -99,11 +92,10 @@ func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	return errors.Join(errs...)
 }
 
-// Attach attaches program (nat66prog.Nat66Objects.Nat66Ingress) to
-// ifaceName's XDP hook in native (driver) mode, returning the resulting
-// link.Link for the caller to hold open and Close on shutdown -- see
-// doc.go for why native mode is required, not merely preferred, and why no
-// pinning or Watch-style re-attachment is needed here.
+// Attach attaches program to ifaceName's XDP hook in native driver mode,
+// returning the link for the caller to hold open and close on shutdown. See the
+// package doc comment for why native mode is required and why no pinning or
+// re-attachment is needed.
 func Attach(program *ebpf.Program, ifaceName string) (link.Link, error) {
 	if program == nil {
 		return nil, errors.New("nat66attach: program is nil")

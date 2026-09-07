@@ -16,14 +16,10 @@ import (
 
 const cniTimeout = 10 * time.Second
 
-// ebpfPinDir is the bpffs directory this package's own eBPF registration
-// (registerEBPFDatapath, bgp.go), rollback (resourceTracker.cleanup,
-// resource.go), and CHECK (checkEBPFEntry, ops_check.go) all read/write
-// pinned uSID maps under. A package var defaulting to attach.PinDir, rather
-// than every call site reading that constant directly, so tests can point
-// it at a throwaway pin directory instead of the real production one —
-// attach.PinDir being a const otherwise gives production callers no seam
-// for that (see resource_test.go's resourceTracker.cleanup tests).
+// ebpfPinDir is the bpffs directory this package's eBPF registration, rollback,
+// and CHECK paths read and write pinned uSID maps under. A package var rather
+// than every call site reading the constant directly, so tests can point it at a
+// throwaway directory instead of the production one.
 var ebpfPinDir = attach.PinDir
 
 // RunPlugin starts galactic-bgp, handling the CNI ADD, DEL, CHECK, and

@@ -12,49 +12,43 @@ import (
 	"sort"
 )
 
-// Backend is one candidate a Table can assign lookup-table slots to. Key
-// must be stable and unique within one Table's backend set — it is the sole
-// input to both of a backend's permutation hashes (offsetSeed/skipSeed
-// below), so two backends sharing a Key would collide onto the identical
-// permutation and are not distinguishable by this package.
+// Backend is one candidate a Table can assign lookup slots to. Key must be
+// stable and unique within a Table's backend set: it is the sole input to both
+// of a backend's permutation hashes, so two backends sharing a Key collide onto
+// the same permutation and are indistinguishable here.
 type Backend interface {
 	Key() string
 }
 
-// offsetSeed/skipSeed are fixed salts distinguishing the two independent
-// hashes Maglev's permutation generation needs (the paper's h1/h2) from one
-// underlying hash function (fnv1a) applied to Key() + a different seed,
-// rather than requiring two unrelated hash algorithms.
+// offsetSeed and skipSeed are fixed salts distinguishing the two independent
+// hashes the permutation needs, derived from one hash function applied to the
+// key plus a different seed rather than two unrelated algorithms.
 const (
 	offsetSeed uint64 = 0xda7a5eed0ffce7e5
 	skipSeed   uint64 = 0x5eedda7a1ceb00c5
 )
 
-// Table is a Maglev consistent-hash lookup table over a fixed backend set.
-// See doc.go for the properties this construction gives: deterministic
-// given (backends, size), and a bounded (~1/N) disruption fraction on
-// backend-set changes.
+// Table is a Maglev consistent-hash lookup table over a fixed backend set. See
+// the package doc comment for the properties: deterministic given its inputs,
+// with a bounded disruption fraction when the backend set changes.
 type Table struct {
 	size     int
 	entries  []Backend
 	backends []Backend // sorted by Key(), for deterministic iteration/inspection
 }
 
-// New builds a Table assigning size lookup slots across backends. size must
-// be prime (see IsPrime) and, per the Maglev paper, at least 100x
-// len(backends) for the disruption-bound property to hold in practice — New
-// does not itself enforce the 100x guidance (a caller validating a small
-// fixed table against a handful of backends in a test is a legitimate use
-// that would otherwise be rejected), but does reject a size that cannot even
-// fit one slot per backend, and any non-prime size (the permutation-cycle
-// argument the paper's disruption bound rests on requires it).
+// New builds a Table assigning size lookup slots across backends.
 //
-// backends must be non-empty and every Key() unique; New returns an error
-// otherwise rather than silently building a degenerate table. The input
-// slice order does not affect the result — backends are sorted by Key()
-// internally, so every caller building a Table from the identical backend
-// set (regardless of the order each independently observed it in, e.g. from
-// unordered CRD list results) produces the byte-identical table.
+// size must be prime, which the disruption bound's permutation-cycle argument
+// requires, and the paper recommends at least 100 times the backend count for
+// that bound to hold in practice. New does not enforce the ratio, a small fixed
+// table in a test being a legitimate use, but does reject a size too small to
+// fit one slot per backend, and any non-prime size.
+//
+// backends must be non-empty with unique keys; anything else is an error rather
+// than a silently degenerate table. Input order does not matter, backends being
+// sorted by key internally, so every caller building from the same set produces
+// the byte-identical table whatever order it observed them in.
 func New(backends []Backend, size int) (*Table, error) {
 	if len(backends) == 0 {
 		return nil, errors.New("maglev: at least one backend is required")
@@ -80,10 +74,10 @@ func New(backends []Backend, size int) (*Table, error) {
 	return t, nil
 }
 
-// fill runs the paper's round-robin permutation-preference algorithm
-// (§3.4): each backend repeatedly proposes its next-preferred still-free
-// slot (computed lazily from its own offset/skip, never materializing a
-// full n-by-size permutation matrix) until every slot is claimed.
+// fill runs the round-robin permutation-preference algorithm: each backend
+// repeatedly proposes its next-preferred free slot, computed lazily from its
+// own offset and skip rather than materializing a full permutation matrix,
+// until every slot is claimed.
 func (t *Table) fill() {
 	n := len(t.backends)
 	offset := make([]uint64, n)
@@ -118,9 +112,8 @@ func (t *Table) fill() {
 	}
 }
 
-// Lookup returns the backend assigned to key's slot (key mod the table
-// size). Every Table built from the identical (backends, size) input
-// resolves the identical key to the identical backend — see doc.go.
+// Lookup returns the backend assigned to key's slot. Every Table built from the
+// same inputs resolves the same key to the same backend.
 func (t *Table) Lookup(key uint64) Backend {
 	return t.entries[key%uint64(t.size)]
 }
@@ -132,11 +125,10 @@ func (t *Table) Size() int { return t.size }
 // Key(). Callers must not mutate the returned slice.
 func (t *Table) Backends() []Backend { return t.backends }
 
-// IsPrime reports whether n is a prime number (n < 2 is never prime). Trial
-// division is intentionally used rather than a probabilistic test: table
-// sizes in this package's use are modest (tens of thousands at most, chosen
-// once per rule/shard-set change, not per packet), and correctness matters
-// more than the marginal speed of a Miller-Rabin implementation here.
+// IsPrime reports whether n is prime; anything below 2 is not. Trial division
+// rather than a probabilistic test: table sizes here are modest and chosen once
+// per rule change rather than per packet, so correctness matters more than the
+// marginal speed.
 func IsPrime(n int) bool {
 	if n < 2 {
 		return false
@@ -152,11 +144,9 @@ func IsPrime(n int) bool {
 	return true
 }
 
-// hashKey derives one of the two independent hash values Maglev's
-// permutation generation needs from a single fnv1a hash of key's own bytes
-// followed by seed's own 8 bytes — a different seed produces an
-// uncorrelated-in-practice second hash without depending on a second,
-// unrelated hash algorithm.
+// hashKey derives one of the two hash values the permutation needs, from a
+// single hash over the key's bytes followed by the seed's. A different seed
+// produces an uncorrelated second hash without a second algorithm.
 func hashKey(key string, seed uint64) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(key))

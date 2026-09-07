@@ -37,11 +37,10 @@ func main() {
 	}
 }
 
-// checkWatchPermissions issues a SelfSubjectAccessReview for each resource
-// type the manager watches, checking the watch verb. If any review denies
-// the request the informer cache will never sync and all reconcilers will
-// be silently blocked; this logs a clear, actionable message at startup so
-// the problem is immediately obvious.
+// checkWatchPermissions issues an access review for the watch verb on each
+// resource the manager watches. A denial means the informer cache never syncs
+// and every reconciler is silently blocked, so this logs a clear, actionable
+// message at startup instead.
 func checkWatchPermissions(mgr ctrl.Manager) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {

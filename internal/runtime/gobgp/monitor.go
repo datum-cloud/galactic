@@ -26,27 +26,23 @@ import (
 	vrfpkg "go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// pinDir is the bpffs directory probeEgressRouteWrite opens egress_route_table
-// from -- a package var defaulting to attach.PinDir, the same test seam
-// internal/plumbing/srv6's own pinDir var provides, so this package's tests
-// don't depend on a real bpffs mount or root privileges either.
+// pinDir is the bpffs directory probeEgressRouteWrite opens
+// egress_route_table from. A package var so tests need no bpffs mount or
+// root.
 var pinDir = attach.PinDir
 
 // errVRFNotInThisNetns marks the one vrfTableID failure that is an ordinary
-// operating condition rather than a fault: the VRF exists, just not in this
-// process's own network namespace. applyVRFs skips such a VRF at debug
-// level instead of reporting that its routes will not be installed --
-// see vrfTableID's own History note for why there is nothing for this
-// process to install in that case anyway.
+// condition rather than a fault: the VRF exists, but not in this process's
+// network namespace. applyVRFs skips such a VRF at debug level, since there is
+// nothing for this process to install for it anyway.
 var errVRFNotInThisNetns = errors.New("kernel VRF interface is not in this process's network namespace")
 
-// startRIBMonitor starts the shared EVPN best-path watcher goroutine once per
-// GoBGPRuntime lifetime, regardless of how many VRFs exist. It installs and
-// removes kernel SEG6 encap routes in the relevant VRF routing table as
-// remote EVPN Type 5 paths are added or withdrawn, dispatching each path to
-// its VRF via rtIndex (kept current by applyVRFs) rather than being scoped to
-// one VRF — a node can host thousands of VRFs, one per VPC attachment, so a
-// dedicated goroutine and WatchEvent subscription per VRF would not scale.
+// startRIBMonitor starts the shared EVPN best-path watcher goroutine, once per
+// runtime lifetime however many VRFs exist. It installs and removes routes in
+// the relevant VRF routing table as remote EVPN Type 5 paths are added and
+// withdrawn, dispatching each path to its VRF through the route-target index.
+// One goroutine and subscription for all VRFs, because a node can host
+// thousands and one per VRF would not scale.
 func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer) {
 	if r.srvCtx == nil {
 		slog.Info("startRIBMonitor: skipping — srvCtx is nil")
@@ -75,20 +71,16 @@ func (r *GoBGPRuntime) watchEVPNRIB(ctx context.Context, b *gobgpserver.BgpServe
 	}
 }
 
-// backfillEVPNRoutes scans the current global EVPN RIB and (re)applies every
-// best path against rtIndex. It is called synchronously from applyVRFs right
-// after a new VRF is registered, to catch remote paths that were already
-// best-path before that VRF's route target existed in rtIndex.
+// backfillEVPNRoutes scans the current global EVPN RIB and reapplies every best
+// path against the route-target index. applyVRFs calls it synchronously right
+// after registering a new VRF, to catch remote paths that were already best
+// path before that VRF's route target was indexed.
 //
-// This matters because the shared watchEVPNRIB goroutine starts once for the
-// whole runtime and registers WatchBestPath(true), which only replays the
-// then-current RIB at that single moment. VRFs are registered incrementally
-// as BGPVRFInstance CRDs are reconciled (potentially thousands, arriving over
-// time), so a remote path that became best-path before its VRF's RT was
-// indexed would otherwise never be installed — WatchBestPath only notifies on
-// future changes, not on-demand re-delivery. Since RouteEgressAdd is a
-// netlink route replace, re-applying already-installed routes here is a
-// harmless no-op.
+// The shared watcher registers for best-path notifications once and replays the
+// RIB only at that moment, while VRFs are registered incrementally as CRDs are
+// reconciled. Without this, a path that became best before its route target was
+// indexed would never be installed, since the watch notifies only on future
+// changes. Reapplying an already-installed route is a harmless replace.
 func (r *GoBGPRuntime) backfillEVPNRoutes(b *gobgpserver.BgpServer) {
 	err := b.ListPath(apiutil.ListPathRequest{
 		TableType: api.TableType_TABLE_TYPE_GLOBAL,
@@ -106,9 +98,9 @@ func (r *GoBGPRuntime) backfillEVPNRoutes(b *gobgpserver.BgpServer) {
 	}
 }
 
-// processEVPNPath installs or withdraws the kernel SEG6 encap route for a
-// single EVPN Type 5 path if it matches a VRF in rtIndex. logPrefix names the
-// caller for log correlation (the shared watcher vs. a VRF-registration backfill).
+// processEVPNPath installs or withdraws the route for a single EVPN Type 5 path
+// when it matches a known VRF. logPrefix names the caller, the shared watcher
+// or a registration backfill, for log correlation.
 func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	if path.Family != bgp.RF_EVPN {
 		return
@@ -149,13 +141,12 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 		return
 	}
 
-	// The destination SRv6 SID travels in the BGP Prefix-SID attribute (see
-	// prefixSIDAttr in paths.go), not the EVPN route's own Gateway IP field —
-	// that field can't carry an IPv6 SID for an IPv4 prefix (RFC 9136 requires
-	// the Gateway IP and Prefix to share an address family), so relying on it
-	// here silently installed a garbage seg6 segment for every IPv4 VPC
-	// prefix. Fall back to the transit next-hop when no Prefix-SID attribute
-	// is present (non-SRv6 advertisements — see buildEVPNPaths).
+	// The destination SID travels in the BGP Prefix-SID attribute, not the EVPN
+	// route's Gateway IP field. That field cannot carry an IPv6 SID for an IPv4
+	// prefix, since RFC 9136 requires the Gateway IP and Prefix to share an
+	// address family, so reading it installs a garbage segment for every IPv4
+	// VPC prefix. Fall back to the transit next hop for non-SRv6
+	// advertisements, which carry no Prefix-SID.
 	gw, ok := evpnPrefixSID(path.Attrs)
 	if !ok {
 		if nh := evpnMpReachNexthop(path.Attrs); nh != "" {
@@ -177,44 +168,32 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	}
 }
 
-// routeInstall is matchTableID's result: which kernel table processEVPNPath
-// should install path's route into, and which of srv6's two installers to
-// use -- RouteEgressAdd's SEG6 encap (a VRF-scoped tenant path, whose gw
-// always resolves to a real uSID decap SID) or RouteMainAdd's plain
-// next-hop route (plain is true; see RouteMainAdd's own doc comment for
-// why an RT-less path needs this instead).
+// routeInstall is matchTableID's result: which kernel table the route belongs
+// in, and which installer to use. plain selects an ordinary next-hop route for
+// a path with no route target; otherwise the route is encapsulated toward a
+// uSID decap SID.
 type routeInstall struct {
 	tableID uint32
 	plain   bool
 }
 
-// matchTableID resolves how to install one EVPN Type 5 path's route.
+// matchTableID resolves how to install one EVPN Type 5 path's route, and
+// reports false when the path belongs to no VRF this node participates in.
 //
-// A path carrying at least one Route Target extended community is a
-// tenant VRF route: matchTableID looks up the kernel VRF table that
-// imports one of those RTs, via the RT index maintained by applyVRFs, and
-// returns false if no VRF configured on this node imports any RT on the
-// path (a VRF this node doesn't participate in -- correctly skipped, not
-// installed anywhere). This is an O(1)-per-community lookup, not an
-// O(#VRFs) scan, so it stays cheap even with thousands of VRFs on the node.
+// A path carrying at least one route target is a tenant VRF route. It is looked
+// up in the route-target index applyVRFs maintains, an O(1) lookup per
+// community rather than a scan over VRFs, so it stays cheap with thousands on a
+// node.
 //
-// A path carrying no Route Target community at all is not VRF-scoped by
-// construction (buildEVPNPaths in paths.go only attaches the extended
-// communities attribute "if len(rts) > 0") -- e.g.
-// NetworkGatewayReconciler's anycast ingress-VIP advertisements, which
-// leave VRFID/Function unset for exactly this reason (that reconciler's
-// own package doc comment). Such a path is installed into the kernel's
-// main routing table (table ID 0, which both the kernel and this
-// vishvananda/netlink call resolve to RT_TABLE_MAIN when left unset) via
-// RouteMainAdd's plain routing, not RouteEgressAdd's SEG6 encap -- see that
-// function's own doc comment for why. This previously silently dropped
-// every anycast VIP path on every node in the mesh (found live: a
-// containerlab NetworkGateway/NetworkRule canary's VIP was never reachable
-// from any other site, even once BGP itself and the DSR/Maglev datapath
-// were both working correctly) -- gated on the absence of any RT
-// altogether, not merely a lookup miss, so a genuine unrecognized-VRF path
-// still correctly falls through to false above rather than being installed
-// into main by accident.
+// A path carrying no route target is not VRF-scoped by construction, since the
+// extended communities attribute is attached only when there is at least one.
+// The anycast ingress-VIP advertisements are the case today, and they leave
+// VRFID and Function unset for exactly this reason. Such a path goes into the
+// main routing table as a plain route rather than an encapsulated one.
+//
+// The distinction is on the absence of any route target, not on a lookup miss,
+// so a path naming a VRF this node does not have still returns false rather
+// than landing in the main table by accident.
 func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeInstall, bool) {
 	r.rtIndexMu.RLock()
 	defer r.rtIndexMu.RUnlock()
@@ -239,59 +218,30 @@ func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeIn
 }
 
 // vrfTableID resolves the kernel VRF table ID for a VRF named "{vpc}-{node}",
-// where vpc is hex-encoded per crdnames.BGPVRFInstanceName/VPCSegment. The
-// kernel VRF itself is keyed by the base62 vpc alone (it's shared by every
-// attachment on this VPC on this node — vrfpkg.TableID needs no node
-// component, since interface names only need to be unique within one host's
-// own namespace), so only the segment before the first '-' matters here;
-// node can itself contain '-' (e.g. "dfw-worker-control"), which is why this
-// splits into exactly 2 parts instead of parsing node back out too. The hex
-// segment has to be decoded back to base62 before it can be used to build
-// the kernel interface name — intf.HexToBase62 naturally errors out on the
-// SHA-256 hash fallback form (crdnames.nameSegment's "x..." prefix, for VPCs
-// that don't cleanly hex-encode), which is correct here too: that form was
-// never recoverable to a real interface name in the first place.
+// where vpc is hex-encoded.
 //
-// A VRF absent from this process's own netns is reported by wrapping
-// errVRFNotInThisNetns, so applyVRFs can treat it as an ordinary skip
-// rather than a failure -- see that variable's own doc comment.
+// The kernel VRF is keyed by the base62 vpc alone, since it is shared by every
+// attachment on this VPC on this node and interface names need only be unique
+// within one host. Only the segment before the first '-' matters, which is why
+// this splits into exactly two parts: a node name may itself contain '-'. The
+// hex segment is decoded back to base62 to build the interface name, which
+// naturally errors on the hash fallback form used for a VPC that does not
+// cleanly hex-encode. That form was never recoverable to an interface name.
 //
-// vrfpkg.TableID's own netlink.LinkList() call is scoped to this
-// process's own network namespace -- galactic-router runs
-// hostNetwork: true, so that's the host's root netns, correct for a VRF
-// galactic-cni created there directly for a real tenant pod's own CNI
-// attachment. It is structurally blind to a VRF #855's ingress sidecar
-// creates instead, which lives entirely inside Envoy's own pod netns by
-// design (so its own SO_BINDTODEVICE calls resolve there). Confirmed
-// live on us-central-1-staging-lab: a node running only the ingress
-// sidecar for a given VPC -- no real tenant CNI attachment for it at all
-// -- never has that VRF's interface visible in its own root netns, so
-// this lookup fails on every single reconcile, forever; not a race, not
-// something a restart or a longer wait fixes.
+// A VRF absent from this process's netns is reported by wrapping
+// errVRFNotInThisNetns, so applyVRFs treats it as an ordinary skip.
 //
-// History: that condition was previously handled by falling back to
-// reading the pinned vrf_table for the VPC's own (block, argument) row,
-// on the stated premise that "internal/ingresssidecar's own
-// ensureEgressDatapath already writes this exact (block, argument) ->
-// kernel table ID mapping there". It does not, on either half of the
-// key: that fallback derived block from the *VPC identifier*
-// (intf.Base62ToHex(vpc) parsed as hex) while every writer of that map
-// keys block off an SRv6 locator's own top 48 bits (uformat.Block, e.g.
-// internal/cnibgp's registerEBPFDatapath) or off the reserved
-// uformat.BlockMax the sidecar itself uses; and it looked up
-// BGPVRFInstance.Spec.VRFID as the argument while the sidecar registers
-// vrf.TableID(vpc) -- two unrelated allocators. The lookup therefore
-// could never hit any real row, and its "no vrf_table entry exists
-// either" error was reported for every sidecar-owned VRF regardless of
-// what the map actually held. Removed rather than re-keyed: on a node
-// whose only consumer of that VPC is Envoy, the egress_route_table
-// entries this table id would have been used to install are already
-// written per-EndpointSlice by the sidecar itself
-// (internal/ingresssidecar's kernelBackend.EnsureRoute ->
-// srv6.RouteEgressAdd), and Envoy only ever connects to backends those
-// same EndpointSlices published -- so there is nothing for this process
-// to add there, and the honest handling is to skip quietly rather than
-// to recover a table id for redundant work.
+// The underlying link lookup is scoped to this process's namespace. This
+// process runs with host networking, which is correct for a VRF the CNI created
+// there for a tenant pod, and structurally blind to one the ingress sidecar
+// creates inside an Envoy pod's namespace so its own socket binds resolve
+// there. On a node running only the sidecar for a VPC, that lookup fails on
+// every reconcile and no restart or wait changes it.
+//
+// Skipping quietly is the honest handling. On such a node the egress routes
+// this table ID would install are already written per-EndpointSlice by the
+// sidecar itself, and Envoy only connects to backends those slices published,
+// so there is nothing for this process to add.
 func vrfTableID(vrfName string) (uint32, error) {
 	parts := strings.SplitN(vrfName, "-", 2)
 	if len(parts) != 2 {
@@ -312,10 +262,9 @@ func vrfTableID(vrfName string) (uint32, error) {
 	return tableID, nil
 }
 
-// evpnMpReachNexthop returns the MpReachNLRI next-hop address string from path
-// attrs, or empty string if none is found. Used to identify locally-originated
-// EVPN paths, and as the non-SRv6 fallback gateway when no Prefix-SID
-// attribute is present (see evpnPrefixSID).
+// evpnMpReachNexthop returns the MpReachNLRI next-hop address from attrs, or ""
+// when none is found. It identifies locally-originated paths, and serves as the
+// gateway for a path carrying no Prefix-SID attribute.
 func evpnMpReachNexthop(attrs []bgp.PathAttributeInterface) string {
 	for _, attr := range attrs {
 		if mp, ok := attr.(*bgp.PathAttributeMpReachNLRI); ok {
@@ -325,12 +274,11 @@ func evpnMpReachNexthop(attrs []bgp.PathAttributeInterface) string {
 	return ""
 }
 
-// evpnPrefixSID extracts the destination SRv6 SID from a BGP Prefix-SID path
-// attribute's SRv6 L3 Service TLV (RFC 9252), if present. This is the sole
-// carrier for the SID in this design — see prefixSIDAttr in paths.go. Unlike
-// the EVPN Type 5 route's own Gateway IP field, the Prefix-SID attribute is a
-// separate path attribute independent of the NLRI's address family, so it
-// carries a SID correctly for both IPv4 and IPv6 VPC prefixes.
+// evpnPrefixSID extracts the destination SRv6 SID from a BGP Prefix-SID
+// attribute's SRv6 L3 Service TLV, reporting whether one was present. It is the
+// only carrier for the SID in this design. Being a separate path attribute,
+// independent of the NLRI's address family, it carries a SID correctly for both
+// IPv4 and IPv6 VPC prefixes.
 func evpnPrefixSID(attrs []bgp.PathAttributeInterface) (net.IP, bool) {
 	for _, attr := range attrs {
 		psid, ok := attr.(*bgp.PathAttributePrefixSID)
@@ -354,14 +302,13 @@ func evpnPrefixSID(attrs []bgp.PathAttributeInterface) (net.IP, bool) {
 	return nil, false
 }
 
-// addrToIPNet converts a netip.Addr and prefix length to a masked *net.IPNet.
-// IPv4 addresses are kept in native 4-byte form: netip.Addr.As16() returns an
-// IPv4-mapped 16-byte address, but pairing that with net.CIDRMask(bits, 128)
-// sets the mask's leading bits — the wrong end for a 4-in-16 address, whose
-// meaningful octets sit in the last 4 bytes — so consumers that reduce the IP
-// to 4 bytes (net.IP.To4(), as net.IPNet.String() and vishvananda/netlink's
-// family detection both do) see the mask's trailing, unset bits and read the
-// prefix length as 0 regardless of bits.
+// addrToIPNet converts addr and a prefix length of bits to a masked *net.IPNet.
+//
+// IPv4 addresses are kept in native 4-byte form. An IPv4-mapped 16-byte address
+// paired with a 128-bit mask sets the mask's leading bits, the wrong end for an
+// address whose meaningful octets are the last four, so any consumer that
+// reduces the address to 4 bytes reads the prefix length as 0 whatever bits
+// says.
 func addrToIPNet(addr netip.Addr, bits int) *net.IPNet {
 	masked := netip.PrefixFrom(addr, bits).Masked()
 	if masked.Addr().Is4() {
@@ -384,31 +331,21 @@ func addrToNetIP(addr netip.Addr) net.IP {
 	return ip
 }
 
-// probeEgressRouteWrite verifies that this process can actually write
-// egress_route_table entries for tableID before applyVRFs trusts this VRF's
-// routing to work at all. It installs a pass-through test entry for a
-// prefix from the RFC 3849 documentation range (2001:db8::/32) — which can
-// never conflict with real VPC traffic — then immediately removes it. A
-// pass-through entry (RegisterPassThrough, not Register) is deliberate:
-// unlike a real route, it needs no SID/next-hop resolution, so this probe
-// only exercises the one thing it exists to check -- the pinned bpffs map's
-// open+write path -- not incidentally depending on some other prefix
-// already having a resolvable neighbor.
+// probeEgressRouteWrite verifies that this process can write
+// egress_route_table entries for tableID, before applyVRFs trusts this VRF's
+// routing to work. It installs a pass-through entry for a prefix from the RFC
+// 3849 documentation range, which can never conflict with real traffic, then
+// removes it.
 //
-// This replaces an earlier version of this probe that wrote a real kernel
-// route via netlink instead (the same RFC 3849 prefix, same install/remove
-// shape) -- a leftover check from this codebase's pre-TC-BPF design, when
-// RouteEgressAdd really did write kernel SEG6 routes and so really did need
-// CAP_NET_ADMIN. Since the TC-BPF migration (see RouteEgressAdd's own doc
-// comment in internal/plumbing/srv6/egress.go), installing a VRF's routes
-// only ever writes into this pinned eBPF map — never the kernel FIB — so a
-// probe that tests kernel route-write capability instead tests a privilege
-// this path no longer needs, while never actually verifying the one this
-// path does need (a mounted bpffs at pinDir, readable/writable by this
-// process). galactic-router's DaemonSet happens to still grant NET_ADMIN
-// today (for the unrelated RouteMainAdd/anycast path), which is why the
-// old probe kept silently passing rather than ever catching this — but it
-// was verifying the wrong thing the whole time.
+// A pass-through entry rather than a real route: it needs no SID or next-hop
+// resolution, so the probe exercises only the pinned map's open and write path
+// and does not incidentally depend on some prefix having a resolvable
+// neighbor.
+//
+// Probing the map rather than the kernel FIB is the point. Installing a VRF's
+// routes writes only into this map, so a probe of kernel route-write capability
+// would test a privilege this path no longer needs while never checking the one
+// it does: a mounted bpffs at pinDir this process can read and write.
 func probeEgressRouteWrite(tableID uint32) error {
 	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {

@@ -56,23 +56,22 @@ func newRootCommand() *cobra.Command {
 				return version.All.Encode(os.Stdout)
 			}
 
-			// Real CNI runtimes always pipe the network config JSON on
-			// stdin and close it. If stdin is an interactive terminal
-			// instead, no config will ever arrive and skel's blocking
-			// stdin read would hang forever — print version info instead.
+			// Real CNI runtimes always pipe the network config on stdin and
+			// close it. When stdin is an interactive terminal instead, no
+			// config ever arrives and the library's blocking read would hang
+			// forever, so print version info instead.
 			if term.IsTerminal(int(os.Stdin.Fd())) {
 				fmt.Printf("%s version %s\n", appName, metadata.Version)
 				fmt.Printf("CNI protocol versions supported: %s\n", strings.Join(version.All.SupportedVersions(), ", "))
 				return nil
 			}
 
-			// Tap mode never enters a network namespace — all operations
-			// are host-side. Set the override so the CNI library skips its
-			// same-netns rejection check, which would otherwise reject
-			// kraftlet workloads that pass the host netns. Unconditional
-			// here (unlike galactic-veth, which has no override logic at
-			// all): every invocation of this binary is tap mode, so there
-			// is no config content to peek at first.
+			// Tap mode never enters a network namespace; every operation is
+			// host-side. The override makes the library skip its same-namespace
+			// rejection check, which would otherwise reject a workload that
+			// passes the host namespace. Unconditional here, unlike the veth
+			// binary: every invocation of this one is tap mode, so there is no
+			// config to peek at first.
 			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
 
 			cnitap.RunPlugin()

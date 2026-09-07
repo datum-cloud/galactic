@@ -15,20 +15,17 @@ import (
 	"go.datum.net/galactic/internal/cni/ipam"
 )
 
-// localIPAMDefaultPool is the IPv6 CIDR pool used when local IPAM is enabled
-// but neither static_ip nor ipv6_subnet/ipv4_subnet is set in the ipam
-// block. Allocations from it use ipam.DefaultSubnetLen (/96).
+// localIPAMDefaultPool is the IPv6 pool used when local IPAM is enabled but the
+// ipam block names no static address and no subnet.
 const localIPAMDefaultPool = "fd00:10:ff01::/64"
 
-// lockDir is the on-disk allocation-state root both PoolAllocator and
-// IPv4PoolAllocator persist to. Overridable in tests so unit tests never
-// touch the real production path.
+// lockDir is the on-disk allocation-state root both allocators persist to.
+// Overridable so tests never touch the production path.
 var lockDir = ipam.DefaultLockDir
 
-// allocate assigns addresses for the given container according to conf's
-// mode: presence of Addresses selects the pre-decided addresses path,
-// presence of StaticIP the legacy static path; otherwise the pool path
-// (either family alone, or both).
+// allocate assigns addresses for a container according to conf's mode: an
+// addresses list selects the pre-decided path, a static address the legacy
+// path, and otherwise the pool path, for either family alone or both.
 func allocate(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 	switch {
 	case len(conf.Addresses) > 0:
@@ -41,9 +38,8 @@ func allocate(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 }
 
 // allocateAddresses assigns the addresses the config already carries, exactly
-// as given — prefix length included, both families, gateways honored. Nothing
-// is allocated and nothing is persisted: the addresses belong to whoever
-// decided them.
+// as given, prefix lengths included and gateways honored. Nothing is allocated
+// and nothing is persisted: the addresses belong to whoever decided them.
 func allocateAddresses(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 	parsed, err := parseAddresses(conf.Addresses)
 	if err != nil {
@@ -76,9 +72,9 @@ func defaultRoutes(ipv6, ipv4 bool) []*net.IPNet {
 	return routes
 }
 
-// allocateStatic validates and returns the pre-assigned static IPv6 address
-// from static_ip. No IPv4 address is ever allocated for static IPAM — it is
-// a single fixed address, not a dual-stack pool.
+// allocateStatic validates and returns the pre-assigned static IPv6 address. No
+// IPv4 address is ever allocated on this path, it being a single fixed address
+// rather than a pool.
 func allocateStatic(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 	alloc := ipam.NewStaticAllocator()
 	allocIP, err := alloc.Allocate(args.ContainerID, conf.StaticIP)
@@ -93,12 +89,10 @@ func allocateStatic(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 	return &IPAMResult{IPv6Subnet: subnet}, nil
 }
 
-// allocatePool allocates a dual-stack, IPv6-only, or IPv4-only pool-based
-// endpoint address for the given container, via ipam.DualStackAllocator.
-// IPv6Subnet and IPv4Subnet each independently supply a pool CIDR for their
-// family; at least one must be set (falling back to localIPAMDefaultPool
-// for IPv6 when GALACTIC_IPAM_ENABLE_LOCAL_IPAM is set and both are unset —
-// see parseConf, which fills that default in before this ever runs).
+// allocatePool allocates a dual-stack, IPv6-only, or IPv4-only endpoint address
+// for a container. Each family's subnet independently supplies a pool, and at
+// least one must be set; config parsing fills in the default IPv6 pool before
+// this runs when local IPAM is enabled and neither is.
 func allocatePool(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 	if conf.IPv6Subnet == "" && conf.IPv4Subnet == "" {
 		return nil, errors.New("ipam.ipv6_subnet or ipam.ipv4_subnet is required (or enable GALACTIC_IPAM_ENABLE_LOCAL_IPAM)")
@@ -129,15 +123,14 @@ func allocatePool(args *skel.CmdArgs, conf *IPAM) (*IPAMResult, error) {
 	}, nil
 }
 
-// effectiveIPv6Subnet returns conf.IPv6Subnet if either family's subnet was
-// ever explicitly set. Otherwise — neither ipv6_subnet nor ipv4_subnet is
-// set — the only pool an allocation could possibly have come from is
-// parseConf's default-filler pool, so that's returned directly instead of
-// re-deriving it from GALACTIC_IPAM_ENABLE_LOCAL_IPAM. deallocate/
-// checkAllocation must not depend on that env var still agreeing at DEL/
-// CHECK time with whatever it resolved to at ADD time: if it flips in
-// between, re-checking it here would see an empty subnet and silently skip
-// cleanup/verification, leaking the allocation instead of releasing it.
+// effectiveIPv6Subnet returns the configured IPv6 subnet when either family's
+// subnet was explicitly set, and otherwise the default pool directly.
+//
+// Returning it directly, rather than re-deriving it from the local-IPAM
+// environment flag, is what keeps deallocation and checking independent of that
+// flag still agreeing at DEL or CHECK time with what it resolved to at ADD. A
+// flag that flipped in between would leave an empty subnet here, silently
+// skipping cleanup and leaking the allocation.
 func effectiveIPv6Subnet(conf *IPAM) string {
 	if conf.IPv6Subnet != "" || conf.IPv4Subnet != "" {
 		return conf.IPv6Subnet
@@ -146,13 +139,12 @@ func effectiveIPv6Subnet(conf *IPAM) string {
 }
 
 // deallocate releases whatever allocation containerID holds against conf's
-// pools — entirely local: each family's own on-disk marker file is looked
-// up directly by containerID (internal/cni/ipam's DeallocateContainer), no
-// external state (a CRD read, a Kubernetes client) required. A missing
-// allocation for one family (e.g. a v6-only pod, or a partial ADD failure
-// that never reached IPv4 allocation) does not prevent cleanup of the
-// other — each call is independent and silently no-ops if nothing is
-// found.
+// pools. It is entirely local: each family's marker file is looked up by
+// container ID, needing no CRD read or API client.
+//
+// A missing allocation for one family, from an IPv6-only pod or a partial ADD
+// failure, does not prevent cleanup of the other: each call is independent and
+// silently does nothing when it finds none.
 func deallocate(containerID string, conf *IPAM) {
 	if len(conf.Addresses) > 0 {
 		// Externally decided addresses were never allocated here, so there is nothing to release.
@@ -185,12 +177,10 @@ func deallocate(containerID string, conf *IPAM) {
 	}
 }
 
-// checkAllocation verifies that containerID still holds an allocation
-// against every family conf configures — used by CHECK. An externally
-// decided address (addresses, static_ip) has nothing persisted to check
-// (it's validated once, at ADD, and never stored), so it always passes.
-// Returns one error per missing/unreachable family; nil means every
-// configured family checked out.
+// checkAllocation verifies containerID still holds an allocation against every
+// family conf configures, returning one error per missing family and nil when
+// all check out. An externally decided address has nothing persisted to check,
+// being validated once at ADD and never stored, so it always passes.
 func checkAllocation(containerID string, conf *IPAM) []error {
 	if len(conf.Addresses) > 0 || conf.StaticIP != "" {
 		return nil

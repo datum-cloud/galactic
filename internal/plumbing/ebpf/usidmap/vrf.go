@@ -15,20 +15,16 @@ import (
 )
 
 // VRFKey identifies one vrf_table row: the uSID Block that matched in
-// locator_table, plus the 12-bit Argument. Block is part of the key, not
-// Argument alone (design plan R8), so two Blocks can each hold an
-// independently counted, independently matched entry for the same Argument
-// value during a make-before-break migration.
+// locator_table plus the 12-bit Argument. Block is part of the key rather than
+// Argument alone, so two Blocks can each hold an independently counted entry
+// for the same Argument during a make-before-break migration.
 type VRFKey struct {
 	Block    uint64
 	Argument uint16
 }
 
-// VRFEntry is one fully decoded vrf_table row, decoupled from
-// prog.UsidVrfValue's cilium/ebpf/BTF-generated field layout so callers
-// outside this package (the GC controller, Milestone 7.3; the CNI
-// registration call, Milestone 7.1) don't need to import prog or
-// cilium/ebpf directly.
+// VRFEntry is one decoded vrf_table row, kept separate from the generated
+// kernel layout so callers outside this package need not import it.
 type VRFEntry struct {
 	VRFKey
 
@@ -36,24 +32,20 @@ type VRFEntry struct {
 	// (internal/plumbing/vrf.TableID()) this Argument resolves to.
 	VRFTableID uint32
 
-	// EgressKind is EgressKindVeth or EgressKindTap -- which redirect
-	// helper usid_ingress's step 9 uses for this entry's resolved egress
-	// interface (Milestone 6.1's tap-mode redirect fix).
+	// EgressKind is EgressKindVeth or EgressKindTap: which redirect helper the
+	// datapath uses for this entry's resolved egress interface.
 	EgressKind uint32
 
-	// Generation is the table's monotonic-clock reading (table.go's
-	// monotonicNow) at the time this entry was last written by Register.
-	// See doc.go's "plugin-binary-vs-run-container race" section for how
-	// Reconcile uses it.
+	// Generation is the table's monotonic-clock reading when this entry was
+	// last written by Register. See the package doc comment for how Reconcile
+	// uses it.
 	Generation uint64
 
 	// Packets, Bytes, LastSeenNs, and DroppedPackets are the datapath's own
-	// per-Argument hit counters (design plan R8), updated by usid_ingress
-	// itself on every packet that matches this entry. Register carries
-	// these forward on a re-registration of an existing key rather than
-	// resetting them (see Register's doc comment) -- they only ever
-	// originate from a real map write by the datapath itself, and are read
-	// back here via Get/List/Reconcile.
+	// per-Argument counters, updated on every packet matching this entry.
+	// Register carries them forward on a re-registration rather than resetting
+	// them; they only ever originate from a datapath write and are read back
+	// here.
 	Packets        uint64
 	Bytes          uint64
 	LastSeenNs     uint64
@@ -66,50 +58,38 @@ type VRFTable struct {
 	clock func() uint64
 }
 
-// NewVRFTable wraps table as a VRFTable. Production callers pass a
-// KernelTable wrapping a loaded *prog.UsidObjects's VrfTable map (or use
-// NewRegistryFromObjects, which does this for all three tables at once);
-// tests pass a fake Table.
+// NewVRFTable wraps table as a VRFTable. Production callers pass a kernel table
+// over the loaded map, or use NewRegistryFromObjects for all three at once;
+// tests pass a fake.
 func NewVRFTable(table Table) *VRFTable {
 	return &VRFTable{table: table, clock: clockFn}
 }
 
-// Generation returns a snapshot of this table's monotonic clock. The GC
-// controller (Milestone 7.3) must call this immediately *before* listing
-// BGPVRFInstance CRDs for Reconcile's live set, and pass the result as
-// Reconcile's cutoff argument -- see doc.go's "plugin-binary-vs-run-
-// container race" section for why the ordering matters.
+// Generation returns a snapshot of this table's monotonic clock. A caller must
+// read it immediately before listing CRDs to build Reconcile's live set, and
+// pass the result as that call's cutoff. See the package doc comment for why the
+// ordering matters.
 func (t *VRFTable) Generation() uint64 {
 	return t.clock()
 }
 
-// Register writes (or overwrites) the vrf_table entry for (block,
-// argument), mapping it to vrfTableID and stamping it with this table's
-// current Generation (design plan §5.1, §5.4).
+// Register writes, or overwrites, the vrf_table entry for (block, argument),
+// mapping it to vrfTableID with egressKind and stamping it with this table's
+// current generation.
 //
-// Register rejects argument == 0 outright: PR #740 reserves Instance ID
-// 0x000, and the datapath is required to always miss vrf_table for it
-// (R4) -- rejecting it here means a caller bug upstream of Register
-// (whatever eventually allocates Arguments, out of this plan's scope)
-// cannot silently plant a live entry for the one value that must always
-// miss.
+// argument 0 is rejected: that value is reserved and the datapath must always
+// miss vrf_table for it, so rejecting it here stops an upstream allocator bug
+// from planting a live entry for the one value that must never match.
 //
-// Re-registering an existing (block, argument) key updates its
-// VRFTableID/EgressKind and bumps Generation, but preserves whatever
-// Packets/Bytes/LastSeenNs usid_ingress has already accumulated against it
-// (a read-modify-write: Register looks the key up first, and carries its
-// existing counter fields forward into the value it writes). This matters
-// because a repeat Register of the *same* key is not always a fresh
-// attachment lifecycle -- it is also, in the ordinary case, the CNI ADD
-// retry path re-registering after a transient k8s-op failure
-// (internal/cnibgp/bgp.go's retryK8sOps), which happens on an Argument that
-// may already be carrying live traffic. R8's make-before-break migration
-// gate reads these counters to prove an Argument carried no traffic before
-// cutover; a blind overwrite that zeroed them on every retry would make a
-// previously-live Argument read as untouched. A genuinely new key (no
-// prior entry) still starts every counter at zero, since there is nothing
-// to carry forward -- ebpf.ErrKeyNotExist from the Lookup below is exactly
-// that case, not a failure.
+// Re-registering an existing key updates its table ID and egress kind and bumps
+// the generation, but carries the accumulated counters forward through a
+// read-modify-write. A repeat Register of the same key is not always a fresh
+// attachment: in the ordinary case it is the CNI ADD retry path re-registering
+// after a transient API failure, on an Argument that may already be carrying
+// live traffic. A make-before-break migration reads those counters to prove an
+// Argument carried none before cutover, and a blind overwrite would make a
+// previously live Argument read as untouched. A genuinely new key starts every
+// counter at zero, there being nothing to carry forward.
 func (t *VRFTable) Register(block uint64, argument uint16, vrfTableID uint32, egressKind uint32) error {
 	if err := uformat.ValidateArgument(argument); err != nil {
 		return fmt.Errorf("usidmap: vrf_table: register block=%#x argument=%#x: %w", block, argument, err)
@@ -140,11 +120,10 @@ func (t *VRFTable) Register(block uint64, argument uint16, vrfTableID uint32, eg
 	return nil
 }
 
-// Unregister removes the vrf_table entry for (block, argument), if
-// present. It is not an error to unregister an already-absent entry --
-// design plan §5.1 requires this call at both the failed-ADD rollback path
-// (Milestone 7.2) and the GC sweep (Milestone 7.3), and either caller may
-// legitimately race with the other having already removed the same entry.
+// Unregister removes the vrf_table entry for (block, argument) if present. An
+// already-absent entry is not an error: both the failed-ADD rollback path and
+// the GC sweep call this, and either may race the other having already removed
+// it.
 func (t *VRFTable) Unregister(block uint64, argument uint16) error {
 	key, err := uformat.NewVRFKey(block, argument)
 	if err != nil {
@@ -186,11 +165,9 @@ func (t *VRFTable) Get(block uint64, argument uint16) (VRFEntry, bool, error) {
 	}, true, nil
 }
 
-// List returns every entry currently in vrf_table, in unspecified order.
-// Because vrf_table's key (Block<<12|Argument, see uformat.NewVRFKey)
-// folds Block and Argument together, List decodes both back out of each
-// raw key rather than needing a separate Block parameter the way
-// Get/Register/Unregister do.
+// List returns every entry in vrf_table, in unspecified order. The raw key folds
+// Block and Argument together, so List decodes both back out of it rather than
+// taking a Block parameter the way the single-entry methods do.
 func (t *VRFTable) List() ([]VRFEntry, error) {
 	var (
 		entries []VRFEntry
@@ -219,26 +196,19 @@ func (t *VRFTable) List() ([]VRFEntry, error) {
 	return entries, nil
 }
 
-// Reconcile brings vrf_table into agreement with live -- the caller's
-// current set of (Block, Argument) pairs that have a live BGPVRFInstance
-// CRD -- removing every vrf_table entry whose key is absent from live,
-// *except* an entry whose Generation is >= cutoff.
+// Reconcile brings vrf_table into agreement with live, the caller's current set
+// of (Block, Argument) pairs backed by a live BGPVRFInstance CRD. It removes
+// every entry whose key is absent from live, except one whose generation is at
+// or above cutoff, and returns the entries removed.
 //
-// cutoff must be a value returned by this table's own Generation, captured
-// by the caller *before* it lists CRDs to build live (see doc.go's
-// "plugin-binary-vs-run-container race" section, and Generation's own doc
-// comment). An entry with Generation >= cutoff was registered at or after
-// that snapshot was taken, so it is always kept here regardless of whether
-// its key is in live -- it is correctly re-evaluated on the caller's
-// *next* Reconcile call, once the CRD list has had a chance to catch up.
-// Only entries older than the snapshot (Generation < cutoff) are ever
-// candidates for deletion, and then only if their key is genuinely absent
-// from live.
+// cutoff must come from this table's Generation, read before the caller listed
+// CRDs. An entry at or above it was registered at or after that snapshot, so it
+// is kept whatever live says and re-evaluated on the next call, once the CRD
+// list has caught up. Only older entries whose key is genuinely absent are
+// candidates for deletion.
 //
-// Reconcile attempts every stale candidate even if deleting one fails,
-// joining every such error into the returned error with errors.Join;
-// removed lists every entry actually deleted, regardless of whether a
-// later deletion in the same call failed.
+// Every stale candidate is attempted even if deleting one fails, with the errors
+// joined; removed lists everything actually deleted regardless.
 func (t *VRFTable) Reconcile(live map[VRFKey]struct{}, cutoff uint64) (removed []VRFEntry, err error) {
 	entries, err := t.List()
 	if err != nil {
@@ -251,9 +221,9 @@ func (t *VRFTable) Reconcile(live map[VRFKey]struct{}, cutoff uint64) (removed [
 			continue // still has a live BGPVRFInstance per the CRD snapshot
 		}
 		if e.Generation >= cutoff {
-			// Registered at or after the CRD-list snapshot was taken --
-			// too new to judge against a live set captured before it
-			// existed. Leave it for the next sweep (design plan §5.4).
+			// Registered at or after the CRD snapshot, so too new to judge
+			// against a live set captured before it existed. Leave it for the
+			// next sweep.
 			continue
 		}
 		if err := t.Unregister(e.Block, e.Argument); err != nil {

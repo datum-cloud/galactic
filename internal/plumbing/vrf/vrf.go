@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package vrf manages Linux VRF interfaces for Galactic VPC network isolation.
-// Each VPC gets its own VRF with a unique routing table ID, per node — shared
-// by every attachment (pod or VM) landing on that VPC on that node, not
-// per-attachment. Requires CAP_NET_ADMIN.
+// Package vrf manages the Linux VRF interfaces that isolate Galactic VPC
+// networks. Each VPC gets one VRF with its own routing table ID per node,
+// shared by every attachment landing on that VPC on that node rather than one
+// per attachment. Requires CAP_NET_ADMIN.
 package vrf
 
 import (
@@ -24,32 +24,29 @@ import (
 const minVRFID = uint32(1)
 const maxVRFID = uint32(math.MaxUint32 - 1)
 
-// ErrNotFound is returned (wrapped) by TableID when no VRF interface for
-// that VPC exists in *this process's own* network namespace. Callers need
-// this distinguishable from a genuine netlink failure because "absent" is
-// an ordinary, expected condition for some callers rather than an error:
-// galactic-router runs in the host's root netns and legitimately cannot
-// see a VRF #855's ingress sidecar created inside Envoy's own pod netns
-// (see internal/runtime/gobgp's vrfTableID), while a failed
-// netlink.LinkList is a real problem worth surfacing either way.
+// ErrNotFound is wrapped by TableID when no VRF interface for that VPC exists
+// in this process's own network namespace.
+//
+// Callers need that distinguishable from a genuine netlink failure, because
+// absent is an ordinary condition for some of them: a process in the host's
+// root namespace legitimately cannot see a VRF the ingress sidecar created
+// inside a pod's namespace, while a failed link listing is a real problem
+// either way.
 var ErrNotFound = errors.New("vrf: no VRF interface for this VPC in this network namespace")
 
-// vrfMu serializes VRF creation/deletion within a single process (e.g.
-// concurrent goroutines in galactic-router's GC). It does not, by itself,
-// protect against two separate CNI ADD/DEL invocations racing on the same
-// node — each is its own OS process — so Add and Delete also take the
-// cross-process flock in lock.go.
+// vrfMu serializes VRF creation and deletion within one process. It does not by
+// itself protect two separate CNI invocations racing on the same node, each
+// being its own process, so Add and Delete also take a cross-process lock.
 var vrfMu sync.Mutex
 
-// Add creates a Linux VRF interface for the given base62-encoded VPC,
-// allocating the next available routing table ID and applying the required
-// sysctl settings. The VRF is shared by every attachment (pod or VM) on this
-// VPC on this node: concurrent calls — whether from goroutines in this
-// process, from separate CNI plugin processes attaching different pods to
-// the same VPC, or both — are serialized, and Add is idempotent by name. If
-// a VRF with the same name already exists (because another attachment on
-// this VPC already created it, or one was left behind by a previous failed
-// cmdAdd with no corresponding cmdDel), Add returns nil.
+// Add creates the Linux VRF interface for a base62-encoded VPC, allocating the
+// next available routing table ID and applying the required sysctls.
+//
+// The VRF is shared by every attachment on this VPC on this node, so concurrent
+// calls, from goroutines here or from separate plugin processes attaching
+// different pods, are serialized. It is idempotent by name: a VRF that already
+// exists, whether created by a sibling attachment or left behind by a failed
+// ADD, returns nil.
 func Add(vpc string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
@@ -93,14 +90,15 @@ func Add(vpc string) error {
 	return netlink.LinkSetUp(vrf)
 }
 
-// Delete flushes all routes from the VRF routing table and removes the VRF
-// interface for the given base62-encoded VPC. Delete is idempotent: if the
-// VRF interface does not exist, it returns nil. Callers must only invoke
-// Delete once no attachment on this VPC on this node remains live — deleting
-// out from under a still-live sibling attachment breaks it. galactic-veth's
-// own cmdDel never calls this directly for exactly that reason; only
-// galactic-router's GC controller does, after confirming via every
-// BGPAdvertisement for this VPC/node that none are still in use.
+// Delete flushes every route from the VRF's routing table and removes the
+// interface for a base62-encoded VPC. Idempotent: an absent interface returns
+// nil.
+//
+// Callers must only invoke it once no attachment on this VPC on this node
+// remains live, since deleting out from under a sibling breaks it. The CNI
+// teardown path never calls it for that reason; only garbage collection does,
+// after confirming through every advertisement for this VPC and node that none
+// is still in use.
 func Delete(vpc string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
@@ -130,11 +128,10 @@ func Delete(vpc string) error {
 	return netlink.LinkDel(link)
 }
 
-// TableID returns the Linux routing table ID for the VRF associated with the
-// given base62-encoded VPC. The returned error wraps ErrNotFound when no
-// such interface exists in this process's own network namespace — see that
-// variable's doc comment for why callers may need to treat that case as
-// ordinary rather than as a failure.
+// TableID returns the Linux routing table ID for a base62-encoded VPC's VRF.
+// The error wraps ErrNotFound when no such interface exists in this process's
+// own network namespace, which some callers treat as ordinary rather than a
+// failure.
 func TableID(vpc string) (uint32, error) {
 	return getVRFIDForInterface(intf.GenerateInterfaceNameVRF(vpc))
 }
@@ -149,18 +146,15 @@ func Exists(vpc string) error {
 	return nil
 }
 
-// FlushTable removes every IPv4 and IPv6 route from the given Linux routing
-// table ID. Add calls this before creating a VRF on a reused table ID (a
-// table can be reused if a previous VRF using it was removed without going
-// through Delete, e.g. a hard node reboot), and Delete calls it before
-// removing the VRF interface — so a stale table is always cleared on reuse
-// rather than inherited.
+// FlushTable removes every IPv4 and IPv6 route from the given routing table.
+// Add calls it before creating a VRF on a reused table ID, which happens when a
+// previous VRF was removed without going through Delete, and Delete calls it
+// before removing the interface, so a stale table is always cleared rather than
+// inherited.
 //
-// Exported so internal/gc's legacy-name fallback in RemoveOrphanedVRFs (a
-// pre-rename VRF interface Delete can't resolve by name, so it removes the
-// link directly instead of going through Delete) can flush the table itself
-// before removing the link, and get the same guarantee Delete gives the
-// normal path — see RemoveOrphanedVRFs' own doc comment and #343.
+// Exported so garbage collection's fallback path, which removes a legacy-named
+// interface directly rather than through Delete, can flush the table itself and
+// get the same guarantee.
 func FlushTable(vrfID uint32) error {
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		routes, err := netlink.RouteListFiltered(

@@ -18,11 +18,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
-// cmdAdd installs each of pluginConf's termination routes into the VRF
-// routing table the preceding master plugin (galactic-veth/galactic-tap)
-// already created, then passes prevResult through unchanged — galactic-
-// route adds no interfaces or IPs of its own, only kernel routes alongside
-// whatever came before it in the chain.
+// cmdAdd installs each configured termination route into the VRF routing table
+// the master plugin already created, then passes the previous result through
+// unchanged. This plugin adds no interfaces or addresses of its own, only kernel
+// routes.
 func cmdAdd(args *skel.CmdArgs) (err error) {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -38,10 +37,9 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment,
 		"terminations", len(pluginConf.Terminations))
 
-	// The host interface name is derived from (vpc, vpcAttachment) alone —
-	// identical for a veth master's host end and a tap master's tap device
-	// (both call intf.GenerateInterfaceNameHost), so galactic-route needs no
-	// interface-kind inference the way galactic-bgp does.
+	// The host interface name derives from the identifiers alone and is
+	// identical for a veth master's host end and a tap master's device, so this
+	// plugin needs none of the interface-kind inference the BGP plugin does.
 	dev := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
 
 	tracker := &resourceTracker{vpc: pluginConf.VPC, vpcAttachment: pluginConf.VPCAttachment, dev: dev}
@@ -66,12 +64,11 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	return types.PrintResult(prevResult, pluginConf.CNIVersion)
 }
 
-// parsePrevResult parses rawPrevResult (PluginConf.RawPrevResult; the typed
-// PluginConf.PrevResult field is never populated by plain JSON unmarshal,
-// per its "json:\"-\"" tag) into a versioned CNI result galactic-route can
-// pass straight back through as its own ADD result. galactic-route is
-// optional in the chain, but when present it must be chained after a
-// master plugin, which always produces a prevResult.
+// parsePrevResult parses the raw previous result into a versioned CNI result
+// this plugin can pass straight back as its own. The typed field is never
+// populated by a plain unmarshal, so the raw form is the one to read. This
+// plugin is optional in the chain, but when present it is chained after a master
+// plugin, which always produces a result.
 func parsePrevResult(rawPrevResult map[string]interface{}) (types.Result, error) {
 	if rawPrevResult == nil {
 		return nil, errors.New("no prevResult: galactic-route must be chained after a master plugin")

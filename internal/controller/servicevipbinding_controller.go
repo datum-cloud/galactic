@@ -24,39 +24,30 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// serviceVIPBindingFinalizer guards ServiceVIPBinding teardown: the
-// veth/tap-specific unbind (vip.Unbind, or the translation table's
-// Unregister calls) must complete before the object is actually removed
-// from etcd, mirroring networkRuleFinalizer's identical ordering purpose
-// on NetworkRule.
+// serviceVIPBindingFinalizer guards teardown: the veth or tap unbind must
+// complete before the object is removed from etcd.
 const serviceVIPBindingFinalizer = "galactic.datum.net/servicevipbinding-teardown"
 
-// ipProtoTCP/ipProtoUDP are the wire protocol numbers (IANA) matching
-// usid.c's USID_IPPROTO_TCP/USID_IPPROTO_UDP constants -- the only two
-// protocols vip_xlat_table's rewrite path ever applies to.
+// ipProtoTCP and ipProtoUDP are the IANA wire protocol numbers matching the
+// datapath's own constants, the only two protocols vip_xlat_table's rewrite
+// path applies to.
 const (
 	ipProtoTCP = uint8(6)
 	ipProtoUDP = uint8(17)
 )
 
-// vipBindFn/vipUnbindFn/vipVerifyFn are package-level overridable indirections
-// onto internal/plumbing/vip's Bind/Unbind/Verify -- the same pattern
-// internal/plumbing/ebpf/attach.go uses (routeListFn/linkByIndexFn/
-// preflightCheckFn/filterPriorityFn) so tests can exercise the
-// EgressKindVeth branch's control flow without CAP_NET_ADMIN or a real
-// netlink socket. Production code never reassigns these; vip.go itself is
-// untouched.
+// vipBindFn, vipUnbindFn, and vipVerifyFn indirect internal/plumbing/vip so
+// tests can exercise the veth branch without CAP_NET_ADMIN or a real netlink
+// socket. Production never reassigns them.
 var (
 	vipBindFn   = vip.Bind
 	vipUnbindFn = vip.Unbind
 	vipVerifyFn = vip.Verify
 )
 
-// VIPTranslationTable is the interface ServiceVIPBindingReconciler drives
-// for both EgressKindVeth and EgressKindTap bindings (see
-// registerVIPTranslation), satisfied by *vipxlatmap.VipXlatTable in
-// production and a fake in tests -- the same interface-seam pattern
-// GatewayEngine (networkgateway_controller.go) provides for *gateway.Engine.
+// VIPTranslationTable is the interface ServiceVIPBindingReconciler drives for
+// both egress kinds, satisfied by *vipxlatmap.VipXlatTable in production and a
+// fake in tests.
 type VIPTranslationTable interface {
 	RegisterIngress(block uint64, argument uint16, proto uint8,
 		vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) error
@@ -67,56 +58,42 @@ type VIPTranslationTable interface {
 }
 
 // ServiceVIPBindingReconciler reconciles ServiceVIPBinding objects targeting
-// this node (spec.targetRef.name == NodeName) -- the backend-side half of
-// the DSR/Maglev gateway redesign (see ServiceVIPBinding's own doc
-// comment). It branches on Spec.EgressKind exactly like usid.c's own
-// vrf_table egress_kind field does, but both branches now converge on the
-// same delivery mechanism:
+// this node. It branches on Spec.EgressKind the way the datapath's vrf_table
+// egress_kind field does, but both branches converge on the same delivery
+// mechanism:
 //
-//   - EgressKindTap calls VIPTranslationTable's Register/Unregister methods
-//     (vip_xlat_table's two independent rows -- see
-//     internal/plumbing/ebpf/vipxlatmap's package doc comment), after
-//     resolving this node's own uSID Block and the tenant VRF's Argument
-//     via resolveVIPBindingContext.
-//   - EgressKindVeth does the *same* vip_xlat_table registration (see
-//     registerVIPTranslation), plus internal/plumbing/vip.Bind/Unbind/Verify.
+//   - EgressKindTap registers vip_xlat_table's two rows, after resolving this
+//     node's uSID Block and the tenant VRF's Argument.
+//   - EgressKindVeth registers the same rows, and additionally binds the VIP in
+//     the root namespace through internal/plumbing/vip.
 //
-// # Why veth needs vip_xlat_table too, not just vip.Bind
+// # Why veth needs vip_xlat_table too, not just the bind
 //
-// vip.Bind only assigns the VIP to a plain dummy interface in the node's
-// *root* network namespace -- not enslaved to any tenant VRF (see
-// internal/plumbing/vip's own doc comment). But a DSR-forwarded ingress
-// packet is decapsulated by usid_ingress and delivered into the owning
-// tenant's *own* VRF routing table, which has no route to an address that
-// only exists on a root-namespace interface outside that VRF entirely.
-// Found live in containerlab: a NetworkRule's VIP reported fully
-// Advertised/Ready, the edge datapath's own metrics showed it matching and
-// forwarding every packet with zero drops, and the connection still never
-// completed -- traced to exactly this: iad-worker's own vrf60 routing
-// table had a route for the backend pod's real address but none at all for
-// the VIP. vip_xlat_table's ingress row rewrites the packet's destination
-// from VIP to the backend's real, already-routed address *before* that VRF
-// lookup happens (usid.c's own comment on this step: "translate the inner
-// packet's destination before the FIB lookup ... so the lookup resolves
-// against the tenant's real, routed address") -- exactly the missing
-// piece, and usid_ingress applies it unconditionally whenever a matching
-// vip_xlat_table row exists, regardless of egress_kind; only the control
-// plane was ever kind-gated. vip.Bind is kept alongside it for veth (not
-// replaced): it still gives the node itself a locally-verifiable answer on
-// the VIP (see vip.Verify), which registerVIPTranslation alone would not.
+// Binding assigns the VIP to a dummy interface in the node's root namespace,
+// enslaved to no tenant VRF. A DSR-forwarded ingress packet is decapsulated and
+// delivered into the owning tenant's VRF routing table, which has no route to an
+// address that exists only outside that VRF. The symptom is a VIP that reports
+// fully advertised and ready, with the edge datapath matching and forwarding
+// every packet and no drops, while the connection never completes.
 //
-// VIPTranslationTable is nil-safe for tests that never reconcile a live
-// binding: a nil table only matters once one actually is, at which point
-// it fails with a clear, actionable error rather than a nil-pointer panic.
+// The ingress row rewrites the destination from VIP to the backend's real,
+// already-routed address before that lookup happens. usid_ingress applies it
+// whenever a matching row exists, whatever the egress kind; only the control
+// plane was ever kind-gated. The bind is kept alongside it for veth rather than
+// replaced, because it still gives the node a locally verifiable answer on the
+// VIP.
+//
+// VIPTranslationTable may be nil for tests that never reconcile a live binding.
+// A nil table matters only once one is, at which point it fails with a clear
+// error rather than a nil-pointer panic.
 type ServiceVIPBindingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
 	NodeName string
 
-	// VIPTranslationTable is the kernel-map handle both EgressKindVeth and
-	// EgressKindTap now drive (see the type doc comment above). See its own
-	// nil-safety contract there.
+	// VIPTranslationTable is the kernel-map handle both egress kinds drive. See
+	// the type doc comment for its nil-safety contract.
 	VIPTranslationTable VIPTranslationTable
 }
 
@@ -152,11 +129,10 @@ func (r *ServiceVIPBindingReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return ctrl.Result{}, nil
 }
 
-// reconcileBind applies binding's desired bind/translation state and
-// records the outcome on Status.Conditions[Bound], mirroring
-// networkrule_controller.go's own condition-update style (status update
-// happens regardless of success/failure, and the bind/register error, if
-// any, is returned afterward so the controller-runtime requeues it).
+// reconcileBind applies binding's desired bind and translation state and records
+// the outcome on the Bound condition. The status update happens whether or not
+// the bind succeeded, and the error is returned afterward so controller-runtime
+// requeues.
 func (r *ServiceVIPBindingReconciler) reconcileBind(ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding) error {
 	bindErr := r.applyBind(ctx, binding)
 
@@ -184,10 +160,9 @@ func (r *ServiceVIPBindingReconciler) reconcileBind(ctx context.Context, binding
 	return nil
 }
 
-// applyBind performs the actual veth or tap binding for binding, branching
-// on Spec.EgressKind. Both kinds now register the same vip_xlat_table rows
-// (see registerVIPTranslation and the type doc comment above); veth
-// additionally does the root-namespace vip.Bind/Verify.
+// applyBind performs the veth or tap binding for binding, branching on
+// Spec.EgressKind. Both kinds register the same vip_xlat_table rows; veth
+// additionally binds and verifies the VIP in the root namespace.
 func (r *ServiceVIPBindingReconciler) applyBind(ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding) error {
 	switch binding.Spec.EgressKind {
 	case bgpv1alpha1.ServiceVIPBindingEgressKindVeth:
@@ -209,11 +184,9 @@ func (r *ServiceVIPBindingReconciler) applyBind(ctx context.Context, binding *bg
 	}
 }
 
-// registerVIPTranslation registers both vip_xlat_table rows (ingress and
-// egress) for binding, after resolving this node's own uSID Block and the
-// owning tenant VRF's Argument (resolveVIPBindingContext). Shared by both
-// EgressKindVeth and EgressKindTap -- see ServiceVIPBindingReconciler's own
-// doc comment for why veth needs this too, not just tap.
+// registerVIPTranslation registers both vip_xlat_table rows for binding, after
+// resolving this node's uSID Block and the owning tenant VRF's Argument. Shared
+// by both egress kinds; see the type doc comment for why veth needs it too.
 func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
@@ -260,12 +233,9 @@ func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
 	return nil
 }
 
-// reconcileDelete performs the finalizer-guarded unbind/unregister on
-// ServiceVIPBinding deletion, mirroring networkrule_controller.go's
-// reconcileDelete pattern: the finalizer is only removed once the
-// underlying unbind/unregister has actually succeeded, so a failure here
-// blocks deletion (and is retried) rather than silently leaking kernel/host
-// state.
+// reconcileDelete performs the finalizer-guarded unbind on deletion. The
+// finalizer is removed only once the unbind has succeeded, so a failure blocks
+// deletion and is retried rather than silently leaking kernel state.
 func (r *ServiceVIPBindingReconciler) reconcileDelete(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) (ctrl.Result, error) {
@@ -286,13 +256,11 @@ func (r *ServiceVIPBindingReconciler) reconcileDelete(
 	return ctrl.Result{}, nil
 }
 
-// applyUnbind performs the actual veth or tap unbind for binding, branching
-// on Spec.EgressKind. Both kinds now unregister the same vip_xlat_table
-// rows (see unregisterVIPTranslation); veth additionally does the
-// root-namespace vip.Unbind. For veth, both are attempted even if one
-// fails, and any errors are joined -- mirroring unregisterVIPTranslation's
-// own "attempt every candidate even if one fails" convention -- so a
-// failure in one mechanism never silently skips tearing down the other.
+// applyUnbind performs the veth or tap unbind for binding, branching on
+// Spec.EgressKind. Both kinds unregister the same vip_xlat_table rows; veth
+// additionally unbinds in the root namespace. For veth both are attempted even
+// if one fails, and the errors are joined, so a failure in one never skips
+// tearing down the other.
 func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding) error {
 	switch binding.Spec.EgressKind {
 	case bgpv1alpha1.ServiceVIPBindingEgressKindVeth:
@@ -313,14 +281,10 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 	}
 }
 
-// unregisterVIPTranslation removes both vip_xlat_table rows for binding.
-// Shared by both EgressKindVeth and EgressKindTap -- see
-// ServiceVIPBindingReconciler's own doc comment. Both directions are
-// attempted even if resolving the VRF context or the first Unregister call
-// fails, and any errors are joined together -- mirroring
-// usidmap.VRFTable.Reconcile's own "attempt every candidate even if one
-// fails" convention -- so a partial failure never silently leaves the
-// other row behind unregistered.
+// unregisterVIPTranslation removes both vip_xlat_table rows for binding. Shared
+// by both egress kinds. Both directions are attempted even if resolving the VRF
+// context or the first removal fails, and the errors are joined, so a partial
+// failure never leaves the other row behind.
 func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
@@ -371,47 +335,31 @@ func ipProtocolNumber(proto bgpv1alpha1.NetworkRuleProtocol) (uint8, error) {
 	}
 }
 
-// resolveVIPBindingContext resolves this node's own uSID Block (from its
-// BGPRouter's SRv6Locator) and the owning tenant VRF's Argument (from the
-// BGPVRFInstance whose VRFID is associated with a BGPAdvertisement whose
-// advertised prefix contains backendAddr) -- the (block, argument) pair
-// vip_xlat_table's key needs (usid.c's struct vip_xlat_key), for a
-// tap-kind ServiceVIPBinding on this node.
+// resolveVIPBindingContext resolves the (block, argument) pair vip_xlat_table's
+// key needs for a binding on this node: the Block from this node's BGPRouter
+// locator, and the Argument from the BGPVRFInstance whose advertised prefix
+// contains backendAddr.
 //
-// # A documented ambiguity (no VPCRef/VRFRef field on ServiceVIPBinding)
+// # A documented ambiguity
 //
-// ServiceVIPBinding carries no VPCRef or VRFRef field of its own (see its
-// own doc comment and internal/controller/usidresolver.go's identical
-// concern for NetworkRule backends) -- the writer that is expected to
-// eventually populate ServiceVIPBinding objects (a future extension of
-// NetworkRuleReconciler, out of this reconciler's scope) has direct access
-// to the owning NetworkRule's VPCRef at creation time, but that identity is
-// not carried onto the ServiceVIPBinding object itself today. Absent that
-// field, this function resolves ownership the same way
-// usidresolver.go's backendSIDIndex already does for NetworkRule backends:
-// by matching BackendAddress against this node's own BGPVRFInstances'
-// advertised prefixes (reusing buildBackendSIDIndex directly rather than
-// re-listing the same CRDs) -- restricted to VRFs whose BGPVRFInstance
-// actually targets *this node's* own BGPRouter, since a tap binding's VRF
-// context is always local to the node it was written for.
+// ServiceVIPBinding carries no VPC or VRF reference of its own. The writer that
+// creates these objects has the owning rule's VPC reference at creation time,
+// but does not record it here. Absent that field, ownership is resolved by
+// matching backendAddr against the advertised prefixes of BGPVRFInstances
+// targeting this node's own BGPRouter, since a binding's VRF context is always
+// local to the node it was written for.
 //
-// This resolution is unambiguous as long as no two VRFs on this same node
-// advertise overlapping prefixes that both contain backendAddr (e.g. two
-// tenants independently choosing the same ULA range) -- exactly the
-// scenario backendSIDIndex.verifyTenantOwnership already exists to guard
-// against elsewhere, but that guard needs a known vpcRef to check
-// ownership *against*, which this function does not have. When more than
-// one candidate VRF matches, this function fails closed (an explicit
-// error) rather than guessing, on the same reasoning
-// verifyTenantOwnership's own doc comment gives: silently picking one
-// candidate over another risks translating a backend's traffic into the
-// wrong tenant's VRF, not merely an inconvenience.
+// That is unambiguous only while no two VRFs on this node advertise overlapping
+// prefixes containing backendAddr, such as two tenants choosing the same ULA
+// range. The ownership guard used elsewhere needs a known VPC reference to check
+// against, which this function does not have, so when more than one candidate
+// matches it fails with an explicit error rather than guessing: picking one
+// would translate a backend's traffic into the wrong tenant's VRF.
 //
-// TODO(dsr-maglev): once ServiceVIPBinding gains a VPCRef/VRFRef field (or
-// the writer encodes the resolved (block, argument) directly on the
-// object), replace this address-containment heuristic with a direct
-// lookup -- see crdnames.BGPVRFInstanceName(vpc, nodeName) for the
-// deterministic name that lookup would use.
+// TODO(dsr-maglev): once ServiceVIPBinding carries a VPC or VRF reference, or
+// the writer records the resolved (block, argument) on the object, replace this
+// address-containment heuristic with a direct lookup by
+// crdnames.BGPVRFInstanceName.
 func resolveVIPBindingContext(
 	ctx context.Context, c client.Client, namespace, nodeName string, backendAddr netip.Addr,
 ) (block uint64, argument uint16, err error) {
@@ -492,10 +440,9 @@ func resolveVIPBindingContext(
 	}
 }
 
-// vrfInstanceTargetsRouter reports whether vrf's RouterTarget (RouterRef or
-// RouterSelector) resolves to router -- mirroring routing.go's
-// enqueueRoutersForTarget matching logic, but as a boolean test against one
-// already-known router rather than a List-driven fan-out.
+// vrfInstanceTargetsRouter reports whether vrf's router target, by reference or
+// selector, resolves to router. The same matching the watch fan-out does, as a
+// boolean test against one known router rather than a list.
 func vrfInstanceTargetsRouter(vrf *bgpv1alpha1.BGPVRFInstance, router *bgpv1alpha1.BGPRouter) bool {
 	if vrf.Spec.RouterRef != nil {
 		return vrf.Spec.RouterRef.Name == router.Name
@@ -513,11 +460,9 @@ func vrfInstanceTargetsRouter(vrf *bgpv1alpha1.BGPVRFInstance, router *bgpv1alph
 	return false
 }
 
-// SetupWithManager registers the ServiceVIPBindingReconciler with the
-// manager. ServiceVIPBinding is a leaf CRD written by another controller
-// and consumed only here -- no additional watch is needed beyond the
-// object itself, unlike NetworkRuleReconciler's NetworkGateway watch
-// (which reacts to a namespace-wide gateway-node pool changing).
+// SetupWithManager registers the reconciler with the manager. ServiceVIPBinding
+// is a leaf CRD written outside this repo and consumed only here, so no watch
+// beyond the object itself is needed.
 func (r *ServiceVIPBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.ServiceVIPBinding{}).

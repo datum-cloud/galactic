@@ -17,9 +17,9 @@ import (
 	"go.datum.net/galactic/internal/gc"
 )
 
-// GCReconciler runs periodic garbage collection to clean up stale BGP CRDs
-// and orphaned VRF interfaces left behind when containers are force-terminated
-// and CNI DEL never fires.
+// GCReconciler runs periodic garbage collection over the stale BGP CRDs and
+// orphaned VRF interfaces left behind when a container is force-terminated and
+// CNI DEL never fires.
 type GCReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -53,9 +53,9 @@ func (r *GCReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Resu
 	return ctrl.Result{RequeueAfter: r.Interval}, nil
 }
 
-// SetupWithManager registers the GCReconciler with the manager. The GC
-// reconciler is started by a ticker goroutine launched from root.go where
-// the manager's context is available.
+// SetupWithManager registers the reconciler with the manager. The actual pass is
+// driven by a ticker goroutine started where the manager's context is
+// available.
 func (r *GCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Interval == 0 {
 		r.Interval = 5 * time.Minute

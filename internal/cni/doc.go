@@ -2,30 +2,22 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package cni implements galactic-veth, the veth master plugin for wiring
-// container workloads into SRv6-backed VPC networks. Tap-based workloads
-// (Kata, Firecracker, kraftlet/Unikraft) are galactic-tap's own master
-// plugin (internal/cnitap) — interface kind is which binary is invoked now,
-// not a config field either binary branches on.
+// Package cni implements galactic-veth, the veth master plugin wiring container
+// workloads into SRv6-backed VPC networks. Tap-based workloads are a separate
+// master plugin: interface kind is which binary the runtime invokes, not a
+// config field either branches on.
 //
-// On ADD the plugin creates a VRF, a veth pair, and patches the pod's NAD
-// with the host interface name. On DEL it performs best-effort cleanup in
-// reverse order. CHECK and STATUS validate that managed kernel resources are
-// intact. IPAM allocation, termination-route installation, and
-// BGPAdvertisement/BGPVRFInstance publish are no longer this package's
-// concern — they're galactic-ipam's, galactic-route's, and galactic-bgp's
-// own, chained after this plugin per the conflist (see
-// internal/cniipam, internal/cniroute, internal/cnibgp).
+// On ADD it creates a VRF, a veth pair, and patches the pod's attachment
+// definition with the host interface name. On DEL it cleans up best-effort in
+// reverse order. CHECK and STATUS validate that the managed kernel resources
+// are intact.
 //
-// Subpackages isolate kernel primitives:
+// Address allocation, termination routes, and BGP publishing are each their own
+// chain-invoked binary, not this package's concern.
 //
-//   - veth: veth pair creation for container workloads
-//
-// internal/cni/ipam, internal/cni/route, and internal/cni/tap are the same
-// kind of kernel-primitive package, but are no longer used by this package
-// itself — they're used exclusively by internal/cniipam, internal/cniroute,
-// and internal/cnitap respectively, now that IPAM, termination routes, and
-// tap are each their own chain-invoked binary.
+// Subpackages isolate kernel primitives: veth creates the pair for container
+// workloads. The sibling ipam, route, and tap packages are the same kind of
+// package but are used by their own binaries rather than by this one.
 //
 // Usage:
 //

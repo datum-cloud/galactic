@@ -2,13 +2,12 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package cnitestutil holds test helpers shared by internal/cni's and
-// internal/cnitap's own test suites — the same reasoning as internal/
-// cnimaster, but for test-only scaffolding rather than production code:
-// neither helper is specific to veth or tap, so a fix only has to happen
-// once. Not a _test.go file, since Go doesn't let one package's _test.go
-// import another package's _test.go — this is a regular importable package
-// that happens to only ever be imported from test code.
+// Package cnitestutil holds the test helpers both master plugins' test suites
+// share, the same reasoning as the shared production package but for test
+// scaffolding: neither helper is specific to veth or tap, so a fix happens once.
+//
+// It is a regular importable package rather than a test file, since one
+// package's test files cannot import another's.
 package cnitestutil
 
 import (
@@ -20,9 +19,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 )
 
-// AssertCNIError verifies that err is a *types.Error with the expected Code
-// and that its Msg contains wantMsg (substring match). Pass wantMsg == "" to
-// skip the message check.
+// AssertCNIError verifies that err is a CNI error with the expected code and a
+// message containing wantMsg. Pass an empty wantMsg to skip the message check.
 func AssertCNIError(t *testing.T, err error, wantCode uint, wantMsg string) {
 	t.Helper()
 	var cniErr *types.Error

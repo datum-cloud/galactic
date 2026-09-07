@@ -23,20 +23,17 @@ import (
 
 var ConfFile = config.DefaultConfFile
 
-// cniConfig is the shared config resolver for env var resolution.
-// Initialized by InitCNIConfig() (called from cmd/galactic-bgp/main.go).
+// cniConfig is the shared config resolver for environment resolution,
+// initialized once at process startup by InitCNIConfig.
 //
-// Reuses internal/config.CNIConfig (the GALACTIC_CNI_* env var names) as-is
-// rather than defining a GALACTIC_BGP_* set: node_name/kubeconfig/namespace
-// are shared node-level settings, not domain-specific behavior the way
-// galactic-ipam's own enable-local-ipam flag is — every binary in the chain
-// resolves them from the same static conflist file (see
-// go.datum.net/galactic/internal/hostconf's doc comment).
+// It reuses the shared CNI environment names rather than defining a set of its
+// own: the node name, kubeconfig, and namespace are node-level settings every
+// binary in the chain resolves from the same static conflist, not
+// domain-specific behavior.
 var cniConfig *config.CNIConfig
 
-// InitCNIConfig initializes the shared config resolver for CNI env var
-// resolution. Callers should invoke this once at process startup before any
-// config lookups.
+// InitCNIConfig initializes the shared config resolver. Call it once at process
+// startup, before any config lookup.
 func InitCNIConfig() {
 	cniConfig = config.NewCNIConfig()
 }
@@ -64,9 +61,9 @@ func isValidBase62(s string) bool {
 	return true
 }
 
-// loadHostConf loads node-local settings from the static per-node conflist.
-// If the file is missing, it returns a zero-value HostConf (tolerating local
-// test runs) but still defaulting Namespace to config.DefaultNamespace.
+// loadHostConf loads node-local settings from the static per-node conflist. A
+// missing file yields a zero-value HostConf, tolerating local test runs, with
+// the namespace still defaulted.
 func loadHostConf(filePath string) (*HostConf, error) {
 	if filePath == "" {
 		filePath = config.DefaultConfFile
@@ -147,9 +144,9 @@ func parseStatusConf(data []byte) error {
 	return nil
 }
 
-// parseConf unmarshals the CNI configuration from stdin data (the same
-// document the master plugin received), validates the base62-encoded
-// identifier fields, and resolves node-level settings and logging.
+// parseConf unmarshals the CNI configuration from data, the same document the
+// master plugin received, validates the base62 identifier fields, and resolves
+// node-level settings and logging.
 func parseConf(data []byte) (*PluginConf, error) {
 	conf := &PluginConf{}
 	if err := json.Unmarshal(data, &conf); err != nil {
@@ -201,21 +198,18 @@ func parseConf(data []byte) (*PluginConf, error) {
 	}
 	_ = os.Setenv("KUBECONFIG", cniConfig.Kubeconfig)
 
-	// Bridges the conflist-resolved interface list into the raw env var
-	// attach.ResolveInterfaces itself checks, exactly the same
-	// "downstream library reads via plain os.Getenv" reason the
-	// KUBECONFIG bridge just above exists for. Without this, every
-	// srv6.ResolveNodeSourceAddress/ResolvePublicUplink call this
-	// process makes (registerNodeSourceAddress/registerPublicUplink,
-	// bgp.go) falls back to attach.ResolveInterfaces' own
-	// default-IPv6-route auto-detection -- wrong on any node where that
-	// route's interface isn't the fabric one (found live: this exact gap
-	// produced a plausible-but-wrong public_uplink_table entry with no
-	// error at all). Only sets it when the process's own environment
-	// doesn't already carry it, so an operator who genuinely does set
-	// GALACTIC_CNI_EBPF_INTERFACES on this exec environment directly
-	// (unlike this lab, which only sets it on the DaemonSet container's
-	// own env, never on a CNI plugin's) is never overridden.
+	// Bridge the conflist-resolved interface list into the raw environment
+	// variable the attach package reads directly, the same reason the
+	// kubeconfig bridge above exists.
+	//
+	// Without it, every source-address and uplink resolution this process
+	// makes falls back to the attach package's own default-route
+	// auto-detection, which is wrong on any node where that route's
+	// interface is not the fabric one and produces a plausible but wrong
+	// uplink entry with no error at all.
+	//
+	// Set only when this process's environment does not already carry it,
+	// so an operator who does set it directly is never overridden.
 	if os.Getenv(config.EnvCNIEBPFInterfaces) == "" && cniConfig.EBPFInterfaces != "" {
 		_ = os.Setenv(config.EnvCNIEBPFInterfaces, cniConfig.EBPFInterfaces)
 	}

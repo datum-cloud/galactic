@@ -17,38 +17,31 @@ import (
 
 const namespace = "galactic_usid"
 
-// DropReasonsReader abstracts drop_reasons's per-CPU lookup (a
-// BPF_MAP_TYPE_PERCPU_ARRAY keyed by drop reason index, design plan §4.4)
-// down to the one operation Collector needs, so tests can substitute an
-// in-memory fake instead of a real, kernel-loaded map. *ebpf.Map already
-// satisfies this interface structurally -- see NewCollectorFromObjects.
+// DropReasonsReader narrows the drop-reason map, a per-CPU array keyed by
+// reason index, to the one operation Collector needs, so tests can substitute an
+// in-memory fake. A real loaded map already satisfies it structurally.
 type DropReasonsReader interface {
 	Lookup(key, valueOut any) error
 }
 
-// Collector is a prometheus.Collector reading the eBPF uSID datapath's live
-// map state at every scrape (package doc comment): packets/bytes per
-// (uSID Block, Argument) vrf_table entry, drops by reason, and current
-// Argument-space utilization per uSID Block.
+// Collector reads the uSID datapath's live map state at every scrape:
+// per-Argument packet and byte counters, drops by reason, and Argument-space
+// utilization per Block.
 type Collector struct {
 	vrf         *usidmap.VRFTable
 	locator     *usidmap.LocatorTable
 	dropReasons DropReasonsReader
 }
 
-// NewCollector builds a Collector from already-constructed table/reader
-// values. Production callers normally use NewCollectorFromObjects; this
-// constructor exists so tests can pass fakes satisfying usidmap.Table (via
-// usidmap.NewVRFTable/NewLocatorTable) and DropReasonsReader without a
-// kernel.
+// NewCollector builds a Collector from already-constructed tables and reader.
+// Production callers normally use NewCollectorFromObjects; this exists so tests
+// can pass fakes without a kernel.
 func NewCollector(vrf *usidmap.VRFTable, locator *usidmap.LocatorTable, dropReasons DropReasonsReader) *Collector {
 	return &Collector{vrf: vrf, locator: locator, dropReasons: dropReasons}
 }
 
-// NewCollectorFromObjects builds a Collector reading directly from a
-// loaded *prog.UsidObjects's vrf_table/locator_table/drop_reasons maps --
-// e.g. the object internal/plumbing/ebpf/attach.Load/.Start/.StartWatching
-// returns.
+// NewCollectorFromObjects builds a Collector reading directly from a loaded
+// object set's maps.
 func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 	return NewCollector(
 		usidmap.NewVRFTable(usidmap.KernelTable{Map: objs.VrfTable}),
@@ -57,9 +50,8 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 	)
 }
 
-// labelBlock is the Prometheus label name for a uSID Block value, shared
-// across every metric Desc below that carries one (goconst: avoid repeating
-// the "block" string literal at each call site).
+// labelBlock is the Prometheus label name for a uSID Block, shared by every
+// metric below that carries one.
 const labelBlock = "block"
 
 var (
@@ -106,22 +98,17 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectDrops(ch)
 }
 
-// formatBlock renders a uSID Block value as a metric label -- hex, matching
-// the %#x formatting usidmap/uformat's own error messages already use for
-// Block values throughout this codebase.
+// formatBlock renders a Block as a metric label, in hex, matching how Block
+// values are formatted in error messages elsewhere.
 func formatBlock(block uint64) string {
 	return fmt.Sprintf("%#x", block)
 }
 
 func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
-	// Seed every currently-active uSID Block (from locator_table, the set
-	// of Blocks this node is actually configured for) with a zero count,
-	// so a Block with no vrf_table entries yet still reports
-	// arguments_used=0 / utilization_ratio=0 rather than simply being
-	// absent -- important for exhaustion alerting (package doc comment):
-	// an alert on "utilization > 0.9" needs the series to exist at 0 to
-	// have something to compare against later, not spring into existence
-	// only once traffic starts.
+	// Seed every currently active Block with a zero count, so one with no
+	// entries yet still reports zero rather than being absent. An alert on high
+	// utilization needs the series to exist at zero to compare against, not
+	// spring into existence once traffic starts.
 	perBlockUsed := make(map[uint64]int)
 	if c.locator != nil {
 		locatorEntries, err := c.locator.List()

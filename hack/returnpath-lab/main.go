@@ -2,36 +2,30 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command returnpath-lab is the Phase 0 proof harness for
-// docs/plans/855-return-path-ingress-decap.md. It is a lab tool, not a
-// shipped binary: it performs, by hand and reversibly, exactly what that
-// plan's Pieces 1-3 would automate, so the plan's three derived-but-
-// unproven kernel assumptions can be tested before any production code is
-// written against them.
+// Command returnpath-lab is a proof harness for the ingress sidecar's return
+// path. It is a lab tool, not a shipped binary: it performs by hand, and
+// reversibly, what production code would automate, so three kernel assumptions
+// can be tested before anything is written against them.
 //
-// The assumptions under test, and how a successful `up` + end-to-end
-// request proves each:
+// The assumptions, each proven by a successful `up` plus an end-to-end request:
 //
-//  1. bpf_fib_lookup with BPF_FIB_LOOKUP_TBID resolves against a bare
-//     Linux routing table that has no VRF device attached (plan D-7). `up`
-//     installs the return route into exactly such a table.
-//  2. bpf_redirect_peer from the host root netns into a VRF-enslaved
-//     pod-side veth end delivers to a socket that is SO_BINDTODEVICE-bound
-//     to that VRF master (plan §7.1). `up` builds precisely that topology.
-//  3. A packet arriving on one VRF-enslaved link is locally delivered for
-//     an address configured on a *different* link enslaved to the same VRF
-//     (plan §7.1 point 3) -- the gateway address lives on the sidecar's own
-//     ivsN veth, not on the link this tool creates.
+//  1. bpf_fib_lookup with a table id resolves against a bare Linux routing
+//     table with no VRF device attached. `up` installs the return route into
+//     exactly such a table.
+//  2. bpf_redirect_peer from the host root namespace into a VRF-enslaved
+//     pod-side veth end delivers to a socket bound to that VRF master. `up`
+//     builds that topology.
+//  3. A packet arriving on one VRF-enslaved link is locally delivered for an
+//     address configured on a different link in the same VRF: the gateway
+//     address lives on the sidecar's own veth, not the link this tool creates.
 //
-// It deliberately reuses the production packages (internal/plumbing/ebpf/
-// usidmap, internal/plumbing/intf, internal/plumbing/ebpf/uformat) rather
-// than hand-marshalling map keys with bpftool, both to avoid layout bugs
-// and so that whatever `up` proves is proven about the real code paths that
-// Phase 2 will move into galactic-router.
+// It reuses the production packages rather than hand-marshalling map keys, both
+// to avoid layout bugs and so what it proves is proven about the real code
+// paths.
 //
-// Must run in the host's root network namespace with CAP_NET_ADMIN, CAP_BPF
-// and hostPID (the pod-netns discovery below walks /proc), with the host's
-// bpffs mounted. See hack/returnpath-lab/README.md.
+// Must run in the host's root network namespace with CAP_NET_ADMIN, CAP_BPF,
+// and host PID, since namespace discovery walks /proc, with the host's bpffs
+// mounted. See the README beside it.
 package main
 
 import (
@@ -134,9 +128,9 @@ func main() {
 			"as UNKNOWN_FUNCTION instead of passing it through to the XDP/stack path that handles it.")
 	flag.Usage = usage
 
-	// The action is the first argument, consumed before flag.Parse: Go's
-	// flag package stops parsing at the first non-flag argument, so a
-	// trailing subcommand would silently swallow every flag after it.
+	// The action is the first argument, consumed before flag parsing: Go's flag
+	// package stops at the first non-flag argument, so a trailing subcommand
+	// would silently swallow every flag after it.
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -194,9 +188,9 @@ func usage() {
 	flag.PrintDefaults()
 }
 
-// derived holds the values every action computes from the flags, so the
-// key arithmetic lives in exactly one place and `status` prints the same
-// numbers `up` would write.
+// derived holds the values every action computes from the flags, so the key
+// arithmetic lives in one place and `status` prints the same numbers `up`
+// writes.
 type derived struct {
 	block       uint64
 	nodeID      uint16
@@ -316,17 +310,15 @@ type podNetns struct {
 	inode string
 }
 
-// findPodNetns locates the network namespace holding vrfName by walking
-// /proc, deduplicating by netns inode, and entering each distinct namespace
-// to look for that interface.
+// findPodNetns locates the network namespaces holding vrfName by walking /proc,
+// deduplicating by namespace inode, and entering each distinct namespace to look
+// for that interface.
 //
-// This is deliberately the same mechanism the plan's Open Question 1 needs
-// an answer for: identifying which pod's netns holds a given VPC's VRF, from
-// a root-netns process, with no CNI ADD ever having happened for that pod.
-// Proving it here is part of Phase 0's job. The VRF's name is fully
-// determined by the VPC id (intf.GenerateInterfaceNameVRF), so the interface
-// itself is the identifier -- no annotation, CRI call or published inode is
-// needed.
+// This is the mechanism for identifying which pod's namespace holds a given
+// VPC's VRF from a root-namespace process, with no CNI ADD ever having happened
+// for that pod. The VRF's name is fully determined by the VPC id, so the
+// interface itself is the identifier: no annotation, runtime call, or published
+// inode is needed.
 func findPodNetns(vrfName string) ([]podNetns, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -553,11 +545,11 @@ func reportForwarding(hostIf string) {
 	}
 }
 
-// describePodNetns reports, from inside the pod's own namespace, the three
-// things the return path depends on there: the VRF and its table, which
-// links are enslaved to it, and which of those links actually carries the
-// gateway address (plan §7.1 point 3 -- delivery is cross-interface within
-// one VRF, so this is expected NOT to be the link this tool creates).
+// describePodNetns reports, from inside the pod's namespace, the three things
+// the return path depends on there: the VRF and its table, which links are
+// enslaved to it, and which of those carries the gateway address. Delivery is
+// cross-interface within one VRF, so that is expected not to be the link this
+// tool creates.
 func describePodNetns(path string, d derived) error {
 	return ns.WithNetNSPath(path, func(ns.NetNS) error {
 		vrfLink, err := netlink.LinkByName(d.vrfName)
@@ -608,12 +600,11 @@ func reportDropReasons(pinDir string) error {
 	}
 	defer func() { _ = m.Close() }()
 
-	// max_entries matters: attach.Load reuses an already-pinned map as-is,
-	// so a node whose bpffs pin predates a newly-added drop reason has a
-	// map too small to hold it, and count_drop for that index silently
-	// fails. Two nodes running the identical image can therefore expose
-	// different counters -- report the size so that is visible rather than
-	// looking like a genuine zero.
+	// The entry count matters: loading reuses an already-pinned map as-is, so a
+	// node whose pin predates a newly added drop reason has a map too small to
+	// hold it and the counter for that index silently fails. Two nodes running
+	// the same image can therefore expose different counters, so report the
+	// size rather than let it look like a genuine zero.
 	fmt.Printf("  (map max_entries=%d; usid.c currently defines 29)\n", m.MaxEntries())
 
 	any := false
@@ -633,12 +624,11 @@ func reportDropReasons(pinDir string) error {
 		any = true
 		name, ok := prog.DropReasonNames[idx]
 		if !ok {
-			// usid.c carries diagnostic TRACE_* counters above the Go
-			// mirror's DropReasonCount (16); prog.DropReasonNames stops
-			// there, and metrics/collector.go deliberately does not export
-			// them. They are the most useful signal for this harness, so
-			// name them locally rather than widening the production mirror
-			// for a set usid.c documents as temporary.
+			// The datapath carries diagnostic counters above the Go mirror's
+			// count, which stops there and which the metrics collector
+			// deliberately does not export. They are the most useful signal
+			// here, so name them locally rather than widen the production
+			// mirror for a set documented as temporary.
 			if n, tok := traceReasonNames[idx]; tok {
 				name = n
 			} else {
@@ -653,16 +643,15 @@ func reportDropReasons(pinDir string) error {
 	return nil
 }
 
-// traceReasonNames mirrors usid.c's DROP_REASON_TRACE_* diagnostic
-// checkpoints, which sit above prog.DropReasonCount and so have no entry in
-// prog.DropReasonNames. Read together they say how far usid_egress got:
-// ENTRY -> IFINDEX_HIT -> ADJUST_ROOM_OK -> REACHED_REDIRECT -> REDIRECT_OK
-// is a fully successful encapsulation.
+// traceReasonNames mirrors the datapath's diagnostic checkpoints, which sit
+// above the Go mirror's drop-reason count and so have no name there. Read
+// together they say how far usid_egress got: entry, ifindex hit, room adjusted,
+// reached redirect, redirect ok is a fully successful encapsulation.
 //
-// Slots 29-32 are the same idea for usid_ingress, which had no success
-// counter at all: ING_REACHED_REDIRECT -> ING_REDIRECT_OK brackets its own
-// step 9. ing_last_ifindex is a value, not a count -- the ifindex
-// bpf_fib_lookup resolved, printed as-is. fib_no_ifindex is a real drop.
+// The higher slots are the same idea for usid_ingress, which had no success
+// counter at all, bracketing its own redirect step. One of them is a value
+// rather than a count, the ifindex the FIB lookup resolved, printed as-is. One
+// is a real drop.
 var traceReasonNames = map[uint32]string{
 	16: "trace_multicast_ll_bail",
 	17: "trace_miss_vrf",
@@ -728,10 +717,9 @@ func up(cfg config, d derived) error {
 		return nil
 	}
 
-	// 1 + 2: the veth. Both ends are created in this (root) netns, then the
-	// peer is moved -- the same order galactic-cni uses for a tenant pod,
-	// and the reason the router can know the peer's MAC (needed by step 4)
-	// without ever entering the pod's namespace.
+	// The veth. Both ends are created in this root namespace and then the peer
+	// is moved, the same order the CNI uses for a tenant pod, and the reason
+	// this side can know the peer's MAC without entering the pod's namespace.
 	peerMAC, err := ensureVeth(d)
 	if err != nil {
 		return err
@@ -762,9 +750,8 @@ func up(cfg config, d derived) error {
 	}
 	fmt.Printf("  [3]   route %s/128 dev %s table %d\n", d.gwAddr, d.hostIf, cfg.tableID)
 
-	// 4: the permanent neighbor entry. Without this, bpf_fib_lookup returns
-	// BPF_FIB_LKUP_RET_NO_NEIGH and usid_ingress drops the packet -- see
-	// internal/hostgw.installGatewayNeighbor's doc comment.
+	// The permanent neighbor entry. Without it, bpf_fib_lookup returns
+	// NO_NEIGH and usid_ingress drops the packet.
 	if err := netlink.NeighSet(&netlink.Neigh{
 		LinkIndex:    hostLink.Attrs().Index,
 		Family:       netlink.FAMILY_V6,
@@ -903,9 +890,8 @@ func down(cfg config, d derived) error {
 
 	var errs []error
 
-	// Unregister the map entry before the veth goes, so a decapped packet
-	// can never be redirected at a freed ifindex (plan §8's one ordering
-	// requirement).
+	// Unregister the map entry before the veth goes, so a decapsulated packet
+	// can never be redirected at a freed ifindex.
 	if registry, closer, err := usidmap.OpenPinnedRegistry(cfg.pinDir); err != nil {
 		errs = append(errs, fmt.Errorf("open pinned registry: %w", err))
 	} else {
@@ -968,24 +954,22 @@ func down(cfg config, d derived) error {
 // probe
 // ---------------------------------------------------------------------
 
-// probe opens a TCP connection from inside the Envoy pod's own network
-// namespace, bound to that VPC's VRF device with SO_BINDTODEVICE -- the
-// exact socket shape #856's extension server configures on Envoy's upstream
-// clusters (network-services-operator's mutate.ApplyVPCPodSocketBind). What
-// comes back classifies the return path:
+// probe opens a TCP connection from inside the Envoy pod's network namespace,
+// bound to that VPC's VRF device, the exact socket shape the extension server
+// configures on Envoy's upstream clusters. What comes back classifies the
+// return path:
 //
-//   - connected, or refused (RST): the return path WORKS. Both outcomes
-//     require a packet to have travelled backend -> VRF -> SRv6 encap ->
-//     fabric -> this node -> usid_ingress decap -> veth -> this socket.
-//     A RST is as good a proof as a SYN-ACK.
-//   - timeout: nothing came back. Either the forward path did not reach the
-//     backend, or the reply was lost on the return path. `status`'s
-//     vrf_table counters and drop_reasons disambiguate which.
+//   - Connected, or refused: the return path works. Both require a packet to
+//     have travelled backend, VRF, encapsulation, fabric, this node,
+//     decapsulation, veth, socket. A reset proves it as well as a handshake.
+//   - Timeout: nothing came back. Either the forward path never reached the
+//     backend or the reply was lost returning. The map counters and drop
+//     reasons `status` prints disambiguate which.
 //
-// Raw syscalls rather than net.Dialer: the socket must be created on the
-// same OS thread that is currently attached to the pod's netns, and Go's
-// netpoll offers no guarantee about which thread performs the underlying
-// socket(2). SO_SNDTIMEO bounds the blocking connect(2).
+// Raw syscalls rather than a dialer: the socket must be created on the same OS
+// thread currently attached to the pod's namespace, and Go's netpoll offers no
+// guarantee about which thread performs the underlying socket call. A send
+// timeout bounds the blocking connect.
 func probe(cfg config, d derived) error {
 	if cfg.backend == "" {
 		return errors.New("-backend is required for probe")
@@ -1045,9 +1029,9 @@ func connectOnce(vrfName string, backend net.IP, port int, timeout time.Duration
 	}
 	defer func() { _ = syscall.Close(fd) }()
 
-	// SO_BINDTODEVICE against the VRF master is what sends this socket's
-	// route lookup into that VPC's own table, and what makes a reply
-	// arriving on a VRF-enslaved link match this socket at all (plan §7.1).
+	// Binding to the VRF master is what sends this socket's route lookup into
+	// that VPC's table, and what makes a reply arriving on a VRF-enslaved link
+	// match this socket at all.
 	if err := syscall.SetsockoptString(fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, vrfName); err != nil {
 		return "SO_BINDTODEVICE FAILED", "", err
 	}
@@ -1089,16 +1073,16 @@ func connectOnce(vrfName string, backend net.IP, port int, timeout time.Duration
 // egress-route
 // ---------------------------------------------------------------------
 
-// egressRoute answers the one question that separates "the backend never
-// replied" from "the backend replied but its node had nowhere to send the
-// reply": does egress_route_table hold an entry for this address in this
-// VRF's table, and if so toward which SID?
+// egressRoute answers the one question separating "the backend never replied"
+// from "the backend replied but its node had nowhere to send the reply": does
+// egress_route_table hold an entry for this address in this VRF's table, and if
+// so toward which SID?
 //
-// Run on a backend node with the *gateway* address and that node's own
-// tenant VRF table id. A hit means galactic-router imported the sidecar's
-// BGPAdvertisement and usid_egress will encapsulate replies toward the
-// gateway node. A miss means the reply leaves unencapsulated (or not at
-// all), and no amount of decap state on the gateway node can help.
+// Run it on a backend node with the gateway address and that node's own tenant
+// VRF table id. A hit means the router imported the sidecar's advertisement and
+// usid_egress will encapsulate replies toward the gateway node. A miss means
+// the reply leaves unencapsulated, or not at all, and no amount of decap state
+// on the gateway node can help.
 func egressRoute(cfg config, _ derived) error {
 	if cfg.addr == "" || cfg.egressTable == 0 {
 		return errors.New("-addr and -egress-table are both required for egress-route")
@@ -1148,29 +1132,26 @@ func mustAddr(ip net.IP) netip.Addr {
 // inject
 // ---------------------------------------------------------------------
 
-// inject sends one genuine SRv6/IPv6-in-IPv6 encapsulated packet at a
-// gateway node's uplink, addressed to that node's return SID, carrying an
-// inner TCP SYN from a VPC backend address to the gateway address.
+// inject sends one genuine encapsulated packet at a gateway node's uplink,
+// addressed to that node's return SID and carrying an inner TCP SYN from a VPC
+// backend address to the gateway address.
 //
-// This is what finally isolates the decap path. Every other way of
-// generating the reply depends on a tenant workload actually replying:
+// This is what isolates the decap path. Every other way of generating the reply
+// depends on a tenant workload actually replying:
 //
-//   - probing the backend from Envoy needs the backend to answer, and this
-//     lab's VPC-2 backends are Kraftlet unikernels behind a tap that do not
-//     (see the fib_no_neigh drops on their own node).
-//   - probing the gateway address from the backend node's own root-netns
+//   - Probing the backend from Envoy needs the backend to answer, and a
+//     unikernel behind a tap may not.
+//   - Probing the gateway address from the backend node's own root-namespace
 //     VRF does not work either, and the reason is instructive: usid_egress
-//     attaches to the *ingress* hook of a tenant's tap/veth -- where a
-//     tenant's own outbound traffic arrives from the workload -- so a packet
-//     the host itself originates into that VRF never traverses it, and
-//     leaves via the VRF's NAT66 default route instead.
+//     attaches to the ingress hook of a tenant's tap or veth, where a tenant's
+//     outbound traffic arrives from the workload, so a packet the host itself
+//     originates into that VRF never traverses it and leaves through the VRF's
+//     NAT66 default instead.
 //
-// So the encapsulation is done here, by the kernel, on our behalf: an
-// AF_INET6 SOCK_RAW socket with protocol 41 (IPv6-in-IPv6) makes the kernel
-// build the outer header -- next-header 41, source address chosen from the
-// host's own routing, which is what keeps it past BCP38 filtering -- with
-// our inner packet as its payload. Byte-for-byte what a backend node's
-// usid_egress would have produced.
+// So the encapsulation is done here, by the kernel: a raw IPv6 socket with
+// protocol 41 makes the kernel build the outer header, with a source address
+// chosen from the host's own routing, which is what keeps it past source
+// filtering. Byte for byte what a backend node's usid_egress would produce.
 func inject(cfg config, d derived) error {
 	innerSrc := net.ParseIP(cfg.innerSrc)
 	if innerSrc == nil {
@@ -1221,10 +1202,10 @@ func inject(cfg config, d derived) error {
 }
 
 // buildInnerSYN builds a 60-byte inner packet: a 40-byte IPv6 header plus a
-// 20-byte TCP SYN, with the TCP checksum computed over the RFC 2460
-// pseudo-header. usid_ingress requires the inner packet's own version nibble
-// to be 4 or 6 and reads its addresses for the step 8 FIB lookup, so this
-// has to be genuinely well-formed, not a stub payload.
+// 20-byte TCP SYN, with the checksum computed over the pseudo-header.
+// usid_ingress requires the inner packet's version nibble to be 4 or 6 and
+// reads its addresses for the FIB lookup, so it must be genuinely well formed
+// rather than a stub payload.
 func buildInnerSYN(src, dst net.IP, sport, dport uint16) []byte {
 	const tcpLen = 20
 	pkt := make([]byte, 40+tcpLen)
@@ -1273,19 +1254,16 @@ func checksum(b []byte) uint16 {
 // filters
 // ---------------------------------------------------------------------
 
-// filters lists the clsact ingress filter chain on an interface, in the
-// order the kernel evaluates it (ascending priority).
+// filters lists the clsact ingress filter chain on an interface, in the order
+// the kernel evaluates it.
 //
-// This exists because a correct usid_ingress with correct maps still does
-// nothing if it never runs. usid.c attaches direct-action at a fixed
-// priority (attach.go's defaultFilterPriority) to the same native-device
-// ingress hook Cilium uses, and returns TC_ACT_UNSPEC on every fail-open
-// path specifically so a Cilium filter at a *later* priority still sees the
-// packet. That reasoning only holds while galactic actually sits earlier in
-// the chain and is still present: in direct-action mode an earlier filter
-// returning TC_ACT_OK is a final verdict that ends the chain, and a filter
-// installed at the same priority by another agent replaces rather than
-// stacks.
+// A correct program with correct maps still does nothing if it never runs. It
+// attaches direct-action at a fixed priority to the same hook a cluster CNI
+// uses, and returns TC_ACT_UNSPEC on every fail-open path so a filter at a
+// later priority still sees the packet. That reasoning holds only while it sits
+// earlier in the chain and is still present: in direct-action mode an earlier
+// filter returning TC_ACT_OK ends the chain, and a filter installed at the same
+// priority by another agent replaces rather than stacks.
 func filters(cfg config, _ derived) error {
 	if cfg.iface == "" {
 		return errors.New("-iface is required for filters")
@@ -1335,17 +1313,16 @@ func filters(cfg config, _ derived) error {
 // verify-maps
 // ---------------------------------------------------------------------
 
-// verifyMaps checks the assumption every other action here silently rests
-// on: that the maps reachable through bpffs pins are the same kernel objects
-// the *attached* program actually reads.
+// verifyMaps checks the assumption every other action rests on: that the maps
+// reachable through bpffs pins are the same kernel objects the attached program
+// reads.
 //
-// They can diverge. attach.Load pins each map under pinDir and reuses an
-// existing pin as-is, but a schema-incompatible reload replaces the
-// program's maps; anything still holding, or newly opening, the old pin then
-// reads and writes an orphaned map that no attached program consults. The
-// symptom is exactly what it looks like from outside: registrations that
-// appear to succeed, a program that is demonstrably attached and receiving
-// packets, and counters that never move.
+// They can diverge. Loading pins each map and reuses an existing pin as-is, but
+// a schema-incompatible reload replaces the program's maps, and anything still
+// holding, or newly opening, the old pin then reads and writes an orphan no
+// attached program consults. The symptom is what it looks like from outside:
+// registrations that appear to succeed, a program demonstrably attached and
+// receiving packets, and counters that never move.
 func verifyMaps(cfg config, _ derived) error {
 	if cfg.progID == 0 {
 		return errors.New("-prog-id is required (take it from the filters output)")
@@ -1408,19 +1385,17 @@ func verifyMaps(cfg config, _ derived) error {
 // attach-iface / detach-iface
 // ---------------------------------------------------------------------
 
-// attachIface attaches an already-loaded usid_ingress (by program id, from
-// the filters output) to an additional interface, via the same
-// attach.Attach path production uses.
+// attachIface attaches an already-loaded usid_ingress, by program id from the
+// filters output, to an additional interface, through the same path production
+// uses.
 //
-// It exists to test one specific failure: attach.ResolveInterfaces picks the
-// interfaces carrying the IPv6 default route and then deliberately skips
-// WireGuard links (attach/interfaces.go's excludedLinkType), because a
-// WireGuard mesh can install a default-ish route of its own and
-// srv6.ResolveNodeSourceAddress would then bake its ULA in as this node's
-// source address. On a Talos cluster with KubeSpan enabled, that same
-// WireGuard interface is what actually carries inter-node traffic --
-// including the iBGP sessions and every SRv6-encapsulated packet -- so the
-// skip removes the only interface the datapath needed.
+// It exists to test one failure: interface resolution picks the interfaces
+// carrying the IPv6 default route and then skips WireGuard links, because a
+// mesh can install a default route of its own and this node's source address
+// would then be a mesh address unreachable off-node. On a cluster where that
+// same WireGuard interface carries inter-node traffic, including the BGP
+// sessions and every encapsulated packet, the skip removes the only interface
+// the datapath needed.
 func attachIface(cfg config, _ derived) error {
 	if cfg.progID == 0 || cfg.iface == "" {
 		return errors.New("-prog-id and -iface are both required")

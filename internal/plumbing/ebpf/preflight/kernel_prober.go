@@ -15,30 +15,22 @@ import (
 )
 
 // fibLookupStructName and tbidMemberName identify the kernel BTF type and
-// member this package's FIBLookupTBID check looks for. Named constants so
-// both the lookup and its error messages stay in sync if either ever needs
-// to change.
+// member the FIB lookup check looks for. Named so the lookup and its error
+// messages stay in sync.
 const (
 	fibLookupStructName = "bpf_fib_lookup"
 	tbidMemberName      = "tbid"
 )
 
-// KernelProber is the real, kernel-backed [Prober] implementation used in
-// production. It probes the actual running kernel via
-// github.com/cilium/ebpf's features package (for BPF_PROG_TYPE_SCHED_CLS
-// and BPF_MAP_TYPE_HASH -- both of which that package detects by actually
-// attempting the create/load syscall, the same technique any BPF loader
-// uses) and via kernel BTF introspection (for BTF presence and the
-// bpf_fib_lookup tbid member specifically -- see this package's doc
-// comment for why a struct-field check, not a version-string parse).
+// KernelProber is the real Prober implementation. It probes the running kernel
+// by attempting the create and load syscalls for the program and map types, the
+// same technique any BPF loader uses, and by introspecting kernel BTF for BTF
+// presence and the FIB lookup's table-id member.
 //
-// The zero value is not ready to use; construct with [NewKernelProber].
-// A *KernelProber may be reused across multiple Check/CheckWith calls --
-// its one piece of internal state (the loaded kernel BTF spec) is cached
-// after the first probe that needs it, since re-parsing the kernel's BTF
-// blob (several megabytes) on every call would make repeated preflight
-// checks (e.g. a health-check loop re-running this at Milestone 3.1/4)
-// needlessly expensive.
+// The zero value is not ready to use; construct with NewKernelProber. One may
+// be reused across calls: its only internal state, the loaded BTF spec, is
+// cached after the first probe that needs it, since re-parsing a multi-megabyte
+// blob on every call would make a repeated check needlessly expensive.
 type KernelProber struct {
 	specOnce sync.Once
 	spec     *btf.Spec
@@ -50,9 +42,8 @@ func NewKernelProber() *KernelProber {
 	return &KernelProber{}
 }
 
-// SchedCLS implements [Prober] by attempting to create a minimal
-// BPF_PROG_TYPE_SCHED_CLS program and reporting whether the kernel accepted
-// the program type.
+// SchedCLS reports whether the kernel accepts the TC-BPF program type, by
+// attempting to create a minimal program of that type.
 func (k *KernelProber) SchedCLS() error {
 	if err := ensureMemlockRemoved(); err != nil {
 		return err
@@ -63,9 +54,8 @@ func (k *KernelProber) SchedCLS() error {
 	return nil
 }
 
-// HashMap implements [Prober] by attempting to create a minimal
-// BPF_MAP_TYPE_HASH map and reporting whether the kernel accepted the map
-// type.
+// HashMap reports whether the kernel accepts the hash map type, by attempting
+// to create a minimal map of that type.
 func (k *KernelProber) HashMap() error {
 	if err := ensureMemlockRemoved(); err != nil {
 		return err
@@ -85,15 +75,14 @@ func (k *KernelProber) BTF() error {
 	return nil
 }
 
-// FIBLookupTBID implements [Prober] by loading the running kernel's BTF
-// description of `struct bpf_fib_lookup` and checking, recursively (the
-// real struct nests `tbid` inside an anonymous union -- see
-// hasMemberNamed), for a member literally named `tbid`. Presence of that
-// field is a direct, version-string-independent proof that this kernel's
-// bpf_fib_lookup() understands the BPF_FIB_LOOKUP_TBID flag and the
-// VRF-table-id lookup R5 depends on, since the kernel's BTF is generated
-// from the exact same struct definition its bpf_fib_lookup()
-// implementation reads.
+// FIBLookupTBID reports whether this kernel's bpf_fib_lookup understands the
+// VRF-table-id parameter, by loading the kernel's BTF description of the lookup
+// struct and searching it recursively for a member named tbid, which the real
+// struct nests inside an anonymous union.
+//
+// Presence of that field is version-string-independent proof, the kernel's BTF
+// being generated from the same struct definition the helper implementation
+// reads.
 func (k *KernelProber) FIBLookupTBID() error {
 	spec, err := k.kernelSpec()
 	if err != nil {
@@ -124,19 +113,15 @@ func (k *KernelProber) kernelSpec() (*btf.Spec, error) {
 	return k.spec, k.specErr
 }
 
-// maxMemberSearchDepth bounds hasMemberNamed's recursion. struct
-// bpf_fib_lookup nests at most one level deep (a handful of anonymous
-// unions directly inside the outer struct); this ceiling is generous
-// headroom against any deeper nesting a future kernel might introduce,
-// while still guaranteeing termination against unexpected/malformed BTF.
+// maxMemberSearchDepth bounds the recursive member search. The real struct
+// nests at most one level deep, so this is headroom against deeper nesting in a
+// future kernel while still guaranteeing termination against malformed BTF.
 const maxMemberSearchDepth = 8
 
-// hasMemberNamed reports whether t (expected to be a *btf.Struct or
-// *btf.Union) has a member named name, searching recursively into any
-// nested anonymous struct/union members -- required here because the real
-// kernel's `struct bpf_fib_lookup` places `tbid` inside an anonymous
-// `union { struct { ... vlan fields ... }; __u32 tbid; }`, not as a
-// top-level member.
+// hasMemberNamed reports whether t, a struct or union, has a member named name,
+// searching recursively into nested anonymous members. That is required because
+// the kernel places the field this checks for inside an anonymous union rather
+// than at the top level.
 func hasMemberNamed(t btf.Type, name string, depth int) bool {
 	if depth > maxMemberSearchDepth {
 		return false
@@ -163,13 +148,10 @@ func hasMemberNamed(t btf.Type, name string, depth int) bool {
 	return false
 }
 
-// ensureMemlockRemoved lifts the memlock rlimit that older kernels (pre-5.11
-// cgroup-based BPF memory accounting) enforce against BPF map/program
-// creation. It is safe and cheap to call repeatedly -- github.com/cilium/
-// ebpf's rlimit package makes the underlying setrlimit call idempotent --
-// and is required here because this package's probes may be the first BPF
-// syscalls a process makes (Milestone 3.1's control daemon is expected to
-// call [Check] before doing any other BPF setup of its own).
+// ensureMemlockRemoved lifts the memlock limit older kernels enforce against
+// BPF map and program creation. Safe and cheap to call repeatedly, the
+// underlying call being idempotent, and required here because these probes may
+// be the first BPF syscalls a process makes.
 func ensureMemlockRemoved() error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("remove memlock rlimit: %w", err)

@@ -15,33 +15,25 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// bpfFuncXDPAdjustHead is the raw BPF_FUNC_xdp_adjust_head helper ID from
-// the kernel UAPI's enum bpf_func_id (include/uapi/linux/bpf.h). This
-// numeric ID is stable ABI once a helper is introduced -- unlike
-// preflight's tbid check, no BTF struct-field probe is possible for "does
-// this helper exist," so features.HaveProgramHelper (the same
-// creation-attempt technique preflight's own SchedCLS/HashMap checks use,
-// just applied to a specific helper rather than a program/map type) is the
-// house convention here instead of a version-string heuristic.
+// bpfFuncXDPAdjustHead is the raw helper ID from the kernel's helper enum. That
+// numeric ID is stable ABI once a helper is introduced.
 //
-// github.com/cilium/ebpf v0.22.0's asm package does not export a named
-// constant for this helper (BuiltinFunc constants are resolved per platform
-// via BuiltinFuncForPlatform for helpers the library hasn't
-// special-cased) -- cited directly against the raw enum value confirmed
-// empirically on this repo's target kernel (7.1.3-200.fc44.x86_64) during
-// this design's Phase 0 spike.
+// No BTF struct-field probe is possible for whether a helper exists, unlike the
+// uSID datapath's table-id check, so support is detected by attempting to load a
+// program using it, the same technique the program and map type checks use.
+//
+// The eBPF library exports no named constant for this helper, resolving such
+// constants per platform for helpers it has not special-cased, so the raw enum
+// value is cited directly.
 const bpfFuncXDPAdjustHead asm.BuiltinFunc = 44
 
-// KernelProber is the real, kernel-backed [Prober] implementation used in
-// production. It probes the actual running kernel via
-// github.com/cilium/ebpf's features package (which detects support by
-// actually attempting the create/load syscall) and via kernel BTF
-// introspection for BTF presence.
+// KernelProber is the real Prober implementation. It probes the running kernel
+// by attempting the create and load syscalls, and by BTF introspection for BTF
+// presence.
 //
-// The zero value is not ready to use; construct with [NewKernelProber]. A
-// *KernelProber may be reused across multiple Check/CheckWith calls -- its
-// one piece of internal state (the loaded kernel BTF spec) is cached after
-// the first probe that needs it.
+// The zero value is not ready to use; construct with NewKernelProber. One may be
+// reused across calls: its only internal state, the loaded BTF spec, is cached
+// after the first probe that needs it.
 type KernelProber struct {
 	specOnce sync.Once
 	spec     *btf.Spec
@@ -53,9 +45,8 @@ func NewKernelProber() *KernelProber {
 	return &KernelProber{}
 }
 
-// XDP implements [Prober] by attempting to create a minimal
-// BPF_PROG_TYPE_XDP program and reporting whether the kernel accepted the
-// program type.
+// XDP reports whether the kernel accepts the XDP program type, by attempting to
+// create a minimal program of that type.
 func (k *KernelProber) XDP() error {
 	if err := ensureMemlockRemoved(); err != nil {
 		return err

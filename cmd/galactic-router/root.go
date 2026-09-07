@@ -47,10 +47,9 @@ const (
  Find more information at: https://www.datum.net/docs`
 )
 
-// resolveBGPLocalAddress returns explicit if non-empty. Otherwise it calls
-// detect to read the BGP local address from the host's lo interface,
-// returning an error if detection fails — there is no silent fallback to an
-// unset address.
+// resolveBGPLocalAddress returns explicit when non-empty, and otherwise calls
+// detect to read the BGP local address from the host's loopback. A detection
+// failure is an error; there is no silent fallback to an unset address.
 func resolveBGPLocalAddress(explicit string, detect func() (string, error)) (string, error) {
 	if explicit != "" {
 		return explicit, nil
@@ -89,12 +88,9 @@ func runCmd(cfg *config.RouterConfig) error {
 			BindAddress: fmt.Sprintf(":%d", metricsPort),
 		},
 	}
-	// The NetworkRule admission webhook (internal/webhook) is opt-in: it is
-	// the first webhook in this codebase, and enabling it requires TLS cert
-	// material (config/webhook/'s kustomization.yaml documents the
-	// cert-manager-or-equivalent prerequisite) plus the
-	// ValidatingWebhookConfiguration/Service manifests to actually be
-	// applied — see config.RouterConfig.WebhookEnabled's doc comment.
+	// The NetworkRule admission webhook is opt-in: enabling it requires TLS
+	// cert material plus the webhook configuration and service manifests to be
+	// applied.
 	if cfg.WebhookEnabled {
 		mgrOptions.WebhookServer = webhook.NewServer(webhook.Options{
 			Port:    cfg.WebhookPort,
@@ -107,10 +103,9 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 
-	// ctx carries a cause so that an ordinary signal-triggered shutdown can
-	// be told apart from the health server's own Serve failure below (#372),
-	// which cmd/galactic-gateway already treats as fatal -- see the cause
-	// check after mgr.Start.
+	// ctx carries a cause so an ordinary signal-triggered shutdown can be told
+	// apart from the health server's own Serve failure below. See the cause
+	// check after the manager returns.
 	ctx, cancel := context.WithCancelCause(ctrl.SetupSignalHandler())
 	defer cancel(nil)
 
@@ -124,13 +119,12 @@ func runCmd(cfg *config.RouterConfig) error {
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	go func() {
-		// Serve returning non-nil means this node has lost its health
-		// signal for good: logging it and continuing would leave the
-		// router running unprobeable, with nothing to restart it and
-		// nothing to report it. Cancelling ctx with the failure as its
-		// cause routes it out through mgr.Start below, so it surfaces
-		// like any other fatal startup error. The GracefulStop path
-		// below is unaffected: Serve returns nil there.
+		// A non-nil return means this node has lost its health signal for
+		// good: logging and continuing would leave the router running
+		// unprobeable, with nothing to restart or report it. Cancelling
+		// with the failure as the cause routes it out through the manager
+		// below, so it surfaces like any other fatal startup error. The
+		// graceful-stop path is unaffected, returning nil.
 		if serveErr := grpcSrv.Serve(lis); serveErr != nil {
 			cancel(fmt.Errorf("gRPC health server: %w", serveErr))
 		}
@@ -142,9 +136,8 @@ func runCmd(cfg *config.RouterConfig) error {
 
 	if cfg.WebhookEnabled {
 		validator := &networkwebhook.NetworkRuleValidator{
-			// TODO(edge-gateway): AllowAllAuthorizer is a placeholder — see
-			// its doc comment. Wire a real Authorizer here once the
-			// companion operator integration exists.
+			// TODO(edge-gateway): a placeholder authorizer. Wire a real
+			// one here once the companion operator integration exists.
 			Authorizer: networkwebhook.AllowAllAuthorizer{},
 		}
 		if err := validator.SetupWebhookWithManager(mgr); err != nil {
@@ -155,26 +148,18 @@ func runCmd(cfg *config.RouterConfig) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
-	// Open this node's own vip_xlat_table handle for
-	// ServiceVIPBindingReconciler's EgressKindTap branch. This is new
-	// plumbing (docs/agents/ARCHITECTURE-ROUTER.md's "For Claude" table
-	// pre-dates it): galactic-router has never before needed to reach any
-	// of the eBPF uSID datapath's maps -- that program is loaded/attached
-	// once, elsewhere, by galactic-cni/internal/plumbing/ebpf/attach; this
-	// only opens a *second* handle onto the map it already pinned, the
-	// exact pattern internal/plumbing/ebpf/usidmap.OpenPinnedRegistry
-	// already established for the short-lived galactic-cni plugin binary.
-	// Unlike that binary, galactic-router is long-lived, so the returned
-	// closer is deferred to process shutdown rather than closed
-	// immediately -- it never affects the pinned map's own lifetime.
+	// Open this node's own vip_xlat_table handle for the ServiceVIPBinding
+	// reconciler's tap branch. The datapath program is loaded and attached
+	// elsewhere, by the CNI side; this only opens a second handle onto the map
+	// it already pinned. Being long-lived, this process defers the closer to
+	// shutdown rather than closing immediately, which never affects the pinned
+	// map's own lifetime.
 	//
-	// A missing pin (e.g. this node's eBPF uSID datapath hasn't loaded
-	// yet, or never will -- a route-reflector/control-role node has no
-	// CNI attach point at all) is not fatal: it only matters once a
-	// tap-kind ServiceVIPBinding is actually reconciled on this node, at
-	// which point ServiceVIPBindingReconciler.applyTapBind reports a
-	// clear, actionable error instead of silently no-op'ing. Every
-	// EgressKindVeth binding works regardless.
+	// A missing pin is not fatal. It means this node's datapath has not loaded
+	// yet, or never will on a control-role node with no CNI attach point. It
+	// matters only once a tap-kind binding is reconciled here, at which point
+	// the reconciler reports a clear error rather than silently doing nothing.
+	// Veth bindings work regardless.
 	var vipTranslationTable controller.VIPTranslationTable
 	vipXlatTable, vipXlatCloser, vipXlatErr := vipxlatmap.OpenPinnedVipXlatTable(attach.PinDir)
 	if vipXlatErr != nil {
@@ -190,13 +175,12 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("register field indexes: %w", err)
 	}
 
-	// BGP peer session-state transitions are detected in real time by each
-	// GoBGPRuntime's own peer-event watcher (internal/runtime/gobgp/peer_monitor.go)
-	// rather than by polling BGPPeer.Status, since a flap that reverts
-	// between two peerStatusRequeue polls would otherwise leave no trace.
-	// PeerStateEventEmitter turns those transitions into Kubernetes Events on
-	// the corresponding BGPPeer; registering it with the manager gives its
-	// worker goroutine the same start/stop lifecycle as every reconciler.
+	// Peer session-state transitions are detected in real time by each
+	// runtime's own watcher rather than by polling status, since a flap
+	// between two polls would leave no trace. The emitter turns those
+	// transitions into Kubernetes events on the corresponding BGPPeer, and
+	// registering it with the manager gives its goroutine the same lifecycle
+	// as every reconciler.
 	peerEventEmitter := controller.NewPeerStateEventEmitter(mgr.GetClient(), mgr.GetEventRecorder(appName))
 	if err := mgr.Add(peerEventEmitter); err != nil {
 		return fmt.Errorf("register peer state event emitter: %w", err)
@@ -292,9 +276,9 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("setup GC controller: %w", err)
 	}
 
-	// Start the GC ticker goroutine. It runs until the manager's context
-	// is cancelled. The initial GC pass waits for informer caches to sync
-	// so it doesn't see an empty BGPAdvertisement list and delete live VRFs.
+	// The GC ticker runs until the manager's context is cancelled. The
+	// first pass waits for informer caches to sync, so it does not see an
+	// empty advertisement list and delete live VRFs.
 	go func() {
 		ticker := time.NewTicker(cfg.GCInterval)
 		defer ticker.Stop()
@@ -319,29 +303,24 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("manager exited: %w", err)
 	}
 
-	// mgr.Start returning nil means ctx is Done (signal-triggered shutdown
-	// or the health server's fatal Serve error above) -- either way, every
-	// GoBGP runtime this node was running is still holding its BGP/EVPN
-	// sessions open at this point, since the manager only stops registered
-	// Runnables and the GoBGP server goroutine is started independently of
-	// ctx (see internal/runtime/gobgp). Without this, the process just
-	// exits and peers only notice via TCP RST or hold-timer expiry --
-	// routes stay in the RIB and traffic blackholes until then. StopAll
-	// drives each runtime's Stop, which cancels its GoBGP server context and
-	// triggers GoBGP's own StopBgp, sending a Cease NOTIFICATION to every
-	// peer so routes are withdrawn immediately instead of on a timer. Use a
-	// fresh context (ctx is already Done) with a bounded timeout so a stuck
-	// runtime can't block shutdown forever.
+	// A nil return means the context is done, from a signal or the health
+	// server's fatal error above. Either way every GoBGP runtime is still
+	// holding its sessions open, the manager only stopping registered runnables
+	// while the GoBGP goroutine starts independently of that context. Without
+	// this the process just exits and peers notice only on a TCP reset or hold
+	// timer, leaving routes in the RIB and traffic blackholed until then.
+	// Stopping each runtime sends a cease notification to every peer so routes
+	// are withdrawn immediately. A fresh context with a bounded timeout keeps a
+	// stuck runtime from blocking shutdown forever.
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stopCancel()
 	if err := runtimeMgr.StopAll(stopCtx); err != nil {
 		log.Printf("graceful runtime shutdown: %v", err)
 	}
 
-	// A nil return from mgr.Start means ctx is Done, so it always has a
-	// cause by now: context.Canceled for a signal-triggered shutdown, or
-	// the health server's fatal Serve error from above. Only the second
-	// should fail the process.
+	// A nil return means the context is done, so it always has a cause by now:
+	// cancellation for a signal-triggered shutdown, or the health server's
+	// fatal error. Only the second should fail the process.
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
 		return cause
 	}

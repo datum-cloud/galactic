@@ -16,13 +16,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 )
 
-// protoNumber maps a NetworkRuleSpec.Protocol string ("tcp"/"udp") to the
-// IANA protocol number edgedsr.c's vip_key.proto expects. There is no
-// generated/shared constant for this: network.datumapis.com/v1alpha1's
-// NetworkRuleProtocol enum is a string type for CRD readability, and
-// edgeprog's wire format is the numeric IPPROTO_* value edgedsr.c already
-// reads directly off the packet — this is the one place those two
-// representations need to be reconciled.
+// protoNumber maps a rule's protocol string to the IANA number the datapath's
+// key expects. There is no shared constant: the CRD enum is a string for
+// readability while the wire format is the numeric value read off the packet,
+// and this is the one place the two representations meet.
 func protoNumber(protocol string) (uint8, error) {
 	switch protocol {
 	case "tcp":
@@ -34,10 +31,9 @@ func protoNumber(protocol string) (uint8, error) {
 	}
 }
 
-// vipKeysForRule returns the vip_table keys ApplyRule registers for rule --
-// one per VIPAddress, since edgedsr.c's vip_table is keyed by (proto, VIP
-// port, VIP address) with the backend list and Maglev table identical
-// across every VIP a rule owns.
+// vipKeysForRule returns the vip_table keys ApplyRule registers for rule, one
+// per VIP address, the map being keyed by protocol, port, and address with the
+// backend list and Maglev table identical across every VIP a rule owns.
 func vipKeysForRule(rule DesiredRule) ([]edgemap.VIPKey, error) {
 	proto, err := protoNumber(rule.Protocol)
 	if err != nil {
@@ -50,24 +46,18 @@ func vipKeysForRule(rule DesiredRule) ([]edgemap.VIPKey, error) {
 	return keys, nil
 }
 
-// buildMaglevTable builds the ordered backend list and flattened Maglev
-// lookup table Register expects from rule.Backends, via
-// internal/maglev.Table:
+// buildMaglevTable builds the ordered backend list and the flattened Maglev
+// lookup table Register expects from rule.Backends:
 //
-//  1. Reject up front if rule.Backends exceeds edgemap.MaxBackends -- this
-//     shouldn't happen given NetworkRuleSpec.Backends' own CRD
-//     MaxItems=64, but a silently truncated or overflowed backend array is
-//     worse than a clear error here.
-//  2. Build a maglev.Table over rule.Backends (each DesiredBackend already
-//     implements maglev.Backend via its Key() method — see that method's
-//     doc comment for the address:port convention chosen).
-//  3. table.Backends() returns the backend set sorted by Key(); that sort
-//     order becomes each backend's index into the returned backends slice
-//     (and therefore into vip_value's own fixed-size Backends array).
-//  4. For each of the table's EDGE_MAGLEV_TABLE_SIZE slots, table.Lookup
-//     resolves the assigned backend, translated back to its index via a
-//     Key()->index map built from the same sorted list in the previous
-//     step.
+//  1. Reject up front when the backend count exceeds the cap. The CRD already
+//     bounds it, but a silently truncated array is worse than a clear error.
+//  2. Build a Maglev table over the backends, each of which supplies its own
+//     key.
+//  3. The table returns its backend set sorted by key, and that order becomes
+//     each backend's index into the returned slice, and so into the map value's
+//     fixed-size array.
+//  4. For each slot, resolve the assigned backend and translate it back to its
+//     index through a key-to-index map built from the same sorted list.
 func buildMaglevTable(rule DesiredRule) ([]edgemap.Backend, [edgemap.MaglevTableSize]byte, error) {
 	var maglevTable [edgemap.MaglevTableSize]byte
 
@@ -104,36 +94,26 @@ func buildMaglevTable(rule DesiredRule) ([]edgemap.Backend, [edgemap.MaglevTable
 	return backends, maglevTable, nil
 }
 
-// KernelDatapath is the real Datapath implementation, backed by
-// internal/plumbing/ebpf/edgemap's VIPTable API onto a loaded
-// internal/plumbing/ebpf/edgeprog.EdgedsrObjects. It assumes the compiled
-// program is already loaded and attached to the gateway node's public
-// interface by the time ApplyRule is first called — that attach lifecycle
-// is internal/plumbing/ebpf/edgeattach's job and cmd/galactic-gateway's own
-// startup sequence's, not this package's. NoopDatapath remains available
-// for tests and any caller not yet wired to a loaded program.
+// KernelDatapath is the real Datapath implementation, backed by the map layer
+// over a loaded edge program. It assumes the program is already loaded and
+// attached to the node's public interface by the time ApplyRule is first
+// called; that lifecycle belongs to the attach package and process startup.
 type KernelDatapath struct {
 	mu       sync.Mutex
 	vipTable *edgemap.VIPTable
 
-	// vipKeysByName maps a DesiredRule.Key to the vip_table keys currently
-	// registered for it, so RemoveRule (which the Datapath interface only
-	// passes a bare key string, not the full DesiredRule) knows what to
-	// unregister, and so ApplyRule can prune a key a rule dropped since
-	// its last apply (e.g. a VIP removed from spec.vipAddresses) without
-	// needing the caller to have tracked that itself.
+	// vipKeysByName maps a rule's key to the vip_table keys currently registered
+	// for it, so RemoveRule, which receives only a key string, knows what to
+	// unregister, and ApplyRule can prune a key the rule dropped since its last
+	// apply without the caller having tracked it.
 	vipKeysByName map[string][]edgemap.VIPKey
 }
 
-// NewKernelDatapath constructs a KernelDatapath and writes encapSrc into
-// encap_config_table once, immediately -- encapSrc is this gateway node's
-// own plain SRv6-reachable address (NetworkGatewayStatus.SRv6Address),
-// stable for the life of the process, so there is no per-rule or
-// per-reconcile path that ever needs to rewrite it again. Unlike the
-// Full-NAT predecessor's gw_config (gwAddr), this is never a NAT/SNAT
-// source and never needs to match anything on a return path -- DSR has no
-// return path through this node at all (see edgedsr.c's own header
-// comment).
+// NewKernelDatapath constructs a KernelDatapath and writes encapSrc into the
+// encapsulation config once, immediately. encapSrc is this node's plain
+// SRv6-reachable address, stable for the life of the process, so nothing per
+// rule or per reconcile ever rewrites it. It is never a translation source and
+// has no return-path significance.
 func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*KernelDatapath, error) {
 	if !encapSrc.Is6() || encapSrc.Is4In6() {
 		return nil, fmt.Errorf("kerneldatapath: encap source address %s is not a native IPv6 address", encapSrc)
@@ -150,9 +130,9 @@ func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*Ker
 	}, nil
 }
 
-// ApplyRule registers vip_table entries for rule (one per VIPAddress,
-// sharing rule.Backends' Maglev table), replacing whatever this rule had
-// registered previously and pruning any key it no longer owns.
+// ApplyRule registers vip_table entries for rule, one per VIP address sharing
+// its Maglev table, replacing whatever the rule had registered before and
+// pruning any key it no longer owns.
 func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -170,7 +150,7 @@ func (d *KernelDatapath) ApplyRule(_ context.Context, rule DesiredRule) error {
 	for i, key := range keys {
 		if err := d.vipTable.Register(key, backends, maglevTable); err != nil {
 			// Record the keys that did land, alongside the ones this rule
-			// already owned (the prune below has not run yet), so
+			// already owned, the prune below not having run yet, so
 			// RemoveRule can still find every live entry.
 			for _, written := range keys[:i] {
 				if !slices.Contains(d.vipKeysByName[rule.Key], written) {
@@ -219,19 +199,17 @@ func (d *KernelDatapath) Generation() uint64 {
 	return d.vipTable.Generation()
 }
 
-// ReconcileOrphans removes vip_table entries whose key is not implied by
-// any rule in live and was written before cutoff -- see
-// edgemap.VIPTable.Reconcile's identical contract, which this delegates to
-// directly.
+// ReconcileOrphans removes vip_table entries whose key is not implied by any
+// rule in live and was written before cutoff, delegating to the map layer's
+// reconcile.
 func (d *KernelDatapath) ReconcileOrphans(_ context.Context, live []DesiredRule, cutoff uint64) error {
 	liveKeys := make(map[edgemap.VIPKey]struct{})
 	for _, rule := range live {
 		keys, err := vipKeysForRule(rule)
 		if err != nil {
-			// A rule with an unsupported protocol never got registered
-			// by ApplyRule in the first place, so it can't own any
-			// vip_table entry to spare here either; skip rather than
-			// fail the whole orphan sweep over one bad rule.
+			// A rule with an unsupported protocol was never registered, so
+			// it owns no entry to spare here. Skip rather than fail the
+			// whole sweep over one bad rule.
 			continue
 		}
 		for _, k := range keys {

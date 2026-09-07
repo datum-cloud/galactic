@@ -16,21 +16,14 @@ const telemetryNamespace = "galactic_edge"
 // shared across every metric below that carries one.
 const labelRule = "rule"
 
-// PrometheusTelemetryEmitter is a real (not stubbed) TelemetryEmitter,
-// covering the one thing only knowable at Engine's own call sites -- not
-// re-derivable from a live scrape of vip_table state, which
-// internal/plumbing/ebpf/edgemetrics's Collector already exposes separately
-// (packets/bytes/dropped_packets/last_seen_ns per rule, same
-// pull-at-scrape-time pattern as internal/plumbing/ebpf/metrics's Collector
-// for the SRv6 uSID datapath): rule applications rejected before ever
-// reaching the datapath (e.g. QuotaEnforcer denials). These never touch
-// vip_table at all, so vip_table's own DroppedPackets counter (a strictly
-// datapath-level, per-packet count) cannot see them.
+// PrometheusTelemetryEmitter covers the one thing only knowable at the engine's
+// own call sites: rule applications rejected before reaching the datapath, such
+// as a quota denial. Those never touch the map at all, so its own drop counter,
+// a strictly per-packet datapath count, cannot see them.
 //
-// Unlike this engine's Full-NAT predecessor, there is no primary/secondary
-// placement gauge here: DSR's anycast model means every gateway node
-// serves every rule identically, so there is no per-rule placement state
-// left to report (see doc.go).
+// Everything re-derivable from live map state is exposed separately by the
+// metrics collector at scrape time instead. There is no per-rule placement
+// gauge, every gateway node serving every rule identically under anycast.
 type PrometheusTelemetryEmitter struct {
 	controlPlaneDrops *prometheus.CounterVec
 }
@@ -49,20 +42,16 @@ func NewPrometheusTelemetryEmitter() *PrometheusTelemetryEmitter {
 	}
 }
 
-// MustRegister registers every metric this type owns against reg. Panics
-// on a duplicate registration, matching prometheus.Registerer.MustRegister's
-// own documented behavior -- callers only ever do this once per process,
-// at startup, same convention as internal/plumbing/ebpf/metrics's
-// EventCounters.MustRegister.
+// MustRegister registers every metric this type owns against reg, panicking on
+// a duplicate as the underlying registry does. Callers do this once per process,
+// at startup.
 func (e *PrometheusTelemetryEmitter) MustRegister(reg prometheus.Registerer) {
 	reg.MustRegister(e.controlPlaneDrops)
 }
 
-// RuleApplied is a no-op: unlike this engine's Full-NAT predecessor, there
-// is no per-rule primary/secondary placement fact left to record here (see
-// this type's doc comment). Kept as a method (rather than removed) to
-// satisfy the TelemetryEmitter interface, and as the natural place for any
-// future call-site-only fact this engine learns.
+// RuleApplied is a no-op: there is no per-rule placement fact left to record.
+// It is kept to satisfy the interface, and as the natural place for any future
+// call-site-only fact this engine learns.
 func (e *PrometheusTelemetryEmitter) RuleApplied(context.Context, DesiredRule) {}
 
 // RuleRemoved is a no-op, for the same reason as RuleApplied.

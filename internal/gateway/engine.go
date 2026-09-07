@@ -11,15 +11,10 @@ import (
 	"sync"
 )
 
-// Engine is the in-process gateway engine running on one gateway node,
-// mirroring internal/runtime/gobgp's GoBGPRuntime shape: a mutex-protected
-// map of currently-active state, converged towards a desired state on each
-// Reconcile call.
-//
-// Unlike an earlier, rejected design's identically-named type,
-// Engine holds no VRF/Geneve state at all — no vrfLinkNames map, no
-// SetVRFLink method — because this datapath has no VRF dependency (see
-// doc.go).
+// Engine is the in-process gateway engine on one gateway node: a
+// mutex-protected map of currently active state, converged toward a desired
+// state on each Reconcile. It holds no VRF state, this datapath having no VRF
+// dependency.
 type Engine struct {
 	mu     sync.Mutex
 	active map[string]DesiredRule
@@ -29,11 +24,9 @@ type Engine struct {
 	telemetry TelemetryEmitter
 }
 
-// NewEngine returns an Engine wired to the given Datapath, QuotaEnforcer,
-// and TelemetryEmitter implementations. Production callers pass
-// KernelDatapath (kerneldatapath.go), NoopQuotaEnforcer{}, and
-// NoopTelemetryEmitter{} until those interfaces' real implementations
-// land; tests pass fakes.
+// NewEngine returns an Engine wired to the given implementations. Production
+// callers pass the kernel datapath and the real quota and telemetry
+// implementations; tests pass fakes.
 func NewEngine(datapath Datapath, quota QuotaEnforcer, telemetry TelemetryEmitter) *Engine {
 	return &Engine{
 		active:    make(map[string]DesiredRule),
@@ -43,19 +36,15 @@ func NewEngine(datapath Datapath, quota QuotaEnforcer, telemetry TelemetryEmitte
 	}
 }
 
-// Reconcile converges the engine's live state toward desired: every rule in
-// desired.Rules is (re-)applied via Datapath.ApplyRule, and every rule no
-// longer present in desired.Rules but still active is torn down via
-// Datapath.RemoveRule (the caller must already have withdrawn its BGP
-// route before it ever disappears from desired — see Datapath.RemoveRule's
-// doc comment).
+// Reconcile converges live state toward desired: every rule in desired is
+// re-applied, and every rule still active but no longer in desired is torn
+// down. The caller must already have withdrawn a rule's BGP route before it
+// disappears from desired.
 //
-// Reconcile is intentionally "apply everything in desired, remove
-// everything not in desired" rather than a fine-grained field-level diff —
-// matching GoBGPRuntime.Apply's own convergence style — so a partial
-// previous failure (e.g. the process crashed between two rules) always
-// self-heals on the next call rather than requiring the caller to track
-// what succeeded.
+// It applies everything in desired and removes everything not in it, rather
+// than diffing field by field, so a partial previous failure, such as a crash
+// between two rules, self-heals on the next call instead of requiring the
+// caller to track what succeeded.
 func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStatus, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -104,9 +93,8 @@ func (e *Engine) Status(context.Context) (EngineStatus, error) {
 	return EngineStatus{Healthy: true, Rules: statuses}, nil
 }
 
-// Stop tears down every currently-active rule. The caller must already
-// have withdrawn BGP routes for every rule before calling this, exactly as
-// for an individual rule removal via Reconcile.
+// Stop tears down every currently active rule. The caller must already have
+// withdrawn BGP routes for every one, exactly as for an individual removal.
 func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -126,11 +114,9 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return firstErr
 }
 
-// DatapathGeneration returns a snapshot of the underlying Datapath's
-// monotonic clock. Callers intending to call ReconcileOrphans must invoke
-// this *before* listing the NetworkRule CRDs that will become that call's
-// live set — see Datapath.Generation's doc comment for why the ordering
-// matters, and recovery.go for the full crash-recovery contract.
+// DatapathGeneration returns a snapshot of the underlying datapath's monotonic
+// clock. A caller intending to call ReconcileOrphans must read it before
+// listing the CRDs that become that call's live set.
 func (e *Engine) DatapathGeneration() uint64 {
 	return e.datapath.Generation()
 }
@@ -167,8 +153,8 @@ func (e *Engine) applyRuleLocked(ctx context.Context, rule DesiredRule) error {
 // Caller must hold e.mu.
 func (e *Engine) removeRuleLocked(ctx context.Context, key string) error {
 	// Quota is released even when datapath removal fails, so a reservation
-	// cannot outlive the rule; Release is a no-op for an already-released
-	// key, so the caller's next retry stays correct.
+	// cannot outlive the rule. Release is a no-op for an already-released key,
+	// so a retry stays correct.
 	dpErr := e.datapath.RemoveRule(ctx, key)
 	if dpErr != nil {
 		dpErr = fmt.Errorf("remove datapath rule %s: %w", key, dpErr)

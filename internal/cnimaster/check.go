@@ -23,14 +23,12 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// RunStatus implements the CNI spec STATUS operation shared by both master
-// plugins: config is parseable and the API server is reachable for
-// BGPAdvertisement CRD operations. Attachment-specific kernel resources
-// (VRF, host interface) are NOT checked because STATUS must succeed before
-// any ADD has ever run.
+// RunStatus implements the CNI STATUS operation shared by both master plugins:
+// the config parses and the API server is reachable. Attachment-specific kernel
+// resources are not checked, since STATUS must succeed before any ADD has run.
 //
-// cniConfig and confFile are the caller's own package state — see
-// ParseConf's doc comment for why these aren't shared globals.
+// cniConfig and confFile are the caller's own package state rather than shared
+// globals.
 func RunStatus(stdinData []byte, cniConfig *config.CNIConfig, confFile string) error {
 	// Validate config is parseable (minimal check — no VPC/VPCAttachment
 	// validation since STATUS must succeed before any ADD has run).
@@ -69,11 +67,9 @@ func RunStatus(stdinData []byte, cniConfig *config.CNIConfig, confFile string) e
 	return nil
 }
 
-// ProbeAPIServerFn performs a lightweight GET against the in-cluster API
-// server to verify reachability. Returns nil when the server responds (any
-// HTTP status code) or when running outside a cluster with no kubeconfig.
-//
-// ProbeAPIServer is a variable so tests can override it.
+// ProbeAPIServerFn performs a lightweight request against the in-cluster API
+// server to check reachability. It returns nil when the server responds with any
+// status, and when running outside a cluster with no kubeconfig.
 var ProbeAPIServerFn = func() error {
 	kubeconfig, err := ctrl.GetConfig()
 	if err != nil {
@@ -105,16 +101,14 @@ var ProbeAPIServerFn = func() error {
 	return nil
 }
 
-// ProbeAPIServer is the seam cmdStatus/RunStatus call through; tests
-// override it (and restore ProbeAPIServerFn afterward) to simulate API
-// server reachability failures without a real cluster.
+// ProbeAPIServer is the seam the status paths call through, overridden by tests
+// to simulate an unreachable API server without a real cluster.
 var ProbeAPIServer = ProbeAPIServerFn
 
-// CheckNodeLevelState verifies that node-level networking resources exist:
-// the VRF interface and the host-side endpoint interface. Returns the host
-// interface name (for callers that need it, e.g. cmdCheck's prevResult
-// validation) and a slice of errors (nil when all checks pass) so callers
-// can accumulate and report all failures at once.
+// CheckNodeLevelState verifies the node-level resources exist: the VRF
+// interface and the host-side endpoint interface. It returns the host interface
+// name, for callers that need it, and a slice of errors, nil when everything
+// passes, so a caller can report every failure at once.
 func CheckNodeLevelState(vpc, vpcAttachment string) (string, []error) {
 	var errs []error
 

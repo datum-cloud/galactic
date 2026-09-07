@@ -8,11 +8,9 @@ import "github.com/prometheus/client_golang/prometheus"
 
 const metricsNamespace = "galactic_ingress_sidecar"
 
-// Metrics is this sidecar's Prometheus surface — §6 of the plan: "active
-// VRF (per-VPC) count, active route (per-pod) count, reconcile error rate,
-// reconcile latency, teardown-grace-period queue depth for both." Mirrors
-// internal/gateway's PrometheusTelemetryEmitter in shape: build once via
-// NewMetrics, MustRegister once at startup, then pass into NewStore.
+// Metrics is this sidecar's Prometheus surface: active VRF and route counts,
+// reconcile error rate and latency, and teardown queue depth. Build it once,
+// register it once at startup, then pass it into the store.
 type Metrics struct {
 	VRFActive     prometheus.Gauge
 	RouteActive   prometheus.Gauge
@@ -60,10 +58,8 @@ func NewMetrics() *Metrics {
 	}
 }
 
-// MustRegister registers every metric this type owns against reg. Panics on
-// a duplicate registration — callers only ever do this once per process, at
-// startup, same convention as internal/gateway.PrometheusTelemetryEmitter's
-// own MustRegister.
+// MustRegister registers every metric this type owns against reg, panicking on
+// a duplicate. Callers do this once per process, at startup.
 func (m *Metrics) MustRegister(reg prometheus.Registerer) {
 	reg.MustRegister(m.VRFActive, m.RouteActive, m.VRFPending, m.RoutePending, m.ReconcileErrs, m.ReconcileTime)
 }

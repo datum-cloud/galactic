@@ -2,17 +2,17 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package cniroute implements galactic-route, the termination-route plugin
-// in the galactic CNI chain — chained after galactic-veth/galactic-tap
-// and before galactic-bgp per conflist order (optional: only present when
-// an attachment has terminations to install). It installs kernel routes
-// into the VRF routing table the preceding master plugin already created,
-// then passes prevResult through unchanged, adding no interfaces or IPs of
-// its own.
+// Package cniroute implements galactic-route, the termination-route plugin in
+// the galactic CNI chain. It is chained after a master plugin and before the BGP
+// plugin, and is optional: present only when an attachment has terminations to
+// install.
 //
-// Unlike every other binary in the chain, galactic-route has no Kubernetes
-// dependency at all: it neither reads nor writes any CRD, and never needs
-// a namespace.
+// It installs kernel routes into the VRF routing table the master plugin already
+// created, then passes the previous result through unchanged, adding no
+// interfaces or addresses of its own.
+//
+// Unlike every other binary in the chain it has no Kubernetes dependency at all:
+// it neither reads nor writes any CRD and never needs a namespace.
 package cniroute
 
 import (
@@ -28,12 +28,10 @@ type Termination struct {
 	Via     string `json:"via,omitempty"`
 }
 
-// PluginConf is the CNI plugin configuration passed via stdin on each
-// invocation of galactic-route — the same document the master plugin
-// itself received, since the CNI runtime passes each chain entry its own
-// stanza plus prevResult. galactic-route only reads vpc/vpcattachment/
-// terminations out of it (mtu, ipam, namespace are the master's/
-// galactic-ipam's/galactic-bgp's own concerns).
+// PluginConf is the CNI plugin configuration passed on stdin, the same document
+// the master plugin received, since the runtime passes each chain entry its own
+// stanza plus the previous result. This plugin reads only the identifiers and
+// terminations out of it; the rest belongs to other plugins in the chain.
 type PluginConf struct {
 	types.PluginConf
 	VPC           string        `json:"vpc"`

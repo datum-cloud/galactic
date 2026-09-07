@@ -32,13 +32,10 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// cmdCheck verifies that the BGP state cmdAdd published is still in place:
-// the BGPVRFInstance and BGPAdvertisement CRDs exist, and — when this
-// node's BGPRouter has SRv6 configured — the eBPF vrf_table entry for this
-// attachment is still registered. None of this is a move from
-// internal/cni's own CHECK; it's genuinely new, since nothing before this
-// split ever verified CRD/eBPF state independently of kernel interface
-// state.
+// cmdCheck verifies that the state cmdAdd published is still in place: the
+// BGPVRFInstance and BGPAdvertisement exist, and, when this node's BGPRouter
+// has SRv6 configured, the eBPF entries for this attachment are still
+// registered.
 func cmdCheck(args *skel.CmdArgs) error {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -64,10 +61,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 		errs = append(errs, fmt.Errorf("BGPVRFInstance %s: %w", vrfName, vrfErr))
 	}
 
-	// checkEndpointSlice's SID check and checkEBPFEntry below both need
-	// this node's BGPRouter (keyed by cniConfig.NodeName/pluginConf.Namespace)
-	// once the BGPVRFInstance lookup above succeeded; look it up here once
-	// and hand the result to both instead of each fetching it independently.
+	// Both the EndpointSlice SID check and the eBPF check below need this
+	// node's BGPRouter once the instance lookup has succeeded. Look it up once
+	// and hand it to both rather than have each fetch it.
 	var bgp bgpConfig
 	if vrfErr == nil {
 		var bgpErr error
@@ -83,17 +79,15 @@ func cmdCheck(args *skel.CmdArgs) error {
 		errs = append(errs, fmt.Errorf("BGPAdvertisement %s: %w", advName, err))
 	}
 
-	// ipamResult == nil or carrying no IPv6 address means cmdAdd never
-	// published an EndpointSlice for this attachment in the first place —
-	// same "no address to publish" skip as cmdAdd's own (see ops_add.go),
-	// not tap/VM-specific (Open Decision 5).
+	// No IPAM result, or one carrying no IPv6 address, means cmdAdd never
+	// published an EndpointSlice for this attachment, the same skip the ADD
+	// path takes.
 	if _, ipamResult, _, prevErr := inferFromPrevResult(pluginConf.RawPrevResult); prevErr != nil {
 		errs = append(errs, fmt.Errorf("infer from prevResult: %w", prevErr))
 	} else if ipamResult != nil && ipamResult.IPv6Subnet != nil {
 		podName := nadpatch.ParsePodName(args.Args)
-		// The EndpointSlice lives in the pod's own namespace (see ops_add.go's
-		// cmdAdd), not pluginConf.Namespace — that's only where the BGP CRDs
-		// checked above live.
+		// The EndpointSlice lives in the pod's own namespace, not the one the
+		// BGP CRDs checked above live in.
 		podNamespace := nadpatch.ParsePodNamespace(args.Args)
 		if podName == "" || podNamespace == "" {
 			errs = append(errs, errors.New("EndpointSlice: no K8S_POD_NAME/K8S_POD_NAMESPACE in CNI_ARGS"))
@@ -104,10 +98,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 		}
 	}
 
-	// The eBPF vrf_table entry is only checkable once the BGPVRFInstance
-	// lookup succeeded (it carries the Argument value the entry is keyed
-	// on) and this node's router actually has SRv6 configured — matches
-	// registerEBPFDatapath's own no-op case.
+	// The eBPF entries are only checkable once the instance lookup succeeded,
+	// it carrying the Argument they are keyed on, and this node's router
+	// actually has SRv6 configured.
 	if vrfErr == nil {
 		if err := checkEBPFEntry(pluginConf, uint16(vrfInst.Spec.VRFID), bgp); err != nil {
 			errs = append(errs, err)
@@ -125,19 +118,17 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-// checkEBPFEntry verifies every eBPF table registerEBPFDatapath wrote for
-// this attachment still exists and is intact: the locator_table entry (this
-// router's own node), the function_table entry (SRv6 End.DT46 behavior),
-// and the vrf_table entry (still resolving to this attachment's own VRF
-// table id) — plus the same nodeID range check ADD treats as a hard error.
-// Checking vrf_table alone would miss a corrupted/missing locator or
-// function entry, or a nodeID that drifted out of range after ADD, while
-// still reporting the attachment healthy. Returns nil (not an error) when
-// this node's router has no SRv6Locator/nodeID configured — SRv6 was
-// intentionally never set up for this attachment, matching
-// registerEBPFDatapath's own no-op case. bgp is this node's BGPRouter,
-// looked up once by the caller (cmdCheck) and shared with checkEndpointSlice
-// rather than each fetching it independently.
+// checkEBPFEntry verifies every eBPF entry the ADD path wrote for this
+// attachment still exists and is intact: the locator entry for this node, the
+// function entry for the endpoint behavior, and the VRF entry still resolving
+// to this attachment's table, plus the same node ID range check ADD treats as
+// fatal. Checking the VRF entry alone would miss a missing locator or function
+// entry, or a node ID that drifted out of range, while still reporting the
+// attachment healthy.
+//
+// Returns nil, not an error, when this node's router has no locator or node ID
+// configured: SRv6 was intentionally never set up. bgp is this node's
+// BGPRouter, looked up once by the caller.
 func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig) error {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return nil
@@ -199,18 +190,15 @@ func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig) erro
 	return errors.Join(errs...)
 }
 
-// checkEndpointSlice verifies the per-pod EndpointSlice cmdAdd published
-// (endpointslice.go) is still in place: it exists, carries the pod's
-// current address, and its tenant-id/SID label and annotations match
-// freshly recomputed expected values. bgp is this node's BGPRouter, looked
-// up once by the caller (cmdCheck) and shared with checkEBPFEntry rather
-// than fetched here independently; a zero-value bgp (as when the
-// BGPVRFInstance lookup in cmdCheck above failed) means the SID can't be
-// recomputed, so its annotation is not checked — matches
-// registerEBPFDatapath/checkEBPFEntry's own "can't check what we can't
-// compute" convention. podNamespace is the pod's own namespace (parsed from
-// CNI_ARGS) — where cmdAdd created the EndpointSlice — distinct from
-// pluginConf.Namespace, which is only where the BGP CRDs live.
+// checkEndpointSlice verifies the per-pod EndpointSlice the ADD path published
+// is still in place: it exists, carries the pod's current address, and its
+// label and annotations match freshly recomputed values.
+//
+// bgp is this node's BGPRouter, looked up once by the caller. A zero value,
+// which is what a failed instance lookup leaves, means the SID cannot be
+// recomputed, so its annotation is not checked. podNamespace is the pod's own
+// namespace, where the slice was created, distinct from the namespace holding
+// the BGP CRDs.
 func checkEndpointSlice(
 	ctx context.Context, k8s client.Client, pluginConf *PluginConf, podName, podNamespace string,
 	addr net.IP, bgp bgpConfig, vrfID int32,
@@ -255,9 +243,8 @@ func checkEndpointSlice(
 	return errors.Join(errs...)
 }
 
-// cmdStatus implements the CNI spec STATUS operation — galactic-bgp talks
-// to the API server (BGP CRD reads/writes), so this probes it the same way
-// internal/cni's own cmdStatus does.
+// cmdStatus implements the CNI STATUS operation. This plugin talks to the API
+// server, so this probes it.
 func cmdStatus(args *skel.CmdArgs) error {
 	if err := parseStatusConf(args.StdinData); err != nil {
 		return err

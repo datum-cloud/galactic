@@ -2,23 +2,16 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package vip manages loopback-style VIP binding on backend nodes -- one
-// half of the DSR/Maglev gateway redesign's veth/container case (design
-// plan §0.1, §1): a backend node binds a service VIP to its own dedicated
-// dummy interface, letting the node itself verifiably answer on that
-// address (see Verify) without the reply ever passing back through
-// galactic-gateway. Requires CAP_NET_ADMIN, mirroring internal/plumbing/vrf.
+// Package vip manages loopback-style VIP binding on backend nodes: a node binds
+// a service VIP to its own dummy interface, letting the node verifiably answer
+// on that address without the reply passing back through the gateway. Requires
+// CAP_NET_ADMIN.
 //
-// This alone does not deliver anything to a VRF-isolated backend pod,
-// though: the dummy interface lives in the node's root network namespace,
-// not enslaved to any tenant VRF, and a DSR-forwarded ingress packet is
-// decapsulated straight into the owning tenant's own VRF routing table --
-// which has no route to an address that only exists outside it. The other
-// half, internal/plumbing/ebpf/vipxlatmap's vip_xlat_table translation
-// (originally built for the tap case only), now also runs for veth for
-// exactly this reason -- see
-// internal/controller.ServiceVIPBindingReconciler's own doc comment for
-// the live containerlab finding that surfaced this gap.
+// This alone delivers nothing to a VRF-isolated backend pod. The dummy interface
+// lives in the node's root namespace, enslaved to no tenant VRF, while a
+// forwarded ingress packet is decapsulated straight into the owning tenant's VRF
+// table, which has no route to an address existing only outside it. The address
+// translation in the eBPF map layer covers that half.
 package vip
 
 import (
@@ -31,23 +24,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// InterfaceName is the dedicated dummy link this package owns exclusively
-// for VIP addresses — not lo, since lo already carries the SRv6 locator
-// address internal/plumbing/loaddr.Detect reads; mixing VIP churn onto that
-// same interface risks disturbing the one address the fabric underlay
-// depends on.
+// InterfaceName is the dummy link this package owns exclusively for VIP
+// addresses. Not loopback, which already carries the SRv6 locator address the
+// underlay depends on: mixing VIP churn onto it risks disturbing that.
 const InterfaceName = "galactic-vip0"
 
-// vipMu serializes Bind/Unbind within a single process, mirroring
-// internal/plumbing/vrf's identical vrfMu — this package has no
-// cross-process lock file of its own because, unlike VRF creation (raced by
-// separate CNI plugin processes), every caller of this package runs inside
-// one long-lived galactic-router process.
+// vipMu serializes Bind and Unbind within one process. There is no
+// cross-process lock here because, unlike VRF creation, every caller runs inside
+// one long-lived process.
 var vipMu sync.Mutex
 
-// Bind idempotently assigns addr to InterfaceName, creating the interface
-// first if this is the first VIP ever bound on this node. Safe to call
-// repeatedly for the same address.
+// Bind idempotently assigns addr to InterfaceName, creating the interface if
+// this is the first VIP bound on this node. Safe to call repeatedly for the same
+// address.
 func Bind(addr net.IP) error {
 	vipMu.Lock()
 	defer vipMu.Unlock()
@@ -86,14 +75,13 @@ func Unbind(addr net.IP) error {
 	return nil
 }
 
-// Verify confirms addr is actually live: present in InterfaceName's address
-// list AND resolvable as a local (RTN_LOCAL) route via the kernel's own
-// route table -- not just "AddrAdd returned nil" (an address the kernel
-// duplicate-address-detection has since removed, for example, would still
-// have been accepted by AddrAdd at the time). Verify does not attempt to
-// contact any application-level listener on addr:port -- whether something
-// is actually listening on it is the workload's concern, not this
-// package's.
+// Verify confirms addr is live: present in the interface's address list and
+// resolvable as a local route in the kernel's own table. That is more than the
+// add having returned successfully, since an address duplicate-address detection
+// has since removed would still have been accepted at the time.
+//
+// It does not contact any listener on the address: whether something is
+// listening is the workload's concern.
 func Verify(addr net.IP) error {
 	link, err := netlink.LinkByName(InterfaceName)
 	if err != nil {
@@ -131,10 +119,8 @@ func Verify(addr net.IP) error {
 	return fmt.Errorf("vip: %s is not resolvable as a local route", addr)
 }
 
-// ensureInterface returns InterfaceName, creating it as a dummy link (and
-// bringing it up) the first time this is called on a node -- idempotent by
-// name, mirroring internal/plumbing/vrf.Add's identical
-// LinkByName-then-LinkAdd pattern.
+// ensureInterface returns InterfaceName, creating it as a dummy link and
+// bringing it up the first time this is called on a node. Idempotent by name.
 func ensureInterface() (netlink.Link, error) {
 	if link, err := netlink.LinkByName(InterfaceName); err == nil {
 		return link, nil
@@ -155,9 +141,8 @@ func ensureInterface() (netlink.Link, error) {
 	return link, nil
 }
 
-// hostNet returns addr expressed as its own host route (a /32 for IPv4, a
-// /128 for IPv6) -- the mask AddrAdd/AddrDel need to bind a single VIP
-// without claiming a whole subnet on InterfaceName.
+// hostNet returns addr as its own host route, the mask needed to bind a single
+// VIP without claiming a whole subnet on the interface.
 func hostNet(addr net.IP) *net.IPNet {
 	if v4 := addr.To4(); v4 != nil {
 		return &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}

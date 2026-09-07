@@ -13,9 +13,9 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 )
 
-// cmdAdd implements the CNI IPAM delegation ADD path. Being invoked at all
-// is the master plugin's own signal that its "ipam" block was present —
-// this function always allocates, it never re-checks whether it should.
+// cmdAdd implements the IPAM delegation ADD path. Being invoked at all is the
+// master plugin's signal that its ipam block was present, so this always
+// allocates and never re-checks whether it should.
 func cmdAdd(args *skel.CmdArgs) error {
 	conf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -38,9 +38,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 	return nil
 }
 
-// cmdDel implements the CNI IPAM delegation DEL path. Per the CNI spec,
-// DEL is idempotent: a config parse failure or a missing allocation is not
-// an error, since there may be nothing left to clean up.
+// cmdDel implements the IPAM delegation DEL path. Per the CNI spec it is
+// idempotent: a config parse failure or a missing allocation is not an error,
+// there possibly being nothing left to clean up.
 func cmdDel(args *skel.CmdArgs) error {
 	slog.Info("DEL: starting", "containerID", args.ContainerID)
 
@@ -55,9 +55,8 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// cmdCheck implements the CNI IPAM delegation CHECK path: confirm the
-// containerID's allocation, if any, is still present in each family conf
-// configures.
+// cmdCheck implements the IPAM delegation CHECK path: confirm the container's
+// allocation, if any, is still present for each family the config names.
 func cmdCheck(args *skel.CmdArgs) error {
 	conf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -73,9 +72,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-// cmdStatus implements the CNI spec STATUS operation. galactic-ipam has no
-// API server or attachment-specific state to probe — it either parses a
-// well-formed config or it doesn't.
+// cmdStatus implements the CNI STATUS operation. This plugin has no API server
+// or attachment-specific state to probe: it either parses a well-formed config
+// or it does not.
 func cmdStatus(args *skel.CmdArgs) error {
 	if err := parseStatusConf(args.StdinData); err != nil {
 		return err

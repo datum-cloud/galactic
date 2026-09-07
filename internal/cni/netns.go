@@ -13,9 +13,9 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// configureInterfaceInNetns applies IP addresses and default routes to the
-// guest interface inside the container network namespace. ipv4Net/ipv4GW are
-// nil for an IPv6-only attachment.
+// configureInterfaceInNetns applies addresses and default routes to the guest
+// interface inside the container network namespace. The IPv4 arguments are nil
+// on an IPv6-only attachment.
 func configureInterfaceInNetns(
 	netnsPath, ifName string,
 	ipv6Net *net.IPNet, ipv6GW net.IP,
@@ -60,13 +60,14 @@ func configureInterfaceInNetns(
 	return nil
 }
 
-// addAddrAndDefaultRoute assigns ipNet to link and, if gateway is set,
-// installs a default route via it. No-op when ipNet is nil (family not in
-// use for this attachment). Both the address and the route are added
-// idempotently: a call that finds its target already in place (e.g. a
-// retried CNI ADD against a netns that a previous, non-DEL'd ADD already
-// configured) succeeds without touching kernel state; a call that finds
-// different, conflicting state fails loudly instead of overwriting it.
+// addAddrAndDefaultRoute assigns ipNet to link and, when gateway is set,
+// installs a default route through it. A nil ipNet, meaning that family is
+// unused here, is a no-op.
+//
+// Both are added idempotently: finding the target already in place, as a
+// retried ADD against a namespace a previous ADD configured would, succeeds
+// without touching kernel state, while finding conflicting state fails loudly
+// rather than overwriting it.
 func addAddrAndDefaultRoute(
 	handle *netlink.Handle, link netlink.Link, ifName string, ipNet *net.IPNet, gateway net.IP,
 ) error {
@@ -93,11 +94,10 @@ func addrFamily(ip net.IP) int {
 	return netlink.FAMILY_V6
 }
 
-// addAddrIfMissing adds ipNet to link unless an identical address (same IP
-// and prefix length) is already present, in which case it is a no-op. A
-// link can legitimately carry multiple distinct addresses per family, so no
-// existing address is ever treated as a conflict here — only an exact match
-// short-circuits the add.
+// addAddrIfMissing adds ipNet to link unless an identical address is already
+// present. A link can legitimately carry several distinct addresses per family,
+// so only an exact match short-circuits the add; no existing address is treated
+// as a conflict.
 func addAddrIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, ipNet *net.IPNet) error {
 	want := netlink.Addr{IPNet: ipNet}
 
@@ -117,11 +117,10 @@ func addAddrIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, 
 	return nil
 }
 
-// addDefaultRouteIfMissing installs a default route via gateway on link
-// unless a default route via that same gateway already exists, in which
-// case it is a no-op. If a default route via a *different* gateway already
-// exists, that's a real misconfiguration (not something a retried ADD
-// should paper over), so it is returned as an error instead.
+// addDefaultRouteIfMissing installs a default route through gateway on link
+// unless one through that same gateway already exists. One through a different
+// gateway is a real misconfiguration rather than something a retried ADD should
+// paper over, so it returns an error.
 func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName string, gateway net.IP) error {
 	existing, err := handle.RouteList(link, addrFamily(gateway))
 	if err != nil {
@@ -138,11 +137,11 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 			ifName, r.Gw, gateway)
 	}
 
-	// onlink: the IPv4 pool allocates a /32 host address (no on-link subnet
-	// route to the gateway), so the kernel refuses this route with
-	// ENETUNREACH unless told to treat the gateway as directly reachable.
-	// IPv6's /96 subnet allocation already covers the gateway, so the flag
-	// is a no-op there — safe to set unconditionally for both families.
+	// The on-link flag: the IPv4 pool allocates a host address with no on-link
+	// subnet route to the gateway, so the kernel refuses this route unless told
+	// to treat the gateway as directly reachable. The IPv6 subnet allocation
+	// already covers its gateway, making the flag a no-op there, so it is safe
+	// to set for both families.
 	defaultRoute := &netlink.Route{
 		Dst:       nil, // default route
 		Gw:        gateway,
@@ -155,10 +154,9 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 	return nil
 }
 
-// isDefaultRouteDst reports whether dst represents a default route
-// (0.0.0.0/0 or ::/0). netlink represents this as a nil Dst on routes it
-// creates itself, but routes read back from the kernel may instead carry an
-// explicit zero-length-prefix net.IPNet.
+// isDefaultRouteDst reports whether dst is a default route. Netlink represents
+// one as a nil destination on routes it creates, while routes read back from the
+// kernel may carry an explicit zero-length prefix instead.
 func isDefaultRouteDst(dst *net.IPNet) bool {
 	if dst == nil {
 		return true
@@ -167,23 +165,21 @@ func isDefaultRouteDst(dst *net.IPNet) bool {
 	return ones == 0
 }
 
-// flushGuestNetnsConfig removes any IP addresses and default routes
-// configured on ifName inside the container netns, without deleting the
-// link itself. No-op if ifName is not present.
+// flushGuestNetnsConfig removes any addresses and default routes on ifName
+// inside the container namespace, without deleting the link. A no-op when
+// ifName is absent.
 //
-// DEL normally relies on hostDevice DEL moving the guest veth end back out
-// of the container netns to flush this state as a side effect: the kernel
-// strips a link's addresses/routes when it genuinely crosses a namespace
-// boundary. But that move is a no-op — and so triggers no such flush — when
-// the "container" netns is the same namespace the link already lives in
-// (e.g. a hostNetwork pod with a Multus secondary attachment, where
-// args.Netns resolves to the host's own root netns rather than a distinct
-// per-sandbox namespace). Left unflushed, that state survives indefinitely
-// (there is no ephemeral sandbox netns to tear down and reclaim it), and the
-// next ADD on that same interface fails with "file exists" trying to add a
-// default route that never went away. Calling this unconditionally in DEL,
-// ahead of hostDevice DEL, makes cleanup reliable regardless of whether the
-// move-triggered flush fires.
+// DEL normally relies on the delegated move of the guest end back out of the
+// container namespace to flush this as a side effect, the kernel stripping a
+// link's addresses and routes when it genuinely crosses a namespace boundary.
+// That move is a no-op, and triggers no flush, when the container namespace is
+// the one the link already lives in, as for a host-network pod with a secondary
+// attachment. Left unflushed the state survives indefinitely, there being no
+// ephemeral namespace to reclaim it, and the next ADD fails trying to add a
+// default route that never went away.
+//
+// Calling this unconditionally in DEL, ahead of the delegated step, makes
+// cleanup reliable either way.
 func flushGuestNetnsConfig(netnsPath, ifName string) error {
 	containerNS, err := ns.GetNS(netnsPath)
 	if err != nil {
@@ -266,12 +262,11 @@ func readGuestInterface(netnsPath, ifName string) (string, int, error) {
 	return mac, mtu, err
 }
 
-// cleanupContainerNetns removes any existing veth interface with the given name
-// from the container network namespace. This is needed to handle stale state
-// from previous CNI ADD runs that may have left interfaces behind.
+// cleanupContainerNetns removes any existing veth named ifName from the
+// container namespace, clearing stale state left behind by a previous ADD.
 //
-// Only *netlink.Veth interfaces are deleted; other types produce a clear error
-// to prevent accidental deletion of unrelated interfaces.
+// Only veth interfaces are deleted; any other type produces a clear error, to
+// prevent deleting an unrelated interface.
 func cleanupContainerNetns(netnsPath, ifName string) error {
 	containerNS, err := ns.GetNS(netnsPath)
 	if err != nil {

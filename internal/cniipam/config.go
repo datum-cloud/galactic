@@ -17,9 +17,9 @@ import (
 const errInvalidCNIConfig = "invalid CNI config"
 
 const (
-	// maxIPv6SubnetPrefixLen mirrors internal/cni's own constraint: pool
-	// prefix must be no longer than the per-allocation subnet length, and
-	// dual-stack tenant addressing allocates /96 endpoints.
+	// maxIPv6SubnetPrefixLen bounds the pool prefix: it must be no longer than
+	// the per-allocation subnet length, and dual-stack tenant addressing
+	// allocates /96 endpoints.
 	maxIPv6SubnetPrefixLen = 96
 	maxIPv4SubnetPrefixLen = 32
 )
@@ -33,11 +33,10 @@ const (
 // sanitizeForError's printable-ASCII check.
 const sanitizeForErrorBinary = "<binary>"
 
-// parseConf unmarshals the full CNI config document (the same one the
-// master plugin itself received) and validates/normalizes the "ipam"
-// block. Returns a *types.Error (CNI error code 7) for anything a real IPAM
-// invocation should never see, since a master plugin only ever delegates
-// here when its own "ipam" block is present.
+// parseConf unmarshals the full CNI config document, the same one the master
+// plugin received, and validates and normalizes the ipam block. It returns a
+// CNI validation error for anything a real IPAM invocation should never see,
+// since a master plugin only delegates here when that block is present.
 func parseConf(data []byte) (*pluginConf, error) {
 	conf := &pluginConf{}
 	if err := json.Unmarshal(data, conf); err != nil {
@@ -64,10 +63,10 @@ func parseConf(data []byte) (*pluginConf, error) {
 		}
 	}
 
-	// Default-filler: only when the ipam block is present but specifies
-	// neither a static address nor a pool CIDR for either family. Cannot
-	// manufacture an ipam block out of thin air — that decision already
-	// happened in the master plugin, before this process was even execed.
+	// Fill in a default only when the ipam block is present but names
+	// neither a static address nor a pool for either family. It cannot
+	// manufacture the block itself: that decision was made in the master
+	// plugin, before this process was execed.
 	if len(conf.IPAM.Addresses) == 0 && conf.IPAM.StaticIP == "" &&
 		conf.IPAM.IPv6Subnet == "" && conf.IPAM.IPv4Subnet == "" {
 		if config.IPAMGetEnableLocalIPAM() {
@@ -75,11 +74,9 @@ func parseConf(data []byte) (*pluginConf, error) {
 		}
 	}
 
-	// Unset means "no restriction" — allocate from whatever pool(s) are
-	// configured, exactly like before this field had any effect at all.
-	// Defaulting an unset field to ["ipv6"] here would silently turn every
-	// existing dual-stack or IPv4-only config that has never set this field
-	// into IPv6-only once the filter below is applied.
+	// Unset means no restriction: allocate from whatever pools are configured.
+	// Defaulting an unset field to IPv6 would silently turn every existing
+	// dual-stack or IPv4-only config that never set it into IPv6-only.
 	if len(conf.IPAM.AddressFamilies) > 0 {
 		var wantIPv6, wantIPv4 bool
 		for _, af := range conf.IPAM.AddressFamilies {
@@ -96,9 +93,9 @@ func parseConf(data []byte) (*pluginConf, error) {
 			}
 		}
 
-		// Meaningless for the paths that carry addresses they were given
-		// rather than allocating: both are selected on their own field's
-		// presence, regardless of what else is configured.
+		// Meaningless for the paths carrying addresses they were given
+		// rather than allocating, both being selected on their own field's
+		// presence whatever else is configured.
 		if conf.IPAM.StaticIP == "" && len(conf.IPAM.Addresses) == 0 {
 			if !wantIPv6 {
 				conf.IPAM.IPv6Subnet = ""
@@ -118,9 +115,9 @@ func parseConf(data []byte) (*pluginConf, error) {
 	return conf, nil
 }
 
-// parsedAddresses is the addresses path's config, validated and parsed:
-// at most one address per family, each keeping the exact prefix length it
-// was given.
+// parsedAddresses is the pre-decided addresses path's config, validated and
+// parsed: at most one address per family, each keeping the exact prefix length
+// it was given.
 type parsedAddresses struct {
 	ipv6        *net.IPNet
 	ipv6Gateway net.IP
@@ -147,9 +144,8 @@ func validateAddressesMode(conf *IPAM) error {
 	return err
 }
 
-// parseAddresses validates and parses the addresses block. Every address
-// must carry an explicit prefix length, which is preserved exactly: an
-// endpoint block decided upstream as a /96 stays a /96.
+// parseAddresses validates and parses the addresses block. Every address must
+// carry an explicit prefix length, which is preserved exactly.
 func parseAddresses(addresses []Address) (*parsedAddresses, error) {
 	parsed := &parsedAddresses{}
 	for _, addr := range addresses {
@@ -271,9 +267,9 @@ func sanitizeForError(s string) string {
 	return s
 }
 
-// parseStatusConf validates that STATUS's config is minimally parseable.
-// galactic-ipam has no attachment-specific or API-server state to check —
-// STATUS just confirms the binary can parse a well-formed CNI config.
+// parseStatusConf validates that a STATUS config is minimally parseable. This
+// plugin has no attachment-specific or API-server state to check, so STATUS
+// confirms only that it can parse a well-formed config.
 func parseStatusConf(data []byte) error {
 	var sc struct {
 		CNIVersion string `json:"cniVersion"`

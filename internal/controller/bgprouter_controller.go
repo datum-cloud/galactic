@@ -33,9 +33,9 @@ import (
 // config hash across pod restarts, enabling no-op detection on reconcile.
 const annotationConfigHash = "galactic.datum.net/config-hash"
 
-// peerStatusRequeue is the interval at which the router reconciler re-checks
-// GoBGP session state. BGP FSM transitions are not Kubernetes events, so a
-// periodic requeue is required to keep BGPPeer status current.
+// peerStatusRequeue is how often the router reconciler re-checks GoBGP session
+// state. BGP state transitions are not Kubernetes events, so a periodic requeue
+// is what keeps BGPPeer status current.
 const peerStatusRequeue = 30 * time.Second
 
 // reasonAccepted is the shared condition Reason used across this
@@ -114,30 +114,27 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("hash desired router: %w", hashErr)
 	}
 
-	// Fetch runtime status early so peer status updates happen on every
-	// reconcile, even when the config hash is unchanged.  Without this,
-	// BGP session state transitions (Idle → Established, etc.) would never
-	// be reflected in BGPPeer CR status because the no-op path returned
-	// before updatePeerStatuses was called.
+	// Fetched early so peer status updates happen on every reconcile, even when
+	// the config hash is unchanged. Otherwise session-state transitions would
+	// never reach BGPPeer status, the no-op path returning before the update
+	// runs.
 	runtimeStatus, statusErr := r.RuntimeManager.Status(ctx, req.NamespacedName)
 	if statusErr != nil {
 		logger.Error(statusErr, "get runtime status")
 	}
 
-	// Only skip Apply if the runtime is healthy, the config is unchanged, AND
-	// every desired peer is actually present in the runtime's live peer list.
-	// runtimeStatus.Healthy only reflects "is the GoBGP process up" — it says
-	// nothing about whether GoBGP still holds every desired peer. A peer can
-	// be silently dropped from GoBGP's live state (e.g. a GC cycle deletes
-	// and recreates the BGPVRFInstance/BGPAdvertisement CRs backing it, and
-	// whatever happens during that churn drops the peer) without the desired
-	// config's hash ever changing, since the recreated CRs hash identically
-	// to before. Without this check, the no-op branch below wedges
-	// permanently — Apply() (and its ListPeer/AddPeer diff) never runs again
-	// until something manually busts the config-hash annotation. If the
-	// runtime is unhealthy (e.g. after a controller restart where GoBGP was
-	// not yet running), we must also re-apply to restart GoBGP even if the
-	// desired config hash matches the annotation.
+	// Skip Apply only when the runtime is healthy, the config is unchanged, and
+	// every desired peer is actually present in the runtime's live list.
+	//
+	// Health reflects only whether the GoBGP process is up, not whether it
+	// still holds every desired peer. A peer can be dropped from live state
+	// without the desired config's hash changing, for instance when churn
+	// deletes and recreates the CRs backing it and they hash identically.
+	// Without the presence check the no-op branch wedges permanently, and Apply
+	// never runs again until something busts the hash annotation.
+	//
+	// An unhealthy runtime, such as after a restart where GoBGP is not yet
+	// running, must also re-apply even when the hash matches.
 	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy &&
 		allDesiredPeersPresent(desired.Peers, runtimeStatus) {
 		// True no-op: runtime is healthy with the current config.
@@ -247,9 +244,9 @@ func (r *BGPRouterReconciler) updateRouterStatus(router *bgpv1alpha1.BGPRouter, 
 	}
 }
 
-// updatePeerStatuses updates BGPPeer status only for peers that target this router.
-// It uses the routerRef name index for direct references and evaluates routerSelector
-// for selector-based bindings.
+// updatePeerStatuses updates BGPPeer status for the peers targeting this
+// router, resolving direct references through the name index and evaluating
+// selector-based bindings.
 func (r *BGPRouterReconciler) updatePeerStatuses(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 	rs model.RuntimeStatus,
@@ -295,11 +292,9 @@ func (r *BGPRouterReconciler) updatePeerStatuses(
 	}
 }
 
-// peersForRouter returns every BGPPeer that targets router, either via a
-// direct routerRef.name reference or a routerSelector matching the router's
-// own labels. Shared by updatePeerStatuses (polled every peerStatusRequeue)
-// and PeerStateEventEmitter (driven in real time by each runtime's own
-// peer-event watcher — see peer_events.go), so both resolve "which BGPPeer
+// peersForRouter returns every BGPPeer targeting router, whether by direct
+// reference or by a selector matching the router's labels. Shared by the polled
+// status update and the real-time event emitter, so both resolve "which BGPPeer
 // does this belong to" the same way.
 func peersForRouter(
 	ctx context.Context, c client.Client, router *bgpv1alpha1.BGPRouter,
@@ -457,13 +452,13 @@ func (r *BGPRouterReconciler) updateVRFInstanceStatuses(ctx context.Context, rou
 	}
 }
 
-// nptv6ConfiguredCondition validates spec (parseable CIDRs, matching prefix
-// lengths, and a supported prefix length — internal/plumbing/nptv6.Mapping's
-// own rules) and returns the ConditionNPTv6Configured condition reporting
-// the result. This reconciler has no access to the eBPF datapath's
-// nptv6_table map at all (galactic-router's DaemonSet has no /sys/fs/bpf
-// mount or CAP_BPF — see gc.SweepEBPFNPTv6Table's doc comment), so this
-// condition reflects spec validity only, never live kernel state.
+// nptv6ConfiguredCondition validates spec, checking that the CIDRs parse, that
+// the prefix lengths match, and that the length is supported, and returns the
+// condition reporting the result.
+//
+// This reconciler cannot reach the datapath's nptv6_table at all, its DaemonSet
+// having neither the bpffs mount nor CAP_BPF, so the condition reflects spec
+// validity only and never live kernel state.
 func nptv6ConfiguredCondition(spec *bgpv1alpha1.NPTv6Spec) metav1.Condition {
 	_, ula, err := net.ParseCIDR(spec.ULAPrefix)
 	if err != nil {
@@ -529,11 +524,9 @@ func (r *BGPRouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // allDesiredPeersPresent reports whether every desired peer appears in the
-// runtime's live peer list, matched by normalized address (see normalizeIP).
-// This is what distinguishes a true no-op reconcile — config unchanged,
-// runtime healthy, AND every peer GoBGP is supposed to hold is actually
-// present — from a runtime that is nominally healthy but has silently lost
-// a peer, which must fall through to Apply() instead of being skipped.
+// runtime's live list, matched by normalized address. It is what separates a
+// true no-op reconcile from a runtime that is nominally healthy but has
+// silently lost a peer, which must fall through to Apply instead.
 func allDesiredPeersPresent(peers []model.DesiredPeer, rs model.RuntimeStatus) bool {
 	present := make(map[string]bool, len(rs.Peers))
 	for _, ps := range rs.Peers {
@@ -547,10 +540,9 @@ func allDesiredPeersPresent(peers []model.DesiredPeer, rs model.RuntimeStatus) b
 	return true
 }
 
-// normalizeIP returns the canonical text form of an IP address,
-// ensuring IPv6 addresses with leading zeros (e.g. 2607:ed40:01fb::2)
-// match their GoBGP-normalized form (2607:ed40:1fb::2). Falls back to
-// the original string if parsing fails.
+// normalizeIP returns the canonical text form of an IP address, so an IPv6
+// address written with leading zeros matches its normalized form. Falls back to
+// the original string when parsing fails.
 func normalizeIP(s string) string {
 	if ip := net.ParseIP(s); ip != nil {
 		return ip.String()

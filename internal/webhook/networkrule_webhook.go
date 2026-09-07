@@ -14,14 +14,12 @@ import (
 	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// NetworkRuleValidator implements the typed admission.Validator generic
-// interface for NetworkRule, verifying (via the pluggable Authorizer) that
-// the requesting identity is authorized for the vpc/vpcattachment named in
-// the rule before a create or update is admitted.
+// NetworkRuleValidator is the admission validator for NetworkRule, verifying
+// through the pluggable Authorizer that the requesting identity may act on the
+// VPC and attachment the rule names before a create or update is admitted.
 type NetworkRuleValidator struct {
-	// Authorizer performs the actual authorization check. Production
-	// callers must not leave this as AllowAllAuthorizer{} — see that
-	// type's doc comment.
+	// Authorizer performs the actual check. Production callers must not leave
+	// this as AllowAllAuthorizer.
 	Authorizer Authorizer
 }
 
@@ -35,33 +33,32 @@ func (v *NetworkRuleValidator) ValidateCreate(
 	return nil, v.authorize(ctx, rule)
 }
 
-// ValidateUpdate re-verifies authorization on update — a rule's vpcRef/
-// vpcAttachmentRef could otherwise be changed post-creation to point at a
-// different tenant's resources without ever re-running the create-time
-// check.
+// ValidateUpdate re-verifies authorization on update: a rule's VPC and
+// attachment references could otherwise be changed after creation to point at
+// another tenant's resources without the create-time check running again.
 func (v *NetworkRuleValidator) ValidateUpdate(
 	ctx context.Context, _, newRule *networkv1alpha1.NetworkRule,
 ) (admission.Warnings, error) {
 	return nil, v.authorize(ctx, newRule)
 }
 
-// ValidateDelete performs no additional authorization check: deleting a
-// NetworkRule that already exists in the cluster is scoped by Kubernetes'
-// own RBAC on the delete verb, not by vpc/vpcattachment ownership.
+// ValidateDelete performs no additional check. Deleting a rule that already
+// exists is scoped by the cluster's own access control on the delete verb, not
+// by VPC ownership.
 func (v *NetworkRuleValidator) ValidateDelete(
 	context.Context, *networkv1alpha1.NetworkRule,
 ) (admission.Warnings, error) {
 	return nil, nil
 }
 
-// authorize resolves the requesting identity from the admission.Request
-// carried on ctx (controller-runtime's Validator interface does not pass
-// the request directly) and calls the configured Authorizer. A denial
-// surfaces to the requester as the admission rejection message; the
-// Accepted condition on the NetworkRule itself is set by the future
-// NetworkRule controller once the object has passed admission and been
-// persisted, since a validating webhook cannot itself write to the
-// object's status subresource on a create/update it hasn't yet admitted.
+// authorize resolves the requesting identity from the admission request carried
+// on ctx, the validator interface not passing it directly, and calls the
+// configured Authorizer. A denial surfaces to the requester as the rejection
+// message.
+//
+// The Accepted condition on the rule itself is set by the reconciler once the
+// object has passed admission and been persisted: a validating webhook cannot
+// write to the status of a request it has not yet admitted.
 func (v *NetworkRuleValidator) authorize(ctx context.Context, rule *networkv1alpha1.NetworkRule) error {
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
@@ -70,9 +67,9 @@ func (v *NetworkRuleValidator) authorize(ctx context.Context, rule *networkv1alp
 
 	ok, err := v.Authorizer.Authorize(ctx, req.UserInfo, rule)
 	if err != nil {
-		// Fail closed: an authorization check that itself failed (e.g. the
-		// companion operator was unreachable) must never be treated as an
-		// implicit allow.
+		// Fail closed: a check that itself failed, because the companion
+		// operator was unreachable, must never be treated as an implicit
+		// allow.
 		return fmt.Errorf("authorization check failed: %w", err)
 	}
 	if !ok {
@@ -85,18 +82,14 @@ func (v *NetworkRuleValidator) authorize(ctx context.Context, rule *networkv1alp
 }
 
 // SetupWebhookWithManager registers the NetworkRule validating webhook with
-// mgr, using controller-runtime's generic builder API — the shape
-// sigs.k8s.io/controller-runtime v0.24.1 (this repo's go.mod) actually
-// exposes: NewWebhookManagedBy[T] infers T from the object argument, and
-// WithValidator takes the typed admission.Validator[T] this type
-// implements above.
+// mgr, through controller-runtime's generic builder: the constructor infers the
+// object type from its argument, and the validator argument takes the typed
+// interface this type implements.
 func (v *NetworkRuleValidator) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, &networkv1alpha1.NetworkRule{}).
 		WithValidator(v).
 		Complete()
 }
 
-// Production webhook registration additionally requires a
-// ValidatingWebhookConfiguration/Service manifest, plus a cert-manager (or
-// equivalent) TLS provisioning step -- Phase D of the design plan, not
-// wired up yet.
+// Production registration additionally requires a webhook configuration and
+// service manifest, plus TLS provisioning, neither of which is wired up here.

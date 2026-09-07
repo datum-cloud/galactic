@@ -20,47 +20,38 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// ensureLocatorLocalRoute installs a local route for this node's own uSID
-// locator /64 -- the Block(48) + Node-ID(16) prefix from its BGPRouter --
-// into the kernel's local table, pointed at lo.
+// ensureLocatorLocalRoute installs a local route for this node's uSID locator
+// /64, the Block and Node-ID prefix from its BGPRouter, into the kernel's local
+// table pointed at loopback.
 //
-// This exists because a node has to be able to resolve a route to its *own*
-// SIDs. internal/plumbing/ebpf/egressroutemap's resolveLinkAndL2 calls
-// netlink.RouteGet(sid) once per registration to pick the egress interface
-// and next-hop MAC that usid_egress will then redirect to, and for a
-// same-node destination (an Envoy sidecar reaching a backend on its own
-// node) that SID belongs to this very node. Without a matching route,
-// RouteGet fails against the locator's own Null0 discard route with EINVAL,
-// registration fails, and same-node SRv6 encapsulation is never set up.
+// A node has to be able to resolve a route to its own SIDs. Egress route
+// registration resolves each SID once to pick the egress interface and next-hop
+// MAC the datapath then redirects to, and for a same-node destination, an Envoy
+// sidecar reaching a backend on its own node, that SID belongs to this node.
+// Without a matching route the lookup fails against the locator's own discard
+// route, registration fails, and same-node encapsulation is never set up.
 //
-// A route, deliberately, and not an address on a dummy interface -- which is
-// how this was previously satisfied. A locally-assigned global address is
-// published as a node address by cluster discovery, which lands it in every
-// KubeSpan peer's allowedIPs; KubeSpan's nftables chains then steer traffic
-// to it into the WireGuard policy table, where this datapath is not attached
-// (attach.ResolveInterfaces skips wireguard links) and could not parse it
-// anyway, a WireGuard interface being link-type RAW with no Ethernet header
-// for usid_ingress's first parse step. That silently blackholed every
-// inter-node SRv6 packet. Cluster discovery publishes addresses, not routes,
-// so a local route restores resolution without re-creating that.
+// A route, deliberately, and not an address on a dummy interface. A locally
+// assigned global address is published as a node address by cluster discovery,
+// which lands it in every mesh peer's allowed addresses, and the mesh's own
+// rules then steer traffic for it into a policy table where this datapath is
+// not attached and could not parse the packets anyway, the tunnel having no
+// Ethernet header for the first parse step. That silently blackholes every
+// inter-node encapsulated packet. Discovery publishes addresses, not routes.
 //
 // Covering the whole /64 rather than individual SIDs is what makes this
-// self-maintaining: every SID this node can compute shares that prefix, so
-// no per-VPC or per-Argument bookkeeping is needed, and a VPC whose Argument
-// nobody thought to configure resolves the same as any other. It cannot
-// shadow decapsulation either, because usid_ingress claims packets at tc
-// ingress before any FIB lookup runs.
+// self-maintaining: every SID this node can compute shares that prefix, so no
+// per-VPC bookkeeping is needed and a VPC nobody configured resolves like any
+// other. It cannot shadow decapsulation either, since usid_ingress claims
+// packets at tc ingress before any FIB lookup runs.
 //
-// Idempotent (RouteReplace), and safe to call repeatedly: Run invokes it at
-// startup and on its refresh ticker, so a BGPRouter that appears later, or a
-// route flushed out from under us, is picked up without a restart.
+// Idempotent and safe to call repeatedly, so a BGPRouter that appears later, or
+// a route flushed out from under it, is picked up without a restart.
 //
-// It also removes the routes it installed for a locator this node no longer
-// owns. RouteReplace alone cannot: a changed Block or Node-ID is a different
-// prefix, so the old route is left behind claiming address space this node
-// has given up, and nothing would ever retract it. Observed after moving a
-// node back to its cluster Block, which left both the new and the old /64
-// local on lo.
+// It also removes routes it installed for a locator this node no longer owns. A
+// replace alone cannot: a changed Block or Node-ID is a different prefix, so the
+// old route is left behind claiming address space this node gave up, and nothing
+// would retract it.
 func ensureLocatorLocalRoute(ctx context.Context, k8s client.Client, namespace, nodeName string) error {
 	if k8s == nil || nodeName == "" {
 		return nil // no node identity configured; nothing to resolve against
@@ -90,12 +81,11 @@ func ensureLocatorLocalRoute(ctx context.Context, k8s client.Client, namespace, 
 		return fmt.Errorf("install local route %s dev lo table local: %w", prefix, err)
 	}
 
-	// Deliberately only after a successful install, and only with a valid
-	// desired prefix in hand -- pruning against the zero Prefix would strip
-	// this node's working route every time the BGPRouter is briefly
-	// unreadable during bring-up. A prune failure is not the install
-	// failing: same-node resolution already works, a leftover only
-	// over-claims space, and the refresh ticker retries.
+	// Only after a successful install, and only with a valid desired prefix in
+	// hand: pruning against the zero prefix would strip this node's working
+	// route every time the BGPRouter is briefly unreadable during bring-up. A
+	// prune failure is not an install failure, since same-node resolution
+	// already works and a leftover only over-claims space.
 	if err := pruneStaleLocatorLocalRoutes(lo.Attrs().Index, prefix); err != nil {
 		slog.Warn("Could not remove stale uSID locator local routes; this node still "+
 			"claims a locator prefix it no longer owns", "keep", prefix.String(), "err", err)
@@ -128,17 +118,16 @@ func pruneStaleLocatorLocalRoutes(loIndex int, keep netip.Prefix) error {
 	return errors.Join(errs...)
 }
 
-// staleLocatorLocalRoute reports whether r is one of ensureLocatorLocalRoute's
-// own routes for a prefix other than keep.
+// staleLocatorLocalRoute reports whether r is one of this component's own
+// routes for a prefix other than keep.
 //
-// The filtering is the whole safety argument, because the local table is
-// mostly the kernel's and deleting from it wrongly would black-hole one of
-// this node's own addresses. Every entry the kernel derives from an assigned
-// address carries RTPROT_KERNEL and is a /128 host route; what this component
-// installs carries neither. So a candidate must be RTN_LOCAL on lo, not
-// RTPROT_KERNEL, and exactly a Block+Node-ID /64 -- the one length
-// ensureLocatorLocalRoute ever writes. A node's own loopback /128, ::1, and
-// anything on another link all fail that.
+// The filtering carries the safety argument, the local table being mostly the
+// kernel's and a wrong delete blackholing one of this node's own addresses.
+// Every entry the kernel derives from an assigned address is a kernel-protocol
+// /128 host route, and what this component installs is neither. So a candidate
+// must be a local route on loopback, not kernel-derived, and exactly a /64, the
+// one length ever written here. A loopback /128, ::1, and anything on another
+// link all fail that.
 func staleLocatorLocalRoute(r netlink.Route, loIndex int, keep netip.Prefix) bool {
 	if r.LinkIndex != loIndex || r.Table != unix.RT_TABLE_LOCAL {
 		return false
@@ -160,13 +149,11 @@ func staleLocatorLocalRoute(r netlink.Route, loIndex int, keep netip.Prefix) boo
 	return netip.PrefixFrom(got.Unmap(), ones) != keep
 }
 
-// nodeLocatorPrefix returns the Block(48)+Node-ID(16) /64 carved out of this
-// node's BGPRouter locator, or the zero Prefix when this node has no
-// BGPRouter or that router carries no SRv6 locator yet -- both ordinary
-// during bring-up, and neither an error.
-//
-// Matched on Spec.TargetRef.Name, the same way internal/cnibgp and
-// internal/ingresssidecar both find the router for a node.
+// nodeLocatorPrefix returns the /64 carved out of this node's BGPRouter
+// locator, or the zero Prefix when this node has no BGPRouter or that router
+// carries no locator yet. Both are ordinary during bring-up and neither is an
+// error. The router is matched on its target name, the same way every other
+// component here finds a node's router.
 func nodeLocatorPrefix(
 	ctx context.Context, k8s client.Client, namespace, nodeName string,
 ) (netip.Prefix, error) {
@@ -205,9 +192,9 @@ func nodeLocatorPrefix(
 	return netip.Prefix{}, nil
 }
 
-// reconcileLocatorLocalRoute is Run's non-fatal wrapper: a missing or
-// not-yet-created BGPRouter, or a transient API error, must not stop the
-// installer daemon, and the refresh ticker retries on its own.
+// reconcileLocatorLocalRoute is Run's non-fatal wrapper: a missing BGPRouter or
+// a transient API error must not stop the installer daemon, and the refresh
+// ticker retries.
 func reconcileLocatorLocalRoute(ctx context.Context, st ebpfDatapathState) {
 	if err := ensureLocatorLocalRoute(ctx, st.k8sClient, st.namespace, st.nodeName); err != nil {
 		slog.Warn("Could not install this node's uSID locator local route; "+

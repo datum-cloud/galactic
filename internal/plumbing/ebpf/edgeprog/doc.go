@@ -2,54 +2,35 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package edgeprog holds the compiled XDP program that implements the edge
-// gateway's Maglev/DSR (Direct Server Return) consistent-hash
-// load-balancing datapath, plus a direct SRv6 uSID push -- no Geneve
-// overlay, no separate gateway-tier decap step, no kernel VRF/FIB
-// dependency for the encap itself, and (unlike the Full-NAT predecessor
-// this replaces) no address/port rewriting or reverse-path decap of any
-// kind: the backend answers the client directly, so this program only
-// ever needs a forward path. See the DSR/Maglev design plan (kitt
-// notebook, projects/galactic/dsr-maglev-nptv6-nat66-design.md) for the
-// full rationale, and edgedsr.c's own header comment for what this
-// simplification removes versus the Full-NAT edgenat.c it replaces
-// (removed entirely, not kept as an alternate mode -- breaking change, no
-// migration path).
+// Package edgeprog holds the compiled XDP program implementing the edge
+// gateway's Maglev direct-server-return load-balancing datapath, plus a direct
+// SRv6 uSID push. No overlay, no separate decap step, no kernel VRF dependency
+// for the encapsulation, and no address or port rewriting: the backend answers
+// the client directly, so this program only ever needs a forward path.
 //
-// edgedsr.c is the single source of truth for the packet path; see its
-// header comment for the full walkthrough. `go generate` (via bpf2go,
-// github.com/cilium/ebpf's code generator) compiles it with clang into a
-// CO-RE-portable BPF object and generates matching Go bindings
-// (EdgedsrObjects, LoadEdgedsr, LoadEdgedsrObjects, plus per-map/
-// per-program fields) in this package -- run `go generate ./...` from the
-// repo root, or `go generate` from this directory, after editing
-// edgedsr.c.
+// edgedsr.c is the single source of truth for the packet path; its header
+// comment walks it. `go generate` compiles it with clang into a
+// CO-RE-portable BPF object and generates the matching Go bindings here. Run it
+// after editing the C source.
 //
-// Same not-committed-generated-artifacts convention as
-// internal/plumbing/ebpf/prog (see that package's doc.go): *_bpfel.go/
-// *_bpfel.o and *_bpfeb.go/*_bpfeb.o are gitignored, regenerated fresh by
-// `task build:ebpf` at every build site.
+// The generated files are gitignored rather than committed and are regenerated
+// at every build site, for the same reason as the other datapath packages: a
+// committed binary blob can drift out of sync with its source with nothing short
+// of a byte-diff to catch it.
 //
-// Placement: sibling of internal/plumbing/ebpf/prog under the shared
-// internal/plumbing/ebpf/ umbrella, kept as its own package rather than a
-// second program in prog itself -- this is a different datapath domain
-// (edge ingress NAT/LB vs. SRv6 uSID decap) with no shared map/key layout,
-// so folding it into prog would couple two things that change for
-// unrelated reasons (CONVENTIONS.md: "prefer creating a focused
-// sub-package over adding to an existing large one").
+// It is a sibling of the uSID datapath package rather than a second program
+// inside it. The two are different domains, edge ingress load balancing against
+// uSID decap, sharing no map or key layout, so folding them together would
+// couple things that change for unrelated reasons.
 //
-// This package does not itself load or attach the compiled program to any
-// interface -- that is internal/plumbing/ebpf/edgeattach's job, and
-// ultimately internal/gateway's KernelDatapath, which calls into
-// edgeattach/edgemap from Engine's convergence loop.
+// This package neither loads nor attaches the program; the attach package and
+// the gateway engine's datapath do that.
 package edgeprog
 
-// See internal/plumbing/ebpf/prog/doc.go for why -idirafter lists both
-// multiarch directories and why -cc is omitted (same clang/bpf2go
-// environment, same rationale, not repeated here).
+// See the uSID program package's doc.go for why the include flags list both
+// multiarch directories and why the compiler is not named explicitly.
 //
-// Unlike edgenat.c, edgedsr.c never takes the address of a field inside a
-// packed struct (no rewrite-by-pointer of any header field -- see its own
-// header comment), so -Wno-address-of-packed-member is no longer needed.
+// This program never takes the address of a field inside a packed struct, so it
+// needs no warning suppression for that.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type vip_key -type backend -type vip_value -type vip_stats_value -type encap_config Edgedsr edgedsr.c

@@ -50,12 +50,11 @@ func buildResult(
 	return result
 }
 
-// buildVethResult handles veth-specific result building: host-device
-// delegation, IPAM, host gateway configuration, guest interface reading,
-// and result printing. galactic-bgp (chained next by the runtime) picks up
-// everything it needs — the allocated addresses, and that this was a veth
-// attachment — from the result this prints, not from a Go-level return
-// value.
+// buildVethResult handles the veth-specific result: delegating the device move,
+// allocating addresses, configuring the host gateway, reading back the guest
+// interface, and printing. The BGP plugin chained next picks up everything it
+// needs, the allocated addresses and that this was a veth attachment, from the
+// printed result rather than a Go return value.
 func buildVethResult(
 	args *skel.CmdArgs,
 	pluginConf *PluginConf,
@@ -63,13 +62,13 @@ func buildVethResult(
 	hostMac string,
 	hostMTU int,
 ) error {
-	// Only call host-device ADD if the guest interface is still in the host
-	// namespace. If a prior attempt already moved it to the container netns but
-	// failed at a later step, we must not try to move it again.
+	// Only delegate the move if the guest interface is still in the host
+	// namespace. A prior attempt that moved it and then failed later must not
+	// move it again.
 	if _, linkErr := netlink.LinkByName(guestName); linkErr == nil {
-		// Clean up any stale interface in the container netns left by a
-		// previous run. The host-device plugin renames the moved interface
-		// to args.IfName, so a prior run may have left that name behind.
+		// Clean up a stale interface left in the container namespace by a
+		// previous run: the delegate renames the moved interface, so a prior
+		// run may have left that name behind.
 		if err := cleanupContainerNetns(args.Netns, args.IfName); err != nil {
 			return fmt.Errorf("cleanup container netns: %w", err)
 		}
@@ -78,10 +77,9 @@ func buildVethResult(
 		}
 	}
 
-	// Configure IP address on the guest interface inside the container netns.
-	// Delegating at all is this plugin's own call, decided solely by "ipam"
-	// block presence — no config field or env var elsewhere can override
-	// that (see internal/cniipam's doc comment for the explicit contract).
+	// Configure the address on the guest interface inside the container
+	// namespace. Whether to delegate at all is this plugin's own call, decided
+	// solely by the ipam block's presence.
 	var ipamResult *cniipam.IPAMResult
 	if pluginConf.IPAM != nil {
 		result, err := configureIPAM(args, pluginConf, args.IfName)
@@ -106,10 +104,8 @@ func buildVethResult(
 		return fmt.Errorf("parse guest interface MAC %q: %w", guestMac, err)
 	}
 
-	// Configure the host-side gateway address and VRF route before printing
-	// the result — kernel-interface work this plugin owns (see
-	// internal/hostgw's doc comment for why galactic-bgp no longer does
-	// this itself).
+	// Configure the host-side gateway address and VRF route before printing the
+	// result: kernel-interface work this plugin owns.
 	if err := hostgw.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, guestHWAddr); err != nil {
 		return fmt.Errorf("configure host gateway: %w", err)
 	}
@@ -122,14 +118,13 @@ func buildVethResult(
 	return nil
 }
 
-// configureIPAM delegates IPAM allocation to whatever binary pluginConf's
-// own "ipam.type" names (per the CNI IPAM delegation protocol — see
-// github.com/containernetworking/plugins/pkg/ipam.ExecAdd), then applies
-// the returned addresses to the guest interface inside the container
-// network namespace with both families (when dual-stack). args.StdinData
-// is passed straight through as the delegate's own netconf: it already
-// contains the "ipam" block (plus everything else in this plugin's own
-// config, which the delegate simply ignores).
+// configureIPAM delegates allocation to whatever binary the config's ipam type
+// names, then applies the returned addresses to the guest interface inside the
+// container namespace, for both families when dual-stack.
+//
+// The plugin's own stdin is passed through as the delegate's netconf: it already
+// contains the ipam block, plus everything else in this plugin's config, which
+// the delegate ignores.
 func configureIPAM(args *skel.CmdArgs, pluginConf *PluginConf, guestName string) (*cniipam.IPAMResult, error) {
 	cniResult, err := ipam.ExecAdd(pluginConf.IPAM.Type, args.StdinData)
 	if err != nil {

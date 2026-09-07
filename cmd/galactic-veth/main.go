@@ -53,26 +53,23 @@ func newRootCommand() *cobra.Command {
 				return version.All.Encode(os.Stdout)
 			}
 
-			// Real CNI runtimes (containerd, CRI-O) always pipe the network
-			// config JSON on stdin and close it. If stdin is an interactive
-			// terminal instead, no config will ever arrive, and both skel's
-			// blocking stdin read and the io.ReadAll below would hang
-			// forever. Detect that case up front and print version info
-			// rather than hanging.
+			// Real CNI runtimes always pipe the network config on stdin and
+			// close it. When stdin is an interactive terminal instead, no
+			// config ever arrives and both the library's blocking read and the
+			// read below would hang forever. Detect that up front and print
+			// version info instead.
 			if term.IsTerminal(int(os.Stdin.Fd())) {
 				fmt.Printf("galactic-veth version %s\n", metadata.Version)
 				fmt.Printf("CNI protocol versions supported: %s\n", strings.Join(version.All.SupportedVersions(), ", "))
 				return nil
 			}
 
-			// galactic-veth is veth-only: it always moves an interface into
-			// the container's own netns, so it always needs the CNI
-			// library's normal same-netns rejection check — unlike
-			// galactic-tap (which unconditionally sets
-			// CNI_NETNS_OVERRIDE, since tap workloads never enter a netns
-			// at all), there is no stdin-peeking tap-mode detection here
-			// anymore. Interface kind is which binary you invoke now, not a
-			// config field this process branches on.
+			// This binary is veth-only: it always moves an interface into the
+			// container's namespace, so it always needs the library's
+			// same-namespace rejection check. The tap binary unconditionally
+			// overrides that, tap workloads never entering a namespace.
+			// Interface kind is which binary you invoke, not a config field
+			// this process branches on.
 			cni.RunPlugin()
 			return nil
 		},

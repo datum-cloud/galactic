@@ -15,18 +15,16 @@ var ConfFile = config.DefaultConfFile
 // Initialized by InitCNIConfig() (called from cmd/galactic-veth/main.go).
 var cniConfig *config.CNIConfig
 
-// InitCNIConfig initializes the shared config resolver for CNI env var
-// resolution. Callers should invoke this once at process startup before any
-// config lookups.
+// InitCNIConfig initializes the shared config resolver. Call it once at process
+// startup, before any config lookup.
 func InitCNIConfig() {
 	cniConfig = config.NewCNIConfig()
 }
 
-// parseConf unmarshals the CNI configuration from stdin data, validates the
-// base62-encoded identifier fields, and resolves logging. The actual logic
-// is shared with galactic-tap — see internal/cnimaster.ParseConf — since
-// none of it is veth-specific; this is a thin wrapper binding it to this
-// binary's own cniConfig/ConfFile.
+// parseConf unmarshals the CNI configuration from data, validates the base62
+// identifier fields, and resolves logging. The logic is shared with the tap
+// plugin, none of it being veth-specific; this binds it to this binary's own
+// resolver and conflist path.
 func parseConf(data []byte) (*PluginConf, error) {
 	return cnimaster.ParseConf(data, cniConfig, ConfFile)
 }

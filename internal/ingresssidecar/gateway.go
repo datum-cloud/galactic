@@ -24,51 +24,41 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// ingressVPCAttachment is the synthetic "vpcAttachment" segment
-// crdnames.BGPAdvertisementName needs a third argument for. This sidecar
-// has no real VPCAttachment of its own (that identity belongs to a CNI
-// attachment — see internal/cnibgp) — it uses this fixed, valid-base62
-// literal so its own advertisement's name still follows the established
-// (vpc, vpcAttachment, node) convention and can never collide with a real
-// CNI-derived attachment's own advertisement for the same (vpc, node),
-// which always shares this sidecar's own BGPVRFInstance (see
-// PublishGateway) but never its BGPAdvertisement.
+// ingressVPCAttachment is the synthetic attachment segment
+// crdnames.BGPAdvertisementName takes as its third argument. This sidecar has
+// no real VPCAttachment, that identity belonging to a CNI attachment, so a
+// fixed base62 literal keeps its advertisement name following the same
+// (vpc, attachment, node) convention while never colliding with a real
+// attachment's advertisement for the same VPC and node.
 //
-// Aliased to crdnames' own constant rather than repeating the literal: the
-// host side has to recognize the advertisements this writes (see
-// internal/installer's sidecar return path), so both ends must read the
-// same value or the recognition quietly stops matching.
+// Aliased to the shared constant rather than repeating the literal: the host
+// side has to recognise the advertisements this writes, so both ends must read
+// the same value or the recognition quietly stops matching.
 const ingressVPCAttachment = crdnames.IngressAttachment
 
-// ErrGatewayAddressNotProvisioned is returned by a GatewayAddressResolver
-// when this VPC has no local gateway address to advertise yet. Callers
-// (Store) treat this as "nothing to do yet", not a reconcile error — see
-// Store's own gateway-publish call site.
+// ErrGatewayAddressNotProvisioned is returned by a GatewayAddressResolver when
+// this VPC has no local gateway address to advertise yet. Callers treat it as
+// nothing to do, not a reconcile error.
 var ErrGatewayAddressNotProvisioned = errors.New("ingresssidecar: no gateway address provisioned for this VPC yet")
 
-// GatewayAddressResolver discovers this sidecar's own local address inside
-// a managed VPC's subnet — the source address Envoy's outbound connections
-// into that VPC use (see internal/plumbing/srv6.ResolveNodeSourceAddress's
-// doc comment for why the kernel, not this codebase, picks that address).
-// GatewayPublisher advertises whatever this returns so that a VPC backend's
-// reply traffic has an SRv6 route back to it.
+// GatewayAddressResolver discovers this sidecar's local address inside a
+// managed VPC's subnet: the source address Envoy's outbound connections into
+// that VPC use. GatewayPublisher advertises whatever it returns, so a backend's
+// reply traffic has an SRv6 route back.
 //
-// This interface deliberately does not create that address: provisioning
-// it (a veth-style attachment into the VPC, with its own IPAM allocation)
-// is a real, unimplemented gap — see docs/plans/855-return-path-gateway-
-// advertisement.md's "Not implemented here" section. NetlinkGatewayAddressResolver
-// only discovers an address some other mechanism already provisioned.
+// It does not create that address. Provisioning one, as an attachment into the
+// VPC with its own allocation, is a separate mechanism; this only discovers an
+// address something else already provisioned.
 type GatewayAddressResolver interface {
 	// ResolveGatewayAddress returns this node's own local address for vpc,
 	// or ErrGatewayAddressNotProvisioned (wrapped) if none exists yet.
 	ResolveGatewayAddress(vpc string) (net.IP, error)
 }
 
-// NetlinkGatewayAddressResolver is the production GatewayAddressResolver:
-// it looks for a global-scope IPv6 address on some interface enslaved to
-// vpc's own Linux VRF device (the same device internal/plumbing/vrf.Add
-// creates) — the shape a veth-style ingress attachment would take if one
-// exists. Requires CAP_NET_ADMIN, like internal/plumbing/vrf itself.
+// NetlinkGatewayAddressResolver is the production resolver: it looks for a
+// global-scope IPv6 address on an interface enslaved to the VPC's Linux VRF
+// device, the shape an attachment into the VPC would take. Requires
+// CAP_NET_ADMIN.
 type NetlinkGatewayAddressResolver struct{}
 
 // ResolveGatewayAddress implements GatewayAddressResolver.
@@ -103,28 +93,22 @@ func (NetlinkGatewayAddressResolver) ResolveGatewayAddress(vpc string) (net.IP, 
 		ErrGatewayAddressNotProvisioned, vrfName)
 }
 
-// GatewayPublisher advertises (and withdraws) this sidecar's own local
-// gateway address for a VPC via a BGPAdvertisement CRD, so that a backend
-// pod's reply traffic — addressed back to that gateway address — has an
-// SRv6 route to follow. Mirrors internal/cnibgp/bgp.go's own
-// BGPVRFInstance/BGPAdvertisement publish pattern (lookupBGPRouter,
-// allocateArgument, routeTarget, buildVRFInstanceSpec/buildAdvertisementSpec)
-// for a pod's own address; deliberately reimplemented here in miniature
-// rather than imported, since cnibgp's version is entangled with CNI-only
-// concerns (prevResult, IPAM, container-ID-keyed annotations, rollback
-// tracking) this sidecar has none of. Consolidating the two into one shared
-// package is a reasonable follow-up, not done here to avoid touching
-// cnibgp's existing, heavily-relied-upon publish path in the same change
-// that introduces this new caller.
+// GatewayPublisher advertises, and withdraws, this sidecar's local gateway
+// address for a VPC through a BGPAdvertisement, so a backend pod's reply
+// traffic addressed back to it has an SRv6 route to follow.
+//
+// It reimplements the CNI path's publish pattern in miniature rather than
+// importing it, since that version is entangled with CNI-only concerns this
+// sidecar has none of: previous results, IPAM, container-keyed annotations, and
+// rollback tracking. Consolidating the two is a reasonable follow-up.
 type GatewayPublisher interface {
 	// PublishGateway ensures a BGPAdvertisement exists for addr, the local
-	// gateway address for vpc, originated from this node's own BGPRouter.
-	// Idempotent: safe to call every time Store creates vpc's VRF.
+	// gateway address for vpc, originated from this node's BGPRouter.
+	// Idempotent.
 	PublishGateway(ctx context.Context, vpc string, addr net.IP) error
-	// WithdrawGateway removes the BGPAdvertisement PublishGateway created
-	// for vpc, if any. Never removes the (possibly shared) BGPVRFInstance
-	// PublishGateway reused or created — see its own doc comment for why
-	// that's galactic-router's GC controller's job, not this one's.
+	// WithdrawGateway removes the BGPAdvertisement PublishGateway created for
+	// vpc, if any. It never removes the possibly shared BGPVRFInstance, which
+	// is garbage collection's job.
 	WithdrawGateway(ctx context.Context, vpc string) error
 }
 
@@ -135,20 +119,17 @@ type k8sGatewayPublisher struct {
 	namespace string
 }
 
-// NewK8sGatewayPublisher returns a GatewayPublisher that reads/writes BGP
-// CRDs in namespace via c, attributing every advertisement it creates to
-// the BGPRouter targeting nodeName.
+// NewK8sGatewayPublisher returns a GatewayPublisher that reads and writes BGP
+// CRDs in namespace, attributing every advertisement to the BGPRouter targeting
+// nodeName.
 func NewK8sGatewayPublisher(c client.Client, nodeName, namespace string) GatewayPublisher {
 	return &k8sGatewayPublisher{client: c, nodeName: nodeName, namespace: namespace}
 }
 
 // gatewayBGPConfig is the subset of a matched BGPRouter's spec PublishGateway
-// needs — mirrors internal/cnibgp/bgp.go's own unexported bgpConfig, minus
-// the SRv6Locator/NodeID fields that caller doesn't need: unlike a pod's own
-// advertisement, this one never computes a SID directly (see
-// internal/reconcile.resolveSRv6SID, which derives it from the
-// BGPAdvertisement's own VRFID/Function plus the BGPRouter it targets, at
-// reconcile time, not here).
+// needs. It omits the locator and node ID, since this advertisement never
+// computes a SID: that is derived at reconcile time from the advertisement's
+// own VRFID and function plus the router it targets.
 type gatewayBGPConfig struct {
 	asNumber   int64
 	routerName string
@@ -176,12 +157,11 @@ func (p *k8sGatewayPublisher) lookupBGPRouter(ctx context.Context) (gatewayBGPCo
 	}
 }
 
-// vpcRouteTarget mirrors internal/cnibgp/bgp.go's own routeTarget: the RT in
-// "ASN:NN" format using the low 32 bits of the VPC identifier, so this
-// advertisement's community matches every other advertisement for the same
-// VPC (whichever node/attachment originated them) bit for bit — that
-// equality, not any shared code path, is what makes a receiving node's own
-// ImportRouteTargets pick this advertisement up.
+// vpcRouteTarget returns the route target in "ASN:NN" form from the low 32 bits
+// of the VPC identifier, so this advertisement's community matches every other
+// advertisement for the same VPC bit for bit, whichever node or attachment
+// originated it. That equality, not any shared code path, is what makes a
+// receiving node import it.
 func vpcRouteTarget(asNumber int64, vpc string) (string, error) {
 	vpcHex, err := intf.Base62ToHex(vpc)
 	if err != nil {
@@ -194,11 +174,9 @@ func vpcRouteTarget(asNumber int64, vpc string) (string, error) {
 	return fmt.Sprintf("%d:%d", asNumber, uint32(v)), nil
 }
 
-// allocateGatewayArgument mirrors internal/cnibgp/bgp.go's own
-// allocateArgument: the value already registered under vrfName if a
-// BGPVRFInstance by that name exists, otherwise the lowest value in
-// [uformat.ArgumentMin, uformat.ArgumentMax] not already used by routerName's
-// other BGPVRFInstances.
+// allocateGatewayArgument returns the Argument already registered under vrfName
+// if a BGPVRFInstance by that name exists, and otherwise the lowest value in
+// range not already used by routerName's other instances.
 func allocateGatewayArgument(
 	ctx context.Context, k8s client.Client, namespace, routerName, vrfName string,
 ) (int32, error) {
@@ -229,26 +207,22 @@ func allocateGatewayArgument(
 // under, and so the veth whose peer is this pod's way in from the host.
 const primaryPodInterface = "eth0"
 
-// podEntryPoint returns the ifindex, in the *host's* namespace, of the peer
-// of this pod's primary interface, plus that interface's own hardware
-// address.
+// podEntryPoint returns the ifindex, in the host's namespace, of the peer of
+// this pod's primary interface, plus that interface's hardware address.
 //
-// Read here, and published on the advertisement, because this is the only
-// side that can see it. For a veth the kernel reports the peer's index even
-// when the peer is in another namespace, so both values come out of one
-// ordinary link query with no extra privilege. Reading them from the host
-// instead would mean entering this namespace, which needs CAP_SYS_ADMIN --
-// see crdnames.AnnotationIngressHostIfindex.
+// Read here, and published on the advertisement, because this is the only side
+// that can see it. For a veth the kernel reports the peer's index even when the
+// peer is in another namespace, so both values come from one ordinary link query
+// with no extra privilege. Reading them from the host would mean entering this
+// namespace, which needs CAP_SYS_ADMIN.
 //
-// A missing primary interface is a real error rather than a skip: a pod
-// without one has no way in at all, so publishing a gateway address for it
-// would advertise a return path that cannot be completed.
-// podEntryPointFn is podEntryPoint, indirected so tests can supply a pod
-// that does not exist -- the same override pattern
-// internal/installer's newK8sClientFn and addrListFn use. There is no
-// primary interface in a unit test's own namespace, and the value this
-// reads is a plain kernel attribute rather than logic worth faking a
-// netlink server for.
+// A missing primary interface is an error rather than a skip: a pod without one
+// has no way in, so publishing a gateway address for it would advertise a
+// return path that cannot complete.
+//
+// podEntryPointFn indirects it so tests can supply a pod that does not exist.
+// There is no primary interface in a unit test's namespace, and the value read
+// is a plain kernel attribute rather than logic worth faking netlink for.
 var podEntryPointFn = podEntryPoint
 
 func podEntryPoint() (hostIfindex int, mac net.HardwareAddr, err error) {
@@ -278,12 +252,10 @@ func (p *k8sGatewayPublisher) PublishGateway(ctx context.Context, vpc string, ad
 		return err
 	}
 
-	// Same (vpc, node)-keyed BGPVRFInstance a real CNI attachment on this
-	// node would use (crdnames.BGPVRFInstanceName's own doc comment) —
-	// CreateOrUpdate here reuses one that already exists (a tenant pod
-	// sharing this node and VPC) rather than creating a competing entry, or
-	// creates one for the shared VRFID/route-target bookkeeping if none
-	// does yet.
+	// The same (vpc, node)-keyed BGPVRFInstance a real CNI attachment on this
+	// node would use. This reuses one that already exists, for a tenant pod
+	// sharing this node and VPC, rather than creating a competing entry, or
+	// creates one for the shared VRFID and route-target bookkeeping.
 	vrfName := crdnames.BGPVRFInstanceName(vpc, p.nodeName)
 	vrfID, err := allocateGatewayArgument(ctx, p.client, p.namespace, bgp.routerName, vrfName)
 	if err != nil {
@@ -309,12 +281,11 @@ func (p *k8sGatewayPublisher) PublishGateway(ctx context.Context, vpc string, ad
 		return fmt.Errorf("apply BGPVRFInstance %s: %w", vrfName, err)
 	}
 
-	// The two facts the host side of this return path needs and cannot read
-	// for itself -- see podEntryPoint. Resolved before the advertisement is
-	// written so an advertisement never exists without them: the host keys
-	// its route and neighbor off these, and one published without them
-	// would look like a return path that should work while nothing could
-	// complete it.
+	// The two facts the host side of this return path needs and cannot read for
+	// itself. Resolved before the advertisement is written so one never exists
+	// without them: the host keys its route and neighbor off these, and an
+	// advertisement published without them looks like a working return path
+	// that nothing can complete.
 	hostIfindex, mac, err := podEntryPointFn()
 	if err != nil {
 		return fmt.Errorf("resolve this pod's host-side entry point for vpc %s: %w", vpc, err)

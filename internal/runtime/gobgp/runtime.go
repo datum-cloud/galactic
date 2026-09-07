@@ -29,10 +29,9 @@ import (
 type GoBGPRuntime struct {
 	key    types.NamespacedName
 	server *Server
-	// listenPort is the process-wide default TCP port GoBGP binds for
-	// incoming BGP connections (from GALACTIC_ROUTER_BGP_LISTEN_PORT). A
-	// per-router BGPRouter.spec.listenPort, carried as DesiredRouter.ListenPort,
-	// overrides it when set — see applyGlobal.
+	// listenPort is the process-wide default TCP port GoBGP binds for incoming
+	// connections. A per-router listen port, carried on DesiredRouter,
+	// overrides it when set.
 	listenPort   int32
 	reflector    bool
 	localAddress string
@@ -40,107 +39,88 @@ type GoBGPRuntime struct {
 
 	lastASN      int64
 	lastRouterID string
-	// lastListenPort is the effective listen port (r.listenPort, overridden by
-	// DesiredRouter.ListenPort when set) applied on the last StartBgp — zero
-	// means "not yet applied," the same unset-sentinel convention lastASN and
-	// lastRouterID use, since a real listen port is never 0 (validated to
-	// -1 or 1-65535 upstream). A change forces a Reconfigure, same as
-	// asnChanged/idChanged, because GoBGP cannot rebind its listen socket on
-	// an already-started BgpServer.
+	// lastListenPort is the effective listen port applied on the last start, 0
+	// meaning not yet applied, since a real port is never 0. A change forces a
+	// reconfigure, like an ASN or router ID change, because GoBGP cannot
+	// rebind its listen socket on an already-started server.
 	lastListenPort int32
 	// establishedAt tracks when each peer last reached the Established state.
 	establishedAt map[string]time.Time
 	// appliedPolicies tracks the direction of each applied policy by name so
 	// stale policies can be removed when they disappear from desired state.
 	appliedPolicies map[string]model.BGPPolicyDirection
-	// appliedVRFs tracks the kernel VRF table ID of each VRF that has been
-	// applied to GoBGP, keyed by VRF name, so stale VRFs can be removed when
-	// they disappear from desired state and so the route-write privilege probe
-	// runs only once per VRF rather than on every reconcile.
+	// appliedVRFs tracks the kernel VRF table ID of each VRF applied to GoBGP,
+	// keyed by VRF name, so stale VRFs can be removed when they leave desired
+	// state and the route-write probe runs once per VRF rather than on every
+	// reconcile.
 	appliedVRFs map[string]uint32
-	// appliedVRFImportRTs tracks the last-applied import route-target set for
-	// each already-registered VRF, keyed by VRF name, so applyVRFs can detect
-	// when an existing VRF's import RTs change (not just when a VRF is first
-	// registered) and trigger a RIB backfill for it — see applyVRFs.
+	// appliedVRFImportRTs tracks the last-applied import route-target set per
+	// registered VRF, so applyVRFs can tell when an existing VRF's targets
+	// change, not only when a VRF is first registered, and trigger a RIB
+	// backfill for it.
 	appliedVRFImportRTs map[string][]string
 	// rtIndexMu guards rtIndex, which is read concurrently by the shared EVPN
 	// RIB watcher goroutine.
 	rtIndexMu sync.RWMutex
-	// rtIndex maps an import route-target string to the kernel VRF table ID
-	// that imports it, letting the single shared watcher dispatch a best-path
-	// event to the right table in O(1) instead of scanning every VRF — a node
-	// can host thousands of VPC attachments, each with its own VRF.
+	// rtIndex maps an import route target to the kernel VRF table ID importing
+	// it, so the shared watcher dispatches a best-path event in constant time
+	// rather than scanning every VRF. A node can host thousands.
 	rtIndex map[string]uint32
-	// appliedAdvertisements tracks the last-applied DesiredAdvertisement per
-	// name so a changed advertisement's previous EVPN paths can be withdrawn.
-	// This matters because the EVPN Type 5 route's Gateway IP Address (the
-	// SRv6 SID) is part of the NLRI itself, not a mutable path attribute:
-	// re-adding a path with a new SID creates a structurally different route
-	// rather than replacing the old one, so the stale route must be withdrawn
-	// explicitly or it stays advertised indefinitely.
+	// appliedAdvertisements tracks the last-applied advertisement per name, so a
+	// changed one's previous EVPN paths can be withdrawn. The route's gateway
+	// address, the SRv6 SID, is part of the NLRI rather than a mutable
+	// attribute, so re-adding a path with a new SID creates a structurally
+	// different route instead of replacing the old one, which then stays
+	// advertised until withdrawn explicitly.
 	appliedAdvertisements map[string]model.DesiredAdvertisement
 	// serverCtxCancel cancels the goroutine running server.Start.
 	serverCtxCancel context.CancelFunc
 	// srvCtx is the context passed to server.Start; monitor goroutines use it.
 	srvCtx context.Context
-	// monitorOnce ensures the single shared EVPN RIB watcher goroutine is
-	// started at most once per runtime lifetime; it dispatches to all VRFs via
-	// rtIndex rather than being scoped to one VRF.
+	// monitorOnce starts the shared EVPN RIB watcher at most once per runtime
+	// lifetime. It dispatches to every VRF through rtIndex rather than being
+	// scoped to one.
 	monitorOnce sync.Once
-	// peerMonitorOnce ensures the shared peer FSM transition watcher goroutine
-	// (see peer_monitor.go) is started at most once per runtime lifetime, the
-	// same one-shared-goroutine pattern monitorOnce uses for EVPN best-path.
+	// peerMonitorOnce starts the shared peer FSM watcher at most once per
+	// runtime lifetime, as monitorOnce does for best-path events.
 	peerMonitorOnce sync.Once
-	// peerStateMu guards lastPeerState. Kept separate from mu (rather than
-	// reusing it) so the peer-event watcher goroutine — which fires
-	// concurrently with Apply/Status — never contends with the lock those
-	// hold for potentially long VRF/policy convergence work.
+	// peerStateMu guards lastPeerState, kept separate from mu so the peer-event
+	// watcher never contends with the lock Apply and Status hold for
+	// potentially long VRF and policy convergence work.
 	peerStateMu sync.Mutex
 	// lastPeerState tracks each peer's last-observed FSM state, keyed by
-	// neighbor address, so onPeerUpdate can detect an actual transition
-	// instead of logging every re-signal of the same state. This is distinct
-	// from establishedAt below: that one records when a peer first reached
-	// Established for status reporting, this one records the current state
-	// of every peer regardless of what it is, for transition logging.
+	// neighbor address, so a transition can be told apart from a re-signal of
+	// the same state. Distinct from establishedAt, which records when a peer
+	// first reached Established for status reporting.
 	lastPeerState map[string]model.BGPPeerState
-	// appliedPeers tracks the last-applied DesiredPeer per address so
-	// applyPeers can skip re-adding/updating a peer whose config hasn't
-	// actually changed. Without this, applyPeers called AddPeer/UpdatePeer
-	// for every desired peer on every Apply() — including reconciles where
-	// nothing changed — and GoBGP's UpdatePeer resets the session
-	// unconditionally, so a peer could never stay Established: any
-	// watch-triggered reconcile (including one caused by this router's own
-	// BGPPeer status write) tore every session back down before it converged.
+	// appliedPeers tracks the last-applied peer config per address, so a peer
+	// whose config has not changed is not pushed again. GoBGP resets the
+	// session on every update, even an identical one, so without this any
+	// reconcile, including one caused by this router's own status write, tore
+	// every session down before it could converge.
 	appliedPeers map[string]model.DesiredPeer
-	// observer, when non-nil, is notified in real time of every peer FSM
-	// transition onPeerUpdate detects (see peer_monitor.go). May be nil in
-	// tests that construct a GoBGPRuntime directly without going through
-	// NewRuntimeFactory.
+	// observer, when non-nil, is notified of every peer FSM transition
+	// detected. It may be nil in tests that construct a runtime directly.
 	observer model.PeerStateObserver
-	// wg tracks the server.Start and watchEVPNRIB goroutines so Stop can block
-	// until both have actually exited instead of merely cancelling srvCtx and
-	// returning. GoBGP keeps some path-selection state (table.SelectionOptions,
-	// table.UseMultiplePaths) as package-level globals rather than per-server
-	// fields, so a BgpServer that outlives Stop() races the next runtime's
-	// StartBgp in any test (or other in-process caller) that creates more than
-	// one GoBGPRuntime -- this is what the CI race detector caught once this
-	// package's tests started creating more than one GoBGPRuntime per run.
+	// wg tracks the server and RIB watcher goroutines so Stop blocks until both
+	// have exited rather than merely being asked to. GoBGP keeps some
+	// path-selection state in package-level globals rather than per-server
+	// fields, so a server that outlives Stop races the next runtime's start in
+	// any process that creates more than one.
 	wg sync.WaitGroup
 }
 
-// NewRuntimeFactory returns a RuntimeFactory that creates a GoBGPRuntime per key.
-// listenPort controls the TCP port GoBGP binds for incoming BGP connections.
-// Pass -1 to disable inbound connections (outbound-only mode).
-// reflector, when true, marks every peer of this runtime instance as an iBGP
-// route-reflector client — this is a distinct, explicit signal from
+// NewRuntimeFactory returns a RuntimeFactory that creates one GoBGPRuntime per
+// key.
+//
+// listenPort is the TCP port GoBGP binds for incoming connections; -1 disables
+// inbound connections entirely. reflector marks every peer of the created
+// runtime as an iBGP route-reflector client. That is deliberately separate from
 // listenPort: whether a node accepts inbound BGP is not the same property as
-// whether it is the fabric-facing route-reflector, even though the two
-// happen to coincide in every overlay that exists today.
-// localAddress, if non-empty, is bound as the source address for outgoing BGP
-// TCP connections (sets Transport.LocalAddress on every peer).
-// observer, when non-nil, is notified in real time of every peer FSM
-// transition each created runtime detects (see peer_monitor.go); pass nil to
-// disable this (e.g. in tests that don't care about it).
+// whether it is the fabric's route reflector, even where the two coincide today.
+// localAddress, when non-empty, is bound as the source address for outgoing BGP
+// connections. observer, when non-nil, is notified of every peer FSM transition
+// each created runtime detects.
 func NewRuntimeFactory(
 	listenPort int32, reflector bool, localAddress string, observer model.PeerStateObserver,
 ) runtime.RuntimeFactory {
@@ -308,24 +288,20 @@ func (r *GoBGPRuntime) applyPeers(ctx context.Context, b *gobgpserver.BgpServer,
 	return nil
 }
 
-// peerNeedsApply reports whether p must be (re-)pushed to GoBGP via
-// AddPeer/UpdatePeer: either it was never applied, its desired config
-// changed since the last apply, or GoBGP no longer reports it as configured
-// (e.g. silently dropped by an unrelated churn elsewhere, such as a GC cycle
-// recreating the BGPVRFInstance/BGPAdvertisement CRs backing it). Any other
-// case is a true no-op — skipping it matters because AddPeer/UpdatePeer
-// reset the BGP session unconditionally, even when the pushed config is
-// identical to what's already running.
+// peerNeedsApply reports whether p must be pushed to GoBGP: it was never
+// applied, its config changed since the last apply, or GoBGP no longer reports
+// it as configured, which can happen when unrelated churn drops it. Any other
+// case is a true no-op, and skipping matters because adding or updating a peer
+// resets the session unconditionally, even when the config is identical.
 func peerNeedsApply(applied map[string]model.DesiredPeer, current map[string]bool, p model.DesiredPeer) bool {
 	last, ok := applied[p.Address]
 	return !ok || !current[p.Address] || !reflect.DeepEqual(last, p)
 }
 
-// applyVRFs configures every desired VRF instance and removes stale ones. A
-// node can host many VRFs (one per VPC that has at least one attachment on
-// this node, shared by every attachment on that VPC/node — not one per
-// attachment), so this — unlike the single-VRF code it replaces — must
-// handle the full set, not just one.
+// applyVRFs configures every desired VRF instance and removes stale ones. A node
+// can host many VRFs, one per VPC with at least one attachment here and shared
+// by every attachment on that VPC, so this handles the full set rather than a
+// single VRF.
 func (r *GoBGPRuntime) applyVRFs(
 	ctx context.Context, b *gobgpserver.BgpServer, vrfs []model.DesiredVRFInstance, routerID string,
 ) error {
@@ -353,12 +329,11 @@ func (r *GoBGPRuntime) applyVRFs(
 			var err error
 			tableID, err = vrfTableID(v.Name)
 			if err != nil {
-				// A VRF whose interface simply isn't in this process's own
-				// netns is the ordinary case for a VPC served only by #855's
-				// ingress sidecar on this node, not a fault -- and there is
-				// nothing for this process to install for it either way (see
-				// vrfTableID's own History note). Skip it quietly rather than
-				// reporting a failure on every reconcile, forever.
+				// A VRF whose interface is not in this process's namespace is
+				// the ordinary case for a VPC served only by the ingress
+				// sidecar on this node, and there is nothing for this process
+				// to install for it either way. Skip quietly rather than
+				// report a failure on every reconcile.
 				if errors.Is(err, errVRFNotInThisNetns) {
 					slog.Debug("applyVRFs: skipping VRF whose kernel interface is not in this netns",
 						"vrf", v.Name, "err", err)
@@ -378,13 +353,12 @@ func (r *GoBGPRuntime) applyVRFs(
 			r.appliedVRFs[v.Name] = tableID
 			needsBackfill = true
 		} else if !equalRTSets(r.appliedVRFImportRTs[v.Name], v.ImportRouteTargets) {
-			// This VRF was already registered, but its import route-target
-			// set has changed (e.g. an import policy widened to pick up
-			// another VPC/location's RT). A remote path matching a
-			// newly-added RT may already be best-path in GoBGP's RIB —
-			// added before this VRF's rtIndex entry existed for that RT —
-			// and watchEVPNRIB only notifies on *future* best-path events,
-			// so it would never be redelivered without a backfill.
+			// This VRF is registered but its import route targets have
+			// changed, for instance because a policy widened to pick up
+			// another location's target. A remote path matching a newly
+			// added target may already be best path, having arrived
+			// before the index held that target, and the watcher notifies
+			// only on future events, so it would never be redelivered.
 			needsBackfill = true
 		}
 		r.appliedVRFImportRTs[v.Name] = append([]string(nil), v.ImportRouteTargets...)
@@ -398,12 +372,11 @@ func (r *GoBGPRuntime) applyVRFs(
 	r.rtIndex = rtIndex
 	r.rtIndexMu.Unlock()
 
-	// A newly registered VRF's route targets, or a route-target set that
-	// changed on an already-registered VRF, may match paths that were
-	// already best-path in GoBGP's RIB before that RT existed in rtIndex —
-	// the shared watcher's WatchBestPath(true) only replays the RIB once, at
-	// its own startup, so it would never redeliver those. Backfill from the
-	// current RIB now that rtIndex reflects the change.
+	// A newly registered VRF's targets, or a changed set on an existing one, may
+	// match paths that were already best path before the index held that
+	// target. The shared watcher replays the RIB only once, at its own startup,
+	// so backfill from the current RIB now that the index reflects the
+	// change.
 	if needsBackfill {
 		r.backfillEVPNRoutes(b)
 	}
@@ -411,10 +384,9 @@ func (r *GoBGPRuntime) applyVRFs(
 	return nil
 }
 
-// equalRTSets reports whether a and b contain the same route targets,
-// ignoring order — the desired route-target list's order isn't guaranteed
-// stable across reconciles, since it round-trips through a Kubernetes CR
-// spec (BGPVRFInstance.Spec.ImportRouteTargets).
+// equalRTSets reports whether a and b hold the same route targets, ignoring
+// order, since the desired list round-trips through a CRD spec and its order is
+// not stable across reconciles.
 func equalRTSets(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -553,11 +525,10 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 	return status, nil
 }
 
-// Stop shuts down the GoBGP server. It blocks until the embedded server and
-// the shared EVPN RIB watcher have both actually exited (not merely been
-// asked to), so a caller that creates another GoBGPRuntime immediately after
-// Stop returns -- as tests in this package do -- cannot race the outgoing
-// server's GoBGP package-level path-selection state (see the wg field doc).
+// Stop shuts down the GoBGP server, blocking until the embedded server and the
+// EVPN RIB watcher have both exited rather than merely been asked to. A caller
+// that creates another runtime immediately after would otherwise race the
+// outgoing server's package-level path-selection state; see the wg field.
 func (r *GoBGPRuntime) Stop(_ context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -590,11 +561,10 @@ func fsmStateToModel(state api.PeerState_SessionState) model.BGPPeerState {
 	}
 }
 
-// applyVRF configures a VRF in GoBGP via AddVrf. The route distinguisher is
-// derived as the RFC 4364 Type 1 (IP-address:local-admin) format
-// "routerID:vrfID", matching the convention buildEVPNPaths uses for the
-// per-VRF RD so that EVPN paths and VRF registration share the same distinguisher.
-// If the VRF already exists, the call is treated as idempotent (no-op).
+// applyVRF configures one VRF in GoBGP. The route distinguisher is the RFC 4364
+// Type 1 "routerID:vrfID" form, matching what EVPN path construction uses, so
+// paths and VRF registration share one distinguisher. A VRF that already exists
+// is a no-op.
 func applyVRF(ctx context.Context, b *gobgpserver.BgpServer, vrf *model.DesiredVRFInstance, routerID string) error {
 	// Derive and parse the route distinguisher.
 	rdStr := fmt.Sprintf("%s:%d", routerID, vrf.VRFID)

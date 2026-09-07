@@ -17,13 +17,12 @@ import (
 )
 
 const (
-	// neighSolicitDialTimeout bounds the solicit Dial. A guest that is not
-	// answering yet is the common case (the VM may not have booted), and
-	// the next reconcile retries, so this stays short.
+	// neighSolicitDialTimeout bounds the solicit dial. A guest not answering
+	// yet is the common case, the VM may not have booted, and the next
+	// reconcile retries, so this stays short.
 	neighSolicitDialTimeout = 500 * time.Millisecond
-	// neighResolveTimeout bounds the poll for a solicited entry to appear.
-	// A live guest answers in well under a millisecond; this is headroom,
-	// not an expected wait.
+	// neighResolveTimeout bounds the poll for a solicited entry to appear. A
+	// live guest answers in well under a millisecond; this is headroom.
 	neighResolveTimeout = 1 * time.Second
 	neighPollInterval   = 50 * time.Millisecond
 	// discardPort is soliciting traffic's destination. Nothing needs to
@@ -31,39 +30,32 @@ const (
 	discardPort = "9"
 )
 
-// EnsureTapGuestNeighbors resolves the neighbor entry for every VM/unikernel
-// guest behind a tap attachment on this node, so usid_ingress can deliver
-// decapsulated traffic to it.
+// EnsureTapGuestNeighbors resolves the neighbor entry for every guest behind a
+// tap attachment on this node, so usid_ingress can deliver decapsulated traffic
+// to it. It returns how many were resolved and how many are still pending.
 //
-// The bug this fixes: usid_ingress's step 8 calls bpf_fib_lookup, which does
-// not itself trigger ARP/NDP the way ordinary kernel forwarding does, so an
-// unresolved neighbor returns BPF_FIB_LKUP_RET_NO_NEIGH and the packet is
-// dropped (see installGatewayNeighbor's doc comment). For a veth attachment
-// ConfigureHostGateway primes a permanent entry at CNI ADD from the guest
-// veth's own known MAC. A tap has no guest-side link in this netns to read a
-// MAC from -- internal/cni/tap creates a bare Tuntap and the guest picks its
-// own address, so guestHWAddr is nil there and no entry was ever installed.
-// Measured on us-central-1-staging-lab: 20 injected packets, 20 decapsulated,
-// 20 dropped on fib_no_neigh.
+// bpf_fib_lookup does not trigger NDP the way ordinary forwarding does, so an
+// unresolved neighbor makes it return NO_NEIGH and the packet is dropped. For a
+// veth the CNI primes a permanent entry at ADD from the guest end's known MAC.
+// A tap has no guest-side link in this namespace to read a MAC from, the guest
+// picking its own address, so no entry was ever installed and every packet
+// dropped.
 //
 // So resolve it the only way available, by asking the guest. This deliberately
-// does not install a NUD_PERMANENT entry the way the veth path does: the host
-// never learns a tap guest's MAC authoritatively, and a permanent entry
-// holding a stale one after a guest reboots with a new MAC is worse than
-// having none, since nothing would ever correct it. A dynamically resolved
-// entry is what bpf_fib_lookup needs (any NUD_VALID state satisfies it),
-// the kernel refreshes it from the guest's own advertisements, and this
-// function re-solicits whenever it has fallen out of the cache.
+// does not install a permanent entry the way the veth path does: the host never
+// learns a tap guest's MAC authoritatively, and a permanent entry holding a
+// stale one after a guest reboots is worse than none, since nothing would
+// correct it. A dynamically resolved entry is what the lookup needs, any valid
+// state satisfying it, the kernel refreshes it from the guest's own
+// advertisements, and this re-solicits whenever it falls out of the cache.
 //
-// Everything it needs comes from kernel state, so nothing has to be persisted
-// at ADD time and a guest that boots long after its CNI ADD is picked up on a
-// later pass: for each tap enslaved to a VPC VRF, the guest prefixes are the
-// routes in that VRF's table pointing at the tap, which is exactly what
-// installPodSubnetRoute put there.
+// Everything needed comes from kernel state, so nothing is persisted at ADD
+// time and a guest that boots long after its ADD is picked up on a later pass:
+// for each tap enslaved to a VPC VRF, the guest prefixes are the routes in that
+// VRF's table pointing at the tap.
 //
-// Errors are per-attachment and never abort the sweep: one guest that is down
-// must not stop the others being resolved. Returns the number resolved and
-// still-unresolved, for the caller to log or export.
+// Errors are per attachment and never abort the sweep: one guest that is down
+// must not stop the others.
 func EnsureTapGuestNeighbors() (resolved, pending int) {
 	links, err := netlink.LinkList()
 	if err != nil {
@@ -110,15 +102,13 @@ func EnsureTapGuestNeighbors() (resolved, pending int) {
 }
 
 // guestAddrsForTap returns the guest addresses reachable out this tap, read
-// back from the pod-subnet routes installPodSubnetRoute installed in the
-// VPC VRF's own table. Both families, since the same NO_NEIGH drop applies
-// to each; only the IPv6 side has been observed in the wild.
+// back from the pod-subnet routes in the VPC VRF's own table. Both families,
+// since the same drop applies to each.
 //
-// The filtering is the whole job. A VPC VRF's table carries several routes
-// per tap and only one of them names a guest, so an unfiltered sweep spends
-// its time soliciting addresses that can never answer. Measured on
-// us-central-1-staging-lab with three real guests, it found 32 candidates
-// and blocked for 32 seconds a pass. What the table actually holds:
+// The filtering is the whole job. A VRF's table carries several routes per tap
+// and only one names a guest, so an unfiltered sweep spends its time soliciting
+// addresses that can never answer, which on a node with a few guests means
+// dozens of candidates and tens of seconds a pass. What the table holds:
 //
 //	local fd20:0:2::1 dev <tap> proto kernel metric 0     <- host's own gateway addr
 //	fd20:0:2::1 dev <tap> proto kernel metric 256         <- its connected route
@@ -126,11 +116,11 @@ func EnsureTapGuestNeighbors() (resolved, pending int) {
 //	anycast fe80:: dev <tap> proto kernel metric 0
 //	fe80::/64 dev <tap> proto kernel metric 256
 //
-// So: only unicast routes this component installed itself. RTPROT_KERNEL
-// excludes everything the kernel derived from an address assignment, which
-// is the gateway address and the link-local pair; RTN_UNICAST excludes the
-// local and anycast entries; and link-local or multicast destinations are
-// skipped outright, since a guest is never addressed by one here.
+// So: only unicast routes this component installed itself. Excluding
+// kernel-derived routes drops the gateway address and the link-local pair,
+// requiring unicast drops the local and anycast entries, and link-local or
+// multicast destinations are skipped outright, a guest never being addressed by
+// one here.
 func guestAddrsForTap(tableID, tapIndex int) []net.IP {
 	var out []net.IP
 	for _, family := range []int{netlink.FAMILY_V6, netlink.FAMILY_V4} {
@@ -156,9 +146,9 @@ func guestAddrsForTap(tableID, tapIndex int) []net.IP {
 	return out
 }
 
-// ensureNeighbor reports whether guest has a usable neighbor entry on the
-// tap, soliciting once and polling if it does not. ok is false with a nil
-// error when the guest simply has not answered.
+// ensureNeighbor reports whether guest has a usable neighbor entry on the tap,
+// soliciting once and polling if it does not. ok is false with a nil error when
+// the guest simply has not answered.
 func ensureNeighbor(vrfName string, tap *netlink.LinkAttrs, guest net.IP) (ok bool, err error) {
 	if mac, lerr := lookupNeighborMAC(tap.Index, guest); lerr != nil {
 		return false, lerr
@@ -185,9 +175,8 @@ func ensureNeighbor(vrfName string, tap *netlink.LinkAttrs, guest net.IP) (ok bo
 }
 
 // lookupNeighborMAC reads the neighbor cache for guest on linkIndex without
-// soliciting, accepting any entry that already carries a hardware address --
-// bpf_fib_lookup is satisfied by any NUD_VALID state, not REACHABLE alone,
-// so a STALE entry counts.
+// soliciting, accepting any entry that already carries a hardware address:
+// bpf_fib_lookup is satisfied by any valid state, so a stale entry counts.
 func lookupNeighborMAC(linkIndex int, guest net.IP) (net.HardwareAddr, error) {
 	family := netlink.FAMILY_V6
 	if guest.To4() != nil {
@@ -205,25 +194,22 @@ func lookupNeighborMAC(linkIndex int, guest net.IP) (net.HardwareAddr, error) {
 	return nil, nil
 }
 
-// solicitVRFNeighbor drives the kernel to resolve guest by sending it an
-// actual packet, bound to the VPC's VRF device.
+// solicitVRFNeighbor drives the kernel to resolve guest by sending it a real
+// packet, bound to the VPC's VRF device.
 //
-// The send itself mirrors internal/plumbing/ebpf/egressroutemap's own
-// solicitNeighbor, whose doc comment records why an administrative
-// NeighSet(NUD_NONE, NTF_USE) does not work here (verified against a live
-// veth: it parks the entry in NUD_INCOMPLETE and never carries it further)
-// while writing a real datagram resolves in well under a millisecond.
-// Nothing need listen on the far side; constructing and writing the packet
-// is what drives resolution, and its fate past this host's output path is
-// irrelevant.
+// The send mirrors the egress route map's own solicit, whose doc comment
+// records why an administrative neighbor update does not work here while
+// writing a real datagram resolves in well under a millisecond. Nothing need
+// listen on the far side; writing the packet is what drives resolution, and its
+// fate past this host's output path is irrelevant.
 //
-// The addition for taps is SO_BINDTODEVICE on the VRF. A guest address is
-// only routable in its VPC's own table, so an unbound socket would resolve
-// against the main table -- reaching the default route, or nothing -- and
+// The addition for taps is binding the socket to the VRF device. A guest
+// address is routable only in its VPC's table, so an unbound socket would
+// resolve against the main table, reaching the default route or nothing, and
 // solicit on the wrong interface or not at all.
 //
-// Every error is deliberately ignored: ensureNeighbor's poll is the only
-// judge of whether this worked.
+// Errors are ignored deliberately: the caller's poll is the only judge of
+// whether this worked.
 func solicitVRFNeighbor(vrfName string, guest net.IP) {
 	network := "udp6"
 	if guest.To4() != nil {

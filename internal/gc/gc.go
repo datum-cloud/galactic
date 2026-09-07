@@ -28,9 +28,9 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// annotationNetNS is the annotation key prefix used by the CNI plugin
-// to store the netns path it was invoked with, keyed by container ID.
-// This is the liveness signal GC uses — see cni.netnsAnnotationKey.
+// annotationNetNS is the annotation key prefix the CNI plugin uses to record
+// the netns path it was invoked with, keyed by container ID. It is the
+// liveness signal GC reads.
 const annotationNetNS = "galactic.datum.net/netns"
 
 // OrphanedCRD represents a BGP CRD that appears to be orphaned because its
@@ -46,14 +46,12 @@ type OrphanedCRD struct {
 type CleanupResult struct {
 	OrphanedCRDsRemoved int
 	OrphanedVRFsRemoved int
-	// EBPFVRFEntriesRemoved counts stale eBPF uSID datapath vrf_table map
-	// entries removed by SweepEBPFVRFTable -- a distinct kind of resource
-	// from OrphanedVRFsRemoved's kernel VRF *interfaces* above (Milestone
-	// 7.3).
+	// EBPFVRFEntriesRemoved counts stale eBPF vrf_table map entries removed by
+	// SweepEBPFVRFTable, a different resource from the kernel VRF interfaces
+	// OrphanedVRFsRemoved counts.
 	EBPFVRFEntriesRemoved int
 	// EBPFVRFEntriesRegistered counts vrf_table entries SweepEBPFVRFTable
-	// (re-)registered for a live BGPVRFInstance CRD that had no
-	// corresponding vrf_table row -- see its repair-loop doc comment.
+	// re-registered for a live BGPVRFInstance CRD that had no matching row.
 	EBPFVRFEntriesRegistered int
 	// EBPFNPTv6EntriesRemoved counts stale eBPF uSID datapath nptv6_table
 	// map entries removed by SweepEBPFNPTv6Table.
@@ -61,35 +59,32 @@ type CleanupResult struct {
 	Errors                  int
 }
 
-// vrfNameRegex matches the deterministic VRF interface name pattern used by
-// Galactic. The template is "G%09sV" where %09s is the base62 VPC — the
-// kernel VRF is shared by every attachment on this VPC on this node, so
-// unlike the host/guest veth templates it carries no VPCAttachment segment.
-// Base62 includes digits and letters.
+// vrfNameRegex matches the deterministic VRF interface name Galactic
+// generates, "G%09sV", where the padded field is the base62 VPC. The kernel
+// VRF is shared by every attachment on this VPC on this node, so unlike the
+// host and guest veth templates it carries no VPCAttachment segment.
 var vrfNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})V$`)
 
-// legacyVRFNameRegex matches the VRF interface name Galactic generated before
-// the VRF became per-VPC: the template was "G%09s%03sV", carrying the same
-// VPCAttachment segment the host/guest veth names still do (14 chars). A node
-// upgraded in place keeps whatever VRFs it created under the old template, and
-// those interfaces hold a routing table ID and its routes for as long as they
-// survive — so collection has to recognise them, map them to the same VPC the
-// current name would yield, and reclaim them once nothing references that VPC.
+// legacyVRFNameRegex matches the VRF interface name generated before the VRF
+// became per-VPC: "G%09s%03sV", carrying the VPCAttachment segment the veth
+// names still do. A node upgraded in place keeps whatever VRFs it created
+// under that template, and each holds a routing table ID and its routes for as
+// long as it survives, so collection has to recognise them, map them to the
+// same VPC the current name would yield, and reclaim them.
 //
-// This is deliberately a collection-only concern: nothing creates these names
-// any more, and the removal path must NOT resolve one back through
-// intf.GenerateInterfaceNameVRF (see vpcFromVRFName and RemoveOrphanedVRFs).
+// Collection only. Nothing creates these names, and the removal path must not
+// resolve one back through intf.GenerateInterfaceNameVRF; see vpcFromVRFName
+// and RemoveOrphanedVRFs.
 var legacyVRFNameRegex = regexp.MustCompile(`^G([A-Za-z0-9]{9})[A-Za-z0-9]{3}V$`)
 
-// routerNamesForNode returns the names of every BGPRouter in the namespace
-// whose TargetRef points at nodeName. BGPAdvertisement/BGPVRFInstance CRDs
-// are namespace-scoped, not node-scoped — a namespace can hold CRDs created
-// by routers on other nodes (e.g. the default and rr roles both
-// watch the same namespace in the containerlab lab), and this node's local
-// kernel/filesystem state (VRFs, /var/run/netns) can only ever confirm or
-// deny liveness for containers that actually ran here. Callers must use this
-// to skip CRDs belonging to other nodes entirely, rather than risk deleting
-// another node's live resources because they look orphaned from here.
+// routerNamesForNode returns the names of every BGPRouter in namespace whose
+// TargetRef points at nodeName.
+//
+// BGPAdvertisement and BGPVRFInstance CRDs are namespace-scoped, not
+// node-scoped, so a namespace can hold CRDs created by routers on other nodes,
+// while this node's kernel and filesystem state can only confirm liveness for
+// containers that ran here. Callers must use this to skip other nodes' CRDs
+// rather than delete live resources that merely look orphaned from here.
 func routerNamesForNode(
 	ctx context.Context, k8s client.Client, namespace, nodeName string,
 ) (map[string]struct{}, error) {
@@ -104,11 +99,10 @@ func routerNamesForNode(
 	return names, nil
 }
 
-// routersForNode is routerNamesForNode's fuller sibling: it keeps the full
-// BGPRouter object (keyed by name) rather than just membership, for
-// callers that need more than the name -- SweepEBPFVRFTable (Milestone
-// 7.3) needs each router's Spec.SRv6Locator to derive the eBPF uSID Block
-// its BGPVRFInstances resolve into.
+// routersForNode is routerNamesForNode's fuller sibling, keeping each
+// BGPRouter object keyed by name rather than just its membership.
+// SweepEBPFVRFTable needs each router's Spec.SRv6Locator to derive the uSID
+// Block its BGPVRFInstances resolve into.
 func routersForNode(
 	ctx context.Context, k8s client.Client, namespace, nodeName string,
 ) (map[string]bgpv1alpha1.BGPRouter, error) {
@@ -126,21 +120,19 @@ func routersForNode(
 	return routers, nil
 }
 
-// vpcFromName extracts the VPC segment from a "vpc-suffix" CRD name —
-// BGPAdvertisement's vpc-vpcAttachment (crdnames.BGPAdvertisementName) or
-// BGPVRFInstance's vpc-node (crdnames.BGPVRFInstanceName). The base62 VPC
-// value itself never contains '-', so the first segment is always
-// unambiguous regardless of what the suffix contains — including a node
-// name that itself contains '-' (e.g. "dfw-worker-control").
+// vpcFromName extracts the VPC segment from a "vpc-suffix" CRD name, either a
+// BGPAdvertisement's vpc-vpcAttachment or a BGPVRFInstance's vpc-node. The
+// base62 VPC never contains '-', so the first segment is unambiguous whatever
+// the suffix holds, including a node name that itself contains '-'.
 func vpcFromName(name string) string {
 	vpc, _, _ := strings.Cut(name, "-")
 	return vpc
 }
 
 // vpcKeys returns every form a VPC may appear as in a CRD name: the value
-// itself, plus its encoded form (crdnames.VPCSegment). CRD names written
-// before the encoding change carry the raw base62 VPC, which is also what a
-// kernel VRF name yields, so both have to join for as long as either exists.
+// itself, plus its encoded form. CRD names written before the encoding change
+// carry the raw base62 VPC, which is also what a kernel VRF name yields, so
+// both must match for as long as either exists.
 func vpcKeys(vpc string) []string {
 	encoded := crdnames.VPCSegment(vpc)
 	if encoded == vpc {
@@ -167,24 +159,20 @@ func vpcInSet(set map[string]struct{}, vpc string) bool {
 }
 
 // CollectOrphanedCRDs scans BGPAdvertisement and BGPVRFInstance CRDs owned by
-// nodeName's BGPRouter(s) in the given namespace and returns those whose
-// associated container(s)/attachment(s) no longer exist on this node.
+// nodeName's BGPRouters in namespace and returns those whose containers or
+// attachments no longer exist on this node.
 //
-// A CRD is considered orphaned when:
-//   - It is a BGPAdvertisement targeting one of nodeName's BGPRouters, with
-//     at least one netns annotation, and NONE of the recorded paths exist
-//     under /var/run/netns. A vpc/vpcAttachment is shared across every pod
-//     that has ever attached to it on this node (pod churn adds a new
-//     annotation entry without removing old ones — see cmdDel in
-//     internal/cni/ops_del.go), so the object is only orphaned once every
-//     container that ever referenced it is gone, not just one.
-//   - It is a BGPVRFInstance (named vpc-node — crdnames.BGPVRFInstanceName —
-//     shared by every attachment on this VPC on this node, unlike the 1:1
-//     BGPAdvertisement) whose VPC has no surviving BGPAdvertisement: every
-//     BGPAdvertisement whose name's vpc segment matches is either orphaned
-//     or absent entirely. A BGPAdvertisement this pass could not determine
-//     the liveness of (no netns annotations at all) counts as surviving,
-//     not orphaned — GC must never guess a shared VRF is safe to reclaim.
+// A CRD is orphaned when:
+//   - It is a BGPAdvertisement with at least one netns annotation, and none of
+//     the recorded paths exist under /var/run/netns. An attachment is shared
+//     by every pod that has ever attached to it on this node, and pod churn
+//     adds annotations without removing old ones, so the object is orphaned
+//     only once every container that referenced it is gone.
+//   - It is a BGPVRFInstance, shared by every attachment on this VPC on this
+//     node, whose VPC has no surviving BGPAdvertisement. A BGPAdvertisement
+//     whose liveness this pass cannot determine, having no netns annotations,
+//     counts as surviving: GC must never guess that a shared VRF is safe to
+//     reclaim.
 func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, nodeName string) ([]OrphanedCRD, error) {
 	routerNames, err := routerNamesForNode(ctx, k8s, namespace, nodeName)
 	if err != nil {
@@ -197,10 +185,10 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 	}
 
 	var orphaned []OrphanedCRD
-	// vpcSurvives records every VPC (attachments owned by this node's
-	// router(s) only) with at least one BGPAdvertisement that is live, or
-	// whose liveness could not be determined — the shared BGPVRFInstance for
-	// that VPC must not be touched while any of these remain.
+	// vpcSurvives records every VPC, among attachments owned by this node's
+	// routers, with at least one BGPAdvertisement that is live or whose
+	// liveness could not be determined. That VPC's shared BGPVRFInstance must
+	// not be touched while any of these remain.
 	vpcSurvives := make(map[string]struct{})
 
 	for _, adv := range advList.Items {
@@ -212,9 +200,8 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 
 		netnsPaths := collectNetNSPaths(&adv)
 		if len(netnsPaths) == 0 {
-			// No netns annotations — skip (might be legacy or manually
-			// created). We cannot determine if it is orphaned, so its VPC
-			// must be treated as surviving.
+			// No netns annotations, so liveness is unknown. Its VPC counts as
+			// surviving.
 			addVPC(vpcSurvives, vpc)
 			continue
 		}
@@ -248,12 +235,10 @@ func CollectOrphanedCRDs(ctx context.Context, k8s client.Client, namespace, node
 		})
 	}
 
-	// A BGPVRFInstance is orphaned only once every attachment on its VPC —
-	// not just one — is gone, since it's shared by all of them. This counts
-	// across every BGPAdvertisement for the VPC rather than aliasing 1:1 off
-	// a single BGPAdvertisement's name, the way the two used to share an
-	// identical vpc-vpcattachment name before BGPVRFInstance moved to
-	// vpc-node naming.
+	// A BGPVRFInstance is shared by every attachment on its VPC, so it is
+	// orphaned only once all of them are gone. This counts across every
+	// BGPAdvertisement for the VPC rather than aliasing off a single one's
+	// name.
 	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
 	if err := k8s.List(ctx, vrfList, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPVRFInstances: %w", err)
@@ -325,36 +310,23 @@ func RemoveOrphanedCRDs(ctx context.Context, k8s client.Client, orphans []Orphan
 }
 
 // activeVPCsFromEndpointSlices returns every VPC named by an EndpointSlice
-// carrying crdnames.LabelTenantID, cluster-wide — the same label
-// internal/ingresssidecar's own controller watches (hasTenantLabel in
-// internal/ingresssidecar/controller.go) to decide it needs a local VRF for
-// that VPC, entirely independent of any BGPAdvertisement/BGPVRFInstance CRD.
+// carrying crdnames.LabelTenantID, cluster-wide. It is the same label the
+// ingress sidecar watches to decide it needs a local VRF for that VPC,
+// independent of any BGPAdvertisement or BGPVRFInstance CRD.
 //
-// SweepEBPFVRFTable already exempts that sidecar's own eBPF vrf_table
-// entries by their reserved uformat.BlockMax block (see that function's own
-// doc comment on the ingress sidecar's BlockMax exemption: without it,
-// every entry the sidecar registers is invisible to the CRD-built live set
-// and gets reaped as an orphan on the very next sweep). This is the same
-// exemption at the kernel-VRF-interface layer instead,
-// needed because CollectOrphanedVRFs runs inside galactic-router
-// (cmd/galactic-router), which — deliberately, per SweepEBPFVRFTable's own
-// doc comment on why that sweep runs inside galactic-cni instead — has
-// neither the /sys/fs/bpf hostPath mount nor CAP_BPF to read vrf_table
-// itself. Found live: without this, ensureEgressDatapath's own VRF for a
-// real tenant VPC (created for the sidecar's own outbound routing, sharing
-// that VPC's identifier with — but never advertised by — any real CNI
-// attachment) gets reaped as orphaned on this sweep's very next tick,
-// stranding EnsureRoute with "no VRF interface found" on every subsequent
-// reconcile.
+// Without this, a VRF the sidecar created for its own outbound routing, which
+// no CNI attachment ever advertises, is reaped as orphaned on the next sweep
+// and every later reconcile fails to find a VRF interface. SweepEBPFVRFTable
+// makes the equivalent exemption one layer down, at the eBPF map, by reserving
+// a block; this is the kernel-interface layer, which needs its own because
+// CollectOrphanedVRFs runs inside galactic-router, which has neither the
+// /sys/fs/bpf mount nor CAP_BPF to read that map.
 //
-// Deliberately not scoped to this node, unlike the BGPAdvertisement check
-// above: an EndpointSlice carries no node affinity to filter on, so the
-// conservative direction is to err toward not reaping — a VPC claimed by
-// some other node's ingress sidecar is not this function's call to make,
-// the same way an unrelated node's BGPAdvertisement already isn't allowed
-// to vouch for a *different* node's VRF, just inverted (there, cross-node
-// claims are excluded to avoid a false "still alive"; here, they're
-// included to avoid a false "orphaned").
+// Not scoped to this node, unlike the BGPAdvertisement check above: an
+// EndpointSlice carries no node affinity to filter on, so the conservative
+// direction is to err away from reaping. A cross-node BGPAdvertisement is
+// excluded to avoid a false "still alive"; a cross-node EndpointSlice is
+// included to avoid a false "orphaned".
 func activeVPCsFromEndpointSlices(ctx context.Context, k8s client.Client) (map[string]struct{}, error) {
 	sliceList := &discoveryv1.EndpointSliceList{}
 	if err := k8s.List(ctx, sliceList, client.HasLabels{crdnames.LabelTenantID}); err != nil {
@@ -372,31 +344,22 @@ func activeVPCsFromEndpointSlices(ctx context.Context, k8s client.Client) (map[s
 	return vpcs, nil
 }
 
-// CollectOrphanedVRFs scans all VRF interfaces on this node and returns the
-// names of VRFs whose VPC has no surviving BGPAdvertisement CRD owned by
-// nodeName's BGPRouter(s) in the given namespace, and no ingress-sidecar
-// EndpointSlice claiming it either (see activeVPCsFromEndpointSlices).
+// CollectOrphanedVRFs scans the VRF interfaces on this node and returns those
+// whose VPC has no surviving BGPAdvertisement owned by nodeName's BGPRouters in
+// namespace, and no ingress-sidecar EndpointSlice claiming it.
 //
-// A VRF is considered orphaned when:
-//   - Its interface name matches the Galactic VRF naming pattern — either the
-//     current per-VPC name or the legacy pre-rename name that carried a
-//     VPCAttachment segment, both of which resolve to the same VPC (see
-//     vpcFromVRFName). A node upgraded in place still carries the latter, and
-//     they must be reclaimed too rather than stranding a routing table ID and
-//     its routes forever.
-//   - No BGPAdvertisement owned by this node (name's vpc segment matches,
-//     RouterRef pointing at one of nodeName's BGPRouters) exists for its
-//     VPC. The VRF is shared by every attachment on this VPC on this node
-//     (crdnames.BGPVRFInstanceName), so any one surviving BGPAdvertisement
-//     for the VPC — regardless of which vpcAttachment it names — keeps it
-//     alive, not just a single exact-name match. Other nodes sharing this
-//     namespace may coincidentally reuse the same VPC for their own,
-//     unrelated attachment — only this node's own BGPAdvertisements can
-//     vouch for a local VRF.
-//   - No EndpointSlice claims the VPC either, per
-//     activeVPCsFromEndpointSlices's own doc comment — internal/ingresssidecar
-//     creates and owns its own VRF for a VPC entirely independent of any
-//     BGPAdvertisement, and this sweep has no other way to see that claim.
+// A VRF is orphaned when:
+//   - Its name matches the current per-VPC pattern or the legacy pattern that
+//     carried a VPCAttachment segment. Both resolve to the same VPC. A node
+//     upgraded in place still carries legacy names, and leaving them behind
+//     strands a routing table ID and its routes forever.
+//   - No BGPAdvertisement owned by this node exists for its VPC. The VRF is
+//     shared by every attachment on this VPC on this node, so any one
+//     surviving BGPAdvertisement for the VPC keeps it alive, whichever
+//     attachment it names. Only this node's own advertisements can vouch for
+//     a local VRF, since another node may reuse the same VPC for an unrelated
+//     attachment.
+//   - No EndpointSlice claims the VPC, per activeVPCsFromEndpointSlices.
 func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, nodeName string) ([]string, error) {
 	vrfs, err := vrf.ListVRFLinks()
 	if err != nil {
@@ -447,26 +410,25 @@ func CollectOrphanedVRFs(ctx context.Context, k8s client.Client, namespace, node
 	return orphaned, nil
 }
 
-// RemoveOrphanedVRFs deletes the given orphaned VRF interfaces from the
-// kernel. Errors are logged but do not abort the cleanup — best-effort
-// semantics.
+// RemoveOrphanedVRFs deletes the named orphaned VRF interfaces from the
+// kernel. Errors are logged rather than returned; cleanup is best effort and
+// continues past a failure.
 func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 	result := CleanupResult{}
 
 	for _, name := range vrfNames {
-		// We need the vpc to call vrf.Delete. Parse the name back to get it —
-		// deliberately with parseVRFName, not vpcFromVRFName: vrf.Delete
-		// rebuilds the current "G%09sV" interface name from the VPC, so a
-		// legacy "G%09s%03sV" interface resolved that way would be looked up
-		// under a name that does not exist and silently reported as removed.
+		// Parse the name back to the VPC that vrf.Delete needs. Deliberately
+		// parseVRFName, not vpcFromVRFName: vrf.Delete rebuilds the current
+		// "G%09sV" name from the VPC, so a legacy interface resolved that way
+		// would be looked up under a name that does not exist and silently
+		// reported as removed.
 		vpc, ok := parseVRFName(name)
 		if !ok {
-			// Not a current-shape name — this is where a legacy VRF collected
-			// by vpcFromVRFName lands. Delete the interface we actually
-			// observed, by name, but flush its routing table first — the
-			// same order vrf.Delete uses — so this path leaves behind the
-			// same state as the one above rather than leaning on Add's own
-			// flush-on-reuse to clean up a table this path skipped (#343).
+			// Not a current-shape name, so this is where a legacy VRF lands.
+			// Delete the interface actually observed, by name, flushing its
+			// routing table first in the same order vrf.Delete uses, so this
+			// path leaves the same state behind rather than leaning on Add's
+			// flush-on-reuse to clean up a table it skipped.
 			link, err := netlink.LinkByName(name)
 			if err != nil {
 				// Already gone — not an error.
@@ -480,11 +442,9 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 					continue
 				}
 			} else {
-				// CollectOrphanedVRFs only ever collects names from
-				// vrf.ListVRFLinks, which filters to *netlink.Vrf — this
-				// branch means the interface changed kind between that scan
-				// and this delete. Nothing to flush; fall through and
-				// remove whatever is there now.
+				// Names are only ever collected from vrf.ListVRFLinks, which
+				// filters to VRF links, so this means the interface changed
+				// kind between that scan and this delete. Nothing to flush.
 				slog.Warn("GC: orphaned VRF name no longer resolves to a VRF interface, skipping flush",
 					"name", name)
 			}
@@ -512,29 +472,21 @@ func RemoveOrphanedVRFs(vrfNames []string) CleanupResult {
 	return result
 }
 
-// SweepEBPFVRFTable removes eBPF uSID datapath vrf_table map entries whose
-// (Block, Argument) key no longer corresponds to a live BGPVRFInstance CRD
-// owned by nodeName's BGPRouter(s) (design plan §5.3; Milestone 7.3).
-// Unlike RunGC's CRD/kernel-VRF sweep above, this deliberately does NOT run
-// from galactic-router's existing GC controller (internal/controller/
-// gc_controller.go): the pinned vrf_table map only exists inside
-// galactic-cni's "run" container, which has the /sys/fs/bpf hostPath mount
-// and CAP_BPF (Milestone 3.1) that galactic-router's own DaemonSet does
-// not and, for this alone, should not need. internal/installer.Run calls
-// this directly on its own ticker instead -- see that package's doc
-// comment for the full reasoning. The RBAC galactic-cni's ServiceAccount
-// already has (get/list bgprouters; get/list/...  bgpvrfinstances, see
-// config/galactic-cni/rbac.yaml) is exactly what this function needs, so no
-// permission change was required to place it there.
+// SweepEBPFVRFTable removes eBPF vrf_table entries whose (Block, Argument) key
+// no longer matches a live BGPVRFInstance CRD owned by nodeName's BGPRouters,
+// and re-registers entries a live CRD expects but the map lacks. pinDir is the
+// bpffs directory holding the pinned map.
 //
-// A pin directory this process can't confirm exists -- either genuinely
-// absent (the "run" container's eBPF datapath hasn't finished loading yet)
-// or inaccessible (e.g. /sys/fs/bpf's own restrictive mode denying a
-// non-root stat, which the production "run" container never hits since it
-// runs as root, design plan §9) -- is treated as "nothing to do this
-// tick," not an error; any stat failure here means there's no pinned
-// datapath this process can reach right now, and it isn't this function's
-// job to diagnose why.
+// It runs from internal/installer.Run's ticker rather than galactic-router's GC
+// controller because the pinned map exists only inside galactic-cni's run
+// container, which has the /sys/fs/bpf hostPath mount and CAP_BPF that
+// galactic-router does not need and should not have. The RBAC galactic-cni
+// already holds covers everything this reads.
+//
+// A pin directory this process cannot confirm exists, whether genuinely absent
+// because the datapath has not finished loading or merely inaccessible, means
+// there is no reachable datapath this tick. That is treated as nothing to do,
+// not an error.
 func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeName, pinDir string) CleanupResult {
 	result := CleanupResult{}
 
@@ -550,11 +502,8 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	}
 	defer func() { _ = closer.Close() }()
 
-	// Capture the cutoff *before* listing BGPVRFInstance CRDs below --
-	// VRFTable.Generation's own doc comment and doc.go's
-	// "plugin-binary-vs-run-container race" section explain why the
-	// ordering matters: a Register landing between this line and the List
-	// call below must survive this sweep.
+	// Capture the cutoff before listing CRDs below, so a Register landing
+	// between here and the List survives this sweep.
 	cutoff := reg.VRF.Generation()
 
 	routers, err := routersForNode(ctx, k8s, namespace, nodeName)
@@ -564,16 +513,13 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		return result
 	}
 	if len(routers) == 0 {
-		// A node with any live eBPF-registered attachment at all necessarily
-		// has a BGPRouter targeting it -- registerEBPFDatapath requires one
-		// to run at all (internal/cnibgp/bgp.go). Finding none here is
-		// indistinguishable from a transient listing/cache hiccup or the
-		// router having just been renamed/recreated, so it must not be
-		// treated the same as "genuinely zero live attachments": doing so
-		// would fold every entry into the below-cutoff, absent-from-live
-		// case and wipe the entire vrf_table -- every pod on this node --
-		// on what may just be one bad tick. Skip this sweep instead; the
-		// next tick tries again once router listing is reliable again.
+		// A node with any live eBPF-registered attachment necessarily has a
+		// BGPRouter targeting it, since registerEBPFDatapath requires one.
+		// Finding none is indistinguishable from a transient listing hiccup or
+		// a router just renamed, so it must not read as "genuinely nothing is
+		// live": that would fold every entry into the stale case and wipe the
+		// whole vrf_table, and every pod on this node with it, on one bad
+		// tick. Skip and retry next tick instead.
 		slog.Warn("GC: no BGPRouter found for node during eBPF vrf_table sweep, skipping reconcile this tick",
 			"nodeName", nodeName)
 		return result
@@ -587,11 +533,10 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	}
 
 	live := make(map[usidmap.VRFKey]struct{}, len(vrfInstList.Items))
-	// liveCRDNames tracks, for every CRD-derived key above, the
-	// BGPVRFInstance name it came from -- the registration-repair step
-	// below needs the name back (to re-derive vrfTableID/egressKind via
-	// resolveVRFKernelState) but Reconcile only needs the key, so this
-	// stays a separate map rather than changing live's value type.
+	// liveCRDNames tracks the BGPVRFInstance name each key came from. The
+	// repair step below needs the name back to re-derive vrfTableID and
+	// egressKind, while Reconcile needs only the key, so this stays separate
+	// rather than widening live's value type.
 	liveCRDNames := make(map[usidmap.VRFKey]string, len(vrfInstList.Items))
 	for _, inst := range vrfInstList.Items {
 		if inst.Spec.RouterRef == nil {
@@ -616,11 +561,9 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 				"vrfInstance", inst.Name, "router", router.Name, "locator", router.Spec.SRv6Locator, "err", err)
 			continue
 		}
-		// inst.Spec.VRFID is the real, allocated Argument value directly
-		// (Milestone 6.1) -- no derivation needed. Guard the int32->uint16
-		// narrowing explicitly rather than trusting an external CRD value
-		// (a boundary this GC sweep does not otherwise validate) to
-		// already be in range.
+		// Spec.VRFID is the allocated Argument value directly. Guard the
+		// int32 to uint16 narrowing explicitly rather than trust an external
+		// CRD value this sweep does not otherwise validate.
 		if inst.Spec.VRFID < int32(uformat.ArgumentMin) || inst.Spec.VRFID > int32(uformat.ArgumentMax) {
 			slog.Warn("GC: skipping BGPVRFInstance with out-of-range VRFID during eBPF sweep",
 				"vrfInstance", inst.Name, "vrfID", inst.Spec.VRFID)
@@ -631,20 +574,14 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		liveCRDNames[key] = inst.Name
 	}
 
-	// internal/ingresssidecar registers its own vrf_table entries under
-	// uformat.BlockMax -- a block deliberately reserved so it can never
-	// collide with a real BGPRouter locator (see that package's
-	// ingressSidecarBlock doc comment) -- and owns their entire lifecycle
-	// itself (ensureEgressDatapath/removeEgressDatapath), independent of
-	// any BGPVRFInstance CRD. Without this, every entry it ever registers
-	// is invisible to the CRD-built live set above and gets reaped as an
-	// orphan on this sweep's very next tick: with nothing preserving them,
-	// vrf_table would sit permanently empty for that sidecar's entries
-	// while ifindex_vrf_table (which this sweep never touches) kept
-	// holding the same entries, silently blackholing that sidecar's own
-	// outbound connections to VPC backends. Preserve every entry in that
-	// block unconditionally, the same way an entry with a live CRD is
-	// preserved.
+	// The ingress sidecar registers its own vrf_table entries under a reserved
+	// block that can never collide with a real BGPRouter locator, and owns
+	// their whole lifecycle independent of any BGPVRFInstance CRD. Without
+	// this exemption they are invisible to the CRD-built live set and reaped
+	// on the next tick, leaving vrf_table empty for those entries while
+	// ifindex_vrf_table, which this sweep never touches, still holds them, and
+	// silently blackholing the sidecar's outbound connections. Preserve every
+	// entry in that block unconditionally.
 	existing, err := reg.VRF.List()
 	if err != nil {
 		slog.Error("GC: failed to list eBPF vrf_table for sweep", "err", err)
@@ -659,15 +596,12 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		}
 	}
 
-	// Repair vrf_table entries that a live BGPVRFInstance CRD expects but
-	// vrf_table does not currently have -- most notably attach.Load's own
-	// incompatible-map-schema reload (see its doc comment), which wipes
-	// every pinned map, including vrf_table, and leaves nothing behind for
-	// a *pre-existing* attachment to repopulate from: registerEBPFDatapath
-	// only ever runs once, at CNI ADD time, and nothing re-invokes it for
-	// an attachment that already succeeded. Reconcile above only ever
-	// deletes; this is vrf_table's only self-healing path for an entry
-	// that a live CRD says should exist but doesn't.
+	// Repair entries a live BGPVRFInstance expects but vrf_table lacks. An
+	// incompatible-schema reload wipes every pinned map, and nothing
+	// repopulates a pre-existing attachment: registerEBPFDatapath runs once,
+	// at CNI ADD, and is never re-invoked for an attachment that already
+	// succeeded. Reconcile above only deletes, so this is vrf_table's only
+	// self-healing path.
 	for key, instName := range liveCRDNames {
 		if _, ok := existingKeys[key]; ok {
 			continue // already present -- Reconcile above is what handles this one
@@ -680,10 +614,9 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 			continue
 		}
 		if !ok {
-			// No matching kernel VRF interface exists right now -- e.g. the
-			// attachment's own teardown is in flight, or the CNI ADD that
-			// will create it hasn't run yet. Nothing to repopulate from;
-			// leave it missing for this tick.
+			// No matching kernel VRF interface right now, because teardown is
+			// in flight or the CNI ADD that creates it has not run. Nothing
+			// to repopulate from this tick.
 			continue
 		}
 		if err := reg.VRF.Register(key.Block, key.Argument, vrfTableID, egressKind); err != nil {
@@ -711,48 +644,36 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	return result
 }
 
-// listVRFLinksFn/listAllLinksFn indirect the two netlink calls
-// resolveVRFKernelState needs, so tests can substitute fabricated
-// *netlink.Vrf/netlink.Link values -- plain structs needing no real kernel
-// VRF interface or CAP_NET_ADMIN -- the same way attach.go's
-// preflightCheckFn lets tests substitute a kernel-touching call it makes.
+// listVRFLinksFn and listAllLinksFn indirect the netlink calls
+// resolveVRFKernelState makes, so tests can substitute fabricated links
+// needing no real VRF interface or CAP_NET_ADMIN.
 var (
 	listVRFLinksFn = vrf.ListVRFLinks
 	listAllLinksFn = netlink.LinkList
 )
 
-// resolveVRFKernelState recovers the (Linux VRF routing table id, egress
-// kind) a live BGPVRFInstance named instName should register in vrf_table,
-// by matching it against a real, currently existing kernel VRF interface.
-// SweepEBPFVRFTable uses this to repair an entry vrf_table is missing for a
-// still-live CRD (see that function's own doc comment on the repair loop).
+// resolveVRFKernelState recovers the Linux VRF routing table ID and egress
+// kind that a live BGPVRFInstance named instName should register in vrf_table,
+// by matching it against a kernel VRF interface that currently exists.
+// SweepEBPFVRFTable uses it to repair a missing entry.
 //
-// instName alone doesn't carry vrfTableID or egressKind -- BGPVRFInstance's
-// Spec has neither field, only RouterRef/VRFID/route targets -- so this
-// goes the other way: list every real kernel VRF interface (an ordinary,
-// independently-persisted kernel object, unaffected by an eBPF map wipe),
-// and check whether re-deriving its own CRD name -- via
-// crdnames.BGPVRFInstanceName, the exact forward computation the CNI ADD
-// path used to name instName in the first place -- reproduces instName.
-// vpcKeys accepts both the current (nameSegment-encoded) and legacy (raw)
-// CRD name shapes, the same as CollectOrphanedVRFs already does when going
-// in the opposite direction (kernel VRF -> live VPC set).
+// instName carries neither value, and BGPVRFInstance's Spec has no field for
+// either, so this works backwards: it lists every kernel VRF interface, an
+// ordinary kernel object unaffected by an eBPF map wipe, and checks whether
+// re-deriving its CRD name reproduces instName. Both the current and legacy
+// CRD name shapes are accepted.
 //
-// ok is false, not an error, when no matching kernel VRF interface exists
-// right now -- the ordinary case for a BGPVRFInstance whose attachment has
-// already been torn down (there is nothing left to repopulate an entry
-// from; Reconcile's own stale-entry sweep, not this function, is what
-// eventually removes its CRD).
+// ok is false, not an error, when no matching interface exists, the ordinary
+// case for a BGPVRFInstance whose attachment is already torn down: there is
+// nothing to repopulate an entry from, and Reconcile is what eventually
+// removes the CRD.
 //
-// The egress kind is read off whichever interface is currently enslaved to
-// the matched VRF: a "tuntap" link (internal/cnitap's tap-mode attachment)
-// yields EgressKindTap, anything else (ordinarily a "veth" link) yields
-// EgressKindVeth -- the same veth/tap distinction registerEBPFDatapath's
-// own egressKindForInterfaceType makes from the CNI config's interface
-// type, just read back from the kernel instead of from that config, which
-// this call site does not have. A VRF with no enslaved interface at all
-// (a narrow, transient window) falls back to EgressKindVeth, vrf_table's
-// own zero value and by far the common case.
+// The egress kind is read off whichever interface is enslaved to the matched
+// VRF. A tuntap link yields EgressKindTap and anything else EgressKindVeth,
+// the same distinction the CNI ADD path makes from its config, read back from
+// the kernel because this call site has no config. A VRF with nothing enslaved
+// yet falls back to EgressKindVeth, the common case and vrf_table's zero
+// value.
 func resolveVRFKernelState(nodeName, instName string) (vrfTableID uint32, egressKind uint32, ok bool, err error) {
 	links, err := listVRFLinksFn()
 	if err != nil {
@@ -797,30 +718,21 @@ func resolveVRFKernelState(nodeName, instName string) (vrfTableID uint32, egress
 	return match.Table, kind, true, nil
 }
 
-// SweepEBPFNPTv6Table registers/reconciles the eBPF uSID datapath's
-// nptv6_table map (internal/plumbing/ebpf/nptv6map) against every live
-// BGPVRFInstance CRD's own Spec.NPTv6 field, owned by nodeName's
-// BGPRouter(s).
+// SweepEBPFNPTv6Table reconciles the eBPF nptv6_table map against the NPTv6
+// field of every live BGPVRFInstance CRD owned by nodeName's BGPRouters in
+// namespace. pinDir is the bpffs directory holding the pinned map.
 //
-// Unlike SweepEBPFVRFTable (whose vrf_table registration happens at CNI ADD
-// time via internal/cnibgp's registerEBPFDatapath, and this function only
-// reconciles stale entries away), this function is nptv6_table's *only*
-// writer: nothing registers an NPTv6 mapping at CNI ADD time at all (the CNI
-// ADD path has no per-attachment notion of NPTv6 -- it is a per-VRF, not
-// per-attachment, config field). Every currently-live mapping is therefore
-// (re-)registered here, on the same tick that also reconciles stale ones
-// away -- see internal/plumbing/ebpf/nptv6map/doc.go's "no Generation/
-// monotonic-clock kernel field" section for why a single, sequential writer
-// (this function, never raced by a second writer) makes that safe without
-// vrf_table's own kernel-persisted generation field.
+// Unlike SweepEBPFVRFTable, which only reaps entries the CNI ADD path
+// registered, this is nptv6_table's only writer: NPTv6 is a per-VRF field with
+// no per-attachment counterpart, so nothing registers a mapping at ADD time.
+// Every live mapping is therefore re-registered on the same tick that reaps
+// stale ones. Being the sole writer is what makes that safe without the
+// kernel-persisted generation field vrf_table relies on.
 //
-// Runs from the same place as SweepEBPFVRFTable
-// (internal/installer.Run's ebpfGCSweepTicker), for the identical reason:
-// the pinned nptv6_table map only exists inside that container -- see
-// SweepEBPFVRFTable's own doc comment for the full reasoning (galactic-router's
-// own DaemonSet has no /sys/fs/bpf mount or CAP_BPF, so the BGPVRFInstance
-// controller-runtime reconciler cannot open this map directly regardless of
-// how it validates the CRD's own NPTv6 field).
+// It runs alongside SweepEBPFVRFTable, from the same ticker and for the same
+// reason: the pinned map exists only in the container with the /sys/fs/bpf
+// mount and CAP_BPF, so the BGPVRFInstance reconciler cannot open it whatever
+// it does with the CRD field.
 func SweepEBPFNPTv6Table(ctx context.Context, k8s client.Client, namespace, nodeName, pinDir string) CleanupResult {
 	result := CleanupResult{}
 
@@ -836,11 +748,9 @@ func SweepEBPFNPTv6Table(ctx context.Context, k8s client.Client, namespace, node
 	}
 	defer func() { _ = closer.Close() }()
 
-	// Capture the cutoff *before* listing BGPVRFInstance CRDs and
-	// (re-)registering their live mappings below -- every entry this same
-	// call registers therefore stamps a generation >= cutoff, and Reconcile
-	// keeps it regardless (it is also always in live directly). See
-	// nptv6map/doc.go for why this table has no second writer to race.
+	// Capture the cutoff before listing CRDs and re-registering their mappings
+	// below, so every entry this call registers stamps a generation at or
+	// above it and Reconcile keeps it.
 	cutoff := table.Generation()
 
 	routers, err := routersForNode(ctx, k8s, namespace, nodeName)
@@ -850,9 +760,8 @@ func SweepEBPFNPTv6Table(ctx context.Context, k8s client.Client, namespace, node
 		return result
 	}
 	if len(routers) == 0 {
-		// See SweepEBPFVRFTable's own identical guard for why zero routers
-		// found is treated as "skip this tick," not "genuinely nothing is
-		// live."
+		// Zero routers found means skip this tick, not "nothing is live". See
+		// SweepEBPFVRFTable's identical guard.
 		slog.Warn("GC: no BGPRouter found for node during eBPF nptv6_table sweep, skipping reconcile this tick",
 			"nodeName", nodeName)
 		return result
@@ -923,9 +832,9 @@ func SweepEBPFNPTv6Table(ctx context.Context, k8s client.Client, namespace, node
 	return result
 }
 
-// buildNPTv6Mapping converts a BGPVRFInstanceSpec's NPTv6 field (validated
-// only as parseable CIDRs here; nptv6.Mapping.Adjustment/Register perform
-// the fuller RFC 6296 range validation) into an internal/plumbing/nptv6.Mapping.
+// buildNPTv6Mapping converts a BGPVRFInstanceSpec's NPTv6 field into an
+// nptv6.Mapping. It checks only that the CIDRs parse; nptv6.Mapping performs
+// the fuller RFC 6296 range validation.
 func buildNPTv6Mapping(spec *bgpv1alpha1.NPTv6Spec) (nptv6.Mapping, error) {
 	_, ula, err := net.ParseCIDR(spec.ULAPrefix)
 	if err != nil {
@@ -938,10 +847,9 @@ func buildNPTv6Mapping(spec *bgpv1alpha1.NPTv6Spec) (nptv6.Mapping, error) {
 	return nptv6.Mapping{ULAPrefix: ula, PublicPrefix: pub}, nil
 }
 
-// RunGC performs a full garbage collection pass: removes orphaned BGP CRDs
-// and orphaned VRF interfaces. Returns a summary of what was cleaned up.
-// nodeName scopes the pass to CRDs owned by this node's BGPRouter(s) — see
-// routerNamesForNode.
+// RunGC performs a full garbage collection pass, removing orphaned BGP CRDs
+// and orphaned VRF interfaces, and returns a summary of what it cleaned up.
+// nodeName scopes the pass to CRDs owned by this node's BGPRouters.
 func RunGC(ctx context.Context, k8s client.Client, namespace, nodeName string) CleanupResult {
 	var result CleanupResult
 
@@ -979,11 +887,10 @@ func RunGC(ctx context.Context, k8s client.Client, namespace, nodeName string) C
 	return result
 }
 
-// collectNetNSPaths extracts every (containerID, netnsPath) pair recorded on
-// a BGPAdvertisement's netns annotations — one per container that has ever
-// attached to this vpc/vpcAttachment on this node. Pod churn adds a new
-// annotation entry without removing old ones (see cmdDel in
-// internal/cni/ops_del.go), so an object can carry several.
+// collectNetNSPaths extracts every (containerID, netnsPath) pair recorded on a
+// BGPAdvertisement's netns annotations, one per container that has ever
+// attached to this attachment on this node. Pod churn adds entries without
+// removing old ones, so an object can carry several.
 func collectNetNSPaths(adv *bgpv1alpha1.BGPAdvertisement) map[string]string {
 	paths := make(map[string]string)
 	if adv.Annotations == nil {
@@ -999,13 +906,12 @@ func collectNetNSPaths(adv *bgpv1alpha1.BGPAdvertisement) map[string]string {
 	return paths
 }
 
-// parseVRFName extracts the base62-encoded VPC and VPCAttachment from a
-// Galactic VRF interface name. Returns the parsed values and whether the
-// name matched the expected pattern.
+// parseVRFName extracts the base62 VPC from a Galactic VRF interface name,
+// reporting whether the name matched the current pattern.
 //
-// The interface name template ("G%09s%03sV") zero-pads the base62 components,
-// but BGP CRD names use the raw (unpadded) base62 values. parseVRFName strips
-// leading zeros so the returned values match the CRD naming convention.
+// The interface name template zero-pads its base62 components while BGP CRD
+// names use the raw values, so leading zeros are stripped to match the CRD
+// naming convention.
 func parseVRFName(name string) (vpc string, ok bool) {
 	// The template is "G%09sV" — 1 + 9 + 1 = 11 characters. But base62
 	// encoding can produce mixed alphanumeric, so we need a regex approach.
@@ -1018,18 +924,16 @@ func parseVRFName(name string) (vpc string, ok bool) {
 	return strings.TrimLeft(matches[1], "0"), true
 }
 
-// vpcFromVRFName resolves the VPC that a kernel VRF interface belongs to,
-// accepting both the current per-VPC name (parseVRFName) and the legacy
-// pre-rename name (legacyVRFNameRegex). Both shapes carry the same base62 VPC
-// in the same leading position, so a legacy VRF resolves to exactly the VPC
-// its BGPAdvertisements are named after and is judged against them like any
-// other.
+// vpcFromVRFName resolves the VPC a kernel VRF interface belongs to, accepting
+// both the current per-VPC name and the legacy pre-rename name. Both carry the
+// same base62 VPC in the same leading position, so a legacy VRF resolves to
+// exactly the VPC its BGPAdvertisements are named after.
 //
-// Only CollectOrphanedVRFs uses this. RemoveOrphanedVRFs deliberately keeps
-// using parseVRFName: it deletes a resolved VPC via vrf.Delete, which rebuilds
-// the *current* interface name from that VPC and so would silently no-op
-// against a legacy interface. Leaving a legacy name unresolved there routes it
-// into the by-name fallback, which deletes the interface actually observed.
+// Only CollectOrphanedVRFs uses this. RemoveOrphanedVRFs keeps parseVRFName,
+// because it deletes through vrf.Delete, which rebuilds the current interface
+// name from the VPC and would silently no-op against a legacy interface.
+// Leaving a legacy name unresolved there routes it into the by-name fallback,
+// which deletes the interface actually observed.
 func vpcFromVRFName(name string) (vpc string, ok bool) {
 	if vpc, ok := parseVRFName(name); ok {
 		return vpc, true

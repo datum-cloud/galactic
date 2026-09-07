@@ -18,28 +18,24 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// NADPatchTimeout bounds each k8s call a master plugin makes with the
-// client from NewK8sClient: the chain-completeness Get run right after
-// creating it, and the NAD-annotation Patch later in the same ADD — veth's
-// and tap's own ADD both use the same budget for both calls.
+// NADPatchTimeout bounds each API call a master plugin makes with the client
+// from NewK8sClient: the chain-completeness read right after creating it, and
+// the annotation patch later in the same ADD.
 const NADPatchTimeout = 10 * time.Second
 
 var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	// bgpv1alpha1 is registered even though neither master plugin reads or
-	// writes BGP CRDs itself (that's galactic-bgp's own, chain-invoked
-	// concern now) — kept here only because nothing else needs its own
-	// scheme, and NAD annotation's unstructured.Unstructured Patch call
-	// doesn't require any scheme registration at all. Harmless to leave;
-	// trim if this scheme ever needs to shrink for another reason.
+	// The BGP types are registered even though neither master plugin reads or
+	// writes them, that being the BGP plugin's concern. Nothing else needs its
+	// own scheme, and the annotation patch uses an unstructured object needing
+	// no registration at all. Harmless to leave.
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 }
 
-// NewK8sClient creates a new Kubernetes client using the in-cluster config.
-// The only k8s call either master plugin makes directly is the NAD
-// annotation patch.
+// NewK8sClient creates a Kubernetes client from the in-cluster config. The only
+// call either master plugin makes directly is the annotation patch.
 func NewK8sClient() (client.Client, error) {
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {
@@ -52,20 +48,17 @@ func NewK8sClient() (client.Client, error) {
 	return c, nil
 }
 
-// CleanupAttachment rolls back a failed ADD's host-side interface for
-// selective rollback. Errors are logged but never returned — the caller
-// already has a failure to report.
+// CleanupAttachment rolls back a failed ADD's host-side interface. Errors are
+// logged and never returned, the caller already having a failure to report.
 //
-// ifaceKind names the interface kind for log messages ("veth", "tap"); del
-// removes the attachment's own host/guest interface pair.
+// ifaceKind names the interface kind for log messages, and del removes the
+// attachment's own interface pair.
 //
-// Deliberately absent: deleting the VRF. The VRF is shared by every
-// attachment on this VPC on this node (internal/plumbing/vrf keys it by
-// VPC alone), and vrf.Add is idempotent, so there's no way to distinguish
-// "I created it" from "a sibling attachment already had." Deleting it on
-// this attachment's own failed ADD could tear down a still-live sibling's
-// VRF out from under it. Reclaiming it is exclusively galactic-router's GC
-// controller's job.
+// Deliberately absent: deleting the VRF. It is shared by every attachment on
+// this VPC on this node, and creating it is idempotent, so there is no way to
+// tell "I created it" from "a sibling already had". Deleting it on a failed ADD
+// could tear down a live sibling's VRF. Reclaiming it is garbage collection's
+// job.
 func CleanupAttachment(vpc, vpcAttachment, ifaceKind string, del func(vpc, vpcAttachment string) error) {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", vpc, "vpcAttachment", vpcAttachment)

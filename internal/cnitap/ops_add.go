@@ -26,11 +26,11 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// cmdAdd mirrors internal/cni's own cmdAdd, minus everything specific to a
-// guest-side netns: no host-device delegation, no guest interface, no
-// netns IP configuration. The VM manages its own interface entirely.
-// BGP/SRv6/eBPF publish is galactic-bgp's job, invoked next by the CNI
-// runtime per conflist order, not by this process.
+// cmdAdd mirrors the veth plugin's own, minus everything specific to a guest
+// namespace: no device-move delegation, no guest interface, no in-namespace
+// address configuration. The VM manages its own interface. BGP and eBPF
+// publishing is the next plugin's job, invoked by the runtime per conflist
+// order.
 func cmdAdd(args *skel.CmdArgs) (err error) {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -55,11 +55,11 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment,
 		"namespace", namespace, "nodeName", nodeName)
 
-	// Chain-completeness check, before any kernel state is created: a
-	// conflist missing galactic-bgp would otherwise attach successfully
-	// with no BGP/SRv6 path to its VPC (issue #331). k8sClient/podNamespace
-	// are created here rather than at the NAD-annotation site below so a
-	// stale conflist fails ADD with nothing to roll back yet.
+	// Chain-completeness check, before any kernel state is created: a conflist
+	// missing the BGP plugin would otherwise attach successfully with no path
+	// to its VPC. The client and namespace are resolved here rather than at the
+	// annotation site below, so a stale conflist fails ADD with nothing to roll
+	// back yet.
 	k8sClient, err := cnimaster.NewK8sClient()
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
@@ -122,10 +122,9 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// Termination routes are galactic-route's job now — chained next after
 	// this plugin, when the attachment has any (see internal/cniroute).
 
-	// Allocate IPAM for the tap interface via delegation (only if pluginConf
-	// carries an "ipam" block at all — see internal/cniipam's doc comment
-	// for the explicit contract). The VM manages its own guest interface;
-	// this plugin only configures the host side.
+	// Allocate addresses for the tap through delegation, only when the config
+	// carries an ipam block. The VM manages its own guest interface; this plugin
+	// configures the host side.
 	var ipamResult *cniipam.IPAMResult
 	if pluginConf.IPAM != nil {
 		cniResult, err := ipam.ExecAdd(pluginConf.IPAM.Type, args.StdinData)
@@ -143,21 +142,18 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			"ipv4Address", ipamResult.IPv4Address, "ipv4Gateway", ipamResult.IPv4Gateway)
 	}
 
-	// Configure the gateway address on the host tap and install the VRF
-	// route — kernel-interface work this plugin owns (see
-	// internal/hostgw's doc comment).
+	// Configure the gateway address on the host tap and install the VRF route:
+	// kernel-interface work this plugin owns.
 	if err := hostgw.ConfigureHostGateway(pluginConf.VPC, pluginConf.VPCAttachment, ipamResult, nil); err != nil {
 		return err
 	}
 	if ipamResult != nil && ipamResult.IPv6Gateway != nil {
 		slog.Debug("ADD: host gateway configured", "name", hostName, "gateway", ipamResult.IPv6Gateway)
 
-		// Record this attachment for periodic Router Advertisement resend
-		// by galactic-cni's long-lived installer daemon, rather than
-		// sending an RA from here: this process exits as soon as ADD
-		// returns, almost always before the VM guest it's attached to has
-		// even booted far enough to be listening for one — see
-		// internal/plumbing/radv's own doc comment.
+		// Record this attachment for periodic Router Advertisement resend by the
+		// long-lived node daemon, rather than sending one from here: this
+		// process exits as ADD returns, almost always before the guest has
+		// booted far enough to be listening.
 		if err := radv.RecordAttachment(radv.DefaultStateDir, hostName, hostMTU); err != nil {
 			slog.Warn("ADD: failed to record attachment for router advertisement (non-fatal)",
 				"err", err, "name", hostName)

@@ -38,15 +38,10 @@ const (
  Find more information at: https://www.datum.net/docs`
 )
 
-// runCmd contains the application startup logic: it loads and attaches the
-// edge NAT+LB eBPF datapath to this node's public interface and registers
-// the NetworkGateway/NetworkRule reconcilers that drive it. Unlike
-// cmd/galactic-router's runCmd, there is no BGP runtime, RuntimeManager, or
-// BGP-family reconciler here at all: NetworkGatewayReconciler/
-// NetworkRuleReconciler need no BGP client of their own — they only
-// create/update/delete BGPAdvertisement CRDs, which the co-located
-// galactic-router (default role) picks up via its own
-// BGPAdvertisementReconciler.
+// runCmd is the application startup: it loads and attaches the edge eBPF
+// datapath to this node's public interface and registers the reconcilers that
+// drive it. There is no BGP runtime here at all; the reconcilers only create
+// and delete BGPAdvertisement CRDs, which the co-located router picks up.
 func runCmd(cfg *config.GatewayConfig) error {
 	nodeName := cfg.NodeName
 	metricsPort := cfg.MetricsPort
@@ -69,19 +64,17 @@ func runCmd(cfg *config.GatewayConfig) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 
-	// ctx's cause distinguishes a normal signal-triggered shutdown from the
-	// health server's own Serve failure below (#360) -- see the cause check
-	// after mgr.Start.
+	// The cause distinguishes a normal signal-triggered shutdown from the
+	// health server's own Serve failure below. See the cause check after the
+	// manager returns.
 	ctx, cancel := context.WithCancelCause(ctrl.SetupSignalHandler())
 	defer cancel(nil)
 
-	// Start gRPC health server. grpchealth.NewServer() defaults the ""
-	// overall-health service to SERVING, so that must be overridden to
-	// NOT_SERVING here, explicitly and immediately: otherwise a probe could
-	// see "healthy" for the entire window before the datapath below is
-	// even attached, which is exactly the failure #360 describes. Only once
-	// the datapath is attached and the rule table is reachable does this
-	// flip to SERVING, further down.
+	// The health server defaults its overall service to serving, which must be
+	// overridden to not-serving here, immediately: otherwise a probe sees
+	// healthy for the whole window before the datapath is even attached. It
+	// flips to serving further down, once the datapath is attached and the
+	// rule table is reachable.
 	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", fmt.Sprintf(":%d", grpcHealthPort))
 	if err != nil {
 		return fmt.Errorf("listen on gRPC health port %d: %w", grpcHealthPort, err)
@@ -91,11 +84,11 @@ func runCmd(cfg *config.GatewayConfig) error {
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	go func() {
-		// A Serve failure here is fatal, not merely logged: with no health
-		// server left running and nothing to notice, the process would
-		// otherwise carry on with no health signal at all. Canceling ctx
-		// with this error as its cause carries it out through mgr.Start
-		// below, the same way any other fatal startup error does.
+		// A Serve failure is fatal rather than merely logged: with no health
+		// server left and nothing to notice, the process would carry on
+		// with no health signal at all. Cancelling with this as the cause
+		// carries it out through the manager below, like any other fatal
+		// startup error.
 		if serveErr := grpcSrv.Serve(lis); serveErr != nil {
 			cancel(fmt.Errorf("gRPC health server: %w", serveErr))
 		}
@@ -105,31 +98,16 @@ func runCmd(cfg *config.GatewayConfig) error {
 		grpcSrv.GracefulStop()
 	}()
 
-	// Register field indexes. NetworkGatewayReconciler.resolveBGPRouterForNode
-	// (networkgateway_controller.go) lists BGPRouters by BGPRouterByTargetName
-	// -- an index, not a real API field, so it only resolves if something on
-	// this process's own manager registered it first. cmd/galactic-router
-	// registers it via the same call for its own, separate manager; galactic-
-	// gateway is a distinct binary/process/manager and never did, so every
-	// NetworkGateway reconcile here failed outright ("Index with name
-	// field:.spec.targetRef.name does not exist") until this call was added --
-	// found via a live containerlab deploy's own reconciler error loop.
+	// Register the field index the gateway reconciler queries. It is an index
+	// rather than a real API field, so it resolves only if this process's own
+	// manager registered it: every reconcile here fails outright without this,
+	// even though another binary registers the same index on its own manager.
 	//
-	// RegisterBGPRouterTargetIndex, not the full RegisterIndexes: galactic-
-	// gateway's reconcilers (networkgateway_controller.go,
-	// networkrule_controller.go, usidresolver.go) only ever query
-	// BGPRouterByTargetName -- never BGPPeerBySecretName/BGPPeerByRouterName/
-	// BGPPolicyByRouterName/BGPVRFInstanceByRouterName, which RegisterIndexes
-	// also registers. Calling the full RegisterIndexes here was wrong: it
-	// starts a live informer for BGPPeer/BGPPolicy/BGPVRFInstance too
-	// (RegisterIndexes' own doc comment explains why that's eager and
-	// unconditional), and config/galactic-gateway/rbac.yaml's ClusterRole
-	// grants none of those -- found live as a permanently-stuck manager
-	// (every controller blocked forever on WaitForCacheSync, logging nothing
-	// but "bgppeers ... is forbidden" reflector errors) the moment this was
-	// deployed. RegisterBGPRouterTargetIndex is the same narrower function
-	// cmd/galactic-nat66 already uses for exactly this reason -- see its own
-	// doc comment.
+	// Only this one index, not the full set. This binary's reconcilers query no
+	// other, and registering the rest starts live informers for kinds this
+	// binary's role grants no access to, which wedges the manager permanently
+	// with every controller blocked on cache sync behind forbidden reflector
+	// errors.
 	if err := controller.RegisterBGPRouterTargetIndex(ctx, mgr); err != nil {
 		return fmt.Errorf("register field indexes: %w", err)
 	}
@@ -137,31 +115,27 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
-	// Load and attach the edge NAT+LB eBPF datapath. Always loads a real
-	// gateway.KernelDatapath -- unlike cmd/galactic-router's removed
-	// setupGatewayDatapath, there is no gateway.NoopDatapath{} case here:
-	// config.GatewayConfig.Validate already rejects an empty
-	// PublicInterface/SRv6Address before runCmd is ever reached.
+	// Load and attach the edge eBPF datapath. Always a real datapath, never a
+	// no-op: configuration validation rejects an empty public interface or SRv6
+	// address before this is reached.
 	gwDatapath, err := setupGatewayDatapath(cfg.PublicInterface, cfg.SRv6Address, ctrlmetrics.Registry)
 	if err != nil {
 		return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 	}
-	// Only now is the datapath attached and its rule table reachable --
-	// report serving from here on, not from process start (#360).
+	// Only now is the datapath attached and its rule table reachable. Report
+	// serving from here on, not from process start.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
-	// Real (not stubbed) QuotaEnforcer/TelemetryEmitter — see
-	// internal/gateway/quota.go and telemetry.go's doc comments for what
-	// each does and does not cover.
+	// Real quota and telemetry implementations, not stubs. See their own doc
+	// comments for what each does and does not cover.
 	gwQuota := gateway.NewNodeQuotaEnforcer(gateway.DefaultMaxRulesPerTenant, gateway.DefaultMaxRuleTableEntries)
 	gwTelemetry := gateway.NewPrometheusTelemetryEmitter()
 	gwTelemetry.MustRegister(ctrlmetrics.Registry)
 	gwEngine := gateway.NewEngine(gwDatapath, gwQuota, gwTelemetry)
 
-	// Register NetworkGateway controller (edge Maglev/DSR gateway engine).
-	// No SRv6Address to pass here anymore: DSR rewrites nothing, so a
-	// gateway node has no SNAT source of its own to publish (see
-	// controller.NetworkGatewayReconciler's package doc comment).
+	// The gateway engine reconciler. No SRv6 address is passed: this datapath
+	// rewrites nothing, so a gateway node has no translation source of its own
+	// to publish.
 	if err := (&controller.NetworkGatewayReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
@@ -171,9 +145,8 @@ func runCmd(cfg *config.GatewayConfig) error {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
 
-	// Register NetworkRule controller (finalizer-guarded teardown ordering
-	// and one-time primary_node assignment; see
-	// internal/controller/networkrule_controller.go).
+	// The rule reconciler: finalizer-guarded teardown ordering and the Accepted
+	// condition.
 	if err := (&controller.NetworkRuleReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
@@ -185,10 +158,9 @@ func runCmd(cfg *config.GatewayConfig) error {
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
 	}
-	// mgr.Start only returns nil once ctx is Done, and by then ctx always
-	// has a cause: either context.Canceled (an ordinary signal-triggered
-	// shutdown) or the gRPC health server's own fatal Serve error from
-	// above. Only the latter should fail the process.
+	// The manager returns nil only once the context is done, and by then it
+	// always has a cause: cancellation for an ordinary shutdown, or the health
+	// server's fatal error above. Only the latter should fail the process.
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
 		return cause
 	}

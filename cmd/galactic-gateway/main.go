@@ -2,18 +2,14 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command galactic-gateway is the edge XDP NAT+LB gateway control plane of
-// the Galactic data plane. It loads and attaches the edge NAT+LB eBPF
-// program (internal/plumbing/ebpf/edgeprog) to a gateway node's public/
-// underlay-facing uplink interface and drives it via the
-// NetworkGateway/NetworkRule reconcilers.
+// Command galactic-gateway is the edge XDP gateway control plane. It loads and
+// attaches the edge eBPF program to a gateway node's underlay-facing uplink and
+// drives it through the NetworkGateway and NetworkRule reconcilers.
 //
-// This binary was split out of galactic-router so that a crash on either
-// side (tenant BGP vs. the XDP-holding gateway engine) no longer takes the
-// other down with it. Tenant BGP (the embedded GoBGP server and the
-// BGPRouter/BGPPeer/
-// BGPAdvertisement/BGPPolicy/BGPVRFInstance reconcilers) still runs in
-// galactic-router, co-located on the same gateway node.
+// It is a separate binary from galactic-router so that a crash on either side,
+// tenant BGP or the gateway engine holding the XDP attachment, no longer takes
+// the other down. Tenant BGP still runs in the router, co-located on the same
+// node.
 package main
 
 import (
@@ -43,20 +39,14 @@ func main() {
 	}
 }
 
-// checkWatchPermissions issues a SelfSubjectAccessReview for each resource
-// type the manager watches, checking the watch verb. If any review denies
-// the request the informer cache will never sync and all reconcilers will
-// be silently blocked; this logs a clear, actionable message at startup so
-// the problem is immediately obvious. Mirrors
-// cmd/galactic-router/main.go's identically-named function, scoped to this
-// binary's own resource set instead of the BGP-family CRDs.
+// checkWatchPermissions issues an access review for the watch verb on each
+// resource the manager watches. A denial means the informer cache never syncs
+// and every reconciler is silently blocked, so this logs a clear, actionable
+// message at startup instead.
 //
-// resourceBGPRouters is included even though this binary has no BGP
-// client of its own: internal/controller/usidresolver.go's
-// buildBackendSIDIndex lists
-// BGPRouter CRDs directly (alongside BGPAdvertisement) to resolve a
-// NetworkRule backend's SRv6 uSID, so read access to bgprouters is a real
-// RBAC requirement here regardless of not needing a BGP runtime.
+// BGPRouter is included even though this binary has no BGP client of its own:
+// resolving a backend's uSID lists those CRDs directly, so read access to them
+// is a real requirement here.
 func checkWatchPermissions(mgr ctrl.Manager) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {

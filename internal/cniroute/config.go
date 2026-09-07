@@ -23,20 +23,17 @@ import (
 
 var ConfFile = config.DefaultConfFile
 
-// cniConfig is the shared config resolver for env var resolution.
-// Initialized by InitCNIConfig() (called from cmd/galactic-route/main.go).
+// cniConfig is the shared config resolver for environment resolution,
+// initialized once at process startup by InitCNIConfig.
 //
-// galactic-route has no k8s dependency, so — unlike every other binary in
-// the chain — it never resolves NodeName or Kubeconfig. It uses
-// config.CNIConfig purely for LogFile/LogLevel's env-var > conflist >
-// default precedence, so logging behaves the same way here as everywhere
-// else in the chain (see internal/hostconf's doc comment on the one
-// static conflist file every binary shares).
+// This plugin has no Kubernetes dependency, so unlike the others in the chain
+// it never resolves a node name or kubeconfig. It uses the shared resolver
+// purely for the log file and level's environment-over-conflist-over-default
+// precedence, so logging behaves the same way here as everywhere else.
 var cniConfig *config.CNIConfig
 
-// InitCNIConfig initializes the shared config resolver for CNI env var
-// resolution. Callers should invoke this once at process startup before any
-// config lookups.
+// InitCNIConfig initializes the shared config resolver. Call it once at process
+// startup, before any config lookup.
 func InitCNIConfig() {
 	cniConfig = config.NewCNIConfig()
 }
@@ -64,9 +61,8 @@ func isValidBase62(s string) bool {
 	return true
 }
 
-// loadHostConf loads node-local settings from the static per-node conflist.
-// If the file is missing, it returns a zero-value HostConf (tolerating local
-// test runs).
+// loadHostConf loads node-local settings from the static per-node conflist. A
+// missing file yields a zero-value HostConf, tolerating local test runs.
 func loadHostConf(filePath string) (*HostConf, error) {
 	if filePath == "" {
 		filePath = config.DefaultConfFile
@@ -131,10 +127,10 @@ type statusConf struct {
 	Type       string `json:"type"`
 }
 
-// parseStatusConf validates that the CNI config is parseable and contains
-// the required top-level fields. galactic-route has no attachment-specific
-// or API-server state to check — STATUS must succeed on a freshly started
-// node before any ADD has run.
+// parseStatusConf validates that a STATUS config parses and carries the
+// required top-level fields. This plugin has no attachment-specific or
+// API-server state to check, and STATUS must succeed on a freshly started
+// node.
 func parseStatusConf(data []byte) error {
 	var sc statusConf
 	if err := json.Unmarshal(data, &sc); err != nil {
@@ -149,9 +145,9 @@ func parseStatusConf(data []byte) error {
 	return nil
 }
 
-// parseConf unmarshals the CNI configuration from stdin data (the same
-// document the master plugin received), validates the base62-encoded
-// identifier fields, and resolves logging.
+// parseConf unmarshals the CNI configuration from data, the same document the
+// master plugin received, validates the base62 identifier fields, and resolves
+// logging.
 func parseConf(data []byte) (*PluginConf, error) {
 	conf := &PluginConf{}
 	if err := json.Unmarshal(data, &conf); err != nil {

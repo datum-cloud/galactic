@@ -41,18 +41,13 @@ func newK8sClient() (client.Client, error) {
 	return c, nil
 }
 
-// resourceTracker tracks resources created during cmdAdd for selective
-// rollback. galactic-bgp's own ADD only ever creates BGP CRDs and an eBPF
-// vrf_table entry — the kernel-interface/VRF cleanup that used to live
-// alongside these in one process-wide tracker is now each master plugin's
-// own, smaller tracker (internal/cni, internal/cnitap), scoped to exactly
-// what its own ADD creates.
+// resourceTracker tracks the resources cmdAdd created, for selective rollback.
+// This plugin's ADD only ever creates BGP CRDs and an eBPF vrf_table entry;
+// kernel-interface cleanup belongs to each master plugin's own tracker.
 //
-// publishResult is embedded, rather than its five fields being copied over
-// field-by-field, so a future field added to one struct can't silently stop
-// being tracked in the other with no compiler error to catch it — cmdAdd
-// assigns the whole publishResult from publishBGPState in one shot
-// (tracker.publishResult = result).
+// publishResult is embedded rather than copied field by field, so a field added
+// to one struct cannot silently stop being tracked in the other with no
+// compiler error to catch it.
 type resourceTracker struct {
 	vpc, vpcAttachment, nodeName string
 	namespace                    string
@@ -61,30 +56,23 @@ type resourceTracker struct {
 	publishResult
 }
 
-// cleanup rolls back all tracked resources. Errors are logged but never
-// returned — the caller already has a failure.
+// cleanup rolls back the tracked resources. Errors are logged and never
+// returned, the caller already having a failure.
 //
-// Deliberately conditional: deleting the BGPVRFInstance CRD only when this
-// ADD's own attempt just created it (vrfInstanceCreated), and never
-// unregistering the eBPF vrf_table entry registerEBPFDatapath wrote at all.
-// Unlike the BGPAdvertisement below (still a reliable 1:1 key per
-// attachment — see crdnames.BGPAdvertisementName), both the BGPVRFInstance
-// and the vrf_table entry are shared by every attachment on this VPC on
-// this node (crdnames.BGPVRFInstanceName): once a second attachment's ADD
-// reuses an already-live sibling's CRD/eBPF entry (publishBGPState's
-// CreateOrUpdate and usidmap.VRF.Register are both idempotent-by-name/key,
-// so this is the ordinary case, not an edge case), unconditionally rolling
-// either back here would tear down a live sibling's VRF out from under it.
-// This is the same reasoning internal/cni/veth and internal/plumbing/vrf
-// already apply on the kernel side (see vrf.Delete's doc comment): shared
-// per-(vpc,node) state is exclusively galactic-router's GC controller's job
-// to reclaim, once it has confirmed via every BGPAdvertisement for this
-// VPC/node that none remain (internal/gc's CollectOrphanedCRDs and
-// SweepEBPFVRFTable) — the eBPF entry has no cheap "did I just create this"
-// signal the way a k8s object's CreateOrUpdate result gives us, so it stays
-// unconditional there; the BGPVRFInstance does, which is what lets a
-// checkArgumentCollision rejection of a freshly-created instance (see
-// publishBGPState) self-heal on retry instead of wedging permanently.
+// Deliberately conditional. The BGPVRFInstance is deleted only when this ADD's
+// own attempt created it, and the vrf_table entry is never unregistered at all.
+// Unlike the advertisement, which is a reliable one-per-attachment key, both are
+// shared by every attachment on this VPC on this node. Once a second
+// attachment's ADD reuses a live sibling's, which is the ordinary case since
+// both writes are idempotent, rolling either back would tear down that
+// sibling's VRF.
+//
+// Reclaiming shared per-node state is garbage collection's job, once it has
+// confirmed no advertisement for this VPC and node remains. The map entry has no
+// cheap "did I just create this" signal the way an API object's write result
+// does, so it stays unconditional there. The CRD does have one, which is what
+// lets a rejected freshly created instance self-heal on retry rather than
+// wedging permanently.
 func (rt *resourceTracker) cleanup(ctx context.Context) {
 	slog.Info("Selective rollback: cleaning up resources created during failed ADD",
 		"vpc", rt.vpc, "vpcAttachment", rt.vpcAttachment)

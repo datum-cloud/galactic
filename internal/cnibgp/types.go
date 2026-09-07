@@ -10,12 +10,10 @@ import (
 	"go.datum.net/galactic/internal/hostconf"
 )
 
-// PluginConf is the CNI plugin configuration passed via stdin on each
-// invocation of galactic-bgp — the same document the master plugin itself
-// received, since the CNI runtime passes each chain entry its own stanza
-// plus prevResult; galactic-bgp only reads vpc/vpcattachment/namespace out
-// of it (mtu, terminations, ipam are the master's/galactic-ipam's own
-// concerns).
+// PluginConf is the CNI plugin configuration passed on stdin, the same document
+// the master plugin received, since the runtime passes each chain entry its own
+// stanza plus the previous result. This plugin reads only the identifiers and
+// namespace out of it; the rest belongs to other plugins in the chain.
 type PluginConf struct {
 	types.PluginConf
 	VPC           string `json:"vpc"`

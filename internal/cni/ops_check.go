@@ -21,10 +21,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
-// cmdCheck validates that the container's network state matches what was
-// established during cmdAdd. Per the CNI spec, CHECK is called by the runtime
-// to probe the status of an existing container and should return an error if
-// managed resources are missing or in an invalid state.
+// cmdCheck validates that the container's network state matches what ADD
+// established. Per the CNI spec, the runtime calls CHECK to probe an existing
+// container, and it must return an error when a managed resource is missing or
+// invalid.
 func cmdCheck(args *skel.CmdArgs) error {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -45,8 +45,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 		errs = append(errs, fmt.Errorf("guest interface %q: %w", guestName, err))
 	}
 
-	// Termination routes are galactic-route's own CHECK now (see
-	// internal/cniroute's checkTerminationRoutes) — this plugin's CHECK no
+	// Termination routes are the routing plugin's own CHECK now; this one no
 	// longer verifies them.
 
 	// Validate kernel state against prevResult (CNI spec §4.3).
@@ -75,9 +74,8 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-// cmdStatus implements the CNI spec STATUS operation — see
-// internal/cnimaster.RunStatus for the full reasoning, shared verbatim with
-// galactic-tap.
+// cmdStatus implements the CNI STATUS operation, shared verbatim with the tap
+// plugin.
 func cmdStatus(args *skel.CmdArgs) error {
 	return cnimaster.RunStatus(args.StdinData, cniConfig, ConfFile)
 }
@@ -105,9 +103,9 @@ func checkGuestInterface(netnsPath, ifName string) error {
 	})
 }
 
-// checkPrevResult validates that kernel state matches the interfaces and IPs
-// recorded in the prevResult returned by the most recent ADD. Per the CNI spec
-// §4.3, CHECK must verify that managed resources have not drifted.
+// checkPrevResult validates that kernel state still matches the interfaces and
+// addresses the most recent ADD recorded, which the CNI spec requires CHECK to
+// verify.
 func checkPrevResult(rawPrevResult map[string]interface{}, _ string, netns string) error {
 	// RawPrevResult is map[string]interface{} — marshal back to JSON, then
 	// parse as a versioned CNI result.

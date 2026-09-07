@@ -12,15 +12,11 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// functionNibble maps an SRv6Function to its uFMT 48+16 Function value
-// (uformat.FunctionEndDT46 or FunctionEndDT2). End.DT46 is the only
-// officially supported value (go.datum.net/network's SRv6Function enum
-// dropped End.DT4/End.DT6 entirely -- neither was ever requested by any
-// caller in this codebase, and the uFMT shared Function/Argument slot has
-// no distinct wire code for a per-family variant anyway, design plan R3):
-// it is the only endpoint behavior the eBPF datapath's vrf_table ever
-// installs, regardless of pod-subnet address family (see
-// internal/cnibgp/bgp.go's registerEBPFDatapath/buildAdvertisementSpec).
+// functionNibble maps an SRv6Function to its 4-bit uFMT 48+16 Function value.
+// End.DT46 is the only accepted value: it is the only endpoint behavior the
+// eBPF datapath installs, whatever the pod subnet's address family, and the
+// shared Function/Argument slot has no distinct code for a per-family
+// variant. Any other function is an error.
 func functionNibble(fn bgpv1alpha1.SRv6Function) (uint8, error) {
 	if fn == bgpv1alpha1.SRv6FunctionEndDT46 {
 		return uformat.FunctionEndDT46, nil
@@ -29,9 +25,8 @@ func functionNibble(fn bgpv1alpha1.SRv6Function) (uint8, error) {
 }
 
 // ComputeSID derives the compressed SRv6 uSID for a (locator, nodeID,
-// argument, function) tuple in the `uFMT 48+16` REPLACE-CSID layout (RFC
-// 9800 §4.2.7; datum-cloud/enhancements#740 "Option 2 — Shared 16-bit
-// Slot"):
+// argument, function) tuple in the uFMT 48+16 REPLACE-CSID layout of RFC 9800
+// §4.2.7:
 //
 //	bits 1-48   uSID Block    (locator's network prefix; must be an IPv6 /48)
 //	bits 49-64  Node-ID       (nodeID; BGPRouterSpec.NodeID, this router's PoP-local slot)
@@ -42,8 +37,9 @@ func functionNibble(fn bgpv1alpha1.SRv6Function) (uint8, error) {
 //	                           from the VPCAttachment identifier)
 //	bits 81-128 Padding       (always zero)
 //
-// See internal/plumbing/ebpf/uformat for the field layout and the
-// encode/decode primitives this delegates to.
+// locator must be an IPv6 /48; nodeID and argument must fit their fields.
+// Returns the full 128-bit SID, or an error naming the field that is out of
+// range. See internal/plumbing/ebpf/uformat for the encode primitives.
 func ComputeSID(locator string, nodeID, argument int32, function bgpv1alpha1.SRv6Function) (netip.Addr, error) {
 	prefix, err := netip.ParsePrefix(locator)
 	if err != nil {

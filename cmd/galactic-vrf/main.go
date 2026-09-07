@@ -2,23 +2,17 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command galactic-vrf is #855's ingress sidecar: the second container in
-// the shared Envoy Gateway fleet's pod, responsible only for VPC backend
-// connectivity — Linux VRF device + SRv6 seg6 encap route lifecycle, driven
-// entirely by a cluster-scoped watch on discoveryv1.EndpointSlice objects
-// galactic-cni (#854) publishes per pod. See
-// docs/plans/855-ingress-sidecar-vpc-backend-connectivity.md and
-// internal/ingresssidecar's own doc comment for the full design; this
-// binary is just the process wiring (config, manager, metrics, RBAC
-// pre-flight) around that package.
+// Command galactic-vrf is the ingress sidecar: the second container in the
+// shared Envoy fleet's pod, responsible only for VPC backend connectivity,
+// meaning the Linux VRF device and SRv6 egress route lifecycle, driven entirely
+// by a cluster-scoped watch on the EndpointSlices the CNI publishes per pod.
+// This binary is the process wiring around internal/ingresssidecar: config,
+// manager, metrics, and an access pre-flight check.
 //
-// Unlike galactic-router/galactic-gateway, this binary exposes no gRPC
-// health server: neither of this repo's existing binaries has an
-// established /healthz convention to copy (galactic-router explicitly
-// disables its health probe; galactic-cni has none at all — see §5 of the
-// plan), so building one here would be new design work rather than
-// following a pattern, and container liveness (process exits, kubelet
-// restarts it) is enough for v1.
+// Unlike the router and gateway binaries it exposes no gRPC health server.
+// Neither has an established convention to copy, one disabling its probe and the
+// other having none, so building one here would be new design work rather than
+// following a pattern, and container liveness is enough.
 package main
 
 import (
@@ -44,15 +38,10 @@ func main() {
 	}
 }
 
-// checkWatchPermissions issues a SelfSubjectAccessReview for the "watch"
-// verb on endpointslices, the only resource this binary's manager watches.
-// If the review denies the request the informer cache will never sync and
-// the reconciler will be silently blocked; this logs a clear, actionable
-// message at startup so the problem is immediately obvious. Mirrors
-// cmd/galactic-router and cmd/galactic-gateway's identically-named
-// functions, scoped to this binary's own single resource — see §9 item 8
-// of the plan (the read-only ClusterRole decision this check exists to
-// help catch a misconfiguration of).
+// checkWatchPermissions issues an access review for the watch verb on
+// endpointslices, the only resource this binary's manager watches. A denial
+// means the informer cache never syncs and the reconciler is silently blocked,
+// so this logs a clear, actionable message at startup instead.
 func checkWatchPermissions(mgr ctrl.Manager) {
 	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {

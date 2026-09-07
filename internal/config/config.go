@@ -2,11 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package config provides shared configuration defaults, environment variable
-// keys, and typed resolvers for both galactic-cni and galactic-router.
-//
-// Each component gets its own resolver (CNIConfig, RouterConfig).
-// Precedence: env var > conflist/flag > compiled-in default.
+// Package config provides the shared configuration defaults, environment
+// variable names, and typed resolvers every galactic binary uses. Each gets its
+// own resolver, all with the same precedence: environment variable, then
+// conflist or flag, then compiled-in default.
 package config
 
 import (
@@ -28,9 +27,8 @@ const (
 	LogLevelWarning = "warning"
 	LogLevelError   = "error"
 
-	// flagMetricsPort is the CLI flag name shared by RouterConfig,
-	// GatewayConfig, and VRFConfig's BindFlags -- each binds it to the same
-	// keyMetricsPort Viper key.
+	// flagMetricsPort is the CLI flag name several resolvers share, each
+	// binding it to the same key.
 	flagMetricsPort = "metrics-port"
 
 	// keyMetricsPort is the Viper key each component's MetricsPort field
@@ -44,12 +42,9 @@ const (
 
 // --- Shared CLI flag names --------------------------------------------
 
-// FlagNodeName/FlagMetricsPort/FlagGRPCHealthPort are the CLI flag name
-// strings every per-binary Config's BindFlags bindings table
-// (RouterConfig, GatewayConfig, NAT66Config) binds verbatim -- pulled out
-// to shared constants rather than left as three near-identical literal
-// copies (one per binary), which is exactly what golangci-lint's goconst
-// flags once a third copy exists.
+// FlagNodeName, FlagMetricsPort, and FlagGRPCHealthPort are the CLI flag names
+// every per-binary resolver binds verbatim, shared rather than repeated once
+// per binary.
 const (
 	FlagNodeName       = "node-name"
 	FlagMetricsPort    = "metrics-port"
@@ -58,11 +53,9 @@ const (
 
 // --- Shared Viper key names ---------------------------------------------
 
-// KeyNodeName/KeyMetricsPort/KeyGRPCHealthPort are the Viper key strings
-// every per-binary Config's SetDefault/BindFlags/readFields trio uses for
-// the same three fields FlagNodeName/FlagMetricsPort/FlagGRPCHealthPort
-// bind -- pulled out for the same goconst-across-three-near-identical-
-// binaries reason as the Flag* constants above.
+// KeyNodeName, KeyMetricsPort, and KeyGRPCHealthPort are the config keys every
+// per-binary resolver uses for the three fields the flags above bind, shared for
+// the same reason.
 const (
 	KeyNodeName       = "node_name"
 	KeyMetricsPort    = "metrics_port"

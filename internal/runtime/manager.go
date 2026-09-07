@@ -74,9 +74,9 @@ func (m *runtimeManager) Status(ctx context.Context, key types.NamespacedName) (
 	m.mu.RUnlock()
 
 	if !ok {
-		// No runtime yet — this is normal before the first successful Apply.
-		// Return an empty status so the caller can distinguish "not yet applied"
-		// from "applied but unhealthy".
+		// No runtime yet, which is normal before the first successful apply.
+		// An empty status lets the caller tell "not yet applied" from "applied
+		// but unhealthy".
 		return model.RuntimeStatus{}, nil
 	}
 	return rt.Status(ctx)

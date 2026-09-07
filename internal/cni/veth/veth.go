@@ -35,9 +35,9 @@ func isLinkNotFoundError(err error) bool {
 	return strings.Contains(msg, "no such device") || strings.Contains(msg, "not found")
 }
 
-// isIptablesRuleNotFoundError reports whether err indicates that an iptables
-// rule does not exist. The go-iptables package returns a generic error whose
-// message contains "rule not found" when the target rule is absent.
+// isIptablesRuleNotFoundError reports whether err means the rule does not
+// exist. The library returns a generic error whose message names that
+// condition.
 func isIptablesRuleNotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -84,9 +84,9 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	guestName := intf.GenerateInterfaceNameGuest(vpc, vpcAttachment)
 
-	// If the host veth already exists (e.g. left behind by a failed cmdAdd
-	// with no corresponding cmdDel), clean up the stale guest end and recreate
-	// the pair so the guest side is in a known-good state.
+	// A host veth left behind by a failed ADD with no matching DEL: clean up
+	// the stale guest end and recreate the pair, so the guest side is in a
+	// known-good state.
 	if existing, err := netlink.LinkByName(hostName); err == nil {
 		slog.Warn("veth: removing stale host veth left behind by a previous ADD attempt",
 			"host", hostName, "guest", guestName)
