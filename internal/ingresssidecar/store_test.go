@@ -22,11 +22,13 @@ func mustPrefix(t *testing.T, s string) *net.IPNet {
 
 const testGrace = 10 * time.Second
 
-// testVPC1, testPodName, and testMalformedTenantID are fixture values
-// shared across this package's tests.
+// testVPC1, testPodName, testOldKey, testNewKey, and testMalformedTenantID
+// are fixture values shared across this package's tests.
 const (
 	testVPC1    = "vpc1"
 	testPodName = "pod-a"
+	testOldKey  = "ns/old-name"
+	testNewKey  = "ns/new-name"
 	// testMalformedTenantID has no "-" separator, so
 	// crdnames.ParseTenantIdentifier rejects it -- used by both
 	// controller_test.go and seed_test.go to build a selected-but-
@@ -297,7 +299,7 @@ func TestStoreSweepKeepsPrefixClaimedByAnotherKey(t *testing.T) {
 
 			prefix := mustPrefix(t, "fd00::3")
 			desired := &DesiredRoute{VPC: testVPC1, Prefix: prefix, SID: net.ParseIP("fd00:99::1")}
-			for _, key := range []string{"ns/old-name", "ns/new-name"} {
+			for _, key := range []string{testOldKey, testNewKey} {
 				if err := store.SetDesired(ctx, key, desired); err != nil {
 					t.Fatalf("SetDesired(%s): %v", key, err)
 				}
@@ -307,13 +309,13 @@ func TestStoreSweepKeepsPrefixClaimedByAnotherKey(t *testing.T) {
 			}
 
 			start := time.Now()
-			if err := store.SetDesired(ctx, "ns/old-name", nil); err != nil {
+			if err := store.SetDesired(ctx, testOldKey, nil); err != nil {
 				t.Fatalf("SetDesired(old, nil): %v", err)
 			}
 			if tt.survivorAbsent {
 				// Marked absent later, so it is still inside its own grace
 				// when the old key's has already elapsed.
-				store.routes["ns/new-name"].absentSince = start.Add(testGrace)
+				store.routes[testNewKey].absentSince = start.Add(testGrace)
 			}
 
 			store.Sweep(ctx, start.Add(testGrace+time.Second))
@@ -321,10 +323,10 @@ func TestStoreSweepKeepsPrefixClaimedByAnotherKey(t *testing.T) {
 			if got := backend.routeCount(); got != tt.wantRoutes {
 				t.Errorf("routeCount after sweep = %d, want %d", got, tt.wantRoutes)
 			}
-			if _, ok := store.routes["ns/old-name"]; ok {
+			if _, ok := store.routes[testOldKey]; ok {
 				t.Error("expired key ns/old-name still tracked after sweep")
 			}
-			if _, ok := store.routes["ns/new-name"]; !ok {
+			if _, ok := store.routes[testNewKey]; !ok {
 				t.Error("surviving key ns/new-name dropped by sweep")
 			}
 		})
@@ -341,14 +343,14 @@ func TestStoreSweepRemovesPrefixOnceLastKeyExpires(t *testing.T) {
 
 	prefix := mustPrefix(t, "fd00::3")
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: prefix, SID: net.ParseIP("fd00:99::1")}
-	for _, key := range []string{"ns/old-name", "ns/new-name"} {
+	for _, key := range []string{testOldKey, testNewKey} {
 		if err := store.SetDesired(ctx, key, desired); err != nil {
 			t.Fatalf("SetDesired(%s): %v", key, err)
 		}
 	}
 
 	start := time.Now()
-	for _, key := range []string{"ns/old-name", "ns/new-name"} {
+	for _, key := range []string{testOldKey, testNewKey} {
 		if err := store.SetDesired(ctx, key, nil); err != nil {
 			t.Fatalf("SetDesired(%s, nil): %v", key, err)
 		}
