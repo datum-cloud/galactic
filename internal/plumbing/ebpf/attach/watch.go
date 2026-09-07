@@ -19,73 +19,53 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
-// debounceInterval coalesces a burst of netlink link/route change events
-// (e.g. an interface flapping, or several routes updating as part of one
-// routing-table change) into a single interface-set re-evaluation, instead
-// of re-running ResolveInterfaces -- and possibly re-attaching -- once per
-// individual netlink message. It is a package-level var (not a const) so
-// tests can shrink it and exercise Watch's event-to-reaction path in
-// milliseconds instead of real wall-clock time.
+// debounceInterval coalesces a burst of netlink link and route events, such as
+// an interface flapping or several routes changing together, into a single
+// interface-set re-evaluation rather than one per netlink message. A var, not a
+// const, so tests can shrink it.
 var debounceInterval = 250 * time.Millisecond
 
-// linkSubscribeFn and routeSubscribeFn are package-level override points --
-// the same pattern interfaces.go uses for routeListFn/linkByIndexFn -- so
-// tests can simulate real interface/route change events without a live
-// netlink socket or root privileges: a fake implementation receives the
-// exact channel Watch reads from and can push a synthetic
-// netlink.LinkUpdate/netlink.RouteUpdate onto it whenever the test wants to
-// simulate a change.
+// linkSubscribeFn and routeSubscribeFn are override points so tests can
+// simulate interface and route change events without a live netlink socket or
+// root. A fake receives the channel Watch reads from and can push synthetic
+// updates onto it.
 var (
 	linkSubscribeFn  = netlink.LinkSubscribeWithOptions
 	routeSubscribeFn = netlink.RouteSubscribeWithOptions
 )
 
-// resolveInterfacesFn is a package-level override point so Watch's own
-// tests can control what a re-evaluation resolves to across successive
-// calls (the "interface set changed" scenario this milestone exists for)
-// without touching the real netlink route table. Production code always
-// leaves this at its default, ResolveInterfaces, which has its own
-// independent override vars (routeListFn/linkByIndexFn) exercised by
-// interfaces_test.go.
+// resolveInterfacesFn is an override point so Watch's tests can control what
+// successive re-evaluations resolve to without touching the real route table.
+// Production always leaves it at ResolveInterfaces, which has override vars of
+// its own.
 var resolveInterfacesFn = ResolveInterfaces
 
-// onReconcileDone is a test-only hook invoked once after every debounced
-// re-evaluation (whether or not it changed anything, and whether or not
-// ResolveInterfaces itself failed). It lets tests wait deterministically
-// for a reconciliation attempt to finish instead of guessing with a sleep.
-// Production code never overrides it.
+// onReconcileDone is a test-only hook invoked after every debounced
+// re-evaluation, whether or not anything changed and whether or not resolution
+// failed, so tests can wait deterministically instead of sleeping. Production
+// never overrides it.
 var onReconcileDone = func() {}
 
-// Watcher is a live handle onto a running Watch loop, returned by
-// StartWatching alongside the objects/interfaces Start itself already
-// returns. It exists so a caller outside this package -- specifically
-// internal/installer's health-check ticker -- can (a) tell whether the
-// watch loop is still actually running, and (b) ask it to re-evaluate the
-// attachment set out of band, without needing to wait for the next
-// netlink link/route event or a container restart (ecv's review of #283:
-// "should a failed health check drive a reconcile before it fails the
-// probe?" and "should a dead watcher fail health?").
+// Watcher is a live handle on a running Watch loop, returned by StartWatching.
+// It lets a caller outside this package tell whether the loop is still running
+// and ask it to re-evaluate the attachment set out of band, without waiting for
+// the next netlink event or a container restart.
 type Watcher struct {
 	alive atomic.Bool
 	nudge chan struct{}
 }
 
-// newWatcher creates a Watcher in its not-yet-started state. alive is set
-// true once the Watch loop it is passed to actually starts running, and
-// false again once that loop exits for any reason (ctx canceled, or an
-// unrecoverable error) -- see Watch's own use of it below.
+// newWatcher creates a Watcher in its not-yet-started state. It is marked alive
+// once the Watch loop it is passed to starts running, and dead again once that
+// loop exits for any reason.
 func newWatcher() *Watcher {
 	return &Watcher{nudge: make(chan struct{}, 1)}
 }
 
-// Alive reports whether the Watch loop this Watcher was passed to is
-// still actually running. A Watch loop that has exited -- because its
-// initial netlink subscriptions failed and StartWatching's spawning
-// goroutine logged the error and gave up (watch.go's own doc comment),
-// with no retry -- can no longer react to netlink events or Reconcile
-// nudges at all, so a caller relying on it to self-heal drift (an
-// externally cleared tc filter, a moved default route) needs to know that
-// self-healing isn't happening anymore.
+// Alive reports whether the Watch loop this Watcher was passed to is still
+// running. A loop that exited, because its initial netlink subscriptions failed
+// and nothing retries them, can no longer react to events or nudges, so a
+// caller relying on it to heal drift needs to know that healing has stopped.
 func (w *Watcher) Alive() bool {
 	if w == nil {
 		return false
@@ -93,16 +73,13 @@ func (w *Watcher) Alive() bool {
 	return w.alive.Load()
 }
 
-// Reconcile asks the Watch loop to re-evaluate and re-assert the
-// attachment set as soon as its next debounce interval elapses, the same
-// path a real netlink link/route event drives. It is safe to call from any
-// goroutine and safe to call when nothing is actually wrong -- attachOne/
-// Detach are idempotent, so an unnecessary reconcile is a cheap no-op. A
-// pending, not-yet-delivered nudge is not duplicated (the channel is
-// buffered by exactly one and this send never blocks), so calling
-// Reconcile repeatedly in a tight loop coalesces into a single
-// re-evaluation, the same way a burst of netlink events already does via
-// scheduleReevaluate's debounce timer reset.
+// Reconcile asks the Watch loop to re-evaluate and re-assert the attachment set
+// at its next debounce interval, the same path a real netlink event drives.
+//
+// Safe from any goroutine and safe when nothing is wrong, since attach and
+// detach are idempotent. A pending nudge is not duplicated, the channel being
+// buffered by one and the send never blocking, so repeated calls coalesce into
+// one re-evaluation just as a burst of netlink events does.
 func (w *Watcher) Reconcile() {
 	if w == nil {
 		return
@@ -113,16 +90,12 @@ func (w *Watcher) Reconcile() {
 	}
 }
 
-// logDegradedSubscription logs a netlink subscription channel closing
-// (which Watch's select loop reacts to by setting that channel variable to
-// nil and no longer selecting on it -- a nil channel case in a Go select
-// simply never fires). Neither closure was previously logged at all
-// (ecv's review of #283), which mattered most in the otherKindAlreadyNil
-// case: once both the link and route subscriptions have closed, Watch's
-// main select degrades to reacting only to ctx.Done() and the health-
-// triggered nudge channel -- it can no longer notice any real interface or
-// route change on its own -- and that transition passed completely
-// silently before this.
+// logDegradedSubscription logs a netlink subscription channel closing, which
+// Watch reacts to by nil-ing that channel so its select case never fires again.
+// otherKindAlreadyNil says whether the other subscription is already gone,
+// which is the case worth noticing: with both closed, the loop reacts only to
+// context cancellation and out-of-band nudges and can no longer see any
+// interface or route change on its own.
 func logDegradedSubscription(kind string, otherKindAlreadyNil bool) {
 	if otherKindAlreadyNil {
 		slog.Error("attach: watch: both netlink link and route subscriptions have now closed; " +
@@ -133,60 +106,43 @@ func logDegradedSubscription(kind string, otherKindAlreadyNil bool) {
 	slog.Warn("attach: watch: netlink subscription closed", "kind", kind)
 }
 
-// Watch subscribes to netlink link and route change events and, for as
-// long as ctx is not canceled, re-evaluates the eBPF uSID datapath's
-// attachment set whenever one occurs (design plan §4.1: "re-evaluate on
-// interface/route change events (netlink subscription), not just at
-// startup" -- Milestone 3.2 of the implementation plan). It is meant to run
-// in its own goroutine alongside the Start (or Load+Attach) call whose
-// resolved interface set seeds initial.
+// Watch subscribes to netlink link and route change events and, until ctx is
+// canceled, re-evaluates the datapath's attachment set whenever one occurs. It
+// is meant to run in its own goroutine alongside the call whose resolved
+// interface set seeds initial. program is the loaded usid_ingress program to
+// attach.
 //
-// Change events are debounced (see debounceInterval) so a burst of related
-// netlink messages triggers one re-evaluation, not one per message. Each
-// re-evaluation calls ResolveInterfaces (via resolveInterfacesFn) again and
-// reconciles the actually-attached state against it:
-//   - every interface in the freshly-resolved set is (re-)attached to
-//     program, not just ones newly present -- Attach's underlying
-//     FilterReplace semantics make this idempotent and cheap, and it is
-//     deliberately unconditional (not gated on the interface set having
-//     changed at all) so that an external event that silently clears this
-//     package's own tc filter without ever removing the interface from the
-//     resolved set -- confirmed in a real deployment: the underlay routing
-//     daemon (FRR) restarting bounced the interface, which cleared the
-//     filter, but the interface never left the resolved set (still the
-//     default-route interface), so a diff-only reconcile never noticed and
-//     never healed it -- gets self-healed on the very next netlink event
-//     instead of silently blackholing traffic until the pod restarts;
-//   - every interface no longer present has this package's own tc filter
-//     removed via Detach, so a downed or reassigned interface stops
-//     silently forwarding into whatever VRF its Argument used to resolve
-//     to.
+// Events are debounced, so a burst of related messages triggers one
+// re-evaluation. Each re-evaluation resolves the interface set again and
+// reconciles the attached state against it:
+//   - Every interface in the fresh set is re-attached, not only newly present
+//     ones. Attach is idempotent and cheap, and doing it unconditionally is
+//     what heals an external event that clears this package's filter without
+//     removing the interface from the resolved set. An underlay routing daemon
+//     restarting bounces the interface and clears the filter while it remains
+//     the default-route interface, which a diff-only reconcile never notices.
+//   - Every interface no longer present has this package's filter removed, so a
+//     downed or reassigned interface stops forwarding into whatever VRF its
+//     Argument used to resolve to.
 //
-// A failure to attach or detach one interface during a re-evaluation is
-// logged and does not stop the watch loop or abandon that interface -- it
-// is retried on the next re-evaluation for as long as the mismatch between
-// the resolved set and the actually-attached set persists (see reconcile).
-// A failure of ResolveInterfaces itself during a re-evaluation is likewise
-// logged and skipped, leaving the previous attachment set in place rather
-// than tearing anything down on a transient resolution error.
+// A per-interface attach or detach failure is logged and retried on the next
+// re-evaluation, for as long as the mismatch persists. A resolution failure is
+// likewise logged and skipped, leaving the previous attachment set in place
+// rather than tearing anything down on a transient error.
 //
-// Watch's w parameter, if non-nil, is marked alive for as long as Watch's
-// loop is actually running (see Watcher's own doc comment) and receives an
-// out-of-band re-evaluation trigger via its Reconcile method -- passing
-// nil is fine and disables both; production always passes the *Watcher
-// StartWatching itself created.
+// w, when non-nil, is marked alive while this loop runs and supplies the
+// out-of-band re-evaluation trigger. Passing nil disables both.
 //
-// Watch returns nil when ctx is canceled. It returns a non-nil error only
-// if establishing the initial netlink subscriptions themselves fails.
+// Returns nil when ctx is canceled, and a non-nil error only if establishing
+// the initial netlink subscriptions fails.
 func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watcher) error {
 	if program == nil {
 		return errors.New("attach: watch: program is nil")
 	}
 
-	// Buffered by one so the netlink library's own subscription goroutine
-	// (see vishvananda/netlink's linkSubscribeAt/routeSubscribeAt) can hand
-	// off one in-flight update without blocking forever if it races with
-	// this function returning (ctx canceled) right as a message arrives.
+	// Buffered by one so netlink's own subscription goroutine can hand off an
+	// in-flight update without blocking forever if it races with this function
+	// returning as a message arrives.
 	linkCh := make(chan netlink.LinkUpdate, 1)
 	routeCh := make(chan netlink.RouteUpdate, 1)
 	done := make(chan struct{})
@@ -207,11 +163,10 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 		return fmt.Errorf("attach: watch: subscribe to route updates: %w", err)
 	}
 
-	// Only now that both subscriptions are up does this loop actually start
-	// reacting to events -- mark it alive, and guarantee it is marked dead
-	// again on every return path (including a subscription failure above
-	// would have already returned before this point, correctly never
-	// claiming to be alive at all).
+	// Only now that both subscriptions are up does this loop react to events.
+	// Mark it alive, and guarantee it is marked dead again on every return
+	// path. A subscription failure returns above, so it never claims to be
+	// alive at all.
 	if w != nil {
 		w.alive.Store(true)
 		defer w.alive.Store(false)
@@ -267,11 +222,9 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 			scheduleReevaluate()
 
 		case <-nudge:
-			// An out-of-band request (Watcher.Reconcile, e.g. from a
-			// failing health check) to re-evaluate -- routed through the
-			// same debounce path a real netlink event uses, so a nudge
-			// racing an actual event still coalesces into one
-			// re-evaluation rather than two.
+			// An out-of-band request to re-evaluate, routed through the same
+			// debounce path a netlink event uses, so a nudge racing a real
+			// event coalesces into one re-evaluation.
 			scheduleReevaluate()
 
 		case <-debounceC:
@@ -288,26 +241,16 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 	}
 }
 
-// StartWatching runs Start and, if it succeeds, launches Watch in its own
-// goroutine (stopped when ctx is done) to keep the resolved interface set
-// re-evaluated against netlink link/route change events for the life of the
-// returned objects (design plan §4.1; Milestone 3.2). It is the production
-// entry point internal/installer.Run uses -- Start alone (Milestone 3.1)
-// only ever evaluates the interface set once, at startup.
+// StartWatching runs Start and, on success, launches Watch in its own goroutine
+// to keep the resolved interface set re-evaluated against netlink events for the
+// life of the returned objects. pinDir is the bpffs directory to pin into. Start
+// alone evaluates the interface set once, at startup.
 //
-// The returned *Watcher is StartWatching's caller's handle onto that
-// background loop -- Alive reports whether it is still running, and
-// Reconcile requests an out-of-band re-evaluation (see internal/installer's
-// health-check ticker, which uses both: it fails health if the watch loop
-// has died, and nudges a reconcile when the datapath's own health checks
-// fail, on the chance the failure is something Watch's reconcile can heal
-// without waiting for an unrelated netlink event or the liveness probe
-// restarting the container -- ecv's review of #283).
+// The returned *Watcher is the caller's handle on that loop: Alive reports
+// whether it still runs, and Reconcile requests an out-of-band re-evaluation.
 //
-// Canceling ctx stops the background watch loop; it does not Close objs --
-// the caller still owns objs and must Close it itself, exactly as with
-// Start (see the package doc comment for why that's safe against an
-// already-attached filter).
+// Canceling ctx stops the loop but does not close the returned objects. The
+// caller still owns and must close them, as with Start.
 func StartWatching(ctx context.Context, pinDir string) (
 	objs *prog.UsidObjects, ifaces []string, watcher *Watcher, err error,
 ) {
@@ -336,9 +279,8 @@ func toSet(names []string) map[string]struct{} {
 	return set
 }
 
-// diffSets returns, in sorted order (for deterministic logging and
-// testing), the names present in next but not current (added) and present
-// in current but not next (removed).
+// diffSets returns the names present in next but not current, and present in
+// current but not next, each sorted for deterministic logging and tests.
 func diffSets(current, next map[string]struct{}) (added, removed []string) {
 	for name := range next {
 		if _, ok := current[name]; !ok {
@@ -355,21 +297,17 @@ func diffSets(current, next map[string]struct{}) (added, removed []string) {
 	return added, removed
 }
 
-// reconcile brings the actual attachment state toward next, starting from
-// current (the last-known actually-attached set), and returns the
-// resulting actually-attached set.
+// reconcile brings the attached state toward next, starting from current, the
+// last-known attached set, and returns the resulting attached set.
 //
-// Every interface in next is (re-)attached unconditionally, not only ones
-// added since current -- see Watch's doc comment above for why a
-// diff-only reconcile (the original design) misses external drift that
-// clears the tc filter without ever changing the resolved interface set.
-// attachOne (FilterReplace) is idempotent, so re-asserting an
-// already-correctly-attached interface is a cheap no-op.
+// Every interface in next is re-attached unconditionally rather than only those
+// added since current, because a diff-only reconcile misses external drift that
+// clears the filter without changing the resolved set. Attaching is idempotent,
+// so re-asserting a correctly attached interface is a cheap no-op.
 //
-// A per-interface attach or detach failure is logged and that interface is
-// simply left out of (for a failed attach) or kept in (for a failed detach)
-// the returned set -- which means it is retried again on the next
-// reconcile, without any separate retry-tracking state.
+// A per-interface failure is logged, and that interface is left out of the
+// returned set on a failed attach or kept in it on a failed detach, which
+// retries it on the next reconcile with no separate retry state.
 func reconcile(program *ebpf.Program, current, next map[string]struct{}) map[string]struct{} {
 	added, removed := diffSets(current, next)
 	if len(added) != 0 || len(removed) != 0 {

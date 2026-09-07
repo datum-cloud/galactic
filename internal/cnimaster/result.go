@@ -13,14 +13,12 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 )
 
-// AppendIPConfigs adds one IPConfig per allocated address family in ipRes
-// (IPv6, and IPv4 when present) plus any default routes, all pointing at
-// the given Interfaces index. No-op when ipRes is nil.
+// AppendIPConfigs adds one address configuration per allocated family in ipRes,
+// plus any default routes, all pointing at the given interface index. A nil
+// ipRes is a no-op.
 //
-// Shared verbatim between galactic-veth (internal/cni) and galactic-tap
-// (internal/cnitap): only the ifaceIndex and ipv4Mask each passes in differ
-// (veth's guest interface vs tap's own host interface, /32 vs /25), never
-// the logic itself.
+// Shared verbatim between the two master plugins: only the interface index and
+// IPv4 mask each passes differ, never the logic.
 func AppendIPConfigs(result *type100.Result, ipRes *cniipam.IPAMResult, ifaceIndex int, ipv4Mask net.IPMask) {
 	if ipRes == nil {
 		return

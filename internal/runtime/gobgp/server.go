@@ -59,10 +59,10 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Reconfigure replaces the running BgpServer with a fresh instance.
-// StopBgp in GoBGP v4 terminates the Serve loop, making the server permanently
-// dead. Call this instead of StopBgp+StartBgp when reconfiguration is needed.
-// The caller must call StartBgp on the returned server.
+// Reconfigure replaces the running server with a fresh instance and returns it.
+// Stopping the server terminates its serve loop permanently, so this is what to
+// call instead of a stop-then-start when reconfiguration is needed. The caller
+// must start the returned server.
 func (s *Server) Reconfigure() (*gobgpserver.BgpServer, error) {
 	if old := s.bgp.Load(); old != nil {
 		old.Stop()

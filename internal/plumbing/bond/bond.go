@@ -2,27 +2,18 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package bond holds the pure, netlink-view-agnostic logic for recognizing
-// a Linux bonding master and enumerating its slave interfaces. It exists so
-// internal/plumbing/ebpf/attach (the CNI's TC-BPF ingress path, which
-// attaches to both a bond master and its slaves -- ingress tc/eBPF
-// classification on a bonded interface happens on the slaves, not the
-// master) and internal/plumbing/ebpf/edgeattach (the gateway's XDP path,
-// which must attach to the slaves only -- native-mode XDP cannot attach to
-// a bonding master at all, since bonding doesn't implement ndo_bpf) share
-// one implementation of "is this a bond, and if so what are its slaves"
-// instead of each maintaining its own copy. See
-// internal/plumbing/ebpf/edgeattach.ResolveTargets' own doc comment for the
-// more precise statement of why XDP can't rely on the bond master itself:
-// it isn't simply "bonding never implements ndo_bpf" on every kernel, but
-// attaching to the master is never something this codebase relies on
-// working either way.
+// Package bond holds the netlink-view-agnostic logic for recognizing a Linux
+// bonding master and enumerating its slaves.
 //
-// Each caller keeps its own package-level netlink override vars for
-// testability (matching the existing linkByNameFn/linkListFn pattern in
-// both packages above); this package takes plain netlink.Link/[]netlink.Link
-// values rather than function vars of its own, so it has no test-only
-// indirection to carry.
+// It exists so the two attach paths share one implementation of "is this a bond,
+// and if so what are its slaves". The TC-BPF ingress path attaches to both the
+// master and its slaves, ingress classification on a bond happening on the
+// slaves; the XDP path attaches to the slaves only, native XDP against a bonding
+// master being unreliable.
+//
+// Each caller keeps its own netlink override vars for testability, and this
+// package takes plain link values rather than function vars, so it carries no
+// test-only indirection.
 package bond
 
 import "github.com/vishvananda/netlink"
@@ -36,10 +27,9 @@ func IsMaster(link netlink.Link) bool {
 	return link.Type() == LinkType
 }
 
-// SlaveNames returns the names of every link in links enslaved to master
-// (i.e. whose MasterIndex, populated from netlink's IFLA_MASTER attribute,
-// equals master's own index), in whatever order links itself is in. Returns
-// nil if master has no slaves in links.
+// SlaveNames returns the names of every link in links enslaved to master,
+// meaning those whose master index equals master's own, in whatever order links
+// is in. Returns nil when master has no slaves there.
 func SlaveNames(master netlink.Link, links []netlink.Link) []string {
 	masterIndex := master.Attrs().Index
 	var slaves []string

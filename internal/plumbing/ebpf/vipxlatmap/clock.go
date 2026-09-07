@@ -6,26 +6,19 @@ package vipxlatmap
 
 import "golang.org/x/sys/unix"
 
-// monotonicNow returns a nanosecond reading from CLOCK_MONOTONIC, used as
-// this table's in-memory Generation source (VipXlatTable.Generation) -- see
-// the package doc comment for why this is in-memory only, unlike
-// usidmap.VRFTable's kernel-stored generation field.
+// monotonicNow returns a nanosecond reading from the monotonic clock, this
+// table's in-memory generation source. See the package doc comment for why the
+// generation is in-memory only here.
 //
-// This is a deliberate, small duplicate of
-// internal/plumbing/ebpf/usidmap/table.go's own monotonicNow (identical
-// body, identical reasoning: CLOCK_MONOTONIC rather than wall-clock
-// time.Now(), for the same immune-to-NTP-step-corrections and
-// stable-across-a-restart-within-the-same-boot properties that function's
-// doc comment explains in full) -- that function is unexported inside a
-// different package, so it cannot be imported directly; copying roughly ten
-// lines here was judged simpler and clearer than exporting it solely for
-// this one cross-package reuse.
+// A deliberate small duplicate of the uSID map layer's identical function, which
+// is unexported in another package and so cannot be imported. Copying ten lines
+// was judged simpler than exporting it for one cross-package use.
 func monotonicNow() uint64 {
 	var ts unix.Timespec
-	// See usidmap/table.go's monotonicNow for the failure-mode reasoning if
-	// this syscall is ever rejected (e.g. a syscall-filtering sandbox):
-	// every reading in this process then reads 0, which fails toward never
-	// reaping an entry rather than reaping one out from under live state.
+	// See the uSID map layer's equivalent for the failure mode if this call is
+	// ever rejected: every reading in this process then reads 0, which fails
+	// toward never reaping an entry rather than reaping one out from under live
+	// state.
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 	return uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 }

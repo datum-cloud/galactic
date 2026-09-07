@@ -6,17 +6,13 @@ package nptv6map
 
 import "golang.org/x/sys/unix"
 
-// monotonicNow returns a nanosecond CLOCK_MONOTONIC reading, used to stamp
-// this process's own in-memory Generation bookkeeping (see doc.go and
-// NPTv6Table.Register). This is a small, deliberate duplicate of
-// usidmap's own unexported monotonicNow (internal/plumbing/ebpf/usidmap/
-// table.go) rather than an exported/imported dependency on it: it is five
-// lines wrapping one syscall, and usidmap's own egresskind.go/
-// prog/dropreason.go already establish the precedent in this codebase of
-// hand-keeping a tiny piece of logic in sync across packages rather than
-// introducing a shared-but-barely-used export for it. See table.go's
-// monotonicNow for the full reasoning on why CLOCK_MONOTONIC, not
-// wall-clock time.Now(), is used here.
+// monotonicNow returns a nanosecond reading from the monotonic clock, stamping
+// this process's in-memory generation bookkeeping.
+//
+// A deliberate small duplicate of the uSID map layer's unexported equivalent,
+// rather than an exported dependency on it: it is a few lines wrapping one
+// syscall. See that function for why the monotonic clock rather than a wall
+// clock.
 func monotonicNow() uint64 {
 	var ts unix.Timespec
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)

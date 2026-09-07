@@ -20,18 +20,16 @@ import (
 )
 
 // NPTv6Key identifies one nptv6_table row: the uSID Block that matched in
-// locator_table, plus the 12-bit Argument -- the identical composition
-// usidmap.VRFKey uses, kept as its own type here (rather than reusing
-// usidmap.VRFKey directly) purely so this package's own exported API never
-// forces a caller to import usidmap just to build a key.
+// locator_table plus the 12-bit Argument. The same composition usidmap.VRFKey
+// uses, kept as its own type so a caller need not import that package just to
+// build a key.
 type NPTv6Key struct {
 	Block    uint64
 	Argument uint16
 }
 
-// NPTv6Entry is one fully decoded nptv6_table row, decoupled from
-// prog.UsidNptv6Value's cilium/ebpf/BTF-generated field layout -- mirrors
-// usidmap.VRFEntry's own reasoning.
+// NPTv6Entry is one decoded nptv6_table row, kept separate from the generated
+// kernel layout, as usidmap.VRFEntry is.
 type NPTv6Entry struct {
 	NPTv6Key
 
@@ -39,16 +37,13 @@ type NPTv6Entry struct {
 	// internal/plumbing/nptv6's doc comment for the translation itself.
 	Mapping nptv6.Mapping
 
-	// Adjustment is the precomputed RFC 6296 §3.6 checksum-neutral
-	// adjustment (nptv6.Mapping.Adjustment), stored in the kernel value so
-	// the datapath never recomputes it per packet.
+	// Adjustment is the precomputed RFC 6296 checksum-neutral adjustment, stored
+	// in the kernel value so the datapath never recomputes it per packet.
 	Adjustment uint16
 
-	// Generation is this process's own in-memory bookkeeping of when this
-	// entry was last (re-)registered by Register -- see doc.go's "no
-	// Generation/monotonic-clock kernel field" section for why this is not
-	// persisted in the kernel value the way usidmap.VRFEntry's own
-	// Generation is.
+	// Generation is this process's in-memory record of when Register last wrote
+	// this entry. See the package doc comment for why it is not persisted in
+	// the kernel value the way vrf_table's is.
 	Generation uint64
 }
 
@@ -61,22 +56,17 @@ type NPTv6Table struct {
 	generation map[NPTv6Key]uint64
 }
 
-// NewNPTv6Table wraps table as an NPTv6Table. Production callers pass a
-// usidmap.KernelTable wrapping a loaded *prog.UsidObjects's Nptv6Table map
-// (or OpenPinned, below, for a process that did not itself load the
-// datapath); tests pass a fake usidmap.Table.
+// NewNPTv6Table wraps table as an NPTv6Table. Production callers pass a kernel
+// table over the loaded map, or use OpenPinned in a process that did not load
+// the datapath; tests pass a fake.
 func NewNPTv6Table(table usidmap.Table) *NPTv6Table {
 	return &NPTv6Table{table: table, clock: monotonicNow, generation: make(map[NPTv6Key]uint64)}
 }
 
-// OpenPinned opens nptv6_table from its pinned path under pinDir
-// (internal/plumbing/ebpf/attach.Load pins each map at
-// <pinDir>/<map name>) and returns an NPTv6Table wrapping it, mirroring
-// usidmap.OpenPinnedRegistry -- for a process (internal/gc's periodic
-// sweep, via internal/installer.Run) that did not itself load the
-// datapath but needs to read/write this one map. The returned io.Closer
-// (the opened *ebpf.Map itself) must be closed once the caller is done; it
-// does not affect the map's pinned lifetime.
+// OpenPinned opens nptv6_table from its pinned path under pinDir and returns an
+// NPTv6Table wrapping it, for a process that did not itself load the datapath
+// but needs to read and write this one map. The returned map must be closed
+// when the caller is done, which does not affect its pinned lifetime.
 func OpenPinned(pinDir string) (*NPTv6Table, *ebpf.Map, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapNptv6Table), nil)
 	if err != nil {
@@ -91,15 +81,14 @@ func (t *NPTv6Table) Generation() uint64 {
 	return t.clock()
 }
 
-// Register writes (or overwrites) the nptv6_table entry for (block,
-// argument): computes m.Adjustment() internally and converts m's two
-// prefixes into the fixed 16-byte zero-padded arrays prog.UsidNptv6Value
-// expects, mirroring exactly how internal/plumbing/nptv6.prefixChecksum/
-// Translate already read prefix bytes (net.IPNet.IP, as produced by
-// net.ParseCIDR, is already zero-padded beyond its own prefix length). There
-// is no read-modify-write step here (unlike usidmap.VRFTable.Register):
-// nptv6_table carries no per-entry counters to preserve across a
-// re-registration, so every call is a plain overwrite.
+// Register writes, or overwrites, the nptv6_table entry for (block, argument).
+// It computes the adjustment from m and converts m's prefixes into the fixed
+// 16-byte zero-padded arrays the kernel value expects, which parsed CIDRs
+// already are beyond their own prefix length.
+//
+// There is no read-modify-write step, unlike vrf_table's Register: this table
+// carries no per-entry counters to preserve, so every call is a plain
+// overwrite.
 func (t *NPTv6Table) Register(block uint64, argument uint16, m nptv6.Mapping) error {
 	if err := uformat.ValidateArgument(argument); err != nil {
 		return fmt.Errorf("nptv6map: nptv6_table: register block=%#x argument=%#x: %w", block, argument, err)
@@ -130,9 +119,8 @@ func (t *NPTv6Table) Register(block uint64, argument uint16, m nptv6.Mapping) er
 	return nil
 }
 
-// Unregister removes the nptv6_table entry for (block, argument), if
-// present. Not an error to unregister an already-absent entry, matching
-// usidmap.VRFTable.Unregister's own idempotent contract.
+// Unregister removes the nptv6_table entry for (block, argument) if present. An
+// already-absent entry is not an error.
 func (t *NPTv6Table) Unregister(block uint64, argument uint16) error {
 	key, err := uformat.NewVRFKey(block, argument)
 	if err != nil {
@@ -188,14 +176,11 @@ func (t *NPTv6Table) List() ([]NPTv6Entry, error) {
 	return entries, nil
 }
 
-// Reconcile brings nptv6_table into agreement with live -- the caller's
-// current set of (Block, Argument) pairs that should have an entry --
-// removing every entry whose key is absent from live, except an entry whose
-// Generation is >= cutoff. Mirrors usidmap.VRFTable.Reconcile's exact
-// semantics; see doc.go for why this table's own writer (a single,
-// sequential periodic sweep) makes the race that mechanism guards against
-// far narrower here than for vrf_table, and why Generation is nonetheless
-// still tracked and honored the same way.
+// Reconcile brings nptv6_table into agreement with live, the caller's current
+// set of keys that should have an entry, removing every entry whose key is
+// absent except one whose generation is at or above cutoff. The same semantics
+// as vrf_table's; see the package doc comment for why this table's single
+// sequential writer makes the race that guards against far narrower here.
 func (t *NPTv6Table) Reconcile(live map[NPTv6Key]struct{}, cutoff uint64) (removed []NPTv6Entry, err error) {
 	entries, err := t.List()
 	if err != nil {
@@ -220,10 +205,9 @@ func (t *NPTv6Table) Reconcile(live map[NPTv6Key]struct{}, cutoff uint64) (remov
 	return removed, errors.Join(errs...)
 }
 
-// decode converts a raw kernel value plus its (block, argument) key into an
-// NPTv6Entry, filling in Generation from this process's own in-memory
-// bookkeeping (zero if this entry was never registered by this process
-// instance -- see doc.go).
+// decode converts a raw kernel value and its key into an NPTv6Entry, filling in
+// the generation from this process's own bookkeeping, or zero when this process
+// never registered the entry.
 func (t *NPTv6Table) decode(block uint64, argument uint16, value prog.UsidNptv6Value) NPTv6Entry {
 	nk := NPTv6Key{Block: block, Argument: argument}
 
@@ -248,12 +232,10 @@ func (t *NPTv6Table) decode(block uint64, argument uint16, value prog.UsidNptv6V
 	}
 }
 
-// toValue converts m (plus its precomputed adjustment) into the fixed
-// 16-byte zero-padded arrays prog.UsidNptv6Value expects. m.ULAPrefix/
-// m.PublicPrefix.IP are already 16-byte, zero-padded-beyond-prefix-length
-// slices by construction of net.ParseCIDR (the same assumption
-// nptv6.prefixChecksum documents), so this only needs a To16 conversion, no
-// further masking.
+// toValue converts m and its precomputed adjustment into the fixed 16-byte
+// zero-padded arrays the kernel value expects. A parsed CIDR's address is
+// already 16 bytes and zero-padded beyond its prefix length, so this needs only
+// a conversion and no further masking.
 func toValue(m nptv6.Mapping, adjustment uint16) (prog.UsidNptv6Value, error) {
 	ulaIP := m.ULAPrefix.IP.To16()
 	if ulaIP == nil {

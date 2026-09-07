@@ -2,45 +2,32 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package nat66prog holds the compiled XDP program that implements one
-// shard of galactic-nat66's sharded, stateful NAT66 egress tier (design
-// plan §3) -- deliberately its own standalone datapath, not a personality
-// bolted onto galactic-gateway's own edgedsr.c: tenant egress traffic
-// (backend -> arbitrary internet destination) is a different pattern from
-// ingress (fixed VIP, fixed backend pool) and needs its own placement
-// ring, own state, own maps, with nothing shared between the two tiers.
+// Package nat66prog holds the compiled XDP program implementing one shard of
+// the sharded, stateful NAT66 egress tier.
 //
-// nat66.c is the single source of truth for the packet path; see its
-// header comment for the full walkthrough. `go generate` (via bpf2go)
-// compiles it with clang into a CO-RE-portable BPF object and generates
-// matching Go bindings (Nat66Objects, LoadNat66, LoadNat66Objects, plus
-// per-map/per-program fields) in this package.
+// It is deliberately its own datapath rather than a second personality on the
+// edge gateway's: tenant egress toward an arbitrary internet destination is a
+// different pattern from ingress toward a fixed VIP and backend pool, and needs
+// its own placement ring, state, and maps, sharing nothing with that tier.
 //
-// Same not-committed-generated-artifacts convention as
-// internal/plumbing/ebpf/prog and internal/plumbing/ebpf/edgeprog: see
-// either's doc.go for the full rationale (a compiled binary blob risks
-// silently drifting out of sync with its own source with nothing to catch
-// the mismatch short of a byte-diff).
+// nat66.c is the single source of truth for the packet path; its header comment
+// walks it. `go generate` compiles it with clang into a CO-RE-portable BPF
+// object and generates the matching Go bindings here.
 //
-// Placement: sibling of internal/plumbing/ebpf/edgeprog under the shared
-// internal/plumbing/ebpf/ umbrella, its own package rather than a second
-// program in edgeprog -- same "different datapath domain, no shared
-// map/key layout" reasoning edgeprog's own doc.go gives for not folding
-// into internal/plumbing/ebpf/prog.
+// The generated files are gitignored rather than committed, as in the sibling
+// datapath packages: a committed binary blob can drift out of sync with its
+// source with nothing short of a byte-diff to catch it.
 //
-// This package does not itself load or attach the compiled program to any
-// interface -- that is internal/plumbing/ebpf/nat66attach's job (mirroring
-// edgeattach's shape), driven by cmd/galactic-nat66.
+// This package neither loads nor attaches the program; internal/plumbing/ebpf/
+// nat66attach does, driven by cmd/galactic-nat66.
 package nat66prog
 
-// See internal/plumbing/ebpf/prog/doc.go for why -idirafter lists both
-// multiarch directories and why -cc is omitted.
+// See the uSID program package's doc.go for why the include flags list both
+// multiarch directories and why the compiler is not named explicitly.
 //
-// -Wno-address-of-packed-member: same known clang false positive
-// edgenat.c's own doc.go documented -- struct l4_view's sport_ptr/
-// dport_ptr/check_ptr fields all sit at compile-time-fixed *even* offsets
-// within their packed struct (nat66_tcphdr's source/dest/check are
-// 0/2/16; nat66_udphdr's are 0/2/6), genuinely 2-byte aligned despite the
+// The packed-member warning is suppressed for a known false positive: the
+// pointer fields into the L4 view all sit at compile-time-fixed even offsets
+// within their packed structs, so they are genuinely 2-byte aligned despite the
 // packed attribute.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-address-of-packed-member -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type conn_key -type conn_value -type shard_config Nat66 nat66.c

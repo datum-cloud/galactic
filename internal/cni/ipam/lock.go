@@ -11,13 +11,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fileLock is a cross-process advisory lock backed by flock(2). Each CNI ADD
-// or DEL is a separate OS process, so in-process synchronization (a
-// sync.Mutex or sync.Map) does nothing to serialize concurrent invocations
-// against state shared across processes, such as a site-wide IPv4 pool.
-// fileLock closes that gap: flock(2) locks are held per open file
-// description, so any number of processes (or goroutines, each opening their
-// own file description) opening the same path contend for the same lock.
+// fileLock is a cross-process advisory lock. Each CNI ADD or DEL is a separate
+// process, so in-process synchronization does nothing to serialize concurrent
+// invocations against state shared across processes, such as a site-wide IPv4
+// pool. These locks are held per open file description, so any number of
+// processes opening the same path contend for the same lock.
 type fileLock struct {
 	f *os.File
 }

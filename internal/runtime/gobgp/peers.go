@@ -20,9 +20,8 @@ const (
 	safiEVPN    = "evpn"
 )
 
-// familyToGlobalInt maps a model.AddressFamily to the integer used in
-// api.Global.Families. These values correspond to OC AfiSafi type codes:
-// ipv4/unicast=0, ipv6/unicast=1, l2vpn/evpn=9.
+// familyToGlobalInt maps an address family to the integer GoBGP's global
+// configuration uses, which are the standard AFI/SAFI type codes.
 func familyToGlobalInt(af model.AddressFamily) uint32 {
 	switch {
 	case af.AFI == afiIPv4 && af.SAFI == safiUnicast:
@@ -56,10 +55,10 @@ func familyFromModel(af model.AddressFamily) *api.Family {
 	return f
 }
 
-// peerFromDesired converts a DesiredPeer to a GoBGP api.Peer.
-// localAddress, if non-empty, is the process-wide default TCP source address;
-// p.UpdateSource, if non-empty, overrides it for this peer specifically.
-// routeReflectorMode, when true, marks this peer as an iBGP route-reflector client.
+// peerFromDesired converts a desired peer into GoBGP's own peer type.
+// localAddress, when non-empty, is the process-wide default TCP source, which
+// the peer's own update source overrides. routeReflectorMode marks the peer as
+// an iBGP route-reflector client.
 func peerFromDesired(p model.DesiredPeer, localAddress string, routeReflectorMode bool) *api.Peer {
 	peer := &api.Peer{
 		Conf: &api.PeerConf{
@@ -87,13 +86,13 @@ func peerFromDesired(p model.DesiredPeer, localAddress string, routeReflectorMod
 		peer.Conf.AuthPassword = p.AuthPassword
 	}
 
-	// LocalAddress pins the TCP source to the node's SRv6 loopback by default,
-	// so the return path from the RR uses a routed prefix instead of the link
-	// address. p.UpdateSource overrides this per peer (BGPPeer.spec.updateSource)
-	// for a session that needs to source from somewhere else instead — e.g. a
-	// peer reached over the node's own eth0/bond0 link rather than the SRv6
-	// underlay. RemotePort defaults to 1790 (the overlay BGP port) since port
-	// 179 is occupied by the underlay FRR bgpd on every node.
+	// The local address pins the TCP source to the node's SRv6 loopback by
+	// default, so the return path uses a routed prefix rather than a link
+	// address. A per-peer update source overrides that for a session that must
+	// source elsewhere, such as one reached over the node's own link rather
+	// than the SRv6 underlay. The remote port defaults to the overlay BGP
+	// port, the standard one being taken by the underlay daemon on every
+	// node.
 	peerLocalAddress := localAddress
 	if p.UpdateSource != "" {
 		peerLocalAddress = p.UpdateSource

@@ -26,63 +26,47 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// GatewayEngine is the interface NetworkGatewayReconciler drives, satisfied
-// by *gateway.Engine in production and a fake in tests — the same
-// interface-seam pattern galacticruntime.RuntimeManager provides for
-// BGPRouterReconciler.
-//
-// Unlike an earlier, rejected design's identically-named
-// interface, there is no SetVRFLink: this engine has no kernel VRF/Geneve
-// dependency at all (design plan decision #4).
+// GatewayEngine is the interface NetworkGatewayReconciler drives, satisfied by
+// *gateway.Engine in production and a fake in tests. The engine has no kernel
+// VRF or Geneve dependency, so nothing here sets up a link.
 type GatewayEngine interface {
 	// Reconcile converges the engine's live state toward desired.
 	Reconcile(ctx context.Context, desired gateway.EngineState) (gateway.EngineStatus, error)
 
-	// DatapathGeneration returns the datapath's current generation
-	// counter. Must be captured before desired's NetworkRule CRDs are
-	// listed — see ReconcileOrphans's doc comment.
+	// DatapathGeneration returns the datapath's current generation counter. It
+	// must be captured before the NetworkRule CRDs are listed; see
+	// ReconcileOrphans.
 	DatapathGeneration() uint64
 
-	// ReconcileOrphans cleans up rule_table state left behind by a
-	// mid-reconcile crash — see gateway.Engine.ReconcileOrphans. cutoff
-	// must have been obtained from DatapathGeneration before desired's
-	// NetworkRule CRDs were listed.
+	// ReconcileOrphans removes rule_table state left behind by a mid-reconcile
+	// crash. cutoff must come from DatapathGeneration, read before desired's
+	// NetworkRule CRDs were listed, so an entry written during the listing
+	// survives.
 	ReconcileOrphans(ctx context.Context, desired gateway.EngineState, cutoff uint64) error
 
 	// Stop tears down every currently-active rule.
 	Stop(ctx context.Context) error
 }
 
-// NetworkGatewayReconciler reconciles the single NetworkGateway object for
-// this node (spec.targetRef.name == NodeName), mirroring BGPRouterReconciler's
-// "does real reconcile work" pattern — NetworkGateway is the node-scoped
-// root object, exactly like BGPRouter.
+// NetworkGatewayReconciler reconciles the single NetworkGateway object whose
+// spec.targetRef.name is this node. NetworkGateway is the node-scoped root
+// object, as BGPRouter is for the router.
 //
-// It does three things per reconcile:
+// Each pass does three things:
 //
 //  1. Assembles a gateway.EngineState from every accepted, non-deleting
-//     NetworkRule in this namespace — under DSR's anycast model (design
-//     plan §0) every gateway node in a PoP serves every accepted rule
-//     identically, with no primary/secondary distinction to gate on (an
-//     earlier, Full-NAT-era version of this reconciler excluded rules with
-//     no status.primaryNode assigned; that field and the active-passive
-//     model it implemented no longer exist) — resolving each backend's
-//     SRv6 uSID via buildBackendSIDIndex, and converges Engine toward it.
-//  2. Reconciles a BGPAdvertisement per rule per VIP address family. This
-//     reuses the BGP API's existing l2vpn/evpn Type-5 IP-Prefix
-//     advertisement path end-to-end unmodified. VRFID/Function are left
-//     unset: these advertisements need no SRv6 decap behavior of their
-//     own (deriveRD falls back to "routerID:0", a different RD per
-//     originating node — see the go/no-go anycast spike,
-//     internal/runtime/gobgp/anycast_spike_test.go — which is exactly
-//     what lets every gateway node's identical-prefix advertisement
-//     survive as an independent, non-competing route rather than one
-//     silently replacing another). No LocalPreference is set: unlike the
-//     removed Full-NAT design's primary/secondary local-pref split, every
-//     gateway node's route is equally preferred by construction — RD
-//     independence, not BGP preference, is what keeps every node's route
-//     alive over the iBGP/EVPN mesh.
-//  3. Runs Engine.ReconcileOrphans for crash recovery.
+//     NetworkRule in the namespace, resolving each backend's SRv6 uSID, and
+//     converges the engine toward it. Under the anycast model every gateway
+//     node in a PoP serves every accepted rule identically, so there is no
+//     primary or secondary node to gate on.
+//  2. Reconciles one BGPAdvertisement per rule per VIP address family, reusing
+//     the l2vpn/evpn Type-5 IP-Prefix path unmodified. VRFID and Function stay
+//     unset, since these advertisements need no SRv6 decap behavior, which
+//     gives each originating node a distinct route distinguisher. That
+//     distinctness, not BGP preference, is what keeps every node's
+//     identical-prefix advertisement alive as an independent route, so no
+//     local preference is set either.
+//  3. Runs ReconcileOrphans for crash recovery.
 type NetworkGatewayReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -96,18 +80,15 @@ const (
 	// converged and fully advertised node.
 	reasonEngineHealthy = "EngineHealthy"
 
-	// reasonAdvertisementFailed is the Ready condition reason for a node
-	// whose engine converged but which could not publish one or more of the
-	// BGPAdvertisements that make that convergence reachable — its own
-	// self-address route, or a rule's VIP route. Such a node serves
-	// nothing, so it must not report reasonEngineHealthy (#365).
+	// reasonAdvertisementFailed is the Ready reason for a node whose engine
+	// converged but which could not publish one or more of the
+	// BGPAdvertisements that make it reachable. Such a node serves nothing, so
+	// it must not report reasonEngineHealthy.
 	reasonAdvertisementFailed = "AdvertisementFailed"
 
-	// reasonTerminating is the Ready condition reason for a NetworkGateway
-	// that is being deleted, whether observed via a live object still
-	// carrying a DeletionTimestamp or reconstructed for the NotFound case
-	// where the object is already gone (see Reconcile's two
-	// withdrawNodeAdvertisements call sites).
+	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
+	// whether observed on a live object carrying a deletion timestamp or
+	// reconstructed for the case where the object is already gone.
 	reasonTerminating = "Terminating"
 )
 
@@ -118,31 +99,24 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	gw := &bgpv1alpha1.NetworkGateway{}
 	if err := r.Get(ctx, req.NamespacedName, gw); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Every gateway node's process reconciles every NetworkGateway
-			// in the namespace (SetupWithManager has no predicate), so a
-			// sibling node's deletion reaches this reconciler too, and by
-			// the time we get here the deleted object can no longer be
-			// read to check whose it was. Ask instead whether *some*
-			// NetworkGateway still targets this node: if one does, this
-			// node's own object is untouched and its engine must keep
-			// running. Only stop when this node no longer has a
-			// NetworkGateway of its own -- otherwise one node's deletion
-			// tears down every other gateway node's data plane too (#364).
+			// Every gateway node's process reconciles every NetworkGateway in
+			// the namespace, so a sibling node's deletion reaches this
+			// reconciler too, and the deleted object can no longer be read to
+			// see whose it was. Ask instead whether some NetworkGateway still
+			// targets this node: if one does, this node is untouched and its
+			// engine must keep running. Stopping otherwise would let one
+			// node's deletion tear down every other gateway node's data
+			// plane.
 			//
-			// req.Name is the departed NetworkGateway's own name, which by
-			// this repo's own convention (every NetworkGateway fixture and
-			// deployment overlay) is always that node's node name -- the
-			// same identity applyBGPAdvertisements/publishSelfAddress
-			// already used to name every advertisement it created. This is
-			// the reachable path for #406: without a finalizer on
-			// NetworkGateway (there is none), this reconciler never
-			// observes a live object with a deletion timestamp for a node
-			// that has already left -- the object is simply gone by the
-			// time any process's Get runs, on whichever node's process
-			// happens to handle the event. Withdrawing here, keyed on
-			// req.Name rather than r.NodeName, is what makes that node's
-			// own advertisements go away even though its own process is
-			// the one most likely already gone.
+			// req.Name is the departed NetworkGateway's name, which by
+			// convention is that node's name, the same identity
+			// applyBGPAdvertisements names every advertisement with. NetworkGateway carries no finalizer, so this
+			// reconciler never observes a live object with a deletion
+			// timestamp for a node that has left: the object is gone by the
+			// time any Get runs. Withdrawing here, keyed on req.Name rather
+			// than r.NodeName, is what makes a departed node's
+			// advertisements go away even though its own process is the one
+			// most likely already gone.
 			withdrawErr := withdrawNodeAdvertisements(ctx, r.Client, req.Namespace, req.Name)
 			if withdrawErr != nil {
 				logger.Error(withdrawErr, "withdraw BGPAdvertisements for departed gateway node", "node", req.Name)
@@ -163,24 +137,18 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("get NetworkGateway %s: %w", req.NamespacedName, err)
 	}
 
-	// Node check: skip gateways that don't target this node, mirroring
-	// BGPRouterReconciler/internal/reconcile.Reconciler.BuildDesiredRouter's
-	// own targetRef.Name check.
+	// Skip gateways that do not target this node.
 	if gw.Spec.TargetRef.Name != r.NodeName {
 		return ctrl.Result{}, nil
 	}
 
 	if !gw.DeletionTimestamp.IsZero() {
-		// Withdrawn before Engine.Stop, not after: the reverse order would
-		// leave a window where this node's forwarding state is already
-		// gone but BGP still advertises it as a valid destination -- the
-		// exact blackhole #406 reports, just moved one step earlier
-		// instead of eliminated. This branch is not known to be reachable
-		// today (NetworkGateway carries no finalizer, so a deletion
-		// ordinarily removes the object before any Get here observes a
-		// live DeletionTimestamp -- see the NotFound branch above, which
-		// is), but it costs nothing to keep it correct in case a finalizer
-		// is added later or another controller races this Get.
+		// Withdrawn before Engine.Stop, not after: the reverse order leaves a
+		// window where this node's forwarding state is gone while BGP still
+		// advertises it as a valid destination. This branch is not known to be
+		// reachable while NetworkGateway carries no finalizer, since a
+		// deletion removes the object before any Get here sees a live deletion
+		// timestamp, but it costs nothing to keep correct.
 		withdrawErr := withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, gw.Name)
 		if withdrawErr != nil {
 			logger.Error(withdrawErr, "withdraw BGPAdvertisements for terminating NetworkGateway",
@@ -202,12 +170,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, withdrawErr
 	}
 
-	// Advertisement failures are collected rather than returned on the spot:
-	// the rest of the pass still runs (one bad rule must not stop the
-	// others), then they are reported on the object as
-	// reasonAdvertisementFailed and returned, so controller-runtime retries
-	// with backoff instead of leaving a node that advertised nothing
-	// claiming EngineHealthy (#365).
+	// Advertisement failures are collected rather than returned on the spot, so
+	// one bad rule does not stop the others. They are then reported on the
+	// object and returned, so controller-runtime retries with backoff instead
+	// of leaving a node that advertised nothing claiming to be healthy.
 	var advErrs []error
 
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
@@ -239,11 +205,9 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	for i := range ruleList.Items {
 		rule := &ruleList.Items[i]
 		if !rule.DeletionTimestamp.IsZero() {
-			// Being torn down: exclude from desired state immediately so
-			// this node's rule_table state converges towards "gone"
-			// without waiting on NetworkRuleReconciler's finalizer to
-			// finish the BGP-withdrawal step first (see that reconciler's
-			// doc comment on why the two aren't cross-node-synchronized).
+			// Being torn down: excluded from desired state immediately, so
+			// this node's rule_table converges toward gone without waiting on
+			// NetworkRuleReconciler's finalizer to finish withdrawing BGP.
 			continue
 		}
 		if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
@@ -294,10 +258,9 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(updateErr, "update NetworkGateway status")
 	}
 
-	// Crash recovery (see GatewayEngine.ReconcileOrphans): a failed sweep
-	// leaves orphaned rule_table state behind until some later pass
-	// succeeds, so it is returned for retry too, after the status write
-	// above so the failure is still visible on the object.
+	// Crash recovery. A failed sweep leaves orphaned rule_table state behind
+	// until a later pass succeeds, so it is returned for retry, after the
+	// status write above so the failure stays visible on the object.
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		logger.Error(err, "reconcile orphaned rule_table state")
 		return ctrl.Result{}, errors.Join(advErr, fmt.Errorf("reconcile orphaned rule_table state: %w", err))
@@ -306,10 +269,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, advErr
 }
 
-// readyConditionFor computes the Ready condition for a completed pass:
-// engine health first, then advertisement failures — a node whose engine
-// converged but whose routes never reached BGP serves no traffic, so it
-// must not report reasonEngineHealthy (#365).
+// readyConditionFor computes the Ready condition for a completed pass: engine
+// health first, then advertisement failures. A node whose engine converged but
+// whose routes never reached BGP serves no traffic, so it must not report
+// reasonEngineHealthy.
 func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Condition {
 	switch {
 	case !status.Healthy:
@@ -331,9 +294,8 @@ func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Conditi
 }
 
 // buildDesiredRule converts rule into a gateway.DesiredRule, resolving each
-// backend's SRv6 uSID via sidIndex (design plan decision #5) — there is no
-// kernel VRF/FIB dependency here at all (decision #4), unlike an earlier,
-// rejected design's identically-named function.
+// backend's SRv6 uSID through sidIndex. There is no kernel VRF or FIB
+// dependency.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
 ) (gateway.DesiredRule, error) {
@@ -373,19 +335,16 @@ func buildDesiredRule(
 }
 
 // routerNameForNode returns the name of the BGPRouter whose targetRef.name
-// matches this node, or "" if none exists yet. Thin wrapper around the
-// package-level routerNameForNode, kept as a method so existing call sites
-// and tests don't need to change.
+// matches this node, or "" if none exists yet. A method wrapper around the
+// package-level function of the same name.
 func (r *NetworkGatewayReconciler) routerNameForNode(ctx context.Context, namespace string) (string, error) {
 	return routerNameForNode(ctx, r.Client, namespace, r.NodeName)
 }
 
 // routerNameForNode returns the name of the BGPRouter whose targetRef.name
-// matches nodeName, or "" if none exists yet. Extracted as a free function
-// (originally a NetworkGatewayReconciler method only) so
-// NAT66ShardReconciler's own shard-SID advertisement (nat66shard_controller.go)
-// can resolve the same "which BGPRouter is mine" lookup without either
-// duplicating it or reaching into a sibling reconciler's method set.
+// matches nodeName, or "" if none exists yet. A free function so
+// NAT66ShardReconciler can resolve the same "which BGPRouter is mine" lookup
+// without duplicating it or reaching into another reconciler's method set.
 func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName string) (string, error) {
 	list := &bgpv1alpha1.BGPRouterList{}
 	if err := c.List(ctx, list,
@@ -400,31 +359,24 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 	return list.Items[0].Name, nil
 }
 
-// applyBGPAdvertisements reconciles the BGPAdvertisement object(s) for a
-// single rule — one per non-empty VIP address family, name-qualified by
-// r.NodeName. The node qualifier is required, not cosmetic: this reconciler
-// runs once per gateway node, and under DSR's anycast model every gateway
-// node advertises every accepted rule it holds identically (see this file's
-// package doc comment) — without the node qualifier, every gateway node in
-// a namespace would compute the exact same name for the same rule and race
-// to create/update a single shared object, the same AlreadyExists failure
-// mode the removed Full-NAT/primary-secondary design already hit live.
+// applyBGPAdvertisements reconciles the BGPAdvertisements for a single rule,
+// one per non-empty VIP address family, with names qualified by r.NodeName.
 //
-// No LocalPreference is set on these advertisements: unlike that removed
-// design (which split PrimaryLocalPref/SecondaryLocalPref to pick one
-// "best" node), every gateway node's route here is equally preferred by
-// construction — each one gets its own distinct Route Distinguisher
-// (paths.go's deriveRD, RFC 4364 §4.3.2), which is what keeps every node's
-// advertisement alive as an independent, non-competing route rather than
-// BGP collapsing them to a single best path (see the go/no-go anycast
-// spike, internal/runtime/gobgp/anycast_spike_test.go).
+// The node qualifier is required. This reconciler runs once per gateway node,
+// and under the anycast model every gateway node advertises every accepted
+// rule identically, so without it every node in a namespace would compute the
+// same name for the same rule and race to own one shared object.
 //
-// Every object created or touched here is also labeled with
-// networkRuleLabel (backfilled on existing objects too), which is what lets
-// networkrule_controller.go's teardown find every advertisement this rule
-// ever caused across every gateway node — including one for a node that
-// has since left the namespace — without depending on this naming
-// convention at all; see networkRuleLabel's doc comment.
+// No local preference is set. Every gateway node's route is equally preferred
+// by construction, because each gets its own route distinguisher, which is what
+// keeps the advertisements alive as independent routes instead of BGP
+// collapsing them to a single best path.
+//
+// Every object created or touched here is labeled with networkRuleLabel,
+// backfilled on existing objects too. That label is what lets rule teardown
+// find every advertisement a rule ever caused on any gateway node, including
+// one that has since left the namespace, without depending on this naming
+// convention.
 func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired gateway.DesiredRule, routerName string,
 ) error {
@@ -444,13 +396,10 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 			continue
 		}
 		name := rule.Name + "-" + r.NodeName + "-" + g.suffix
-		// This advertisement is built as l2vpn/evpn regardless of the VIP's
-		// own IPv4/IPv6 family — see this reconciler's doc comment for why
-		// (plain ipv4/ipv6-unicast BGPAdvertisements are never actually
-		// originated by the runtime). The per-family split still matters
-		// because a single EVPN IP-Prefix route's own Prefix field is
-		// single-family (see internal/runtime/gobgp/paths.go's
-		// gatewayForPrefix), so a dual-stack rule needs two advertisements.
+		// Built as l2vpn/evpn whatever the VIP's own family, since the runtime
+		// never originates plain unicast advertisements. The per-family split
+		// still matters because one EVPN IP-Prefix route's Prefix field is
+		// single-family, so a dual-stack rule needs two advertisements.
 
 		prefixes := make([]bgpv1alpha1.Prefix, len(g.prefixes))
 		for i, p := range g.prefixes {
@@ -486,10 +435,8 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 		}
 
 		advCopy := adv.DeepCopy()
-		// Backfills networkRuleLabel on an advertisement created before this
-		// label existed, so teardown's label-selector List (see
-		// networkrule_controller.go's reconcileDelete) finds it too — self-
-		// healing, not just a create-time concern.
+		// Backfill networkRuleLabel on an advertisement created before the
+		// label existed, so teardown's label-selector list finds it too.
 		if advCopy.Labels == nil {
 			advCopy.Labels = map[string]string{}
 		}
@@ -527,23 +474,15 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return ruleToGatewayRequests(ctx, r.Client, obj)
 			}),
 		).
-		// buildBackendSIDIndex (via buildDesiredRule) resolves each rule's
-		// backend uSID from BGPRouter/BGPAdvertisement/BGPVRFInstance, but
-		// none of those were ever watched -- only NetworkRule/NetworkGateway
-		// themselves. A backend whose owning BGPAdvertisement doesn't exist
-		// yet at reconcile time (a real, observed startup race: this
-		// reconciler's own initial reconcile can run before
-		// NetworkRuleReconciler/galactic-router have created and
-		// re-reconciled it) permanently fails that rule with "no
-		// BGPAdvertisement owned by VPC ... found" -- buildDesiredRule's
-		// error is logged and the rule is skipped, not requeued, and
-		// nothing the reconciler *does* watch ever changes afterward, so
-		// the rule stays broken until something unrelated (a NetworkRule
-		// edit, a pod restart) happens to trigger another reconcile. These
-		// three watches close that gap the same way NetworkRule's own
-		// watch does: broadcast to every NetworkGateway in the namespace,
-		// since any of them could be the one whose backend resolution was
-		// waiting on this exact object.
+		// Backend uSIDs resolve from BGPRouter, BGPAdvertisement, and
+		// BGPVRFInstance, so all three must be watched. A backend whose owning
+		// BGPAdvertisement does not exist yet at reconcile time, a real
+		// startup race, fails that rule with "no BGPAdvertisement owned by VPC
+		// ... found": the error is logged and the rule skipped rather than
+		// requeued, so without these watches nothing would trigger another
+		// reconcile and the rule would stay broken until an unrelated event.
+		// Each broadcasts to every NetworkGateway in the namespace, since any
+		// of them could be the one waiting on this object.
 		Watches(&bgpv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "BGPRouter", obj.GetName())
@@ -563,13 +502,11 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// ruleToGatewayRequests maps a NetworkRule change to every NetworkGateway
-// in its namespace. Unlike peerToRouterRequests (which targets exactly the
-// BGPPeer's own routerRef), a NetworkRule carries no gatewayRef — the
-// Active-Active BGP model means every gateway node in a rule's PoP
-// (namespace, in this containerlab-style one-PoP-per-cluster deployment)
-// must re-evaluate its own local-pref and engine state whenever any rule
-// changes, so this is an intentional broadcast rather than a missing index.
+// ruleToGatewayRequests maps a NetworkRule change to every NetworkGateway in
+// its namespace. A NetworkRule carries no gatewayRef, and under the
+// Active-Active model every gateway node in the rule's PoP must re-evaluate its
+// own engine state whenever any rule changes, so the broadcast is intentional
+// rather than a missing index.
 func ruleToGatewayRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
 	rule, ok := obj.(*bgpv1alpha1.NetworkRule)
 	if !ok {
@@ -579,10 +516,9 @@ func ruleToGatewayRequests(ctx context.Context, c client.Client, obj client.Obje
 }
 
 // broadcastToGatewayRequests lists every NetworkGateway in namespace and
-// returns a reconcile request for each — the shared primitive
-// ruleToGatewayRequests and SetupWithManager's BGPRouter/BGPAdvertisement/
-// BGPVRFInstance watches all build on. sourceKind/sourceName are for the
-// list-failure log line only.
+// returns a reconcile request for each. It is the primitive the NetworkRule,
+// BGPRouter, BGPAdvertisement, and BGPVRFInstance watches all build on.
+// sourceKind and sourceName appear only in the list-failure log line.
 func broadcastToGatewayRequests(
 	ctx context.Context, c client.Client, namespace, sourceKind, sourceName string,
 ) []ctrlreconcile.Request {
@@ -603,8 +539,7 @@ func broadcastToGatewayRequests(
 }
 
 // gatewayNodeNames returns the targetRef.name of every NetworkGateway in
-// namespace — the pool of gateway nodes for this PoP that
-// gateway.AssignPrimaryNode chooses from.
+// namespace, the pool of gateway nodes for this PoP.
 func gatewayNodeNames(ctx context.Context, c client.Client, namespace string) ([]string, error) {
 	list := &bgpv1alpha1.NetworkGatewayList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -618,10 +553,9 @@ func gatewayNodeNames(ctx context.Context, c client.Client, namespace string) ([
 }
 
 // isGatewayNode reports whether nodeName is one of namespace's registered
-// gateway nodes. NetworkRuleReconciler uses this to scope its per-object
-// lifecycle work (finalizer, primary_node assignment) to gateway-role nodes
-// only — every other node's galactic-router process leaves NetworkRule
-// objects alone.
+// gateway nodes. NetworkRuleReconciler uses it to scope its per-object
+// lifecycle work to gateway-role nodes, so every other node's router process
+// leaves NetworkRule objects alone.
 func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName string) (bool, error) {
 	names, err := gatewayNodeNames(ctx, c, namespace)
 	if err != nil {
@@ -635,42 +569,24 @@ func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName str
 	return false, nil
 }
 
-// withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway
-// node nodeName created in namespace: every per-rule, per-address-family
-// route it advertised (named "<rule>-<node>-v4"/"-v6" -- see
-// applyBGPAdvertisements). An earlier, Full-NAT-era version of this
-// function also withdrew a "<node>-selfaddr" self-address route
-// (publishSelfAddress); DSR's anycast model has no self-address to
-// publish at all (no gateway node rewrites addresses, so none needs its
-// own reachable SNAT source advertised — see this file's package doc
-// comment), so that name pattern no longer applies here.
+// withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway node
+// nodeName created in namespace: each per-rule, per-address-family route it
+// advertised, found by the "<rule>-<node>-v4"/"-v6" names applyBGPAdvertisements
+// gives them.
 //
-// This is issue #367's teardown fix in reverse. That fix
-// (networkRuleLabel, networkrule_controller.go's reconcileDelete)
-// withdraws every advertisement a *rule* caused, no matter which node
-// created it, discovered by List + label selector rather than
-// reconstructed names because the namespace's *current* gateway-node
-// membership no longer includes a node that has since left. The same
-// blind spot exists here in the other direction: a rule's own
-// advertisement is name-qualified by the node that created it, but
-// nothing lists "every rule this node ever advertised" the way
-// networkRuleLabel lists "every node that ever advertised this rule" --
-// especially once the rule itself has been deleted and left no object to
-// enumerate backwards from. Selecting by NAME rather than by a new label
-// sidesteps that: it needs no rule object, live or deleted, and no label
-// backfill pass from a node that is gone by the time this runs -- the
-// exact self-healing gap issue #406's own "label backfill" note flags for
-// networkRuleLabel would otherwise repeat here for a brand new label.
+// It selects by name rather than by label, the mirror image of how rule
+// teardown works. That path lists every advertisement a rule caused, whatever
+// node made it, because the namespace's current gateway membership no longer
+// includes a node that has left. Here the gap runs the other way: nothing
+// enumerates every rule a node ever advertised, least of all once the rule
+// itself is deleted. Selecting by name needs no rule object, live or deleted,
+// and no label backfill from a node that is already gone.
 //
-// Called with the departing node's own identity, not r.NodeName: the
-// caller may be running on any surviving gateway node's process (every
-// gateway node's process reconciles every NetworkGateway in the
-// namespace, see Reconcile's NotFound branch), most likely because the
-// departing node's own process is already gone -- that is exactly why
-// its NetworkGateway object got deleted in the first place. Concurrent
-// callers across surviving nodes racing this same sweep for the same
-// departed node is expected and harmless: every delete here is
-// idempotent (not-found is not an error).
+// nodeName is the departing node's identity, not the caller's. The caller may
+// be any surviving gateway node's process, most likely because the departing
+// node's process is already gone, which is why its NetworkGateway was deleted.
+// Surviving nodes racing this same sweep is expected and harmless, since every
+// delete is idempotent.
 func withdrawNodeAdvertisements(ctx context.Context, c client.Client, namespace, nodeName string) error {
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
 	if err := c.List(ctx, advList, client.InNamespace(namespace)); err != nil {

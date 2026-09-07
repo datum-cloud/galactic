@@ -59,23 +59,22 @@ func newRootCommand() *cobra.Command {
 				return version.All.Encode(os.Stdout)
 			}
 
-			// Real CNI runtimes always pipe the network config JSON on
-			// stdin and close it. If stdin is an interactive terminal
-			// instead, no config will ever arrive and skel's blocking
-			// stdin read would hang forever — print version info instead.
+			// Real CNI runtimes always pipe the network config on stdin and
+			// close it. When stdin is an interactive terminal instead, no
+			// config ever arrives and the library's blocking read would hang
+			// forever, so print version info instead.
 			if term.IsTerminal(int(os.Stdin.Fd())) {
 				fmt.Printf("%s version %s\n", appName, metadata.Version)
 				fmt.Printf("CNI protocol versions supported: %s\n", strings.Join(version.All.SupportedVersions(), ", "))
 				return nil
 			}
 
-			// This plugin never enters a network namespace — it installs
-			// routes into the VRF table the master plugin already created.
-			// For tap-mode attachments, CNI_NETNS points at the host netns,
-			// which equals this process's ambient netns and would trigger
-			// the CNI library's same-netns rejection check. Set the override
-			// unconditionally (it is a no-op for veth-mode where CNI_NETNS
-			// differs from the ambient netns anyway).
+			// This plugin never enters a network namespace; it installs routes
+			// into the VRF table the master plugin created. For a tap
+			// attachment the namespace given is the host's, which equals this
+			// process's own and would trigger the library's same-namespace
+			// rejection. The override is set unconditionally, being a no-op
+			// for veth where the two differ anyway.
 			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
 
 			cniroute.RunPlugin()

@@ -13,14 +13,12 @@ import (
 
 const netnsPath = "/var/run/netns"
 
-// NetNSExists checks whether the network namespace at the given path (as
-// recorded by the CNI plugin at ADD time — see cni.netnsAnnotationKey) is
-// still present on this node.
+// NetNSExists reports whether the network namespace at netnsPathStr, as recorded
+// by the CNI plugin at ADD time, is still present on this node.
 //
-// This cannot be reconstructed from a container ID: netns bind-mounts are
-// named by the container runtime's own convention (e.g. containerd's
-// "cni-<uuid>"), which has no relationship to the container ID the CNI
-// plugin receives. The exact path used at ADD time must be recorded and
+// The path cannot be reconstructed from a container ID: namespace bind mounts
+// are named by the runtime's own convention, which bears no relationship to the
+// ID the plugin receives. The exact path used at ADD must be recorded and
 // checked verbatim.
 func NetNSExists(netnsPathStr string) bool {
 	if netnsPathStr == "" {

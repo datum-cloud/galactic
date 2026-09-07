@@ -4,88 +4,50 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// edgedsr.c implements the XDP ingress datapath for the edge gateway's
-// Maglev/DSR (Direct Server Return) consistent-hash load-balancing engine,
-// IPv6-only, phase 1 scope (plain TCP/UDP, no extension headers) -- see the
-// design plan's §0 for the full architectural rationale. This replaces
-// edgenat.c's Full-NAT (DNAT+SNAT) datapath entirely, not a mode alongside
-// it: breaking change, no migration path, per the redesign's explicit
-// decision to drop Full-NAT rather than grow a second personality.
+// edgedsr.c implements the XDP ingress datapath for the edge gateway's Maglev
+// direct-server-return load balancer. IPv6-only, plain TCP and UDP, no
+// extension headers.
 //
-// The defining simplification versus edgenat.c: this program does NO
-// address or port rewriting at all. It picks a backend via consistent
-// hashing on the client's own (address, port) and pushes an SRv6 outer
-// header addressed to that backend's worker node -- the untouched original
-// packet travels inside, unmodified. The backend answers the client
-// *directly* (internal/plumbing/vip's loopback bind, or the tap-boundary
-// substitution in internal/plumbing/ebpf/prog/usid.c, for a VM backend) --
-// reply traffic never re-enters this program at all. Consequences that
-// follow directly from that:
+// It does no address or port rewriting at all. It picks a backend by consistent
+// hashing on the client's own address and port, then pushes an SRv6 outer
+// header addressed to that backend's worker node; the original packet travels
+// inside unmodified. The backend answers the client directly, so reply traffic
+// never re-enters this program. That has three consequences:
 //
-//   - No conn_table. Full-NAT needed one to remember which backend/SNAT
-//     port a flow was assigned, because DNAT/SNAT state has to persist for
-//     the life of the connection. DSR has nothing to remember: the same
-//     consistent-hash table produces the same backend for the same flow on
-//     every packet, forwards or not, with no state at all.
-//   - No return/decap branch. Full-NAT's handle_return existed solely to
-//     route its own SNAT'd replies back through this node. DSR never sees
-//     replies, so there is nothing to decap here.
-//   - No PAT/SNAT-port allocation, no L3/L4 checksum touch anywhere in this
-//     file -- the packet's own checksum is already correct for its own,
-//     completely unmodified content.
-//
-// What IS reused from edgenat.c, unchanged: push_outer_header/
-// resolve_fib_and_write_eth's SRv6 encap-push mechanics (one
-// bpf_xdp_adjust_head(-40) growing the packet, a fresh 54-byte
-// Ethernet+IPv6 header written at the front, bpf_fib_lookup resolving the
-// L2 next-hop) -- encapsulating toward a backend's worker-node uSID is
-// identical work whether or not the datapath also NATs, so this file
-// copies that mechanism rather than reinventing it.
+//   - No connection table. A full-NAT datapath needs one to remember which
+//     backend and translated port a flow was assigned, because that state must
+//     persist for the life of the connection. Here the same hash table produces
+//     the same backend for the same flow on every packet, with no state.
+//   - No return or decap branch, since this node never sees replies.
+//   - No port allocation and no checksum touch anywhere in this file, the
+//     packet's own checksum already being correct for its unmodified content.
 //
 // Packet path:
 //
-//  1. Parse the outer Ethernet + IPv6 header (bounds-checked). Not IPv6, or
-//     unparseable -- XDP_PASS (falls through to the kernel stack).
-//  2. Parse the L4 header (TCP or UDP only; anything else -- XDP_PASS).
-//     Only source/destination port are read; nothing here is ever
-//     rewritten, so no pointer-to-field resolution is needed the way
-//     edgenat.c's parse_l4/l4_view needed for its later rewrite.
-//  3. Match (proto, dst port, dst addr) against vip_table, keyed
-//     identically to edgenat.c's former rule_table -- a VIP is globally
-//     unique by construction, no tenant dimension needed. No match --
-//     XDP_PASS (not one of this gateway's VIPs).
-//  4. Claimed past this point (this gateway owns this VIP+port+protocol):
-//     bump vip_stats_table's hit counters (packets/bytes/last_seen_ns),
-//     lazily creating the row on first match -- same split-from-vip_table
-//     convention edgenat.c's rule_stats_table used, and for the identical
-//     reason (issue #361: a control-plane Register's read-modify-write
-//     must never race this program's own per-packet increments).
-//  5. Empty backend list -- drop, counted (EMPTY_BACKEND_LIST). Otherwise,
-//     hash the client's own (address, port) and look up the precomputed
-//     Maglev table (vip_table's own maglev_table field, populated by the
-//     Go control plane's internal/maglev.Table -- see edgemap's doc
-//     comment) to get a backend index, deterministically and statelessly:
-//     every gateway node computes the identical index for the identical
-//     flow from the identical (VIP, backend list) input, which is what
-//     makes this design safe under anycast/ECMP (design plan §0's go/no-go
-//     spike) -- a flow's packets landing on a different gateway node
-//     mid-connection still resolve to the same backend.
-//  6. Push a fresh 40-byte outer IPv6 header addressed to the chosen
-//     backend's own worker-node SRv6 uSID (vip_table's per-backend field,
-//     resolved by the Go control plane the same way any other cross-node
-//     SRv6 destination is -- srv6.ComputeSID over the backend's
-//     BGPRouter/BGPAdvertisement), sourced from this node's own
-//     encap_config_table entry (this node's plain SRv6-reachable address --
-//     unlike edgenat.c's gw_config, this is never a NAT/SNAT source and
-//     never needs to match anything on a return path, since there is no
-//     return path through this node at all). Resolve the L2 next-hop via
-//     bpf_fib_lookup and XDP_TX back out this same interface.
+//  1. Parse the outer Ethernet and IPv6 header, bounds-checked. Not IPv6, or
+//     unparseable: XDP_PASS to the kernel stack.
+//  2. Parse the L4 header, TCP or UDP only. Only the ports are read, and
+//     nothing is ever rewritten.
+//  3. Match (proto, destination port, destination address) against vip_table. A
+//     VIP is globally unique by construction, so no tenant dimension is needed.
+//     No match: XDP_PASS.
+//  4. Claimed past this point. Bump vip_stats_table's counters, creating the
+//     row on first match. Stats live in their own map so a control-plane
+//     read-modify-write can never race these per-packet increments.
+//  5. An empty backend list is a counted drop. Otherwise hash the client's
+//     address and port and index the precomputed Maglev table to get a backend.
+//     Every gateway node computes the same index for the same flow from the
+//     same inputs, which is what makes this safe under anycast: a flow landing
+//     on a different node mid-connection still resolves to the same backend.
+//  6. Push a fresh 40-byte outer IPv6 header addressed to that backend's
+//     worker-node uSID, sourced from this node's encap_config_table entry,
+//     which is simply this node's SRv6-reachable address and is never compared
+//     against anything on a receive path. Resolve the L2 next hop and XDP_TX
+//     back out the same interface.
 //
-// The same eBPF-verifier bounds-narrowing gotcha edgenat.c's own header
-// comment documents applies to the backend-index lookup below (a Maglev
-// table entry is a plain byte read from a map, not derived from a %
-// expression the verifier can bound on its own) -- EDGE_BARRIER_VAR is
-// reused unchanged.
+// The verifier's bounds-narrowing behavior described at EDGE_BARRIER_VAR
+// applies to the backend-index lookup below, a plain byte read from a map
+// rather than an expression the verifier can bound.
 #include <linux/bpf.h>
 
 // __u8/__u16/__u32/__u64/__s16/__s32/__be16/__be32 all come transitively
@@ -98,9 +60,7 @@
 
 // EDGE_BARRIER_VAR forces the compiler to treat var as opaque immediately
 // before a bounds-narrowing operation on it, so that operation survives
-// dead-code elimination even when clang can otherwise prove the narrowing
-// is redundant -- see edgenat.c's identical macro and header-comment
-// gotcha; unchanged here.
+// dead-code elimination even where clang can prove the narrowing redundant.
 #define EDGE_BARRIER_VAR(var) asm volatile("" : "=r"(var) : "0"(var))
 
 // ---------------------------------------------------------------------
@@ -125,32 +85,24 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 #define EDGE_IPPROTO_UDP 17
 #define EDGE_IPPROTO_IPV6 41 // this program's own pushed outer header's Next Header, always
 
-// EDGE_MAX_BACKENDS matches NetworkRuleSpec.Backends' own
-// +kubebuilder:validation:MaxItems=64 (go.datum.net/network's rule_types.go)
-// -- edgenat.c's identical constant was fixed at 8, silently below the
-// CRD's own advertised limit; closed here as a natural side effect of this
-// rewrite rather than carried forward unexamined. Must stay a power of two
-// for the EDGE_BARRIER_VAR mask trick below.
+// EDGE_MAX_BACKENDS matches the CRD's own maximum backend count. It must stay a
+// power of two for the masking below to be equivalent to a range check.
 #define EDGE_MAX_BACKENDS 64
 
-// EDGE_MAGLEV_TABLE_SIZE is this program's per-VIP Maglev lookup table
-// size (internal/maglev.Table, mirrored here as a flat backend-index
-// array -- see edgemap's doc comment for the Go-side construction). The
-// Maglev paper recommends >=100x the backend count for its disruption
-// bound to hold with wide margin; at EDGE_MAX_BACKENDS=64 that would be
-// 6400+, but this is a *per-VIP* table (bounded by vip_table's own
-// max_entries below), not the paper's single datacenter-wide table -- 1021
-// (prime, ~16x this program's own backend cap) keeps each vip_table row's
-// memory cost modest (~3KB) while still giving a meaningfully bounded
-// disruption fraction (internal/maglev.Table's own tests pin the bound at
-// this multiplier). Revisit if a real deployment's measured disruption on
-// backend-set changes needs a tighter bound than this ratio gives.
+// EDGE_MAGLEV_TABLE_SIZE is the per-VIP Maglev lookup table size, mirrored here
+// as a flat backend-index array.
+//
+// The Maglev paper recommends at least 100 times the backend count for its
+// disruption bound to hold with wide margin, which at this backend cap would be
+// 6400 or more. That figure is for a single datacenter-wide table; this is per
+// VIP, so 1021, prime and roughly 16 times the backend cap, keeps each row's
+// memory cost near 3KB while still bounding disruption meaningfully. Revisit if
+// a deployment's measured disruption on backend-set changes needs tighter.
 #define EDGE_MAGLEV_TABLE_SIZE 1021
 
 // ---------------------------------------------------------------------
-// Minimal, self-contained header structs -- byte-exact to the wire
-// formats, matching edgenat.c/usid.c's own convention (one external header
-// dependency: <linux/bpf.h>).
+// Minimal, self-contained header structs, byte-exact to the wire formats, with
+// one external header dependency.
 // ---------------------------------------------------------------------
 
 struct edge_ethhdr {
@@ -168,10 +120,8 @@ struct edge_ip6hdr {
 	__u8 daddr[16];
 } __attribute__((packed));
 
-// Only source/dest port are ever read (both TCP and UDP place them at the
-// identical offset) -- unlike edgenat.c's edge_tcphdr/edge_udphdr, no
-// other field of either header is ever touched, so one shared struct
-// suffices instead of two protocol-specific ones.
+// Only the ports are ever read, and TCP and UDP place them at the same offset,
+// so one shared struct covers both.
 struct edge_l4ports {
 	__be16 source;
 	__be16 dest;
@@ -181,11 +131,9 @@ struct edge_l4ports {
 // Map key/value types.
 // ---------------------------------------------------------------------
 
-// struct backend is one load-balancing target -- identical fields to
-// edgenat.c's struct backend (this file's own encap-push needs exactly the
-// same three fields; DSR just never touches addr/port for rewriting,
-// only carries them through as identifying metadata the Go control plane
-// may want for telemetry, and usid for the actual encap destination).
+// struct backend is one load-balancing target. addr and port are carried
+// through as identifying metadata for the control plane; only usid is used, as
+// the encapsulation destination.
 struct backend {
 	__u8 addr[16];
 	__be16 port;
@@ -202,17 +150,14 @@ struct vip_key {
 	__u8 vip[16];
 };
 
-// struct vip_value is vip_table's value: the backend set for one
-// VIP+port+protocol, plus a precomputed Maglev lookup table mapping each
-// of EDGE_MAGLEV_TABLE_SIZE slots to an index into backends[]. generation
-// is a __u64 monotonic-clock reading stamped by the Go control plane on
-// every Register call, backing the same crash-safe Reconcile cutoff
-// pattern usid.c's vrf_value.generation and edgenat.c's former
-// rule_value.generation already use -- this program never reads it.
+// struct vip_value is vip_table's value: the backend set for one VIP, port, and
+// protocol, plus a precomputed Maglev table mapping each slot to an index into
+// backends. generation is a monotonic reading stamped by the control plane on
+// every registration, backing the crash-safe reconcile cutoff, and is never
+// read here.
 //
-// Deliberately no packet/byte/drop counters here, for the identical
-// issue-#361 reason edgenat.c's own rule_value doc comment gives: see
-// struct vip_stats_value below, a separate map this program alone writes.
+// Deliberately no counters: see struct vip_stats_value below, a separate map
+// only this program writes.
 struct vip_value {
 	__u32 backend_count;
 	struct backend backends[EDGE_MAX_BACKENDS];
@@ -220,11 +165,9 @@ struct vip_value {
 	__u64 generation;
 };
 
-// struct vip_stats_value is vip_stats_table's value -- identical shape and
-// identical reason for existing as its own map as edgenat.c's former
-// rule_stats_value (issue #361): the Go control plane's Register never
-// writes this map at all, so its own per-packet __sync_fetch_and_add calls
-// here never race a control-plane read-modify-write.
+// struct vip_stats_value is vip_stats_table's value. It is a separate map
+// because the control plane never writes it, so this program's per-packet
+// atomic increments can never race a control-plane read-modify-write.
 struct vip_stats_value {
 	__u64 packets;
 	__u64 bytes;
@@ -232,13 +175,10 @@ struct vip_stats_value {
 	__u64 last_seen_ns;
 };
 
-// struct encap_config is encap_config_table's single-entry value: this
-// gateway node's own plain SRv6-reachable address, used as the outer
-// source for every pushed header. Unlike edgenat.c's gw_config (which
-// doubled as the Full-NAT return-branch match address), this is never
-// compared against anything on a receive path -- DSR has no return branch
-// through this node at all -- so it is exactly this node's own
-// loaddr.Detect()-equivalent address, nothing more.
+// struct encap_config is encap_config_table's single-entry value: this gateway
+// node's SRv6-reachable address, used as the outer source of every pushed
+// header. It is never compared against anything on a receive path, since no
+// return traffic passes through this node.
 struct encap_config {
 	__u8 encap_src[16];
 };
@@ -304,11 +244,9 @@ static EDGE_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vip_stats
 }
 
 // fnv1a_flow is a deterministic, stateless hash of a flow's client-facing
-// tuple -- identical technique to edgenat.c's own fnv1a_flow, reused here
-// as the sole input to Maglev slot selection (hash % EDGE_MAGLEV_TABLE_SIZE)
-// rather than a direct hash % backend_count: this is exactly what makes
-// backend-set changes reassign only ~1/N of flows instead of ~100% of
-// them (see internal/maglev's own doc comment).
+// tuple. It feeds Maglev slot selection rather than a direct modulo over the
+// backend count, which is what makes a backend-set change reassign roughly one
+// flow in N instead of nearly all of them.
 static EDGE_ALWAYS_INLINE __u32 fnv1a_flow(const __u8 addr[16], __be16 port)
 {
 	__u32 h = 2166136261u;
@@ -323,14 +261,11 @@ static EDGE_ALWAYS_INLINE __u32 fnv1a_flow(const __u8 addr[16], __be16 port)
 	return h;
 }
 
-// resolve_fib_and_write_eth and push_outer_header are edgenat.c's own
-// encap-push mechanics, unchanged (see edgenat.c's identical functions for
-// the full byte-level rationale) -- copied rather than shared via a common
-// header because the two datapaths' surrounding types (struct edge_ip6hdr
-// etc.) are independently defined in each file per this codebase's
-// existing one-external-header-dependency convention; duplicating ~40
-// lines of proven, unchanging mechanism is judged preferable to a shared
-// header neither file otherwise needs.
+// resolve_fib_and_write_eth and push_outer_header carry the encapsulation
+// mechanics: grow the packet, write a fresh Ethernet and IPv6 header at the
+// front, and resolve the L2 next hop. They are duplicated rather than shared
+// through a header because each datapath file defines its own header structs
+// under the one-external-dependency convention.
 static EDGE_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifindex,
 							  const __u8 src[16], const __u8 dst[16],
 							  __u16 tot_len, struct edge_ethhdr *eth)
@@ -384,18 +319,12 @@ static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 s
 	struct edge_ethhdr *eth = data;
 	struct edge_ip6hdr *outer = (void *) (eth + 1);
 
-	// vtc_flow's first nibble is the IPv6 version field -- must be 6, not
-	// left at a zeroed default. Found via live-kernel investigation (not
-	// BPF_PROG_TEST_RUN, which never validates this): a real receiver
-	// downstream of this push (e.g. tcpdump on a veth peer) parses this
-	// pushed header as "invalid IPv6, version 0 != 6" -- a real,
-	// previously uncaught bug (inherited unchanged from the removed
-	// edgenat.c's identical push_outer_header), not specific to DSR.
-	// usid_ingress's own decap doesn't validate the version nibble at all
-	// (it reads fields at fixed offsets unconditionally), so this was
-	// invisible on that specific receive path -- but any version-checking
-	// intermediate hop or receiver would legitimately reject every packet
-	// this datapath ever pushed.
+	// vtc_flow's first nibble is the IPv6 version and must be 6 rather than a
+	// zeroed default. A synthetic program run never validates this, but any
+	// receiver downstream parses such a header as invalid IPv6 with version 0.
+	// usid_ingress's decap reads fields at fixed offsets and never checks the
+	// version, so this is invisible on that path, while any version-checking
+	// hop or receiver would reject every packet pushed.
 	__builtin_memset(outer->vtc_flow, 0, sizeof(outer->vtc_flow));
 	outer->vtc_flow[0] = 0x60;
 	outer->payload_len = inner_payload_len_plus_ip6hdr;
@@ -471,32 +400,24 @@ int edge_lb(struct xdp_md *ctx)
 		return XDP_DROP;
 	}
 
-	// Maglev slot selection: confirmed empirically via BPF_PROG_TEST_RUN
-	// that, unlike a literal array index, the verifier does NOT track a
-	// bounded range through clang's emitted division-by-constant sequence
-	// for hash % EDGE_MAGLEV_TABLE_SIZE (1021 is prime, so clang lowers
-	// the mod to a multiply-and-shift reciprocal trick, not a mask) --
-	// "R2 unbounded memory access" at the maglev_table read below without
-	// this. The same EDGE_BARRIER_VAR-then-clamp technique the
-	// backend_idx step already needs (for a different reason: a plain
-	// byte read from a map, not derivable from any expression at all) is
-	// applied here too, just as an explicit range clamp instead of a mask
-	// (EDGE_MAGLEV_TABLE_SIZE is prime, not a power of two, so no bitmask
-	// is equivalent to bounding it).
+	// Maglev slot selection. Unlike a literal array index, the verifier does
+	// not track a bounded range through clang's division-by-constant sequence
+	// for this modulo: the table size is prime, so clang lowers it to a
+	// multiply-and-shift reciprocal rather than a mask, and the read below is
+	// rejected as unbounded without help. The same barrier-then-clamp technique
+	// the backend index needs is applied here, as an explicit range clamp
+	// rather than a mask, since no bitmask bounds a prime.
 	__u32 slot = fnv1a_flow(ip6->saddr, ports->source) % EDGE_MAGLEV_TABLE_SIZE;
 	EDGE_BARRIER_VAR(slot);
 	if (slot >= EDGE_MAGLEV_TABLE_SIZE)
 		slot = EDGE_MAGLEV_TABLE_SIZE - 1;
 	__u8 backend_idx = rule->maglev_table[slot];
 
-	// backend_idx is a plain byte read from a map value, not derived from
-	// a %-expression the verifier can bound on its own -- the same
-	// bounds-narrowing gotcha edgenat.c's own header comment and
-	// EDGE_BARRIER_VAR macro document, reused unchanged: EDGE_MAX_BACKENDS
-	// must stay a power of two for this mask to be equivalent to a
-	// range-check, and the barrier call keeps clang from eliminating it
-	// as dead code once it (correctly, but unhelpfully for the verifier)
-	// proves the mask redundant given backend_idx's declared type.
+	// backend_idx is a plain byte read from a map value, not derived from an
+	// expression the verifier can bound. EDGE_MAX_BACKENDS must stay a power of
+	// two for this mask to be equivalent to a range check, and the barrier
+	// keeps clang from eliminating the mask as dead once it proves it redundant
+	// given the declared type.
 	EDGE_BARRIER_VAR(backend_idx);
 	backend_idx &= (EDGE_MAX_BACKENDS - 1);
 	struct backend *b = &rule->backends[backend_idx];
@@ -508,26 +429,17 @@ int edge_lb(struct xdp_md *ctx)
 		return XDP_DROP;
 	}
 
-	// The inner packet is pushed completely unmodified -- this is DSR's
-	// entire premise (design plan §0): no DNAT, no SNAT, no checksum
-	// touch, the client's own packet travels inside untouched all the way
-	// to the backend, which replies to the client directly.
+	// The inner packet is pushed completely unmodified: no translation and no
+	// checksum touch, the client's packet travelling inside untouched to the
+	// backend, which replies to the client directly.
 	//
-	// push_outer_header's own parameter name says "plus ip6hdr": the
-	// outer header's payload_len must cover the *entire* inner packet,
-	// including the inner IPv6 header itself (40 bytes), not just the
-	// inner UDP/TCP payload ip6->payload_len alone names. A previous
-	// version of this call site passed ip6->payload_len directly,
-	// undercounting the outer header's declared length by exactly 40
-	// bytes on every packet -- found via live-kernel investigation (a
-	// real receiver, e.g. tcpdump on a veth peer, parsed the result as
-	// "length 24 < 40 (invalid)"), inherited unchanged from the removed
-	// edgenat.c's identical bug. usid_ingress's own decap doesn't
-	// validate payload_len at all (fixed-offset reads only), so this was
-	// invisible on that specific receive path, same as the version-nibble
-	// bug this file's other recent fix addresses -- but any
-	// length-validating intermediate hop or receiver would have rejected
-	// every packet this datapath ever pushed.
+	// The outer header's payload length must cover the entire inner packet
+	// including its own 40-byte IPv6 header, not just the transport payload the
+	// inner payload_len names. Passing that field directly undercounts the outer
+	// length by exactly 40 bytes on every packet, which a receiver parses as an
+	// invalid length. usid_ingress's decap reads at fixed offsets and never
+	// validates the length, so this is invisible on that path while any
+	// length-validating hop would reject every packet pushed.
 	__be16 inner_payload_len_plus_ip6hdr =
 		__builtin_bswap16((__u16) sizeof(struct edge_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 

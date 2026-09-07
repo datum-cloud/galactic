@@ -3,59 +3,42 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package vipxlatmap implements the read/write API for the eBPF uSID
-// datapath's vip_xlat_table map (usid.c's struct vip_xlat_key/
-// vip_xlat_value) -- the DSR/Maglev redesign's VIP-boundary substitution
-// (design plan §0.1, §2), originally built for the tap-backend case but
-// now driven by ServiceVIPBindingReconciler
-// (internal/controller/servicevipbinding_controller.go) for EgressKindVeth
-// too: a decapsulated ingress packet is delivered into the owning
-// tenant's own VRF routing table, which has no route to a veth binding's
-// address on internal/plumbing/vip's root-namespace dummy interface --
-// found live in containerlab (see ServiceVIPBindingReconciler's own doc
-// comment) -- and this package's ingress row, run unconditionally by
-// usid_ingress whenever a matching entry exists, rewrites the destination
-// to the backend's real, already-routed address before that VRF lookup
-// happens, closing exactly that gap. Mirrors
-// internal/plumbing/ebpf/usidmap's own Register/Unregister/Get/List/
-// Reconcile shape for vrf_table.
+// datapath's vip_xlat_table map, which substitutes addresses at the VIP
+// boundary.
+//
+// A decapsulated ingress packet is delivered into the owning tenant's VRF
+// routing table, which has no route to a binding's address on the root
+// namespace's dummy interface. The ingress row, applied whenever a matching
+// entry exists, rewrites the destination to the backend's real, already-routed
+// address before that lookup happens. The API mirrors usidmap's
+// Register/Unregister/Get/List/Reconcile shape for vrf_table.
 //
 // # Two independent rows per binding
 //
-// usid.c's struct vip_xlat_key doc comment describes vip_xlat_table's
-// direction convention precisely: the *ingress*-direction lookup (in
-// usid_ingress, on a client's inbound request) keys on the packet's own
-// destination port -- the VIP port a client dialed -- and rewrites the
-// packet's destination to the backend's real address:port; the
-// *egress*-direction lookup (in usid_egress, on the backend's own reply)
-// keys on the packet's own source port -- the backend's real port -- and
-// rewrites the packet's source back to the VIP's address:port. These are
-// two independent map entries, not a single symmetric pair sharing one key:
-// RegisterIngress and RegisterEgress each write exactly one row, with
-// reversed key/value roles (RegisterIngress keys on the VIP port and values
-// the backend address:port; RegisterEgress keys on the backend port and
-// values the VIP address:port).
+// The ingress lookup, on a client's inbound request, keys on the packet's
+// destination port, the VIP port the client dialed, and rewrites the
+// destination to the backend's address and port. The egress lookup, on the
+// backend's reply, keys on the packet's source port, the backend's real port,
+// and rewrites the source back to the VIP's address and port.
 //
-// # No on-disk generation field, unlike vrf_table
+// These are two independent entries, not one symmetric pair. RegisterIngress
+// and RegisterEgress each write exactly one row, with the key and value roles
+// reversed.
 //
-// usidmap.VRFTable's crash-safety Generation convention (see usidmap's own
-// doc comment, "The plugin-binary-vs-run-container race") relies on a
-// generation field stored directly in vrf_table's own kernel value struct
-// (prog.UsidVrfValue.Generation), so it survives a control-daemon restart.
-// struct vip_xlat_value (usid.c) has no equivalent field -- it is a bare
-// `{addr[16], port}` substitution target with no spare bytes for one, and
-// this package does not modify usid.c to add one (that file is a shared,
-// already-verified eBPF program; changing its value layout is out of this
-// package's scope). Generation/Reconcile below are therefore backed by an
-// in-memory, per-process map instead of a kernel-stored field: Reconcile
-// still protects against the intra-process race (a Register call landing
-// between a caller's live-snapshot and its own Reconcile call, within the
-// same running reconciler process -- the scenario GC-style sweeps care
-// about day to day), but a process restart resets the tracked generations
-// to unknown (surfaced as Generation 0 on every pre-existing entry), so
-// immediately after a restart Reconcile can only safely trust the caller's
-// live set, not an entry's staleness history. This is an accepted, smaller
-// guarantee than VRFTable's, forced by struct vip_xlat_value's fixed
-// layout -- see this package's own tests for the exact behavior.
+// # Generation is per-process here, unlike vrf_table
+//
+// usidmap.VRFTable stores its crash-safety generation in the kernel value
+// struct, so it survives a control-daemon restart. struct vip_xlat_value is a
+// bare address and port with no spare bytes for one, and adding a field to the
+// shared datapath program is out of this package's scope.
+//
+// Generation and Reconcile are therefore backed by an in-memory, per-process
+// map. Reconcile still protects against the intra-process race, a Register
+// landing between a caller's snapshot and its Reconcile, which is what a
+// GC-style sweep needs day to day. A restart resets the tracked generations, so
+// every pre-existing entry reports generation 0 and Reconcile can only trust
+// the caller's live set. That is a smaller guarantee than VRFTable's, forced by
+// the value layout.
 package vipxlatmap
 
 import (
@@ -73,24 +56,18 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
-// Supported transport protocols -- the only two vip_xlat_table's rewrite
-// path is ever consulted for (usid_ingress/usid_egress both gate the
-// vip_xlat_table lookup behind `nexthdr == USID_IPPROTO_TCP ||
-// USID_IPPROTO_UDP`, usid.c). Register rejects any other proto value
-// outright rather than silently writing a kernel entry the datapath can
-// never reach.
+// The transport protocols vip_xlat_table's rewrite path is consulted for. Both
+// datapath programs gate the lookup on TCP or UDP, so Register rejects any
+// other value rather than write an entry the datapath can never reach.
 const (
 	ProtoTCP = uint8(unix.IPPROTO_TCP)
 	ProtoUDP = uint8(unix.IPPROTO_UDP)
 )
 
-// Key identifies one vip_xlat_table row exactly as the kernel key is
-// composed (usid.c's struct vip_xlat_key): Block/Argument identify the
-// tenant VRF (same composition as vrf_table's own key), Proto is the
-// transport protocol, and Port is direction-dependent -- see this
-// package's doc comment. Port is host order here; RegisterIngress/
-// RegisterEgress/Get/List/Reconcile all convert to/from the kernel's
-// wire-order representation internally (see hostToNetwork16).
+// Key identifies one vip_xlat_table row as the kernel composes it. Block and
+// Argument identify the tenant VRF, Proto is the transport protocol, and Port
+// is direction-dependent: the VIP port for an ingress row, the backend port for
+// an egress row. Port is in host order here and converted internally.
 type Key struct {
 	Block    uint64
 	Argument uint16
@@ -98,9 +75,8 @@ type Key struct {
 	Port     uint16
 }
 
-// Entry is one fully decoded vip_xlat_table row, decoupled from
-// prog.UsidVipXlatKey/Value's cilium/ebpf/BTF-generated layout so callers
-// outside this package don't need to import prog or cilium/ebpf directly.
+// Entry is one decoded vip_xlat_table row, kept separate from the generated
+// kernel layout so callers outside this package need not import it.
 type Entry struct {
 	Key
 
@@ -112,10 +88,9 @@ type Entry struct {
 	// Addr.
 	RewritePort uint16
 
-	// Generation is this table wrapper's own in-memory registration
-	// sequence number (see the package doc comment) -- 0 for any entry this
-	// process did not itself Register (e.g. one pinned by a previous
-	// process incarnation, discovered only via List/Get).
+	// Generation is this wrapper's in-memory registration sequence number, 0
+	// for any entry this process did not itself Register, such as one pinned by
+	// a previous incarnation and discovered through List or Get.
 	Generation uint64
 }
 
@@ -129,8 +104,7 @@ type VipXlatTable struct {
 }
 
 // NewVipXlatTable wraps table as a VipXlatTable. Production callers pass a
-// usidmap.KernelTable wrapping a loaded vip_xlat_table map (see
-// OpenPinnedVipXlatTable); tests pass a fake usidmap.Table.
+// kernel table over the loaded map; tests pass a fake.
 func NewVipXlatTable(table usidmap.Table) *VipXlatTable {
 	return &VipXlatTable{
 		table:       table,
@@ -139,9 +113,8 @@ func NewVipXlatTable(table usidmap.Table) *VipXlatTable {
 	}
 }
 
-// Generation returns a snapshot of this table's own in-memory monotonic
-// clock -- see the package doc comment for how this differs from
-// usidmap.VRFTable.Generation.
+// Generation returns a snapshot of this table's in-memory monotonic clock. See
+// the package doc comment for how it differs from usidmap.VRFTable's.
 func (t *VipXlatTable) Generation() uint64 {
 	return t.clock()
 }
@@ -166,11 +139,9 @@ func validatePort(port uint16) error {
 }
 
 // addrTo16 returns addr's raw 16 bytes in wire order, or an error if addr is
-// not a genuine IPv6 address. Both usid_ingress's inner-packet path and
-// usid_egress are IPv6-only by design (usid_egress's own doc comment: "IPv6
-// only (component 2/0.1 are both IPv6-only by design)"), so an IPv4
-// (or IPv4-mapped) address is rejected here rather than silently truncated
-// or zero-padded into something the datapath would misinterpret.
+// not a genuine IPv6 address. Both datapath paths are IPv6-only by design, so
+// an IPv4 or IPv4-mapped address is rejected rather than silently truncated or
+// zero-padded into something the datapath would misread.
 func addrTo16(addr net.IP) ([16]byte, error) {
 	if addr == nil {
 		return [16]byte{}, errors.New("vipxlatmap: vip_xlat_table: address is nil")
@@ -187,29 +158,24 @@ func addrTo16(addr net.IP) ([16]byte, error) {
 	return a.As16(), nil
 }
 
-// directionIngress/directionEgress mirror usid.c's
-// USID_VIP_XLAT_DIR_INGRESS/USID_VIP_XLAT_DIR_EGRESS -- the byte value the
-// kernel key's Direction field must carry so usid_ingress's and
-// usid_egress's own, direction-fixed key constructions ever find the row
-// each is looking for. Needed because (block, argument, proto, port) alone
-// is not always unique: a binding that keeps the same port number on both
-// the VIP and the backend (an unremarkable, common case, not a rare one --
-// found live in containerlab, ns60's binding uses port 80 both ways) would
-// otherwise collapse the ingress and egress rows into the same map entry,
-// silently losing whichever was registered first. This package's own
-// exported API stays direction-implicit (RegisterIngress/RegisterEgress/
-// UnregisterIngress/UnregisterEgress/GetIngress/GetEgress each hard-code
-// the direction their own name implies) -- only the kernel key construction
-// below needs the actual byte value.
+// directionIngress and directionEgress mirror the datapath's direction
+// constants, the byte the kernel key must carry so each program's
+// direction-fixed key construction finds the row it is looking for.
+//
+// A direction field is needed because (block, argument, proto, port) is not
+// always unique: a binding that keeps the same port number on both the VIP and
+// the backend, an ordinary case, would otherwise collapse the two rows into one
+// entry and silently lose whichever was registered first. The exported API
+// stays direction-implicit, so only the key construction needs these values.
 const (
 	directionIngress = uint8(0)
 	directionEgress  = uint8(1)
 )
 
-// register is the shared primitive RegisterIngress/RegisterEgress build
-// their (key, value) pair around. keyPort is the port this row's kernel key
-// is composed with (direction-dependent -- see the package doc comment);
-// valAddr/valPort are the rewrite target this row substitutes in.
+// register is the shared primitive RegisterIngress and RegisterEgress build
+// their key and value around. keyPort is the port the kernel key is composed
+// with, which is direction-dependent; valAddr and valPort are the rewrite
+// target the row substitutes in.
 func (t *VipXlatTable) register(
 	direction uint8, block uint64, argument uint16, proto uint8, keyPort uint16, valAddr net.IP, valPort uint16,
 ) error {
@@ -255,19 +221,14 @@ func (t *VipXlatTable) register(
 	return nil
 }
 
-// RegisterIngress writes vip_xlat_table's ingress-direction row for one
-// ServiceVIPBinding: keyed on (block, argument, proto, vipPort) -- the
-// packet's own destination port on a client's inbound request, per
-// usid_ingress's lookup -- and rewriting to backendAddr:backendPort.
+// RegisterIngress writes the ingress-direction row for one binding, keyed on
+// (block, argument, proto, vipPort), the packet's destination port on an
+// inbound request, and rewriting to backendAddr and backendPort.
 //
-// vipAddr is accepted for call-site symmetry with RegisterEgress and with
-// ServiceVIPBindingSpec's own field set (so a caller can pass the binding's
-// VIPAddress/Port/BackendAddress/BackendPort straight through in the order
-// they appear on the CRD) and is validated for family consistency with
-// backendAddr, but it is not itself part of the kernel key or value:
-// usid.c's struct vip_xlat_key carries no address field at all (only
-// Proto+Port), and the ingress row's value is backendAddr:backendPort, not
-// vipAddr.
+// vipAddr is accepted for symmetry with RegisterEgress and with the CRD's field
+// order, and is validated for family consistency with backendAddr, but is not
+// part of the kernel key or value: the key carries no address field, and the
+// ingress row's value is the backend.
 func (t *VipXlatTable) RegisterIngress(
 	block uint64, argument uint16, proto uint8,
 	vipAddr net.IP, vipPort uint16,
@@ -279,12 +240,10 @@ func (t *VipXlatTable) RegisterIngress(
 	return t.register(directionIngress, block, argument, proto, vipPort, backendAddr, backendPort)
 }
 
-// RegisterEgress writes vip_xlat_table's egress-direction row for one
-// ServiceVIPBinding: keyed on (block, argument, proto, backendPort) -- the
-// packet's own source port on the backend's own reply, per usid_egress's
-// lookup -- and rewriting to vipAddr:vipPort. See RegisterIngress's doc
-// comment for why backendAddr is accepted but not itself part of the
-// kernel key.
+// RegisterEgress writes the egress-direction row for one binding, keyed on
+// (block, argument, proto, backendPort), the packet's source port on the
+// backend's reply, and rewriting to vipAddr and vipPort. backendAddr is
+// accepted but not part of the kernel key, as in RegisterIngress.
 func (t *VipXlatTable) RegisterEgress(
 	block uint64, argument uint16, proto uint8,
 	backendAddr net.IP, backendPort uint16,
@@ -296,9 +255,8 @@ func (t *VipXlatTable) RegisterEgress(
 	return t.register(directionEgress, block, argument, proto, backendPort, vipAddr, vipPort)
 }
 
-// unregister removes the vip_xlat_table entry keyed by (direction, block,
-// argument, proto, port), if present. Not an error if already absent,
-// mirroring usidmap.VRFTable.Unregister's identical idempotency contract.
+// unregister removes the entry keyed by (direction, block, argument, proto,
+// port) if present. An entry that is already absent is not an error.
 func (t *VipXlatTable) unregister(direction uint8, block uint64, argument uint16, proto uint8, port uint16) error {
 	key := prog.UsidVipXlatKey{
 		Block:     block,
@@ -332,9 +290,8 @@ func (t *VipXlatTable) UnregisterEgress(block uint64, argument uint16, proto uin
 	return t.unregister(directionEgress, block, argument, proto, backendPort)
 }
 
-// decodeEntry converts a raw kernel key/value pair into an Entry, attaching
-// this table's own in-memory Generation bookkeeping for key (0 if unknown --
-// see the package doc comment).
+// decodeEntry converts a raw kernel key and value into an Entry, attaching this
+// table's in-memory generation for that key, or 0 when unknown.
 func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXlatValue) Entry {
 	t.mu.Lock()
 	gen := t.generations[key]
@@ -356,16 +313,14 @@ func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXl
 	}
 }
 
-// GetIngress reads the ingress-direction vip_xlat_table entry for (block,
-// argument, proto, vipPort) -- the row RegisterIngress would have written --
-// reporting whether it exists.
+// GetIngress reads the ingress-direction entry for (block, argument, proto,
+// vipPort), the row RegisterIngress writes, and reports whether it exists.
 func (t *VipXlatTable) GetIngress(block uint64, argument uint16, proto uint8, vipPort uint16) (Entry, bool, error) {
 	return t.get(directionIngress, block, argument, proto, vipPort)
 }
 
-// GetEgress reads the egress-direction vip_xlat_table entry for (block,
-// argument, proto, backendPort) -- the row RegisterEgress would have
-// written -- reporting whether it exists.
+// GetEgress reads the egress-direction entry for (block, argument, proto,
+// backendPort), the row RegisterEgress writes, and reports whether it exists.
 func (t *VipXlatTable) GetEgress(block uint64, argument uint16, proto uint8, backendPort uint16) (Entry, bool, error) {
 	return t.get(directionEgress, block, argument, proto, backendPort)
 }
@@ -392,13 +347,10 @@ func (t *VipXlatTable) get(
 	return t.decodeEntry(key, value), true, nil
 }
 
-// List returns every entry currently in vip_xlat_table, in unspecified
-// order. There is no way to tell an ingress-direction row apart from an
-// egress-direction row purely from a raw entry -- both are just
-// (block, argument, proto, port) -> (addr, port) rows to the kernel; a
-// caller that needs to know which direction a given entry belongs to must
-// bring that context itself (e.g. from the ServiceVIPBinding it expects to
-// correspond to it).
+// List returns every entry in vip_xlat_table, in unspecified order. A raw entry
+// does not reveal its direction, since both are just (block, argument, proto,
+// port) to (addr, port) rows, so a caller needing that must bring the context
+// itself.
 func (t *VipXlatTable) List() ([]Entry, error) {
 	var (
 		entries []Entry
@@ -415,21 +367,17 @@ func (t *VipXlatTable) List() ([]Entry, error) {
 	return entries, nil
 }
 
-// Reconcile brings vip_xlat_table into agreement with live -- the caller's
-// current set of Keys that should exist -- removing every entry whose Key
-// is absent from live, except an entry whose Generation is >= cutoff.
+// Reconcile brings vip_xlat_table into agreement with live, the caller's
+// current set of keys, removing every entry whose key is absent from live
+// unless its generation is at or above cutoff. It returns the entries removed.
 //
-// cutoff must be a value returned by this table's own Generation, captured
-// by the caller immediately before it builds live, mirroring
-// usidmap.VRFTable.Reconcile's identical contract. See the package doc
-// comment for how this method's crash-safety differs from VRFTable's: an
-// entry this process did not itself Register (Generation 0, e.g. one left
-// by a previous process incarnation) is never treated as "too new to
-// judge" by this rule alone -- only entries this process has itself
-// Registered at or after the snapshot are protected. A fresh process
-// should let its own reconciler re-Register every live binding before ever
-// calling Reconcile, rather than relying on this method alone to preserve
-// state across a restart.
+// cutoff must come from this table's Generation, captured immediately before
+// the caller builds live.
+//
+// Only entries this process itself registered at or after the snapshot are
+// protected. An entry left by a previous incarnation reports generation 0 and
+// is not treated as too new to judge, so a fresh process should let its
+// reconciler re-register every live binding before calling this.
 func (t *VipXlatTable) Reconcile(live map[Key]struct{}, cutoff uint64) (removed []Entry, err error) {
 	entries, err := t.List()
 	if err != nil {
@@ -444,11 +392,9 @@ func (t *VipXlatTable) Reconcile(live map[Key]struct{}, cutoff uint64) (removed 
 		if e.Generation >= cutoff {
 			continue
 		}
-		// Key carries no Direction (List's own doc comment: a raw entry
-		// alone can't tell an ingress row from an egress row) -- try both;
-		// unregister is a no-op for whichever direction was never actually
-		// registered at this exact (block, argument, proto, port), so this
-		// never deletes anything that didn't already match e.
+		// Key carries no direction, so try both. unregister is a no-op for
+		// whichever direction was never registered at this exact key, so this
+		// never deletes anything that did not already match e.
 		delErr := errors.Join(
 			t.unregister(directionIngress, e.Block, e.Argument, e.Proto, e.Port),
 			t.unregister(directionEgress, e.Block, e.Argument, e.Proto, e.Port),
@@ -462,13 +408,8 @@ func (t *VipXlatTable) Reconcile(live map[Key]struct{}, cutoff uint64) (removed 
 	return removed, errors.Join(errs...)
 }
 
-// hostToNetwork16 converts a host-order uint16 to the network/big-endian
-// byte order struct vip_xlat_key.Port and struct vip_xlat_value.Port
-// require on the wire: bpf2go generates prog.UsidVipXlatKey/Value's Port
-// fields as a plain uint16 with no automatic byte-swap (mirroring
-// internal/plumbing/ebpf/prog/usid_test.go's own bswap16 helper, which
-// performs the identical swap for the same reason -- populating the same
-// map from a test). uint16 byte-swap is its own inverse, so this same
-// function also converts a wire-order value read back out of the kernel to
-// host order (see decodeEntry above).
+// hostToNetwork16 converts a host-order uint16 to the big-endian byte order the
+// kernel key and value ports use on the wire, since the generated structs
+// declare them as plain uint16 with no automatic swap. A uint16 byte swap is
+// its own inverse, so this also converts a value read back out to host order.
 func hostToNetwork16(v uint16) uint16 { return v<<8 | v>>8 }

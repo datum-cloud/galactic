@@ -26,60 +26,44 @@ import (
 )
 
 // ebpfPinDir is the bpffs directory this file's registrations read from and
-// attach against -- a package-level var, not a bare use of attach.PinDir,
-// so tests can override it the same way internal/plumbing/srv6's own
-// pinDir does. Production always uses attach.PinDir: this sidecar mounts
-// the same host /sys/fs/bpf hostPath (see its DaemonSet volume) that
-// galactic-cni's own control daemon already loads and pins usid_egress and
-// its maps under, so the pins this file opens are the very same
-// kernel-side objects, not a second, sidecar-private instance of them.
+// attach against. A package var so tests can override it. In production it is
+// attach.PinDir: this sidecar mounts the same host /sys/fs/bpf that the CNI
+// control daemon pins usid_egress and its maps under, so these are the same
+// kernel objects, not a private second copy.
 var ebpfPinDir = attach.PinDir
 
-// ingressSidecarBlock is the fixed, synthetic uSID Block this file uses for
-// every vrf_table/ifindex_vrf_table entry it registers, standing in for
-// the real, per-router bgp.srv6Locator-derived Block internal/cnibgp's own
-// registerEBPFDatapath uses for a genuine tenant CNI attachment.
+// ingressSidecarBlock is the fixed, synthetic uSID Block this file registers
+// every vrf_table and ifindex_vrf_table entry under, standing in for the real
+// locator-derived Block a genuine tenant CNI attachment uses.
 //
-// Why a synthetic value is correct here, not a shortcut: vrf_table's key
-// (block<<12 | argument) is consulted by usid_egress purely as a local,
-// opaque lookup into this *one node's* own vrf_table -- never embedded in
-// a packet, never interpreted by any other node (contrast the real,
-// wire-significant Block a genuine SID's outer header carries). Nothing
-// about correctness requires this sidecar's own entries to share the
-// node's real BGPRouter locator; they only need to (a) never collide with
-// a real (block, argument) pair internal/cnibgp might independently
-// register for some other tenant VPC's CNI attachment sharing this same
-// node, and (b) stay internally consistent between this file's own
-// ifindex_vrf_table and vrf_table writes.
+// A synthetic value is correct here because vrf_table's key is consulted by
+// usid_egress purely as a local lookup into this node's own map. It is never
+// put on the wire and never interpreted by another node, unlike the Block a
+// real SID's outer header carries. These entries only need to avoid colliding
+// with any (block, argument) pair the CNI path might register for a tenant VPC
+// on this same node, and to stay consistent between this file's own two map
+// writes.
 //
-// (a) is what this constant buys: uformat.BlockMax is the all-ones 48-bit
-// value -- as an IPv6 prefix, ffff:ffff:ffff::/48, a pattern no fabric
-// operator would plausibly assign as a real SRv6 locator (every real one
-// in this fleet today is a normal-looking GUA/ULA prefix, e.g.
-// 2607:ed40:8002::/48) -- so this file's entries occupy a corner of
-// vrf_table's keyspace no real CNI attachment's own (block, argument) pair
-// can ever land in, regardless of which argument/vrfID it was allocated.
-// Deliberately not derived from the VPC identifier or anything else
-// per-VPC: a single reserved Block, with per-VPC disambiguation left
-// entirely to argument (see argumentForTableID), is simpler and no less
-// collision-safe, since this whole Block is already carved out.
+// uformat.BlockMax buys the first: as a prefix it is ffff:ffff:ffff::/48, which
+// no operator would assign as a real locator, so these entries sit in a corner
+// of the keyspace no CNI attachment can reach whatever argument it was
+// allocated. One reserved Block with per-VPC disambiguation left to argument is
+// simpler than deriving a Block per VPC and no less collision-safe, since the
+// whole Block is already carved out.
 //
-// See internal/ingresssidecar's own package-level "no BGP runtime, CRD
-// scheme, or per-node identity" design constraint (cmd/galactic-vrf's
-// runCmd doc comment) for why this file cannot simply read a real
-// bgp.srv6Locator the way internal/cnibgp does.
+// This sidecar has no BGP runtime and no per-node identity, so it cannot read a
+// real locator the way the CNI path does.
 const ingressSidecarBlock = uformat.BlockMax
 
-// argumentForTableID derives this file's uSID Argument for vpc's VRF from
-// its own Linux kernel routing table ID, rather than allocating a separate
-// value: vrf.TableID(vpc) already guarantees node-local uniqueness per VPC
-// (that is its entire purpose), which is the only property Argument needs
-// here (see ingressSidecarBlock's own doc comment) -- so reusing it avoids
-// needing a second, redundant allocator. Fails if tableID does not fit in
-// Argument's 12-bit range: vrf.Add allocates table IDs starting from 1 and
-// counting up, so this is not expected to happen in any deployment with
-// anywhere near 4095 VPCs live on one node, but a silently wrapped/aliased
-// Argument would be a real cross-VPC datapath bug, not a safe fallback.
+// argumentForTableID derives the uSID Argument for a VPC's VRF from its Linux
+// routing table ID rather than allocating a separate value. The table ID is
+// already unique per VPC on this node, which is the only property Argument
+// needs here, so reusing it avoids a second allocator.
+//
+// Fails if tableID does not fit Argument's 12-bit range. Table IDs are
+// allocated from 1 upward, so this needs about 4095 live VPCs on one node, but
+// a silently aliased Argument would be a cross-VPC datapath bug rather than a
+// safe fallback.
 func argumentForTableID(tableID uint32) (uint16, error) {
 	if tableID < uint32(uformat.ArgumentMin) || tableID > uint32(uformat.ArgumentMax) {
 		return 0, fmt.Errorf(
@@ -89,12 +73,10 @@ func argumentForTableID(tableID uint32) (uint16, error) {
 	return uint16(tableID), nil
 }
 
-// vrfLinkForTable returns the kernel VRF link whose own routing table is
-// tableID -- the interface EnsureVRF already created for this table, found
-// by table id rather than by name since this file's callers (EnsureRoute,
-// EnsureEgressDatapath and their Remove counterparts) only ever carry a
-// tableID forward, not the vpc string it came from (mirroring Backend's
-// own EnsureRoute/RemoveRoute signatures).
+// vrfLinkForTable returns the kernel VRF link whose routing table is tableID,
+// the interface EnsureVRF already created. Found by table ID rather than by
+// name because this file's callers carry only a tableID forward, not the vpc
+// string it came from.
 func vrfLinkForTable(tableID uint32) (*netlink.Vrf, error) {
 	links, err := vrf.ListVRFLinks()
 	if err != nil {
@@ -108,31 +90,24 @@ func vrfLinkForTable(tableID uint32) (*netlink.Vrf, error) {
 	return nil, fmt.Errorf("no VRF interface found for table %d", tableID)
 }
 
-// egressVethNames derives this VPC's own veth pair names from tableID
-// alone -- ensureEgressDatapath/removeEgressDatapath only ever carry a
-// tableID forward, not the vpc string vrf.Add itself was keyed on
-// (vrfLinkForTable's own doc comment). Collision-free the same way
-// vrf.TableID(vpc) already is (that is its whole purpose), and
-// comfortably inside IFNAMSIZ: tableID fits uSID Argument's 12-bit range
-// (argumentForTableID's own check), so at most 4 decimal digits.
+// egressVethNames derives a VPC's veth pair names from tableID alone, since the
+// callers carry only a tableID forward. Collision-free because table IDs are
+// already unique per VPC on this node, and comfortably inside IFNAMSIZ, since a
+// table ID that fits Argument's 12-bit range is at most 4 decimal digits.
 func egressVethNames(tableID uint32) (inner, peer string) {
 	return fmt.Sprintf("ivs%d", tableID), fmt.Sprintf("ivp%d", tableID)
 }
 
-// ensureEgressVeth creates (or finds) the one real interface pair
-// usid_egress actually intercepts this VPC's traffic on: inner enslaved
-// into vrfLink itself, with a default route in vrfLink's own table
-// pointed at it, so every destination this VPC's egress_route_table might
-// ever match has somewhere real to go once the kernel's own vrf_xmit()
-// redoes its route lookup inside that table. peer -- left outside the
-// VRF, in this pod's main netns -- is where usid_egress actually attaches
-// (see ensureEgressDatapath's own doc comment for why the VRF's own
-// egress hook doesn't work for that).
+// ensureEgressVeth creates, or finds, the interface pair usid_egress
+// intercepts this VPC's traffic on. inner is enslaved into vrfLink with a
+// default route in that VRF's table pointed at it, so every destination
+// egress_route_table might match has somewhere real to go once the kernel
+// redoes its route lookup inside the VRF. peer stays outside the VRF, in the
+// pod's main namespace, and is where usid_egress actually attaches.
 //
-// Idempotent: LinkAdd against an already-existing name is treated as
-// already-done, and RouteReplace overwrites rather than errors on a
-// second call -- the same "safe on every SetDesired that ensures a VRF"
-// contract every other step in this file already has.
+// Idempotent: an existing name counts as already done, and the route is
+// replaced rather than added, so it is safe on every call that ensures a
+// VRF.
 func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string) (netlink.Link, error) {
 	peerLink, err := netlink.LinkByName(peer)
 	if err != nil {
@@ -167,25 +142,16 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string) (netlink.Link, e
 		return nil, fmt.Errorf("set %q up: %w", peer, err)
 	}
 
-	// The second, inner hop vrf_xmit() takes once a packet actually
-	// enters this VRF -- a route in the VRF's own table, not the main
-	// table ensureRedirectRoute installs, which otherwise has no route of
-	// its own to anywhere.
+	// The inner hop the kernel takes once a packet enters this VRF: a route in
+	// the VRF's own table, which otherwise has no route anywhere.
 	//
-	// Routed via the peer's own link-local address, deliberately not a
-	// bare on-link route (LinkIndex alone, no Gw): an on-link default
-	// forces the kernel to resolve a neighbor for the packet's own final
-	// destination before
-	// it ever reaches usid_egress's TC hook at all -- nothing answers
-	// that (there is no real host at an arbitrary destination this VRF's
-	// egress_route_table is about to rewrite), so the kernel gives up
-	// with "destination unreachable" and the packet never reaches the
-	// interface's qdisc, let alone the ingress filter on it. Routing via
-	// a gateway instead means the kernel only ever has to resolve *one*
-	// neighbor -- the peer, always present and always answerable, the
-	// same real ND exchange proven to complete in under a millisecond
-	// earlier in this investigation -- regardless of what the packet's
-	// own destination address is.
+	// Routed via the peer's link-local address rather than as a bare on-link
+	// route. An on-link default makes the kernel resolve a neighbor for the
+	// packet's final destination before it ever reaches usid_egress, and
+	// nothing answers for a destination egress_route_table is about to
+	// rewrite, so the kernel gives up and the packet never reaches the qdisc.
+	// A gateway route means only one neighbor is ever resolved, the peer,
+	// which is always present and always answers, whatever the destination.
 	peerLinkLocal, err := waitForLinkLocalAddr(peerLink)
 	if err != nil {
 		return nil, fmt.Errorf("wait for veth peer %q's own link-local address: %w", peer, err)
@@ -203,12 +169,10 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string) (netlink.Link, e
 	return peerLink, nil
 }
 
-// waitForLinkLocalAddr returns link's own global-scope-eligible link-local
-// IPv6 address (kernel-assigned via SLAAC/EUI-64 the moment the link comes
-// up), polling briefly since that assignment happens asynchronously to
-// LinkSetUp returning -- confirmed live to normally already be present
-// within the first poll, this bound is headroom, not an expected steady-
-// state wait.
+// waitForLinkLocalAddr returns link's kernel-assigned link-local IPv6 address,
+// polling briefly because that assignment happens asynchronously to LinkSetUp
+// returning. The address is normally present on the first poll, so the bound is
+// headroom rather than an expected wait.
 func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -228,20 +192,13 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 	}
 }
 
-// ensureNodeSourceAddress registers this node's own SRv6/underlay-facing
-// source address into node_src_addr_table, mirroring
-// internal/cnibgp's own registerNodeSourceAddress -- see
-// ensureEgressDatapath's own call site for why this sidecar cannot rely on
-// that copy alone having already run on this node. Idempotent and cheap
-// (one netlink query or one k8s list, one map write), safe to call on every
-// ensureEgressDatapath the same way srv6.ResolveNodeSourceAddress's own
-// per-node-constant result already tolerates being redone.
+// ensureNodeSourceAddress registers this node's underlay-facing SRv6 source
+// address into node_src_addr_table. Idempotent and cheap, so it is safe on
+// every call.
 //
-// Prefers a configured NodeSourceAddressResolver (SetNodeSourceAddressResolver)
-// over srv6.ResolveNodeSourceAddress's own local-netns auto-detection --
-// see that interface's own doc comment for why the latter resolves to the
-// wrong address (this pod's own ULA overlay IP, not this node's real one)
-// for every real deployment of this specific sidecar.
+// It prefers a resolver configured through SetNodeSourceAddressResolver over
+// local auto-detection, which in this sidecar resolves to the pod's own overlay
+// address rather than the node's real one.
 func ensureNodeSourceAddress() error {
 	var (
 		addr net.IP
@@ -263,64 +220,40 @@ func ensureNodeSourceAddress() error {
 	return nodeSrc.Set(addr)
 }
 
-// ensureEgressDatapath makes usid_egress's own VRF resolution
-// (ifindex_vrf_table -> vrf_table -> Linux VRF table id, usid.c's own
-// doc comment on usid_egress) resolve correctly for vpc's VRF interface,
-// then attaches usid_egress where it actually intercepts that VRF's
-// traffic -- the actual enforcement point that was entirely missing
-// before this file existed: EnsureRoute's egress_route_table entries had
-// nothing anywhere in this pod's netns ever attached to read them.
+// ensureEgressDatapath makes usid_egress's VRF resolution, from
+// ifindex_vrf_table through vrf_table to a Linux VRF table ID, resolve for
+// vpc's VRF, then attaches usid_egress where it intercepts that VRF's traffic.
+// Without it, EnsureRoute's egress_route_table entries have nothing attached in
+// this pod's namespace to read them.
 //
-// This used to attach directly to the VRF interface's own TC *egress*
-// hook (attach.AttachLocalEgress). That looked right -- the VRF is where
-// usid_egress's ifindex_vrf_table lookup needs a 1:1 ifindex<->VRF
-// mapping anyway, the same shape internal/cnibgp's own
-// registerEBPFDatapath relies on for a genuine tenant veth/tap attachment
-// -- but did not hold up: packet capture confirmed that a Linux VRF
-// master device's own TC egress hook never actually fires for traffic
-// routed through it, for any tenant, however
-// correctly every map involved is populated. internal/cnibgp's own
-// attachUsidEgress never attaches to a VRF at all; it attaches to a real
-// tenant veth's *ingress* hook from the host side, because that is where
-// the tenant's own egress traffic actually arrives. ensureEgressVeth
-// gives this file the equivalent of that real veth -- enslaved into the
-// VRF so vrf_xmit() has somewhere to send a packet once it resolves
-// there -- and this attaches the exact same way internal/cnibgp already
-// does, on its peer's ingress hook via attach.AttachEgress, not
-// attach.AttachLocalEgress.
+// The attachment goes on the peer end's ingress hook, not the VRF device's
+// egress hook. A VRF master device's TC egress hook never fires for traffic
+// routed through it, however correctly the maps are populated. The CNI path has
+// the same shape for a real tenant: it attaches to a veth's ingress hook from
+// the host side, because that is where the tenant's egress traffic arrives.
+// ensureEgressVeth supplies the equivalent veth here.
 //
-// Attaching on this pod's own shared eth0 instead, tempting since that is
-// where cilium ultimately hands the packet off, was considered and
-// rejected: eth0 is shared by every VPC this sidecar serves, and
-// ifindex_vrf_table can only carry one (block, argument) per ifindex -- a
-// single eth0 registration could resolve at most one of this pod's VPCs
-// correctly.
+// Attaching to the pod's shared eth0 instead does not work either: eth0 is
+// shared by every VPC this sidecar serves, and ifindex_vrf_table holds one
+// (block, argument) per ifindex, so a single registration could resolve at most
+// one VPC.
 //
-// Idempotent: every step here is a plain overwrite/replace operation,
-// safe to call on every SetDesired that ensures a VRF (a repeat call for
-// an already-provisioned VPC, e.g. after this sidecar's own restart, is a
-// no-op in effect).
+// tableID is the VPC's Linux routing table. vpc is used to derive that VPC's
+// return-path gateway address when one is configured.
 //
-// vpc (added alongside tableID, not derived from it) is used for exactly
-// one thing beyond this doc comment's own long-standing "vpc's VRF
-// interface" description: deriving vpc's own return-path gateway address,
-// when SetGatewayAddressAssignment has configured one -- see
-// ensureGatewayAddress in gatewayaddress.go.
+// Idempotent: every step is a replace, so a repeat call for an
+// already-provisioned VPC is in effect a no-op.
 func ensureEgressDatapath(vpc string, tableID uint32) error {
-	// node_src_addr_table is a per-node singleton, not per-VPC: usid_egress
-	// fails open (TC_ACT_UNSPEC, uncounted) on every encapsulation attempt
-	// until some caller sets it, and internal/cnibgp's own registration
-	// only ever runs as a side effect of a real tenant CNI ADD landing on
-	// this node -- something a node running only this sidecar's synthetic
-	// attachments, with no real tenant CNI attachment at all, never gets.
-	// An otherwise fully correct attachment (VRF, veth, ifindex_vrf_table,
-	// egress_route_table all resolving) can therefore silently produce no
-	// encapsulated traffic at all, traced to this exact gap. Non-fatal on
-	// failure, same as
-	// internal/cnibgp's own call site and for the identical reason --
-	// ResolveNodeSourceAddress needs a converged underlay default route,
-	// which this pod can transiently lack right after this sidecar itself
-	// restarts.
+	// node_src_addr_table is a per-node singleton, not per-VPC. usid_egress
+	// fails open, uncounted, on every encapsulation attempt until something
+	// sets it, and the CNI path only registers it as a side effect of a real
+	// tenant ADD landing on this node, which a node running only this
+	// sidecar's synthetic attachments never sees. An otherwise correct
+	// attachment then produces no encapsulated traffic at all.
+	//
+	// Non-fatal, as at the CNI call site and for the same reason: resolving
+	// the address needs a converged underlay default route, which this pod can
+	// transiently lack right after a restart.
 	if err := ensureNodeSourceAddress(); err != nil {
 		slog.Warn("ensureEgressDatapath: could not register this node's own SRv6 source address; "+
 			"egress routing will fail open until this succeeds", "err", err)
@@ -342,12 +275,10 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 		return fmt.Errorf("ensure egress veth for VRF table %d: %w", tableID, err)
 	}
 
-	// Assigns this VPC's own return-path gateway address (if configured,
-	// see SetGatewayAddressAssignment) to inner -- the same VRF-slave veth
-	// just enslaved above. Non-fatal on failure, same stance as
-	// ensureNodeSourceAddress just above: a still-missing gateway address
-	// degrades the return path (or, unconfigured, is simply a no-op), it
-	// does not make the forward path this function exists for any worse.
+	// Assign this VPC's return-path gateway address, when one is configured,
+	// to the VRF-slave veth enslaved above. Non-fatal, like
+	// ensureNodeSourceAddress: a missing gateway address degrades the return
+	// path without making the forward path any worse.
 	if err := ensureGatewayAddress(vpc, inner); err != nil {
 		slog.Warn("ensureEgressDatapath: could not assign this VPC's own gateway address", "vpc", vpc, "err", err)
 	}
@@ -358,13 +289,10 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	}
 	defer func() { _ = closer.Close() }()
 
-	// EgressKindVeth: a don't-care here, not a real claim about this VRF
-	// device's own link type. EgressKind only steers usid_ingress's own
-	// step-9 redirect (usid.c's own doc comment on enum egress_kind), and
-	// usid_ingress is never attached anywhere in this pod's netns -- this
-	// sidecar has no ingress/decap side at all (its own package doc
-	// comment). usid_egress, the only program this file's registrations
-	// ever feed, never reads EgressKind.
+	// EgressKindVeth is a don't-care here, not a claim about this device's link
+	// type. EgressKind steers only usid_ingress's redirect, and usid_ingress is
+	// never attached in this pod's namespace, since this sidecar has no decap
+	// side. usid_egress never reads it.
 	if err := registry.VRF.Register(ingressSidecarBlock, argument, tableID, usidmap.EgressKindVeth); err != nil {
 		return fmt.Errorf("register eBPF vrf_table entry: %w", err)
 	}
@@ -375,10 +303,8 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	}
 	defer func() { _ = ifindexCloser.Close() }()
 
-	// Keyed by the veth peer's ifindex, not the VRF's own -- see this
-	// function's own doc comment for why usid_egress has to see this
-	// traffic arriving on that interface's ingress hook, not the VRF's
-	// egress.
+	// Keyed by the veth peer's ifindex, not the VRF's, because usid_egress has
+	// to see this traffic arrive on that interface's ingress hook.
 	if err := ifindexTable.Register(uint32(peerLink.Attrs().Index), ingressSidecarBlock, argument); err != nil {
 		return fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
@@ -395,21 +321,16 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	return nil
 }
 
-// removeEgressDatapath undoes ensureEgressDatapath's own registrations for
-// the VPC whose VRF table is tableID -- called before RemoveVRF deletes
-// the VRF interface itself (backend.go's RemoveVRF), while the veth
-// pair's own names can still be derived. Best-effort and idempotent,
-// matching every other teardown step in this package (Unregister is
-// already "absent is not an error"): every step is attempted even if an
-// earlier one failed, and every failure is joined and returned together,
-// rather than a first error aborting the rest of cleanup.
+// removeEgressDatapath undoes ensureEgressDatapath's registrations for the VPC
+// whose VRF table is tableID. It runs before RemoveVRF deletes the VRF
+// interface, while the veth names can still be derived.
 //
-// No explicit detach call for usid_egress: deleting the veth pair below
-// removes both ends and, with them, every qdisc/filter attached to
-// either -- the same "the interface going away is the detach" contract
-// internal/cnibgp's own teardown already relies on for its real tenant
-// veth (attachUsidEgress's own doc comment has no DetachEgress
-// counterpart at all).
+// Best-effort and idempotent: every step is attempted even if an earlier one
+// failed, and the failures are joined and returned together rather than the
+// first one aborting cleanup.
+//
+// usid_egress needs no explicit detach. Deleting the veth pair removes both
+// ends and every qdisc and filter on them.
 func removeEgressDatapath(tableID uint32) error {
 	argument, err := argumentForTableID(tableID)
 	if err != nil {
@@ -452,24 +373,18 @@ func removeEgressDatapath(tableID uint32) error {
 	return errors.Join(errs...)
 }
 
-// ensureRedirectRoute installs a plain (unencapsulated, no SEG6 involved)
-// host route for prefix into this pod's own main routing table, forwarding
-// out the VRF interface for tableID as a bare nexthop device -- no gateway
-// address, since a Linux VRF master device needs none: a route naming it
-// as LinkIndex alone re-dispatches the packet through that device's own
-// egress hook, which is exactly where ensureEgressDatapath already
-// attached usid_egress.
+// ensureRedirectRoute installs a plain host route for prefix into this pod's
+// main routing table, out the VRF interface for tableID as a bare nexthop
+// device. A VRF master device needs no gateway address: naming it as the link
+// re-dispatches the packet through that device, which is where usid_egress is
+// attached.
 //
-// This exists because nothing else pulls this pod's outbound traffic for
-// prefix off its ordinary default route: neither Envoy nor cilium has any
-// notion of this destination belonging to a VPC VRF (see this fix's own
-// design notes), so an unbound socket's normal FIB lookup would otherwise
-// resolve prefix via the default route out eth0 exactly like any other
-// "world" destination. A route this specific (EnsureRoute's own callers
-// always pass a /128 -- see DesiredRoute.Prefix) wins ordinary
-// longest-prefix-match over that default route without needing cilium to
-// know anything about the VPC address space, or Envoy to bind its sockets
-// to anything.
+// Nothing else pulls this pod's outbound traffic for prefix off its default
+// route. Neither Envoy nor the cluster CNI knows this destination belongs to a
+// VPC VRF, so an unbound socket's ordinary lookup would resolve prefix out eth0
+// like any other destination. Callers always pass a /128, so this route wins
+// longest-prefix match over the default without the CNI knowing anything about
+// VPC address space or Envoy binding its sockets to anything.
 func ensureRedirectRoute(prefix *net.IPNet, tableID uint32) error {
 	link, err := vrfLinkForTable(tableID)
 	if err != nil {
@@ -486,10 +401,9 @@ func ensureRedirectRoute(prefix *net.IPNet, tableID uint32) error {
 	return nil
 }
 
-// removeRedirectRoute removes the main-table redirect route ensureRedirectRoute
-// installed for prefix -- ensureRedirectRoute's own counterpart, mirroring
-// srv6.RouteMainDel's identical shape (a plain netlink.RouteDel by Dst and
-// Table alone, no LinkIndex needed to identify it).
+// removeRedirectRoute removes the main-table route ensureRedirectRoute
+// installed for prefix. Deleting by destination and table alone is enough to
+// identify it.
 func removeRedirectRoute(prefix *net.IPNet) error {
 	return netlink.RouteDel(&netlink.Route{
 		Dst:   prefix,

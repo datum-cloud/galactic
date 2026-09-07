@@ -35,15 +35,13 @@ const (
  Find more information at: https://www.datum.net/docs`
 )
 
-// runCmd contains the application startup logic: it registers
-// internal/ingresssidecar's Reconciler against a cluster-scoped
-// EndpointSlice watch, then seeds Store from the live API state and runs
-// its startup inventory and periodic sweep. There is no BGP runtime here —
-// bgpv1alpha1 is registered on the scheme solely so the optional gateway
-// publisher below can read BGPRouter/BGPVRFInstance and write
-// BGPAdvertisement CRDs; see internal/config.VRFConfig's own doc comment
-// for why cfg.NodeName, unlike everything else this binary reads, has no
-// default and leaves that one feature off when unset.
+// runCmd is the application startup: it registers the ingress sidecar's
+// reconciler against a cluster-scoped EndpointSlice watch, then seeds the store
+// from live API state and runs its startup inventory and periodic sweep.
+//
+// There is no BGP runtime here. The BGP types are on the scheme solely so the
+// optional gateway publisher below can read routers and instances and write
+// advertisements, which stays off while no node name is configured.
 func runCmd(cfg *config.VRFConfig) error {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
@@ -74,44 +72,36 @@ func runCmd(cfg *config.VRFConfig) error {
 	backend := ingresssidecar.NewKernelBackend()
 	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, metrics)
 
-	// Return-path gateway-advertisement publishing (docs/plans/855-return-
-	// path-gateway-advertisement.md) is opt-in on cfg.NodeName alone: most
-	// deployments of this sidecar don't set it yet, and leaving it unset
-	// here is exactly the no-op SetGatewayPublisher's own doc comment
-	// describes -- Store behaves identically to before this feature
-	// existed. mgr.GetClient() (the cached client) is fine for this: unlike
-	// the reconcile hot path, publishing only runs once per VRF's lifetime.
+	// Return-path gateway advertisement is opt-in on the node name alone,
+	// and leaving it unset is fully inert. The cached client is fine here:
+	// unlike the reconcile hot path, publishing runs once per VRF
+	// lifetime.
 	if cfg.NodeName != "" {
 		store.SetGatewayPublisher(
 			ingresssidecar.NewK8sGatewayPublisher(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
 			ingresssidecar.NetlinkGatewayAddressResolver{},
 		)
 
-		// This node's own real, globally-routable underlay source address --
-		// see NodeSourceAddressResolver's own doc comment for why the
-		// default (srv6.ResolveNodeSourceAddress's local-netns
-		// auto-detection) resolves to the wrong address from inside Envoy's
-		// own pod netns, which is where this sidecar always runs. Gated on
-		// cfg.NodeName alone, like the gateway publisher above: both need
-		// this node's own identity, and mgr.GetClient() is fine here for
-		// the identical reason (one read per ensureEgressDatapath call, not
-		// a reconcile hot path).
+		// This node's real, globally routable underlay source address. The
+		// default local auto-detection resolves to the wrong address from
+		// inside Envoy's pod namespace, which is where this sidecar always
+		// runs. Gated on the node name like the publisher above, both needing
+		// this node's identity, and the cached client is fine for the same
+		// reason.
 		ingresssidecar.SetNodeSourceAddressResolver(
 			ingresssidecar.NewK8sNodeSourceAddressResolver(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
 		)
 
-		// Gateway address *provisioning* is a second, independent opt-in on
-		// top of the publisher above -- see internal/config.VRFConfig's own
-		// GatewayPrefix doc comment for why it needs its own explicit
-		// platform-addressing decision, not a default. Without this, the
-		// publisher above stays permanently idle: NetlinkGatewayAddressResolver
-		// has nothing to find, so PublishGateway never actually fires.
+		// Gateway address provisioning is a second, independent opt-in on
+		// top of the publisher: it needs its own explicit platform
+		// addressing decision rather than a default. Without it the
+		// publisher stays idle, the resolver having nothing to find.
 		if cfg.GatewayPrefix != "" {
 			_, network, err := net.ParseCIDR(cfg.GatewayPrefix)
 			if err != nil {
-				// cfg.Validate() already checked this parses; a failure here
-				// would mean Validate and this call disagree, a real bug --
-				// fail loudly rather than silently run with no provisioning.
+				// Validation already checked this parses, so a failure here
+				// means the two disagree. Fail loudly rather than run
+				// silently with no provisioning.
 				return fmt.Errorf("parse gateway prefix %q: %w", cfg.GatewayPrefix, err)
 			}
 			ingresssidecar.SetGatewayAddressAssignment(network, cfg.NodeName)
@@ -129,17 +119,16 @@ func runCmd(cfg *config.VRFConfig) error {
 		return fmt.Errorf("setup EndpointSlice controller: %w", err)
 	}
 
-	// Startup seed + inventory + periodic sweep. Every EndpointSlice that
-	// exists at boot must be visible to Store *before* Inventory or Sweep
-	// ever run, or a live VPC/pod could be misjudged as orphaned -- see
-	// ingresssidecar.SeedFromAPI's own doc comment for why that can no
-	// longer be mgr.GetCache().WaitForCacheSync's job: a synced cache only
-	// guarantees the informer's initial List landed in the cache, not that
-	// the controller's own Reconcile has drained the workqueue that same
-	// List fed, so on a busy node at boot the two could race. SeedFromAPI
-	// uses mgr.GetAPIReader(), the manager's uncached reader, so it
-	// doesn't depend on cache/workqueue timing at all. Mirrors
-	// cmd/galactic-router's own GC-ticker startup goroutine.
+	// Startup seed, then inventory, then the periodic sweep. Every
+	// EndpointSlice existing at boot must be visible to the store before
+	// inventory or a sweep runs, or a live VPC could be misjudged as
+	// orphaned.
+	//
+	// Waiting for the cache to sync is not enough: that guarantees the
+	// informer's initial list landed in the cache, not that the
+	// controller's own reconciles have drained the workqueue that list
+	// fed, so on a busy node at boot the two race. Seeding uses the
+	// manager's uncached reader, which depends on neither.
 	go func() {
 		if err := ingresssidecar.SeedFromAPI(ctx, mgr.GetAPIReader(), store); err != nil {
 			log.Printf("startup seed: %v", err)
@@ -155,14 +144,12 @@ func runCmd(cfg *config.VRFConfig) error {
 		return fmt.Errorf("manager exited: %w", err)
 	}
 
-	// mgr.Start only returns nil once ctx is Done (signal-triggered
-	// shutdown -- there's no other source of cancellation here, unlike
-	// cmd/galactic-router/cmd/galactic-gateway's health-server-failure
-	// case). No proactive VRF/route teardown on exit: §6 of the plan
-	// leans toward leaving kernel state for the next instance to
-	// reconcile from scratch, since a live Envoy container next to a
-	// dying sidecar mid-rollout would otherwise blackhole in-flight
-	// connections.
+	// The manager returns nil only once the context is done, which here means
+	// a signal-triggered shutdown; there is no other source of cancellation.
+	//
+	// No proactive teardown on exit: kernel state is left for the next instance
+	// to reconcile from scratch, since a live Envoy container beside a dying
+	// sidecar mid-rollout would otherwise blackhole in-flight connections.
 	return nil
 }
 

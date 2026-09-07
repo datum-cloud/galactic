@@ -13,15 +13,10 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vip"
 )
 
-// newVIPCommand builds the "vip" subcommand group: a thin, manual/debug
-// surface directly over internal/plumbing/vip's Bind/Unbind/Verify --
-// the same veth-branch mechanism ServiceVIPBindingReconciler
-// (internal/controller/servicevipbinding_controller.go) drives for every
-// EgressKindVeth ServiceVIPBinding. This is the first subcommand group
-// galactic-router's root command has ever had (see cmd/galactic-cni/main.go
-// for the established pattern this mirrors); the root command's own RunE
-// (root.go) still runs the router daemon itself when no subcommand is
-// given, unaffected by this addition.
+// newVIPCommand builds the "vip" subcommand group: a manual debugging surface
+// over the same bind, unbind, and verify mechanism the ServiceVIPBinding
+// reconciler drives for every veth-kind binding. The root command still runs the
+// router daemon when no subcommand is given.
 func newVIPCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "vip",
@@ -35,9 +30,8 @@ only manipulates this node's own galactic-vip0 dummy interface.`,
 	return cmd
 }
 
-// parseVIPAddr parses addr as an IP address, returning a clear,
-// actionable error (rather than a nil net.IP silently propagating) if it
-// isn't one.
+// parseVIPAddr parses addr as an IP address, returning a clear error rather than
+// letting a nil address propagate silently.
 func parseVIPAddr(addr string) (net.IP, error) {
 	ip := net.ParseIP(addr)
 	if ip == nil {

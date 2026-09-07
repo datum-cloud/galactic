@@ -10,23 +10,16 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
 )
 
-// DropReasonsReader abstracts drop_reasons's per-CPU lookup (a
-// BPF_MAP_TYPE_PERCPU_ARRAY keyed by drop reason index) down to the one
-// operation this package needs, so tests can substitute an in-memory fake
-// instead of a real, kernel-loaded map -- same interface shape as
-// internal/plumbing/ebpf/edgemetrics.DropReasonsReader and
-// internal/plumbing/ebpf/metrics's identical type. *ebpf.Map already
-// satisfies this interface structurally.
+// DropReasonsReader narrows the drop-reason map, a per-CPU array keyed by
+// reason index, to the one operation this package needs, so tests can substitute
+// an in-memory fake. A real loaded map already satisfies it structurally.
 type DropReasonsReader interface {
 	Lookup(key, valueOut any) error
 }
 
-// SumDropReason reads drop_reasons[index] (one per-CPU counter slice) and
-// returns the sum across every CPU -- the per-CPU-array summing idiom
-// internal/plumbing/ebpf/prog's test helpers and
-// internal/plumbing/ebpf/edgemetrics.Collector.collectDrops both already
-// use, duplicated here rather than imported for the same "no shared
-// datapath" reasoning doc.go gives for Table/KernelTable/Iterator.
+// SumDropReason reads one drop-reason counter and returns the sum across every
+// CPU. Duplicated here rather than imported, for the same no-shared-datapath
+// reasoning the package doc comment gives for the map interfaces.
 func SumDropReason(reader DropReasonsReader, index uint32) (uint64, error) {
 	var perCPU []uint64
 	if err := reader.Lookup(index, &perCPU); err != nil {
@@ -39,11 +32,9 @@ func SumDropReason(reader DropReasonsReader, index uint32) (uint64, error) {
 	return total, nil
 }
 
-// DropReasonTotals reads every drop reason index
-// (nat66prog.DropReasonNat66Count of them) and returns the per-CPU-summed
-// total for each, keyed by its DropReasonNat66* index -- the shape a
-// Prometheus collector (or any other caller) reads a full snapshot from in
-// one call rather than looping SumDropReason itself.
+// DropReasonTotals reads every drop reason index and returns the per-CPU summed
+// total for each, keyed by index: a full snapshot in one call rather than a
+// caller looping over SumDropReason.
 func DropReasonTotals(reader DropReasonsReader) (map[uint32]uint64, error) {
 	totals := make(map[uint32]uint64, nat66prog.DropReasonNat66Count)
 	for i := range nat66prog.DropReasonNat66Count {

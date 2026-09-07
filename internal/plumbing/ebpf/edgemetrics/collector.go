@@ -16,38 +16,30 @@ import (
 
 const namespace = "galactic_edge"
 
-// DropReasonsReader abstracts drop_reasons's per-CPU lookup (a
-// BPF_MAP_TYPE_PERCPU_ARRAY keyed by drop reason index) down to the one
-// operation Collector needs, so tests can substitute an in-memory fake
-// instead of a real, kernel-loaded map -- same interface shape as
-// internal/plumbing/ebpf/metrics's identical type. *ebpf.Map already
-// satisfies this interface structurally.
+// DropReasonsReader narrows the drop-reason map, a per-CPU array keyed by
+// reason index, to the one operation Collector needs, so tests can substitute an
+// in-memory fake. A real loaded map already satisfies it structurally.
 type DropReasonsReader interface {
 	Lookup(key, valueOut any) error
 }
 
-// Collector is a prometheus.Collector reading the edge gateway's live eBPF
-// map state at every scrape: per-VIP hit counters from vip_table/
-// vip_stats_table, and drops by reason (package doc comment). Unlike this
-// package's Full-NAT predecessor, there is no conn_table here at all --
-// DSR keeps no per-flow state to report on (see edgedsr.c's own header
-// comment).
+// Collector reads the edge gateway's live map state at every scrape: per-VIP
+// counters and drops by reason. There is no connection table here at all, direct
+// server return keeping no per-flow state to report.
 type Collector struct {
 	vipTable    *edgemap.VIPTable
 	dropReasons DropReasonsReader
 }
 
-// NewCollector builds a Collector from already-constructed values, so tests
-// can pass fakes (a fake edgemap.Table wrapped in edgemap.NewVIPTable, and
-// any DropReasonsReader) without a kernel. Production callers normally use
+// NewCollector builds a Collector from already-constructed values, so tests can
+// pass fakes without a kernel. Production callers normally use
 // NewCollectorFromObjects.
 func NewCollector(vipTable *edgemap.VIPTable, dropReasons DropReasonsReader) *Collector {
 	return &Collector{vipTable: vipTable, dropReasons: dropReasons}
 }
 
 // NewCollectorFromObjects builds a Collector reading directly from a loaded
-// *edgeprog.EdgedsrObjects's vip_table/vip_stats_table/drop_reasons maps --
-// e.g. the object internal/plumbing/ebpf/edgeattach.Load returns.
+// object set's maps.
 func NewCollectorFromObjects(objs *edgeprog.EdgedsrObjects) *Collector {
 	return NewCollector(
 		edgemap.NewVIPTable(edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable}),
@@ -117,11 +109,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectDrops(ch)
 }
 
-// protoLabel renders a vip_key.proto value as a metric label -- the
-// IANA-numeric value's name where this package knows it (tcp/udp, the
-// only two protocols NetworkRuleSpec.Protocol accepts), the raw number
-// otherwise, so an unrecognized value is still visible rather than
-// silently dropped.
+// protoLabel renders a protocol number as a metric label: its name where this
+// package knows it, and the raw number otherwise, so an unrecognized value is
+// still visible rather than silently dropped.
 func protoLabel(proto uint8) string {
 	switch proto {
 	case 6:

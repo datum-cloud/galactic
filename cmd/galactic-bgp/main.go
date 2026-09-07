@@ -58,21 +58,21 @@ func newRootCommand() *cobra.Command {
 				return version.All.Encode(os.Stdout)
 			}
 
-			// Real CNI runtimes always pipe the network config JSON on
-			// stdin and close it. If stdin is an interactive terminal
-			// instead, no config will ever arrive and skel's blocking
-			// stdin read would hang forever — print version info instead.
+			// Real CNI runtimes always pipe the network config on stdin and
+			// close it. When stdin is an interactive terminal instead, no
+			// config ever arrives and the library's blocking read would hang
+			// forever, so print version info instead.
 			if term.IsTerminal(int(os.Stdin.Fd())) {
 				fmt.Printf("%s version %s\n", appName, metadata.Version)
 				fmt.Printf("CNI protocol versions supported: %s\n", strings.Join(version.All.SupportedVersions(), ", "))
 				return nil
 			}
 
-			// This plugin never enters a network namespace — it only makes
-			// k8s API calls to publish BGP advertisements. For tap-mode
-			// attachments, CNI_NETNS points at the host netns which equals
-			// this process's ambient netns, so the CNI library's same-netns
-			// rejection check would fire without the override.
+			// This plugin never enters a network namespace; it only makes API
+			// calls to publish advertisements. For a tap attachment the
+			// namespace given is the host's, which equals this process's own,
+			// so the library's same-namespace rejection would fire without the
+			// override.
 			_ = os.Setenv("CNI_NETNS_OVERRIDE", "true")
 
 			cnibgp.RunPlugin()

@@ -15,17 +15,13 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
-// OpenPinnedEgressRouteTable opens egress_route_table from its pinned path
-// under pinDir (internal/plumbing/ebpf/attach.Load pins every usid_ingress
-// map at <pinDir>/<map name> -- see usidmap.OpenPinnedRegistry's identical
-// convention) and returns an *EgressRouteTable wrapping it.
+// OpenPinnedEgressRouteTable opens egress_route_table from its pinned path under
+// pinDir and returns a table wrapping it. The datapath's maps are each pinned at
+// <pinDir>/<map name>.
 //
-// The returned io.Closer should be closed once at process shutdown for a
-// long-lived caller (galactic-router), or immediately after use for a
-// short-lived one (galactic-cni's own per-CNI-ADD/DEL process) --
-// mirroring vipxlatmap.OpenPinnedVipXlatTable's identical note; closing
-// only releases this process's own file descriptor onto the kernel-side
-// map object, never the map's pinned lifetime itself.
+// The returned closer should be closed once at process shutdown for a long-lived
+// caller, or immediately after use for a short-lived one. Either way it releases
+// only this process's own descriptor, never the map's pinned lifetime.
 func OpenPinnedEgressRouteTable(pinDir string) (*EgressRouteTable, io.Closer, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapEgressRouteTable), nil)
 	if err != nil {
@@ -35,10 +31,9 @@ func OpenPinnedEgressRouteTable(pinDir string) (*EgressRouteTable, io.Closer, er
 	return NewEgressRouteTable(usidmap.KernelTable{Map: m}), m, nil
 }
 
-// OpenPinnedNodeSourceAddress opens node_src_addr_table from its pinned
-// path under pinDir and returns a *NodeSourceAddress wrapping it. See
-// OpenPinnedEgressRouteTable's own comment for the pinning convention and
-// close-lifetime contract.
+// OpenPinnedNodeSourceAddress opens node_src_addr_table from its pinned path
+// under pinDir and returns a wrapper. See OpenPinnedEgressRouteTable for the
+// pinning convention and close contract.
 func OpenPinnedNodeSourceAddress(pinDir string) (*NodeSourceAddress, io.Closer, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapNodeSrcAddrTable), nil)
 	if err != nil {
@@ -48,10 +43,9 @@ func OpenPinnedNodeSourceAddress(pinDir string) (*NodeSourceAddress, io.Closer, 
 	return &NodeSourceAddress{table: usidmap.KernelTable{Map: m}}, m, nil
 }
 
-// OpenPinnedPublicUplink opens public_uplink_table from its pinned path
-// under pinDir and returns a *PublicUplink wrapping it. See
-// OpenPinnedEgressRouteTable's own comment for the pinning convention and
-// close-lifetime contract.
+// OpenPinnedPublicUplink opens public_uplink_table from its pinned path under
+// pinDir and returns a wrapper. See OpenPinnedEgressRouteTable for the pinning
+// convention and close contract.
 func OpenPinnedPublicUplink(pinDir string) (*PublicUplink, io.Closer, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapPublicUplinkTable), nil)
 	if err != nil {

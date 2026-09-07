@@ -16,34 +16,27 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
-// linkByNameFn and filterListFn are package-level override points -- the
-// same pattern used throughout this package (interfaces.go's
-// routeListFn/linkByIndexFn, watch.go's linkSubscribeFn/routeSubscribeFn) --
-// so Health's own tests can simulate an interface losing its attachment
-// without needing root or a live network interface.
+// linkByNameFn and filterListFn are override points, as elsewhere in this
+// package, so Health's tests can simulate an interface losing its attachment
+// without root or a live interface.
 var (
 	linkByNameFn = netlink.LinkByName
 	filterListFn = netlink.FilterList
 )
 
-// Health reports whether the eBPF uSID datapath is genuinely healthy right
-// now: objs is non-nil and its program/maps still have live, reachable
-// kernel file descriptors, and the program is still attached to every
-// interface in ifaces via this package's own TC-BPF ingress filter
-// (filterName). This is deliberately more than "the process is alive"
-// (design plan .local/plan-ebpf-xdp-usid-datapath.md §9: "confirms the BPF
-// program is actually attached and the maps are reachable -- not just that
-// the process is alive"; Milestone 4 of
-// .local/implementation-plan-ebpf-xdp-usid-datapath.md) -- a process can be
-// running perfectly well while its BPF program has been unloaded out from
-// under it (e.g. someone ran `ip link del` on the attached interface, or
-// bpftool prog detach), and this function is what a caller (internal/
-// installer's gRPC health check) uses to notice that gap.
+// Health reports whether the eBPF uSID datapath is healthy right now: objs is
+// non-nil, its program and maps still have live kernel descriptors, and the
+// program is still attached to every interface in ifaces through this package's
+// TC-BPF ingress filter.
 //
-// A non-nil error joins every failing check (errors.Join), so a caller
-// logging the result sees the complete picture rather than just the first
-// problem encountered; every interface in ifaces is checked even after an
-// earlier interface or the program/map checks already failed.
+// That is deliberately more than "the process is alive". A process can run
+// perfectly well while its program has been unloaded from under it, by an
+// interface being deleted or a filter detached, and this is what lets a caller
+// notice the gap.
+//
+// A non-nil error joins every failing check, so a caller logging the result
+// sees the whole picture rather than the first problem. Every interface is
+// checked even after an earlier one failed.
 func Health(objs *prog.UsidObjects, ifaces []string) error {
 	if objs == nil {
 		return errors.New("attach: health: eBPF uSID datapath objects are nil (not loaded)")
@@ -56,10 +49,9 @@ func Health(objs *prog.UsidObjects, ifaces []string) error {
 	)
 }
 
-// checkProgramReachable confirms this process's own handle to usid_ingress
-// still refers to a live kernel program, via a lightweight
-// BPF_OBJ_GET_INFO_BY_FD query (program.Info()) rather than anything that
-// touches the packet path.
+// checkProgramReachable confirms this process's handle to usid_ingress still
+// refers to a live kernel program, through a lightweight info query rather than
+// anything touching the packet path.
 func checkProgramReachable(program *ebpf.Program) error {
 	if program == nil {
 		return errors.New("attach: health: usid_ingress program handle is nil")
@@ -70,10 +62,9 @@ func checkProgramReachable(program *ebpf.Program) error {
 	return nil
 }
 
-// checkMapsReachable confirms every one of the three control-plane maps
-// (locator_table, function_table, vrf_table) plus drop_reasons still has a
-// live, reachable kernel file descriptor, via the same lightweight Info()
-// query checkProgramReachable uses for the program.
+// checkMapsReachable confirms locator_table, function_table, vrf_table, and
+// drop_reasons still have live kernel descriptors, through the same lightweight
+// query checkProgramReachable uses.
 func checkMapsReachable(objs *prog.UsidObjects) error {
 	checks := []struct {
 		name string
@@ -98,13 +89,10 @@ func checkMapsReachable(objs *prog.UsidObjects) error {
 	return errors.Join(errs...)
 }
 
-// checkAttached confirms this package's own TC-BPF ingress filter
-// (filterName) is currently present on every interface in ifaces --
-// proving actual kernel-level attachment, not merely that this process's
-// program/map handles are still open (checkProgramReachable/
-// checkMapsReachable can pass even after the filter itself was removed by
-// something outside this process, e.g. `tc filter del` or the interface
-// being recreated).
+// checkAttached confirms this package's TC-BPF ingress filter is present on
+// every interface in ifaces. That proves kernel-level attachment, which the
+// program and map checks do not: those pass even after the filter itself was
+// removed from outside this process.
 func checkAttached(ifaces []string) error {
 	if len(ifaces) == 0 {
 		return errors.New("attach: health: no interfaces resolved to check attachment against")
@@ -119,11 +107,9 @@ func checkAttached(ifaces []string) error {
 	return errors.Join(errs...)
 }
 
-// checkAttachedOne confirms filterName is present among name's ingress
-// filters -- the same identification method detachOne already uses (match
-// by filter name, not by comparing file descriptor numbers, which are
-// process-local and not meaningfully comparable against a value returned
-// from a netlink query).
+// checkAttachedOne confirms the filter is present among name's ingress filters,
+// matched by name rather than by descriptor number, which is process-local and
+// not comparable against a netlink query result.
 func checkAttachedOne(name string) error {
 	iface, err := linkByNameFn(name)
 	if err != nil {
@@ -142,62 +128,47 @@ func checkAttachedOne(name string) error {
 	return errors.New("galactic uSID ingress filter not attached")
 }
 
-// Handle bundles a loaded *prog.UsidObjects with a Healthy check
-// (Milestone 4), so internal/installer's gRPC health-check handler can
-// query datapath health without depending on prog.UsidObjects or this
-// package's Health function directly -- and without needing to track the
-// datapath's resolved interface set itself (Healthy re-resolves it fresh on
-// every call, see below). Objs is exported so a caller that also needs the
-// raw maps for something else (e.g. internal/plumbing/ebpf/metrics's
-// Prometheus collector, also Milestone 4) can reach them without a second
-// load.
+// Handle bundles loaded objects with a health check, so a caller can query
+// datapath health without depending on the loaded types or on Health directly,
+// and without tracking the resolved interface set itself. Objs is exported so a
+// caller that also needs the raw maps, such as the metrics collector, can reach
+// them without a second load.
 type Handle struct {
 	Objs *prog.UsidObjects
 
-	// Watcher, if non-nil (StartWatching's return value in production),
-	// is consulted by Healthy alongside Health's own program/map/filter
-	// checks (ecv's review of #283):
-	//   - a Watch loop that is no longer running (Watcher.Alive() ==
-	//     false) can't self-heal drift on its own -- an externally
-	//     cleared tc filter or a moved default route would otherwise sit
-	//     unfixed indefinitely, since nothing else in this package
-	//     restarts it -- so Healthy reports that as unhealthy even if
-	//     Health's own checks currently pass;
-	//   - a failing Health result nudges the watcher (Watcher.Reconcile)
-	//     to re-evaluate before the next health-check tick, on the chance
-	//     the failure is exactly the kind of drift Watch's own reconcile
-	//     heals, rather than only ever healing via an unrelated netlink
-	//     event or the liveness probe restarting the container.
+	// Watcher, when non-nil, is consulted by Healthy alongside Health's own
+	// checks:
+	//   - A watch loop that is no longer running cannot self-heal drift, and
+	//     nothing else restarts it, so an externally cleared filter or a moved
+	//     default route would sit unfixed. Healthy reports that as unhealthy
+	//     even when Health's own checks pass.
+	//   - A failing Health result nudges the watcher to re-evaluate before the
+	//     next tick, in case the failure is the kind of drift its reconcile
+	//     heals, rather than waiting on an unrelated netlink event.
 	Watcher *Watcher
 }
 
-// Close releases this process's own BPF map/program file descriptors -- it
-// does not detach the filter or unpin the maps (see the package doc
-// comment for why that is safe).
+// Close releases this process's BPF map and program descriptors. It does not
+// detach the filter or unpin the maps; see the package doc comment for why that
+// is safe.
 func (h *Handle) Close() error {
 	return h.Objs.Close()
 }
 
-// Healthy re-resolves the current interface set (the same auto-detect/
-// override logic ResolveInterfaces always uses) and reports whether the
-// datapath is still attached to it and its maps are reachable. Re-resolving
-// fresh on every call, rather than reusing a cached set captured at
-// startup, means a health probe reflects the datapath's *current* desired
-// attachment state, consistent with Watch's own netlink-driven
-// re-evaluation (Milestone 3.2) -- a transient ResolveInterfaces failure
-// (e.g. no default route momentarily) is reported as unhealthy here too,
-// which is the correct, if occasionally noisy, behavior for a liveness/
-// readiness signal.
+// Healthy re-resolves the current interface set and reports whether the
+// datapath is still attached to it with its maps reachable.
 //
-// If h.Watcher is set, a non-nil Health result nudges it (Watcher.
-// Reconcile) before Healthy returns -- asynchronously and debounced by
-// Watch's own debounceInterval, so this call still reports the failure it
-// just observed, but the *next* Healthy call (one health-check interval
-// later) may find the drift already self-healed instead of needing an
-// unrelated netlink event or a full container restart to fix it (ecv's
-// review of #283). Separately, and regardless of Health's own result, a
-// dead watcher (h.Watcher.Alive() == false) is always reported as
-// unhealthy: it can no longer react to anything, including this nudge.
+// Resolving fresh on every call, rather than reusing a set captured at startup,
+// makes a probe reflect the datapath's current desired attachment, consistent
+// with the watcher's netlink-driven re-evaluation. A transient resolution
+// failure, such as a momentarily absent default route, is reported as unhealthy
+// too, which is correct if occasionally noisy for a liveness signal.
+//
+// When a watcher is set, a non-nil Health result nudges it before returning.
+// The nudge is asynchronous and debounced, so this call still reports what it
+// observed while the next one may find the drift already healed. Separately, a
+// watcher that is no longer running is always unhealthy: it can no longer react
+// to anything, including that nudge.
 func (h *Handle) Healthy() error {
 	ifaces, err := ResolveInterfaces()
 	if err != nil {
@@ -218,9 +189,8 @@ func (h *Handle) Healthy() error {
 	return healthErr
 }
 
-// tcxQueryFn is a package-level override point, matching linkByNameFn and
-// filterListFn above, so checkNotPreempted's tests need neither root nor a
-// live interface with a foreign program on it.
+// tcxQueryFn is an override point so checkNotPreempted's tests need neither
+// root nor a live interface with a foreign program on it.
 var tcxQueryFn = func(ifindex int) ([]ebpf.ProgramID, error) {
 	res, err := link.QueryPrograms(link.QueryOptions{
 		Target: ifindex,
@@ -251,20 +221,17 @@ var programNameFn = func(id ebpf.ProgramID) (string, error) {
 	return info.Name, nil
 }
 
-// ownProgramIDs returns the kernel ids of this datapath's own programs, for
-// checkNotPreempted to recognize itself by.
+// ownProgramIDs returns the kernel IDs of this datapath's own programs, so
+// checkNotPreempted can recognise itself.
 //
-// By id rather than by name, because reading a name means opening the
-// program by id, and BPF_PROG_GET_FD_BY_ID wants CAP_SYS_ADMIN or
-// CAP_PERFMON. This container carries neither (it drops ALL and adds BPF,
-// NET_ADMIN and NET_RAW), so that call returns EPERM here. An id needs no
-// such privilege: it comes from BPF_OBJ_GET_INFO_BY_FD on a descriptor
-// this process already holds.
+// By ID rather than by name, because reading a name means opening the program
+// by ID, which wants CAP_SYS_ADMIN or CAP_PERFMON. This container carries
+// neither, so that call returns EPERM. An ID needs no such privilege: it comes
+// from an info query on a descriptor this process already holds.
 //
-// Getting this wrong is what made the first version of this check useless.
-// It compared names, could not read them, and treated the failure as
-// nothing to report -- so it sat inert on a node that genuinely was
-// preempted.
+// Getting this wrong is what made the first version of the check useless. It
+// compared names, could not read them, and treated the failure as nothing to
+// report, so it sat inert on a node that genuinely was preempted.
 func ownProgramIDs(objs *prog.UsidObjects) map[ebpf.ProgramID]struct{} {
 	out := make(map[ebpf.ProgramID]struct{}, 2)
 	for _, p := range []*ebpf.Program{objs.UsidIngress, objs.UsidEgress} {
@@ -285,18 +252,16 @@ func ownProgramIDs(objs *prog.UsidObjects) map[ebpf.ProgramID]struct{} {
 // reportPreemption logs, and deliberately does not return, whatever
 // checkNotPreempted finds.
 //
-// This must never reach the health service. Both the liveness and the
-// readiness probe point at that one service, so anything reported through
-// it restarts this container -- and a restart cannot remove another CNI's
-// program from an interface. Wiring preemption into it produced a
-// permanent crashloop: measured at six restarts in as many minutes on a
-// node with a foreign program deliberately attached, each restart
-// changing nothing about the condition that caused it.
+// This must never reach the health service. Both the liveness and readiness
+// probes point at that one service, so anything reported through it restarts
+// the container, and a restart cannot remove another CNI's program from an
+// interface. Wiring preemption into it produces a permanent crashloop, each
+// restart changing nothing about the condition that caused it.
 //
-// Every other check in Health is a condition a restart plausibly fixes,
-// since restarting reloads the programs and re-attaches them. This one is
-// not, so it belongs in the log next to the other things an operator reads
-// rather than in the signal that decides whether this container lives.
+// Every other check in Health is a condition a restart plausibly fixes, since
+// restarting reloads and re-attaches the programs. This one is not, so it
+// belongs in the log an operator reads rather than in the signal that decides
+// whether this container lives.
 func reportPreemption(objs *prog.UsidObjects) {
 	if objs == nil {
 		return
@@ -309,32 +274,31 @@ func reportPreemption(objs *prog.UsidObjects) {
 }
 
 // checkNotPreempted confirms nothing runs ahead of this datapath on the
-// interfaces it owns exclusively.
+// interfaces it owns exclusively. own is the set of program IDs to recognise as
+// this datapath's own.
 //
 // Being attached is not the same as being reached. This package attaches
-// via clsact, and the kernel runs every tcx program on a hook before any
-// clsact filter on it, so another CNI's tcx program on the same interface
-// decides a packet's fate first. If it consumes or drops the packet,
-// usid_egress is never invoked and every counter here reads a clean zero,
-// because from this side nothing arrived. That is worth a check because it
-// is invisible from every vantage point this codebase otherwise has:
-// diagnosing one instance took kernel kfree_skb tracing, then bpftool to
-// see a tcx link `tc filter show` cannot display, then the other CNI's own
-// drop monitor to name the reason.
+// through clsact, and the kernel runs every tcx program on a hook before any
+// clsact filter, so another CNI's tcx program decides a packet's fate first. If
+// it consumes or drops the packet, usid_egress is never invoked and every
+// counter reads a clean zero, because from this side nothing arrived. That is
+// worth checking because it is invisible from every other vantage point:
+// diagnosing one instance took kernel tracing, then bpftool to see a tcx link
+// that tc cannot display, then the other CNI's own drop monitor to name the
+// reason.
 //
-// Scoped to this datapath's own per-attachment interfaces -- the taps and
-// veths carrying usid_egress -- and deliberately not to the shared uplinks
-// usid_ingress attaches to. On an uplink another CNI is expected: it is
-// that CNI's interface too, and this datapath's own receive classification
-// happens on a bond's slaves rather than on the master a cluster CNI
-// attaches to, so a tcx program there is not in the way of anything.
-// Checking uplinks would report every node in a fleet unhealthy over the
-// ordinary arrangement.
+// Scoped to this datapath's per-attachment interfaces, the taps and veths
+// carrying usid_egress, and not to the shared uplinks usid_ingress attaches to.
+// On an uplink another CNI is expected: the interface is that CNI's too, and
+// receive classification here happens on a bond's slaves rather than the master
+// a cluster CNI attaches to, so a program there is not in the way. Checking
+// uplinks would report every node in a fleet unhealthy over an ordinary
+// arrangement.
 //
-// Enumerating by filter rather than taking a caller-supplied list: an
-// interface carrying this package's own usid_egress filter is by definition
-// one this datapath owns, so the set defines itself and cannot drift out of
-// step with what is actually attached.
+// The interface set is enumerated by filter rather than supplied by the caller:
+// an interface carrying this package's usid_egress filter is by definition one
+// this datapath owns, so the set cannot drift out of step with what is
+// attached.
 func checkNotPreempted(own map[ebpf.ProgramID]struct{}) error {
 	links, err := linkListFn()
 	if err != nil {
@@ -368,29 +332,27 @@ func hasEgressFilter(l netlink.Link) bool {
 	return false
 }
 
-// checkNotPreemptedOne reports whether anything precedes this datapath on
-// one owned interface.
+// checkNotPreemptedOne reports whether anything precedes this datapath on one
+// owned interface. own is the set of program IDs belonging to this datapath.
 //
-// Reported by program id, with a name only when one can be read. The id
-// alone is enough to act on (`bpftool prog show id N` names it), and
-// insisting on the name is what left the first version of this check
-// unable to report anything at all -- see ownProgramIDs.
+// Findings are reported by program ID, with a name only when one can be read.
+// The ID alone is enough to act on, and insisting on the name is what left the
+// first version of this check unable to report anything.
 //
-// A failure to look is logged rather than returned. This check is a
-// diagnostic, and its own inability to run says nothing about whether the
-// datapath is carrying traffic, so failing health on it would report the
-// wrong thing. Logged, though, and not swallowed: silence that could mean
-// either "nothing is wrong" or "this never ran" is what allowed an inert
-// check to look identical to a passing one.
+// A failure to look is logged rather than returned. This is a diagnostic, and
+// its own inability to run says nothing about whether the datapath is carrying
+// traffic, so failing health on it would report the wrong thing. It is logged
+// rather than swallowed, because silence that could mean either "nothing is
+// wrong" or "this never ran" is what let an inert check look like a passing
+// one.
 func checkNotPreemptedOne(l netlink.Link, own map[ebpf.ProgramID]struct{}) error {
 	name := l.Attrs().Name
 
 	ids, err := tcxQueryFn(l.Attrs().Index)
 	if err != nil {
 		if errors.Is(err, ebpf.ErrNotSupported) {
-			// A kernel with no tcx cannot have a tcx program to be
-			// preempted by, so there is nothing to report and nothing
-			// to warn about either.
+			// A kernel with no tcx cannot have a tcx program to be preempted
+			// by, so there is nothing to report or warn about.
 			return nil
 		}
 		slog.Warn("attach: health: could not check whether another tc program precedes this datapath",

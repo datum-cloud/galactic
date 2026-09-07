@@ -4,18 +4,14 @@
 
 package prog
 
-// Drop reason indices into the drop_reasons map (usid.c's `enum
-// drop_reason`), exported for callers outside this package -- notably
-// internal/plumbing/ebpf/metrics's Prometheus collector (Milestone 4 of
-// .local/implementation-plan-ebpf-xdp-usid-datapath.md), which needs a
-// stable, human-readable label per index. Hand-kept in sync with usid.c
-// for the same reason usidmap's BehaviorEndDT46/BehaviorEndDT2 constants
-// are (see usidmap/function.go's identical comment): bpf2go's -type flag
-// cannot generate a Go type for a C enum that is only ever used as a
-// literal constant, never as a typed variable/field the compiler retains
-// distinct BTF for. usid_test.go (this package) uses these same exported
-// constants directly rather than keeping its own copy -- if usid.c's enum
-// drop_reason ever changes, update both this file and usid_test.go.
+// Drop reason indices into the drop_reasons map, mirroring the datapath's own
+// enum and exported for callers outside this package, notably the Prometheus
+// collector, which needs a stable label per index.
+//
+// Hand-kept in sync with the C source, because the generator cannot produce a Go
+// type for an enum used only as a literal constant. This package's own tests use
+// these same constants rather than keeping a copy, so a change to the enum means
+// updating both this file and those tests.
 const (
 	DropReasonUnknownFunction            uint32 = 0
 	DropReasonUnknownArgument            uint32 = 1
@@ -36,10 +32,9 @@ const (
 	DropReasonCount                      uint32 = 16
 )
 
-// DropReasonNames maps each DropReason* index to a short, stable,
-// metrics/log-friendly name, decoupling Prometheus label values (Milestone
-// 4) and any other external representation from usid.c's C identifier
-// spelling.
+// DropReasonNames maps each index to a short, stable, metrics-friendly name,
+// decoupling label values and any other external representation from the C
+// identifier spelling.
 var DropReasonNames = map[uint32]string{
 	DropReasonUnknownFunction:            "unknown_function",
 	DropReasonUnknownArgument:            "unknown_argument",

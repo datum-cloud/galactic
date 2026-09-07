@@ -21,23 +21,18 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 )
 
-// publishEndpointSlice creates or updates the per-pod discoveryv1.EndpointSlice
-// that the HTTP-ingress extension server discovers VPC backends through (see
-// crdnames.LabelTenantID's doc comment — Open Decision 2 of the #854 plan).
-// One EndpointSlice per pod, named after the pod (crdnames.EndpointSliceName),
-// IPv6-only (Open Decision 1: a dual-stack pod's IPv4 address is not
-// published).
+// publishEndpointSlice creates or updates the per-pod EndpointSlice the HTTP
+// ingress extension server discovers VPC backends through. One slice per pod,
+// named after the pod, and IPv6-only: a dual-stack pod's IPv4 address is not
+// published.
 //
-// Runs as its own step after publishBGPState returns successfully, not
-// folded into its retry closure — see the #854 plan's Phase 4 rollback-risk
-// note for why that sequencing, combined with fixing advertisementCreated's
-// gating (bgp.go), is what keeps a failure here from ever causing rollback to
-// delete a BGPAdvertisement still backing a live sibling.
+// It runs as its own step after the BGP publish succeeds, not inside its retry
+// closure. That sequencing is what keeps a failure here from causing rollback to
+// delete an advertisement still backing a live sibling.
 //
-// Also sets metadata.ownerReferences to the owning Pod (Open Decision 6 /
-// Phase 8: the k8s garbage collector's own reclaim is the backstop for
-// force-deleted/never-DEL'd pods; cmdDel's explicit delete, ops_del.go, is
-// the fast, deterministic path for the common case).
+// It also sets an owner reference to the pod, so the cluster's garbage collector
+// is the backstop for pods that are force-deleted and never see a DEL. The
+// explicit delete on DEL is the fast path for the common case.
 func publishEndpointSlice(
 	ctx context.Context, k8s client.Client, namespace, podName, vpc, vpcAttachment string, addr net.IP, sid netip.Addr,
 ) error {
@@ -53,11 +48,10 @@ func publishEndpointSlice(
 	getErr := k8s.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, slice)
 	switch {
 	case getErr == nil:
-		// Naming-collision defensive check: EndpointSliceName is a trivial
-		// passthrough of the pod's own name, so nothing but convention stops
-		// some other EndpointSlice (Service-backed or otherwise) from
-		// landing on this exact name/namespace. Bail rather than silently
-		// start mutating an object this plugin doesn't own.
+		// Defensive against a naming collision: the slice name is a
+		// passthrough of the pod's name, so nothing but convention stops
+		// another slice from landing on this exact name. Bail rather than
+		// silently mutate an object this plugin does not own.
 		if _, ok := slice.Labels[crdnames.LabelTenantID]; !ok {
 			return fmt.Errorf(
 				"EndpointSlice %s/%s already exists without a %s label — refusing to overwrite an object this plugin doesn't own",
@@ -103,11 +97,10 @@ func publishEndpointSlice(
 			},
 		}}
 
-		// Same namespace (Pod and EndpointSlice always are, here), so the
-		// cross-namespace-owner restriction doesn't apply. Not a controller
-		// ref (SetOwnerReference, not SetControllerReference) and
-		// BlockOwnerDeletion left at its default false — ordering doesn't
-		// matter for this object.
+		// Pod and slice are always in the same namespace here, so the
+		// cross-namespace restriction does not apply. Not a controller
+		// reference, and not blocking owner deletion: ordering does not matter
+		// for this object.
 		return controllerutil.SetOwnerReference(pod, slice, k8s.Scheme())
 	})
 	if err != nil {
@@ -118,9 +111,8 @@ func publishEndpointSlice(
 	return nil
 }
 
-// deleteEndpointSlice deletes the per-pod EndpointSlice cmdAdd published,
-// treating not-found as success — see cmdDel's own doc comment for why DEL,
-// unlike the rest of the chain's DEL paths, does real work here.
+// deleteEndpointSlice deletes the per-pod EndpointSlice the ADD path published,
+// treating not-found as success.
 func deleteEndpointSlice(ctx context.Context, k8s client.Client, namespace, podName string) error {
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{

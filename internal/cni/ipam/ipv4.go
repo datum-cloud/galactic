@@ -18,26 +18,25 @@ const (
 	// ipv4Bits is the number of bits in an IPv4 address.
 	ipv4Bits = 32
 
-	// ipv4LockFileName is the flock target within each pool's state
-	// directory; every other entry in that directory is an allocation
-	// marker file named after the address it reserves.
+	// ipv4LockFileName is the flock target within each pool's state directory.
+	// Every other entry there is an allocation marker named after the address
+	// it reserves.
 	ipv4LockFileName = "lock"
 )
 
-// IPv4PoolAllocator allocates individual IPv4 /32 addresses from a CIDR pool.
-// Unlike PoolAllocator's ephemeral in-memory tracking, IPv4PoolAllocator
-// persists each allocation as a marker file under a lock directory, keyed by
-// the pool CIDR, and guards reads/writes of that state with a cross-process
-// flock. This is required because PR #740's IPv4 pool is a site-wide /20
-// shared by every VPC at that site: each CNI invocation is a separate OS
-// process, so two pods in different VPCs concurrently ADDing on the same
-// node construct independent allocator instances against the identical pool
-// — an in-memory-only "used" set (as PoolAllocator uses for IPv6, where each
-// VPCAttachment's pool is exclusively its own) would let both instances
-// allocate the same address. Four addresses in the pool are reserved and
-// never handed out: the network address (first address), the gateway
-// address (network address + 1, or an explicit gateway), the second-to-last
-// address (platform reserved), and the last address (broadcast-equivalent).
+// IPv4PoolAllocator allocates individual IPv4 addresses from a CIDR pool,
+// persisting each allocation as a marker file under a lock directory keyed by
+// the pool CIDR and guarding that state with a cross-process flock.
+//
+// The cross-process guard is required because the IPv4 pool is a site-wide
+// prefix shared by every VPC at that site. Each CNI invocation is a separate
+// process, so two pods in different VPCs adding concurrently on one node build
+// independent allocators against the same pool, and an in-memory used set would
+// let both pick the same address. The IPv6 allocator does not need this, each
+// attachment's pool being exclusively its own.
+//
+// Four addresses are reserved and never handed out: the network address, the
+// gateway, the second-to-last address, and the last.
 type IPv4PoolAllocator struct {
 	pool     *net.IPNet // the master pool (e.g. a /20 site subnet)
 	gateway  net.IP     // gateway IP address
@@ -46,12 +45,10 @@ type IPv4PoolAllocator struct {
 	state    lockedState
 }
 
-// NewIPv4PoolAllocator creates a new IPv4 pool allocator from a CIDR pool and
-// an optional gateway address. The pool must be an IPv4 prefix. If gateway is
-// empty, the network address plus 1 is used as the gateway. lockDir is the
-// parent directory for this pool's on-disk lock and allocation state (see
-// DefaultLockDir for the production path); it must not be empty, and a
-// pool-scoped subdirectory under it is created if it doesn't already exist.
+// NewIPv4PoolAllocator creates an allocator over an IPv4 CIDR pool. An empty
+// gateway defaults to the network address plus one. lockDir is the parent
+// directory for this pool's on-disk lock and allocation state and must not be
+// empty; a pool-scoped subdirectory under it is created if absent.
 func NewIPv4PoolAllocator(poolCIDR, gateway, lockDir string) (*IPv4PoolAllocator, error) {
 	_, pool, err := net.ParseCIDR(poolCIDR)
 	if err != nil {
@@ -98,17 +95,14 @@ func NewIPv4PoolAllocator(poolCIDR, gateway, lockDir string) (*IPv4PoolAllocator
 	return a, nil
 }
 
-// Allocate assigns the next available IPv4 /32 address from the pool for the
-// given container ID, skipping reserved addresses (the network address, the
-// gateway, the second-to-last address, and the last address of the pool). If
-// containerID already holds an allocation in this pool, that same address is
-// returned rather than a fresh one being handed out — see
-// PoolAllocator.Allocate's doc comment (IPv6) for why this idempotency check
-// matters for CNI ADD retries. Returns an error if the pool is exhausted.
-// The read-modify-write against the on-disk allocation state is serialized
-// both within this process (via mu) and across processes sharing the same
-// pool (via a flock on the pool's lock file), so concurrent ADDs from
-// different VPCs on the same node never return the same address.
+// Allocate assigns the next available address from the pool to containerID,
+// skipping the reserved ones. A containerID that already holds an allocation
+// gets the same address back rather than a fresh one, which is what makes an
+// ADD retry safe. Returns an error if the pool is exhausted.
+//
+// The read-modify-write against the on-disk state is serialized both within
+// this process and across processes sharing the pool, so concurrent adds from
+// different VPCs on one node never return the same address.
 func (a *IPv4PoolAllocator) Allocate(containerID string) (net.IP, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -168,9 +162,9 @@ func (a *IPv4PoolAllocator) Deallocate(addr string) {
 	})
 }
 
-// LookupContainer reports the address, if any, allocated to containerID,
-// without removing it — used by CHECK to confirm an allocation is still in
-// place. Returns ("", false) if none is found.
+// LookupContainer reports the address allocated to containerID, without
+// removing it, for CHECK to confirm an allocation is still in place. Returns
+// ("", false) when none is found.
 func (a *IPv4PoolAllocator) LookupContainer(containerID string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -184,12 +178,9 @@ func (a *IPv4PoolAllocator) LookupContainer(containerID string) (string, bool) {
 	return addr, ok
 }
 
-// DeallocateContainer removes the allocation, if any, held by containerID,
-// without the caller needing to already know the allocated address —
-// mirrors PoolAllocator.DeallocateContainer (IPv6); see its doc comment for
-// why the scan and the removal must happen under a single flock acquisition.
-// Returns the deallocated address and true if one was found; ("", false)
-// otherwise.
+// DeallocateContainer removes the allocation held by containerID without the
+// caller needing to know the address. The scan and removal share a single flock
+// acquisition. Returns the deallocated address and true, or ("", false).
 func (a *IPv4PoolAllocator) DeallocateContainer(containerID string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -218,9 +209,8 @@ func (a *IPv4PoolAllocator) IsAllocated(addr string) bool {
 	return err == nil
 }
 
-// usedAddresses reads the pool's state directory and returns the set of
-// addresses currently marked allocated by any process sharing this pool.
-// Callers must hold both mu and the pool's flock.
+// usedAddresses returns the set of addresses currently marked allocated by any
+// process sharing this pool. Callers must hold both mu and the pool's flock.
 func (a *IPv4PoolAllocator) usedAddresses() (map[string]struct{}, error) {
 	entries, err := a.state.entries()
 	if err != nil {
@@ -245,9 +235,8 @@ func (a *IPv4PoolAllocator) Gateway() net.IP {
 	return a.gateway
 }
 
-// reservedAddresses returns the set of addresses in the pool that are never
-// handed out by Allocate: the network address, the gateway address, the
-// second-to-last address, and the last address.
+// reservedAddresses returns the addresses Allocate never hands out: the network
+// address, the gateway, the second-to-last, and the last.
 func (a *IPv4PoolAllocator) reservedAddresses() map[string]struct{} {
 	ones, bits := a.pool.Mask.Size()
 	total := uint64(1) << uint(bits-ones)

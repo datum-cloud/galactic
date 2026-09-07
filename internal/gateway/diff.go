@@ -6,17 +6,15 @@ package gateway
 
 import "sort"
 
-// diffRuleKeys compares the currently-active rule keys against the desired
-// EngineState and returns which keys need to be (re)applied and which need
-// to be removed. A key present in both sets is always returned in toApply
-// (Engine.Reconcile applies unconditionally rather than trying to diff
-// individual field changes — matching GoBGPRuntime's own "re-apply the
-// whole desired set" convergence style) — toApply/toRemove partition the
-// *key space*, not "changed vs. unchanged".
+// diffRuleKeys compares the currently active rule keys against the desired state
+// and returns which need applying and which removing.
 //
-// Both returned slices are sorted for deterministic iteration order (log
-// output, test assertions) — desired/active are Go maps, whose iteration
-// order is intentionally randomized.
+// A key present in both is always returned in toApply: the engine applies
+// unconditionally rather than diffing individual field changes. The two slices
+// partition the key space, not changed against unchanged.
+//
+// Both are sorted, for deterministic log output and test assertions, the inputs
+// being maps whose iteration order is randomized.
 func diffRuleKeys(active map[string]DesiredRule, desired map[string]DesiredRule) (toApply, toRemove []string) {
 	for key := range desired {
 		toApply = append(toApply, key)

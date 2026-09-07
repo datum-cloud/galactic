@@ -3,43 +3,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package preflight implements the startup kernel-capability check for the
-// `uFMT 48+16` eBPF/TC-BPF uSID datapath (design plan
-// .local/plan-ebpf-xdp-usid-datapath.md §6 "Preflight capability check";
-// Milestone 2.3 of .local/implementation-plan-ebpf-xdp-usid-datapath.md).
+// eBPF uSID datapath.
 //
-// Before Milestone 3.1's control daemon attempts to load and attach
-// internal/plumbing/ebpf/prog's compiled BPF object, it must confirm the
-// running kernel actually supports everything that object needs:
+// Before the control daemon loads and attaches the compiled BPF object, the
+// running kernel must be confirmed to support everything that object needs:
 //
-//   - BPF_PROG_TYPE_SCHED_CLS (the TC-BPF ingress hook usid.c attaches as,
-//     design plan §4.1).
-//   - BPF_MAP_TYPE_HASH (locator_table/function_table/vrf_table are all
-//     this type, design plan §4.4).
-//   - Kernel BTF (usid.c is compiled CO-RE -- Compile Once, Run Everywhere
-//     -- and needs /sys/kernel/btf/vmlinux to load at all, design plan §6).
-//   - bpf_fib_lookup()'s VRF-table-id (tbid) parameter, specifically --
-//     not just that the bpf_fib_lookup helper exists at all. That
-//     parameter (the BPF_FIB_LOOKUP_TBID flag plus struct bpf_fib_lookup's
-//     `tbid` field) was added to the kernel in a later release than the
-//     base helper. A kernel that has bpf_fib_lookup but predates tbid
-//     support would pass a naive "is the helper present" check and then
-//     either fail the load (if usid.c's struct layout doesn't match what
-//     the running kernel expects) or, worse, silently misroute traffic at
-//     runtime -- R5 of the design plan depends on FIB lookups being scoped
-//     to the resolved Argument's Linux VRF table via exactly this
-//     parameter. This package detects tbid support by walking the running
-//     kernel's own BTF description of `struct bpf_fib_lookup` (via
-//     [KernelProber], see kernel_prober.go) for a member literally named
-//     `tbid`, rather than parsing a kernel version string: the kernel's
-//     BTF is generated directly from the same struct definition its
-//     bpf_fib_lookup() implementation reads, so if the field isn't there,
-//     the running kernel provably doesn't support it, independent of
-//     whatever version string /proc/version reports (backports/vendor
-//     kernels routinely change what a given "version" supports).
+//   - The TC-BPF program type usid.c attaches as.
+//   - The hash map type all three lookup maps use.
+//   - Kernel BTF, without which a CO-RE-compiled object cannot load at all.
+//   - bpf_fib_lookup's VRF-table-id parameter specifically, not merely that
+//     the helper exists.
 //
-// This check must never produce a partial pass: any missing capability
-// fails the whole check, and the caller must not fall back to a
-// degraded/unsafe mode (design plan §6). See [Check] and [CheckWith].
+// That last one needs its own check. The table-id flag and struct field were
+// added later than the base helper, so a kernel with the helper but without
+// them passes a naive presence check and then either fails the load or, worse,
+// silently misroutes traffic, since scoping the FIB lookup to the resolved
+// Argument's VRF table depends on exactly that parameter.
+//
+// Support is detected by walking the running kernel's own BTF for a member
+// named tbid rather than parsing a version string. The BTF is generated from
+// the same struct definition the helper implementation reads, so its absence is
+// proof, whatever version the kernel reports: backports and vendor kernels
+// routinely change what a given version supports.
+//
+// This check never passes partially. Any missing capability fails the whole
+// check, and the caller must not fall back to a degraded mode.
 package preflight
 
 import (
@@ -47,42 +35,33 @@ import (
 	"fmt"
 )
 
-// Prober is the kernel-capability probe interface this package's checks run
-// against. [NewKernelProber] returns the real, kernel-backed implementation
-// used in production; tests substitute a mocked/stubbed implementation (see
-// preflight_test.go) to exercise the pass case and each individual failure
-// case in [CheckWith] without touching the real kernel (Milestone 2.3 exit
-// criteria).
+// Prober is the kernel-capability probe interface the checks run against.
+// NewKernelProber returns the real implementation; tests substitute a stub to
+// exercise the pass case and each failure case without a kernel.
 type Prober interface {
-	// SchedCLS reports whether the running kernel supports
-	// BPF_PROG_TYPE_SCHED_CLS. Returns nil if supported, a non-nil error
-	// otherwise.
+	// SchedCLS reports whether the kernel supports the TC-BPF program type,
+	// returning nil when it does.
 	SchedCLS() error
 
-	// HashMap reports whether the running kernel supports
-	// BPF_MAP_TYPE_HASH. Returns nil if supported, a non-nil error
-	// otherwise.
+	// HashMap reports whether the kernel supports the hash map type, returning
+	// nil when it does.
 	HashMap() error
 
-	// BTF reports whether the running kernel exposes BTF type
-	// information (required for usid.c's CO-RE compilation to resolve
-	// against this kernel). Returns nil if available, a non-nil error
-	// otherwise.
+	// BTF reports whether the kernel exposes BTF type information, which a
+	// CO-RE-compiled object needs to resolve against it. Returns nil when
+	// available.
 	BTF() error
 
-	// FIBLookupTBID reports whether this kernel's bpf_fib_lookup()
-	// supports the VRF-table-id (tbid) parameter specifically -- not
-	// merely that the base helper exists. Returns nil if supported, a
-	// non-nil error otherwise.
+	// FIBLookupTBID reports whether this kernel's bpf_fib_lookup supports the
+	// VRF-table-id parameter, not merely that the helper exists. Returns nil
+	// when supported.
 	FIBLookupTBID() error
 }
 
-// capabilityCheck names one required capability, binds it to its probe
-// function, and carries a one-line, actionable "why this matters" note used
-// to build [CheckWith]'s aggregate error. The why text is independent of
-// whatever detail the underlying Prober error carries, so the aggregate
-// error is equally actionable regardless of which Prober implementation
-// (real or stubbed) produced it.
+// capabilityCheck names one required capability, binds it to its probe, and
+// carries a one-line actionable note used to build the aggregate error. That
+// note is independent of whatever detail the probe's own error carries, so the
+// aggregate stays equally actionable whichever Prober produced it.
 type capabilityCheck struct {
 	name string
 	fn   func() error
@@ -117,27 +96,21 @@ func capabilityChecks(p Prober) []capabilityCheck {
 }
 
 // Check runs every capability probe this datapath depends on against the
-// real running kernel (via [NewKernelProber]) and returns a clear,
-// actionable error if any is missing. It is the entry point Milestone
-// 3.1's control daemon calls before attempting to load
-// internal/plumbing/ebpf/prog's compiled object.
+// running kernel and returns an actionable error if any is missing. It is what
+// the control daemon calls before attempting to load the compiled object.
 func Check() error {
 	return CheckWith(NewKernelProber())
 }
 
-// CheckWith runs the same checks as [Check] against an arbitrary [Prober],
-// so tests can substitute a mocked/stubbed kernel-feature-probe
-// implementation and exercise the pass case and each individual failure
-// case without touching the real kernel.
+// CheckWith runs the same probes as Check against an arbitrary Prober, so tests
+// can exercise the pass case and each failure case without a kernel.
 //
-// Every check always runs, even after an earlier one fails, so a caller
-// sees every missing capability at once rather than one at a time across
-// repeated fix-and-rerun cycles. If nothing is missing, CheckWith returns
-// nil. If anything is missing, CheckWith returns a single non-nil error
-// (built with [errors.Join]) describing every failure -- there is no
-// partial-pass return value, and callers must treat any non-nil error as
-// "do not load the datapath on this node," never as a signal to fall back
-// to a degraded or unsafe mode (design plan §6).
+// Every check runs even after an earlier one fails, so a caller sees every
+// missing capability at once rather than one per fix-and-rerun cycle. It
+// returns nil when nothing is missing, and otherwise a single joined error
+// describing every failure. There is no partial-pass return: any non-nil error
+// means do not load the datapath on this node, never fall back to a degraded
+// mode.
 func CheckWith(p Prober) error {
 	checks := capabilityChecks(p)
 

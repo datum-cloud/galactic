@@ -23,35 +23,27 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
-// PinDir is the default bpffs directory every usid_ingress map is pinned
-// under (design plan §4.4/§9: "All maps pinned under /sys/fs/bpf/galactic/
-// so a control-daemon restart does not require the datapath to stop
-// forwarding").
+// PinDir is the default bpffs directory every usid_ingress map is pinned under,
+// so a control-daemon restart does not stop the datapath forwarding.
 const PinDir = "/sys/fs/bpf/galactic"
 
-// filterName identifies this package's own TC-BPF ingress filter on an
-// interface, so re-attachment (across a container restart, or Watch's
-// netlink-driven re-attachment, Milestone 3.2) replaces the same filter
-// instead of stacking a duplicate.
+// filterName identifies this package's TC-BPF ingress filter on an interface,
+// so a re-attach replaces the same filter rather than stacking a duplicate.
 const filterName = "galactic_usid_ingress"
 
-// defaultFilterPriority is the tc priority attachOne uses when
-// config.EnvCNIEBPFFilterPriority is unset. Priority 1 is the highest
-// (lowest-numbered) priority tc allows; this has not been validated
-// against Cilium's own clsact priority on any specific version/datapath
-// mode -- see config.EnvCNIEBPFFilterPriority's doc comment. Override via
-// that env var if it collides.
+// defaultFilterPriority is the tc priority attachOne uses when no override is
+// set. Priority 1 is the highest tc allows, and has not been validated against
+// another CNI's clsact priority on any particular version. Override it through
+// the environment if it collides.
 const defaultFilterPriority = 1
 
-// filterPriorityFn resolves the tc priority attachOne attaches at. It is a
-// package-level override point (the same pattern interfaces.go's
-// routeListFn/linkByIndexFn use) so tests can exercise a non-default
-// priority without setting a real process environment variable.
+// filterPriorityFn resolves the tc priority attachOne attaches at. An override
+// point so tests can exercise a non-default priority without setting a real
+// environment variable.
 var filterPriorityFn = resolveFilterPriority
 
-// resolveFilterPriority reads config.EnvCNIEBPFFilterPriority, if set and a
-// valid uint16, as the tc priority to attach this package's ingress filter
-// at; otherwise it returns defaultFilterPriority.
+// resolveFilterPriority returns the configured tc priority when the environment
+// sets a valid uint16, and defaultFilterPriority otherwise.
 func resolveFilterPriority() uint16 {
 	if v := strings.TrimSpace(os.Getenv(config.EnvCNIEBPFFilterPriority)); v != "" {
 		if parsed, err := strconv.ParseUint(v, 10, 16); err == nil {
@@ -63,22 +55,20 @@ func resolveFilterPriority() uint16 {
 	return defaultFilterPriority
 }
 
-// preflightCheckFn is a package-level override point so tests can force the
-// preflight failure path without touching the real kernel -- the same
-// pattern preflight.CheckWith itself uses for Prober.
+// preflightCheckFn is an override point so tests can force the preflight
+// failure path without touching the real kernel.
 var preflightCheckFn = preflight.Check
 
-// Start runs the kernel preflight check (blocking on failure -- design plan
-// §6), loads and pins internal/plumbing/ebpf/prog's compiled usid_ingress
-// object under pinDir, resolves the interface set per §4.1, and attaches
-// the program to each resolved interface's ingress hook. On any failure the
-// returned *prog.UsidObjects is nil and any partially-loaded kernel objects
-// from this call are cleaned up -- there is no partial/unsafe fallback.
+// Start runs the kernel preflight check, loads and pins the compiled
+// usid_ingress object under pinDir, resolves the interface set, and attaches the
+// program to each resolved interface's ingress hook. It returns the loaded
+// objects and the interfaces actually attached to.
 //
-// On success, the caller owns the returned objects and the interfaces
-// actually attached to; the objects should be kept open for the life of the
-// process and Closed on shutdown (see the package doc comment for why that
-// is safe).
+// A preflight failure blocks. On any failure the returned objects are nil and
+// partially loaded kernel objects are cleaned up: there is no partial fallback.
+//
+// On success the caller owns the objects, which should stay open for the life of
+// the process and be closed on shutdown.
 func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 	objs, err = Load(pinDir)
 	if err != nil {
@@ -99,18 +89,14 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 	return objs, ifaces, nil
 }
 
-// Load runs the kernel preflight check (design plan §6, Milestone 2.3) and,
-// only if it passes, loads internal/plumbing/ebpf/prog's compiled object
-// with every map pinned under pinDir. A map already pinned there from a
-// previous process is reused as-is (its contents survive); a map with no
-// existing pin is created and pinned fresh. Load does not attach the
-// program to any interface -- call Attach (or use Start) for that.
+// Load runs the kernel preflight check and, only if it passes, loads the
+// compiled object with every map pinned under pinDir. A map already pinned there
+// by a previous process is reused with its contents intact; one with no pin is
+// created and pinned fresh. Load attaches nothing; call Attach or Start for
+// that.
 func Load(pinDir string) (objs *prog.UsidObjects, err error) {
-	// loadHook observes every return path below (design plan §9's "BPF
-	// program load/reload events and failures" metric; Milestone 4) via a
-	// single defer over the named return, rather than a call at each
-	// return statement -- so a future return path added here can't
-	// accidentally forget to report itself.
+	// A single defer over the named return observes every path below, so a
+	// return added later cannot forget to report itself.
 	defer func() { loadHook(err) }()
 
 	if err = preflightCheckFn(); err != nil {
@@ -134,13 +120,10 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		return nil, err
 	}
 
-	// Pin every map by name under pinDir (design plan §4.4: "All maps
-	// pinned"). usid.c's map definitions don't set a BTF `pinning`
-	// attribute themselves, so pinning is configured here at load time
-	// instead -- see github.com/cilium/ebpf's Map.newMapWithOptions:
-	// PinByName + MapOptions.PinPath together make LoadAndAssign reuse an
-	// existing pin if one exists at <pinDir>/<map name>, rather than
-	// always creating a fresh map.
+	// Pin every map by name under pinDir. The datapath's map definitions set
+	// no BTF pinning attribute, so pinning is configured here at load time:
+	// pin-by-name plus a pin path together make the load reuse an existing pin
+	// when one is present rather than always creating a fresh map.
 	for _, m := range spec.Maps {
 		m.Pinning = ebpf.PinByName
 	}
@@ -151,16 +134,12 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 	}
 	loadErr := spec.LoadAndAssign(&loaded, opts)
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
-		// A pin left by a previous version of this program no longer
-		// matches the newly compiled map spec (e.g. a changed value
-		// struct size or max_entries) -- cilium/ebpf refuses to reuse it
-		// as-is. Every map here is control-plane-owned and reconstructable
-		// (usidmap.Register calls re-populate it from BGPVRFInstance/
-		// BGPRouter CRD state, and the GC controller sweeps anything
-		// stale), so recreating it from scratch on a schema mismatch is
-		// safe -- the alternative, leaving this fatal, would crashloop
-		// every node on the first such schema change until an operator
-		// manually deletes the stale pins under pinDir.
+		// A pin left by a previous version no longer matches the compiled map
+		// spec, after a changed value size or entry count, and cannot be
+		// reused. Every map here is control-plane-owned and reconstructable
+		// from CRD state, with GC sweeping anything stale, so recreating it is
+		// safe. Leaving this fatal would crashloop every node on the first
+		// schema change until an operator deleted the pins by hand.
 		slog.Warn("attach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate on the next CNI ADD/GC sweep)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
@@ -180,17 +159,15 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		return nil, err
 	}
 
-	// Pin usid_egress too, alongside the maps above -- unlike usid_ingress
-	// (attached once per node, by this same long-running process, to a
-	// known interface name from a static env var), usid_egress attaches
-	// per-attachment, at CNI ADD time, to an interface that doesn't exist
-	// until that ADD creates it -- internal/cnibgp, a short-lived process
-	// with no other handle on this collection, needs to load this exact
-	// program by its pin to attach it. A stale pin from a previous
-	// process's Load is removed and replaced unconditionally: unlike a
-	// map, a program has no persistent state to preserve across the
-	// swap, so there's no reuse-vs-recreate decision to make the way
-	// unpinIncompatibleMaps has to make for maps.
+	// Pin usid_egress alongside the maps. usid_ingress is attached once per
+	// node by this long-running process to a known interface, while usid_egress
+	// attaches per attachment, at CNI ADD time, to an interface that does not
+	// exist until that ADD creates it. The short-lived plugin process has no
+	// other handle on this collection and loads the program by its pin.
+	//
+	// A stale pin is removed and replaced unconditionally: a program has no
+	// persistent state to preserve, so there is no reuse-or-recreate decision
+	// to make as there is for a map.
 	egressPinPath := filepath.Join(pinDir, UsidEgressPinName)
 	if rmErr := os.Remove(egressPinPath); rmErr != nil && !os.IsNotExist(rmErr) {
 		err = fmt.Errorf("attach: remove stale usid_egress pin: %w", rmErr)
@@ -204,20 +181,17 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 	return &loaded, nil
 }
 
-// UsidEgressPinName is the bpffs filename usid_egress is pinned under,
-// alongside (but distinct from, so it can never collide with) every map
-// name under the same pinDir.
+// UsidEgressPinName is the bpffs filename usid_egress is pinned under, distinct
+// from every map name in the same directory so the two can never collide.
 const UsidEgressPinName = "usid_egress_prog"
 
-// unpinIncompatibleMaps removes the on-disk pin for every map spec.Maps
-// names, if one exists under pinDir -- called after LoadAndAssign fails
-// with ebpf.ErrMapIncompatible, so the immediately following retry creates
-// each map fresh instead of failing against the stale pin again. A map
-// with no existing pin (os.ErrNotExist from LoadPinnedMap) isn't an error
-// here: LoadAndAssign would have created that one fine on the first
-// attempt, so only the actually-incompatible pin(s) need clearing, but
-// clearing all of them unconditionally is simpler and equally safe since
-// every one of these maps is control-plane-reconstructable.
+// unpinIncompatibleMaps removes the on-disk pin for every map spec names, if one
+// exists under pinDir, so the retry that follows an incompatible-map load creates
+// each map fresh instead of failing against the stale pin again.
+//
+// A map with no existing pin is not an error: that one would have loaded fine.
+// Clearing all of them unconditionally is simpler and equally safe, since every
+// one is reconstructable from control-plane state.
 func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	var errs []error
 	for name := range spec.Maps {
@@ -238,15 +212,14 @@ func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	return errors.Join(errs...)
 }
 
-// Attach attaches program to the ingress hook of each named interface via a
-// clsact qdisc + direct-action BPF filter (design plan §4.1: "TC-BPF
-// (clsact qdisc, ingress)"), creating the clsact qdisc if it doesn't
-// already exist. Re-running Attach against an interface that already has
-// this package's filter replaces it (github.com/vishvananda/netlink's
-// FilterReplace) instead of stacking a duplicate, so repeated calls -- a
-// container restart, or Watch's netlink-driven re-attachment (Milestone
-// 3.2) -- are idempotent. Every interface is attempted even if one fails;
-// all failures are joined and returned together.
+// Attach attaches program to the ingress hook of each named interface, through a
+// clsact qdisc and a direct-action BPF filter, creating the qdisc if it does not
+// exist.
+//
+// Re-running against an interface that already carries this package's filter
+// replaces it rather than stacking a duplicate, so repeated calls are
+// idempotent. Every interface is attempted even if one fails, and the failures
+// are joined and returned together.
 func Attach(program *ebpf.Program, ifaceNames []string) error {
 	if program == nil {
 		return errors.New("attach: program is nil")
@@ -264,23 +237,20 @@ func Attach(program *ebpf.Program, ifaceNames []string) error {
 	return errors.Join(errs...)
 }
 
-// egressFilterName identifies usid_egress's own TC-BPF ingress filter,
-// mirroring filterName's identical "so a re-attach replaces the same
-// filter instead of stacking a duplicate" role for usid_ingress -- kept
-// as its own distinct constant even though the two programs never
-// target the same interface in practice (usid_ingress: the shared
-// uplink; usid_egress: each tenant's own host-side veth/tap).
+// egressFilterName identifies usid_egress's TC-BPF ingress filter, so a
+// re-attach replaces the same filter rather than stacking a duplicate. Its own
+// constant even though the two programs never target the same interface:
+// usid_ingress takes the shared uplink, usid_egress each tenant's host-side veth
+// or tap.
 const egressFilterName = "galactic_usid_egress"
 
-// AttachEgress attaches program (usid_egress, loaded via its own pin --
-// see Load's own doc comment for why) to ifaceName's ingress hook: the
-// tenant's own host-side veth/tap interface, per usid_egress's own doc
-// comment in usid.c for why that -- not the shared uplink usid_ingress
-// uses -- is the correct attach point. Thin wrapper around the same
-// attachOne/FilterReplace idempotency Attach already provides, just
-// under egressFilterName and for exactly one interface at a time (each
-// internal/cnibgp CNI ADD attaches its own single attachment's interface,
-// never a batch).
+// AttachEgress attaches program, usid_egress loaded from its pin, to ifaceName's
+// ingress hook. That interface is the tenant's own host-side veth or tap, not
+// the shared uplink usid_ingress uses, because that is where the tenant's egress
+// traffic arrives.
+//
+// A thin wrapper around the same idempotency Attach provides, for one interface
+// at a time, since each CNI ADD attaches only its own attachment's interface.
 func AttachEgress(program *ebpf.Program, ifaceName string) error {
 	if program == nil {
 		return errors.New("attach: program is nil")
@@ -288,13 +258,10 @@ func AttachEgress(program *ebpf.Program, ifaceName string) error {
 	return attachOne(program, ifaceName, egressFilterName, netlink.HANDLE_MIN_INGRESS)
 }
 
-// attachOne attaches program to one interface's TC hook (parent -- either
-// netlink.HANDLE_MIN_INGRESS or netlink.HANDLE_MIN_EGRESS) under the given
-// tc filter name. It is the single internal choke point every attach path
-// in this package goes through (Attach's loop above, AttachEgress above,
-// and Watch's netlink-driven reconcile in watch.go), so instrumenting it
-// here with attachHook (hooks.go, Milestone 4) observes every attach
-// attempt regardless of caller.
+// attachOne attaches program to one interface's TC hook, named by
+// tcFilterName and rooted at parent, either the ingress or egress handle. It is
+// the choke point every attach path in this package goes through, so
+// instrumenting it here observes every attempt whatever the caller.
 func attachOne(program *ebpf.Program, name, tcFilterName string, parent uint32) (err error) {
 	defer func() { attachHook(name, err) }()
 
@@ -328,16 +295,14 @@ func attachOne(program *ebpf.Program, name, tcFilterName string, parent uint32) 
 	return nil
 }
 
-// Detach removes this package's own TC-BPF ingress filter (identified by
-// filterName) from each named interface, without touching the interface's
-// clsact qdisc itself -- another filter, or a future Attach, may still need
-// it. It is not an error for an interface to already lack the filter, or to
-// no longer exist on the host at all (netlink.LinkNotFoundError): Watch
-// (Milestone 3.2) calls Detach for interfaces that just dropped out of the
-// resolved interface set, and by the time that runs the interface may
-// already be gone entirely. Every interface is attempted even if one fails;
-// all failures are joined and returned together, matching Attach's own
-// all-attempted semantics.
+// Detach removes this package's ingress filter from each named interface,
+// leaving the clsact qdisc in place since another filter or a future attach may
+// still need it.
+//
+// An interface that already lacks the filter, or no longer exists at all, is not
+// an error: the watch loop detaches interfaces that just left the resolved set,
+// by which time one may already be gone. Every interface is attempted even if
+// one fails, and the failures are joined and returned together.
 func Detach(ifaceNames []string) error {
 	var errs []error
 	for _, name := range ifaceNames {
@@ -348,14 +313,11 @@ func Detach(ifaceNames []string) error {
 	return errors.Join(errs...)
 }
 
-// detachOne removes one named tc filter (identified by tcFilterName) from
-// one interface's TC hook (parent), if present. Like attachOne, it is the
-// single internal choke point every detach path in this package goes
-// through (Detach's loop above, DetachLocalEgress, and Watch's
-// netlink-driven reconcile), so instrumenting it here with detachHook
-// (hooks.go, Milestone 4) observes every detach attempt regardless of
-// caller. Not an error for the interface to already lack the filter, or to
-// no longer exist on the host at all (netlink.LinkNotFoundError).
+// detachOne removes the filter named tcFilterName from one interface's TC hook
+// at parent, if present. Like attachOne it is the choke point every detach path
+// goes through, so instrumenting it here observes every attempt whatever the
+// caller. An interface that already lacks the filter, or no longer exists, is
+// not an error.
 func detachOne(name, tcFilterName string, parent uint32) (err error) {
 	defer func() { detachHook(name, err) }()
 
@@ -388,26 +350,20 @@ func detachOne(name, tcFilterName string, parent uint32) (err error) {
 	return nil
 }
 
-// qdiscListFn and qdiscAddFn are package-level override points -- the same
-// pattern used throughout this package (interfaces.go's
-// routeListFn/linkByIndexFn) -- so ensureClsact's own tests can simulate
-// the concurrent-EEXIST race below without a live netlink socket or root
-// privileges.
+// qdiscListFn and qdiscAddFn are override points so ensureClsact's tests can
+// simulate the concurrent-EEXIST race below without a live netlink socket or
+// root.
 var (
 	qdiscListFn = netlink.QdiscList
 	qdiscAddFn  = netlink.QdiscAdd
 )
 
-// ensureClsact adds a clsact qdisc to link if one isn't already present.
+// ensureClsact adds a clsact qdisc to link if one is not already present.
 //
-// Listing qdiscs and then conditionally adding one is inherently racy
-// against any other agent doing the same thing to the same device --
-// notably Cilium, which also ensures a clsact qdisc exists on native
-// devices for its own tc/bpf programs. If something else wins that race
-// and creates the qdisc between this function's List and its Add call,
-// QdiscAdd returns EEXIST; that is exactly the outcome ensureClsact itself
-// was trying to reach (a clsact qdisc now exists on link), so it is
-// treated as success rather than propagated as an error.
+// Listing then conditionally adding is inherently racy against any other agent
+// doing the same to the same device, notably a cluster CNI ensuring its own
+// clsact qdisc. If something else wins that race, the add returns EEXIST, which
+// is the outcome this function wanted, so it is treated as success.
 func ensureClsact(link netlink.Link) error {
 	qdiscs, err := qdiscListFn(link)
 	if err != nil {

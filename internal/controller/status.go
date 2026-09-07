@@ -36,11 +36,9 @@ func setRouterCondition(router *bgpv1alpha1.BGPRouter, condition metav1.Conditio
 	meta.SetStatusCondition(&router.Status.Conditions, condition)
 }
 
-// setPeerReadyCondition updates the Ready condition based on the current BGP
-// FSM state, following the same semantics as the reference implementation in
-// the BGP API (BGPPeerStatus.updatePeerConditions). Ready is True only when
-// sessionState == Established; False otherwise with Reason set to the FSM
-// state (for Idle, the idleReason argument is used).
+// setPeerReadyCondition updates the Ready condition from the current FSM state.
+// Ready is true only when the session is Established, and false otherwise with
+// the reason set to the FSM state; for Idle, idleReason is used instead.
 func setPeerReadyCondition(peer *bgpv1alpha1.BGPPeer, state bgpv1alpha1.BGPPeerState, idleReason string) {
 	peer.Status.SessionState = state
 	peer.Status.ObservedGeneration = peer.Generation
@@ -102,49 +100,40 @@ func setVRFInstanceCondition(vrf *bgpv1alpha1.BGPVRFInstance, condition metav1.C
 	meta.SetStatusCondition(&vrf.Status.Conditions, condition)
 }
 
-// ConditionNPTv6Configured reports whether a BGPVRFInstance's own
-// Spec.NPTv6 field (when set) parses into a valid RFC 6296 mapping —
-// locally defined here (rather than added to the network module's own
-// vrf_types.go, which this workstream does not own) since generic
-// Conditions is exactly the extension point BGPVRFInstanceStatus already
-// exposes for this. It reflects config validity only, not live eBPF
-// datapath state: the process that actually registers/reconciles
-// nptv6_table entries (gc.SweepEBPFNPTv6Table, run from
-// internal/installer.Run inside the CNI "run" container) has no access
-// back to this CRD's status from there — see that function's own doc
-// comment for why eBPF map access is confined to that container.
+// ConditionNPTv6Configured reports whether a BGPVRFInstance's NPTv6 field, when
+// set, parses into a valid mapping. It is defined here rather than in the API
+// module this workstream does not own, generic conditions being exactly the
+// extension point the status already exposes.
+//
+// It reflects config validity only, never live datapath state: the process that
+// registers those map entries runs in a different container with no access back
+// to this CRD's status.
 const ConditionNPTv6Configured = "NPTv6Configured"
 
-// setGatewayCondition sets or updates a condition on NetworkGateway.
-// ConditionTypeReady (reused from peer_types.go, not redeclared) is the
-// only condition type NetworkGateway currently uses.
+// setGatewayCondition sets or updates a condition on a NetworkGateway. Ready is
+// the only type it currently uses.
 func setGatewayCondition(gw *bgpv1alpha1.NetworkGateway, condition metav1.Condition) {
 	condition.ObservedGeneration = gw.Generation
 	meta.SetStatusCondition(&gw.Status.Conditions, condition)
 }
 
-// setBindingCondition sets or updates a condition on ServiceVIPBinding.
-// bgpv1alpha1.ConditionTypeBound (vipbinding_types.go) is the only
-// condition type ServiceVIPBinding uses.
+// setBindingCondition sets or updates a condition on a ServiceVIPBinding. Bound
+// is the only type it uses.
 func setBindingCondition(binding *bgpv1alpha1.ServiceVIPBinding, condition metav1.Condition) {
 	condition.ObservedGeneration = binding.Generation
 	meta.SetStatusCondition(&binding.Status.Conditions, condition)
 }
 
-// setRuleCondition sets or updates a condition on NetworkRule.
-// ConditionTypeReady and ConditionTypeAccepted (both reused from
-// peer_types.go) are the condition types NetworkRule uses — Accepted per
-// the admission-webhook ownership check (internal/webhook), Ready per the
-// engine's own convergence result for that rule.
+// setRuleCondition sets or updates a condition on a NetworkRule. It uses two
+// types: Accepted, from the admission ownership check, and Ready, from the
+// engine's convergence result for that rule.
 func setRuleCondition(rule *bgpv1alpha1.NetworkRule, condition metav1.Condition) {
 	condition.ObservedGeneration = rule.Generation
 	meta.SetStatusCondition(&rule.Status.Conditions, condition)
 }
 
-// setNAT66ShardCondition sets or updates a condition on NAT66Shard.
-// ConditionTypeReady (reused from peer_types.go, not redeclared) is the
-// only condition type NAT66Shard currently uses — mirrors
-// setGatewayCondition's identical shape for NetworkGateway.
+// setNAT66ShardCondition sets or updates a condition on a NAT66Shard. Ready is
+// the only type it currently uses.
 func setNAT66ShardCondition(shard *bgpv1alpha1.NAT66Shard, condition metav1.Condition) {
 	condition.ObservedGeneration = shard.Generation
 	meta.SetStatusCondition(&shard.Status.Conditions, condition)

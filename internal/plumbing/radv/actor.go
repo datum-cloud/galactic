@@ -16,23 +16,20 @@ import (
 	"github.com/mdlayher/ndp"
 )
 
-// RunActor owns one tap attachment's entire Router Advertisement lifecycle
-// for as long as ctx is not canceled: it sends unsolicited RAs on the
-// jittered schedule NextInterval describes, and it replies to Router
-// Solicitations (RFC 4861 §6.2.6) so a freshly-booted or reconnected guest
-// doesn't have to wait out a full resend cycle to converge. Both jobs share
-// one Conn and one "when did we last send" clock, so a solicited reply also
-// reschedules the next unsolicited send — see the RFC 4861 §6.2.6 combining
-// behavior this mirrors — rather than the guest receiving a redundant
-// unsolicited RA moments after a solicited one.
+// RunActor owns one tap attachment's whole Router Advertisement lifecycle for
+// as long as ctx lives: it sends unsolicited advertisements on the jittered
+// schedule, and replies to solicitations so a freshly booted or reconnected
+// guest need not wait out a full resend cycle.
 //
-// Callers (internal/installer's reconciler) run one RunActor per currently
-// recorded attachment (state.go), start it when a new attachment appears,
-// and cancel ctx when the attachment disappears or the daemon shuts down.
-// RunActor returns nil on a clean ctx cancellation; a non-nil error means it
-// never got the Conn open in the first place (nothing to clean up, and the
-// reconciler is expected to retry on its next tick since the attachment
-// record is still there).
+// Both jobs share one connection and one last-sent clock, so a solicited reply
+// also reschedules the next unsolicited send rather than the guest receiving a
+// redundant advertisement moments later.
+//
+// Callers run one per recorded attachment, starting it when the attachment
+// appears and cancelling when it disappears or the daemon shuts down. It
+// returns nil on a clean cancellation; a non-nil error means it never got the
+// connection open, leaving nothing to clean up and the caller free to retry on
+// its next tick.
 func RunActor(ctx context.Context, iface string, mtu int) error {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
@@ -44,10 +41,10 @@ func RunActor(ctx context.Context, iface string, mtu int) error {
 		return fmt.Errorf("open NDP connection on %q: %w", iface, err)
 	}
 
-	// Without joining this group, the kernel never delivers multicast
-	// traffic addressed to ff02::2 to this socket at all — a guest's
-	// Router Solicitation is sent there (RFC 4861 §4.1), not to this
-	// interface's own unicast address.
+	// Without joining this group the kernel never delivers multicast
+	// traffic addressed to it to this socket at all, and a guest's Router
+	// Solicitation goes there rather than to this interface's unicast
+	// address.
 	if err := conn.JoinGroup(allRoutersMulticast); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("join all-routers multicast group on %q: %w", iface, err)
@@ -65,12 +62,10 @@ func RunActor(ctx context.Context, iface string, mtu int) error {
 	return nil
 }
 
-// readSolicitations is RunActor's blocking read loop, run on its own
-// goroutine since ndp.Conn.ReadFrom blocks and so can't share a select
-// statement with the resend timer in runActorLoop below. It exits as soon
-// as ReadFrom errors -- which is exactly what happens once runActorLoop
-// closes conn on shutdown, so no separate cancellation signal is needed
-// here.
+// readSolicitations is the blocking read loop, on its own goroutine since the
+// read blocks and so cannot share a select with the resend timer. It exits as
+// soon as the read errors, which is what happens once the main loop closes the
+// connection on shutdown, so it needs no separate cancellation signal.
 func readSolicitations(wg *sync.WaitGroup, conn *ndp.Conn, rsCh chan<- netip.Addr) {
 	defer wg.Done()
 
@@ -88,16 +83,16 @@ func readSolicitations(wg *sync.WaitGroup, conn *ndp.Conn, rsCh chan<- netip.Add
 		select {
 		case rsCh <- src:
 		case <-time.After(time.Second):
-			// The main loop only fails to receive here if it has already
-			// returned (about to close conn) -- drop rather than leak this
-			// goroutine waiting forever on a send nothing will ever read.
+			// The main loop only fails to receive here when it has already
+			// returned and is about to close the connection. Drop rather
+			// than leak this goroutine on a send nothing will read.
 		}
 	}
 }
 
-// runActorLoop is RunActor's own select loop, split out solely so RunActor
-// itself stays a short, readable setup/teardown wrapper. See RunActor's doc
-// comment for the combined resend/solicit behavior this implements.
+// runActorLoop is RunActor's select loop, split out so RunActor stays a short
+// setup and teardown wrapper. See RunActor for the combined behavior it
+// implements.
 func runActorLoop(
 	ctx context.Context, conn *ndp.Conn, iface string, mtu int, hwAddr net.HardwareAddr, rsCh <-chan netip.Addr,
 ) {
@@ -138,10 +133,9 @@ func runActorLoop(
 }
 
 // rateLimited reports whether now is too soon after lastSent to send another
-// advertisement, per RFC 4861 §6.2.6/§10 (MinDelayBetweenRAs): a router must
-// never send more than one advertisement -- solicited or not -- within that
-// window of the last one. A zero lastSent (no advertisement sent yet this
-// actor's lifetime) is never rate-limited.
+// advertisement: a router must never send more than one, solicited or not,
+// within the minimum delay. A zero lastSent, meaning none sent yet this
+// actor's lifetime, is never rate-limited.
 func rateLimited(lastSent, now time.Time) bool {
 	if lastSent.IsZero() {
 		return false
@@ -149,15 +143,14 @@ func rateLimited(lastSent, now time.Time) bool {
 	return now.Sub(lastSent) < MinDelayBetweenRAs
 }
 
-// responseDestination returns the address a solicited reply should be sent
-// to for a Router Solicitation whose source address was src. RFC 4861
-// §6.1.1: a solicitation with the unspecified source address (::) means the
-// guest hasn't self-configured any address yet, so there is nothing to
-// unicast a reply to -- fall back to the same all-nodes multicast address
-// unsolicited RAs use. Otherwise, unicast directly back to the soliciting
-// guest: cheaper than multicast, and correct here since there is exactly
-// one guest per tap link, not a shared segment with other listeners to also
-// serve.
+// responseDestination returns where a solicited reply should go for a
+// solicitation from src.
+//
+// An unspecified source means the guest has not self-configured any address, so
+// there is nothing to unicast to and the reply goes to the same all-nodes
+// address unsolicited advertisements use. Otherwise it goes straight back to
+// the guest: cheaper than multicast, and correct here since there is exactly
+// one guest per tap link rather than a shared segment.
 func responseDestination(src netip.Addr) netip.Addr {
 	if src.IsUnspecified() {
 		return allNodesMulticast

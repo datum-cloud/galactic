@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package nadpatch patches the NetworkAttachmentDefinition with the
-// deterministic host-side interface name a master plugin (galactic-veth,
-// galactic-tap) just created — shared since NAD annotation is identical
-// regardless of interface type.
+// Package nadpatch records, on a pod's network-attachment definition, the
+// deterministic host-side interface name a master plugin just created. Shared
+// between the master plugins, since the annotation is identical whichever
+// interface type was made.
 package nadpatch
 
 import (
@@ -23,9 +23,8 @@ import (
 	"go.datum.net/galactic/internal/hostconf"
 )
 
-// AnnotationHostInterface is the NAD annotation key that records the
-// deterministic host-side interface name created by the CNI plugin for
-// this VPC+VPCAttachment pair.
+// AnnotationHostInterface is the annotation key recording the deterministic
+// host-side interface name created for this VPC and attachment pair.
 const AnnotationHostInterface = "k8s.v1.cni.cncf.io/host-interface"
 
 // nadGVK is the GroupVersionKind for NetworkAttachmentDefinition.
@@ -35,10 +34,8 @@ var nadGVK = schema.GroupVersionKind{
 	Kind:    "NetworkAttachmentDefinition",
 }
 
-// ParsePodNamespace extracts the K8S_POD_NAMESPACE value from the CNI_ARGS
-// environment variable string passed as args.Args by Multus. Returns an
-// empty string when the value is not present (e.g. standalone CNI
-// invocation).
+// ParsePodNamespace extracts the pod namespace from the CNI arguments string
+// the runtime passes. Returns "" when absent, as in a standalone invocation.
 func ParsePodNamespace(cniArgs string) string {
 	for _, part := range strings.Split(cniArgs, ";") {
 		key, value, ok := strings.Cut(part, "=")
@@ -49,10 +46,8 @@ func ParsePodNamespace(cniArgs string) string {
 	return ""
 }
 
-// ParsePodName extracts the K8S_POD_NAME value from the CNI_ARGS
-// environment variable string passed as args.Args by Multus. Returns an
-// empty string when the value is not present (e.g. standalone CNI
-// invocation), same convention as ParsePodNamespace.
+// ParsePodName extracts the pod name from the CNI arguments string the runtime
+// passes. Returns "" when absent, as ParsePodNamespace does.
 func ParsePodName(cniArgs string) string {
 	for _, part := range strings.Split(cniArgs, ";") {
 		key, value, ok := strings.Cut(part, "=")
@@ -63,12 +58,12 @@ func ParsePodName(cniArgs string) string {
 	return ""
 }
 
-// AnnotateNAD patches the NetworkAttachmentDefinition with the host
-// interface name. The NAD is expected to already exist (created by the
-// external VPC operator before the CNI is invoked), so a not-found response
-// is a hard failure rather than something to tolerate. A conflict response
-// is the one case treated as non-fatal: it means the annotation was already
-// applied by a previous invocation.
+// AnnotateNAD patches the attachment definition with the host interface name.
+//
+// The definition is expected to already exist, created by the external VPC
+// operator before the CNI runs, so not-found is a hard failure. A conflict is
+// the one non-fatal case: it means a previous invocation already applied the
+// annotation.
 func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, hostInterface string) error {
 	if nadNamespace == "" {
 		return nil
@@ -98,17 +93,15 @@ func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 	return nil
 }
 
-// VerifyChainComplete fetches nadName's NetworkAttachmentDefinition and
-// fails if its own spec.config does not chain expectedType anywhere in its
-// plugins list. A conflist that omits it — stale, hand-edited, or a bug in
-// the external operator that authors it — would otherwise let every plugin
-// that DOES run report ADD success, handing back a pod with a working
-// interface and no path to its VPC (issue #331).
+// VerifyChainComplete fetches the attachment definition and fails if its config
+// does not chain expectedType anywhere in its plugin list.
 //
-// nadNamespace == "" (no CNI_ARGS — a standalone/manual chain invocation,
-// not a real Multus-driven attach; see tests/e2e's TestCNITapInterface) is
-// treated as nothing to check, mirroring AnnotateNAD's own convention:
-// there is no NAD to read in that case.
+// A conflist that omits it, whether stale, hand-edited, or a bug in the operator
+// that authors it, would otherwise let every plugin that does run report success,
+// handing back a pod with a working interface and no path to its VPC.
+//
+// An empty nadNamespace, meaning no CNI arguments and so a manual rather than
+// runtime-driven attach, is nothing to check: there is no definition to read.
 func VerifyChainComplete(ctx context.Context, k8s client.Client, nadName, nadNamespace, expectedType string) error {
 	if nadNamespace == "" {
 		return nil

@@ -17,10 +17,9 @@ import (
 	"go.datum.net/galactic/internal/cnimaster"
 )
 
-// cmdCheck validates that the node's tap-side networking state matches what
-// was established during cmdAdd. Unlike internal/cni's own cmdCheck, there
-// is no guest interface to verify — tap mode never enters a container
-// netns.
+// cmdCheck validates that the node's tap-side state matches what ADD
+// established. Unlike the veth plugin's, there is no guest interface to verify:
+// tap mode never enters a container namespace.
 func cmdCheck(args *skel.CmdArgs) error {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -34,8 +33,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	hostName, nodeErrs := cnimaster.CheckNodeLevelState(pluginConf.VPC, pluginConf.VPCAttachment)
 	errs = append(errs, nodeErrs...)
 
-	// Termination routes are galactic-route's own CHECK now (see
-	// internal/cniroute's checkTerminationRoutes) — this plugin's CHECK no
+	// Termination routes are the routing plugin's own CHECK now; this one no
 	// longer verifies them.
 
 	if pluginConf.RawPrevResult != nil {
@@ -63,16 +61,15 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-// cmdStatus implements the CNI spec STATUS operation — see
-// internal/cnimaster.RunStatus for the full reasoning, shared verbatim with
-// galactic-veth.
+// cmdStatus implements the CNI STATUS operation, shared verbatim with the veth
+// plugin.
 func cmdStatus(args *skel.CmdArgs) error {
 	return cnimaster.RunStatus(args.StdinData, cniConfig, ConfFile)
 }
 
-// checkPrevResult validates that kernel state matches the host interface
-// recorded in the prevResult returned by the most recent ADD. Tap mode has
-// no guest-side interface or netns to validate against.
+// checkPrevResult validates that kernel state still matches the host interface
+// the most recent ADD recorded. Tap mode has no guest interface or namespace to
+// validate against.
 func checkPrevResult(rawPrevResult map[string]interface{}, _ string) error {
 	jsonBytes, err := json.Marshal(rawPrevResult)
 	if err != nil {

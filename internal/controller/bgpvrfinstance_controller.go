@@ -26,9 +26,9 @@ type BGPVRFInstanceReconciler struct {
 
 // Reconcile enqueues the owning BGPRouter when a BGPVRFInstance changes.
 func (r *BGPVRFInstanceReconciler) Reconcile(_ context.Context, _ ctrl.Request) (ctrl.Result, error) {
-	// BGPVRFInstance changes are handled by enqueuing the owning router in
-	// SetupWithManager via EnqueueRequestsFromMapFunc. This reconciler is
-	// intentionally empty — the work is done by BGPRouterReconciler.
+	// Deliberately empty: a BGPVRFInstance change is handled by enqueuing the
+	// owning router through this reconciler's watch, and the work is done by
+	// BGPRouterReconciler.
 	return ctrl.Result{}, nil
 }
 

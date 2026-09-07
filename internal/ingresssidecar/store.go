@@ -21,10 +21,9 @@ type routeState struct {
 	prefix    *net.IPNet
 	sid       net.IP
 	installed bool
-	// absentSince is the zero Time while this route is desired. SetDesired
-	// sets it the moment a nil desired value is first observed for this
-	// key, and clears it again if the route is reactivated before Sweep
-	// tears it down — see SetDesired and Sweep.
+	// absentSince is the zero Time while this route is desired. It is set the
+	// moment a nil desired value is first observed, and cleared again if the
+	// route is reactivated before Sweep tears it down.
 	absentSince time.Time
 }
 
@@ -32,39 +31,33 @@ type routeState struct {
 type vrfState struct {
 	tableID   uint32
 	installed bool
-	// absentSince is the zero Time while at least one route still
-	// references this VPC (installed or itself still within its own grace
-	// period — see Sweep). Only once every such route is gone does this
-	// VPC's own teardown grace period start.
+	// absentSince is the zero Time while at least one route still references
+	// this VPC, whether installed or itself within its grace period. Only once
+	// every such route is gone does this VPC's teardown clock start.
 	absentSince time.Time
-	// gatewayPublished is true once this VPC's return-path BGPAdvertisement
-	// has been published (see Store.publishGateway) — set at most once per
-	// VRF lifetime, alongside installed, so a transient resolve/publish
-	// failure retries on the next SetDesired for this VPC rather than being
-	// silently abandoned for the VRF's whole remaining lifetime.
+	// gatewayPublished is true once this VPC's return-path advertisement has
+	// been published. Set at most once per VRF lifetime, so a transient resolve
+	// or publish failure retries on the next SetDesired rather than being
+	// abandoned for the VRF's remaining lifetime.
 	gatewayPublished bool
 }
 
-// Store is the in-process desired/applied-state reconciler for this
-// sidecar's two granularities (§1 of the plan): route lifecycle keyed per
-// pod, VRF lifecycle keyed per VPC and rolled up from every route
-// referencing it. Mirrors internal/gateway's Engine and
-// internal/runtime/gobgp's GoBGPRuntime in shape — a mutex-protected map of
-// applied state, converged via Backend calls — except teardown here is
-// intentionally delayed by a grace period rather than applied synchronously
-// (§9 item 1 of the plan's teardown-race decision), so SetDesired/Sweep
-// replace a single Reconcile/Apply call: SetDesired applies "up" transitions
-// immediately and only starts a clock on "down" ones; Sweep is what actually
-// acts once that clock expires.
+// Store is the in-process desired-versus-applied reconciler for this sidecar's
+// two granularities: route lifecycle keyed per pod, and VRF lifecycle keyed per
+// VPC and rolled up from every route referencing it.
+//
+// Teardown is deliberately delayed by a grace period rather than applied
+// synchronously, which is why SetDesired and Sweep replace a single reconcile
+// call: SetDesired applies transitions up immediately and only starts a clock
+// on transitions down, and Sweep acts once that clock expires.
 type Store struct {
 	mu      sync.Mutex
 	backend Backend
 	grace   time.Duration
 	metrics *Metrics
 
-	// gatewayPublisher and gatewayResolver are both nil by default — see
-	// SetGatewayPublisher's doc comment for what enabling them does and why
-	// leaving them unset is a safe, fully backward-compatible no-op.
+	// gatewayPublisher and gatewayResolver are nil by default. See
+	// SetGatewayPublisher for what enabling them does.
 	gatewayPublisher GatewayPublisher
 	gatewayResolver  GatewayAddressResolver
 
@@ -72,10 +65,9 @@ type Store struct {
 	vrfs   map[string]*vrfState
 }
 
-// NewStore returns a Store that converges against backend, delaying
-// teardown of any route or VRF by grace after it drops out of desired
-// state. metrics may be nil (tests commonly pass nil; production callers
-// always pass a real *Metrics).
+// NewStore returns a Store that converges against backend, delaying teardown of
+// any route or VRF by grace after it leaves desired state. metrics may be nil,
+// as tests commonly pass.
 func NewStore(backend Backend, grace time.Duration, metrics *Metrics) *Store {
 	return &Store{
 		backend: backend,
@@ -86,21 +78,14 @@ func NewStore(backend Backend, grace time.Duration, metrics *Metrics) *Store {
 	}
 }
 
-// SetGatewayPublisher enables this Store to publish (and withdraw) a
-// return-path BGPAdvertisement for each VPC it manages a VRF for — see
-// GatewayPublisher/GatewayAddressResolver's own doc comments for the
-// mechanism and docs/plans/855-return-path-gateway-advertisement.md for why
-// it's needed: without it, a VPC backend's reply traffic has no SRv6 route
-// back to this node, confirmed live by packet capture (see that doc).
+// SetGatewayPublisher enables this Store to publish and withdraw a return-path
+// BGPAdvertisement for each VPC it manages a VRF for. Without one, a backend's
+// reply traffic has no SRv6 route back to this node.
 //
-// Both arguments default to nil (the zero Store), which is a fully inert,
-// backward-compatible no-op — every existing deployment of this sidecar
-// today has no gateway address provisioned for resolver to find anyway
-// (see GatewayAddressResolver's own doc comment on what provisioning it
-// still needs), so leaving this unset changes nothing about how Store
-// already behaves. Call this once, before the first SetDesired, from
-// cmd/galactic-vrf's own startup only when both a node identity and a real
-// resolver are actually configured.
+// Both arguments default to nil, which is fully inert: a deployment with no
+// gateway address provisioned has nothing for the resolver to find anyway. Call
+// this once, before the first SetDesired, and only when both a node identity
+// and a real resolver are configured.
 func (s *Store) SetGatewayPublisher(publisher GatewayPublisher, resolver GatewayAddressResolver) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,17 +93,15 @@ func (s *Store) SetGatewayPublisher(publisher GatewayPublisher, resolver Gateway
 	s.gatewayResolver = resolver
 }
 
-// publishGateway attempts to publish vpc's return-path gateway
-// advertisement once, the first time its VRF is created. Called with s.mu
-// already held (from SetDesired). A resolve failure because nothing has
-// provisioned a gateway address yet (ErrGatewayAddressNotProvisioned) is
-// logged at debug and left for the next SetDesired to retry — not a
-// reconcile error, since most deployments have no such provisioning
-// mechanism at all yet (see SetGatewayPublisher's doc comment). Any other
-// error is logged at warn and also left to retry, rather than failing the
-// route reconcile that triggered it — a missing return path degrades this
-// VPC's ingress traffic, it doesn't make it worse to also install the
-// forward-path route while it's unresolved.
+// publishGateway attempts to publish vpc's return-path advertisement once, the
+// first time its VRF is created. Called with s.mu held.
+//
+// A resolve failure because nothing has provisioned a gateway address yet is
+// logged at debug and left for the next SetDesired to retry, not treated as a
+// reconcile error. Any other error is logged at warn and likewise retried,
+// rather than failing the route reconcile that triggered it: a missing return
+// path degrades this VPC's ingress traffic, and withholding the forward-path
+// route as well would not improve it.
 func (s *Store) publishGateway(ctx context.Context, vpc string, v *vrfState) {
 	if s.gatewayPublisher == nil || s.gatewayResolver == nil || v.gatewayPublished {
 		return
@@ -139,13 +122,12 @@ func (s *Store) publishGateway(ctx context.Context, vpc string, v *vrfState) {
 	v.gatewayPublished = true
 }
 
-// withdrawGateway is publishGateway's teardown counterpart, called with
-// s.mu already held (from Sweep) once a VPC's VRF is actually about to be
-// removed. Best-effort: a failure here is logged, not propagated — it must
-// never block the kernel-side vrf.Delete that follows it, or a transient
-// k8s API error would leave a VPC's VRF permanently stuck mid-teardown.
-// galactic-router's GC controller reaps a BGPAdvertisement left behind by a
-// failed withdraw the same way it already reaps any other orphaned one.
+// withdrawGateway is publishGateway's counterpart, called with s.mu held once a
+// VPC's VRF is about to be removed. Best-effort: a failure is logged rather
+// than propagated, since it must never block the kernel-side delete that
+// follows, or a transient API error would leave a VRF stuck mid-teardown.
+// Garbage collection reaps an advertisement left behind by a failed withdraw
+// like any other orphan.
 func (s *Store) withdrawGateway(ctx context.Context, vpc string, v *vrfState) {
 	if s.gatewayPublisher == nil || !v.gatewayPublished {
 		return
@@ -155,17 +137,15 @@ func (s *Store) withdrawGateway(ctx context.Context, vpc string, v *vrfState) {
 	}
 }
 
-// SetDesired updates the desired state for the route identified by key —
-// an EndpointSlice's namespace/name (see Reconciler). desired == nil means
-// the EndpointSlice is gone or no longer selected (BuildDesiredRoute
-// returned nil for a not-yet-ready one, or the object was deleted): this
-// starts (or leaves running) that route's teardown grace period rather than
-// removing it immediately. desired != nil ensures the route's VRF and its
-// own seg6 route exist immediately — no delay on the way up, only on the
-// way down, the asymmetry §9 item 1 of the plan calls for. A route
-// reappearing before its own grace period elapses, or a VPC gaining a new
-// route before its VRF's grace period elapses, cancels that pending
-// teardown outright.
+// SetDesired updates the desired state for the route identified by key, an
+// EndpointSlice's namespace and name.
+//
+// A nil desired means the slice is gone or no longer selected, which starts, or
+// leaves running, that route's teardown grace period rather than removing it
+// immediately. A non-nil desired ensures the route's VRF and its own route
+// exist immediately: no delay on the way up, only on the way down. A route
+// reappearing before its grace period elapses, or a VPC gaining a new route
+// before its VRF's does, cancels the pending teardown outright.
 func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRoute) (err error) {
 	if s.metrics != nil {
 		timer := prometheusTimer(s.metrics)
@@ -222,15 +202,16 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 	return nil
 }
 
-// Sweep advances every pending teardown whose grace period has elapsed as
-// of now, removing kernel state and forgetting it. Routes are processed
-// first; a VPC's own grace period only starts once Sweep observes no
-// remaining route — installed or still within its own grace — referencing
-// it, so the two timers can never overlap: a VPC is never torn down while
-// any of its routes still might come back. Call this periodically (see
-// RunSweeper), never reactively — VRF-level teardown is an aggregate
-// condition over potentially many routes, not a single watched object's own
-// transition.
+// Sweep advances every pending teardown whose grace period has elapsed as of
+// now, removing kernel state and forgetting it.
+//
+// Routes are processed first. A VPC's grace period only starts once Sweep
+// observes no remaining route referencing it, installed or still within its own
+// grace, so the two timers can never overlap and a VPC is never torn down while
+// one of its routes might still come back.
+//
+// Call this periodically, never reactively: VRF teardown is an aggregate
+// condition over many routes, not one watched object's transition.
 func (s *Store) Sweep(ctx context.Context, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -297,23 +278,19 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 	}
 }
 
-// Inventory seeds Store with every Galactic-managed VRF device (and its
-// currently-installed seg6 routes) already present on the host at process
-// start — §9 item 2 of the plan's startup-reconcile-safety decision.
+// Inventory seeds Store with every managed VRF device, and its installed
+// routes, already present on the host at process start.
 //
-// Call this once, after every EndpointSlice existing at boot has already
-// been through SetDesired — see SeedFromAPI, which callers must run first
-// for exactly that reason (its own doc comment covers why
-// mgr.GetCache().WaitForCacheSync alone isn't sufficient here) — but before
-// the first Sweep runs. A VPC/route already known by that point is left
-// alone: SeedFromAPI's call already claimed it, so its absentSince is
-// already clear. Anything Inventory itself has to seed is, by construction,
-// missing that claim — either a VPC/pod truly orphaned while this sidecar
-// was down, or one whose EndpointSlice is itself gone/unready for some
-// other reason — so it's seeded with an ordinary grace period starting now
-// rather than torn down on sight (giving a slightly late EndpointSlice
-// update a chance to reclaim it) and rather than kept alive forever (the
-// pre-#377-revision failure mode this decision exists to avoid).
+// Call it once, after every EndpointSlice existing at boot has been through
+// SetDesired, and before the first Sweep. Anything already known by then is
+// left alone, its claim having been made by that seeding.
+//
+// Anything Inventory itself has to seed is by construction missing that claim:
+// either genuinely orphaned while this sidecar was down, or belonging to a slice
+// that is gone or unready for some other reason. Such state is seeded with an
+// ordinary grace period starting now, rather than torn down on sight, which
+// gives a slightly late update a chance to reclaim it, and rather than kept
+// alive forever.
 func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 	infos, err := s.backend.ListVRFs()
 	if err != nil {
@@ -350,9 +327,9 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// routeKnownLocked reports whether some already-tracked route shares vpc
-// and prefix with the given kernel route — i.e. it's not orphaned, a live
-// EndpointSlice already claims it. Callers must hold s.mu.
+// routeKnownLocked reports whether an already-tracked route shares vpc and
+// prefix with the given kernel route, meaning a live EndpointSlice claims it
+// and it is not orphaned. Callers must hold s.mu.
 func (s *Store) routeKnownLocked(vpc string, prefix *net.IPNet) bool {
 	for _, r := range s.routes {
 		if r.vpc == vpc && r.prefix.String() == prefix.String() {
@@ -368,9 +345,8 @@ func (s *Store) countError(kind string) {
 	}
 }
 
-// vrfActiveDelta and routeActiveDelta adjust the vrf_active/route_active
-// gauges by delta, no-oping if metrics weren't configured (tests commonly
-// pass nil — see NewStore).
+// vrfActiveDelta and routeActiveDelta adjust the active-count gauges by delta,
+// doing nothing when metrics were not configured.
 func (s *Store) vrfActiveDelta(delta float64) {
 	if s.metrics != nil {
 		s.metrics.VRFActive.Add(delta)

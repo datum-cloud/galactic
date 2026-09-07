@@ -15,28 +15,18 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
-// OpenPinnedVipXlatTable opens vip_xlat_table from its pinned path under
-// pinDir (internal/plumbing/ebpf/attach.Load pins every usid_ingress map at
-// <pinDir>/<map name>, e.g. <pinDir>/vip_xlat_table -- the same convention
-// usidmap.OpenPinnedRegistry already documents and relies on for
-// vrf_table/locator_table/function_table) and returns a *VipXlatTable
-// wrapping it.
+// OpenPinnedVipXlatTable opens vip_xlat_table from its pinned path under pinDir
+// and returns a table wrapping it. The datapath's maps are each pinned at
+// <pinDir>/<map name>, the same convention the uSID registry relies on.
 //
-// This is new plumbing: nothing in this codebase needed galactic-router to
-// reach any of usid.c's maps before the DSR/Maglev tap-VIP substitution --
-// galactic-router loads/attaches no eBPF program of its own (that happens
-// once, elsewhere, driven by galactic-cni/internal/plumbing/ebpf/attach on
-// the CNI side), so this function's only job is to open a *second* handle
-// onto maps some other, already-running process on this node pinned --
-// exactly usidmap.OpenPinnedRegistry's own established pattern, reused here
-// for the one additional map that pattern didn't yet cover.
+// The router loads and attaches no eBPF program of its own, that happening once
+// elsewhere on the CNI side, so this function's only job is to open a second
+// handle onto a map another running process on this node pinned.
 //
-// Unlike usidmap.OpenPinnedRegistry's intended caller (the short-lived
-// galactic-cni plugin binary, one process per CNI ADD/DEL), galactic-router
-// is a long-lived daemon: the returned io.Closer should be closed once at
-// process shutdown, not immediately after use -- it does not affect the
-// map's pinned lifetime either way (closing only releases this process's
-// own file descriptor onto the kernel-side map object).
+// Unlike the short-lived plugin binary the uSID registry serves, the router is a
+// long-lived daemon: the returned closer should be closed once at process
+// shutdown rather than immediately after use. Either way it does not affect the
+// map's pinned lifetime, closing only this process's own descriptor.
 func OpenPinnedVipXlatTable(pinDir string) (*VipXlatTable, io.Closer, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapVipXlatTable), nil)
 	if err != nil {

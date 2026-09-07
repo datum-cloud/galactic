@@ -14,23 +14,19 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
 )
 
-// beU16 converts v between host and big-endian ("network") representation
-// by a full 2-byte swap -- its own inverse, so this same function is used
-// for both directions. Required because nat66prog's generated Go structs
-// store a C __be16 field as a plain uint16, and cilium/ebpf's BTF-based
-// marshalling writes it using the host's native (little-endian, on every
-// architecture this repo targets) byte order with no swap of its own. This
-// duplicates edgemap's identically-named helper rather than importing it --
-// see doc.go for why this package does not depend on edgemap.
+// beU16 swaps a uint16 between host and network byte order. A full 2-byte swap
+// is its own inverse, so one function serves both directions. Needed because the
+// generated Go structs store a big-endian C field as a plain uint16, which the
+// marshalling writes in host order with no swap. Duplicated rather than imported
+// from a sibling map package; see the package doc comment for why this package
+// depends on none of them.
 func beU16(v uint16) uint16 {
 	return v<<8 | v>>8
 }
 
-// ConnKey identifies one nat66_conn_table row -- see nat66.c's struct
-// conn_key doc comment for the forward/reverse row layout this mirrors.
-// TenantArg is host-order (nat66.c's read_argument already returns it in
-// host order, not wire order, so unlike Sport/Dport it needs no beU16
-// swap); Sport/Dport are the packet's own wire-order (__be16) ports.
+// ConnKey identifies one nat66_conn_table row, mirroring the datapath's forward
+// and reverse row layout. TenantArg is in host order, the datapath already
+// returning it that way; the ports are the packet's own wire-order values.
 type ConnKey struct {
 	Proto     uint8
 	TenantArg uint16
@@ -45,9 +41,8 @@ type ConnKey struct {
 type ConnEntry struct {
 	ConnKey
 
-	// BackendAddr/BackendPort are the tenant backend's own facing
-	// address/port -- present in both the forward and reverse row's value
-	// (nat66.c's struct conn_value comment).
+	// BackendAddr and BackendPort are the tenant backend's facing address and
+	// port, present in both the forward and reverse row's value.
 	BackendAddr netip.Addr
 	BackendPort uint16
 
@@ -63,24 +58,21 @@ type ConnEntry struct {
 	// to re-encapsulate a reply back toward it (handle_return).
 	BackendUSID netip.Addr
 
-	// Proto is the value's own copy of the protocol, read back
-	// independently of ConnKey.Proto (both are always equal by
-	// construction -- nat66.c never writes them differently -- exposed
-	// separately only because Nat66ConnValue carries its own field).
+	// Proto is the value's own copy of the protocol, always equal to the key's
+	// by construction and exposed separately only because the kernel value
+	// carries its own field.
 	Proto uint8
 }
 
-// ConnTable is the read-only accessor for nat66_conn_table -- see doc.go
-// for why this package never writes to it. Get/List exist purely for
-// observability/metrics (e.g. a future admin CLI or diagnostics endpoint);
-// nothing in this codebase's control plane depends on reading it today.
+// ConnTable is the read-only accessor for nat66_conn_table; see the package doc
+// comment for why this package never writes it. Get and List exist for
+// observability, and nothing in the control plane depends on reading them.
 type ConnTable struct {
 	table Table
 }
 
-// NewConnTable wraps table as a ConnTable. Production callers pass a
-// KernelTable wrapping a loaded *nat66prog.Nat66Objects's Nat66ConnTable
-// map; tests pass a fake Table.
+// NewConnTable wraps table as a ConnTable. Production callers pass a kernel
+// table over the loaded map; tests pass a fake.
 func NewConnTable(table Table) *ConnTable {
 	return &ConnTable{table: table}
 }
@@ -144,10 +136,9 @@ func (t *ConnTable) Get(key ConnKey) (ConnEntry, bool, error) {
 	return fromWireConnValue(key, value), true, nil
 }
 
-// List returns every entry currently in nat66_conn_table, in unspecified
-// order. Since this is an LRU-evicting map under live traffic, the result
-// is only ever a point-in-time snapshot -- a row present in one List call
-// may be gone (evicted, or aged out) by the next.
+// List returns every entry currently in nat66_conn_table, in unspecified order.
+// The map evicts under live traffic, so the result is a point-in-time snapshot:
+// a row present in one call may be gone by the next.
 func (t *ConnTable) List() ([]ConnEntry, error) {
 	var (
 		entries []ConnEntry

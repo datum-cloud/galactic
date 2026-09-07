@@ -18,73 +18,48 @@ import (
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
-// gatewayDatapathKeepAlive holds the loaded *edgeprog.EdgedsrObjects and
-// every attached link.Link (one per public-interface XDP attach target --
-// see setupGatewayDatapath's doc comment on why there can be more than one)
-// for the life of this process, once setupGatewayDatapath's attach path
-// succeeds. Neither is Closed anywhere in this file — see
-// setupGatewayDatapath's doc comment for why — but a value that isn't
-// stored somewhere reachable is exactly as good as Closed: cilium/ebpf's
-// *ebpf.Program, *ebpf.Map, and link.Link types all
-// register a runtime finalizer that closes their underlying fd once the
-// garbage collector determines nothing reachable still points at them,
-// with no error surfaced anywhere when that happens. gateway.KernelDatapath
-// only keeps objs.VipTable (via edgemap.KernelTable) alive on its own, so
-// without this package-level var, objs.EdgeLb (the program) and the
-// link.Link returned by Attach — the two things actually keeping this
-// node's XDP attachment live on the wire — would eventually get GC'd and
-// silently detached, with every control-plane signal (the DaemonSet pod
-// healthy, ApplyRule succeeding, vip_table metrics populated) still looking
-// completely normal. Confirmed live: this is exactly what happened the
-// first time this path was ever exercised against a real interface
-// (ingress traffic for a registered rule was never intercepted at all,
-// bouncing between this node and its transit-facing peer via ordinary
-// kernel routing instead) — no unit test exercises this path with a real
-// attach for a GC cycle to occur during, and this repo's own manifests-only
-// validation predates any live underlay BGP peering that would have
-// delivered real traffic to notice the gap.
+// gatewayDatapathKeepAlive holds the loaded objects and every attached link for
+// the life of this process, once the attach path succeeds.
 //
-// This var, and the rest of this file, moved here unchanged from
-// cmd/galactic-router/gateway.go: the edge Maglev/DSR gateway datapath now
-// lives in its own process rather than sharing one with the tenant BGP
-// reconcilers.
+// Nothing here is closed explicitly, but a value not stored somewhere reachable
+// is exactly as good as closed: the eBPF program, map, and link types all
+// register a finalizer that closes the underlying descriptor once the garbage
+// collector sees nothing pointing at them, with no error surfaced anywhere.
+//
+// The datapath implementation keeps only the VIP table alive on its own, so
+// without this var the program and the link, the two things actually keeping
+// this node's XDP attachment live on the wire, would eventually be collected
+// and silently detached. Every control-plane signal would still look normal:
+// the pod healthy, rules applying, metrics populated, while ingress traffic for
+// a registered rule is never intercepted at all and routes past the node
+// ordinarily.
 var gatewayDatapathKeepAlive struct {
 	objs  *edgeprog.EdgedsrObjects
 	links []link.Link
 }
 
-// setupGatewayDatapath loads and attaches the edge Maglev/DSR eBPF datapath
-// to publicInterface and returns the gateway.Datapath this node's Engine
-// should use. Unlike cmd/galactic-router's identically-named predecessor
-// (now removed), publicInterface and
-// srv6Address are both required here, not a jointly-optional pair with a
-// gateway.NoopDatapath{} fallback: config.GatewayConfig.Validate already
-// rejects either being empty before runCmd ever calls this function, since
-// this binary only exists to run the gateway role.
+// setupGatewayDatapath loads and attaches the edge Maglev datapath to
+// publicInterface and returns the Datapath this node's engine should use.
 //
-// publicInterface is usually attached to directly, but if it names a Linux
-// bonding master, edgeattach.ResolveTargets expands it to that bond's slave
-// interfaces instead (native-mode XDP cannot attach to a bonding master at
-// all) -- so this may end up loading and attaching to more than one
-// interface. Every resulting sysctl configuration and XDP attachment
-// targets the same resolved set, not publicInterface itself in that case.
+// publicInterface and srv6Address are both required: configuration validation
+// rejects either being empty before this runs, since this binary exists only to
+// run the gateway role.
 //
-// The loaded *edgeprog.EdgedsrObjects and every returned link.Link are
-// stashed in gatewayDatapathKeepAlive (see that var's doc comment for why)
-// rather than Closed here: they, and the XDP attachment itself, must
-// survive for the life of this process — same convention as
-// internal/plumbing/ebpf/attach.Start's identical choice for the SRv6 uSID
-// datapath.
+// publicInterface is usually attached to directly, but one naming a Linux
+// bonding master is expanded to that bond's slaves instead, native-mode XDP
+// being unable to attach to a bonding master. Every sysctl and every attachment
+// then targets the resolved set rather than the named interface.
 //
-// srv6Address is written into encap_config_table as this node's own plain
-// SRv6-reachable encap source -- unlike this datapath's Full-NAT
-// predecessor, it is never a NAT/SNAT source and never has return-path
-// significance (see edgedsr.c's own header comment).
+// The loaded objects and every returned link are stashed in
+// gatewayDatapathKeepAlive rather than closed here: they, and the attachment
+// itself, must survive for the life of this process.
 //
-// metricsReg additionally gets an edgemetrics.Collector registered against
-// it once objs is loaded, reading vip_table/vip_stats_table/drop_reasons
-// live at every scrape — see that package's doc comment for why this is a
-// pull-based Collector rather than incrementally-updated Gauges.
+// srv6Address is written into the encapsulation config as this node's plain
+// SRv6-reachable source. It is never a translation source and has no
+// return-path significance.
+//
+// metricsReg additionally gets a collector registered against it once the
+// objects are loaded, reading the maps live at every scrape.
 func setupGatewayDatapath(
 	publicInterface, srv6Address string, metricsReg prometheus.Registerer,
 ) (gateway.Datapath, error) {
@@ -98,18 +73,13 @@ func setupGatewayDatapath(
 		return nil, fmt.Errorf("resolve edge gateway public interface %q: %w", publicInterface, err)
 	}
 
-	// Required for bpf_fib_lookup() (edgedsr.c's push_outer_header) to
-	// ever succeed on the interface the XDP program actually runs on --
-	// see ConfigureFIBLookupUplinkSysctls's own doc comment for why (a
-	// real, previously-undiagnosed blocker, not a hypothetical one).
-	// edgedsr.c looks up ctx->ingress_ifindex, i.e. whichever interface in
-	// targets the packet actually arrived on, so this must be applied to
-	// every resolved target, not publicInterface itself -- once
-	// publicInterface names a bond, its slaves (not the bond master) are
-	// what the kernel actually reports as the ingress interface. Best-
-	// effort/non-fatal, matching this package's own established
-	// sysctl-configuration convention (internal/cni already calls
-	// ConfigureInterfaceSysctls the same way for VRF interfaces).
+	// Required for the FIB lookup in the datapath's header push to succeed
+	// on the interface the program actually runs on. The lookup uses the
+	// ingress interface, meaning whichever resolved target the packet
+	// arrived on, so this must be applied to every one of them: once the
+	// named interface is a bond, its slaves rather than the master are
+	// what the kernel reports as ingress. Best-effort and non-fatal,
+	// matching how sysctls are configured elsewhere here.
 	for _, target := range targets {
 		if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
 			return nil, fmt.Errorf("configure IPv6 forwarding on public interface %q: %w", target, err)
@@ -146,9 +116,8 @@ func setupGatewayDatapath(
 	return datapath, nil
 }
 
-// closeAll best-effort Closes every link in links, e.g. to unwind a
-// partially-set-up datapath after edgeattach.Attach already succeeded but a
-// later setupGatewayDatapath step failed.
+// closeAll best-effort closes every link, to unwind a partially set-up datapath
+// when attaching succeeded but a later step failed.
 func closeAll(links []link.Link) {
 	for _, l := range links {
 		_ = l.Close()

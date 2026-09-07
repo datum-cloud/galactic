@@ -13,10 +13,10 @@ import (
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 )
 
-// BuildCNIResult constructs the type100.Result IPAM delegation returns —
-// ips/routes only, no interfaces. The master plugin owns interface
-// creation entirely; keeping interfaces out of this result is exactly what
-// delegation exists to enforce (see the package doc comment).
+// BuildCNIResult constructs the result IPAM delegation returns: addresses and
+// routes only, no interfaces. The master plugin owns interface creation
+// entirely, and keeping interfaces out of this result is what delegation exists
+// to enforce.
 func BuildCNIResult(cniVersion string, res *IPAMResult) *type100.Result {
 	result := &type100.Result{CNIVersion: cniVersion}
 	if res == nil {
@@ -40,14 +40,11 @@ func BuildCNIResult(cniVersion string, res *IPAMResult) *type100.Result {
 	return result
 }
 
-// ResultToIPAMResult converts a CNI result — as returned by
-// github.com/containernetworking/cni/pkg/ipam.ExecAdd back to the master
-// plugin that just delegated an ADD — into the local shape callers apply
-// directly (configureInterfaceInNetns for veth, or read straight into a
-// tap/BGP-advertisement result). Marshals and re-parses via type100 rather
-// than a direct type assertion, since the concrete type returned by
-// ExecAdd depends on CNI version negotiation (mirrors the same pattern
-// internal/cni's own prevResult validation already uses).
+// ResultToIPAMResult converts a CNI result, as returned to a master plugin that
+// just delegated an ADD, into the local shape callers apply directly.
+//
+// It marshals and re-parses rather than type-asserting, since the concrete type
+// returned depends on CNI version negotiation.
 func ResultToIPAMResult(res types.Result) (*IPAMResult, error) {
 	jsonBytes, err := json.Marshal(res)
 	if err != nil {

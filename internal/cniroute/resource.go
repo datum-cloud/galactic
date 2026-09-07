@@ -10,11 +10,10 @@ import (
 	"go.datum.net/galactic/internal/cni/route"
 )
 
-// resourceTracker tracks routes created during cmdAdd for selective
-// rollback. galactic-route's own ADD only ever creates termination
-// routes — route-delete only, per the plan's decision that each binary's
-// tracker unwinds exactly what its own ADD created (the VRF/veth-or-tap
-// it runs alongside belongs to the master plugin's own tracker instead).
+// resourceTracker tracks the routes cmdAdd created, for selective rollback.
+// This plugin's ADD only ever creates termination routes, so route deletion is
+// all it unwinds: the VRF and interface it runs alongside belong to the master
+// plugin's own tracker.
 type resourceTracker struct {
 	vpc, vpcAttachment, dev string
 	added                   []Termination

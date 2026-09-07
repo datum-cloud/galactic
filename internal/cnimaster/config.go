@@ -21,17 +21,13 @@ import (
 	"go.datum.net/galactic/internal/hostconf"
 )
 
-// PluginConf is the CNI plugin configuration passed via stdin on each
-// invocation of either master plugin (galactic-veth or galactic-tap).
+// PluginConf is the CNI plugin configuration passed on stdin to either master
+// plugin.
 //
-// IPAM addressing fields (ipv6_subnet, ipv4_subnet, address_families,
-// static_ip) live entirely inside the "ipam" block — see
-// go.datum.net/galactic/internal/cniipam's doc comment for the explicit
-// delegation contract: this struct only decides *whether* to delegate
-// (IPAM != nil), never anything about how allocation itself works.
-// Termination routes are galactic-route's own concern (see
-// internal/cniroute) — neither master plugin's own JSON stanza carries a
-// "terminations" field of its own to read.
+// Addressing fields live entirely inside the "ipam" block; this struct decides
+// only whether to delegate, never anything about how allocation works.
+// Termination routes are the routing plugin's concern, so neither master
+// plugin's stanza carries a field for them.
 type PluginConf struct {
 	types.PluginConf
 	VPC           string        `json:"vpc"`
@@ -53,11 +49,10 @@ const (
 	errVPCAttachmentRequired = "vpcattachment is required and must be a non-empty base62 string"
 )
 
-// IsValidBase62 reports whether s contains only valid base62 characters
-// ([0-9a-zA-Z]) and is non-empty. VPC and VPCAttachment identifiers are
-// base62-encoded and used throughout the ADD path (interface naming,
-// BGP CRD population). Rejecting them early in ParseConf prevents cryptic
-// errors deep in the stack after partial kernel state has been created.
+// IsValidBase62 reports whether s is non-empty and contains only base62
+// characters. VPC and attachment identifiers are base62 and used throughout the
+// ADD path for interface naming and CRD population, so rejecting them early
+// avoids cryptic errors deep in the stack after partial kernel state exists.
 func IsValidBase62(s string) bool {
 	if len(s) == 0 {
 		return false
@@ -70,9 +65,9 @@ func IsValidBase62(s string) bool {
 	return true
 }
 
-// LoadHostConf loads node-local settings from the static per-node conflist.
-// If the file is missing, it returns a zero-value HostConf (tolerating local
-// test runs) but still defaulting Namespace to config.DefaultNamespace.
+// LoadHostConf loads node-local settings from the static per-node conflist. A
+// missing file yields a zero-value HostConf, tolerating local test runs, with
+// Namespace still defaulted.
 func LoadHostConf(filePath string) (*hostconf.HostConf, error) {
 	if filePath == "" {
 		filePath = config.DefaultConfFile
@@ -90,10 +85,9 @@ func LoadHostConf(filePath string) (*hostconf.HostConf, error) {
 	return conf, nil
 }
 
-// UnwrapPathError returns the innermost *os.PathError-shaped error wrapped
-// by err, if any, so os.IsNotExist (which does not itself traverse %w
-// wrapping) can still recognize a missing conflist file wrapped by
-// hostconf.Load's fmt.Errorf("read conflist file %q: %w", ...).
+// UnwrapPathError returns the innermost path error wrapped by err, if any, so a
+// missing-file check can recognise a missing conflist through the wrapping the
+// loader adds.
 func UnwrapPathError(err error) error {
 	for {
 		unwrapped := errors.Unwrap(err)
@@ -104,10 +98,10 @@ func UnwrapPathError(err error) error {
 	}
 }
 
-// ParseLogLevel maps a config-supplied level name to a slog.Level. Matching
-// is case-insensitive. An empty string resolves to config.DefaultLogLevel.
-// Unrecognized values return an error alongside the info-level fallback, so
-// callers can warn without failing the CNI operation over a typo'd setting.
+// ParseLogLevel maps a config-supplied level name to a slog level,
+// case-insensitively. An empty string resolves to the default. An unrecognised
+// value returns an error alongside the info-level fallback, so callers can warn
+// without failing the CNI operation over a typo.
 func ParseLogLevel(s string) (slog.Level, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "":
@@ -126,11 +120,9 @@ func ParseLogLevel(s string) (slog.Level, error) {
 	}
 }
 
-// SetupLogging configures the slog default logger to write to the specified
-// path at the specified verbosity. If opening the file fails, it logs a
-// warning to os.Stderr and falls back. An unrecognized logLevel also logs a
-// warning and falls back to config.DefaultLogLevel rather than failing the
-// operation.
+// SetupLogging points the default logger at logPath with verbosity logLevel. A
+// failure to open the file, or an unrecognised level, logs a warning to stderr
+// and falls back rather than failing the operation.
 func SetupLogging(logPath, logLevel string) {
 	if logPath == "" {
 		logPath = config.DefaultLogFile
@@ -155,20 +147,17 @@ func SetupLogging(logPath, logLevel string) {
 	slog.SetDefault(slog.New(handler))
 }
 
-// statusConf holds the minimal CNI config fields needed for STATUS validation.
-//
-// STATUS only checks that the config is parseable and the API server is
-// reachable; it does not validate attachment-specific fields (VPC,
-// VPCAttachment) because STATUS must succeed before any ADD has ever run.
+// statusConf holds the minimal config fields STATUS validation needs. STATUS
+// only checks that the config parses and the API server is reachable, not
+// attachment-specific fields, since it must succeed before any ADD has run.
 type statusConf struct {
 	CNIVersion string `json:"cniVersion"`
 	Type       string `json:"type"`
 }
 
-// ParseStatusConf validates that the CNI config is parseable and contains
-// the required top-level fields (cniVersion, type). Unlike ParseConf, it
-// does not validate VPC or VPCAttachment because STATUS must succeed on a
-// freshly started node before any ADD has run.
+// ParseStatusConf validates that the CNI config parses and carries the required
+// top-level fields. Unlike ParseConf it does not validate the attachment
+// identifiers, since STATUS must succeed on a freshly started node.
 func ParseStatusConf(data []byte) error {
 	var sc statusConf
 	if err := json.Unmarshal(data, &sc); err != nil {
@@ -183,11 +172,9 @@ func ParseStatusConf(data []byte) error {
 	return nil
 }
 
-// ValidatePrevResult checks that the prevResult (from a preceding plugin in
-// the CNI chain) is a valid, parseable CNI result. Returns an error if the
-// result is non-nil but cannot be parsed as a versioned CNI result, ensuring
-// the master plugin fails fast rather than silently operating on garbage
-// state.
+// ValidatePrevResult checks that a preceding plugin's result is a parseable,
+// versioned CNI result. A non-nil result that cannot be parsed is an error, so
+// the master plugin fails fast rather than operating on garbage.
 func ValidatePrevResult(res types.Result) error {
 	if res == nil {
 		return nil
@@ -204,12 +191,9 @@ func ValidatePrevResult(res types.Result) error {
 	return nil
 }
 
-// ValidatePrevResultAdd performs content-level validation of prevResult
-// during the ADD operation. It ensures the preceding plugin produced a
-// result with at least one interface or IP assignment, which is the minimum
-// expected structure for any meaningful CNI chain. Returns nil when
-// prevResult is nil (no preceding plugin) or structurally valid with
-// expected content.
+// ValidatePrevResultAdd checks a preceding plugin's result during ADD for at
+// least one interface or IP assignment, the minimum for a meaningful chain. A
+// nil result, meaning no preceding plugin, is fine.
 func ValidatePrevResultAdd(res types.Result) error {
 	if res == nil {
 		return nil
@@ -233,15 +217,13 @@ func ValidatePrevResultAdd(res types.Result) error {
 	return nil
 }
 
-// ParseConf unmarshals the CNI configuration from stdin data and validates
-// the base62-encoded identifier fields. It resolves the host configuration
-// and sets up process environment variables and logging.
+// ParseConf unmarshals the CNI configuration from data, validates the
+// base62 identifier fields, resolves the host configuration, and sets up
+// process environment and logging.
 //
-// cniConfig is the caller's own *config.CNIConfig singleton (each master
-// plugin binary owns one, initialized once via its own InitCNIConfig() at
-// process startup) and confFile is the caller's own ConfFile package var —
-// both are caller state, not shared, since each binary resolves its own
-// GALACTIC_CNI_* environment independently.
+// cniConfig and confFile are the caller's own state, one per master plugin
+// binary, since each resolves its own environment independently. confFile names
+// the conflist for error reporting.
 func ParseConf(data []byte, cniConfig *config.CNIConfig, confFile string) (*PluginConf, error) {
 	conf := &PluginConf{}
 	if err := json.Unmarshal(data, &conf); err != nil {
@@ -281,10 +263,9 @@ func ParseConf(data []byte, cniConfig *config.CNIConfig, confFile string) (*Plug
 		LogLevel:   hostConf.LogLevel,
 	})
 
-	// NodeName fallback: auto-detect from the Kubernetes API by matching local
-	// interface addresses against node InternalIPs. This handles cases where
-	// the conflist file is missing (e.g. hostPath mount issues in container-
-	// based environments like Kind).
+	// Fall back to auto-detecting the node name from the API by matching local
+	// interface addresses against node addresses, for when the conflist is
+	// missing.
 	if cniConfig.NodeName == "" {
 		detected, detectErr := hostconf.DetectNodeNameFromAPI()
 		if detectErr != nil {
@@ -311,23 +292,20 @@ func ParseConf(data []byte, cniConfig *config.CNIConfig, confFile string) (*Plug
 	SetupLogging(cniConfig.LogFile, cniConfig.LogLevel)
 	slog.Debug("CNI config received", "stdin", string(data))
 
-	// Refuse a config still written against the old flat addressing shape
-	// before anything else happens — those keys would otherwise be dropped
-	// as unknown fields and the pod would attach with no addresses at all.
+	// Refuse a config written against the old flat addressing shape before
+	// anything else: those keys would be dropped as unknown fields and the pod
+	// would attach with no addresses at all.
 	if err := hostconf.RejectMovedIPAMKeys(data); err != nil {
 		return nil, err
 	}
 
 	// Whether IPAM runs at all is decided entirely by whether "ipam" is
-	// present — no environment variable or sibling field can trigger or
-	// suppress that. Addressing fields (ipv6_subnet, ipv4_subnet,
-	// address_families, static_ip) and their own default-filling/CIDR
-	// validation live inside internal/cniipam, since they're only ever
-	// read by whichever binary "ipam.type" names — the master plugin passes
-	// its own StdinData straight through unmodified when it delegates, so
-	// validating them here too would just be redundant work on the same
-	// bytes. Their *placement* is this plugin's concern, though — see the
-	// RejectMovedIPAMKeys call above.
+	// present; no environment variable or sibling field can trigger or suppress
+	// it. The addressing fields and their own validation live in the IPAM
+	// package, since only the binary named by "ipam.type" reads them and the
+	// master plugin passes its stdin through unmodified when it delegates.
+	// Their placement is this plugin's concern, which the check above
+	// enforces.
 
 	if conf.PrevResult != nil {
 		if err := ValidatePrevResult(conf.PrevResult); err != nil {

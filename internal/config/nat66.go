@@ -16,20 +16,11 @@ import (
 // --- NAT66 defaults ---------------------------------------------------
 
 const (
-	// DefaultNAT66MetricsPort/DefaultNAT66GRPCHealthPort are the next
-	// unused values past every other hostNetwork: true galactic-* process
-	// already running on a node: fabric-router's BGP listener (179),
-	// galactic-router's grpc-health/metrics (5179/9179), galactic-cni's
-	// (5180/9180), and galactic-gateway's (5181/8081 -- see
-	// internal/config/gateway.go's own doc comment for why that pair
-	// isn't a clean continuation of the 517x/917x pattern). galactic-nat66
-	// runs hostNetwork: true on every galactic.datumapis.com/node=compute
-	// node (config/galactic-nat66/base/daemonset.yaml) -- the same nodes
-	// as galactic-router's default role and galactic-cni, disjoint from
-	// galactic-gateway's own edge-role nodes -- but a node's role labels
-	// are not mutually exclusive by construction, so these still avoid
-	// every value already claimed above rather than assuming no overlap
-	// will ever happen.
+	// DefaultNAT66MetricsPort and DefaultNAT66GRPCHealthPort are the next unused
+	// values past every other host-network process on a node. This binary runs
+	// on the same nodes as the router and CNI and disjoint from the gateway's,
+	// but a node's role labels are not mutually exclusive by construction, so
+	// these avoid every value already claimed rather than assume no overlap.
 	DefaultNAT66MetricsPort    = 9182
 	DefaultNAT66GRPCHealthPort = 5182
 )
@@ -41,38 +32,30 @@ const (
 	EnvNAT66MetricsPort    = "GALACTIC_NAT66_METRICS_PORT"
 	EnvNAT66GRPCHealthPort = "GALACTIC_NAT66_GRPC_HEALTH_PORT"
 
-	// EnvNAT66UplinkInterface names this shard's single fabric-facing
-	// uplink interface -- the interface
-	// internal/plumbing/ebpf/nat66prog's XDP program attaches to. Required:
-	// galactic-nat66 only ever runs as a dedicated NAT66 shard, so there is
-	// no "not this role, skip the datapath" case to support, mirroring
-	// config.EnvGatewayPublicInterface's identical reasoning.
+	// EnvNAT66UplinkInterface names this shard's fabric-facing uplink, the
+	// interface the NAT66 XDP program attaches to. Required: this binary only
+	// ever runs as a dedicated shard, so there is no "not this role, skip the
+	// datapath" case.
 	EnvNAT66UplinkInterface = "GALACTIC_NAT66_UPLINK_INTERFACE"
 
-	// EnvNAT66ShardSID is this shard's own SRv6 uSID
-	// (network.datumapis.com/v1alpha1's NAT66ShardStatus.ShardSID) --
-	// the outer destination a tenant's egress packet is encapsulated
-	// toward. Required -- see EnvNAT66UplinkInterface. Operator-supplied
-	// today (no in-cluster derivation mechanism yet -- the same gap
-	// BGPRouter.Spec.SRv6Locator/NodeID assignment and
-	// GALACTIC_GATEWAY_SRV6_ADDRESS both have today; see
-	// docs/agents/ARCHITECTURE-GATEWAY.md's "Argument-0 reservation"
-	// section for the established precedent this follows).
+	// EnvNAT66ShardSID is this shard's own SRv6 uSID, the outer destination a
+	// tenant's egress packet is encapsulated toward. Required, and
+	// operator-supplied: no in-cluster mechanism derives it yet, the same gap
+	// the router locator and the gateway address both have.
 	EnvNAT66ShardSID = "GALACTIC_NAT66_SHARD_SID"
 
-	// EnvNAT66ShardPubAddr is this shard's own publicly-routable
-	// masquerade source address (NAT66ShardStatus.ShardAddress) -- every
-	// flow this shard NATs is SNAT'd to an address:port within it.
-	// Required -- see EnvNAT66UplinkInterface.
+	// EnvNAT66ShardPubAddr is this shard's publicly routable masquerade source.
+	// Every flow this shard translates is given an address and port within it.
+	// Required.
 	EnvNAT66ShardPubAddr = "GALACTIC_NAT66_SHARD_PUB_ADDR"
 )
 
 // --- NAT66Config ---------------------------------------------------------
 
-// NAT66Config resolves galactic-nat66 configuration with three-tier
-// precedence: CLI flag > env var > compiled-in default. Create once via
-// NewNAT66Config(), call BindFlags() to layer CLI flags, then read the
-// exported fields.
+// NAT66Config resolves galactic-nat66 configuration with three-tier precedence:
+// CLI flag, then environment variable, then compiled-in default. Create one with
+// NewNAT66Config, call BindFlags to layer CLI flags, then read the exported
+// fields.
 type NAT66Config struct {
 	v      *viper.Viper
 	prefix string
@@ -82,17 +65,16 @@ type NAT66Config struct {
 	MetricsPort    int
 	GRPCHealthPort int
 
-	// UplinkInterface/ShardSID/ShardPubAddr configure the NAT66 egress
-	// shard datapath -- see EnvNAT66UplinkInterface's doc comment. All
-	// three required; NAT66Config.Validate rejects any being empty.
+	// UplinkInterface, ShardSID, and ShardPubAddr configure the egress shard
+	// datapath. All three are required; Validate rejects any being empty.
 	UplinkInterface string
 	ShardSID        string
 	ShardPubAddr    string
 }
 
-// NewNAT66Config creates a NAT66 config resolver with the GALACTIC_NAT66
-// env prefix and AutomaticEnv enabled. Exported fields are populated from
-// env vars and defaults; call BindFlags() to layer CLI overrides.
+// NewNAT66Config creates a config resolver reading the GALACTIC_NAT66
+// environment prefix. Exported fields are populated from the environment and
+// defaults; call BindFlags to layer CLI overrides.
 func NewNAT66Config() *NAT66Config {
 	v := viper.New()
 	v.SetEnvPrefix("GALACTIC_NAT66")
@@ -113,9 +95,8 @@ func NewNAT66Config() *NAT66Config {
 	return cfg
 }
 
-// BindFlags binds Cobra/pflag flags to the config resolver and re-reads
-// the exported fields. Each flag is bound to a Viper key using the key
-// argument.
+// BindFlags binds the CLI flags to the config resolver and re-reads the
+// exported fields.
 func (c *NAT66Config) BindFlags(flags *pflag.FlagSet) {
 	bindings := []struct {
 		flag string
@@ -149,15 +130,12 @@ func (c *NAT66Config) readFields() {
 	c.ShardPubAddr = c.v.GetString("shard_pub_addr")
 }
 
-// validateShardAddr parses and range-checks a shard identity address
-// (ShardSID or ShardPubAddr), rejecting anything that isn't a native
-// IPv6 address -- caught eventually anyway by
-// internal/plumbing/ebpf/nat66map's identical check, but late: only once
-// setupNat66Datapath has already loaded and attached the eBPF datapath.
-// Reject it here instead, at startup, with a message that names the
-// actual field rather than surfacing as a deeper, less obvious
-// kernel-datapath error -- mirrors GatewayConfig.Validate's identical
-// SRv6Address check.
+// validateShardAddr parses and range-checks a shard identity address, rejecting
+// anything that is not a native IPv6 address.
+//
+// The map layer catches the same thing eventually, but only after the datapath
+// has been loaded and attached. Rejecting it at startup names the actual field
+// instead of surfacing as a deeper kernel-datapath error.
 func validateShardAddr(field, value string) error {
 	addr, err := netip.ParseAddr(value)
 	if err != nil {

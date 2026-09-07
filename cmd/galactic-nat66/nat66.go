@@ -18,54 +18,42 @@ import (
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
-// nat66DatapathKeepAlive holds the loaded *nat66prog.Nat66Objects and the
-// attached link.Link for the life of this process, once
-// setupNat66Datapath's attach path succeeds. Neither is Closed anywhere in
-// this file -- mirrors cmd/galactic-gateway/gateway.go's
-// gatewayDatapathKeepAlive var and its doc comment's full rationale
-// (cilium/ebpf's *ebpf.Program, *ebpf.Map, and link.Link types all
-// register a runtime finalizer that closes their underlying fd once the
-// garbage collector determines nothing reachable still points at them,
-// with no error surfaced anywhere when that happens -- confirmed live the
-// first time gatewayDatapathKeepAlive's absence was ever exercised against
-// a real interface: ingress traffic for a registered rule was silently
-// never intercepted at all). Without an equivalent var here,
-// objs.Nat66Ingress (the program) and the link.Link returned by Attach --
-// the two things actually keeping this shard's XDP attachment live on the
-// wire -- would eventually get GC'd and silently detached, with the
-// NAT66Shard's own Ready condition still reporting healthy.
+// nat66DatapathKeepAlive holds the loaded objects and the attached link for the
+// life of this process, once the attach path succeeds.
+//
+// Nothing here is closed explicitly, but a value not stored somewhere reachable
+// is as good as closed: the eBPF program, map, and link types all register a
+// finalizer that closes the underlying descriptor once the garbage collector
+// sees nothing pointing at them, with no error surfaced anywhere.
+//
+// Without this var, the program and the link, the two things keeping this
+// shard's XDP attachment live on the wire, would eventually be collected and
+// silently detached while the shard's Ready condition still reported healthy.
 var nat66DatapathKeepAlive struct {
 	objs *nat66prog.Nat66Objects
 	link link.Link
 }
 
-// nat66DatapathStatus implements controller.NAT66DatapathHealth,
-// reporting whether setupNat66Datapath has completed a successful
-// load+attach+configure pass. attached is only ever set true, once, by
-// setupNat66Datapath after every step below succeeds -- there is no
-// runtime detach detection here (the datapath is expected to survive for
-// this process's whole lifetime, mirroring gatewayDatapathKeepAlive's own
-// "attached once at startup, held open forever" convention), so an
-// atomic.Bool rather than a mutex-guarded struct is sufficient: it's only
-// ever written once and read concurrently by every subsequent
-// NAT66ShardReconciler.Reconcile call.
+// nat66DatapathStatus reports whether setup has completed a successful load,
+// attach, and configure pass. The flag is set true once, after every step
+// succeeds, and never cleared: there is no runtime detach detection, the
+// datapath being expected to survive the process's whole lifetime. That makes
+// an atomic sufficient, it being written once and read concurrently by every
+// later reconcile.
 type nat66DatapathStatus struct {
 	attached atomic.Bool
 }
 
 func (s *nat66DatapathStatus) Attached() bool { return s.attached.Load() }
 
-// setupNat66Datapath loads and attaches the NAT66 egress eBPF datapath to
-// uplinkInterface, writes shardSID/shardPubAddr into shard_config_table,
-// and registers this shard's Prometheus metrics, returning the
-// controller.NAT66DatapathHealth NAT66ShardReconciler uses to report its
-// Ready condition.
+// setupNat66Datapath loads and attaches the NAT66 egress datapath to
+// uplinkInterface, writes the shard's SID and public address into its config
+// map, and registers this shard's metrics. It returns the health reporter the
+// reconciler uses for its Ready condition.
 //
-// Mirrors cmd/galactic-gateway/gateway.go's setupGatewayDatapath: the
-// loaded *nat66prog.Nat66Objects and the returned link.Link are stashed in
-// nat66DatapathKeepAlive (see that var's doc comment for why) rather than
-// Closed here -- they, and the XDP attachment itself, must survive for the
-// life of this process.
+// The loaded objects and the returned link are stashed in
+// nat66DatapathKeepAlive rather than closed here: they, and the attachment
+// itself, must survive for the life of this process.
 func setupNat66Datapath(
 	uplinkInterface, shardSID, shardPubAddr string, metricsReg prometheus.Registerer,
 ) (*nat66DatapathStatus, error) {
@@ -78,13 +66,9 @@ func setupNat66Datapath(
 		return nil, fmt.Errorf("parse shard public address %q: %w", shardPubAddr, err)
 	}
 
-	// Required for bpf_fib_lookup() (nat66.c's push_outer_header, used by
-	// both the forward and return paths) to ever succeed on this interface
-	// -- see sysctl.ConfigureFIBLookupUplinkSysctls's own doc comment for
-	// why (a real, previously-undiagnosed blocker, first found against
-	// edgedsr.c but equally applicable here since both datapaths share the
-	// identical bpf_fib_lookup mechanism). Best-effort/non-fatal, matching
-	// cmd/galactic-gateway/gateway.go's identical call.
+	// Required for the FIB lookup in both the forward and return paths to
+	// succeed on this interface. Best-effort and non-fatal, matching how the
+	// gateway binary configures the same sysctls.
 	if err := sysctl.ConfigureFIBLookupUplinkSysctls(uplinkInterface); err != nil {
 		return nil, fmt.Errorf("configure IPv6 forwarding on uplink interface %q: %w", uplinkInterface, err)
 	}

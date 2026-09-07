@@ -23,12 +23,9 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// legacySRv6SIDAnnotation is the pre-VRFID/Function fallback annotation used
-// when a BGPAdvertisement or its BGPRouter has not yet been migrated to the
-// RFC 9800 NEXT-CSID uSID fields (VRFID/Function on the advertisement,
-// SRv6Locator/NodeID on the router). This keeps existing containerlab
-// labs/e2e fixtures working since their BGPRouter definitions may not yet set
-// NodeID.
+// legacySRv6SIDAnnotation carries a SID directly, for a BGPAdvertisement or
+// BGPRouter not yet migrated to the uSID fields. It keeps lab and test fixtures
+// working whose routers may not set a node ID.
 const legacySRv6SIDAnnotation = "galactic.datum.net/srv6-sid"
 
 // Reconciler assembles DesiredRouter values from BGP CRDs.
@@ -39,9 +36,9 @@ type Reconciler struct {
 }
 
 // New returns a Reconciler for the given node and local BGP address.
-// localAddress, when non-empty, is used as the EVPN next-hop instead of the
-// node's first IPv6 InternalIP — required when the node InternalIP is not
-// reachable via the SRv6 transit mesh (e.g. Kind/ContainerLab Docker bridge).
+// localAddress, when non-empty, is used as the EVPN next hop instead of the
+// node's first IPv6 internal address, which is required when that address is
+// not reachable over the SRv6 transit mesh.
 func New(c client.Client, nodeName, localAddress string) *Reconciler {
 	return &Reconciler{
 		client:       c,
@@ -50,9 +47,9 @@ func New(c client.Client, nodeName, localAddress string) *Reconciler {
 	}
 }
 
-// BuildDesiredRouter assembles the full DesiredRouter from BGP CRDs for
-// the given BGPRouter. It returns (nil, nil) if the router should be silently
-// skipped (wrong node). It returns (nil, err) on error.
+// BuildDesiredRouter assembles the full desired router from BGP CRDs for the
+// given BGPRouter. It returns nil with a nil error when the router targets
+// another node and should be silently skipped.
 func (r *Reconciler) BuildDesiredRouter(
 	ctx context.Context, router *bgpv1alpha1.BGPRouter,
 ) (*model.DesiredRouter, error) {
@@ -84,10 +81,9 @@ func (r *Reconciler) BuildDesiredRouter(
 		return nil, fmt.Errorf("list BGPAdvertisements for router %s/%s: %w", namespace, router.Name, err)
 	}
 
-	// Gather VRF instances. A node hosts one BGPVRFInstance per VPC that has
-	// at least one attachment here — shared by every attachment on that
-	// VPC/node, not one per attachment — so every instance targeting this
-	// router must be carried into DesiredRouter — not just the first.
+	// A node hosts one instance per VPC with at least one attachment here,
+	// shared by every attachment on that VPC, so every instance targeting this
+	// router must be carried through, not just the first.
 	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
 	if err := r.client.List(ctx, vrfList,
 		client.InNamespace(namespace),
@@ -100,10 +96,9 @@ func (r *Reconciler) BuildDesiredRouter(
 		vrfInstances[i] = buildVRFInstance(v)
 	}
 
-	// Resolve the EVPN next-hop. When localAddress is set (e.g. from
-	// BGP_LOCAL_ADDRESS), use it directly — it is the transit-reachable
-	// address. Fall back to the node's first IPv6 InternalIP only when
-	// localAddress is not configured.
+	// Resolve the EVPN next hop. A configured local address is used directly,
+	// being the transit-reachable one; otherwise fall back to the node's first
+	// IPv6 internal address.
 	var nextHop string
 	if r.localAddress != "" {
 		nextHop = r.localAddress
@@ -339,10 +334,9 @@ func policyTargetsRouter(policy *bgpv1alpha1.BGPPolicy, router *bgpv1alpha1.BGPR
 	return false
 }
 
-// buildVRFInstance converts a BGPVRFInstance CRD into a DesiredVRFInstance.
-// VRFID carries straight through; the runtime derives the RFC 4364 Type 1
-// route distinguisher ("routerID:vrfID") from it rather than the CRD storing
-// one directly.
+// buildVRFInstance converts a BGPVRFInstance into its desired-state form. The
+// VRFID carries straight through, and the runtime derives the route
+// distinguisher from it rather than the CRD storing one.
 func buildVRFInstance(v bgpv1alpha1.BGPVRFInstance) model.DesiredVRFInstance {
 	importRTs := make([]string, len(v.Spec.ImportRouteTargets))
 	for j, rt := range v.Spec.ImportRouteTargets {
@@ -360,11 +354,10 @@ func buildVRFInstance(v bgpv1alpha1.BGPVRFInstance) model.DesiredVRFInstance {
 	}
 }
 
-// resolveSRv6SID computes the SRv6 SID to place in the EVPN GWIPAddress field
-// for adv on router. When adv.Spec.VRFID and adv.Spec.Function are both set,
-// and router.Spec.SRv6Locator and router.Spec.NodeID are both configured, the
-// SID is derived via srv6.ComputeSID (RFC 9800 NEXT-CSID uSID compression).
-// Otherwise it falls back to the legacy srv6-sid annotation.
+// resolveSRv6SID computes the SID to advertise for adv on router. When the
+// advertisement carries both a VRFID and a function, and the router a locator
+// and a node ID, the SID is derived from them. Otherwise it falls back to the
+// legacy annotation.
 func resolveSRv6SID(router *bgpv1alpha1.BGPRouter, adv *bgpv1alpha1.BGPAdvertisement) (string, error) {
 	if adv.Spec.VRFID == nil || adv.Spec.Function == nil ||
 		router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {

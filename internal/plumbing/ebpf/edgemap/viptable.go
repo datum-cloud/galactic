@@ -14,67 +14,47 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 )
 
-// MaxBackends is edgedsr.c's EDGE_MAX_BACKENDS, hand-kept in sync -- bpf2go's
-// -type flag generates a Go struct matching struct vip_value's fixed-size
-// Backends array, but the #define itself has no BTF representation to
-// generate a Go constant from (same reason
-// internal/plumbing/ebpf/prog/dropreason.go's constants are hand-kept, not
-// generated). Register rejects more backends than this before ever writing
-// to the map, rather than letting a silently-truncated Put succeed. Matches
-// NetworkRuleSpec.Backends' own +kubebuilder:validation:MaxItems=64
-// (go.datum.net/network's rule_types.go) -- edgenat.c's predecessor rule_key
-// capped this at 8, silently below the CRD's own advertised limit; closed as
-// a side effect of the DSR/Maglev rewrite rather than carried forward
-// unexamined.
+// MaxBackends mirrors the datapath's own backend cap, hand-kept in sync: the
+// generated Go struct matches the fixed-size array, but a C define has no BTF
+// representation to generate a constant from. Register rejects more backends
+// than this before writing, rather than letting a silently truncated write
+// succeed. It matches the CRD's own maximum.
 const MaxBackends = 64
 
-// MaglevTableSize is edgedsr.c's EDGE_MAGLEV_TABLE_SIZE, hand-kept in sync
-// for the same reason as MaxBackends. It is the fixed slot count of
-// vip_value's own maglev_table array -- every Register call must supply a
-// [MaglevTableSize]byte array built from internal/maglev.Table's own
-// Backends()/Lookup() (see kerneldatapath.go's buildMaglevBackends), sized
-// to exactly this constant, not internal/maglev.Table's own configurable
-// Size().
+// MaglevTableSize mirrors the datapath's Maglev table slot count, hand-kept in
+// sync for the same reason as MaxBackends. Every Register call must supply an
+// array of exactly this size, not one sized to the Maglev builder's own
+// configurable size.
 const MaglevTableSize = 1021
 
-// MaxVIPTableEntries is vip_table's own __uint(max_entries, ...) in
-// edgedsr.c, hand-kept in sync for the same reason as MaxBackends (a map's
-// max_entries has no BTF representation bpf2go could generate a Go constant
-// from). internal/gateway's QuotaEnforcer uses this as the hard ceiling
-// protecting the shared map's fixed capacity across every tenant on the
-// node -- vip_table itself has no notion of "full,"
-// bpf_map_update_elem simply starts failing once it is, so this quota exists
-// to fail closed at the control-plane admission point instead.
+// MaxVIPTableEntries mirrors vip_table's own maximum entry count, hand-kept in
+// sync for the same reason as MaxBackends. The engine's quota enforcer uses it
+// as the hard ceiling protecting the shared map's capacity across every tenant
+// on the node: the map itself has no notion of full, updates simply start
+// failing once it is, so the quota fails closed at admission instead.
 const MaxVIPTableEntries = 4096
 
-// beU16 converts v between host and big-endian ("network") representation
-// by a full 2-byte swap -- its own inverse, so this same function is used
-// for both directions. Required because edgeprog's generated Go structs
-// store a C __be16 field as a plain uint16, and cilium/ebpf's BTF-based
-// marshalling writes it using the host's native (little-endian, on every
-// architecture this repo targets) byte order with no swap of its own.
+// beU16 swaps a uint16 between host and network byte order. A full 2-byte swap
+// is its own inverse, so one function serves both directions. Needed because
+// the generated Go structs store a big-endian C field as a plain uint16, which
+// the marshalling writes in host order with no swap.
 func beU16(v uint16) uint16 {
 	return v<<8 | v>>8
 }
 
-// VIPKey identifies one vip_table row: (proto, VIP port, VIP address). No
-// tenant dimension here -- a VIP is globally unique by construction (it's a
-// public address), so this key never needs one; see edgedsr.c's struct
-// vip_key doc comment.
+// VIPKey identifies one vip_table row: protocol, VIP port, and VIP address.
+// There is no tenant dimension, a VIP being globally unique by construction.
 type VIPKey struct {
 	Proto uint8
 	VPort uint16
 	VIP   netip.Addr
 }
 
-// Backend is one VIPEntry load-balancing target: the backend Pod's own
-// address/port, plus the SRv6 uSID of the worker node it's reachable
-// through -- resolved by the caller (internal/gateway's control plane) the
-// same way any other cross-node SRv6 destination is, never parsed from a
-// packet. Unchanged from edgenat.c's predecessor Backend type: DSR still
-// needs exactly these three fields, it just never rewrites Addr/Port for
-// NAT purposes, only carries them through as identifying metadata (see
-// edgedsr.c's struct backend doc comment).
+// Backend is one load-balancing target: the backend pod's address and port,
+// plus the SRv6 uSID of the worker node reaching it, resolved by the control
+// plane like any other cross-node SRv6 destination and never parsed from a
+// packet. The address and port are carried through as identifying metadata and
+// never rewritten.
 type Backend struct {
 	Addr netip.Addr
 	Port uint16
@@ -86,62 +66,52 @@ type VIPEntry struct {
 	VIPKey
 	Backends []Backend
 
-	// MaglevTable is the precomputed Maglev lookup table this entry was
-	// registered with -- MaglevTable[slot] is an index into Backends,
-	// sorted in the same order internal/maglev.Table.Backends() returns
-	// (see kerneldatapath.go's buildMaglevBackends). Callers reading this
-	// back (e.g. diagnostics) must not mutate it.
+	// MaglevTable is the precomputed lookup table this entry was registered
+	// with: each slot holds an index into Backends, in the order the Maglev
+	// builder returns them. A caller reading it back must not mutate it.
 	MaglevTable [MaglevTableSize]byte
 
-	// Generation is this table's monotonic-clock reading at the time this
-	// entry was last written by Register -- see doc.go's "why VIPTable
-	// carries a Generation field" section.
+	// Generation is this table's monotonic-clock reading when Register last
+	// wrote this entry. See the package doc comment.
 	Generation uint64
 
-	// Packets/Bytes/DroppedPackets/LastSeenNs are per-VIP hit counters
-	// maintained by the datapath itself (edgedsr.c's vip_stats_table).
-	// Packets counts every packet that matched this VIP+port+protocol,
-	// regardless of outcome; DroppedPackets is the subset of those the
-	// datapath then dropped (count_claimed_drop) -- so DroppedPackets is
-	// always <= Packets. LastSeenNs is a CLOCK_MONOTONIC nanosecond
-	// timestamp of the most recent matching packet, 0 if none yet.
+	// Packets, Bytes, DroppedPackets, and LastSeenNs are per-VIP counters
+	// maintained by the datapath. Packets counts every packet matching this
+	// VIP, port, and protocol whatever the outcome, and DroppedPackets is the
+	// subset the datapath then dropped, so it never exceeds Packets. LastSeenNs
+	// is a monotonic nanosecond timestamp of the most recent match, 0 if none.
 	//
-	// These live in a separate map from the rest of VIPEntry (vip_table
-	// itself), keyed identically -- see Register's doc comment for why
-	// (issue #361): Register never reads or writes them, so re-registering
-	// a VIP (e.g. every controller reconcile pass) can never race, and
-	// therefore never lose, the datapath's own increments. A key with no
-	// vip_stats_table row yet (a VIP that has never seen a matching packet)
-	// reads back as all zero, not an error.
+	// They live in a separate map from the rest of the entry, keyed identically,
+	// so Register never reads or writes them and re-registering a VIP cannot
+	// race, and so lose, the datapath's increments. A key with no stats row yet
+	// reads back as all zero rather than an error.
 	Packets        uint64
 	Bytes          uint64
 	DroppedPackets uint64
 	LastSeenNs     uint64
 }
 
-// VIPTable is the read/write API for vip_table and vip_stats_table
-// together -- two separate eBPF maps, keyed identically (VIPKey), that this
-// type presents as one logical table (see Register's doc comment for why
-// they're split: issue #361). table backs vip_table (config: backend list,
-// Maglev lookup table, Generation); stats backs vip_stats_table (the
-// datapath's own hit counters -- Register never touches it).
+// VIPTable is the read/write API for vip_table and vip_stats_table together,
+// two separate maps keyed identically that this type presents as one logical
+// table. table holds the configuration: backend list, Maglev table, and
+// generation. stats holds the datapath's counters, which Register never
+// touches.
 type VIPTable struct {
 	table Table
 	stats Table
 	clock func() uint64
 }
 
-// NewVIPTable wraps table (vip_table) and stats (vip_stats_table) as a
-// VIPTable. Production callers pass two KernelTables wrapping a loaded
-// *edgeprog.EdgedsrObjects's VipTable/VipStatsTable map fields; tests pass
-// fake Tables.
+// NewVIPTable wraps the configuration and statistics maps as a VIPTable.
+// Production callers pass kernel tables over the two loaded maps; tests pass
+// fakes.
 func NewVIPTable(table, stats Table) *VIPTable {
 	return &VIPTable{table: table, stats: stats, clock: clockFn}
 }
 
 // Generation returns a snapshot of this table's monotonic clock. A caller
-// intending to call Reconcile must capture this immediately *before*
-// listing the NetworkRule CRDs that will become Reconcile's live set.
+// intending to call Reconcile must read it immediately before listing the CRDs
+// that become that call's live set.
 func (t *VIPTable) Generation() uint64 {
 	return t.clock()
 }
@@ -167,23 +137,15 @@ func toWireBackends(backends []Backend) ([MaxBackends]edgeprog.EdgedsrBackend, e
 	return out, nil
 }
 
-// Register writes (or overwrites) the vip_table entry for key, mapping it
-// to backends and maglevTable and stamping it with this table's current
-// Generation. maglevTable[slot] must be an index into backends (i.e. into
-// the same slice, in the same order) -- see kerneldatapath.go's
-// buildMaglevBackends for how the caller builds both together from a
-// DesiredRule's backend list. Rejects an empty or over-capacity backend
-// list before ever writing to the map, per MaxBackends' doc comment.
+// Register writes, or overwrites, the vip_table entry for key, mapping it to
+// backends and maglevTable and stamping it with the current generation. Each
+// slot of maglevTable must be an index into backends, in the same order.
+// Rejects an empty or over-capacity backend list before writing.
 //
-// This is a blind overwrite of vip_table, not a read-modify-write -- same
-// issue #361 rationale as edgenat.c's predecessor rule_table.Register: it
-// never touches vip_stats_table at all, so it has nothing to race against
-// the datapath's own per-packet __sync_fetch_and_add calls into that map.
-// Moving the counters to their own map (vip_stats_table, populated lazily
-// by the datapath itself, never by this method) closes the race instead of
-// narrowing it: nothing this method does can ever discard a concurrent
-// datapath increment, because this method has no reason to read or write
-// that map.
+// A blind overwrite rather than a read-modify-write, because it never touches
+// the statistics map and so has nothing to race against the datapath's
+// per-packet increments. Keeping the counters in a map this method has no
+// reason to read closes that race rather than narrowing it.
 func (t *VIPTable) Register(key VIPKey, backends []Backend, maglevTable [MaglevTableSize]byte) error {
 	if len(backends) == 0 {
 		return fmt.Errorf("edgemap: vip_table: register %+v: at least one backend is required", key)
@@ -215,21 +177,16 @@ func (t *VIPTable) Register(key VIPKey, backends []Backend, maglevTable [MaglevT
 }
 
 // Unregister removes the vip_table entry for key, if present, and its
-// vip_stats_table counterpart, if any (best-effort past that point -- see
-// below). Not an error if either is already absent.
+// statistics row, if any. Neither being present is not an error.
 //
-// Deleting the stats row too, rather than leaving it behind, keeps
-// vip_stats_table from accumulating rows for VIPs that no longer exist:
-// unlike vip_table, whose capacity is enforced up front by
-// internal/gateway's QuotaEnforcer, nothing else here bounds
-// vip_stats_table's own occupancy, and it is a plain BPF_MAP_TYPE_HASH
-// (edgedsr.c), not self-evicting the way an LRU map would be. If the stats
-// delete fails after the config delete already succeeded, the VIP itself is
-// still gone (the caller's Reconcile/RemoveRule sees it as removed); the
-// orphaned stats row is a latent leak, not a correctness problem for
-// anything reading vip_table, so this reports the error rather than
-// silently swallowing it, but does not roll back the config delete to "fix"
-// it.
+// The statistics row is deleted rather than left behind so that map does not
+// accumulate rows for VIPs that no longer exist: unlike vip_table, whose
+// capacity the quota enforcer bounds up front, nothing else bounds it, and it
+// is a plain hash map rather than a self-evicting one.
+//
+// If the statistics delete fails after the configuration delete succeeded, the
+// VIP is still gone and the orphaned row is a latent leak rather than a
+// correctness problem, so the error is reported without rolling back.
 func (t *VIPTable) Unregister(key VIPKey) error {
 	wireKey, err := toWireKey(key)
 	if err != nil {
@@ -244,9 +201,9 @@ func (t *VIPTable) Unregister(key VIPKey) error {
 	return nil
 }
 
-// lookupStats reads vip_stats_table's row for wireKey, defaulting to the
-// zero value (a VIP that has never seen a matching packet has no row yet --
-// see VIPEntry's doc comment) rather than treating a miss as an error.
+// lookupStats reads the statistics row for wireKey, defaulting to the zero
+// value rather than treating a miss as an error: a VIP that has never seen a
+// matching packet has no row yet.
 func (t *VIPTable) lookupStats(wireKey edgeprog.EdgedsrVipKey) (edgeprog.EdgedsrVipStatsValue, error) {
 	var stats edgeprog.EdgedsrVipStatsValue
 	if err := t.stats.Lookup(wireKey, &stats); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -322,12 +279,10 @@ func (t *VIPTable) List() ([]VIPEntry, error) {
 	return entries, nil
 }
 
-// Reconcile brings vip_table into agreement with live -- the caller's
-// current set of VIPKeys that have a live NetworkRule CRD -- removing every
-// vip_table entry whose key is absent from live, *except* an entry whose
-// Generation is >= cutoff (it was written after the caller's live snapshot
-// was taken, so deleting it could race a fresh Register). See doc.go's "why
-// VIPTable carries a Generation field."
+// Reconcile brings vip_table into agreement with live, the caller's current set
+// of keys backed by a live NetworkRule, removing every entry whose key is absent
+// from live except one whose generation is at or above cutoff, which was written
+// after the caller's snapshot and could race a fresh Register.
 func (t *VIPTable) Reconcile(live map[VIPKey]struct{}, cutoff uint64) (removed []VIPEntry, err error) {
 	entries, err := t.List()
 	if err != nil {

@@ -36,24 +36,17 @@ const (
 	BGPRouterByTargetName = ".spec.targetRef.name"
 )
 
-// RegisterIndexes registers all field indexes required by galactic-router's
-// and galactic-gateway's controllers (e.g. NetworkGatewayReconciler's own
-// BGPRouterByTargetName lookup) against mgr's cache. Each binary runs its
-// own separate manager/cache, so this must be called once per process --
-// it must be called before starting the manager.
+// RegisterIndexes registers every field index galactic-router's and
+// galactic-gateway's controllers need against mgr's cache. Each binary runs its
+// own manager and cache, so it must be called once per process, before starting
+// the manager.
 //
-// controller-runtime's cache starts a live informer for every type touched
-// by IndexField, immediately, regardless of whether any reconciler in this
-// process ever reads that type again -- calling this full function from a
-// binary whose RBAC doesn't cover every one of BGPPeer/BGPPolicy/
-// BGPAdvertisement/BGPVRFInstance/BGPRouter fails outright ("cannot list
-// resource ... at the cluster scope"), found live the first time
-// cmd/galactic-nat66 called this instead of RegisterBGPRouterTargetIndex
-// below. Only galactic-router's own manager (which already holds the full
-// BGP RBAC set) and galactic-gateway's (which inherits it via its second
-// ClusterRoleBinding onto galactic-router's ClusterRole, config/galactic-
-// gateway/rbac.yaml's own doc comment) should call this; anything narrower
-// should call one of the single-index functions below instead.
+// The cache starts a live informer for every type an index touches, immediately
+// and regardless of whether any reconciler here reads that type again. Calling
+// this from a binary whose role does not cover every BGP kind fails outright at
+// startup with a forbidden list error. Only the router's manager, which holds
+// the full BGP access, and the gateway's, which inherits it, should call this;
+// anything narrower should call one of the single-index functions below.
 func RegisterIndexes(ctx context.Context, mgr ctrl.Manager) error {
 	c := mgr.GetCache()
 
@@ -75,17 +68,13 @@ func RegisterIndexes(ctx context.Context, mgr ctrl.Manager) error {
 	return RegisterBGPRouterTargetIndex(ctx, mgr)
 }
 
-// RegisterBGPRouterTargetIndex registers only the BGPRouterByTargetName
-// index against mgr's cache -- the single index
-// NAT66ShardReconciler.applyShardAdvertisement's routerNameForNode lookup
-// actually needs (nat66shard_controller.go). Deliberately narrower than
-// RegisterIndexes: cmd/galactic-nat66's RBAC (config/galactic-nat66/rbac.yaml)
-// grants exactly nat66shards/bgpadvertisements/bgprouters, not the full BGP
-// CRD set RegisterIndexes' own doc comment explains that function requires
-// -- calling RegisterIndexes here failed live with a
-// bgppolicies-cluster-scope-forbidden error the moment the manager started
-// (its cache eagerly starts an informer for every type any IndexField call
-// touches, not just BGPRouter).
+// RegisterBGPRouterTargetIndex registers only the router-by-target index, the
+// one the shard reconciler's router lookup needs.
+//
+// Deliberately narrower than RegisterIndexes: this binary's role grants only the
+// kinds it uses, and the full function fails at manager startup with a forbidden
+// error, the cache eagerly starting an informer for every type any index
+// touches.
 func RegisterBGPRouterTargetIndex(ctx context.Context, mgr ctrl.Manager) error {
 	if err := mgr.GetCache().IndexField(
 		ctx, &bgpv1alpha1.BGPRouter{}, BGPRouterByTargetName, func(obj client.Object) []string {

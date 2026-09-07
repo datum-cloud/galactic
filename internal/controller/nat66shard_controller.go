@@ -22,13 +22,9 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// NAT66DatapathHealth reports whether this node's NAT66 egress XDP
-// datapath (internal/plumbing/ebpf/nat66prog, loaded and attached by
-// cmd/galactic-nat66's setupNat66Datapath) is currently attached and
-// serving traffic -- the interface NAT66ShardReconciler uses to decide
-// whether to set its Ready condition True, mirroring GatewayEngine's
-// interface-seam pattern in networkgateway_controller.go for
-// test-fakeability.
+// NAT66DatapathHealth reports whether this node's NAT66 egress XDP datapath is
+// attached and serving traffic. NAT66ShardReconciler uses it to decide whether
+// to set its Ready condition, and it is an interface so tests can fake it.
 type NAT66DatapathHealth interface {
 	// Attached reports whether the datapath is loaded and attached.
 	Attached() bool
@@ -44,44 +40,29 @@ const (
 	reasonNAT66DatapathNotAttached = "DatapathNotAttached"
 )
 
-// NAT66ShardReconciler reconciles the single NAT66Shard object for this
-// node (spec.targetRef.name == NodeName), mirroring
-// NetworkGatewayReconciler's node-scoped root-object pattern -- simpler in
-// one respect (no rule/backend desired-state assembly) but, as of the
-// shard advertisement added below, no longer BGP-free: this reconciler's
-// job is to publish Status.ShardAddress/Status.ShardSID, echoing back the
-// operator-configured values this node's own cmd/galactic-nat66 process
-// was started with (ShardAddress/ShardSID below -- plain strings, not
-// re-derived from anything), set a Ready condition once the datapath is
-// confirmed attached, and -- exactly as NAT66ShardStatus.ShardSID's and
-// ShardAddress's own doc comments in datum-cloud/network already promise
-// -- create/withdraw a single /128-per-address BGPAdvertisement that
-// makes *both* actually reachable fabric-wide, the same RT-less,
-// VRFID/Function-less "plain node reachability" shape
-// NetworkGatewayReconciler.applyBGPAdvertisements uses for its own VIP
-// advertisements. Without ShardSID's route, internal/plumbing/srv6.
-// EgressDefaultRouteAdd (internal/cnibgp) would install a tenant VRF
-// default route toward a SID no node ever learns a kernel route to, so
-// no forward traffic would ever reach this shard at all; without
-// ShardAddress's route (found live, 2026-08-19 -- see this repo's own
-// docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md for the
-// investigation), forward traffic reaches and is correctly SNATed by
-// this shard, but the reply has no route back to it from anywhere else
-// on the fabric -- a real TCP connection through NAT66 would then never
-// complete, even though every dataplane counter along the forward path
-// looks perfectly healthy.
+// NAT66ShardReconciler reconciles the single NAT66Shard object whose
+// spec.targetRef.name is this node. It publishes the shard address and SID this
+// node's datapath process was started with, echoing the operator-configured
+// values rather than deriving them, sets Ready once the datapath is confirmed
+// attached, and maintains one BGPAdvertisement carrying a /128 for each.
+//
+// That advertisement is what makes both addresses reachable across the fabric,
+// in the same route-target-less, VRFID-less shape the gateway's VIP
+// advertisements use. Without the SID's route, a tenant VRF default egress
+// route points at a SID no node ever learns a kernel route to, so no forward
+// traffic reaches this shard. Without the address's route, forward traffic
+// arrives and is correctly translated, but the reply has no route back from
+// anywhere else on the fabric, so a TCP connection never completes even while
+// every forward-path counter looks healthy.
 type NAT66ShardReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
 	NodeName string
 
-	// ShardAddress/ShardSID are this node's own operator-configured NAT66
-	// shard identity (config.NAT66Config.ShardPubAddr/ShardSID,
-	// already the values the running datapath was configured with -- see
-	// cmd/galactic-nat66's setupNat66Datapath). This reconciler publishes
-	// them, it does not compute them -- same division of responsibility
-	// as NetworkGatewayReconciler.SRv6Address/publishSelfAddress.
+	// ShardAddress and ShardSID are this node's operator-configured NAT66 shard
+	// identity, the same values the running datapath was configured with. This
+	// reconciler publishes them; it does not compute them.
 	ShardAddress string
 	ShardSID     string
 
@@ -97,16 +78,11 @@ func (r *NAT66ShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	shard := &bgpv1alpha1.NAT66Shard{}
 	if err := r.Get(ctx, req.NamespacedName, shard); err != nil {
 		if apierrors.IsNotFound(err) {
-			// No finalizer on NAT66Shard (same deliberate choice
-			// NetworkGateway makes -- see that reconciler's own NotFound
-			// branch), so by the time this Get observes NotFound the object
-			// is already gone everywhere, on whichever node's process
-			// happens to handle the delete event -- not necessarily the
-			// shard's own node. Withdraw this shard's BGPAdvertisement keyed
-			// on req.Name (shardAdvertisementName is deterministic, derived
-			// from the name alone) rather than the now-unreadable deleted
-			// object, mirroring withdrawNodeAdvertisements's identical
-			// req.Name-keyed shape.
+			// NAT66Shard carries no finalizer, so by the time this Get sees
+			// NotFound the object is gone everywhere, on whichever node's
+			// process handled the event and not necessarily the shard's own.
+			// Withdraw keyed on req.Name, which the advertisement name is
+			// derived from, rather than on the unreadable deleted object.
 			if err := withdrawShardAdvertisement(ctx, r.Client, req.Namespace, req.Name); err != nil {
 				logger.Error(err, "withdraw BGPAdvertisement for deleted NAT66Shard", "nat66Shard", req.NamespacedName)
 				return ctrl.Result{}, err
@@ -123,11 +99,9 @@ func (r *NAT66ShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if !shard.DeletionTimestamp.IsZero() {
-		// Not known to be reachable today -- no finalizer, so the NotFound
-		// branch above is the one that actually runs on a real delete (see
-		// its own comment) -- kept correct in case that changes later,
-		// mirroring NetworkGatewayReconciler's identical stance on its own
-		// equivalent branch.
+		// Not known to be reachable while there is no finalizer, the NotFound
+		// branch above being the one a real delete takes, but kept correct in
+		// case that changes.
 		if err := withdrawShardAdvertisement(ctx, r.Client, shard.Namespace, shard.Name); err != nil {
 			logger.Error(err, "withdraw BGPAdvertisement for terminating NAT66Shard", "nat66Shard", req.NamespacedName)
 			return ctrl.Result{}, err
@@ -158,30 +132,25 @@ func (r *NAT66ShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
-// shardAdvertisementName derives the deterministic BGPAdvertisement name
-// for a given NAT66Shard, so withdrawal (keyed on a deletion event's
-// req.Name alone, per the NotFound branch above) never needs to read the
-// shard object it's naming. Named "-sid" from when this advertisement
-// carried only Status.ShardSID; kept unchanged now that it also carries
-// Status.ShardAddress (shardAdvertisementPrefixes, below) rather than
-// churning every existing shard's deterministic name for a cosmetic
-// rename.
+// shardAdvertisementName derives the deterministic BGPAdvertisement name for a
+// NAT66Shard, so withdrawal keyed on a deletion event's name alone never needs
+// to read the object it is naming. The "-sid" suffix predates the advertisement
+// also carrying the shard address, and is kept rather than churning every
+// existing shard's name for a cosmetic rename.
 func shardAdvertisementName(shardName string) string {
 	return shardName + "-sid"
 }
 
-// shardAdvertisementPrefixes builds the /128 prefixes
-// applyShardAdvertisement advertises for shard: Status.ShardSID (the
-// *forward*/tenant-to-shard leg -- the uSID decap SID a tenant VRF's own
-// default egress route, srv6.EgressDefaultRouteAdd, encapsulates toward)
-// and Status.ShardAddress (the *return* leg -- the shard's own public
-// address a reply's destination is rewritten to by nat66_ingress's SNAT,
-// which needs a route back from wherever that reply's next hop is, not
-// just from the shard's own node). Either may be independently unset (an
-// operator who hasn't finished configuring this node's shard identity
-// yet), in which case it's simply omitted rather than failing the whole
-// advertisement -- callers treat a fully-empty result as "nothing to
-// advertise yet," not an error.
+// shardAdvertisementPrefixes builds the /128 prefixes advertised for shard: the
+// shard SID, which is the forward leg a tenant VRF's default egress route
+// encapsulates toward, and the shard address, which is the return leg a reply's
+// destination is rewritten to and which needs a route back from wherever that
+// reply's next hop is, not just from this node.
+//
+// Either may be independently unset, by an operator who has not finished
+// configuring this node's identity, in which case it is omitted rather than
+// failing the whole advertisement. Callers treat an empty result as nothing to
+// advertise yet, not an error.
 func shardAdvertisementPrefixes(shard *bgpv1alpha1.NAT66Shard) ([]bgpv1alpha1.Prefix, error) {
 	var prefixes []bgpv1alpha1.Prefix
 	for _, raw := range []string{shard.Status.ShardSID, shard.Status.ShardAddress} {
@@ -198,17 +167,12 @@ func shardAdvertisementPrefixes(shard *bgpv1alpha1.NAT66Shard) ([]bgpv1alpha1.Pr
 }
 
 // applyShardAdvertisement reconciles this shard's single BGPAdvertisement
-// covering both Status.ShardSID and Status.ShardAddress (see
-// shardAdvertisementPrefixes) -- RT-less, VRFID/Function-less, the same
-// "plain node reachability" shape NetworkGatewayReconciler.
-// applyBGPAdvertisements uses for its own VIP advertisements, and exactly
-// what ShardSID's and ShardAddress's own doc comments in datum-cloud/
-// network already promise. A no-op, not an error, when neither is set yet
-// (an operator who hasn't configured this node's shard identity yet has
-// nothing to advertise) or when no BGPRouter targets this node yet (the
-// BGPRouter watch added in SetupWithManager retries once one appears,
-// closing the same startup-race class NetworkGatewayReconciler hit before
-// commit 782c231).
+// covering both prefixes, in the route-target-less, VRFID-less plain
+// reachability shape the gateway's VIP advertisements use.
+//
+// A no-op rather than an error when neither address is set yet, or when no
+// BGPRouter targets this node yet: the BGPRouter watch retries once one
+// appears.
 func (r *NAT66ShardReconciler) applyShardAdvertisement(ctx context.Context, shard *bgpv1alpha1.NAT66Shard) error {
 	prefixes, err := shardAdvertisementPrefixes(shard)
 	if err != nil {
@@ -260,8 +224,8 @@ func (r *NAT66ShardReconciler) applyShardAdvertisement(ctx context.Context, shar
 }
 
 // withdrawShardAdvertisement deletes the BGPAdvertisement
-// applyShardAdvertisement creates for shardName, if any. Not an error if
-// it never existed (ShardSID was never set) or is already gone.
+// applyShardAdvertisement creates for shardName, if any. One that never existed
+// or is already gone is not an error.
 func withdrawShardAdvertisement(ctx context.Context, c client.Client, namespace, shardName string) error {
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: shardAdvertisementName(shardName)},
@@ -273,10 +237,8 @@ func withdrawShardAdvertisement(ctx context.Context, c client.Client, namespace,
 }
 
 // readyCondition computes the Ready condition from the datapath's current
-// attachment state. A nil Datapath (not expected in production --
-// cmd/galactic-nat66 always wires a real one -- but guarded against for
-// test/defensive-programming reasons the same way GatewayEngine's own
-// callers never pass nil) is treated as not attached, not as a panic.
+// attachment state. A nil datapath, not expected in production, is treated as
+// not attached rather than a panic.
 func (r *NAT66ShardReconciler) readyCondition() metav1.Condition {
 	if r.Datapath != nil && r.Datapath.Attached() {
 		return metav1.Condition{
@@ -294,14 +256,12 @@ func (r *NAT66ShardReconciler) readyCondition() metav1.Condition {
 	}
 }
 
-// SetupWithManager registers the NAT66ShardReconciler with the manager.
+// SetupWithManager registers the reconciler with the manager.
 //
-// The BGPRouter watch below closes the same startup-race class
-// NetworkGatewayReconciler hit before commit 782c231: without it, a
-// NAT66Shard whose node's BGPRouter doesn't exist yet at first reconcile
-// would fail applyShardAdvertisement's routerNameForNode lookup once and
-// never get a second chance until some unrelated event happened to
-// trigger a fresh reconcile.
+// The BGPRouter watch closes a startup race: without it, a NAT66Shard whose
+// node's BGPRouter does not exist yet at first reconcile fails its router
+// lookup once and gets no second chance until an unrelated event triggers a
+// fresh reconcile.
 func (r *NAT66ShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.NAT66Shard{}).
@@ -314,11 +274,9 @@ func (r *NAT66ShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// broadcastToShardRequests enqueues every NAT66Shard in namespace --
-// mirrors broadcastToGatewayRequests (networkgateway_controller.go) for
-// the same reason: a BGPRouter change might be the one this node's own
-// NAT66Shard was waiting on, and there is normally at most one NAT66Shard
-// per node anyway, so listing the whole namespace is cheap.
+// broadcastToShardRequests enqueues every NAT66Shard in namespace. A BGPRouter
+// change may be the one this node's shard was waiting on, and there is normally
+// at most one shard per node, so listing the namespace is cheap.
 func broadcastToShardRequests(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
 	logger := log.FromContext(ctx)
 	shardList := &bgpv1alpha1.NAT66ShardList{}

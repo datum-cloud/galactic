@@ -20,9 +20,8 @@ import (
 	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
-// cmdDel mirrors internal/cni's own cmdDel, minus everything guest-netns
-// specific (no flushGuestNetnsConfig, no host-device DEL delegation — tap
-// mode never touches a container netns at all).
+// cmdDel mirrors the veth plugin's own, minus everything guest-namespace
+// specific: tap mode never touches a container namespace at all.
 func cmdDel(args *skel.CmdArgs) error {
 	// DEL is idempotent per the CNI spec: always return success.
 	slog.Info("DEL: starting", "containerID", args.ContainerID, "netns", args.Netns)
@@ -44,40 +43,34 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 	}
 
-	// Unregister this attachment's own ifindex_vrf_table entry -- mirrors
-	// internal/cni's own cmdDel (same reasoning: genuinely private to this
-	// one attachment's own ifindex, so it belongs alongside tap.Delete
-	// below, not the shared VRF/BGP CRD cleanup deferred further down).
-	// Resolved and removed *before* tap.Delete tears the interface down,
-	// since there is nothing left to resolve an ifindex from afterward.
+	// Unregister this attachment's ifindex_vrf_table entry. Private to this
+	// attachment's own ifindex, so it belongs alongside the device deletion
+	// below rather than the shared cleanup deferred to GC. Resolved and removed
+	// before the interface is torn down, since there is nothing to resolve an
+	// ifindex from afterward.
 	unregisterIfindexVRFEntry(vpc, vpcAtt, args.ContainerID)
 
-	// Stop galactic-cni's installer daemon from resending Router
-	// Advertisements for this attachment — best-effort and unconditional,
-	// same as tap.Delete below: a missing record (no IPv6 gateway was ever
-	// allocated for this attachment) is not an error, and DEL must stay
-	// idempotent regardless.
+	// Stop the node daemon resending Router Advertisements for this attachment.
+	// Best-effort and unconditional: a missing record, from an attachment that
+	// never had an IPv6 gateway allocated, is not an error, and DEL must stay
+	// idempotent.
 	removeRadvState(vpc, vpcAtt, args.ContainerID)
 
-	// Delete this attachment's own tap device. Unlike the VRF and BGP CRDs
-	// below, the tap device is genuinely private to this attachment (see
-	// resourceTracker.cleanup's doc comment) — no sibling VM can ever still
-	// be depending on it, so there is no ADD-race to defer to GC for.
+	// Delete this attachment's tap device. Unlike the VRF and CRDs below it is
+	// private to this attachment, so no sibling VM can still depend on it and
+	// there is no race to defer to GC.
 	//
-	// A VMM (Kata/Firecracker/QEMU) that still holds the tap's fd open at
-	// this point can make the kernel delete lazily rather than immediately,
-	// but never blocks or fails this call — tap.Delete is best-effort and
-	// idempotent either way, matching every other step in this function.
+	// A VMM still holding the device's descriptor open can make the kernel
+	// delete lazily rather than immediately, but never blocks or fails this
+	// call.
 	if err := tap.Delete(vpc, vpcAtt); err != nil {
 		slog.Warn("DEL: failed to delete tap device", "err", err,
 			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
 	}
 
-	// Shared resources (VRF, BGPAdvertisement, BGPVRFInstance) are keyed by
-	// (vpc, vpcAttachment) or (vpc, node) and may still be in use by another
-	// VM. Deleting them here races with cmdAdd during restarts, so cleanup
-	// is left to galactic-router's GC controller — see internal/cni's own
-	// cmdDel for the full reasoning.
+	// Shared resources, the VRF and the BGP CRDs, are keyed by attachment or by
+	// node and may still be in use by another VM. Deleting them here races
+	// cmdAdd during a restart, so cleanup is left to garbage collection.
 	slog.Info("DEL: skipping shared resource cleanup (handled by GC)",
 		"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
 
@@ -87,11 +80,9 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// unregisterIfindexVRFEntry removes this attachment's own ifindex_vrf_table
-// entry (internal/plumbing/ebpf/ifindexvrfmap), if one exists -- mirrors
-// internal/cni's own identical helper (see its doc comment for the full
-// reasoning), adapted to a tap device's own host-side interface instead of
-// a veth pair's.
+// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table entry
+// if one exists, mirroring the veth plugin's identical helper but resolving a
+// tap device's host-side interface rather than a veth pair's.
 func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	link, err := netlink.LinkByName(hostName)
@@ -111,11 +102,10 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 	}
 }
 
-// removeRadvState removes this attachment's router-advertisement resend
-// record (internal/plumbing/radv), if any -- mirrors
-// unregisterIfindexVRFEntry above (same reasoning: genuinely private to this
-// one attachment's own host interface, so it belongs alongside tap.Delete
-// rather than the shared VRF/BGP CRD cleanup deferred to GC).
+// removeRadvState removes this attachment's router-advertisement resend record,
+// if any. Private to this attachment's own host interface, so it belongs
+// alongside the device deletion rather than the shared cleanup deferred to
+// GC.
 func removeRadvState(vpc, vpcAttachment, containerID string) {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	if err := radv.RemoveAttachment(radv.DefaultStateDir, hostName); err != nil {

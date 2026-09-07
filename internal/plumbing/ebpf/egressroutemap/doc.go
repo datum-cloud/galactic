@@ -3,22 +3,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package egressroutemap implements the read/write API for the eBPF uSID
-// datapath's egress_route_table and node_src_addr_table maps
-// (internal/plumbing/ebpf/prog/usid.c's struct egress_route_key/value and
-// usid_egress's egress-routing extension) -- see
-// docs/plans/tc-bpf-egress-srv6-encap.md for the mechanism this replaces
-// (internal/plumbing/srv6's kernel-native SEG6 lwtunnel route
-// encapsulation, confirmed broken by CVE-2026-31668 under this
-// codebase's own per-tenant-VRF architecture) and why.
+// datapath's egress_route_table, node_src_addr_table, and public_uplink_table
+// maps, which together drive usid_egress's encapsulation.
 //
-// Two callers, two processes, mirroring vipxlatmap's own precedent for
-// exactly this shape: internal/runtime/gobgp/monitor.go
-// (galactic-router, a long-lived daemon that never loads/attaches an
-// eBPF program of its own) writes Register/Unregister entries as EVPN
-// paths arrive and are withdrawn -- the same events that used to drive
-// srv6.RouteEgressAdd/RouteEgressDel/RouteMainAdd/RouteMainDel -- and
-// internal/cnibgp (galactic-cni, the process that actually loads and
-// attaches usid_egress) writes this node's own SetNodeSourceAddress
-// entry once, at datapath registration time, alongside its existing
-// attachUsidEgress call.
+// It replaces kernel SEG6 lwtunnel route encapsulation, which is unusable under
+// per-tenant VRFs: the lwtunnel reuses one route cache across the input and
+// output resolution paths, whose routing contexts differ once every tenant has
+// its own VRF.
+//
+// Two callers in two processes. The router, a long-lived daemon that never
+// loads a program of its own, registers and unregisters route entries as EVPN
+// paths arrive and are withdrawn. The CNI side, which does load and attach
+// usid_egress, writes this node's source address and uplink entries at datapath
+// registration time.
 package egressroutemap

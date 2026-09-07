@@ -19,17 +19,13 @@ type LocatorEntry struct {
 	Block  uint64
 	NodeID uint16
 
-	// Generation is bumped by Register on every (re-)registration of this
-	// Block/Node-ID pair -- e.g. on BGPRouter.Spec.SRv6Locator change --
-	// giving R7's multiple-concurrent-Block bookkeeping a way to tell a
-	// freshly (re-)confirmed locator apart from one that hasn't been
-	// touched by the control daemon in a while. Unlike vrf_table's
-	// generation (vrf.go), this is not currently consumed by any
-	// Reconcile-style staleness sweep -- the GC controller's scope (design
-	// plan §5.3) is vrf_table only -- so LocatorTable exposes no Reconcile
-	// method; this field exists because locator_value already carried it
-	// from Milestone 2.2, not because this milestone adds new sweep logic
-	// for it.
+	// Generation is bumped on every registration of this Block and Node-ID pair,
+	// such as on a locator change, so multi-Block bookkeeping can tell a freshly
+	// confirmed locator from one the control daemon has not touched in a while.
+	//
+	// Unlike vrf_table's, it is consumed by no staleness sweep, the GC scope
+	// being vrf_table alone, so this type exposes no Reconcile. The field exists
+	// because the kernel value already carries it.
 	Generation uint64
 }
 
@@ -40,16 +36,15 @@ type LocatorTable struct {
 }
 
 // NewLocatorTable wraps table as a LocatorTable. Production callers pass a
-// KernelTable wrapping a loaded *prog.UsidObjects's LocatorTable map (or
-// use NewRegistryFromObjects); tests pass a fake Table.
+// kernel table over the loaded map, or use the registry constructor; tests pass
+// a fake.
 func NewLocatorTable(table Table) *LocatorTable {
 	return &LocatorTable{table: table, clock: clockFn}
 }
 
-// Register writes (or overwrites) the locator_table entry for (block,
-// nodeID), stamping it with this table's current clock reading as its
-// Generation. Design plan §4.4: populated "at startup + on locator
-// change" by the control daemon, from BGPRouter.Spec.SRv6Locator/.NodeID.
+// Register writes, or overwrites, the locator_table entry for (block, nodeID),
+// stamping it with this table's current clock reading. The control daemon
+// populates it at startup and whenever the router's locator changes.
 func (t *LocatorTable) Register(block uint64, nodeID uint16) error {
 	if err := uformat.ValidateBlock(block); err != nil {
 		return fmt.Errorf("usidmap: locator_table: register block=%#x node-id=%#x: %w", block, nodeID, err)
@@ -104,10 +99,8 @@ func (t *LocatorTable) Get(block uint64, nodeID uint16) (LocatorEntry, bool, err
 	return LocatorEntry{Block: block, NodeID: nodeID, Generation: value.Generation}, true, nil
 }
 
-// List returns every entry currently in locator_table, in unspecified
-// order. Because locator_table's key (Block<<16|NodeID, see
-// uformat.NewLocatorKey) folds Block and Node-ID together, List decodes
-// both back out of each raw key.
+// List returns every entry in locator_table, in unspecified order. The raw key
+// folds Block and Node-ID together, so List decodes both back out of it.
 func (t *LocatorTable) List() ([]LocatorEntry, error) {
 	var (
 		entries []LocatorEntry

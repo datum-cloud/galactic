@@ -18,17 +18,15 @@ import (
 const (
 	DefaultRouterBGPListenPort = 179
 	DefaultRouterMetricsPort   = 9179
-	// DefaultRouterGRPCHealthPort avoids 5000: one of the most overloaded
-	// dev ports in existence (macOS AirPlay Receiver, Flask's dev server,
-	// Docker Registry), and on Talos specifically /sbin/dashboard
-	// permanently binds 127.0.0.1:5000 -- see docs/router/configuration.md.
+	// DefaultRouterGRPCHealthPort avoids 5000, one of the most overloaded dev
+	// ports there is, and permanently bound on the loopback interface by some
+	// host operating systems.
 	DefaultRouterGRPCHealthPort = 5179
 	DefaultRouterGCNamespace    = "galactic-system"
 	DefaultRouterGCInterval     = 5 * time.Minute
 
-	// DefaultRouterWebhookPort matches sigs.k8s.io/controller-runtime/pkg/webhook's
-	// own DefaultPort, named here so callers don't need that import just to
-	// read the default.
+	// DefaultRouterWebhookPort matches controller-runtime's own default, named
+	// here so callers need not import that package to read it.
 	DefaultRouterWebhookPort = 9443
 )
 
@@ -44,14 +42,11 @@ const (
 	EnvRouterGCNamespace    = "GALACTIC_ROUTER_GC_NAMESPACE"
 	EnvRouterGCInterval     = "GALACTIC_ROUTER_GC_INTERVAL"
 
-	// EnvRouterWebhookEnabled gates the NetworkRule admission webhook
-	// (internal/webhook). Defaults to false: this is the first webhook in
-	// this codebase, and enabling it requires TLS cert material
-	// (config/webhook/'s kustomization.yaml documents the cert-manager-or-
-	// equivalent prerequisite this repo does not itself provision) plus the
-	// ValidatingWebhookConfiguration/Service manifests to actually be
-	// applied — turning it on without both is a broken deployment, not a
-	// safe default.
+	// EnvRouterWebhookEnabled gates the NetworkRule admission webhook. It
+	// defaults to false: enabling it requires TLS cert material this repo does
+	// not provision, plus the webhook configuration and service manifests
+	// actually being applied. Turning it on without both is a broken deployment
+	// rather than a safe default.
 	EnvRouterWebhookEnabled = "GALACTIC_ROUTER_WEBHOOK_ENABLED"
 	EnvRouterWebhookPort    = "GALACTIC_ROUTER_WEBHOOK_PORT"
 	EnvRouterWebhookCertDir = "GALACTIC_ROUTER_WEBHOOK_CERT_DIR"
@@ -60,20 +55,20 @@ const (
 // --- RouterConfig ----------------------------------------------------------
 
 // RouterConfig resolves router configuration with three-tier precedence: CLI
-// flag > env var > compiled-in default. Create once via NewRouterConfig(),
-// call BindFlags() to layer CLI flags, then read the exported fields.
+// flag, then environment variable, then compiled-in default. Create one with
+// NewRouterConfig, call BindFlags to layer CLI flags, then read the exported
+// fields.
 type RouterConfig struct {
 	v      *viper.Viper
 	prefix string
 
 	// Resolved fields.
 	NodeName string
-	// Reflector marks every BGP peer this router instance adds as an iBGP
-	// route-reflector client (GoBGP's RouteReflectorClient flag), so this
-	// node reflects paths to those peers instead of requiring full-mesh
-	// iBGP. This is a distinct signal from BGPListenPort: whether a node
-	// accepts inbound BGP connections is not the same property as whether
-	// it is the fabric-facing route reflector.
+	// Reflector marks every peer this router adds as an iBGP route-reflector
+	// client, so this node reflects paths to them instead of requiring a full
+	// mesh. A distinct signal from the listen port: whether a node accepts
+	// inbound connections is not the same property as whether it is the
+	// fabric's route reflector.
 	Reflector      bool
 	BGPListenPort  int
 	BGPLocalAddr   string
@@ -82,17 +77,16 @@ type RouterConfig struct {
 	GCNamespace    string
 	GCInterval     time.Duration
 
-	// WebhookEnabled/WebhookPort/WebhookCertDir configure the NetworkRule
-	// admission webhook (internal/webhook) -- see
-	// EnvRouterWebhookEnabled's doc comment. Disabled by default.
+	// WebhookEnabled, WebhookPort, and WebhookCertDir configure the NetworkRule
+	// admission webhook. Disabled by default.
 	WebhookEnabled bool
 	WebhookPort    int
 	WebhookCertDir string
 }
 
-// NewRouterConfig creates a router config resolver with the GALACTIC_ROUTER
-// env prefix and AutomaticEnv enabled. Exported fields are populated from env
-// vars and defaults; call BindFlags() to layer CLI overrides.
+// NewRouterConfig creates a config resolver reading the GALACTIC_ROUTER
+// environment prefix. Exported fields are populated from the environment and
+// defaults; call BindFlags to layer CLI overrides.
 func NewRouterConfig() *RouterConfig {
 	v := viper.New()
 	v.SetEnvPrefix("GALACTIC_ROUTER")

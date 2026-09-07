@@ -18,32 +18,21 @@ import (
 // --- VRF sidecar defaults ---------------------------------------------
 
 const (
-	// DefaultVRFMetricsPort deliberately avoids the port ranges the other
-	// binaries in this repo already use (9179 router, 8081 gateway, 9180
-	// CNI credential-refresh) for the same reason config.go's own
-	// DefaultGatewayMetricsPort comment gives: unlike those, though, this
-	// binary runs as a second container sharing its *pod's* network
-	// namespace with Envoy (not hostNetwork: true, see §1.5 of the #855
-	// plan), so the port only has to avoid Envoy's own well-known ports
-	// (9901 admin, 10000 default listener) within that one pod, not every
-	// other galactic-* process on the node.
+	// DefaultVRFMetricsPort avoids the ports the other binaries here use. This
+	// binary runs as a second container sharing its pod's network namespace
+	// with Envoy rather than the host's, so it only has to avoid Envoy's own
+	// ports within that pod, not every other process on the node.
 	DefaultVRFMetricsPort = 9182
 
-	// DefaultVRFTeardownGracePeriod is a conservative placeholder, not a
-	// tuned value: long enough to plausibly cover a typical Envoy Gateway
-	// extension server (#856/#857) config-push-plus-drain window, short
-	// enough not to wedge normal-churn testing. See §9 item 1's
-	// 2026-08-18 decision in docs/plans/855-ingress-sidecar-vpc-backend-
-	// connectivity.md -- revisit once #857 exists and its latency is
-	// observable.
+	// DefaultVRFTeardownGracePeriod is a conservative placeholder, not a tuned
+	// value: long enough to plausibly cover a config-push and drain window,
+	// short enough not to wedge normal-churn testing.
 	DefaultVRFTeardownGracePeriod = 30 * time.Second
 
-	// DefaultVRFSweepInterval controls how often Store.Sweep re-checks
-	// pending teardowns -- see internal/ingresssidecar.RunSweeper's doc
-	// comment for why this has to be polling-driven. Independent of (and
-	// deliberately much shorter than) DefaultVRFTeardownGracePeriod: this
-	// is the granularity of the grace-period clock, not the grace period
-	// itself.
+	// DefaultVRFSweepInterval controls how often pending teardowns are
+	// re-checked. It is the granularity of the grace-period clock, not the
+	// grace period itself, so it is deliberately much shorter than
+	// DefaultVRFTeardownGracePeriod.
 	DefaultVRFSweepInterval = 5 * time.Second
 )
 
@@ -55,43 +44,32 @@ const (
 	EnvVRFSweepInterval       = "GALACTIC_VRF_SWEEP_INTERVAL"
 
 	// EnvVRFNodeName and EnvVRFNamespace configure the return-path gateway
-	// BGPAdvertisement publisher (see NodeName/Namespace's own doc
-	// comments below) -- unset by default, matching every env var above,
-	// but unlike them this pair has no compiled-in default for NodeName:
-	// there is no generic value that could ever be right for "which node
-	// is this", the same reason GALACTIC_ROUTER_NODE_NAME/
-	// GALACTIC_GATEWAY_NODE_NAME have none either.
+	// advertisement publisher. Unset by default, and unlike the others
+	// NodeName has no compiled-in default: no generic value could be right for
+	// "which node is this".
 	EnvVRFNodeName  = "GALACTIC_VRF_NODE_NAME"
 	EnvVRFNamespace = "GALACTIC_VRF_NAMESPACE"
 
-	// EnvVRFGatewayPrefix configures return-path gateway *address
-	// provisioning* (docs/plans/855-return-path-gateway-advertisement.md's
-	// "Not implemented here" gap) -- see GatewayPrefix's own doc comment.
-	// Unset by default, same as EnvVRFNodeName and for the identical
-	// reason: no generic value could ever be right for "which address
-	// space is reserved for this on this platform."
+	// EnvVRFGatewayPrefix configures return-path gateway address provisioning.
+	// Unset by default and with no compiled-in value, for the same reason: no
+	// generic value could be right for which address space a platform
+	// reserves.
 	EnvVRFGatewayPrefix = "GALACTIC_VRF_GATEWAY_PREFIX"
 )
 
 // --- VRFConfig -----------------------------------------------------------
 
-// VRFConfig resolves galactic-vrf (the #855 ingress sidecar) configuration
-// with three-tier precedence: CLI flag > env var > compiled-in default.
-// Create once via NewVRFConfig(), call BindFlags() to layer CLI flags, then
-// read the exported fields.
+// VRFConfig resolves galactic-vrf configuration with three-tier precedence: CLI
+// flag, then environment variable, then compiled-in default. Create one with
+// NewVRFConfig, call BindFlags to layer CLI flags, then read the exported
+// fields.
 //
-// NodeName/Namespace are the exception to that precedence and to
-// RouterConfig/GatewayConfig's own pattern: this sidecar's *route*
-// reconciliation still has no CRD identity keyed by node and no
-// ConfigMap/CRD configuration surface (desired state derives entirely from
-// the EndpointSlice watch, per §1 of docs/plans/855-ingress-sidecar-vpc-
-// backend-connectivity.md's acceptance-criteria table) -- but publishing
-// this node's own return-path gateway advertisement (docs/plans/855-
-// return-path-gateway-advertisement.md) does need to know which BGPRouter
-// to attribute it to. NodeName's default is "" (feature disabled -- see
-// cmd/galactic-vrf's own startup logic, which only wires up a
-// GatewayPublisher when NodeName is non-empty), not a Validate failure,
-// since most deployments of this sidecar don't set it at all yet.
+// NodeName and Namespace are exceptions to that precedence. Route
+// reconciliation needs neither, deriving desired state entirely from the
+// EndpointSlice watch, but publishing this node's return-path gateway
+// advertisement needs to know which BGPRouter to attribute it to. NodeName
+// defaults to "", which disables that publisher rather than failing
+// validation, since most deployments do not set it.
 type VRFConfig struct {
 	v      *viper.Viper
 	prefix string
@@ -100,52 +78,38 @@ type VRFConfig struct {
 	MetricsPort         int
 	TeardownGracePeriod time.Duration
 	SweepInterval       time.Duration
-	// NodeName is this node's name, as it appears in a BGPRouter's
-	// spec.targetRef.name -- required only to enable the return-path
-	// gateway-advertisement publisher (see this type's own doc comment);
-	// "" leaves that feature disabled. Resolved from EnvVRFNodeName,
-	// falling back to the same EnvNodeNameLegacy ("NODE_NAME") downward-API
-	// convention internal/config.CNIConfig's own NodeName uses.
+	// NodeName is this node's name as it appears in a BGPRouter's target
+	// reference. It is required only to enable the gateway-advertisement
+	// publisher; "" leaves that disabled. Resolved from EnvVRFNodeName, falling
+	// back to the same downward-API variable the CNI config uses.
 	NodeName string
-	// Namespace is where this sidecar reads BGPRouter/BGPVRFInstance and
-	// writes BGPAdvertisement CRDs when the gateway-advertisement publisher
-	// is enabled -- defaults to DefaultNamespace ("galactic-system"),
-	// matching every other galactic-* binary's own default.
+	// Namespace is where this sidecar reads BGPRouter and BGPVRFInstance and
+	// writes BGPAdvertisement CRDs when the publisher is enabled. Defaults to
+	// DefaultNamespace, matching every other binary here.
 	Namespace string
-	// GatewayPrefix is a reserved IPv6 CIDR (a byte-aligned mask, e.g. a
-	// /80 or /96) this sidecar derives its own per-VPC return-path gateway
-	// address from (see internal/ingresssidecar.DeriveGatewayAddress) and
-	// assigns to the VRF-slave interface it already creates for
-	// usid_egress (see ensureEgressDatapath's own doc comment) -- closing
-	// docs/plans/855-return-path-gateway-advertisement.md's "Not
-	// implemented here" gap.
+	// GatewayPrefix is a reserved, byte-aligned IPv6 CIDR this sidecar derives
+	// its per-VPC return-path gateway address from and assigns to the VRF-slave
+	// interface it creates for usid_egress.
 	//
-	// This must be address space nothing else -- not this repo's own
-	// internal/cniipam, not whatever external system allocates a VPC's
-	// real tenant subnets -- ever hands out as a tenant pool. It is
-	// deliberately not derived from, or carved out of, any tenant VPC's
-	// own subnet: that space is owned by an allocator outside this
-	// repo's visibility (confirmed live: a real tenant address's own bit
-	// layout doesn't match this repo's own internal/cni/ipam allocator,
-	// so nothing here can prove a "reserved" sub-range of it is safe),
-	// so the only way to guarantee no collision is a prefix that's
-	// structurally disjoint from all of it, not merely improbable to
-	// collide. "" (the default) leaves gateway-address provisioning
-	// disabled entirely -- the same inert-by-default stance NodeName's own
-	// doc comment describes, and deliberately no compiled-in value: this
-	// is a real platform-addressing decision for whoever owns this
-	// deployment's IPAM plan to make explicitly, not a default to
-	// silently pick here. Only takes effect when NodeName is also set
-	// (GatewayPrefix alone would derive one, unadvertisable address, and
-	// an empty NodeName would make every replica of this sidecar collide
-	// on the identical address for a given VPC -- see
-	// DeriveGatewayAddress's own nodeID parameter).
+	// It must be address space nothing else ever hands out as a tenant pool,
+	// neither this repo's own IPAM nor whatever external system allocates a
+	// VPC's real subnets. It is deliberately not carved out of any tenant VPC's
+	// subnet: that space is owned by an allocator outside this repo's
+	// visibility, so nothing here can prove a reserved sub-range of it is safe,
+	// and only a structurally disjoint prefix guarantees no collision.
+	//
+	// "" disables gateway-address provisioning entirely, and there is
+	// deliberately no compiled-in value: this is a platform addressing decision
+	// for whoever owns the deployment's IPAM plan. It takes effect only when
+	// NodeName is also set, since a prefix alone derives one unadvertisable
+	// address, and an empty node identity makes every replica derive the same
+	// address for a given VPC.
 	GatewayPrefix string
 }
 
-// NewVRFConfig creates a config resolver with the GALACTIC_VRF env prefix
-// and AutomaticEnv enabled. Exported fields are populated from env vars and
-// defaults; call BindFlags() to layer CLI overrides.
+// NewVRFConfig creates a config resolver reading the GALACTIC_VRF environment
+// prefix. Exported fields are populated from the environment and defaults; call
+// BindFlags to layer CLI overrides.
 func NewVRFConfig() *VRFConfig {
 	v := viper.New()
 	v.SetEnvPrefix("GALACTIC_VRF")
@@ -198,10 +162,9 @@ func (c *VRFConfig) readFields() {
 
 	c.NodeName = c.v.GetString("node_name")
 	if c.NodeName == "" {
-		// Same downward-API fallback internal/config.CNIConfig's own
-		// NodeName resolution uses -- a plain os.Getenv, not viper, since
-		// EnvNodeNameLegacy ("NODE_NAME") deliberately carries no
-		// GALACTIC_VRF prefix for AutomaticEnv to match.
+		// The same downward-API fallback the CNI config uses. A plain Getenv
+		// rather than viper, since this variable carries no prefix for the
+		// automatic binding to match.
 		c.NodeName = os.Getenv(EnvNodeNameLegacy)
 	}
 	c.GatewayPrefix = c.v.GetString("gateway_prefix")

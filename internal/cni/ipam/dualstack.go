@@ -6,20 +6,17 @@ package ipam
 
 import "net"
 
-// DualStackAllocator wraps an optional IPv6 PoolAllocator and an optional
-// IPv4 IPv4PoolAllocator, allocating from whichever are configured in a
-// single call. Both families are optional: when the CNI config does not
-// carry an IPv6 pool, DualStackAllocator behaves as IPv4-only, and vice
-// versa.
+// DualStackAllocator wraps an optional IPv6 and an optional IPv4 pool allocator,
+// allocating from whichever are configured in one call. Both are optional: with
+// no IPv6 pool it behaves as IPv4-only, and the reverse.
 type DualStackAllocator struct {
 	ipv6 *PoolAllocator
 	ipv4 *IPv4PoolAllocator
 }
 
-// DualStackResult carries the addresses allocated for a single container.
-// IPv6Subnet/IPv6Gateway are nil when the allocator was constructed without
-// an IPv6 pool; IPv4Address/IPv4Gateway are nil when constructed without an
-// IPv4 pool.
+// DualStackResult carries the addresses allocated for one container. The IPv6
+// fields are nil when the allocator was built without an IPv6 pool, and the IPv4
+// fields likewise.
 type DualStackResult struct {
 	IPv6Subnet  *net.IPNet
 	IPv6Gateway net.IP
@@ -27,14 +24,10 @@ type DualStackResult struct {
 	IPv4Gateway net.IP
 }
 
-// NewDualStackAllocator creates a DualStackAllocator. If ipv6Pool is empty,
-// the resulting allocator only allocates IPv4 addresses (IPv6 fields in
-// DualStackResult are left nil). If ipv4Pool is empty, the resulting
-// allocator only allocates IPv6 addresses (IPv4 fields in DualStackResult
-// are left nil). lockDir is passed straight through to both
-// NewPoolAllocator and NewIPv4PoolAllocator (see DefaultLockDir for the
-// production path) — one shared root serves both families, since each
-// pool's own CIDR namespaces its state into a distinct subdirectory.
+// NewDualStackAllocator creates a DualStackAllocator. An empty pool for either
+// family leaves that family's result fields nil. lockDir passes straight through
+// to both underlying allocators: one shared root serves both families, since each
+// pool's CIDR namespaces its state into its own subdirectory.
 func NewDualStackAllocator(
 	ipv6Pool, ipv6Gateway, ipv4Pool, ipv4Gateway, lockDir string,
 ) (*DualStackAllocator, error) {
@@ -59,9 +52,8 @@ func NewDualStackAllocator(
 	return a, nil
 }
 
-// Allocate allocates an IPv6 subnet (if an IPv6 pool was configured) and an
-// IPv4 address (if an IPv4 pool was configured) for the given container ID.
-// Thread-safe (delegates to the underlying allocators' own locking).
+// Allocate allocates from whichever pools were configured for the given
+// container. Thread-safe, delegating to the underlying allocators' locking.
 func (a *DualStackAllocator) Allocate(containerID string) (*DualStackResult, error) {
 	result := &DualStackResult{}
 

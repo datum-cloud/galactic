@@ -19,11 +19,9 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 )
 
-// Reconciler is the thin controller-runtime glue that turns EndpointSlice
-// watch events into Store.SetDesired calls — all the actual VRF/route
-// lifecycle logic lives in Store. Mirrors this repo's other CRD-to-desired-
-// state reconcilers (e.g. internal/controller.BGPAdvertisementReconciler)
-// in being a pure translation layer with no state of its own.
+// Reconciler is the controller-runtime glue turning EndpointSlice watch events
+// into desired-state updates on the Store, where all the actual VRF and route
+// lifecycle logic lives. A pure translation layer with no state of its own.
 type Reconciler struct {
 	client.Client
 	Store *Store
@@ -45,10 +43,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	desired, err := BuildDesiredRoute(slice)
 	if err != nil {
-		// Selected but malformed in a way retrying can't fix (a bad
-		// annotation isn't going to parse differently on the next attempt)
-		// -- log via the returned error (controller-runtime logs Reconcile
-		// errors itself) and drop it rather than requeue-looping forever.
+		// Selected but malformed in a way retrying cannot fix: a bad annotation
+		// will not parse differently next time. Log through the returned
+		// error, which controller-runtime logs itself, and drop it rather than
+		// requeue-loop forever.
 		ctrl.LoggerFrom(ctx).Error(err, "skipping malformed EndpointSlice", "endpointslice", req.String())
 		return ctrl.Result{}, nil
 	}
@@ -59,10 +57,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 // SetupWithManager registers the controller against mgr, watching every
-// EndpointSlice cluster-wide — per §3 of the plan, these land in each pod's
-// own namespace, not one fixed namespace, so the cache/watch must not be
-// namespace-scoped — filtered to only those carrying crdnames.LabelTenantID
-// (§3: "select by label presence").
+// EndpointSlice cluster-wide, since these land in each pod's own namespace
+// rather than one fixed namespace, and filtering to those carrying the tenant
+// label.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
 	return ctrl.NewControllerManagedBy(mgr).
@@ -75,15 +72,13 @@ func hasTenantLabel(obj client.Object) bool {
 	return ok
 }
 
-// RunSweeper blocks, calling store.Sweep on a fixed interval tick until ctx
-// is done — the periodic mechanism that actually acts on expired teardown
-// grace periods (see Store.Sweep's own doc comment for why this has to be
-// polling-driven rather than reactive: VRF-level teardown is an aggregate
-// condition over potentially many routes, not a single watched object's own
-// transition). Mirrors cmd/galactic-router's GC ticker goroutine in shape.
+// RunSweeper blocks, sweeping the store on a fixed interval until ctx is done.
+// It is what actually acts on expired teardown grace periods, and has to be
+// polling-driven rather than reactive: VRF teardown is an aggregate condition
+// over many routes, not one watched object's transition.
 //
-// Callers must not start this until SeedFromAPI and Store.Inventory have
-// both run — see Store.Inventory's own doc comment.
+// Callers must not start it until the API seed and the store's inventory pass
+// have both run.
 func RunSweeper(ctx context.Context, store *Store, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

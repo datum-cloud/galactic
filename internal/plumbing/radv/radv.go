@@ -2,24 +2,18 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package radv sends IPv6 Router Advertisements (RFC 4861) out a tap
-// interface's host side so a VM guest attached to it (Kata, Firecracker,
-// kraftlet/Unikraft) can learn a default route. A VM guest is an opaque
-// kernel this codebase has no netlink access into — unlike a veth-attached
-// container, whose guest netns galactic-veth configures directly (address
-// and default route both) via internal/cni/netns.go — so an RA is the only
-// channel available to tell it about a gateway at all.
+// Package radv sends IPv6 Router Advertisements out a tap interface's host
+// side, so a VM guest attached to it can learn a default route. A guest is an
+// opaque kernel this codebase has no netlink access into, unlike a
+// veth-attached container whose namespace the CNI configures directly, so an RA
+// is the only channel available to tell it about a gateway.
 //
-// Sending is deliberately split from tracking which tap interfaces need it:
-// this file only knows how to construct and send one RA, and how long to
-// wait before the next one (RFC 4861 §6.2.4's jittered interval). State.go
-// owns the durable, cross-process record of which host interfaces are
-// currently attached, which internal/cnitap (galactic-tap, short-lived, one
-// exec per CNI ADD/DEL) writes and internal/installer's long-lived daemon
-// (one process per node, for as long as the node has any tap attachments)
-// reads to keep resending on that jittered schedule — see state.go's own
-// doc comment for why a single send at ADD time is not sufficient on its
-// own.
+// Sending is deliberately split from tracking which taps need it. This file
+// knows only how to construct and send one RA and how long to wait before the
+// next. state.go owns the durable, cross-process record of which host
+// interfaces are attached: the short-lived tap plugin writes it, and the
+// long-lived node daemon reads it to keep resending on the jittered
+// schedule.
 package radv
 
 import (
@@ -32,86 +26,76 @@ import (
 	"github.com/mdlayher/ndp"
 )
 
-// MaxRtrAdvInterval and MinRtrAdvInterval bound the delay between
-// unsolicited RAs, per RFC 4861 §6.2.1 (valid range 4–1800s for Max; Min
-// MUST be no less than 3s and no greater than .75 * Max). radvd's own
-// widely-deployed default is Max=600s/Min≈198s (0.33 * Max) — this package
-// runs tighter than that: there is exactly one router (this node) per tap
-// link, so the multi-router synchronization concern the wider default range
-// guards against doesn't apply, and there's no meaningful bandwidth cost to
-// a shorter interval on a single point-to-point tap link. Min=220s keeps
-// comfortably under the .75 * Max = 225s ceiling while staying close to
-// Max, so a guest converges quickly without spending unsolicited RAs it
-// doesn't need. Package-level vars (not consts), matching
-// internal/installer's ebpfHealthCheckInterval override pattern, so tests
-// can shrink them.
+// MaxRtrAdvInterval and MinRtrAdvInterval bound the delay between unsolicited
+// RAs. RFC 4861 allows 4 to 1800 seconds for the maximum, and requires the
+// minimum to be at least 3 seconds and no more than three quarters of it.
+//
+// These run tighter than the widely deployed defaults. There is exactly one
+// router, this node, per tap link, so the multi-router synchronization concern
+// behind the wider range does not apply, and a shorter interval costs nothing
+// on a point-to-point link. The minimum stays just under the three-quarters
+// ceiling, so a guest converges quickly without spending RAs it does not need.
+//
+// Vars rather than consts so tests can shrink them.
 var (
 	MaxRtrAdvInterval = 300 * time.Second
 	MinRtrAdvInterval = 220 * time.Second
 )
 
-// RouterLifetime is the RouterLifetime advertised in every RA this package
-// sends (RFC 4861 §4.2) — how long a receiving guest should keep treating
-// the advertising link-local address as its default router absent another
-// RA. RFC 4861 §6.2.1 requires RouterLifetime >= MaxRtrAdvInterval (and <=
-// 9000s, the protocol's hard cap); 900s (3x MaxRtrAdvInterval) gives a
-// guest two full resend cycles of margin before its route would go stale,
-// while still expiring a guest's route reasonably soon after a tap
-// attachment disappears without a clean DEL (e.g. a hard node/VMM crash) —
-// unlike the one-shot version of this package, which used the 9000s hard
-// cap directly because nothing existed to refresh it before then.
+// RouterLifetime is advertised in every RA: how long a receiving guest keeps
+// treating the advertising link-local address as its default router without
+// another RA. RFC 4861 requires it to be at least MaxRtrAdvInterval and at most
+// 9000 seconds.
+//
+// Three times the maximum interval gives a guest two full resend cycles of
+// margin before its route goes stale, while still expiring it reasonably soon
+// after an attachment disappears without a clean teardown, such as a node or
+// VMM crash.
 var RouterLifetime = 900 * time.Second
 
-// allNodesMulticast is the RFC 4861 §6.2.3 destination for unsolicited RAs
-// and for solicited replies to a solicitation whose source address was
-// unspecified — every host on the link, not just one that solicited.
+// allNodesMulticast is the destination for unsolicited RAs, and for a reply to
+// a solicitation whose source was unspecified: every host on the link rather
+// than just the one that solicited.
 var allNodesMulticast = netip.MustParseAddr("ff02::1")
 
-// allRoutersMulticast is the RFC 4861 §4.1 destination a guest sends its
-// Router Solicitations to — an actor (actor.go) joins this group on its tap
-// host interface so its Conn actually receives them; ICMPv6 multicast
-// traffic isn't delivered to a socket that hasn't joined the group it's
-// addressed to.
+// allRoutersMulticast is the destination a guest sends Router Solicitations to.
+// An actor joins this group on its tap host interface so its socket actually
+// receives them, ICMPv6 multicast not being delivered to a socket that has not
+// joined the group.
 var allRoutersMulticast = netip.MustParseAddr("ff02::2")
 
-// NextInterval returns a random delay in [MinRtrAdvInterval,
-// MaxRtrAdvInterval) before the next unsolicited RA should be sent, per RFC
-// 4861 §6.2.4 — routers are required to jitter rather than fire on a fixed
-// clock specifically so that multiple routers on the same link don't
-// synchronize their RAs into bursts. Callers reschedule with a fresh call to
-// this function after every send (see actor.go's resend timer), rather than
-// using a fixed-period ticker.
+// NextInterval returns a random delay in [MinRtrAdvInterval, MaxRtrAdvInterval)
+// before the next unsolicited RA. Routers are required to jitter rather than
+// fire on a fixed clock, so several on one link do not synchronize into bursts.
+// Callers reschedule with a fresh call after every send rather than using a
+// fixed-period ticker.
 func NextInterval() time.Duration {
 	span := MaxRtrAdvInterval - MinRtrAdvInterval
 	return MinRtrAdvInterval + rand.N(span)
 }
 
-// MinDelayBetweenRAs and MaxRADelayTime are RFC 4861 §10's fixed protocol
-// constants governing solicited replies (actor.go): a router MUST NOT send
-// more than one advertisement within MinDelayBetweenRAs of the last one it
-// sent (solicited or not), and MUST wait a random delay in
-// [0, MaxRADelayTime) before replying to a solicitation, so that several
-// solicitations arriving close together don't each provoke an immediate,
-// synchronized reply. Package-level vars (not consts), matching
-// MaxRtrAdvInterval/MinRtrAdvInterval above, so tests can shrink them; unlike
-// those two, the RFC does not intend these to be tunable in production.
+// MinDelayBetweenRAs and MaxRADelayTime are the fixed protocol constants
+// governing solicited replies: no more than one advertisement within
+// MinDelayBetweenRAs of the last one sent, solicited or not, and a random delay
+// in [0, MaxRADelayTime) before replying, so several solicitations arriving
+// together do not each provoke a synchronized reply.
+//
+// Vars rather than consts so tests can shrink them; unlike the intervals above,
+// the RFC does not intend these to be tunable in production.
 var (
 	MinDelayBetweenRAs = 3 * time.Second
 	MaxRADelayTime     = 500 * time.Millisecond
 )
 
 // nextResponseDelay returns a random delay in [0, MaxRADelayTime) to wait
-// before replying to a Router Solicitation — see MaxRADelayTime's own doc
-// comment.
+// before replying to a Router Solicitation.
 func nextResponseDelay() time.Duration {
 	return rand.N(MaxRADelayTime)
 }
 
-// buildAdvertisement constructs the Router Advertisement both the
-// unsolicited resend path and the solicited-reply path (actor.go) send —
-// factored out so the two paths can never drift apart on hop
-// limit/lifetime/options. See SendRouterAdvertisement's doc comment for why
-// there is no Prefix Information option.
+// buildAdvertisement constructs the Router Advertisement both the unsolicited
+// resend and the solicited reply send, so the two paths cannot drift apart on
+// hop limit, lifetime, or options.
 func buildAdvertisement(mtu int, hwAddr net.HardwareAddr) *ndp.RouterAdvertisement {
 	return &ndp.RouterAdvertisement{
 		CurrentHopLimit: 64,
@@ -126,26 +110,21 @@ func buildAdvertisement(mtu int, hwAddr net.HardwareAddr) *ndp.RouterAdvertiseme
 	}
 }
 
-// SendRouterAdvertisement sends a single unsolicited Router Advertisement out
-// iface (a tap interface's host side), sourced from that interface's
-// kernel-assigned IPv6 link-local address. galactic-cni never programs a
-// link-local address of its own onto a veth or tap interface — see
-// internal/cni/tap's and internal/cni/veth's own doc comments — so this
-// relies entirely on the kernel's automatic fe80::/10 assignment as the RA's
-// source; ndp.Listen(ifi, ndp.LinkLocal) reads that address back rather than
-// creating one.
+// SendRouterAdvertisement sends one unsolicited Router Advertisement out iface,
+// a tap interface's host side, sourced from that interface's kernel-assigned
+// link-local address. Nothing in this codebase programs a link-local address
+// onto a veth or tap, so this relies on the kernel's automatic assignment; the
+// listen call reads that address back rather than creating one. mtu is
+// advertised as the link's MTU.
 //
-// The RA carries no Prefix Information option: a tap-attached guest gets its
-// address from IPAM, not IPv6 SLAAC, so the only thing being announced is
-// "this link-local address is your default router" plus the link's MTU —
-// nothing about how to self-assign an address.
+// The RA carries no prefix information option: a tap-attached guest gets its
+// address from IPAM rather than autoconfiguration, so the only things announced
+// are the default router and the MTU.
 //
-// This is a standalone, one-shot sender — production use is actor.go's
-// RunActor, which keeps one Conn open per attachment for its whole lifetime
-// (both the periodic resend and Router Solicitation replies) rather than
-// opening and closing a fresh Conn on every send. SendRouterAdvertisement
-// remains for callers that only need a single send with no RS-responsiveness
-// (e.g. a one-off diagnostic).
+// A standalone one-shot sender. Production use is RunActor, which keeps one
+// connection open per attachment for its whole lifetime, handling both the
+// periodic resend and solicitation replies. This remains for a caller needing a
+// single send with no solicitation handling.
 func SendRouterAdvertisement(iface string, mtu int) error {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {

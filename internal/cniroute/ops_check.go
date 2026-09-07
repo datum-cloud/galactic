@@ -16,12 +16,8 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// cmdCheck verifies that the termination routes cmdAdd installed are still
-// present in the VRF routing table. Per the plan's CHECK/STATUS
-// distribution, this is galactic-route's entire CHECK story — moved
-// unchanged from internal/cni/ops_check.go (also mirrored in
-// internal/cnitap), since the underlying kernel state it verifies didn't
-// change shape by moving which process installs it.
+// cmdCheck verifies that the termination routes ADD installed are still present
+// in the VRF routing table. That is this plugin's entire CHECK story.
 func cmdCheck(args *skel.CmdArgs) error {
 	pluginConf, err := parseConf(args.StdinData)
 	if err != nil {
@@ -41,11 +37,10 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-// cmdStatus implements the CNI spec STATUS operation. galactic-route has no
-// API server or attachment-specific state to probe — it either parses a
-// well-formed config or it doesn't, matching galactic-ipam's own trivial
-// STATUS (see the plan's CHECK/STATUS distribution: implemented for
-// uniformity across the chain, not skipped).
+// cmdStatus implements the CNI STATUS operation. This plugin has no API server
+// or attachment-specific state to probe: it either parses a well-formed config
+// or it does not. Implemented for uniformity across the chain rather than
+// skipped.
 func cmdStatus(args *skel.CmdArgs) error {
 	if err := parseStatusConf(args.StdinData); err != nil {
 		return err
@@ -79,10 +74,9 @@ func checkTerminationRoutes(vpc, vpcAttachment string, terminations []Terminatio
 
 	dev := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	for _, term := range terminations {
-		// An empty Via is not an error: assembleRoute (route.go) installs a
-		// valid on-link route for it, device-scoped with no gateway, and
-		// cmdAdd installs it fine. Only reject a non-empty Via that fails to
-		// parse.
+		// An empty via is not an error: the route assembly installs a valid
+		// on-link, device-scoped route for it, and ADD installs it fine.
+		// Only a non-empty via that fails to parse is rejected.
 		var viaIP net.IP
 		if term.Via != "" {
 			viaIP = net.ParseIP(term.Via)

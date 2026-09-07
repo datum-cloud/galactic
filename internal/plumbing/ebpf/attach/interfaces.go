@@ -18,21 +18,14 @@ import (
 	"go.datum.net/galactic/internal/plumbing/bond"
 )
 
-// routeListFn and linkByIndexFn are package-level function variables so
-// tests can substitute a fake netlink view without touching the real host
-// network stack -- the same override-var pattern internal/installer uses
-// for addrListFn.
+// routeListFn and linkByIndexFn are package vars so tests can substitute a fake
+// netlink view without touching the host network stack.
 //
-// routeListFn deliberately lists routes across every routing table, not
-// just the main table: passing RT_FILTER_TABLE with an unfiltered
-// (RT_TABLE_UNSPEC) Table lifts vishvananda/netlink's own default of
-// skipping any non-main-table route, rather than narrowing the result to
-// one specific table. A default route relevant to this node's
-// underlay/overlay interface selection may legitimately live in a
-// non-main table (e.g. a VRF-scoped underlay), and restricting
-// auto-detection to the main table only would make that topology
-// undetectable -- the caller (autoDetectInterfaces) still just looks for
-// any IPv6 default route, wherever it lives, exactly as before.
+// routeListFn lists routes across every routing table. Passing RT_FILTER_TABLE
+// with an unspecified table lifts netlink's default of skipping non-main-table
+// routes rather than narrowing to one table. A default route relevant to
+// interface selection may legitimately live in a non-main table, such as a
+// VRF-scoped underlay, and would otherwise be undetectable.
 var (
 	routeListFn = func() ([]netlink.Route, error) {
 		return netlink.RouteListFiltered(netlink.FAMILY_V6,
@@ -41,38 +34,31 @@ var (
 	linkByIndexFn = func(index int) (netlink.Link, error) {
 		return netlink.LinkByIndex(index)
 	}
-	// linkListFn enumerates every link on the host, for expandBondSlaves'
-	// slave lookup below. linkByNameFn (resolving one name to its Link) is
-	// already declared in health.go -- reused here rather than redeclared.
+	// linkListFn enumerates every link on the host, for expandBondSlaves.
+	// linkByNameFn is declared in health.go and reused here.
 	linkListFn = func() ([]netlink.Link, error) {
 		return netlink.LinkList()
 	}
 )
 
-// ResolveInterfaces returns the set of interface names the uSID datapath
-// should attach its TC-BPF ingress hook to (design plan §4.1).
+// ResolveInterfaces returns the interface names the uSID datapath should attach
+// its TC-BPF ingress hook to.
 //
-// If config.EnvCNIEBPFInterfaces is set, it is parsed as a comma-separated
-// list of interface names (whitespace trimmed, duplicates and empty
-// entries removed) and used directly -- no auto-detection is performed.
-// This is the explicit override for multi-homed nodes where auto-detection
-// is ambiguous.
+// When config.EnvCNIEBPFInterfaces is set it is parsed as a comma-separated
+// list, with whitespace trimmed and duplicates and empty entries removed, and
+// used as-is. That is the explicit override for multi-homed nodes where
+// auto-detection is ambiguous.
 //
-// Otherwise the interfaces are auto-detected: those carrying the default
-// IPv6 route, followed by those carrying a BGP-learned route, which is
-// where a fabric peer's SRv6 traffic arrives when the locators travel over
-// a segment the default route does not use (see isFabricPeerRoute).
-// Attaching to the wrong (or too few) interfaces fails as silent
-// blackholing of overlay traffic (design plan §4.1), so callers that get
-// an error here must not proceed with a partial or empty interface set.
+// Otherwise interfaces are auto-detected: those carrying the default IPv6
+// route first, then those carrying a BGP-learned route, which is where a fabric
+// peer's SRv6 traffic arrives when locators travel over a segment the default
+// route does not use. Attaching to too few interfaces shows up as silently
+// blackholed overlay traffic, so a caller that gets an error here must not
+// proceed with a partial or empty set.
 //
-// Either way, the resolved set is then run through expandBondSlaves: any
-// interface that is itself a Linux bonding master is expanded to include
-// its slave interfaces too, since ingress tc/eBPF classification on a
-// bonded interface happens on the slaves, not the master -- see
-// expandBondSlaves' own doc comment. This applies uniformly to both paths
-// above, so an operator using the override only needs to name the bond
-// master, not hand-list every slave alongside it.
+// Either way the result passes through expandBondSlaves, so an operator using
+// the override names only the bond master rather than hand-listing every
+// slave.
 func ResolveInterfaces() ([]string, error) {
 	var (
 		names []string
@@ -109,45 +95,26 @@ func parseInterfaceList(v string) []string {
 	return out
 }
 
-// autoDetectInterfaces returns the deduplicated set of interface names
-// carrying an IPv6 default route (::/0) or a BGP-learned route, default
-// routes first, and within each group in the order netlink reports them
-// -- analogous to the existing GALACTIC_ROUTER_BGP_LOCAL_ADDRESS
-// auto-detection-from-`lo` pattern (internal/plumbing/loaddr), but over
-// routes rather than addresses.
+// autoDetectInterfaces returns the deduplicated interface names carrying an
+// IPv6 default route or a BGP-learned route, default routes first and within
+// each group in the order netlink reports them.
 //
-// Skips wireguard-type links (excludedLinkType): a WireGuard mesh
-// interface can install its own IPv6 default-ish route alongside the real
-// fabric NIC's, and if netlink reports the mesh interface's route first,
-// ResolveNodeSourceAddress would bake the mesh interface's ULA in as this
-// node's SRv6 outer-header source address for every encapsulated packet.
-// That address is never reachable off-node (it's not advertised anywhere
-// outside the WireGuard mesh), so every cross-site SRv6 packet would leave
-// the box correctly SID-routed but with a source no intermediate network
-// would forward on (or a receiving node would recognize as this peer) --
-// silent packet loss with no error on either side. A WireGuard tunnel can
-// never legitimately be "the real fabric NIC" this datapath pushes raw
-// SRv6-encapsulated Ethernet frames onto, so it's excluded categorically
-// rather than by interface name (the specific mesh interface name is
-// deployment-specific; the underlying failure mode -- a tunnel interface
-// racing a real NIC for the default route -- is not).
+// WireGuard links are skipped. A mesh interface can install its own IPv6
+// default route alongside the real fabric NIC's, and if netlink reports it
+// first, this node's outer-header source address becomes a mesh address that is
+// not advertised outside the mesh. Every cross-site packet then leaves
+// correctly SID-routed with a source no intermediate network forwards on, and
+// is lost with no error at either end. A tunnel can never be the real fabric
+// NIC, so the exclusion is by link type rather than by a deployment-specific
+// interface name.
 //
-// Also skips any interface enslaved to a Linux VRF master (excludedMasterType),
-// for the identical reasoning, confirmed live: internal/ingresssidecar's
-// own per-VPC veth pair (ensureEgressDatapath's ivpN/ivsN, enslaved into
-// that VPC's VRF so usid_egress has a real ingress hook to attach to --
-// see that function's own doc comment) picks up a spurious
-// `default via fe80::... dev ivsN table <vrf>` route, almost certainly
-// from IPv6 router-solicitation/advertisement between the veth peers. With
-// six VPCs' VRFs present, that put ivs1 (the lowest VRF table id) ahead of
-// eth0 in this function's own result, so ResolveNodeSourceAddress
-// permanently resolved a link-local-only interface instead of the real
-// fabric NIC -- ensureEgressDatapath's own doc comment confirms the
-// consequence isn't cosmetic: usid_egress fails open (TC_ACT_UNSPEC,
-// uncounted) on every encapsulation attempt until this resolves. A VRF
-// slave -- this sidecar's own internal plumbing or a real tenant
-// attachment either one -- can never legitimately be "the real fabric NIC"
-// any more than a WireGuard mesh interface can.
+// Links enslaved to a VRF are skipped for the same reason. The ingress
+// sidecar's per-VPC veth pairs pick up a spurious default route in their VRF's
+// table, almost certainly from router advertisements between the peers, and
+// with several VPCs present that put a link-local-only veth ahead of the real
+// NIC. usid_egress then fails open, uncounted, on every encapsulation attempt.
+// A VRF slave, sidecar plumbing or tenant attachment alike, can no more be the
+// fabric NIC than a tunnel can.
 func autoDetectInterfaces() ([]string, error) {
 	routes, err := routeListFn()
 	if err != nil {
@@ -163,9 +130,9 @@ func autoDetectInterfaces() ([]string, error) {
 			}
 			link, err := linkByIndexFn(r.LinkIndex)
 			if err != nil {
-				// A route pointing at an interface we can't resolve isn't
-				// actionable here; skip it rather than failing the whole
-				// detection over one stale/racing route.
+				// A route pointing at an interface that will not resolve
+				// is not actionable; skip it rather than fail the whole
+				// detection over one stale route.
 				continue
 			}
 			if link.Type() == excludedLinkType {
@@ -186,14 +153,12 @@ func autoDetectInterfaces() ([]string, error) {
 		}
 	}
 
-	// Default-route interfaces first, and the ordering is contractual, not
-	// cosmetic: ResolveNodeSourceAddress takes names[0] and uses that
-	// interface's global address as the outer source of every packet this
-	// node encapsulates. That has to stay the interface carrying the
-	// default route. A private fabric segment's address is reachable only
-	// from that segment, so promoting it here would give cross-site SRv6
-	// a source no intermediate network forwards on -- the same silent loss
-	// the wireguard exclusion above exists to prevent.
+	// Default-route interfaces first, and the order is contractual.
+	// ResolveNodeSourceAddress takes names[0] and uses that interface's global
+	// address as the outer source of every encapsulated packet, which has to
+	// stay the interface carrying the default route. A private segment's
+	// address is reachable only from that segment, so promoting it would give
+	// cross-site traffic a source no intermediate network forwards on.
 	collect(isDefaultRoute)
 	collect(isFabricPeerRoute)
 
@@ -205,42 +170,36 @@ func autoDetectInterfaces() ([]string, error) {
 	return names, nil
 }
 
-// isFabricPeerRoute reports whether r is a route this node's own routing
-// daemon learned over BGP, making r's interface one where a fabric peer --
-// and so SRv6-encapsulated traffic from it -- can arrive.
+// isFabricPeerRoute reports whether r was learned over BGP, making r's
+// interface one where a fabric peer, and so SRv6-encapsulated traffic from it,
+// can arrive.
 //
-// Default-route detection alone is not enough, and the gap is not
-// theoretical. Encapsulated traffic arrives wherever a peer's route to
-// this node's locator points, which is not necessarily the default route's
-// interface: a fabric can carry its locators over a private segment shared
-// only by the nodes on it, reached by a specific route rather than the
-// default. Measured on such a pair -- iBGP and the locators over a VLAN on
-// a private bond, the default route still on the public NIC -- 10
-// correctly-formed SRv6 packets arrived on the VLAN, the ingress hook was
-// attached only to the public NIC, nothing was decapsulated, and the
-// kernel counted them as Ip6InHdrErrors because a local SID with no
-// seg6local action is all it saw. No error anywhere: the tenant datapath
-// was silently dead.
+// Default-route detection alone is not enough. Encapsulated traffic arrives
+// wherever a peer's route to this node's locator points, which need not be the
+// default route's interface: a fabric can carry locators over a private segment
+// reached by a specific route. When that happens and the hook is attached only
+// to the public NIC, correctly formed SRv6 packets arrive on the other
+// interface, nothing decapsulates them, and the kernel counts them as
+// Ip6InHdrErrors because all it sees is a local SID with no action. Nothing
+// reports an error while the tenant datapath is dead.
 //
 // BGP is the signal because a fabric peer is by definition one this node
-// exchanges routes with, so the interface reaching it carries a
-// BGP-learned route whatever addressing the segment uses. It holds for a
-// peer in this node's own uSID Block and for one in a different Block,
-// which a rule keyed on locator address space would not. The exclusions
-// applied to default routes apply here unchanged, and they matter more:
-// EVPN routes for tenant prefixes are BGP-learned too, and every one of
-// them points into a VRF, which isVRFSlave rejects.
+// exchanges routes with, so the interface reaching it carries a BGP-learned
+// route whatever addressing the segment uses. That holds for a peer in this
+// node's own uSID Block and for one in a different Block, which a rule keyed on
+// locator address space would not. The exclusions applied to default routes
+// matter more here: EVPN routes for tenant prefixes are BGP-learned too, and
+// every one points into a VRF.
 func isFabricPeerRoute(r netlink.Route) bool {
 	if r.Protocol != unix.RTPROT_BGP {
 		return false
 	}
-	// A discard is not a path to anything. FRR installs the locator and
-	// aggregate prefixes this node originates itself as blackholes, and
-	// reports them on lo, so without this every node with an originated
-	// aggregate would nominate lo as a fabric interface. Rejecting the
-	// known non-forwarding types rather than requiring RTN_UNICAST, because
-	// an ordinary unicast route is also reported as RTN_UNSPEC by some
-	// netlink paths and requiring unicast would then match nothing.
+	// A discard route is not a path to anything. The locator and aggregate
+	// prefixes this node originates are installed as blackholes on lo, so
+	// without this every node originating an aggregate would nominate lo as a
+	// fabric interface. Non-forwarding types are rejected rather than unicast
+	// required, because some netlink paths report an ordinary unicast route as
+	// RTN_UNSPEC and requiring unicast would match nothing.
 	switch r.Type {
 	case unix.RTN_BLACKHOLE, unix.RTN_UNREACHABLE, unix.RTN_PROHIBIT:
 		return false
@@ -248,25 +207,20 @@ func isFabricPeerRoute(r netlink.Route) bool {
 	return true
 }
 
-// excludedLinkType is the vishvananda/netlink Link.Type() value
-// autoDetectInterfaces never treats as a candidate fabric interface -- see
-// autoDetectInterfaces' own doc comment for why.
+// excludedLinkType is the netlink Link.Type() autoDetectInterfaces never treats
+// as a candidate fabric interface.
 const excludedLinkType = "wireguard"
 
-// excludedMasterType is the vishvananda/netlink Link.Type() value a link's
-// *master* is checked against by isVRFSlave -- see autoDetectInterfaces'
-// own doc comment for why a VRF slave is excluded the same way a
-// WireGuard link is.
+// excludedMasterType is the netlink Link.Type() a link's master is checked
+// against by isVRFSlave.
 const excludedMasterType = "vrf"
 
-// isVRFSlave reports whether link is enslaved to a Linux VRF master.
-// Resolves the master via linkByIndexFn rather than trusting link's own
-// Type() (a VRF slave is still reported as its real underlying type --
-// "veth", "bond", etc. -- only the separate MasterIndex/master-side
-// SlaveKind marks the enslavement), so this only ever excludes a link that
-// genuinely belongs to a VRF, not every enslaved link (a bond slave, which
-// expandBondSlaves deliberately wants included, is never itself a VRF
-// slave at the same time on any topology this codebase creates).
+// isVRFSlave reports whether link is enslaved to a Linux VRF master. The master
+// is resolved rather than link's own Type() trusted, because a VRF slave still
+// reports its underlying type and only the master marks the enslavement. That
+// keeps this to links genuinely in a VRF: a bond slave, which expandBondSlaves
+// wants included, is never also a VRF slave on any topology this codebase
+// creates.
 func isVRFSlave(link netlink.Link) bool {
 	idx := link.Attrs().MasterIndex
 	if idx <= 0 {
@@ -274,45 +228,31 @@ func isVRFSlave(link netlink.Link) bool {
 	}
 	master, err := linkByIndexFn(idx)
 	if err != nil {
-		// Master unresolvable isn't actionable here; don't exclude on a
-		// guess -- matches autoDetectInterfaces' own stance on an
-		// unresolvable route target just above.
+		// An unresolvable master is not actionable; do not exclude on a
+		// guess.
 		return false
 	}
 	return master.Type() == excludedMasterType
 }
 
-// expandBondSlaves expands any bonding-master interface in names to also
-// include its slave interfaces, and does the same for a VLAN interface
-// sitting on top of a bond (vlanBondMaster), leaving every other interface
-// unchanged.
+// expandBondSlaves expands any bonding master in names to include its slaves,
+// does the same for a VLAN sitting on top of a bond, and leaves every other
+// interface unchanged.
 //
-// On a Linux bonding master, RX ingress tc/eBPF classification happens on
-// the slave devices, not the bond master itself -- a well-known kernel
-// behavior (confirmed live: `tc filter show dev bond0 ingress` showed this
-// package's own filter correctly attached, `tc filter show dev <slave>
-// ingress` showed nothing on either slave, and every uSID datapath map
-// counter -- locator_table, function_table, vrf_table, drop_reasons --
-// stayed at zero despite tcpdump confirming packets arriving on the wire).
-// The bond master still carries the IP/route configuration ResolveInterfaces
-// resolves from (auto-detect) or an operator names directly (the
-// GALACTIC_CNI_EBPF_INTERFACES override), but attaching the ingress hook to
-// only the master silently never sees any traffic that arrives while
-// bonded -- so both master and slaves are attached, mirroring the
-// tc/bonding gotcha this replaces the historical per-node "list the master
-// plus every slave name in GALACTIC_CNI_EBPF_INTERFACES by hand" workaround.
+// RX ingress tc classification on a bond happens on the slave devices, not the
+// master. The master still carries the addresses and routes ResolveInterfaces
+// detects from, or that an operator names directly, but a hook attached only
+// there never sees traffic that arrives while bonded, and every datapath
+// counter stays at zero while packets arrive on the wire. Attaching both master
+// and slaves is what removes the need to hand-list slave names in the override.
 //
-// A name that can't be resolved at all is passed through unchanged (logged,
-// not failed): ResolveInterfaces' override path has never required its
-// named interfaces to actually exist on the host at resolution time (e.g.
-// internal/installer's static-conflist generation resolves this purely to
-// produce a config string, independent of whether/when this init
-// container's netns can see the interface) -- callers that do need the
-// interface to genuinely exist still get that failure from attachOne at
-// actual attach time, unchanged from before this function existed. Once a
-// name does resolve to a real bonding master, though, failing to enumerate
-// its slaves is treated as fatal -- silently falling back to "just the
-// master" would reproduce the exact bug this function exists to fix.
+// A name that does not resolve is passed through and logged rather than failed.
+// The override path has never required its interfaces to exist at resolution
+// time, since conflist generation resolves names purely to produce a config
+// string. A caller that needs the interface to exist still gets that failure at
+// attach time. Once a name does resolve to a real bonding master, though,
+// failing to enumerate its slaves is fatal: falling back to the master alone
+// would reproduce the bug this exists to fix.
 func expandBondSlaves(names []string) ([]string, error) {
 	var out []string
 	seen := make(map[string]bool)
@@ -336,9 +276,8 @@ func expandBondSlaves(names []string) ([]string, error) {
 
 		master := link
 		if !bond.IsMaster(master) {
-			// Not a bond itself. It may still sit on top of one: a VLAN
-			// over a bond has the same problem as the bond master, one
-			// level further up. See vlanBondMaster.
+			// Not a bond itself, but it may sit on one: a VLAN over a
+			// bond has the same problem one level up.
 			master = vlanBondMaster(link)
 			if master == nil {
 				continue
@@ -357,31 +296,24 @@ func expandBondSlaves(names []string) ([]string, error) {
 	return out, nil
 }
 
-// vlanBondMaster returns the bonding master a VLAN interface sits on top of,
-// or nil when link is not a VLAN or its parent is not a bond.
+// vlanBondMaster returns the bonding master a VLAN interface sits on, or nil
+// when link is not a VLAN or its parent is not a bond.
 //
 // A VLAN over a bond inherits the bond master's ingress problem rather than
 // escaping it. RX classification still happens on the physical slaves, so a
-// filter on the VLAN device never runs for traffic that arrives while
-// bonded, exactly as a filter on the bond master never does.
+// filter on the VLAN device never runs for traffic arriving while bonded, just
+// as a filter on the bond master never does. Packets show up in a capture on
+// the VLAN device, because the packet tap runs where tc classification does
+// not, while the datapath's counters stay flat.
 //
-// Measured on a fabric carrying its locators over a VLAN on a private bond,
-// with the ingress hook attached to the VLAN device: SRv6 packets arrived
-// (pcap on the VLAN device showed them, since the packet tap runs where tc
-// classification does not), the datapath's own counters did not move at all,
-// and nothing was decapsulated. Attaching to the parent bond's slaves moved
-// the per-VRF packet counter by exactly the number of packets sent, and
-// detaching them stopped it again.
+// The parent's slaves are what get added, not the parent itself, since
+// attaching to a bond master is inert for the same reason.
 //
-// The parent's own slaves are what gets added, not the parent: attaching to
-// a bond master is inert for the same reason, so naming it would achieve
-// nothing.
-//
-// The tag is not a problem here. These NICs strip it in hardware, so the
-// frame reaching tc on the slave carries ethertype IPv6 with the VLAN id in
-// skb metadata, which is what usid_ingress's Ethernet parse already
-// expects. A deployment whose NICs leave the tag in the packet data would
-// additionally need 802.1Q parsing in the datapath, which it does not have.
+// The tag is handled in the datapath, not here. NICs that strip it in hardware
+// leave the frame at tc with ethertype IPv6 and the VLAN id in skb metadata,
+// which usid_ingress pops before redirecting. A deployment whose NICs leave the
+// tag in packet data would additionally need 802.1Q parsing, which the datapath
+// does not have.
 func vlanBondMaster(link netlink.Link) netlink.Link {
 	if link.Type() != vlanLinkType {
 		return nil

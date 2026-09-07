@@ -18,34 +18,28 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// Event Reason values PeerStateEventEmitter raises. Exported as constants
-// (rather than inline literals) so callers — and this package's own tests —
-// have one shared spelling to filter/assert on, e.g.
-// `kubectl get events --field-selector reason=SessionDown`.
+// Event reason values this emitter raises, named so callers and tests share one
+// spelling to filter and assert on.
 const (
 	ReasonSessionEstablished = "SessionEstablished"
 	ReasonSessionDown        = "SessionDown"
 )
 
-// peerEventQueueSize bounds PeerStateEventEmitter's internal queue. It's
-// arbitrary but generous relative to how often real peer flaps happen; once
-// full, ObservePeerStateChange drops the transition (logging it) rather than
-// blocking, since it runs synchronously on the reporting runtime's own
-// peer-event watcher goroutine — see PeerStateEventEmitter's doc comment.
+// peerEventQueueSize bounds the emitter's internal queue: generous relative to
+// how often real flaps happen. Once full, an observed transition is dropped and
+// logged rather than blocking, since observation runs synchronously on the
+// reporting runtime's own watcher goroutine.
 const peerEventQueueSize = 64
 
-// PeerStateEventEmitter turns real-time BGP peer FSM transitions
-// (model.PeerStateChange, as reported by a RouterRuntime's own peer-event
-// watcher — see internal/runtime/gobgp/peer_monitor.go) into Kubernetes
-// Events on the corresponding BGPPeer object. It implements
-// model.PeerStateObserver and manager.Runnable, so the controller-runtime
-// manager owns its worker goroutine's lifecycle the same way it owns every
-// reconciler — see docs/plans/router-bgp-peer-session-events.md.
+// PeerStateEventEmitter turns real-time peer FSM transitions, as reported by a
+// runtime's own watcher, into Kubernetes events on the corresponding BGPPeer.
+// It is both an observer and a manager runnable, so the manager owns its worker
+// goroutine's lifecycle the way it owns every reconciler.
 //
-// This is deliberately independent of BGPRouterReconciler's periodic
-// (peerStatusRequeue) BGPPeer.Status update: that keeps the CRD's status
-// current on a poll; this reacts to each transition immediately, including
-// ones that revert between two polls and would otherwise leave no trace.
+// It is deliberately independent of the reconciler's periodic status update:
+// that keeps the CRD current on a poll, while this reacts to each transition
+// immediately, including ones that revert between polls and would otherwise
+// leave no trace.
 type PeerStateEventEmitter struct {
 	Client   client.Client
 	Recorder events.EventRecorder
@@ -53,9 +47,8 @@ type PeerStateEventEmitter struct {
 	queue chan model.PeerStateChange
 }
 
-// NewPeerStateEventEmitter returns a PeerStateEventEmitter ready to be
-// registered with a manager (mgr.Add) and passed to
-// gobgp.NewRuntimeFactory as a model.PeerStateObserver.
+// NewPeerStateEventEmitter returns an emitter ready to be registered with a
+// manager and passed to the runtime factory as an observer.
 func NewPeerStateEventEmitter(c client.Client, recorder events.EventRecorder) *PeerStateEventEmitter {
 	return &PeerStateEventEmitter{
 		Client:   c,
@@ -64,10 +57,9 @@ func NewPeerStateEventEmitter(c client.Client, recorder events.EventRecorder) *P
 	}
 }
 
-// ObservePeerStateChange implements model.PeerStateObserver. It must never
-// block — see the type doc comment — so it only enqueues change for Start's
-// worker loop to process, dropping (and logging) it if the queue is ever
-// full rather than stalling the calling runtime's session convergence.
+// ObservePeerStateChange enqueues change for the worker loop. It must never
+// block, so a full queue drops and logs the change rather than stalling the
+// calling runtime's session convergence.
 func (e *PeerStateEventEmitter) ObservePeerStateChange(change model.PeerStateChange) {
 	select {
 	case e.queue <- change:
@@ -117,9 +109,8 @@ func (e *PeerStateEventEmitter) emit(ctx context.Context, change model.PeerState
 		if normalizeIP(peer.Spec.Address) != normalizeIP(change.Address) {
 			continue
 		}
-		// action mirrors reason: this emitter only reports an observed
-		// transition, it doesn't itself take a distinct "action" the
-		// EventsV1 Action field would otherwise describe.
+		// The action mirrors the reason: this emitter reports an observed
+		// transition rather than taking a distinct action of its own.
 		e.Recorder.Eventf(peer, nil, eventType, reason, reason, "%s", message)
 		return
 	}
@@ -127,13 +118,12 @@ func (e *PeerStateEventEmitter) emit(ctx context.Context, change model.PeerState
 		"router", change.RouterKey, "peer", change.Address)
 }
 
-// peerStateEventDetails reports the Event fields for change, and false when
-// change isn't one of the transitions this emitter surfaces. Only crossing
-// into or out of Established is reported: every other FSM hop (Idle,
-// Connect, Active, OpenSent, OpenConfirm cycling while a session has never
-// reached Established, e.g. initial connection setup or backoff) is normal
-// and would otherwise flood `kubectl get events` for any peer that simply
-// isn't up yet.
+// peerStateEventDetails reports the event fields for change, and false when
+// change is not a transition this emitter surfaces.
+//
+// Only crossing into or out of Established is reported. Every other FSM hop
+// while a session has never come up is normal, and reporting them would flood
+// the event stream for any peer that simply is not up yet.
 func peerStateEventDetails(change model.PeerStateChange) (eventType, reason, message string, ok bool) {
 	switch {
 	case change.To == model.BGPPeerStateEstablished:

@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package tap manages tap interfaces for VM-based workloads (Kata, Firecracker,
-// QEMU). Unlike veth, tap interfaces are L2 file descriptors opened by userspace
-// VMMs; the CNI plugin only configures the host side.
+// Package tap manages tap interfaces for VM-based workloads. Unlike a veth, a
+// tap is an L2 file descriptor opened by a userspace VMM; the CNI plugin only
+// configures the host side.
 package tap
 
 import (
@@ -60,9 +60,9 @@ func updateForwardRule(interfaceName string, action string) error {
 	return nil
 }
 
-// Add creates a tap interface with the given MTU, enslaves it to the VRF,
-// applies sysctls and iptables FORWARD rules. Idempotent — repairs state
-// if the tap already exists (crash-recovery).
+// Add creates a tap interface with the given MTU, enslaves it to the VRF, and
+// applies the sysctls and firewall rules it needs. Idempotent, repairing state
+// when the tap already exists.
 func Add(vpc, vpcAttachment string, mtu int) error {
 	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 	tapName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
@@ -97,9 +97,8 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 		return err
 	}
 
-	// Enslave to VRF, add iptables rules, bring up, then apply sysctls.
-	// Sysctl files (rp_filter, forwarding) are only populated by the kernel
-	// after the interface is brought UP.
+	// Enslave to the VRF, add the rules, bring the link up, then apply sysctls:
+	// the kernel only populates the sysctl files once the interface is up.
 	if err := netlink.LinkSetMaster(tapLink, vrfLink); err != nil {
 		return fmt.Errorf("enslave tap to VRF: %w", err)
 	}

@@ -15,27 +15,21 @@ import (
 	"go.datum.net/galactic/internal/nadpatch"
 )
 
-// cmdDel deletes the per-pod EndpointSlice cmdAdd published, then falls
-// through to the same no-op the rest of the chain's DEL paths follow for
-// the BGPVRFInstance/BGPAdvertisement CRDs and eBPF vrf_table entry: those
-// are keyed by (vpc, vpcAttachment) and may still be in use by another
-// pod/VM sharing the same attachment, so deleting them here would race with
-// a concurrent ADD during restarts — cleanup for those stays galactic-
-// router's GC controller's job (see internal/cni's own cmdDel for the full
-// reasoning, identical here).
+// cmdDel deletes the per-pod EndpointSlice the ADD path published, then falls
+// through to the same no-op the rest of the chain's DEL paths follow for the BGP
+// CRDs and the vrf_table entry. Those are keyed by attachment and may still be
+// in use by another pod sharing it, so deleting them here would race a
+// concurrent ADD during a restart; that cleanup stays garbage collection's job.
 //
-// The EndpointSlice is a deliberate, correct divergence from that pattern:
-// it's 1:1 with exactly one pod, never shared, so there's no "might belong
-// to a live sibling" risk to avoid — see the #854 plan's Phase 5. Deletion
-// is best-effort: any failure (including failing to build a k8s client at
-// all) is logged and DEL still returns success, since a k8s API hiccup
-// during pod teardown shouldn't block the pod from actually going away —
-// Phase 8's ownerReference-to-Pod is the backstop for exactly this case.
+// The EndpointSlice is a deliberate divergence: it is one per pod and never
+// shared, so there is no live sibling to endanger. Deletion is best-effort, and
+// any failure, including failing to build a client at all, is logged while DEL
+// still returns success: an API hiccup during teardown must not block the pod
+// from going away. The owner reference is the backstop for exactly that case.
 func cmdDel(args *skel.CmdArgs) error {
-	// DEL is idempotent per the CNI spec: always return success, even if
-	// parsing the config fails — logging vpc/vpcAttachment (when parseable)
-	// is the only reason to parse at all here, since there's no cleanup to
-	// gate on it.
+	// DEL is idempotent per the CNI spec and always returns success, even when
+	// the config fails to parse. Parsing exists only to log the identifiers when
+	// they are available; no cleanup is gated on it.
 	pluginConf, parseErr := parseConf(args.StdinData)
 	if parseErr != nil {
 		slog.Error("DEL: failed to parse CNI config, skipping cleanup", "err", parseErr,
@@ -56,10 +50,9 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 // deleteEndpointSliceBestEffort deletes this pod's EndpointSlice, logging
-// (never failing DEL) on any error — see cmdDel's own doc comment for why.
-// The EndpointSlice lives in the pod's own namespace (parsed from CNI_ARGS
-// below, same as podName), not pluginConf.Namespace — that's only where the
-// BGP CRDs live, and cmdDel deliberately leaves those alone (see above).
+// rather than failing DEL on any error. The slice lives in the pod's own
+// namespace, not the one holding the BGP CRDs, which this path deliberately
+// leaves alone.
 func deleteEndpointSliceBestEffort(args *skel.CmdArgs) {
 	podName := nadpatch.ParsePodName(args.Args)
 	podNamespace := nadpatch.ParsePodNamespace(args.Args)

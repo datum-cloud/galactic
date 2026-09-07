@@ -2,26 +2,21 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package hostconf reads node-local settings (node name, kubeconfig,
-// namespace, log file/level) from the static per-node CNI conflist written
-// once by internal/installer.Bootstrap. Every binary in the galactic CNI
-// plugin chain needs this same lookup, so it lives here rather than being
-// duplicated per binary — internal/cni and internal/installer both used to
-// carry their own near-identical copy, hardcoded to match a single plugin
-// type ("galactic-cni").
+// Package hostconf reads node-local settings, the node name, kubeconfig,
+// namespace, and log file and level, from the static per-node CNI conflist
+// written once by the installer. Every binary in the plugin chain needs the
+// same lookup, so it lives here rather than being duplicated per binary.
 //
-// The static conflist is not the per-attachment chain conflist the CNI
-// runtime execs each plugin with (that one carries vpc/vpcattachment and is
-// templated per VPCAttachment by the external companion operator) — it
-// exists solely so any binary in the chain can find node-level settings by
-// reading a well-known path off disk, independent of how it was actually
-// invoked. Bootstrap only ever writes one entry, typed PluginType, so every
-// caller in this repo passes that same constant.
+// That static conflist is not the per-attachment conflist the CNI runtime execs
+// each plugin with, which carries the VPC identifiers and is templated per
+// attachment by an external operator. It exists so any binary in the chain can
+// find node-level settings at a well-known path, whatever it was invoked as.
+// The installer writes exactly one entry, typed PluginType, which every caller
+// here passes.
 //
-// It also carries RejectMovedIPAMKeys, the guard every master plugin runs
-// over that per-attachment config — shared here for the same reason Load
-// is, so the two master plugins cannot drift apart on which keys they
-// refuse.
+// It also carries RejectMovedIPAMKeys, the guard every master plugin runs over
+// the per-attachment config, shared here for the same reason: so the two master
+// plugins cannot drift apart on which keys they refuse.
 package hostconf
 
 import (
@@ -41,18 +36,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// PluginType is the "type" value Bootstrap always writes into the static
-// conflist's single plugin entry. It names galactic-cni, the installer that
-// actually authors this file, not any particular master plugin — veth, tap,
-// and bgp all read this same value regardless of which binary is actually
-// reading it. Every caller in the chain passes this to Load.
+// PluginType is the "type" value the installer writes into the static
+// conflist's single entry. It names the installer that authors the file, not
+// any particular master plugin, so every binary in the chain passes it to
+// Load.
 const PluginType = "galactic-cni"
 
-// BGPPluginType is the "type" value a conflist entry must carry for
-// galactic-bgp, the chained plugin that publishes BGP/SRv6/eBPF state after
-// a master plugin (galactic-veth/galactic-tap) creates the interface. Both
-// master plugins check for its presence in their own attachment's conflist
-// before doing any other work — see VerifyChainIncludes.
+// BGPPluginType is the "type" a conflist entry must carry for the chained
+// plugin that publishes BGP, SRv6, and eBPF state after a master plugin creates
+// the interface. Both master plugins check for its presence in their own
+// attachment's conflist before doing any other work.
 const BGPPluginType = "galactic-bgp"
 
 // HostConf holds node-local settings read from the static per-node conflist
@@ -64,30 +57,22 @@ type HostConf struct {
 	LogFile    string `json:"log_file"`
 	LogLevel   string `json:"log_level,omitempty"`
 
-	// NAT66ShardSIDs is the comma-separated NAT66 shard SID list --
-	// see config.EnvCNINAT66ShardSIDs's own doc comment. Written by
-	// internal/installer.Bootstrap from its own env, read by
-	// internal/cnibgp the same way every other field here is: a CNI
+	// NAT66ShardSIDs is the comma-separated NAT66 shard SID list, written by
+	// the installer from its own environment and read by the BGP plugin: a CNI
 	// plugin's exec environment carries none of this on its own.
 	NAT66ShardSIDs string `json:"nat66_shard_sids,omitempty"`
 
-	// EBPFInterfaces is the comma-separated interface list
-	// config.EnvCNIEBPFInterfaces would otherwise carry -- see that env
-	// var's own doc comment. Written by internal/installer.Bootstrap
-	// from its own env/auto-detection (an init container sharing its
-	// pod's env with the long-running "run" container, which is why
-	// attach.ResolveInterfaces' env-var override already works
-	// correctly there today), for exactly the same reason NAT66ShardSIDs
-	// above is: internal/cnibgp -- invoked per-pod by the CNI runtime,
-	// not a long-lived process with configurable env -- never sees
-	// GALACTIC_CNI_EBPF_INTERFACES on its own, and silently falls back
-	// to attach.ResolveInterfaces' own auto-detection instead, which is
-	// wrong on any node where the interface actually carrying the
-	// default IPv6 route (e.g. Cilium's own uplink) isn't the fabric
-	// interface -- found live, this exact gap produced a plausible but
-	// wrong public_uplink_table entry (internal/plumbing/ebpf/prog/
-	// usid.c's DSR-reply redirect) that had nothing to do with that
-	// mechanism's own correctness.
+	// EBPFInterfaces is the comma-separated interface list, written by the
+	// installer from its own environment or auto-detection. The installer runs
+	// as an init container sharing its pod's environment with the long-running
+	// one, so its detection is correct there.
+	//
+	// The BGP plugin, invoked per pod by the CNI runtime rather than being a
+	// long-lived process with configurable environment, would otherwise never
+	// see the setting and would silently fall back to its own auto-detection.
+	// That is wrong on any node where the interface carrying the default IPv6
+	// route is not the fabric interface, and produces a plausible but wrong
+	// uplink entry for the DSR reply redirect.
 	EBPFInterfaces string `json:"ebpf_interfaces,omitempty"`
 }
 
@@ -98,10 +83,10 @@ type conflistEnvelope struct {
 	Plugins    []json.RawMessage `json:"plugins"`
 }
 
-// Load reads and parses the conflist at filePath and returns the HostConf
-// carried by whichever plugin entry's "type" matches one of acceptedTypes.
-// Returns an error wrapping fs.ErrNotExist (checkable via errors.Is) when
-// filePath does not exist, so tolerant callers can fall back to defaults.
+// Load reads and parses the conflist at filePath and returns the HostConf from
+// whichever plugin entry's type matches one of acceptedTypes. A missing file
+// returns an error wrapping fs.ErrNotExist, so a tolerant caller can fall back
+// to defaults.
 func Load(filePath string, acceptedTypes ...string) (*HostConf, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -137,20 +122,15 @@ func Load(filePath string, acceptedTypes ...string) (*HostConf, error) {
 	return nil, fmt.Errorf("conflist at %q does not contain a plugin with type in %v", filePath, acceptedTypes)
 }
 
-// VerifyChainIncludes parses configJSON as a CNI NetConfList — the same
-// {"plugins":[{"type":...}, ...]} envelope Load already parses, here read
-// from a NetworkAttachmentDefinition's own spec.config rather than a file —
-// and reports a CNI error (code 7) naming expectedType if no entry's "type"
-// field equals it anywhere in the list.
+// VerifyChainIncludes parses configJSON as a CNI plugin list, the same envelope
+// Load parses but read from an attachment definition rather than a file, and
+// returns a CNI error naming expectedType if no entry's type equals it.
 //
-// Presence-only, not position-aware: a conflist that names expectedType out
-// of order is a separate authoring bug this does not catch. Presence is
-// what issue #331 asks for ("attach fails when the chain is incomplete")
-// and is the cheapest check that catches the actual failure mode reported
-// there — a stale/hand-edited conflist that drops the entry entirely. A
-// conflist with no "plugins" key at all (the pre-#305 flat single-plugin
-// shape) has zero entries to match and fails the same way a conflist
-// missing just the galactic-bgp entry does.
+// Presence only, not position: a conflist naming expectedType out of order is a
+// separate authoring bug this does not catch. Presence is the cheapest check
+// that catches the real failure, a stale or hand-edited conflist that drops the
+// entry. A conflist with no plugin list at all has zero entries to match and
+// fails the same way.
 func VerifyChainIncludes(configJSON []byte, expectedType string) error {
 	var env conflistEnvelope
 	if err := json.Unmarshal(configJSON, &env); err != nil {
@@ -176,11 +156,11 @@ func VerifyChainIncludes(configJSON []byte, expectedType string) error {
 	}
 }
 
-// movedIPAMKeys holds exactly the addressing keys that used to sit at the
-// top level of a master plugin's config and now live inside its "ipam"
-// block. Every field is a json.RawMessage so presence is all that is
-// decoded: a wrong-typed value must still be reported as present rather
-// than failing the decode, and no value here is ever read.
+// movedIPAMKeys holds exactly the addressing keys that once sat at the top
+// level of a master plugin's config and now live inside its "ipam" block. Every
+// field is a raw message so only presence is decoded: a wrong-typed value must
+// still report as present rather than failing the decode, and no value is ever
+// read.
 type movedIPAMKeys struct {
 	IPv6Subnet      json.RawMessage `json:"ipv6_subnet"`
 	IPv4Subnet      json.RawMessage `json:"ipv4_subnet"`
@@ -188,22 +168,20 @@ type movedIPAMKeys struct {
 	StaticIP        json.RawMessage `json:"static_ip"`
 }
 
-// RejectMovedIPAMKeys reports a CNI validation error (code 7) when data
-// carries any of the moved addressing keys at the top level of a master
-// plugin's config.
+// RejectMovedIPAMKeys returns a CNI validation error when data carries any of
+// the moved addressing keys at the top level of a master plugin's config.
 //
 // Whether a master plugin allocates addresses at all is decided purely by
-// whether the "ipam" block is present. encoding/json drops unknown fields,
-// so a config still written against the old flat shape parses cleanly, the
-// pod attaches with a working interface and no addresses, and its
-// BGPAdvertisement is created advertising nothing — no error, no warning.
-// Guessing wrong about a pod's addressing is worse than refusing to attach
-// it, so the keys are refused by name instead.
+// whether the "ipam" block is present, and JSON decoding drops unknown fields.
+// A config written against the old flat shape therefore parses cleanly, the pod
+// attaches with a working interface and no addresses, and its advertisement is
+// created advertising nothing, with no error or warning. Guessing wrong about a
+// pod's addressing is worse than refusing to attach it.
 func RejectMovedIPAMKeys(data []byte) error {
 	var moved movedIPAMKeys
-	// A decode error here is the caller's own to report: every master
-	// plugin unmarshals the same bytes into its full config first, so
-	// malformed JSON has already been rejected with its own message.
+	// A decode error is the caller's to report: every master plugin unmarshals
+	// the same bytes into its full config first, so malformed JSON has already
+	// been rejected with its own message.
 	if err := json.Unmarshal(data, &moved); err != nil {
 		return nil
 	}
@@ -247,13 +225,11 @@ func detectScheme() *runtime.Scheme {
 	return scheme
 }
 
-// DetectNodeNameFromAPI queries the Kubernetes API and matches the node's
-// InternalIP addresses against local interface addresses. Returns the first
-// matching node name, or empty string with no error if detection fails
-// (allowing callers to fall through to other resolution methods). Used as a
-// fallback by any binary's config resolution when the static conflist is
-// missing or doesn't carry a node name (e.g. hostPath mount issues in
-// container-based test environments like Kind).
+// DetectNodeNameFromAPI queries the Kubernetes API and matches nodes' internal
+// addresses against local interface addresses, returning the first match. It
+// returns "" with no error when detection fails, so callers can fall through to
+// other methods. Used when the static conflist is missing or carries no node
+// name.
 func DetectNodeNameFromAPI() (string, error) {
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {

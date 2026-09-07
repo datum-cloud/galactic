@@ -100,9 +100,10 @@ func buildStatements(p model.DesiredPolicy) []*api.Statement {
 				}
 			}
 			if len(term.Set.CommunitiesRemove) > 0 {
-				// If we already have an add action, the remove must be a separate pass.
-				// GoBGP CommunityAction supports only one operation per statement.
-				// When both add and remove are present, prefer add here.
+				// An add action is already set, so the remove must be a
+				// separate pass: the community action supports only one
+				// operation per statement. With both present, add wins
+				// here.
 				if stmt.Actions.Community == nil {
 					stmt.Actions.Community = &api.CommunityAction{
 						Type:        api.CommunityAction_TYPE_REMOVE,
@@ -120,9 +121,8 @@ func buildStatements(p model.DesiredPolicy) []*api.Statement {
 	return stmts
 }
 
-// removeToRegexp converts community strings to GoBGP community regexp format.
-// GoBGP community matching uses exact string comparison, so we wrap each
-// community in ^...$ anchors to prevent partial matches.
+// removeToRegexp wraps each community in anchors, GoBGP's community matching
+// being a regexp match, so a community cannot match another partially.
 func removeToRegexp(communities []string) []string {
 	out := make([]string, len(communities))
 	for i, c := range communities {
