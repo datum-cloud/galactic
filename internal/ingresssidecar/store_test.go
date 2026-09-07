@@ -22,11 +22,13 @@ func mustPrefix(t *testing.T, s string) *net.IPNet {
 
 const testGrace = 10 * time.Second
 
-// testVPC1, testPodName, and testMalformedTenantID are fixture values
-// shared across this package's tests.
+// testVPC1, testPodName, testOldKey, testNewKey, and testMalformedTenantID
+// are fixture values shared across this package's tests.
 const (
 	testVPC1    = "vpc1"
 	testPodName = "pod-a"
+	testOldKey  = "ns/old-name"
+	testNewKey  = "ns/new-name"
 	// testMalformedTenantID has no "-" separator, so
 	// crdnames.ParseTenantIdentifier rejects it -- used by both
 	// controller_test.go and seed_test.go to build a selected-but-
@@ -272,3 +274,91 @@ var errTest = &testError{"boom"}
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+// TestStoreSweepKeepsPrefixClaimedByAnotherKey verifies that expiring one
+// EndpointSlice key does not delete a kernel route a second, still-live key
+// claims for the same VPC and prefix. Two keys legitimately name one
+// underlying route while an EndpointSlice is being republished under a new
+// name, and the kernel addresses routes by prefix+table rather than by
+// Store's key -- so an unguarded removal strands the survivor with
+// installed still set and nothing left to reinstall it.
+func TestStoreSweepKeepsPrefixClaimedByAnotherKey(t *testing.T) {
+	tests := []struct {
+		name           string
+		survivorAbsent bool
+		wantRoutes     int
+	}{
+		{"SurvivorStillDesired", false, 1},
+		{"SurvivorWithinItsOwnGrace", true, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			backend := newFakeBackend()
+			store := NewStore(backend, testGrace, nil)
+
+			prefix := mustPrefix(t, "fd00::3")
+			desired := &DesiredRoute{VPC: testVPC1, Prefix: prefix, SID: net.ParseIP("fd00:99::1")}
+			for _, key := range []string{testOldKey, testNewKey} {
+				if err := store.SetDesired(ctx, key, desired); err != nil {
+					t.Fatalf("SetDesired(%s): %v", key, err)
+				}
+			}
+			if got := backend.routeCount(); got != 1 {
+				t.Fatalf("routeCount after both keys = %d, want 1", got)
+			}
+
+			start := time.Now()
+			if err := store.SetDesired(ctx, testOldKey, nil); err != nil {
+				t.Fatalf("SetDesired(old, nil): %v", err)
+			}
+			if tt.survivorAbsent {
+				// Marked absent later, so it is still inside its own grace
+				// when the old key's has already elapsed.
+				store.routes[testNewKey].absentSince = start.Add(testGrace)
+			}
+
+			store.Sweep(ctx, start.Add(testGrace+time.Second))
+
+			if got := backend.routeCount(); got != tt.wantRoutes {
+				t.Errorf("routeCount after sweep = %d, want %d", got, tt.wantRoutes)
+			}
+			if _, ok := store.routes[testOldKey]; ok {
+				t.Error("expired key ns/old-name still tracked after sweep")
+			}
+			if _, ok := store.routes[testNewKey]; !ok {
+				t.Error("surviving key ns/new-name dropped by sweep")
+			}
+		})
+	}
+}
+
+// TestStoreSweepRemovesPrefixOnceLastKeyExpires verifies the guard added by
+// TestStoreSweepKeepsPrefixClaimedByAnotherKey does not leak the kernel
+// route: once every key claiming the prefix has expired, it is removed.
+func TestStoreSweepRemovesPrefixOnceLastKeyExpires(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	store := NewStore(backend, testGrace, nil)
+
+	prefix := mustPrefix(t, "fd00::3")
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: prefix, SID: net.ParseIP("fd00:99::1")}
+	for _, key := range []string{testOldKey, testNewKey} {
+		if err := store.SetDesired(ctx, key, desired); err != nil {
+			t.Fatalf("SetDesired(%s): %v", key, err)
+		}
+	}
+
+	start := time.Now()
+	for _, key := range []string{testOldKey, testNewKey} {
+		if err := store.SetDesired(ctx, key, nil); err != nil {
+			t.Fatalf("SetDesired(%s, nil): %v", key, err)
+		}
+	}
+
+	store.Sweep(ctx, start.Add(testGrace+time.Second))
+
+	if got := backend.routeCount(); got != 0 {
+		t.Errorf("routeCount after both keys expired = %d, want 0", got)
+	}
+}
