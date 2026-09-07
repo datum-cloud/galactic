@@ -1,4 +1,4 @@
-ARG KINDEST_VER=v1.36.1
+ARG KINDEST_VER=v1.37.0
 
 FROM kindest/node:${KINDEST_VER}
 
