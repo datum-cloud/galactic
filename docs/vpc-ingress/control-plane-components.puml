@@ -1,0 +1,85 @@
+@startuml control-plane-components
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title VPC Ingress — Component Diagram (control plane only, no packet path)
+
+' Render status: rendered successfully via
+'   podman run --rm -v "$(pwd)/docs/vpc-ingress:/data:Z" docker.io/plantuml/plantuml -tpng "/data/control-plane-components.puml"
+' (docs/architecture/README.md's own documented command), producing
+' control-plane-components.png, committed alongside this source. Follows
+' this repo's existing docs/architecture/*.puml conventions (C4-PlantUML
+' stdlib, LAYOUT_WITH_LEGEND()).
+
+Person_Ext(client, "External Client", "HTTP request to a Gateway VIP")
+Person(tenant, "Tenant / Developer", "Deploys Pods/VMs onto a VPC network")
+System_Ext(nso, "NSO Envoy Gateway Extension Server", "Resolves HTTPProxy backends and patches Envoy's generated xDS config; a separate repo")
+System_Ext(k8sapi, "Kubernetes API Server", "BGPRouter/BGPPeer/BGPPolicy/BGPAdvertisement/BGPVRFInstance CRDs, Node, Secret, EndpointSlice")
+
+System_Boundary(node, "One Kubernetes node") {
+
+    Container_Boundary(envoypod, "Envoy Gateway Pod (envoyDaemonSet, one per node)") {
+        Component(envoy, "envoy", "Envoy proxy", "Terminates the client HTTP connection; upstream socket is SO_BINDTODEVICE-bound to the sidecar's VRF device by NSO")
+        Component(sidecarreconciler, "ingresssidecar.Reconciler", "controller-runtime (cmd/galactic-vrf)", "Watches cluster-scoped EndpointSlice, filtered by galactic.datum.net/tenant-id label presence (controller.go:66-72)")
+        Component(sidecarstore, "ingresssidecar.Store", "in-process", "Two reconcile granularities: one Linux VRF per VPC, one SRv6 egress route per pod/EndpointSlice (doc.go:29-38)")
+        Component(gatewaypublisher, "k8sGatewayPublisher.PublishGateway", "gateway.go:120-", "Advertises the sidecar's own per-VPC gateway address: creates/reuses BGPVRFInstance, creates BGPAdvertisement annotated with this pod's host ifindex/MAC")
+    }
+
+    Container_Boundary(cnichain, "galactic CNI chain (invoked at Pod ADD, per binary)") {
+        Component(veth, "galactic-veth / galactic-tap", "cmdAdd", "Creates the VRF, veth/tap pair, host gateway (internal/cni/ops_add.go)")
+        Component(ipam, "galactic-ipam", "cmdAdd (delegated)", "Allocates the Pod's address(es)")
+        Component(cnibgp, "galactic-bgp: publishBGPState", "bgp.go:414-562", "Allocates the uSID Argument; writes BGPVRFInstance + BGPAdvertisement; registers eBPF uSID state; publishes the per-pod EndpointSlice")
+    }
+
+    Container_Boundary(installer, "galactic-cni installer daemon (internal/installer.Run)") {
+        Component(attachwatch, "attach.Watch", "netlink link/route subscription", "Re-resolves and re-attaches usid_ingress on interface/route change events (watch.go:181-)")
+        Component(locatorroute, "ensureLocatorLocalRoute", "refreshTicker, 300s", "Installs this node's own uSID locator /64 into the kernel local table on lo (locatorroute.go:63-100)")
+        Component(sidecarreturn, "ensureSidecarReturnPath", "sidecarReturnTicker, 30s", "Host side of the sidecar's return path: locator_table/function_table/vrf_table entries + route + permanent neighbor (sidecarreturn.go:151-)")
+        Component(vrfsweep, "gc.SweepEBPFVRFTable / SweepEBPFNPTv6Table", "ebpfGCSweepTicker, 5min", "Repairs missing vrf_table entries against live BGPVRFInstance CRDs -- the only repaired uSID map (gc.go:538-)")
+    }
+
+    ComponentDb(usidmaps, "Pinned uSID maps", "bpffs (cilium/ebpf)", "locator_table, function_table, vrf_table, ifindex_vrf_table, egress_route_table -- unpinned & recreated together on any one map's schema change (attach.go:214-233)")
+    Component(usidprogs, "usid_ingress / usid_egress", "TC-BPF (clsact)", "usid_ingress: shared host uplink(s), ingress hook. usid_egress: per-VRF host-side veth/tap, ingress hook")
+}
+
+System_Boundary(routernode, "Every node (galactic-router, galactic.datumapis.com/galactic: router)") {
+    Component(bgprouterrec, "BGPRouterReconciler", "controller-runtime", "For(BGPRouter); Watches BGPPeer, BGPPolicy, Secret, BGPAdvertisement (bgprouter_controller.go:495-529)")
+    Component(bgpvrfrec, "BGPVRFInstanceReconciler", "controller-runtime", "For(BGPVRFInstance); Watches BGPVRFInstance -> owning router (bgpvrfinstance_controller.go:36-58)")
+    Component(gobgp, "Embedded GoBGP", "osrg/gobgp v4, in-process", "EVPN path origination/import for this node's router")
+    Component(gcticker, "GCReconciler.RunGC", "hand-rolled ticker, 5min default", "No watches at all -- started by cmd/galactic-router/root.go:295-314, not SetupWithManager (gc_controller.go:59-64)")
+}
+
+System_Ext(fabricrouter, "fabric-router", "FRR DaemonSet, config/fabric-router/ -- NODE_NAME-selected frr.conf.<nodename> (daemonset.yaml:83-93)")
+
+Rel(client, envoy, "HTTP request", "IPv6")
+Rel(nso, envoy, "Generates/patches xDS config")
+Rel(tenant, k8sapi, "Deploys Pod/VM; triggers CNI ADD")
+
+Rel(envoy, sidecarreconciler, "Shares one pod netns; no direct RPC")
+Rel(sidecarreconciler, k8sapi, "Watches EndpointSlice (cluster-scoped)")
+Rel(sidecarreconciler, sidecarstore, "SetDesired per EndpointSlice")
+Rel(sidecarstore, gatewaypublisher, "Triggers PublishGateway when a VPC's VRF is first created")
+Rel(gatewaypublisher, k8sapi, "CreateOrUpdate BGPVRFInstance, BGPAdvertisement")
+Rel(sidecarstore, usidprogs, "Attaches usid_egress to its own VRF's veth (ebpfdatapath.go)")
+
+Rel(veth, ipam, "Chain-invoked (conflist order)")
+Rel(ipam, cnibgp, "prevResult")
+Rel(cnibgp, k8sapi, "CreateOrUpdate BGPVRFInstance, BGPAdvertisement; publish EndpointSlice")
+Rel(cnibgp, usidmaps, "Registers locator_table, function_table,\nvrf_table, ifindex_vrf_table (bgp.go:651,654,658,667)")
+Rel(cnibgp, usidprogs, "Attaches usid_egress to this Pod's host-side interface")
+
+Rel(attachwatch, usidprogs, "Attach/detach on netlink events")
+Rel(locatorroute, k8sapi, "Reads this node's own BGPRouter")
+Rel(sidecarreturn, k8sapi, "Reads BGPAdvertisement (ingress-host-ifindex/-mac annotations)")
+Rel(sidecarreturn, usidmaps, "Registers locator_table, function_table, vrf_table")
+Rel(vrfsweep, k8sapi, "Lists BGPVRFInstance, BGPRouter")
+Rel(vrfsweep, usidmaps, "Repairs vrf_table only")
+
+Rel(k8sapi, bgprouterrec, "Watch events")
+Rel(bgpvrfrec, bgprouterrec, "Re-triggers owning router's reconcile")
+Rel(bgprouterrec, gobgp, "Applies DesiredRouter (peers, VRFs, EVPN paths, policies)")
+Rel(gobgp, fabricrouter, "Peers over eBGP underlay", "must carry every node's locator /64")
+Rel(gcticker, k8sapi, "Deletes orphaned BGPAdvertisement/BGPVRFInstance CRDs and VRF interfaces")
+
+@enduml
