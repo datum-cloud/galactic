@@ -28,8 +28,8 @@ publishes a per-pod `discoveryv1.EndpointSlice` (when the attachment has an
 IPv6 address to carry) — the mechanism the HTTP-ingress extension server
 discovers VPC backends through; see
 [docs/plans/854-vpc-http-ingress-endpointslice.md](../plans/854-vpc-http-ingress-endpointslice.md)
-and [docs/cni/configuration.md](../cni/configuration.md)'s "EndpointSlice
-publish" section.
+and [docs/cni/conflist-reference.md](../cni/conflist-reference.md)'s
+"EndpointSlice publish" section.
 
 The CNI attach side is a **chain of small binaries**, not one monolithic
 plugin: a master plugin (`galactic-veth` for containers, `galactic-tap` for
@@ -296,8 +296,10 @@ inference is needed). No Kubernetes dependency at all.
 
 There is no single `PluginConf` shape anymore — each binary in the chain reads
 only the fields its own JSON stanza carries. See
-[docs/cni/configuration.md](../cni/configuration.md) for the full per-binary
-field tables and seven example conflists; summary:
+[docs/cni/conflist-reference.md](../cni/conflist-reference.md) for the full
+per-binary field tables and
+[docs/cni/conflist-examples.md](../cni/conflist-examples.md) for seven
+example conflists; summary:
 
 | Field           | Read by                                                                                                          | Description                                                                                                                                       |
 | --------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -305,7 +307,7 @@ field tables and seven example conflists; summary:
 | `vpcattachment` | every binary                                                                                                     | Base62-encoded 16-bit VPCAttachment identifier                                                                                                    |
 | `namespace`     | `galactic-veth`/`galactic-tap`/`galactic-bgp`                                                                    | Kubernetes namespace for NAD/BGP CRD lookup; resolution order is this field → `GALACTIC_CNI_NAMESPACE` → `HostConf.Namespace` → `galactic-system` |
 | `mtu`           | `galactic-veth`/`galactic-tap`                                                                                   | MTU for the host-side interface (veth pair or tap); 0 uses kernel default                                                                         |
-| `ipam`          | `galactic-veth`/`galactic-tap` (decides whether to delegate), `galactic-ipam` (reads the block's own sub-fields) | IPAM delegation block; `type` names the delegate binary (`galactic-ipam`). See [docs/cni/configuration.md](../cni/configuration.md#ipam-fields).  |
+| `ipam`          | `galactic-veth`/`galactic-tap` (decides whether to delegate), `galactic-ipam` (reads the block's own sub-fields) | IPAM delegation block; `type` names the delegate binary (`galactic-ipam`). See [docs/cni/conflist-reference.md](../cni/conflist-reference.md#ipam-fields).  |
 | `terminations`  | `galactic-route` only                                                                                            | Static routes to install on the host-side interface (`network`, `via`)                                                                            |
 
 There is no `interface_type` field anymore — which binary you invoke *is* the
@@ -318,7 +320,7 @@ path (`--node-name` exists only on the separate `galactic-cni` installer
 binary's own `init` subcommand). Each binary's own `parseConf()` resolves the settings below on every
 ADD/DEL/CHECK/STATUS call, in the listed precedence, re-exporting the result as a
 process env var. `galactic-ipam` and `galactic-route` skip this table entirely —
-see [docs/cni/configuration.md](../cni/configuration.md#runtime-configuration).
+see [docs/cni/environment-variables.md](../cni/environment-variables.md).
 
 | Variable                          | Resolution precedence (highest first)                                                                                                                                                           | Default                              | Resolved by                                     |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ----------------------------------------------- |
@@ -341,7 +343,7 @@ shape the `init` installer subcommand writes into the static conflist at
 (`debug`/`info`/`warn`/`error`) controls how much detail each binary's own
 `setupLogging()` emits — `info` (the default) logs one line per operation for
 start/outcome plus all warnings/errors; `debug` adds per-resource milestones. See
-[docs/cni/configuration.md#log-verbosity](../cni/configuration.md#log-verbosity).
+[docs/cni/environment-variables.md#log-verbosity](../cni/environment-variables.md#log-verbosity).
 
 ### CNI chain ADD result
 
@@ -379,15 +381,15 @@ interface entry since the fd is handed off to the VM hypervisor, not moved
 into a container netns. Both masters run IPAM identically (if `"ipam"` is
 present) and both configure the host gateway (`internal/hostgw`) before
 printing their own result — see
-[Interface Types](../cni/configuration.md#master-plugin-fields-galactic-veth--galactic-tap)
-in the CNI config doc.
+[Interface Types](../cni/conflist-reference.md#master-plugin-fields-galactic-veth--galactic-tap)
+in the Conflist Field Reference.
 
 The host gateway's IPv4 address is assigned as a `/25` on the host tap (vs.
 `/32` everywhere else) so it looks like a real subnet to the VM guest, adding
 it with `IFA_F_NOPREFIXROUTE` to suppress the kernel's auto-created connected
 route for the wider mask — otherwise this would reintroduce the
 subnet-router-anycast hazard that `/32` avoids elsewhere. See
-[docs/cni/configuration.md](../cni/configuration.md) for details.
+[docs/cni/conflist-reference.md](../cni/conflist-reference.md) for details.
 
 **Every stage after the master plugin passes `prevResult` straight through as
 its own result, unchanged** — `galactic-route` and `galactic-bgp` add no
