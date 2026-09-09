@@ -5,7 +5,7 @@
 > (VRF, veth/tap, SRv6 uSID datapath registration) and writes
 > `BGPAdvertisement`/`BGPVRFInstance` CRDs for `galactic-router` to pick up.
 
-_Last updated: 2026-08-18_
+_Last updated: 2026-09-09_
 
 This document covers the CNI side of Galactic only. See
 [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) for the BGP/EVPN control
@@ -134,16 +134,18 @@ galactic/
 │       ├── intf/            # Interface naming, base62↔hex encoding
 │       ├── ebpf/             # TC-BPF uSID datapath: preflight, uformat,
 │       │                    #   prog (usid.c), attach, usidmap, metrics —
-│       │                    #   see internal/plumbing/ebpf/doc.go. (The edge
-│       │                    #   gateway's own eBPF datapath — edgeprog,
-│       │                    #   edgemap, edgeattach — lives in this same
-│       │                    #   umbrella but is out of scope here; see
-│       │                    #   ARCHITECTURE-GATEWAY.md.)
+│       │                    #   see internal/plumbing/ebpf/doc.go. (Two
+│       │                    #   sibling datapaths live in this same
+│       │                    #   umbrella but are out of scope here: the edge
+│       │                    #   gateway's edgeprog/edgemap/edgeattach — see
+│       │                    #   ARCHITECTURE-GATEWAY.md — and galactic-nat66's
+│       │                    #   nat66prog/nat66map/nat66attach, which has no
+│       │                    #   architecture doc of its own yet.)
 │       ├── sysctl/          # Interface sysctl helpers
 │       └── vrf/             # Linux VRF create/delete/lookup
 ├── config/
-│   ├── system/              # galactic-system namespace (shared by every component)
-│   └── cni/                 # hostNetwork DaemonSet: `init` container stages
+│   ├── galactic-system/     # galactic-system namespace (shared by every component)
+│   └── galactic-cni/        # hostNetwork DaemonSet: `init` container stages
 │                            #   every chain binary + host-device into
 │                            #   /opt/cni/bin and writes the conflist +
 │                            #   kubeconfig; `run` container refreshes
@@ -162,7 +164,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (one unified ADD diagram covering both the veth and tap master-plugin paths, one DEL diagram covering the whole chain), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all three Galactic applications, including a component-level diagram of this chain's six binaries.
+See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/DEL sequence diagrams (one unified ADD diagram covering both the veth and tap master-plugin paths, one DEL diagram covering the whole chain), and [docs/architecture/](../architecture/) for C4 context/container/component diagrams of all four Galactic applications, including a component-level diagram of this chain's six binaries.
 
 ---
 
@@ -441,15 +443,15 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `go.datum.net/network`                   | bumped frequently     | BGP CRD API types (`BGPAdvertisement`, `BGPVRFInstance`) — `galactic-bgp` writes these via a bare `sigs.k8s.io/controller-runtime/pkg/client.Client`, no manager/reconciler                                                                                |
 | `sigs.k8s.io/controller-runtime`         | v0.24.1               | `pkg/client` only for `galactic-bgp`/`galactic-cni`'s installer (CRD CRUD, node lookup) — neither runs a manager or reconciler; that usage lives entirely in `galactic-router`/`galactic-gateway`, see the other two architecture docs                     |
 | `github.com/spf13/cobra`                 | v1.10.2               | CLI command/flag handling for every binary                                                                                                                                                                                                                 |
-| `github.com/containernetworking/cni`     | v1.3.0                | CNI plugin spec, skel, invoke                                                                                                                                                                                                                              |
+| `github.com/containernetworking/cni`     | v1.3.1                | CNI plugin spec, skel, invoke                                                                                                                                                                                                                              |
 | `github.com/containernetworking/plugins` | v1.9.1                | `pkg/ipam.ExecAdd`/`ExecDel`/`ExecCheck` (real IPAM delegation to `galactic-ipam`, used by `galactic-veth`/`galactic-tap`); `host-device` plugin, delegated to by `galactic-veth` for moving the guest veth into the pod netns                             |
 | `github.com/vishvananda/netlink`         | pinned pseudo-version | Linux netlink: VRF, veth, SRv6 routes                                                                                                                                                                                                                      |
 | `github.com/kenshaw/baseconv`            | v0.1.1                | Base62↔hex conversion for interface names                                                                                                                                                                                                                  |
 | `github.com/lorenzosaino/go-sysctl`      | v0.3.1                | Interface sysctl helpers                                                                                                                                                                                                                                   |
 | `github.com/coreos/go-iptables`          | v0.8.0                | iptables manipulation (CNI path)                                                                                                                                                                                                                           |
-| `github.com/cilium/ebpf`                 | v0.22.0               | TC-BPF uSID datapath load/attach/map bindings (`internal/plumbing/ebpf`) — a sibling `edgeprog`/`edgemap`/`edgeattach` set under the same package lives here too but belongs to `galactic-gateway`, see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) |
-| `google.golang.org/grpc`                 | v1.82.0               | gRPC health server (`galactic-cni`'s `run` subcommand, default `:5180`)                                                                                                                                                                                    |
-| `k8s.io/api`, `k8s.io/client-go`         | v0.36.0               | Kubernetes client, Node API types                                                                                                                                                                                                                          |
+| `github.com/cilium/ebpf`                 | v0.22.0               | TC-BPF uSID datapath load/attach/map bindings (`internal/plumbing/ebpf`) — two sibling program/map/attach sets live under the same package umbrella but belong elsewhere: `edgeprog`/`edgemap`/`edgeattach` to `galactic-gateway` (see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)), `nat66prog`/`nat66map`/`nat66attach` to `galactic-nat66` |
+| `google.golang.org/grpc`                 | v1.83.2               | gRPC health server (`galactic-cni`'s `run` subcommand, default `:5180`)                                                                                                                                                                                    |
+| `k8s.io/api`, `k8s.io/client-go`         | v0.36.3               | Kubernetes client, Node API types                                                                                                                                                                                                                          |
 
 Note: unlike `galactic-router`/`galactic-gateway`, no CNI-chain binary imports
 `github.com/spf13/viper` — each resolves its own config from conflist/env/API

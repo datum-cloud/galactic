@@ -5,17 +5,18 @@
 > `BGPVRFInstance`) and drives an embedded GoBGP server per node to
 > distribute EVPN (L2VPN/EVPN AFI/SAFI) paths between nodes.
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-09-09_
 
 This document covers `galactic-router`'s tenant-BGP core only. See
 [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md) for the CNI attach chain that
 writes the CRDs this binary reconciles, and
 [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) for the edge XDP NAT+LB
-gateway (`galactic-gateway`, which co-locates a `galactic-router` container
-in the same pod on gateway-role nodes but adds no gateway-specific code to
-this binary — see that doc for the `NetworkGateway`/`NetworkRule`
-reconcilers, which run in `galactic-gateway`, not here, despite living in
-the same `internal/controller` package). This file, together with those
+gateway (`galactic-gateway`, its own separate DaemonSet co-located on
+gateway-role nodes — not a `galactic-router` container in the same pod;
+that arrangement was retired when the gateway split into its own binary —
+see that doc for the `NetworkGateway`/`NetworkRule` reconcilers, which run
+in `galactic-gateway`, not here, despite living in the same
+`internal/controller` package). This file, together with those
 two, supersedes the former monolithic `ARCHITECTURE.md` — see
 [AGENTS.md](../../AGENTS.md) for which document to start from for a given
 task.
@@ -85,20 +86,22 @@ galactic/
 │   └── plumbing/            # Low-level kernel and network primitives (shared with
 │       ├── intf/            #   the CNI chain — see ARCHITECTURE-CNI.md's own copy
 │       ├── srv6/             #   of this tree for the CNI-side entries)
-│       ├── ebpf/             # GC's stale vrf_table entry sweep only, here
+│       ├── ebpf/             # GC's stale vrf_table entry sweep, plus vipxlatmap
+│       │                     #   (ServiceVIPBindingReconciler's tap-kind VIP
+│       │                     #   translation lookups), here
 │       └── vrf/
 ├── config/
-│   └── router/              # Shared RBAC/ServiceAccount, plus:
+│   └── galactic-router/      # Shared RBAC/ServiceAccount, plus:
 │       ├── base/             #   role-agnostic DaemonSet spec; not applied directly
 │       └── overlays/
-│           ├── default/       #   the plain (non-reflector) per-node role: patches ../../base
+│           ├── router/        #   the plain (non-reflector) per-node role: patches ../../base
 │           │                 #     with node affinity excluding control-plane nodes, opt-in via
 │           │                 #     galactic.datumapis.com/galactic=router -- runs on both
 │           │                 #     compute and edge nodes; no role-specific name/label of its own
-│           └── rr/            #   route-reflector role: independently patches ../../base with
-│                              #     GALACTIC_ROUTER_REFLECTOR=true, nameSuffix -rr, opt-in via
-│                              #     galactic.datumapis.com/galactic=control (mutually exclusive
-│                              #     with =router on the same node; not a
+│           └── control/       #   route-reflector role (galactic-router-rr): independently patches
+│                              #     ../../base with GALACTIC_ROUTER_REFLECTOR=true, nameSuffix -rr,
+│                              #     opt-in via galactic.datumapis.com/galactic=control (mutually
+│                              #     exclusive with =router on the same node; not a
 │                              #     galactic.datumapis.com/node value)
 └── containers/
     └── galactic-router/     # galactic-router production image
@@ -110,7 +113,7 @@ Production images are published by `.github/workflows/publish.yaml` — see CI/C
 
 ## Data Flow
 
-See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram, [docs/gc-cmd-sequence.md](../cni/gc-cmd-sequence.md) for the GC controller's orphaned CRD/kernel-VRF sweep sequence diagram (plus `galactic-cni`'s companion eBPF `vrf_table` sweep), and [docs/architecture/](../architecture/) for C4 context/container diagrams covering all three Galactic applications.
+See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence diagram, [docs/cni/gc-cmd-sequence.md](../cni/gc-cmd-sequence.md) for the GC controller's orphaned CRD/kernel-VRF sweep sequence diagram (plus `galactic-cni`'s companion eBPF `vrf_table` sweep), and [docs/architecture/](../architecture/) for C4 context/container diagrams covering all four Galactic applications.
 
 ---
 
@@ -118,7 +121,8 @@ See [docs/agent-startup.md](../agent-startup.md) for the router startup sequence
 
 | Component                | Binary                                     | Role                                                                                                                                                                                                                  |
 | ------------------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `internal/controller`    | `galactic-router`                          | controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Secret, Node, GC — not NetworkGateway/NetworkRule, see the note above); field index registration; CRD status helpers |
+| `internal/controller`    | `galactic-router`                          | controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Secret, Node, ServiceVIPBinding, GC — not NetworkGateway/NetworkRule, see the note above); field index registration; CRD status helpers |
+| `internal/webhook`       | `galactic-router`                          | `NetworkRuleValidator` — the `NetworkRule` admission webhook, gated behind `GALACTIC_ROUTER_WEBHOOK_ENABLED` (default off); registered on *this* binary's manager despite validating a gateway-domain CRD — see [Known Constraints](#known-constraints) |
 | `internal/reconcile`     | `galactic-router`                          | CRD → DesiredRouter translation                                                                                                                                                                                       |
 | `internal/runtime/gobgp` | `galactic-router`                          | Embedded GoBGP server (the only backend)                                                                                                                                                                              |
 | `internal/model`         | `galactic-router`                          | Internal BGP model types                                                                                                                                                                                              |
@@ -142,21 +146,36 @@ lives in `root.go`'s `runCmd`:
    plus optional `GALACTIC_ROUTER_BGP_LISTEN_PORT`,
    `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`, `GALACTIC_ROUTER_METRICS_PORT`,
    `GALACTIC_ROUTER_GRPC_HEALTH_PORT`, `GALACTIC_ROUTER_GC_NAMESPACE`,
-   `GALACTIC_ROUTER_GC_INTERVAL`, `GALACTIC_ROUTER_REFLECTOR`.
-2. Create the `RuntimeFactory`: an unconditional `gobgp.NewRuntimeFactory(...)` call —
-   GoBGP is the only backend, so there is no mode-based selection to make.
-3. Build controller-runtime manager (metrics on configurable port, default `:9179`;
-   no HTTP health endpoint).
+   `GALACTIC_ROUTER_GC_INTERVAL`, `GALACTIC_ROUTER_REFLECTOR`,
+   `GALACTIC_ROUTER_WEBHOOK_ENABLED`, `GALACTIC_ROUTER_WEBHOOK_PORT`,
+   `GALACTIC_ROUTER_WEBHOOK_CERT_DIR`.
+2. Resolve the BGP local address (`resolveBGPLocalAddress`): the explicit
+   env var if set, otherwise auto-detected from the host's `lo` interface.
+3. Build controller-runtime manager (metrics on configurable port, default
+   `:9179`; no HTTP health endpoint). If `GALACTIC_ROUTER_WEBHOOK_ENABLED`,
+   the manager is also given a `WebhookServer` on the configured port/cert
+   dir.
 4. Start gRPC health server on a configurable port (default `:5179`).
-5. RBAC pre-flight: `checkWatchPermissions` (in `main.go`) issues a
+5. If webhooks are enabled, register `internal/webhook.NetworkRuleValidator`
+   with this manager — see [Known Constraints](#known-constraints) for why
+   a `NetworkRule` admission webhook is wired into *this* binary, not
+   `galactic-gateway`.
+6. RBAC pre-flight: `checkWatchPermissions` (in `main.go`) issues a
    `SelfSubjectAccessReview` for every watched resource type and logs an actionable
    error if watch RBAC is missing (informer caches would otherwise silently never sync).
-6. Register field indexes: BGPPeer→secret, BGPPeer→router, BGPPolicy→router,
+7. Open this node's own `vip_xlat_table` handle (`vipxlatmap.OpenPinnedVipXlatTable`)
+   for `ServiceVIPBindingReconciler`'s tap-kind branch — a missing pin (no
+   eBPF uSID datapath loaded on this node yet) is logged, not fatal, and
+   only matters once a tap-kind `ServiceVIPBinding` is actually reconciled.
+8. Register field indexes: BGPPeer→secret, BGPPeer→router, BGPPolicy→router,
    BGPAdvertisement→router, BGPVRFInstance→router, BGPRouter→node.
-7. Register eight controllers: BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance,
-   BGPPolicy, Secret, Node, and GC (the GC controller also starts a ticker goroutine
-   that waits for cache sync, then runs on `--gc-interval`, default 5m).
-8. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
+9. Register the peer-state event emitter (`controller.NewPeerStateEventEmitter`)
+   with the manager — see the peer-FSM design decision below.
+10. Register nine controllers: BGPRouter, BGPPeer, BGPAdvertisement,
+    BGPVRFInstance, BGPPolicy, Secret, Node, ServiceVIPBinding, and GC (the
+    GC controller also starts a ticker goroutine that waits for cache sync,
+    then runs on `--gc-interval`, default 5m).
+11. `mgr.Start(ctx)` — blocks until the signal-handler context is cancelled.
 
 This is identical whether the pod is running in the plain role
 (`config/galactic-router/overlays/router/`, opt-in via
@@ -184,6 +203,9 @@ there instead.
 | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`  | No       | `5179`            | gRPC health check port (liveness/readiness probes)                                                   |
 | `GALACTIC_ROUTER_GC_NAMESPACE`      | No       | `galactic-system` | Namespace the GC controller scans for orphaned CRDs                                                  |
 | `GALACTIC_ROUTER_GC_INTERVAL`       | No       | `5m`              | GC controller sweep interval                                                                         |
+| `GALACTIC_ROUTER_WEBHOOK_ENABLED`   | No       | `false`           | Enables the `NetworkRule` admission webhook (`internal/webhook.NetworkRuleValidator`)                |
+| `GALACTIC_ROUTER_WEBHOOK_PORT`      | No       | `9443`            | Webhook server listen port (matches controller-runtime's own default)                                |
+| `GALACTIC_ROUTER_WEBHOOK_CERT_DIR`  | No       | —                 | TLS cert/key directory for the webhook server; empty uses controller-runtime's own default           |
 
 See [docs/router/configuration.md](../router/configuration.md) for the full reference, including CLI flags and precedence.
 
@@ -202,7 +224,8 @@ co-located `galactic-gateway` container's own health port on the same
 
 | Package                  | Binary                                   | Responsibility                                                                                                                                                                 | Owns state        |
 | ------------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- |
-| `internal/controller`    | galactic-router                          | controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Node, Secret, GC); field index registration; CRD status helpers               | No                |
+| `internal/controller`    | galactic-router                          | controller-runtime reconcilers (BGPRouter, BGPPeer, BGPAdvertisement, BGPVRFInstance, BGPPolicy, Node, Secret, ServiceVIPBinding, GC); field index registration; CRD status helpers | No                |
+| `internal/webhook`       | galactic-router                          | `NetworkRuleValidator`: the `NetworkRule` admission webhook (opt-in via `GALACTIC_ROUTER_WEBHOOK_ENABLED`); `AllowAllAuthorizer` is the only `Authorizer` implementation today | No                |
 | `internal/reconcile`     | galactic-router                          | Translates BGPRouter + related CRDs into `model.DesiredRouter`; enforces node targeting, timer validation, AFI validation                                                      | No                |
 | `internal/runtime`       | galactic-router                          | `RouterRuntime` interface; `RuntimeManager` (keyed map of live runtimes, double-checked lock create)                                                                           | Yes (runtime map) |
 | `internal/runtime/gobgp` | galactic-router                          | Embeds GoBGP v4; lazy-starts on first Apply; handles peer/VRF/EVPN-path/policy add/update/delete; tracks established timestamps; logs peer FSM transitions (`peer_monitor.go`) | Yes (per-router)  |
@@ -220,14 +243,14 @@ co-located `galactic-gateway` container's own health port on the same
 
 | Dependency                       | Version               | Purpose                                                                                                                                                                         |
 | -------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `github.com/osrg/gobgp/v4`       | v4.7.0                | Embedded BGP server                                                                                                                                                              |
+| `github.com/osrg/gobgp/v4`       | v4.9.0                | Embedded BGP server                                                                                                                                                              |
 | `go.datum.net/network`           | bumped frequently     | BGP CRD API types (BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance)                                                                                             |
 | `sigs.k8s.io/controller-runtime` | v0.24.1               | Full manager + reconciler framework: manager, field indexes, eight registered controllers (see Entry Points)                                                                    |
 | `github.com/spf13/cobra`         | v1.10.2               | CLI command/flag handling                                                                                                                                                       |
 | `github.com/spf13/viper`         | v1.21.0               | Config resolution (flags/env/defaults) — unlike the CNI-chain binaries (see [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)), which resolve config themselves and don't import viper |
 | `github.com/vishvananda/netlink` | pinned pseudo-version | Linux netlink: VRF, SRv6 routes (GC's kernel-state sweep)                                                                                                                       |
-| `google.golang.org/grpc`         | v1.82.0               | gRPC health server (default `:5179`)                                                                                                                                            |
-| `k8s.io/api`, `k8s.io/client-go` | v0.36.0               | Kubernetes client, Node/Secret API types                                                                                                                                        |
+| `google.golang.org/grpc`         | v1.83.2               | gRPC health server (default `:5179`)                                                                                                                                            |
+| `k8s.io/api`, `k8s.io/client-go` | v0.36.3               | Kubernetes client, Node/Secret API types                                                                                                                                        |
 
 ---
 
@@ -286,6 +309,7 @@ own publish/image details.
 - **GoBGP RIB is ephemeral.** All BGP state is in-process memory. On restart, sessions and paths must be re-established from CRD state; controller-runtime's reconcile loop handles this automatically.
 - **EVPN Type 5 is implemented, not deferred.** `internal/runtime/gobgp/paths.go`'s `buildEVPNPaths` builds real `EVPNIPPrefixRoute` NLRIs, deriving the Route Distinguisher from `routerID + ":0"` (not from the CRD). The `BGPVRFInstance` CRD carries its own explicit `RouteDistinguisher` and import/export Route Targets (see Key Design Decisions above), applied via `internal/runtime/gobgp/runtime.go`'s `applyVRFs`. There is no `ErrMissingRouteDistinguisher` or similar rejection path in the current code.
 - **No binary's `cmdDel` tears down shared kernel/CRD state.** See [ARCHITECTURE-CNI.md#known-constraints](ARCHITECTURE-CNI.md#known-constraints) for the CNI-side half; this reconciler's GC controller (`internal/gc`) is the asynchronous cleanup path for all of it.
+- **The `NetworkRule` admission webhook lives in this binary, not `galactic-gateway`.** `internal/webhook.NetworkRuleValidator` is wired into `cmd/galactic-router/root.go`, gated behind `GALACTIC_ROUTER_WEBHOOK_ENABLED` (default `false`) — even though `NetworkRule` is otherwise entirely a `galactic-gateway`-domain CRD (see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)). It is not deployed today: no `ValidatingWebhookConfiguration`/`Service` exists in `config/` yet, and the only `Authorizer` implementation is `AllowAllAuthorizer` — see [ARCHITECTURE-GATEWAY.md#known-constraints](ARCHITECTURE-GATEWAY.md#known-constraints) for the resulting `Accepted`-condition gap this leaves on the gateway side.
 
 ---
 
@@ -305,6 +329,8 @@ own publish/image details.
 | Hash-based no-op suppression                 | `internal/hash/hash.go`; annotation `galactic.datum.net/config-hash` on BGPRouter        |
 | GoBGP server lifecycle (start/reconfigure)   | `internal/runtime/gobgp/server.go`                                                       |
 | SRv6 SID computation for BGP Prefix-SID      | `internal/plumbing/srv6/usid.go:ComputeSID`                                              |
+| Tap-kind ServiceVIPBinding / vip_xlat_table   | `internal/controller/servicevipbinding_controller.go`, `internal/plumbing/ebpf/vipxlatmap` |
+| `NetworkRule` admission webhook               | `internal/webhook/networkrule_webhook.go:NetworkRuleValidator`                          |
 
 **Stable vs. frequently changed:**
 - Stable: `internal/plumbing/` (pure kernel primitives), `internal/model/types.go`, `internal/runtime/runtime.go` (interface)
@@ -320,3 +346,4 @@ own publish/image details.
 - No binary's `cmdDel` deletes the VRF, veth/tap, routes, the eBPF `vrf_table` entry, or `BGPAdvertisement`/`BGPVRFInstance` CRDs — each CNI-chain binary's own DEL only handles its own per-container bookkeeping. Shared-resource cleanup is entirely this GC controller's job (`internal/gc`), to avoid racing a concurrent ADD during pod restarts.
 - Production images are published by `.github/workflows/publish.yaml` as separate per-binary images (`galactic-cni`, `galactic-router`, `galactic-gateway`), not one shared image — see CI/CD above.
 - `internal/controller` also hosts `NetworkGatewayReconciler`/`NetworkRuleReconciler`/`usidresolver.go` — these register with `galactic-gateway`'s manager, not `galactic-router`'s (compare `cmd/galactic-router/root.go`'s controller registration list in Entry Points above against `cmd/galactic-gateway/root.go`'s — see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)). Don't assume every reconciler type in this package runs in this binary.
+- The reverse also holds: `internal/webhook.NetworkRuleValidator` — the admission webhook for `galactic-gateway`'s own `NetworkRule` CRD — registers with *this* binary's manager (`cmd/galactic-router/root.go`), not `galactic-gateway`'s. Don't assume every `NetworkRule`-related type runs wherever `NetworkRuleReconciler` does.
