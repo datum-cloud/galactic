@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-gateway
+spec:
+  template:
+    spec:
+      # Image override only. This must NOT carry a galactic-router entry:
+      # `containers` is a strategic-merge list keyed on `name`, so an entry
+      # for a container config/galactic-gateway/base/daemonset.yaml doesn't
+      # define is *added* rather than overridden. This patch used to list
+      # one, from when galactic-router ran as a sidecar in the gateway pod;
+      # once that moved to its own DaemonSet, the entry stayed behind and
+      # silently resurrected a galactic-router container with an image and
+      # nothing else -- no GALACTIC_ROUTER_NODE_NAME, no volumes -- which
+      # exited 1 ("node name is required") into CrashLoopBackOff on both
+      # gateway nodes while the gateway container itself stayed Ready (pod
+      # stuck at 1/2). galactic-router reaches these nodes via
+      # config/galactic-router/overlays/router/ like every other node,
+      # since they carry galactic.datumapis.com/galactic=router.
+      containers:
+        - name: galactic-gateway
+          image: galactic-gateway:latest
+          imagePullPolicy: Never

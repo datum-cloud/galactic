@@ -38,22 +38,26 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# galactic-nat66 transitively imports both
-# internal/plumbing/ebpf/nat66prog (the sharded NAT66 egress XDP program it
-# loads directly) and, via internal/plumbing/ebpf/nat66attach ->
-# internal/plumbing/ebpf/nat66map -> ... no further transitive eBPF
-# program dependency of its own -- but galactic-router's shared
-# internal/plumbing/ebpf/prog (the SRv6 uSID TC-BPF program) is still
-# generated here too, matching containers/galactic-gateway/Dockerfile's
-# own two-package-generate pattern, since a NAT66 shard node also needs the
-# uSID decap datapath transitively available to the rest of this module's
-# build graph. Neither package's bpf2go output (*_bpfel.go/.o,
-# *_bpfeb.go/.o) is committed to git (see each package's doc.go), so both
-# must be regenerated here.
+# galactic-nat66's build graph reaches all three of this module's eBPF
+# program packages, so all three must be generated here -- none of their
+# bpf2go output (*_bpfel.go/.o, *_bpfeb.go/.o) is committed to git (see each
+# package's doc.go). Only the first is loaded by this binary; the other two
+# arrive transitively and still have to compile:
+#   - nat66prog  -- the sharded NAT66 egress XDP program, loaded directly
+#                   via internal/plumbing/ebpf/nat66attach.
+#   - prog       -- the SRv6 uSID TC-BPF program, via
+#                   internal/plumbing/ebpf/attach and .../usidmap.
+#   - edgeprog   -- the edge NAT+LB DSR XDP program, via internal/gateway
+#                   and internal/controller -> .../edgemap. galactic-nat66
+#                   never loads it, but shares those packages with
+#                   galactic-gateway, so it links against the bindings.
+# Dropping any one of these turns into an "undefined: <Prog><Type>" build
+# failure in the go build step below, not a missing-file error.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       clang llvm linux-libc-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN go generate ./internal/plumbing/ebpf/prog/...
+RUN go generate ./internal/plumbing/ebpf/edgeprog/...
 RUN go generate ./internal/plumbing/ebpf/nat66prog/...
 
 # Build galactic-nat66

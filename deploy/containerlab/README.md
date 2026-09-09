@@ -76,8 +76,7 @@ topology nodes. Each cluster's `control-plane`/`worker` nodes above are its memb
 
 ```
 AS 65000 (dfw fabric-router / FRR)   ──eBGP──  tr1 (AS 65100)
-AS 65000 (iad fabric-router / FRR)   ──eBGP──  tr3:eth5,eth6,eth7 (AS 65100)
-AS 65000 (iad fabric-control / FRR)  ──eBGP──  tr3:eth4 (AS 65100)
+AS 65000 (iad fabric-router / FRR)   ──eBGP──  tr3:eth4,eth5,eth6,eth7 (AS 65100)
 AS 65000 (sjc fabric-router / FRR)   ──eBGP──  tr2 (AS 65100)
 
 AS 65000 (dfw-tenant / galactic-router)    ──iBGP──  iad-control-tenant (AS 65000 RR)
@@ -195,7 +194,6 @@ deploy/containerlab/
 ├── resources/
 │   ├── galactic-cni/            # galactic-cni installer DaemonSet + ConfigMap
 │   ├── fabric-router/           # FRR DaemonSet per-site overlays (dfw, iad, sjc)
-│   ├── fabric-control/iad/        # FRR DaemonSet iad-control overlay
 │   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs (dfw, iad, sjc)
 │   ├── galactic-control/iad/    # galactic-router RR + BGP CRs (iad-control)
 │   └── tenants/                 # test VPCs — one shared base/ (Namespace + netshoot

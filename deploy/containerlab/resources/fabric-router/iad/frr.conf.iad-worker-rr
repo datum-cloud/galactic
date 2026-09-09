@@ -1,5 +1,5 @@
 frr defaults traditional
-hostname iad-fabric-control
+hostname iad-fabric-rr
 log syslog informational
 
 interface lo
