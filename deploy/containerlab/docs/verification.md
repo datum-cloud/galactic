@@ -32,8 +32,6 @@ docker exec sjc-control-plane kubectl exec -n galactic-system ds/fabric-router \
   -- vtysh -c "show bgp ipv6 unicast summary"
 docker exec iad-control-plane kubectl exec -n galactic-system ds/fabric-router \
   -- vtysh -c "show bgp ipv6 unicast summary"
-docker exec iad-control-plane kubectl exec -n galactic-system ds/fabric-control \
-  -- vtysh -c "show bgp ipv6 unicast summary"
 ```
 
 ## galactic-router DaemonSets (EVPN tenant)

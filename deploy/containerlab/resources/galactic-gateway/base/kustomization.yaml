@@ -9,7 +9,7 @@
 resources:
   - gateway
 patches:
-  - path: router-lab-patch.yaml
+  - path: gateway-lab-patch.yaml
     target:
       kind: DaemonSet
       name: galactic-gateway
