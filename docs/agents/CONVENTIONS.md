@@ -70,6 +70,45 @@ import (
 
 Do not use `_` in Go identifiers except in test package names.
 
+### Docstrings
+
+A function or method docstring describes the function itself: what it does,
+what its parameters mean, and what it returns — including the error
+conditions it can produce. Nothing else belongs in it.
+
+- Do not describe historical context: no "used to do X", "replaced an
+  earlier Y design", "added after an incident", or any other narration of
+  how the function changed over time. That belongs in the commit message
+  that made the change, not in text every future reader has to read.
+- Do not link out to other documents for context: no URLs, no "see
+  docs/...", no "see ARCHITECTURE-*.md". A docstring must stand on its own —
+  a reader should never have to leave the function to understand its
+  contract. Design rationale that genuinely needs a home belongs in the
+  relevant `docs/agents/ARCHITECTURE-*.md`'s own sections, not folded into
+  the docstring.
+- Do not name specific deployment environments, infra vendors, or site names,
+  and do not claim something was "found live in production" — describe the
+  general mechanism and failure mode a function guards against, not the
+  specific incident or platform that surfaced it.
+- Keep it short: state the contract in as few sentences as the behavior
+  actually requires.
+
+```go
+// Good — the function, its inputs, and its output, nothing else
+// resolveBGPLocalAddress returns explicit when non-empty, and otherwise calls
+// detect to read the BGP local address from the host's loopback. A detection
+// failure is an error; there is no silent fallback to an unset address.
+func resolveBGPLocalAddress(explicit string, detect func() (string, error)) (string, error) { ... }
+
+// Bad — historical narrative and an external link instead of the contract
+// resolveBGPLocalAddress was added when the router moved off a hardcoded
+// address; see docs/router/configuration.md for the full migration history.
+// It used to just read GALACTIC_ROUTER_BGP_LOCAL_ADDRESS directly...
+func resolveBGPLocalAddress(explicit string, detect func() (string, error)) (string, error) { ... }
+```
+
+This applies to exported and unexported function/method docstrings alike.
+
 ### Error handling
 
 - Wrap errors with context using `fmt.Errorf("what failed: %w", err)`. The context string must complete the sentence "could not `<what>`".

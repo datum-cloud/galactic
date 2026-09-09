@@ -24,6 +24,9 @@ below.
 | gRPC health port | `GALACTIC_ROUTER_GRPC_HEALTH_PORT` | `--grpc-health-port` | `5179` |
 | Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE` | `--gc-namespace` | `galactic-system` |
 | Orphan-cleanup interval | `GALACTIC_ROUTER_GC_INTERVAL` | `--gc-interval` | `5m` |
+| Webhook enabled | `GALACTIC_ROUTER_WEBHOOK_ENABLED` | `--webhook-enabled` | `false` |
+| Webhook port | `GALACTIC_ROUTER_WEBHOOK_PORT` | `--webhook-port` | `9443` |
+| Webhook cert dir | `GALACTIC_ROUTER_WEBHOOK_CERT_DIR` | `--webhook-cert-dir` | _(controller-runtime default)_ |
 
 ## Required Options
 
@@ -142,6 +145,35 @@ the informer caches sync at startup.
 **Type:** duration
 **Default:** `5m`
 
+### `--webhook-enabled` / `GALACTIC_ROUTER_WEBHOOK_ENABLED`
+
+Enables the `NetworkRule` admission webhook. Disabled by default: turning it
+on requires TLS cert material this repo does not provision, plus the webhook
+`ValidatingWebhookConfiguration` and `Service` manifests actually being
+applied — enabling it without both is a broken deployment, not a safe
+default. When enabled, the webhook uses a placeholder allow-all authorizer
+(`internal/webhook`) until the companion operator integration exists.
+
+**Type:** boolean
+**Default:** `false`
+
+### `--webhook-port` / `GALACTIC_ROUTER_WEBHOOK_PORT`
+
+TCP port the webhook server binds when `--webhook-enabled` is set. Matches
+controller-runtime's own default so callers need not look it up separately.
+
+**Type:** integer
+**Default:** `9443`
+**Valid values:** `1`–`65535`
+
+### `--webhook-cert-dir` / `GALACTIC_ROUTER_WEBHOOK_CERT_DIR`
+
+Directory containing the webhook server's TLS certificate and key, when
+`--webhook-enabled` is set. Empty uses controller-runtime's own default.
+
+**Type:** string
+**Default:** _(empty; controller-runtime default)_
+
 ## Configuration Precedence
 
 Values are resolved in the following order (highest to lowest priority):
@@ -162,9 +194,16 @@ env:
         fieldPath: spec.nodeName
   - name: GALACTIC_ROUTER_GC_NAMESPACE
     value: galactic-system
+  - name: GALACTIC_ROUTER_GRPC_HEALTH_PORT
+    value: "5179"
 ```
 
-All other options use their defaults.
+`GALACTIC_ROUTER_GRPC_HEALTH_PORT` is set explicitly even though `5179` is
+also the binary's own default, matching this manifest's convention of not
+relying on defaults silently staying in sync. All other options use their
+defaults; the `router` and `control` overlays (see
+`config/galactic-router/overlays/`) additionally set
+`GALACTIC_ROUTER_REFLECTOR` and `GALACTIC_ROUTER_BGP_LISTEN_PORT` per role.
 
 ### CLI flag configuration
 

@@ -7,9 +7,9 @@ the design rationale (why DSR, why anycast, why no VRF dependency) see
 this document only covers the "how", not the "why", and cross-links back to
 that doc wherever the mechanics matter.
 
-> Last verified: 2026-08-25 against the current working tree of
+> Last verified: 2026-09-09 against the current working tree of
 > `cmd/galactic-gateway/`, `internal/config/gateway.go`, `config/galactic-gateway/`,
-> and `deploy/containerlab/resources/galactic-gateway/`.
+> `config/galactic-router/`, and `deploy/containerlab/resources/galactic-gateway/`.
 
 ## What `galactic-gateway` is, and when you need it
 
@@ -17,14 +17,18 @@ that doc wherever the mechanics matter.
 load-balances into a tenant VPC's backend Pods, using a stateless DSR
 (Direct Server Return) datapath over a Maglev consistent-hash ring — no
 address/port rewriting, no VRF or Geneve dependency. It is a **separate
-binary and container from `galactic-router`**, deployed as the second
-container in a two-container pod (`galactic-router` + `galactic-gateway`,
-`config/galactic-gateway/base/daemonset.yaml`) on dedicated gateway-role
-nodes only, specifically so a crash on either side no longer takes the
-other down with it. You need it only on nodes that terminate external
-ingress traffic for tenant VPCs — every other node in the fleet
-(`galactic-router` default role, `galactic-cni`, `galactic-nat66`) has no
-dependency on it. See
+binary, container, and DaemonSet from `galactic-router`** —
+`config/galactic-gateway/base/daemonset.yaml` is a single-container pod —
+deployed on dedicated gateway-role nodes only, alongside `galactic-router`'s
+own standalone DaemonSet on those same nodes (opted in via
+`galactic.datumapis.com/galactic=router`, the same flag `compute` nodes use;
+see `config/galactic-router/overlays/router/`). `galactic-router` used to
+run as a second container inside this same pod; it now runs as its own pod,
+so a crash on either side no longer takes the other's *pod* down with it,
+not just the other's binary. You need `galactic-gateway` only on nodes that
+terminate external ingress traffic for tenant VPCs — every other node in the
+fleet (`galactic-router` default role, `galactic-cni`, `galactic-nat66`) has
+no dependency on it. See
 [ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) for the full
 design (DSR vs. the removed Full-NAT design, the anycast BGP model, the
 XDP packet path) and
@@ -56,7 +60,7 @@ used to mean the tenant-serving role and would collide with a diagram or
 comment using today's meaning).
 
 A gateway node still needs the same underlay BGP connectivity every other
-node needs — `galactic.datumapis.com/fabric=true` for `fabric-router` — and,
+node needs — `galactic.datumapis.com/fabric=router` for `fabric-router` — and,
 in a real (non-lab) deployment, is expected to be tainted to keep ordinary
 tenant workloads off it (see `deploy/containerlab/node_files/iad/config.yaml`
 for the lab's own taint).
@@ -73,24 +77,31 @@ ServiceAccount in `galactic-system`) and `config/galactic-gateway/rbac.yaml`
 (a `ClusterRole`/`ClusterRoleBinding` pair granting that ServiceAccount
 `get`/`list`/`watch`/`update`/`patch` on `networkgateways`/`networkrules`
 (+`/status`), full CRUD on `bgpadvertisements`, and read-only
-`get`/`list`/`watch` on `bgprouters`). It deliberately does **not** include
+`get`/`list`/`watch` on both `bgprouters` and `bgpvrfinstances` — the latter
+so `NetworkGatewayReconciler`'s `BGPVRFInstance` watch has an informer it's
+actually allowed to list/watch; omitting it once left the manager's cache
+sync hanging forever behind a silent `forbidden` reflector error, so it's
+called out explicitly in `config/galactic-gateway/rbac.yaml`'s own
+comments). It deliberately does **not** include
 `config/galactic-gateway/base/` (the DaemonSet itself) — see Step 2. It's
 safe and idempotent to apply cluster-wide regardless of how many gateway
 nodes exist, and is **not** part of the root `config/kustomization.yaml`'s
 default resource list: this role is opt-in, not "batteries included"
 cluster bring-up.
 
-Because the two-container pod has exactly one ServiceAccount identity, the
-`galactic-gateway` ServiceAccount must **also** be bound to the
-`galactic-router` `ClusterRole` from `config/galactic-router/rbac.yaml` (a
-second `ClusterRoleBinding` inside `config/galactic-gateway/rbac.yaml`
-already does this) — so `config/galactic-router/rbac.yaml` must be applied
-too. If you already run `kubectl apply -k config/galactic-router/` for your
-compute nodes, this is already satisfied; a gateway-only cluster with no
-compute nodes yet must apply that RBAC on its own
-(`kubectl apply -f config/galactic-router/rbac.yaml`). A bare
-`galactic-gateway` container with no co-located `galactic-router` container
-advertising the node's tenant BGP session is not a supported configuration.
+`galactic-gateway` is a single-container pod with its own ServiceAccount and
+ClusterRole — it carries none of `galactic-router`'s RBAC, and none is
+bound to it. But a gateway node still needs a co-located `galactic-router`
+**pod** (its own DaemonSet, not a container in this one) advertising that
+node's tenant BGP session, since the gateway datapath itself publishes no
+routes — so `config/galactic-router/` must also be applied to every gateway
+node, opted in the same way a `compute` node is
+(`galactic.datumapis.com/galactic=router`; see
+[docs/router/configuration.md](../router/configuration.md)). If you already
+run `kubectl apply -k config/galactic-router/` for your compute nodes, this
+is already satisfied — the same DaemonSet's affinity matches both roles. A
+bare `galactic-gateway` pod with no co-located `galactic-router` pod on that
+node is not a supported configuration.
 
 ## Step 2: Why `config/galactic-gateway/base/` isn't applied as-is
 
@@ -151,44 +162,43 @@ rejects an SRv6 address that isn't a native IPv6 address (an IPv4 or
 4-in-6 value fails validation, per `internal/config/gateway.go`).
 
 The `8081`/`5181` metrics/gRPC-health port defaults deliberately differ
-from `galactic-router`'s own `9179`/`5179` defaults, because
-`galactic-gateway` runs as a second container in the same
-`hostNetwork: true` pod — every port it binds shares that node's network
-namespace with the co-located `galactic-router` container and must not
-collide with it:
+from `galactic-router`'s own `9179`/`5179` defaults, because on a gateway
+node both run as separate `hostNetwork: true` pods — every port either one
+binds shares that node's network namespace and must not collide, even
+though the two are no longer co-located in the same pod:
 
-| Container                                      | Metrics | gRPC health |
-| ---------------------------------------------- | ------- | ----------- |
-| `galactic-router` (this pod's tenant-BGP side) | `9179`  | `5179`      |
-| `galactic-gateway`                             | `8081`  | `5181`      |
+| Pod                                                                                          | Metrics | gRPC health |
+| --------------------------------------------------------------------------------------------- | ------- | ----------- |
+| `galactic-router` (this node's tenant-BGP side, `config/galactic-router/overlays/router/`)     | `9179`  | `5179`      |
+| `galactic-gateway`                                                                              | `8081`  | `5181`      |
 
-The co-located `galactic-router` container carries no gateway-specific
-env of its own; `config/galactic-gateway/base/daemonset.yaml` sets it up
-identically to `galactic-router`'s default role, plus an explicit
-`GALACTIC_ROUTER_GRPC_HEALTH_PORT=5179` (so it can never silently drift
-into colliding with `galactic-gateway`'s own `5181`) and
+The `galactic-router` pod on a gateway node is the exact same DaemonSet as
+`galactic-router`'s default role on a `compute` node — it carries no
+gateway-specific env of its own and sets
 `GALACTIC_ROUTER_BGP_LISTEN_PORT=-1` (outbound-only — no inbound BGP
-listener on this role, same as `galactic-router`'s default overlay). See
+listener on this role). See
 [docs/router/configuration.md](../router/configuration.md) for what every
 `GALACTIC_ROUTER_*` variable does.
 
-### Two-container pod capabilities
+### Capabilities across the two co-located pods
 
-Both containers run with `runAsUser: 0`, `allowPrivilegeEscalation: false`,
-`readOnlyRootFilesystem: true`, and `drop: ["ALL"]` on their Linux
-capabilities, adding back only what each needs:
+`galactic-gateway` and the `galactic-router` pod it's co-located with on the
+same gateway node both run with `runAsUser: 0`,
+`allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, and
+`drop: ["ALL"]` on their Linux capabilities, adding back only what each
+needs — each in its own pod's `securityContext`, not shared:
 
-| Container          | Added capabilities            | Why                                                                                                                                                                 |
+| Pod                | Added capabilities            | Why                                                                                                                                                                 |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic-router`  | `NET_ADMIN`                   | Same as the plain `default`/`rr` roles — no BPF/PERFMON, since gateway-specific eBPF is confined to the other container                                             |
+| `galactic-router`  | `NET_ADMIN`                   | Same as the plain `default`/`rr` roles — no BPF/PERFMON, since gateway-specific eBPF is confined to the `galactic-gateway` pod                                      |
 | `galactic-gateway` | `NET_ADMIN`, `BPF`, `PERFMON` | `BPF` for program/map creation; `PERFMON` because the verifier only allows pointer+scalar arithmetic on packet data when the loading process is `perfmon_capable()` |
 
-The `galactic-gateway` container also requires `/sys/fs/bpf` mounted from
-the host as a real bpffs (`type: Directory`, not `DirectoryOrCreate` — a
-missing mount fails loudly rather than silently pinning maps to a plain
-directory); `edgeattach.PinDir` pins every map under
-`/sys/fs/bpf/galactic-edge`. The `galactic-router` container mounts
-`/var/run/netns` read-only for its own GC netns-liveness check (unrelated
+`galactic-gateway` also requires `/sys/fs/bpf` mounted from the host as a
+real bpffs (`type: Directory`, not `DirectoryOrCreate` — a missing mount
+fails loudly rather than silently pinning maps to a plain directory);
+`edgeattach.PinDir` pins every map under `/sys/fs/bpf/galactic-edge`. The
+`galactic-router` pod separately mounts `/var/run/netns` read-only for its
+own GC netns-liveness check (unrelated
 to the gateway datapath — see
 [ARCHITECTURE-ROUTER.md](../agents/ARCHITECTURE-ROUTER.md)).
 
@@ -202,7 +212,7 @@ overlay directory:
 ```
 deploy/containerlab/resources/galactic-gateway/
 ├── base/                 # kustomize base pointing at config/galactic-gateway/base,
-│                         #   plus a lab-only image-tag patch (router-lab-patch.yaml)
+│                         #   plus a lab-only image-tag patch (gateway-lab-patch.yaml)
 ├── iad-gateway1/
 │   ├── kustomization.yaml
 │   ├── node-patch.yaml      # pins to one node, sets PUBLIC_INTERFACE/SRV6_ADDRESS
@@ -273,7 +283,7 @@ for you.
 
 ### `bgprouter.yaml`/`bgppeer.yaml` — this node's tenant BGP
 
-The co-located `galactic-router` container needs its own `BGPRouter`/
+The co-located `galactic-router` pod needs its own `BGPRouter`/
 `BGPPeer` CRDs, exactly like every other `galactic-router` node — a gateway
 node is not exempt from the normal tenant-BGP setup:
 
@@ -463,19 +473,19 @@ kubectl get networkgateway <node-name> -n galactic-system -o yaml
 kubectl get networkrule <rule-name> -n galactic-system -o yaml
 ```
 
-Check both containers' logs — `galactic-gateway`'s own gRPC health check
-only reports `SERVING` once the XDP datapath is attached and its VIP table
-is reachable (it's forced to `NOT_SERVING` at process start specifically
-so a probe never reports healthy before that point):
+Check both pods' logs — `galactic-gateway`'s own gRPC health check only
+reports `SERVING` once the XDP datapath is attached and its VIP table is
+reachable (it's forced to `NOT_SERVING` at process start specifically so a
+probe never reports healthy before that point):
 
 ```sh
-kubectl logs -n galactic-system <pod> -c galactic-gateway
-kubectl logs -n galactic-system <pod> -c galactic-router
+kubectl logs -n galactic-system <galactic-gateway-pod>
+kubectl logs -n galactic-system -l app.kubernetes.io/name=galactic-router --field-selector spec.nodeName=<node-name>
 ```
 
-Check this node's tenant BGP session state — `galactic-router`'s
-co-located container advertises this node's own `BGPRouter`/`BGPPeer`
-exactly like any other node; `STATE` should read `Established`:
+Check this node's tenant BGP session state — the co-located `galactic-router`
+pod advertises this node's own `BGPRouter`/`BGPPeer` exactly like any other
+node; `STATE` should read `Established`:
 
 ```sh
 kubectl get bgppeer -n galactic-system -o wide
@@ -489,7 +499,7 @@ Prometheus metrics `galactic-gateway` exposes on its metrics port
 separately:
 
 ```sh
-kubectl exec -n galactic-system <pod> -c galactic-gateway -- \
+kubectl exec -n galactic-system <galactic-gateway-pod> -- \
   wget -qO- http://localhost:8081/metrics | grep galactic_edge_
 ```
 
@@ -525,4 +535,4 @@ access.
   Full-NAT datapath).
 - [docs/router/configuration.md](../router/configuration.md) — the
   `GALACTIC_ROUTER_*` environment variables the co-located `galactic-router`
-  container in this same pod also reads.
+  pod on the same gateway node also reads.

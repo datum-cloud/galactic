@@ -8,12 +8,13 @@
 > existing tenant EVPN mesh — there is no primary/secondary node, no BGP
 > local-preference split, and no address rewriting anywhere in the datapath.
 
-_Last updated: 2026-08-17_
+_Last updated: 2026-09-09_
 
 This document covers `galactic-gateway` and the `NetworkGateway`/
 `NetworkRule` reconcilers only. See
 [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) for the tenant-BGP core
-(`galactic-router`, co-located in the same pod on gateway-role nodes) and
+(`galactic-router`, its own separate DaemonSet co-located on gateway-role
+nodes — not the same pod) and
 [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md) for the CNI attach chain that
 produces the `BGPAdvertisement`/`BGPRouter` CRDs this binary's own
 uSID-resolution code reads. A third, separate `galactic-nat66` binary (out
@@ -21,7 +22,8 @@ of this document's scope) provides sharded stateful NAT66 egress for
 VPC-attached workloads reaching the internet — see `cmd/galactic-nat66`,
 `internal/plumbing/ebpf/nat66prog`, and the `NAT66Shard` reconciler
 (`internal/controller/nat66shard_controller.go`, which registers with
-`galactic-router`'s manager, not this binary's) rather than this file for
+`galactic-nat66`'s own manager (`cmd/galactic-nat66/root.go`) — a separate
+binary from both this one and `galactic-router`) rather than this file for
 egress. This file,
 together with the other two architecture docs, supersedes the former
 monolithic `ARCHITECTURE.md` — see [AGENTS.md](../../AGENTS.md) for which
@@ -131,9 +133,9 @@ galactic/
 │   │                        #   recovery — no VRF/Geneve state, no
 │   │                        #   primary/secondary placement
 │   ├── maglev/               # Pure-Go Maglev consistent-hash lookup table
-│   │                        #   (internal/maglev/table.go), shared in spirit
-│   │                        #   (not by import) with galactic-nat66's own
-│   │                        #   independent shard-placement ring
+│   │                        #   (internal/maglev/table.go) — this binary's
+│   │                        #   only importer; galactic-nat66 has no
+│   │                        #   analogous ring today (see Known Constraints)
 │   └── plumbing/ebpf/
 │       ├── edgeprog/         # Compiled XDP program (edgedsr.c, program
 │       │                     #   edge_lb) + bpf2go bindings
@@ -152,7 +154,7 @@ galactic/
 │   │   ├── kustomization.yaml   # Covers only the two files above — deliberately
 │   │   │                        #   excludes base/, see that dir's own note
 │   │   └── base/
-│   │       ├── daemonset.yaml   # Two-container pod: galactic-router + galactic-gateway
+│   │       ├── daemonset.yaml   # Single-container pod: galactic-gateway only
 │   │       └── kustomization.yaml
 │   └── fabric-router/        # (not gateway-specific, but fabric-router must also
 │                              #   run on gateway-role nodes — see ARCHITECTURE-CNI.md
@@ -197,7 +199,7 @@ sample rule.
 
 ## Data Flow
 
-See [docs/architecture/](../architecture/) for C4 context/container diagrams covering all three Galactic applications, including how `galactic-gateway` co-locates with `galactic-router` on gateway-role nodes.
+See [docs/architecture/](../architecture/) for C4 context/container diagrams covering all four Galactic applications, including how `galactic-gateway` and `galactic-router` run as separate, co-located DaemonSets on gateway-role nodes.
 
 ### Control-plane reconcile flow (per gateway node, per `NetworkGateway` reconcile)
 
@@ -428,34 +430,40 @@ mechanism deriving it automatically from a node's own `BGPRouter`
 locator/node-ID; see the [worked example](#worked-containerlab-example) for
 how a real deployment picks this value.
 
-### Two-container pod (`config/galactic-gateway/base/daemonset.yaml`)
+### Deployment (`config/galactic-gateway/base/daemonset.yaml`)
 
-One `ServiceAccount` (`galactic-gateway`) for both containers — a
-Kubernetes Pod has exactly one ServiceAccount identity, not a design
-choice; its `ClusterRoleBinding`s grant the union of what each container
-needs (the trimmed BGP-only `galactic-router` ClusterRole *plus* this
-binary's own, see [RBAC](#rbac) below).
+Single-container pod: `galactic-gateway` only, with its own
+`ServiceAccount` (`galactic-gateway`) and `ClusterRoleBinding` (see
+[RBAC](#rbac) below). `galactic-router` used to run as a second container
+in this same pod; it now runs on the same gateway-role node as its own,
+separate DaemonSet and pod (`config/galactic-router/overlays/router/`).
 
-| Container          | Capabilities                  | Why                                                                                                                                                                                                                                                                                                                          |
-| ------------------ | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic-router`  | `NET_ADMIN`                   | Same as the plain `default`/`rr` roles — no BPF/PERFMON, since gateway-specific eBPF is confined to the other container now                                                                                                                                                                                       |
-| `galactic-gateway` | `NET_ADMIN`, `BPF`, `PERFMON` | `BPF` for the `bpf()` syscalls (program/map creation); `PERFMON` because the verifier only allows pointer+scalar arithmetic on packet data/data_end when the loading process is `perfmon_capable()` — without it, even a `root` container gets "pointer arithmetic ... prohibited for !root" |
+| Capability | Why                                                                                                                                                                                                                                                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NET_ADMIN` | netlink XDP attach                                                                                                                                                                                                                                                                                                          |
+| `BPF`       | the `bpf()` syscalls themselves (program/map creation)                                                                                                                                                                                                                                                                      |
+| `PERFMON`   | the verifier only allows pointer+scalar arithmetic on packet data/data_end when the loading process is `perfmon_capable()` — without it, even a `root` container gets "pointer arithmetic ... prohibited for !root"                                                                                                       |
 
-Both containers mount host paths: `galactic-router` mounts
-`/var/run/netns` read-only (GC's netns-liveness check, see
-[ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)); `galactic-gateway`
-mounts `/sys/fs/bpf` (must already be a real bpffs — `type: Directory`,
+Mounts `/sys/fs/bpf` (must already be a real bpffs — `type: Directory`,
 not `DirectoryOrCreate`, so a missing mount fails loudly instead of
 silently pinning to a plain directory) for `edgeattach.PinDir`
-(`/sys/fs/bpf/galactic-edge`).
+(`/sys/fs/bpf/galactic-edge`). See [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)
+for the co-located `galactic-router` pod's own capabilities (`NET_ADMIN`
+only) and its `/var/run/netns` mount (GC's netns-liveness check) — a
+separate pod spec entirely, not part of this manifest.
 
 ### RBAC
 
 `config/galactic-gateway/rbac.yaml`'s `ClusterRole` covers exactly what
 `NetworkGatewayReconciler`/`NetworkRuleReconciler` touch:
 `networkgateways`/`networkrules` (+ `/status`) read-write,
-`bgpadvertisements` full CRUD, `bgprouters` read-only (for
-`usidresolver.go` — see above). This was split out of
+`bgpadvertisements` full CRUD, and read-only `get`/`list`/`watch` on both
+`bgprouters` (for `usidresolver.go` — see above) and `bgpvrfinstances`
+(`NetworkGatewayReconciler.SetupWithManager` also watches `BGPVRFInstance`
+to re-trigger reconciliation once a backend's owning VRF/advertisement data
+actually exists; omitting this rule left the manager's informer cache never
+finishing `WaitForCacheSync`, silently, behind a `bgpvrfinstances ...
+is forbidden` reflector error loop). This was split out of
 `config/galactic-router/rbac.yaml`'s single `ClusterRole`, which used to grant one
 `galactic-router` identity both the BGP-family CRD verbs and
 `networkgateways`/`networkrules` verbs when both reconciler sets lived in
@@ -463,14 +471,13 @@ the same binary — every *other* (non-gateway) node's `galactic-router`
 ServiceAccount now loses that access entirely, rather than every
 `galactic-router` pod in the cluster carrying it as before.
 
-Because one Pod has one ServiceAccount, the `galactic-gateway`
-ServiceAccount is bound to *both* this `ClusterRole` and the (trimmed,
-BGP-only) `galactic-router` `ClusterRole` from `config/galactic-router/rbac.yaml` —
-the smallest deviation from a literal per-container RBAC split Kubernetes
-allows. `config/galactic-router/rbac.yaml` must be applied for any gateway node
-deployment (a bare `galactic-gateway` container with no co-located
-`galactic-router` container advertising the node's tenant BGP session is
-not a supported configuration).
+`galactic-gateway` has its own self-contained `ServiceAccount`/`ClusterRole`
+— it carries none of `galactic-router`'s RBAC, and none is bound to it. A
+gateway node still needs `config/galactic-router/` (its RBAC included)
+applied too, since the co-located `galactic-router` **pod** — not a
+container in this one — is what actually advertises the node's tenant BGP
+session: a bare `galactic-gateway` pod with no co-located `galactic-router`
+pod on that node is not a supported configuration.
 
 ---
 
@@ -488,7 +495,7 @@ not a supported configuration).
 | `internal/gateway` (`quota.go`)                         | galactic-gateway | `NodeQuotaEnforcer` — real, coarse node-level admission caps (max rules/tenant, max total `vip_table` entries); `NoopQuotaEnforcer` for tests                                                    | Yes (in-memory reservation counters) |
 | `internal/gateway` (`telemetry.go`)                     | galactic-gateway | `PrometheusTelemetryEmitter` — control-plane-drop counter only (no primary/secondary placement gauge — see Key Design Decisions); `NoopTelemetryEmitter` for tests                               | Yes (Prometheus metric state)        |
 | `internal/gateway` (`recovery.go`, `diff.go`)           | galactic-gateway | `Engine.ReconcileOrphans` (crash recovery) and `diffRuleKeys` (the pure key-set diff both `Reconcile`/`ReconcileOrphans` build on)                                                               | No                                   |
-| `internal/maglev` (`table.go`)                          | galactic-gateway, galactic-nat66 | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; shared in design, not by import, with `galactic-nat66`'s independent shard-placement ring | No                        |
+| `internal/maglev` (`table.go`)                          | galactic-gateway | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; this binary's only importer today (`galactic-nat66` has no analogous shard-placement ring — see Known Constraints) | No                        |
 | `internal/plumbing/ebpf/edgeprog`                       | galactic-gateway | Compiled XDP program (`edgedsr.c`, program `edge_lb`) + bpf2go-generated Go bindings (`EdgedsrObjects`)                                                                                          | No                                   |
 | `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                                        | Yes (via `KernelTable`)              |
 | `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + native-XDP-only attach of the compiled program to one interface                                                                                                                          | Yes (pinned maps, held link)         |
@@ -506,7 +513,7 @@ not a supported configuration).
 | `sigs.k8s.io/controller-runtime`      | v0.24.1           | Full manager + reconciler framework — like `galactic-router`, not a bare client like the CNI chain                                                                                                                                                                                                  |
 | `github.com/prometheus/client_golang` | v1.24.1           | `PrometheusTelemetryEmitter`'s control-plane-drop counter, plus `edgemetrics`'s pull-based `vip_table`/`vip_stats_table`/`drop_reasons` collector                                                                                                                                                   |
 | `github.com/spf13/cobra`              | v1.10.2           | CLI command/flag handling                                                                                                                                                                                                                                                                            |
-| `google.golang.org/grpc`              | v1.83.0           | gRPC health server (default `:5181`)                                                                                                                                                                                                                                                                 |
+| `google.golang.org/grpc`              | v1.83.2           | gRPC health server (default `:5181`)                                                                                                                                                                                                                                                                 |
 | `k8s.io/api`, `k8s.io/client-go`      | v0.36.3           | Kubernetes client, `SelfSubjectAccessReview` (RBAC pre-flight)                                                                                                                                                                                                                                       |
 
 ---
@@ -638,8 +645,11 @@ tier structure.
 **Publish pipeline:** `.github/workflows/publish.yaml`'s
 `publish-galactic-gateway-image` job builds and pushes
 `ghcr.io/datum-cloud/galactic-gateway`; `publish-kustomize-bundles` stamps
-that tag (alongside the `galactic-router` tag) into `config/galactic-gateway/base`,
-since that base's DaemonSet runs both images in one pod.
+that tag into `config/galactic-gateway/base`. That same step also stamps
+the `galactic-router` tag into the same path — a carryover from when this
+DaemonSet ran both images in one pod, now stale (`daemonset.yaml` is
+single-container and references no `galactic-router` image at all — see
+[Known Constraints](#known-constraints)).
 
 **Container image:**
 - `containers/galactic-gateway/Dockerfile` — golang builder →
@@ -666,6 +676,7 @@ since that base's DaemonSet runs both images in one pod.
 - **`bpf_fib_lookup()` requires IPv6 forwarding sysctls on the public uplink, not just XDP driver support.** `setupGatewayDatapath` calls `sysctl.ConfigureFIBLookupUplinkSysctls` before attaching the datapath — without `net.ipv6.conf.<iface>.forwarding` and `net.ipv6.conf.all.forwarding` both set, the kernel returns `BPF_FIB_LKUP_RET_NOT_FWDED` for every lookup regardless of anything this program does, which `edgedsr.c`'s own drop-reason accounting cannot distinguish from a generic FIB lookup failure. Found via live-kernel investigation of a pre-existing containerlab veth/XDP_TX blocker: the sysctl gap, not `XDP_TX` itself, was the actual cause. A related, lab-only characteristic the same investigation turned up: native `XDP_TX` on a veth pair only promotes a frame into the peer's normal receive stack (visible to `tcpdump`) if the peer *also* runs an XDP program — otherwise delivery uses a raw fast-path invisible to normal tools. This does not apply to a real physical NIC uplink in production, where there is no "peer's own XDP program" question to begin with.
 - **A bonded public uplink attaches per-slave, with per-slave FIB-lookup sysctls to match.** Native-mode XDP against a Linux bonding master is not reliable: confirmed failing outright with "operation not supported" on a real gateway node (802.3ad over an igb/tg3 slave pair). Not every kernel's bonding driver categorically lacks `ndo_bpf` — some do implement it by forwarding the attach to every slave — but that still requires each slave's own driver to support native XDP itself, which not every NIC driver does (tg3 is a commonly cited example that doesn't), so this codebase never relies on attaching to the master working, on any kernel. `edgeattach.ResolveTargets` expands a bonding-master `GALACTIC_GATEWAY_PUBLIC_INTERFACE` to its slave interfaces (never the master itself — see `internal/plumbing/bond`, shared with `internal/plumbing/ebpf/attach`'s TC-BPF path, which attaches to the master *and* its slaves instead), and `setupGatewayDatapath` attaches to and configures FIB-lookup sysctls on every one of them. This is not cosmetic: `edgedsr.c`'s `push_outer_header` calls `bpf_fib_lookup()` with `ctx->ingress_ifindex` — confirmed against the source, not assumed — which for a native XDP program attached to a bond slave is that slave's own ifindex, not the bond master's, so `net.ipv6.conf.<slave>.forwarding` (not `net.ipv6.conf.<bond-master>.forwarding`) is what the kernel actually checks. A bonding master with no resolvable slaves is a hard startup error, not a silent fallback to attaching the master (which would only risk repeating the same failure). `edgeattach.Attach` is all-or-nothing across every resolved slave in one call — if any single slave's driver can't accept a native XDP attach (a real possibility per the tg3 note above, not independently confirmed against that node specifically), the whole datapath startup fails rather than running in a degraded, missing-that-slave's-traffic state; this has not been exercised against real igb/tg3 hardware, only veth in tests, so whether all of a real bonded pair's slaves actually accept native XDP on the affected class of hardware is still open. One further accepted tradeoff: attaching per-slave rather than to the bond as a whole means a slave failing over (LACP renegotiation, a link flap) is not automatically picked up — there is no Watch-style re-resolution here, matching the rest of this package's "resolved once at startup" design (see `edgeattach`'s package doc comment).
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place, unlike the removed Full-NAT predecessor's `conn_table`, which relied on `BPF_MAP_TYPE_LRU_HASH` self-eviction for the same purpose.
+- **`publish.yaml` still stamps a `galactic-router` tag into `config/galactic-gateway/base`.** A leftover from when this DaemonSet ran both images in one pod (see [CI/CD](#cicd)) — harmless today only because the string it replaces no longer appears in this single-container manifest, not because the step was updated to reflect the split. Worth removing in `.github/workflows/publish.yaml` rather than relying on that.
 - **Egress is out of this binary's scope, not unimplemented.** An earlier plan (`docs/plans/865-edge-gateway-nat66-egress.md`) proposed adding a second, egress-masquerading XDP personality to this same program and process; that approach was superseded by a separate, sharded stateful NAT66 tier (`galactic-nat66`, its own binary — see `cmd/galactic-nat66` and `internal/controller/nat66shard_controller.go`) rather than built here. `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.
 
 ---
@@ -691,7 +702,7 @@ since that base's DaemonSet runs both images in one pod.
 **Stable vs. frequently changed:**
 - Stable: `internal/maglev/table.go` (a settled, well-tested algorithm — Google's published Maglev construction), `internal/plumbing/ebpf/edgemap` (mirrors `usidmap`'s already-settled crash-safety pattern)
 - Active: `internal/gateway/quota.go`/`telemetry.go` (real but coarse — see Key Design Decisions; likely to grow richer enforcement)
-- Out of scope here, but related and evolving: `galactic-nat66`'s sharded stateful NAT66 egress tier (`cmd/galactic-nat66`, a separate binary, its own Maglev ring built from this same `internal/maglev` package for shard placement rather than backend selection), the `NetworkRule` admission webhook
+- Out of scope here, but related and evolving: `galactic-nat66`'s sharded stateful NAT66 egress tier (`cmd/galactic-nat66`, a separate binary; unlike this gateway, it has no consistent-hash ring for shard selection today — `EgressDefaultRouteAdd` installs only the first resolvable shard SID, every other configured shard sitting as cold standby), the `NetworkRule` admission webhook
 
 **Non-obvious patterns:**
 - `gatewayDatapathKeepAlive` (`cmd/galactic-gateway/gateway.go`) intentionally never calls `Close` on the loaded eBPF objects or the XDP `link.Link` — see that var's doc comment for the live incident this guards against (silent GC-triggered detach with every control-plane signal still looking healthy).

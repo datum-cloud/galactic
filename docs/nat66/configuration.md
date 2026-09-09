@@ -7,7 +7,7 @@ of standing this up from nothing, see
 [docs/nat66/getting-started.md](getting-started.md); this document only
 covers the "what", not the "why" or the step-by-step.
 
-> Last verified: 2026-08-25 against the current working tree of
+> Last verified: 2026-09-09 against the current working tree of
 > `internal/config/nat66.go`, `internal/config/cni.go`,
 > `cmd/galactic-nat66/`, `config/galactic-nat66/`,
 > `internal/controller/nat66shard_controller.go`, and
