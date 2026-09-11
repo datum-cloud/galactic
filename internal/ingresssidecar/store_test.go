@@ -272,3 +272,35 @@ var errTest = &testError{"boom"}
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+// TestStoreSharedPrefixSurvivesSiblingTeardown verifies that tearing down one
+// of two EndpointSlices sharing a backend address leaves the other's kernel
+// route in place. The platform publishes both a pod-owned slice and a
+// federated copy of it, so a shared address is the ordinary case.
+func TestStoreSharedPrefixSurvivesSiblingTeardown(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	store := NewStore(backend, testGrace, nil)
+
+	shared := func() *DesiredRoute {
+		return &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	}
+	if err := store.SetDesired(ctx, "ns/pod-a", shared()); err != nil {
+		t.Fatalf("SetDesired(pod-a): %v", err)
+	}
+	if err := store.SetDesired(ctx, "ns/projected-pod-a", shared()); err != nil {
+		t.Fatalf("SetDesired(projected-pod-a): %v", err)
+	}
+	if err := store.SetDesired(ctx, "ns/projected-pod-a", nil); err != nil {
+		t.Fatalf("SetDesired(projected-pod-a, nil): %v", err)
+	}
+
+	store.Sweep(ctx, time.Now().Add(2*testGrace))
+
+	if got := backend.routeCount(); got != 1 {
+		t.Errorf("routeCount = %d, want 1 (live slice still needs the route)", got)
+	}
+	if got := backend.vrfCount(); got != 1 {
+		t.Errorf("vrfCount = %d, want 1", got)
+	}
+}
