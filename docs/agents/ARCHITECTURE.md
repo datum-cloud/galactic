@@ -16,9 +16,9 @@ their own architecture document:
 | [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)   | The BGP/EVPN control plane — `galactic-router`                                                                                                     |
 | [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) | The edge XDP NAT+LB gateway — `galactic-gateway`, `NetworkGateway`/`NetworkRule`                                                                   |
 
-The fourth, `galactic-nat` (sharded stateful NAT66 egress, `EgressShard`),
+The fourth, `galactic-nat` (sharded stateful egress translation, `EgressShard`),
 has no architecture document of its own yet — see
-[docs/nat/configuration.md](../nat66/configuration.md) for its
+[docs/nat/configuration.md](../nat/configuration.md) for its
 configuration reference in the meantime.
 
 See [AGENTS.md](../../AGENTS.md#architecture-reference) for guidance on
