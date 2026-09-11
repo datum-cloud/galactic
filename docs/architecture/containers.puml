@@ -18,11 +18,11 @@ System_Boundary(galactic, "Galactic") {
     Container(gateway, "galactic-gateway", "Go, controller-runtime", "Reconciles NetworkGateway/NetworkRule CRDs; Active-Active BGP placement; own single-container DaemonSet on gateway-role nodes")
     Container(edgebpf, "Edge XDP NAT+LB datapath", "XDP (cilium/ebpf)", "DSR (Direct Server Return) load-balancing over a Maglev consistent-hash ring on the gateway node's public interface")
 
-    Container(nat66, "galactic-nat66", "Go, controller-runtime", "Reconciles NAT66Shard CRD; publishes a /128 BGPAdvertisement for this shard's SID + public address; own DaemonSet on every compute node")
+    Container(nat66, "galactic-nat", "Go, controller-runtime", "Reconciles EgressShard CRD; publishes a /128 BGPAdvertisement for this shard's SID + public address; own DaemonSet on every compute node")
     Container(nat66bpf, "NAT66 egress XDP datapath", "XDP (cilium/ebpf)", "Sharded, stateful SNAT/un-SNAT for tenant egress traffic on the shard's uplink interface")
 }
 
-Container_Ext(crds, "BGP / Gateway / NAT66 CRDs", "go.datum.net/network API", "BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, NetworkGateway, NetworkRule, NAT66Shard")
+Container_Ext(crds, "BGP / Gateway / NAT66 CRDs", "go.datum.net/network API", "BGPRouter, BGPPeer, BGPAdvertisement, BGPPolicy, BGPVRFInstance, NetworkGateway, NetworkRule, EgressShard")
 Container_Ext(vpccrds, "VPC / VPCAttachment CRDs", "go.datum.net/cloud API", "Owned by the companion VPC operator")
 Container_Ext(fabric, "fabric-router", "FRR DaemonSet", "eBGP underlay reachability")
 System_Ext(k8sapi, "Kubernetes API Server")
@@ -46,9 +46,9 @@ Rel(client, edgebpf, "External ingress traffic to VIP:port", "IPv6")
 Rel(gateway, router, "Co-located on the same gateway-role node -- separate pod/DaemonSet, not a sidecar", "no direct RPC")
 
 ' NAT66 internals
-Rel(nat66, crds, "Reconciles NAT66Shard; reads this node's own BGPRouter; creates/updates/deletes the shard's BGPAdvertisement", "controller-runtime manager")
-Rel(nat66, nat66bpf, "Loads/attaches XDP program; reads nat66_conn_table / drop_reasons for metrics", "cilium/ebpf")
-Rel(usidbpf, nat66bpf, "Tenant VRF default egress route SRv6-encapsulates toward a live shard SID (galactic-cni side, see GALACTIC_CNI_NAT66_SHARD_SIDS)", "SRv6, fabric-wide")
+Rel(nat66, crds, "Reconciles EgressShard; reads this node's own BGPRouter; creates/updates/deletes the shard's BGPAdvertisement", "controller-runtime manager")
+Rel(nat66, nat66bpf, "Loads/attaches XDP program; reads nat_conn_table / drop_reasons for metrics", "cilium/ebpf")
+Rel(usidbpf, nat66bpf, "Tenant VRF default egress route SRv6-encapsulates toward a live shard SID (galactic-cni side, see GALACTIC_CNI_EGRESS_SHARD_SIDS)", "SRv6, fabric-wide")
 Rel(nat66, router, "Co-located on the same compute node -- separate pod/DaemonSet", "no direct RPC")
 
 Rel(cnichain, k8sapi, "Node lookup, kubeconfig refresh", "client-go")

@@ -11,7 +11,7 @@
 # read.
 FROM scratch AS network
 
-# Build the galactic-nat66 binary
+# Build the galactic-nat binary
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -38,17 +38,17 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# galactic-nat66's build graph reaches all three of this module's eBPF
+# galactic-nat's build graph reaches all three of this module's eBPF
 # program packages, so all three must be generated here -- none of their
 # bpf2go output (*_bpfel.go/.o, *_bpfeb.go/.o) is committed to git (see each
 # package's doc.go). Only the first is loaded by this binary; the other two
 # arrive transitively and still have to compile:
-#   - nat66prog  -- the sharded NAT66 egress XDP program, loaded directly
-#                   via internal/plumbing/ebpf/nat66attach.
+#   - natprog  -- the sharded NAT66 egress XDP program, loaded directly
+#                   via internal/plumbing/ebpf/natattach.
 #   - prog       -- the SRv6 uSID TC-BPF program, via
 #                   internal/plumbing/ebpf/attach and .../usidmap.
 #   - edgeprog   -- the edge NAT+LB DSR XDP program, via internal/gateway
-#                   and internal/controller -> .../edgemap. galactic-nat66
+#                   and internal/controller -> .../edgemap. galactic-nat
 #                   never loads it, but shares those packages with
 #                   galactic-gateway, so it links against the bindings.
 # Dropping any one of these turns into an "undefined: <Prog><Type>" build
@@ -58,9 +58,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN go generate ./internal/plumbing/ebpf/prog/...
 RUN go generate ./internal/plumbing/ebpf/edgeprog/...
-RUN go generate ./internal/plumbing/ebpf/nat66prog/...
+RUN go generate ./internal/plumbing/ebpf/natprog/...
 
-# Build galactic-nat66
+# Build galactic-nat
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -ldflags "-s -w \
       -X go.datum.net/galactic/internal/metadata.Version=${VERSION} \
@@ -69,16 +69,16 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
       -X go.datum.net/galactic/internal/metadata.BuildDate=${BUILD_DATE} \
       -X go.datum.net/galactic/internal/metadata.SPDXLicense=${SPDX_LICENSE} \
       -X go.datum.net/galactic/internal/metadata.GitURL=${GIT_URL}" \
-    -o galactic-nat66 ./cmd/galactic-nat66
+    -o galactic-nat ./cmd/galactic-nat
 
-# Use distroless as minimal base image to package the binary. galactic-nat66
-# drives its eBPF/XDP and NAT66Shard CRD state through the cilium/ebpf and
+# Use distroless as minimal base image to package the binary. galactic-nat
+# drives its eBPF/XDP and EgressShard CRD state through the cilium/ebpf and
 # controller-runtime Go libraries directly, never shells out to `ip` or any
 # other host CLI tool, so no shell is required in the final image.
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/galactic-nat66 .
+COPY --from=builder /workspace/galactic-nat .
 USER 65532:65532
 
-ENTRYPOINT ["/galactic-nat66"]
+ENTRYPOINT ["/galactic-nat"]

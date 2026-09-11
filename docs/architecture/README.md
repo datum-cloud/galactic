@@ -36,16 +36,16 @@ underlay fabric, iBGP peers).
 
 The four separately-built, separately-deployed applications — the
 `galactic-veth` CNI chain, `galactic-router`, `galactic-gateway`, and
-`galactic-nat66` — plus the kernel eBPF datapaths each one drives and the
+`galactic-nat` — plus the kernel eBPF datapaths each one drives and the
 CRDs that connect them. `galactic-gateway` is deployed as its own
 single-container DaemonSet on gateway-role (`edge`) nodes; `galactic-router`
 runs there too, as its own independent DaemonSet (the same one that runs on
-`compute` nodes), not co-located in the same pod. `galactic-nat66` is the
+`compute` nodes), not co-located in the same pod. `galactic-nat` is the
 `compute`-node equivalent: its own single-container DaemonSet running
 unconditionally on every compute node, alongside — again not co-located
 with — that same `galactic-router` DaemonSet. The diagram shows each pairing
 co-located on the node but connected by no direct RPC — a crash in one does
-not take down the other; both `galactic-gateway` and `galactic-nat66`
+not take down the other; both `galactic-gateway` and `galactic-nat`
 publish their own BGP reachability by writing a `BGPAdvertisement` CRD that
 the co-located `galactic-router`'s embedded GoBGP picks up and advertises,
 not by speaking BGP themselves.

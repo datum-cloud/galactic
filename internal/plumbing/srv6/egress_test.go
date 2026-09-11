@@ -474,7 +474,7 @@ func TestRouteMainAdd_ResolvesIndirectGateway(t *testing.T) {
 }
 
 // TestEgressDefaultRouteAdd_EmptyShardListIsANoop covers the "no shard
-// configured yet" case config.EnvCNINAT66ShardSIDs's own doc comment
+// configured yet" case config.EnvCNIEgressShardSIDs's own doc comment
 // describes as normal, not an error -- no root needed since nothing ever
 // reaches netlink.
 func TestEgressDefaultRouteAdd_EmptyShardListIsANoop(t *testing.T) {
@@ -513,7 +513,7 @@ func TestEgressDefaultRouteAddRejectsUnspecifiedShardSID(t *testing.T) {
 // encapsulating toward the first configured shard SID, and that
 // EgressDefaultRouteDel removes it cleanly -- the mechanism that finally
 // gives a tenant VRF somewhere to send a packet with no more specific
-// route, closing the gap nat66.c's own shard-receive side was always
+// route, closing the gap nat.c's own shard-receive side was always
 // able to answer but nothing ever fed traffic into.
 //
 // Unlike this function's pre-TC-BPF implementation, no live route to

@@ -1,11 +1,11 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: galactic-nat66
+  name: galactic-nat
 spec:
   template:
     spec:
-      # config/galactic-nat66/base/daemonset.yaml's own affinity requires
+      # config/galactic-nat/base/daemonset.yaml's own affinity requires
       # galactic.datumapis.com/node: compute -- dfw-worker
       # (node_files/dfw/config.yaml) carries it, reusing that existing
       # compute worker as this site's shard rather than introducing a
@@ -15,19 +15,19 @@ spec:
       # already resolves to exactly it -- unlike
       # resources/galactic-gateway/iad-gateway1/, which needs a
       # kubernetes.io/hostname pin because iad has *two* edge-labeled
-      # nodes needing different per-node env. GALACTIC_NAT66_SHARD_SID/
+      # nodes needing different per-node env. GALACTIC_NAT_SHARD_SID/
       # _SHARD_PUB_ADDR below must be unique per shard node (see
-      # config/galactic-nat66/kustomization.yaml's doc comment), so
+      # config/galactic-nat/kustomization.yaml's doc comment), so
       # dfw/iad/sjc are three separate per-node overlays rather than one
       # overlay matching all three site workers with identical env.
       containers:
-        - name: galactic-nat66
+        - name: galactic-nat
           env:
             # eth1 is this lab's dedicated transit-fabric-facing uplink on
             # every node (see resources/galactic-cni/daemonset-patch.yaml's
             # comment) -- the same interface internal/plumbing/ebpf/
-            # nat66prog's XDP program attaches to.
-            - name: GALACTIC_NAT66_UPLINK_INTERFACE
+            # natprog's XDP program attaches to.
+            - name: GALACTIC_NAT_UPLINK_INTERFACE
               value: eth1
             # uFMT 48+16 uSID over dfw's own locator (2001:db8:ff01::/48,
             # see resources/galactic-router/dfw/bgprouter.yaml's
@@ -36,7 +36,7 @@ spec:
             # (an earlier version of this file reused it, on the theory
             # that this shard "runs on that exact physical node, not a
             # separate dedicated node"). That reuse was a real bug, found
-            # live: internal/plumbing/ebpf/nat66prog/nat66.c's own
+            # live: internal/plumbing/ebpf/natprog/nat.c's own
             # locator_matches only checks the top 64 bits (Block+Node-ID)
             # of a packet's outer destination against shard_sid -- see
             # that function's own doc comment -- so reusing dfw-worker's
@@ -53,7 +53,7 @@ spec:
             # iad-gateway1/node-patch.yaml's convention, even though this
             # address is never actually looked up through
             # function_table/vrf_table the way a real uSID is --
-            # NAT66ShardStatus.ShardSID's own doc comment says it's
+            # EgressShardStatus.ShardSID's own doc comment says it's
             # advertised as a plain /128 node-reachability route "no
             # VRFID/Function" -- the uFMT encoding here only keeps the
             # address inside dfw's locator block. Argument=1 is otherwise
@@ -61,9 +61,9 @@ spec:
             # collision -- kept for continuity with the other two sites'
             # identical choice, still a lab-only placeholder needing real
             # allocation logic (the same gap GALACTIC_GATEWAY_SRV6_ADDRESS
-            # and EnvNAT66ShardSID's own doc comment both flag today)
+            # and EnvNATShardSID's own doc comment both flag today)
             # before production.
-            - name: GALACTIC_NAT66_SHARD_SID
+            - name: GALACTIC_NAT_SHARD_SID
               value: "2001:db8:ff01:9:e001::"
             # Lab-only placeholder masquerade source address, same
             # "operator-supplied, no in-cluster derivation yet" status as
@@ -76,5 +76,5 @@ spec:
             # 2001:db8:1:*::/64; SRv6 locators: 2001:db8:ff0X::/48; the
             # ns60 ingress VIP: 2001:db8:6060::1) -- "9966" as a mnemonic
             # for "NAT66". ::1 here is dfw's shard (shard 1 of 3).
-            - name: GALACTIC_NAT66_SHARD_PUB_ADDR
+            - name: GALACTIC_NAT_SHARD_PUB_ADDR
               value: "2001:db8:9966:1::1"

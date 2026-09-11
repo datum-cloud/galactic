@@ -138,7 +138,7 @@ func TestCNIConfigEBPFInterfaces(t *testing.T) {
 
 	// Default: empty, not an error -- "fall back to
 	// attach.ResolveInterfaces' own auto-detection" is the pre-existing
-	// behavior, same stance as NAT66ShardSIDs' own default above.
+	// behavior, same stance as EgressShardSIDs' own default above.
 	cfg := NewCNIConfig()
 	cfg.Resolve(&ConflistValues{})
 	if cfg.EBPFInterfaces != "" {

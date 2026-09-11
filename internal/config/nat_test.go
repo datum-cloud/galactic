@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	testNAT66NodeName = "test-nat66-node"
-	testNAT66Iface    = "eth1"
-	testNATShardSID   = "fc00:1:2::1"
-	testNATShardPub4  = "192.0.2.10"
-	testNAT64Prefix   = "2001:db8:64::/96"
-	testNATShardPub   = "2001:db8:9999::1"
+	testNATNodeName  = "test-nat-node"
+	testNATIface     = "eth1"
+	testNATShardSID  = "fc00:1:2::1"
+	testNATShardPub4 = "192.0.2.10"
+	testNAT64Prefix  = "2001:db8:64::/96"
+	testNATShardPub  = "2001:db8:9999::1"
 )
 
 func TestNATConfigDefaults(t *testing.T) {
@@ -45,7 +45,7 @@ func TestNATConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvNATNodeName, testEnvNode)
 	t.Setenv(EnvNATMetricsPort, "9090")
 	t.Setenv(EnvNATGRPCHealthPort, "9091")
-	t.Setenv(EnvNATUplinkInterface, testNAT66Iface)
+	t.Setenv(EnvNATUplinkInterface, testNATIface)
 	t.Setenv(EnvNATShardSID, testNATShardSID)
 	t.Setenv(EnvNATShardPubAddr, testNATShardPub)
 
@@ -60,8 +60,8 @@ func TestNATConfigEnvOverride(t *testing.T) {
 	if cfg.GRPCHealthPort != 9091 {
 		t.Errorf("GRPCHealthPort = %d, want 9091", cfg.GRPCHealthPort)
 	}
-	if cfg.UplinkInterface != testNAT66Iface {
-		t.Errorf("UplinkInterface = %q, want %q", cfg.UplinkInterface, testNAT66Iface)
+	if cfg.UplinkInterface != testNATIface {
+		t.Errorf("UplinkInterface = %q, want %q", cfg.UplinkInterface, testNATIface)
 	}
 	if cfg.ShardSID != testNATShardSID {
 		t.Errorf("ShardSID = %q, want %q", cfg.ShardSID, testNATShardSID)
@@ -80,7 +80,7 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: testCaseMissingNodeName,
 			envVars: map[string]string{
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr:    testNATShardPub,
 			},
@@ -89,7 +89,7 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "missing uplink interface",
 			envVars: map[string]string{
-				EnvNATNodeName:     testNAT66NodeName,
+				EnvNATNodeName:     testNATNodeName,
 				EnvNATShardSID:     testNATShardSID,
 				EnvNATShardPubAddr: testNATShardPub,
 			},
@@ -98,8 +98,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "missing shard SID",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardPubAddr:    testNATShardPub,
 			},
 			wantErr: "shard SID is required",
@@ -107,8 +107,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "unparseable shard SID",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        "not-an-ip-address",
 				EnvNATShardPubAddr:    testNATShardPub,
 			},
@@ -117,8 +117,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "ipv4 shard SID is wrong family",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testIPv4Addr,
 				EnvNATShardPubAddr:    testNATShardPub,
 			},
@@ -129,8 +129,8 @@ func TestNATConfigValidate(t *testing.T) {
 			// NAT64 alone. What is still required is that it serve something.
 			name: "serving neither address family",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 			},
 			wantErr: "must serve at least one address family",
@@ -138,8 +138,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "NAT64 prefix without a public IPv4 address",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr:    testNATShardPub,
 				EnvNAT64Prefix:        testNAT64Prefix,
@@ -149,8 +149,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "public IPv4 address without a NAT64 prefix",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr:    testNATShardPub,
 				EnvNATShardPubAddr4:   testNATShardPub4,
@@ -160,8 +160,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "ipv6 shard public IPv4 address is wrong family",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr4:   testNATShardPub,
 				EnvNAT64Prefix:        testNAT64Prefix,
@@ -173,8 +173,8 @@ func TestNATConfigValidate(t *testing.T) {
 			// four-byte run, which only a /96 guarantees.
 			name: "NAT64 prefix of the wrong length",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr4:   testNATShardPub4,
 				EnvNAT64Prefix:        "2001:db8:64::/64",
@@ -184,8 +184,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "NAT64 prefix with bits below its length",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr4:   testNATShardPub4,
 				EnvNAT64Prefix:        "2001:db8:64::1/96",
@@ -195,8 +195,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: "ipv4 shard public address is wrong family",
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr:    testIPv4Addr,
 			},
@@ -205,8 +205,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: testCaseInvalidMetricsPort,
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr:    testNATShardPub,
 				EnvNATMetricsPort:     "0",
@@ -216,8 +216,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: testCaseInvalidGRPCHealthPort,
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr:    testNATShardPub,
 				EnvNATGRPCHealthPort:  "0",
@@ -227,8 +227,8 @@ func TestNATConfigValidate(t *testing.T) {
 		{
 			name: testCaseValidConfig,
 			envVars: map[string]string{
-				EnvNATNodeName:        testNAT66NodeName,
-				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATNodeName:        testNATNodeName,
+				EnvNATUplinkInterface: testNATIface,
 				EnvNATShardSID:        testNATShardSID,
 				EnvNATShardPubAddr:    testNATShardPub,
 			},
@@ -304,8 +304,8 @@ func TestNATConfigValidateAcceptsEachFamilyCombination(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(EnvNATNodeName, testNAT66NodeName)
-			t.Setenv(EnvNATUplinkInterface, testNAT66Iface)
+			t.Setenv(EnvNATNodeName, testNATNodeName)
+			t.Setenv(EnvNATUplinkInterface, testNATIface)
 			t.Setenv(EnvNATShardSID, testNATShardSID)
 			for k, v := range tt.envVars {
 				t.Setenv(k, v)
