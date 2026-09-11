@@ -687,7 +687,24 @@ func TestReconcileRadvActors_FailedStartupIsRetried(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("actors.failed never received a report for the interface that can't exist")
 	}
+	// Cancelling releases the attempt's context from the daemon's own, so a
+	// retry loop cannot grow memory without bound.
+	recorded, ok := actors.cancel[iface]
+	if !ok {
+		t.Fatalf("actors.cancel[%q] missing before radvActorFailed", iface)
+	}
+	cancelled := false
+	actors.cancel[iface] = func() {
+		cancelled = true
+		recorded()
+	}
+
 	radvActorFailed(actors, iface)
+
+	if !cancelled {
+		t.Fatalf("radvActorFailed did not cancel %q's context, leaving it attached to "+
+			"the daemon's context for the life of the process", iface)
+	}
 
 	if _, ok := actors.cancel[iface]; ok {
 		t.Fatalf("actors.cancel[%q] still present after radvActorFailed, want it cleared so the next reconcile retries",

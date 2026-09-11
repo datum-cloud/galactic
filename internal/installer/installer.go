@@ -594,7 +594,16 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 // it, reconcileRadvActors would stay convinced the actor is running. Deleting a
 // key that is already gone, because the attachment itself disappeared, is a
 // safe no-op.
+//
+// Each attempt derives its context from one that lives as long as the process.
+// Only cancelling detaches the derived context. Deleting the entry alone leaves
+// it attached, so a retry loop grows this daemon's memory without bound.
 func radvActorFailed(actors *radvActorSet, iface string) {
+	cancel, ok := actors.cancel[iface]
+	if !ok {
+		return
+	}
+	cancel()
 	delete(actors.cancel, iface)
 }
 
