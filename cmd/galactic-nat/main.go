@@ -2,8 +2,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command galactic-nat66 is one shard of the sharded, stateful NAT66 egress tier
-// of the Galactic data plane. It loads and attaches the NAT66 XDP program to
+// Command galactic-nat is one shard of the sharded, stateful egress translation
+// tier of the Galactic data plane, serving NAT66, NAT64, or both. It loads and
+// attaches the egress translation XDP programs to
 // this shard's fabric-facing uplink and registers the reconciler that publishes
 // this shard's operator-configured identity and Ready condition.
 //
@@ -27,7 +28,7 @@ const (
 	networkAPIGroup   = "network.datumapis.com"
 	networkAPIVersion = "v1alpha1"
 
-	resourceNAT66Shards       = "nat66shards"
+	resourceEgressShards      = "egressshards"
 	resourceBGPAdvertisements = "bgpadvertisements"
 	resourceBGPRouters        = "bgprouters"
 )
@@ -63,7 +64,7 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		version  string
 		resource string
 	}{
-		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNAT66Shards},
+		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceEgressShards},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPAdvertisements},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
 	}

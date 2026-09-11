@@ -43,8 +43,8 @@ func ConfigureInterfaceSysctls(iface string) error {
 }
 
 // ConfigureFIBLookupUplinkSysctls enables IPv6 forwarding on iface, a gateway
-// or NAT66 node's fabric-facing uplink, and alongside it the all-interfaces
-// forwarding sysctl.
+// or egress shard node's fabric-facing uplink, and alongside it the
+// all-interfaces forwarding sysctl.
 //
 // Without them, bpf_fib_lookup returns not-forwarded for every lookup, the
 // kernel correctly refusing to resolve a forwarding route on an interface not
@@ -63,6 +63,31 @@ func ConfigureFIBLookupUplinkSysctls(iface string) error {
 	settings := []struct{ key, value string }{
 		{fmt.Sprintf("net.ipv6.conf.%s.forwarding", iface), "1"},
 		{"net.ipv6.conf.all.forwarding", "1"},
+	}
+	for _, s := range settings {
+		if err := gosysctl.Set(s.key, s.value); err != nil {
+			logger.Warn("failed to set sysctl (non-fatal)", "sysctl", s.key, "err", err)
+		}
+	}
+	return nil
+}
+
+// ConfigureFIBLookupUplinkSysctlsIPv4 enables IPv4 forwarding on iface, the
+// IPv4 counterpart to ConfigureFIBLookupUplinkSysctls and needed only on a
+// shard that performs NAT64.
+//
+// A NAT64 forward leg hands the kernel a translated IPv4 packet to route,
+// exactly as the NAT66 leg hands it an IPv6 one. Without this the kernel drops
+// every translated packet after the datapath has already counted it as
+// successfully translated, so the shard reads as healthy while no IPv4 traffic
+// ever leaves it.
+//
+// A sysctl that does not exist is skipped silently, as elsewhere here.
+func ConfigureFIBLookupUplinkSysctlsIPv4(iface string) error {
+	settings := []struct{ key, value string }{
+		{fmt.Sprintf("net.ipv4.conf.%s.forwarding", iface), "1"},
+		{"net.ipv4.conf.all.forwarding", "1"},
+		{"net.ipv4.ip_forward", "1"},
 	}
 	for _, s := range settings {
 		if err := gosysctl.Set(s.key, s.value); err != nil {

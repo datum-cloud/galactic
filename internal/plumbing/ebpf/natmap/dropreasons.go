@@ -2,12 +2,12 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package nat66map
+package natmap
 
 import (
 	"fmt"
 
-	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 )
 
 // DropReasonsReader narrows the drop-reason map, a per-CPU array keyed by
@@ -23,7 +23,7 @@ type DropReasonsReader interface {
 func SumDropReason(reader DropReasonsReader, index uint32) (uint64, error) {
 	var perCPU []uint64
 	if err := reader.Lookup(index, &perCPU); err != nil {
-		return 0, fmt.Errorf("nat66map: drop_reasons: lookup[%d]: %w", index, err)
+		return 0, fmt.Errorf("natmap: drop_reasons: lookup[%d]: %w", index, err)
 	}
 	var total uint64
 	for _, v := range perCPU {
@@ -36,11 +36,11 @@ func SumDropReason(reader DropReasonsReader, index uint32) (uint64, error) {
 // total for each, keyed by index: a full snapshot in one call rather than a
 // caller looping over SumDropReason.
 func DropReasonTotals(reader DropReasonsReader) (map[uint32]uint64, error) {
-	totals := make(map[uint32]uint64, nat66prog.DropReasonNat66Count)
-	for i := range nat66prog.DropReasonNat66Count {
+	totals := make(map[uint32]uint64, natprog.DropReasonNatCount)
+	for i := range natprog.DropReasonNatCount {
 		total, err := SumDropReason(reader, i)
 		if err != nil {
-			return nil, fmt.Errorf("nat66map: drop_reasons: totals: %w", err)
+			return nil, fmt.Errorf("natmap: drop_reasons: totals: %w", err)
 		}
 		totals[i] = total
 	}

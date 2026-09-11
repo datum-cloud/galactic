@@ -2,23 +2,23 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package nat66map
+package natmap
 
 import (
 	"errors"
 	"testing"
 
-	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 )
 
 func TestSumDropReason(t *testing.T) {
 	reader := &fakeDropReasonsReader{
 		perCPU: map[uint32][]uint64{
-			nat66prog.DropReasonNat66NoReturnConn: {3, 0, 1, 2},
+			natprog.DropReasonNat66NoReturnConn: {3, 0, 1, 2},
 		},
 	}
 
-	got, err := SumDropReason(reader, nat66prog.DropReasonNat66NoReturnConn)
+	got, err := SumDropReason(reader, natprog.DropReasonNat66NoReturnConn)
 	if err != nil {
 		t.Fatalf("SumDropReason() error = %v", err)
 	}
@@ -30,7 +30,7 @@ func TestSumDropReason(t *testing.T) {
 func TestSumDropReason_AbsentIndexIsZero(t *testing.T) {
 	reader := &fakeDropReasonsReader{perCPU: map[uint32][]uint64{}}
 
-	got, err := SumDropReason(reader, nat66prog.DropReasonNat66PatExhausted)
+	got, err := SumDropReason(reader, natprog.DropReasonNat66PatExhausted)
 	if err != nil {
 		t.Fatalf("SumDropReason() error = %v", err)
 	}
@@ -43,7 +43,7 @@ func TestSumDropReason_LookupError(t *testing.T) {
 	wantErr := errors.New("simulated map lookup failure")
 	reader := &fakeDropReasonsReader{err: wantErr}
 
-	_, err := SumDropReason(reader, nat66prog.DropReasonNat66NoReturnConn)
+	_, err := SumDropReason(reader, natprog.DropReasonNat66NoReturnConn)
 	if err == nil {
 		t.Fatal("SumDropReason() error = nil, want the wrapped lookup failure")
 	}
@@ -55,15 +55,15 @@ func TestSumDropReason_LookupError(t *testing.T) {
 func TestDropReasonTotals(t *testing.T) {
 	reader := &fakeDropReasonsReader{
 		perCPU: map[uint32][]uint64{
-			nat66prog.DropReasonNat66NoReturnConn:     {1, 1},
-			nat66prog.DropReasonNat66MalformedReturn:  {2, 2},
-			nat66prog.DropReasonNat66PatExhausted:     {0, 0},
-			nat66prog.DropReasonNat66MalformedForward: {3, 0},
-			nat66prog.DropReasonNat66FibNoNeigh:       {0, 0},
-			nat66prog.DropReasonNat66FibUnreachable:   {0, 0},
-			nat66prog.DropReasonNat66FibFragNeeded:    {0, 0},
-			nat66prog.DropReasonNat66FibLookupFailed:  {5, 0},
-			nat66prog.DropReasonNat66AdjustHeadFailed: {0, 0},
+			natprog.DropReasonNat66NoReturnConn:     {1, 1},
+			natprog.DropReasonNat66MalformedReturn:  {2, 2},
+			natprog.DropReasonNat66PatExhausted:     {0, 0},
+			natprog.DropReasonNat66MalformedForward: {3, 0},
+			natprog.DropReasonNatFibNoNeigh:         {0, 0},
+			natprog.DropReasonNatFibUnreachable:     {0, 0},
+			natprog.DropReasonNatFibFragNeeded:      {0, 0},
+			natprog.DropReasonNatFibLookupFailed:    {5, 0},
+			natprog.DropReasonNatAdjustHeadFailed:   {0, 0},
 		},
 	}
 
@@ -71,17 +71,17 @@ func TestDropReasonTotals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DropReasonTotals() error = %v", err)
 	}
-	if len(totals) != int(nat66prog.DropReasonNat66Count) {
-		t.Fatalf("DropReasonTotals() returned %d entries, want %d", len(totals), nat66prog.DropReasonNat66Count)
+	if len(totals) != int(natprog.DropReasonNatCount) {
+		t.Fatalf("DropReasonTotals() returned %d entries, want %d", len(totals), natprog.DropReasonNatCount)
 	}
-	if totals[nat66prog.DropReasonNat66NoReturnConn] != 2 {
-		t.Errorf("totals[no_return_conn] = %d, want 2", totals[nat66prog.DropReasonNat66NoReturnConn])
+	if totals[natprog.DropReasonNat66NoReturnConn] != 2 {
+		t.Errorf("totals[no_return_conn] = %d, want 2", totals[natprog.DropReasonNat66NoReturnConn])
 	}
-	if totals[nat66prog.DropReasonNat66MalformedReturn] != 4 {
-		t.Errorf("totals[malformed_return] = %d, want 4", totals[nat66prog.DropReasonNat66MalformedReturn])
+	if totals[natprog.DropReasonNat66MalformedReturn] != 4 {
+		t.Errorf("totals[malformed_return] = %d, want 4", totals[natprog.DropReasonNat66MalformedReturn])
 	}
-	if totals[nat66prog.DropReasonNat66FibLookupFailed] != 5 {
-		t.Errorf("totals[fib_lookup_failed] = %d, want 5", totals[nat66prog.DropReasonNat66FibLookupFailed])
+	if totals[natprog.DropReasonNatFibLookupFailed] != 5 {
+		t.Errorf("totals[fib_lookup_failed] = %d, want 5", totals[natprog.DropReasonNatFibLookupFailed])
 	}
 }
 

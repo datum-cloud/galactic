@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package nat66attach loads the compiled NAT66 XDP program and attaches it to
+// Package natattach loads the compiled NAT66 XDP program and attaches it to
 // one interface, a shard's fabric-facing uplink.
 //
 // It mirrors the edge attach package's mechanics almost verbatim: pinned maps,
@@ -24,4 +24,4 @@
 // This program has exactly one target, a fixed operator-configured interface,
 // attached once at process startup. There is no external event this package
 // needs to notice on its own.
-package nat66attach
+package natattach

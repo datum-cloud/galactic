@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package nat66map
+package natmap
 
 import (
 	"errors"
@@ -11,7 +11,7 @@ import (
 
 	"github.com/cilium/ebpf"
 
-	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 )
 
 // beU16 swaps a uint16 between host and network byte order. A full 2-byte swap
@@ -24,10 +24,16 @@ func beU16(v uint16) uint16 {
 	return v<<8 | v>>8
 }
 
-// ConnKey identifies one nat66_conn_table row, mirroring the datapath's forward
+// ConnKey identifies one nat_conn_table row, mirroring the datapath's forward
 // and reverse row layout. TenantArg is in host order, the datapath already
 // returning it that way; the ports are the packet's own wire-order values.
 type ConnKey struct {
+	// Family is natprog.FamilyIPv6 for a NAT66 flow or natprog.FamilyIPv4 for a
+	// NAT64 one. It is part of the key, not a description of it: a NAT64 row
+	// stores its IPv4 addresses IPv4-mapped, which without this byte could
+	// alias a genuine IPv6 flow inside ::ffff:0:0/96.
+	Family uint8
+
 	Proto     uint8
 	TenantArg uint16
 	Sport     uint16
@@ -36,8 +42,8 @@ type ConnKey struct {
 	Daddr     netip.Addr
 }
 
-// ConnEntry is one fully decoded nat66_conn_table row, decoupled from
-// nat66prog.Nat66ConnValue's cilium/ebpf/BTF-generated field layout.
+// ConnEntry is one fully decoded nat_conn_table row, decoupled from
+// natprog.NatConnValue's cilium/ebpf/BTF-generated field layout.
 type ConnEntry struct {
 	ConnKey
 
@@ -64,7 +70,7 @@ type ConnEntry struct {
 	Proto uint8
 }
 
-// ConnTable is the read-only accessor for nat66_conn_table; see the package doc
+// ConnTable is the read-only accessor for nat_conn_table; see the package doc
 // comment for why this package never writes it. Get and List exist for
 // observability, and nothing in the control plane depends on reading them.
 type ConnTable struct {
@@ -77,14 +83,15 @@ func NewConnTable(table Table) *ConnTable {
 	return &ConnTable{table: table}
 }
 
-func toWireConnKey(key ConnKey) (nat66prog.Nat66ConnKey, error) {
-	if err := validateAddr("conn key source address", key.Saddr); err != nil {
-		return nat66prog.Nat66ConnKey{}, err
+func toWireConnKey(key ConnKey) (natprog.NatConnKey, error) {
+	if err := validateConnAddr("conn key source address", key.Saddr); err != nil {
+		return natprog.NatConnKey{}, err
 	}
-	if err := validateAddr("conn key destination address", key.Daddr); err != nil {
-		return nat66prog.Nat66ConnKey{}, err
+	if err := validateConnAddr("conn key destination address", key.Daddr); err != nil {
+		return natprog.NatConnKey{}, err
 	}
-	return nat66prog.Nat66ConnKey{
+	return natprog.NatConnKey{
+		Family:    key.Family,
 		Proto:     key.Proto,
 		TenantArg: key.TenantArg,
 		Sport:     beU16(key.Sport),
@@ -94,8 +101,9 @@ func toWireConnKey(key ConnKey) (nat66prog.Nat66ConnKey, error) {
 	}, nil
 }
 
-func fromWireConnKey(wireKey nat66prog.Nat66ConnKey) ConnKey {
+func fromWireConnKey(wireKey natprog.NatConnKey) ConnKey {
 	return ConnKey{
+		Family:    wireKey.Family,
 		Proto:     wireKey.Proto,
 		TenantArg: wireKey.TenantArg,
 		Sport:     beU16(wireKey.Sport),
@@ -105,7 +113,21 @@ func fromWireConnKey(wireKey nat66prog.Nat66ConnKey) ConnKey {
 	}
 }
 
-func fromWireConnValue(key ConnKey, value nat66prog.Nat66ConnValue) ConnEntry {
+// validateConnAddr accepts any address the session table legitimately holds.
+// Unlike the shard-identity addresses, a connection row's addresses may be
+// IPv4-mapped: that is how a NAT64 flow's IPv4 peer and masquerade address are
+// stored in the 16-byte key fields.
+func validateConnAddr(field string, addr netip.Addr) error {
+	if !addr.IsValid() {
+		return fmt.Errorf("%s is not a valid address", field)
+	}
+	if !addr.Is6() {
+		return fmt.Errorf("%s %s must be stored in 16-byte form (IPv4 addresses IPv4-mapped)", field, addr)
+	}
+	return nil
+}
+
+func fromWireConnValue(key ConnKey, value natprog.NatConnValue) ConnEntry {
 	return ConnEntry{
 		ConnKey:     key,
 		BackendAddr: netip.AddrFrom16(value.BackendAddr),
@@ -118,32 +140,32 @@ func fromWireConnValue(key ConnKey, value nat66prog.Nat66ConnValue) ConnEntry {
 	}
 }
 
-// Get reads the nat66_conn_table entry for key, reporting whether it
+// Get reads the nat_conn_table entry for key, reporting whether it
 // exists.
 func (t *ConnTable) Get(key ConnKey) (ConnEntry, bool, error) {
 	wireKey, err := toWireConnKey(key)
 	if err != nil {
-		return ConnEntry{}, false, fmt.Errorf("nat66map: nat66_conn_table: get %+v: %w", key, err)
+		return ConnEntry{}, false, fmt.Errorf("natmap: nat_conn_table: get %+v: %w", key, err)
 	}
 
-	var value nat66prog.Nat66ConnValue
+	var value natprog.NatConnValue
 	if err := t.table.Lookup(wireKey, &value); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			return ConnEntry{}, false, nil
 		}
-		return ConnEntry{}, false, fmt.Errorf("nat66map: nat66_conn_table: get %+v: %w", key, err)
+		return ConnEntry{}, false, fmt.Errorf("natmap: nat_conn_table: get %+v: %w", key, err)
 	}
 	return fromWireConnValue(key, value), true, nil
 }
 
-// List returns every entry currently in nat66_conn_table, in unspecified order.
+// List returns every entry currently in nat_conn_table, in unspecified order.
 // The map evicts under live traffic, so the result is a point-in-time snapshot:
 // a row present in one call may be gone by the next.
 func (t *ConnTable) List() ([]ConnEntry, error) {
 	var (
 		entries []ConnEntry
-		rawKey  nat66prog.Nat66ConnKey
-		value   nat66prog.Nat66ConnValue
+		rawKey  natprog.NatConnKey
+		value   natprog.NatConnValue
 	)
 	it := t.table.Iterate()
 	for it.Next(&rawKey, &value) {
@@ -151,7 +173,7 @@ func (t *ConnTable) List() ([]ConnEntry, error) {
 		entries = append(entries, fromWireConnValue(key, value))
 	}
 	if err := it.Err(); err != nil {
-		return nil, fmt.Errorf("nat66map: nat66_conn_table: list: %w", err)
+		return nil, fmt.Errorf("natmap: nat_conn_table: list: %w", err)
 	}
 	return entries, nil
 }

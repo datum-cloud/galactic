@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package nat66map
+package natmap
 
 import (
 	"reflect"
@@ -14,7 +14,7 @@ import (
 // package's tests, keyed by `any` (rather than usidmap's fakeTable, which
 // assumes every key is a uint64) since this package's two tables use two
 // different key types: shard_config_table's fixed uint32(0) and
-// nat66_conn_table's nat66prog.Nat66ConnKey struct. It stores each value as
+// nat_conn_table's natprog.NatConnKey struct. It stores each value as
 // the concrete Go struct Put was given, copying into/out of callers'
 // pointer arguments via reflection to mirror *ebpf.Map's own copy-in/
 // copy-out semantics for Put/Lookup/Delete/Iterate, without needing a

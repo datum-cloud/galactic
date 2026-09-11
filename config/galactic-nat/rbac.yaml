@@ -1,36 +1,36 @@
-# The sharded NAT66 egress datapath's own RBAC. This ClusterRole covers
-# only what NAT66ShardReconciler (internal/controller/nat66shard_controller.go)
-# actually touches.
+# The sharded egress translation datapath's own RBAC. This ClusterRole covers
+# only what EgressShardReconciler
+# (internal/controller/egressshard_controller.go) actually touches.
 #
 # bgprouters (get/list/watch) plus full CRUD on bgpadvertisements are
 # included even though this binary runs no BGP client of its own:
-# NAT66ShardReconciler.applyShardAdvertisement looks up this node's own
+# EgressShardReconciler.applyShardAdvertisement looks up this node's own
 # BGPRouter and creates/updates/deletes the /128 BGPAdvertisement that
 # makes Status.ShardSID actually reachable fabric-wide -- exactly the
 # same shape config/galactic-gateway/rbac.yaml already grants
 # NetworkGatewayReconciler for its own VIP advertisements, and exactly
-# what NAT66ShardStatus.ShardSID's own doc comment in datum-cloud/network
+# what EgressShardStatus.ShardSID's own doc comment in datum-cloud/network
 # promises ("advertised into BGP... so every other node learns a kernel
 # SEG6 route toward it").
 #
-# networkegresspolicies is deliberately NOT granted here: NAT66ShardReconciler
+# networkegresspolicies is deliberately NOT granted here: EgressShardReconciler
 # never reads or writes that CRD (it belongs to the earlier, now-superseded
-# #865 egress-policy stack this sharded-NAT66 design replaces), so granting
+# #865 egress-policy stack this sharded-egress design replaces), so granting
 # it would be scope creep past what this binary's own reconciler actually
 # does -- see this ClusterRole's own principle of granting exactly what is
 # used, not what a future phase might use.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: galactic-nat66
+  name: galactic-nat
 rules:
   - apiGroups: ["network.datumapis.com"]
     resources:
-      - nat66shards
+      - egressshards
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
-      - nat66shards/status
+      - egressshards/status
     verbs: ["get", "update", "patch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
@@ -44,12 +44,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: galactic-nat66
+  name: galactic-nat
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: galactic-nat66
+  name: galactic-nat
 subjects:
   - kind: ServiceAccount
-    name: galactic-nat66
+    name: galactic-nat
     namespace: galactic-system

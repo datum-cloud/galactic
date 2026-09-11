@@ -2,14 +2,14 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package nat66map
+package natmap
 
 import (
 	"net/netip"
 	"sort"
 	"testing"
 
-	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 )
 
 func testConnKey() ConnKey {
@@ -39,8 +39,8 @@ func testConnEntry() ConnEntry {
 // connValueFromEntry is the inverse of fromWireConnValue -- test-only,
 // since ConnTable itself is deliberately read-only (see doc.go) and
 // exposes no Put/Register method to seed test data through.
-func connValueFromEntry(e ConnEntry) nat66prog.Nat66ConnValue {
-	return nat66prog.Nat66ConnValue{
+func connValueFromEntry(e ConnEntry) natprog.NatConnValue {
+	return natprog.NatConnValue{
 		BackendAddr: e.BackendAddr.As16(),
 		BackendPort: beU16(e.BackendPort),
 		DestAddr:    e.DestAddr.As16(),

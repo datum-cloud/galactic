@@ -22,25 +22,25 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// NAT66DatapathHealth reports whether this node's NAT66 egress XDP datapath is
-// attached and serving traffic. NAT66ShardReconciler uses it to decide whether
+// EgressDatapathHealth reports whether this node's egress translation XDP datapath is
+// attached and serving traffic. EgressShardReconciler uses it to decide whether
 // to set its Ready condition, and it is an interface so tests can fake it.
-type NAT66DatapathHealth interface {
+type EgressDatapathHealth interface {
 	// Attached reports whether the datapath is loaded and attached.
 	Attached() bool
 }
 
 const (
-	// reasonNAT66DatapathAttached is the Ready condition reason once the
+	// reasonEgressDatapathAttached is the Ready condition reason once the
 	// datapath is confirmed attached.
-	reasonNAT66DatapathAttached = "DatapathAttached"
+	reasonEgressDatapathAttached = "DatapathAttached"
 
-	// reasonNAT66DatapathNotAttached is the Ready condition reason while
+	// reasonEgressDatapathNotAttached is the Ready condition reason while
 	// the datapath is not yet (or no longer) attached.
-	reasonNAT66DatapathNotAttached = "DatapathNotAttached"
+	reasonEgressDatapathNotAttached = "DatapathNotAttached"
 )
 
-// NAT66ShardReconciler reconciles the single NAT66Shard object whose
+// EgressShardReconciler reconciles the single EgressShard object whose
 // spec.targetRef.name is this node. It publishes the shard address and SID this
 // node's datapath process was started with, echoing the operator-configured
 // values rather than deriving them, sets Ready once the datapath is confirmed
@@ -54,42 +54,47 @@ const (
 // arrives and is correctly translated, but the reply has no route back from
 // anywhere else on the fabric, so a TCP connection never completes even while
 // every forward-path counter looks healthy.
-type NAT66ShardReconciler struct {
+type EgressShardReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
 	NodeName string
 
-	// ShardAddress and ShardSID are this node's operator-configured NAT66 shard
-	// identity, the same values the running datapath was configured with. This
-	// reconciler publishes them; it does not compute them.
-	ShardAddress string
-	ShardSID     string
+	// ShardSID and the ShardAddress fields are this node's operator-configured
+	// shard identity, the same values the running datapath was configured with.
+	// This reconciler publishes them; it does not compute them.
+	//
+	// ShardAddressIPv4 and NAT64Prefix are set together or not at all, and only
+	// on a shard performing NAT64.
+	ShardSID         string
+	ShardAddressIPv6 string
+	ShardAddressIPv4 string
+	NAT64Prefix      string
 
-	// Datapath reports whether this node's NAT66 datapath is currently
-	// attached -- see NAT66DatapathHealth's doc comment.
-	Datapath NAT66DatapathHealth
+	// Datapath reports whether this node's egress translation datapath is
+	// currently attached -- see EgressDatapathHealth's doc comment.
+	Datapath EgressDatapathHealth
 }
 
-// Reconcile reconciles a single NAT66Shard.
-func (r *NAT66ShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile reconciles a single EgressShard.
+func (r *EgressShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	shard := &bgpv1alpha1.NAT66Shard{}
+	shard := &bgpv1alpha1.EgressShard{}
 	if err := r.Get(ctx, req.NamespacedName, shard); err != nil {
 		if apierrors.IsNotFound(err) {
-			// NAT66Shard carries no finalizer, so by the time this Get sees
+			// EgressShard carries no finalizer, so by the time this Get sees
 			// NotFound the object is gone everywhere, on whichever node's
 			// process handled the event and not necessarily the shard's own.
 			// Withdraw keyed on req.Name, which the advertisement name is
 			// derived from, rather than on the unreadable deleted object.
 			if err := withdrawShardAdvertisement(ctx, r.Client, req.Namespace, req.Name); err != nil {
-				logger.Error(err, "withdraw BGPAdvertisement for deleted NAT66Shard", "nat66Shard", req.NamespacedName)
+				logger.Error(err, "withdraw BGPAdvertisement for deleted EgressShard", "egressShard", req.NamespacedName)
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get NAT66Shard %s: %w", req.NamespacedName, err)
+		return ctrl.Result{}, fmt.Errorf("get EgressShard %s: %w", req.NamespacedName, err)
 	}
 
 	// Node check: skip shards that don't target this node, mirroring
@@ -103,7 +108,7 @@ func (r *NAT66ShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// branch above being the one a real delete takes, but kept correct in
 		// case that changes.
 		if err := withdrawShardAdvertisement(ctx, r.Client, shard.Namespace, shard.Name); err != nil {
-			logger.Error(err, "withdraw BGPAdvertisement for terminating NAT66Shard", "nat66Shard", req.NamespacedName)
+			logger.Error(err, "withdraw BGPAdvertisement for terminating EgressShard", "egressShard", req.NamespacedName)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -111,21 +116,27 @@ func (r *NAT66ShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	shardCopy := shard.DeepCopy()
 	shardCopy.Status.ObservedGeneration = shard.Generation
-	if r.ShardAddress != "" {
-		shardCopy.Status.ShardAddress = r.ShardAddress
-	}
 	if r.ShardSID != "" {
 		shardCopy.Status.ShardSID = r.ShardSID
 	}
-	setNAT66ShardCondition(shardCopy, r.readyCondition())
+	if r.ShardAddressIPv6 != "" {
+		shardCopy.Status.ShardAddressIPv6 = r.ShardAddressIPv6
+	}
+	if r.ShardAddressIPv4 != "" {
+		shardCopy.Status.ShardAddressIPv4 = r.ShardAddressIPv4
+	}
+	if r.NAT64Prefix != "" {
+		shardCopy.Status.NAT64Prefix = r.NAT64Prefix
+	}
+	setEgressShardCondition(shardCopy, r.readyCondition())
 
 	if err := r.Status().Update(ctx, shardCopy); err != nil {
-		logger.Error(err, "update NAT66Shard status", "nat66Shard", req.NamespacedName)
-		return ctrl.Result{}, fmt.Errorf("update NAT66Shard %s status: %w", req.NamespacedName, err)
+		logger.Error(err, "update EgressShard status", "egressShard", req.NamespacedName)
+		return ctrl.Result{}, fmt.Errorf("update EgressShard %s status: %w", req.NamespacedName, err)
 	}
 
 	if err := r.applyShardAdvertisement(ctx, shardCopy); err != nil {
-		logger.Error(err, "apply BGPAdvertisement for NAT66Shard", "nat66Shard", req.NamespacedName)
+		logger.Error(err, "apply BGPAdvertisement for EgressShard", "egressShard", req.NamespacedName)
 		return ctrl.Result{}, err
 	}
 
@@ -133,7 +144,7 @@ func (r *NAT66ShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 // shardAdvertisementName derives the deterministic BGPAdvertisement name for a
-// NAT66Shard, so withdrawal keyed on a deletion event's name alone never needs
+// EgressShard, so withdrawal keyed on a deletion event's name alone never needs
 // to read the object it is naming. The "-sid" suffix predates the advertisement
 // also carrying the shard address, and is kept rather than churning every
 // existing shard's name for a cosmetic rename.
@@ -142,18 +153,24 @@ func shardAdvertisementName(shardName string) string {
 }
 
 // shardAdvertisementPrefixes builds the /128 prefixes advertised for shard: the
-// shard SID, which is the forward leg a tenant VRF's default egress route
-// encapsulates toward, and the shard address, which is the return leg a reply's
+// shard SID, which is the forward leg a tenant VRF's egress routes encapsulate
+// toward, and the IPv6 shard address, which is the return leg a reply's
 // destination is rewritten to and which needs a route back from wherever that
 // reply's next hop is, not just from this node.
 //
-// Either may be independently unset, by an operator who has not finished
+// Status.ShardAddressIPv4 is deliberately absent. A NAT64 reply arrives from the
+// IPv4 internet rather than across this fabric, so advertising that address into
+// the EVPN mesh would not make it reachable by the party that needs to reach it;
+// the underlay or an upstream announcement has to attract it to this node. See
+// EgressShard's own field documentation.
+//
+// Either prefix may be independently unset, by an operator who has not finished
 // configuring this node's identity, in which case it is omitted rather than
 // failing the whole advertisement. Callers treat an empty result as nothing to
 // advertise yet, not an error.
-func shardAdvertisementPrefixes(shard *bgpv1alpha1.NAT66Shard) ([]bgpv1alpha1.Prefix, error) {
+func shardAdvertisementPrefixes(shard *bgpv1alpha1.EgressShard) ([]bgpv1alpha1.Prefix, error) {
 	var prefixes []bgpv1alpha1.Prefix
-	for _, raw := range []string{shard.Status.ShardSID, shard.Status.ShardAddress} {
+	for _, raw := range []string{shard.Status.ShardSID, shard.Status.ShardAddressIPv6} {
 		if raw == "" {
 			continue
 		}
@@ -173,7 +190,7 @@ func shardAdvertisementPrefixes(shard *bgpv1alpha1.NAT66Shard) ([]bgpv1alpha1.Pr
 // A no-op rather than an error when neither address is set yet, or when no
 // BGPRouter targets this node yet: the BGPRouter watch retries once one
 // appears.
-func (r *NAT66ShardReconciler) applyShardAdvertisement(ctx context.Context, shard *bgpv1alpha1.NAT66Shard) error {
+func (r *EgressShardReconciler) applyShardAdvertisement(ctx context.Context, shard *bgpv1alpha1.EgressShard) error {
 	prefixes, err := shardAdvertisementPrefixes(shard)
 	if err != nil {
 		return fmt.Errorf("build advertised prefixes: %w", err)
@@ -239,49 +256,49 @@ func withdrawShardAdvertisement(ctx context.Context, c client.Client, namespace,
 // readyCondition computes the Ready condition from the datapath's current
 // attachment state. A nil datapath, not expected in production, is treated as
 // not attached rather than a panic.
-func (r *NAT66ShardReconciler) readyCondition() metav1.Condition {
+func (r *EgressShardReconciler) readyCondition() metav1.Condition {
 	if r.Datapath != nil && r.Datapath.Attached() {
 		return metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionTrue,
-			Reason:  reasonNAT66DatapathAttached,
-			Message: "NAT66 egress datapath is attached and serving traffic",
+			Reason:  reasonEgressDatapathAttached,
+			Message: "Egress translation datapath is attached and serving traffic",
 		}
 	}
 	return metav1.Condition{
 		Type:    bgpv1alpha1.ConditionTypeReady,
 		Status:  metav1.ConditionFalse,
-		Reason:  reasonNAT66DatapathNotAttached,
-		Message: "NAT66 egress datapath is not yet attached",
+		Reason:  reasonEgressDatapathNotAttached,
+		Message: "Egress translation datapath is not yet attached",
 	}
 }
 
 // SetupWithManager registers the reconciler with the manager.
 //
-// The BGPRouter watch closes a startup race: without it, a NAT66Shard whose
+// The BGPRouter watch closes a startup race: without it, a EgressShard whose
 // node's BGPRouter does not exist yet at first reconcile fails its router
 // lookup once and gets no second chance until an unrelated event triggers a
 // fresh reconcile.
-func (r *NAT66ShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *EgressShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&bgpv1alpha1.NAT66Shard{}).
+		For(&bgpv1alpha1.EgressShard{}).
 		Watches(&bgpv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToShardRequests(ctx, r.Client, obj.GetNamespace())
 			}),
 		).
-		Named("nat66shard").
+		Named("egressshard").
 		Complete(r)
 }
 
-// broadcastToShardRequests enqueues every NAT66Shard in namespace. A BGPRouter
+// broadcastToShardRequests enqueues every EgressShard in namespace. A BGPRouter
 // change may be the one this node's shard was waiting on, and there is normally
 // at most one shard per node, so listing the namespace is cheap.
 func broadcastToShardRequests(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
 	logger := log.FromContext(ctx)
-	shardList := &bgpv1alpha1.NAT66ShardList{}
+	shardList := &bgpv1alpha1.EgressShardList{}
 	if err := c.List(ctx, shardList, client.InNamespace(namespace)); err != nil {
-		logger.Error(err, "list NAT66Shards for BGPRouter change", "namespace", namespace)
+		logger.Error(err, "list EgressShards for BGPRouter change", "namespace", namespace)
 		return nil
 	}
 	reqs := make([]ctrlreconcile.Request, 0, len(shardList.Items))

@@ -27,7 +27,7 @@ const (
 	testNAT66ShardSIDVal = "fc00:1:2::1"
 )
 
-// fakeDatapathHealth is a NAT66DatapathHealth test double whose Attached
+// fakeDatapathHealth is a EgressDatapathHealth test double whose Attached
 // return value is directly settable.
 type fakeDatapathHealth struct {
 	attached bool
@@ -42,13 +42,13 @@ func nat66TestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// newNAT66Shard builds the fixture NAT66Shard object (always named
+// newEgressShard builds the fixture EgressShard object (always named
 // testNAT66ShardName, matching every reconcileReq call below) targeting
 // nodeName.
-func newNAT66Shard(nodeName string) *bgpv1alpha1.NAT66Shard {
-	return &bgpv1alpha1.NAT66Shard{
+func newEgressShard(nodeName string) *bgpv1alpha1.EgressShard {
+	return &bgpv1alpha1.EgressShard{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNAT66Namespace, Name: testNAT66ShardName},
-		Spec: bgpv1alpha1.NAT66ShardSpec{
+		Spec: bgpv1alpha1.EgressShardSpec{
 			TargetRef: bgpv1alpha1.TargetRef{Kind: "Node", Name: nodeName},
 		},
 	}
@@ -62,17 +62,17 @@ type nat66ReconcilerParams struct {
 	nodeName string
 	addr     string
 	sid      string
-	datapath NAT66DatapathHealth
+	datapath EgressDatapathHealth
 }
 
-func newNAT66Reconciler(p nat66ReconcilerParams) *NAT66ShardReconciler {
-	return &NAT66ShardReconciler{
-		Client:       p.client,
-		Scheme:       p.scheme,
-		NodeName:     p.nodeName,
-		ShardAddress: p.addr,
-		ShardSID:     p.sid,
-		Datapath:     p.datapath,
+func newNAT66Reconciler(p nat66ReconcilerParams) *EgressShardReconciler {
+	return &EgressShardReconciler{
+		Client:           p.client,
+		Scheme:           p.scheme,
+		NodeName:         p.nodeName,
+		ShardAddressIPv6: p.addr,
+		ShardSID:         p.sid,
+		Datapath:         p.datapath,
 	}
 }
 
@@ -80,7 +80,7 @@ func reconcileReq(name string) ctrl.Request {
 	return ctrl.Request{NamespacedName: client.ObjectKey{Namespace: testNAT66Namespace, Name: name}}
 }
 
-func TestNAT66ShardReconciler_NotFoundIsANoop(t *testing.T) {
+func TestEgressShardReconciler_NotFoundIsANoop(t *testing.T) {
 	scheme := nat66TestScheme(t)
 	c := newIndexedClientBuilder(scheme).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
@@ -93,9 +93,9 @@ func TestNAT66ShardReconciler_NotFoundIsANoop(t *testing.T) {
 	}
 }
 
-func TestNAT66ShardReconciler_SkipsShardForAnotherNode(t *testing.T) {
+func TestEgressShardReconciler_SkipsShardForAnotherNode(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeB)
+	shard := newEgressShard(testNAT66NodeB)
 	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
@@ -106,13 +106,13 @@ func TestNAT66ShardReconciler_SkipsShardForAnotherNode(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	got := &bgpv1alpha1.NAT66Shard{}
+	got := &bgpv1alpha1.EgressShard{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(shard), got); err != nil {
 		t.Fatalf("get shard after reconcile: %v", err)
 	}
-	if got.Status.ShardAddress != "" {
-		t.Errorf("Status.ShardAddress = %q, want untouched empty string (shard targets another node)",
-			got.Status.ShardAddress)
+	if got.Status.ShardAddressIPv6 != "" {
+		t.Errorf("Status.ShardAddressIPv6 = %q, want untouched empty string (shard targets another node)",
+			got.Status.ShardAddressIPv6)
 	}
 	if len(got.Status.Conditions) != 0 {
 		t.Errorf("Status.Conditions = %+v, want untouched empty slice (shard targets another node)",
@@ -120,9 +120,9 @@ func TestNAT66ShardReconciler_SkipsShardForAnotherNode(t *testing.T) {
 	}
 }
 
-func TestNAT66ShardReconciler_PublishesStatusWhenAttached(t *testing.T) {
+func TestEgressShardReconciler_PublishesStatusWhenAttached(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
@@ -133,12 +133,12 @@ func TestNAT66ShardReconciler_PublishesStatusWhenAttached(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	got := &bgpv1alpha1.NAT66Shard{}
+	got := &bgpv1alpha1.EgressShard{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(shard), got); err != nil {
 		t.Fatalf("get shard after reconcile: %v", err)
 	}
-	if got.Status.ShardAddress != testNAT66ShardAddr {
-		t.Errorf("Status.ShardAddress = %q, want %q", got.Status.ShardAddress, testNAT66ShardAddr)
+	if got.Status.ShardAddressIPv6 != testNAT66ShardAddr {
+		t.Errorf("Status.ShardAddressIPv6 = %q, want %q", got.Status.ShardAddressIPv6, testNAT66ShardAddr)
 	}
 	if got.Status.ShardSID != testNAT66ShardSIDVal {
 		t.Errorf("Status.ShardSID = %q, want %q", got.Status.ShardSID, testNAT66ShardSIDVal)
@@ -154,14 +154,14 @@ func TestNAT66ShardReconciler_PublishesStatusWhenAttached(t *testing.T) {
 	if cond.Status != metav1.ConditionTrue {
 		t.Errorf("Ready condition status = %v, want True", cond.Status)
 	}
-	if cond.Reason != reasonNAT66DatapathAttached {
-		t.Errorf("Ready condition reason = %q, want %q", cond.Reason, reasonNAT66DatapathAttached)
+	if cond.Reason != reasonEgressDatapathAttached {
+		t.Errorf("Ready condition reason = %q, want %q", cond.Reason, reasonEgressDatapathAttached)
 	}
 }
 
-func TestNAT66ShardReconciler_ReadyFalseWhenNotAttached(t *testing.T) {
+func TestEgressShardReconciler_ReadyFalseWhenNotAttached(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
@@ -172,7 +172,7 @@ func TestNAT66ShardReconciler_ReadyFalseWhenNotAttached(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	got := &bgpv1alpha1.NAT66Shard{}
+	got := &bgpv1alpha1.EgressShard{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(shard), got); err != nil {
 		t.Fatalf("get shard after reconcile: %v", err)
 	}
@@ -184,14 +184,14 @@ func TestNAT66ShardReconciler_ReadyFalseWhenNotAttached(t *testing.T) {
 	if cond.Status != metav1.ConditionFalse {
 		t.Errorf("Ready condition status = %v, want False", cond.Status)
 	}
-	if cond.Reason != reasonNAT66DatapathNotAttached {
-		t.Errorf("Ready condition reason = %q, want %q", cond.Reason, reasonNAT66DatapathNotAttached)
+	if cond.Reason != reasonEgressDatapathNotAttached {
+		t.Errorf("Ready condition reason = %q, want %q", cond.Reason, reasonEgressDatapathNotAttached)
 	}
 }
 
-func TestNAT66ShardReconciler_NilDatapathIsNotAttached(t *testing.T) {
+func TestEgressShardReconciler_NilDatapathIsNotAttached(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
@@ -202,7 +202,7 @@ func TestNAT66ShardReconciler_NilDatapathIsNotAttached(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	got := &bgpv1alpha1.NAT66Shard{}
+	got := &bgpv1alpha1.EgressShard{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(shard), got); err != nil {
 		t.Fatalf("get shard after reconcile: %v", err)
 	}
@@ -215,9 +215,9 @@ func TestNAT66ShardReconciler_NilDatapathIsNotAttached(t *testing.T) {
 	}
 }
 
-func TestNAT66ShardReconciler_DeletingShardIsANoop(t *testing.T) {
+func TestEgressShardReconciler_DeletingShardIsANoop(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	shard.Finalizers = []string{"test.datum.net/keep"} // required for the fake client to accept a deletion timestamp
 	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 
@@ -233,19 +233,20 @@ func TestNAT66ShardReconciler_DeletingShardIsANoop(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	got := &bgpv1alpha1.NAT66Shard{}
+	got := &bgpv1alpha1.EgressShard{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(shard), got); err != nil {
 		t.Fatalf("get shard after reconcile: %v", err)
 	}
-	if got.Status.ShardAddress != "" {
-		t.Errorf("Status.ShardAddress = %q, want untouched empty string for a terminating shard", got.Status.ShardAddress)
+	if got.Status.ShardAddressIPv6 != "" {
+		t.Errorf("Status.ShardAddressIPv6 = %q, want untouched empty string for a terminating shard",
+			got.Status.ShardAddressIPv6)
 	}
 }
 
-func TestNAT66ShardReconciler_EmptyConfiguredValuesLeaveStatusUntouched(t *testing.T) {
+func TestEgressShardReconciler_EmptyConfiguredValuesLeaveStatusUntouched(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
-	shard.Status.ShardAddress = testNAT66ShardAddr
+	shard := newEgressShard(testNAT66NodeA)
+	shard.Status.ShardAddressIPv6 = testNAT66ShardAddr
 	shard.Status.ShardSID = testNAT66ShardSIDVal
 	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 
@@ -261,12 +262,12 @@ func TestNAT66ShardReconciler_EmptyConfiguredValuesLeaveStatusUntouched(t *testi
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	got := &bgpv1alpha1.NAT66Shard{}
+	got := &bgpv1alpha1.EgressShard{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(shard), got); err != nil {
 		t.Fatalf("get shard after reconcile: %v", err)
 	}
-	if got.Status.ShardAddress != testNAT66ShardAddr {
-		t.Errorf("Status.ShardAddress = %q, want untouched %q", got.Status.ShardAddress, testNAT66ShardAddr)
+	if got.Status.ShardAddressIPv6 != testNAT66ShardAddr {
+		t.Errorf("Status.ShardAddressIPv6 = %q, want untouched %q", got.Status.ShardAddressIPv6, testNAT66ShardAddr)
 	}
 	if got.Status.ShardSID != testNAT66ShardSIDVal {
 		t.Errorf("Status.ShardSID = %q, want untouched %q", got.Status.ShardSID, testNAT66ShardSIDVal)
@@ -282,9 +283,9 @@ const testNAT66RouterName = "node-a-router"
 // targeting testNAT66NodeA, resolved through the BGPRouterByTargetName
 // index newIndexedClientBuilder (shared with
 // networkgateway_controller_test.go) registers. Every call site below
-// reconciles against testNAT66NodeA, so unlike newNAT66Shard/
+// reconciles against testNAT66NodeA, so unlike newEgressShard/
 // newNAT66Reconciler (which do vary their own node-related argument
-// across tests, e.g. TestNAT66ShardReconciler_SkipsShardForAnotherNode),
+// across tests, e.g. TestEgressShardReconciler_SkipsShardForAnotherNode),
 // this takes no arguments at all.
 func newTestNAT66Router() *bgpv1alpha1.BGPRouter {
 	return &bgpv1alpha1.BGPRouter{
@@ -293,16 +294,16 @@ func newTestNAT66Router() *bgpv1alpha1.BGPRouter {
 	}
 }
 
-// TestNAT66ShardReconciler_CreatesAdvertisementForBothSIDAndAddress covers
+// TestEgressShardReconciler_CreatesAdvertisementForBothSIDAndAddress covers
 // the 2026-08-19 fix: the shard's advertisement must carry ShardAddress
 // (the return leg -- see shardAdvertisementPrefixes' own doc comment) as
 // well as ShardSID (the forward leg), not just the latter -- a real TCP
 // connection through NAT66 never completed while only ShardSID was
 // advertised, since no route back to ShardAddress existed anywhere else
 // on the fabric.
-func TestNAT66ShardReconciler_CreatesAdvertisementForBothSIDAndAddress(t *testing.T) {
+func TestEgressShardReconciler_CreatesAdvertisementForBothSIDAndAddress(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	router := newTestNAT66Router()
 	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
@@ -339,16 +340,16 @@ func TestNAT66ShardReconciler_CreatesAdvertisementForBothSIDAndAddress(t *testin
 	}
 }
 
-// TestNAT66ShardReconciler_AdvertisesShardAddressAloneWhenSIDUnset covers
+// TestEgressShardReconciler_AdvertisesShardAddressAloneWhenSIDUnset covers
 // shardAdvertisementPrefixes' "either may be independently unset" claim
 // from the other direction: with no ShardSID configured at all (an
 // operator mid-rollout, or a shard that only participates in the return
 // leg), ShardAddress alone must still be advertised -- the old
 // implementation's `if shard.Status.ShardSID == "" { return nil }` guard
 // would have skipped this entirely.
-func TestNAT66ShardReconciler_AdvertisesShardAddressAloneWhenSIDUnset(t *testing.T) {
+func TestEgressShardReconciler_AdvertisesShardAddressAloneWhenSIDUnset(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	router := newTestNAT66Router()
 	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
@@ -371,12 +372,12 @@ func TestNAT66ShardReconciler_AdvertisesShardAddressAloneWhenSIDUnset(t *testing
 	}
 }
 
-// TestNAT66ShardReconciler_SkipsAdvertisementWhenNeitherSIDNorAddressSet
+// TestEgressShardReconciler_SkipsAdvertisementWhenNeitherSIDNorAddressSet
 // covers shardAdvertisementPrefixes' all-empty case: no advertisement at
 // all, not an error, when an operator hasn't configured either value yet.
-func TestNAT66ShardReconciler_SkipsAdvertisementWhenNeitherSIDNorAddressSet(t *testing.T) {
+func TestEgressShardReconciler_SkipsAdvertisementWhenNeitherSIDNorAddressSet(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	router := newTestNAT66Router()
 	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
@@ -395,9 +396,9 @@ func TestNAT66ShardReconciler_SkipsAdvertisementWhenNeitherSIDNorAddressSet(t *t
 	}
 }
 
-func TestNAT66ShardReconciler_SkipsAdvertisementWithoutRouter(t *testing.T) {
+func TestEgressShardReconciler_SkipsAdvertisementWithoutRouter(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
 	r := newNAT66Reconciler(nat66ReconcilerParams{
 		client: c, scheme: scheme, nodeName: testNAT66NodeA,
@@ -415,9 +416,9 @@ func TestNAT66ShardReconciler_SkipsAdvertisementWithoutRouter(t *testing.T) {
 	}
 }
 
-func TestNAT66ShardReconciler_WithdrawsAdvertisementOnDelete(t *testing.T) {
+func TestEgressShardReconciler_WithdrawsAdvertisementOnDelete(t *testing.T) {
 	scheme := nat66TestScheme(t)
-	shard := newNAT66Shard(testNAT66NodeA)
+	shard := newEgressShard(testNAT66NodeA)
 	shard.Finalizers = []string{"test.datum.net/keep"} // required for the fake client to accept a deletion timestamp
 	router := newTestNAT66Router()
 	adv := &bgpv1alpha1.BGPAdvertisement{
@@ -447,11 +448,11 @@ func TestNAT66ShardReconciler_WithdrawsAdvertisementOnDelete(t *testing.T) {
 
 	got := &bgpv1alpha1.BGPAdvertisement{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(adv), got); err == nil {
-		t.Fatalf("BGPAdvertisement %v still exists after deleting its NAT66Shard", client.ObjectKeyFromObject(adv))
+		t.Fatalf("BGPAdvertisement %v still exists after deleting its EgressShard", client.ObjectKeyFromObject(adv))
 	}
 }
 
-func TestNAT66ShardReconciler_WithdrawsAdvertisementWhenShardObjectAlreadyGone(t *testing.T) {
+func TestEgressShardReconciler_WithdrawsAdvertisementWhenShardObjectAlreadyGone(t *testing.T) {
 	// Mirrors NetworkGatewayReconciler's own req.Name-keyed withdrawal in
 	// its NotFound branch: this reconciler never observes a live shard
 	// object at all here, only the deletion event's req.Name, and must
@@ -482,6 +483,6 @@ func TestNAT66ShardReconciler_WithdrawsAdvertisementWhenShardObjectAlreadyGone(t
 
 	got := &bgpv1alpha1.BGPAdvertisement{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(adv), got); err == nil {
-		t.Fatalf("BGPAdvertisement %v still exists after its NAT66Shard object disappeared", client.ObjectKeyFromObject(adv))
+		t.Fatalf("BGPAdvertisement %v still exists after its EgressShard object disappeared", client.ObjectKeyFromObject(adv))
 	}
 }

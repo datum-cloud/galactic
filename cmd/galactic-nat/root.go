@@ -30,9 +30,9 @@ import (
 )
 
 const (
-	appName = "galactic-nat66"
+	appName = "galactic-nat"
 
-	appDesc = `Galactic sharded NAT66 egress datapath
+	appDesc = `Galactic sharded egress translation datapath (NAT66 and NAT64)
 
  Find more information at: https://www.datum.net/docs`
 )
@@ -40,7 +40,7 @@ const (
 // runCmd is the application startup: it loads and attaches this shard's NAT66
 // egress datapath to its fabric-facing uplink and registers the reconciler that
 // publishes this shard's identity and health.
-func runCmd(cfg *config.NAT66Config) error {
+func runCmd(cfg *config.NATConfig) error {
 	nodeName := cfg.NodeName
 	metricsPort := cfg.MetricsPort
 	grpcHealthPort := cfg.GRPCHealthPort
@@ -111,27 +111,34 @@ func runCmd(cfg *config.NAT66Config) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
-	// Load and attach the NAT66 egress datapath. Always a real datapath:
-	// configuration validation rejects an empty uplink, SID, or public address
-	// before this is reached, this binary existing only to run a shard.
-	datapathHealth, err := setupNat66Datapath(cfg.UplinkInterface, cfg.ShardSID, cfg.ShardPubAddr, ctrlmetrics.Registry)
+	// Load and attach the egress translation datapath. Always a real datapath:
+	// configuration validation rejects an empty uplink or SID, and a shard
+	// serving neither address family, before this is reached -- this binary
+	// exists only to run a shard.
+	datapathHealth, err := setupNatDatapath(cfg, ctrlmetrics.Registry)
 	if err != nil {
-		return fmt.Errorf("setup NAT66 egress eBPF datapath: %w", err)
+		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
+
+	// Correct the per-tenant session counts the datapath cannot maintain on its
+	// own; see runSessionResync. Tied to ctx, so it stops with the manager.
+	go runSessionResync(ctx, natDatapathKeepAlive.objs)
 	// Only now is the datapath attached. Report serving from here on, not from
 	// process start.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
-	// Register NAT66Shard controller.
-	if err := (&controller.NAT66ShardReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		NodeName:     nodeName,
-		ShardAddress: cfg.ShardPubAddr,
-		ShardSID:     cfg.ShardSID,
-		Datapath:     datapathHealth,
+	// Register EgressShard controller.
+	if err := (&controller.EgressShardReconciler{
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		NodeName:         nodeName,
+		ShardSID:         cfg.ShardSID,
+		ShardAddressIPv6: cfg.ShardPubAddr,
+		ShardAddressIPv4: cfg.ShardPubAddr4,
+		NAT64Prefix:      cfg.NAT64Prefix,
+		Datapath:         datapathHealth,
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup NAT66Shard controller: %w", err)
+		return fmt.Errorf("setup EgressShard controller: %w", err)
 	}
 
 	if err := mgr.Start(ctx); err != nil {
@@ -160,11 +167,11 @@ func newRootCommand() *cobra.Command {
 				return nil
 			}
 			if ok, _ := cmd.Flags().GetBool("version"); ok {
-				fmt.Printf("galactic-nat66 version %s\n", metadata.Version)
+				fmt.Printf("galactic-nat version %s\n", metadata.Version)
 				return nil
 			}
 
-			cfg := config.NewNAT66Config()
+			cfg := config.NewNATConfig()
 			cfg.BindFlags(cmd.Flags())
 			if err := cfg.Validate(); err != nil {
 				return err
@@ -175,17 +182,25 @@ func newRootCommand() *cobra.Command {
 
 	cmd.Flags().StringP("node-name", "n", "", "Kubernetes node name (required)")
 	cmd.Flags().IntP("metrics-port", "",
-		config.DefaultNAT66MetricsPort,
+		config.DefaultNATMetricsPort,
 		"Metrics listen port")
 	cmd.Flags().IntP("grpc-health-port", "",
-		config.DefaultNAT66GRPCHealthPort,
+		config.DefaultNATGRPCHealthPort,
 		"gRPC health check port")
-	cmd.Flags().StringP("nat66-uplink-interface", "", "",
-		"Fabric-facing uplink interface this NAT66 shard's XDP datapath attaches to (required)")
-	cmd.Flags().StringP("nat66-shard-sid", "", "",
+	cmd.Flags().StringP("nat-uplink-interface", "", "",
+		"Fabric-facing uplink interface this shard's XDP datapath attaches to (required)")
+	cmd.Flags().StringP("nat-shard-sid", "", "",
 		"This shard's own SRv6 uSID, encapsulation target for tenant egress traffic (required)")
-	cmd.Flags().StringP("nat66-shard-pub-addr", "", "",
-		"This shard's own publicly-routable masquerade source address (required)")
+	cmd.Flags().StringP("nat-shard-pub-addr", "", "",
+		"This shard's own publicly-routable IPv6 masquerade source address, enabling NAT66")
+	cmd.Flags().StringP("nat-shard-pub-addr4", "", "",
+		"This shard's own publicly-routable IPv4 masquerade source address, enabling NAT64 "+
+			"together with --nat64-prefix")
+	cmd.Flags().StringP("nat64-prefix", "", "",
+		"Fabric-wide NAT64 /96 this shard translates for; must match what DNS64 synthesizes into")
+	cmd.Flags().IntP("nat-session-limit", "",
+		config.DefaultNATSessionLimit,
+		"Per-tenant translated-session ceiling across both address families (0 means unlimited)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

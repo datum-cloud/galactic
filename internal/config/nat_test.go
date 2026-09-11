@@ -12,18 +12,20 @@ import (
 const (
 	testNAT66NodeName = "test-nat66-node"
 	testNAT66Iface    = "eth1"
-	testNAT66ShardSID = "fc00:1:2::1"
-	testNAT66ShardPub = "2001:db8:9999::1"
+	testNATShardSID   = "fc00:1:2::1"
+	testNATShardPub4  = "192.0.2.10"
+	testNAT64Prefix   = "2001:db8:64::/96"
+	testNATShardPub   = "2001:db8:9999::1"
 )
 
-func TestNAT66ConfigDefaults(t *testing.T) {
-	cfg := NewNAT66Config()
+func TestNATConfigDefaults(t *testing.T) {
+	cfg := NewNATConfig()
 
-	if cfg.MetricsPort != DefaultNAT66MetricsPort {
-		t.Errorf("MetricsPort = %d, want %d", cfg.MetricsPort, DefaultNAT66MetricsPort)
+	if cfg.MetricsPort != DefaultNATMetricsPort {
+		t.Errorf("MetricsPort = %d, want %d", cfg.MetricsPort, DefaultNATMetricsPort)
 	}
-	if cfg.GRPCHealthPort != DefaultNAT66GRPCHealthPort {
-		t.Errorf("GRPCHealthPort = %d, want %d", cfg.GRPCHealthPort, DefaultNAT66GRPCHealthPort)
+	if cfg.GRPCHealthPort != DefaultNATGRPCHealthPort {
+		t.Errorf("GRPCHealthPort = %d, want %d", cfg.GRPCHealthPort, DefaultNATGRPCHealthPort)
 	}
 	if cfg.NodeName != "" {
 		t.Errorf("NodeName = %q, want empty", cfg.NodeName)
@@ -39,15 +41,15 @@ func TestNAT66ConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestNAT66ConfigEnvOverride(t *testing.T) {
-	t.Setenv(EnvNAT66NodeName, testEnvNode)
-	t.Setenv(EnvNAT66MetricsPort, "9090")
-	t.Setenv(EnvNAT66GRPCHealthPort, "9091")
-	t.Setenv(EnvNAT66UplinkInterface, testNAT66Iface)
-	t.Setenv(EnvNAT66ShardSID, testNAT66ShardSID)
-	t.Setenv(EnvNAT66ShardPubAddr, testNAT66ShardPub)
+func TestNATConfigEnvOverride(t *testing.T) {
+	t.Setenv(EnvNATNodeName, testEnvNode)
+	t.Setenv(EnvNATMetricsPort, "9090")
+	t.Setenv(EnvNATGRPCHealthPort, "9091")
+	t.Setenv(EnvNATUplinkInterface, testNAT66Iface)
+	t.Setenv(EnvNATShardSID, testNATShardSID)
+	t.Setenv(EnvNATShardPubAddr, testNATShardPub)
 
-	cfg := NewNAT66Config()
+	cfg := NewNATConfig()
 
 	if cfg.NodeName != testEnvNode {
 		t.Errorf("NodeName = %q, want %q", cfg.NodeName, testEnvNode)
@@ -61,15 +63,15 @@ func TestNAT66ConfigEnvOverride(t *testing.T) {
 	if cfg.UplinkInterface != testNAT66Iface {
 		t.Errorf("UplinkInterface = %q, want %q", cfg.UplinkInterface, testNAT66Iface)
 	}
-	if cfg.ShardSID != testNAT66ShardSID {
-		t.Errorf("ShardSID = %q, want %q", cfg.ShardSID, testNAT66ShardSID)
+	if cfg.ShardSID != testNATShardSID {
+		t.Errorf("ShardSID = %q, want %q", cfg.ShardSID, testNATShardSID)
 	}
-	if cfg.ShardPubAddr != testNAT66ShardPub {
-		t.Errorf("ShardPubAddr = %q, want %q", cfg.ShardPubAddr, testNAT66ShardPub)
+	if cfg.ShardPubAddr != testNATShardPub {
+		t.Errorf("ShardPubAddr = %q, want %q", cfg.ShardPubAddr, testNATShardPub)
 	}
 }
 
-func TestNAT66ConfigValidate(t *testing.T) {
+func TestNATConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
 		envVars map[string]string
@@ -78,98 +80,157 @@ func TestNAT66ConfigValidate(t *testing.T) {
 		{
 			name: testCaseMissingNodeName,
 			envVars: map[string]string{
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        testNAT66ShardSID,
-				EnvNAT66ShardPubAddr:    testNAT66ShardPub,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr:    testNATShardPub,
 			},
 			wantErr: testErrNodeNameRequired,
 		},
 		{
 			name: "missing uplink interface",
 			envVars: map[string]string{
-				EnvNAT66NodeName:     testNAT66NodeName,
-				EnvNAT66ShardSID:     testNAT66ShardSID,
-				EnvNAT66ShardPubAddr: testNAT66ShardPub,
+				EnvNATNodeName:     testNAT66NodeName,
+				EnvNATShardSID:     testNATShardSID,
+				EnvNATShardPubAddr: testNATShardPub,
 			},
 			wantErr: "uplink interface is required",
 		},
 		{
 			name: "missing shard SID",
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardPubAddr:    testNAT66ShardPub,
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardPubAddr:    testNATShardPub,
 			},
 			wantErr: "shard SID is required",
 		},
 		{
 			name: "unparseable shard SID",
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        "not-an-ip-address",
-				EnvNAT66ShardPubAddr:    testNAT66ShardPub,
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        "not-an-ip-address",
+				EnvNATShardPubAddr:    testNATShardPub,
 			},
 			wantErr: "is not a valid IP address",
 		},
 		{
 			name: "ipv4 shard SID is wrong family",
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        testIPv4Addr,
-				EnvNAT66ShardPubAddr:    testNAT66ShardPub,
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testIPv4Addr,
+				EnvNATShardPubAddr:    testNATShardPub,
 			},
 			wantErr: testErrMustBeNativeIPv6,
 		},
 		{
-			name: "missing shard public address",
+			// No longer "the IPv6 address is required" -- a shard may serve
+			// NAT64 alone. What is still required is that it serve something.
+			name: "serving neither address family",
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        testNAT66ShardSID,
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
 			},
-			wantErr: "shard public address is required",
+			wantErr: "must serve at least one address family",
+		},
+		{
+			name: "NAT64 prefix without a public IPv4 address",
+			envVars: map[string]string{
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr:    testNATShardPub,
+				EnvNAT64Prefix:        testNAT64Prefix,
+			},
+			wantErr: "shard public IPv4 address is not",
+		},
+		{
+			name: "public IPv4 address without a NAT64 prefix",
+			envVars: map[string]string{
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr:    testNATShardPub,
+				EnvNATShardPubAddr4:   testNATShardPub4,
+			},
+			wantErr: "NAT64 prefix is not",
+		},
+		{
+			name: "ipv6 shard public IPv4 address is wrong family",
+			envVars: map[string]string{
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr4:   testNATShardPub,
+				EnvNAT64Prefix:        testNAT64Prefix,
+			},
+			wantErr: "must be an IPv4 address",
+		},
+		{
+			// The datapath extracts the embedded IPv4 address from one aligned
+			// four-byte run, which only a /96 guarantees.
+			name: "NAT64 prefix of the wrong length",
+			envVars: map[string]string{
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr4:   testNATShardPub4,
+				EnvNAT64Prefix:        "2001:db8:64::/64",
+			},
+			wantErr: "must be a /96",
+		},
+		{
+			name: "NAT64 prefix with bits below its length",
+			envVars: map[string]string{
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr4:   testNATShardPub4,
+				EnvNAT64Prefix:        "2001:db8:64::1/96",
+			},
+			wantErr: "bits set below its prefix length",
 		},
 		{
 			name: "ipv4 shard public address is wrong family",
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        testNAT66ShardSID,
-				EnvNAT66ShardPubAddr:    testIPv4Addr,
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr:    testIPv4Addr,
 			},
 			wantErr: testErrMustBeNativeIPv6,
 		},
 		{
 			name: testCaseInvalidMetricsPort,
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        testNAT66ShardSID,
-				EnvNAT66ShardPubAddr:    testNAT66ShardPub,
-				EnvNAT66MetricsPort:     "0",
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr:    testNATShardPub,
+				EnvNATMetricsPort:     "0",
 			},
 			wantErr: testErrMetricsPortRange,
 		},
 		{
 			name: testCaseInvalidGRPCHealthPort,
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        testNAT66ShardSID,
-				EnvNAT66ShardPubAddr:    testNAT66ShardPub,
-				EnvNAT66GRPCHealthPort:  "0",
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr:    testNATShardPub,
+				EnvNATGRPCHealthPort:  "0",
 			},
 			wantErr: testErrGRPCHealthPortRange,
 		},
 		{
 			name: testCaseValidConfig,
 			envVars: map[string]string{
-				EnvNAT66NodeName:        testNAT66NodeName,
-				EnvNAT66UplinkInterface: testNAT66Iface,
-				EnvNAT66ShardSID:        testNAT66ShardSID,
-				EnvNAT66ShardPubAddr:    testNAT66ShardPub,
+				EnvNATNodeName:        testNAT66NodeName,
+				EnvNATUplinkInterface: testNAT66Iface,
+				EnvNATShardSID:        testNATShardSID,
+				EnvNATShardPubAddr:    testNATShardPub,
 			},
 			wantErr: "",
 		},
@@ -180,7 +241,7 @@ func TestNAT66ConfigValidate(t *testing.T) {
 			for k, v := range tc.envVars {
 				t.Setenv(k, v)
 			}
-			cfg := NewNAT66Config()
+			cfg := NewNATConfig()
 			err := cfg.Validate()
 			if tc.wantErr == "" {
 				if err != nil {
@@ -194,6 +255,71 @@ func TestNAT66ConfigValidate(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("Validate() = %q, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestNATConfigValidateAcceptsEachFamilyCombination pins the three shard shapes
+// the generalization is for: NAT66 alone (what every shard was before this),
+// NAT64 alone, and both at once. The negative table above proves half a NAT64
+// configuration is rejected; this proves a whole one is not.
+func TestNATConfigValidateAcceptsEachFamilyCombination(t *testing.T) {
+	tests := []struct {
+		name        string
+		envVars     map[string]string
+		wantNAT66   bool
+		wantNAT64   bool
+		description string
+	}{
+		{
+			name: "NAT66 only",
+			envVars: map[string]string{
+				EnvNATShardPubAddr: testNATShardPub,
+			},
+			wantNAT66:   true,
+			description: "the shape every shard had before NAT64 existed",
+		},
+		{
+			name: "NAT64 only",
+			envVars: map[string]string{
+				EnvNATShardPubAddr4: testNATShardPub4,
+				EnvNAT64Prefix:      testNAT64Prefix,
+			},
+			wantNAT64:   true,
+			description: "a shard dedicated to IPv4 reachability",
+		},
+		{
+			name: "both families",
+			envVars: map[string]string{
+				EnvNATShardPubAddr:  testNATShardPub,
+				EnvNATShardPubAddr4: testNATShardPub4,
+				EnvNAT64Prefix:      testNAT64Prefix,
+			},
+			wantNAT66:   true,
+			wantNAT64:   true,
+			description: "one shard, one session table, both families",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvNATNodeName, testNAT66NodeName)
+			t.Setenv(EnvNATUplinkInterface, testNAT66Iface)
+			t.Setenv(EnvNATShardSID, testNATShardSID)
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			cfg := NewNATConfig()
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want nil (%s)", err, tt.description)
+			}
+			if got := cfg.ServesNAT66(); got != tt.wantNAT66 {
+				t.Errorf("ServesNAT66() = %v, want %v", got, tt.wantNAT66)
+			}
+			if got := cfg.ServesNAT64(); got != tt.wantNAT64 {
+				t.Errorf("ServesNAT64() = %v, want %v", got, tt.wantNAT64)
 			}
 		})
 	}

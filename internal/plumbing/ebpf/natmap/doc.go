@@ -2,12 +2,12 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package nat66map implements the read/write API for the NAT66 datapath's two
+// Package natmap implements the read/write API for the NAT66 datapath's two
 // control-plane-facing maps, shard_config_table and drop_reasons, plus a
-// read-only accessor for nat66_conn_table, the datapath's self-managed LRU flow
+// read-only accessor for nat_conn_table, the datapath's self-managed LRU flow
 // table.
 //
-// # nat66_conn_table is never written here
+// # nat_conn_table is never written here
 //
 // The datapath alone writes that table: it allocates masquerade ports, claims
 // rows, and self-evicts under memory pressure, with no GC needed. ConnTable
@@ -32,4 +32,4 @@
 // Every table type is built against the Table interface rather than directly
 // against a loaded map: KernelTable adapts a real map for production, and tests
 // substitute an in-memory fake to exercise every path without a kernel or root.
-package nat66map
+package natmap

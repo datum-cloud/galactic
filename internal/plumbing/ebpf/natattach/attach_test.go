@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package nat66attach
+package natattach
 
 import (
 	"fmt"
@@ -14,7 +14,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 
-	"go.datum.net/galactic/internal/plumbing/ebpf/nat66prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 )
 
 func requireRoot(t *testing.T) {
@@ -49,7 +49,7 @@ func TestAttach_NilProgramIsError(t *testing.T) {
 func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 	requireRoot(t)
 
-	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-nat66-test-%d", os.Getpid()))
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-nat-test-%d", os.Getpid()))
 	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
 
 	const ifaceName = "nat66test0"
@@ -82,7 +82,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		t.Fatalf("setup veth interface: %v", err)
 	}
 
-	cfg := nat66prog.Nat66ShardConfig{
+	cfg := natprog.NatShardConfig{
 		ShardSid:     netip.MustParseAddr("fc00:1:2::1").As16(),
 		ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1").As16(),
 	}
@@ -96,7 +96,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		l, err := Attach(objs.Nat66Ingress, ifaceName)
+		l, err := Attach(objs.NatIngress, ifaceName)
 		if err != nil {
 			return fmt.Errorf("attach: %w", err)
 		}
@@ -127,13 +127,13 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		l, err := Attach(objs.Nat66Ingress, ifaceName)
+		l, err := Attach(objs.NatIngress, ifaceName)
 		if err != nil {
 			return fmt.Errorf("re-attach after restart: %w", err)
 		}
 		defer func() { _ = l.Close() }()
 
-		var got nat66prog.Nat66ShardConfig
+		var got natprog.NatShardConfig
 		if err := objs.ShardConfigTable.Lookup(uint32(0), &got); err != nil {
 			return fmt.Errorf("lookup shard_config_table entry after restart: %w", err)
 		}
