@@ -6,6 +6,8 @@ package config
 
 import (
 	"os"
+
+	"go.datum.net/galactic/internal/plumbing/dan"
 )
 
 // --- CNI environment variable keys -----------------------------------------
@@ -45,6 +47,13 @@ const (
 	// Unset or empty means no shard is configured yet: a VRF gets no default
 	// route, which is no egress capability rather than an error.
 	EnvCNINAT66ShardSIDs = "GALACTIC_CNI_NAT66_SHARD_SIDS"
+
+	// EnvCNIDANDir overrides where Directly Attachable Network files are
+	// written, for a node whose shim reads somewhere other than the default.
+	//
+	// Only the location is node-level. Whether an attachment gets a file at all
+	// is stated in its own CNI config, that being a property of the workload.
+	EnvCNIDANDir = "GALACTIC_CNI_DAN_DIR"
 )
 
 // --- CNIConfig -------------------------------------------------------------
@@ -65,6 +74,9 @@ type CNIConfig struct {
 	// plugin splits and validates it.
 	NAT66ShardSIDs string
 
+	// DANDir is where Directly Attachable Network files are written.
+	DANDir string
+
 	// EBPFInterfaces is the raw comma-separated interface list. It needs the
 	// same environment-over-conflist-over-default resolution as NAT66ShardSIDs,
 	// not a plain environment read at the call site.
@@ -82,6 +94,7 @@ func NewCNIConfig() *CNIConfig {
 // the environment and the compiled-in defaults.
 func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 	var cnflistNode, cnflistKube, cnflistNS, cnflistLog, cnflistLevel, cnflistShardSIDs, cnflistEBPFIfaces string
+	var cnflistDANDir string
 	if conflist != nil {
 		cnflistNode = conflist.NodeName
 		cnflistKube = conflist.Kubeconfig
@@ -90,6 +103,7 @@ func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 		cnflistLevel = conflist.LogLevel
 		cnflistShardSIDs = conflist.NAT66ShardSIDs
 		cnflistEBPFIfaces = conflist.EBPFInterfaces
+		cnflistDANDir = conflist.DANDir
 	}
 
 	// NodeName: env > conflist > legacy fallback > (no default)
@@ -119,6 +133,8 @@ func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 	// No default: empty means fall back to the datapath's own interface
 	// auto-detection, not an error.
 	c.EBPFInterfaces = resolveEnv(EnvCNIEBPFInterfaces, cnflistEBPFIfaces, "")
+
+	c.DANDir = resolveEnv(EnvCNIDANDir, cnflistDANDir, dan.DefaultDir)
 }
 
 // ConflistValues holds the raw values read from the CNI conflist file.
@@ -131,4 +147,5 @@ type ConflistValues struct {
 	LogLevel       string
 	NAT66ShardSIDs string
 	EBPFInterfaces string
+	DANDir         string
 }

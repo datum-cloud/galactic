@@ -5,6 +5,8 @@
 package cnitap
 
 import (
+	"encoding/json"
+
 	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/config"
 )
@@ -27,4 +29,27 @@ func InitCNIConfig() {
 // resolver and conflist path.
 func parseConf(data []byte) (*PluginConf, error) {
 	return cnimaster.ParseConf(data, cniConfig, ConfFile)
+}
+
+// danRequested reports whether this attachment's guest adopts the tap through a
+// Directly Attachable Network file, rather than having its network discovered
+// by the runtime.
+//
+// The decision follows the workload rather than the node, because a cell runs
+// guests of several runtimes over the same tap master plugin. The CNI config
+// carries it, that being the one channel delivered identically to ADD, DEL, and
+// CHECK.
+//
+// It is read from the raw config rather than the shared master-plugin struct,
+// this being the one master plugin that acts on it.
+func danRequested(data []byte) bool {
+	var conf struct {
+		DAN bool `json:"dan"`
+	}
+	// A decode error needs no report. The caller unmarshals the same bytes into
+	// the full config first, so malformed JSON is already rejected.
+	if err := json.Unmarshal(data, &conf); err != nil {
+		return false
+	}
+	return conf.DAN
 }

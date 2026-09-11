@@ -261,6 +261,7 @@ func ParseConf(data []byte, cniConfig *config.CNIConfig, confFile string) (*Plug
 		Namespace:  hostConf.Namespace,
 		LogFile:    hostConf.LogFile,
 		LogLevel:   hostConf.LogLevel,
+		DANDir:     hostConf.DANDir,
 	})
 
 	// Fall back to auto-detecting the node name from the API by matching local

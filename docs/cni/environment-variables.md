@@ -40,6 +40,7 @@ they resolve only `LogFile`/`LogLevel` from `HostConf` — never `NodeName` or
 | `LogFile`        | Path the plugin logs to (`/var/log/galactic/galactic-cni.log` by default, shared across every binary in the chain).                                                                                                                                                                                                                  |
 | `LogLevel`       | Verbosity of plugin logging: `debug`, `info`, `warn`, or `error` (`info` by default). See [Log verbosity](#log-verbosity) below.                                                                                                                                                                                                     |
 | `NAT66ShardSIDs` | Comma-separated list of every live `galactic-nat66` shard's `Status.ShardSID`, resolved once by `galactic-cni init` from `GALACTIC_CNI_NAT66_SHARD_SIDS` and written here so a per-pod CNI invocation can read it. See [`GALACTIC_CNI_NAT66_SHARD_SIDS`](#galactic_cni_nat66_shard_sids) below.                                      |
+| `DANDir`         | Directory the tap master plugin writes a sandbox's Directly Attachable Network file to (`/run/kata-containers/dans-rs` by default). Only the location is node-level; whether an attachment gets a file is the `dan` field in its own CNI config. See [`GALACTIC_CNI_DAN_DIR`](#galactic_cni_dan_dir) below.                        |
 | `EBPFInterfaces` | Comma-separated interface list the eBPF uSID datapath attaches its ingress hook to, resolved once by `galactic-cni init` (env override or auto-detection) and written here for the same reason as `NAT66ShardSIDs`. See [`GALACTIC_CNI_EBPF_INTERFACES`](#galactic_cni_ebpf_interfaces-and-galactic_cni_ebpf_filter_priority) below. |
 
 ## Resolution precedence
@@ -53,6 +54,7 @@ they resolve only `LogFile`/`LogLevel` from `HostConf` — never `NodeName` or
 | Log level            | `GALACTIC_CNI_LOG_LEVEL` env → `HostConf.LogLevel`                                                                                                                                                                               | `info`                               | every binary in the chain                       |
 | NAT66 shard SIDs     | `GALACTIC_CNI_NAT66_SHARD_SIDS` env (`galactic-cni init`/`run` only) → `HostConf.NAT66ShardSIDs`                                                                                                                                 | _(empty: no shard configured)_       | `galactic-cni init`, `galactic-bgp`             |
 | eBPF interfaces      | `GALACTIC_CNI_EBPF_INTERFACES` env → `HostConf.EBPFInterfaces` (bridged back into the env var for `galactic-bgp`'s own process, see below) → auto-detect (interface(s) carrying the default IPv6 route)                          | _(auto-detected)_                    | `galactic-cni init`/`run`, `galactic-bgp`       |
+| DAN directory        | `GALACTIC_CNI_DAN_DIR` env → `HostConf.DANDir`                                                                                                                                                                                  | `/run/kata-containers/dans-rs`       | `galactic-cni init`, `galactic-tap`             |
 | eBPF filter priority | `GALACTIC_CNI_EBPF_FILTER_PRIORITY` env (plain `os.Getenv`, no `HostConf`/conflist tier)                                                                                                                                         | `1`                                  | `galactic-cni init`/`run`                       |
 
 `GALACTIC_CNI_*` env var names are shared as-is across every binary that
@@ -152,6 +154,25 @@ the same behavior as before this mechanism existed, not an error.
 
 **Type:** comma-separated string · **Default:** _(empty — no shard
 configured)_
+
+## `GALACTIC_CNI_DAN_DIR`
+
+Directory the tap master plugin writes a sandbox's Directly Attachable
+Network (DAN) file to. A Kata runtime-rs shim reads that file and adopts
+the tap galactic already created for the attachment, instead of discovering
+a network of its own.
+
+Set it only for a node whose shim is configured to read somewhere other
+than the default. The Go shim's directory, `/run/kata-containers/dans`, is
+refused: that shim hard-errors on the host tap device this plugin writes,
+with no fallback, which would stop every sandbox on the node from starting.
+
+Node-level because it describes where that node's shim reads. Whether an
+attachment gets a file at all is the `dan` field in its own CNI config, no
+file being written for an attachment that does not ask for one.
+
+**Type:** string (filesystem path) · **Default:**
+`/run/kata-containers/dans-rs`
 
 ## `GALACTIC_CNI_KUBERNETES_CONFIG`
 
