@@ -347,6 +347,7 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	logLevel := resolveLogLevel()
 	nat66ShardSIDs := resolveNAT66ShardSIDs()
 	ebpfInterfaces := resolveEBPFInterfaces()
+	danDir := os.Getenv(config.EnvCNIDANDir)
 	conflistContent := fmt.Sprintf(`{
   "cniVersion": "1.0.0",
   "name": "galactic",
@@ -359,12 +360,13 @@ func Bootstrap(ctx context.Context, nodeName string) error {
       "log_file": %q,
       "log_level": %q,
       "nat66_shard_sids": %q,
-      "ebpf_interfaces": %q
+      "ebpf_interfaces": %q,
+      "dan_dir": %q
     }
   ]
 }
 `, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel,
-		nat66ShardSIDs, ebpfInterfaces)
+		nat66ShardSIDs, ebpfInterfaces, danDir)
 
 	if err := atomicWriteFile(HostConflist, []byte(conflistContent), 0644); err != nil {
 		return fmt.Errorf("write conflist file: %w", err)

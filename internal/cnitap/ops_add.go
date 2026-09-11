@@ -160,6 +160,19 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 	}
 
+	// Hand the sandbox to a Kata runtime-rs shim, when this attachment asked
+	// for it. This is the last thing ADD does, so the file exists only once the
+	// tap behind it is real and addressed. A failure is fatal to ADD, never
+	// best-effort. See dan.Write.
+	if danRequested(args.StdinData) {
+		tracker.danDir, tracker.danSandboxID = cniConfig.DANDir, args.ContainerID
+		if err := writeDANFile(cniConfig.DANDir, args.ContainerID, hostName, ipamResult, hostMTU); err != nil {
+			return fmt.Errorf("emit DAN file: %w", err)
+		}
+		slog.Debug("ADD: DAN file written", "containerID", args.ContainerID,
+			"dir", cniConfig.DANDir, "tap", hostName)
+	}
+
 	result := buildTapResult(pluginConf, ipamResult, hostName, hostMac, hostMTU)
 	return types.PrintResult(result, pluginConf.CNIVersion)
 }

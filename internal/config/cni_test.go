@@ -4,7 +4,11 @@
 
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"go.datum.net/galactic/internal/plumbing/dan"
+)
 
 const (
 	testConflistNode = "conflist-node"
@@ -15,6 +19,7 @@ const (
 	testEnvKube      = "/env/kubeconfig"
 	testEnvNS        = "env-ns"
 	testEnvNode      = "env-node"
+	testConflistDAN  = "/run/other/dans"
 )
 
 func TestCNIConfigDefaults(t *testing.T) {
@@ -170,5 +175,30 @@ func TestCNIConfigNodeNameLegacyFallback(t *testing.T) {
 
 	if cfg.NodeName != "legacy-node" {
 		t.Errorf("NodeName = %q, want %q", cfg.NodeName, "legacy-node")
+	}
+}
+
+func TestCNIConfigDANDir(t *testing.T) {
+	// Default: the runtime-rs directory. Whether anything is written there is
+	// decided per attachment, not here.
+	cfg := NewCNIConfig()
+	cfg.Resolve(&ConflistValues{})
+	if cfg.DANDir != dan.DefaultDir {
+		t.Errorf("DANDir = %q, want %q", cfg.DANDir, dan.DefaultDir)
+	}
+
+	// Conflist value flows through.
+	cfg = NewCNIConfig()
+	cfg.Resolve(&ConflistValues{DANDir: testConflistDAN})
+	if cfg.DANDir != testConflistDAN {
+		t.Errorf("DANDir = %q, want the conflist value", cfg.DANDir)
+	}
+
+	// Env var overrides the conflist value.
+	t.Setenv(EnvCNIDANDir, "/run/env/dans")
+	cfg = NewCNIConfig()
+	cfg.Resolve(&ConflistValues{DANDir: testConflistDAN})
+	if cfg.DANDir != "/run/env/dans" {
+		t.Errorf("DANDir = %q, want the env value", cfg.DANDir)
 	}
 }

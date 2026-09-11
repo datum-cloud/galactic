@@ -27,6 +27,7 @@ else is).
 | `vpcattachment` | **Yes**  | `string` | Base62-encoded VPC attachment identifier (16-bit value). Paired with `vpc` for deterministic VRF/BGP naming.                                                                                                         |
 | `mtu`           | No       | `int`    | MTU for the host-side interface. For `galactic-veth` this applies to both veth endpoints; for `galactic-tap` it applies to the tap interface.                                                                        |
 | `namespace`     | No       | `string` | Kubernetes namespace used for NAD lookup (and, for `galactic-bgp`'s own stanza, `BGPRouter`/BGP CRD lookup). Resolution order: this field → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace` → `galactic-system`. |
+| `dan`           | No       | `bool`   | `galactic-tap` only. Write a Directly Attachable Network file for the sandbox, so a Kata runtime-rs shim adopts this tap instead of discovering a network of its own. Off unless set. See [Directly attachable networking](#directly-attachable-networking) below.                                                     |
 | `ipam`          | No       | `IPAM`   | IPAM delegation block (see [IPAM Fields](#ipam-fields) below). Presence alone decides whether IPAM runs at all — no env var or sibling field can trigger or suppress it.                                             |
 
 Standard CNI fields (`cniVersion`, `name`, `dns`, `runtimeConfig`) are also
@@ -70,6 +71,32 @@ never delegates to host-device and never configures a guest netns. It still
 runs IPAM (if `"ipam"` is present) and configures the host gateway exactly as
 `galactic-veth` does; the CNI result carries a single interface (the host tap,
 empty sandbox) since there's no guest-side interface entry.
+
+#### Directly attachable networking
+
+A microVM guest cannot be handed an interface the way a container can, so a
+Kata shim has to be told which host device belongs to the sandbox and what the
+guest should see on it. Setting `"dan": true` makes `galactic-tap` write that
+description to `<DAN directory>/<sandbox ID>.json` at the end of ADD, from
+values it already holds: the tap name, the addresses IPAM allocated, their
+gateways, the MTU, and a guest MAC derived from the tap name so it is stable
+across instance replacement. The directory is node-level configuration (see
+[`GALACTIC_CNI_DAN_DIR`](environment-variables.md#galactic_cni_dan_dir)) and
+defaults to `/run/kata-containers/dans-rs`.
+
+Per attachment rather than per node, because the decision follows the
+workload: one cell runs guests of several runtimes over this same plugin, and
+only some of them read the file. It is carried in the CNI config because that
+is the one channel delivered identically to ADD, DEL, and CHECK, so no
+operation has to re-derive it.
+
+A failed write fails ADD. Kata treats a missing file as "discover the network
+yourself", which produces a healthy-looking sandbox on the wrong network — a
+far worse outcome than an attachment that does not come up.
+
+DEL removes the file unconditionally, whether or not the attachment asked for
+one. Nothing in Kata removes it, so the CNI plugin owns it for the sandbox's
+whole lifetime.
 
 The IPv4 gateway address on the host tap is a `/25`, not the `/32` used
 everywhere else (veth's host/guest gateways, and the pod's own address in both

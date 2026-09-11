@@ -14,6 +14,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/cni/tap"
+	"go.datum.net/galactic/internal/plumbing/dan"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
@@ -55,6 +56,17 @@ func cmdDel(args *skel.CmdArgs) error {
 	// never had an IPv6 gateway allocated, is not an error, and DEL must stay
 	// idempotent.
 	removeRadvState(vpc, vpcAtt, args.ContainerID)
+
+	// Remove the sandbox's DAN file. Nothing in Kata deletes it, so files would
+	// accumulate in a tmpfs directory for the node's uptime.
+	//
+	// Removal is unconditional because it is idempotent, so a misread opt-in
+	// cannot strand state. Failures are logged rather than returned, because
+	// DEL is required to succeed.
+	if err := dan.Remove(cniConfig.DANDir, args.ContainerID); err != nil {
+		slog.Warn("DEL: failed to remove DAN file", "err", err,
+			"containerID", args.ContainerID, "dir", cniConfig.DANDir)
+	}
 
 	// Delete this attachment's tap device. Unlike the VRF and CRDs below it is
 	// private to this attachment, so no sibling VM can still depend on it and

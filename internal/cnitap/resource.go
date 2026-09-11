@@ -11,6 +11,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cnimaster"
+	"go.datum.net/galactic/internal/plumbing/dan"
 )
 
 // resourceTracker tracks the resources cmdAdd created, for selective rollback.
@@ -27,6 +28,11 @@ type resourceTracker struct {
 	ipamDelegated bool
 	ipamType      string
 	ipamStdin     []byte
+
+	// danDir and danSandboxID locate the DAN file to unlink during rollback.
+	// They are empty for an attachment that did not ask for one, and cleanup
+	// tolerates a file that was never written.
+	danDir, danSandboxID string
 }
 
 // cleanup rolls back the tracked resources in reverse creation order.
@@ -46,6 +52,14 @@ func (rt *resourceTracker) cleanup() {
 			slog.Error("Rollback: failed to release IPAM allocation", "err", err, "ipamType", rt.ipamType)
 		} else {
 			slog.Debug("Rollback: released IPAM allocation", "ipamType", rt.ipamType)
+		}
+	}
+
+	// Unlink the DAN file before the tap it names goes away, so no window
+	// exists where a shim could adopt a device that is being deleted.
+	if rt.danDir != "" && rt.danSandboxID != "" {
+		if err := dan.Remove(rt.danDir, rt.danSandboxID); err != nil {
+			slog.Error("Rollback: failed to remove DAN file", "err", err, "dir", rt.danDir)
 		}
 	}
 

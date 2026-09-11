@@ -74,6 +74,12 @@ type HostConf struct {
 	// route is not the fabric interface, and produces a plausible but wrong
 	// uplink entry for the DSR reply redirect.
 	EBPFInterfaces string `json:"ebpf_interfaces,omitempty"`
+
+	// DANDir is where the tap master plugin writes Directly Attachable Network
+	// files. The installer writes it from its own environment for the same
+	// reason as the fields above. A per-pod CNI invocation sees none of the
+	// daemonset's environment.
+	DANDir string `json:"dan_dir,omitempty"`
 }
 
 // conflistEnvelope matches standard CNI conflist JSON structure.
