@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package nat66prog
+package natprog
 
 import (
 	"encoding/binary"
@@ -39,11 +39,11 @@ func requireRoot(t *testing.T) {
 	}
 }
 
-func loadObjects(t *testing.T) *Nat66Objects {
+func loadObjects(t *testing.T) *NatObjects {
 	t.Helper()
 
-	var objs Nat66Objects
-	if err := LoadNat66Objects(&objs, nil); err != nil {
+	var objs NatObjects
+	if err := LoadNatObjects(&objs, nil); err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			t.Fatalf("load objects: verifier rejected program:\n%+v", ve)
@@ -55,7 +55,27 @@ func loadObjects(t *testing.T) *Nat66Objects {
 			t.Errorf("close objects: %v", err)
 		}
 	})
+	populateProgArray(t, &objs)
 	return &objs
+}
+
+// populateProgArray fills nat_progs with the four translation leaves, which is
+// what makes nat_ingress's tail calls resolve. natattach does the same thing
+// before attaching in production; a test that skipped it would exercise only
+// the dispatcher's fall-through-to-XDP_PASS path and silently prove nothing.
+func populateProgArray(t *testing.T, objs *NatObjects) {
+	t.Helper()
+	slots := map[uint32]*ebpf.Program{
+		ProgNAT66Forward: objs.Nat66Forward,
+		ProgNAT66Return:  objs.Nat66Return,
+		ProgNAT64Forward: objs.Nat64Forward,
+		ProgNAT64Return:  objs.Nat64Return,
+	}
+	for slot, prog := range slots {
+		if err := objs.NatProgs.Put(slot, prog); err != nil {
+			t.Fatalf("populate nat_progs[%d]: %v", slot, err)
+		}
+	}
 }
 
 func sumPerCPU(t *testing.T, m *ebpf.Map, index uint32) uint64 {
@@ -110,7 +130,7 @@ func buildUDPPacket(t *testing.T, dst, src netip.Addr, srcPort, dstPort uint16, 
 
 // udp6Checksum is the same independent reference implementation
 // internal/plumbing/ebpf/prog/usid_test.go's identical helper is -- used
-// only to build/verify checksums, not to exercise anything in nat66.c.
+// only to build/verify checksums, not to exercise anything in nat.c.
 func udp6Checksum(src, dst [16]byte, udpHeaderAndPayload []byte) uint16 {
 	var sum uint32
 	add16 := func(b []byte) {
@@ -168,23 +188,24 @@ func buildEncappedUDPPacket(t *testing.T, outerDst, outerSrc, innerSrc, innerDst
 	return pkt
 }
 
-// TestNat66Ingress_UnclaimedTrafficPassesThrough covers the common case:
+// TestNatIngress_UnclaimedTrafficPassesThrough covers the common case:
 // traffic addressed to neither shard_pub_addr nor this shard's own
 // shard_sid locator must pass through completely unmodified.
-func TestNat66Ingress_UnclaimedTrafficPassesThrough(t *testing.T) {
+func TestNatIngress_UnclaimedTrafficPassesThrough(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 
-	if err := objs.ShardConfigTable.Put(uint32(0), Nat66ShardConfig{
+	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
 		ShardSid:     netip.MustParseAddr("fc00:1:2::1").As16(),
 		ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1").As16(),
+		ServesV6:     1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
 
 	pkt := buildUDPPacket(t, netip.MustParseAddr("2001:db8::9999"),
 		netip.MustParseAddr("2001:db8:ffff::1"), 5000, 443, []byte("hi"))
-	ret, out, err := objs.Nat66Ingress.Test(pkt)
+	ret, out, err := objs.NatIngress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
@@ -196,19 +217,19 @@ func TestNat66Ingress_UnclaimedTrafficPassesThrough(t *testing.T) {
 	}
 }
 
-// TestNat66Ingress_ForwardSNATsAndPreservesChecksum covers handle_forward:
+// TestNatIngress_ForwardSNATsAndPreservesChecksum covers handle_forward:
 // a tenant's own SRv6-encapsulated egress packet must be decapsulated,
 // SNAT'd to shard_pub_addr with an allocated port, and passed through
 // (XDP_PASS) with a checksum that verifies against an independent full
 // recompute -- not just "the verifier accepted it".
-func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
+func TestNatIngress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
-	if err := objs.ShardConfigTable.Put(uint32(0), Nat66ShardConfig{
-		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(),
+	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
+		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(), ServesV6: 1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
@@ -229,13 +250,21 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	pkt := buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg), backendUSID,
 		backendAddr, destAddr, payload)
 
-	ret, out, err := objs.Nat66Ingress.Test(pkt)
+	ret, out, err := objs.NatIngress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
 	if ret != xdpPass {
 		t.Fatalf("verdict = %d, want XDP_PASS (%d) -- SNAT'd traffic must be handed to the kernel's "+
 			"own routing, not dropped or re-encapsulated", ret, xdpPass)
+	}
+
+	// The decapsulated frame must still carry a real link header. Widening the
+	// head past it and reclaiming 14 bytes exposes the old packet's bytes at
+	// that offset unless strip_outer_header carries it across, and an XDP_PASS
+	// frame whose EtherType is those bytes reaches no protocol handler at all.
+	if got := binary.BigEndian.Uint16(out[12:14]); got != 0x86DD {
+		t.Errorf("EtherType after decap = %#04x, want 0x86DD", got)
 	}
 
 	// Post-decap layout: eth(14) + ip6(40) + udp -- daddr unchanged
@@ -279,7 +308,7 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	// lifetime.
 	pkt2 := buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg), backendUSID,
 		backendAddr, destAddr, []byte("second packet"))
-	_, out2, err := objs.Nat66Ingress.Test(pkt2)
+	_, out2, err := objs.NatIngress.Test(pkt2)
 	if err != nil {
 		t.Fatalf("program test-run (2nd packet): %v", err)
 	}
@@ -289,7 +318,7 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	}
 }
 
-// TestNat66Ingress_DifferentNodeIDPassesThrough proves locator_matches'
+// TestNatIngress_DifferentNodeIDPassesThrough proves locator_matches'
 // deliberate 64-bit (Block+Node-ID) granularity does NOT accidentally
 // widen to a full 128-bit match: two uSIDs sharing shard_sid's Block but
 // not its Node-ID must never be treated as this shard's own traffic,
@@ -300,14 +329,14 @@ func TestNat66Ingress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 // this same 64-bit match cannot, by itself, detect or prevent; this test
 // only proves the match's own stated granularity is what's implemented,
 // not a fix for that allocation-level constraint.
-func TestNat66Ingress_DifferentNodeIDPassesThrough(t *testing.T) {
+func TestNatIngress_DifferentNodeIDPassesThrough(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
-	if err := objs.ShardConfigTable.Put(uint32(0), Nat66ShardConfig{
-		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(),
+	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
+		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(), ServesV6: 1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
@@ -326,7 +355,7 @@ func TestNat66Ingress_DifferentNodeIDPassesThrough(t *testing.T) {
 	pkt := buildEncappedUDPPacket(t, netip.AddrFrom16(otherUSID), backendUSID,
 		backendAddr, destAddr, []byte("a different node's own uSID space"))
 
-	ret, out, err := objs.Nat66Ingress.Test(pkt)
+	ret, out, err := objs.NatIngress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
@@ -339,18 +368,18 @@ func TestNat66Ingress_DifferentNodeIDPassesThrough(t *testing.T) {
 	}
 }
 
-// TestNat66Ingress_ReturnUnNATsAndReencapsulates covers handle_return: a
+// TestNatIngress_ReturnUnNATsAndReencapsulates covers handle_return: a
 // reply from the internet, addressed to shard_pub_addr:allocated_port,
 // must be un-SNAT'd back to the tenant backend's own view and
 // re-encapsulated via SRv6 toward that backend's worker node.
-func TestNat66Ingress_ReturnUnNATsAndReencapsulates(t *testing.T) {
+func TestNatIngress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
-	if err := objs.ShardConfigTable.Put(uint32(0), Nat66ShardConfig{
-		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(),
+	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
+		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(), ServesV6: 1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
@@ -368,7 +397,7 @@ func TestNat66Ingress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	// learn the allocated masquerade port.
 	fwdPkt := buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg), backendUSID,
 		backendAddr, destAddr, []byte("out"))
-	_, fwdOut, err := objs.Nat66Ingress.Test(fwdPkt)
+	_, fwdOut, err := objs.NatIngress.Test(fwdPkt)
 	if err != nil {
 		t.Fatalf("forward program test-run: %v", err)
 	}
@@ -378,7 +407,7 @@ func TestNat66Ingress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	// Now the reply: from destAddr:destPort, to shardPub:masqPort.
 	replyPkt := buildUDPPacket(t, shardPub, destAddr, destPort, masqPort, []byte("reply"))
 
-	ret, out, err := objs.Nat66Ingress.Test(replyPkt)
+	ret, out, err := objs.NatIngress.Test(replyPkt)
 	if err != nil {
 		t.Fatalf("return program test-run: %v", err)
 	}
@@ -386,7 +415,7 @@ func TestNat66Ingress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 		t.Fatalf("verdict = %d, want XDP_DROP (%d) (FIB lookup against a synthetic backend uSID must "+
 			"fail, not succeed, on this test host)", ret, xdpDrop)
 	}
-	if got := sumPerCPU(t, objs.DropReasons, DropReasonNat66FibLookupFailed); got != 1 {
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonNatFibLookupFailed); got != 1 {
 		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (push_outer_header must have run)", got)
 	}
 
@@ -436,23 +465,24 @@ func TestNat66Ingress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	}
 }
 
-// TestNat66Ingress_ReturnWithNoConnDropped covers the claimed-address
+// TestNatIngress_ReturnWithNoConnDropped covers the claimed-address
 // fail-closed contract: a reply to shard_pub_addr with no matching
 // conn_table row must drop, not pass through (this address is claimed).
-func TestNat66Ingress_ReturnWithNoConnDropped(t *testing.T) {
+func TestNatIngress_ReturnWithNoConnDropped(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
-	if err := objs.ShardConfigTable.Put(uint32(0), Nat66ShardConfig{
+	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
 		ShardSid:     netip.MustParseAddr("fc00:1:2::1").As16(),
 		ShardPubAddr: shardPub.As16(),
+		ServesV6:     1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
 
 	pkt := buildUDPPacket(t, shardPub, netip.MustParseAddr("2001:db8:9998::1"), 443, 55555, []byte("x"))
-	ret, _, err := objs.Nat66Ingress.Test(pkt)
+	ret, _, err := objs.NatIngress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
