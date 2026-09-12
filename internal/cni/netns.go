@@ -137,11 +137,10 @@ func addDefaultRouteIfMissing(handle *netlink.Handle, link netlink.Link, ifName 
 			ifName, r.Gw, gateway)
 	}
 
-	// The on-link flag: the IPv4 pool allocates a host address with no on-link
-	// subnet route to the gateway, so the kernel refuses this route unless told
-	// to treat the gateway as directly reachable. The IPv6 subnet allocation
-	// already covers its gateway, making the flag a no-op there, so it is safe
-	// to set for both families.
+	// The on-link flag: a VPC gateway sits outside the prefix allocated to the
+	// attachment, for either family, so nothing on the interface tells the
+	// kernel the gateway is reachable and it refuses this route unless the
+	// route says the gateway is directly reachable.
 	defaultRoute := &netlink.Route{
 		Dst:       nil, // default route
 		Gw:        gateway,

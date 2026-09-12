@@ -90,6 +90,11 @@ type Interface struct {
 	Flags       uint32   `json:"flags"`
 }
 
+// RouteFlagOnLink marks a route's gateway as reachable on the link even when
+// no address on the interface covers it. It is the kernel's RTNH_F_ONLINK,
+// passed through to the guest's routing table unchanged.
+const RouteFlagOnLink uint32 = 4
+
 // Route is one route installed inside the guest. An empty Dest is the default
 // route for whichever family Gateway belongs to.
 type Route struct {
