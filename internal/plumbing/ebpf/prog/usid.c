@@ -175,6 +175,12 @@ static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const vo
 // mirror whatever budget the original sender chose.
 #define USID_EGRESS_HOP_LIMIT 64
 
+// BPF_F_ADJ_ROOM_ENCAP_L3_IPV6 from the kernel's UAPI. It marks the room
+// usid_egress opens as an outer IPv6 tunnel header, so a GSO packet the tenant
+// handed over is still segmented after encapsulation; without it the kernel
+// cannot segment the packet on the uplink and drops it.
+#define USID_BPF_F_ADJ_ROOM_ENCAP_L3_IPV6 (1ULL << 2)
+
 // USID_L3_OFFSET is the fixed byte offset of the IPv6 header from skb->data, a
 // compile-time constant.
 //
@@ -1512,7 +1518,17 @@ int usid_egress(struct __sk_buff *skb)
 	// room, the ingress strip being the same call with a negative one, and the
 	// MAC-anchored mode keeps the Ethernet header at the front and opens the
 	// space directly after it, where the outer header belongs.
-	if (bpf_skb_adjust_room(skb, (__s32) sizeof(struct usid_ip6hdr), BPF_ADJ_ROOM_MAC, 0)) {
+	//
+	// The room is declared an outer IPv6 tunnel header. A guest behind a tap
+	// with offloads hands over TCP super-segments many MSS long, and only a
+	// tunnel-marked GSO packet can be segmented once it reaches the uplink;
+	// an unmarked one is dropped there, leaving the connection to crawl along
+	// on single-segment retransmissions. The kernel refuses the flag for a
+	// packet already marked encapsulated, which keeps the unmarked push.
+	__s32 outer_len = (__s32) sizeof(struct usid_ip6hdr);
+
+	if (bpf_skb_adjust_room(skb, outer_len, BPF_ADJ_ROOM_MAC, USID_BPF_F_ADJ_ROOM_ENCAP_L3_IPV6) &&
+	    bpf_skb_adjust_room(skb, outer_len, BPF_ADJ_ROOM_MAC, 0)) {
 		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
