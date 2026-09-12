@@ -161,6 +161,57 @@ func TestBuildResult(t *testing.T) {
 	}
 }
 
+// TestBuildResultNamesRequestedInterface pins the same runtime contract the
+// tap path has to meet, for veth: the sandbox's default interface appears
+// under the requested name, in the container namespace, and carries an
+// address. The host end stays first and unaddressed.
+func TestBuildResultNamesRequestedInterface(t *testing.T) {
+	subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/80")
+	gateway := net.ParseIP("fd00:10:ff01::1")
+	netns := "/proc/1234/ns/net"
+	hostName := "G09-vpc03-vpcAttH"
+
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+	ipRes := &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway}
+
+	result := buildResult(conf, ipRes, hostName, testIfName, testMac, "aa:bb:cc:dd:ee:11", 1500, 1500, netns)
+
+	if len(result.Interfaces) != 2 {
+		t.Fatalf("Interfaces count = %d, want 2", len(result.Interfaces))
+	}
+	if result.Interfaces[0].Name != hostName || result.Interfaces[0].Sandbox != "" {
+		t.Errorf("Interfaces[0] = %+v, want the host end %q with no sandbox", result.Interfaces[0], hostName)
+	}
+
+	idx := -1
+	for i, iface := range result.Interfaces {
+		if iface.Name == testIfName {
+			idx = i
+			break
+		}
+	}
+	if idx != 1 {
+		t.Fatalf("interface %q at index %d, want 1: %+v", testIfName, idx, result.Interfaces)
+	}
+	if result.Interfaces[idx].Sandbox != netns {
+		t.Errorf("Interfaces[%d].Sandbox = %q, want %q", idx, result.Interfaces[idx].Sandbox, netns)
+	}
+
+	var addressed int
+	for _, ip := range result.IPs {
+		if ip.Interface != nil && *ip.Interface == idx {
+			addressed++
+		}
+	}
+	if addressed == 0 {
+		t.Errorf("interface %q carries no IPConfig; a runtime rejects the sandbox for this", testIfName)
+	}
+}
+
 // TestBuildResultDualStack verifies that buildResult emits both an IPv6 and
 // an IPv4 IPConfig, both pointing at the guest interface, plus both default
 // routes, when ipamResult carries an IPv4 allocation.

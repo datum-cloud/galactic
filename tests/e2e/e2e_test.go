@@ -330,6 +330,14 @@ NODE_NAME=` + nodeName() + ` \
 		t.Errorf("interfaces[0].sandbox = %q, want empty (tap has no guest endpoint)", sandbox)
 	}
 
+	// The interface carries the name the runtime asked for (CNI_IFNAME above),
+	// not the host tap device name. A container runtime resolves the sandbox's
+	// address by that name and refuses the sandbox when it finds no addressed
+	// entry under it.
+	if ifName, _ := iface["name"].(string); ifName != "eth0" {
+		t.Errorf("interfaces[0].name = %q, want %q (the requested CNI_IFNAME)", ifName, "eth0")
+	}
+
 	// Tap mode now runs IPAM allocation like veth mode (the guest still
 	// configures its own IP; this is the host-side gateway/subnet recorded
 	// against the host tap interface).

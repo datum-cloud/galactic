@@ -26,6 +26,11 @@ const (
 	testContainerID   = "test-container"
 	testInvalidBase62 = "abc-def"
 	testCNIVersion    = "1.0.0"
+	// testIfName is the interface name a container runtime requests, and
+	// testHostTap the host tap device backing it. They differ on purpose: the
+	// result must report the requested name, never the device name.
+	testIfName  = "eth0"
+	testHostTap = "G0abc123def"
 )
 
 func TestMain(m *testing.M) {
@@ -172,7 +177,7 @@ func TestBuildTapResult(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildTapResult(conf, tt.ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
+			result := buildTapResult(conf, tt.ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
 
 			if result.CNIVersion != testCNIVersion {
 				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, testCNIVersion)
@@ -180,8 +185,8 @@ func TestBuildTapResult(t *testing.T) {
 			if len(result.Interfaces) != 1 {
 				t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
 			}
-			if result.Interfaces[0].Name != "H0abc123" {
-				t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, "H0abc123")
+			if result.Interfaces[0].Name != testIfName {
+				t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, testIfName)
 			}
 			if result.Interfaces[0].Sandbox != "" {
 				t.Errorf("Interfaces[0].Sandbox = %q, want empty", result.Interfaces[0].Sandbox)
@@ -217,7 +222,7 @@ func TestBuildTapResultIPv4Mask(t *testing.T) {
 	}
 	ipRes := &cniipam.IPAMResult{IPv4Address: ipv4Address, IPv4Gateway: ipv4Gateway, Routes: []*net.IPNet{ipv4Route}}
 
-	result := buildTapResult(conf, ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
+	result := buildTapResult(conf, ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
 
 	if len(result.IPs) != 1 {
 		t.Fatalf("IPs count = %d, want 1", len(result.IPs))
@@ -246,10 +251,58 @@ func TestBuildTapResultHostNetns(t *testing.T) {
 	}
 	ipRes := &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway, Routes: []*net.IPNet{defaultRoute}}
 
-	result := buildTapResult(conf, ipRes, "H0abc123", "aa:bb:cc:dd:ee:ff", 1500)
+	result := buildTapResult(conf, ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
 
 	if result.Interfaces[0].Sandbox != "" {
 		t.Errorf("Interfaces[0].Sandbox = %q, want empty (host netns, no sandbox)", result.Interfaces[0].Sandbox)
+	}
+}
+
+// TestBuildTapResultNamesRequestedInterface pins the contract a container
+// runtime enforces on the sandbox's default interface: an entry under the
+// requested name, carrying at least one address. containerd refuses to start
+// the sandbox when that entry is missing or has no address, which is what a
+// result named after the host tap device produced.
+func TestBuildTapResultNamesRequestedInterface(t *testing.T) {
+	subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/80")
+	gateway := net.ParseIP("fd00:10:ff01::1")
+
+	conf := &PluginConf{
+		PluginConf:    types.PluginConf{CNIVersion: testCNIVersion},
+		VPC:           testVPC,
+		VPCAttachment: testAttachment,
+	}
+	ipRes := &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway}
+
+	result := buildTapResult(conf, ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
+
+	idx := -1
+	for i, iface := range result.Interfaces {
+		if iface.Name == testIfName {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("no interface named %q in result: %+v", testIfName, result.Interfaces)
+	}
+	if result.Interfaces[idx].Name == testHostTap {
+		t.Errorf("Interfaces[%d].Name = %q, want the requested name, not the host tap device",
+			idx, result.Interfaces[idx].Name)
+	}
+	if result.Interfaces[idx].Sandbox != "" {
+		t.Errorf("Interfaces[%d].Sandbox = %q, want empty (the tap stays in the host namespace)",
+			idx, result.Interfaces[idx].Sandbox)
+	}
+
+	var addressed int
+	for _, ip := range result.IPs {
+		if ip.Interface != nil && *ip.Interface == idx {
+			addressed++
+		}
+	}
+	if addressed == 0 {
+		t.Errorf("interface %q carries no IPConfig; a runtime rejects the sandbox for this", testIfName)
 	}
 }
 
