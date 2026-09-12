@@ -404,9 +404,18 @@ func ensureRedirectRoute(prefix *net.IPNet, tableID uint32) error {
 // removeRedirectRoute removes the main-table route ensureRedirectRoute
 // installed for prefix. Deleting by destination and table alone is enough to
 // identify it.
+//
+// An absent route is the outcome a removal asks for, so ESRCH counts as
+// success. Reporting failure instead retries a teardown that can never
+// complete, and keeps the entry alive to collide with the next tenant given
+// this address.
 func removeRedirectRoute(prefix *net.IPNet) error {
-	return netlink.RouteDel(&netlink.Route{
+	err := netlink.RouteDel(&netlink.Route{
 		Dst:   prefix,
 		Table: unix.RT_TABLE_MAIN,
 	})
+	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	return err
 }

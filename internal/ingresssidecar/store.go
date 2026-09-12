@@ -229,6 +229,14 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 			pendingRoutes++
 			continue
 		}
+		if r.installed && s.prefixClaimedElsewhereLocked(key, r, now) {
+			// One backend address reaches this sidecar through more than one
+			// EndpointSlice, sharing a single kernel route. Removing it while
+			// another slice is live blackholes a healthy backend.
+			s.routeActiveDelta(-1)
+			delete(s.routes, key)
+			continue
+		}
 		if r.installed {
 			v, ok := s.vrfs[r.vpc]
 			if !ok {
@@ -325,6 +333,22 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// prefixClaimedElsewhereLocked reports whether some other tracked route still
+// needs the kernel state installed for r's VPC and prefix, either because it
+// is desired or because its own grace period has not elapsed. Callers must
+// hold s.mu.
+func (s *Store) prefixClaimedElsewhereLocked(key string, r *routeState, now time.Time) bool {
+	for otherKey, other := range s.routes {
+		if otherKey == key || other.vpc != r.vpc || other.prefix.String() != r.prefix.String() {
+			continue
+		}
+		if other.absentSince.IsZero() || now.Sub(other.absentSince) < s.grace {
+			return true
+		}
+	}
+	return false
 }
 
 // routeKnownLocked reports whether an already-tracked route shares vpc and
