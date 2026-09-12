@@ -24,14 +24,6 @@ const (
 	DefaultNATMetricsPort    = 9182
 	DefaultNATGRPCHealthPort = 5182
 
-	// DefaultNATSessionLimit is the per-tenant translated-session ceiling a
-	// shard applies when the operator sets none. Zero means unlimited, which is
-	// deliberately the default: a limit that arrives without an operator
-	// choosing it turns into an outage nobody can explain, since this design
-	// collects the admission-failure counters but does not yet surface them
-	// anywhere a tenant or an on-call engineer can read.
-	DefaultNATSessionLimit = 0
-
 	// DefaultNAT64PrefixLen is the only NAT64 prefix length the datapath
 	// supports; see natmap's own constant for why a /96 specifically.
 	DefaultNAT64PrefixLen = 96
@@ -85,10 +77,6 @@ const (
 	// symptom on either side, which is why this value is echoed into
 	// EgressShard status rather than living only here.
 	EnvNAT64Prefix = "GALACTIC_NAT_NAT64_PREFIX"
-
-	// EnvNATSessionLimit caps how many translated sessions one tenant may hold
-	// on this shard, across both address families. Zero means unlimited.
-	EnvNATSessionLimit = "GALACTIC_NAT_SESSION_LIMIT"
 )
 
 // --- NATConfig ---------------------------------------------------------
@@ -116,9 +104,6 @@ type NATConfig struct {
 	ShardPubAddr6 string
 	ShardPubAddr4 string
 	NAT64Prefix   string
-
-	// SessionLimit is the per-tenant ceiling; zero is unlimited.
-	SessionLimit int
 }
 
 // NewNATConfig creates a config resolver reading the GALACTIC_NAT
@@ -137,7 +122,6 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault("shard_pub_addr6", "")
 	v.SetDefault("shard_pub_addr4", "")
 	v.SetDefault("nat64_prefix", "")
-	v.SetDefault("session_limit", DefaultNATSessionLimit)
 
 	cfg := &NATConfig{
 		v:      v,
@@ -162,7 +146,6 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{"nat-shard-pub-addr6", "shard_pub_addr6"},
 		{"nat-shard-pub-addr4", "shard_pub_addr4"},
 		{"nat64-prefix", "nat64_prefix"},
-		{"nat-session-limit", "session_limit"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -185,7 +168,6 @@ func (c *NATConfig) readFields() {
 	c.ShardPubAddr6 = c.v.GetString("shard_pub_addr6")
 	c.ShardPubAddr4 = c.v.GetString("shard_pub_addr4")
 	c.NAT64Prefix = c.v.GetString("nat64_prefix")
-	c.SessionLimit = c.v.GetInt("session_limit")
 }
 
 // ServesNAT66 and ServesNAT64 report which families this shard's configuration
@@ -287,9 +269,6 @@ func (c *NATConfig) Validate() error {
 		return fmt.Errorf(
 			"a shard must serve at least one address family: set %s for NAT66, or %s and %s for NAT64",
 			EnvNATShardPubAddr6, EnvNATShardPubAddr4, EnvNAT64Prefix)
-	}
-	if c.SessionLimit < 0 {
-		return errors.New("session limit must not be negative (zero means unlimited)")
 	}
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
 		return errors.New("metrics port must be between 1 and 65535")

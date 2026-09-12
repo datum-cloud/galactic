@@ -37,23 +37,14 @@ type NatConnValue struct {
 }
 
 type NatShardConfig struct {
-	_                   structs.HostLayout
-	ShardSid            [16]uint8
-	ShardPubAddr6       [16]uint8
-	Nat64Prefix         [16]uint8
-	ShardPubAddr4       uint32
-	DefaultSessionLimit uint32
-	ServesV6            uint8
-	ServesV4            uint8
-	Pad                 [2]uint8
-}
-
-type NatTenantState struct {
-	_                    structs.HostLayout
-	Sessions             uint64
-	Limit                uint64
-	AdmitFailLimit       uint64
-	AdmitFailUnavailable uint64
+	_             structs.HostLayout
+	ShardSid      [16]uint8
+	ShardPubAddr6 [16]uint8
+	Nat64Prefix   [16]uint8
+	ShardPubAddr4 uint32
+	ServesV6      uint8
+	ServesV4      uint8
+	Pad           [2]uint8
 }
 
 // Names of all BPF objects in the ELF.
@@ -64,7 +55,6 @@ const (
 	NatMapNatConnTable     = "nat_conn_table"
 	NatMapNatProgs         = "nat_progs"
 	NatMapShardConfigTable = "shard_config_table"
-	NatMapTenantStateTable = "tenant_state_table"
 	NatProgNat64Forward    = "nat64_forward"
 	NatProgNat64Return     = "nat64_return"
 	NatProgNat66Forward    = "nat66_forward"
@@ -129,7 +119,6 @@ type NatMapSpecs struct {
 	NatConnTable     *ebpf.MapSpec `ebpf:"nat_conn_table"`
 	NatProgs         *ebpf.MapSpec `ebpf:"nat_progs"`
 	ShardConfigTable *ebpf.MapSpec `ebpf:"shard_config_table"`
-	TenantStateTable *ebpf.MapSpec `ebpf:"tenant_state_table"`
 }
 
 // NatVariableSpecs contains global variables before they are loaded into the kernel.
@@ -162,7 +151,6 @@ type NatMaps struct {
 	NatConnTable     *ebpf.Map `ebpf:"nat_conn_table"`
 	NatProgs         *ebpf.Map `ebpf:"nat_progs"`
 	ShardConfigTable *ebpf.Map `ebpf:"shard_config_table"`
-	TenantStateTable *ebpf.Map `ebpf:"tenant_state_table"`
 }
 
 func (m *NatMaps) Close() error {
@@ -171,7 +159,6 @@ func (m *NatMaps) Close() error {
 		m.NatConnTable,
 		m.NatProgs,
 		m.ShardConfigTable,
-		m.TenantStateTable,
 	)
 }
 

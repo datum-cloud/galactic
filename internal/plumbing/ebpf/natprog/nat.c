@@ -9,8 +9,8 @@
 // PAT) and NAT64 (IPv6 -> IPv4, RFC 6146). They are the same function --
 // stateful egress PAT with a VRF-scoped session table, port allocation, and
 // decap/re-encap on the return path -- so they share one session table, one
-// port allocator, one tenant session-limit counter, and one set of drop
-// counters rather than existing as two near-duplicate programs.
+// port allocator, and one set of drop counters rather than existing as two
+// near-duplicate programs.
 //
 // The whole tier is deliberately separate from the gateway's ingress datapath:
 // tenant egress toward an arbitrary internet destination is a different traffic
@@ -261,36 +261,9 @@ struct shard_config {
 	__u8 shard_pub_addr6[16];
 	__u8 nat64_prefix[16];
 	__be32 shard_pub_addr4;
-	__u32 default_session_limit;
 	__u8 serves_v6;
 	__u8 serves_v4;
 	__u8 pad[2];
-};
-
-// struct tenant_state is the per-tenant (per-VRFID) session accounting one
-// shard keeps, and the only place a session limit is enforced.
-//
-// sessions counts live translated flows across *both* families against one
-// shared ceiling: both are table entries scoped by the same VRFID, and there is
-// no reason to give a tenant separate budgets for reaching an IPv4 host and an
-// IPv6 one.
-//
-// The two admit_fail counters separate the causes an operator would act on
-// differently -- a tenant at its own configured ceiling, versus this shard not
-// serving the family the tenant asked for. Aggregating them would make the
-// common "why did this connection fail" question unanswerable from counters
-// alone, which is the whole reason they exist.
-//
-// sessions is maintained by the datapath but *resynchronized* by userspace:
-// nat_conn_table is an LRU map, so an evicted row decrements nothing here, and
-// nothing in the datapath ages a flow out. Left alone the count would only ever
-// climb until every tenant read as over limit. cmd/galactic-nat recomputes it
-// from the connection table on an interval; see that package.
-struct tenant_state {
-	__u64 sessions;
-	__u64 limit;
-	__u64 admit_fail_limit;
-	__u64 admit_fail_unavailable;
 };
 
 enum nat_drop_reason {
@@ -312,8 +285,7 @@ enum nat_drop_reason {
 	DROP_REASON_NAT64_V4_FRAGMENT        = 13,
 	DROP_REASON_NAT64_V4_OPTIONS         = 14,
 	DROP_REASON_NAT64_SHARD_UNAVAILABLE  = 15,
-	DROP_REASON_NAT_TENANT_LIMIT         = 16,
-	DROP_REASON_NAT_COUNT                = 17,
+	DROP_REASON_NAT_COUNT                = 16,
 };
 
 // ---------------------------------------------------------------------
@@ -333,13 +305,6 @@ struct {
 	__type(key, __u32);
 	__type(value, struct shard_config);
 } shard_config_table SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 4096);
-	__type(key, __u32);
-	__type(value, struct tenant_state);
-} tenant_state_table SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
@@ -449,64 +414,6 @@ static NAT_ALWAYS_INLINE __be16 csum_fold_add(__be16 check, __s64 diff)
 	sum = (sum & 0xffff) + (sum >> 16);
 	sum = (sum & 0xffff) + (sum >> 16);
 	return (__be16) ~((__u16) sum);
-}
-
-// ---------------------------------------------------------------------
-// Per-tenant session accounting.
-// ---------------------------------------------------------------------
-
-// tenant_entry returns this tenant's accounting row, creating a zeroed one on
-// first sight. A NULL return means the tenant table is full, which is treated
-// by every caller as "cannot account for this flow", not as "no limit".
-static NAT_ALWAYS_INLINE struct tenant_state *tenant_entry(__u32 tenant_arg, struct shard_config *cfg)
-{
-	struct tenant_state *ts = bpf_map_lookup_elem(&tenant_state_table, &tenant_arg);
-	if (ts)
-		return ts;
-
-	struct tenant_state init;
-	__builtin_memset(&init, 0, sizeof(init));
-	init.limit = cfg->default_session_limit;
-	bpf_map_update_elem(&tenant_state_table, &tenant_arg, &init, BPF_NOEXIST);
-	return bpf_map_lookup_elem(&tenant_state_table, &tenant_arg);
-}
-
-// tenant_admits reports whether this tenant may open one more session, counting
-// the refusal against them when it may not. A zero limit means unlimited, which
-// is the default and the state in which this check changes nothing.
-//
-// The check is read-only and the increment happens later, in tenant_commit,
-// once a masquerade port has actually been claimed -- so a failed port
-// allocation never consumes budget. The gap between them lets concurrent CPUs
-// overshoot a limit by at most the number of CPUs racing, which is the right
-// trade against holding a lock on the hot path for a ceiling that exists to
-// stop runaway tenants rather than to meter them exactly.
-static NAT_ALWAYS_INLINE int tenant_admits(__u32 tenant_arg, struct shard_config *cfg)
-{
-	struct tenant_state *ts = tenant_entry(tenant_arg, cfg);
-	if (!ts)
-		return 0;
-
-	__u64 limit = ts->limit ? ts->limit : (__u64) cfg->default_session_limit;
-	if (limit && ts->sessions >= limit) {
-		__sync_fetch_and_add(&ts->admit_fail_limit, 1);
-		return 0;
-	}
-	return 1;
-}
-
-static NAT_ALWAYS_INLINE void tenant_commit(__u32 tenant_arg, struct shard_config *cfg)
-{
-	struct tenant_state *ts = tenant_entry(tenant_arg, cfg);
-	if (ts)
-		__sync_fetch_and_add(&ts->sessions, 1);
-}
-
-static NAT_ALWAYS_INLINE void tenant_unavailable(__u32 tenant_arg, struct shard_config *cfg)
-{
-	struct tenant_state *ts = tenant_entry(tenant_arg, cfg);
-	if (ts)
-		__sync_fetch_and_add(&ts->admit_fail_unavailable, 1);
 }
 
 // ---------------------------------------------------------------------
@@ -864,11 +771,6 @@ int nat66_forward(struct xdp_md *ctx)
 	if (existing) {
 		__builtin_memcpy(&cv, existing, sizeof(cv));
 	} else {
-		if (!tenant_admits(tenant_arg, cfg)) {
-			count_drop(DROP_REASON_NAT_TENANT_LIMIT);
-			return XDP_DROP;
-		}
-
 		__builtin_memset(&cv, 0, sizeof(cv));
 		__builtin_memcpy(cv.backend_addr, inner->saddr, 16);
 		cv.backend_port = l4v.sport;
@@ -893,7 +795,6 @@ int nat66_forward(struct xdp_md *ctx)
 		}
 
 		bpf_map_update_elem(&nat_conn_table, &fwd_key, &cv, BPF_ANY);
-		tenant_commit(tenant_arg, cfg);
 	}
 
 	fix_l4_checksum(l4v.check_ptr, inner->saddr, l4v.sport, cfg->shard_pub_addr6, cv.shard_port);
@@ -1010,7 +911,6 @@ int nat64_forward(struct xdp_md *ctx)
 	// Counting it per-tenant, distinctly from a limit refusal, is what makes
 	// "this shard cannot serve you" separable from "you are over budget".
 	if (cfg->shard_pub_addr4 == 0) {
-		tenant_unavailable(tenant_arg, cfg);
 		count_drop(DROP_REASON_NAT64_SHARD_UNAVAILABLE);
 		return XDP_DROP;
 	}
@@ -1080,11 +980,6 @@ int nat64_forward(struct xdp_md *ctx)
 	if (existing) {
 		__builtin_memcpy(&cv, existing, sizeof(cv));
 	} else {
-		if (!tenant_admits(tenant_arg, cfg)) {
-			count_drop(DROP_REASON_NAT_TENANT_LIMIT);
-			return XDP_DROP;
-		}
-
 		__builtin_memset(&cv, 0, sizeof(cv));
 		__builtin_memcpy(cv.backend_addr, src6, 16);
 		cv.backend_port = sport;
@@ -1111,7 +1006,6 @@ int nat64_forward(struct xdp_md *ctx)
 		}
 
 		bpf_map_update_elem(&nat_conn_table, &fwd_key, &cv, BPF_ANY);
-		tenant_commit(tenant_arg, cfg);
 	}
 
 	// Shrink the front by the 20 bytes an IPv4 header saves over an IPv6 one.

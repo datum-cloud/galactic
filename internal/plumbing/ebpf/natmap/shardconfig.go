@@ -42,11 +42,6 @@ type ShardConfig struct {
 	// translates to IPv4 -- one Datum-operated Network-Specific Prefix, shared
 	// fabric-wide, never per-tenant. Required whenever ShardPubAddr4 is set.
 	NAT64Prefix netip.Prefix
-
-	// DefaultSessionLimit caps how many translated sessions one tenant may hold
-	// on this shard across both address families. Zero means unlimited, which is
-	// the state in which the datapath's admission check changes nothing.
-	DefaultSessionLimit uint32
 }
 
 // nat64PrefixLen is the only NAT64 prefix length this datapath supports. RFC
@@ -116,8 +111,7 @@ func (c ShardConfig) toWire() (natprog.NatShardConfig, error) {
 	}
 
 	value := natprog.NatShardConfig{
-		ShardSid:            c.ShardSID.As16(),
-		DefaultSessionLimit: c.DefaultSessionLimit,
+		ShardSid: c.ShardSID.As16(),
 	}
 
 	if c.ShardPubAddr6.IsValid() {
@@ -174,8 +168,7 @@ func (t *ShardConfigTable) Get() (ShardConfig, bool, error) {
 		return ShardConfig{}, false, fmt.Errorf("natmap: shard_config_table: get: %w", err)
 	}
 	cfg := ShardConfig{
-		ShardSID:            netip.AddrFrom16(value.ShardSid),
-		DefaultSessionLimit: value.DefaultSessionLimit,
+		ShardSID: netip.AddrFrom16(value.ShardSid),
 	}
 	if value.ServesV6 != 0 {
 		cfg.ShardPubAddr6 = netip.AddrFrom16(value.ShardPubAddr6)

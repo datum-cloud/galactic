@@ -111,15 +111,14 @@ func buildIPv4UDPPacket(t *testing.T, dst, src netip.Addr, srcPort, dstPort uint
 // nat64ShardConfig is the dual-family shard every test in this file runs
 // against: it serves NAT66 exactly as before and NAT64 in addition, which is
 // the configuration the generalization exists to make possible.
-func nat64ShardConfig(shardSID, shardPub netip.Addr, shardPub4 netip.Addr, limit uint32) NatShardConfig {
+func nat64ShardConfig(shardSID, shardPub netip.Addr, shardPub4 netip.Addr) NatShardConfig {
 	return NatShardConfig{
-		ShardSid:            shardSID.As16(),
-		ShardPubAddr6:       shardPub.As16(),
-		Nat64Prefix:         nat64Prefix.As16(),
-		ShardPubAddr4:       v4ToWire(shardPub4),
-		DefaultSessionLimit: limit,
-		ServesV6:            1,
-		ServesV4:            1,
+		ShardSid:      shardSID.As16(),
+		ShardPubAddr6: shardPub.As16(),
+		Nat64Prefix:   nat64Prefix.As16(),
+		ShardPubAddr4: v4ToWire(shardPub4),
+		ServesV6:      1,
+		ServesV4:      1,
 	}
 }
 
@@ -144,7 +143,7 @@ func TestNat64Forward_TranslatesIPv6ToIPv4(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	shardPub4 := netip.MustParseAddr("192.0.2.10")
-	if err := objs.ShardConfigTable.Put(uint32(0), nat64ShardConfig(shardSID, shardPub, shardPub4, 0)); err != nil {
+	if err := objs.ShardConfigTable.Put(uint32(0), nat64ShardConfig(shardSID, shardPub, shardPub4)); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
 
@@ -241,7 +240,7 @@ func TestNat64Return_TranslatesIPv4BackAndReencapsulates(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	shardPub4 := netip.MustParseAddr("192.0.2.10")
-	if err := objs.ShardConfigTable.Put(uint32(0), nat64ShardConfig(shardSID, shardPub, shardPub4, 0)); err != nil {
+	if err := objs.ShardConfigTable.Put(uint32(0), nat64ShardConfig(shardSID, shardPub, shardPub4)); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
 
@@ -335,7 +334,7 @@ func TestNat64_TenantIsolationAcrossFamilies(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	shardPub4 := netip.MustParseAddr("192.0.2.10")
-	if err := objs.ShardConfigTable.Put(uint32(0), nat64ShardConfig(shardSID, shardPub, shardPub4, 0)); err != nil {
+	if err := objs.ShardConfigTable.Put(uint32(0), nat64ShardConfig(shardSID, shardPub, shardPub4)); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
 
@@ -375,88 +374,6 @@ func TestNat64_TenantIsolationAcrossFamilies(t *testing.T) {
 	if rows != 6 {
 		t.Errorf("nat_conn_table rows = %d, want 6 (three flows, forward and reverse each) -- fewer "+
 			"means two tenants' or two families' flows collided in one row", rows)
-	}
-}
-
-// TestNat64_TenantSessionLimitFailsClosed covers the admission check: a tenant
-// at its configured ceiling has the triggering packet dropped, with the cause
-// recorded against that tenant rather than only in a shard-wide counter, and
-// without disturbing any session it already holds.
-func TestNat64_TenantSessionLimitFailsClosed(t *testing.T) {
-	requireRoot(t)
-	objs := loadObjects(t)
-
-	shardSID := netip.MustParseAddr("fc00:1:2::1")
-	shardPub := netip.MustParseAddr("2001:db8:9999::1")
-	shardPub4 := netip.MustParseAddr("192.0.2.10")
-	const limit = 2
-	if err := objs.ShardConfigTable.Put(uint32(0),
-		nat64ShardConfig(shardSID, shardPub, shardPub4, limit)); err != nil {
-		t.Fatalf("populate shard_config_table: %v", err)
-	}
-
-	const vrfID = 0x123
-	backendAddr := netip.MustParseAddr("fd20:60::5")
-	backendUSID := netip.MustParseAddr("fc00:3:4::a1b2")
-
-	newFlow := func(port uint16) (int, error) {
-		dest := synthesize(nat64Prefix, netip.MustParseAddr("198.51.100.7"))
-		inner := buildUDPPacket(t, dest, backendAddr, port, encappedDstPort, []byte("x"))[ethLen:]
-		pkt := make([]byte, 0, ethLen+ip6Len+len(inner))
-		pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
-		pkt = append(pkt, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB)
-		pkt = append(pkt, 0x86, 0xDD, 0x60, 0x00, 0x00, 0x00)
-		pkt = append(pkt, byte(len(inner)>>8), byte(len(inner)), 41, 64)
-		srcB := backendUSID.As16()
-		dstB := sidWithArgument(shardSID, vrfID).As16()
-		pkt = append(pkt, srcB[:]...)
-		pkt = append(pkt, dstB[:]...)
-		pkt = append(pkt, inner...)
-		ret, _, err := objs.NatIngress.Test(pkt)
-		return int(ret), err
-	}
-
-	for i, port := range []uint16{41000, 41001} {
-		ret, err := newFlow(port)
-		if err != nil {
-			t.Fatalf("flow %d test-run: %v", i, err)
-		}
-		if ret != xdpPass {
-			t.Fatalf("flow %d verdict = %d, want XDP_PASS (%d) -- it is within the limit", i, ret, xdpPass)
-		}
-	}
-
-	ret, err := newFlow(41002)
-	if err != nil {
-		t.Fatalf("over-limit flow test-run: %v", err)
-	}
-	if ret != xdpDrop {
-		t.Errorf("over-limit verdict = %d, want XDP_DROP (%d) -- a tenant at its ceiling must have the "+
-			"triggering packet dropped, never an established session evicted to make room", ret, xdpDrop)
-	}
-	if got := sumPerCPU(t, objs.DropReasons, DropReasonNatTenantLimit); got != 1 {
-		t.Errorf("drop_reasons[tenant_session_limit] = %d, want 1", got)
-	}
-
-	var ts NatTenantState
-	if err := objs.TenantStateTable.Lookup(uint32(vrfID), &ts); err != nil {
-		t.Fatalf("lookup tenant_state_table[%#x]: %v", vrfID, err)
-	}
-	if ts.Sessions != limit {
-		t.Errorf("tenant sessions = %d, want %d -- a refused flow must not consume budget", ts.Sessions, limit)
-	}
-	if ts.AdmitFailLimit != 1 {
-		t.Errorf("tenant admit_fail_limit = %d, want 1", ts.AdmitFailLimit)
-	}
-	if ts.AdmitFailUnavailable != 0 {
-		t.Errorf("tenant admit_fail_unavailable = %d, want 0 -- a limit refusal must not be recorded as "+
-			"the shard being unable to serve the family", ts.AdmitFailUnavailable)
-	}
-
-	// The two admitted flows still translate, proving the ceiling refused only
-	// the new one.
-	if ret, err := newFlow(41000); err != nil || ret != xdpPass {
-		t.Errorf("established flow after the refusal: verdict %d err %v, want XDP_PASS", ret, err)
 	}
 }
 
@@ -501,7 +418,7 @@ func TestNat64Return_DropsFragmentsAndOptions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			objs := loadObjects(t)
 			if err := objs.ShardConfigTable.Put(uint32(0),
-				nat64ShardConfig(shardSID, shardPub, shardPub4, 0)); err != nil {
+				nat64ShardConfig(shardSID, shardPub, shardPub4)); err != nil {
 				t.Fatalf("populate shard_config_table: %v", err)
 			}
 
@@ -532,7 +449,7 @@ func TestNat64Forward_ShardWithoutIPv4AddressIsUnavailable(t *testing.T) {
 
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	cfg := nat64ShardConfig(shardSID, netip.MustParseAddr("2001:db8:9999::1"),
-		netip.MustParseAddr("192.0.2.10"), 0)
+		netip.MustParseAddr("192.0.2.10"))
 	cfg.ShardPubAddr4 = 0
 	if err := objs.ShardConfigTable.Put(uint32(0), cfg); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
@@ -552,18 +469,6 @@ func TestNat64Forward_ShardWithoutIPv4AddressIsUnavailable(t *testing.T) {
 	}
 	if got := sumPerCPU(t, objs.DropReasons, DropReasonNat64ShardUnavailable); got != 1 {
 		t.Errorf("drop_reasons[nat64_shard_unavailable] = %d, want 1", got)
-	}
-
-	var ts NatTenantState
-	if err := objs.TenantStateTable.Lookup(uint32(vrfID), &ts); err != nil {
-		t.Fatalf("lookup tenant_state_table[%#x]: %v", vrfID, err)
-	}
-	if ts.AdmitFailUnavailable != 1 {
-		t.Errorf("tenant admit_fail_unavailable = %d, want 1", ts.AdmitFailUnavailable)
-	}
-	if ts.AdmitFailLimit != 0 {
-		t.Errorf("tenant admit_fail_limit = %d, want 0 -- an unavailable shard is not a limit refusal, "+
-			"and conflating them makes the common failure unanswerable from counters", ts.AdmitFailLimit)
 	}
 }
 

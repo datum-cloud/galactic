@@ -31,7 +31,6 @@ flags, or a combination of both (CLI flags take precedence), with the
 | IPv6 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR6`    | `--nat-shard-pub-addr6`    | —       | Enables NAT66     |
 | IPv4 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR4`   | `--nat-shard-pub-addr4`   | —       | Enables NAT64     |
 | NAT64 prefix        | `GALACTIC_NAT_NAT64_PREFIX`      | `--nat64-prefix`          | —       | With the above    |
-| Session limit       | `GALACTIC_NAT_SESSION_LIMIT`     | `--nat-session-limit`     | `0`     | No                |
 | Metrics port        | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`  | No                |
 | gRPC health port    | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`  | No                |
 

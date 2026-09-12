@@ -5,12 +5,10 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net/netip"
 	"sync/atomic"
-	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,11 +19,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
-
-// sessionResyncInterval is how often the per-tenant session counts are
-// recomputed from the connection table. See runSessionResync for why they need
-// recomputing at all.
-const sessionResyncInterval = 30 * time.Second
 
 // natDatapathKeepAlive holds the loaded objects and the attached link for the
 // life of this process, once the attach path succeeds.
@@ -66,8 +59,7 @@ func shardConfigFromFlags(cfg *config.NATConfig) (natmap.ShardConfig, error) {
 	}
 
 	shardCfg := natmap.ShardConfig{
-		ShardSID:            sidAddr,
-		DefaultSessionLimit: uint32(cfg.SessionLimit),
+		ShardSID: sidAddr,
 	}
 
 	if cfg.ServesNAT66() {
@@ -167,44 +159,9 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 		"shardSID", cfg.ShardSID,
 		"nat66", cfg.ServesNAT66(),
 		"nat64", cfg.ServesNAT64(),
-		"sessionLimit", cfg.SessionLimit,
 	)
 
 	status := &natDatapathStatus{}
 	status.attached.Store(true)
 	return status, nil
-}
-
-// runSessionResync periodically recomputes every tenant's live session count
-// from the connection table, until ctx is cancelled.
-//
-// The datapath cannot keep that count accurate on its own. nat_conn_table is an
-// LRU map, so the kernel evicts rows under pressure with nothing to decrement,
-// and no datapath path ages an idle flow out. Left alone the count only climbs,
-// and every tenant eventually reads as over limit and stops being able to open
-// connections at all -- a per-tenant ceiling degrading into a dead shard.
-//
-// A resync failure is logged and retried on the next tick rather than being
-// fatal: the counts it corrects drift slowly, and taking the process down would
-// stop translating traffic that is otherwise fine.
-func runSessionResync(ctx context.Context, objs *natprog.NatObjects) {
-	conns := natmap.NewConnTable(natmap.KernelTable{Map: objs.NatConnTable})
-	tenants := natmap.NewTenantStateTable(natmap.KernelTable{Map: objs.TenantStateTable})
-
-	ticker := time.NewTicker(sessionResyncInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			states, err := tenants.Resync(conns)
-			if err != nil {
-				slog.Error("Resync per-tenant session counts", "err", err)
-				continue
-			}
-			slog.Debug("Resynced per-tenant session counts", "tenants", len(states))
-		}
-	}
 }

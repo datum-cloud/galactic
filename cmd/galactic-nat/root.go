@@ -119,10 +119,6 @@ func runCmd(cfg *config.NATConfig) error {
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
-
-	// Correct the per-tenant session counts the datapath cannot maintain on its
-	// own; see runSessionResync. Tied to ctx, so it stops with the manager.
-	go runSessionResync(ctx, natDatapathKeepAlive.objs)
 	// Only now is the datapath attached. Report serving from here on, not from
 	// process start.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
@@ -198,9 +194,6 @@ func newRootCommand() *cobra.Command {
 			"together with --nat64-prefix")
 	cmd.Flags().StringP("nat64-prefix", "", "",
 		"Fabric-wide NAT64 /96 this shard translates for; must match what DNS64 synthesizes into")
-	cmd.Flags().IntP("nat-session-limit", "",
-		config.DefaultNATSessionLimit,
-		"Per-tenant translated-session ceiling across both address families (0 means unlimited)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

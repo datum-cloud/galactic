@@ -119,13 +119,6 @@ spec:
             # node. Setting it without that in place yields a shard that
             # translates outbound traffic and never sees a reply.
             #
-            # GALACTIC_NAT_SESSION_LIMIT caps how many translated sessions
-            # one tenant may hold here, across both families. It defaults to
-            # 0 (unlimited) deliberately: a ceiling nobody chose becomes an
-            # outage nobody can explain, since the admission-failure
-            # counters are collected but not yet surfaced anywhere a tenant
-            # or an on-call engineer reads.
-            #
             # See deploy/containerlab/resources/galactic-gateway/ for a
             # worked example of the equivalent per-node overlay pattern.
           ports:

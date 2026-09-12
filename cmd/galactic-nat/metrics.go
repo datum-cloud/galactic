@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -17,13 +16,11 @@ import (
 const metricsNamespace = "galactic_nat"
 
 // natCollector reads this shard's live map state at every scrape: drops by
-// reason, connection-table occupancy by address family, and each tenant's
-// session accounting. It is a pull-based collector like the other datapaths',
+// reason and connection-table occupancy by address family. It is a pull-based collector like the other datapaths',
 // scoped to what the map layer exposes read access to, the connection table
 // being entirely datapath-owned and so observability-only.
 type natCollector struct {
 	connTable   *natmap.ConnTable
-	tenants     *natmap.TenantStateTable
 	dropReasons natmap.DropReasonsReader
 }
 
@@ -32,14 +29,9 @@ type natCollector struct {
 func newNatCollector(objs *natprog.NatObjects) *natCollector {
 	return &natCollector{
 		connTable:   natmap.NewConnTable(natmap.KernelTable{Map: objs.NatConnTable}),
-		tenants:     natmap.NewTenantStateTable(natmap.KernelTable{Map: objs.TenantStateTable}),
 		dropReasons: objs.DropReasons,
 	}
 }
-
-// labelVRFID is the label every per-tenant metric is keyed by: the VRFID the
-// datapath reads out of each flow's SRv6 Argument.
-const labelVRFID = "vrfid"
 
 var (
 	connsDesc = prometheus.NewDesc(
@@ -54,39 +46,18 @@ var (
 		"Packets dropped by this shard's datapath, by reason (drop_reasons map).",
 		[]string{"reason"}, nil,
 	)
-	tenantSessionsDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(metricsNamespace, "", "tenant_sessions"),
-		"Live translated sessions held by one tenant, across both address families.",
-		[]string{labelVRFID}, nil,
-	)
-	tenantLimitDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(metricsNamespace, "", "tenant_session_limit"),
-		"Configured session ceiling for one tenant. Zero means unlimited.",
-		[]string{labelVRFID}, nil,
-	)
-	tenantAdmitFailDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(metricsNamespace, "", "tenant_admission_failures_total"),
-		"Flows this shard refused to admit for one tenant, by cause: \"limit\" means the tenant was at "+
-			"their ceiling, \"unavailable\" means this shard does not serve the address family the flow "+
-			"needed. The two are separate because an operator acts on them differently.",
-		[]string{labelVRFID, "cause"}, nil,
-	)
 )
 
 // Describe implements prometheus.Collector.
 func (c *natCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- connsDesc
 	ch <- dropsDesc
-	ch <- tenantSessionsDesc
-	ch <- tenantLimitDesc
-	ch <- tenantAdmitFailDesc
 }
 
 // Collect implements prometheus.Collector.
 func (c *natCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectConns(ch)
 	c.collectDrops(ch)
-	c.collectTenants(ch)
 }
 
 func familyLabel(family uint8) string {
@@ -133,24 +104,5 @@ func (c *natCollector) collectDrops(ch chan<- prometheus.Metric) {
 			name = fmt.Sprintf("unknown_%d", i)
 		}
 		ch <- prometheus.MustNewConstMetric(dropsDesc, prometheus.CounterValue, float64(total), name)
-	}
-}
-
-func (c *natCollector) collectTenants(ch chan<- prometheus.Metric) {
-	states, err := c.tenants.List()
-	if err != nil {
-		ch <- prometheus.NewInvalidMetric(tenantSessionsDesc, fmt.Errorf("list tenant_state_table: %w", err))
-		return
-	}
-	for _, state := range states {
-		vrfID := strconv.FormatUint(uint64(state.VRFID), 10)
-		ch <- prometheus.MustNewConstMetric(tenantSessionsDesc, prometheus.GaugeValue,
-			float64(state.Sessions), vrfID)
-		ch <- prometheus.MustNewConstMetric(tenantLimitDesc, prometheus.GaugeValue,
-			float64(state.Limit), vrfID)
-		ch <- prometheus.MustNewConstMetric(tenantAdmitFailDesc, prometheus.CounterValue,
-			float64(state.AdmitFailLimit), vrfID, "limit")
-		ch <- prometheus.MustNewConstMetric(tenantAdmitFailDesc, prometheus.CounterValue,
-			float64(state.AdmitFailUnavailable), vrfID, "unavailable")
 	}
 }

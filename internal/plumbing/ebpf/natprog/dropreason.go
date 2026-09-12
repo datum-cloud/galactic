@@ -29,8 +29,7 @@ const (
 	DropReasonNat64V4Fragment       uint32 = 13
 	DropReasonNat64V4Options        uint32 = 14
 	DropReasonNat64ShardUnavailable uint32 = 15
-	DropReasonNatTenantLimit        uint32 = 16
-	DropReasonNatCount              uint32 = 17
+	DropReasonNatCount              uint32 = 16
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
@@ -52,5 +51,4 @@ var DropReasonNames = map[uint32]string{
 	DropReasonNat64V4Fragment:       "nat64_v4_fragment",
 	DropReasonNat64V4Options:        "nat64_v4_options",
 	DropReasonNat64ShardUnavailable: "nat64_shard_unavailable",
-	DropReasonNatTenantLimit:        "tenant_session_limit",
 }
