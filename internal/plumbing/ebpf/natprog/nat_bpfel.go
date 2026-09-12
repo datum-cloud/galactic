@@ -39,7 +39,7 @@ type NatConnValue struct {
 type NatShardConfig struct {
 	_                   structs.HostLayout
 	ShardSid            [16]uint8
-	ShardPubAddr        [16]uint8
+	ShardPubAddr6       [16]uint8
 	Nat64Prefix         [16]uint8
 	ShardPubAddr4       uint32
 	DefaultSessionLimit uint32

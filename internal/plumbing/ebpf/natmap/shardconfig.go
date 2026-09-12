@@ -28,10 +28,10 @@ type ShardConfig struct {
 	// on the way back.
 	ShardSID netip.Addr
 
-	// ShardPubAddr is this shard's publicly routable IPv6 masquerade source.
+	// ShardPubAddr6 is this shard's publicly routable IPv6 masquerade source.
 	// Every NAT66 flow this shard translates is given an address and port
 	// within it. Unset means this shard does not perform NAT66.
-	ShardPubAddr netip.Addr
+	ShardPubAddr6 netip.Addr
 
 	// ShardPubAddr4 is this shard's publicly routable IPv4 masquerade source,
 	// the address an IPv4-only destination sees. Unset means this shard does
@@ -120,11 +120,11 @@ func (c ShardConfig) toWire() (natprog.NatShardConfig, error) {
 		DefaultSessionLimit: c.DefaultSessionLimit,
 	}
 
-	if c.ShardPubAddr.IsValid() {
-		if err := validateAddr("shard public address", c.ShardPubAddr); err != nil {
+	if c.ShardPubAddr6.IsValid() {
+		if err := validateAddr("shard public address", c.ShardPubAddr6); err != nil {
 			return natprog.NatShardConfig{}, err
 		}
-		value.ShardPubAddr = c.ShardPubAddr.As16()
+		value.ShardPubAddr6 = c.ShardPubAddr6.As16()
 		value.ServesV6 = 1
 	}
 
@@ -178,7 +178,7 @@ func (t *ShardConfigTable) Get() (ShardConfig, bool, error) {
 		DefaultSessionLimit: value.DefaultSessionLimit,
 	}
 	if value.ServesV6 != 0 {
-		cfg.ShardPubAddr = netip.AddrFrom16(value.ShardPubAddr)
+		cfg.ShardPubAddr6 = netip.AddrFrom16(value.ShardPubAddr6)
 	}
 	if value.ServesV4 != 0 {
 		cfg.ShardPubAddr4 = v4FromWire(value.ShardPubAddr4)

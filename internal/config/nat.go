@@ -60,10 +60,10 @@ const (
 	// second SID and no second route on any tenant VRF.
 	EnvNATShardSID = "GALACTIC_NAT_SHARD_SID"
 
-	// EnvNATShardPubAddr is this shard's publicly routable IPv6 masquerade
+	// EnvNATShardPubAddr6 is this shard's publicly routable IPv6 masquerade
 	// source. Every NAT66 flow this shard translates is given an address and
 	// port within it. Optional: a shard may serve NAT64 alone.
-	EnvNATShardPubAddr = "GALACTIC_NAT_SHARD_PUB_ADDR"
+	EnvNATShardPubAddr6 = "GALACTIC_NAT_SHARD_PUB_ADDR6"
 
 	// EnvNATShardPubAddr4 is this shard's publicly routable IPv4 masquerade
 	// source, the address an IPv4-only destination sees. Setting it, together
@@ -111,9 +111,9 @@ type NATConfig struct {
 	UplinkInterface string
 	ShardSID        string
 
-	// ShardPubAddr enables NAT66; ShardPubAddr4 with NAT64Prefix enables NAT64.
+	// ShardPubAddr6 enables NAT66; ShardPubAddr4 with NAT64Prefix enables NAT64.
 	// Validate requires at least one family, and rejects half of either.
-	ShardPubAddr  string
+	ShardPubAddr6 string
 	ShardPubAddr4 string
 	NAT64Prefix   string
 
@@ -134,7 +134,7 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault(KeyGRPCHealthPort, DefaultNATGRPCHealthPort)
 	v.SetDefault("uplink_interface", "")
 	v.SetDefault("shard_sid", "")
-	v.SetDefault("shard_pub_addr", "")
+	v.SetDefault("shard_pub_addr6", "")
 	v.SetDefault("shard_pub_addr4", "")
 	v.SetDefault("nat64_prefix", "")
 	v.SetDefault("session_limit", DefaultNATSessionLimit)
@@ -159,7 +159,7 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"nat-uplink-interface", "uplink_interface"},
 		{"nat-shard-sid", "shard_sid"},
-		{"nat-shard-pub-addr", "shard_pub_addr"},
+		{"nat-shard-pub-addr6", "shard_pub_addr6"},
 		{"nat-shard-pub-addr4", "shard_pub_addr4"},
 		{"nat64-prefix", "nat64_prefix"},
 		{"nat-session-limit", "session_limit"},
@@ -182,7 +182,7 @@ func (c *NATConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.UplinkInterface = c.v.GetString("uplink_interface")
 	c.ShardSID = c.v.GetString("shard_sid")
-	c.ShardPubAddr = c.v.GetString("shard_pub_addr")
+	c.ShardPubAddr6 = c.v.GetString("shard_pub_addr6")
 	c.ShardPubAddr4 = c.v.GetString("shard_pub_addr4")
 	c.NAT64Prefix = c.v.GetString("nat64_prefix")
 	c.SessionLimit = c.v.GetInt("session_limit")
@@ -192,7 +192,7 @@ func (c *NATConfig) readFields() {
 // turns on. They are what the binary and the EgressShard reconciler both read,
 // so "does this shard do NAT64" has one answer rather than each caller
 // re-deriving it from which fields happen to be non-empty.
-func (c *NATConfig) ServesNAT66() bool { return c.ShardPubAddr != "" }
+func (c *NATConfig) ServesNAT66() bool { return c.ShardPubAddr6 != "" }
 func (c *NATConfig) ServesNAT64() bool { return c.ShardPubAddr4 != "" }
 
 // validateShardAddr parses and range-checks a shard identity address, rejecting
@@ -272,8 +272,8 @@ func (c *NATConfig) Validate() error {
 	if err := validateShardAddr("shard SID", c.ShardSID); err != nil {
 		return err
 	}
-	if c.ShardPubAddr != "" {
-		if err := validateShardAddr("shard public address", c.ShardPubAddr); err != nil {
+	if c.ShardPubAddr6 != "" {
+		if err := validateShardAddr("shard public address", c.ShardPubAddr6); err != nil {
 			return err
 		}
 	}
@@ -286,7 +286,7 @@ func (c *NATConfig) Validate() error {
 	if !c.ServesNAT66() && !c.ServesNAT64() {
 		return fmt.Errorf(
 			"a shard must serve at least one address family: set %s for NAT66, or %s and %s for NAT64",
-			EnvNATShardPubAddr, EnvNATShardPubAddr4, EnvNAT64Prefix)
+			EnvNATShardPubAddr6, EnvNATShardPubAddr4, EnvNAT64Prefix)
 	}
 	if c.SessionLimit < 0 {
 		return errors.New("session limit must not be negative (zero means unlimited)")

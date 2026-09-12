@@ -83,8 +83,8 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 	}
 
 	cfg := natprog.NatShardConfig{
-		ShardSid:     netip.MustParseAddr("fc00:1:2::1").As16(),
-		ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1").As16(),
+		ShardSid:      netip.MustParseAddr("fc00:1:2::1").As16(),
+		ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1").As16(),
 	}
 
 	// --- pre-restart: first load, attach, and populate a map entry. ---

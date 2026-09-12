@@ -71,11 +71,11 @@ func shardConfigFromFlags(cfg *config.NATConfig) (natmap.ShardConfig, error) {
 	}
 
 	if cfg.ServesNAT66() {
-		pubAddr, err := netip.ParseAddr(cfg.ShardPubAddr)
+		pubAddr, err := netip.ParseAddr(cfg.ShardPubAddr6)
 		if err != nil {
-			return natmap.ShardConfig{}, fmt.Errorf("parse shard public address %q: %w", cfg.ShardPubAddr, err)
+			return natmap.ShardConfig{}, fmt.Errorf("parse shard public address %q: %w", cfg.ShardPubAddr6, err)
 		}
-		shardCfg.ShardPubAddr = pubAddr
+		shardCfg.ShardPubAddr6 = pubAddr
 	}
 
 	if cfg.ServesNAT64() {

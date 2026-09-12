@@ -26,7 +26,7 @@
 // datapath's vrf_table lookup does. One SID serves both families -- which
 // translation a packet gets is decided from the inner destination, not from a
 // second SID, so a tenant VRF needs no second route and no second shard
-// assignment to gain NAT64. shard_pub_addr (IPv6) and shard_pub_addr4 (IPv4)
+// assignment to gain NAT64. shard_pub_addr6 (IPv6) and shard_pub_addr4 (IPv4)
 // are the masquerade sources for their respective families, so ordinary unicast
 // routing returns a reply to this exact shard with no hashing or cross-shard
 // lookup on the return path.
@@ -55,7 +55,7 @@
 //
 //  1. Not IPv6 and not IPv4: XDP_PASS. Not configured yet: XDP_PASS, this
 //     shard claiming nothing until it knows its own identity.
-//  2. IPv6 destination equal to shard_pub_addr is a reply from the IPv6
+//  2. IPv6 destination equal to shard_pub_addr6 is a reply from the IPv6
 //     internet addressed to a masquerade source this shard allocated ->
 //     nat66_return.
 //  3. IPv6 destination whose top 64 bits match shard_sid, with an
@@ -258,7 +258,7 @@ struct conn_value {
 // translation.
 struct shard_config {
 	__u8 shard_sid[16];
-	__u8 shard_pub_addr[16];
+	__u8 shard_pub_addr6[16];
 	__u8 nat64_prefix[16];
 	__be32 shard_pub_addr4;
 	__u32 default_session_limit;
@@ -884,7 +884,7 @@ int nat66_forward(struct xdp_md *ctx)
 		rev_template.proto = inner->nexthdr;
 		__builtin_memcpy(rev_template.saddr, inner->daddr, 16);
 		rev_template.sport = l4v.dport;
-		__builtin_memcpy(rev_template.daddr, cfg->shard_pub_addr, 16);
+		__builtin_memcpy(rev_template.daddr, cfg->shard_pub_addr6, 16);
 
 		__u32 base = fnv1a_flow(inner->saddr, l4v.sport) ^ (__u32) l4v.dport ^ tenant_arg;
 		if (claim_masquerade_port(&rev_template, &cv, base) == 0) {
@@ -896,8 +896,8 @@ int nat66_forward(struct xdp_md *ctx)
 		tenant_commit(tenant_arg, cfg);
 	}
 
-	fix_l4_checksum(l4v.check_ptr, inner->saddr, l4v.sport, cfg->shard_pub_addr, cv.shard_port);
-	__builtin_memcpy(inner->saddr, cfg->shard_pub_addr, 16);
+	fix_l4_checksum(l4v.check_ptr, inner->saddr, l4v.sport, cfg->shard_pub_addr6, cv.shard_port);
+	__builtin_memcpy(inner->saddr, cfg->shard_pub_addr6, 16);
 	*l4v.sport_ptr = cv.shard_port;
 
 	return XDP_PASS;
@@ -1338,7 +1338,7 @@ int nat_ingress(struct xdp_md *ctx)
 		if ((void *) (ip6 + 1) > data_end)
 			return XDP_PASS;
 
-		if (cfg->serves_v6 && addr6_eq(ip6->daddr, cfg->shard_pub_addr)) {
+		if (cfg->serves_v6 && addr6_eq(ip6->daddr, cfg->shard_pub_addr6)) {
 			bpf_tail_call(ctx, &nat_progs, NAT_PROG_NAT66_RETURN);
 			return XDP_PASS;
 		}

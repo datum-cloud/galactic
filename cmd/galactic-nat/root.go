@@ -133,7 +133,7 @@ func runCmd(cfg *config.NATConfig) error {
 		Scheme:           mgr.GetScheme(),
 		NodeName:         nodeName,
 		ShardSID:         cfg.ShardSID,
-		ShardAddressIPv6: cfg.ShardPubAddr,
+		ShardAddressIPv6: cfg.ShardPubAddr6,
 		ShardAddressIPv4: cfg.ShardPubAddr4,
 		NAT64Prefix:      cfg.NAT64Prefix,
 		Datapath:         datapathHealth,
@@ -191,7 +191,7 @@ func newRootCommand() *cobra.Command {
 		"Fabric-facing uplink interface this shard's XDP datapath attaches to (required)")
 	cmd.Flags().StringP("nat-shard-sid", "", "",
 		"This shard's own SRv6 uSID, encapsulation target for tenant egress traffic (required)")
-	cmd.Flags().StringP("nat-shard-pub-addr", "", "",
+	cmd.Flags().StringP("nat-shard-pub-addr6", "", "",
 		"This shard's own publicly-routable IPv6 masquerade source address, enabling NAT66")
 	cmd.Flags().StringP("nat-shard-pub-addr4", "", "",
 		"This shard's own publicly-routable IPv4 masquerade source address, enabling NAT64 "+

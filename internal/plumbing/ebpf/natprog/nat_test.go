@@ -189,16 +189,16 @@ func buildEncappedUDPPacket(t *testing.T, outerDst, outerSrc, innerSrc, innerDst
 }
 
 // TestNatIngress_UnclaimedTrafficPassesThrough covers the common case:
-// traffic addressed to neither shard_pub_addr nor this shard's own
+// traffic addressed to neither shard_pub_addr6 nor this shard's own
 // shard_sid locator must pass through completely unmodified.
 func TestNatIngress_UnclaimedTrafficPassesThrough(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 
 	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
-		ShardSid:     netip.MustParseAddr("fc00:1:2::1").As16(),
-		ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1").As16(),
-		ServesV6:     1,
+		ShardSid:      netip.MustParseAddr("fc00:1:2::1").As16(),
+		ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1").As16(),
+		ServesV6:      1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestNatIngress_UnclaimedTrafficPassesThrough(t *testing.T) {
 
 // TestNatIngress_ForwardSNATsAndPreservesChecksum covers handle_forward:
 // a tenant's own SRv6-encapsulated egress packet must be decapsulated,
-// SNAT'd to shard_pub_addr with an allocated port, and passed through
+// SNAT'd to shard_pub_addr6 with an allocated port, and passed through
 // (XDP_PASS) with a checksum that verifies against an independent full
 // recompute -- not just "the verifier accepted it".
 func TestNatIngress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
@@ -229,7 +229,7 @@ func TestNatIngress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
-		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(), ServesV6: 1,
+		ShardSid: shardSID.As16(), ShardPubAddr6: shardPub.As16(), ServesV6: 1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestNatIngress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	copy(gotSaddr[:], out[saddrOffset:saddrOffset+16])
 	copy(gotDaddr[:], out[daddrOffset:daddrOffset+16])
 	if gotSaddr != shardPub.As16() {
-		t.Errorf("saddr after SNAT = %x, want %x (shard_pub_addr)", gotSaddr, shardPub.As16())
+		t.Errorf("saddr after SNAT = %x, want %x (shard_pub_addr6)", gotSaddr, shardPub.As16())
 	}
 	if gotDaddr != destAddr.As16() {
 		t.Errorf("daddr changed unexpectedly: got %x, want %x (untouched)", gotDaddr, destAddr.As16())
@@ -336,7 +336,7 @@ func TestNatIngress_DifferentNodeIDPassesThrough(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
-		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(), ServesV6: 1,
+		ShardSid: shardSID.As16(), ShardPubAddr6: shardPub.As16(), ServesV6: 1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestNatIngress_DifferentNodeIDPassesThrough(t *testing.T) {
 }
 
 // TestNatIngress_ReturnUnNATsAndReencapsulates covers handle_return: a
-// reply from the internet, addressed to shard_pub_addr:allocated_port,
+// reply from the internet, addressed to shard_pub_addr6:allocated_port,
 // must be un-SNAT'd back to the tenant backend's own view and
 // re-encapsulated via SRv6 toward that backend's worker node.
 func TestNatIngress_ReturnUnNATsAndReencapsulates(t *testing.T) {
@@ -379,7 +379,7 @@ func TestNatIngress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
-		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(), ServesV6: 1,
+		ShardSid: shardSID.As16(), ShardPubAddr6: shardPub.As16(), ServesV6: 1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestNatIngress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 }
 
 // TestNatIngress_ReturnWithNoConnDropped covers the claimed-address
-// fail-closed contract: a reply to shard_pub_addr with no matching
+// fail-closed contract: a reply to shard_pub_addr6 with no matching
 // conn_table row must drop, not pass through (this address is claimed).
 func TestNatIngress_ReturnWithNoConnDropped(t *testing.T) {
 	requireRoot(t)
@@ -474,9 +474,9 @@ func TestNatIngress_ReturnWithNoConnDropped(t *testing.T) {
 
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
-		ShardSid:     netip.MustParseAddr("fc00:1:2::1").As16(),
-		ShardPubAddr: shardPub.As16(),
-		ServesV6:     1,
+		ShardSid:      netip.MustParseAddr("fc00:1:2::1").As16(),
+		ShardPubAddr6: shardPub.As16(),
+		ServesV6:      1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}

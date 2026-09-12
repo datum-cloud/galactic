@@ -21,7 +21,7 @@ spec:
       # unlike resources/galactic-gateway/iad-gateway1/, which needs a
       # kubernetes.io/hostname pin because iad has *two* edge-labeled
       # nodes needing different per-node env. GALACTIC_NAT_SHARD_SID/
-      # _SHARD_PUB_ADDR below must be unique per shard node (see
+      # _SHARD_PUB_ADDR6 below must be unique per shard node (see
       # config/galactic-nat/kustomization.yaml's doc comment), so
       # dfw/iad/sjc are three separate per-node overlays rather than one
       # overlay matching all three site workers with identical env.
@@ -83,5 +83,5 @@ spec:
             # 2001:db8:1:*::/64; SRv6 locators: 2001:db8:ff0X::/48; the
             # ns60 ingress VIP: 2001:db8:6060::1) -- "9966" as a mnemonic
             # for "NAT66". ::2 here is iad's shard (shard 2 of 3).
-            - name: GALACTIC_NAT_SHARD_PUB_ADDR
+            - name: GALACTIC_NAT_SHARD_PUB_ADDR6
               value: "2001:db8:9966:2::1"

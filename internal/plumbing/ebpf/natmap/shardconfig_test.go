@@ -14,8 +14,8 @@ func TestShardConfigTable_SetAndGet(t *testing.T) {
 	table := NewShardConfigTable(newFakeTable())
 
 	cfg := ShardConfig{
-		ShardSID:     netip.MustParseAddr("fc00:1:2::1"),
-		ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1"),
+		ShardSID:      netip.MustParseAddr("fc00:1:2::1"),
+		ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1"),
 	}
 	if err := table.Set(cfg); err != nil {
 		t.Fatalf("Set() error = %v", err)
@@ -49,12 +49,12 @@ func TestShardConfigTable_SetOverwrites(t *testing.T) {
 	table := NewShardConfigTable(newFakeTable())
 
 	first := ShardConfig{
-		ShardSID:     netip.MustParseAddr("fc00:1:2::1"),
-		ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1"),
+		ShardSID:      netip.MustParseAddr("fc00:1:2::1"),
+		ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1"),
 	}
 	second := ShardConfig{
-		ShardSID:     netip.MustParseAddr("fc00:3:4::1"),
-		ShardPubAddr: netip.MustParseAddr("2001:db8:8888::1"),
+		ShardSID:      netip.MustParseAddr("fc00:3:4::1"),
+		ShardPubAddr6: netip.MustParseAddr("2001:db8:8888::1"),
 	}
 
 	if err := table.Set(first); err != nil {
@@ -86,22 +86,22 @@ func TestShardConfigTable_SetRejectsIPv4(t *testing.T) {
 		{
 			name: "ipv4 shard SID",
 			cfg: ShardConfig{
-				ShardSID:     netip.MustParseAddr("203.0.113.1"),
-				ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1"),
+				ShardSID:      netip.MustParseAddr("203.0.113.1"),
+				ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1"),
 			},
 		},
 		{
 			name: "ipv4 shard pub addr",
 			cfg: ShardConfig{
-				ShardSID:     netip.MustParseAddr("fc00:1:2::1"),
-				ShardPubAddr: netip.MustParseAddr("203.0.113.1"),
+				ShardSID:      netip.MustParseAddr("fc00:1:2::1"),
+				ShardPubAddr6: netip.MustParseAddr("203.0.113.1"),
 			},
 		},
 		{
 			name: "4-in-6 shard SID",
 			cfg: ShardConfig{
-				ShardSID:     netip.MustParseAddr("::ffff:203.0.113.1"),
-				ShardPubAddr: netip.MustParseAddr("2001:db8:9999::1"),
+				ShardSID:      netip.MustParseAddr("::ffff:203.0.113.1"),
+				ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1"),
 			},
 		},
 	}

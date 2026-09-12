@@ -114,7 +114,7 @@ func buildIPv4UDPPacket(t *testing.T, dst, src netip.Addr, srcPort, dstPort uint
 func nat64ShardConfig(shardSID, shardPub netip.Addr, shardPub4 netip.Addr, limit uint32) NatShardConfig {
 	return NatShardConfig{
 		ShardSid:            shardSID.As16(),
-		ShardPubAddr:        shardPub.As16(),
+		ShardPubAddr6:       shardPub.As16(),
 		Nat64Prefix:         nat64Prefix.As16(),
 		ShardPubAddr4:       v4ToWire(shardPub4),
 		DefaultSessionLimit: limit,
@@ -579,7 +579,7 @@ func TestNat64_DisabledShardIsUnchanged(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
-		ShardSid: shardSID.As16(), ShardPubAddr: shardPub.As16(), ServesV6: 1,
+		ShardSid: shardSID.As16(), ShardPubAddr6: shardPub.As16(), ServesV6: 1,
 	}); err != nil {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}

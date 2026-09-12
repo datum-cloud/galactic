@@ -3,7 +3,7 @@
 # iad-gateway1/networkgateway.yaml sits alongside its own node-patch.yaml.
 # Status is left empty: EgressShardReconciler (running inside the
 # galactic-nat process on sjc-worker itself, per node-patch.yaml's
-# GALACTIC_NAT_SHARD_SID/_SHARD_PUB_ADDR) fills in
+# GALACTIC_NAT_SHARD_SID/_SHARD_PUB_ADDR6) fills in
 # status.shardAddress/status.shardSID from its own config at startup --
 # this object only needs to exist and target the right node.
 apiVersion: network.datumapis.com/v1alpha1

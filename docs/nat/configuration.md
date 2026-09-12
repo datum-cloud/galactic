@@ -28,7 +28,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | Node name           | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —       | Yes               |
 | Uplink interface    | `GALACTIC_NAT_UPLINK_INTERFACE`  | `--nat-uplink-interface`  | —       | Yes               |
 | Shard SID           | `GALACTIC_NAT_SHARD_SID`         | `--nat-shard-sid`         | —       | Yes               |
-| IPv6 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR`    | `--nat-shard-pub-addr`    | —       | Enables NAT66     |
+| IPv6 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR6`    | `--nat-shard-pub-addr6`    | —       | Enables NAT66     |
 | IPv4 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR4`   | `--nat-shard-pub-addr4`   | —       | Enables NAT64     |
 | NAT64 prefix        | `GALACTIC_NAT_NAT64_PREFIX`      | `--nat64-prefix`          | —       | With the above    |
 | Session limit       | `GALACTIC_NAT_SESSION_LIMIT`     | `--nat-session-limit`     | `0`     | No                |
@@ -85,7 +85,7 @@ the same gap `BGPRouter.Spec.SRv6Locator`/`NodeID` assignment and
 > `deploy/containerlab/resources/galactic-nat/dfw/node-patch.yaml`'s
 > comment for the exact encoding the lab uses.
 
-**`--nat-shard-pub-addr` / `GALACTIC_NAT_SHARD_PUB_ADDR`**
+**`--nat-shard-pub-addr6` / `GALACTIC_NAT_SHARD_PUB_ADDR6`**
 This shard's own dedicated, publicly-routable IPv6 address
 (`EgressShardStatus.ShardAddressIPv6`) — every flow this shard NATs is SNAT'd
 to an address:port within it. Must also be a native IPv6 address. Must be
@@ -117,7 +117,7 @@ One object per shard node, in the `galactic-system` namespace.
 | --------------------- | -------- | -------- | --------------------------------------------------------------------------------------------- |
 | `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this shard's `galactic-nat` process runs on.                           |
 | `status.shardSID`         | —        | `string` | This shard's uSID, published by the reconciler from `GALACTIC_NAT_SHARD_SID`; not user-set. |
-| `status.shardAddressIPv6` | —        | `string` | This shard's IPv6 masquerade address, from `GALACTIC_NAT_SHARD_PUB_ADDR`. Empty means no NAT66. |
+| `status.shardAddressIPv6` | —        | `string` | This shard's IPv6 masquerade address, from `GALACTIC_NAT_SHARD_PUB_ADDR6`. Empty means no NAT66. |
 | `status.shardAddressIPv4` | —        | `string` | This shard's IPv4 masquerade address, from `GALACTIC_NAT_SHARD_PUB_ADDR4`. Empty means no NAT64. |
 | `status.nat64Prefix`      | —        | `string` | The `/96` this shard translates for, from `GALACTIC_NAT_NAT64_PREFIX`.                        |
 | `status.conditions`       | —        | —        | `Ready` condition, reason `DatapathAttached` or `DatapathNotAttached`.                        |
@@ -275,7 +275,7 @@ knowing before you rely on this component in production:
 - **No anti-spoofing / trust boundary on ingress to a shard.** The
   datapath trusts fabric-internal traffic; this deserves its own security
   pass before carrying untrusted traffic.
-- **`ShardSID`/`ShardPubAddr` are entirely operator-chosen.** There is no
+- **`ShardSID`/`ShardPubAddr6` are entirely operator-chosen.** There is no
   in-cluster allocator for either value, and no automatic check that a
   chosen SID's Node-ID doesn't collide with a real node's own — see the
   "Node-ID collision hazard" callout above.

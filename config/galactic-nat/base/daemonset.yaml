@@ -102,7 +102,7 @@ spec:
             # produces a crash-looping container. The deployer's per-node
             # overlay must set:
             #
-            #   GALACTIC_NAT_SHARD_PUB_ADDR    IPv6 masquerade source,
+            #   GALACTIC_NAT_SHARD_PUB_ADDR6    IPv6 masquerade source,
             #                                  enabling NAT66
             #   GALACTIC_NAT_SHARD_PUB_ADDR4   IPv4 masquerade source, and
             #   GALACTIC_NAT_NAT64_PREFIX      the fabric-wide /96,
