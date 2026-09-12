@@ -518,3 +518,76 @@ func TestNat64_DisabledShardIsUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestConnKey_EncapSourceSeparatesTenantsOnDifferentNodes is the regression
+// guard for composed tenant identity.
+//
+// Two tenants here are indistinguishable by every field the key carried
+// before: same inner source address, same ports, same destination, and the
+// same SRv6 Argument. Only the outer source differs, because they sit on
+// different worker nodes.
+//
+// That combination is not contrived. Arguments are allocated per BGPRouter
+// (internal/cnibgp's allocateArgument scans one router's own
+// BGPVRFInstances), so two tenants on different nodes holding the same value
+// is ordinary rather than exceptional -- and nothing yet writes a per-tenant
+// Argument into a shard SID at all, so today every tenant presents the same
+// one. Without the encapsulation source in the key these two flows share a
+// row, and the second tenant's replies are re-encapsulated toward the first
+// tenant's node: cross-tenant delivery, not merely a lost packet.
+func TestConnKey_EncapSourceSeparatesTenantsOnDifferentNodes(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	shardSID := netip.MustParseAddr("fc00:1:2::1")
+	shardPub := netip.MustParseAddr("2001:db8:9999::1")
+	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
+		ShardSid: shardSID.As16(), ShardPubAddr6: shardPub.As16(), ServesV6: 1,
+	}); err != nil {
+		t.Fatalf("populate shard_config_table: %v", err)
+	}
+
+	// Identical on both tenants -- the colliding case.
+	backendAddr := netip.MustParseAddr("fd20:60::5")
+	destAddr := netip.MustParseAddr("2001:db8:9998::1")
+	dst := sidWithArgument(shardSID, 0x123)
+
+	// Differing only in which node the flow was encapsulated from.
+	nodeA := netip.MustParseAddr("fc00:3:4::a1b2")
+	nodeB := netip.MustParseAddr("fc00:5:6::c3d4")
+
+	ports := make(map[netip.Addr]uint16, 2)
+	for _, node := range []netip.Addr{nodeA, nodeB} {
+		pkt := buildEncappedUDPPacket(t, dst, node, backendAddr, destAddr, []byte("x"))
+		ret, out, err := objs.NatIngress.Test(pkt)
+		if err != nil {
+			t.Fatalf("program test-run from %s: %v", node, err)
+		}
+		if ret != xdpPass {
+			t.Fatalf("verdict from %s = %d, want XDP_PASS (%d)", node, ret, xdpPass)
+		}
+		ports[node] = binary.BigEndian.Uint16(out[ethLen+ip6Len : ethLen+ip6Len+2])
+	}
+
+	if ports[nodeA] == ports[nodeB] {
+		t.Errorf("both tenants were given masquerade port %d -- their flows collapsed into one "+
+			"connection row, so replies for one would be re-encapsulated toward the other's node",
+			ports[nodeA])
+	}
+
+	var (
+		key   NatConnKey
+		value NatConnValue
+		rows  int
+	)
+	it := objs.NatConnTable.Iterate()
+	for it.Next(&key, &value) {
+		rows++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterate nat_conn_table: %v", err)
+	}
+	if rows != 4 {
+		t.Errorf("nat_conn_table rows = %d, want 4 (two flows, forward and reverse each)", rows)
+	}
+}

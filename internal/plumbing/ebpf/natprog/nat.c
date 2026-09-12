@@ -211,12 +211,31 @@ struct nat_udphdr {
 // ---------------------------------------------------------------------
 
 // struct conn_key. The forward row is keyed by the tenant backend's facing
-// tuple, with tenant_arg, this flow's VRFID read from the SRv6 Argument, part
-// of the key so two tenants presenting the same backend address never collide.
+// tuple, plus the two fields that together identify which tenant it belongs to.
 // The reverse row is keyed by the internet peer's tuple against this shard's
-// public address for the family and the masquerade port, with tenant_arg zero:
-// that pair is already globally unique, this shard having allocated it from its
-// own address.
+// public address for the family and the masquerade port, with both tenant
+// fields zero: that pair is already globally unique, this shard having
+// allocated it from its own address.
+//
+// Tenant identity is composed, not carried in one field:
+//
+//   encap_src   the source of the SRv6 outer header -- the address of the
+//               worker node the flow was encapsulated from, unique per node
+//   tenant_arg  this flow's VRFID, read from the SRv6 Argument, unique per
+//               *node* because Arguments are allocated per BGPRouter
+//
+// Neither alone identifies a tenant fabric-wide. Together they do, which is why
+// both are in the key. Without encap_src, two tenants on different nodes
+// holding the same node-local Argument -- an ordinary occurrence, since the
+// allocator's uniqueness scope is one router -- share a row whenever their
+// inner tuples also match, and the second tenant's replies are re-encapsulated
+// toward the first tenant's node.
+//
+// encap_src is doing all the work today: nothing yet writes a per-tenant
+// Argument into a shard SID, so tenant_arg is whatever constant the operator
+// configured and is identical for every tenant. That is a gap in route
+// installation, not here; this key is correct either way, and becomes
+// fully per-tenant once the Argument is threaded through.
 //
 // family separates the two address families' rows; see NAT_FAMILY_V4.
 struct conn_key {
@@ -227,6 +246,7 @@ struct conn_key {
 	__be16 dport;
 	__u8 saddr[16];
 	__u8 daddr[16];
+	__u8 encap_src[16];
 };
 
 // struct conn_value carries the full picture of one translated
@@ -680,7 +700,13 @@ static NAT_ALWAYS_INLINE int strip_outer_header(struct xdp_md *ctx, struct nat_e
 // Installing the reverse row *is* the claim: BPF_NOEXIST makes the map itself
 // the allocator, so two CPUs racing for the same candidate cannot both win. The
 // forward row is written by the caller afterward.
-static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(const struct conn_key *rev_template,
+//
+// rev_key is mutated in place rather than copied per probe. A copy inside an
+// unrolled loop is a second whole key on the stack, and this program's 512-byte
+// BPF stack has no room for one; the caller owns the key and has no use for it
+// after this returns, so there is nothing to preserve by copying. Its dport is
+// left holding whichever candidate was tried last.
+static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct conn_key *rev_key,
 						       struct conn_value *cv, __u32 hash_base)
 {
 	#pragma unroll
@@ -688,11 +714,10 @@ static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(const struct conn_key *rev
 		__u16 candidate = NAT_PAT_PORT_BASE + ((hash_base + (__u32) i) % NAT_PAT_PORT_RANGE);
 		__be16 port = __builtin_bswap16(candidate);
 
-		struct conn_key rev_key = *rev_template;
-		rev_key.dport = port;
+		rev_key->dport = port;
 		cv->shard_port = port;
 
-		if (bpf_map_update_elem(&nat_conn_table, &rev_key, cv, BPF_NOEXIST) == 0)
+		if (bpf_map_update_elem(&nat_conn_table, rev_key, cv, BPF_NOEXIST) == 0)
 			return port;
 	}
 	return 0;
@@ -764,6 +789,7 @@ int nat66_forward(struct xdp_md *ctx)
 	fwd_key.sport = l4v.sport;
 	__builtin_memcpy(fwd_key.daddr, inner->daddr, 16);
 	fwd_key.dport = l4v.dport;
+	__builtin_memcpy(fwd_key.encap_src, tenant_usid, 16);
 
 	struct conn_value *existing = bpf_map_lookup_elem(&nat_conn_table, &fwd_key);
 	struct conn_value cv;
@@ -780,16 +806,16 @@ int nat66_forward(struct xdp_md *ctx)
 		cv.proto = inner->nexthdr;
 		cv.family = NAT_FAMILY_V6;
 
-		struct conn_key rev_template;
-		__builtin_memset(&rev_template, 0, sizeof(rev_template));
-		rev_template.family = NAT_FAMILY_V6;
-		rev_template.proto = inner->nexthdr;
-		__builtin_memcpy(rev_template.saddr, inner->daddr, 16);
-		rev_template.sport = l4v.dport;
-		__builtin_memcpy(rev_template.daddr, cfg->shard_pub_addr6, 16);
+		struct conn_key rev_key;
+		__builtin_memset(&rev_key, 0, sizeof(rev_key));
+		rev_key.family = NAT_FAMILY_V6;
+		rev_key.proto = inner->nexthdr;
+		__builtin_memcpy(rev_key.saddr, inner->daddr, 16);
+		rev_key.sport = l4v.dport;
+		__builtin_memcpy(rev_key.daddr, cfg->shard_pub_addr6, 16);
 
 		__u32 base = fnv1a_flow(inner->saddr, l4v.sport) ^ (__u32) l4v.dport ^ tenant_arg;
-		if (claim_masquerade_port(&rev_template, &cv, base) == 0) {
+		if (claim_masquerade_port(&rev_key, &cv, base) == 0) {
 			count_drop(DROP_REASON_NAT66_PAT_EXHAUSTED);
 			return XDP_DROP;
 		}
@@ -973,6 +999,7 @@ int nat64_forward(struct xdp_md *ctx)
 	fwd_key.sport = sport;
 	__builtin_memcpy(fwd_key.daddr, dst6, 16);
 	fwd_key.dport = dport;
+	__builtin_memcpy(fwd_key.encap_src, tenant_usid, 16);
 
 	struct conn_value *existing = bpf_map_lookup_elem(&nat_conn_table, &fwd_key);
 	struct conn_value cv;
@@ -991,16 +1018,16 @@ int nat64_forward(struct xdp_md *ctx)
 		cv.proto = proto;
 		cv.family = NAT_FAMILY_V4;
 
-		struct conn_key rev_template;
-		__builtin_memset(&rev_template, 0, sizeof(rev_template));
-		rev_template.family = NAT_FAMILY_V4;
-		rev_template.proto = proto;
-		v4_mapped(rev_template.saddr, dst4);
-		rev_template.sport = dport;
-		v4_mapped(rev_template.daddr, cfg->shard_pub_addr4);
+		struct conn_key rev_key;
+		__builtin_memset(&rev_key, 0, sizeof(rev_key));
+		rev_key.family = NAT_FAMILY_V4;
+		rev_key.proto = proto;
+		v4_mapped(rev_key.saddr, dst4);
+		rev_key.sport = dport;
+		v4_mapped(rev_key.daddr, cfg->shard_pub_addr4);
 
 		__u32 base = fnv1a_flow(src6, sport) ^ (__u32) dport ^ tenant_arg;
-		if (claim_masquerade_port(&rev_template, &cv, base) == 0) {
+		if (claim_masquerade_port(&rev_key, &cv, base) == 0) {
 			count_drop(DROP_REASON_NAT64_PAT_EXHAUSTED);
 			return XDP_DROP;
 		}

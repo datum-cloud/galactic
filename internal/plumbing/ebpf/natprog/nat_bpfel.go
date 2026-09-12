@@ -22,6 +22,7 @@ type NatConnKey struct {
 	Dport     uint16
 	Saddr     [16]uint8
 	Daddr     [16]uint8
+	EncapSrc  [16]uint8
 }
 
 type NatConnValue struct {

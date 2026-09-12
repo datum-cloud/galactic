@@ -40,6 +40,18 @@ type ConnKey struct {
 	Dport     uint16
 	Saddr     netip.Addr
 	Daddr     netip.Addr
+
+	// EncapSrc is the source of the SRv6 outer header a forward row's packet
+	// arrived in -- the address of the worker node it was encapsulated from.
+	// Zero on a reverse row, whose reply arrives from the internet rather than
+	// across the fabric and whose uniqueness comes from the shard's own
+	// (address, masquerade port) pair instead.
+	//
+	// It is part of the key because TenantArg alone does not identify a tenant
+	// fabric-wide: Arguments are allocated per BGPRouter, so two tenants on
+	// different nodes routinely hold the same one. See the datapath's own
+	// conn_key comment.
+	EncapSrc netip.Addr
 }
 
 // ConnEntry is one fully decoded nat_conn_table row, decoupled from
@@ -90,7 +102,7 @@ func toWireConnKey(key ConnKey) (natprog.NatConnKey, error) {
 	if err := validateConnAddr("conn key destination address", key.Daddr); err != nil {
 		return natprog.NatConnKey{}, err
 	}
-	return natprog.NatConnKey{
+	wire := natprog.NatConnKey{
 		Family:    key.Family,
 		Proto:     key.Proto,
 		TenantArg: key.TenantArg,
@@ -98,7 +110,15 @@ func toWireConnKey(key ConnKey) (natprog.NatConnKey, error) {
 		Dport:     beU16(key.Dport),
 		Saddr:     key.Saddr.As16(),
 		Daddr:     key.Daddr.As16(),
-	}, nil
+	}
+	// Left zero when unset, which is what a reverse row carries.
+	if key.EncapSrc.IsValid() {
+		if err := validateConnAddr("conn key encapsulation source", key.EncapSrc); err != nil {
+			return natprog.NatConnKey{}, err
+		}
+		wire.EncapSrc = key.EncapSrc.As16()
+	}
+	return wire, nil
 }
 
 func fromWireConnKey(wireKey natprog.NatConnKey) ConnKey {
@@ -110,6 +130,7 @@ func fromWireConnKey(wireKey natprog.NatConnKey) ConnKey {
 		Dport:     beU16(wireKey.Dport),
 		Saddr:     netip.AddrFrom16(wireKey.Saddr),
 		Daddr:     netip.AddrFrom16(wireKey.Daddr),
+		EncapSrc:  encapSrcFromWire(wireKey.EncapSrc),
 	}
 }
 
@@ -125,6 +146,20 @@ func validateConnAddr(field string, addr netip.Addr) error {
 		return fmt.Errorf("%s %s must be stored in 16-byte form (IPv4 addresses IPv4-mapped)", field, addr)
 	}
 	return nil
+}
+
+// encapSrcFromWire decodes a forward row's encapsulation source, returning the
+// zero Addr for the all-zero field a reverse row carries.
+//
+// Decoding that as "::" instead would be a round-trip asymmetry: toWireConnKey
+// writes zeros for an unset source, so "::" would come back out where nothing
+// went in, and a caller could not tell a reverse row from a forward row
+// encapsulated from the unspecified address.
+func encapSrcFromWire(raw [16]byte) netip.Addr {
+	if raw == ([16]byte{}) {
+		return netip.Addr{}
+	}
+	return netip.AddrFrom16(raw)
 }
 
 func fromWireConnValue(key ConnKey, value natprog.NatConnValue) ConnEntry {
