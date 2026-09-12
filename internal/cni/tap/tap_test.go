@@ -11,6 +11,8 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
+
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 func TestIsLinkNotFoundError(t *testing.T) {
@@ -66,8 +68,8 @@ func TestUpdateForwardRuleInvalidAction(t *testing.T) {
 	}
 }
 
-// requiresRoot skips the test when not running as root.
-func requiresRoot(t *testing.T) {
+// requireRoot skips the test when not running as root.
+func requireRoot(t *testing.T) {
 	t.Helper()
 	if os.Getuid() != 0 {
 		t.Skip("skipping: requires root")
@@ -75,20 +77,20 @@ func requiresRoot(t *testing.T) {
 }
 
 func TestDeleteNonExistent(t *testing.T) {
-	requiresRoot(t)
+	requireRoot(t)
 
 	// Delete with a name that definitely doesn't exist.
-	err := Delete("zzz_nonexistent_vpc", "zzz_nonexistent_att")
+	err := Delete("zz", "zz9")
 	if err != nil {
 		t.Errorf("Delete(nonexistent) = %v, want nil", err)
 	}
 }
 
 func TestAddCreatesTapLink(t *testing.T) {
-	requiresRoot(t)
+	requireRoot(t)
 
-	vpc := "taptest_a"
-	att := "taptest_b"
+	vpc, att := "at", "b1"
+	addVRFStandIn(t, vpc)
 	t.Cleanup(func() { _ = Delete(vpc, att) })
 
 	err := Add(vpc, att, 1500)
@@ -97,20 +99,92 @@ func TestAddCreatesTapLink(t *testing.T) {
 	}
 
 	// Verify the link exists and is a tap.
-	link, err := findLink(t, generateInterfaceNameHost(vpc, att))
+	link, err := findLink(t, intf.GenerateInterfaceNameHost(vpc, att))
 	if err != nil {
 		t.Fatalf("link not found: %v", err)
 	}
-	if link.Type() != "tap" {
-		t.Errorf("link type = %q, want %q", link.Type(), "tap")
+	if link.Type() != "tuntap" {
+		t.Errorf("link type = %q, want %q", link.Type(), "tuntap")
+	}
+}
+
+// testMTU differs from the kernel's 1500 default, so a tap that silently kept
+// the default fails the assertion.
+const testMTU = 1460
+
+// addVRFStandIn creates the master device Add enslaves the tap to. A bridge
+// stands in for the VRF because Add only needs a master-capable link under the
+// VRF's name, and not every kernel that runs these tests ships the VRF module.
+func addVRFStandIn(t *testing.T, vpc string) {
+	t.Helper()
+	name := intf.GenerateInterfaceNameVRF(vpc)
+	if err := netlink.LinkAdd(&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: name}}); err != nil {
+		t.Fatalf("create VRF stand-in %q: %v", name, err)
+	}
+	t.Cleanup(func() {
+		if link, err := netlink.LinkByName(name); err == nil {
+			_ = netlink.LinkDel(link)
+		}
+	})
+}
+
+func TestAddAppliesConfiguredMTU(t *testing.T) {
+	requireRoot(t)
+
+	vpc, att := "mt", "a1"
+	addVRFStandIn(t, vpc)
+	t.Cleanup(func() { _ = Delete(vpc, att) })
+
+	if err := Add(vpc, att, testMTU); err != nil {
+		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
+	}
+
+	link, err := findLink(t, intf.GenerateInterfaceNameHost(vpc, att))
+	if err != nil {
+		t.Fatalf("link not found: %v", err)
+	}
+	if got := link.Attrs().MTU; got != testMTU {
+		t.Errorf("tap MTU = %d, want %d", got, testMTU)
+	}
+}
+
+func TestAddRepairRestoresConfiguredMTU(t *testing.T) {
+	requireRoot(t)
+
+	vpc, att := "mr", "b1"
+	addVRFStandIn(t, vpc)
+	t.Cleanup(func() { _ = Delete(vpc, att) })
+
+	if err := Add(vpc, att, testMTU); err != nil {
+		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
+	}
+	hostName := intf.GenerateInterfaceNameHost(vpc, att)
+	link, err := findLink(t, hostName)
+	if err != nil {
+		t.Fatalf("link not found: %v", err)
+	}
+	// Model a tap an earlier ADD left at the kernel default.
+	if err := netlink.LinkSetMTU(link, 1500); err != nil {
+		t.Fatalf("LinkSetMTU: %v", err)
+	}
+
+	if err := Add(vpc, att, testMTU); err != nil {
+		t.Fatalf("repeat Add(%q, %q) = %v", vpc, att, err)
+	}
+	link, err = findLink(t, hostName)
+	if err != nil {
+		t.Fatalf("link not found after repair: %v", err)
+	}
+	if got := link.Attrs().MTU; got != testMTU {
+		t.Errorf("tap MTU after repair = %d, want %d", got, testMTU)
 	}
 }
 
 func TestAddEnslavesToVRF(t *testing.T) {
-	requiresRoot(t)
+	requireRoot(t)
 
-	vpc := "taptest_c"
-	att := "taptest_d"
+	vpc, att := "ct", "d1"
+	addVRFStandIn(t, vpc)
 	t.Cleanup(func() { _ = Delete(vpc, att) })
 
 	err := Add(vpc, att, 1500)
@@ -118,8 +192,8 @@ func TestAddEnslavesToVRF(t *testing.T) {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
 
-	hostName := generateInterfaceNameHost(vpc, att)
-	vrfName := generateInterfaceNameVRF(vpc, att)
+	hostName := intf.GenerateInterfaceNameHost(vpc, att)
+	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 
 	link, err := findLink(t, hostName)
 	if err != nil {
@@ -137,10 +211,10 @@ func TestAddEnslavesToVRF(t *testing.T) {
 }
 
 func TestAddBidirectionalRules(t *testing.T) {
-	requiresRoot(t)
+	requireRoot(t)
 
-	vpc := "taptest_e"
-	att := "taptest_f"
+	vpc, att := "et", "f1"
+	addVRFStandIn(t, vpc)
 	t.Cleanup(func() { _ = Delete(vpc, att) })
 
 	err := Add(vpc, att, 1500)
@@ -148,7 +222,7 @@ func TestAddBidirectionalRules(t *testing.T) {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
 
-	hostName := generateInterfaceNameHost(vpc, att)
+	hostName := intf.GenerateInterfaceNameHost(vpc, att)
 
 	// Check iptables rules exist for both -i and -o.
 	for _, proto := range []int{iptablesProtocolIPv4, iptablesProtocolIPv6} {
@@ -180,17 +254,17 @@ func TestAddBidirectionalRules(t *testing.T) {
 }
 
 func TestDeleteRemovesLink(t *testing.T) {
-	requiresRoot(t)
+	requireRoot(t)
 
-	vpc := "taptest_g"
-	att := "taptest_h"
+	vpc, att := "gt", "h1"
+	addVRFStandIn(t, vpc)
 
 	err := Add(vpc, att, 1500)
 	if err != nil {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
 
-	hostName := generateInterfaceNameHost(vpc, att)
+	hostName := intf.GenerateInterfaceNameHost(vpc, att)
 	if _, err := findLink(t, hostName); err != nil {
 		t.Fatalf("link not found after Add: %v", err)
 	}
@@ -206,18 +280,6 @@ func TestDeleteRemovesLink(t *testing.T) {
 }
 
 // ---- helpers -------------------------------------------------------------
-
-func generateInterfaceNameHost(vpc, att string) string {
-	// Inline the intf name generation to avoid a test-time import cycle.
-	// This mirrors intf.GenerateInterfaceNameHost.
-	return "H" + vpc + att
-}
-
-func generateInterfaceNameVRF(vpc, att string) string {
-	// Inline the intf name generation to avoid a test-time import cycle.
-	// This mirrors intf.GenerateInterfaceNameVRF.
-	return "V" + vpc + att
-}
 
 const (
 	iptablesProtocolIPv4 = 0

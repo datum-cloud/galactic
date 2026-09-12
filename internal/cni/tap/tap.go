@@ -48,7 +48,10 @@ func updateForwardRule(interfaceName string, action string) error {
 					return err
 				}
 			case "delete":
-				if err := ipt.Delete("filter", "FORWARD", ruleSpec...); err != nil {
+				// A rule already gone is the desired end state, and treating it
+				// as a failure would make a repeated or partial DEL impossible
+				// to complete.
+				if err := ipt.DeleteIfExists("filter", "FORWARD", ruleSpec...); err != nil {
 					return err
 				}
 			default:
@@ -76,15 +79,12 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	existingTap, err := netlink.LinkByName(tapName)
 	if err == nil {
 		slog.Warn("tap: found existing tap from a previous ADD attempt, repairing state", "tap", tapName)
-		return repairTap(existingTap, vrfLink, tapName)
+		return repairTap(existingTap, vrfLink, tapName, mtu)
 	}
 
 	tap := &netlink.Tuntap{
-		LinkAttrs: netlink.LinkAttrs{
-			Name: tapName,
-			MTU:  mtu,
-		},
-		Mode: netlink.TUNTAP_MODE_TAP,
+		LinkAttrs: netlink.LinkAttrs{Name: tapName},
+		Mode:      netlink.TUNTAP_MODE_TAP,
 	}
 
 	if err := netlink.LinkAdd(tap); err != nil {
@@ -94,6 +94,10 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 
 	tapLink, err := netlink.LinkByName(tapName)
 	if err != nil {
+		return err
+	}
+
+	if err := ensureMTU(tapLink, tapName, mtu); err != nil {
 		return err
 	}
 
@@ -148,8 +152,33 @@ func Delete(vpc, vpcAttachment string) error {
 	return nil
 }
 
+// ensureMTU sets the tap's MTU to mtu, leaving the kernel default in place
+// when none is configured.
+//
+// Creating a tap never applies an MTU: the tap is made by an ioctl that has no
+// MTU field, and the netlink library silently drops the one it is given. An
+// unset MTU leaves the tap at 1500, too large for a VPC network whose packets
+// gain an SRv6 header on the wire, and the guest adopts whatever the tap
+// carries.
+func ensureMTU(tapLink netlink.Link, tapName string, mtu int) error {
+	if mtu <= 0 || tapLink.Attrs().MTU == mtu {
+		return nil
+	}
+	if err := netlink.LinkSetMTU(tapLink, mtu); err != nil {
+		return fmt.Errorf("set MTU %d on tap %q: %w", mtu, tapName, err)
+	}
+	return nil
+}
+
 // repairTap verifies and repairs a pre-existing tap interface's state.
-func repairTap(tapLink netlink.Link, vrfLink netlink.Link, tapName string) error {
+func repairTap(tapLink netlink.Link, vrfLink netlink.Link, tapName string, mtu int) error {
+	// A tap left behind by an earlier ADD keeps whatever MTU it had, and the
+	// caller reports this tap's MTU to the guest, so a wrong value would
+	// otherwise persist for the life of the instance.
+	if err := ensureMTU(tapLink, tapName, mtu); err != nil {
+		return err
+	}
+
 	// Verify VRF enslavement.
 	if tapLink.Attrs().MasterIndex != vrfLink.Attrs().Index {
 		slog.Warn("tap: re-enslaving tap to VRF during repair", "tap", tapName)
