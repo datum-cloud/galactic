@@ -69,8 +69,13 @@ interface is moved into a container — the tap fd is managed directly by the
 guest VM hypervisor (Kata, Firecracker, kraftlet/Unikraft), so this binary
 never delegates to host-device and never configures a guest netns. It still
 runs IPAM (if `"ipam"` is present) and configures the host gateway exactly as
-`galactic-veth` does; the CNI result carries a single interface (the host tap,
-empty sandbox) since there's no guest-side interface entry.
+`galactic-veth` does; the CNI result carries a single interface since there's
+no guest-side interface entry. That interface carries the name the runtime
+requested (`CNI_IFNAME`, `eth0` in practice) with an empty sandbox, because the
+device is the tap and it stays in the host namespace. A container runtime looks
+the sandbox's default interface up by the requested name and refuses to start
+the sandbox when it finds no addressed entry under it, which is why the result
+does not report the host tap device name.
 
 #### Directly attachable networking
 
@@ -89,6 +94,11 @@ workload: one cell runs guests of several runtimes over this same plugin, and
 only some of them read the file. It is carried in the CNI config because that
 is the one channel delivered identically to ADD, DEL, and CHECK, so no
 operation has to re-derive it.
+
+The guest's default route is marked on-link. A VPC gateway sits outside the
+prefix allocated to the attachment, so the guest kernel has nothing telling it
+the gateway is reachable and rejects the route as unreachable otherwise. The
+host side of the tap is given the same treatment.
 
 A failed write fails ADD. Kata treats a missing file as "discover the network
 yourself", which produces a healthy-looking sandbox on the wrong network — a

@@ -70,7 +70,12 @@ func cmdStatus(args *skel.CmdArgs) error {
 // checkPrevResult validates that kernel state still matches the host interface
 // the most recent ADD recorded. Tap mode has no guest interface or namespace to
 // validate against.
-func checkPrevResult(rawPrevResult map[string]interface{}, _ string) error {
+//
+// The device to validate is the tap derived from the attachment, not a name
+// read back out of the result: the result names its interface as the runtime
+// requested it, since that is the name the runtime resolves the sandbox's
+// address by.
+func checkPrevResult(rawPrevResult map[string]interface{}, hostName string) error {
 	jsonBytes, err := json.Marshal(rawPrevResult)
 	if err != nil {
 		return fmt.Errorf("marshal prevResult: %w", err)
@@ -83,14 +88,19 @@ func checkPrevResult(rawPrevResult map[string]interface{}, _ string) error {
 	if err != nil {
 		return fmt.Errorf("get prevResult: %w", err)
 	}
+	if hostName == "" {
+		return nil
+	}
 
 	for _, iface := range result.Interfaces {
-		if iface.Name == "" || iface.Sandbox != "" {
+		if iface.Sandbox != "" {
 			continue
 		}
-		if err := cnimaster.ValidateHostInterface(iface.Name, iface.Mac, iface.Mtu); err != nil {
-			return fmt.Errorf("interface %q (host): %w", iface.Name, err)
+		if err := cnimaster.ValidateHostInterface(hostName, iface.Mac, iface.Mtu); err != nil {
+			return fmt.Errorf("interface %q (host tap): %w", hostName, err)
 		}
+		// One host-namespace interface per attachment: the tap.
+		break
 	}
 	return nil
 }

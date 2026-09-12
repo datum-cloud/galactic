@@ -85,8 +85,13 @@ func buildDANDocument(tapName string, res *cniipam.IPAMResult, mtu int) (*dan.Do
 
 // defaultRoute returns the guest's default route through gateway. An empty
 // destination is the default route for the gateway's own family.
+//
+// The route is on-link. A VPC gateway sits outside the prefix allocated to the
+// attachment, for either family, so the guest kernel has nothing telling it the
+// gateway is reachable and rejects the route as unreachable unless the route
+// says so. The host side of the tap is given the same treatment.
 func defaultRoute(gateway net.IP) dan.Route {
-	return dan.Route{Gateway: gateway.String()}
+	return dan.Route{Gateway: gateway.String(), Flags: dan.RouteFlagOnLink}
 }
 
 // guestMAC derives the guest interface's address from the tap's name, which

@@ -53,7 +53,7 @@ func TestBuildDANDocumentDescribesTheAttachment(t *testing.T) {
 	if !reflect.DeepEqual(device.NetworkInfo.Interface.IPAddresses, wantAddresses) {
 		t.Errorf("addresses = %v, want %v", device.NetworkInfo.Interface.IPAddresses, wantAddresses)
 	}
-	wantRoutes := []dan.Route{{Gateway: "fd20:0:f::1"}}
+	wantRoutes := []dan.Route{{Gateway: "fd20:0:f::1", Flags: dan.RouteFlagOnLink}}
 	if !reflect.DeepEqual(device.NetworkInfo.Routes, wantRoutes) {
 		t.Errorf("routes = %v, want %v", device.NetworkInfo.Routes, wantRoutes)
 	}
@@ -81,9 +81,38 @@ func TestBuildDANDocumentOrdersDualStackAddresses(t *testing.T) {
 	if !reflect.DeepEqual(document.Devices[0].NetworkInfo.Interface.IPAddresses, want) {
 		t.Errorf("addresses = %v, want %v", document.Devices[0].NetworkInfo.Interface.IPAddresses, want)
 	}
-	wantRoutes := []dan.Route{{Gateway: "fd20:0:f::1"}, {Gateway: "10.244.1.1"}}
+	wantRoutes := []dan.Route{
+		{Gateway: "fd20:0:f::1", Flags: dan.RouteFlagOnLink},
+		{Gateway: "10.244.1.1", Flags: dan.RouteFlagOnLink},
+	}
 	if !reflect.DeepEqual(document.Devices[0].NetworkInfo.Routes, wantRoutes) {
 		t.Errorf("routes = %v, want %v", document.Devices[0].NetworkInfo.Routes, wantRoutes)
+	}
+}
+
+// TestBuildDANDocumentMarksTheDefaultRouteOnLink pins the property the guest
+// kernel needs to accept the route at all: a VPC gateway is outside the prefix
+// allocated to the attachment, so a route that does not declare the gateway
+// on-link is rejected as unreachable and the instance comes up with no
+// connectivity.
+func TestBuildDANDocumentMarksTheDefaultRouteOnLink(t *testing.T) {
+	res := ipv6Result()
+	res.IPv4Address = net.ParseIP("10.244.1.5")
+	res.IPv4Gateway = net.ParseIP("10.244.1.1")
+
+	document, err := buildDANDocument("G00000000bayhH", res, 1460)
+	if err != nil {
+		t.Fatalf("buildDANDocument: %v", err)
+	}
+
+	routes := document.Devices[0].NetworkInfo.Routes
+	if len(routes) != 2 {
+		t.Fatalf("routes = %v, want one per family", routes)
+	}
+	for _, route := range routes {
+		if route.Flags&dan.RouteFlagOnLink == 0 {
+			t.Errorf("route via %s has flags %d, want the on-link flag set", route.Gateway, route.Flags)
+		}
 	}
 }
 
@@ -153,6 +182,14 @@ func TestWriteDANFileProducesTheProvenShape(t *testing.T) {
 	}
 	if _, present := got["netns"]; present {
 		t.Errorf("DAN JSON carries a netns field: %s", data)
+	}
+	networkInfo := device["network_info"].(map[string]any)
+	routes := networkInfo["routes"].([]any)
+	if len(routes) != 1 {
+		t.Fatalf("routes = %v, want one entry", routes)
+	}
+	if flags := routes[0].(map[string]any)["flags"]; flags != float64(dan.RouteFlagOnLink) {
+		t.Errorf("routes[0].flags = %v, want %d (on-link)", flags, dan.RouteFlagOnLink)
 	}
 }
 
