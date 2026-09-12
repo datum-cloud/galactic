@@ -122,6 +122,88 @@ func TestAnnotateNAD(t *testing.T) {
 		}
 	})
 
+	t.Run("pre-existing foreign annotations survive", func(t *testing.T) {
+		// A NetworkAttachmentDefinition is authored and owned by the external
+		// VPC operator, so it arrives carrying annotations from Multus, the
+		// CNI tooling, and whatever applied it. The patch has to leave every
+		// one of them in place.
+		const (
+			resourceNameKey = "k8s.v1.cni.cncf.io/resourceName"
+			resourceNameVal = "intel.com/sriov_netdevice"
+			lastAppliedKey  = "kubectl.kubernetes.io/last-applied-configuration"
+			lastAppliedVal  = `{"apiVersion":"k8s.cni.cncf.io/v1"}`
+			tildeKey        = "example.com/odd~key/with~slash"
+			tildeVal        = "preserved"
+		)
+
+		nad := &unstructured.Unstructured{}
+		nad.SetGroupVersionKind(nadGVK)
+		nad.SetName(nadName)
+		nad.SetNamespace(nadNamespace)
+		nad.SetAnnotations(map[string]string{
+			resourceNameKey: resourceNameVal,
+			lastAppliedKey:  lastAppliedVal,
+			tildeKey:        tildeVal,
+		})
+		k8s := fakeClient(nad)
+
+		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface); err != nil {
+			t.Fatalf("AnnotateNAD() = %v, want nil", err)
+		}
+
+		got := &unstructured.Unstructured{}
+		got.SetGroupVersionKind(nadGVK)
+		if err := k8s.Get(context.Background(), client.ObjectKey{Name: nadName, Namespace: nadNamespace}, got); err != nil {
+			t.Fatalf("get NAD after annotate: %v", err)
+		}
+
+		want := map[string]string{
+			resourceNameKey:         resourceNameVal,
+			lastAppliedKey:          lastAppliedVal,
+			tildeKey:                tildeVal,
+			AnnotationHostInterface: hostIface,
+		}
+		gotAnnotations := got.GetAnnotations()
+		for key, wantValue := range want {
+			if gotAnnotations[key] != wantValue {
+				t.Errorf("annotation %s = %q, want %q", key, gotAnnotations[key], wantValue)
+			}
+		}
+		if len(gotAnnotations) != len(want) {
+			t.Errorf("annotations = %v, want exactly %d entries", gotAnnotations, len(want))
+		}
+	})
+
+	t.Run("re-annotating an already annotated NAD overwrites only its own key", func(t *testing.T) {
+		const foreignKey = "k8s.v1.cni.cncf.io/resourceName"
+
+		nad := &unstructured.Unstructured{}
+		nad.SetGroupVersionKind(nadGVK)
+		nad.SetName(nadName)
+		nad.SetNamespace(nadNamespace)
+		nad.SetAnnotations(map[string]string{
+			foreignKey:              "intel.com/sriov_netdevice",
+			AnnotationHostInterface: "vpc-stale-iface",
+		})
+		k8s := fakeClient(nad)
+
+		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface); err != nil {
+			t.Fatalf("AnnotateNAD() = %v, want nil", err)
+		}
+
+		got := &unstructured.Unstructured{}
+		got.SetGroupVersionKind(nadGVK)
+		if err := k8s.Get(context.Background(), client.ObjectKey{Name: nadName, Namespace: nadNamespace}, got); err != nil {
+			t.Fatalf("get NAD after annotate: %v", err)
+		}
+		if v := got.GetAnnotations()[AnnotationHostInterface]; v != hostIface {
+			t.Errorf("annotation %s = %q, want %q", AnnotationHostInterface, v, hostIface)
+		}
+		if v := got.GetAnnotations()[foreignKey]; v != "intel.com/sriov_netdevice" {
+			t.Errorf("annotation %s = %q, want it preserved", foreignKey, v)
+		}
+	})
+
 	t.Run("empty pod namespace is a no-op", func(t *testing.T) {
 		k8s := fakeClient()
 

@@ -10,6 +10,7 @@ package nadpatch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -64,6 +65,13 @@ func ParsePodName(cniArgs string) string {
 // operator before the CNI runs, so not-found is a hard failure. A conflict is
 // the one non-fatal case: it means a previous invocation already applied the
 // annotation.
+//
+// The patch is a merge patch so it touches only this one annotation. The
+// definition belongs to the external operator and carries annotations from
+// Multus, the CNI tooling, and whatever applied it; a patch that replaced the
+// whole annotation map would drop all of them. A key-scoped JSON Patch would
+// scope the write just as narrowly but fails outright on a definition that
+// carries no annotations yet, which is the common case.
 func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, hostInterface string) error {
 	if nadNamespace == "" {
 		return nil
@@ -74,10 +82,16 @@ func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 	nad.SetName(nadName)
 	nad.SetNamespace(nadNamespace)
 
-	patch := fmt.Sprintf(`[{"op":"add","path":"/metadata/annotations","value":{"%s":"%s"}}]`,
-		AnnotationHostInterface, hostInterface)
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{AnnotationHostInterface: hostInterface},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("build annotation patch for %s/%s: %w", nadNamespace, nadName, err)
+	}
 
-	err := k8s.Patch(ctx, nad, client.RawPatch(types.JSONPatchType, []byte(patch)))
+	err = k8s.Patch(ctx, nad, client.RawPatch(types.MergePatchType, patch))
 	if err != nil {
 		if apierrors.IsConflict(err) {
 			slog.Debug("annotate NAD: already annotated by a previous invocation",
