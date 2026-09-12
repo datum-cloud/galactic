@@ -62,9 +62,10 @@ func ParsePodName(cniArgs string) string {
 // AnnotateNAD patches the attachment definition with the host interface name.
 //
 // The definition is expected to already exist, created by the external VPC
-// operator before the CNI runs, so not-found is a hard failure. A conflict is
-// the one non-fatal case: it means a previous invocation already applied the
-// annotation.
+// operator before the CNI runs, so not-found is a hard failure. So is every
+// other rejection: the patch states no resourceVersion precondition, so a
+// repeat attach just reapplies it, and any error that does come back means the
+// host interface name never reached the definition.
 //
 // The patch is a merge patch so it touches only this one annotation. The
 // definition belongs to the external operator and carries annotations from
@@ -93,11 +94,6 @@ func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 
 	err = k8s.Patch(ctx, nad, client.RawPatch(types.MergePatchType, patch))
 	if err != nil {
-		if apierrors.IsConflict(err) {
-			slog.Debug("annotate NAD: already annotated by a previous invocation",
-				"name", nadName, "namespace", nadNamespace)
-			return nil
-		}
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("NetworkAttachmentDefinition %s/%s not found: %w", nadNamespace, nadName, err)
 		}
