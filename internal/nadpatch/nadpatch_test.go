@@ -6,14 +6,17 @@ package nadpatch
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func fakeClient(objs ...client.Object) client.Client {
@@ -201,6 +204,32 @@ func TestAnnotateNAD(t *testing.T) {
 		}
 		if v := got.GetAnnotations()[foreignKey]; v != "intel.com/sriov_netdevice" {
 			t.Errorf("annotation %s = %q, want it preserved", foreignKey, v)
+		}
+	})
+
+	t.Run("a conflict from the server is surfaced, not swallowed", func(t *testing.T) {
+		// A merge patch carries no resourceVersion, so the API server has no
+		// precondition to fail and cannot answer this call with a conflict of
+		// its own. One can still arrive from an admission webhook, and it
+		// means the host interface never reached the definition: report it so
+		// the attach fails loudly instead of handing back an interface with no
+		// path to its VPC.
+		base := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+		k8s := interceptor.NewClient(base, interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: nadGVK.Group, Resource: "network-attachment-definitions"},
+					nadName, errors.New("rejected by webhook"),
+				)
+			},
+		})
+
+		err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface)
+		if err == nil {
+			t.Fatal("expected error when the server reports a conflict, got nil")
+		}
+		if !apierrors.IsConflict(err) {
+			t.Errorf("expected error to wrap a conflict status, got: %v", err)
 		}
 	})
 
