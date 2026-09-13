@@ -101,7 +101,7 @@ func TestCNIConfigEnvOverride(t *testing.T) {
 	}
 }
 
-func TestCNIConfigNAT66ShardSIDs(t *testing.T) {
+func TestCNIConfigEgressShardSIDs(t *testing.T) {
 	const (
 		conflistSIDs = "2001:db8:ff01:1:e001::"
 		envSIDs      = "2001:db8:ff01:1:e001::,2001:db8:ff03:1:e001::"
@@ -110,23 +110,23 @@ func TestCNIConfigNAT66ShardSIDs(t *testing.T) {
 	// Default: empty, not an error -- "no shard configured yet" is normal.
 	cfg := NewCNIConfig()
 	cfg.Resolve(&ConflistValues{})
-	if cfg.NAT66ShardSIDs != "" {
-		t.Errorf("NAT66ShardSIDs = %q, want empty by default", cfg.NAT66ShardSIDs)
+	if cfg.EgressShardSIDs != "" {
+		t.Errorf("EgressShardSIDs = %q, want empty by default", cfg.EgressShardSIDs)
 	}
 
 	// Conflist value flows through.
 	cfg = NewCNIConfig()
-	cfg.Resolve(&ConflistValues{NAT66ShardSIDs: conflistSIDs})
-	if cfg.NAT66ShardSIDs != conflistSIDs {
-		t.Errorf("NAT66ShardSIDs = %q, want %q (conflist)", cfg.NAT66ShardSIDs, conflistSIDs)
+	cfg.Resolve(&ConflistValues{EgressShardSIDs: conflistSIDs})
+	if cfg.EgressShardSIDs != conflistSIDs {
+		t.Errorf("EgressShardSIDs = %q, want %q (conflist)", cfg.EgressShardSIDs, conflistSIDs)
 	}
 
 	// Env var overrides the conflist value.
-	t.Setenv(EnvCNINAT66ShardSIDs, envSIDs)
+	t.Setenv(EnvCNIEgressShardSIDs, envSIDs)
 	cfg = NewCNIConfig()
-	cfg.Resolve(&ConflistValues{NAT66ShardSIDs: conflistSIDs})
-	if cfg.NAT66ShardSIDs != envSIDs {
-		t.Errorf("NAT66ShardSIDs = %q, want %q (env override)", cfg.NAT66ShardSIDs, envSIDs)
+	cfg.Resolve(&ConflistValues{EgressShardSIDs: conflistSIDs})
+	if cfg.EgressShardSIDs != envSIDs {
+		t.Errorf("EgressShardSIDs = %q, want %q (env override)", cfg.EgressShardSIDs, envSIDs)
 	}
 }
 
@@ -138,7 +138,7 @@ func TestCNIConfigEBPFInterfaces(t *testing.T) {
 
 	// Default: empty, not an error -- "fall back to
 	// attach.ResolveInterfaces' own auto-detection" is the pre-existing
-	// behavior, same stance as NAT66ShardSIDs' own default above.
+	// behavior, same stance as EgressShardSIDs' own default above.
 	cfg := NewCNIConfig()
 	cfg.Resolve(&ConflistValues{})
 	if cfg.EBPFInterfaces != "" {

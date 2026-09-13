@@ -38,7 +38,7 @@ over iBGP to the route reflector on iad-control.
 dedicated nodes, same idea as `iad-worker-rr`'s taint: no tenant pods land there, only
 DaemonSets with a blanket toleration (`fabric-router`, `galactic-cni`, plain-mode
 `galactic-router`, and each node's own single-container `galactic-gateway1`/`-gateway2`).
-They never run `galactic-router-rr` (that's `iad-worker-rr` alone) or `galactic-nat66`
+They never run `galactic-router-rr` (that's `iad-worker-rr` alone) or `galactic-nat`
 (compute-only) — but unlike the older two-container gateway pod this lab used to run,
 they now run `galactic-cni` and plain-mode `galactic-router` as their own independent
 DaemonSets, same as every compute node (see docs/node-labels.md).
@@ -62,12 +62,12 @@ collision, both fixed in galactic. See the redesign plan's
 the full account, and `resources/galactic-gateway/`.
 
 The NAT66/default-egress gap that validation surfaced (no tenant VRF had
-any route out at all) is now closed: `task deploy:galactic-nat66` stands
+any route out at all) is now closed: `task deploy:galactic-nat` stands
 up the sharded NAT66 tier on the three existing site workers as shards
-(`resources/galactic-nat66/`), and every CNI ADD now installs a default
+(`resources/galactic-nat/`), and every CNI ADD now installs a default
 route toward those shards' advertised SIDs
 (`internal/plumbing/srv6.EgressDefaultRouteAdd`, `internal/cnibgp`) --
-see `resources/galactic-nat66/README.md` for the full mechanism.
+see `resources/galactic-nat/README.md` for the full mechanism.
 
 `dfw`, `iad`, and `sjc` are the three Kind cluster names — not separate ContainerLab
 topology nodes. Each cluster's `control-plane`/`worker` nodes above are its members.

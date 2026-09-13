@@ -27,7 +27,7 @@ run as a second container inside this same pod; it now runs as its own pod,
 so a crash on either side no longer takes the other's *pod* down with it,
 not just the other's binary. You need `galactic-gateway` only on nodes that
 terminate external ingress traffic for tenant VPCs — every other node in the
-fleet (`galactic-router` default role, `galactic-cni`, `galactic-nat66`) has
+fleet (`galactic-router` default role, `galactic-cni`, `galactic-nat`) has
 no dependency on it. See
 [ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) for the full
 design (DSR vs. the removed Full-NAT design, the anycast BGP model, the
@@ -49,7 +49,7 @@ strategy before doing anything else here.
 `galactic.datumapis.com/node=edge` is the *node role* label — it identifies a
 dedicated gateway node, distinct from the ordinary tenant-serving
 `galactic.datumapis.com/node=compute` role that runs `galactic-router`
-(default role)/`galactic-cni`/`galactic-nat66`. "Edge XDP" is a separate,
+(default role)/`galactic-cni`/`galactic-nat`. "Edge XDP" is a separate,
 pre-existing description of *what the datapath is* (an XDP program attached
 at the actual network edge), used throughout
 [ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) independently

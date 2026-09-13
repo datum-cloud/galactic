@@ -138,8 +138,8 @@ galactic/
 │       │                    #   sibling datapaths live in this same
 │       │                    #   umbrella but are out of scope here: the edge
 │       │                    #   gateway's edgeprog/edgemap/edgeattach — see
-│       │                    #   ARCHITECTURE-GATEWAY.md — and galactic-nat66's
-│       │                    #   nat66prog/nat66map/nat66attach, which has no
+│       │                    #   ARCHITECTURE-GATEWAY.md — and galactic-nat's
+│       │                    #   natprog/natmap/natattach, which has no
 │       │                    #   architecture doc of its own yet.)
 │       ├── sysctl/          # Interface sysctl helpers
 │       └── vrf/             # Linux VRF create/delete/lookup
@@ -449,7 +449,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `github.com/kenshaw/baseconv`            | v0.1.1                | Base62↔hex conversion for interface names                                                                                                                                                                                                                  |
 | `github.com/lorenzosaino/go-sysctl`      | v0.3.1                | Interface sysctl helpers                                                                                                                                                                                                                                   |
 | `github.com/coreos/go-iptables`          | v0.8.0                | iptables manipulation (CNI path)                                                                                                                                                                                                                           |
-| `github.com/cilium/ebpf`                 | v0.22.0               | TC-BPF uSID datapath load/attach/map bindings (`internal/plumbing/ebpf`) — two sibling program/map/attach sets live under the same package umbrella but belong elsewhere: `edgeprog`/`edgemap`/`edgeattach` to `galactic-gateway` (see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)), `nat66prog`/`nat66map`/`nat66attach` to `galactic-nat66` |
+| `github.com/cilium/ebpf`                 | v0.22.0               | TC-BPF uSID datapath load/attach/map bindings (`internal/plumbing/ebpf`) — two sibling program/map/attach sets live under the same package umbrella but belong elsewhere: `edgeprog`/`edgemap`/`edgeattach` to `galactic-gateway` (see [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)), `natprog`/`natmap`/`natattach` to `galactic-nat` |
 | `google.golang.org/grpc`                 | v1.83.2               | gRPC health server (`galactic-cni`'s `run` subcommand, default `:5180`)                                                                                                                                                                                    |
 | `k8s.io/api`, `k8s.io/client-go`         | v0.36.3               | Kubernetes client, Node API types                                                                                                                                                                                                                          |
 

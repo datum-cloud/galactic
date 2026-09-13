@@ -5,7 +5,7 @@
 _Last updated: 2026-08-28_
 
 This document is cross-cutting — it covers the node-selection contract shared
-by `galactic-cni`, `galactic-router`, `galactic-gateway`, `galactic-nat66`,
+by `galactic-cni`, `galactic-router`, `galactic-gateway`, `galactic-nat`,
 and `fabric-router`, none of which owns it individually. See
 [AGENTS.md](../AGENTS.md) for which per-component architecture doc to read
 for everything else about a given binary.
@@ -16,7 +16,7 @@ for everything else about a given binary.
 
 | Label                                            | Deploys                                               | Kind              |
 |--------------------------------------------------|-------------------------------------------------------|-------------------|
-| `galactic.datumapis.com/node=compute`            | `galactic-nat66`                                      | primary role enum |
+| `galactic.datumapis.com/node=compute`            | `galactic-nat`                                      | primary role enum |
 | `galactic.datumapis.com/node=edge`               | `galactic-gateway` (standalone — see below)           | primary role enum |
 | `galactic.datumapis.com/galactic=router`         | `galactic-cni`, `galactic-router` (plain/tenant mode) | mode enum         |
 | `galactic.datumapis.com/galactic=control`        | `galactic-router-rr`                                  | mode enum         |
@@ -37,7 +37,7 @@ single-valued, and these two are genuinely mutually exclusive by design:
 `edge` nodes are tainted specifically to keep tenant workloads off them (see
 `deploy/containerlab/node_files/iad/config.yaml`'s gateway-node taints), so a
 node is never both at once. Each value now deploys only the one component
-that actually differs between the two roles — `galactic-nat66` for
+that actually differs between the two roles — `galactic-nat` for
 `compute`, `galactic-gateway` for `edge` — not everything that role runs
 (see the worked example below for the full per-node picture).
 
@@ -81,13 +81,13 @@ bug, not a hypothetical:
   advertisement depends on. Fixed by making `fabric` its own label that any
   role opts into, rather than a list `fabric-router` has to keep in sync
   with every other component's roles.
-- `galactic-nat66` used to require `galactic.datumapis.com/node: nat66` as a
+- `galactic-nat` used to require `galactic.datumapis.com/node: nat66` as a
   dedicated enum value. Since a node can only have one `node` value, that
   made it impossible for a node to be both `edge` (i.e. `compute`, in
   today's naming — see below) and a NAT66 shard at once, which is the only
   configuration that's ever actually used. Fixed by dropping `nat66` from
   the enum and folding shard duty into `node=compute` directly — every
-  compute node now runs `galactic-nat66` unconditionally.
+  compute node now runs `galactic-nat` unconditionally.
 - `galactic-router-rr` used to require a dedicated
   `galactic.datumapis.com/galactic-route-reflector=true` boolean flag,
   independent of everything else. Once `galactic-cni`/`galactic-router`
@@ -127,12 +127,12 @@ If you're reading an older comment, commit, or diagram that says
 
 ### `galactic.datumapis.com/node=compute`
 
-The ordinary tenant-serving node. Runs `galactic-nat66` — the one component
+The ordinary tenant-serving node. Runs `galactic-nat` — the one component
 that differs between `compute` and `edge` — plus (via
 `galactic.datumapis.com/galactic=router`, below) `galactic-cni` and
 `galactic-router`.
 
-- `config/galactic-nat66/base/daemonset.yaml`
+- `config/galactic-nat/base/daemonset.yaml`
 
 ### `galactic.datumapis.com/node=edge`
 
@@ -188,7 +188,7 @@ same node, the same way `galactic`'s two values are, once implemented.
 
 | Node | `node` | `galactic` | `fabric` | Runs |
 |---|---|---|---|---|
-| `dfw-worker`, `sjc-worker`, `iad-worker` | `compute` | `router` | `router` | `galactic-nat66`, `galactic-cni`, `galactic-router`, `fabric-router` |
+| `dfw-worker`, `sjc-worker`, `iad-worker` | `compute` | `router` | `router` | `galactic-nat`, `galactic-cni`, `galactic-router`, `fabric-router` |
 | `iad-worker-rr` | — | `control` | `router` | `galactic-router-rr`, `fabric-router` |
 | `iad-gateway1`, `iad-gateway2` | `edge` | `router` | `router` | `galactic-gateway`, `galactic-cni`, `galactic-router`, `fabric-router` |
 

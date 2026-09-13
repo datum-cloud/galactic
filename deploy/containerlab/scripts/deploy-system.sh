@@ -44,7 +44,7 @@ network_crds=(
   network.datumapis.com_networkrules.yaml
 )
 
-# ServiceVIPBinding and NAT66Shard are the DSR/Maglev redesign's own CRDs
+# ServiceVIPBinding and EgressShard are the DSR/Maglev redesign's own CRDs
 # (design plan §1/§3), added on network's local feat/dsr-maglev-crds
 # branch alongside this repo's feat/dsr-maglev-gateway -- never pushed, so
 # neither exists at NETWORK_SHA on GitHub the way network_crds above does.
@@ -70,7 +70,7 @@ network_crds=(
 network_crds_local=(
   network.datumapis.com_bgpvrfinstances.yaml
   network.datumapis.com_servicevipbindings.yaml
-  network.datumapis.com_nat66shards.yaml
+  network.datumapis.com_egressshards.yaml
 )
 
 cloud_crds=(
@@ -103,8 +103,8 @@ for site in dfw sjc iad; do
   apply_f "${node}" /galactic/config/galactic-cni/rbac.yaml
   apply_f "${node}" /galactic/config/galactic-router/serviceaccount.yaml
   apply_f "${node}" /galactic/config/galactic-router/rbac.yaml
-  apply_f "${node}" /galactic/config/galactic-nat66/serviceaccount.yaml
-  apply_f "${node}" /galactic/config/galactic-nat66/rbac.yaml
+  apply_f "${node}" /galactic/config/galactic-nat/serviceaccount.yaml
+  apply_f "${node}" /galactic/config/galactic-nat/rbac.yaml
 done
 
 echo "Done."

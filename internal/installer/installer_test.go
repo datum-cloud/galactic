@@ -73,17 +73,17 @@ func TestResolveLogLevel(t *testing.T) {
 	}
 }
 
-func TestResolveNAT66ShardSIDs(t *testing.T) {
+func TestResolveEgressShardSIDs(t *testing.T) {
 	// Unset: no default to normalize to, unlike resolveLogLevel -- empty
 	// means "no shard configured yet," written into the conflist verbatim.
-	if got := resolveNAT66ShardSIDs(); got != "" {
-		t.Errorf("resolveNAT66ShardSIDs() = %q, want empty when unset", got)
+	if got := resolveEgressShardSIDs(); got != "" {
+		t.Errorf("resolveEgressShardSIDs() = %q, want empty when unset", got)
 	}
 
 	const want = "2001:db8:ff01:1:e001::,2001:db8:ff03:1:e001::"
-	t.Setenv(config.EnvCNINAT66ShardSIDs, want)
-	if got := resolveNAT66ShardSIDs(); got != want {
-		t.Errorf("resolveNAT66ShardSIDs() = %q, want %q", got, want)
+	t.Setenv(config.EnvCNIEgressShardSIDs, want)
+	if got := resolveEgressShardSIDs(); got != want {
+		t.Errorf("resolveEgressShardSIDs() = %q, want %q", got, want)
 	}
 }
 
@@ -205,7 +205,7 @@ func TestBootstrap(t *testing.T) {
 			return nil, nil
 		}
 		const wantShardSIDs = "2001:db8:ff01:1:e001::,2001:db8:ff03:1:e001::"
-		t.Setenv(config.EnvCNINAT66ShardSIDs, wantShardSIDs)
+		t.Setenv(config.EnvCNIEgressShardSIDs, wantShardSIDs)
 		const wantEBPFIfaces = "eth1"
 		t.Setenv(config.EnvCNIEBPFInterfaces, wantEBPFIfaces)
 
@@ -241,8 +241,8 @@ func TestBootstrap(t *testing.T) {
 		if conflist.LogLevel != config.DefaultLogLevel {
 			t.Errorf("expected log_level %s, got %s", config.DefaultLogLevel, conflist.LogLevel)
 		}
-		if conflist.NAT66ShardSIDs != wantShardSIDs {
-			t.Errorf("expected nat66_shard_sids %s, got %s", wantShardSIDs, conflist.NAT66ShardSIDs)
+		if conflist.EgressShardSIDs != wantShardSIDs {
+			t.Errorf("expected nat66_shard_sids %s, got %s", wantShardSIDs, conflist.EgressShardSIDs)
 		}
 		if conflist.EBPFInterfaces != wantEBPFIfaces {
 			t.Errorf("expected ebpf_interfaces %s, got %s", wantEBPFIfaces, conflist.EBPFInterfaces)

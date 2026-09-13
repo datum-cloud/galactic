@@ -211,11 +211,18 @@ func resolveLogLevel() string {
 	return config.NormalizeLogLevel(os.Getenv(config.EnvLogLevel))
 }
 
-// resolveNAT66ShardSIDs reads the fabric-wide NAT66 shard membership list from
-// the environment. An unset or empty value means no shard is configured yet and
-// is written into the conflist verbatim, with no default substituted.
-func resolveNAT66ShardSIDs() string {
-	return os.Getenv(config.EnvCNINAT66ShardSIDs)
+// resolveEgressShardSIDs reads the fabric-wide egress shard membership list
+// from the environment. An unset or empty value means no shard is configured
+// yet and is written into the conflist verbatim, with no default substituted.
+func resolveEgressShardSIDs() string {
+	return os.Getenv(config.EnvCNIEgressShardSIDs)
+}
+
+// resolveNAT64Prefix reads the fabric-wide NAT64 prefix from the environment.
+// Empty means this fabric has no NAT64, and is written through verbatim for the
+// same reason the shard list is.
+func resolveNAT64Prefix() string {
+	return os.Getenv(config.EnvCNINAT64Prefix)
 }
 
 // resolveEBPFInterfaces resolves the eBPF datapath's interface list, from the
@@ -345,7 +352,8 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 
 	// 4. Write static conflist to /host/etc/cni/net.d/10-galactic.conflist
 	logLevel := resolveLogLevel()
-	nat66ShardSIDs := resolveNAT66ShardSIDs()
+	egressShardSIDs := resolveEgressShardSIDs()
+	nat64Prefix := resolveNAT64Prefix()
 	ebpfInterfaces := resolveEBPFInterfaces()
 	danDir := os.Getenv(config.EnvCNIDANDir)
 	conflistContent := fmt.Sprintf(`{
@@ -359,14 +367,15 @@ func Bootstrap(ctx context.Context, nodeName string) error {
       "namespace": %q,
       "log_file": %q,
       "log_level": %q,
-      "nat66_shard_sids": %q,
+      "egress_shard_sids": %q,
+      "nat64_prefix": %q,
       "ebpf_interfaces": %q,
       "dan_dir": %q
     }
   ]
 }
 `, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel,
-		nat66ShardSIDs, ebpfInterfaces, danDir)
+		egressShardSIDs, nat64Prefix, ebpfInterfaces, danDir)
 
 	if err := atomicWriteFile(HostConflist, []byte(conflistContent), 0644); err != nil {
 		return fmt.Errorf("write conflist file: %w", err)

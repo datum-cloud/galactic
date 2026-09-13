@@ -8,7 +8,7 @@ import "testing"
 
 // Shared test literals, factored out here so goconst doesn't need to be
 // silenced once a third per-binary *_test.go file (gateway_test.go,
-// router_test.go, nat66_test.go) repeats the same test-case name/error
+// router_test.go, nat_test.go) repeats the same test-case name/error
 // substring -- see config.go's identical "shared CLI flag names"
 // rationale for the production-code half of this pattern.
 const (

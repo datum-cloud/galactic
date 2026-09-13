@@ -132,10 +132,27 @@ func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
 // EgressDefaultRouteAdd installs egress_route_table's default (::/0) entry for
 // Linux VRF table tableID, encapsulating toward the first usable address in
 // shardSIDs. It gives a tenant VRF a route out for any destination with no
-// more specific entry, so traffic reaches the NAT66 shard tier that decaps and
+// more specific entry, so traffic reaches the egress shard tier that decaps and
 // translates it.
 //
-// shardSIDs lists the candidate NAT66 shards. An empty slice installs nothing
+// See EgressPrefixRouteAdd, which this delegates to, for shard selection and
+// error behavior.
+func EgressDefaultRouteAdd(tableID uint32, shardSIDs []net.IP) error {
+	return EgressPrefixRouteAdd(tableID, egressroutemap.DefaultPrefix, shardSIDs)
+}
+
+// EgressPrefixRouteAdd installs egress_route_table's entry for prefix on Linux
+// VRF table tableID, encapsulating toward the first usable address in
+// shardSIDs.
+//
+// Two prefixes are installed in practice: ::/0, reaching the IPv6 internet
+// through NAT66, and the fabric's NAT64 prefix, reaching the IPv4 internet.
+// Both point at the same shard SID -- a shard decides which translation a
+// packet gets from its inner destination, not from which route carried it --
+// so the NAT64 entry exists to make that prefix reachable where no default
+// route covers it, not to steer it elsewhere.
+//
+// shardSIDs lists the candidate shards. An empty slice installs nothing
 // and returns nil, treating "nothing configured yet" as success. A nil or
 // unspecified entry is a misconfiguration and fails immediately.
 //
@@ -148,13 +165,16 @@ func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
 // self-originated path back into the originating node's received paths.
 // Register resolves link and L2 information as part of the write, which is
 // what makes an unresolvable shard fail here.
-func EgressDefaultRouteAdd(tableID uint32, shardSIDs []net.IP) error {
+func EgressPrefixRouteAdd(tableID uint32, prefix *net.IPNet, shardSIDs []net.IP) error {
 	if len(shardSIDs) == 0 {
 		return nil
 	}
+	if prefix == nil {
+		return errors.New("srv6: EgressPrefixRouteAdd: prefix is nil")
+	}
 	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
 	if err != nil {
-		return fmt.Errorf("srv6: EgressDefaultRouteAdd: %w", err)
+		return fmt.Errorf("srv6: EgressPrefixRouteAdd: %w", err)
 	}
 	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
 
@@ -162,16 +182,17 @@ func EgressDefaultRouteAdd(tableID uint32, shardSIDs []net.IP) error {
 	for _, sid := range shardSIDs {
 		// Checked before touching bpffs, as in RouteEgressAdd.
 		if sid == nil || sid.IsUnspecified() {
-			return fmt.Errorf("refusing to install NAT66 default route: shard SID %s is not a usable SRv6 SID", sid)
+			return fmt.Errorf("refusing to install egress route for %s: shard SID %s is not a usable SRv6 SID",
+				prefix, sid)
 		}
-		if err := table.Register(tableID, egressroutemap.DefaultPrefix, sid); err != nil {
+		if err := table.Register(tableID, prefix, sid); err != nil {
 			unresolved = append(unresolved, fmt.Errorf("shard %s: %w", sid, err))
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("no NAT66 shard SID is resolvable yet, out of %d configured: %w",
-		len(shardSIDs), errors.Join(unresolved...))
+	return fmt.Errorf("no egress shard SID is resolvable yet for %s, out of %d configured: %w",
+		prefix, len(shardSIDs), errors.Join(unresolved...))
 }
 
 // EgressDefaultRouteDel removes egress_route_table's default (::/0) entry for

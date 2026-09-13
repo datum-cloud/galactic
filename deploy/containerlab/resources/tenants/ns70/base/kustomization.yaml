@@ -1,0 +1,33 @@
+# ns70 exists to exercise one specific datapath property: two different
+# tenants whose pods hold the *same* ULA, on different worker nodes, egressing
+# through the same shard.
+#
+# Every other tenant here is given a site-unique ipv6_subnet, so no two of
+# them ever present the same inner source address to a shard and the
+# collision path is never reached. ns70 deliberately gives iad and sjc the
+# identical subnet. ULAs are RFC 4193 locally-assigned and not globally
+# coordinated, so two tenants picking the same one is a real possibility
+# rather than a contrived one -- it is precisely the case the SRv6 Argument
+# was meant to disambiguate, and the case the connection key's encapsulation
+# source now covers.
+#
+# iad and sjc are the two sites on purpose: both resolve dfw's shard SID
+# first (a node cannot resolve its own self-originated SID), so both land on
+# dfw-worker's shard and arrive there encapsulated from different nodes.
+namespace: ns70
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+      name: netshoot
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: netshoot
+      spec:
+        template:
+          metadata:
+            annotations:
+              v1.multus-cni.io/default-network: ns70/private

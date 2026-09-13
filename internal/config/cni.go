@@ -34,8 +34,11 @@ const (
 	// where a deployment needs this filter ordered differently.
 	EnvCNIEBPFFilterPriority = "GALACTIC_CNI_EBPF_FILTER_PRIORITY"
 
-	// EnvCNINAT66ShardSIDs is a comma-separated list of every live NAT66 shard's
-	// SID: the fabric-wide membership a tenant VRF's default egress route needs.
+	// EnvCNIEgressShardSIDs is a comma-separated list of every live egress
+	// shard's SID: the fabric-wide membership a tenant VRF's egress routes need.
+	// One SID per shard covers both address families -- a shard decides which
+	// translation a packet gets from its inner destination -- so enabling NAT64
+	// adds no entry here.
 	// It is operator-supplied because no single CRD is visible across this
 	// fabric's separate clusters the way BGP itself is.
 	//
@@ -44,9 +47,9 @@ const (
 	// static per-node conflist, so the BGP plugin can read it the way it reads
 	// every other node-level setting.
 	//
-	// Unset or empty means no shard is configured yet: a VRF gets no default
+	// Unset or empty means no shard is configured yet: a VRF gets no egress
 	// route, which is no egress capability rather than an error.
-	EnvCNINAT66ShardSIDs = "GALACTIC_CNI_NAT66_SHARD_SIDS"
+	EnvCNIEgressShardSIDs = "GALACTIC_CNI_EGRESS_SHARD_SIDS"
 
 	// EnvCNIDANDir overrides where Directly Attachable Network files are
 	// written, for a node whose shim reads somewhere other than the default.
@@ -54,6 +57,19 @@ const (
 	// Only the location is node-level. Whether an attachment gets a file at all
 	// is stated in its own CNI config, that being a property of the workload.
 	EnvCNIDANDir = "GALACTIC_CNI_DAN_DIR"
+
+	// EnvCNINAT64Prefix is the fabric-wide NAT64 prefix, and setting it is what
+	// gives a tenant VRF a route toward IPv4 reachability.
+	//
+	// It has to be installed as its own more-specific route rather than relying
+	// on the ::/0 default, because the two are independent: a VRF may have NAT64
+	// egress without NAT66 egress, in which case no default route exists for
+	// this traffic to fall into. Where both exist they point at the same shard
+	// SID and longest-prefix match picks this one, which changes nothing.
+	//
+	// Unset or empty means this fabric has no NAT64, and a VRF gets no such
+	// route -- not an error.
+	EnvCNINAT64Prefix = "GALACTIC_CNI_NAT64_PREFIX"
 )
 
 // --- CNIConfig -------------------------------------------------------------
@@ -69,16 +85,20 @@ type CNIConfig struct {
 	LogFile    string
 	LogLevel   string
 
-	// NAT66ShardSIDs is the raw comma-separated shard SID list, left unparsed
+	// EgressShardSIDs is the raw comma-separated shard SID list, left unparsed
 	// here since this package has no IP type of its own to return. The BGP
 	// plugin splits and validates it.
-	NAT66ShardSIDs string
+	EgressShardSIDs string
+
+	// NAT64Prefix is the raw fabric-wide NAT64 prefix, unparsed for the same
+	// reason. Empty means this fabric has no NAT64.
+	NAT64Prefix string
 
 	// DANDir is where Directly Attachable Network files are written.
 	DANDir string
 
 	// EBPFInterfaces is the raw comma-separated interface list. It needs the
-	// same environment-over-conflist-over-default resolution as NAT66ShardSIDs,
+	// same environment-over-conflist-over-default resolution as EgressShardSIDs,
 	// not a plain environment read at the call site.
 	EBPFInterfaces string
 }
@@ -93,15 +113,19 @@ func NewCNIConfig() *CNIConfig {
 // any matching environment variable. The conflist is the middle tier between
 // the environment and the compiled-in defaults.
 func (c *CNIConfig) Resolve(conflist *ConflistValues) {
-	var cnflistNode, cnflistKube, cnflistNS, cnflistLog, cnflistLevel, cnflistShardSIDs, cnflistEBPFIfaces string
-	var cnflistDANDir string
+	var (
+		cnflistNode, cnflistKube, cnflistNS, cnflistLog, cnflistLevel string
+		cnflistShardSIDs, cnflistNAT64Prefix, cnflistEBPFIfaces       string
+		cnflistDANDir                                                 string
+	)
 	if conflist != nil {
 		cnflistNode = conflist.NodeName
 		cnflistKube = conflist.Kubeconfig
 		cnflistNS = conflist.Namespace
 		cnflistLog = conflist.LogFile
 		cnflistLevel = conflist.LogLevel
-		cnflistShardSIDs = conflist.NAT66ShardSIDs
+		cnflistShardSIDs = conflist.EgressShardSIDs
+		cnflistNAT64Prefix = conflist.NAT64Prefix
 		cnflistEBPFIfaces = conflist.EBPFInterfaces
 		cnflistDANDir = conflist.DANDir
 	}
@@ -128,7 +152,10 @@ func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 	c.LogLevel = resolveEnv(EnvLogLevel, cnflistLevel, DefaultLogLevel)
 
 	// No default: empty means no shard configured, not an error.
-	c.NAT66ShardSIDs = resolveEnv(EnvCNINAT66ShardSIDs, cnflistShardSIDs, "")
+	c.EgressShardSIDs = resolveEnv(EnvCNIEgressShardSIDs, cnflistShardSIDs, "")
+
+	// No default: empty means this fabric has no NAT64, not an error.
+	c.NAT64Prefix = resolveEnv(EnvCNINAT64Prefix, cnflistNAT64Prefix, "")
 
 	// No default: empty means fall back to the datapath's own interface
 	// auto-detection, not an error.
@@ -140,12 +167,13 @@ func (c *CNIConfig) Resolve(conflist *ConflistValues) {
 // ConflistValues holds the raw values read from the CNI conflist file.
 // Passed to CNIConfig.Resolve() as the middle tier between env vars and defaults.
 type ConflistValues struct {
-	NodeName       string
-	Kubeconfig     string
-	Namespace      string
-	LogFile        string
-	LogLevel       string
-	NAT66ShardSIDs string
-	EBPFInterfaces string
-	DANDir         string
+	NodeName        string
+	Kubeconfig      string
+	Namespace       string
+	LogFile         string
+	LogLevel        string
+	EgressShardSIDs string
+	NAT64Prefix     string
+	EBPFInterfaces  string
+	DANDir          string
 }

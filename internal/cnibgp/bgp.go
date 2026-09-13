@@ -13,7 +13,7 @@
 // the host-side interface's ifindex with a read-only netlink.LinkByName to key
 // its ifindex_vrf_table row, because the (Block, Argument) values that row
 // pairs with are known only at that call site, and the interface name is
-// deterministic. installNAT66EgressRoute writes a real kernel route, because
+// deterministic. installEgressRoutes writes a real kernel route, because
 // the optional routing plugin in this chain may be absent from a conflist and
 // the route must exist wherever a NAT66 shard is configured.
 package cnibgp
@@ -552,7 +552,7 @@ func registerEBPFDatapath(
 	// optional routing plugin in this chain may be absent from a given
 	// conflist, and this route must exist wherever a shard is configured, so
 	// it is written here.
-	if err := installNAT66EgressRoute(vrfTableID); err != nil {
+	if err := installEgressRoutes(vrfTableID); err != nil {
 		return false, fmt.Errorf("install NAT66 default egress route: %w", err)
 	}
 
@@ -727,32 +727,58 @@ func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []stri
 	return nil
 }
 
-// installNAT66EgressRoute installs or refreshes vrfTableID's default egress
-// route toward the configured NAT66 shards. Idempotent, so it is safe on every
-// attachment ADD sharing this VRF.
+// installEgressRoutes installs or refreshes vrfTableID's egress routes toward
+// the configured shards: the ::/0 default that reaches the IPv6 internet, and,
+// where this fabric has NAT64, a more-specific route for the NAT64 prefix.
+// Idempotent, so it is safe on every attachment ADD sharing this VRF.
+//
+// Both point at the same shard SID. A shard decides which translation a packet
+// gets from its inner destination, so the second route exists to make the NAT64
+// prefix reachable at all rather than to steer it somewhere else -- which
+// matters because the two are independent: a fabric may offer NAT64 without
+// NAT66, and then no default route exists for this traffic to fall into.
 //
 // No shard configured is not an error: the shard list parses to an empty slice
 // and srv6.EgressDefaultRouteAdd no-ops. A shard SID that is invalid, or that
 // has no reachable route yet, fails this attachment's ADD rather than leaving
 // the VRF with no egress at all.
-func installNAT66EgressRoute(vrfTableID uint32) error {
+func installEgressRoutes(vrfTableID uint32) error {
 	// cniConfig is nil until InitCNIConfig runs, which several unit tests
 	// calling registerEBPFDatapath directly never do. Treated as "no shard
 	// configured" rather than a panic.
 	if cniConfig == nil {
 		return nil
 	}
-	shardSIDs, err := parseShardSIDs(cniConfig.NAT66ShardSIDs)
+	shardSIDs, err := parseShardSIDs(cniConfig.EgressShardSIDs)
 	if err != nil {
-		return fmt.Errorf("parse %s: %w", config.EnvCNINAT66ShardSIDs, err)
+		return fmt.Errorf("parse %s: %w", config.EnvCNIEgressShardSIDs, err)
 	}
 	if len(shardSIDs) == 0 {
 		return nil
 	}
-	return srv6.EgressDefaultRouteAdd(vrfTableID, shardSIDs)
+	if err := srv6.EgressDefaultRouteAdd(vrfTableID, shardSIDs); err != nil {
+		return err
+	}
+	return installNAT64EgressRoute(vrfTableID, shardSIDs)
 }
 
-// parseShardSIDs splits a comma-separated NAT66 shard SID list into addresses,
+// installNAT64EgressRoute installs vrfTableID's route for the fabric's NAT64
+// prefix. An unset prefix means this fabric has no NAT64 and is not an error; a
+// set but unparseable one is a misconfiguration and fails the ADD, since
+// silently skipping it would leave the VRF with no IPv4 reachability and
+// nothing to say why.
+func installNAT64EgressRoute(vrfTableID uint32, shardSIDs []net.IP) error {
+	if cniConfig.NAT64Prefix == "" {
+		return nil
+	}
+	_, prefix, err := net.ParseCIDR(cniConfig.NAT64Prefix)
+	if err != nil {
+		return fmt.Errorf("parse %s %q: %w", config.EnvCNINAT64Prefix, cniConfig.NAT64Prefix, err)
+	}
+	return srv6.EgressPrefixRouteAdd(vrfTableID, prefix, shardSIDs)
+}
+
+// parseShardSIDs splits a comma-separated egress shard SID list into addresses,
 // trimming whitespace and skipping blank entries, so a trailing comma or stray
 // space in the operator-supplied value does not fail every attachment ADD in
 // the cluster. An entry that survives trimming but is not a valid IP address
@@ -766,7 +792,7 @@ func parseShardSIDs(raw string) ([]net.IP, error) {
 		}
 		sid := net.ParseIP(part)
 		if sid == nil {
-			return nil, fmt.Errorf("invalid NAT66 shard SID %q", part)
+			return nil, fmt.Errorf("invalid egress shard SID %q", part)
 		}
 		sids = append(sids, sid)
 	}

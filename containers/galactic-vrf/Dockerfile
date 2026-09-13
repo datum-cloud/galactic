@@ -34,7 +34,7 @@ COPY internal/ internal/
 # output (usid_bpfel/eb.go plus their go:embed'd .o's) is not committed to
 # git -- see its doc.go. Regenerate it here, exactly as
 # containers/galactic-cni/Dockerfile does. Only the usid datapath is on
-# this binary's import graph; edgeprog/nat66prog are not.
+# this binary's import graph; edgeprog/natprog are not.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       clang llvm linux-libc-dev \
     && rm -rf /var/lib/apt/lists/*

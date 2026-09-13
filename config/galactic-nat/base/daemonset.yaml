@@ -1,0 +1,192 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-nat
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: galactic-nat
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-nat
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-nat
+    spec:
+      # galactic-nat is compute's role-differentiating component --
+      # every compute node runs it unconditionally, no separate opt-in
+      # capability label, the same way galactic-gateway is edge's
+      # role-differentiating component (config/galactic-gateway/base/
+      # daemonset.yaml). Egress translation isn't a thing some compute
+      # nodes opt out of -- it's simply part of what "compute" means. galactic-cni and
+      # galactic-router run here too, but via the separate, independent
+      # galactic.datumapis.com/galactic=router flag every compute *and*
+      # edge node carries (config/galactic-cni/daemonset.yaml,
+      # config/galactic-router/overlays/router/daemonset-patch.yaml) --
+      # not via this label, since those two aren't compute-specific
+      # anymore. A shard's own SID/public addresses must still be
+      # unique per node (see ../kustomization.yaml), which is why this
+      # base is meant to be instantiated once per shard node rather than
+      # applied as-is -- that per-node uniqueness is handled by the
+      # per-node overlay's env vars, not by the scheduling gate here.
+      # Excludes control-plane outright for the same reason the other
+      # roles do.
+      #
+      # A shard advertises its own SID over BGP just like any other
+      # role, so a real shard node also needs galactic.datumapis.com/fabric=router
+      # set (config/fabric-router/'s own affinity keys off that label,
+      # independently of the label here) -- otherwise it never gets the
+      # underlay eBGP session and its SID has no fabric to advertise onto.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - compute
+      serviceAccountName: galactic-nat
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Loss of galactic-nat blackholes this shard's own claimed
+      # masquerade addresses/ports -- every in-flight egress flow it owns
+      # loses its return path -- so the scheduler/kubelet must never
+      # preempt it for ordinary workloads under node pressure. Same
+      # rationale as config/galactic-gateway/base/daemonset.yaml's
+      # identical setting.
+      priorityClassName: system-node-critical
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: galactic-nat
+          # ":latest" is a placeholder only: no such tag is ever pushed to
+          # GHCR. CI resolves and stamps real version tags here when it
+          # publishes the ghcr.io/datum-cloud/galactic-kustomize OCI bundle
+          # (see .github/workflows/publish.yaml); applying this manifest
+          # directly from a git checkout will fail to pull the image
+          # unless you override the tag first.
+          image: ghcr.io/datum-cloud/galactic-nat:latest
+          command:
+            - /galactic-nat
+          env:
+            - name: GALACTIC_NAT_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Also the binary's own default (config.DefaultNATGRPCHealthPort).
+            # Set explicitly here anyway so it can't silently drift.
+            - name: GALACTIC_NAT_GRPC_HEALTH_PORT
+              value: "5182"
+            # GALACTIC_NAT_UPLINK_INTERFACE and _SHARD_SID are
+            # intentionally left unset here: the interface name is
+            # deployment-specific and the shard SID must be unique per
+            # shard node (no in-cluster mechanism yet derives them
+            # automatically -- see internal/config/nat.go's EnvNATShardSID
+            # doc comment, the same gap GALACTIC_GATEWAY_SRV6_ADDRESS has
+            # today).
+            #
+            # So is every address that selects which families this shard
+            # serves. config.NATConfig.Validate requires the uplink, the
+            # SID, and at least one family, so applying this base as-is
+            # produces a crash-looping container. The deployer's per-node
+            # overlay must set:
+            #
+            #   GALACTIC_NAT_SHARD_PUB_ADDR6    IPv6 masquerade source,
+            #                                  enabling NAT66
+            #   GALACTIC_NAT_SHARD_PUB_ADDR4   IPv4 masquerade source, and
+            #   GALACTIC_NAT_NAT64_PREFIX      the fabric-wide /96,
+            #                                  together enabling NAT64
+            #
+            # The NAT64 pair is all-or-nothing and the prefix must match
+            # what DNS64 synthesizes into, or the shard translates for a
+            # prefix nothing resolves to.
+            #
+            # Note that nothing in this repo makes
+            # GALACTIC_NAT_SHARD_PUB_ADDR4 reachable: a NAT64 reply arrives
+            # from the IPv4 internet rather than across the fabric, so the
+            # underlay or an upstream announcement has to attract it to this
+            # node. Setting it without that in place yields a shard that
+            # translates outbound traffic and never sees a reply.
+            #
+            # See deploy/containerlab/resources/galactic-gateway/ for a
+            # worked example of the equivalent per-node overlay pattern.
+          ports:
+            - name: metrics
+              containerPort: 9182
+              protocol: TCP
+            - name: grpc-health
+              containerPort: 5182
+              protocol: TCP
+          # The eBPF XDP loader (map creation/attach) has the same
+          # slow-cold-start shape as galactic-cni's/galactic-gateway's --
+          # see either manifest's startupProbe comment.
+          startupProbe:
+            grpc:
+              port: 5182
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            grpc:
+              port: 5182
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            grpc:
+              port: 5182
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # This container needs CAP_BPF for the bpf() syscalls themselves
+          # (program/map creation) on top of NET_ADMIN for the netlink XDP
+          # attach -- the same pair config/galactic-gateway/base/daemonset.yaml's
+          # own eBPF-loading container uses. PERFMON is additionally
+          # required: the verifier only allows pointer+scalar arithmetic on
+          # packet data/data_end (nat.c's SNAT/un-SNAT and NAT64 header
+          # rewrites)
+          # when the loading process is perfmon_capable() -- without it the
+          # verifier falls back to its unprivileged-BPF ruleset and rejects
+          # the program even though the container runs as root.
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - NET_ADMIN
+                - BPF
+                - PERFMON
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            # natattach.PinDir pins every natprog map under
+            # /sys/fs/bpf/galactic-nat, same convention
+            # config/galactic-gateway/base/daemonset.yaml's bpf-fs mount
+            # documents: bpffs must already be mounted at this host path by
+            # the node itself (type: Directory, not DirectoryOrCreate --
+            # creating a plain directory here if bpffs weren't mounted
+            # would silently produce a regular filesystem path instead of a
+            # real bpf filesystem, masking the failure instead of
+            # surfacing it at load time). The galactic-nat/ subdirectory
+            # itself is created by this container on first pin.
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+      volumes:
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory

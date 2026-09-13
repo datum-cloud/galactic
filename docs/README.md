@@ -35,8 +35,8 @@ data flow, module reference, known constraints):
 - [gateway/configuration.md](gateway/configuration.md) — `galactic-gateway`
   deployment (node labeling, RBAC, per-node overlay), its config reference,
   and the `NetworkGateway`/`NetworkRule`/`ServiceVIPBinding` CRD fields.
-- [nat66/configuration.md](nat66/configuration.md) — `galactic-nat66` config
-  reference, the `NAT66Shard` CRD, and the `galactic-cni`-side shard
+- [nat/configuration.md](nat/configuration.md) — `galactic-nat` config
+  reference, the `EgressShard` CRD, and the `galactic-cni`-side shard
   membership settings that point tenant nodes at it.
 - [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs
   subtree; from there:

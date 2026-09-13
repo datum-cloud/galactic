@@ -1134,7 +1134,7 @@ func TestParseShardSIDs_InvalidEntryFailsLoudly(t *testing.T) {
 
 // TestInstallNAT66EgressRoute_NilCNIConfigIsANoop is the regression test
 // for a real panic found live: several tests in this package (and, before
-// this guard, installNAT66EgressRoute itself) call registerEBPFDatapath
+// this guard, installEgressRoutes itself) call registerEBPFDatapath
 // directly without ever calling InitCNIConfig first, leaving the
 // package-level cniConfig nil -- exactly the state ops_del_test.go's own
 // helper already works around for a different call path. Production never
@@ -1146,7 +1146,7 @@ func TestInstallNAT66EgressRoute_NilCNIConfigIsANoop(t *testing.T) {
 	cniConfig = nil
 	defer func() { cniConfig = original }()
 
-	if err := installNAT66EgressRoute(1); err != nil {
-		t.Errorf("installNAT66EgressRoute(1) = %v, want nil with cniConfig == nil", err)
+	if err := installEgressRoutes(1); err != nil {
+		t.Errorf("installEgressRoutes(1) = %v, want nil with cniConfig == nil", err)
 	}
 }

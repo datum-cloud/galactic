@@ -72,7 +72,7 @@ Summary:
 
 | Label | Deploys |
 | ----- | ------- |
-| `galactic.datumapis.com/node=compute` | `galactic-nat66` |
+| `galactic.datumapis.com/node=compute` | `galactic-nat` |
 | `galactic.datumapis.com/node=edge` | `galactic-gateway` (standalone; the actual network-edge/ingress boundary — not to be confused with `compute`) |
 | `galactic.datumapis.com/galactic=router` | `galactic-cni`, `galactic-router` (plain/tenant mode) — runs on both `compute` and `edge` nodes |
 | `galactic.datumapis.com/galactic=control` | `galactic-router-rr`; mutually exclusive with `galactic=router` on the same node |
