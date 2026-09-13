@@ -32,8 +32,9 @@ type VRFEntry struct {
 	// (internal/plumbing/vrf.TableID()) this Argument resolves to.
 	VRFTableID uint32
 
-	// EgressKind is EgressKindVeth or EgressKindTap: which redirect helper the
-	// datapath uses for this entry's resolved egress interface.
+	// EgressKind is EgressKindVeth or EgressKindTap. The current datapath does
+	// not read it, since one VPC can mix both kinds on a node; it is kept for a
+	// datapath rolled back to an older build, which does.
 	EgressKind uint32
 
 	// Generation is the table's monotonic-clock reading when this entry was

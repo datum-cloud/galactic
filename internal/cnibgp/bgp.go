@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -69,7 +70,7 @@ const (
 // publishing needs.
 type publishConfig struct {
 	vpc, vpcAttachment string
-	// ifaceType selects the vrf_table egress_kind, veth or tap. Inferred from
+	// ifaceType selects the attachment's egress kind, veth or tap. Inferred from
 	// prevResult, never a config field.
 	ifaceType string
 }
@@ -592,6 +593,9 @@ func registerEBPFDatapath(
 	if err := ifindexTable.Register(hostIfindex, block, argument); err != nil {
 		return false, fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
+	if err := registerEgressKind(pinDir, hostIfindex, egressKind); err != nil {
+		return false, err
+	}
 
 	// Attach usid_egress to this attachment's host-side interface. This is
 	// what translates a reply's source address on the way back out.
@@ -782,10 +786,37 @@ func hostInterfaceIndex(vpc, vpcAttachment string) (uint32, error) {
 	return uint32(link.Attrs().Index), nil
 }
 
+// registerEgressKind records which redirect helper usid_ingress uses to deliver
+// into this attachment's host-side interface. It is keyed by that interface
+// rather than by VPC because one VPC can hold tap and veth attachments on the
+// same node.
+//
+// A map that is not pinned yet is logged, not returned. The install-cni init
+// container replaces this binary before the run container reloads the datapath
+// that pins the map, so an ADD can land in between. Failing it would block
+// Instances from starting during every upgrade, while the datapath's fallback
+// for a missing entry, a plain redirect, still delivers to both kinds.
+func registerEgressKind(pinDir string, hostIfindex, egressKind uint32) error {
+	table, closer, err := ifindexvrfmap.OpenPinnedEgressKind(pinDir)
+	if errors.Is(err, os.ErrNotExist) {
+		slog.Warn("ADD: eBPF ifindex_egress_kind_table is not pinned yet; "+
+			"delivery to this attachment uses the plain-redirect fallback until its next ADD",
+			"hostIfindex", hostIfindex, "err", err)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open pinned eBPF ifindex_egress_kind_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	if err := table.Register(hostIfindex, egressKind); err != nil {
+		return fmt.Errorf("register eBPF ifindex_egress_kind_table entry: %w", err)
+	}
+	return nil
+}
+
 // egressKindForInterfaceType maps a "veth" or "tap" interface type to the
-// vrf_table egress_kind value the datapath uses to choose between
-// bpf_redirect_peer, which crosses into the container's netns, and plain
-// bpf_redirect, which does not.
+// egress kind the datapath uses to choose between bpf_redirect_peer, which
+// crosses into the container's netns, and plain bpf_redirect, which does not.
 func egressKindForInterfaceType(ifaceType string) (uint32, error) {
 	switch ifaceType {
 	case ifaceTypeVeth:

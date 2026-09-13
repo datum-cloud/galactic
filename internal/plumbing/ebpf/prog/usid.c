@@ -36,9 +36,9 @@
 //  8. bpf_fib_lookup against the resolved Linux VRF table, scoped to that
 //     table exactly as the kernel's own End.DT46 does.
 //  9. Redirect to the resolved egress interface: bpf_redirect_peer for a veth
-//     attachment, whose container-side peer is in another namespace, or plain
-//     bpf_redirect for a tap, which already sits in this namespace. Which one
-//     comes from vrf_table's egress_kind, set at registration time.
+//     host-side end, which crosses straight into the peer's namespace, and
+//     plain bpf_redirect otherwise. Which one comes from
+//     ifindex_egress_kind_table, keyed by the egress interface itself.
 //
 // This file depends on no libbpf headers. It declares only the helpers it
 // calls, using the enum constants from the system's <linux/bpf.h>, and defines
@@ -108,9 +108,9 @@ static long (*bpf_skb_change_proto)(struct __sk_buff *skb, __be16 proto,
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 plen,
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 
-// Step 9 calls one of these two, chosen per entry through vrf_table's
-// egress_kind: bpf_redirect_peer for a veth attachment, which crosses into the
-// peer's namespace, and bpf_redirect for a tap, which does not.
+// Step 9 calls one of these two, chosen per egress interface through
+// ifindex_egress_kind_table: bpf_redirect_peer for a veth attachment, which
+// crosses into the peer's namespace, and bpf_redirect for everything else.
 static long (*bpf_redirect_peer)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect_peer;
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
 
@@ -261,17 +261,17 @@ struct function_value {
 	__u32 behavior;
 };
 
-// enum egress_kind selects which redirect helper step 9 uses for an entry's
-// resolved egress interface. EGRESS_KIND_VETH, the zero value, uses
-// bpf_redirect_peer; EGRESS_KIND_TAP uses plain bpf_redirect, since a tap
-// device never has a namespace-crossing peer.
+// enum egress_kind selects which redirect helper step 9 uses for a resolved
+// egress interface. EGRESS_KIND_VETH uses bpf_redirect_peer; EGRESS_KIND_TAP
+// uses plain bpf_redirect, since a tap device never has a namespace-crossing
+// peer.
 enum egress_kind {
 	EGRESS_KIND_VETH = 0,
 	EGRESS_KIND_TAP = 1,
 };
 
 // struct vrf_value is vrf_table's value: the Linux VRF table ID this Argument
-// resolves to, per-Argument counters, an egress_kind, and a generation.
+// resolves to, per-Argument counters, a legacy egress_kind, and a generation.
 //
 // generation is written only by userspace, at registration time, and never read
 // here. It lets the GC sweep tell "existed before this sweep's snapshot" from
@@ -286,6 +286,11 @@ enum egress_kind {
 // is a claimed count, and packets minus dropped_packets is what actually left.
 // Without it, a VRF dropping everything still shows healthy per-Argument
 // counters, since drop_reasons has no Block or Argument dimension.
+//
+// egress_kind is no longer read here. It is still written, because a datapath
+// rolled back to an older build reads it, but step 9 cannot use it: this entry
+// is shared by every attachment on one VPC and node, and one VPC can hold both
+// tap and veth attachments. See ifindex_egress_kind_table.
 //
 // egress_kind occupies what was an alignment pad, and generation and
 // dropped_packets are placed last, so every other field keeps its offset.
@@ -627,6 +632,28 @@ struct {
 	__type(key, __u32); // ifindex
 	__type(value, struct ifindex_vrf_value);
 } ifindex_vrf_table SEC(".maps");
+
+// ifindex_egress_kind_table: the enum egress_kind of each attachment's
+// host-side interface, keyed by that interface's ifindex and written and
+// removed alongside its ifindex_vrf_table row. Step 9 keys on the interface the
+// FIB lookup resolved rather than on vrf_table, whose single per-VPC value
+// cannot describe a VPC mixing tap and veth attachments on one node.
+//
+// A separate map rather than a field on ifindex_vrf_value: changing a pinned
+// map's layout makes the loader recreate every map empty, wiping live routing
+// state on every node until each attachment is re-added.
+//
+// A miss uses plain bpf_redirect, which delivers to either kind. Into a veth it
+// transmits on the host-side end, whose xmit forwards into the peer's
+// namespace, so it only forgoes bpf_redirect_peer's shortcut past the backlog
+// queue. That keeps attachments registered before this map existed, or after a
+// recreated pin, delivering until their next ADD.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32); // host-side ifindex
+	__type(value, __u32); // enum egress_kind
+} ifindex_egress_kind_table SEC(".maps");
 
 // nptv6_table: one row per VRF with NPTv6 configured, keyed like vrf_table.
 // usid_ingress already holds that key locally, and usid_egress resolves it
@@ -1235,24 +1262,25 @@ int usid_ingress(struct __sk_buff *skb)
 	// Step 9: redirect to the resolved egress interface.
 	//
 	// A veth attachment's egress interface is the pod's host-side veth, whose
-	// container-side peer is in another namespace, so bpf_redirect_peer is
-	// required to cross into it. A tap has no peer at all, being created in this
-	// namespace and never moved, so plain bpf_redirect is required instead.
-	// bpf_redirect_peer against a tap always fails, which is the tap-mode
-	// blackhole this per-entry egress_kind fixes.
+	// container-side peer is in another namespace, so bpf_redirect_peer crosses
+	// straight into it. A tap has no peer at all, being created in this namespace
+	// and never moved, so bpf_redirect_peer against a tap is silently discarded
+	// after this program returns TC_ACT_REDIRECT, and plain bpf_redirect is
+	// required instead.
 	//
-	// Unit tests cover egress_kind's control-plane wiring only. A real
-	// lookup-then-redirect by egress kind needs a live route and net device
-	// that a synthetic program run cannot fabricate, so that part is a
-	// live-cluster concern like this file's other FIB-lookup tests.
+	// The choice is keyed by the resolved interface, not by vrf_table's entry: a
+	// VPC can mix both kinds on one node, and a per-VPC value black-holes
+	// whichever kind did not register last.
 	long redirect_rc;
+	__u32 egress_ifindex = fib_params.ifindex;
+	__u32 *egress_kind = bpf_map_lookup_elem(&ifindex_egress_kind_table, &egress_ifindex);
 
 	count_drop(DROP_REASON_TRACE_ING_REACHED_REDIRECT); // TEMPORARY
 
-	if (vrf->egress_kind == EGRESS_KIND_TAP)
-		redirect_rc = bpf_redirect(fib_params.ifindex, 0);
+	if (egress_kind && *egress_kind == EGRESS_KIND_VETH)
+		redirect_rc = bpf_redirect_peer(egress_ifindex, 0);
 	else
-		redirect_rc = bpf_redirect_peer(fib_params.ifindex, 0);
+		redirect_rc = bpf_redirect(egress_ifindex, 0);
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
 		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, vrf);

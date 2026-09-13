@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/nadpatch"
+	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
@@ -82,7 +83,8 @@ func cmdCheck(args *skel.CmdArgs) error {
 	// No IPAM result, or one carrying no IPv6 address, means cmdAdd never
 	// published an EndpointSlice for this attachment, the same skip the ADD
 	// path takes.
-	if _, ipamResult, _, prevErr := inferFromPrevResult(pluginConf.RawPrevResult); prevErr != nil {
+	ifaceType, ipamResult, _, prevErr := inferFromPrevResult(pluginConf.RawPrevResult)
+	if prevErr != nil {
 		errs = append(errs, fmt.Errorf("infer from prevResult: %w", prevErr))
 	} else if ipamResult != nil && ipamResult.IPv6Subnet != nil {
 		podName := nadpatch.ParsePodName(args.Args)
@@ -102,7 +104,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	// it carrying the Argument they are keyed on, and this node's router
 	// actually has SRv6 configured.
 	if vrfErr == nil {
-		if err := checkEBPFEntry(pluginConf, uint16(vrfInst.Spec.VRFID), bgp); err != nil {
+		if err := checkEBPFEntry(pluginConf, uint16(vrfInst.Spec.VRFID), bgp, ifaceType); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -126,10 +128,16 @@ func cmdCheck(args *skel.CmdArgs) error {
 // entry, or a node ID that drifted out of range, while still reporting the
 // attachment healthy.
 //
+// ifaceType is the attachment's interface type inferred from prevResult. When
+// set, the host-side interface's egress kind entry is checked against it too,
+// since a missing or wrong entry changes how inbound traffic is delivered. It
+// is empty only when prevResult could not be parsed, which the caller already
+// reports.
+//
 // Returns nil, not an error, when this node's router has no locator or node ID
 // configured: SRv6 was intentionally never set up. bgp is this node's
 // BGPRouter, looked up once by the caller.
-func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig) error {
+func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig, ifaceType string) error {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return nil
 	}
@@ -187,7 +195,45 @@ func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig) erro
 		errs = append(errs, fmt.Errorf("eBPF vrf_table entry VRFTableID = %#x, want %#x", entry.VRFTableID, vrfTableID))
 	}
 
+	if ifaceType != "" {
+		if err := checkEgressKind(ebpfPinDir, pluginConf.VPC, pluginConf.VPCAttachment, ifaceType); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	return errors.Join(errs...)
+}
+
+// checkEgressKind verifies the host-side interface's ifindex_egress_kind_table
+// entry exists and matches ifaceType. Unlike ADD, a map that is not pinned is
+// an error here: once the datapath has reloaded, a still-missing entry means
+// this attachment has lost its fast delivery path.
+func checkEgressKind(pinDir, vpc, vpcAttachment, ifaceType string) error {
+	want, err := egressKindForInterfaceType(ifaceType)
+	if err != nil {
+		return fmt.Errorf("determine eBPF egress kind: %w", err)
+	}
+	hostIfindex, err := hostInterfaceIndex(vpc, vpcAttachment)
+	if err != nil {
+		return fmt.Errorf("resolve host interface ifindex for eBPF check: %w", err)
+	}
+	table, closer, err := ifindexvrfmap.OpenPinnedEgressKind(pinDir)
+	if err != nil {
+		return fmt.Errorf("open pinned eBPF ifindex_egress_kind_table: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	got, ok, err := table.Get(hostIfindex)
+	switch {
+	case err != nil:
+		return fmt.Errorf("read eBPF ifindex_egress_kind_table entry: %w", err)
+	case !ok:
+		return fmt.Errorf("eBPF ifindex_egress_kind_table entry for host ifindex %d not found", hostIfindex)
+	case got != want:
+		return fmt.Errorf("eBPF ifindex_egress_kind_table entry for host ifindex %d = %d, want %d (%s)",
+			hostIfindex, got, want, ifaceType)
+	}
+	return nil
 }
 
 // checkEndpointSlice verifies the per-pod EndpointSlice the ADD path published
