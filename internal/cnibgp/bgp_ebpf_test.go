@@ -14,6 +14,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
@@ -329,5 +330,103 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 		if !sid.Equal(net.IPv6zero) {
 			t.Errorf("egress_route_table entry for %s = sid %s, want the all-zero pass-through sentinel", prefixStr, sid)
 		}
+	}
+}
+
+// TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind reproduces a
+// VPC holding a tap and a veth attachment on one node. Their shared vrf_table
+// entry can only hold the last writer's kind, so each host-side interface must
+// carry its own, whichever registers last, and removing one must leave the
+// other intact.
+func TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		vpc            = testVPC
+		locator        = "2001:db8:1::/48"
+		nodeID         = int32(5)
+		vrfID          = int32(42)
+		tapAttachment  = testAttachment
+		vethAttachment = "def2"
+	)
+	type attachment struct{ name, ifaceType string }
+	tapAtt := attachment{name: tapAttachment, ifaceType: ifaceTypeTap}
+	vethAtt := attachment{name: vethAttachment, ifaceType: ifaceTypeVeth}
+
+	for _, tt := range []struct {
+		name  string
+		order []attachment
+	}{
+		{name: "tap then veth", order: []attachment{tapAtt, vethAtt}},
+		{name: "veth then tap", order: []attachment{vethAtt, tapAtt}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := vrf.Add(vpc); err != nil {
+				t.Fatalf("vrf.Add: %v", err)
+			}
+			t.Cleanup(func() { _ = vrf.Delete(vpc) })
+			if err := tap.Add(vpc, tapAttachment, 1500); err != nil {
+				t.Fatalf("tap.Add: %v", err)
+			}
+			t.Cleanup(func() { _ = tap.Delete(vpc, tapAttachment) })
+			if err := veth.Add(vpc, vethAttachment, 1500); err != nil {
+				t.Fatalf("veth.Add: %v", err)
+			}
+			t.Cleanup(func() { _ = veth.Delete(vpc, vethAttachment) })
+
+			pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
+			t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+			loaderObjs, err := attach.Load(pinDir)
+			if err != nil {
+				t.Fatalf("attach.Load: %v", err)
+			}
+			t.Cleanup(func() { _ = loaderObjs.Close() })
+
+			cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
+			for _, a := range tt.order {
+				if _, err := registerEBPFDatapath(cfg, vpc, a.name, a.ifaceType, uint16(vrfID), pinDir, nil); err != nil {
+					t.Fatalf("registerEBPFDatapath(%s): %v", a.name, err)
+				}
+			}
+
+			for _, a := range []attachment{tapAtt, vethAtt} {
+				if err := checkEgressKind(pinDir, vpc, a.name, a.ifaceType); err != nil {
+					t.Errorf("CHECK of %s attachment after both registered: %v", a.ifaceType, err)
+				}
+			}
+			if err := checkEgressKind(pinDir, vpc, tapAttachment, ifaceTypeVeth); err == nil {
+				t.Error("CHECK of the tap attachment against type veth = nil error, want a mismatch")
+			}
+
+			kinds, closer, err := ifindexvrfmap.OpenPinnedEgressKind(pinDir)
+			if err != nil {
+				t.Fatalf("OpenPinnedEgressKind: %v", err)
+			}
+			defer func() { _ = closer.Close() }()
+			tapIfindex, err := hostInterfaceIndex(vpc, tapAttachment)
+			if err != nil {
+				t.Fatalf("hostInterfaceIndex(tap): %v", err)
+			}
+			if err := kinds.Unregister(tapIfindex); err != nil {
+				t.Fatalf("Unregister(tap): %v", err)
+			}
+			if err := checkEgressKind(pinDir, vpc, vethAttachment, ifaceTypeVeth); err != nil {
+				t.Errorf("CHECK of the veth attachment after the tap's entry was removed: %v", err)
+			}
+			if err := checkEgressKind(pinDir, vpc, tapAttachment, ifaceTypeTap); err == nil {
+				t.Error("CHECK of the tap attachment after its entry was removed = nil error, want not found")
+			}
+		})
+	}
+}
+
+// TestRegisterEgressKind_UnpinnedMapIsNotFatal covers an ADD that runs after
+// install-cni replaced this binary but before the datapath reloaded and pinned
+// the map. Failing it would block Instances from starting during an upgrade.
+func TestRegisterEgressKind_UnpinnedMapIsNotFatal(t *testing.T) {
+	requireRoot(t)
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-unpinned-%d", os.Getpid())
+	if err := registerEgressKind(pinDir, 42, usidmap.EgressKindTap); err != nil {
+		t.Errorf("registerEgressKind with no pinned map = %v, want nil", err)
 	}
 }

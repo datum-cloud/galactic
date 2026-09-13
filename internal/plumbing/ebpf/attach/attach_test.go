@@ -297,3 +297,45 @@ func TestResolveFilterPriority_EnvOverride(t *testing.T) {
 		})
 	}
 }
+
+// TestLoad_AddedMapKeepsExistingPinnedState covers rolling out a datapath build
+// that adds a map. The previous build's pins lack it, and that alone must not
+// count as incompatible, which would recreate every map empty and drop live
+// routing state until each attachment is re-added.
+func TestLoad_AddedMapKeepsExistingPinnedState(t *testing.T) {
+	requireRoot(t)
+
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-test-added-map-%d", os.Getpid()))
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	objs, err := Load(pinDir)
+	if err != nil {
+		t.Fatalf("first Load(): %v", err)
+	}
+	const vrfKey = uint64(0x123)
+	if err := objs.VrfTable.Put(vrfKey, prog.UsidVrfValue{VrfTableId: 7}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+	addedPin := filepath.Join(pinDir, prog.UsidMapIfindexEgressKindTable)
+	if err := os.Remove(addedPin); err != nil {
+		t.Fatalf("remove %s pin to stand in for the previous build's pin set: %v", prog.UsidMapIfindexEgressKindTable, err)
+	}
+	_ = objs.Close()
+
+	objs, err = Load(pinDir)
+	if err != nil {
+		t.Fatalf("second Load(): %v", err)
+	}
+	defer func() { _ = objs.Close() }()
+
+	var got prog.UsidVrfValue
+	if err := objs.VrfTable.Lookup(vrfKey, &got); err != nil {
+		t.Fatalf("vrf_table entry after loading with an added map: %v, want it preserved", err)
+	}
+	if got.VrfTableId != 7 {
+		t.Errorf("vrf_table entry VrfTableId = %d, want 7", got.VrfTableId)
+	}
+	if _, err := os.Stat(addedPin); err != nil {
+		t.Errorf("added map was not pinned: %v", err)
+	}
+}

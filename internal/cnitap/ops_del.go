@@ -92,8 +92,8 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table entry
-// if one exists, mirroring the veth plugin's identical helper but resolving a
+// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table and
+// ifindex_egress_kind_table entries if they exist, mirroring the veth plugin's identical helper but resolving a
 // tap device's host-side interface rather than a veth pair's.
 func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
@@ -110,6 +110,20 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 
 	if err := table.Unregister(uint32(link.Attrs().Index)); err != nil {
 		slog.Warn("DEL: failed to unregister eBPF ifindex_vrf_table entry", "err", err,
+			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
+	}
+
+	// The egress kind entry shares this row's lifecycle. Left behind, it would
+	// steer delivery for whatever attachment next reuses this ifindex until
+	// that attachment's own ADD overwrites it.
+	kinds, kindsCloser, err := ifindexvrfmap.OpenPinnedEgressKind(attach.PinDir)
+	if err != nil {
+		return
+	}
+	defer func() { _ = kindsCloser.Close() }()
+
+	if err := kinds.Unregister(uint32(link.Attrs().Index)); err != nil {
+		slog.Warn("DEL: failed to unregister eBPF ifindex_egress_kind_table entry", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
 	}
 }

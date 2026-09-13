@@ -290,9 +290,9 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	defer func() { _ = closer.Close() }()
 
 	// EgressKindVeth is a don't-care here, not a claim about this device's link
-	// type. EgressKind steers only usid_ingress's redirect, and usid_ingress is
-	// never attached in this pod's namespace, since this sidecar has no decap
-	// side. usid_egress never reads it.
+	// type. The current datapath reads egress kind per interface rather than
+	// from vrf_table, and usid_ingress never delivers into this pod's namespace
+	// anyway, since this sidecar has no decap side. usid_egress never reads it.
 	if err := registry.VRF.Register(ingressSidecarBlock, argument, tableID, usidmap.EgressKindVeth); err != nil {
 		return fmt.Errorf("register eBPF vrf_table entry: %w", err)
 	}
