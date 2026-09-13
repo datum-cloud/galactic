@@ -459,13 +459,20 @@ tasks:
       # same probe starting point, so the second claims the next candidate.
       - |
         set -e
+        # A source port that changes per run, so each run creates genuinely new
+        # flows. With a fixed port the connection rows survive in the pinned
+        # map across a DaemonSet restart, and a rerun re-asserts the ports an
+        # earlier run allocated instead of exercising the allocator at all --
+        # the test would keep passing after the code it covers stopped working.
+        sport=$(( 20000 + ($(date +%s) % 10000) ))
+        echo "source port for this run: ${sport}"
         docker exec dfw-worker timeout 16 tcpdump -i eth1 -nn -c 4 \
           'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:10::1' >/tmp/nat-collision.txt 2>&1 &
         sleep 2
         for site in iad sjc; do
           pod=$(docker exec ${site}-control-plane kubectl -n ns70 get pods -o jsonpath='{.items[0].metadata.name}')
           docker exec ${site}-control-plane kubectl -n ns70 exec "${pod}" -- \
-            timeout 5 bash -c 'echo collide | nc -u -w1 -p 7777 2001:db8:1:10::1 9999' >/dev/null 2>&1 || true
+            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:10::1 9999" >/dev/null 2>&1 || true
         done
         wait
         ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision.txt | cut -d. -f2 | sort -u)
