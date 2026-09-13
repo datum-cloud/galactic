@@ -181,6 +181,25 @@ static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const vo
 // cannot segment the packet on the uplink and drops it.
 #define USID_BPF_F_ADJ_ROOM_ENCAP_L3_IPV6 (1ULL << 2)
 
+// The kernel UAPI flags usid_ingress passes when it strips the outer header.
+// FIXED_GSO keeps a merged packet's segment size at what the sender chose;
+// without it the kernel grows the segment size by the stripped header length,
+// so the forwarded segments no longer match the ones that arrived. The DECAP
+// flags name the inner header the packet is left with.
+#define USID_BPF_F_ADJ_ROOM_FIXED_GSO (1ULL << 0)
+#define USID_BPF_F_ADJ_ROOM_DECAP_L3_IPV4 (1ULL << 7)
+#define USID_BPF_F_ADJ_ROOM_DECAP_L3_IPV6 (1ULL << 8)
+
+// Transport header facts the FIB length computation needs: where the TCP data
+// offset lives, and the UDP header's fixed size.
+#define USID_TCP_DOFF_OFFSET 12
+#define USID_TCP_MIN_HDR_LEN 20
+#define USID_UDP_HDR_LEN 8
+
+// GSO_BY_FRAGS, a segment size that means "each fragment is one segment". Such
+// a packet has no single segment length to check.
+#define USID_GSO_BY_FRAGS 0xFFFF
+
 // USID_L3_OFFSET is the fixed byte offset of the IPv6 header from skb->data, a
 // compile-time constant.
 //
@@ -854,6 +873,49 @@ static USID_ALWAYS_INLINE long apply_vip_xlat(struct __sk_buff *skb, __u32 addr_
 // Program
 // ---------------------------------------------------------------------
 
+// usid_fib_tot_len returns the L3 length step 8's FIB lookup checks against the
+// route MTU: the packet's own length for a single packet, and the length of one
+// segment for a packet the NIC merged with GRO.
+//
+// The lookup compares any nonzero length strictly against the MTU, so passing a
+// merged packet's total length drops return traffic whose every segment fits.
+// Passing zero is no better: the kernel then accepts any GSO packet without
+// checking its segments at all. One segment's length keeps path-MTU enforcement
+// for both cases, matching what the kernel's own IPv4 and IPv6 forwarding check.
+//
+// A GSO packet whose transport header can't be read falls back to the total
+// length, which can only over-reject.
+static USID_ALWAYS_INLINE __u16 usid_fib_tot_len(struct __sk_buff *skb, __u8 *l4, __u16 l3_len, __u32 l3_hdr_len,
+						__u8 l4proto)
+{
+	void *data_end = (void *) (long) skb->data_end;
+	__u32 gso_size = skb->gso_size;
+	__u32 l4_hdr_len;
+
+	if (gso_size == 0)
+		return l3_len;
+	if (gso_size == USID_GSO_BY_FRAGS || l3_hdr_len < sizeof(struct usid_iphdr))
+		return l3_len;
+
+	if (l4proto == USID_IPPROTO_TCP) {
+		__u8 *doff = l4 + USID_TCP_DOFF_OFFSET;
+
+		if ((void *) (doff + 1) > data_end)
+			return l3_len;
+		l4_hdr_len = (__u32) (*doff >> 4) * 4;
+		if (l4_hdr_len < USID_TCP_MIN_HDR_LEN)
+			return l3_len;
+	} else if (l4proto == USID_IPPROTO_UDP) {
+		l4_hdr_len = USID_UDP_HDR_LEN;
+	} else {
+		return l3_len;
+	}
+
+	__u32 seg_len = l3_hdr_len + l4_hdr_len + gso_size;
+
+	return seg_len < l3_len ? (__u16) seg_len : l3_len;
+}
+
 SEC("tc")
 int usid_ingress(struct __sk_buff *skb)
 {
@@ -1032,7 +1094,13 @@ int usid_ingress(struct __sk_buff *skb)
 	// in front of the real inner header, which the plain carve below removes,
 	// exposing it at offset 0 as in the IPv6 case. Net bytes removed is 40
 	// either way; only the protocol side effect differs.
+	//
+	// A packet the NIC merged with GRO keeps its sender's segment size, and
+	// the DECAP flag names the inner header it is left with. A kernel that
+	// predates the DECAP flags rejects them, so the strip retries without.
 	__s32 strip_len = (__s32) sizeof(struct usid_ip6hdr);
+	__u64 strip_flags = USID_BPF_F_ADJ_ROOM_FIXED_GSO;
+	__u64 decap_flag = USID_BPF_F_ADJ_ROOM_DECAP_L3_IPV6;
 
 	if (inner_version == 4) {
 		if (bpf_skb_change_proto(skb, __builtin_bswap16(USID_ETH_P_IP), 0)) {
@@ -1040,9 +1108,11 @@ int usid_ingress(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		}
 		strip_len = (__s32) sizeof(struct usid_iphdr);
+		decap_flag = USID_BPF_F_ADJ_ROOM_DECAP_L3_IPV4;
 	}
 
-	if (bpf_skb_adjust_room(skb, -strip_len, BPF_ADJ_ROOM_MAC, 0)) {
+	if (bpf_skb_adjust_room(skb, -strip_len, BPF_ADJ_ROOM_MAC, strip_flags | decap_flag) &&
+	    bpf_skb_adjust_room(skb, -strip_len, BPF_ADJ_ROOM_MAC, strip_flags)) {
 		count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
@@ -1168,13 +1238,12 @@ int usid_ingress(struct __sk_buff *skb)
 		__builtin_memcpy(fib_params.ipv6_dst, inner6->daddr, sizeof(fib_params.ipv6_dst));
 		new_eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
 
-		// fib_params.tot_len is the L3 length the kernel's MTU check compares
-		// against the route's MTU, but only when nonzero: left at zero that
-		// check is skipped and a fragmentation-needed result can never fire.
-		// IPv6 has no total-length field, so this is the fixed 40-byte header
-		// plus payload_len, in host order.
-		fib_params.tot_len = (__u16) sizeof(struct usid_ip6hdr) +
-				     __builtin_bswap16(inner6->payload_len);
+		// IPv6 has no total-length field, so the packet's L3 length is the
+		// fixed 40-byte header plus payload_len, in host order.
+		__u16 l3_len = (__u16) sizeof(struct usid_ip6hdr) + __builtin_bswap16(inner6->payload_len);
+
+		fib_params.tot_len = usid_fib_tot_len(skb, (__u8 *) (inner6 + 1), l3_len, sizeof(struct usid_ip6hdr),
+						      inner6->nexthdr);
 	} else {
 		struct usid_iphdr *inner4 = (void *) inner;
 
@@ -1188,10 +1257,12 @@ int usid_ingress(struct __sk_buff *skb)
 		__builtin_memcpy(&fib_params.ipv4_dst, inner4->daddr, sizeof(fib_params.ipv4_dst));
 		new_eth->h_proto = __builtin_bswap16(USID_ETH_P_IP);
 
-		// The same tot_len requirement as the IPv6 branch, except IPv4 carries
-		// its own total-length field, in host order, so no arithmetic is
-		// needed.
-		fib_params.tot_len = __builtin_bswap16(inner4->tot_len);
+		// IPv4 carries its own total-length field. The header length comes from
+		// IHL, since options move the transport header.
+		__u32 ihl_len = (__u32) (inner4->ver_ihl & 0x0F) * 4;
+
+		fib_params.tot_len = usid_fib_tot_len(skb, (__u8 *) inner4 + ihl_len, __builtin_bswap16(inner4->tot_len),
+						      ihl_len, inner4->protocol);
 	}
 
 	fib_params.ifindex = skb->ingress_ifindex;
