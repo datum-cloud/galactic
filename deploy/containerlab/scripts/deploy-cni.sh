@@ -41,7 +41,10 @@ for site in dfw sjc iad; do
   # Cilium fell back to its real default (ipv4.enabled: true, ipv6.enabled:
   # false), allocating from 10.0.0.0/8 — unreachable from these IPv6-only
   # clusters (ipFamily: ipv6) and why CoreDNS/any non-edge-node pod can't
-  # reach the IPv6 [fd00:200::1]:443 apiserver service. Likewise the
+  # reach the IPv6 [fd00:200::1]:443 apiserver service. That fallback would
+  # now also collide with the dual-stack transit underlay, which numbers its
+  # links out of 10.0.0.0/16 and 10.1.0.0/16 (see README.md's Addressing
+  # section) — one more reason ipv4.enabled must stay false here. Likewise the
   # cluster-pool IPv6 CIDR lives at ipam.operator.clusterPoolIPv6PodCIDRList
   # (a list) / clusterPoolIPv6MaskSize, not clusterPoolIPv6.clusterCIDR/
   # maskSize. Tunnel mode is used since Cilium v1.20 requires IPv4 for

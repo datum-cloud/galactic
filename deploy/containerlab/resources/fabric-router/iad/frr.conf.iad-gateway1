@@ -3,6 +3,7 @@ hostname iad-fabric-gateway1
 log syslog informational
 
 interface lo
+ ip address 10.255.255.5/32
  ! /128 provides a reachable address for this node's own outbound BGP
  ! session to the route reflector (fc00:0:8::1:1790, GALACTIC_ROUTER_
  ! BGP_LOCAL_ADDRESS auto-detected from lo, matching iad-worker/
@@ -11,6 +12,7 @@ interface lo
 !
 interface eth1
  description tr3-facing
+ ip address 10.1.32.2/24
  ipv6 address 2001:db8:1:32::2/64
 !
 
@@ -51,6 +53,7 @@ router bgp 65000
  no bgp ebgp-requires-policy
  bgp log-neighbor-changes
  neighbor 2001:db8:1:32::1 remote-as 65100
+ neighbor 10.1.32.1 remote-as 65100
 
  address-family ipv6 unicast
   neighbor 2001:db8:1:32::1 activate
@@ -72,4 +75,16 @@ router bgp 65000
   network 2001:db8:6060::/48
  exit-address-family
 
+ # IPv4 underlay -- see resources/fabric-router/dfw/frr.conf.dfw-worker for
+ # why it carries this node's /32 loopback and nothing else. The ingress VIP
+ # aggregate above stays IPv6-only: NetworkRule's VIPs in this lab
+ # (resources/galactic-gateway/iad/) are IPv6, and an IPv4 VIP would need an
+ # IPv4 EVPN/NPTv6 path through the gateway datapath that does not exist yet.
+ address-family ipv4 unicast
+  neighbor 10.1.32.1 activate
+  neighbor 10.1.32.1 allowas-in 1
+  network 10.255.255.5/32
+ exit-address-family
+
+ip forwarding
 ipv6 forwarding

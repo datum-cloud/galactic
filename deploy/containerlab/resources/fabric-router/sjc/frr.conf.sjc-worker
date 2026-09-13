@@ -3,10 +3,12 @@ hostname sjc-fabric
 log syslog informational
 
 interface lo
+ ip address 10.255.255.3/32
  ipv6 address fc00:0:3::1/128
 !
 interface eth1
  description tr2-facing
+ ip address 10.1.20.2/24
  ipv6 address 2001:db8:1:20::2/64
 
 
@@ -19,7 +21,8 @@ router bgp 65000
  no bgp ebgp-requires-policy
  bgp log-neighbor-changes
  neighbor 2001:db8:1:20::1 remote-as 65100
- 
+ neighbor 10.1.20.1 remote-as 65100
+
  address-family ipv6 unicast
   neighbor 2001:db8:1:20::1 activate
   neighbor 2001:db8:1:20::1 allowas-in 1
@@ -27,4 +30,13 @@ router bgp 65000
   network fc00:0:3::/48
  exit-address-family
 
+ # IPv4 underlay -- see frr.conf.dfw-worker for why it carries the /32
+ # loopback and nothing else.
+ address-family ipv4 unicast
+  neighbor 10.1.20.1 activate
+  neighbor 10.1.20.1 allowas-in 1
+  network 10.255.255.3/32
+ exit-address-family
+
+ip forwarding
 ipv6 forwarding

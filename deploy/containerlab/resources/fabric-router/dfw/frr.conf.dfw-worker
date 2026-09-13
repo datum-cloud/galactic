@@ -3,10 +3,12 @@ hostname dfw-fabric
 log syslog informational
 
 interface lo
+ ip address 10.255.255.2/32
  ipv6 address fc00:0:2::1/128
 
 interface eth1
  description tr1-facing
+ ip address 10.1.10.2/24
  ipv6 address 2001:db8:1:10::2/64
 
 ipv6 route 2001:db8:ff01::/48 Null0
@@ -19,6 +21,7 @@ router bgp 65000
  bgp log-neighbor-changes
 
  neighbor 2001:db8:1:10::1 remote-as 65100
+ neighbor 10.1.10.1 remote-as 65100
 
  address-family ipv6 unicast
   neighbor 2001:db8:1:10::1 activate
@@ -27,4 +30,15 @@ router bgp 65000
   network fc00:0:2::/48
  exit-address-family
 
+ # IPv4 underlay: this node's own /32 loopback only. There is no IPv4
+ # counterpart to the SRv6 locator block -- tenant IPv4 (ns20/ns40) rides
+ # inside SRv6 and never touches the IPv4 transit FIB. See the transit
+ # routers' FILTER_PREFIX_V4, which drops anything shorter than /24.
+ address-family ipv4 unicast
+  neighbor 10.1.10.1 activate
+  neighbor 10.1.10.1 allowas-in 1
+  network 10.255.255.2/32
+ exit-address-family
+
+ip forwarding
 ipv6 forwarding
