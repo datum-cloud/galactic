@@ -126,12 +126,28 @@ spec:
           # tap attachment. Without it, ndp.Listen fails "operation not
           # permitted" for every attachment on every node -- confirmed live,
           # continuously retried and continuously failing, on staging infra.
+          # PERFMON is required alongside BPF for the same reason
+          # config/galactic-gateway/base/daemonset.yaml and
+          # config/galactic-nat/base/daemonset.yaml already document for their
+          # own eBPF-loading containers: the verifier only permits
+          # pointer+scalar arithmetic on packet data when the loading process
+          # is perfmon_capable(). Without it the verifier applies its
+          # unprivileged ruleset and rejects the program outright, running as
+          # root notwithstanding -- "R8 has pointer with unsupported alu
+          # operation, pointer arithmetic with it prohibited for !root".
+          #
+          # usid.c did not need it until the GRO-merged decap path began
+          # offsetting a packet pointer by a computed header length, so this
+          # container ran without it for as long as the program happened to
+          # stay inside what unprivileged BPF allows. That was luck rather
+          # than a property worth depending on.
           securityContext:
             runAsUser: 0
             capabilities:
               drop: ["ALL"]
               add:
                 - BPF
+                - PERFMON
                 - NET_ADMIN
                 - NET_RAW
             allowPrivilegeEscalation: false
