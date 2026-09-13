@@ -126,7 +126,7 @@ topology:
         - ip -6 route add blackhole 2001:db8:ff03:100::/56 metric 2048
         - /galactic/scripts/install.sh
 
-    iad-worker2:
+    iad-worker-rr:
       kind: ext-container
       labels:
         cluster: iad
@@ -145,19 +145,22 @@ topology:
       exec:
         - /galactic/scripts/install.sh
 
-    # Kind names these two containers iad-worker3/iad-worker4 (sequential,
-    # matching declaration order in node_files/iad/config.yaml) even though
-    # their Kubernetes node names are iad-gateway1/iad-gateway2 (set via
-    # that file's kubeadmConfigPatches, same indirection iad-worker2/
-    # iad-worker-rr already uses) -- Taskfile.yaml's deploy:rename-*
-    # step renames both to match after cluster creation, purely cosmetic
-    # (doesn't affect the links below, which are wired to the container
-    # before the rename happens). galactic-cni now runs here too (edge
+    # Kind creates these two containers as iad-worker3/iad-worker4
+    # (sequential, matching declaration order in node_files/iad/config.yaml)
+    # even though their Kubernetes node names are iad-gateway1/iad-gateway2,
+    # set via that file's kubeadmConfigPatches -- the same indirection
+    # iad-worker2/iad-worker-rr uses. Taskfile.yaml's deploy:rename-control
+    # step reconciles the two, and runs *before* deploy:topology so the
+    # names here are the names the containers already carry. Naming the
+    # pre-rename containers here instead would still deploy, since links are
+    # wired once at deploy time, but would leave every later containerlab
+    # operation on this topology -- inspect, destroy -- unable to resolve
+    # three of its own nodes. galactic-cni now runs here too (edge
     # nodes carry galactic.datumapis.com/galactic=router, same as compute
     # -- see docs/node-labels.md), so these get the same blackhole route as
     # iad-worker, same site locator (2001:db8:ff03::/48): both nodes run
     # galactic-veth's usid.c decap program and can compute a matching USID.
-    iad-worker3:
+    iad-gateway1:
       kind: ext-container
       labels:
         cluster: iad
@@ -177,7 +180,7 @@ topology:
         - ip -6 route add blackhole 2001:db8:ff03:100::/56 metric 2048
         - /galactic/scripts/install.sh
 
-    iad-worker4:
+    iad-gateway2:
       kind: ext-container
       labels:
         cluster: iad
@@ -248,7 +251,7 @@ topology:
   links:
     # Cluster worker uplinks. mtu: 1500 on dfw-worker/sjc-worker/iad-worker's
     # own links (unlike containerlab's jumbo-frame veth default, ~9500,
-    # which iad-worker2/tr3:eth4 below keeps -- it never runs
+    # which iad-worker-rr/tr3:eth4 below keeps -- it never runs
     # galactic-nat) -- required for the same -ERANGE reason the gateway
     # node links below already document in detail: galactic-nat's own
     # XDP program (natattach.go, also native/driver-mode-only) attaches
@@ -258,7 +261,7 @@ topology:
     # workers as shards"). Confirmed live: galactic-nat crash-looped on
     # dfw-worker/sjc-worker/iad-worker with exactly this ERANGE
     # ("veth: Peer MTU is too large to set XDP") until these three links
-    # were dropped to 1500, mirroring iad-worker3/iad-worker4's own fix
+    # were dropped to 1500, mirroring iad-gateway1/iad-gateway2's own fix
     # below. Accepted trade-off, not risk-free: ordinary tenant SRv6
     # traffic (ns10/ns20/ns30/ns40) previously had headroom up to the
     # jumbo default; a packet whose SRv6-encapsulated size would have
@@ -272,13 +275,13 @@ topology:
       mtu: 1500
     - endpoints: ["iad-worker:eth1", "tr3:eth5"]
       mtu: 1500
-    - endpoints: ["iad-worker2:eth1", "tr3:eth4"]
+    - endpoints: ["iad-worker-rr:eth1", "tr3:eth4"]
 
     # Gateway node uplinks (edge XDP Maglev/DSR DaemonSet; see
     # config/galactic-gateway/base/ and deploy/containerlab/resources/
     # galactic-gateway/). tr3 (iad's transit router) already
     # consumed eth1/eth2/eth3 for the TR mesh and eth4/eth5 for
-    # iad-worker/iad-worker2, so these take the next free ports. BGP
+    # iad-worker/iad-worker-rr, so these take the next free ports. BGP
     # peering on these links is configured (node_files/tr3/frr.conf, plus
     # two BGPPeer objects in resources/galactic-control/iad/ for the route
     # reflector side), the fabric converges over them, and real
@@ -317,9 +320,9 @@ topology:
     # end asks. Confirmed live: galactic-gateway{1,2} crash-looped
     # with exactly this ERANGE until both ends of these two links were
     # dropped to 1500.
-    - endpoints: ["iad-worker3:eth1", "tr3:eth6"]
+    - endpoints: ["iad-gateway1:eth1", "tr3:eth6"]
       mtu: 1500
-    - endpoints: ["iad-worker4:eth1", "tr3:eth7"]
+    - endpoints: ["iad-gateway2:eth1", "tr3:eth7"]
       mtu: 1500
 
     # TR full mesh (iBGP within AS 65100)

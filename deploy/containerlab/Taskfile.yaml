@@ -69,9 +69,12 @@ tasks:
     deps: [build, host-setup]
     cmds:
       - task: "deploy:clusters"
+      # Before deploy:topology, not after: gvpc.clab.yaml names these
+      # containers by the names they end up with, so they have to carry those
+      # names before containerlab attaches to them as ext-containers.
+      - task: "deploy:rename-control"
       - task: "deploy:topology"
       - task: "deploy:lab-xdp-passthrough"
-      - task: "deploy:rename-control"
       - task: "deploy:images"
       - task: "deploy:system"
       - task: "deploy:cni"
@@ -96,7 +99,12 @@ tasks:
       - sudo containerlab deploy -t {{.TOPO}}
 
   "deploy:rename-control":
-    desc: Rename iad worker nodes
+    desc: Give iad's extra workers the names the topology and manifests use
+    # Kind names workers sequentially; these three carry Kubernetes node names
+    # set through kubeadmConfigPatches that do not match. Reconciling the
+    # container names makes `docker exec` against a node name work, and lets
+    # gvpc.clab.yaml refer to its own nodes by one set of names rather than
+    # two. Runs before deploy:topology -- see the deploy task.
     cmds:
       - docker rename iad-worker2 iad-worker-rr
       - docker rename iad-worker3 iad-gateway1
