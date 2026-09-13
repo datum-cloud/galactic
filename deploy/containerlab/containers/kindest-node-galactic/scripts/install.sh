@@ -17,9 +17,13 @@ until ip6tables -L KUBE-FORWARD; do
   sleep 1
 done
 
-# Allow BGP for FRR node routing daemon
+# Allow BGP for FRR node routing daemon. Both families: the transit underlay
+# is dual-stack, so each worker runs one eBGP session per address family to
+# its transit router (see resources/fabric-router/*/frr.conf.*).
 ip6tables -I INPUT 1 -p tcp --dport 179 -j ACCEPT
 ip6tables -I INPUT 1 -p tcp --sport 179 -j ACCEPT
+iptables -I INPUT 1 -p tcp --dport 179 -j ACCEPT
+iptables -I INPUT 1 -p tcp --sport 179 -j ACCEPT
 
 # SRv6 prefix forwarding
 ip6tables -I FORWARD 1 -s ${SRV6_PREFIX} -j ACCEPT

@@ -316,6 +316,7 @@ tasks:
       - task: "verify:bgp-transit"
       - task: "verify:bgp-fabric"
       - task: "verify:bgp-peers"
+      - task: "verify:underlay"
       - task: "verify:srv6"
       - task: "verify:evpn"
       - task: "verify:gateway"
@@ -325,29 +326,28 @@ tasks:
       - task: "verify:scenarios"
 
   "verify:bgp-transit":
-    desc: Verify transit router BGP sessions
+    desc: Verify transit router BGP sessions (both address families)
     cmds:
       - |
         for r in tr1 tr2 tr3 tr4; do
-          echo "--- $r ---"
+          echo "--- $r (ipv6) ---"
           docker exec clab-gvpc-$r vtysh -c "show bgp ipv6 unicast summary"
+          echo "--- $r (ipv4) ---"
+          docker exec clab-gvpc-$r vtysh -c "show bgp ipv4 unicast summary"
         done
 
   "verify:bgp-fabric":
-    desc: Verify fabric BGP sessions on all sites
+    desc: Verify fabric BGP sessions on all sites (both address families)
     cmds:
       - |
-        docker exec dfw-control-plane \
-          kubectl exec -n galactic-system ds/fabric-router \
-          -- vtysh -c "show bgp ipv6 unicast summary"
-      - |
-        docker exec iad-control-plane \
-          kubectl exec -n galactic-system ds/fabric-router \
-          -- vtysh -c "show bgp ipv6 unicast summary"
-      - |
-        docker exec sjc-control-plane \
-          kubectl exec -n galactic-system ds/fabric-router \
-          -- vtysh -c "show bgp ipv6 unicast summary"
+        for site in dfw iad sjc; do
+          for af in ipv6 ipv4; do
+            echo "--- ${site} (${af}) ---"
+            docker exec ${site}-control-plane \
+              kubectl exec -n galactic-system ds/fabric-router \
+              -- vtysh -c "show bgp ${af} unicast summary"
+          done
+        done
 
   "verify:bgp-peers":
     desc: Verify galactic-router BGP peer sessions
@@ -355,6 +355,32 @@ tasks:
       - docker exec dfw-control-plane kubectl get bgppeers -n galactic-system
       - docker exec sjc-control-plane kubectl get bgppeers -n galactic-system
       - docker exec iad-control-plane kubectl get bgppeers -n galactic-system
+
+  "verify:underlay":
+    desc: Verify dual-stack underlay loopback reachability from tr1
+    cmds:
+      # Sourced from tr1's own loopback, not the link address: the transit
+      # carries per-node loopbacks only (/32 and /128), never the numbered
+      # link subnets, so a ping sourced from eth1 has no return path.
+      - |
+        fail=0
+        for lo in 10.255.255.1 10.255.255.2 10.255.255.3 10.255.255.4 \
+                  10.255.255.5 10.255.255.6 10.255.255.101 10.255.255.102 10.255.255.103; do
+          if docker exec clab-gvpc-tr1 ping -c1 -W2 -I 10.255.255.100 "$lo" >/dev/null 2>&1; then
+            echo "ok    ipv4 tr1 -> $lo"
+          else
+            echo "FAIL  ipv4 tr1 -> $lo"; fail=1
+          fi
+        done
+        for lo in fc00:0:2::1 fc00:0:3::1 fc00:0:4::1 fc00:0:8::1 fc00:0:9::1 \
+                  fc00:0:a::1 fc00:0:5::1 fc00:0:6::1 fc00:0:7::1; do
+          if docker exec clab-gvpc-tr1 ping -6 -c1 -W2 -I fc00:0:1::1 "$lo" >/dev/null 2>&1; then
+            echo "ok    ipv6 tr1 -> $lo"
+          else
+            echo "FAIL  ipv6 tr1 -> $lo"; fail=1
+          fi
+        done
+        exit $fail
 
   "verify:srv6":
     desc: Verify each site's SRv6 locator prefix

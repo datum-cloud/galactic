@@ -3,11 +3,13 @@ hostname iad-fabric-rr
 log syslog informational
 
 interface lo
+ ip address 10.255.255.4/32
  ! /128 provides a reachable address for galactic-router peers to connect to on port 1790.
  ipv6 address fc00:0:8::1/128
 !
 interface eth1
  description tr3-facing
+ ip address 10.1.31.2/24
  ipv6 address 2001:db8:1:31::2/64
 !
 
@@ -22,6 +24,7 @@ router bgp 65000
  no bgp ebgp-requires-policy
  bgp log-neighbor-changes
  neighbor 2001:db8:1:31::1 remote-as 65100
+ neighbor 10.1.31.1 remote-as 65100
  !
  address-family ipv6 unicast
   neighbor 2001:db8:1:31::1 activate
@@ -29,6 +32,18 @@ router bgp 65000
   neighbor 2001:db8:1:31::1 route-map SET_SRC in
   network fc00:0:8::/48
  exit-address-family
+ !
+ ! IPv4 underlay -- see resources/fabric-router/dfw/frr.conf.dfw-worker for
+ ! why it carries this node's /32 loopback and nothing else. No IPv4
+ ! counterpart to SET_SRC above: that route-map exists so galactic-router's
+ ! own (IPv6-only) BGP session sources from fc00:0:8::1, and nothing peers
+ ! with this node over IPv4.
+ address-family ipv4 unicast
+  neighbor 10.1.31.1 activate
+  neighbor 10.1.31.1 allowas-in 1
+  network 10.255.255.4/32
+ exit-address-family
 !
 
+ip forwarding
 ipv6 forwarding

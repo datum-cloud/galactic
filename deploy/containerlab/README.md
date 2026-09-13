@@ -1,9 +1,16 @@
 # Galactic VPC Lab Deployment
 
-Three Kind clusters (dfw, iad, sjc) connected over an IPv6 SRv6 transit mesh. Each cluster
-runs FRR as a node routing daemon (hostNetwork DaemonSet) to peer with the transit layer via
-eBGP over numbered IPv6 links. galactic-router runs alongside FRR on the workers to distribute EVPN routes
+Three Kind clusters (dfw, iad, sjc) connected over an SRv6 transit mesh. The transit
+(underlay) network is dual-stack: every transit link and loopback carries both an IPv4 and
+an IPv6 address, and each link runs one BGP session per address family. Each cluster runs
+FRR as a node routing daemon (hostNetwork DaemonSet) to peer with the transit layer via
+eBGP over those numbered links. galactic-router runs alongside FRR on the workers to distribute EVPN routes
 over iBGP to the route reflector on iad-control.
+
+The SRv6 data plane itself is IPv6-only and unchanged — tenant IPv4 (`ns20`, `ns40`) rides
+inside SRv6 encapsulation and never reaches the IPv4 underlay FIB. IPv4 on the transit
+exists so the underlay is reachable over both families (loopback-to-loopback), not to carry
+tenant traffic.
 
 ## Topology
 
@@ -86,42 +93,70 @@ AS 65000 (sjc-tenant / galactic-router)    ──iBGP──  iad-control-tenant 
 
 - All clusters use a single AS (65000) for both the FRR fabric and the galactic-router tenant.
 - The transit mesh carries IPv6 unicast (SRv6 locator prefixes and loopbacks) via iBGP within AS 65100.
-- FRR PE nodes originate their per-node SRv6 locator block (`2001:db8:ffXX:100::/56`) and BGP peering loopback (`fc00:0:X::1/128`) toward the transit layer via eBGP over numbered IPv6 links — never the site's full `/48` uSID Block or loopback pool, which would create an anycast ambiguity once a second worker joins a site.
+- Every transit link runs **two** BGP sessions, one per address family: the existing IPv6 session
+  (unnumbered `interface` peers inside the TR mesh, numbered global addresses toward the workers)
+  plus a numbered IPv4 session. One session per family rather than one multiprotocol session with
+  extended next-hop (RFC 8950) keeps `show bgp ipv4 unicast summary` readable and avoids relying on
+  IPv4-over-IPv6-next-hop resolution in the kernel FIB.
+- The IPv4 address family carries per-node `/32` loopbacks only. There is no IPv4 counterpart to the
+  SRv6 locator block, and the numbered link subnets are never redistributed — so a ping between
+  underlay nodes must be sourced from a loopback (`task verify:underlay` does this).
+- FRR PE nodes originate their per-node SRv6 locator block (`2001:db8:ffXX:100::/56`) and BGP peering loopback (`fc00:0:X::1/128`) toward the transit layer via eBGP over numbered links — never the site's full `/48` uSID Block or loopback pool, which would create an anycast ambiguity once a second worker joins a site.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - galactic-router instances on dfw/iad/sjc workers peer with iad-worker-rr over iBGP (AS 65000) for `l2vpn-evpn` routes. GoBGP runs with outbound-only mode (`listenPort=-1`); all BGP sessions are initiated outbound.
 
 ## Addressing
 
+Every underlay address below is dual-stack. The IPv4 loopbacks were chosen to match each
+node's pre-existing `bgp router-id`, so router-id and loopback are the same value everywhere.
+
 ### Transit loopbacks
 
-| Node | Loopback        |
-|------|-----------------|
-| tr1  | fc00:0:1::1/128 |
-| tr2  | fc00:0:5::1/128 |
-| tr3  | fc00:0:6::1/128 |
-| tr4  | fc00:0:7::1/128 |
+| Node | IPv6 loopback   | IPv4 loopback     |
+|------|-----------------|-------------------|
+| tr1  | fc00:0:1::1/128 | 10.255.255.100/32 |
+| tr2  | fc00:0:5::1/128 | 10.255.255.101/32 |
+| tr3  | fc00:0:6::1/128 | 10.255.255.102/32 |
+| tr4  | fc00:0:7::1/128 | 10.255.255.103/32 |
+
+### Fabric (worker) loopbacks
+
+| Node          | IPv6 loopback   | IPv4 loopback   |
+|---------------|-----------------|-----------------|
+| iad-worker    | fc00:0:4::1/128 | 10.255.255.1/32 |
+| dfw-worker    | fc00:0:2::1/128 | 10.255.255.2/32 |
+| sjc-worker    | fc00:0:3::1/128 | 10.255.255.3/32 |
+| iad-worker-rr | fc00:0:8::1/128 | 10.255.255.4/32 |
+| iad-gateway1  | fc00:0:9::1/128 | 10.255.255.5/32 |
+| iad-gateway2  | fc00:0:a::1/128 | 10.255.255.6/32 |
 
 ### TR–TR point-to-point links (numbered)
 
-| Link    | Subnet             |
-|---------|--------------------|
-| tr1–tr2 | 2001:db8:0:12::/64 |
-| tr1–tr3 | 2001:db8:0:13::/64 |
-| tr1–tr4 | 2001:db8:0:14::/64 |
-| tr2–tr3 | 2001:db8:0:23::/64 |
-| tr2–tr4 | 2001:db8:0:24::/64 |
-| tr3–tr4 | 2001:db8:0:34::/64 |
+The host octet/hextet is the transit router's own index on both families, so `10.0.13.3`
+and `2001:db8:0:13::3` are both tr3 on the tr1–tr3 link.
+
+| Link    | IPv6 subnet        | IPv4 subnet  |
+|---------|--------------------|--------------|
+| tr1–tr2 | 2001:db8:0:12::/64 | 10.0.12.0/24 |
+| tr1–tr3 | 2001:db8:0:13::/64 | 10.0.13.0/24 |
+| tr1–tr4 | 2001:db8:0:14::/64 | 10.0.14.0/24 |
+| tr2–tr3 | 2001:db8:0:23::/64 | 10.0.23.0/24 |
+| tr2–tr4 | 2001:db8:0:24::/64 | 10.0.24.0/24 |
+| tr3–tr4 | 2001:db8:0:34::/64 | 10.0.34.0/24 |
 
 ### Worker–TR links (numbered, eBGP)
 
-| Link                | Subnet             | TR address       | Worker address   |
-|---------------------|--------------------|------------------|------------------|
-| dfw-worker – tr1    | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 |
-| sjc-worker – tr2    | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 |
-| iad-worker – tr3    | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 |
-| iad-worker-rr – tr3 | 2001:db8:1:31::/64 | 2001:db8:1:31::1 | 2001:db8:1:31::2 |
-| iad-gateway1 – tr3  | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 |
-| iad-gateway2 – tr3  | 2001:db8:1:33::/64 | 2001:db8:1:33::1 | 2001:db8:1:33::2 |
+The TR always takes `::1`/`.1` and the worker `::2`/`.2`; the IPv4 third octet mirrors the
+IPv6 subnet hextet.
+
+| Link                | IPv6 subnet        | TR address       | Worker address   | IPv4 subnet  | TR address | Worker address |
+|---------------------|--------------------|------------------|------------------|--------------|------------|----------------|
+| dfw-worker – tr1    | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 | 10.1.10.0/24 | 10.1.10.1  | 10.1.10.2      |
+| sjc-worker – tr2    | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 | 10.1.20.0/24 | 10.1.20.1  | 10.1.20.2      |
+| iad-worker – tr3    | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 | 10.1.30.0/24 | 10.1.30.1  | 10.1.30.2      |
+| iad-worker-rr – tr3 | 2001:db8:1:31::/64 | 2001:db8:1:31::1 | 2001:db8:1:31::2 | 10.1.31.0/24 | 10.1.31.1  | 10.1.31.2      |
+| iad-gateway1 – tr3  | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 | 10.1.32.0/24 | 10.1.32.1  | 10.1.32.2      |
+| iad-gateway2 – tr3  | 2001:db8:1:33::/64 | 2001:db8:1:33::1 | 2001:db8:1:33::2 | 10.1.33.0/24 | 10.1.33.1  | 10.1.33.2      |
 
 ### Cluster SRv6 addressing
 
@@ -272,6 +307,7 @@ task deploy
 | `deploy:ns20`            | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                            |
 | `deploy:ns30`            | Deploy ns30 test VPC (dfw only, 2 pods)                                       |
 | `deploy:ns40`            | Deploy ns40 test VPC (iad only, 2 pods)                                       |
+| `verify:underlay`        | Ping every underlay loopback from tr1 over both IPv4 and IPv6                 |
 | `verify:scenarios`       | Verify ping across all VPC test scenarios                                     |
 | `verify:ns10`            | Verify ns10 ping (IPv6-only, 3-site mesh)                                     |
 | `verify:ns20`            | Verify ns20 ping (dual-stack, 3-site mesh)                                    |
@@ -311,7 +347,12 @@ task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
   by `scripts/deploy-cni.sh` (task `deploy:cni`); the BGP (datum-cloud/network) and VPC
   (datum-cloud/cloud) CRDs are installed by `scripts/deploy-system.sh` (task `deploy:system`).
   Neither is baked into the `kindest/node:galactic` image.
-- Worker–TR links use numbered IPv6 subnets (/64) with eBGP peering.
+- Worker–TR links are dual-stack: numbered IPv6 (/64) and IPv4 (/24) subnets, each carrying its
+  own eBGP session.
 - Cilium's iptables rules block BGP by default; the worker bootstrap script
-  (`install.sh`) inserts `ip6tables -I INPUT` rules for TCP/179 before Cilium starts.
+  (`install.sh`) inserts `ip6tables -I INPUT` *and* `iptables -I INPUT` rules for TCP/179 before
+  Cilium starts — one per address family, since the underlay runs a session on each. Changing
+  `install.sh` requires rebuilding the node image (`task build:node`).
+- Cilium itself is installed with `ipv4.enabled=false` (the clusters are `ipFamily: ipv6`), so the
+  IPv4 addresses FRR puts on `lo`/`eth1` are underlay-only and invisible to the cluster network.
 - iad-worker-rr peers with tr3 as AS 65000, the same AS used by all three clusters.
