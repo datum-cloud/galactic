@@ -343,7 +343,7 @@ func (r *NetworkGatewayReconciler) routerNameForNode(ctx context.Context, namesp
 
 // routerNameForNode returns the name of the BGPRouter whose targetRef.name
 // matches nodeName, or "" if none exists yet. A free function so
-// NAT66ShardReconciler can resolve the same "which BGPRouter is mine" lookup
+// EgressShardReconciler can resolve the same "which BGPRouter is mine" lookup
 // without duplicating it or reaching into another reconciler's method set.
 func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName string) (string, error) {
 	list := &bgpv1alpha1.BGPRouterList{}

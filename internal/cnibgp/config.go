@@ -177,13 +177,14 @@ func parseConf(data []byte) (*PluginConf, error) {
 	}
 
 	cniConfig.Resolve(&config.ConflistValues{
-		NodeName:       hostConf.NodeName,
-		Kubeconfig:     hostConf.Kubeconfig,
-		Namespace:      hostConf.Namespace,
-		LogFile:        hostConf.LogFile,
-		LogLevel:       hostConf.LogLevel,
-		NAT66ShardSIDs: hostConf.NAT66ShardSIDs,
-		EBPFInterfaces: hostConf.EBPFInterfaces,
+		NodeName:        hostConf.NodeName,
+		Kubeconfig:      hostConf.Kubeconfig,
+		Namespace:       hostConf.Namespace,
+		LogFile:         hostConf.LogFile,
+		LogLevel:        hostConf.LogLevel,
+		EgressShardSIDs: hostConf.EgressShardSIDs,
+		NAT64Prefix:     hostConf.NAT64Prefix,
+		EBPFInterfaces:  hostConf.EBPFInterfaces,
 	})
 
 	if cniConfig.NodeName == "" {

@@ -1627,10 +1627,10 @@ func TestUsidEgress_NoNodeSourceAddressFailsOpen(t *testing.T) {
 // apply_vip_xlat has rewritten its source from the backend's own real
 // address to the VIP, was still falling through to egress_route_table's
 // own ::/0 NAT66 default (present in any VRF with a NAT66 shard
-// configured, which is every VRF on a node with NAT66ShardSIDs set) and
+// configured, which is every VRF on a node with EgressShardSIDs set) and
 // getting wrongly re-encapsulated/SNAT'd toward a NAT66 shard instead of
 // being delivered toward the real client at all -- confirmed live via
-// nat66_conn_table gaining a brand-new forward-flow entry keyed
+// nat_conn_table gaining a brand-new forward-flow entry keyed
 // saddr=<the VIP>, exactly as if the VIP were a tenant backend
 // originating a fresh outbound connection. public_uplink_table's
 // existence (and usid_egress checking it immediately after a vip_xlat

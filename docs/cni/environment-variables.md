@@ -39,9 +39,10 @@ they resolve only `LogFile`/`LogLevel` from `HostConf` — never `NodeName` or
 | `Namespace`      | Kubernetes namespace for BGP CRDs (`galactic-system` by default).                                                                                                                                                                                                                                                                    |
 | `LogFile`        | Path the plugin logs to (`/var/log/galactic/galactic-cni.log` by default, shared across every binary in the chain).                                                                                                                                                                                                                  |
 | `LogLevel`       | Verbosity of plugin logging: `debug`, `info`, `warn`, or `error` (`info` by default). See [Log verbosity](#log-verbosity) below.                                                                                                                                                                                                     |
-| `NAT66ShardSIDs` | Comma-separated list of every live `galactic-nat66` shard's `Status.ShardSID`, resolved once by `galactic-cni init` from `GALACTIC_CNI_NAT66_SHARD_SIDS` and written here so a per-pod CNI invocation can read it. See [`GALACTIC_CNI_NAT66_SHARD_SIDS`](#galactic_cni_nat66_shard_sids) below.                                      |
+| `EgressShardSIDs` | Comma-separated list of every live `galactic-nat` shard's `Status.ShardSID`, resolved once by `galactic-cni init` from `GALACTIC_CNI_EGRESS_SHARD_SIDS` and written here so a per-pod CNI invocation can read it. See [`GALACTIC_CNI_EGRESS_SHARD_SIDS`](#galactic_cni_egress_shard_sids) below.                                      |
+| `NAT64Prefix`     | Fabric-wide NAT64 `/96` a tenant VRF gets an egress route toward, resolved once by `galactic-cni init` from `GALACTIC_CNI_NAT64_PREFIX`. Empty means this fabric has no NAT64. Must match what the shards translate for and what DNS64 synthesizes into.                                                                              |
+| `EBPFInterfaces` | Comma-separated interface list the eBPF uSID datapath attaches its ingress hook to, resolved once by `galactic-cni init` (env override or auto-detection) and written here for the same reason as `EgressShardSIDs`. See [`GALACTIC_CNI_EBPF_INTERFACES`](#galactic_cni_ebpf_interfaces-and-galactic_cni_ebpf_filter_priority) below. |
 | `DANDir`         | Directory the tap master plugin writes a sandbox's Directly Attachable Network file to (`/run/kata-containers/dans-rs` by default). Only the location is node-level; whether an attachment gets a file is the `dan` field in its own CNI config. See [`GALACTIC_CNI_DAN_DIR`](#galactic_cni_dan_dir) below.                        |
-| `EBPFInterfaces` | Comma-separated interface list the eBPF uSID datapath attaches its ingress hook to, resolved once by `galactic-cni init` (env override or auto-detection) and written here for the same reason as `NAT66ShardSIDs`. See [`GALACTIC_CNI_EBPF_INTERFACES`](#galactic_cni_ebpf_interfaces-and-galactic_cni_ebpf_filter_priority) below. |
 
 ## Resolution precedence
 
@@ -52,7 +53,8 @@ they resolve only `LogFile`/`LogLevel` from `HostConf` — never `NodeName` or
 | Namespace            | `namespace` field in the CNI config JSON → `GALACTIC_CNI_NAMESPACE` env → `HostConf.Namespace`                                                                                                                                   | `galactic-system`                    | `galactic-veth`, `galactic-tap`, `galactic-bgp` |
 | Log file             | `GALACTIC_CNI_LOG_FILE` env → `HostConf.LogFile`                                                                                                                                                                                 | `/var/log/galactic/galactic-cni.log` | every binary in the chain                       |
 | Log level            | `GALACTIC_CNI_LOG_LEVEL` env → `HostConf.LogLevel`                                                                                                                                                                               | `info`                               | every binary in the chain                       |
-| NAT66 shard SIDs     | `GALACTIC_CNI_NAT66_SHARD_SIDS` env (`galactic-cni init`/`run` only) → `HostConf.NAT66ShardSIDs`                                                                                                                                 | _(empty: no shard configured)_       | `galactic-cni init`, `galactic-bgp`             |
+| Egress shard SIDs    | `GALACTIC_CNI_EGRESS_SHARD_SIDS` env (`galactic-cni init`/`run` only) → `HostConf.EgressShardSIDs`                                                                                                                                 | _(empty: no shard configured)_       | `galactic-cni init`, `galactic-bgp`             |
+| NAT64 prefix         | `GALACTIC_CNI_NAT64_PREFIX` env (`galactic-cni init`/`run` only) → `HostConf.NAT64Prefix`                                                                                                                                          | _(empty: no NAT64)_                  | `galactic-cni init`, `galactic-bgp`             |
 | eBPF interfaces      | `GALACTIC_CNI_EBPF_INTERFACES` env → `HostConf.EBPFInterfaces` (bridged back into the env var for `galactic-bgp`'s own process, see below) → auto-detect (interface(s) carrying the default IPv6 route)                          | _(auto-detected)_                    | `galactic-cni init`/`run`, `galactic-bgp`       |
 | DAN directory        | `GALACTIC_CNI_DAN_DIR` env → `HostConf.DANDir`                                                                                                                                                                                  | `/run/kata-containers/dans-rs`       | `galactic-cni init`, `galactic-tap`             |
 | eBPF filter priority | `GALACTIC_CNI_EBPF_FILTER_PRIORITY` env (plain `os.Getenv`, no `HostConf`/conflist tier)                                                                                                                                         | `1`                                  | `galactic-cni init`/`run`                       |
@@ -135,9 +137,9 @@ field; as of this writing it is still env-only.
   **Type:** `uint16` · **Default:** `1` (highest/lowest-numbered priority
   `tc` allows)
 
-## `GALACTIC_CNI_NAT66_SHARD_SIDS`
+## `GALACTIC_CNI_EGRESS_SHARD_SIDS`
 
-Comma-separated list of every live `galactic-nat66` shard's
+Comma-separated list of every live `galactic-nat` shard's
 `Status.ShardSID` — the fabric-wide membership list
 `internal/plumbing/srv6.EgressDefaultRouteAdd` needs to install a tenant
 VRF's default egress route across every shard, since no single Kubernetes
@@ -147,7 +149,7 @@ derivation yet" status as `GALACTIC_GATEWAY_SRV6_ADDRESS`.
 
 Resolved the same way as `GALACTIC_CNI_EBPF_INTERFACES` above: `galactic-cni
 init` reads it once from its own pod env and writes it into
-`HostConf.NAT66ShardSIDs`; `galactic-bgp` (invoked per-pod, not a
+`HostConf.EgressShardSIDs`; `galactic-bgp` (invoked per-pod, not a
 long-lived process with configurable env) reads it from there. Unset or
 empty means no shard configured yet — a VRF gets no default egress route,
 the same behavior as before this mechanism existed, not an error.

@@ -57,10 +57,18 @@ type HostConf struct {
 	LogFile    string `json:"log_file"`
 	LogLevel   string `json:"log_level,omitempty"`
 
-	// NAT66ShardSIDs is the comma-separated NAT66 shard SID list, written by
+	// EgressShardSIDs is the comma-separated egress shard SID list, written by
 	// the installer from its own environment and read by the BGP plugin: a CNI
 	// plugin's exec environment carries none of this on its own.
-	NAT66ShardSIDs string `json:"nat66_shard_sids,omitempty"`
+	//
+	// One SID per shard covers both address families, so enabling NAT64 adds no
+	// entry here -- only NAT64Prefix below.
+	EgressShardSIDs string `json:"egress_shard_sids,omitempty"`
+
+	// NAT64Prefix is the fabric-wide NAT64 prefix, written by the installer
+	// from the same environment. Empty means this fabric has no NAT64 and a VRF
+	// gets no route toward it.
+	NAT64Prefix string `json:"nat64_prefix,omitempty"`
 
 	// EBPFInterfaces is the comma-separated interface list, written by the
 	// installer from its own environment or auto-detection. The installer runs

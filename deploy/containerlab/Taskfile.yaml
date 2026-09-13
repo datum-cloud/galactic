@@ -22,7 +22,7 @@ tasks:
       - "build:galactic-router"
       - "build:galactic-gateway"
       - "build:galactic-cni"
-      - "build:galactic-nat66"
+      - "build:galactic-nat"
 
   "build:node":
     desc: Build the Kind node image
@@ -59,10 +59,10 @@ tasks:
     cmds:
       - docker build --network=host --build-context network=../../../network -t galactic-cni:latest -f ../../containers/galactic-cni/Dockerfile ../..
 
-  "build:galactic-nat66":
-    desc: Build the galactic-nat66 egress datapath image
+  "build:galactic-nat":
+    desc: Build the galactic-nat egress datapath image
     cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-nat66:latest -f ../../containers/galactic-nat66/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t galactic-nat:latest -f ../../containers/galactic-nat/Dockerfile ../..
 
   deploy:
     desc: Build images and deploy the full lab
@@ -77,7 +77,7 @@ tasks:
       - task: "deploy:cni"
       - task: "deploy:fabric"
       - task: "deploy:galactic-router"
-      - task: "deploy:galactic-nat66"
+      - task: "deploy:galactic-nat"
       - task: "deploy:scenarios"
 
   "deploy:clusters":
@@ -208,11 +208,11 @@ tasks:
       - task: load-image
         vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
       - task: load-image
-        vars: {IMAGE: galactic-nat66:latest, NODE: iad-worker}
+        vars: {IMAGE: galactic-nat:latest, NODE: iad-worker}
       - task: load-image
-        vars: {IMAGE: galactic-nat66:latest, NODE: sjc-worker}
+        vars: {IMAGE: galactic-nat:latest, NODE: sjc-worker}
       - task: load-image
-        vars: {IMAGE: galactic-nat66:latest, NODE: dfw-worker}
+        vars: {IMAGE: galactic-nat:latest, NODE: dfw-worker}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -257,10 +257,10 @@ tasks:
     cmds:
       - ./scripts/deploy-galactic-router.sh
 
-  "deploy:galactic-nat66":
+  "deploy:galactic-nat":
     desc: Install the NAT66 egress DaemonSet and shards
     cmds:
-      - ./scripts/deploy-galactic-nat66.sh
+      - ./scripts/deploy-galactic-nat.sh
 
   "deploy:scenarios":
     desc: Deploy all VPC test scenarios
@@ -270,6 +270,7 @@ tasks:
       - task: "deploy:ns30"
       - task: "deploy:ns40"
       - task: "deploy:ns60"
+      - task: "deploy:ns70"
 
   "deploy:ns10":
     desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
@@ -291,6 +292,11 @@ tasks:
     cmds:
       - ./scripts/deploy-ns.sh ns40 iad
 
+  "deploy:ns70":
+    desc: Deploy ns70 test VPC (overlapping ULA on two sites, collision fixture)
+    cmds:
+      - ./scripts/deploy-ns.sh ns70 iad sjc
+
   "deploy:ns60":
     desc: Deploy ns60 test VPC (gateway canary backend)
     cmds:
@@ -305,7 +311,9 @@ tasks:
       - task: "verify:srv6"
       - task: "verify:evpn"
       - task: "verify:gateway"
-      - task: "verify:nat66-sharding"
+      - task: "verify:nat-sharding"
+      - task: "verify:nat-egress"
+      - task: "verify:nat-collision"
       - task: "verify:scenarios"
 
   "verify:bgp-transit":
@@ -360,15 +368,120 @@ tasks:
       - docker exec iad-control-plane kubectl get networkgateways,networkrules -n galactic-system
       - docker exec iad-control-plane kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
 
-  "verify:nat66-sharding":
-    desc: Verify each site's NAT66Shard and shard SID
+  "verify:nat-sharding":
+    desc: Verify each site's EgressShard and shard SID
     cmds:
       - |
         for site in dfw sjc iad; do
           echo "--- ${site} ---"
-          docker exec ${site}-control-plane kubectl get nat66shards -n galactic-system -o wide
+          docker exec ${site}-control-plane kubectl get egressshards -n galactic-system -o wide
           docker exec ${site}-control-plane kubectl get bgpadvertisements -n galactic-system
         done
+
+  "verify:nat-egress":
+    desc: Prove a tenant's packet is actually translated, not just that the shards exist
+    cmds:
+      # verify:nat-sharding above reads CRDs and proves only that the control
+      # plane agrees with itself. This drives a real packet through the
+      # datapath and reads what came out on the wire.
+      #
+      # dfw's tenants egress through sjc's shard: a node cannot resolve its own
+      # self-originated shard SID, so dfw falls through to the next configured
+      # one. That is why the sender and the capture are on different sites.
+      #
+      # Three things are checked, each of which has been broken at some point:
+      # the EtherType (the decapsulated frame needs a rebuilt link header, or
+      # the kernel dispatches it on stale packet bytes and it reaches no
+      # protocol handler), the source address (the whole point of the
+      # translation), and the masquerade port's range.
+      - |
+        set -e
+        shard=$(docker exec sjc-control-plane kubectl -n galactic-system get egressshard \
+          -o jsonpath='{.items[0].status.shardAddressIPv6}')
+        if [ -z "${shard}" ]; then
+          echo "FAIL: sjc's EgressShard publishes no IPv6 masquerade address" >&2
+          exit 1
+        fi
+        echo "sjc shard masquerade address: ${shard}"
+
+        before=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics \
+          | awk -F' ' '/^galactic_nat_conns\{family="nat66"\}/ {print $2}')
+
+        docker exec sjc-worker timeout 16 tcpdump -i eth1 -nn -e -c 2 \
+          "ip6 and src ${shard}" >/tmp/nat-egress.txt 2>&1 &
+        sleep 2
+        pod=$(docker exec dfw-control-plane kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
+        docker exec dfw-control-plane kubectl -n ns10 exec "${pod}" -- \
+          timeout 6 bash -c 'for i in 1 2; do echo probe | nc -u -w1 2001:db8:1:10::1 9999; done' \
+          >/dev/null 2>&1 || true
+        wait
+
+        if ! grep -q "ethertype IPv6 (0x86dd)" /tmp/nat-egress.txt; then
+          echo "FAIL: no translated packet reached the wire with a valid IPv6 EtherType" >&2
+          cat /tmp/nat-egress.txt >&2
+          exit 1
+        fi
+        port=$(grep -oE "${shard}\.[0-9]+" /tmp/nat-egress.txt | head -1 | sed "s/.*\.//")
+        if [ -z "${port}" ] || [ "${port}" -lt 32768 ] || [ "${port}" -ge 60768 ]; then
+          echo "FAIL: masquerade port '${port}' outside the datapath's PAT range [32768,60768)" >&2
+          exit 1
+        fi
+
+        after=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics \
+          | awk -F' ' '/^galactic_nat_conns\{family="nat66"\}/ {print $2}')
+        if [ "${after}" -le "${before}" ]; then
+          echo "FAIL: connection table did not grow (${before} -> ${after})" >&2
+          exit 1
+        fi
+
+        drops=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics \
+          | awk '/^galactic_nat_drops_total/ && $2 != 0 {print}')
+        if [ -n "${drops}" ]; then
+          echo "FAIL: shard recorded drops while translating:" >&2
+          echo "${drops}" >&2
+          exit 1
+        fi
+
+        echo "PASS: translated to ${shard}:${port}, table ${before} -> ${after}, no drops"
+
+  "verify:nat-collision":
+    desc: Prove two tenants sharing a ULA on different nodes do not share a translation
+    cmds:
+      # ns70's iad and sjc pods hold the same address by construction, and both
+      # egress through dfw's shard because neither site can resolve its own
+      # self-originated shard SID. Sending an identical 5-tuple from each makes
+      # every field of the connection key identical except the encapsulation
+      # source, so a shard that keyed on the SRv6 Argument alone would collapse
+      # them into one row -- and then deliver one tenant's replies to the other.
+      #
+      # Two distinct masquerade ports in the capture is the pass condition.
+      # They are normally adjacent: identical hash inputs give both flows the
+      # same probe starting point, so the second claims the next candidate.
+      - |
+        set -e
+        # A source port that changes per run, so each run creates genuinely new
+        # flows. With a fixed port the connection rows survive in the pinned
+        # map across a DaemonSet restart, and a rerun re-asserts the ports an
+        # earlier run allocated instead of exercising the allocator at all --
+        # the test would keep passing after the code it covers stopped working.
+        sport=$(( 20000 + ($(date +%s) % 10000) ))
+        echo "source port for this run: ${sport}"
+        docker exec dfw-worker timeout 16 tcpdump -i eth1 -nn -c 4 \
+          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:10::1' >/tmp/nat-collision.txt 2>&1 &
+        sleep 2
+        for site in iad sjc; do
+          pod=$(docker exec ${site}-control-plane kubectl -n ns70 get pods -o jsonpath='{.items[0].metadata.name}')
+          docker exec ${site}-control-plane kubectl -n ns70 exec "${pod}" -- \
+            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:10::1 9999" >/dev/null 2>&1 || true
+        done
+        wait
+        ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision.txt | cut -d. -f2 | sort -u)
+        echo "masquerade ports allocated: $(echo ${ports} | tr '\n' ' ')"
+        if [ "$(echo "${ports}" | wc -l)" -lt 2 ]; then
+          echo "FAIL: both tenants share one masquerade port -- their flows collided" >&2
+          exit 1
+        fi
+        echo "PASS: each tenant received its own translation"
 
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios
