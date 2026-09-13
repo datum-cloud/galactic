@@ -270,6 +270,7 @@ tasks:
       - task: "deploy:ns30"
       - task: "deploy:ns40"
       - task: "deploy:ns60"
+      - task: "deploy:ns70"
 
   "deploy:ns10":
     desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
@@ -291,6 +292,11 @@ tasks:
     cmds:
       - ./scripts/deploy-ns.sh ns40 iad
 
+  "deploy:ns70":
+    desc: Deploy ns70 test VPC (overlapping ULA on two sites, collision fixture)
+    cmds:
+      - ./scripts/deploy-ns.sh ns70 iad sjc
+
   "deploy:ns60":
     desc: Deploy ns60 test VPC (gateway canary backend)
     cmds:
@@ -306,6 +312,7 @@ tasks:
       - task: "verify:evpn"
       - task: "verify:gateway"
       - task: "verify:nat-sharding"
+      - task: "verify:nat-collision"
       - task: "verify:scenarios"
 
   "verify:bgp-transit":
@@ -369,6 +376,38 @@ tasks:
           docker exec ${site}-control-plane kubectl get egressshards -n galactic-system -o wide
           docker exec ${site}-control-plane kubectl get bgpadvertisements -n galactic-system
         done
+
+  "verify:nat-collision":
+    desc: Prove two tenants sharing a ULA on different nodes do not share a translation
+    cmds:
+      # ns70's iad and sjc pods hold the same address by construction, and both
+      # egress through dfw's shard because neither site can resolve its own
+      # self-originated shard SID. Sending an identical 5-tuple from each makes
+      # every field of the connection key identical except the encapsulation
+      # source, so a shard that keyed on the SRv6 Argument alone would collapse
+      # them into one row -- and then deliver one tenant's replies to the other.
+      #
+      # Two distinct masquerade ports in the capture is the pass condition.
+      # They are normally adjacent: identical hash inputs give both flows the
+      # same probe starting point, so the second claims the next candidate.
+      - |
+        set -e
+        docker exec dfw-worker timeout 16 tcpdump -i eth1 -nn -c 4 \
+          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:10::1' >/tmp/nat-collision.txt 2>&1 &
+        sleep 2
+        for site in iad sjc; do
+          pod=$(docker exec ${site}-control-plane kubectl -n ns70 get pods -o jsonpath='{.items[0].metadata.name}')
+          docker exec ${site}-control-plane kubectl -n ns70 exec "${pod}" -- \
+            timeout 5 bash -c 'echo collide | nc -u -w1 -p 7777 2001:db8:1:10::1 9999' >/dev/null 2>&1 || true
+        done
+        wait
+        ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision.txt | cut -d. -f2 | sort -u)
+        echo "masquerade ports allocated: $(echo ${ports} | tr '\n' ' ')"
+        if [ "$(echo "${ports}" | wc -l)" -lt 2 ]; then
+          echo "FAIL: both tenants share one masquerade port -- their flows collided" >&2
+          exit 1
+        fi
+        echo "PASS: each tenant received its own translation"
 
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios
