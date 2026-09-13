@@ -123,6 +123,8 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 // approach.
 static long (*bpf_l4_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to,
 				    __u64 flags) = (void *) BPF_FUNC_l4_csum_replace;
+static long (*bpf_skb_load_bytes)(const struct __sk_buff *skb, __u32 offset, void *to,
+				__u32 len) = (void *) BPF_FUNC_skb_load_bytes;
 static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const void *from, __u32 len,
 				    __u64 flags) = (void *) BPF_FUNC_skb_store_bytes;
 
@@ -912,10 +914,14 @@ static USID_ALWAYS_INLINE long apply_vip_xlat(struct __sk_buff *skb, __u32 addr_
 //
 // A GSO packet whose transport header can't be read falls back to the total
 // length, which can only over-reject.
-static USID_ALWAYS_INLINE __u16 usid_fib_tot_len(struct __sk_buff *skb, __u8 *l4, __u16 l3_len, __u32 l3_hdr_len,
+//
+// The transport header is read with bpf_skb_load_bytes at a scalar offset
+// rather than through a packet pointer. IPv4 options make the header's position
+// variable, and the verifier rejects adding a variable offset to a packet
+// pointer unless the loader holds CAP_PERFMON, which galactic-cni does not.
+static USID_ALWAYS_INLINE __u16 usid_fib_tot_len(struct __sk_buff *skb, __u16 l3_len, __u32 l3_hdr_len,
 						__u8 l4proto)
 {
-	void *data_end = (void *) (long) skb->data_end;
 	__u32 gso_size = skb->gso_size;
 	__u32 l4_hdr_len;
 
@@ -925,11 +931,11 @@ static USID_ALWAYS_INLINE __u16 usid_fib_tot_len(struct __sk_buff *skb, __u8 *l4
 		return l3_len;
 
 	if (l4proto == USID_IPPROTO_TCP) {
-		__u8 *doff = l4 + USID_TCP_DOFF_OFFSET;
+		__u8 doff;
 
-		if ((void *) (doff + 1) > data_end)
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + l3_hdr_len + USID_TCP_DOFF_OFFSET, &doff, sizeof(doff)))
 			return l3_len;
-		l4_hdr_len = (__u32) (*doff >> 4) * 4;
+		l4_hdr_len = (__u32) (doff >> 4) * 4;
 		if (l4_hdr_len < USID_TCP_MIN_HDR_LEN)
 			return l3_len;
 	} else if (l4proto == USID_IPPROTO_UDP) {
@@ -1269,8 +1275,7 @@ int usid_ingress(struct __sk_buff *skb)
 		// fixed 40-byte header plus payload_len, in host order.
 		__u16 l3_len = (__u16) sizeof(struct usid_ip6hdr) + __builtin_bswap16(inner6->payload_len);
 
-		fib_params.tot_len = usid_fib_tot_len(skb, (__u8 *) (inner6 + 1), l3_len, sizeof(struct usid_ip6hdr),
-						      inner6->nexthdr);
+		fib_params.tot_len = usid_fib_tot_len(skb, l3_len, sizeof(struct usid_ip6hdr), inner6->nexthdr);
 	} else {
 		struct usid_iphdr *inner4 = (void *) inner;
 
@@ -1288,8 +1293,7 @@ int usid_ingress(struct __sk_buff *skb)
 		// IHL, since options move the transport header.
 		__u32 ihl_len = (__u32) (inner4->ver_ihl & 0x0F) * 4;
 
-		fib_params.tot_len = usid_fib_tot_len(skb, (__u8 *) inner4 + ihl_len, __builtin_bswap16(inner4->tot_len),
-						      ihl_len, inner4->protocol);
+		fib_params.tot_len = usid_fib_tot_len(skb, __builtin_bswap16(inner4->tot_len), ihl_len, inner4->protocol);
 	}
 
 	fib_params.ifindex = skb->ingress_ifindex;
