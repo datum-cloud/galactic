@@ -293,6 +293,7 @@ tasks:
       - task: "verify:srv6"
       - task: "verify:evpn"
       - task: "verify:gateway"
+      - task: "verify:gateway-ingress"
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
       - task: "verify:nat-collision"
@@ -386,68 +387,139 @@ tasks:
   # verify:gateway above reads CRDs and DaemonSets, so it passes on a datapath
   # where no connection can complete -- the same shape as #551. This drives a
   # real request from the one host outside every cluster (remote-host on tr4)
-  # to the anycast ingress VIP and reads what comes back.
+  # to the anycast ingress VIP and reads what came back, on the wire and in the
+  # counters.
   #
-  # Both halves of that connection have failed at some point, for unrelated
-  # reasons, and each is asserted separately here. The request reaches a
-  # backend only if the gateway sends its encapsulated packet out the interface
-  # the route to that backend selects rather than the one the client's packet
-  # arrived on (#553). The reply reaches the client only if the edge node
-  # forwards it before netfilter, connection tracking having never seen the
-  # encapsulated forward half and marking the reply invalid for kube-proxy's
-  # KUBE-FORWARD chain to drop (#554) -- so the invalid-drop counter not moving
-  # is as much the result as the response body is.
+  # Four assertions, because a 200 alone would not tell them apart:
   #
-  # Deliberately NOT in the `verify` chain yet, matching verify:nat-datapath
-  # below: it stays red until a gateway image carrying both fixes is deployed,
-  # and a permanently red `verify` destroys the signal for everything else.
-  # Move it into `verify` once they land.
+  #   - The VIP answers. Both halves of the connection worked at all.
+  #   - A backend logged the request, with the off-fabric client's own address
+  #     as its peer. That is DSR's defining property -- the client's packet
+  #     reaches the backend unmodified -- and it is what separates a real
+  #     round trip from some other nginx in the lab answering.
+  #   - The gateway counted the request and the reply. Traffic that took the
+  #     kernel's own forwarding path instead of the datapath would still
+  #     return 200 while both counters sat still.
+  #   - No edge node dropped a packet as ctstate INVALID. The reply crossing
+  #     the kernel forwarding path rather than edge_return is exactly what
+  #     that counter catches, and nothing else in this lab moves it.
+  #
+  # Which site answers is transit best-path's choice, not this task's, so
+  # everything here discovers the serving site rather than assuming one. Note
+  # that only that site is exercised: a second site's gateways stay untested
+  # until best-path moves.
+  #
+  # Needs deploy:ns60's backends (the `deploy` task installs them).
   "verify:gateway-ingress":
     desc: Full round trip from the off-fabric client to an anycast ingress VIP
+    # silent: the script is long enough that echoing it buries the result.
     silent: true
     vars:
       VIP: "2001:db8:6060::1"
+      # remote-host on tr4, the one host outside every cluster.
+      CLIENT: "2001:db8:1:40::2"
       EDGE_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
+      SITES: "dfw sjc iad"
+      METRICS_PORT: "8081"
     cmds:
       - |
         set -e
-        # The first rule of KUBE-FORWARD, per node, before and after. Matched
-        # on the rule text rather than by position: kube-proxy owns this chain
-        # and its ordering is not ours to assume.
-        invalid_drops() {
-          docker exec "$1" ip6tables -t filter -L KUBE-FORWARD -n -v -x 2>/dev/null \
-            | awk '/ctstate INVALID/ {print $1; exit}'
+        marker="galactic-verify-$(date +%s)"
+
+        # One sample per edge node: the kernel's invalid-drop counter plus the
+        # three datapath counters, as "<invalid> <forward> <return> <drops>".
+        # The KUBE-FORWARD rule is matched on its text rather than its
+        # position -- kube-proxy owns that chain and its ordering is not ours
+        # to assume.
+        sample() {
+          inv=$(docker exec "$1" ip6tables -t filter -L KUBE-FORWARD -n -v -x 2>/dev/null \
+            | awk '/ctstate INVALID/ {print $1; exit}')
+          m=$(docker exec "$1" curl -s --max-time 5 http://localhost:{{.METRICS_PORT}}/metrics 2>/dev/null || true)
+          fwd=$(printf '%s\n' "${m}" | awk '/^galactic_edge_rule_packets_total/ {s+=$2} END {print s+0}')
+          ret=$(printf '%s\n' "${m}" | awk '/^galactic_edge_return_packets_total/ {s+=$2} END {print s+0}')
+          drp=$(printf '%s\n' "${m}" | awk '/^galactic_edge_drops_total/ {s+=$2} END {print s+0}')
+          echo "${inv:-0} ${fwd} ${ret} ${drp}"
         }
 
-        before=$(mktemp -d)
-        for node in {{.EDGE_NODES}}; do
-          invalid_drops ${node} > ${before}/${node}
-        done
+        # Counter values are Prometheus floats, so compare in awk rather than
+        # with shell integer tests.
+        rose() { awk -v a="$1" -v b="$2" 'BEGIN {exit !(b > a)}'; }
+
+        snap=$(mktemp -d)
+        for node in {{.EDGE_NODES}}; do sample ${node} > ${snap}/${node}; done
 
         echo "--- GET http://[{{.VIP}}]/ from the off-fabric client ---"
-        body=$(docker exec clab-gvpc-remote-host \
-          curl -sS --max-time 12 -o /dev/null -w '%{http_code}' "http://[{{.VIP}}]/") && rc=0 || rc=$?
+        code=$(docker exec clab-gvpc-remote-host curl -sS --max-time 12 -A "${marker}" \
+          -o /dev/null -w '%{http_code}' "http://[{{.VIP}}]/") && rc=0 || rc=$?
         if [ "${rc}" -ne 0 ]; then
-          echo "FAIL: no response from the VIP (curl exit ${rc})" >&2
+          echo "FAIL: no response from the VIP (curl exit ${rc}) -- the request never reached a backend," \
+               "or its reply never came back" >&2
           exit 1
         fi
-        if [ "${body}" != "200" ]; then
-          echo "FAIL: VIP answered HTTP ${body}, want 200" >&2
+        if [ "${code}" != "200" ]; then
+          echo "FAIL: VIP answered HTTP ${code}, want 200" >&2
           exit 1
         fi
 
+        # Which backend served it, and what it saw as the client.
+        served=""
+        for site in {{.SITES}}; do
+          cp=${site}-control-plane
+          pods=$(docker exec ${cp} kubectl -n ns60 get pods \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+          for pod in ${pods}; do
+            line=$(docker exec ${cp} kubectl -n ns60 logs ${pod} --tail=200 2>/dev/null \
+              | grep "${marker}" | tail -1 || true)
+            if [ -n "${line}" ]; then served="${site}/${pod}"; served_line="${line}"; fi
+          done
+        done
+        if [ -z "${served}" ]; then
+          echo "FAIL: the VIP answered 200 but no ns60 backend logged the request -- something other than a" \
+               "tenant backend answered (or ns60 is not deployed: run deploy:ns60)" >&2
+          exit 1
+        fi
+        peer=$(echo "${served_line}" | awk '{print $1}')
+        if [ "${peer}" != "{{.CLIENT}}" ]; then
+          echo "FAIL: ${served} saw the client as ${peer}, want {{.CLIENT}} -- DSR must carry the client's" \
+               "own address to the backend unmodified" >&2
+          exit 1
+        fi
+        echo "served by ${served}, which saw the client as ${peer}"
+
+        # The datapath's own account of the same request.
+        fwd_moved=0
+        ret_moved=0
         for node in {{.EDGE_NODES}}; do
-          was=$(cat ${before}/${node})
-          now=$(invalid_drops ${node})
-          if [ "${now:-0}" -gt "${was:-0}" ]; then
-            echo "FAIL: ${node} dropped $((now - was)) packet(s) as ctstate INVALID -- the reply crossed the" \
-                 "kernel forwarding path instead of the return datapath (#554)" >&2
+          set -- $(cat ${snap}/${node}); was_inv=$1; was_fwd=$2; was_ret=$3; was_drp=$4
+          set -- $(sample ${node});      now_inv=$1; now_fwd=$2; now_ret=$3; now_drp=$4
+
+          if [ "${now_inv:-0}" -gt "${was_inv:-0}" ]; then
+            echo "FAIL: ${node} dropped $((now_inv - was_inv)) packet(s) as ctstate INVALID -- a reply crossed" \
+                 "the kernel forwarding path instead of the return datapath (#554)" >&2
             exit 1
           fi
+          if rose "${was_drp}" "${now_drp}"; then
+            echo "FAIL: ${node}'s datapath counted a drop during this request (galactic_edge_drops_total" \
+                 "${was_drp} -> ${now_drp}); see its drops_total reason labels" >&2
+            exit 1
+          fi
+          if rose "${was_fwd}" "${now_fwd}"; then fwd_moved=1; echo "forward half claimed by ${node}"; fi
+          if rose "${was_ret}" "${now_ret}"; then ret_moved=1; echo "reply forwarded by ${node}"; fi
         done
-        rm -rf ${before}
 
-        echo "PASS: VIP answered 200, no edge node dropped a packet as invalid"
+        if [ "${fwd_moved}" -eq 0 ]; then
+          echo "FAIL: no gateway counted the request (galactic_edge_rule_packets_total did not move) -- the VIP" \
+               "answered without the XDP datapath intercepting anything" >&2
+          exit 1
+        fi
+        if [ "${ret_moved}" -eq 0 ]; then
+          echo "FAIL: no gateway counted the reply (galactic_edge_return_packets_total did not move) -- the" \
+               "reply took the kernel forwarding path, which survives only while conntrack happens to allow it" >&2
+          exit 1
+        fi
+        rm -rf ${snap}
+
+        echo "PASS: VIP answered 200, backend saw the real client, both halves counted, no invalid drops"
 
   "verify:nat-sharding":
     desc: Verify each site's EgressShard and shard SID
