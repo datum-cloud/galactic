@@ -2,12 +2,51 @@ apiVersion: kind.x-k8s.io/v1alpha4
 kind: Cluster
 nodes:
   - role: control-plane
+  # Kind names workers sequentially by declaration order: dfw-worker,
+  # dfw-worker2, dfw-worker3. Those names are used as-is -- no
+  # kubeadmConfigPatches rename and no post-deploy `docker rename` -- so a
+  # node's role is carried entirely by its labels, and the container name,
+  # the Kubernetes node name, and the frr.conf.<nodename> ConfigMap key all
+  # agree by construction. See docs/node-labels.md.
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw
       galactic.datumapis.com/node: compute
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
+  # Two edge nodes, active-active: a single one would still work but would
+  # never exercise the anycast VIP path that two equal-cost gateways
+  # originating the same ingress route create (see
+  # internal/gateway/doc.go). dfw is the only site with a pair; sjc and iad
+  # each run a single edge node.
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: dfw
+      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/galactic: router
+      galactic.datumapis.com/fabric: router
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: galactic.datumapis.com/node
+              value: edge
+              effect: NoSchedule
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: dfw
+      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/galactic: router
+      galactic.datumapis.com/fabric: router
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: galactic.datumapis.com/node
+              value: edge
+              effect: NoSchedule
 networking:
   ipFamily: ipv6
   disableDefaultCNI: true

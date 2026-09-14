@@ -16,7 +16,7 @@ built on the same base/per-node-overlay shape
   (`dfw-worker`, `iad-worker`, `sjc-worker`) as a 3-shard DaemonSet rather
   than inventing new lab topology. Each pins the DaemonSet to that site's
   own worker via `kubernetes.io/hostname` (`node-patch.yaml`, mirroring
-  `resources/galactic-gateway/iad-gateway1/`'s per-node-pin pattern) and
+  `resources/galactic-gateway/<edge-node>/`'s per-node-pin pattern) and
   sets that shard's own `GALACTIC_NAT_SHARD_SID`/`_SHARD_PUB_ADDR6` —
   see each `node-patch.yaml`'s own comments for the exact uFMT 48+16
   encoding and address choices, including the note on why the NAT66

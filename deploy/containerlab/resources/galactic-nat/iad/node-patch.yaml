@@ -10,15 +10,15 @@ spec:
       # (node_files/iad/config.yaml, worker-index 1) carries it, reusing
       # that existing compute worker as this site's shard rather than
       # introducing a dedicated node, per the redesign plan's own §8
-      # suggestion. iad-worker-rr (the route reflector,
+      # suggestion. iad-worker3 (the route reflector,
       # galactic.datumapis.com/galactic=control, not a
-      # galactic.datumapis.com/node value at all) and iad-gateway1/
-      # iad-gateway2 (the tainted galactic.datumapis.com/node=edge nodes,
-      # see gvpc.clab.yaml and README.md's node table) never carry the
+      # galactic.datumapis.com/node value at all) and iad-worker2 (the
+      # tainted galactic.datumapis.com/node=edge node, see gvpc.clab.yaml
+      # and README.md's node table) never carry the
       # compute label, so no affinity override or hostname pin is needed
       # here: iad-worker is the only node in this cluster carrying it,
       # and the base's own affinity already resolves to exactly it --
-      # unlike resources/galactic-gateway/iad-gateway1/, which needs a
+      # unlike resources/galactic-gateway/dfw-worker2/, which needs a
       # kubernetes.io/hostname pin because iad has *two* edge-labeled
       # nodes needing different per-node env. GALACTIC_NAT_SHARD_SID/
       # _SHARD_PUB_ADDR6 below must be unique per shard node (see
@@ -52,12 +52,12 @@ spec:
             # them. Physical co-location (which node this pod is
             # scheduled to) and uSID identity (which Node-ID a shard's own
             # address claims) are independent; nodeID=9 is free at this
-            # site (iad-worker=1, iad-worker-rr=1, iad-gateway1=2,
-            # iad-gateway2=3 -- see resources/galactic-router/iad/,
-            # resources/galactic-control/iad/, and resources/
-            # galactic-gateway/iad-gateway{1,2}/'s own bgprouter.yaml
-            # files). Function=End.DT46 (0xE), matching resources/
-            # galactic-gateway/iad-gateway1/node-patch.yaml's convention,
+            # site (iad-worker=1, iad-worker2=2, iad-worker3=4 -- see
+            # resources/galactic-router/iad/, resources/galactic-control/
+            # iad/, and resources/galactic-gateway/iad-worker2/'s own
+            # bgprouter.yaml files). Function=End.DT46 (0xE), matching
+            # resources/galactic-gateway/iad-worker2/node-patch.yaml's
+            # convention,
             # even though this address is never actually looked up
             # through function_table/vrf_table the way a real uSID is --
             # EgressShardStatus.ShardSID's own doc comment says it's
@@ -85,3 +85,24 @@ spec:
             # for "NAT66". ::2 here is iad's shard (shard 2 of 3).
             - name: GALACTIC_NAT_SHARD_PUB_ADDR6
               value: "2001:db8:9966:2::1"
+            # Turning NAT64 on for this shard takes both of the next two
+            # together: the IPv4 masquerade source an IPv4-only destination
+            # sees, and the /96 whose synthesized addresses this shard
+            # translates down to IPv4. The prefix is fabric-wide and identical
+            # on every shard and on galactic-cni (which installs the tenant
+            # VRF's route for it); only the address is per-shard.
+            #
+            # 192.0.2.0/24 is RFC 5737 TEST-NET-1, picked for the same reason
+            # 2001:db8:9966::/32 was picked above -- a documentation range
+            # that cannot collide with anything real. ::2 is this site's
+            # shard, matching its IPv6 counterpart's numbering.
+            #
+            # Nothing makes this address reachable, and nothing in this repo
+            # can: a NAT64 reply arrives from the IPv4 internet and something
+            # upstream has to attract it here. Outbound translation therefore
+            # works and replies never arrive -- the IPv4 half of the same gap
+            # #549/#550 describe for IPv6.
+            - name: GALACTIC_NAT_SHARD_PUB_ADDR4
+              value: "192.0.2.2"
+            - name: GALACTIC_NAT_NAT64_PREFIX
+              value: "2001:db8:64::/96"

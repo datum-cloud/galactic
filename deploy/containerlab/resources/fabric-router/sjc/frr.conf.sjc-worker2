@@ -1,0 +1,83 @@
+frr defaults traditional
+hostname sjc-fabric-edge1
+log syslog informational
+
+interface lo
+ ip address 10.255.255.8/32
+ # /128. This is the address galactic-router's outbound EVPN session to the
+ # route reflector sources from, auto-detected from lo via
+ # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS.
+ ipv6 address fc00:0:c::1/128
+!
+interface eth1
+ description tr2-facing (transit uplink)
+ ip address 10.1.21.2/24
+ ipv6 address 2001:db8:1:21::2/64
+!
+interface eth2
+ description sjc-worker-facing (compute)
+ ip address 10.1.20.1/24
+ ipv6 address 2001:db8:1:20::1/64
+!
+
+# Anycast ingress VIP aggregate -- see
+# resources/fabric-router/dfw/frr.conf.dfw-worker2 for the full rationale.
+# Originated identically by every edge node in the lab.
+ipv6 route 2001:db8:6060::/48 Null0
+
+router bgp 65000
+ bgp router-id 10.255.255.8
+ no bgp default ipv4-unicast
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ # eBGP to the transit. This node is one of the lab's only
+ # transit-facing nodes -- compute and the route reflector have no
+ # session to AS 65100 at all, and reach it through the iBGP
+ # sessions below instead.
+ neighbor 2001:db8:1:21::1 remote-as 65100
+ neighbor 10.1.21.1 remote-as 65100
+ #
+ # iBGP to the workers sitting behind this node.
+ neighbor 2001:db8:1:20::2 remote-as 65000
+ neighbor 10.1.20.2 remote-as 65000
+ !
+ address-family ipv6 unicast
+  neighbor 2001:db8:1:21::1 activate
+  neighbor 2001:db8:1:21::1 allowas-in 1
+  neighbor 2001:db8:1:20::2 activate
+  # next-hop-self force: a path this node learned from the transit
+  # carries the transit router's own address as next hop, which the
+  # worker behind this node has no route to. "force" is load-bearing --
+  # plain next-hop-self is not applied to *reflected* paths, because a
+  # route reflector preserves the originator's NEXT_HOP by design
+  # (RFC 4456 s.10). Without it, iad-worker learns the reflector's
+  # loopback with iad-worker3's own link address as next hop, a subnet
+  # it is not on, and resolves it through the Kind management
+  # interface instead -- leaving the EVPN session permanently Active.
+  # route-reflector-client: iBGP split horizon would otherwise stop
+  # this node passing one client's prefixes to another (iad has two).
+  neighbor 2001:db8:1:20::2 next-hop-self force
+  neighbor 2001:db8:1:20::2 route-reflector-client
+  # /128, not the site /48 -- a per-node peering loopback is the only
+  # thing meant to cross the transit as a host route.
+  network fc00:0:c::1/128
+  # Anycast ingress VIP aggregate -- see this file's own comment above.
+  network 2001:db8:6060::/48
+ exit-address-family
+ !
+ # IPv4 underlay -- per-node /32 loopbacks only. There is no IPv4
+ # counterpart to the SRv6 locator block, and the ingress VIP aggregate
+ # stays IPv6-only: this lab's NetworkRule VIPs are IPv6, matching the
+ # edge datapath's own scope (see edgedsr.c).
+ address-family ipv4 unicast
+  neighbor 10.1.21.1 activate
+  neighbor 10.1.21.1 allowas-in 1
+  neighbor 10.1.20.2 activate
+  neighbor 10.1.20.2 next-hop-self force
+  neighbor 10.1.20.2 route-reflector-client
+  network 10.255.255.8/32
+ exit-address-family
+!
+
+ip forwarding
+ipv6 forwarding

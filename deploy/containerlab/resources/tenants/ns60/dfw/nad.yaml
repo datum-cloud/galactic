@@ -1,0 +1,31 @@
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: private
+  namespace: ns60
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "private",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "60",
+          "vpcattachment": "60",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "ipv6_subnet": "fd20:60:ff01::/48",
+            "address_families": ["ipv6"]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "60",
+          "vpcattachment": "60",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

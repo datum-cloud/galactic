@@ -205,30 +205,36 @@ to the gateway datapath — see
 ## Step 3: Worked example, a per-node overlay
 
 `deploy/containerlab/resources/galactic-gateway/` is a real, working
-instantiation pattern to copy for production — two gateway nodes
-(`iad-gateway1`/`iad-gateway2`) in the `iad` lab cluster, each with its own
-overlay directory:
+instantiation pattern to copy for production — four edge nodes across three
+lab clusters, each with its own overlay directory named for the node:
 
 ```
 deploy/containerlab/resources/galactic-gateway/
 ├── base/                 # kustomize base pointing at config/galactic-gateway/base,
 │                         #   plus a lab-only image-tag patch (gateway-lab-patch.yaml)
-├── iad-gateway1/
+├── dfw-worker2/
 │   ├── kustomization.yaml
 │   ├── node-patch.yaml      # pins to one node, sets PUBLIC_INTERFACE/SRV6_ADDRESS
 │   ├── bgprouter.yaml       # this node's tenant BGPRouter
 │   ├── bgppeer.yaml         # this node's iBGP session to the route reflector
 │   └── networkgateway.yaml  # the NetworkGateway object itself
-├── iad-gateway2/            # same shape, this node's own values
-└── iad/
-    ├── kustomization.yaml       # composes both gateway nodes + sample rule
-    ├── networkrule-ns60.yaml    # sample NetworkRule
-    └── servicevipbinding-ns60.yaml  # sample ServiceVIPBinding for the backend
+├── dfw-worker3/             # same shape, this node's own values
+├── sjc-worker2/             #   "
+├── iad-worker2/             #   "
+├── dfw/
+│   ├── kustomization.yaml       # composes this site's edge nodes + its rule
+│   ├── networkrule-ns60.yaml    # sample NetworkRule
+│   └── servicevipbinding-ns60.yaml  # sample ServiceVIPBinding for the backend
+├── sjc/                     # same shape, one edge node
+└── iad/                     #   "
 ```
+
+All three sites bind the same anycast VIP to their own site-local backend, so
+the per-site directories differ only in which backend they point at.
 
 ### `node-patch.yaml` — pin to one node, set the per-node values
 
-`iad-gateway1/node-patch.yaml` adds a `kubernetes.io/hostname` match to the
+`dfw-worker2/node-patch.yaml` adds a `kubernetes.io/hostname` match to the
 DaemonSet's node affinity (so this overlay's copy of the DaemonSet only
 ever schedules onto exactly one node) and sets the two required
 gateway-container env vars:
@@ -253,23 +259,23 @@ spec:
                     values: [edge]
                   - key: kubernetes.io/hostname
                     operator: In
-                    values: [iad-gateway1]
+                    values: [dfw-worker2]
       containers:
         - name: galactic-gateway
           env:
             - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
               value: eth1
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
-              value: "2001:db8:ff03:2:e000::"
+              value: "2001:db8:ff01:2:e000::"
 ```
 
-`iad-gateway2`'s own `node-patch.yaml` repeats this shape with its own
+`dfw-worker3`'s own `node-patch.yaml` repeats this shape with its own
 hostname and a distinct `GALACTIC_GATEWAY_SRV6_ADDRESS`
-(`2001:db8:ff03:3:e000::`) — every gateway node needs its own unique value.
-`iad-gateway1/kustomization.yaml` additionally JSON6902-patches the
-DaemonSet's own `metadata.name` to `galactic-gateway1` (a strategic-merge
-patch can't rename a resource), so the two nodes' DaemonSets don't collide
-under the same name in the same namespace.
+(`2001:db8:ff01:3:e000::`) — every gateway node needs its own unique value.
+`dfw-worker2/kustomization.yaml` additionally JSON6902-patches the
+DaemonSet's own `metadata.name` to `galactic-gateway-dfw-worker2` (a
+strategic-merge patch can't rename a resource), so two gateway nodes in the
+same cluster don't collide under one name in one namespace.
 
 **To generalize this to a real deployment:** create one overlay directory
 per gateway node, each with its own `node-patch.yaml` pinning
@@ -291,16 +297,16 @@ node is not exempt from the normal tenant-BGP setup:
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPRouter
 metadata:
-  name: iad-gateway1-tenant
+  name: dfw-worker2-tenant
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
-    name: iad-gateway1
+    name: dfw-worker2
   roles: [tenant]
   localASN: 65000
-  routerID: "10.0.2.2"
-  srv6Locator: "2001:db8:ff03::/48"
+  routerID: "10.0.1.2"
+  srv6Locator: "2001:db8:ff01::/48"
   nodeID: 2
   addressFamilies:
     - afi: l2vpn
@@ -309,11 +315,11 @@ spec:
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: iad-gateway1-tenant-to-rr
+  name: dfw-worker2-tenant-to-rr
   namespace: galactic-system
 spec:
   routerRef:
-    name: iad-gateway1-tenant
+    name: dfw-worker2-tenant
   peerASN: 65000
   address: "fc00:0:8::1"
   remotePort: 1790
@@ -333,12 +339,12 @@ gateway-specific.
 apiVersion: network.datumapis.com/v1alpha1
 kind: NetworkGateway
 metadata:
-  name: iad-gateway1
+  name: dfw-worker2
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
-    name: iad-gateway1
+    name: dfw-worker2
 ```
 
 `spec.targetRef.name` must equal the Kubernetes node name — by this repo's

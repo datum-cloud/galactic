@@ -6,11 +6,17 @@ metadata:
 spec:
   targetRef:
     kind: Node
-    name: iad-worker-rr
+    name: iad-worker3
   localASN: 65000
   routerID: "10.255.255.4"
   srv6Locator: "2001:db8:ff03::/48"
-  nodeID: 1
+  # nodeID 4, not 1: this router shares iad's locator with iad-worker
+  # (nodeID 1) and iad-worker2 (nodeID 2), and a uSID's Node-ID is what
+  # separates one node's SID space from another's within a site. The
+  # reflector originates no tenant path of its own, so nothing is derived
+  # from this today -- but a duplicate would be indistinguishable from
+  # iad-worker's own SIDs the moment it did.
+  nodeID: 4
   addressFamilies:
     - afi: l2vpn
       safi: evpn

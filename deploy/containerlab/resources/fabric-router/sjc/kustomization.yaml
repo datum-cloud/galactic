@@ -2,7 +2,9 @@ namespace: galactic-system
 resources:
   - ../base
 
+# One key per fabric-carrying node -- see ../dfw/kustomization.yaml.
 configMapGenerator:
   - name: fabric-config
     files:
       - frr.conf.sjc-worker
+      - frr.conf.sjc-worker2

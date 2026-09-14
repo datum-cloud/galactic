@@ -1,0 +1,18 @@
+# This edge node's own client session to the lab's single EVPN route
+# reflector (iad-worker3, fc00:0:8::1 port 1790) -- the same reflector every
+# compute node peers with. Edge and compute exchange EVPN paths through it,
+# never directly.
+apiVersion: network.datumapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: galactic-control-iad-worker2
+  namespace: galactic-system
+spec:
+  routerRef:
+    name: galactic-router-iad-worker2
+  peerASN: 65000
+  address: "fc00:0:8::1"
+  remotePort: 1790
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn
