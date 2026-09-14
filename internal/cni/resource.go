@@ -20,6 +20,12 @@ import (
 type resourceTracker struct {
 	vpc, vpcAttachment string
 
+	// containerID is the CNI container ID this ADD is running for, and so the
+	// owner stamped on any veth it created. Rollback passes it to veth.Delete
+	// so a failed ADD that lost the attachment to a concurrent one tears down
+	// nothing of the winner's.
+	containerID string
+
 	// ipamDelegated, ipamType, and ipamStdin record enough to release the IPAM
 	// allocation during rollback.
 	//
@@ -59,5 +65,7 @@ func (rt *resourceTracker) cleanup() {
 		}
 	}
 
-	cnimaster.CleanupAttachment(rt.vpc, rt.vpcAttachment, "veth", veth.Delete)
+	cnimaster.CleanupAttachment(rt.vpc, rt.vpcAttachment, "veth", func(vpc, vpcAttachment string) error {
+		return veth.Delete(vpc, vpcAttachment, rt.containerID)
+	})
 }

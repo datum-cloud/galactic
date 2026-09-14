@@ -100,10 +100,10 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vrf.Delete(vpc) })
 
-	if err := veth.Add(vpc, testAttachment, 1500); err != nil {
+	if err := veth.Add(vpc, testAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add: %v", err)
 	}
-	t.Cleanup(func() { _ = veth.Delete(vpc, testAttachment) })
+	t.Cleanup(func() { _ = veth.Delete(vpc, testAttachment, testContainerID) })
 	hostLinkObj, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(vpc, testAttachment))
 	if err != nil {
 		t.Fatalf("look up host interface: %v", err)
@@ -249,14 +249,14 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vrf.Delete(vpc) })
 
-	if err := veth.Add(vpc, firstAttachment, 1500); err != nil {
+	if err := veth.Add(vpc, firstAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add(first): %v", err)
 	}
-	t.Cleanup(func() { _ = veth.Delete(vpc, firstAttachment) })
-	if err := veth.Add(vpc, secondAttachment, 1500); err != nil {
+	t.Cleanup(func() { _ = veth.Delete(vpc, firstAttachment, testContainerID) })
+	if err := veth.Add(vpc, secondAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add(second): %v", err)
 	}
-	t.Cleanup(func() { _ = veth.Delete(vpc, secondAttachment) })
+	t.Cleanup(func() { _ = veth.Delete(vpc, secondAttachment, testContainerID) })
 
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
 	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
@@ -369,10 +369,10 @@ func TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind(t *testing.T)
 				t.Fatalf("tap.Add: %v", err)
 			}
 			t.Cleanup(func() { _ = tap.Delete(vpc, tapAttachment) })
-			if err := veth.Add(vpc, vethAttachment, 1500); err != nil {
+			if err := veth.Add(vpc, vethAttachment, testContainerID, 1500); err != nil {
 				t.Fatalf("veth.Add: %v", err)
 			}
-			t.Cleanup(func() { _ = veth.Delete(vpc, vethAttachment) })
+			t.Cleanup(func() { _ = veth.Delete(vpc, vethAttachment, testContainerID) })
 
 			pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
 			t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
