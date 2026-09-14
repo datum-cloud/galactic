@@ -1,0 +1,18 @@
+# Reflector-side session toward sjc-worker (sjc compute). The client side of
+# this same session lives in resources/galactic-router/, pointed
+# back at this node's fc00:0:8::1:1790. Every galactic-router in the lab --
+# compute and edge alike, in all three clusters -- is a client of this one
+# reflector; compute and edge nodes never peer with each other directly.
+apiVersion: network.datumapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: galactic-router-sjc-worker
+  namespace: galactic-system
+spec:
+  routerRef:
+    name: galactic-control
+  peerASN: 65000
+  address: "fc00:0:3::1"
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn

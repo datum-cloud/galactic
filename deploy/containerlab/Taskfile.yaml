@@ -23,6 +23,7 @@ tasks:
       - "build:galactic-gateway"
       - "build:galactic-cni"
       - "build:galactic-nat"
+      - "build:remote-host"
 
   "build:node":
     desc: Build the Kind node image
@@ -64,15 +65,19 @@ tasks:
     cmds:
       - docker build --network=host --build-context network=../../../network -t galactic-nat:latest -f ../../containers/galactic-nat/Dockerfile ../..
 
+  "build:remote-host":
+    desc: Build the off-fabric remote host image (nginx)
+    cmds:
+      - docker build --network=host -t remote-host:latest -f ../../containers/remote-host/Dockerfile ../..
+
   deploy:
     desc: Build images and deploy the full lab
     deps: [build, host-setup]
     cmds:
       - task: "deploy:clusters"
-      # Before deploy:topology, not after: gvpc.clab.yaml names these
-      # containers by the names they end up with, so they have to carry those
-      # names before containerlab attaches to them as ext-containers.
-      - task: "deploy:rename-control"
+      # No rename step: Kind's own sequential worker names are used verbatim
+      # everywhere, so the containers already carry the names gvpc.clab.yaml
+      # and every manifest refer to them by.
       - task: "deploy:topology"
       - task: "deploy:lab-xdp-passthrough"
       - task: "deploy:images"
@@ -98,18 +103,6 @@ tasks:
     cmds:
       - sudo containerlab deploy -t {{.TOPO}}
 
-  "deploy:rename-control":
-    desc: Give iad's extra workers the names the topology and manifests use
-    # Kind names workers sequentially; these three carry Kubernetes node names
-    # set through kubeadmConfigPatches that do not match. Reconciling the
-    # container names makes `docker exec` against a node name work, and lets
-    # gvpc.clab.yaml refer to its own nodes by one set of names rather than
-    # two. Runs before deploy:topology -- see the deploy task.
-    cmds:
-      - docker rename iad-worker2 iad-worker-rr
-      - docker rename iad-worker3 iad-gateway1
-      - docker rename iad-worker4 iad-gateway2
-
   require-clang:
     internal: true
     run: once
@@ -132,95 +125,75 @@ tasks:
     cmds:
       - clang -O2 -g -target bpf -c node_files/common/xdp-passthrough.c -o node_files/common/xdp-passthrough.o
 
-  # Loads the pass-through XDP program on tr3's gateway-facing links
-  # (eth6/eth7) -- makes those veth links behave like a real gateway's
+  # Loads the pass-through XDP program on every transit port facing an
+  # edge node -- makes those veth links behave like a real gateway's
   # physical NIC uplink for edgedsr.c's XDP_TX redirect (see
-  # xdp-passthrough.c's own doc comment). Idempotent: `ip link set ...
-  # xdp obj` replaces whatever program (if any) is already attached.
+  # xdp-passthrough.c's own doc comment). Idempotent: `ip link set ... xdp
+  # obj` replaces whatever program (if any) is already attached.
   "deploy:lab-xdp-passthrough":
-    desc: Load the pass-through XDP program on tr3
+    desc: Load the pass-through XDP program on edge-facing transit ports
     deps: [build:lab-xdp-passthrough]
-    vars:
-      # tr3 is a real containerlab-managed node (kind: linux), unlike the
-      # Kind-cluster nodes elsewhere in this Taskfile (kind: ext-container,
-      # which keep their bare Kind-assigned names) -- containerlab prefixes
-      # its own nodes' container names with "clab-{{.LAB}}-".
-      TR3_CONTAINER: "clab-{{.LAB}}-tr3"
     cmds:
-      - docker cp node_files/common/xdp-passthrough.o {{.TR3_CONTAINER}}:/xdp-passthrough.o
-      # -force: without it, `ip link set ... xdp obj` errors "XDP program
-      # already attached" on any re-run instead of replacing it (verified
-      # live) -- needed for this task to actually be idempotent.
-      - docker exec {{.TR3_CONTAINER}} ip -force link set dev eth6 xdp obj /xdp-passthrough.o sec xdp
-      - docker exec {{.TR3_CONTAINER}} ip -force link set dev eth7 xdp obj /xdp-passthrough.o sec xdp
-
-  # Uses ctr directly instead of `kind load docker-image`, which is
-  # incompatible with containerd v2.
-  "load-image":
-    internal: true
-    desc: Load a docker image into a kind node via ctr
-    requires:
-      vars: [IMAGE, NODE]
-    cmds:
-      - docker save {{.IMAGE}} | docker exec -i {{.NODE}} ctr --namespace k8s.io images import -
+      # Every transit port facing an edge node, and only those: edge nodes
+      # are the lab's only transit-facing nodes, so these are exactly the
+      # links an edge XDP_TX redirect ever lands on. tr1:eth1/eth5 face
+      # dfw-worker2/dfw-worker3, tr2:eth1 faces sjc-worker2, tr3:eth4 faces
+      # iad-worker2 -- keep this list in step with gvpc.clab.yaml's edge
+      # uplinks and node_files/tr*/frr.conf's interface descriptions. The
+      # transit routers are real containerlab-managed nodes (kind: linux),
+      # unlike the Kind-cluster nodes elsewhere in this Taskfile (kind:
+      # ext-container, which keep their bare Kind-assigned names) --
+      # containerlab prefixes its own nodes' container names with
+      # "clab-{{.LAB}}-".
+      - |
+        set -e
+        for pair in tr1:eth1 tr1:eth5 tr2:eth1 tr3:eth4; do
+          tr=${pair%%:*}; iface=${pair##*:}
+          container="clab-{{.LAB}}-${tr}"
+          docker cp node_files/common/xdp-passthrough.o "${container}:/xdp-passthrough.o"
+          # -force: without it, `ip link set ... xdp obj` errors "XDP
+          # program already attached" on any re-run instead of replacing it
+          # (verified live) -- needed for this task to be idempotent.
+          docker exec "${container}" ip -force link set dev "${iface}" xdp obj /xdp-passthrough.o sec xdp
+        done
 
   "deploy:images":
     desc: Load all container images into Kind
+    vars:
+      # Every worker in every cluster runs fabric-router (the underlay eBGP
+      # session everything else depends on) and galactic-router (EVPN --
+      # plain mode on compute/edge, reflector mode on iad-worker3).
+      FABRIC_NODES: >-
+        dfw-worker dfw-worker2 dfw-worker3
+        sjc-worker sjc-worker2
+        iad-worker iad-worker2 iad-worker3
+      # galactic-cni goes everywhere galactic.datumapis.com/galactic=router
+      # is set -- compute and edge alike, but never the reflector, whose
+      # galactic=control value is mutually exclusive with it.
+      CNI_NODES: >-
+        dfw-worker dfw-worker2 dfw-worker3
+        sjc-worker sjc-worker2
+        iad-worker iad-worker2
+      # The edge XDP DSR/Maglev datapath: one instance per edge node.
+      GATEWAY_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
+      # Egress shards reuse each site's compute worker (design plan §8).
+      NAT_NODES: "dfw-worker sjc-worker iad-worker"
     cmds:
-      - task: load-image
-        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker}
-      - task: load-image
-        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-worker-rr}
-      # iad-gateway1/2 need fabric-router (the underlay eBGP session the
-      # gateway XDP datapath's uplink depends on -- see config/fabric-router/'s
-      # affinity, extended to the gateway role), galactic-router (tenant BGP,
-      # its own independent DaemonSet -- see config/galactic-router/overlays/
-      # router/, opted in via galactic.datumapis.com/galactic=router, the
-      # same flag compute nodes carry), galactic-cni (same flag, now also
-      # runs on edge nodes -- see docs/node-labels.md), and galactic-gateway
-      # (the edge XDP NAT+LB engine itself, single-container).
-      - task: load-image
-        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-gateway1}
-      - task: load-image
-        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: iad-gateway2}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-gateway1}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-gateway2}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: iad-gateway1}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: iad-gateway2}
-      - task: load-image
-        vars: {IMAGE: galactic-gateway:latest, NODE: iad-gateway1}
-      - task: load-image
-        vars: {IMAGE: galactic-gateway:latest, NODE: iad-gateway2}
-      - task: load-image
-        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: sjc-worker}
-      - task: load-image
-        vars: {IMAGE: "{{.FABRIC_ROUTER_IMAGE}}", NODE: dfw-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: iad-worker-rr}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: sjc-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-router:latest, NODE: dfw-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: iad-worker-rr}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: sjc-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-cni:latest, NODE: dfw-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-nat:latest, NODE: iad-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-nat:latest, NODE: sjc-worker}
-      - task: load-image
-        vars: {IMAGE: galactic-nat:latest, NODE: dfw-worker}
+      - |
+        set -e
+        load() {
+          image="$1"; shift
+          for node in "$@"; do
+            echo "--- ${image} -> ${node} ---"
+            docker save "${image}" | docker exec -i "${node}" \
+              ctr --namespace k8s.io images import -
+          done
+        }
+        load {{.FABRIC_ROUTER_IMAGE}} {{.FABRIC_NODES}}
+        load galactic-router:latest {{.FABRIC_NODES}}
+        load galactic-cni:latest {{.CNI_NODES}}
+        load galactic-gateway:latest {{.GATEWAY_NODES}}
+        load galactic-nat:latest {{.NAT_NODES}}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -266,7 +239,7 @@ tasks:
       - ./scripts/deploy-galactic-router.sh
 
   "deploy:galactic-nat":
-    desc: Install the NAT66 egress DaemonSet and shards
+    desc: Install the NAT egress DaemonSet and shards
     cmds:
       - ./scripts/deploy-galactic-nat.sh
 
@@ -306,9 +279,9 @@ tasks:
       - ./scripts/deploy-ns.sh ns70 iad sjc
 
   "deploy:ns60":
-    desc: Deploy ns60 test VPC (gateway canary backend)
+    desc: Deploy ns60 test VPC (gateway backend, one per site)
     cmds:
-      - ./scripts/deploy-ns.sh ns60 iad
+      - ./scripts/deploy-ns.sh ns60 dfw sjc iad
 
   verify:
     desc: Run all verification checks
@@ -365,7 +338,8 @@ tasks:
       - |
         fail=0
         for lo in 10.255.255.1 10.255.255.2 10.255.255.3 10.255.255.4 \
-                  10.255.255.5 10.255.255.6 10.255.255.101 10.255.255.102 10.255.255.103; do
+                  10.255.255.5 10.255.255.6 10.255.255.7 10.255.255.8 \
+                  10.255.255.101 10.255.255.102 10.255.255.103; do
           if docker exec clab-gvpc-tr1 ping -c1 -W2 -I 10.255.255.100 "$lo" >/dev/null 2>&1; then
             echo "ok    ipv4 tr1 -> $lo"
           else
@@ -373,7 +347,8 @@ tasks:
           fi
         done
         for lo in fc00:0:2::1 fc00:0:3::1 fc00:0:4::1 fc00:0:8::1 fc00:0:9::1 \
-                  fc00:0:a::1 fc00:0:5::1 fc00:0:6::1 fc00:0:7::1; do
+                  fc00:0:a::1 fc00:0:b::1 fc00:0:c::1 \
+                  fc00:0:5::1 fc00:0:6::1 fc00:0:7::1; do
           if docker exec clab-gvpc-tr1 ping -6 -c1 -W2 -I fc00:0:1::1 "$lo" >/dev/null 2>&1; then
             echo "ok    ipv6 tr1 -> $lo"
           else
@@ -397,10 +372,16 @@ tasks:
       - docker exec dfw-control-plane kubectl get bgprouters -A
 
   "verify:gateway":
-    desc: Verify iad's gateway canary CRDs exist
+    desc: Verify every site's edge gateway CRDs and DaemonSets
     cmds:
-      - docker exec iad-control-plane kubectl get networkgateways,networkrules -n galactic-system
-      - docker exec iad-control-plane kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
+      - |
+        for site in dfw sjc iad; do
+          echo "--- ${site} ---"
+          docker exec ${site}-control-plane \
+            kubectl get networkgateways,networkrules,servicevipbindings -n galactic-system
+          docker exec ${site}-control-plane \
+            kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
+        done
 
   "verify:nat-sharding":
     desc: Verify each site's EgressShard and shard SID
@@ -478,6 +459,97 @@ tasks:
 
         echo "PASS: translated to ${shard}:${port}, table ${before} -> ${after}, no drops"
 
+  # The full egress datapath, both address families, driven as real traffic
+  # against the one host in this lab that sits outside every cluster
+  # (remote-host on tr4, gvpc.clab.yaml). verify:nat-egress above watches for
+  # a translated packet on the wire and stops there -- it never confirms the
+  # packet arrived anywhere, and never confirms a reply came back, so it
+  # reports green on a datapath where no session can complete (#551). This
+  # asserts the whole path in both directions.
+  #
+  # IPv6 goes out as NAT66, masqueraded to the shard's own IPv6 public
+  # address. IPv4 goes out as NAT64: an IPv6-only tenant addresses the
+  # destination's synthesized form (RFC 6052 -- the fabric NAT64 prefix with
+  # the IPv4 address in the low 32 bits) and the shard translates it down to
+  # IPv4, masqueraded to the shard's IPv4 public address.
+  #
+  # Deliberately NOT in the `verify` chain: the return half fails today on
+  # both families (#549, #550), so wiring it in would leave `task verify`
+  # permanently red and destroy the signal for everything else. Move it into
+  # `verify` once those land.
+  "verify:nat-datapath":
+    desc: Full egress round trip through a shard to the off-fabric host (IPv6 + IPv4)
+    # silent: the script is long enough that echoing it buries the result.
+    silent: true
+    vars:
+      HOST6: "2001:db8:1:40::2"
+      HOST4: "10.1.40.2"
+      # {{.HOST4}} synthesized into the fabric NAT64 prefix: 10.1.40.2 is
+      # 0a01:2802, so the tenant addresses 2001:db8:64::a01:2802.
+      HOST4_SYNTH: "2001:db8:64::a01:2802"
+      # dfw's tenant egresses through sjc's shard -- a node cannot resolve its
+      # own self-originated shard SID, so it falls through to the next one.
+      SENDER_SITE: dfw
+      SHARD_NODE: sjc-worker
+      SHARD_SITE: sjc
+    cmds:
+      - |
+        set -e
+        cp={{.SENDER_SITE}}-control-plane
+        pod=$(docker exec ${cp} kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
+        shard6=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system \
+          get egressshard -o jsonpath='{.items[0].status.shardAddressIPv6}')
+        shard4=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system get ds galactic-nat \
+          -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{"\n"}{end}' \
+          | awk -F= '/GALACTIC_NAT_SHARD_PUB_ADDR4/ {print $2}')
+        if [ -z "${shard6}" ]; then echo "FAIL: shard publishes no IPv6 masquerade address" >&2; exit 1; fi
+        if [ -z "${shard4}" ]; then echo "FAIL: shard has no IPv4 masquerade address configured" >&2; exit 1; fi
+        echo "sender ${pod} (${cp})  shard ${shard6} / ${shard4}"
+        rc=0
+
+        # $1 label, $2 url the tenant fetches, $3 tcpdump filter at the far
+        # end, $4 masquerade source the far end must see.
+        probe() {
+          echo "--- $1 ---"
+          docker exec clab-gvpc-remote-host timeout 25 tcpdump -i eth1 -nn -c 4 "$3" >/tmp/nat-dp.txt 2>&1 &
+          dumper=$!
+          sleep 2
+          body=$(docker exec ${cp} kubectl -n ns10 exec "${pod}" -- \
+            curl -sS --max-time 12 "$2" 2>&1) && code=0 || code=$?
+          wait ${dumper} || true
+
+          if ! grep -q "$4" /tmp/nat-dp.txt; then
+            echo "  FAIL forward: nothing reached the off-fabric host from $4" >&2
+            sed 's/^/    /' /tmp/nat-dp.txt >&2
+            rc=1
+            return
+          fi
+          echo "  ok   forward: off-fabric host saw traffic masqueraded to $4"
+
+          if [ ${code} -ne 0 ] || [ -z "${body}" ]; then
+            echo "  FAIL return: the tenant never got a reply (curl exit ${code})" >&2
+            echo "               forward half works, so this is the return path:" >&2
+            echo "               see #549 (masquerade address absent from the underlay)" >&2
+            echo "               and #550 (shard cannot forward a reply back to the tenant)" >&2
+            rc=1
+            return
+          fi
+          echo "  ok   return: tenant received \"${body}\""
+        }
+
+        probe "IPv6 / NAT66" "http://[{{.HOST6}}]/"      "ip6 and src ${shard6}" "${shard6}"
+        probe "IPv4 / NAT64" "http://[{{.HOST4_SYNTH}}]/" "ip and src ${shard4}"  "${shard4}"
+
+        drops=$(docker exec {{.SHARD_NODE}} curl -s --max-time 4 http://localhost:9182/metrics \
+          | awk '/^galactic_nat_drops_total/ && $2 != 0 {print "    "$0}')
+        if [ -n "${drops}" ]; then echo "  shard drop counters:"; echo "${drops}"; fi
+
+        if [ ${rc} -ne 0 ]; then
+          echo "FAIL: the egress datapath does not complete a round trip" >&2
+          exit 1
+        fi
+        echo "PASS: both families completed a round trip through the shard"
+
   "verify:nat-collision":
     desc: Prove two tenants sharing a ULA on different nodes do not share a translation
     cmds:
@@ -554,5 +626,6 @@ tasks:
       - docker rmi galactic-gateway:latest || true
       - docker rmi galactic-cni:latest || true
       - docker rmi {{.FABRIC_ROUTER_IMAGE}} || true
+      - docker rmi remote-host:latest || true
       - rm -rf clab-{{.LAB}} build/
       - rm -f dfw.kubeconfig sjc.kubeconfig iad.kubeconfig

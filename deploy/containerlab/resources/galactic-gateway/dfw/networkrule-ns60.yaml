@@ -1,0 +1,37 @@
+# ns60: a live web service (resources/tenants/ns60/, vpc=60/vpcattachment=60,
+# see ns60/dfw/nad.yaml) exposed through the edge XDP Maglev/DSR gateway on
+# a real, routable ingress VIP. This rule's backend address is the nginx
+# Deployment's actual live pod address (`kubectl get pod -n ns60 -o wide`)
+# and its VIP is IPv6, matching the datapath's current scope: IPv6-only,
+# plain TCP/UDP, no IPv4 support yet (see edgedsr.c).
+#
+# 2001:db8:6060::1 is a documentation-range (RFC 3849, 2001:db8::/32) address
+# picked to avoid colliding with anything else in this topology (transit
+# mesh: 2001:db8:0:*::/64 and 2001:db8:1:*::/64; SRv6 locators:
+# 2001:db8:ff0X::/48; NAT66 shard public addresses: 2001:db8:9966::/32).
+#
+# The *same* VIP is used in all three clusters, each with its own site-local
+# backend -- a genuine anycast service, not three separate ones. Both edge nodes
+# originates it identically (DSR's anycast model: no primary/secondary
+# status.primaryNode assignment, no BGP local-preference split -- see
+# internal/controller/networkgateway_controller.go), and every edge node's
+# FRR also originates the covering 2001:db8:6060::/48 into the underlay
+# (resources/fabric-router/dfw/frr.conf.dfw-worker2), so the transit can
+# forward a packet whose literal destination is the VIP. Which site answers
+# a given client is then just transit best-path; which gateway within that
+# site answers is Maglev's consistent-hash ring.
+apiVersion: network.datumapis.com/v1alpha1
+kind: NetworkRule
+metadata:
+  name: ns60-web
+  namespace: galactic-system
+spec:
+  vpcRef: "60"
+  vpcAttachmentRef: "60"
+  vipAddresses:
+    - 2001:db8:6060::1
+  protocol: tcp
+  port: 80
+  backends:
+    - address: fd20:60:ff01::100:0
+      port: 80

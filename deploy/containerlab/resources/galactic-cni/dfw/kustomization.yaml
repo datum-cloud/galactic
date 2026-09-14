@@ -1,0 +1,10 @@
+# dfw: the one site whose compute node is dual-homed, so the uSID decap hook
+# has to attach to both of its uplinks.
+namespace: galactic-system
+resources:
+  - ../shared
+patches:
+  - path: ebpf-interfaces-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-cni

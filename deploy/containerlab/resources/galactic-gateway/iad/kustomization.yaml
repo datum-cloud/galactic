@@ -1,11 +1,10 @@
-# The single entry point for iad's gateway-role canary: both gateway
-# nodes' DaemonSet+BGP+NetworkGateway instantiations, plus the ns60
-# NetworkRule and its backend's ServiceVIPBinding sample.
-# scripts/deploy-galactic-router.sh applies this one path rather than
-# ../iad-gateway1/ and ../iad-gateway2/ separately.
+# The single entry point for iad's edge tier: every edge node's
+# DaemonSet+BGP+NetworkGateway instantiation, plus this site's own ns60
+# NetworkRule and its backend's ServiceVIPBinding.
+# scripts/deploy-galactic-router.sh applies this one path per site rather
+# than each node overlay separately.
 namespace: galactic-system
 resources:
-  - ../iad-gateway1
-  - ../iad-gateway2
+  - ../iad-worker2
   - networkrule-ns60.yaml
   - servicevipbinding-ns60.yaml

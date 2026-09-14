@@ -92,14 +92,17 @@ for site in dfw sjc iad; do
   # which would break kustomize's "../base" resource reference — so
   # rm -rf first and only docker cp into paths that don't yet exist:
   # copy_to lands resources/galactic-cni/ fresh, then the config/galactic-cni/
-  # copy targets "base", a leaf copy_to didn't create. A rerun without
+  # copy targets "base", a leaf copy_to didn't create. Each site then applies
+  # its own overlay directory (galactic-cni/<site>/), which layers onto the
+  # shared one -- dfw needs a different GALACTIC_CNI_EBPF_INTERFACES than the
+  # single-homed sites. A rerun without
   # the rm -rf would otherwise silently keep serving the prior copy from
   # underneath the new nested directory.
   docker exec "${node}" rm -rf /galactic/resources/galactic-cni
   copy_to "${node}" galactic-cni
   docker cp "${GALACTIC_CNI_DIR}" "${node}:/galactic/resources/galactic-cni/base"
 
-  apply_k "${node}" /galactic/resources/galactic-cni/
+  apply_k "${node}" "/galactic/resources/galactic-cni/${site}/"
   docker exec "${node}" kubectl -n galactic-system rollout status daemonset galactic-cni
 done
 

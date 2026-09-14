@@ -5,10 +5,11 @@ set -eu
 wait_for_interface eth1
 wait_for_interface eth2
 wait_for_interface eth3
+wait_for_interface eth4
 ip link set eth1 up
 ip link set eth2 up
 ip link set eth3 up
-
+ip link set eth4 up
 sysctl -w net.ipv4.conf.all.forwarding=1
 sysctl -w net.ipv6.conf.all.forwarding=1
 

@@ -32,7 +32,13 @@ ip6tables -I FORWARD 1 -d ${SRV6_PREFIX} -j ACCEPT
 modprobe --quiet --dry-run vrf && modprobe vrf
 sysctl -w net.vrf.strict_mode=1
 
-for iface in eth1 all default; do
+# Every fabric-facing interface this node actually has, not just eth1: dfw's
+# compute node is dual-homed to both of its site's edge nodes and so has eth2
+# as well (see deploy/containerlab/gvpc.clab.yaml). Enumerated rather than
+# hardcoded so a node with one uplink and a node with two both work here.
+FABRIC_IFACES=$(ls -1 /sys/class/net | grep -E '^eth[1-9]$' || true)
+
+for iface in ${FABRIC_IFACES} all default; do
   sysctl -w net.ipv4.conf.$iface.forwarding=1
   sysctl -w net.ipv4.conf.$iface.rp_filter=0
   sysctl -w net.ipv6.conf.$iface.forwarding=1
@@ -41,7 +47,9 @@ for iface in eth1 all default; do
   sysctl -w net.ipv6.conf.$iface.seg6_enabled=1
 done
 
-# Bring up the transit-facing data-plane interface
-ip link set dev eth1 up
-sysctl -w net.ipv6.conf.eth1.disable_ipv6=0
-ip link set dev eth1 mtu 1500
+# Bring up the fabric-facing data-plane interfaces
+for iface in ${FABRIC_IFACES}; do
+  ip link set dev "${iface}" up
+  sysctl -w net.ipv6.conf."${iface}".disable_ipv6=0
+  ip link set dev "${iface}" mtu 1500
+done

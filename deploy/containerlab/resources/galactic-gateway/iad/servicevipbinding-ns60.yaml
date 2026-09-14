@@ -1,25 +1,22 @@
-# Sample ServiceVIPBinding for ns60's backend, alongside networkrule-ns60.yaml
-# (same VIP/backend pair -- see that file's own comment for the address
-# provenance). ns60's nginx Deployment (resources/tenants/ns60/) has no
-# node pin of its own beyond excluding control-plane nodes, and lands on
-# iad-worker in practice (the only untainted, non-route-reflector,
-# non-edge-role worker in the iad cluster -- iad-worker2/
-# iad-worker-rr is the route reflector and iad-gateway1/iad-gateway2
-# are tainted edge-role (galactic.datumapis.com/node=edge) nodes; confirm the live pod's actual node with
-# `kubectl get pod -n ns60 -o wide` the same way that file's comment
-# already documents for the backend address itself).
+# Sample ServiceVIPBinding for iad's ns60 backend, alongside
+# networkrule-ns60.yaml (same VIP/backend pair -- see that file's own
+# comment for the address provenance). ns60's nginx Deployment
+# (resources/tenants/ns60/) has no node pin of its own beyond excluding
+# control-plane nodes, and lands on iad-worker in practice: it is this
+# cluster's only untainted worker, since every edge node carries
+# galactic.datumapis.com/node=edge:NoSchedule and iad's reflector carries
+# galactic.datumapis.com/galactic=control:NoSchedule. Confirm the live pod's
+# actual node with `kubectl get pod -n ns60 -o wide`.
 #
 # egressKind: veth, since ns60's backend is a plain container Deployment
 # (veth attach, not a tap/VM backend) -- see ServiceVIPBinding's own doc
-# comment for the veth/tap fork. backendAddress/backendPort now match
-# networkrule-ns60.yaml's own backend entry exactly (fd20:60:ff03::100:0:80)
-# -- required for veth too, not just tap: a decapsulated ingress packet is
-# delivered into vpc60's own VRF routing table, which has no route to
-# vipAddress at all (only bound on the node's own root-namespace
-# galactic-vip0 interface, outside that VRF) -- found live in this exact
-# lab. galactic's ServiceVIPBindingReconciler now registers the same
-# vip_xlat_table substitution tap already used, closing that gap; see its
-# own doc comment for the full story.
+# comment for the veth/tap fork. backendAddress/backendPort match
+# networkrule-ns60.yaml's own backend entry exactly -- required for veth
+# too, not just tap: a decapsulated ingress packet is delivered into vpc60's
+# own VRF routing table, which has no route to vipAddress at all (it is only
+# bound on the node's own root-namespace galactic-vip0 interface, outside
+# that VRF) -- found live in this lab. ServiceVIPBindingReconciler registers
+# the same vip_xlat_table substitution tap already used.
 apiVersion: network.datumapis.com/v1alpha1
 kind: ServiceVIPBinding
 metadata:

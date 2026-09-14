@@ -1,6 +1,6 @@
 # Sample EgressShard for dfw-worker, this cluster's own shard node --
 # alongside node-patch.yaml the same way resources/galactic-gateway/
-# iad-gateway1/networkgateway.yaml sits alongside its own node-patch.yaml.
+# <edge-node>/networkgateway.yaml sits alongside its own node-patch.yaml.
 # Status is left empty: EgressShardReconciler (running inside the
 # galactic-nat process on dfw-worker itself, per node-patch.yaml's
 # GALACTIC_NAT_SHARD_SID/_SHARD_PUB_ADDR6) fills in

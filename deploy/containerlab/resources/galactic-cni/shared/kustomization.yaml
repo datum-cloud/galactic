@@ -1,0 +1,16 @@
+# The lab's shared galactic-cni DaemonSet: config/galactic-cni/ (copied onto
+# the node at deploy time as ../base -- see scripts/deploy-cni.sh) plus the
+# lab-only image/env patch every site needs.
+#
+# Referenced as a directory by each site overlay rather than being applied
+# directly, because one env var has to differ per site: dfw's compute node is
+# dual-homed and needs GALACTIC_CNI_EBPF_INTERFACES to name both uplinks,
+# while a node without eth2 fails its attach outright if eth2 is listed
+# (internal/plumbing/ebpf/attach.attachOne errors on an unknown link).
+resources:
+  - ../base
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-cni

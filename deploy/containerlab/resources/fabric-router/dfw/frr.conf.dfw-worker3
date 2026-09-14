@@ -1,0 +1,98 @@
+frr defaults traditional
+hostname dfw-fabric-edge2
+log syslog informational
+
+interface lo
+ ip address 10.255.255.7/32
+ # /128. This is the address galactic-router's outbound EVPN session to the
+ # route reflector sources from, auto-detected from lo via
+ # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS.
+ ipv6 address fc00:0:b::1/128
+!
+interface eth1
+ description tr1-facing (transit uplink)
+ ip address 10.1.12.2/24
+ ipv6 address 2001:db8:1:12::2/64
+!
+interface eth2
+ description dfw-worker-facing (compute, backup path)
+ ip address 10.1.13.1/24
+ ipv6 address 2001:db8:1:13::1/64
+!
+
+# Anycast ingress VIP aggregate -- see
+# resources/fabric-router/dfw/frr.conf.dfw-worker2 for the full rationale.
+# Originated identically by every edge node in the lab.
+ipv6 route 2001:db8:6060::/48 Null0
+
+# This node is dfw-worker's *backup* uplink. It carries that node's prefixes
+# so the site survives losing dfw-worker2, but advertises them to the transit
+# with a higher MED so the fabric keeps using dfw-worker2 while that path is
+# up. The reason is galactic-nat: its shard XDP program attaches to a single
+# interface on the compute node (eth1, facing dfw-worker2), so egress-shard
+# traffic that arrived via this node would reach no translation program.
+# dfw-worker tags what it sends here with 65000:900; matching on the tag
+# rather than on a prefix list keeps this node from having to know which
+# prefixes dfw-worker happens to originate.
+#
+# This node's *own* originations are deliberately not de-preferred: the
+# anycast ingress VIP below must stay equal-cost from both edge nodes, which
+# is the whole point of the pair.
+bgp community-list standard BACKUP_UPLINK permit 65000:900
+!
+route-map TO_TRANSIT permit 10
+ match community BACKUP_UPLINK
+ set metric 100
+!
+route-map TO_TRANSIT permit 20
+!
+router bgp 65000
+ bgp router-id 10.255.255.7
+ no bgp default ipv4-unicast
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ # eBGP to the transit. This node is one of the lab's only
+ # transit-facing nodes -- compute and the route reflector have no
+ # session to AS 65100 at all, and reach it through the iBGP
+ # sessions below instead.
+ neighbor 2001:db8:1:12::1 remote-as 65100
+ neighbor 10.1.12.1 remote-as 65100
+ #
+ # iBGP to the compute node this edge node backs up.
+ neighbor 2001:db8:1:13::2 remote-as 65000
+ neighbor 10.1.13.2 remote-as 65000
+ !
+ address-family ipv6 unicast
+  neighbor 2001:db8:1:12::1 activate
+  neighbor 2001:db8:1:12::1 allowas-in 1
+  neighbor 2001:db8:1:12::1 route-map TO_TRANSIT out
+  neighbor 2001:db8:1:13::2 activate
+  # next-hop-self force / route-reflector-client: see
+  # resources/fabric-router/dfw/frr.conf.dfw-worker2, which carries the same
+  # pair on its own client session and the reasoning for "force".
+  neighbor 2001:db8:1:13::2 next-hop-self force
+  neighbor 2001:db8:1:13::2 route-reflector-client
+  # /128, not the site /48 -- a per-node peering loopback is the only
+  # thing meant to cross the transit as a host route.
+  network fc00:0:b::1/128
+  # Anycast ingress VIP aggregate -- see this file's own comment above.
+  network 2001:db8:6060::/48
+ exit-address-family
+ !
+ # IPv4 underlay -- per-node /32 loopbacks only. There is no IPv4
+ # counterpart to the SRv6 locator block, and the ingress VIP aggregate
+ # stays IPv6-only: this lab's NetworkRule VIPs are IPv6, matching the
+ # edge datapath's own scope (see edgedsr.c).
+ address-family ipv4 unicast
+  neighbor 10.1.12.1 activate
+  neighbor 10.1.12.1 allowas-in 1
+  neighbor 10.1.12.1 route-map TO_TRANSIT out
+  neighbor 10.1.13.2 activate
+  neighbor 10.1.13.2 next-hop-self force
+  neighbor 10.1.13.2 route-reflector-client
+  network 10.255.255.7/32
+ exit-address-family
+!
+
+ip forwarding
+ipv6 forwarding

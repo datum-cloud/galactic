@@ -177,10 +177,10 @@ public-interface/SRv6-address values.
 
 ### Worked ContainerLab example
 
-`deploy/containerlab/resources/galactic-gateway/` has two gateway
-nodes (`iad-gateway1`/`iad-gateway2`) as a canary for this gateway role in
-the `iad` cluster. Each node's overlay directory (`iad-gateway1/`,
-`iad-gateway2/`) carries:
+`deploy/containerlab/resources/galactic-gateway/` runs this role on four
+edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3` (an
+active-active pair), `sjc-worker2`, and `iad-worker2`. Each node's overlay
+directory, named for the node itself, carries:
 
 - `node-patch.yaml` — pins the DaemonSet to one node via
   `kubernetes.io/hostname` and sets `GALACTIC_GATEWAY_PUBLIC_INTERFACE`
@@ -632,7 +632,7 @@ pod on that node is not a supported configuration.
 | --------------- | -------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Unit            | `task test:unit`                      | `go test -race`                 | `internal/config` (`gateway_test.go`), `internal/controller` (`networkgateway_controller_test.go`, `networkrule_controller_test.go`, `usidresolver_test.go`), `internal/gateway` (`engine_test.go`, `diff_test.go`, `kerneldatapath_test.go`, `quota_test.go`, `recovery_test.go`, `telemetry_test.go`), `internal/maglev` (`table_test.go`), `internal/plumbing/bond` (`bond_test.go`, faked `netlink.Link`s, no kernel required — shared bond-master/slave detection used by both this package's `edgeattach.ResolveTargets` and `internal/plumbing/ebpf/attach`'s CNI TC-BPF path), `internal/plumbing/ebpf/edgemap` (`viptable_test.go`, in-memory fake `Table`, no kernel required), `internal/plumbing/ebpf/edgemetrics` (`collector_test.go`), `internal/plumbing/ebpf/edgepreflight` (`preflight_test.go`, `kernel_prober_test.go`); `edgeattach.ResolveTargets` also has its own faked-netlink `TestResolveTargets` (non-bond passthrough, bond-expands-to-slaves-only, no-slaves error) |
 | Kernel-required | `task test:unit` (root/CAP_BPF gated) | `go test` + `BPF_PROG_TEST_RUN` | `internal/plumbing/ebpf/edgeprog/edgedsr_test.go` — exercises the compiled program directly, including the version-nibble/payload_len regression tests; `internal/plumbing/ebpf/edgeattach/attach_test.go`                                                                                                                                |
-| E2E             | —                                     | —                                | **Not yet covered.** `deploy/containerlab/`'s `iad-gateway1`/`iad-gateway2` nodes are a manifests-and-live-pod canary, not a scripted e2e test — see Known Constraints. No bonded-uplink scenario exists there either, deliberately: `iad-gateway1`/`iad-gateway2`'s uplinks are veth pairs, and (confirmed while adding `TestResolveTargetsAndAttach_RealBondDevice` above) veth slaves accept a native XDP attach on a real bond master directly on at least some kernels, since veth itself supports native XDP and some kernels' bonding driver forwards the attach through to slaves that do — the opposite of the real igb/tg3 failure this whole feature exists for. A containerlab veth-bond scenario would not exercise the bug it would be built to guard against; the root-gated real-bond-device unit test does, without that false sense of coverage. |
+| E2E             | —                                     | —                                | **Not yet covered.** `deploy/containerlab/`'s four edge nodes are a manifests-and-live-pod canary, not a scripted e2e test — see Known Constraints. No bonded-uplink scenario exists there either, deliberately: those nodes' uplinks are veth pairs, and (confirmed while adding `TestResolveTargetsAndAttach_RealBondDevice` above) veth slaves accept a native XDP attach on a real bond master directly on at least some kernels, since veth itself supports native XDP and some kernels' bonding driver forwards the attach through to slaves that do — the opposite of the real igb/tg3 failure this whole feature exists for. A containerlab veth-bond scenario would not exercise the bug it would be built to guard against; the root-gated real-bond-device unit test does, without that false sense of coverage. |
 
 ---
 

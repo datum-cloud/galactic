@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-cni
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: install-cni
+          image: galactic-cni:latest
+          imagePullPolicy: Never
+          env:
+            # Fabric-wide NAT66 shard membership list (design plan §3,
+            # internal/plumbing/srv6.EgressDefaultRouteAdd's own doc
+            # comment) -- the same three shard SIDs
+            # resources/galactic-nat/{dfw,sjc,iad}/node-patch.yaml
+            # configure each shard with, shared identically across every
+            # site here since this list is currently operator-supplied,
+            # not learned in-cluster (see EnvCNIEgressShardSIDs's own doc
+            # comment). Written into the static conflist by
+            # internal/installer.Bootstrap (this init container), read
+            # back by internal/cnibgp at every CNI ADD.
+            - name: GALACTIC_CNI_EGRESS_SHARD_SIDS
+              value: "2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::,2001:db8:ff03:9:e001::"
+            # The fabric-wide NAT64 prefix, identical to every shard's own
+            # GALACTIC_NAT_NAT64_PREFIX. Setting it is what makes each CNI ADD
+            # install the tenant VRF's route for the prefix, so an IPv6-only
+            # tenant reaches an IPv4 destination by addressing its synthesized
+            # form (RFC 6052: the IPv4 address in the low 32 bits). Written
+            # into the static conflist by this init container and read back by
+            # internal/cnibgp on every ADD, exactly like the shard list above.
+            - name: GALACTIC_CNI_NAT64_PREFIX
+              value: "2001:db8:64::/96"
+            # Every lab node is dual-homed: eth0 carries the IPv6 default
+            # route but only reaches the Kind/ContainerLab management
+            # bridge, while eth1 is the dedicated point-to-point link to
+            # the transit fabric that actual SRv6-encapsulated VPC traffic
+            # arrives/departs on -- see credential-refresh's own identical
+            # env var below for the full history of why this override
+            # exists at all. This init container needs its own copy, not
+            # just credential-refresh's: internal/installer.Bootstrap
+            # (this container) is what resolves and writes it into the
+            # static conflist's own "ebpf_interfaces" field for
+            # internal/cnibgp to read back on every CNI ADD (mirroring
+            # NAT66_SHARD_SIDS just above) -- found live, without it here,
+            # Bootstrap's own resolution fell back to the same broken
+            # eth0 auto-detection this override exists to fix, producing
+            # a wrong-but-plausible srv6.ResolvePublicUplink/
+            # ResolveNodeSourceAddress result for every CNI ADD with no
+            # error at all (this env var being set only on
+            # credential-refresh, a separate container in the same pod,
+            # never propagates to this one).
+            - name: GALACTIC_CNI_EBPF_INTERFACES
+              value: eth1
+      containers:
+        - name: credential-refresh
+          image: galactic-cni:latest
+          imagePullPolicy: Never
+          env:
+            # Every lab node is dual-homed: eth0 carries the IPv6 default
+            # route but only reaches the Kind/ContainerLab management
+            # bridge (kubectl/API-server traffic), while eth1 is the
+            # dedicated point-to-point link to the transit fabric (tr1-4)
+            # that actual SRv6-encapsulated VPC traffic arrives on.
+            # ResolveInterfaces' auto-detection (default-IPv6-route
+            # heuristic, internal/plumbing/ebpf/attach/interfaces.go) picks
+            # eth0 here since it's ambiguous between the two -- confirmed
+            # live by tcpdump: cross-region SRv6 packets arrive on eth1 but
+            # the eBPF usid_ingress filter was only ever attached to eth0,
+            # so decapsulation never ran and every VPC ping between sites
+            # silently blackholed. This override forces the correct
+            # interface for this topology; see docs/cni/configuration.md.
+            - name: GALACTIC_CNI_EBPF_INTERFACES
+              value: eth1

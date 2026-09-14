@@ -2,6 +2,8 @@ apiVersion: kind.x-k8s.io/v1alpha4
 kind: Cluster
 nodes:
   - role: control-plane
+  # Sequential Kind names (iad-worker, iad-worker2, iad-worker3) used as-is
+  # -- see node_files/dfw/config.yaml's comment.
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
@@ -11,57 +13,40 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
+      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/galactic: router
+      galactic.datumapis.com/fabric: router
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: galactic.datumapis.com/node
+              value: edge
+              effect: NoSchedule
+  # The EVPN route reflector for the whole lab -- every galactic-router in
+  # every cluster peers with this one node (fc00:0:8::1 port 1790). It is
+  # the only node carrying galactic.datumapis.com/galactic=control, and it
+  # deliberately carries no galactic.datumapis.com/node value at all: that
+  # key's compute/edge roles both imply galactic=router (galactic-cni plus
+  # plain-mode galactic-router), and galactic's router/control values are
+  # mutually exclusive by construction -- one key, one value. So a
+  # reflector cannot also be a compute or edge node, and
+  # config/galactic-router/overlays/control/ additionally excludes
+  # Kubernetes control-plane nodes outright, which is why this role needs a
+  # worker of its own rather than sharing one. See docs/node-labels.md.
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: iad
       galactic.datumapis.com/galactic: control
       galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
       - |
         kind: JoinConfiguration
         nodeRegistration:
-          name: iad-worker-rr
           taints:
             - key: galactic.datumapis.com/galactic
               value: control
-              effect: NoSchedule
-  # Dedicated edge XDP NAT+LB gateway nodes -- canary for
-  # config/galactic-gateway/base/. Two nodes, active-active, matching the design's
-  # own topology requirement (see
-  # internal/gateway/doc.go): a single gateway node would still work but
-  # would never actually exercise the primary/secondary BGP local-pref
-  # failover path. Tainted the same way the route-reflector node is above, to
-  # keep ordinary tenant pods (resources/tenants/*/base/pod.yaml's
-  # netshoot Deployments) off these dedicated nodes -- only DaemonSets
-  # with a blanket toleration (config/galactic-cni/daemonset.yaml,
-  # config/galactic-router/base/daemonset.yaml,
-  # config/fabric-router/daemonset.yaml) tolerate it.
-  - role: worker
-    labels:
-      topology.kubernetes.io/region: iad
-      galactic.datumapis.com/node: edge
-      galactic.datumapis.com/galactic: router
-      galactic.datumapis.com/fabric: router
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          name: iad-gateway1
-          taints:
-            - key: galactic.datumapis.com/node
-              value: edge
-              effect: NoSchedule
-  - role: worker
-    labels:
-      topology.kubernetes.io/region: iad
-      galactic.datumapis.com/node: edge
-      galactic.datumapis.com/galactic: router
-      galactic.datumapis.com/fabric: router
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          name: iad-gateway2
-          taints:
-            - key: galactic.datumapis.com/node
-              value: edge
               effect: NoSchedule
 networking:
   ipFamily: ipv6

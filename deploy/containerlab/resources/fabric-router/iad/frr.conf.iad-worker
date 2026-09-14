@@ -5,11 +5,12 @@ log syslog informational
 interface lo
  ip address 10.255.255.1/32
  ipv6 address fc00:0:4::1/128
-
+!
 interface eth1
- description tr3-facing
+ description iad-worker2-facing (site edge node)
  ip address 10.1.30.2/24
  ipv6 address 2001:db8:1:30::2/64
+!
 
 ipv6 route 2001:db8:ff03::/48 Null0
 ipv6 route fc00:0:4::/48 Null0
@@ -19,18 +20,27 @@ router bgp 65000
  no bgp default ipv4-unicast
  no bgp ebgp-requires-policy
  bgp log-neighbor-changes
- neighbor 2001:db8:1:30::1 remote-as 65100
- neighbor 10.1.30.1 remote-as 65100
+ # One iBGP session, to this site's edge node, and nothing else. A compute
+ # node is not transit-facing: it has no link to a transit router and no
+ # eBGP session anywhere. Everything it learns about the rest of the fabric
+ # arrives over this session (the edge node sets next-hop-self on it), and
+ # everything it originates leaves the site the same way.
+ neighbor 2001:db8:1:30::1 remote-as 65000
+ neighbor 10.1.30.1 remote-as 65000
 
  address-family ipv6 unicast
   neighbor 2001:db8:1:30::1 activate
+  # allowas-in: the transit reflects one AS 65000 site's prefixes to
+  # another, so paths arriving back here legitimately carry this node's own
+  # AS. Without it the loop check drops every remote site's locator.
   neighbor 2001:db8:1:30::1 allowas-in 1
   network 2001:db8:ff03::/48
   network fc00:0:4::/48
  exit-address-family
 
- # IPv4 underlay -- see frr.conf.dfw-worker for why it carries the /32
- # loopback and nothing else.
+ # IPv4 underlay -- this node's own /32 loopback only. There is no IPv4
+ # counterpart to the SRv6 locator block: tenant IPv4 (ns20/ns40) rides
+ # inside SRv6 and never touches the IPv4 transit FIB.
  address-family ipv4 unicast
   neighbor 10.1.30.1 activate
   neighbor 10.1.30.1 allowas-in 1

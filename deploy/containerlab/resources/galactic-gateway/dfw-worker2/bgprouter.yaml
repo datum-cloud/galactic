@@ -1,0 +1,16 @@
+apiVersion: network.datumapis.com/v1alpha1
+kind: BGPRouter
+metadata:
+  name: galactic-router-dfw-worker2
+  namespace: galactic-system
+spec:
+  targetRef:
+    kind: Node
+    name: dfw-worker2
+  localASN: 65000
+  routerID: "10.0.1.2"
+  srv6Locator: "2001:db8:ff01::/48"
+  nodeID: 2
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn

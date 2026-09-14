@@ -2,11 +2,13 @@ namespace: galactic-system
 resources:
   - overlays/control
   - bgprouter.yaml
-  - bgppeer-dfw.yaml
-  - bgppeer-iad.yaml
-  - bgppeer-sjc.yaml
-  - bgppeer-gateway1.yaml
-  - bgppeer-gateway2.yaml
+  - bgppeer-dfw-worker.yaml
+  - bgppeer-dfw-worker2.yaml
+  - bgppeer-dfw-worker3.yaml
+  - bgppeer-sjc-worker.yaml
+  - bgppeer-sjc-worker2.yaml
+  - bgppeer-iad-worker.yaml
+  - bgppeer-iad-worker2.yaml
 patches:
   - path: router-lab-patch.yaml
     target:

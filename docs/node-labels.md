@@ -16,7 +16,7 @@ for everything else about a given binary.
 
 | Label                                            | Deploys                                               | Kind              |
 |--------------------------------------------------|-------------------------------------------------------|-------------------|
-| `galactic.datumapis.com/node=compute`            | `galactic-nat`                                      | primary role enum |
+| `galactic.datumapis.com/node=compute`            | `galactic-nat`                                        | primary role enum |
 | `galactic.datumapis.com/node=edge`               | `galactic-gateway` (standalone — see below)           | primary role enum |
 | `galactic.datumapis.com/galactic=router`         | `galactic-cni`, `galactic-router` (plain/tenant mode) | mode enum         |
 | `galactic.datumapis.com/galactic=control`        | `galactic-router-rr`                                  | mode enum         |
@@ -186,11 +186,17 @@ same node, the same way `galactic`'s two values are, once implemented.
 
 ## Worked example: the containerlab lab
 
-| Node | `node` | `galactic` | `fabric` | Runs |
-|---|---|---|---|---|
-| `dfw-worker`, `sjc-worker`, `iad-worker` | `compute` | `router` | `router` | `galactic-nat`, `galactic-cni`, `galactic-router`, `fabric-router` |
-| `iad-worker-rr` | — | `control` | `router` | `galactic-router-rr`, `fabric-router` |
-| `iad-gateway1`, `iad-gateway2` | `edge` | `router` | `router` | `galactic-gateway`, `galactic-cni`, `galactic-router`, `fabric-router` |
+| Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                   |
+|------------------------------------------------------------|-----------|------------|----------|------------------------------------------------------------------------|
+| `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-nat`, `galactic-cni`, `galactic-router`, `fabric-router`     |
+| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | `edge`    | `router`   | `router` | `galactic-gateway`, `galactic-cni`, `galactic-router`, `fabric-router` |
+| `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                  |
+
+The reflector row is the one that shows why `galactic` is a mode enum rather
+than a boolean: `iad-worker3` carries no `node` value at all. Both `node`
+roles imply `galactic=router`, and `router`/`control` are mutually exclusive
+values of one key, so a reflector structurally cannot also be a compute or
+edge node — it needs a worker of its own.
 
 Every worker in the lab carries `fabric=router` today (see
 `deploy/containerlab/node_files/{dfw,iad,sjc}/config.yaml`), since every
