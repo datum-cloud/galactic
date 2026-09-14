@@ -18,8 +18,8 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260831221819-dcee5577542a
 	go.datum.net/network v0.0.0-20260911175134-ec15d7bda7eb
-	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.45.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
 	google.golang.org/grpc v1.83.2
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
