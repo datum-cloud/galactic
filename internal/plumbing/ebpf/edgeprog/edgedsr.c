@@ -42,8 +42,11 @@
 //  6. Push a fresh 40-byte outer IPv6 header addressed to that backend's
 //     worker-node uSID, sourced from this node's encap_config_table entry,
 //     which is simply this node's SRv6-reachable address and is never compared
-//     against anything on a receive path. Resolve the L2 next hop and XDP_TX
-//     back out the same interface.
+//     against anything on a receive path. Resolve the L2 next hop, and leave
+//     over the interface that resolution chose: XDP_TX where that is the
+//     ingress interface, bpf_redirect and XDP_REDIRECT where it is not. The
+//     two differ on every gateway that reaches its clients and its compute
+//     nodes over different links, which is this role's normal shape.
 //
 // The verifier's bounds-narrowing behavior described at EDGE_BARRIER_VAR
 // applies to the backend-index lookup below, a plain byte read from a map
@@ -74,6 +77,9 @@ static long (*bpf_xdp_adjust_head)(void *ctx, int delta) = (void *) BPF_FUNC_xdp
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 plen,
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
+// bpf_redirect, not bpf_redirect_peer: the latter is TC-only, and every egress
+// interface here is in this node's own namespace anyway.
+static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
 
 // ---------------------------------------------------------------------
 // Constants.
@@ -194,7 +200,9 @@ enum edge_drop_reason {
 	DROP_REASON_FIB_FRAG_NEEDED    = 4,
 	DROP_REASON_FIB_LOOKUP_FAILED  = 5,
 	DROP_REASON_ADJUST_HEAD_FAILED = 6,
-	DROP_REASON_COUNT              = 7,
+	DROP_REASON_NO_EGRESS_IFINDEX  = 7,
+	DROP_REASON_REDIRECT_FAILED    = 8,
+	DROP_REASON_COUNT              = 9,
 };
 
 // ---------------------------------------------------------------------
@@ -266,9 +274,16 @@ static EDGE_ALWAYS_INLINE __u32 fnv1a_flow(const __u8 addr[16], __be16 port)
 // front, and resolve the L2 next hop. They are duplicated rather than shared
 // through a header because each datapath file defines its own header structs
 // under the one-external-dependency convention.
+//
+// The ingress interface goes in as the lookup's scope, and the interface the
+// route egresses comes back out through egress_ifindex: bpf_fib_lookup
+// overwrites fib_params.ifindex with it on success. Discarding that value is
+// what made every encapsulated packet leave on the wrong wire before, since the
+// MACs written below belong to the egress link and nothing else.
 static EDGE_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifindex,
 							  const __u8 src[16], const __u8 dst[16],
-							  __u16 tot_len, struct edge_ethhdr *eth)
+							  __u16 tot_len, struct edge_ethhdr *eth,
+							  __u32 *egress_ifindex)
 {
 	struct bpf_fib_lookup fib_params;
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -285,34 +300,39 @@ static EDGE_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifinde
 	__builtin_memcpy(eth->h_dest, fib_params.dmac, sizeof(eth->h_dest));
 	__builtin_memcpy(eth->h_source, fib_params.smac, sizeof(eth->h_source));
 	eth->h_proto = __builtin_bswap16(EDGE_ETH_P_IPV6);
+	*egress_ifindex = fib_params.ifindex;
 	return BPF_FIB_LKUP_RET_SUCCESS;
 }
 
-static EDGE_ALWAYS_INLINE void count_fib_drop(long fib_rc)
+static EDGE_ALWAYS_INLINE void count_fib_drop(long fib_rc, struct vip_stats_value *stats)
 {
 	if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH)
-		count_drop(DROP_REASON_FIB_NO_NEIGH);
+		count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, stats);
 	else if (fib_rc == BPF_FIB_LKUP_RET_UNREACHABLE || fib_rc == BPF_FIB_LKUP_RET_BLACKHOLE ||
 		 fib_rc == BPF_FIB_LKUP_RET_PROHIBIT)
-		count_drop(DROP_REASON_FIB_UNREACHABLE);
+		count_claimed_drop(DROP_REASON_FIB_UNREACHABLE, stats);
 	else if (fib_rc == BPF_FIB_LKUP_RET_FRAG_NEEDED)
-		count_drop(DROP_REASON_FIB_FRAG_NEEDED);
+		count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, stats);
 	else
-		count_drop(DROP_REASON_FIB_LOOKUP_FAILED);
+		count_claimed_drop(DROP_REASON_FIB_LOOKUP_FAILED, stats);
 }
 
+// Every failure here is a claimed packet this gateway then failed to deliver,
+// so each one counts against the VIP's own dropped_packets as well as its
+// reason bucket -- a gateway that cannot deliver must not read as one that did.
 static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16],
-						 const __u8 dst[16], __be16 inner_payload_len_plus_ip6hdr)
+						 const __u8 dst[16], __be16 inner_payload_len_plus_ip6hdr,
+						 struct vip_stats_value *stats, __u32 *egress_ifindex)
 {
 	if (bpf_xdp_adjust_head(ctx, -40) != 0) {
-		count_drop(DROP_REASON_ADJUST_HEAD_FAILED);
+		count_claimed_drop(DROP_REASON_ADJUST_HEAD_FAILED, stats);
 		return -1;
 	}
 
 	void *data = (void *) (long) ctx->data;
 	void *data_end = (void *) (long) ctx->data_end;
 	if (data + sizeof(struct edge_ethhdr) + sizeof(struct edge_ip6hdr) > data_end) {
-		count_drop(DROP_REASON_ADJUST_HEAD_FAILED);
+		count_claimed_drop(DROP_REASON_ADJUST_HEAD_FAILED, stats);
 		return -1;
 	}
 
@@ -335,9 +355,9 @@ static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 s
 
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, src, dst,
 						 (__u16) (sizeof(*outer) + __builtin_bswap16(inner_payload_len_plus_ip6hdr)),
-						 eth);
+						 eth, egress_ifindex);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
-		count_fib_drop(fib_rc);
+		count_fib_drop(fib_rc, stats);
 		return -1;
 	}
 	return 0;
@@ -443,10 +463,33 @@ int edge_lb(struct xdp_md *ctx)
 	__be16 inner_payload_len_plus_ip6hdr =
 		__builtin_bswap16((__u16) sizeof(struct edge_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 
-	if (push_outer_header(ctx, cfg->encap_src, b->usid, inner_payload_len_plus_ip6hdr) != 0)
+	__u32 egress_ifindex = 0;
+	if (push_outer_header(ctx, cfg->encap_src, b->usid, inner_payload_len_plus_ip6hdr, stats,
+			      &egress_ifindex) != 0)
 		return XDP_DROP;
 
-	return XDP_TX;
+	// Leave over the interface the route to the backend selected, which is
+	// not in general the one the client's packet arrived on: this role
+	// normally reaches its clients over a transit uplink and its compute
+	// nodes over a site-internal link. XDP_TX retransmits out the ingress
+	// interface unconditionally, so on those gateways it puts a frame
+	// carrying the egress link's source and next-hop MACs onto the client
+	// wire, where the neighbour discards it -- and the FIB lookup having
+	// succeeded, nothing counts that as a failure. XDP_TX is kept for the
+	// case it is actually correct, the route egressing the ingress
+	// interface, where it is also the cheaper verdict.
+	if (egress_ifindex == 0) {
+		count_claimed_drop(DROP_REASON_NO_EGRESS_IFINDEX, stats);
+		return XDP_DROP;
+	}
+	if (egress_ifindex == ctx->ingress_ifindex)
+		return XDP_TX;
+
+	if (bpf_redirect(egress_ifindex, 0) != XDP_REDIRECT) {
+		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, stats);
+		return XDP_DROP;
+	}
+	return XDP_REDIRECT;
 }
 
 char _license[] SEC("license") = "GPL";
