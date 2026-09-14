@@ -118,7 +118,8 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// Load and attach the edge eBPF datapath. Always a real datapath, never a
 	// no-op: configuration validation rejects an empty public interface or SRv6
 	// address before this is reached.
-	gwDatapath, err := setupGatewayDatapath(cfg.PublicInterface, cfg.SRv6Address, ctrlmetrics.Registry)
+	gwDatapath, err := setupGatewayDatapath(
+		cfg.PublicInterface, cfg.InternalInterfaces, cfg.SRv6Address, ctrlmetrics.Registry)
 	if err != nil {
 		return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 	}
@@ -203,6 +204,9 @@ func newRootCommand() *cobra.Command {
 		"gRPC health check port")
 	cmd.Flags().StringP("gateway-public-interface", "", "",
 		"Public/underlay-facing uplink interface for the edge NAT+LB gateway datapath (required)")
+	cmd.Flags().StringP("gateway-internal-interfaces", "", "",
+		"Comma-separated compute-facing interfaces whose VIP-sourced return traffic this node "+
+			"forwards before netfilter (optional; empty means this node carries no return traffic)")
 	cmd.Flags().StringP("gateway-srv6-address", "", "",
 		"This gateway node's own SRv6-reachable address, used as the Maglev/DSR encap source (required)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")

@@ -33,4 +33,4 @@ package edgeprog
 // This program never takes the address of a field inside a packed struct, so it
 // needs no warning suppression for that.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type vip_key -type backend -type vip_value -type vip_stats_value -type encap_config Edgedsr edgedsr.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type vip_key -type backend -type vip_value -type vip_stats_value -type encap_config -type vip_addr_key -type vip_addr_value Edgedsr edgedsr.c

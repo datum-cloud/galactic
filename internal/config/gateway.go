@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -37,6 +38,18 @@ const (
 	// gateway role, so there is no "not this role, skip the datapath" case.
 	EnvGatewayPublicInterface = "GALACTIC_GATEWAY_PUBLIC_INTERFACE"
 
+	// EnvGatewayInternalInterfaces names this node's compute-facing interfaces,
+	// comma-separated, for the return path: a backend's reply to a VIP crosses
+	// this node on its way to the fabric wherever the compute tier routes
+	// through it, and the edge_return program forwards those replies before
+	// netfilter sees them. Optional -- a node with no compute tier behind it
+	// sets nothing and attaches no return program.
+	//
+	// Deliberately not the same value as the public uplink, even where an
+	// operator could name it: on the uplink an external client could source a
+	// packet from a VIP address and have it forwarded unexamined.
+	EnvGatewayInternalInterfaces = "GALACTIC_GATEWAY_INTERNAL_INTERFACES"
+
 	// EnvGatewaySRv6Address is this node's plain SRv6-reachable address, used
 	// as the outer-header source for every packet this datapath forwards. It is
 	// never a translation source and is never compared against anything on a
@@ -63,6 +76,11 @@ type GatewayConfig struct {
 	// are required; Validate rejects either being empty.
 	PublicInterface string
 	SRv6Address     string
+
+	// InternalInterfaces are this node's compute-facing interfaces, parsed from
+	// the comma-separated environment value. Empty is valid and means this node
+	// carries no return traffic -- see EnvGatewayInternalInterfaces.
+	InternalInterfaces []string
 }
 
 // NewGatewayConfig creates a config resolver reading the GALACTIC_GATEWAY
@@ -98,6 +116,7 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		{FlagMetricsPort, KeyMetricsPort},
 		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"gateway-public-interface", "public_interface"},
+		{"gateway-internal-interfaces", "internal_interfaces"},
 		{"gateway-srv6-address", "srv6_address"},
 	}
 	for _, b := range bindings {
@@ -117,7 +136,21 @@ func (c *GatewayConfig) readFields() {
 	c.MetricsPort = c.v.GetInt(KeyMetricsPort)
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.PublicInterface = c.v.GetString("public_interface")
+	c.InternalInterfaces = splitInterfaceList(c.v.GetString("internal_interfaces"))
 	c.SRv6Address = c.v.GetString("srv6_address")
+}
+
+// splitInterfaceList parses a comma-separated interface list, dropping blank
+// entries so a trailing comma or a stray space does not produce an interface
+// name no attach could ever resolve.
+func splitInterfaceList(raw string) []string {
+	var names []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			names = append(names, part)
+		}
+	}
+	return names
 }
 
 // Validate checks that the required configuration fields are set.

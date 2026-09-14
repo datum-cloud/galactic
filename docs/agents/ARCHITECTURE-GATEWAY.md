@@ -55,8 +55,11 @@ design entirely — a breaking change with no migration path, not a second
 mode alongside the old one. The defining simplification: this datapath does
 **no address or port rewriting at all**. A client's packet travels inside
 the SRv6 encapsulation byte-for-byte unmodified all the way to the backend;
-the backend replies to the client *directly* (bypassing the gateway node on
-the return path entirely), which is DSR's whole premise. Every gateway node
+the backend replies to the client *directly*, never re-entering the
+load-balancing decision, which is DSR's whole premise. That is a statement
+about *flow state*, not about topology: where the compute tier routes
+through an edge node, the reply still crosses that node as ordinary
+forwarded traffic, and the `edge_return` program below is what carries it. Every gateway node
 the datapath is loaded on advertises every VIP **identically** via BGP —
 anycast, not primary/secondary — and Maglev's consistent-hash ring (not BGP
 local-preference) decides which node's backend set actually answers a given
@@ -73,8 +76,9 @@ Consequences that follow directly from dropping rewriting:
   Full-NAT needed a flow table to remember which backend/SNAT port a flow
   was assigned; Maglev/DSR re-derives the same answer from the same input
   on every packet.
-- No return/decap branch in the XDP program — DSR never sees reply
-  traffic through this node at all, so there is nothing to un-DNAT/un-SNAT.
+- No un-DNAT/un-SNAT branch — a reply carries the client's own addressing
+  already, so the return program forwards it rather than translating it,
+  and needs no flow state to do so.
 - No L3/L4 checksum touch anywhere in the datapath — the packet's own
   checksum is already correct for its own, completely unmodified content.
 - No Active-Active BGP local-preference model, no primary/secondary node
@@ -139,7 +143,7 @@ galactic/
 │   └── plumbing/ebpf/
 │       ├── edgeprog/         # Compiled XDP program (edgedsr.c, program
 │       │                     #   edge_lb) + bpf2go bindings
-│       ├── edgemap/          # vip_table/vip_stats_table/encap_config_table
+│       ├── edgemap/          # vip_table/vip_stats_table/vip_addr_table/encap_config_table
 │       │                     #   read/write API (viptable.go)
 │       ├── edgeattach/       # Load + XDP-attach the compiled program to one
 │       │                     #   interface
@@ -248,12 +252,12 @@ to every object in the namespace on change (`ruleToGatewayRequests`,
 
 ### Packet path (`internal/plumbing/ebpf/edgeprog/edgedsr.c`, program `edge_lb`)
 
-IPv6-only, phase 1 scope (plain TCP/UDP, no extension headers). One XDP
-program, one attach point per gateway node — the node's single public/
-underlay-facing uplink interface. Unlike the removed Full-NAT `edgenat.c`,
-there is no "is this a reply to me" direction check at all — DSR never
-sees reply traffic through this node, so the program has exactly one
-branch, not two.
+IPv6-only, phase 1 scope (plain TCP/UDP, no extension headers). Attached to
+the node's public/underlay-facing uplink. Unlike the removed Full-NAT
+`edgenat.c`, there is no "is this a reply to me" direction check: a reply
+never reaches this program, which sees only the forward half, so it has
+exactly one branch, not two. Replies are `edge_return`'s, on a different
+attach point — see below.
 
 1. **Parse** the outer Ethernet + IPv6 header, then the L4 header (TCP or
    UDP only). Not IPv6, unparseable, or not TCP/UDP — `XDP_PASS` (falls
@@ -285,8 +289,8 @@ branch, not two.
    [uSID resolution](#usid-resolution-for-backends) below), sourced from
    this node's own `encap_config_table` entry (this node's plain
    SRv6-reachable address — never a NAT/SNAT source and never compared
-   against anything on a receive path, since there is no return path
-   through this node at all). Resolve the L2 next-hop via
+   against anything on a receive path, since no reply ever re-enters this
+   program). Resolve the L2 next-hop via
    `bpf_fib_lookup`, then leave over the interface that lookup selected:
    `XDP_TX` where the route egresses the interface the client's packet
    arrived on, `bpf_redirect` + `XDP_REDIRECT` where it does not. Those
@@ -311,6 +315,41 @@ validating either field) but would have caused any version- or
 length-validating intermediate hop or receiver to reject every packet this
 datapath ever pushed — found via live-kernel investigation, not
 `BPF_PROG_TEST_RUN`, and covered by regression tests in `edgedsr_test.go`.
+
+### Return path (`edgedsr.c`, program `edge_return`)
+
+Where the compute tier routes through this node — the shape the
+containerlab topology models, compute nodes holding links only to their
+site's edge nodes — a backend's reply to a VIP crosses this node on its way
+to the fabric. The kernel will not forward it: the forward half reached the
+backend inside an SRv6 packet through XDP, which netfilter never saw, so
+connection tracking holds no entry, marks the reply `INVALID`, and
+kube-proxy's `KUBE-FORWARD` chain drops it on its first rule. No forward
+packet will ever create the entry the reply is judged against, so this is
+structural rather than a misconfiguration to exempt.
+
+`edge_return` forwards the reply itself, in XDP, before netfilter runs, so
+the node keeps its stock forwarding rules and needs no rule of ours ahead
+of kube-proxy's. It matches on the **source address alone**
+(`vip_addr_table`, keyed by VIP with no port or protocol dimension), which
+also covers the ICMPv6 errors a port-keyed match would miss; decrements the
+hop limit, the kernel no longer being there to do it; resolves the next hop
+through the same `bpf_fib_lookup`; and leaves over the interface that
+lookup selected. It is as stateless as the forward path and has no
+relationship to the forward half's backend choice, so a site whose two edge
+nodes take the request and the reply respectively still works — both hold
+the same `vip_addr_table` rows.
+
+Attached only to `GALACTIC_GATEWAY_INTERNAL_INTERFACES`, never the public
+uplink: on the uplink an external client could source a packet from a VIP
+address and have it forwarded unexamined. A node with no compute tier
+behind it sets nothing, attaches no return program, and its packet path is
+unchanged.
+
+`vip_addr_table` is maintained by `edgemap.VIPTable` alongside `vip_table`
+itself, an address present exactly while some rule still uses it, with its
+own generation for the same crash-safe reconcile cutoff. Its counters live
+in `vip_return_stats_table` and surface as `galactic_edge_return_*`.
 
 ---
 
@@ -426,7 +465,8 @@ not collide with any of the others':
 
 `GALACTIC_GATEWAY_SRV6_ADDRESS` is this gateway node's own plain
 SRv6-reachable address, used purely as the source of every outer header
-this node's `edge_lb` program pushes — unlike the removed Full-NAT design's
+this node's `edge_lb` program pushes (`edge_return` pushes no header at
+all, so it never reads this) — unlike the removed Full-NAT design's
 identically-named field, it is never a NAT/SNAT source, never has
 return-path significance (DSR has no return path through this node at
 all), and is never published to any CRD status (`NetworkGatewayStatus`
@@ -503,7 +543,7 @@ pod on that node is not a supported configuration.
 | `internal/gateway` (`recovery.go`, `diff.go`)           | galactic-gateway | `Engine.ReconcileOrphans` (crash recovery) and `diffRuleKeys` (the pure key-set diff both `Reconcile`/`ReconcileOrphans` build on)                                                               | No                                   |
 | `internal/maglev` (`table.go`)                          | galactic-gateway | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; this binary's only importer today (`galactic-nat` has no analogous shard-placement ring — see Known Constraints) | No                        |
 | `internal/plumbing/ebpf/edgeprog`                       | galactic-gateway | Compiled XDP program (`edgedsr.c`, program `edge_lb`) + bpf2go-generated Go bindings (`EdgedsrObjects`)                                                                                          | No                                   |
-| `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                                        | Yes (via `KernelTable`)              |
+| `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table`/`vip_addr_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                       | Yes (via `KernelTable`)              |
 | `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + native-XDP-only attach of the compiled program to one interface                                                                                                                          | Yes (pinned maps, held link)         |
 | `internal/plumbing/ebpf/edgemetrics`                    | galactic-gateway | Pull-based `prometheus.Collector` reading `vip_table`/`vip_stats_table`/`drop_reasons` live at every scrape                                                                                      | No                                   |
 | `internal/plumbing/ebpf/edgepreflight`                  | galactic-gateway | Startup kernel-capability check (`BPF_PROG_TYPE_XDP`, `BPF_MAP_TYPE_HASH`, kernel BTF, `bpf_xdp_adjust_head`) — no partial pass, no degraded fallback                                            | No                                   |
@@ -681,7 +721,9 @@ single-container and references no `galactic-router` image at all — see
 - **The uSID TC-BPF/XDP FIB-lookup PMTUD gap applies here too.** When `bpf_fib_lookup()` returns `BPF_FIB_LKUP_RET_FRAG_NEEDED`, `edgedsr.c` counts `DROP_REASON_FIB_FRAG_NEEDED` and drops rather than emitting an ICMPv6 Packet Too Big — the same accepted gap `internal/plumbing/ebpf/prog/usid.c` has for the SRv6 uSID datapath (see [ARCHITECTURE-CNI.md#known-constraints](ARCHITECTURE-CNI.md#known-constraints)), not yet scheduled to be closed on either side.
 - **`bpf_fib_lookup()` requires IPv6 forwarding sysctls on the public uplink, not just XDP driver support.** `setupGatewayDatapath` calls `sysctl.ConfigureFIBLookupUplinkSysctls` before attaching the datapath — without `net.ipv6.conf.<iface>.forwarding` and `net.ipv6.conf.all.forwarding` both set, the kernel returns `BPF_FIB_LKUP_RET_NOT_FWDED` for every lookup regardless of anything this program does, which `edgedsr.c`'s own drop-reason accounting cannot distinguish from a generic FIB lookup failure. Found via live-kernel investigation of a pre-existing containerlab veth/XDP_TX blocker: the sysctl gap, not `XDP_TX` itself, was the actual cause. A related, lab-only characteristic the same investigation turned up: native `XDP_TX` on a veth pair only promotes a frame into the peer's normal receive stack (visible to `tcpdump`) if the peer *also* runs an XDP program — otherwise delivery uses a raw fast-path invisible to normal tools. This does not apply to a real physical NIC uplink in production, where there is no "peer's own XDP program" question to begin with.
 - **A bonded public uplink attaches per-slave, with per-slave FIB-lookup sysctls to match.** Native-mode XDP against a Linux bonding master is not reliable: confirmed failing outright with "operation not supported" on a real gateway node (802.3ad over an igb/tg3 slave pair). Not every kernel's bonding driver categorically lacks `ndo_bpf` — some do implement it by forwarding the attach to every slave — but that still requires each slave's own driver to support native XDP itself, which not every NIC driver does (tg3 is a commonly cited example that doesn't), so this codebase never relies on attaching to the master working, on any kernel. `edgeattach.ResolveTargets` expands a bonding-master `GALACTIC_GATEWAY_PUBLIC_INTERFACE` to its slave interfaces (never the master itself — see `internal/plumbing/bond`, shared with `internal/plumbing/ebpf/attach`'s TC-BPF path, which attaches to the master *and* its slaves instead), and `setupGatewayDatapath` attaches to and configures FIB-lookup sysctls on every one of them. This is not cosmetic: `edgedsr.c`'s `push_outer_header` calls `bpf_fib_lookup()` with `ctx->ingress_ifindex` — confirmed against the source, not assumed — which for a native XDP program attached to a bond slave is that slave's own ifindex, not the bond master's, so `net.ipv6.conf.<slave>.forwarding` (not `net.ipv6.conf.<bond-master>.forwarding`) is what the kernel actually checks. A bonding master with no resolvable slaves is a hard startup error, not a silent fallback to attaching the master (which would only risk repeating the same failure). `edgeattach.Attach` is all-or-nothing across every resolved slave in one call — if any single slave's driver can't accept a native XDP attach (a real possibility per the tg3 note above, not independently confirmed against that node specifically), the whole datapath startup fails rather than running in a degraded, missing-that-slave's-traffic state; this has not been exercised against real igb/tg3 hardware, only veth in tests, so whether all of a real bonded pair's slaves actually accept native XDP on the affected class of hardware is still open. One further accepted tradeoff: attaching per-slave rather than to the bond as a whole means a slave failing over (LACP renegotiation, a link flap) is not automatically picked up — there is no Watch-style re-resolution here, matching the rest of this package's "resolved once at startup" design (see `edgeattach`'s package doc comment).
-- **`XDP_REDIRECT` into a veth needs NAPI enabled on the *peer*, which is a lab-only concern.** `edgedsr.c` returns `XDP_REDIRECT` whenever the route to the backend egresses an interface other than the ingress one. In native mode that calls the egress device's `ndo_xdp_xmit`, and veth's implementation silently discards the frame unless the peer end has NAPI enabled — which for a veth means the peer runs its own XDP program or has GRO turned on. A containerlab peer inside an FRR/transit container has neither by default, so a redirect there can fail exactly the way this datapath's original bug did: no drop counter moves, because `bpf_redirect()` itself succeeded and the discard happens later in `xdp_do_redirect`. `bpftool prog tracelog` and the `xdp:xdp_redirect_err` tracepoint are the diagnostics; `ethtool -K <peer> gro on` is the lab fix. A production uplink (physical NIC, or a bond slave per the bullet above) implements `ndo_xdp_xmit` natively and has no peer to ask about. This is the redirect-side analogue of the `XDP_TX`-on-veth observability quirk noted above.
+- **`XDP_REDIRECT` into a veth needs NAPI enabled on the *peer*, which is a lab-only concern.** `edgedsr.c` returns `XDP_REDIRECT` whenever the route to the backend egresses an interface other than the ingress one. In native mode that calls the egress device's `ndo_xdp_xmit`, and veth's implementation silently discards the frame unless the peer end has NAPI enabled — which for a veth means the peer runs its own XDP program or has GRO turned on. A containerlab peer inside an FRR/transit container has neither by default, so a redirect there can fail exactly the way this datapath's original bug did: no drop counter moves, because `bpf_redirect()` itself succeeded and the discard happens later in `xdp_do_redirect`. Both programs are affected, and `edge_return` more so: it attaches to compute-facing links, which are veth pairs in the lab and may be veth or a plain NIC in production. `bpftool prog tracelog` and the `xdp:xdp_redirect_err` tracepoint are the diagnostics; `ethtool -K <peer> gro on` is the lab fix. A production uplink (physical NIC, or a bond slave per the bullet above) implements `ndo_xdp_xmit` natively and has no peer to ask about. This is the redirect-side analogue of the `XDP_TX`-on-veth observability quirk noted above.
+- **The return path is opt-in per node and fails closed at startup, not silently.** `edge_return` attaches only where `GALACTIC_GATEWAY_INTERNAL_INTERFACES` names an interface; a node that needs it and does not set it drops every reply in `KUBE-FORWARD` with nothing to say why, exactly as before this program existed. Where it *is* set, an attach failure is fatal to `setupGatewayDatapath` and the pod crash-loops rather than running with the forward half working and replies dying — the same all-or-nothing choice `edgeattach.Attach` already makes across a bond's slaves.
+- **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkRule` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkRule` existing on both sides, which nothing in this repo enforces.
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place, unlike the removed Full-NAT predecessor's `conn_table`, which relied on `BPF_MAP_TYPE_LRU_HASH` self-eviction for the same purpose.
 - **`publish.yaml` still stamps a `galactic-router` tag into `config/galactic-gateway/base`.** A leftover from when this DaemonSet ran both images in one pod (see [CI/CD](#cicd)) — harmless today only because the string it replaces no longer appears in this single-container manifest, not because the step was updated to reflect the split. Worth removing in `.github/workflows/publish.yaml` rather than relying on that.
 - **Egress is out of this binary's scope, not unimplemented.** An earlier plan (`docs/plans/865-edge-gateway-nat66-egress.md`) proposed adding a second, egress-masquerading XDP personality to this same program and process; that approach was superseded by a separate, sharded stateful egress translation tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`) rather than built here. `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.

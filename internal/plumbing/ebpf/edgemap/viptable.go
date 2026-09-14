@@ -91,22 +91,50 @@ type VIPEntry struct {
 	LastSeenNs     uint64
 }
 
-// VIPTable is the read/write API for vip_table and vip_stats_table together,
-// two separate maps keyed identically that this type presents as one logical
-// table. table holds the configuration: backend list, Maglev table, and
-// generation. stats holds the datapath's counters, which Register never
-// touches.
-type VIPTable struct {
-	table Table
-	stats Table
-	clock func() uint64
+// ReturnEntry is one vip_addr_table row: a VIP address this node claims return
+// traffic for, joined with the counters edge_return keeps for it.
+//
+// Keyed by address alone, with no port or protocol, because the return program
+// matches on the source address alone -- so one ReturnEntry covers every rule
+// sharing that VIP, and its counters aggregate across them.
+type ReturnEntry struct {
+	VIP netip.Addr
+
+	// Generation is this table's monotonic-clock reading when the address was
+	// last written, serving the same reconcile cutoff as VIPEntry's.
+	Generation uint64
+
+	// Packets, Bytes, DroppedPackets, and LastSeenNs mirror VIPEntry's, for
+	// traffic this VIP sourced rather than traffic addressed to it.
+	Packets        uint64
+	Bytes          uint64
+	DroppedPackets uint64
+	LastSeenNs     uint64
 }
 
-// NewVIPTable wraps the configuration and statistics maps as a VIPTable.
-// Production callers pass kernel tables over the two loaded maps; tests pass
-// fakes.
-func NewVIPTable(table, stats Table) *VIPTable {
-	return &VIPTable{table: table, stats: stats, clock: clockFn}
+// VIPTable is the read/write API for vip_table, vip_stats_table, and the two
+// return-path maps, which this type presents as one logical table. table holds
+// the configuration: backend list, Maglev table, and generation. stats holds the
+// datapath's counters, which Register never touches. addrs and returnStats are
+// the return path's equivalents, keyed by VIP address alone.
+//
+// The address set is maintained here rather than by a caller because every
+// mutation of vip_table already passes through this type: an address is present
+// exactly while some rule still uses it, which Register and Unregister can keep
+// true between them and no caller has to remember to.
+type VIPTable struct {
+	table       Table
+	stats       Table
+	addrs       Table
+	returnStats Table
+	clock       func() uint64
+}
+
+// NewVIPTable wraps the configuration, statistics, and return-path maps as a
+// VIPTable. Production callers pass kernel tables over the four loaded maps;
+// tests pass fakes.
+func NewVIPTable(table, stats, addrs, returnStats Table) *VIPTable {
+	return &VIPTable{table: table, stats: stats, addrs: addrs, returnStats: returnStats, clock: clockFn}
 }
 
 // Generation returns a snapshot of this table's monotonic clock. A caller
@@ -121,6 +149,14 @@ func toWireKey(key VIPKey) (edgeprog.EdgedsrVipKey, error) {
 		return edgeprog.EdgedsrVipKey{}, fmt.Errorf("VIP %s is not a native IPv6 address (phase 1 is IPv6-only)", key.VIP)
 	}
 	return edgeprog.EdgedsrVipKey{Proto: key.Proto, Port: beU16(key.VPort), Vip: key.VIP.As16()}, nil
+}
+
+func toWireAddrKey(vip netip.Addr) (edgeprog.EdgedsrVipAddrKey, error) {
+	if !vip.Is6() || vip.Is4In6() {
+		return edgeprog.EdgedsrVipAddrKey{}, fmt.Errorf(
+			"VIP %s is not a native IPv6 address (phase 1 is IPv6-only)", vip)
+	}
+	return edgeprog.EdgedsrVipAddrKey{Vip: vip.As16()}, nil
 }
 
 func toWireBackends(backends []Backend) ([MaxBackends]edgeprog.EdgedsrBackend, error) {
@@ -173,6 +209,62 @@ func (t *VIPTable) Register(key VIPKey, backends []Backend, maglevTable [MaglevT
 	if err := t.table.Put(wireKey, value); err != nil {
 		return fmt.Errorf("edgemap: vip_table: register %+v: %w", key, err)
 	}
+	if err := t.claimAddr(key.VIP, value.Generation); err != nil {
+		return fmt.Errorf("edgemap: vip_table: register %+v: %w", key, err)
+	}
+	return nil
+}
+
+// claimAddr records vip in vip_addr_table, so edge_return forwards traffic this
+// node sources from it. Stamped with the same generation as the vip_table entry
+// that claimed it, so a crash mid-reconcile leaves both maps guarded by one
+// cutoff.
+func (t *VIPTable) claimAddr(vip netip.Addr, generation uint64) error {
+	wireAddr, err := toWireAddrKey(vip)
+	if err != nil {
+		return err
+	}
+	if err := t.addrs.Put(wireAddr, edgeprog.EdgedsrVipAddrValue{Generation: generation}); err != nil {
+		return fmt.Errorf("claim %s in vip_addr_table: %w", vip, err)
+	}
+	return nil
+}
+
+// releaseAddr removes vip from vip_addr_table, and its counters with it, once no
+// remaining vip_table entry uses that address.
+//
+// The scan is why this is not a plain delete: several rules can share one VIP
+// across different ports or protocols, and removing one of them must not stop
+// return traffic for the others. A scan rather than a reference count because
+// vip_table is the only durable record of what is registered -- a count held in
+// this process would be wrong after the restart Reconcile's cutoff exists to
+// survive.
+func (t *VIPTable) releaseAddr(vip netip.Addr) error {
+	wireAddr, err := toWireAddrKey(vip)
+	if err != nil {
+		return err
+	}
+
+	var (
+		rawKey edgeprog.EdgedsrVipKey
+		value  edgeprog.EdgedsrVipValue
+	)
+	it := t.table.Iterate()
+	for it.Next(&rawKey, &value) {
+		if netip.AddrFrom16(rawKey.Vip) == vip {
+			return nil // still in use by another rule, port, or protocol
+		}
+	}
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("scan vip_table for remaining users of %s: %w", vip, err)
+	}
+
+	if err := t.addrs.Delete(wireAddr); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("release %s from vip_addr_table: %w", vip, err)
+	}
+	if err := t.returnStats.Delete(wireAddr); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("delete %s vip_return_stats_table row: %w", vip, err)
+	}
 	return nil
 }
 
@@ -198,7 +290,40 @@ func (t *VIPTable) Unregister(key VIPKey) error {
 	if err := t.stats.Delete(wireKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("edgemap: vip_table: unregister %+v: delete vip_stats_table row: %w", key, err)
 	}
+	if err := t.releaseAddr(key.VIP); err != nil {
+		return fmt.Errorf("edgemap: vip_table: unregister %+v: %w", key, err)
+	}
 	return nil
+}
+
+// ListReturn returns every vip_addr_table row joined with its counters, in
+// unspecified order. A row with no counters yet reads back as zero rather than
+// an error, as with vip_stats_table.
+func (t *VIPTable) ListReturn() ([]ReturnEntry, error) {
+	var (
+		entries []ReturnEntry
+		rawKey  edgeprog.EdgedsrVipAddrKey
+		value   edgeprog.EdgedsrVipAddrValue
+	)
+	it := t.addrs.Iterate()
+	for it.Next(&rawKey, &value) {
+		var stats edgeprog.EdgedsrVipStatsValue
+		if err := t.returnStats.Lookup(rawKey, &stats); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil, fmt.Errorf("edgemap: vip_addr_table: list: read vip_return_stats_table row: %w", err)
+		}
+		entries = append(entries, ReturnEntry{
+			VIP:            netip.AddrFrom16(rawKey.Vip),
+			Generation:     value.Generation,
+			Packets:        stats.Packets,
+			Bytes:          stats.Bytes,
+			DroppedPackets: stats.DroppedPackets,
+			LastSeenNs:     stats.LastSeenNs,
+		})
+	}
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("edgemap: vip_addr_table: list: %w", err)
+	}
+	return entries, nil
 }
 
 // lookupStats reads the statistics row for wireKey, defaulting to the zero
@@ -303,5 +428,45 @@ func (t *VIPTable) Reconcile(live map[VIPKey]struct{}, cutoff uint64) (removed [
 		}
 		removed = append(removed, e)
 	}
+	if err := t.reconcileAddrs(cutoff); err != nil {
+		errs = append(errs, err)
+	}
 	return removed, errors.Join(errs...)
+}
+
+// reconcileAddrs prunes vip_addr_table rows no surviving vip_table entry uses.
+//
+// Unregister already releases an address as its last rule goes, so this only
+// catches rows orphaned by a crash between the two deletes -- the same window
+// the generation cutoff guards for vip_table itself, applied to the map that
+// would otherwise keep forwarding return traffic for a VIP this node no longer
+// serves.
+func (t *VIPTable) reconcileAddrs(cutoff uint64) error {
+	entries, err := t.List()
+	if err != nil {
+		return fmt.Errorf("edgemap: vip_addr_table: reconcile: %w", err)
+	}
+	inUse := make(map[netip.Addr]struct{}, len(entries))
+	for _, e := range entries {
+		inUse[e.VIP] = struct{}{}
+	}
+
+	returns, err := t.ListReturn()
+	if err != nil {
+		return fmt.Errorf("edgemap: vip_addr_table: reconcile: %w", err)
+	}
+
+	var errs []error
+	for _, r := range returns {
+		if _, ok := inUse[r.VIP]; ok {
+			continue
+		}
+		if r.Generation >= cutoff {
+			continue
+		}
+		if err := t.releaseAddr(r.VIP); err != nil {
+			errs = append(errs, fmt.Errorf("edgemap: vip_addr_table: reconcile: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }

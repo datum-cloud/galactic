@@ -17,99 +17,39 @@ import (
 // fakeTable is an in-memory Table, letting VIPTable's register/unregister/
 // reconcile logic be exercised without a kernel or root privileges -- same
 // pattern as internal/plumbing/ebpf/usidmap's identical fake table.
-type fakeTable struct {
-	entries map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipValue
-}
-
-func newFakeTable() *fakeTable {
-	return &fakeTable{entries: make(map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipValue)}
-}
-
-func (f *fakeTable) Put(key, value any) error {
-	f.entries[key.(edgeprog.EdgedsrVipKey)] = value.(edgeprog.EdgedsrVipValue)
-	return nil
-}
-
-func (f *fakeTable) Lookup(key, valueOut any) error {
-	v, ok := f.entries[key.(edgeprog.EdgedsrVipKey)]
-	if !ok {
-		return ebpf.ErrKeyNotExist
-	}
-	*valueOut.(*edgeprog.EdgedsrVipValue) = v
-	return nil
-}
-
-func (f *fakeTable) Delete(key any) error {
-	k := key.(edgeprog.EdgedsrVipKey)
-	if _, ok := f.entries[k]; !ok {
-		return ebpf.ErrKeyNotExist
-	}
-	delete(f.entries, k)
-	return nil
-}
-
-func (f *fakeTable) Iterate() Iterator {
-	keys := make([]edgeprog.EdgedsrVipKey, 0, len(f.entries))
-	for k := range f.entries {
-		keys = append(keys, k)
-	}
-	return &fakeIterator{table: f, keys: keys}
-}
-
-type fakeIterator struct {
-	table *fakeTable
-	keys  []edgeprog.EdgedsrVipKey
-	i     int
-}
-
-func (it *fakeIterator) Next(keyOut, valueOut any) bool {
-	if it.i >= len(it.keys) {
-		return false
-	}
-	k := it.keys[it.i]
-	it.i++
-	*keyOut.(*edgeprog.EdgedsrVipKey) = k
-	*valueOut.(*edgeprog.EdgedsrVipValue) = it.table.entries[k]
-	return true
-}
-
-func (it *fakeIterator) Err() error { return nil }
-
-var _ Table = (*fakeTable)(nil)
-
-// fakeStatsTable is an in-memory Table standing in for vip_stats_table
-// (issue #361's split-out counters map) -- same shape as fakeTable, but
-// keyed/valued for EdgedsrVipStatsValue instead of EdgedsrVipValue, and
-// tracking put/lookup call counts so tests can assert Register never
-// touches it (see TestVIPTable_RegisterNeverTouchesStatsTable).
-type fakeStatsTable struct {
-	entries     map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipStatsValue
+// fakeMap is an in-memory Table standing in for any of the four maps a
+// VIPTable wires together. One generic fake rather than one per map because
+// they differ only in key and value type, and the put/lookup counters let a
+// test assert which map an operation touched -- notably that Register never
+// touches the statistics map (see TestVIPTable_RegisterNeverTouchesStatsTable).
+type fakeMap[K comparable, V any] struct {
+	entries     map[K]V
 	putCalls    int
 	lookupCalls int
 }
 
-func newFakeStatsTable() *fakeStatsTable {
-	return &fakeStatsTable{entries: make(map[edgeprog.EdgedsrVipKey]edgeprog.EdgedsrVipStatsValue)}
+func newFakeMap[K comparable, V any]() *fakeMap[K, V] {
+	return &fakeMap[K, V]{entries: make(map[K]V)}
 }
 
-func (f *fakeStatsTable) Put(key, value any) error {
+func (f *fakeMap[K, V]) Put(key, value any) error {
 	f.putCalls++
-	f.entries[key.(edgeprog.EdgedsrVipKey)] = value.(edgeprog.EdgedsrVipStatsValue)
+	f.entries[key.(K)] = value.(V)
 	return nil
 }
 
-func (f *fakeStatsTable) Lookup(key, valueOut any) error {
+func (f *fakeMap[K, V]) Lookup(key, valueOut any) error {
 	f.lookupCalls++
-	v, ok := f.entries[key.(edgeprog.EdgedsrVipKey)]
+	v, ok := f.entries[key.(K)]
 	if !ok {
 		return ebpf.ErrKeyNotExist
 	}
-	*valueOut.(*edgeprog.EdgedsrVipStatsValue) = v
+	*valueOut.(*V) = v
 	return nil
 }
 
-func (f *fakeStatsTable) Delete(key any) error {
-	k := key.(edgeprog.EdgedsrVipKey)
+func (f *fakeMap[K, V]) Delete(key any) error {
+	k := key.(K)
 	if _, ok := f.entries[k]; !ok {
 		return ebpf.ErrKeyNotExist
 	}
@@ -117,34 +57,61 @@ func (f *fakeStatsTable) Delete(key any) error {
 	return nil
 }
 
-func (f *fakeStatsTable) Iterate() Iterator {
-	keys := make([]edgeprog.EdgedsrVipKey, 0, len(f.entries))
+func (f *fakeMap[K, V]) Iterate() Iterator {
+	keys := make([]K, 0, len(f.entries))
 	for k := range f.entries {
 		keys = append(keys, k)
 	}
-	return &fakeStatsIterator{table: f, keys: keys}
+	return &fakeIterator[K, V]{table: f, keys: keys}
 }
 
-type fakeStatsIterator struct {
-	table *fakeStatsTable
-	keys  []edgeprog.EdgedsrVipKey
+type fakeIterator[K comparable, V any] struct {
+	table *fakeMap[K, V]
+	keys  []K
 	i     int
 }
 
-func (it *fakeStatsIterator) Next(keyOut, valueOut any) bool {
+func (it *fakeIterator[K, V]) Next(keyOut, valueOut any) bool {
 	if it.i >= len(it.keys) {
 		return false
 	}
 	k := it.keys[it.i]
 	it.i++
-	*keyOut.(*edgeprog.EdgedsrVipKey) = k
-	*valueOut.(*edgeprog.EdgedsrVipStatsValue) = it.table.entries[k]
+	*keyOut.(*K) = k
+	*valueOut.(*V) = it.table.entries[k]
 	return true
 }
 
-func (it *fakeStatsIterator) Err() error { return nil }
+func (it *fakeIterator[K, V]) Err() error { return nil }
 
-var _ Table = (*fakeStatsTable)(nil)
+type (
+	fakeTable            = fakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipValue]
+	fakeStatsTable       = fakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipStatsValue]
+	fakeAddrTable        = fakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipAddrValue]
+	fakeReturnStatsTable = fakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipStatsValue]
+)
+
+func newFakeTable() *fakeTable { return newFakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipValue]() }
+
+func newFakeStatsTable() *fakeStatsTable {
+	return newFakeMap[edgeprog.EdgedsrVipKey, edgeprog.EdgedsrVipStatsValue]()
+}
+
+func newFakeAddrTable() *fakeAddrTable {
+	return newFakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipAddrValue]()
+}
+
+func newFakeReturnStatsTable() *fakeReturnStatsTable {
+	return newFakeMap[edgeprog.EdgedsrVipAddrKey, edgeprog.EdgedsrVipStatsValue]()
+}
+
+var _ Table = (*fakeTable)(nil)
+
+// newTestVIPTable wires the four maps with fakes, for the majority of tests
+// that only reach for one or two of them.
+func newTestVIPTable() *VIPTable {
+	return NewVIPTable(newFakeTable(), newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
+}
 
 func mustAddr(t *testing.T, s string) netip.Addr {
 	t.Helper()
@@ -168,7 +135,7 @@ func testBackend(t *testing.T) Backend {
 }
 
 func TestVIPTable_RegisterGetRoundTrip(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	key, backend := testKey(t), testBackend(t)
 
 	if err := vt.Register(key, []Backend{backend}, [MaglevTableSize]byte{}); err != nil {
@@ -188,7 +155,7 @@ func TestVIPTable_RegisterGetRoundTrip(t *testing.T) {
 }
 
 func TestVIPTable_RegisterStoresMaglevTable(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	key, backend := testKey(t), testBackend(t)
 
 	var maglevTable [MaglevTableSize]byte
@@ -209,14 +176,14 @@ func TestVIPTable_RegisterStoresMaglevTable(t *testing.T) {
 }
 
 func TestVIPTable_RegisterRejectsEmptyBackends(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	if err := vt.Register(testKey(t), nil, [MaglevTableSize]byte{}); err == nil {
 		t.Error("Register with no backends: want error, got nil")
 	}
 }
 
 func TestVIPTable_RegisterRejectsTooManyBackends(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	backends := make([]Backend, MaxBackends+1)
 	for i := range backends {
 		backends[i] = testBackend(t)
@@ -227,7 +194,7 @@ func TestVIPTable_RegisterRejectsTooManyBackends(t *testing.T) {
 }
 
 func TestVIPTable_RegisterRejectsIPv4Backend(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	backend := testBackend(t)
 	backend.Addr = netip.MustParseAddr("192.0.2.1")
 	if err := vt.Register(testKey(t), []Backend{backend}, [MaglevTableSize]byte{}); err == nil {
@@ -236,7 +203,7 @@ func TestVIPTable_RegisterRejectsIPv4Backend(t *testing.T) {
 }
 
 func TestVIPTable_UnregisterIsIdempotent(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	key := testKey(t)
 	if err := vt.Unregister(key); err != nil {
 		t.Fatalf("Unregister on an absent key: %v, want nil", err)
@@ -256,7 +223,7 @@ func TestVIPTable_UnregisterIsIdempotent(t *testing.T) {
 }
 
 func TestVIPTable_GetMissingReturnsFalseNotError(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	_, ok, err := vt.Get(testKey(t))
 	if err != nil {
 		t.Fatalf("Get on an absent key: %v, want nil error", err)
@@ -267,7 +234,7 @@ func TestVIPTable_GetMissingReturnsFalseNotError(t *testing.T) {
 }
 
 func TestVIPTable_List(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	key1 := testKey(t)
 	key2 := VIPKey{Proto: 17, VPort: 53, VIP: mustAddr(t, "2001:db8:1::11")}
 
@@ -289,7 +256,7 @@ func TestVIPTable_List(t *testing.T) {
 
 func TestVIPTable_ReconcileRemovesStaleNotLive(t *testing.T) {
 	var fakeClock uint64
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	vt.clock = func() uint64 { return fakeClock }
 
 	liveKey := testKey(t)
@@ -334,7 +301,7 @@ func TestVIPTable_ReconcileRemovesStaleNotLive(t *testing.T) {
 // live set yet.
 func TestVIPTable_ReconcileSparesRecentGeneration(t *testing.T) {
 	var fakeClock uint64
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	vt.clock = func() uint64 { return fakeClock }
 
 	cutoff := vt.Generation() // 0
@@ -358,7 +325,7 @@ func TestVIPTable_ReconcileSparesRecentGeneration(t *testing.T) {
 }
 
 func TestVIPTable_RegisterOverwritesExistingKey(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	key := testKey(t)
 	b1 := testBackend(t)
 	b2 := Backend{Addr: mustAddr(t, "fd00:10:1::99"), Port: 9999, USID: mustAddr(t, "2001:db8:2::2")}
@@ -388,7 +355,7 @@ func TestVIPTable_RegisterOverwritesExistingKey(t *testing.T) {
 // vip_stats_table to race against a concurrent datapath increment.
 func TestVIPTable_RegisterPreservesHitCounters(t *testing.T) {
 	statsTable := newFakeStatsTable()
-	vt := NewVIPTable(newFakeTable(), statsTable)
+	vt := NewVIPTable(newFakeTable(), statsTable, newFakeAddrTable(), newFakeReturnStatsTable())
 	key := testKey(t)
 
 	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
@@ -447,7 +414,7 @@ func TestVIPTable_RegisterPreservesHitCounters(t *testing.T) {
 // read-modify-write left to race.
 func TestVIPTable_RegisterNeverTouchesStatsTable(t *testing.T) {
 	statsTable := newFakeStatsTable()
-	vt := NewVIPTable(newFakeTable(), statsTable)
+	vt := NewVIPTable(newFakeTable(), statsTable, newFakeAddrTable(), newFakeReturnStatsTable())
 	key := testKey(t)
 
 	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
@@ -473,7 +440,7 @@ func TestVIPTable_RegisterNeverTouchesStatsTable(t *testing.T) {
 // linger under a key a future, unrelated VIP could reuse.
 func TestVIPTable_UnregisterDeletesStatsRow(t *testing.T) {
 	statsTable := newFakeStatsTable()
-	vt := NewVIPTable(newFakeTable(), statsTable)
+	vt := NewVIPTable(newFakeTable(), statsTable, newFakeAddrTable(), newFakeReturnStatsTable())
 	key := testKey(t)
 
 	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
@@ -500,7 +467,7 @@ func TestVIPTable_UnregisterDeletesStatsRow(t *testing.T) {
 // datapath hasn't seen a matching packet), which Get/List must read back
 // as zero, not as an error.
 func TestVIPTable_RegisterOnFreshKeyStartsCountersAtZero(t *testing.T) {
-	vt := NewVIPTable(newFakeTable(), newFakeStatsTable())
+	vt := newTestVIPTable()
 	key := testKey(t)
 
 	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
@@ -530,5 +497,124 @@ func TestFakeTable_LookupMissingReturnsErrKeyNotExist(t *testing.T) {
 	err := f.Lookup(edgeprog.EdgedsrVipKey{}, &v)
 	if !errors.Is(err, ebpf.ErrKeyNotExist) {
 		t.Errorf("Lookup on empty fakeTable: err = %v, want ebpf.ErrKeyNotExist", err)
+	}
+}
+
+// TestVIPTable_RegisterClaimsTheVIPAddress covers the return path's half of a
+// registration: edge_return matches a reply on its source address, so a VIP
+// that is registered but absent from vip_addr_table load-balances requests
+// while its replies die in the kernel's forwarding path.
+func TestVIPTable_RegisterClaimsTheVIPAddress(t *testing.T) {
+	addrs := newFakeAddrTable()
+	vt := NewVIPTable(newFakeTable(), newFakeStatsTable(), addrs, newFakeReturnStatsTable())
+
+	key := testKey(t)
+	if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	entries, err := vt.ListReturn()
+	if err != nil {
+		t.Fatalf("ListReturn: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ListReturn returned %d entries, want 1", len(entries))
+	}
+	if entries[0].VIP != key.VIP {
+		t.Errorf("claimed address = %s, want %s", entries[0].VIP, key.VIP)
+	}
+	if entries[0].Generation == 0 {
+		t.Error("claimed address carries generation 0, want the registering entry's generation")
+	}
+}
+
+// TestVIPTable_UnregisterKeepsAnAddressAnotherRuleStillUses is why the release
+// is a scan rather than a delete: one VIP commonly carries several ports, and
+// removing one of them must not stop return traffic for the rest.
+func TestVIPTable_UnregisterKeepsAnAddressAnotherRuleStillUses(t *testing.T) {
+	vt := newTestVIPTable()
+
+	vip := mustAddr(t, "2001:db8:1::10")
+	https := VIPKey{Proto: 6, VPort: 443, VIP: vip}
+	http := VIPKey{Proto: 6, VPort: 80, VIP: vip}
+	for _, key := range []VIPKey{https, http} {
+		if err := vt.Register(key, []Backend{testBackend(t)}, [MaglevTableSize]byte{}); err != nil {
+			t.Fatalf("Register %+v: %v", key, err)
+		}
+	}
+
+	if err := vt.Unregister(https); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	entries, err := vt.ListReturn()
+	if err != nil {
+		t.Fatalf("ListReturn: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ListReturn returned %d entries after removing one of two ports, want 1", len(entries))
+	}
+
+	if err := vt.Unregister(http); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	entries, err = vt.ListReturn()
+	if err != nil {
+		t.Fatalf("ListReturn: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("ListReturn returned %d entries after removing the last port, want 0", len(entries))
+	}
+}
+
+// TestVIPTable_ReconcilePrunesAnOrphanedAddress covers the window Unregister
+// cannot: a crash between the two deletes leaves an address claimed with no
+// rule behind it, and this node would keep forwarding return traffic for a VIP
+// it no longer serves.
+func TestVIPTable_ReconcilePrunesAnOrphanedAddress(t *testing.T) {
+	addrs := newFakeAddrTable()
+	vt := NewVIPTable(newFakeTable(), newFakeStatsTable(), addrs, newFakeReturnStatsTable())
+
+	orphan := mustAddr(t, "2001:db8:1::99")
+	if err := addrs.Put(edgeprog.EdgedsrVipAddrKey{Vip: orphan.As16()},
+		edgeprog.EdgedsrVipAddrValue{Generation: 1}); err != nil {
+		t.Fatalf("seed orphaned vip_addr_table row: %v", err)
+	}
+
+	if _, err := vt.Reconcile(map[VIPKey]struct{}{}, 2); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	entries, err := vt.ListReturn()
+	if err != nil {
+		t.Fatalf("ListReturn: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("ListReturn returned %d entries, want 0 (the orphaned address must be pruned)", len(entries))
+	}
+}
+
+// TestVIPTable_ReconcileSparesAnAddressClaimedAfterTheSnapshot is the address
+// set's half of the cutoff guarantee: a VIP registered after the caller listed
+// the CRDs backing this pass must survive it, exactly as its vip_table entry
+// does.
+func TestVIPTable_ReconcileSparesAnAddressClaimedAfterTheSnapshot(t *testing.T) {
+	addrs := newFakeAddrTable()
+	vt := NewVIPTable(newFakeTable(), newFakeStatsTable(), addrs, newFakeReturnStatsTable())
+
+	fresh := mustAddr(t, "2001:db8:1::99")
+	if err := addrs.Put(edgeprog.EdgedsrVipAddrKey{Vip: fresh.As16()},
+		edgeprog.EdgedsrVipAddrValue{Generation: 5}); err != nil {
+		t.Fatalf("seed vip_addr_table row: %v", err)
+	}
+
+	if _, err := vt.Reconcile(map[VIPKey]struct{}{}, 5); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	entries, err := vt.ListReturn()
+	if err != nil {
+		t.Fatalf("ListReturn: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("ListReturn returned %d entries, want 1 (an address at or above the cutoff must survive)",
+			len(entries))
 	}
 }

@@ -139,9 +139,79 @@ func (it *fakeStatsIterator) Err() error                     { return nil }
 
 var _ edgemap.Table = (*fakeStatsTable)(nil)
 
+// fakeReturnMap is an in-memory Table for the two return-path maps, which this
+// package's tests need present but never assert against: the address set's own
+// behaviour is edgemap's to test.
+type fakeReturnMap[V any] struct {
+	entries map[edgeprog.EdgedsrVipAddrKey]V
+}
+
+func newFakeReturnMap[V any]() *fakeReturnMap[V] {
+	return &fakeReturnMap[V]{entries: make(map[edgeprog.EdgedsrVipAddrKey]V)}
+}
+
+func (f *fakeReturnMap[V]) Put(key, value any) error {
+	f.entries[key.(edgeprog.EdgedsrVipAddrKey)] = value.(V)
+	return nil
+}
+
+func (f *fakeReturnMap[V]) Lookup(key, valueOut any) error {
+	v, ok := f.entries[key.(edgeprog.EdgedsrVipAddrKey)]
+	if !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	*valueOut.(*V) = v
+	return nil
+}
+
+func (f *fakeReturnMap[V]) Delete(key any) error {
+	k := key.(edgeprog.EdgedsrVipAddrKey)
+	if _, ok := f.entries[k]; !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	delete(f.entries, k)
+	return nil
+}
+
+func (f *fakeReturnMap[V]) Iterate() edgemap.Iterator {
+	keys := make([]edgeprog.EdgedsrVipAddrKey, 0, len(f.entries))
+	for k := range f.entries {
+		keys = append(keys, k)
+	}
+	return &fakeReturnIterator[V]{table: f, keys: keys}
+}
+
+type fakeReturnIterator[V any] struct {
+	table *fakeReturnMap[V]
+	keys  []edgeprog.EdgedsrVipAddrKey
+	i     int
+}
+
+func (it *fakeReturnIterator[V]) Next(keyOut, valueOut any) bool {
+	if it.i >= len(it.keys) {
+		return false
+	}
+	k := it.keys[it.i]
+	it.i++
+	*keyOut.(*edgeprog.EdgedsrVipAddrKey) = k
+	*valueOut.(*V) = it.table.entries[k]
+	return true
+}
+
+func (it *fakeReturnIterator[V]) Err() error { return nil }
+
+func newFakeAddrTable() *fakeReturnMap[edgeprog.EdgedsrVipAddrValue] {
+	return newFakeReturnMap[edgeprog.EdgedsrVipAddrValue]()
+}
+
+func newFakeReturnStatsTable() *fakeReturnMap[edgeprog.EdgedsrVipStatsValue] {
+	return newFakeReturnMap[edgeprog.EdgedsrVipStatsValue]()
+}
+
 func newTestKernelDatapath() *KernelDatapath {
 	return &KernelDatapath{
-		vipTable:      edgemap.NewVIPTable(newFakeVIPTable(), newFakeStatsTable()),
+		vipTable: edgemap.NewVIPTable(
+			newFakeVIPTable(), newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable()),
 		vipKeysByName: make(map[string][]edgemap.VIPKey),
 	}
 }
@@ -206,7 +276,8 @@ func TestKernelDatapath_ApplyRuleTracksKeysWrittenBeforeAPartialFailure(t *testi
 	table := newFakeVIPTable()
 	table.failOnNthPut = 2 // fail registering the second of three VIPs
 	d := &KernelDatapath{
-		vipTable:      edgemap.NewVIPTable(table, newFakeStatsTable()),
+		vipTable: edgemap.NewVIPTable(
+			table, newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable()),
 		vipKeysByName: make(map[string][]edgemap.VIPKey),
 	}
 	ctx := context.Background()

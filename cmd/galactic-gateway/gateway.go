@@ -54,14 +54,22 @@ var gatewayDatapathKeepAlive struct {
 // gatewayDatapathKeepAlive rather than closed here: they, and the attachment
 // itself, must survive for the life of this process.
 //
+// internalInterfaces name this node's compute-facing links, if any. Each is
+// resolved and attached the same way as publicInterface, but with the
+// edge_return program: where the compute tier routes through this node, a
+// backend's reply to a VIP crosses it as ordinary forwarded traffic, and
+// connection tracking has no record of the forward half to judge it against
+// (see edgedsr.c's edge_return comment). An empty list attaches nothing and
+// leaves the packet path unchanged.
+//
 // srv6Address is written into the encapsulation config as this node's plain
-// SRv6-reachable source. It is never a translation source and has no
-// return-path significance.
+// SRv6-reachable source. It is never a translation source and is not what makes
+// the return path work.
 //
 // metricsReg additionally gets a collector registered against it once the
 // objects are loaded, reading the maps live at every scrape.
 func setupGatewayDatapath(
-	publicInterface, srv6Address string, metricsReg prometheus.Registerer,
+	publicInterface string, internalInterfaces []string, srv6Address string, metricsReg prometheus.Registerer,
 ) (gateway.Datapath, error) {
 	encapSrc, err := netip.ParseAddr(srv6Address)
 	if err != nil {
@@ -71,6 +79,11 @@ func setupGatewayDatapath(
 	targets, err := edgeattach.ResolveTargets(publicInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve edge gateway public interface %q: %w", publicInterface, err)
+	}
+
+	returnTargets, err := resolveReturnTargets(internalInterfaces)
+	if err != nil {
+		return nil, err
 	}
 
 	// Required for the FIB lookup in the datapath's header push to succeed
@@ -86,6 +99,16 @@ func setupGatewayDatapath(
 		}
 	}
 
+	// edge_return calls the same FIB lookup, scoped to the interface the reply
+	// arrived on, so every internal interface needs the same sysctls. Without
+	// them the lookup returns BPF_FIB_LKUP_RET_NOT_FWDED for every reply and the
+	// return path counts a drop per packet.
+	for _, target := range returnTargets {
+		if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
+			return nil, fmt.Errorf("configure IPv6 forwarding on internal interface %q: %w", target, err)
+		}
+	}
+
 	objs, err := edgeattach.Load(edgeattach.PinDir)
 	if err != nil {
 		return nil, fmt.Errorf("load edge gateway eBPF datapath: %w", err)
@@ -95,6 +118,17 @@ func setupGatewayDatapath(
 	if err != nil {
 		_ = objs.Close()
 		return nil, fmt.Errorf("attach edge gateway datapath to public interface %q: %w", publicInterface, err)
+	}
+
+	if len(returnTargets) > 0 {
+		returnLinks, err := edgeattach.Attach(objs.EdgeReturn, returnTargets)
+		if err != nil {
+			closeAll(xdpLinks)
+			_ = objs.Close()
+			return nil, fmt.Errorf("attach edge gateway return datapath to internal interfaces %v: %w",
+				internalInterfaces, err)
+		}
+		xdpLinks = append(xdpLinks, returnLinks...)
 	}
 
 	datapath, err := gateway.NewKernelDatapath(objs, encapSrc)
@@ -114,6 +148,24 @@ func setupGatewayDatapath(
 	gatewayDatapathKeepAlive.links = xdpLinks
 
 	return datapath, nil
+}
+
+// resolveReturnTargets expands every configured internal interface the way the
+// public interface is expanded, a bonding master resolving to its slaves. The
+// result is flattened across all of them, since unlike the public interface
+// there can legitimately be several: a compute node dual-homed to two edge
+// nodes puts one internal link on each, and an edge node fronting several
+// compute racks has one per rack.
+func resolveReturnTargets(internalInterfaces []string) ([]string, error) {
+	var targets []string
+	for _, iface := range internalInterfaces {
+		resolved, err := edgeattach.ResolveTargets(iface)
+		if err != nil {
+			return nil, fmt.Errorf("resolve edge gateway internal interface %q: %w", iface, err)
+		}
+		targets = append(targets, resolved...)
+	}
+	return targets, nil
 }
 
 // closeAll best-effort closes every link, to unwind a partially set-up datapath
