@@ -81,6 +81,20 @@ func setUpResolvableSID(t *testing.T, ifaceName, ifaceAddr, sid string) ns.NetNS
 	}
 	t.Cleanup(func() { _ = nsObj.Close() })
 
+	// The dummy is this namespace's SRv6 uplink. Egress route resolution
+	// rejects a route leaving through any other link, and auto-detection
+	// cannot name one here: a fresh namespace carries no default or
+	// BGP-learned IPv6 route to infer it from. So state it explicitly, the
+	// same override a multi-homed node uses.
+	//
+	// The resolved set is cached, and it is keyed on nothing that
+	// distinguishes one namespace from another, so it is dropped on the way
+	// in as well as out: each test resolves its own dummy's ifindex inside
+	// its own namespace rather than inheriting the previous test's.
+	t.Setenv(config.EnvCNIEBPFInterfaces, ifaceName)
+	attach.InvalidateUplinkIndexes()
+	t.Cleanup(attach.InvalidateUplinkIndexes)
+
 	err = nsObj.Do(func(_ ns.NetNS) error {
 		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: ifaceName}}
 		if err := netlink.LinkAdd(dummy); err != nil {
