@@ -35,6 +35,17 @@ spec:
             # attaches to for both underlay BGP and ingress traffic.
             - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
               value: eth1
+            # eth2 is this node's compute-facing link (see
+            # gvpc.clab.yaml's links section): dfw's compute node is
+            # dual-homed to both of dfw's edge nodes, and every site's
+            # compute node reaches the fabric only through its edge tier.
+            # A backend's reply to a VIP therefore crosses this node,
+            # where connection tracking holds no record of the forward
+            # half -- which went to the backend encapsulated, through XDP
+            # -- and kube-proxy drops it as invalid. edge_return forwards
+            # those replies before netfilter sees them.
+            - name: GALACTIC_GATEWAY_INTERNAL_INTERFACES
+              value: eth2
             # uFMT 48+16 uSID over this site's shared locator (2001:db8:ff02::/48,
             # see bgprouter.yaml's srv6Locator). nodeID=2,
             # Function=End.DT46 (arbitrary -- Argument 0 always misses

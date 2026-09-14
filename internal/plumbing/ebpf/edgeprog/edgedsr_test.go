@@ -344,3 +344,115 @@ func TestDropReasonNamesCoverEveryReason(t *testing.T) {
 		t.Errorf("len(DropReasonNames) = %d, want %d (DropReasonCount)", len(DropReasonNames), DropReasonCount)
 	}
 }
+
+// buildReturnPacket builds a reply the way a backend sends one under DSR: the
+// VIP as its source, the off-fabric client as its destination, and no
+// encapsulation, since the node that answered stripped it.
+func buildReturnPacket(t *testing.T, vip, client netip.Addr, hopLimit byte) []byte {
+	t.Helper()
+	pkt := buildL4Packet(t, ipprotoTCP, client, vip, 80, 44450, nil)
+	pkt[ethLen+7] = hopLimit
+	return pkt
+}
+
+func vipAddrKey(vip netip.Addr) EdgedsrVipAddrKey {
+	return EdgedsrVipAddrKey{Vip: vip.As16()}
+}
+
+// TestEdgeReturn_ForwardsReplyFromAClaimedVIP is the return path's core
+// property: a reply sourced from a VIP this node holds is forwarded by this
+// program rather than handed to the stack, where connection tracking would
+// mark it invalid and kube-proxy's KUBE-FORWARD chain would drop it -- the
+// forward half having crossed the backend's node inside an encapsulated
+// packet that netfilter never saw.
+//
+// As in TestEdgeLB_ForwardsPacketUnmodifiedToBackend, the FIB lookup itself
+// cannot succeed here (no route to the synthetic client exists on the test
+// host), so reaching a FIB drop rather than XDP_PASS is the evidence that the
+// packet was claimed and put on the forwarding path.
+func TestEdgeReturn_ForwardsReplyFromAClaimedVIP(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	vip := netip.MustParseAddr("2001:db8:6060::1")
+	client := netip.MustParseAddr("2001:db8:1:40::2")
+	if err := objs.VipAddrTable.Put(vipAddrKey(vip), EdgedsrVipAddrValue{Generation: 7}); err != nil {
+		t.Fatalf("populate vip_addr_table: %v", err)
+	}
+
+	pkt := buildReturnPacket(t, vip, client, 64)
+	ret, _, err := objs.EdgeReturn.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpDrop {
+		t.Fatalf("verdict = %d, want XDP_DROP (%d) (the FIB lookup against a synthetic client must fail, "+
+			"not succeed)", ret, xdpDrop)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonFibLookupFailed); got != 1 {
+		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (the reply must reach the forwarding path)", got)
+	}
+
+	var stats EdgedsrVipStatsValue
+	if err := objs.VipReturnStatsTable.Lookup(vipAddrKey(vip), &stats); err != nil {
+		t.Fatalf("lookup vip_return_stats_table: %v", err)
+	}
+	if stats.Packets != 1 || stats.DroppedPackets != 1 {
+		t.Errorf("return stats = {packets: %d, dropped: %d}, want {1, 1}", stats.Packets, stats.DroppedPackets)
+	}
+}
+
+// TestEdgeReturn_PassesTrafficFromAnUnclaimedSource covers everything else
+// crossing this interface -- the compute tier's ordinary egress, encapsulated
+// tenant traffic, the node's own management traffic. None of it is this
+// gateway's to forward, so it must reach the stack completely untouched.
+func TestEdgeReturn_PassesTrafficFromAnUnclaimedSource(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	vip := netip.MustParseAddr("2001:db8:6060::1")
+	if err := objs.VipAddrTable.Put(vipAddrKey(vip), EdgedsrVipAddrValue{Generation: 7}); err != nil {
+		t.Fatalf("populate vip_addr_table: %v", err)
+	}
+
+	other := netip.MustParseAddr("fd20:10:ff01::100:0")
+	pkt := buildReturnPacket(t, other, netip.MustParseAddr("2001:db8:1:40::2"), 64)
+	ret, out, err := objs.EdgeReturn.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpPass {
+		t.Errorf("verdict = %d, want XDP_PASS (%d)", ret, xdpPass)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated on a vip_addr_table miss:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+// TestEdgeReturn_DropsAnExpiredHopLimit guards the forwarding obligation this
+// program takes on by handling the packet itself: the kernel never sees it, so
+// nothing else expires a looping packet.
+func TestEdgeReturn_DropsAnExpiredHopLimit(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	vip := netip.MustParseAddr("2001:db8:6060::1")
+	if err := objs.VipAddrTable.Put(vipAddrKey(vip), EdgedsrVipAddrValue{Generation: 7}); err != nil {
+		t.Fatalf("populate vip_addr_table: %v", err)
+	}
+
+	pkt := buildReturnPacket(t, vip, netip.MustParseAddr("2001:db8:1:40::2"), 1)
+	ret, _, err := objs.EdgeReturn.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpDrop {
+		t.Errorf("verdict = %d, want XDP_DROP (%d)", ret, xdpDrop)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonReturnHopLimit); got != 1 {
+		t.Errorf("drop_reasons[return_hop_limit] = %d, want 1", got)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonFibLookupFailed); got != 0 {
+		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 0 (an expired packet must not reach the FIB)", got)
+	}
+}

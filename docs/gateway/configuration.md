@@ -147,13 +147,29 @@ flags, or a combination of both (CLI flags take precedence), with the
 `GALACTIC_GATEWAY` env prefix — the same three-tier precedence pattern
 `galactic-router` uses (see [docs/router/configuration.md](../router/configuration.md)).
 
-| Option           | Environment Variable                | CLI Flag                     | Default | Required |
-| ---------------- | ----------------------------------- | ---------------------------- | ------- | -------- |
-| Node name        | `GALACTIC_GATEWAY_NODE_NAME`        | `--node-name`, `-n`          | —       | Yes      |
-| Public interface | `GALACTIC_GATEWAY_PUBLIC_INTERFACE` | `--gateway-public-interface` | —       | Yes      |
-| SRv6 address     | `GALACTIC_GATEWAY_SRV6_ADDRESS`     | `--gateway-srv6-address`     | —       | Yes      |
-| Metrics port     | `GALACTIC_GATEWAY_METRICS_PORT`     | `--metrics-port`             | `8081`  | No       |
-| gRPC health port | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | `--grpc-health-port`         | `5181`  | No       |
+| Option              | Environment Variable                   | CLI Flag                        | Default | Required |
+| ------------------- | -------------------------------------- | ------------------------------- | ------- | -------- |
+| Node name           | `GALACTIC_GATEWAY_NODE_NAME`           | `--node-name`, `-n`             | —       | Yes      |
+| Public interface    | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`    | `--gateway-public-interface`    | —       | Yes      |
+| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | —       | Yes      |
+| Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —       | No       |
+| Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`  | No       |
+| gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`  | No       |
+
+`GALACTIC_GATEWAY_INTERNAL_INTERFACES` is a comma-separated list of this
+node's compute-facing interfaces, and it is what puts the return path in
+place. Where the compute tier reaches the fabric through this node, a
+backend's reply to a VIP crosses it as ordinary forwarded traffic, and the
+kernel drops it: the request reached the backend encapsulated through XDP,
+so connection tracking never saw the flow and marks the reply invalid, which
+kube-proxy's `KUBE-FORWARD` chain drops. Naming the interfaces here attaches
+the `edge_return` program to them, which forwards those replies before
+netfilter runs. Leave it unset on a node with no compute tier behind it.
+
+Never name the public uplink here. On the uplink, an external client could
+source a packet from a VIP address and have this program forward it
+unexamined; from the compute side that traffic is this gateway's own by
+construction.
 
 All three required fields are enforced by `GatewayConfig.Validate` at
 startup — a node deployed without them crash-loops immediately with an

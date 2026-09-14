@@ -148,6 +148,75 @@ var _ edgemap.Table = (*fakeStatsTable)(nil)
 
 // fakeDropReasons is an in-memory DropReasonsReader for tests -- same
 // shape as internal/plumbing/ebpf/metrics's identical fake.
+// fakeReturnMap is an in-memory Table for the two return-path maps, which this
+// package's tests need present but never assert against: the address set's own
+// behaviour is edgemap's to test.
+type fakeReturnMap[V any] struct {
+	entries map[edgeprog.EdgedsrVipAddrKey]V
+}
+
+func newFakeReturnMap[V any]() *fakeReturnMap[V] {
+	return &fakeReturnMap[V]{entries: make(map[edgeprog.EdgedsrVipAddrKey]V)}
+}
+
+func (f *fakeReturnMap[V]) Put(key, value any) error {
+	f.entries[key.(edgeprog.EdgedsrVipAddrKey)] = value.(V)
+	return nil
+}
+
+func (f *fakeReturnMap[V]) Lookup(key, valueOut any) error {
+	v, ok := f.entries[key.(edgeprog.EdgedsrVipAddrKey)]
+	if !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	*valueOut.(*V) = v
+	return nil
+}
+
+func (f *fakeReturnMap[V]) Delete(key any) error {
+	k := key.(edgeprog.EdgedsrVipAddrKey)
+	if _, ok := f.entries[k]; !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	delete(f.entries, k)
+	return nil
+}
+
+func (f *fakeReturnMap[V]) Iterate() edgemap.Iterator {
+	keys := make([]edgeprog.EdgedsrVipAddrKey, 0, len(f.entries))
+	for k := range f.entries {
+		keys = append(keys, k)
+	}
+	return &fakeReturnIterator[V]{table: f, keys: keys}
+}
+
+type fakeReturnIterator[V any] struct {
+	table *fakeReturnMap[V]
+	keys  []edgeprog.EdgedsrVipAddrKey
+	i     int
+}
+
+func (it *fakeReturnIterator[V]) Next(keyOut, valueOut any) bool {
+	if it.i >= len(it.keys) {
+		return false
+	}
+	k := it.keys[it.i]
+	it.i++
+	*keyOut.(*edgeprog.EdgedsrVipAddrKey) = k
+	*valueOut.(*V) = it.table.entries[k]
+	return true
+}
+
+func (it *fakeReturnIterator[V]) Err() error { return nil }
+
+func newFakeAddrTable() *fakeReturnMap[edgeprog.EdgedsrVipAddrValue] {
+	return newFakeReturnMap[edgeprog.EdgedsrVipAddrValue]()
+}
+
+func newFakeReturnStatsTable() *fakeReturnMap[edgeprog.EdgedsrVipStatsValue] {
+	return newFakeReturnMap[edgeprog.EdgedsrVipStatsValue]()
+}
+
 type fakeDropReasons map[uint32]uint64
 
 func (f fakeDropReasons) Lookup(key, valueOut any) error {
@@ -251,7 +320,7 @@ func findMetric(
 func TestCollector_CollectsRuleCounters(t *testing.T) {
 	table := newFakeVIPTable()
 	statsTable := newFakeStatsTable()
-	vt := edgemap.NewVIPTable(table, statsTable)
+	vt := edgemap.NewVIPTable(table, statsTable, newFakeAddrTable(), newFakeReturnStatsTable())
 	key := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
 	backend := edgemap.Backend{
 		Addr: mustAddr(t, "fd00:10:1::20"),
@@ -314,7 +383,7 @@ func TestCollector_CollectsRuleCounters(t *testing.T) {
 
 func TestCollector_OmitsSecondsSinceLastPacketWhenNeverSeen(t *testing.T) {
 	table := newFakeVIPTable()
-	vt := edgemap.NewVIPTable(table, newFakeStatsTable())
+	vt := edgemap.NewVIPTable(table, newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
 	key := edgemap.VIPKey{Proto: 6, VPort: 443, VIP: mustAddr(t, "2001:db8:1::10")}
 	if err := vt.Register(key, []edgemap.Backend{{
 		Addr: mustAddr(t, "fd00:10:1::20"), Port: 8443, USID: mustAddr(t, "2001:db8:2::1"),
@@ -326,9 +395,18 @@ func TestCollector_OmitsSecondsSinceLastPacketWhenNeverSeen(t *testing.T) {
 	metrics := collect(t, c)
 
 	// 4 metrics per rule (packets/bytes/dropped/backends) when
-	// LastSeenNs == 0, not 5 -- the staleness gauge must be absent.
+	// LastSeenNs == 0, not 5 -- the staleness gauge must be absent. Counted
+	// by Desc rather than by the vip label alone, the return-path metrics
+	// carrying that same label for the same address.
+	ruleDescs := map[*prometheus.Desc]struct{}{
+		rulePacketsDesc: {}, ruleBytesDesc: {}, ruleDroppedDesc: {},
+		ruleBackendsDesc: {}, ruleSecondsSinceLastPacketDesc: {},
+	}
 	count := 0
 	for _, m := range metrics {
+		if _, ok := ruleDescs[m.desc]; !ok {
+			continue
+		}
 		if labelValue(m.pb, "vip") == "2001:db8:1::10" {
 			count++
 		}
@@ -343,7 +421,9 @@ func TestCollector_CollectsDropsByReason(t *testing.T) {
 		edgeprog.DropReasonEmptyBackendList: 3,
 		edgeprog.DropReasonFibLookupFailed:  7,
 	}
-	c := NewCollector(edgemap.NewVIPTable(newFakeVIPTable(), newFakeStatsTable()), drops)
+	vt := edgemap.NewVIPTable(
+		newFakeVIPTable(), newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
+	c := NewCollector(vt, drops)
 	metrics := collect(t, c)
 
 	emptyBackends := findMetric(t, metrics, dropsDesc, "reason", "empty_backend_list")
@@ -353,5 +433,55 @@ func TestCollector_CollectsDropsByReason(t *testing.T) {
 	fibFailed := findMetric(t, metrics, dropsDesc, "reason", "fib_lookup_failed")
 	if got := metricValue(fibFailed); got != 7 {
 		t.Errorf("drops_total{reason=fib_lookup_failed} = %v, want 7", got)
+	}
+}
+
+// TestCollector_CollectsReturnCounters covers the return path's own counters.
+// They are keyed by VIP address alone, with no port or protocol, since
+// edge_return matches a reply on its source address -- so one series covers
+// every rule sharing that VIP rather than one per rule.
+func TestCollector_CollectsReturnCounters(t *testing.T) {
+	table := newFakeVIPTable()
+	addrs := newFakeAddrTable()
+	returnStats := newFakeReturnStatsTable()
+	vt := edgemap.NewVIPTable(table, newFakeStatsTable(), addrs, returnStats)
+
+	vip := mustAddr(t, "2001:db8:6060::1")
+	key := edgemap.VIPKey{Proto: 6, VPort: 80, VIP: vip}
+	backend := edgemap.Backend{
+		Addr: mustAddr(t, "fd20:60:ff01::100:0"),
+		Port: 80,
+		USID: mustAddr(t, "2001:db8:ff01:1:e003::"),
+	}
+	if err := vt.Register(key, []edgemap.Backend{backend}, [edgemap.MaglevTableSize]byte{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// As in TestCollector_CollectsRuleCounters, seeded on the fake's backing
+	// map the way edge_return's own increments would arrive.
+	for k := range addrs.entries {
+		returnStats.entries[k] = edgeprog.EdgedsrVipStatsValue{Packets: 12, Bytes: 9000, DroppedPackets: 2}
+	}
+
+	c := NewCollector(vt, fakeDropReasons{})
+	metrics := collect(t, c)
+
+	for _, tc := range []struct {
+		desc *prometheus.Desc
+		name string
+		want float64
+	}{
+		{returnPacketsDesc, "return_packets_total", 12},
+		{returnBytesDesc, "return_bytes_total", 9000},
+		{returnDroppedDesc, "return_dropped_packets_total", 2},
+	} {
+		m := findMetric(t, metrics, tc.desc, "vip", vip.String())
+		if m == nil {
+			t.Errorf("%s: no metric for vip %s", tc.name, vip)
+			continue
+		}
+		if got := metricValue(m); got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

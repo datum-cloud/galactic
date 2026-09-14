@@ -125,7 +125,8 @@ func NewKernelDatapath(objs *edgeprog.EdgedsrObjects, encapSrc netip.Addr) (*Ker
 
 	return &KernelDatapath{
 		vipTable: edgemap.NewVIPTable(
-			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable}),
+			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable},
+			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable}),
 		vipKeysByName: make(map[string][]edgemap.VIPKey),
 	}, nil
 }

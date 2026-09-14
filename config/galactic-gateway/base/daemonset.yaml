@@ -77,6 +77,18 @@ spec:
                   fieldPath: spec.nodeName
             - name: GALACTIC_GATEWAY_GRPC_HEALTH_PORT
               value: "5181"
+            # GALACTIC_GATEWAY_INTERNAL_INTERFACES is also left unset,
+            # for the same deployment-specific reason. It names the
+            # compute-facing interfaces, comma-separated, whose
+            # VIP-sourced replies this node forwards before netfilter:
+            # where the compute tier routes through this node, a
+            # backend's reply crosses it as ordinary forwarded traffic
+            # that connection tracking has no forward half to judge
+            # against, and kube-proxy's KUBE-FORWARD chain drops it as
+            # invalid. Unlike the two below it is optional — a node with
+            # no compute tier behind it leaves it unset and attaches no
+            # return program.
+            #
             # GALACTIC_GATEWAY_PUBLIC_INTERFACE/_SRV6_ADDRESS are
             # intentionally left unset here: the interface name is
             # deployment-specific and the SRv6 address must be unique per

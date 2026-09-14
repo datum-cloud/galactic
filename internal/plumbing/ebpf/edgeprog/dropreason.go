@@ -10,9 +10,10 @@ package edgeprog
 // source, because the generator cannot produce a Go type for an enum used only
 // as a literal constant.
 //
-// A small set: direct server return has no connection table, no port allocation,
-// and no return path, so there is nothing analogous to a full-NAT datapath's
-// state-related reasons.
+// A small set: direct server return has no connection table and no port
+// allocation, so there is nothing analogous to a full-NAT datapath's
+// state-related reasons. Both programs share these buckets -- a FIB or redirect
+// failure means the same thing whichever direction hit it.
 const (
 	DropReasonEmptyBackendList uint32 = 0
 	DropReasonNoEncapConfig    uint32 = 1
@@ -23,7 +24,8 @@ const (
 	DropReasonAdjustHeadFailed uint32 = 6
 	DropReasonNoEgressIfindex  uint32 = 7
 	DropReasonRedirectFailed   uint32 = 8
-	DropReasonCount            uint32 = 9
+	DropReasonReturnHopLimit   uint32 = 9
+	DropReasonCount            uint32 = 10
 )
 
 // DropReasonNames maps each index to a short, stable, metrics-friendly name,
@@ -39,4 +41,5 @@ var DropReasonNames = map[uint32]string{
 	DropReasonAdjustHeadFailed: "adjust_head_failed",
 	DropReasonNoEgressIfindex:  "no_egress_ifindex",
 	DropReasonRedirectFailed:   "redirect_failed",
+	DropReasonReturnHopLimit:   "return_hop_limit",
 }

@@ -383,6 +383,72 @@ tasks:
             kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
         done
 
+  # verify:gateway above reads CRDs and DaemonSets, so it passes on a datapath
+  # where no connection can complete -- the same shape as #551. This drives a
+  # real request from the one host outside every cluster (remote-host on tr4)
+  # to the anycast ingress VIP and reads what comes back.
+  #
+  # Both halves of that connection have failed at some point, for unrelated
+  # reasons, and each is asserted separately here. The request reaches a
+  # backend only if the gateway sends its encapsulated packet out the interface
+  # the route to that backend selects rather than the one the client's packet
+  # arrived on (#553). The reply reaches the client only if the edge node
+  # forwards it before netfilter, connection tracking having never seen the
+  # encapsulated forward half and marking the reply invalid for kube-proxy's
+  # KUBE-FORWARD chain to drop (#554) -- so the invalid-drop counter not moving
+  # is as much the result as the response body is.
+  #
+  # Deliberately NOT in the `verify` chain yet, matching verify:nat-datapath
+  # below: it stays red until a gateway image carrying both fixes is deployed,
+  # and a permanently red `verify` destroys the signal for everything else.
+  # Move it into `verify` once they land.
+  "verify:gateway-ingress":
+    desc: Full round trip from the off-fabric client to an anycast ingress VIP
+    silent: true
+    vars:
+      VIP: "2001:db8:6060::1"
+      EDGE_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
+    cmds:
+      - |
+        set -e
+        # The first rule of KUBE-FORWARD, per node, before and after. Matched
+        # on the rule text rather than by position: kube-proxy owns this chain
+        # and its ordering is not ours to assume.
+        invalid_drops() {
+          docker exec "$1" ip6tables -t filter -L KUBE-FORWARD -n -v -x 2>/dev/null \
+            | awk '/ctstate INVALID/ {print $1; exit}'
+        }
+
+        before=$(mktemp -d)
+        for node in {{.EDGE_NODES}}; do
+          invalid_drops ${node} > ${before}/${node}
+        done
+
+        echo "--- GET http://[{{.VIP}}]/ from the off-fabric client ---"
+        body=$(docker exec clab-gvpc-remote-host \
+          curl -sS --max-time 12 -o /dev/null -w '%{http_code}' "http://[{{.VIP}}]/") && rc=0 || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+          echo "FAIL: no response from the VIP (curl exit ${rc})" >&2
+          exit 1
+        fi
+        if [ "${body}" != "200" ]; then
+          echo "FAIL: VIP answered HTTP ${body}, want 200" >&2
+          exit 1
+        fi
+
+        for node in {{.EDGE_NODES}}; do
+          was=$(cat ${before}/${node})
+          now=$(invalid_drops ${node})
+          if [ "${now:-0}" -gt "${was:-0}" ]; then
+            echo "FAIL: ${node} dropped $((now - was)) packet(s) as ctstate INVALID -- the reply crossed the" \
+                 "kernel forwarding path instead of the return datapath (#554)" >&2
+            exit 1
+          fi
+        done
+        rm -rf ${before}
+
+        echo "PASS: VIP answered 200, no edge node dropped a packet as invalid"
+
   "verify:nat-sharding":
     desc: Verify each site's EgressShard and shard SID
     cmds:

@@ -42,7 +42,9 @@ func NewCollector(vipTable *edgemap.VIPTable, dropReasons DropReasonsReader) *Co
 // object set's maps.
 func NewCollectorFromObjects(objs *edgeprog.EdgedsrObjects) *Collector {
 	return NewCollector(
-		edgemap.NewVIPTable(edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable}),
+		edgemap.NewVIPTable(
+			edgemap.KernelTable{Map: objs.VipTable}, edgemap.KernelTable{Map: objs.VipStatsTable},
+			edgemap.KernelTable{Map: objs.VipAddrTable}, edgemap.KernelTable{Map: objs.VipReturnStatsTable}),
 		objs.DropReasons,
 	)
 }
@@ -88,8 +90,29 @@ var (
 	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "drops_total"),
-		"Packets dropped by the edge_lb program, by reason (drop_reasons map).",
+		"Packets dropped by the edge_lb and edge_return programs, by reason (drop_reasons map). "+
+			"The two share these buckets: a FIB or redirect failure means the same thing in either "+
+			"direction.",
 		[]string{"reason"}, nil,
+	)
+	returnPacketsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "return", "packets_total"),
+		"Reply packets this node forwarded for traffic sourced from this VIP, bypassing the kernel "+
+			"forwarding path (edge_return). Counted per VIP address, with no port or protocol "+
+			"dimension, since the return program matches on the source address alone.",
+		[]string{labelVIP}, nil,
+	)
+	returnBytesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "return", "bytes_total"),
+		"Reply bytes this node forwarded for traffic sourced from this VIP -- see "+
+			"return_packets_total's help text.",
+		[]string{labelVIP}, nil,
+	)
+	returnDroppedDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "return", "dropped_packets_total"),
+		"Reply packets sourced from this VIP that the datapath then dropped (e.g. an expired hop "+
+			"limit, or no route) -- a subset of return_packets_total, not an additional count.",
+		[]string{labelVIP}, nil,
 	)
 )
 
@@ -101,11 +124,15 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- ruleBackendsDesc
 	ch <- ruleSecondsSinceLastPacketDesc
 	ch <- dropsDesc
+	ch <- returnPacketsDesc
+	ch <- returnBytesDesc
+	ch <- returnDroppedDesc
 }
 
 // Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectRules(ch)
+	c.collectReturn(ch)
 	c.collectDrops(ch)
 }
 
@@ -147,6 +174,24 @@ func (c *Collector) collectRules(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(
 				ruleSecondsSinceLastPacketDesc, prometheus.GaugeValue, secondsSince, proto, port, vip)
 		}
+	}
+}
+
+// collectReturn reports the return path's per-VIP counters. A node with no
+// compute tier behind it never attaches edge_return, and vip_addr_table's rows
+// then simply never gain counters, so these read zero rather than going absent.
+func (c *Collector) collectReturn(ch chan<- prometheus.Metric) {
+	entries, err := c.vipTable.ListReturn()
+	if err != nil {
+		ch <- prometheus.NewInvalidMetric(returnPacketsDesc, fmt.Errorf("list vip_addr_table: %w", err))
+		return
+	}
+	for _, e := range entries {
+		vip := e.VIP.String()
+		ch <- prometheus.MustNewConstMetric(returnPacketsDesc, prometheus.CounterValue, float64(e.Packets), vip)
+		ch <- prometheus.MustNewConstMetric(returnBytesDesc, prometheus.CounterValue, float64(e.Bytes), vip)
+		ch <- prometheus.MustNewConstMetric(
+			returnDroppedDesc, prometheus.CounterValue, float64(e.DroppedPackets), vip)
 	}
 }
 

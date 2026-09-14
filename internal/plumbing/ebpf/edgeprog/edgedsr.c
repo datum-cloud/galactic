@@ -8,6 +8,10 @@
 // direct-server-return load balancer. IPv6-only, plain TCP and UDP, no
 // extension headers.
 //
+// A second program, edge_return, carries the other half of the same connection
+// on a node that also routes for the compute tier; see its own comment further
+// down.
+//
 // It does no address or port rewriting at all. It picks a backend by consistent
 // hashing on the client's own address and port, then pushes an SRv6 outer
 // header addressed to that backend's worker node; the original packet travels
@@ -181,6 +185,22 @@ struct vip_stats_value {
 	__u64 last_seen_ns;
 };
 
+// struct vip_addr_key is vip_addr_table's key: a VIP address alone, with no
+// port or protocol dimension. edge_return matches a reply on its source
+// address only, so it claims everything a VIP sources -- TCP, UDP, and the
+// ICMPv6 errors that a port-and-protocol key would miss, carrying no ports to
+// key on at all.
+struct vip_addr_key {
+	__u8 vip[16];
+};
+
+// struct vip_addr_value is vip_addr_table's value. generation mirrors struct
+// vip_value's and backs the same crash-safe reconcile cutoff. The datapath
+// reads only whether the row exists, never this field.
+struct vip_addr_value {
+	__u64 generation;
+};
+
 // struct encap_config is encap_config_table's single-entry value: this gateway
 // node's SRv6-reachable address, used as the outer source of every pushed
 // header. It is never compared against anything on a receive path, since no
@@ -202,7 +222,8 @@ enum edge_drop_reason {
 	DROP_REASON_ADJUST_HEAD_FAILED = 6,
 	DROP_REASON_NO_EGRESS_IFINDEX  = 7,
 	DROP_REASON_REDIRECT_FAILED    = 8,
-	DROP_REASON_COUNT              = 9,
+	DROP_REASON_RETURN_HOP_LIMIT   = 9,
+	DROP_REASON_COUNT              = 10,
 };
 
 // ---------------------------------------------------------------------
@@ -222,6 +243,24 @@ struct {
 	__type(key, struct vip_key);
 	__type(value, struct vip_stats_value);
 } vip_stats_table SEC(".maps");
+
+// vip_addr_table and vip_return_stats_table are edge_return's pair, split for
+// the same reason vip_table and vip_stats_table are: the control plane owns the
+// first and never writes the second, so per-packet increments cannot race a
+// control-plane read-modify-write.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct vip_addr_key);
+	__type(value, struct vip_addr_value);
+} vip_addr_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct vip_addr_key);
+	__type(value, struct vip_stats_value);
+} vip_return_stats_table SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -249,6 +288,34 @@ static EDGE_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vip_stats
 	count_drop(reason);
 	if (stats)
 		__sync_fetch_and_add(&stats->dropped_packets, 1);
+}
+
+// stats_row returns key's row in a statistics map, creating a zeroed one on
+// first use. A row that cannot be created (map full) yields NULL, which every
+// caller of the counting helpers already tolerates: losing a counter must never
+// cost a packet its verdict.
+static EDGE_ALWAYS_INLINE struct vip_stats_value *stats_row(void *map, const void *key)
+{
+	struct vip_stats_value *stats = bpf_map_lookup_elem(map, key);
+	if (stats)
+		return stats;
+
+	struct vip_stats_value init;
+	__builtin_memset(&init, 0, sizeof(init));
+	bpf_map_update_elem(map, key, &init, BPF_NOEXIST);
+	return bpf_map_lookup_elem(map, key);
+}
+
+// count_match records a packet this program claimed, whatever verdict it then
+// reaches. count_claimed_drop counts the subset that end in a drop, so dropped
+// never exceeds packets.
+static EDGE_ALWAYS_INLINE void count_match(struct vip_stats_value *stats, __u64 bytes)
+{
+	if (!stats)
+		return;
+	__sync_fetch_and_add(&stats->packets, 1);
+	__sync_fetch_and_add(&stats->bytes, bytes);
+	stats->last_seen_ns = bpf_ktime_get_ns();
 }
 
 // fnv1a_flow is a deterministic, stateless hash of a flow's client-facing
@@ -363,8 +430,37 @@ static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 s
 	return 0;
 }
 
+// leave_via turns a resolved egress interface into this packet's verdict, for a
+// packet whose Ethernet header resolve_fib_and_write_eth has already written.
+//
+// Leave over the interface the route selected, which is not in general the one
+// the packet arrived on: a gateway normally reaches its clients over a transit
+// uplink and its compute nodes over a site-internal link. XDP_TX retransmits out
+// the ingress interface unconditionally, so on those gateways it puts a frame
+// carrying the egress link's source and next-hop MACs onto the wrong wire, where
+// the neighbour discards it -- and the FIB lookup having succeeded, nothing
+// counts that as a failure. XDP_TX is kept for the case where it is actually
+// correct, the route egressing the ingress interface, where it is also the
+// cheaper verdict.
+static EDGE_ALWAYS_INLINE int leave_via(struct xdp_md *ctx, __u32 egress_ifindex,
+					 struct vip_stats_value *stats)
+{
+	if (egress_ifindex == 0) {
+		count_claimed_drop(DROP_REASON_NO_EGRESS_IFINDEX, stats);
+		return XDP_DROP;
+	}
+	if (egress_ifindex == ctx->ingress_ifindex)
+		return XDP_TX;
+
+	if (bpf_redirect(egress_ifindex, 0) != XDP_REDIRECT) {
+		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, stats);
+		return XDP_DROP;
+	}
+	return XDP_REDIRECT;
+}
+
 // ---------------------------------------------------------------------
-// Entry point.
+// Entry points.
 // ---------------------------------------------------------------------
 
 SEC("xdp")
@@ -402,18 +498,8 @@ int edge_lb(struct xdp_md *ctx)
 
 	// Claimed past this point -- every subsequent failure is a drop, not
 	// a pass-through (this gateway owns this VIP+port+protocol).
-	struct vip_stats_value *stats = bpf_map_lookup_elem(&vip_stats_table, &vk);
-	if (!stats) {
-		struct vip_stats_value init;
-		__builtin_memset(&init, 0, sizeof(init));
-		bpf_map_update_elem(&vip_stats_table, &vk, &init, BPF_NOEXIST);
-		stats = bpf_map_lookup_elem(&vip_stats_table, &vk);
-	}
-	if (stats) {
-		__sync_fetch_and_add(&stats->packets, 1);
-		__sync_fetch_and_add(&stats->bytes, (__u64) ((char *) data_end - (char *) data));
-		stats->last_seen_ns = bpf_ktime_get_ns();
-	}
+	struct vip_stats_value *stats = stats_row(&vip_stats_table, &vk);
+	count_match(stats, (__u64) ((char *) data_end - (char *) data));
 
 	if (rule->backend_count == 0) {
 		count_claimed_drop(DROP_REASON_EMPTY_BACKEND_LIST, stats);
@@ -468,28 +554,92 @@ int edge_lb(struct xdp_md *ctx)
 			      &egress_ifindex) != 0)
 		return XDP_DROP;
 
-	// Leave over the interface the route to the backend selected, which is
-	// not in general the one the client's packet arrived on: this role
-	// normally reaches its clients over a transit uplink and its compute
-	// nodes over a site-internal link. XDP_TX retransmits out the ingress
-	// interface unconditionally, so on those gateways it puts a frame
-	// carrying the egress link's source and next-hop MACs onto the client
-	// wire, where the neighbour discards it -- and the FIB lookup having
-	// succeeded, nothing counts that as a failure. XDP_TX is kept for the
-	// case it is actually correct, the route egressing the ingress
-	// interface, where it is also the cheaper verdict.
-	if (egress_ifindex == 0) {
-		count_claimed_drop(DROP_REASON_NO_EGRESS_IFINDEX, stats);
-		return XDP_DROP;
-	}
-	if (egress_ifindex == ctx->ingress_ifindex)
-		return XDP_TX;
+	return leave_via(ctx, egress_ifindex, stats);
+}
 
-	if (bpf_redirect(egress_ifindex, 0) != XDP_REDIRECT) {
-		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, stats);
+// edge_return forwards the other half of a load-balanced connection: a reply a
+// backend sent to a client, sourced from one of this node's VIPs, crossing this
+// node on its way to the fabric.
+//
+// DSR means the two halves never traverse the same stateful path. The forward
+// half reaches the backend inside an SRv6 packet, through XDP, which netfilter
+// never sees, so connection tracking holds no record of the inner flow. When the
+// plain reply crosses this node, tracking marks it INVALID and kube-proxy's
+// KUBE-FORWARD chain drops it on its first rule. That is not a misconfiguration
+// to exempt: no forward packet will ever create the entry the reply is judged
+// against. This program forwards the reply itself, before netfilter, so the
+// question never arises and the node keeps its stock forwarding rules.
+//
+// Attached only to the interfaces facing the compute tier, never the public
+// uplink. On the uplink, an external client could source a packet from a VIP
+// address and have it forwarded unexamined; from the compute side that traffic
+// is this gateway's own by construction.
+//
+// Where a node has no compute tier behind it, no interface is configured and
+// this program is never attached: the packet path is unchanged.
+//
+// Matching is on the source address alone -- see struct vip_addr_key. There is
+// no per-flow state and no relationship to the forward half's backend choice,
+// so it holds under anycast the same way the forward path does: a site with two
+// edge nodes may take the request through one and the reply through the other,
+// and both hold the same VIP rows.
+SEC("xdp")
+int edge_return(struct xdp_md *ctx)
+{
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+
+	struct edge_ethhdr *eth = data;
+	if ((void *) (eth + 1) > data_end)
+		return XDP_PASS;
+	if (eth->h_proto != __builtin_bswap16(EDGE_ETH_P_IPV6))
+		return XDP_PASS;
+
+	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
+	if ((void *) (ip6 + 1) > data_end)
+		return XDP_PASS;
+
+	struct vip_addr_key ak;
+	__builtin_memset(&ak, 0, sizeof(ak));
+	__builtin_memcpy(ak.vip, ip6->saddr, 16);
+
+	if (!bpf_map_lookup_elem(&vip_addr_table, &ak))
+		return XDP_PASS; // not sourced from one of this gateway's VIPs
+
+	// Claimed past this point: this node owns the source address, so every
+	// subsequent failure is a counted drop rather than a pass-through that
+	// would meet the connection-tracking drop this program exists to avoid.
+	struct vip_stats_value *stats = stats_row(&vip_return_stats_table, &ak);
+	count_match(stats, (__u64) ((char *) data_end - (char *) data));
+
+	// Forwarding in XDP means the kernel never sees this packet, so nothing
+	// else decrements the hop limit. Omitting it would forward a looping
+	// packet forever and make this node invisible to traceroute. No ICMPv6
+	// Time Exceeded is emitted, the same accepted gap this datapath already
+	// has for Packet Too Big.
+	if (ip6->hop_limit <= 1) {
+		count_claimed_drop(DROP_REASON_RETURN_HOP_LIMIT, stats);
 		return XDP_DROP;
 	}
-	return XDP_REDIRECT;
+
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, ip6->saddr, ip6->daddr,
+						 (__u16) (sizeof(*ip6) + __builtin_bswap16(ip6->payload_len)),
+						 eth, &egress_ifindex);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		// Including BPF_FIB_LKUP_RET_NOT_FWDED, which covers both a
+		// locally destined reply and forwarding being disabled on this
+		// interface. Passing those to the stack instead would deliver
+		// the first correctly while turning the second back into the
+		// silent connection-tracking drop, with nothing counted either
+		// way. A counted drop is diagnosable; attach-time sysctls (see
+		// setupGatewayDatapath) are what keep the second from arising.
+		count_fib_drop(fib_rc, stats);
+		return XDP_DROP;
+	}
+
+	ip6->hop_limit -= 1;
+	return leave_via(ctx, egress_ifindex, stats);
 }
 
 char _license[] SEC("license") = "GPL";
