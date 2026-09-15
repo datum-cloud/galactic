@@ -273,7 +273,8 @@ func TestAnnotateNAD(t *testing.T) {
 	t.Run("empty pod namespace is a no-op", func(t *testing.T) {
 		k8s := fakeClient()
 
-		if err := AnnotateNAD(context.Background(), k8s, nadName, "", hostIface); err != nil {
+		if err := AnnotateNAD(context.Background(), k8s, nadName, "",
+			map[string]string{AnnotationHostInterface: hostIface}); err != nil {
 			t.Fatalf("AnnotateNAD() with empty namespace = %v, want nil", err)
 		}
 	})
