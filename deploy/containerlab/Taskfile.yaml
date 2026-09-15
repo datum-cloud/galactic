@@ -302,6 +302,7 @@ tasks:
       - task: "verify:gateway-ingress"
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
+      - task: "verify:nat-return-route"
       - task: "verify:nat-collision"
       - task: "verify:nat-collision-samenode"
       - task: "verify:scenarios"
@@ -627,6 +628,114 @@ tasks:
 
         echo "PASS: translated to ${shard}:${port}, table ${before} -> ${after}, no new drops"
 
+  # The underlay half of the egress return path. A shard's masquerade
+  # addresses are what a reply from outside the fabric is addressed to, and
+  # only galactic-nat's EVPN Type 5 advertisement ever published the IPv6 one
+  # -- inside galactic-router's iBGP mesh, which the plain-IPv6-unicast
+  # transit never sees. The IPv4 (NAT64) one was published by nothing at all.
+  # A reply therefore reached a transit router holding no route for it and
+  # took that router's own management default, so every masqueraded flow was
+  # one-way while every forward-path counter stayed green (#549). Each shard
+  # node's fabric-router now originates its own two addresses into the
+  # underlay (resources/fabric-router/*/frr.conf.*-worker).
+  #
+  # Two assertions per family, because either half alone is satisfiable by a
+  # datapath that still cannot complete a session: the transit resolves the
+  # address to a BGP path rather than falling through to its default, and a
+  # packet addressed to it from the off-fabric host actually arrives at the
+  # shard's XDP program.
+  #
+  # Arrival is read from the shard's own drop counters rather than from a
+  # capture: a probe with no connection row behind it is dropped by design
+  # (nat66_return/nat64_return's NO_RETURN_CONN path, internal/plumbing/ebpf/
+  # natprog/nat.c), and that counter moving is proof the packet reached the
+  # program rather than merely the wire. It does leave those two counters a
+  # little higher than the traffic warranted, which is harmless: every check
+  # here reads drops as a delta across its own probe (#546), never as an
+  # absolute.
+  #
+  # What this does not prove is that the shard can then deliver the
+  # un-translated reply to the tenant, which is #550 and which
+  # verify:nat-datapath is the check for.
+  "verify:nat-return-route":
+    desc: Prove a reply from outside the fabric reaches each shard's masquerade addresses
+    silent: true
+    cmds:
+      - |
+        set -e
+        rc=0
+
+        # $1 transit container suffix, $2 "ipv6"/"ip", $3 address, $4 the
+        # default prefix in that family. Fails if the lookup landed on the
+        # default (no route for this address at all) or on anything the
+        # transit did not learn over BGP.
+        transit_has_route() {
+          out=$(docker exec clab-gvpc-$1 vtysh -c "show $2 route $3" 2>&1)
+          if printf '%s\n' "${out}" | grep -q "Routing entry for $4"; then
+            echo "  FAIL $1: no route for $3 -- fell through to the $4 default (#549)" >&2
+            return 1
+          fi
+          if ! printf '%s\n' "${out}" | grep -q 'Known via "bgp"'; then
+            echo "  FAIL $1: $3 is not a BGP path on the transit:" >&2
+            printf '%s\n' "${out}" | sed 's/^/    /' >&2
+            return 1
+          fi
+          return 0
+        }
+
+        drops_of() {
+          docker exec $1 curl -s --max-time 4 http://localhost:9182/metrics \
+            | awk -v r="$2" -F'[{}]' '$0 ~ "^galactic_nat_drops_total.*reason=\""r"\"" {print $NF}' \
+            | tr -d ' '
+        }
+
+        for pair in "dfw dfw-worker" "iad iad-worker" "sjc sjc-worker"; do
+          set -- ${pair}; site=$1; node=$2
+          cp=${site}-control-plane
+          shard6=$(docker exec ${cp} kubectl -n galactic-system get egressshard \
+            -o jsonpath='{.items[0].status.shardAddressIPv6}')
+          shard4=$(docker exec ${cp} kubectl -n galactic-system get ds galactic-nat \
+            -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{"\n"}{end}' \
+            | awk -F= '/GALACTIC_NAT_SHARD_PUB_ADDR4/ {print $2}')
+          echo "--- ${site} (${node}): ${shard6} / ${shard4} ---"
+          if [ -z "${shard6}" ] || [ -z "${shard4}" ]; then
+            echo "  FAIL: shard publishes no masquerade address pair" >&2
+            rc=1
+            continue
+          fi
+
+          # Every transit router, not just the one the off-fabric host hangs
+          # off: a reply can enter the fabric at any of them.
+          for tr in tr1 tr2 tr3 tr4; do
+            transit_has_route ${tr} ipv6 "${shard6}" "::/0" || rc=1
+            transit_has_route ${tr} ip   "${shard4}" "0.0.0.0/0" || rc=1
+          done
+          [ ${rc} -eq 0 ] && echo "  ok   both addresses resolve to a BGP path on tr1-tr4"
+
+          # Port 9 (discard): nothing anywhere answers it, so the only thing
+          # under test is whether the SYN arrives.
+          for probe in "nat66_no_return_conn [${shard6}]" "nat64_no_return_conn ${shard4}"; do
+            set -- ${probe}; reason=$1; target=$2
+            before=$(drops_of ${node} ${reason})
+            docker exec clab-gvpc-remote-host \
+              curl -sS --max-time 4 "http://${target}:9/" >/dev/null 2>&1 || true
+            after=$(drops_of ${node} ${reason})
+            if [ "$(awk -v a="${after:-0}" -v b="${before:-0}" 'BEGIN{print (a>b)?1:0}')" -ne 1 ]; then
+              echo "  FAIL ${reason}: nothing from the off-fabric host reached the shard's" \
+                   "datapath (${before:-0} -> ${after:-0}) (#549)" >&2
+              rc=1
+            else
+              echo "  ok   ${target} reached the shard's datapath (${reason} ${before} -> ${after})"
+            fi
+          done
+        done
+
+        if [ ${rc} -ne 0 ]; then
+          echo "FAIL: a reply from outside the fabric cannot reach every shard" >&2
+          exit 1
+        fi
+        echo "PASS: every shard's masquerade addresses are routable from outside the fabric and arrive"
+
   # The full egress datapath, both address families, driven as real traffic
   # against the one host in this lab that sits outside every cluster
   # (remote-host on tr4, gvpc.clab.yaml). verify:nat-egress above watches for
@@ -641,10 +750,17 @@ tasks:
   # the IPv4 address in the low 32 bits) and the shard translates it down to
   # IPv4, masqueraded to the shard's IPv4 public address.
   #
-  # Deliberately NOT in the `verify` chain: the return half fails today on
-  # both families (#549, #550), so wiring it in would leave `task verify`
+  # Deliberately NOT in the `verify` chain: the return half still fails today
+  # on both families (#550), so wiring it in would leave `task verify`
   # permanently red and destroy the signal for everything else. Move it into
-  # `verify` once those land.
+  # `verify` once that lands.
+  #
+  # The other half of that return path, #549, is fixed and covered by
+  # verify:nat-return-route above, which is in the chain. What that leaves
+  # here is a reply that reaches the shard, matches its connection row, and
+  # is dropped on the way back to the tenant -- visible as this task's own
+  # fib_no_neigh delta, which only started moving once the reply began
+  # arriving at all.
   "verify:nat-datapath":
     desc: Full egress round trip through a shard to the off-fabric host (IPv6 + IPv4)
     # silent: the script is long enough that echoing it buries the result.
@@ -708,9 +824,10 @@ tasks:
 
           if [ ${code} -ne 0 ] || [ -z "${body}" ]; then
             echo "  FAIL return: the tenant never got a reply (curl exit ${code})" >&2
-            echo "               forward half works, so this is the return path:" >&2
-            echo "               see #549 (masquerade address absent from the underlay)" >&2
-            echo "               and #550 (shard cannot forward a reply back to the tenant)" >&2
+            echo "               forward half works, so this is the return path: see #550" >&2
+            echo "               (the shard cannot forward a reply back to the tenant). If" >&2
+            echo "               the reply never even reached the shard, that is #549 --" >&2
+            echo "               run verify:nat-return-route, which isolates it." >&2
             rc=1
             return
           fi

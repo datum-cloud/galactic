@@ -200,8 +200,34 @@ docker exec dfw-control-plane kubectl -n ns10 exec "$pod" -- curl -sS --max-time
 docker exec dfw-control-plane kubectl -n ns10 exec "$pod" -- curl -sS --max-time 8 http://[2001:db8:64::a01:2802]/
 ```
 
-The forward half passes on both families today; the return half fails on both.
-See the README's Known limitations.
+The forward half passes on both families today; the return half still fails on
+both, inside the shard (#550). See the README's Known limitations.
+
+### The reply's underlay path
+
+A reply is addressed to the shard's masquerade address, and only the IPv6 one
+is advertised anywhere — as an EVPN Type 5 path, inside `galactic-router`'s
+iBGP mesh, which the plain-unicast transit never sees. Each shard node's
+`fabric-router` therefore originates both of its own masquerade addresses into
+the underlay (a `/64` and a `/32`, see
+`resources/fabric-router/dfw/frr.conf.dfw-worker`). `verify:nat-return-route`
+isolates that half of the return path from what the shard then does with the
+packet: it asserts every transit router resolves both addresses to a BGP path
+rather than to its own default, and that a probe from `remote-host` reaches
+the shard's datapath.
+
+```bash
+task verify:nat-return-route
+
+# By hand: the transit's view, which was the ::/0 default before #549
+docker exec clab-gvpc-tr4 vtysh -c "show ipv6 route 2001:db8:9966:3::1"
+docker exec clab-gvpc-tr4 vtysh -c "show ip route 192.0.2.3"
+```
+
+A probe with no connection row behind it is dropped by the shard by design, so
+arrival is read from `galactic_nat_drops_total{reason="nat66_no_return_conn"}`
+(and its `nat64_` counterpart) moving, which a packet that never reached the
+XDP program could not do.
 
 ## Automated checks
 

@@ -20,6 +20,48 @@ interface eth2
 ipv6 route 2001:db8:ff01::/48 Null0
 ipv6 route fc00:0:2::/48 Null0
 
+# This node's egress shard's two masquerade addresses
+# (GALACTIC_NAT_SHARD_PUB_ADDR6 and _ADDR4, resources/galactic-nat/dfw/
+# node-patch.yaml), originated into the underlay so a reply from outside the
+# fabric can reach the shard that sent the request (#549).
+#
+# galactic-nat's EgressShardReconciler advertises the IPv6 address as an EVPN
+# Type 5 path inside galactic-router's iBGP mesh, which makes it reachable
+# from other fabric nodes and from nowhere else -- the plain-IPv6-unicast
+# transit never sees an EVPN path at all. A masqueraded flow's reply comes
+# back from a host outside every cluster (remote-host on tr4), and the only
+# route it can be forwarded on is whatever the transit holds, which was the
+# transit's own management default: confirmed live as a BGP RIB miss on tr1
+# and tr4 before this existed, with every masqueraded flow one-way. The IPv4
+# address is advertised by nothing at all -- a NAT64 reply arrives over the
+# IPv4 underlay, which carries no EVPN.
+#
+# Same shape as the anycast ingress VIP aggregate on this site's edge nodes
+# (resources/fabric-router/dfw/frr.conf.dfw-worker2), with one difference
+# that matters: the origination has to come from the shard's own node, not
+# from the edge. The address must be attracted the whole way to the node
+# whose XDP program holds that flow's connection state; an aggregate
+# originated at an edge node would pull replies to a node with no route
+# onward to the shard. Arriving here ECMP over eth1 and eth2 is fine -- the
+# shard attaches to both uplinks (#545, see this file's comment below).
+#
+# A per-shard /64 and /32 rather than the covering 2001:db8:9966::/32 and
+# 192.0.2.0/24: each shard's address has to land on its own node, and a
+# single aggregate covering all three sites would send every site's replies
+# to whichever originator won best-path. These lengths also pass the
+# transit's inbound filters unchanged (FILTER_PREFIX/MIN48 and
+# FILTER_PREFIX_V4/MIN24, node_files/tr1/frr.conf), both of which drop short
+# aggregates and permit anything longer.
+#
+# Null0 because a `network` statement needs a matching route in the RIB and
+# nothing else on this node installs one. It cannot blackhole a real reply:
+# galactic-nat's XDP program runs at ingress on eth1/eth2 and rewrites the
+# destination before any FIB lookup (internal/plumbing/ebpf/natprog). A
+# packet that reaches this static is one no shard claimed, which is a drop
+# either way.
+ipv6 route 2001:db8:9966:1::/64 Null0
+ip route 192.0.2.1/32 Null0
+
 # eth1 and eth2 are equal paths, deliberately. This node is dual-homed to
 # both of dfw's edge nodes and every datapath on it attaches to both
 # uplinks: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="eth1,eth2"
@@ -64,17 +106,28 @@ router bgp 65000
   neighbor 2001:db8:1:13::1 allowas-in 1
   network 2001:db8:ff01::/48
   network fc00:0:2::/48
+  # This node's shard's IPv6 masquerade address -- see this file's own
+  # comment above.
+  network 2001:db8:9966:1::/64
  exit-address-family
 
- # IPv4 underlay -- this node's own /32 loopback only. There is no IPv4
- # counterpart to the SRv6 locator block: tenant IPv4 (ns20/ns40) rides
- # inside SRv6 and never touches the IPv4 transit FIB.
+ # IPv4 underlay -- this node's own /32 loopback, plus the one /32 below
+ # that is not a loopback: this node's shard's NAT64 masquerade address.
+ # There is no IPv4 counterpart to the SRv6 locator block, because tenant
+ # IPv4 (ns20/ns40) rides inside SRv6 and never touches the IPv4 transit
+ # FIB -- a NAT64 reply is the exception, arriving from an IPv4-only
+ # destination outside the fabric.
  address-family ipv4 unicast
   neighbor 10.1.10.1 activate
   neighbor 10.1.10.1 allowas-in 1
   neighbor 10.1.13.1 activate
   neighbor 10.1.13.1 allowas-in 1
   network 10.255.255.2/32
+  # This node's shard's IPv4 (NAT64) masquerade address. The one IPv4
+  # prefix here that is not a loopback: a NAT64 reply arrives from an
+  # IPv4-only destination, so unlike tenant IPv4 it does not ride inside
+  # SRv6 and does need a route in the transit FIB.
+  network 192.0.2.1/32
  exit-address-family
 
 ip forwarding
