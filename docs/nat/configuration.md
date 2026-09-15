@@ -107,6 +107,28 @@ ordinary unicast routing on this address alone, with no hashing on the
 return path — two shards sharing an address would make replies
 undeliverable or misdelivered.
 
+> **The underlay has to carry both masquerade addresses, and nothing in
+> this repo puts them there.** `EgressShardReconciler` advertises this
+> address as an EVPN Type 5 path, which makes it reachable from other
+> nodes on the fabric and from nowhere else — the plain-unicast underlay
+> carries no EVPN, and a masqueraded flow's reply comes back from a host
+> that is not on the fabric at all. Unless the underlay holds a route
+> attracting this address to *this* node, that reply is forwarded on
+> whatever default the first router holding no route for it has, and the
+> flow is one-way while every forward-path counter stays green (#549).
+> `--nat-shard-pub-addr4` below needs the same thing over IPv4, where
+> there is no advertisement of any kind.
+>
+> Origination has to come from the shard's own node, not from an
+> aggregate elsewhere: the address must reach the node whose datapath
+> holds that flow's connection state. The lab does it by having each
+> shard node's `fabric-router` originate its own two addresses (a `/64`
+> and a `/32`) — see
+> `deploy/containerlab/resources/fabric-router/dfw/frr.conf.dfw-worker`,
+> and `task -d deploy/containerlab verify:nat-return-route` for the check
+> that proves it. Where those addresses come from in the first place is
+> #409.
+
 ### Capabilities and host requirements
 
 `galactic-nat` runs `hostNetwork: true` and needs:

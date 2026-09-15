@@ -119,12 +119,20 @@ spec:
             # what DNS64 synthesizes into, or the shard translates for a
             # prefix nothing resolves to.
             #
-            # Note that nothing in this repo makes
-            # GALACTIC_NAT_SHARD_PUB_ADDR4 reachable: a NAT64 reply arrives
-            # from the IPv4 internet rather than across the fabric, so the
-            # underlay or an upstream announcement has to attract it to this
-            # node. Setting it without that in place yields a shard that
-            # translates outbound traffic and never sees a reply.
+            # Note that nothing in this repo makes either masquerade
+            # address reachable from outside the fabric. A reply comes back
+            # from a host that is not on the fabric, so the underlay or an
+            # upstream announcement has to attract each address to this
+            # node -- EgressShardReconciler's EVPN advertisement of
+            # _PUB_ADDR6 reaches other fabric nodes and nothing beyond
+            # them, and _PUB_ADDR4 is advertised by nothing at all.
+            # Setting either without that in place yields a shard that
+            # translates outbound traffic and never sees a reply (#549),
+            # with every forward-path counter still green. The origination
+            # has to be for this node specifically: the address must reach
+            # the node whose datapath holds that flow's connection state.
+            # deploy/containerlab/resources/fabric-router/*/frr.conf.*-worker
+            # is a worked example.
             #
             # See deploy/containerlab/resources/galactic-gateway/ for a
             # worked example of the equivalent per-node overlay pattern.

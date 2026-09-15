@@ -278,15 +278,17 @@ site-local `ns60` backend — one anycast service, three sites, four gateways.
 - **Tenant egress is one-way.** The forward half works on both families and is
   proven end to end by `task verify:nat-datapath`: a tenant's traffic reaches
   `remote-host`, outside every cluster, masqueraded to the shard's own public
-  address. Nothing that answers gets back, for two independent reasons — the
-  masquerade address is advertised only into the EVPN overlay and never into
-  the unicast underlay the outside world routes on
-  ([#549](https://github.com/datum-cloud/galactic/issues/549)), and a shard
-  cannot forward a reply back to a tenant it does not itself host
-  ([#550](https://github.com/datum-cloud/galactic/issues/550)) — which is every
-  tenant, since a node never uses its own shard. `verify:nat-datapath` is
-  therefore expected to fail today and is deliberately kept out of the `verify`
-  chain; move it in once those land.
+  address. A reply now reaches the shard — each shard node's `fabric-router`
+  originates its own two masquerade addresses into the underlay, since the
+  EVPN path `galactic-nat` advertises never leaves `galactic-router`'s iBGP
+  mesh, and `verify:nat-return-route` is the check for that
+  ([#549](https://github.com/datum-cloud/galactic/issues/549), fixed) — but
+  the shard cannot forward that reply back to a tenant it does not itself
+  host ([#550](https://github.com/datum-cloud/galactic/issues/550)), which is
+  every tenant, since a node never uses its own shard. The reply is dropped
+  there, counted as `fib_no_neigh`. `verify:nat-datapath` is therefore still
+  expected to fail and is deliberately kept out of the `verify` chain; move
+  it in once #550 lands.
 - **A shard attaches to its uplinks once, at process startup.**
   `GALACTIC_NAT_UPLINK_INTERFACES` is a list and every interface in it gets
   the shard XDP program, so a dual-homed node like `dfw-worker` keeps
@@ -378,43 +380,44 @@ task deploy
 
 ## Tasks
 
-| Task                     | Description                                                                   |
-|--------------------------|-------------------------------------------------------------------------------|
-| `build`                  | Build all container images (node, galactic-router, galactic-cni, frr, host)   |
-| `build:node`             | Build the custom `kindest/node:galactic` image                                |
-| `build:galactic-router`  | Build the galactic-router container from Go source                            |
-| `build:galactic-cni`     | Build the galactic-cni installer image                                        |
-| `build:frr`              | Build the FRR container from Alpine edge                                      |
-| `build:remote-host`      | Build the off-fabric nginx host image                                         |
-| `deploy`                 | Build images, apply host sysctls, and deploy the lab                          |
-| `deploy:topology`        | Deploy the ContainerLab topology (transit routers)                            |
-| `deploy:clusters`        | Create the three Kind clusters and export their kubeconfigs                   |
-| `deploy:images`          | Load container images into Kind clusters                                      |
-| `deploy:system`          | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC |
-| `deploy:cni`             | Install Cilium and Multus, then the galactic-cni DaemonSet                    |
-| `deploy:fabric`          | Apply FRR DaemonSets to all clusters                                          |
-| `deploy:galactic-router` | Apply galactic-router DaemonSets and BGP CRs                                  |
-| `deploy:scenarios`       | Deploy all VPC test scenarios                                                 |
-| `deploy:ns10`            | Deploy ns10 test VPC (IPv6-only, fd20 ULA)                                    |
-| `deploy:ns20`            | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                            |
-| `deploy:ns30`            | Deploy ns30 test VPC (dfw only, 2 pods)                                       |
-| `deploy:ns40`            | Deploy ns40 test VPC (iad only, 2 pods)                                       |
-| `verify:underlay`        | Ping every underlay loopback from tr1 over both IPv4 and IPv6                 |
-| `verify:nat-datapath`    | Full egress round trip to the off-fabric host, IPv6 (NAT66) and IPv4 (NAT64)  |
-| `verify:scenarios`       | Verify ping across all VPC test scenarios                                     |
-| `verify:ns10`            | Verify ns10 ping (IPv6-only, 3-site mesh)                                     |
-| `verify:ns20`            | Verify ns20 ping (dual-stack, 3-site mesh)                                    |
-| `verify:ns30`            | Verify ns30 ping (dfw only, 2 pods)                                           |
-| `verify:ns40`            | Verify ns40 ping (iad only, 2 pods)                                           |
-| `verify:gateway`         | Verify every site's edge gateway CRDs and DaemonSets                          |
-| `destroy`                | Destroy the lab and remove all Kind clusters                                  |
-| `restart`                | Full rebuild — destroy then redeploy                                          |
-| `rebuild`                | Full rebuild — clean (destroy + delete images/artifacts) then redeploy        |
-| `inspect`                | Show running nodes and management addresses                                   |
-| `graph`                  | Generate a draw.io diagram for the topology                                   |
-| `host-setup`             | Apply required host sysctls (IPv6 forwarding, inotify limits)                 |
-| `clean`                  | Destroy lab, delete built images, and remove lab artifacts                    |
-| `test`                   | Run all verification checks                                                   |
+| Task                      | Description                                                                     |
+|---------------------------|---------------------------------------------------------------------------------|
+| `build`                   | Build all container images (node, galactic-router, galactic-cni, frr, host)     |
+| `build:node`              | Build the custom `kindest/node:galactic` image                                  |
+| `build:galactic-router`   | Build the galactic-router container from Go source                              |
+| `build:galactic-cni`      | Build the galactic-cni installer image                                          |
+| `build:frr`               | Build the FRR container from Alpine edge                                        |
+| `build:remote-host`       | Build the off-fabric nginx host image                                           |
+| `deploy`                  | Build images, apply host sysctls, and deploy the lab                            |
+| `deploy:topology`         | Deploy the ContainerLab topology (transit routers)                              |
+| `deploy:clusters`         | Create the three Kind clusters and export their kubeconfigs                     |
+| `deploy:images`           | Load container images into Kind clusters                                        |
+| `deploy:system`           | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC   |
+| `deploy:cni`              | Install Cilium and Multus, then the galactic-cni DaemonSet                      |
+| `deploy:fabric`           | Apply FRR DaemonSets to all clusters                                            |
+| `deploy:galactic-router`  | Apply galactic-router DaemonSets and BGP CRs                                    |
+| `deploy:scenarios`        | Deploy all VPC test scenarios                                                   |
+| `deploy:ns10`             | Deploy ns10 test VPC (IPv6-only, fd20 ULA)                                      |
+| `deploy:ns20`             | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                              |
+| `deploy:ns30`             | Deploy ns30 test VPC (dfw only, 2 pods)                                         |
+| `deploy:ns40`             | Deploy ns40 test VPC (iad only, 2 pods)                                         |
+| `verify:underlay`         | Ping every underlay loopback from tr1 over both IPv4 and IPv6                   |
+| `verify:nat-datapath`     | Full egress round trip to the off-fabric host, IPv6 (NAT66) and IPv4 (NAT64)    |
+| `verify:nat-return-route` | Prove a reply from outside the fabric reaches each shard's masquerade addresses |
+| `verify:scenarios`        | Verify ping across all VPC test scenarios                                       |
+| `verify:ns10`             | Verify ns10 ping (IPv6-only, 3-site mesh)                                       |
+| `verify:ns20`             | Verify ns20 ping (dual-stack, 3-site mesh)                                      |
+| `verify:ns30`             | Verify ns30 ping (dfw only, 2 pods)                                             |
+| `verify:ns40`             | Verify ns40 ping (iad only, 2 pods)                                             |
+| `verify:gateway`          | Verify every site's edge gateway CRDs and DaemonSets                            |
+| `destroy`                 | Destroy the lab and remove all Kind clusters                                    |
+| `restart`                 | Full rebuild — destroy then redeploy                                            |
+| `rebuild`                 | Full rebuild — clean (destroy + delete images/artifacts) then redeploy          |
+| `inspect`                 | Show running nodes and management addresses                                     |
+| `graph`                   | Generate a draw.io diagram for the topology                                     |
+| `host-setup`              | Apply required host sysctls (IPv6 forwarding, inotify limits)                   |
+| `clean`                   | Destroy lab, delete built images, and remove lab artifacts                      |
+| `test`                    | Run all verification checks                                                     |
 
 ## Verification
 

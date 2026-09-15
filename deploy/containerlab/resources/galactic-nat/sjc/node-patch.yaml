@@ -89,6 +89,14 @@ spec:
             # 2001:db8:1:*::/64; SRv6 locators: 2001:db8:ff0X::/48; the
             # ns60 ingress VIP: 2001:db8:6060::1) -- "9966" as a mnemonic
             # for "NAT66". ::3 here is sjc's shard (shard 3 of 3).
+            #
+            # Reachable from outside the fabric only because this node's
+            # fabric-router originates 2001:db8:9966:3::/64 into the underlay
+            # (resources/fabric-router/sjc/frr.conf.sjc-worker): the EVPN path
+            # EgressShardReconciler advertises for this address never leaves
+            # galactic-router's iBGP mesh, so without that origination a
+            # reply from the off-fabric host is discarded by the first
+            # transit router holding no route for it (#549).
             - name: GALACTIC_NAT_SHARD_PUB_ADDR6
               value: "2001:db8:9966:3::1"
             # Turning NAT64 on for this shard takes both of the next two
@@ -103,11 +111,16 @@ spec:
             # that cannot collide with anything real. ::3 is this site's
             # shard, matching its IPv6 counterpart's numbering.
             #
-            # Nothing makes this address reachable, and nothing in this repo
-            # can: a NAT64 reply arrives from the IPv4 internet and something
-            # upstream has to attract it here. Outbound translation therefore
-            # works and replies never arrive -- the IPv4 half of the same gap
-            # #549/#550 describe for IPv6.
+            # A NAT64 reply arrives from the IPv4 internet rather than
+            # across the fabric, so nothing galactic-nat advertises can make
+            # this address reachable -- the underlay has to attract it to
+            # this node. That is exactly what this site's shard node now
+            # originates for itself (resources/fabric-router/sjc/
+            # frr.conf.sjc-worker), the IPv4 half of the same origination its
+            # IPv6 counterpart above needs; without it, outbound translation
+            # works and replies never arrive (#549). The remaining half of
+            # the return path -- delivering an un-translated reply back to a
+            # tenant on another node -- is #550.
             - name: GALACTIC_NAT_SHARD_PUB_ADDR4
               value: "192.0.2.3"
             - name: GALACTIC_NAT_NAT64_PREFIX
