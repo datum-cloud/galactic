@@ -554,6 +554,15 @@ tasks:
       # the kernel dispatches it on stale packet bytes and it reaches no
       # protocol handler), the source address (the whole point of the
       # translation), and the masquerade port's range.
+      #
+      # The drop check is a delta across the probe, not an absolute reading.
+      # galactic_nat_drops_total lives in a pinned map (natattach.PinDir) that
+      # a restarting shard reuses as-is, so the counters are cumulative for the
+      # life of the node, not the process. Failing on any non-zero value made
+      # one long-healed transient -- a link flap, ICMP through a TCP/UDP-only
+      # shard -- fail every later run, including runs where the translation
+      # provably worked, and clearing it took bpftool map surgery (#546). Only
+      # a counter that moves while this task is probing means anything.
       - |
         set -e
         shard=$(docker exec sjc-control-plane kubectl -n galactic-system get egressshard \
@@ -564,8 +573,17 @@ tasks:
         fi
         echo "sjc shard masquerade address: ${shard}"
 
-        before=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics \
-          | awk -F' ' '/^galactic_nat_conns\{family="nat66"\}/ {print $2}')
+        snap=$(mktemp -d)
+        trap 'rm -rf "${snap}"' EXIT
+
+        # One scrape serves both checks below, so the conn-table reading and
+        # the drop reading describe the same instant.
+        conns_of() { awk -F' ' '/^galactic_nat_conns\{family="nat66"\}/ {print $2}'; }
+        drops_of() { awk '/^galactic_nat_drops_total/ {print $1, $2}' | sort; }
+
+        metrics=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics)
+        before=$(printf '%s\n' "${metrics}" | conns_of)
+        printf '%s\n' "${metrics}" | drops_of > "${snap}/drops.before"
 
         docker exec sjc-worker timeout 16 tcpdump -i eth1 -nn -e -c 2 \
           "ip6 and src ${shard}" >/tmp/nat-egress.txt 2>&1 &
@@ -587,22 +605,27 @@ tasks:
           exit 1
         fi
 
-        after=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics \
-          | awk -F' ' '/^galactic_nat_conns\{family="nat66"\}/ {print $2}')
+        metrics=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics)
+        after=$(printf '%s\n' "${metrics}" | conns_of)
+        printf '%s\n' "${metrics}" | drops_of > "${snap}/drops.after"
         if [ "${after}" -le "${before}" ]; then
           echo "FAIL: connection table did not grow (${before} -> ${after})" >&2
           exit 1
         fi
 
-        drops=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics \
-          | awk '/^galactic_nat_drops_total/ && $2 != 0 {print}')
-        if [ -n "${drops}" ]; then
-          echo "FAIL: shard recorded drops while translating:" >&2
-          echo "${drops}" >&2
+        # -a2 -e 0 keeps a reason that shows up only in the after sample,
+        # reading it as 0 -> N. The comparison is awk's, not the shell's:
+        # counter values are Prometheus floats and can arrive in exponent
+        # form, which [ -gt ] cannot parse.
+        moved=$(join -a2 -e 0 -o '0,1.2,2.2' "${snap}/drops.before" "${snap}/drops.after" \
+          | awk '$3 > $2 {printf "  %s %s -> %s\n", $1, $2, $3}')
+        if [ -n "${moved}" ]; then
+          echo "FAIL: the shard dropped packets while translating this probe:" >&2
+          echo "${moved}" >&2
           exit 1
         fi
 
-        echo "PASS: translated to ${shard}:${port}, table ${before} -> ${after}, no drops"
+        echo "PASS: translated to ${shard}:${port}, table ${before} -> ${after}, no new drops"
 
   # The full egress datapath, both address families, driven as real traffic
   # against the one host in this lab that sits outside every cluster
@@ -652,6 +675,18 @@ tasks:
         echo "sender ${pod} (${cp})  shard ${shard6} / ${shard4}"
         rc=0
 
+        # Drops are reported as a delta across both probes, for the reason
+        # verify:nat-egress states at length: the counters are cumulative for
+        # the life of the node, so an absolute reading here described whatever
+        # the shard had ever dropped rather than what this run did (#546).
+        snap=$(mktemp -d)
+        trap 'rm -rf "${snap}"' EXIT
+        drops_of() {
+          docker exec {{.SHARD_NODE}} curl -s --max-time 4 http://localhost:9182/metrics \
+            | awk '/^galactic_nat_drops_total/ {print $1, $2}' | sort
+        }
+        drops_of > "${snap}/drops.before"
+
         # $1 label, $2 url the tenant fetches, $3 tcpdump filter at the far
         # end, $4 masquerade source the far end must see.
         probe() {
@@ -685,9 +720,10 @@ tasks:
         probe "IPv6 / NAT66" "http://[{{.HOST6}}]/"      "ip6 and src ${shard6}" "${shard6}"
         probe "IPv4 / NAT64" "http://[{{.HOST4_SYNTH}}]/" "ip and src ${shard4}"  "${shard4}"
 
-        drops=$(docker exec {{.SHARD_NODE}} curl -s --max-time 4 http://localhost:9182/metrics \
-          | awk '/^galactic_nat_drops_total/ && $2 != 0 {print "    "$0}')
-        if [ -n "${drops}" ]; then echo "  shard drop counters:"; echo "${drops}"; fi
+        drops_of > "${snap}/drops.after"
+        drops=$(join -a2 -e 0 -o '0,1.2,2.2' "${snap}/drops.before" "${snap}/drops.after" \
+          | awk '$3 > $2 {printf "    %s %s -> %s\n", $1, $2, $3}')
+        if [ -n "${drops}" ]; then echo "  shard drops during this run:"; echo "${drops}"; fi
 
         if [ ${rc} -ne 0 ]; then
           echo "FAIL: the egress datapath does not complete a round trip" >&2

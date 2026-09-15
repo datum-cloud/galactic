@@ -302,10 +302,6 @@ site-local `ns60` backend — one anycast service, three sites, four gateways.
   traffic out whichever interface was correct at that moment — in practice
   `eth0`, the Kind management bridge — with no drop counter and no error.
   Re-attaching the workload (scale to 0, wait, scale back) rewrites it.
-- **`galactic_nat_drops_total` is cumulative and survives a pod restart**, so
-  `task verify:nat-egress` fails on drops recorded during any earlier
-  transient, not just current ones. The counters live in a pinned map;
-  clearing one needs `bpftool map update` against it directly.
 - Replacing a pod on an existing VPCAttachment races with its own teardown:
   the host veth is named per VPC/attachment rather than per container, so the
   replacement's ADD removes the veth the terminating pod still holds. Scale to
