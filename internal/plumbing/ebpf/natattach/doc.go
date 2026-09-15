@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package natattach loads the compiled NAT66 XDP program and attaches it to
-// one interface, a shard's fabric-facing uplink.
+// every one of a shard's fabric-facing uplinks.
 //
 // It mirrors the edge attach package's mechanics almost verbatim: pinned maps,
 // verifier-error unwrapping, incompatible-map recreation on a schema change, and
@@ -19,9 +19,17 @@
 // now. Loading already surfaces "this kernel cannot load this program" clearly,
 // just later than a dedicated check would.
 //
-// # One attach target, no re-attachment
+// # No re-attachment
 //
-// This program has exactly one target, a fixed operator-configured interface,
-// attached once at process startup. There is no external event this package
-// needs to notice on its own.
+// Every uplink in the operator-configured list is attached at process startup,
+// so a multi-homed shard node translates on all of them and losing one uplink
+// does not stop translation on the rest. A single uplink is simply a
+// one-element list.
+//
+// Attachment happens once, though, and nothing here watches for link changes
+// afterwards: an interface that appears after startup gets no program until
+// the process restarts. That is the remaining gap, and it is a narrower one
+// than attaching to a single named uplink was -- a node's fabric uplinks are
+// present at boot, where which one carries traffic is decided by routing and
+// changes at any time.
 package natattach

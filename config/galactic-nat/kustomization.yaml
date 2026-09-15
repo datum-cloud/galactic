@@ -2,7 +2,7 @@
 # config/galactic-router/'s equivalent kustomization.yaml, this
 # deliberately does NOT include base/: base/daemonset.yaml's
 # galactic-nat container has no generic default for
-# GALACTIC_NAT_UPLINK_INTERFACE or _SHARD_SID (both required, and the
+# GALACTIC_NAT_UPLINK_INTERFACES or _SHARD_SID (both required, and the
 # shard SID must be unique per shard node), nor for the per-family
 # addresses that decide whether a shard serves NAT66, NAT64, or both --
 # config.NATConfig.Validate requires at least one family. Applying it as

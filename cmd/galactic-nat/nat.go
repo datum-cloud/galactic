@@ -32,8 +32,8 @@ import (
 // shard's XDP attachment live on the wire, would eventually be collected and
 // silently detached while the shard's Ready condition still reported healthy.
 var natDatapathKeepAlive struct {
-	objs *natprog.NatObjects
-	link link.Link
+	objs  *natprog.NatObjects
+	links []link.Link
 }
 
 // natDatapathStatus reports whether setup has completed a successful load,
@@ -87,12 +87,20 @@ func shardConfigFromFlags(cfg *config.NATConfig) (natmap.ShardConfig, error) {
 	return shardCfg, nil
 }
 
-// setupNatDatapath loads and attaches the egress translation datapath to this
-// shard's uplink, writes its identity into the config map, and registers this
-// shard's metrics. It returns the health reporter the reconciler uses for its
-// Ready condition.
+// setupNatDatapath loads and attaches the egress translation datapath to every
+// one of this shard's uplinks, writes its identity into the config map, and
+// registers this shard's metrics. It returns the health reporter the reconciler
+// uses for its Ready condition.
 //
-// The loaded objects and the returned link are stashed in natDatapathKeepAlive
+// Every configured uplink is attached, not only the one this node's traffic
+// uses today: a packet arriving on an uplink with no program reaches no
+// translation at all and leaves untranslated and uncounted, so a multi-homed
+// shard node that attached to one uplink would lose the shard role the moment
+// routing moved. Attachment is all-or-nothing -- natattach.Attach unwinds its
+// own partial work -- so a shard that cannot claim every uplink fails to start
+// rather than running with a hole in its coverage.
+//
+// The loaded objects and every returned link are stashed in natDatapathKeepAlive
 // rather than closed here: they, and the attachment itself, must survive for the
 // life of this process.
 func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (*natDatapathStatus, error) {
@@ -102,20 +110,27 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 	}
 
 	// Required for the FIB lookup in both the forward and return paths to
-	// succeed on this interface. Best-effort and non-fatal, matching how the
-	// gateway binary configures the same sysctls.
-	if err := sysctl.ConfigureFIBLookupUplinkSysctls(cfg.UplinkInterface); err != nil {
-		return nil, fmt.Errorf("configure IPv6 forwarding on uplink interface %q: %w", cfg.UplinkInterface, err)
+	// succeed on the interface the program actually runs on. The lookup uses
+	// the ingress interface, meaning whichever uplink the packet arrived on, so
+	// this must be applied to every one of them rather than to a primary.
+	// Best-effort and non-fatal, matching how the gateway binary configures the
+	// same sysctls.
+	for _, iface := range cfg.UplinkInterfaces {
+		if err := sysctl.ConfigureFIBLookupUplinkSysctls(iface); err != nil {
+			return nil, fmt.Errorf("configure IPv6 forwarding on uplink interface %q: %w", iface, err)
+		}
 	}
 	// A NAT64 forward leg hands the kernel a translated IPv4 packet to route,
 	// exactly as the NAT66 leg hands it an IPv6 one. Without IPv4 forwarding on
-	// this interface the kernel drops every translated packet after the
+	// the interface the kernel drops every translated packet after the
 	// datapath has already counted it as successfully translated, which reads
 	// as a working shard with a silently broken path.
 	if cfg.ServesNAT64() {
-		if err := sysctl.ConfigureFIBLookupUplinkSysctlsIPv4(cfg.UplinkInterface); err != nil {
-			return nil, fmt.Errorf(
-				"configure IPv4 forwarding on uplink interface %q: %w", cfg.UplinkInterface, err)
+		for _, iface := range cfg.UplinkInterfaces {
+			if err := sysctl.ConfigureFIBLookupUplinkSysctlsIPv4(iface); err != nil {
+				return nil, fmt.Errorf(
+					"configure IPv4 forwarding on uplink interface %q: %w", iface, err)
+			}
 		}
 	}
 
@@ -137,25 +152,25 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 		return nil, fmt.Errorf("write shard_config_table: %w", err)
 	}
 
-	xdpLink, err := natattach.Attach(objs.NatIngress, cfg.UplinkInterface)
+	xdpLinks, err := natattach.Attach(objs.NatIngress, cfg.UplinkInterfaces)
 	if err != nil {
 		_ = objs.Close()
-		return nil, fmt.Errorf("attach egress translation datapath to uplink interface %q: %w",
-			cfg.UplinkInterface, err)
+		return nil, fmt.Errorf("attach egress translation datapath to uplink interfaces %v: %w",
+			cfg.UplinkInterfaces, err)
 	}
 
 	collector := newNatCollector(objs)
 	if err := metricsReg.Register(collector); err != nil {
-		_ = xdpLink.Close()
+		closeAll(xdpLinks)
 		_ = objs.Close()
 		return nil, fmt.Errorf("register egress shard metrics collector: %w", err)
 	}
 
 	natDatapathKeepAlive.objs = objs
-	natDatapathKeepAlive.link = xdpLink
+	natDatapathKeepAlive.links = xdpLinks
 
 	slog.Info("Egress translation datapath attached",
-		"interface", cfg.UplinkInterface,
+		"interfaces", cfg.UplinkInterfaces,
 		"shardSID", cfg.ShardSID,
 		"nat66", cfg.ServesNAT66(),
 		"nat64", cfg.ServesNAT64(),
@@ -164,4 +179,12 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 	status := &natDatapathStatus{}
 	status.attached.Store(true)
 	return status, nil
+}
+
+// closeAll best-effort closes every link, to unwind a partially set-up datapath
+// when attaching succeeded but a later step failed.
+func closeAll(links []link.Link) {
+	for _, l := range links {
+		_ = l.Close()
+	}
 }

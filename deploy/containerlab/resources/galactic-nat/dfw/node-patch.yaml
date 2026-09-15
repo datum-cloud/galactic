@@ -23,12 +23,27 @@ spec:
       containers:
         - name: galactic-nat
           env:
-            # eth1 is this lab's dedicated transit-fabric-facing uplink on
-            # every node (see resources/galactic-cni/daemonset-patch.yaml's
-            # comment) -- the same interface internal/plumbing/ebpf/
-            # natprog's XDP program attaches to.
-            - name: GALACTIC_NAT_UPLINK_INTERFACE
-              value: eth1
+            # dfw-worker is the lab's one dual-homed compute node: eth1 to
+            # dfw-worker2 and eth2 to dfw-worker3 (gvpc.clab.yaml), so it
+            # names both here. internal/plumbing/ebpf/natprog's XDP program
+            # attaches to every interface in this list.
+            #
+            # Both, not just eth1, and this is the whole point of the list
+            # (#545): the datapath claims a packet only on an interface it
+            # is attached to, so an encapsulated tenant packet arriving on
+            # an unattached uplink would reach no translation program and be
+            # forwarded untranslated and uncounted. While this took a single
+            # name, dfw's FRR config had to de-prefer eth2 to keep egress-
+            # shard traffic off it -- that workaround is gone now (see
+            # resources/fabric-router/dfw/frr.conf.dfw-worker), and losing
+            # either edge node no longer degrades this node's shard role.
+            #
+            # Matches GALACTIC_CNI_EBPF_INTERFACES on this same site, which
+            # has always named both uplinks
+            # (resources/galactic-cni/dfw/ebpf-interfaces-patch.yaml).
+            # sjc and iad are single-homed and name eth1 alone.
+            - name: GALACTIC_NAT_UPLINK_INTERFACES
+              value: eth1,eth2
             # uFMT 48+16 uSID over dfw's own locator (2001:db8:ff01::/48,
             # see resources/galactic-router/dfw/bgprouter.yaml's
             # srv6Locator), nodeID=9 -- a dedicated Node-ID reserved for

@@ -23,22 +23,22 @@ flags, or a combination of both (CLI flags take precedence), with the
 `galactic-router` and `galactic-gateway` use (see
 [docs/router/configuration.md](../router/configuration.md)).
 
-| Option              | Environment Variable             | CLI Flag                  | Default | Required          |
-| ------------------- | -------------------------------- | ------------------------- | ------- | ----------------- |
-| Node name           | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —       | Yes               |
-| Uplink interface    | `GALACTIC_NAT_UPLINK_INTERFACE`  | `--nat-uplink-interface`  | —       | Yes               |
-| Shard SID           | `GALACTIC_NAT_SHARD_SID`         | `--nat-shard-sid`         | —       | Yes               |
-| IPv6 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR6`    | `--nat-shard-pub-addr6`    | —       | Enables NAT66     |
-| IPv4 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR4`   | `--nat-shard-pub-addr4`   | —       | Enables NAT64     |
-| NAT64 prefix        | `GALACTIC_NAT_NAT64_PREFIX`      | `--nat64-prefix`          | —       | With the above    |
-| Metrics port        | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`  | No                |
-| gRPC health port    | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`  | No                |
+| Option              | Environment Variable              | CLI Flag                   | Default | Required       |
+| ------------------- | --------------------------------- | -------------------------- | ------- | -------------- |
+| Node name           | `GALACTIC_NAT_NODE_NAME`          | `--node-name`              | —       | Yes            |
+| Uplink interfaces   | `GALACTIC_NAT_UPLINK_INTERFACES`  | `--nat-uplink-interfaces`  | —       | Yes            |
+| Shard SID           | `GALACTIC_NAT_SHARD_SID`          | `--nat-shard-sid`          | —       | Yes            |
+| IPv6 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR6`    | `--nat-shard-pub-addr6`    | —       | Enables NAT66  |
+| IPv4 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR4`    | `--nat-shard-pub-addr4`    | —       | Enables NAT64  |
+| NAT64 prefix        | `GALACTIC_NAT_NAT64_PREFIX`       | `--nat64-prefix`           | —       | With the above |
+| Metrics port        | `GALACTIC_NAT_METRICS_PORT`       | `--metrics-port`           | `9182`  | No             |
+| gRPC health port    | `GALACTIC_NAT_GRPC_HEALTH_PORT`   | `--grpc-health-port`       | `5182`  | No             |
 
 `NATConfig.Validate` enforces all of this at startup — a shard node
 deployed wrong crash-loops immediately with an actionable message rather
 than running degraded. Specifically:
 
-- The node name, uplink, and shard SID are always required.
+- The node name, at least one uplink, and the shard SID are always required.
 - **At least one address family must be turned on.** A shard serving
   neither loads a datapath that claims no packet at all, which presents as
   a silent blackhole rather than as the misconfiguration it is.
@@ -56,11 +56,25 @@ running on a compute node (`fabric-router`'s `179`, `galactic-router`'s
 
 ### Option details
 
-**`--nat-uplink-interface` / `GALACTIC_NAT_UPLINK_INTERFACE`**
-Name of this shard's single fabric-facing uplink interface —
-`internal/plumbing/ebpf/natprog`'s XDP program attaches here. Required:
-`galactic-nat` only ever runs as a dedicated shard, so there's no
-"not this role, skip the datapath" case to fall back to.
+**`--nat-uplink-interfaces` / `GALACTIC_NAT_UPLINK_INTERFACES`**
+Comma-separated names of this shard's fabric-facing uplink interfaces —
+`internal/plumbing/ebpf/natprog`'s XDP program attaches to every one of
+them. Required: `galactic-nat` only ever runs as a dedicated shard, so
+there's no "not this role, skip the datapath" case to fall back to.
+
+> **Name every fabric uplink, not just the primary.** The datapath claims
+> a packet only on an interface its program is attached to. An
+> SRv6-encapsulated tenant packet arriving on an uplink with no program
+> reaches no translation at all and is forwarded untranslated and
+> uncounted — nothing on either side reports a fault, and the shard's own
+> `Ready` condition and every counter it exports still read healthy. On a
+> multi-homed shard node, naming one uplink therefore makes the shard role
+> last only as long as that uplink does.
+
+Attachment is all-or-nothing: a shard that cannot attach to every
+interface in the list fails to start, rather than coming up with a hole in
+its coverage. It happens once, at process startup, so an interface that
+appears later is not picked up until the process restarts.
 
 **`--nat-shard-sid` / `GALACTIC_NAT_SHARD_SID`**
 This shard's own SRv6 uSID (`EgressShardStatus.ShardSID`) — the outer

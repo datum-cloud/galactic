@@ -345,12 +345,14 @@ topology:
     # node off the fabric with it. sjc and iad have a single edge node each
     # and so have nothing to dual-home to.
     #
-    # eth1 stays the primary: the uSID decap hook attaches to both uplinks
-    # (GALACTIC_CNI_EBPF_INTERFACES on this site is "eth1,eth2"), but
-    # galactic-nat's shard XDP program takes a single interface name and is
-    # attached to eth1 alone, so egress-shard traffic arriving on eth2 would
-    # miss translation entirely. BGP policy keeps it off eth2 while eth1 is
-    # up -- see resources/fabric-router/dfw/frr.conf.dfw-worker{,3}.
+    # Both uplinks are equal paths. Every datapath on this node attaches to
+    # both: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="eth1,eth2"
+    # and, since #545, galactic-nat's shard XDP program via
+    # GALACTIC_NAT_UPLINK_INTERFACES="eth1,eth2". While the shard took a
+    # single interface name it was attached to eth1 alone and egress-shard
+    # traffic arriving on eth2 missed translation entirely, so BGP policy in
+    # resources/fabric-router/dfw/frr.conf.dfw-worker{,3} had to keep traffic
+    # off eth2; that policy is gone and the pair runs plain ECMP.
     - endpoints: ["dfw-worker:eth2", "dfw-worker3:eth2"]
       mtu: 1500
     - endpoints: ["sjc-worker:eth1", "sjc-worker2:eth2"]

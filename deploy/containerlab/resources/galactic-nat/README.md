@@ -8,7 +8,7 @@ built on the same base/per-node-overlay shape
 - `base/` — the lab's patch onto `config/galactic-nat/base` (image
   override for Kind's locally-built images; see `base/kustomization.yaml`
   and `base/nat-lab-patch.yaml`). Not applied directly, same reason
-  `config/galactic-nat/base` itself isn't (`GALACTIC_NAT_UPLINK_INTERFACE`
+  `config/galactic-nat/base` itself isn't (`GALACTIC_NAT_UPLINK_INTERFACES`
   and `_SHARD_SID` are required and must be unique per shard node, and at
   least one address family has to be turned on).
 - `dfw/`, `sjc/`, `iad/` — one per-site overlay each, per the redesign
@@ -17,7 +17,10 @@ built on the same base/per-node-overlay shape
   than inventing new lab topology. Each pins the DaemonSet to that site's
   own worker via `kubernetes.io/hostname` (`node-patch.yaml`, mirroring
   `resources/galactic-gateway/<edge-node>/`'s per-node-pin pattern) and
-  sets that shard's own `GALACTIC_NAT_SHARD_SID`/`_SHARD_PUB_ADDR6` —
+  sets that shard's own `GALACTIC_NAT_UPLINK_INTERFACES` and
+  `GALACTIC_NAT_SHARD_SID`/`_SHARD_PUB_ADDR6` — `dfw` names both of its
+  dual-homed compute node's uplinks (`eth1,eth2`), `sjc` and `iad` their
+  single `eth1` —
   see each `node-patch.yaml`'s own comments for the exact uFMT 48+16
   encoding and address choices, including the note on why the NAT66
   shards use `Argument=1` rather than reusing the gateway nodes'
