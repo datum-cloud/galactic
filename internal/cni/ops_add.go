@@ -118,7 +118,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	// resolved above.
 	nadCtx, nadCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
 	defer nadCancel()
-	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
+	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace,
+		map[string]string{nadpatch.AnnotationHostInterface: hostName}); err != nil {
 		return fmt.Errorf("annotate NAD: %w", err)
 	}
 

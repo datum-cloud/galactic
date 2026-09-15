@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -111,14 +112,6 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	hostMTU := hostLink.Attrs().MTU
 	slog.Debug("ADD: host interface ready", "name", hostName, "mac", hostMac, "mtu", hostMTU)
 
-	// Reuses the k8sClient/podNamespace resolved above for the
-	// chain-completeness check.
-	nadCtx, nadCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
-	defer nadCancel()
-	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, hostName); err != nil {
-		return fmt.Errorf("annotate NAD: %w", err)
-	}
-
 	// Termination routes are galactic-route's job now — chained next after
 	// this plugin, when the attachment has any (see internal/cniroute).
 
@@ -140,6 +133,24 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		slog.Debug("ADD: IPAM allocated", "containerID", args.ContainerID,
 			"ipv6Subnet", ipamResult.IPv6Subnet, "ipv6Gateway", ipamResult.IPv6Gateway,
 			"ipv4Address", ipamResult.IPv4Address, "ipv4Gateway", ipamResult.IPv4Gateway)
+	}
+
+	// Record the host device on the attachment definition, after allocation so
+	// the prefix length is known. A hypervisor that adopts this tap discovers it
+	// only from here, and needs the prefix length to configure the guest, so both
+	// keys are written in one patch rather than the name on its own.
+	//
+	// Reuses the k8sClient/podNamespace resolved above for the
+	// chain-completeness check.
+	nadAnnotations := map[string]string{nadpatch.AnnotationHostInterface: hostName}
+	if ipamResult != nil && ipamResult.IPv6Subnet != nil {
+		prefixLen, _ := ipamResult.IPv6Subnet.Mask.Size()
+		nadAnnotations[nadpatch.AnnotationSubnetLen] = strconv.Itoa(prefixLen)
+	}
+	nadCtx, nadCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
+	defer nadCancel()
+	if err := nadpatch.AnnotateNAD(nadCtx, k8sClient, pluginConf.Name, podNamespace, nadAnnotations); err != nil {
+		return fmt.Errorf("annotate NAD: %w", err)
 	}
 
 	// Configure the gateway address on the host tap and install the VRF route:

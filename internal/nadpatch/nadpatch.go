@@ -28,6 +28,13 @@ import (
 // host-side interface name created for this VPC and attachment pair.
 const AnnotationHostInterface = "k8s.v1.cni.cncf.io/host-interface"
 
+// AnnotationSubnetLen is the annotation key recording the prefix length of the
+// address allocated to this attachment. A hypervisor that adopts the host
+// device reads both keys together: the name tells it which device to attach,
+// and the prefix length tells it what to configure on the guest side. Recording
+// the name alone leaves such a consumer unable to use either.
+const AnnotationSubnetLen = "k8s.v1.cni.cncf.io/subnet-len"
+
 // nadGVK is the GroupVersionKind for NetworkAttachmentDefinition.
 var nadGVK = schema.GroupVersionKind{
 	Group:   "k8s.cni.cncf.io",
@@ -59,13 +66,13 @@ func ParsePodName(cniArgs string) string {
 	return ""
 }
 
-// AnnotateNAD patches the attachment definition with the host interface name.
+// AnnotateNAD patches the attachment definition with the given annotations.
 //
 // The definition is expected to already exist, created by the external VPC
 // operator before the CNI runs, so not-found is a hard failure. So is every
 // other rejection: the patch states no resourceVersion precondition, so a
 // repeat attach just reapplies it, and any error that does come back means the
-// host interface name never reached the definition.
+// annotations never reached the definition.
 //
 // The patch is a merge patch so it touches only this one annotation. The
 // definition belongs to the external operator and carries annotations from
@@ -73,8 +80,12 @@ func ParsePodName(cniArgs string) string {
 // whole annotation map would drop all of them. A key-scoped JSON Patch would
 // scope the write just as narrowly but fails outright on a definition that
 // carries no annotations yet, which is the common case.
-func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, hostInterface string) error {
+func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace string,
+	annotations map[string]string) error {
 	if nadNamespace == "" {
+		return nil
+	}
+	if len(annotations) == 0 {
 		return nil
 	}
 
@@ -85,7 +96,7 @@ func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 
 	patch, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
-			"annotations": map[string]string{AnnotationHostInterface: hostInterface},
+			"annotations": annotations,
 		},
 	})
 	if err != nil {
@@ -99,7 +110,7 @@ func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace, 
 		}
 		return fmt.Errorf("patch NetworkAttachmentDefinition %s/%s: %w", nadNamespace, nadName, err)
 	}
-	slog.Debug("NAD annotated", "name", nadName, "namespace", nadNamespace, "interface", hostInterface)
+	slog.Debug("NAD annotated", "name", nadName, "namespace", nadNamespace, "annotations", annotations)
 	return nil
 }
 
