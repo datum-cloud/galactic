@@ -154,6 +154,20 @@ long-lived process with configurable env) reads it from there. Unset or
 empty means no shard configured yet — a VRF gets no default egress route,
 the same behavior as before this mechanism existed, not an error.
 
+Each entry names a shard's Block, Node-ID and Function. Whatever **Argument**
+it carries is a placeholder: it identifies no tenant and never could, one
+configured value being shared by every VRF on every node. Each attachment's
+CNI ADD rewrites that Argument to its own VRFID before installing the route
+(`internal/cnibgp`'s `shardSIDsForTenant`), which is what lets a shard tell
+two tenants on one node apart — see
+[#538](https://github.com/datum-cloud/galactic/issues/538). An entry that is
+not a well-formed uFMT 48+16 address fails the ADD there rather than being
+passed through unchanged.
+
+Because the destination therefore differs per tenant, a shard advertises its
+SID's covering `/64` rather than a host route; see
+`EgressShardReconciler.shardAdvertisementPrefixes`.
+
 **Type:** comma-separated string · **Default:** _(empty — no shard
 configured)_
 

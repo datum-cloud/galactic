@@ -18,7 +18,7 @@ System_Boundary(galactic, "Galactic") {
     Container(gateway, "galactic-gateway", "Go, controller-runtime", "Reconciles NetworkGateway/NetworkRule CRDs; Active-Active BGP placement; own single-container DaemonSet on gateway-role nodes")
     Container(edgebpf, "Edge XDP NAT+LB datapath", "XDP (cilium/ebpf)", "DSR (Direct Server Return) load-balancing over a Maglev consistent-hash ring on the gateway node's public interface")
 
-    Container(nat66, "galactic-nat", "Go, controller-runtime", "Reconciles EgressShard CRD; publishes a /128 BGPAdvertisement for this shard's SID + public address; own DaemonSet on every compute node")
+    Container(nat66, "galactic-nat", "Go, controller-runtime", "Reconciles EgressShard CRD; publishes a BGPAdvertisement for this shard's SID (its covering /64, one destination per tenant Argument) + public address (/128); own DaemonSet on every compute node")
     Container(nat66bpf, "NAT66 egress XDP datapath", "XDP (cilium/ebpf)", "Sharded, stateful SNAT/un-SNAT for tenant egress traffic on the shard's uplink interface")
 }
 

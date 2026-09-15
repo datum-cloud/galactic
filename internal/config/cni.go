@@ -42,6 +42,13 @@ const (
 	// It is operator-supplied because no single CRD is visible across this
 	// fabric's separate clusters the way BGP itself is.
 	//
+	// Each entry names a shard's Block, Node-ID and Function; whatever Argument
+	// it carries is a placeholder. Every attachment's ADD rewrites that
+	// Argument to its own VRFID before installing the route, which is what
+	// lets a shard tell two tenants on one node apart -- see
+	// internal/cnibgp's shardSIDsForTenant. An entry that is not a well-formed
+	// uFMT 48+16 address fails the ADD there rather than being passed through.
+	//
 	// The installer resolves it once at startup, from its real pod environment
 	// rather than a plugin's minimal exec environment, and writes it into the
 	// static per-node conflist, so the BGP plugin can read it the way it reads

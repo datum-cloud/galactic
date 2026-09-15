@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -152,11 +153,29 @@ func shardAdvertisementName(shardName string) string {
 	return shardName + "-sid"
 }
 
-// shardAdvertisementPrefixes builds the /128 prefixes advertised for shard: the
+// shardAdvertisementPrefixes builds the prefixes advertised for shard: the
 // shard SID, which is the forward leg a tenant VRF's egress routes encapsulate
 // toward, and the IPv6 shard address, which is the return leg a reply's
 // destination is rewritten to and which needs a route back from wherever that
 // reply's next hop is, not just from this node.
+//
+// The SID is advertised as its covering /64 -- Block and Node-ID, the shard's
+// whole uSID identity -- not as a /128. A tenant VRF's egress route encapsulates
+// toward this SID with that tenant's own 12-bit Argument written into it, so the
+// destination differs per tenant and a /128 covers exactly one of them. The
+// datapath already treats the top 64 bits as the shard's identity: see
+// locator_matches in internal/plumbing/ebpf/natprog/nat.c, which deliberately
+// does not compare the Argument, and locator_table's key in prog/usid.c. This
+// makes the control plane agree with that.
+//
+// Whatever Argument the operator baked into the configured SID is therefore not
+// advertised and carries no meaning; installEgressRoutes overwrites it per
+// tenant. Reserving the Block and Node-ID for this shard alone is what the /64
+// requires, which was already true -- locator_matches' doc comment spells out
+// what reusing a co-located BGPRouter's Node-ID silently breaks.
+//
+// The shard address stays a /128. It is an ordinary masquerade source address,
+// not a uSID, and nothing varies below it.
 //
 // Status.ShardAddressIPv4 is deliberately absent. A NAT64 reply arrives from the
 // IPv4 internet rather than across this fabric, so advertising that address into
@@ -170,16 +189,27 @@ func shardAdvertisementName(shardName string) string {
 // advertise yet, not an error.
 func shardAdvertisementPrefixes(shard *bgpv1alpha1.EgressShard) ([]bgpv1alpha1.Prefix, error) {
 	var prefixes []bgpv1alpha1.Prefix
-	for _, raw := range []string{shard.Status.ShardSID, shard.Status.ShardAddressIPv6} {
-		if raw == "" {
-			continue
+
+	if raw := shard.Status.ShardSID; raw != "" {
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse %q: %w", raw, err)
 		}
+		if addr.BitLen() < uformat.LocatorBits {
+			return nil, fmt.Errorf("parse %q: a shard SID must be an IPv6 address", raw)
+		}
+		prefixes = append(prefixes,
+			bgpv1alpha1.Prefix(netip.PrefixFrom(addr, uformat.LocatorBits).Masked().String()))
+	}
+
+	if raw := shard.Status.ShardAddressIPv6; raw != "" {
 		addr, err := netip.ParseAddr(raw)
 		if err != nil {
 			return nil, fmt.Errorf("parse %q: %w", raw, err)
 		}
 		prefixes = append(prefixes, bgpv1alpha1.Prefix(netip.PrefixFrom(addr, addr.BitLen()).String()))
 	}
+
 	return prefixes, nil
 }
 

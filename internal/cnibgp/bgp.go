@@ -15,7 +15,10 @@
 // pairs with are known only at that call site, and the interface name is
 // deterministic. installEgressRoutes writes a real kernel route, because
 // the optional routing plugin in this chain may be absent from a conflist and
-// the route must exist wherever a NAT66 shard is configured.
+// the route must exist wherever a NAT66 shard is configured. That route
+// encapsulates toward the shard's SID with this attachment's VRFID written
+// into the Argument, which is what a shard reads back to tell one tenant on
+// this node from another.
 package cnibgp
 
 import (
@@ -552,7 +555,7 @@ func registerEBPFDatapath(
 	// optional routing plugin in this chain may be absent from a given
 	// conflist, and this route must exist wherever a shard is configured, so
 	// it is written here.
-	if err := installEgressRoutes(vrfTableID); err != nil {
+	if err := installEgressRoutes(vrfTableID, argument); err != nil {
 		return false, fmt.Errorf("install NAT66 default egress route: %w", err)
 	}
 
@@ -732,17 +735,28 @@ func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []stri
 // where this fabric has NAT64, a more-specific route for the NAT64 prefix.
 // Idempotent, so it is safe on every attachment ADD sharing this VRF.
 //
-// Both point at the same shard SID. A shard decides which translation a packet
-// gets from its inner destination, so the second route exists to make the NAT64
-// prefix reachable at all rather than to steer it somewhere else -- which
-// matters because the two are independent: a fabric may offer NAT64 without
-// NAT66, and then no default route exists for this traffic to fall into.
+// argument is this attachment's VRFID, written into every shard SID these
+// routes encapsulate toward. It is what makes a shard able to tell one tenant
+// on this node from another: the shard reads it back out of the outer
+// destination and composes it with the encapsulation source into its session
+// table key. Without it every VRF on this node encapsulates toward a byte-
+// identical destination, and two tenants whose inner tuples also match -- an
+// ordinary occurrence with overlapping RFC 4193 ULAs -- share one connection
+// row and one masquerade port, so the second tenant's replies are delivered to
+// the first. See struct conn_key in internal/plumbing/ebpf/natprog/nat.c.
+//
+// Both routes point at the same shard SID, argument included. A shard decides
+// which translation a packet gets from its inner destination, so the second
+// route exists to make the NAT64 prefix reachable at all rather than to steer
+// it somewhere else -- which matters because the two are independent: a fabric
+// may offer NAT64 without NAT66, and then no default route exists for this
+// traffic to fall into.
 //
 // No shard configured is not an error: the shard list parses to an empty slice
 // and srv6.EgressDefaultRouteAdd no-ops. A shard SID that is invalid, or that
 // has no reachable route yet, fails this attachment's ADD rather than leaving
 // the VRF with no egress at all.
-func installEgressRoutes(vrfTableID uint32) error {
+func installEgressRoutes(vrfTableID uint32, argument uint16) error {
 	// cniConfig is nil until InitCNIConfig runs, which several unit tests
 	// calling registerEBPFDatapath directly never do. Treated as "no shard
 	// configured" rather than a panic.
@@ -756,10 +770,52 @@ func installEgressRoutes(vrfTableID uint32) error {
 	if len(shardSIDs) == 0 {
 		return nil
 	}
-	if err := srv6.EgressDefaultRouteAdd(vrfTableID, shardSIDs); err != nil {
+	tenantSIDs, err := shardSIDsForTenant(shardSIDs, argument)
+	if err != nil {
+		return fmt.Errorf("apply tenant argument to %s: %w", config.EnvCNIEgressShardSIDs, err)
+	}
+	if err := srv6.EgressDefaultRouteAdd(vrfTableID, tenantSIDs); err != nil {
 		return err
 	}
-	return installNAT64EgressRoute(vrfTableID, shardSIDs)
+	return installNAT64EgressRoute(vrfTableID, tenantSIDs)
+}
+
+// shardSIDsForTenant returns sids with each SID's 12-bit Argument replaced by
+// argument, leaving Block, Node-ID and Function as the operator configured
+// them. Whatever Argument an operator baked into a configured SID is therefore
+// overwritten rather than honoured; it identifies no tenant and never could,
+// one configured value being shared by every VRF on every node.
+//
+// A SID that is not a well-formed uFMT 48+16 address fails here rather than
+// being passed through unchanged. uformat.Decode's padding check is what
+// catches it -- an address with anything in bits 81-128 is not a uSID, and
+// writing an Argument into it would produce a plausible-looking destination
+// that addresses nothing. An IPv4 entry is unmapped first so it fails as "not
+// an IPv6 address" rather than as stray padding, which is what it actually is.
+//
+// The shard must have a route covering its whole Block and Node-ID for these
+// destinations to be reachable, not just a host route for the one SID the
+// operator configured. EgressShardReconciler advertises that /64; see
+// shardAdvertisementPrefixes.
+func shardSIDsForTenant(sids []net.IP, argument uint16) ([]net.IP, error) {
+	out := make([]net.IP, 0, len(sids))
+	for _, sid := range sids {
+		addr, ok := netip.AddrFromSlice(sid.To16())
+		if !ok {
+			return nil, fmt.Errorf("egress shard SID %s is not a 16-byte address", sid)
+		}
+		fields, err := uformat.Decode(addr.Unmap())
+		if err != nil {
+			return nil, fmt.Errorf("decode egress shard SID %s: %w", sid, err)
+		}
+		fields.Argument = argument
+		tenant, err := uformat.Encode(fields)
+		if err != nil {
+			return nil, fmt.Errorf("encode egress shard SID %s with argument %#x: %w", sid, argument, err)
+		}
+		out = append(out, net.IP(tenant.AsSlice()))
+	}
+	return out, nil
 }
 
 // installNAT64EgressRoute installs vrfTableID's route for the fabric's NAT64

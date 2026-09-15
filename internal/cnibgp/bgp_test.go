@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/netip"
 	"os"
 	"reflect"
 	"strings"
@@ -1146,7 +1147,127 @@ func TestInstallNAT66EgressRoute_NilCNIConfigIsANoop(t *testing.T) {
 	cniConfig = nil
 	defer func() { cniConfig = original }()
 
-	if err := installEgressRoutes(1); err != nil {
-		t.Errorf("installEgressRoutes(1) = %v, want nil with cniConfig == nil", err)
+	if err := installEgressRoutes(1, 0x005); err != nil {
+		t.Errorf("installEgressRoutes(1, 0x005) = %v, want nil with cniConfig == nil", err)
+	}
+}
+
+// TestShardSIDsForTenant_WritesTheArgument is the regression test for #538:
+// every tenant VRF on a node encapsulated toward a byte-identical shard SID, so
+// a shard read one constant Argument for all of them and two same-node tenants
+// with overlapping ULAs shared a connection row.
+func TestShardSIDsForTenant_WritesTheArgument(t *testing.T) {
+	sids, err := parseShardSIDs("2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::")
+	if err != nil {
+		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+	}
+
+	got, err := shardSIDsForTenant(sids, 0x2a5)
+	if err != nil {
+		t.Fatalf("shardSIDsForTenant() error = %v, want nil", err)
+	}
+
+	want := []string{"2001:db8:ff01:9:e2a5::", "2001:db8:ff02:9:e2a5::"}
+	if len(got) != len(want) {
+		t.Fatalf("shardSIDsForTenant() = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i].String() != w {
+			t.Errorf("shardSIDsForTenant()[%d] = %v, want %s", i, got[i], w)
+		}
+	}
+}
+
+// TestShardSIDsForTenant_DistinctPerTenant states the property #538 is about
+// directly: two VRFIDs on one node must not produce the same destination.
+func TestShardSIDsForTenant_DistinctPerTenant(t *testing.T) {
+	sids, err := parseShardSIDs("2001:db8:ff01:9:e001::")
+	if err != nil {
+		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+	}
+
+	a, err := shardSIDsForTenant(sids, 0x001)
+	if err != nil {
+		t.Fatalf("shardSIDsForTenant(0x001) error = %v, want nil", err)
+	}
+	b, err := shardSIDsForTenant(sids, 0x002)
+	if err != nil {
+		t.Fatalf("shardSIDsForTenant(0x002) error = %v, want nil", err)
+	}
+	if a[0].Equal(b[0]) {
+		t.Errorf("VRFIDs 0x001 and 0x002 both encapsulate toward %v; they must differ", a[0])
+	}
+}
+
+// TestShardSIDsForTenant_OverwritesAConfiguredArgument covers the operator-
+// supplied Argument every deployment bakes into its shard SID today. It
+// identifies no tenant -- one configured value is shared by every VRF on every
+// node -- so it is replaced, not honoured or treated as a conflict.
+func TestShardSIDsForTenant_OverwritesAConfiguredArgument(t *testing.T) {
+	sids, err := parseShardSIDs("2001:db8:ff01:9:efff::")
+	if err != nil {
+		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+	}
+
+	got, err := shardSIDsForTenant(sids, 0x007)
+	if err != nil {
+		t.Fatalf("shardSIDsForTenant() error = %v, want nil", err)
+	}
+	if want := "2001:db8:ff01:9:e007::"; got[0].String() != want {
+		t.Errorf("shardSIDsForTenant() = %v, want %s", got[0], want)
+	}
+}
+
+// TestShardSIDsForTenant_PreservesBlockNodeIDAndFunction guards the fields the
+// Argument rewrite must leave alone: get any of them wrong and the packet is
+// addressed to a different shard, or to no shard at all.
+func TestShardSIDsForTenant_PreservesBlockNodeIDAndFunction(t *testing.T) {
+	sids, err := parseShardSIDs("2001:db8:ff01:9:e001::")
+	if err != nil {
+		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+	}
+
+	got, err := shardSIDsForTenant(sids, 0x123)
+	if err != nil {
+		t.Fatalf("shardSIDsForTenant() error = %v, want nil", err)
+	}
+	addr, ok := netip.AddrFromSlice(got[0].To16())
+	if !ok {
+		t.Fatalf("shardSIDsForTenant() returned %v, which is not a 16-byte address", got[0])
+	}
+	fields, err := uformat.Decode(addr)
+	if err != nil {
+		t.Fatalf("uformat.Decode(%v) error = %v, want nil", addr, err)
+	}
+	if fields.Block != 0x2001_0db8_ff01 {
+		t.Errorf("Block = %#x, want %#x", fields.Block, 0x2001_0db8_ff01)
+	}
+	if fields.NodeID != 9 {
+		t.Errorf("NodeID = %d, want 9", fields.NodeID)
+	}
+	if fields.Function != uformat.FunctionEndDT46 {
+		t.Errorf("Function = %#x, want %#x", fields.Function, uformat.FunctionEndDT46)
+	}
+	if fields.Argument != 0x123 {
+		t.Errorf("Argument = %#x, want %#x", fields.Argument, 0x123)
+	}
+}
+
+// TestShardSIDsForTenant_RejectsAMalformedSID covers the entries parseShardSIDs
+// accepts as valid IP addresses but that are not uSIDs. Writing an Argument
+// into one produces a plausible-looking destination that addresses nothing, so
+// it fails the ADD instead of being passed through unchanged.
+func TestShardSIDsForTenant_RejectsAMalformedSID(t *testing.T) {
+	for _, raw := range []string{
+		"2001:db8:ff01:9:e001::1", // non-zero padding: not a uFMT 48+16 address
+		"192.0.2.1",               // IPv4: not an SRv6 SID at all
+	} {
+		sids, err := parseShardSIDs(raw)
+		if err != nil {
+			t.Fatalf("parseShardSIDs(%q) error = %v, want nil", raw, err)
+		}
+		if _, err := shardSIDsForTenant(sids, 0x005); err == nil {
+			t.Errorf("shardSIDsForTenant(%q) error = nil, want an error", raw)
+		}
 	}
 }

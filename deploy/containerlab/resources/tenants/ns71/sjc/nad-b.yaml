@@ -1,0 +1,39 @@
+---
+# The second of ns71's two tenants: a different VPC (72, so a different VRF
+# and a different Argument on the same node), holding the identical address
+# nad.yaml's pod holds. Every field of the shard's connection key matches
+# across the two except the Argument -- see ../base/kustomization.yaml.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: private-b
+  namespace: ns71
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "private-b",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "72",
+          "vpcattachment": "72",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:71:ffff:0:0:1::/96",
+                "gateway": "fd20:71:ffff::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "72",
+          "vpcattachment": "72",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

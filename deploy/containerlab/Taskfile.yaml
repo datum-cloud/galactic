@@ -252,6 +252,7 @@ tasks:
       - task: "deploy:ns40"
       - task: "deploy:ns60"
       - task: "deploy:ns70"
+      - task: "deploy:ns71"
 
   "deploy:ns10":
     desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
@@ -278,6 +279,11 @@ tasks:
     cmds:
       - ./scripts/deploy-ns.sh ns70 iad sjc
 
+  "deploy:ns71":
+    desc: Deploy ns71 test VPCs (overlapping ULA on one node, same-node collision fixture)
+    cmds:
+      - ./scripts/deploy-ns.sh ns71 sjc
+
   "deploy:ns60":
     desc: Deploy ns60 test VPC (gateway backend, one per site)
     cmds:
@@ -297,6 +303,7 @@ tasks:
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
       - task: "verify:nat-collision"
+      - task: "verify:nat-collision-samenode"
       - task: "verify:scenarios"
 
   "verify:bgp-transit":
@@ -720,6 +727,53 @@ tasks:
         done
         wait
         ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision.txt | cut -d. -f2 | sort -u)
+        echo "masquerade ports allocated: $(echo ${ports} | tr '\n' ' ')"
+        if [ "$(echo "${ports}" | wc -l)" -lt 2 ]; then
+          echo "FAIL: both tenants share one masquerade port -- their flows collided" >&2
+          exit 1
+        fi
+        echo "PASS: each tenant received its own translation"
+
+  "verify:nat-collision-samenode":
+    desc: Prove two tenants sharing a ULA on the SAME node do not share a translation
+    cmds:
+      # The same-node half of #538, and the counterpart to verify:nat-collision
+      # above. There, the two tenants sit on different nodes and the connection
+      # key's encapsulation source separates them on its own. Here both flows
+      # reach the shard from sjc-worker and carry an identical encapsulation
+      # source, so the SRv6 Argument is the only field left that can: ns71's two
+      # pods are two distinct VPCs on one node holding one address by
+      # construction (resources/tenants/ns71/), and an identical 5-tuple from
+      # each makes every remaining field of the connection key match too.
+      #
+      # Before the fix, installEgressRoutes registered the operator-configured
+      # shard SID verbatim, every VRF on the node encapsulated toward a
+      # byte-identical destination, and read_argument returned one constant for
+      # both -- one connection row, one masquerade port, and the second tenant's
+      # replies delivered to the first.
+      #
+      # Two distinct masquerade ports in the capture is the pass condition, as
+      # in verify:nat-collision. It is observable on the forward path alone and
+      # so does not depend on the return leg, which #549/#550 still cover.
+      - |
+        set -e
+        # A source port that changes per run, for the reason
+        # verify:nat-collision states at length: a fixed one re-asserts ports an
+        # earlier run already allocated instead of exercising the allocator.
+        sport=$(( 30000 + ($(date +%s) % 10000) ))
+        echo "source port for this run: ${sport}"
+        docker exec dfw-worker timeout 16 tcpdump -i eth1 -nn -c 4 \
+          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:10::1' >/tmp/nat-collision-samenode.txt 2>&1 &
+        sleep 2
+        for app in private private-b; do
+          pod=$(docker exec sjc-control-plane kubectl -n ns71 get pods -l app=${app} \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "sourcing from ns71/${pod} (app=${app})"
+          docker exec sjc-control-plane kubectl -n ns71 exec "${pod}" -- \
+            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:10::1 9999" >/dev/null 2>&1 || true
+        done
+        wait
+        ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision-samenode.txt | cut -d. -f2 | sort -u)
         echo "masquerade ports allocated: $(echo ${ports} | tr '\n' ' ')"
         if [ "$(echo "${ports}" | wc -l)" -lt 2 ]; then
           echo "FAIL: both tenants share one masquerade port -- their flows collided" >&2
