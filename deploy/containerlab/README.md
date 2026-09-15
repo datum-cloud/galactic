@@ -131,8 +131,7 @@ overlay (galactic-router, l2vpn/evpn)
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - **Only edge nodes are transit-facing.** They alone hold eBGP sessions to AS 65100; a compute node or the route reflector has no link to a transit router and no eBGP session anywhere. Each site's edge node is its border router.
 - Everything behind an edge node reaches the fabric over an iBGP session to it. The edge node sets `next-hop-self force` on those sessions (a path learned from the transit carries the transit router's own address as next hop, which the node behind it has no route to; `force` is required because plain `next-hop-self` is not applied to *reflected* paths — a route reflector preserves the originator's NEXT_HOP by design, RFC 4456 §10) and `route-reflector-client` (iBGP split horizon would otherwise stop it passing one client's prefixes to another — iad has two behind it).
-- **`dfw-worker`'s second uplink is a backup, not an equal path.** `galactic-nat`'s shard XDP program attaches to a single interface (`GALACTIC_NAT_UPLINK_INTERFACE`, `eth1`), so egress-shard traffic from another site arriving on `eth2` would reach no translation program at all and be forwarded untranslated. `dfw-worker` tags what it advertises over `eth2` with community `65000:900`; `dfw-worker3` matches that tag and re-advertises to `tr1` with `MED 100`, so the fabric keeps using `dfw-worker2` while that path is up, and `dfw-worker` sets `local-preference 90` on what it learns over `eth2` so its own egress prefers `eth1` too. `dfw-worker3`'s *own* originations are deliberately not de-preferred — the anycast ingress VIP has to stay equal-cost from both edge nodes.
-- The uSID decap hook does attach to both of `dfw-worker`'s uplinks (`GALACTIC_CNI_EBPF_INTERFACES` is `eth1,eth2` in dfw, `eth1` elsewhere), so ordinary tenant traffic survives a failover. The egress-shard role does not — see Known limitations.
+- **`dfw-worker`'s two uplinks are equal paths**, plain ECMP with no steering policy. Both of its datapaths attach to both uplinks: the uSID decap hook via `GALACTIC_CNI_EBPF_INTERFACES` (`eth1,eth2` in dfw, `eth1` elsewhere) and the egress shard via `GALACTIC_NAT_UPLINK_INTERFACES` (likewise `eth1,eth2` in dfw), so losing either edge node costs this node neither its fabric connectivity nor its shard role. This used to be a primary/backup pair — `dfw-worker` tagged what it advertised over `eth2` with community `65000:900`, `dfw-worker3` re-advertised that to `tr1` with `MED 100`, and `dfw-worker` set `local-preference 90` on what it learned over `eth2` — purely because `galactic-nat` attached to one interface and traffic reaching `eth2` would have missed translation ([#545](https://github.com/datum-cloud/galactic/issues/545)). The shard now attaches to both, so all of that policy is gone.
 - Edge and compute nodes exchange EVPN paths over iBGP **through the reflector**, never as direct sessions between them: `iad-worker3` is the lab's single route reflector and every galactic-router in all three clusters is a client of it. A node cannot be both a reflector and a compute/edge node, since `galactic=control` and `galactic=router` are two values of one label key.
 - galactic-router runs with outbound-only mode (`listenPort=-1`) on every client; only the reflector listens, on port `1790`. All sessions are initiated outbound toward it.
 
@@ -288,13 +287,12 @@ site-local `ns60` backend — one anycast service, three sites, four gateways.
   tenant, since a node never uses its own shard. `verify:nat-datapath` is
   therefore expected to fail today and is deliberately kept out of the `verify`
   chain; move it in once those land.
-- **A dual-homed node's egress-shard role does not survive failover.**
-  `galactic-nat` takes a single `GALACTIC_NAT_UPLINK_INTERFACE` and attaches
-  its shard XDP program to that one interface, so if `dfw-worker`'s traffic
-  ever shifts to `eth2`, egress traffic from other sites reaches no
-  translation program. BGP policy keeps that from happening while `eth1` is
-  up, but an `eth1` failure degrades the shard role rather than failing over
-  it. The uSID decap hook has no such limit — it takes a list.
+- **A shard attaches to its uplinks once, at process startup.**
+  `GALACTIC_NAT_UPLINK_INTERFACES` is a list and every interface in it gets
+  the shard XDP program, so a dual-homed node like `dfw-worker` keeps
+  translating across an uplink failure. Nothing watches for link changes
+  afterwards, though: an interface that appears after the process started
+  gets no program until it restarts.
 - **The tenant egress route resolves its outgoing link once, at CNI ADD.**
   `srv6.EgressPrefixRouteAdd` stores the resolved `ifindex` in
   `egress_route_table`, and nothing re-resolves it when routing changes. A pod

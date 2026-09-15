@@ -25,27 +25,25 @@ interface eth2
 # Originated identically by every edge node in the lab.
 ipv6 route 2001:db8:6060::/48 Null0
 
-# This node is dfw-worker's *backup* uplink. It carries that node's prefixes
-# so the site survives losing dfw-worker2, but advertises them to the transit
-# with a higher MED so the fabric keeps using dfw-worker2 while that path is
-# up. The reason is galactic-nat: its shard XDP program attaches to a single
-# interface on the compute node (eth1, facing dfw-worker2), so egress-shard
-# traffic that arrived via this node would reach no translation program.
-# dfw-worker tags what it sends here with 65000:900; matching on the tag
-# rather than on a prefix list keeps this node from having to know which
-# prefixes dfw-worker happens to originate.
+# This node is dfw-worker's second uplink, an equal one rather than a
+# backup. It carries that node's prefixes to the transit on the same terms
+# dfw-worker2 does, so either edge node can be lost without taking dfw's
+# compute node off the fabric or costing it its egress-shard role.
 #
-# This node's *own* originations are deliberately not de-preferred: the
-# anycast ingress VIP below must stay equal-cost from both edge nodes, which
-# is the whole point of the pair.
-bgp community-list standard BACKUP_UPLINK permit 65000:900
-!
-route-map TO_TRANSIT permit 10
- match community BACKUP_UPLINK
- set metric 100
-!
-route-map TO_TRANSIT permit 20
-!
+# It advertised those prefixes with a higher MED until #545, so the fabric
+# would keep using dfw-worker2 while that path was up. The reason was
+# galactic-nat: its shard XDP program attached to a single interface on the
+# compute node (eth1, facing dfw-worker2), so egress-shard traffic arriving
+# via this node reached no translation program at all. The shard now
+# attaches to both of that node's uplinks
+# (GALACTIC_NAT_UPLINK_INTERFACES="eth1,eth2",
+# resources/galactic-nat/dfw/node-patch.yaml), so there is nothing left to
+# de-prefer and the MED policy, its BACKUP_UPLINK community-list, and the
+# 65000:900 tag dfw-worker used to set are all gone.
+#
+# Nothing this node originates was ever de-preferred even then, and nothing
+# should be: the anycast ingress VIP below has to stay equal-cost from both
+# edge nodes, which is the whole point of the pair.
 router bgp 65000
  bgp router-id 10.255.255.7
  no bgp default ipv4-unicast
@@ -65,7 +63,6 @@ router bgp 65000
  address-family ipv6 unicast
   neighbor 2001:db8:1:12::1 activate
   neighbor 2001:db8:1:12::1 allowas-in 1
-  neighbor 2001:db8:1:12::1 route-map TO_TRANSIT out
   neighbor 2001:db8:1:13::2 activate
   # next-hop-self force / route-reflector-client: see
   # resources/fabric-router/dfw/frr.conf.dfw-worker2, which carries the same
@@ -86,7 +83,6 @@ router bgp 65000
  address-family ipv4 unicast
   neighbor 10.1.12.1 activate
   neighbor 10.1.12.1 allowas-in 1
-  neighbor 10.1.12.1 route-map TO_TRANSIT out
   neighbor 10.1.13.2 activate
   neighbor 10.1.13.2 next-hop-self force
   neighbor 10.1.13.2 route-reflector-client

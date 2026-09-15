@@ -183,8 +183,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().IntP("grpc-health-port", "",
 		config.DefaultNATGRPCHealthPort,
 		"gRPC health check port")
-	cmd.Flags().StringP("nat-uplink-interface", "", "",
-		"Fabric-facing uplink interface this shard's XDP datapath attaches to (required)")
+	cmd.Flags().StringP("nat-uplink-interfaces", "", "",
+		"Comma-separated fabric-facing uplink interfaces this shard's XDP datapath attaches to; "+
+			"name every fabric uplink, not just the primary (required)")
 	cmd.Flags().StringP("nat-shard-sid", "", "",
 		"This shard's own SRv6 uSID, encapsulation target for tenant egress traffic (required)")
 	cmd.Flags().StringP("nat-shard-pub-addr6", "", "",

@@ -88,13 +88,20 @@ spec:
             # Set explicitly here anyway so it can't silently drift.
             - name: GALACTIC_NAT_GRPC_HEALTH_PORT
               value: "5182"
-            # GALACTIC_NAT_UPLINK_INTERFACE and _SHARD_SID are
-            # intentionally left unset here: the interface name is
+            # GALACTIC_NAT_UPLINK_INTERFACES and _SHARD_SID are
+            # intentionally left unset here: the interface names are
             # deployment-specific and the shard SID must be unique per
             # shard node (no in-cluster mechanism yet derives them
             # automatically -- see internal/config/nat.go's EnvNATShardSID
             # doc comment, the same gap GALACTIC_GATEWAY_SRV6_ADDRESS has
             # today).
+            #
+            # GALACTIC_NAT_UPLINK_INTERFACES is a comma-separated list, and
+            # a multi-homed shard node must name every fabric uplink rather
+            # than only the one its traffic uses today: the datapath claims
+            # a packet only on an interface it is attached to, so an uplink
+            # left out is one whose tenant traffic is forwarded untranslated
+            # and uncounted the moment routing moves to it.
             #
             # So is every address that selects which families this shard
             # serves. config.NATConfig.Validate requires the uplink, the

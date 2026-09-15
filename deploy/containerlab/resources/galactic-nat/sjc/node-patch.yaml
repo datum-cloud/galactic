@@ -23,11 +23,13 @@ spec:
       containers:
         - name: galactic-nat
           env:
-            # eth1 is this lab's dedicated transit-fabric-facing uplink on
-            # every node (see resources/galactic-cni/daemonset-patch.yaml's
-            # comment) -- the same interface internal/plumbing/ebpf/
-            # natprog's XDP program attaches to.
-            - name: GALACTIC_NAT_UPLINK_INTERFACE
+            # eth1 is this node's only transit-fabric-facing uplink (see
+            # resources/galactic-cni/daemonset-patch.yaml's comment) -- the
+            # same interface internal/plumbing/ebpf/natprog's XDP program
+            # attaches to. A single-homed site, so a one-element list;
+            # dfw's compute node is dual-homed and names both of its
+            # uplinks here (resources/galactic-nat/dfw/node-patch.yaml).
+            - name: GALACTIC_NAT_UPLINK_INTERFACES
               value: eth1
             # uFMT 48+16 uSID over sjc's own locator (2001:db8:ff02::/48,
             # see resources/galactic-router/sjc/bgprouter.yaml's

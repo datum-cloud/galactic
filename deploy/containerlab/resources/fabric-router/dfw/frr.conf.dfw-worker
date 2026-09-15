@@ -20,28 +20,23 @@ interface eth2
 ipv6 route 2001:db8:ff01::/48 Null0
 ipv6 route fc00:0:2::/48 Null0
 
-# eth2 is a backup path, not an equal one. Both uplinks carry the same
-# prefixes, but galactic-nat's shard XDP program attaches to a single
-# interface (GALACTIC_NAT_UPLINK_INTERFACE, eth1 here) -- egress-shard
-# traffic from another site arriving on eth2 would reach no translation
-# program at all and be silently forwarded untranslated. The uSID decap hook
-# does attach to both (GALACTIC_CNI_EBPF_INTERFACES="eth1,eth2" on this
-# site), so ordinary tenant traffic survives a failover; the shard role does
-# not, and that is why this policy exists rather than plain ECMP.
+# eth1 and eth2 are equal paths, deliberately. This node is dual-homed to
+# both of dfw's edge nodes and every datapath on it attaches to both
+# uplinks: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="eth1,eth2"
+# (resources/galactic-cni/dfw/ebpf-interfaces-patch.yaml) and, since #545,
+# the egress shard via GALACTIC_NAT_UPLINK_INTERFACES="eth1,eth2"
+# (resources/galactic-nat/dfw/node-patch.yaml). Traffic arriving on either
+# uplink is decapsulated and translated identically, so losing an edge node
+# costs this node neither its fabric connectivity nor its shard role.
 #
-# Outbound: tag what this node originates toward the backup edge node, so
-# that edge node can make the fabric prefer the primary's path back to here.
-# Inbound: de-prefer what arrives over the backup, so this node's own egress
-# also prefers eth1. Both directions are needed -- one alone leaves the
-# return path or the forward path on the wrong uplink.
-bgp community-list standard BACKUP_UPLINK permit 65000:900
-!
-route-map TO_EDGE_BACKUP permit 10
- set community 65000:900
-!
-route-map FROM_EDGE_BACKUP permit 10
- set local-preference 90
-!
+# That was not always so, and this file carried a community-tag/local-
+# preference policy making eth2 a backup path while it was not. galactic-nat
+# took a single interface name and attached to eth1 alone, so egress-shard
+# traffic arriving on eth2 reached no translation program and was forwarded
+# untranslated and uncounted -- BGP had to keep traffic off eth2 to hide a
+# datapath gap. With the shard attached to both uplinks there is nothing
+# left to steer around, and plain ECMP is both simpler and what actually
+# exercises the dual-homing.
 router bgp 65000
  bgp router-id 10.255.255.2
  no bgp default ipv4-unicast
@@ -67,8 +62,6 @@ router bgp 65000
   neighbor 2001:db8:1:10::1 allowas-in 1
   neighbor 2001:db8:1:13::1 activate
   neighbor 2001:db8:1:13::1 allowas-in 1
-  neighbor 2001:db8:1:13::1 route-map TO_EDGE_BACKUP out
-  neighbor 2001:db8:1:13::1 route-map FROM_EDGE_BACKUP in
   network 2001:db8:ff01::/48
   network fc00:0:2::/48
  exit-address-family
@@ -81,8 +74,6 @@ router bgp 65000
   neighbor 10.1.10.1 allowas-in 1
   neighbor 10.1.13.1 activate
   neighbor 10.1.13.1 allowas-in 1
-  neighbor 10.1.13.1 route-map TO_EDGE_BACKUP out
-  neighbor 10.1.13.1 route-map FROM_EDGE_BACKUP in
   network 10.255.255.2/32
  exit-address-family
 

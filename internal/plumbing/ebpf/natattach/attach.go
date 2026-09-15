@@ -118,15 +118,48 @@ func PopulateProgArray(objs *natprog.NatObjects) error {
 	return nil
 }
 
-// Attach attaches program to ifaceName's XDP hook in native driver mode,
-// returning the link for the caller to hold open and close on shutdown. See the
-// package doc comment for why native mode is required and why no pinning or
-// re-attachment is needed.
-func Attach(program *ebpf.Program, ifaceName string) (link.Link, error) {
+// Attach attaches program to the XDP hook of every interface in ifaceNames, in
+// native driver mode, returning the resulting link for each in the same order
+// for the caller to hold open and close on shutdown. See the package doc
+// comment for why native mode is required and why no pinning or re-attachment
+// is needed.
+//
+// Every fabric uplink is attached, not only the one a shard node's traffic uses
+// today: a packet arriving on an interface this program is not attached to
+// reaches no translation at all and is forwarded untranslated and uncounted.
+// An empty list is rejected rather than treated as "attach nothing", which
+// would produce exactly that silence across the whole node.
+//
+// If attaching one interface fails partway through, every link already attached
+// in this call is closed before returning, so a caller that gets an error holds
+// no partial attachment to clean up. Attachment is therefore all-or-nothing: a
+// shard that cannot claim every uplink it was given fails to start rather than
+// running with a hole in its coverage.
+func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	if program == nil {
 		return nil, errors.New("natattach: program is nil")
 	}
+	if len(ifaceNames) == 0 {
+		return nil, errors.New("natattach: no interfaces to attach to")
+	}
 
+	links := make([]link.Link, 0, len(ifaceNames))
+	for _, ifaceName := range ifaceNames {
+		xdpLink, err := attachOne(program, ifaceName)
+		if err != nil {
+			for _, already := range links {
+				_ = already.Close()
+			}
+			return nil, err
+		}
+		links = append(links, xdpLink)
+	}
+	return links, nil
+}
+
+// attachOne attaches program to ifaceName's XDP hook in native driver mode, the
+// single-interface mechanism Attach applies across its list.
+func attachOne(program *ebpf.Program, ifaceName string) (link.Link, error) {
 	iface, err := netlink.LinkByName(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("natattach: find link %q: %w", ifaceName, err)

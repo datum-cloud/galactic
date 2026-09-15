@@ -36,11 +36,20 @@ const (
 	EnvNATMetricsPort    = "GALACTIC_NAT_METRICS_PORT"
 	EnvNATGRPCHealthPort = "GALACTIC_NAT_GRPC_HEALTH_PORT"
 
-	// EnvNATUplinkInterface names this shard's fabric-facing uplink, the
-	// interface the XDP datapath attaches to. Required: this binary only ever
-	// runs as a dedicated shard, so there is no "not this role, skip the
-	// datapath" case.
-	EnvNATUplinkInterface = "GALACTIC_NAT_UPLINK_INTERFACE"
+	// EnvNATUplinkInterfaces names this shard's fabric-facing uplinks, comma-
+	// separated -- every interface the XDP datapath attaches to. Required: this
+	// binary only ever runs as a dedicated shard, so there is no "not this
+	// role, skip the datapath" case.
+	//
+	// Every fabric uplink belongs here, not just the one a node's traffic
+	// happens to use today. A shard claims a packet only on an interface its
+	// program is attached to; an encapsulated tenant packet arriving anywhere
+	// else reaches no translation program at all and is forwarded untranslated
+	// and uncounted, with nothing on either side reporting a fault. Naming one
+	// uplink on a multi-homed node therefore makes the shard role survive only
+	// as long as that uplink does, which is what this taking a list rather than
+	// a single name exists to prevent.
+	EnvNATUplinkInterfaces = "GALACTIC_NAT_UPLINK_INTERFACES"
 
 	// EnvNATShardSID is this shard's own SRv6 uSID, the outer destination a
 	// tenant's egress packet is encapsulated toward. Required, and
@@ -94,10 +103,12 @@ type NATConfig struct {
 	MetricsPort    int
 	GRPCHealthPort int
 
-	// UplinkInterface and ShardSID configure the shard's identity and are
-	// always required.
-	UplinkInterface string
-	ShardSID        string
+	// UplinkInterfaces and ShardSID configure the shard's identity and are
+	// always required. UplinkInterfaces is parsed from the comma-separated
+	// EnvNATUplinkInterfaces and carries every fabric uplink the datapath
+	// attaches to, never only the primary -- see that variable's own comment.
+	UplinkInterfaces []string
+	ShardSID         string
 
 	// ShardPubAddr6 enables NAT66; ShardPubAddr4 with NAT64Prefix enables NAT64.
 	// Validate requires at least one family, and rejects half of either.
@@ -117,7 +128,7 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault(KeyNodeName, "")
 	v.SetDefault(KeyMetricsPort, DefaultNATMetricsPort)
 	v.SetDefault(KeyGRPCHealthPort, DefaultNATGRPCHealthPort)
-	v.SetDefault("uplink_interface", "")
+	v.SetDefault("uplink_interfaces", "")
 	v.SetDefault("shard_sid", "")
 	v.SetDefault("shard_pub_addr6", "")
 	v.SetDefault("shard_pub_addr4", "")
@@ -141,7 +152,7 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{FlagNodeName, KeyNodeName},
 		{FlagMetricsPort, KeyMetricsPort},
 		{FlagGRPCHealthPort, KeyGRPCHealthPort},
-		{"nat-uplink-interface", "uplink_interface"},
+		{"nat-uplink-interfaces", "uplink_interfaces"},
 		{"nat-shard-sid", "shard_sid"},
 		{"nat-shard-pub-addr6", "shard_pub_addr6"},
 		{"nat-shard-pub-addr4", "shard_pub_addr4"},
@@ -163,7 +174,7 @@ func (c *NATConfig) readFields() {
 	c.NodeName = c.v.GetString(KeyNodeName)
 	c.MetricsPort = c.v.GetInt(KeyMetricsPort)
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
-	c.UplinkInterface = c.v.GetString("uplink_interface")
+	c.UplinkInterfaces = splitInterfaceList(c.v.GetString("uplink_interfaces"))
 	c.ShardSID = c.v.GetString("shard_sid")
 	c.ShardPubAddr6 = c.v.GetString("shard_pub_addr6")
 	c.ShardPubAddr4 = c.v.GetString("shard_pub_addr4")
@@ -243,9 +254,10 @@ func (c *NATConfig) Validate() error {
 	if c.NodeName == "" {
 		return fmt.Errorf("node name is required (use --node-name flag or %s env var)", EnvNATNodeName)
 	}
-	if c.UplinkInterface == "" {
+	if len(c.UplinkInterfaces) == 0 {
 		return fmt.Errorf(
-			"uplink interface is required (use --nat-uplink-interface flag or %s env var)", EnvNATUplinkInterface)
+			"at least one uplink interface is required (use --nat-uplink-interfaces flag or %s env var)",
+			EnvNATUplinkInterfaces)
 	}
 	if c.ShardSID == "" {
 		return fmt.Errorf(

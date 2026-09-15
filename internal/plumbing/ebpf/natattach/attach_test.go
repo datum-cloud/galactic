@@ -5,6 +5,7 @@
 package natattach
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -28,8 +29,20 @@ func requireRoot(t *testing.T) {
 // TestAttach_NilProgramIsError covers Attach's defensive nil-program
 // guard directly, without needing root.
 func TestAttach_NilProgramIsError(t *testing.T) {
-	if _, err := Attach(nil, "eth0"); err == nil {
+	if _, err := Attach(nil, []string{"eth0"}); err == nil {
 		t.Error("Attach(nil program, ...) error = nil, want an error")
+	}
+}
+
+// TestAttach_EmptyInterfaceListIsError covers the other guard. An empty list
+// must not read as "attach nothing and carry on": a shard with no attachment
+// claims no packet on any uplink, and every packet crossing the node leaves
+// untranslated and uncounted -- the silent failure #545 is about, node-wide.
+func TestAttach_EmptyInterfaceListIsError(t *testing.T) {
+	for _, names := range [][]string{nil, {}} {
+		if _, err := Attach(nil, names); err == nil {
+			t.Errorf("Attach(_, %v) error = nil, want an error", names)
+		}
 	}
 }
 
@@ -96,11 +109,11 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		l, err := Attach(objs.NatIngress, ifaceName)
+		attached, err := Attach(objs.NatIngress, []string{ifaceName})
 		if err != nil {
 			return fmt.Errorf("attach: %w", err)
 		}
-		firstLink = l
+		firstLink = attached[0]
 
 		if err := objs.ShardConfigTable.Put(uint32(0), cfg); err != nil {
 			return fmt.Errorf("populate shard_config_table: %w", err)
@@ -127,11 +140,11 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 		}
 		defer func() { _ = objs.Close() }()
 
-		l, err := Attach(objs.NatIngress, ifaceName)
+		attached, err := Attach(objs.NatIngress, []string{ifaceName})
 		if err != nil {
 			return fmt.Errorf("re-attach after restart: %w", err)
 		}
-		defer func() { _ = l.Close() }()
+		defer func() { _ = attached[0].Close() }()
 
 		var got natprog.NatShardConfig
 		if err := objs.ShardConfigTable.Lookup(uint32(0), &got); err != nil {
@@ -144,5 +157,106 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("post-restart verification: %v", err)
+	}
+}
+
+// TestAttach_MultipleUplinksRollsBackOnPartialFailure is the root-gated
+// exit criterion for #545: a dual-homed shard node attaches its translation
+// program to every fabric uplink, not just the primary.
+//
+// It also pins the all-or-nothing contract. A shard that attached to one
+// uplink and then failed on the second would be the very condition this
+// change exists to remove -- one uplink translating, the other forwarding
+// tenant traffic untranslated and uncounted -- so a partial failure must
+// leave nothing attached and fail the caller outright.
+//
+// Uses veth pairs, not dummy interfaces, for the reason the restart test
+// above documents: dummy's driver does not implement ndo_bpf.
+func TestAttach_MultipleUplinksRollsBackOnPartialFailure(t *testing.T) {
+	requireRoot(t)
+
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-nat-test-multi-%d", os.Getpid()))
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	const (
+		uplink0Name = "nat66testb0"
+		peer0Name   = "nat66testb1"
+		uplink1Name = "nat66testb2"
+		peer1Name   = "nat66testb3"
+	)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		handle, err := netlink.NewHandle()
+		if err != nil {
+			return err
+		}
+		defer handle.Close() //nolint:errcheck // best-effort cleanup
+
+		for _, v := range []*netlink.Veth{
+			{LinkAttrs: netlink.LinkAttrs{Name: uplink0Name}, PeerName: peer0Name},
+			{LinkAttrs: netlink.LinkAttrs{Name: uplink1Name}, PeerName: peer1Name},
+		} {
+			if err := handle.LinkAdd(v); err != nil {
+				return fmt.Errorf("add veth pair %q/%q: %w", v.Name, v.PeerName, err)
+			}
+			link, err := handle.LinkByName(v.Name)
+			if err != nil {
+				return err
+			}
+			if err := handle.LinkSetUp(link); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup veth uplinks: %v", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		objs, err := Load(pinDir)
+		if err != nil {
+			return fmt.Errorf("load: %w", err)
+		}
+		defer func() { _ = objs.Close() }()
+
+		// --- both uplinks of a dual-homed shard node: two links back. ---
+		links, err := Attach(objs.NatIngress, []string{uplink0Name, uplink1Name})
+		if err != nil {
+			return fmt.Errorf("attach to both uplinks: %w", err)
+		}
+		if len(links) != 2 {
+			return fmt.Errorf("attach: got %d links, want 2 (one per uplink)", len(links))
+		}
+		for _, l := range links {
+			_ = l.Close()
+		}
+
+		// --- a second uplink that can never attach: the first uplink's
+		// attach must be rolled back, not left dangling. ---
+		if _, err := Attach(objs.NatIngress, []string{uplink0Name, "does-not-exist"}); err == nil {
+			return errors.New("Attach() with an unresolvable second uplink error = nil, want an error")
+		}
+
+		// If the rollback genuinely closed the first uplink's link, a fresh
+		// solo attach to it succeeds; if it leaked, this fails with the
+		// kernel refusing a second native XDP program on the same interface.
+		links, err = Attach(objs.NatIngress, []string{uplink0Name})
+		if err != nil {
+			return fmt.Errorf(
+				"re-attach to %q after a rolled-back partial failure: %w "+
+					"(the earlier partial attach was likely not rolled back)", uplink0Name, err)
+		}
+		defer func() { _ = links[0].Close() }()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("multi-uplink attach/rollback: %v", err)
 	}
 }

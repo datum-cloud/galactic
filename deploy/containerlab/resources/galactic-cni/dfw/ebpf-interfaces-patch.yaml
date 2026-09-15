@@ -11,9 +11,11 @@ spec:
       # and an interface a node does not have fails that node's attach.
       #
       # This covers the SRv6 uSID decap hook only. galactic-nat's shard XDP
-      # program takes a single interface name and stays on eth1, which is
-      # why BGP policy keeps egress-shard traffic off eth2 while eth1 is up
-      # (resources/fabric-router/dfw/frr.conf.dfw-worker).
+      # program is configured separately and names the same two uplinks
+      # (GALACTIC_NAT_UPLINK_INTERFACES, resources/galactic-nat/dfw/
+      # node-patch.yaml) -- the two lists have to agree on a dual-homed node,
+      # or traffic arriving on an uplink only one of them covers is
+      # decapsulated but never translated, or vice versa.
       initContainers:
         - name: install-cni
           env:
