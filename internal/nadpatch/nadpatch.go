@@ -80,7 +80,8 @@ func ParsePodName(cniArgs string) string {
 // whole annotation map would drop all of them. A key-scoped JSON Patch would
 // scope the write just as narrowly but fails outright on a definition that
 // carries no annotations yet, which is the common case.
-func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace string, annotations map[string]string) error {
+func AnnotateNAD(ctx context.Context, k8s client.Client, nadName, nadNamespace string,
+	annotations map[string]string) error {
 	if nadNamespace == "" {
 		return nil
 	}
