@@ -225,10 +225,10 @@ kubectl get bgpadvertisement -n galactic-system | grep nat66
 
 Metrics, exposed on `GALACTIC_NAT_METRICS_PORT` (`9182` by default):
 
-| Metric                       | Type    | Labels   | Meaning                                                                                                                                                                    |
-| ---------------------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic_nat_conns`       | Gauge   | —        | Current row count in this shard's `nat_conn_table` — a point-in-time snapshot of an LRU, so it can fluctuate independently of actual live traffic under memory pressure. |
-| `galactic_nat_drops_total` | Counter | `reason` | Packets dropped by the `nat_ingress` program, by reason.                                                                                                                 |
+| Metric                     | Type    | Labels   | Meaning                                                                                                                                                                                                                                                                             |
+| -------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_nat_conns`       | Gauge   | —        | Current row count in this shard's `nat_conn_table` — a point-in-time snapshot of an LRU, so it can fluctuate independently of actual live traffic under memory pressure.                                                                                                          |
+| `galactic_nat_drops_total` | Counter | `reason` | Packets dropped by the `nat_ingress` program, by reason. Cumulative for the life of the *node*, not the process: the counters live in a map pinned under `natattach.PinDir`, which a restarting shard reuses as-is. Always read it as a delta — an absolute value includes every transient the node has ever seen, and zeroing it takes `bpftool map update` against the pin directly. |
 
 Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 `no_return_conn`, `malformed_return`, `pat_exhausted`,
