@@ -19,12 +19,21 @@ import (
 )
 
 const (
-	testNAT66Namespace   = "galactic-system"
-	testNAT66NodeA       = "node-a"
-	testNAT66NodeB       = "node-b"
-	testNAT66ShardName   = "node-a"
-	testNAT66ShardAddr   = "2001:db8:9999::1"
-	testNAT66ShardSIDVal = "fc00:1:2::1"
+	testNAT66Namespace = "galactic-system"
+	testNAT66NodeA     = "node-a"
+	testNAT66NodeB     = "node-b"
+	testNAT66ShardName = "node-a"
+	testNAT66ShardAddr = "2001:db8:9999::1"
+
+	// A well-formed uFMT 48+16 uSID: Block fc00:0001:0002, Node-ID 9,
+	// Function 0xE (uEnd.DT46), Argument 0x001. The shape matters now that the
+	// advertisement is the SID's covering locator rather than a host route --
+	// testNAT66ShardSIDLocator is what that advertisement must carry, and the
+	// Function and Argument nibbles below it are exactly what must be masked
+	// off. The configured Argument is a placeholder every real deployment also
+	// sets; installEgressRoutes overwrites it per tenant.
+	testNAT66ShardSIDVal     = "fc00:1:2:9:e001::"
+	testNAT66ShardSIDLocator = "fc00:1:2:9::/64"
 )
 
 // fakeDatapathHealth is a EgressDatapathHealth test double whose Attached
@@ -327,7 +336,7 @@ func TestEgressShardReconciler_CreatesAdvertisementForBothSIDAndAddress(t *testi
 		t.Errorf("Spec.AddressFamily = %+v, want l2vpn/evpn", adv.Spec.AddressFamily)
 	}
 	wantPrefixes := []bgpv1alpha1.Prefix{
-		bgpv1alpha1.Prefix(testNAT66ShardSIDVal + "/128"),
+		bgpv1alpha1.Prefix(testNAT66ShardSIDLocator),
 		bgpv1alpha1.Prefix(testNAT66ShardAddr + "/128"),
 	}
 	if len(adv.Spec.Prefixes) != len(wantPrefixes) {
@@ -337,6 +346,86 @@ func TestEgressShardReconciler_CreatesAdvertisementForBothSIDAndAddress(t *testi
 		if adv.Spec.Prefixes[i] != want {
 			t.Errorf("Spec.Prefixes[%d] = %s, want %s", i, adv.Spec.Prefixes[i], want)
 		}
+	}
+}
+
+// TestShardAdvertisementPrefixes_AdvertisesTheSIDsCoveringLocator is the
+// control-plane half of #538. A tenant VRF's egress route encapsulates toward
+// this shard with that tenant's own Argument written into the SID, so the
+// destination differs per tenant and the operator-configured /128 covers
+// exactly one of them -- the rest resolve through whatever covering aggregate
+// the underlay happens to carry, or not at all. Advertising the whole locator
+// is what makes every tenant's destination reachable, and it is the same
+// 64-bit "is this mine" granularity locator_matches already applies at the
+// shard.
+//
+// It also asserts the mask: Function and Argument must not survive into the
+// advertised prefix, or two shards differing only below bit 64 would advertise
+// overlapping-but-unequal prefixes.
+func TestShardAdvertisementPrefixes_AdvertisesTheSIDsCoveringLocator(t *testing.T) {
+	shard := &bgpv1alpha1.EgressShard{}
+	shard.Status.ShardSID = testNAT66ShardSIDVal
+
+	got, err := shardAdvertisementPrefixes(shard)
+	if err != nil {
+		t.Fatalf("shardAdvertisementPrefixes() error = %v, want nil", err)
+	}
+	if len(got) != 1 || string(got[0]) != testNAT66ShardSIDLocator {
+		t.Errorf("shardAdvertisementPrefixes() = %+v, want [%s]", got, testNAT66ShardSIDLocator)
+	}
+}
+
+// TestShardAdvertisementPrefixes_SameLocatorWhateverTheConfiguredArgument
+// states the property the previous test's mask exists for: two operators
+// picking different placeholder Argument values for the same shard must not
+// produce two different advertisements.
+func TestShardAdvertisementPrefixes_SameLocatorWhateverTheConfiguredArgument(t *testing.T) {
+	sids := []string{"fc00:1:2:9:e001::", "fc00:1:2:9:efff::", "fc00:1:2:9::"}
+	prefixes := make([]string, 0, len(sids))
+	for _, sid := range sids {
+		shard := &bgpv1alpha1.EgressShard{}
+		shard.Status.ShardSID = sid
+
+		got, err := shardAdvertisementPrefixes(shard)
+		if err != nil {
+			t.Fatalf("shardAdvertisementPrefixes(%q) error = %v, want nil", sid, err)
+		}
+		prefixes = append(prefixes, string(got[0]))
+	}
+	for _, got := range prefixes {
+		if got != testNAT66ShardSIDLocator {
+			t.Errorf("shardAdvertisementPrefixes() = %v, want every entry to be %s", prefixes, testNAT66ShardSIDLocator)
+		}
+	}
+}
+
+// TestShardAdvertisementPrefixes_RejectsANonIPv6SID guards the /64: an IPv4
+// ShardSID has no 64-bit locator to advertise, and silently emitting something
+// else would put a bogus prefix into the EVPN mesh.
+func TestShardAdvertisementPrefixes_RejectsANonIPv6SID(t *testing.T) {
+	shard := &bgpv1alpha1.EgressShard{}
+	shard.Status.ShardSID = "192.0.2.1"
+
+	if _, err := shardAdvertisementPrefixes(shard); err == nil {
+		t.Error("shardAdvertisementPrefixes() error = nil, want an error for an IPv4 shard SID")
+	}
+}
+
+// TestShardAdvertisementPrefixes_ShardAddressStaysAHostRoute is the other side
+// of the /64 change: the masquerade source address is an ordinary address, not
+// a uSID, nothing varies below it, and widening it would attract traffic this
+// shard has no business receiving.
+func TestShardAdvertisementPrefixes_ShardAddressStaysAHostRoute(t *testing.T) {
+	shard := &bgpv1alpha1.EgressShard{}
+	shard.Status.ShardAddressIPv6 = testNAT66ShardAddr
+
+	got, err := shardAdvertisementPrefixes(shard)
+	if err != nil {
+		t.Fatalf("shardAdvertisementPrefixes() error = %v, want nil", err)
+	}
+	want := testNAT66ShardAddr + "/128"
+	if len(got) != 1 || string(got[0]) != want {
+		t.Errorf("shardAdvertisementPrefixes() = %+v, want [%s]", got, want)
 	}
 }
 

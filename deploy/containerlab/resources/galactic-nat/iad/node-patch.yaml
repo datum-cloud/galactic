@@ -61,15 +61,24 @@ spec:
             # even though this address is never actually looked up
             # through function_table/vrf_table the way a real uSID is --
             # EgressShardStatus.ShardSID's own doc comment says it's
-            # advertised as a plain /128 node-reachability route "no
+            # advertised as a plain node-reachability route "no
             # VRFID/Function" -- the uFMT encoding here only keeps the
-            # address inside iad's locator block. Argument=1 is otherwise
-            # unremarkable now that Node-ID alone already guarantees no
-            # collision -- kept for continuity with the other two sites'
-            # identical choice, still a lab-only placeholder needing real
-            # allocation logic (the same gap GALACTIC_GATEWAY_SRV6_ADDRESS
-            # and EnvNATShardSID's own doc comment both flag today)
-            # before production.
+            # address inside iad's locator block.
+            #
+            # Argument=1 is a placeholder and carries no meaning: it names
+            # no tenant and never could, this one configured value being
+            # shared by every VRF on every node. Each CNI ADD overwrites
+            # it with that attachment's own VRFID before installing the
+            # tenant's egress route (internal/cnibgp's
+            # shardSIDsForTenant), which is what lets this shard tell two
+            # same-node tenants apart. What this address does have to
+            # reserve for itself is its whole Block+Node-ID: that /64 is
+            # what EgressShardReconciler advertises and what
+            # locator_matches compares against.
+            #
+            # Still a lab-only value needing real allocation logic (the
+            # same gap GALACTIC_GATEWAY_SRV6_ADDRESS and EnvNATShardSID's
+            # own doc comment both flag today) before production.
             - name: GALACTIC_NAT_SHARD_SID
               value: "2001:db8:ff03:9:e001::"
             # Lab-only placeholder masquerade source address, same

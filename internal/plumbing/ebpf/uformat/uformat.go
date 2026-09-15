@@ -42,6 +42,12 @@ const (
 	FunctionBits = 4
 	ArgumentBits = 12
 	PaddingBits  = 48
+
+	// LocatorBits is the width of the locator itself: Block and Node-ID
+	// together, the leading run every uSID on one node shares whatever its
+	// Function and Argument. It is the prefix length that identifies a node's
+	// -- or a shard's -- whole uSID space, and the width LocatorKey covers.
+	LocatorBits = BlockBits + NodeIDBits
 )
 
 const (

@@ -1,0 +1,38 @@
+---
+# The first of ns71's two tenants. Its address and gateway are identical to
+# nad-b.yaml's by design -- see ../base/kustomization.yaml for why that
+# collision is stated here rather than left to IPAM.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: private
+  namespace: ns71
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "private",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "71",
+          "vpcattachment": "71",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:71:ffff:0:0:1::/96",
+                "gateway": "fd20:71:ffff::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "71",
+          "vpcattachment": "71",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

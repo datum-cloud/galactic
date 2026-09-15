@@ -47,13 +47,25 @@ own, and `EgressShard`/`BGPVRFInstance` (the latter for NPTv6's own
 `nptv6` field) are installed from the local `../network` checkout by that
 same script — see its own comments for why.
 
-Each shard's `Status.ShardSID` is advertised as a plain, RT-less `/128`
+Each shard's `Status.ShardSID` is advertised as a plain, RT-less
 BGPAdvertisement by `EgressShardReconciler`
 (`internal/controller/egressshard_controller.go`) — the same shape
 `NetworkGatewayReconciler` uses for its own ingress VIP — so every other
 node in the mesh learns a real kernel route to it via the existing
 RT-less-EVPN main-table import path
 (`internal/runtime/gobgp/monitor.go`'s `matchTableID`/`RouteMainAdd`).
+
+It is the SID's covering `/64` (Block + Node-ID, e.g.
+`2001:db8:ff01:9::/64` for dfw's shard), not a `/128`. Each tenant VRF
+encapsulates toward this shard with its own 12-bit Argument written into
+the SID, so the destination differs per tenant and a host route would
+cover exactly one of them. Note that a missing `/64` does not
+necessarily fail loudly here: each site originates its locator as a
+`/48` into the underlay (`resources/fabric-router/*/frr.conf.*-worker`),
+so an Argument-bearing SID can still resolve on the sending node and be
+discarded by that aggregate's `Null0` at the far site instead. The shard
+address (`Status.ShardAddressIPv6`) stays a `/128` — it is an ordinary
+masquerade source, not a uSID.
 `GALACTIC_CNI_EGRESS_SHARD_SIDS` (set identically on every site's
 `galactic-cni` DaemonSet, `resources/galactic-cni/daemonset-patch.yaml`)
 carries the fabric-wide membership list every compute node needs to build
