@@ -95,7 +95,8 @@ func TestAnnotateNAD(t *testing.T) {
 	t.Run("NAD does not exist is a hard failure", func(t *testing.T) {
 		k8s := fakeClient()
 
-		err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface)
+		err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace,
+			map[string]string{AnnotationHostInterface: hostIface})
 		if err == nil {
 			t.Fatal("expected error when NAD does not exist, got nil")
 		}
@@ -111,7 +112,8 @@ func TestAnnotateNAD(t *testing.T) {
 		nad.SetNamespace(nadNamespace)
 		k8s := fakeClient(nad)
 
-		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface); err != nil {
+		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace,
+			map[string]string{AnnotationHostInterface: hostIface}); err != nil {
 			t.Fatalf("AnnotateNAD() = %v, want nil", err)
 		}
 
@@ -122,6 +124,38 @@ func TestAnnotateNAD(t *testing.T) {
 		}
 		if gotAnnotation := got.GetAnnotations()[AnnotationHostInterface]; gotAnnotation != hostIface {
 			t.Errorf("annotation %s = %q, want %q", AnnotationHostInterface, gotAnnotation, hostIface)
+		}
+	})
+
+	t.Run("host interface and subnet length are written together", func(t *testing.T) {
+		// A hypervisor adopting the host device reads both keys. Writing the
+		// name without the prefix length leaves it unable to configure the
+		// guest, so the pair has to land in one patch.
+		const subnetLen = "96"
+
+		nad := &unstructured.Unstructured{}
+		nad.SetGroupVersionKind(nadGVK)
+		nad.SetName(nadName)
+		nad.SetNamespace(nadNamespace)
+		k8s := fakeClient(nad)
+
+		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, map[string]string{
+			AnnotationHostInterface: hostIface,
+			AnnotationSubnetLen:     subnetLen,
+		}); err != nil {
+			t.Fatalf("AnnotateNAD() = %v, want nil", err)
+		}
+
+		got := &unstructured.Unstructured{}
+		got.SetGroupVersionKind(nadGVK)
+		if err := k8s.Get(context.Background(), client.ObjectKey{Name: nadName, Namespace: nadNamespace}, got); err != nil {
+			t.Fatalf("get NAD after annotate: %v", err)
+		}
+		if v := got.GetAnnotations()[AnnotationHostInterface]; v != hostIface {
+			t.Errorf("annotation %s = %q, want %q", AnnotationHostInterface, v, hostIface)
+		}
+		if v := got.GetAnnotations()[AnnotationSubnetLen]; v != subnetLen {
+			t.Errorf("annotation %s = %q, want %q", AnnotationSubnetLen, v, subnetLen)
 		}
 	})
 
@@ -150,7 +184,8 @@ func TestAnnotateNAD(t *testing.T) {
 		})
 		k8s := fakeClient(nad)
 
-		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface); err != nil {
+		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace,
+			map[string]string{AnnotationHostInterface: hostIface}); err != nil {
 			t.Fatalf("AnnotateNAD() = %v, want nil", err)
 		}
 
@@ -190,7 +225,8 @@ func TestAnnotateNAD(t *testing.T) {
 		})
 		k8s := fakeClient(nad)
 
-		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface); err != nil {
+		if err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace,
+			map[string]string{AnnotationHostInterface: hostIface}); err != nil {
 			t.Fatalf("AnnotateNAD() = %v, want nil", err)
 		}
 
@@ -224,7 +260,8 @@ func TestAnnotateNAD(t *testing.T) {
 			},
 		})
 
-		err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace, hostIface)
+		err := AnnotateNAD(context.Background(), k8s, nadName, nadNamespace,
+			map[string]string{AnnotationHostInterface: hostIface})
 		if err == nil {
 			t.Fatal("expected error when the server reports a conflict, got nil")
 		}
