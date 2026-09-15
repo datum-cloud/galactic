@@ -236,6 +236,11 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 				continue
 			}
 			current = reconcile(program, current, toSet(next))
+			// The uplink set just moved, or a link/route event says it may
+			// have. Drop the cached ifindexes so an egress route resolved
+			// right after an interface appears is judged against the new set
+			// rather than waiting out the TTL.
+			InvalidateUplinkIndexes()
 			onReconcileDone()
 		}
 	}

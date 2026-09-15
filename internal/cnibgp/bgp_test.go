@@ -464,10 +464,10 @@ func withTempPinDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
 
-	if err := veth.Add(testVPC, testAttachment, 1500); err != nil {
+	if err := veth.Add(testVPC, testAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add: %v", err)
 	}
-	t.Cleanup(func() { _ = veth.Delete(testVPC, testAttachment) })
+	t.Cleanup(func() { _ = veth.Delete(testVPC, testAttachment, testContainerID) })
 
 	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-%d", os.Getpid())
 	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })

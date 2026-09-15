@@ -79,7 +79,16 @@ func updateForwardRule(interfaceName string, action string) error {
 	return nil
 }
 
-func Add(vpc, vpcAttachment string, mtu int) error {
+// Add creates this attachment's veth pair, enslaves the host end to the VPC's
+// VRF, and records ownerID -- the CNI container ID of the container this pair
+// was created for -- on the host end.
+//
+// The ownership stamp is what lets Delete tell this container's interface from
+// one belonging to a container that has since taken the attachment over. Both
+// ends are named from (vpc, vpcAttachment) alone, so a replacement container on
+// the same attachment produces the very same names, and nothing in the name
+// distinguishes the two.
+func Add(vpc, vpcAttachment, ownerID string, mtu int) error {
 	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	guestName := intf.GenerateInterfaceNameGuest(vpc, vpcAttachment)
@@ -89,7 +98,7 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	// known-good state.
 	if existing, err := netlink.LinkByName(hostName); err == nil {
 		slog.Warn("veth: removing stale host veth left behind by a previous ADD attempt",
-			"host", hostName, "guest", guestName)
+			"host", hostName, "guest", guestName, "previousOwner", existing.Attrs().Alias, "owner", ownerID)
 		// Remove any stale guest endpoint that may linger from a prior run.
 		if guest, guestErr := netlink.LinkByName(guestName); guestErr == nil {
 			netlink.LinkDel(guest) //nolint:errcheck // best-effort cleanup
@@ -112,6 +121,19 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	}
 	slog.Debug("veth: pair created", "host", hostName, "guest", guestName, "mtu", mtu)
 
+	// Claim the pair for ownerID before anything else can observe it. Stamped
+	// on the link itself rather than tracked out of band because the only
+	// process that needs to read it is a later CNI DEL, which runs as its own
+	// short-lived process with no shared state and deliberately no Kubernetes
+	// client.
+	hostLink, err := netlink.LinkByName(hostName)
+	if err != nil {
+		return fmt.Errorf("look up newly created veth %q: %w", hostName, err)
+	}
+	if err := netlink.LinkSetAlias(hostLink, ownerID); err != nil {
+		return fmt.Errorf("record owner %q on veth %q: %w", ownerID, hostName, err)
+	}
+
 	// iptables is not available in distroless images; skip forwarding rules
 	// gracefully so the CNI plugin can still produce a result in test environments.
 	if err := updateForwardRule(hostName, "add"); err != nil {
@@ -125,10 +147,6 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 		return err
 	}
 
-	hostLink, err := netlink.LinkByName(hostName)
-	if err != nil {
-		return err
-	}
 	guestLink, err := netlink.LinkByName(guestName)
 	if err != nil {
 		return err
@@ -152,8 +170,59 @@ func Add(vpc, vpcAttachment string, mtu int) error {
 	return nil
 }
 
-func Delete(vpc, vpcAttachment string) error {
+// OwnedBy reports whether link, a host veth, still belongs to ownerID.
+//
+// A link carrying no owner at all is treated as owned by whoever asks. It
+// predates this stamp -- created by an earlier build, or by an ADD that failed
+// before it got that far -- and refusing to clean those up would leak an
+// interface per attachment with nothing left to reclaim it.
+func OwnedBy(link netlink.Link, ownerID string) bool {
+	alias := link.Attrs().Alias
+	return alias == "" || alias == ownerID
+}
+
+// Delete removes this attachment's veth pair, but only while it still belongs
+// to ownerID, the CNI container ID whose ADD created it.
+//
+// The ownership check is the whole point. Both ends are named from (vpc,
+// vpcAttachment) alone, so a container replacing another on the same attachment
+// -- a rolling restart, where the replacement's ADD runs while its predecessor
+// is still terminating -- recreates the pair under the same names. The
+// predecessor's DEL then arrives up to a termination grace period later and,
+// going by name, would tear down the interface the live container is using. The
+// pod stays Running with an address and no interface, and nothing retries,
+// because from CNI's point of view both operations succeeded.
+//
+// This is the same race ops_del.go already defers the VRF and the BGP CRDs to
+// GC for. The veth was left out of that reasoning as "private to this
+// attachment", which is exactly the key that turns out not to be unique per
+// container. Ownership is checked rather than deferring to GC because an
+// interface, unlike a CRD, must be reclaimed promptly for the attachment to be
+// reusable.
+func Delete(vpc, vpcAttachment, ownerID string) error {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+
+	// Resolved first so ownership can be judged before anything is removed. A
+	// nil link with no error means it is already gone, which is not a failure:
+	// the rules below are still worth withdrawing in that case, since an
+	// interface that disappeared by some other route leaves them behind.
+	hostLink, err := netlink.LinkByName(hostName)
+	if err != nil {
+		if !isLinkNotFoundError(err) {
+			return err
+		}
+		hostLink = nil
+	}
+
+	// Checked before the iptables rules come out, not only before the link
+	// does: those rules belong to whoever owns the interface now, and
+	// withdrawing them would have the live container's traffic dropped by the
+	// FORWARD policy with its interface still in place.
+	if hostLink != nil && !OwnedBy(hostLink, ownerID) {
+		slog.Info("veth: leaving host veth alone, another container has taken this attachment over",
+			"host", hostName, "owner", hostLink.Attrs().Alias, "requestedBy", ownerID)
+		return nil
+	}
 
 	// Skip iptables cleanup if binary is unavailable or the rule is already
 	// gone (distroless images, or Delete already ran).
@@ -165,18 +234,14 @@ func Delete(vpc, vpcAttachment string) error {
 		}
 	}
 
-	hostLink, err := netlink.LinkByName(hostName)
-	if err != nil {
-		if isLinkNotFoundError(err) {
-			slog.Debug("veth: host veth already gone, nothing to delete", "host", hostName)
-			return nil // interface already gone — idempotent
-		}
-		return err
+	if hostLink == nil {
+		slog.Debug("veth: host veth already gone, nothing to delete", "host", hostName)
+		return nil // interface already gone — idempotent
 	}
 
 	if err := netlink.LinkDel(hostLink); err != nil {
 		return err
 	}
-	slog.Debug("veth: deleted", "host", hostName)
+	slog.Debug("veth: deleted", "host", hostName, "owner", ownerID)
 	return nil
 }

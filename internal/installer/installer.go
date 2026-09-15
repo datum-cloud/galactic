@@ -33,6 +33,7 @@ import (
 	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/radv"
@@ -69,6 +70,15 @@ var tapNeighReconcileInterval = 30 * time.Second
 // and the sidecar creates the VRF holding the gateway address some time after
 // the pod is scheduled.
 var sidecarReturnReconcileInterval = 30 * time.Second
+
+// egressRouteRefreshInterval paces the egress_route_table re-resolution sweep.
+// Each entry's outgoing link and L2 addresses are resolved once by whoever
+// wrote it and never again, and the writer for a tenant VRF's route toward an
+// egress shard is a CNI plugin process that exited long ago. Fast enough that a
+// node attaching pods before BGP converges heals in well under a minute,
+// slow enough that a converged node re-resolves a handful of entries twice a
+// minute and no more.
+var egressRouteRefreshInterval = 30 * time.Second
 
 // ebpfHealthServiceName is the gRPC health service name reporting the eBPF
 // uSID datapath's status, kept separate from the overall ("") always-serving
@@ -527,6 +537,44 @@ func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfData
 	}
 }
 
+// startEgressRouteRefreshSweep runs one egress_route_table re-resolution pass
+// off Run's goroutine, for the same reason the two sweeps above run off it: an
+// entry whose next hop has no neighbor costs a solicit plus a poll, so a node
+// that has lost its fabric uplink would hold the select loop past the next tick
+// and starve the credential refresh, GC sweeps, and health check with it.
+//
+// sem is a size-1 semaphore, dropping a tick rather than queueing it when the
+// previous pass is still running.
+//
+// A missing pinned map is not an error worth logging on every tick: it means
+// the datapath is not loaded on this node, and the sweep has nothing to do.
+func startEgressRouteRefreshSweep(sem chan struct{}) {
+	select {
+	case sem <- struct{}{}:
+		go func() {
+			defer func() { <-sem }()
+			table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(attach.PinDir)
+			if err != nil {
+				return
+			}
+			defer func() { _ = closer.Close() }()
+
+			result, err := table.Refresh()
+			if err != nil {
+				slog.Error("egress_route_table refresh sweep failed", "err", err,
+					"scanned", result.Scanned, "refreshed", result.Refreshed)
+				return
+			}
+			if result.Refreshed > 0 || result.Unresolved > 0 {
+				slog.Info("egress_route_table refresh sweep complete",
+					"scanned", result.Scanned, "refreshed", result.Refreshed,
+					"unresolved", result.Unresolved)
+			}
+		}()
+	default:
+	}
+}
+
 // radvActorSet tracks the running radv.RunActor goroutines, keyed by host
 // interface name. It is Run's local state, reconciled against the recorded
 // attachments on every tick. The zero value is ready to use.
@@ -750,6 +798,10 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	tapNeighSem := make(chan struct{}, 1)
 	sidecarReturnSem := make(chan struct{}, 1)
 
+	egressRouteRefreshTicker := time.NewTicker(egressRouteRefreshInterval)
+	defer egressRouteRefreshTicker.Stop()
+	egressRouteRefreshSem := make(chan struct{}, 1)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -778,25 +830,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			reconcileLocatorLocalRoute(ctx, ebpfState)
 
 		case <-ebpfHealthTicker.C:
-			if ebpfState.objs == nil {
-				continue
-			}
-			h := attach.Handle{Objs: ebpfState.objs, Watcher: ebpfState.watcher}
-			healthErr := h.Healthy()
-			healthy := healthErr == nil
-			if healthy != ebpfLastHealthy {
-				if healthy {
-					slog.Info("eBPF uSID datapath health check recovered")
-				} else {
-					slog.Error("eBPF uSID datapath health check failed", "err", healthErr)
-				}
-				ebpfLastHealthy = healthy
-			}
-			status := grpc_health_v1.HealthCheckResponse_NOT_SERVING
-			if healthy {
-				status = grpc_health_v1.HealthCheckResponse_SERVING
-			}
-			healthSrv.SetServingStatus(ebpfHealthServiceName, status)
+			reportEBPFHealth(ebpfState, healthSrv, &ebpfLastHealthy)
 
 		case <-ebpfGCSweepTicker.C:
 			if ebpfState.k8sClient == nil {
@@ -839,10 +873,50 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// Envoy pod's per-VPC sidecar VRF.
 			startSidecarReturnSweep(ctx, sidecarReturnSem, ebpfState)
 
+		case <-egressRouteRefreshTicker.C:
+			// Re-resolve every egress route's outgoing link and L2 addresses.
+			// They are resolved once, when the entry is written, and the
+			// writer of a tenant VRF's route toward an egress shard is a CNI
+			// plugin process that has since exited -- so an entry resolved
+			// before the fabric advertised that shard's SID would otherwise
+			// stay wrong for the life of the node.
+			startEgressRouteRefreshSweep(egressRouteRefreshSem)
+
 		case iface := <-radvActors.failed:
 			radvActorFailed(radvActors, iface)
 		}
 	}
+}
+
+// reportEBPFHealth polls the datapath's health and republishes it on the gRPC
+// health service, logging only on a transition so a persistently healthy or
+// persistently broken node does not repeat itself every tick. lastHealthy is
+// read and updated in place, being the only state that has to survive between
+// ticks. Split out of Run's select to keep it within the gocyclo budget, as
+// logEBPFVRFSweepResult below is.
+//
+// A nil objs means no datapath is loaded on this node, so there is nothing to
+// poll and the service keeps whatever status it was given at startup.
+func reportEBPFHealth(st ebpfDatapathState, healthSrv *health.Server, lastHealthy *bool) {
+	if st.objs == nil {
+		return
+	}
+	h := attach.Handle{Objs: st.objs, Watcher: st.watcher}
+	healthErr := h.Healthy()
+	healthy := healthErr == nil
+	if healthy != *lastHealthy {
+		if healthy {
+			slog.Info("eBPF uSID datapath health check recovered")
+		} else {
+			slog.Error("eBPF uSID datapath health check failed", "err", healthErr)
+		}
+		*lastHealthy = healthy
+	}
+	status := grpc_health_v1.HealthCheckResponse_NOT_SERVING
+	if healthy {
+		status = grpc_health_v1.HealthCheckResponse_SERVING
+	}
+	healthSrv.SetServingStatus(ebpfHealthServiceName, status)
 }
 
 // logEBPFVRFSweepResult logs one vrf_table sweep result when there is anything

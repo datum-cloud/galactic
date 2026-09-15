@@ -78,12 +78,18 @@ func cmdDel(args *skel.CmdArgs) error {
 	// GC. Best-effort and log-only, since DEL must always succeed.
 	unregisterIfindexVRFEntry(vpc, vpcAtt, args.ContainerID)
 
-	// Delete this attachment's veth pair. Unlike the VRF and CRDs below, it is
-	// private to this attachment, so no sibling pod can still depend on it and
-	// there is no race to defer to GC. Deleting the host end removes both ends
-	// whichever namespace the guest end is in, so this reclaims the interface
-	// even when the delegated DEL above failed or did nothing.
-	if err := veth.Delete(vpc, vpcAtt); err != nil {
+	// Delete this attachment's veth pair, if it is still ours. Deleting the
+	// host end removes both ends whichever namespace the guest end is in, so
+	// this reclaims the interface even when the delegated DEL above failed or
+	// did nothing.
+	//
+	// "Still ours" is not a formality. The pair is named from the attachment
+	// alone, so a replacement container on the same attachment recreates it
+	// under the same name while this container is still terminating -- the same
+	// race the shared resources below are deferred to GC for. veth.Delete
+	// checks the owner this attachment's ADD stamped on the interface and
+	// leaves a successor's alone.
+	if err := veth.Delete(vpc, vpcAtt, args.ContainerID); err != nil {
 		slog.Warn("DEL: failed to delete host/guest veth pair", "err", err,
 			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
 	}
@@ -119,6 +125,17 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 		// Nothing to unregister when the host interface is already gone, from a
 		// prior DEL attempt or an ADD that never got far enough to create
 		// it.
+		return
+	}
+
+	// The interface resolved by name may already belong to a container that
+	// took this attachment over, in which case its ifindex rows were written by
+	// that container's ADD and are live. Unregistering them here would leave a
+	// running pod's interface forwarding into no VRF at all -- the same
+	// cross-container race veth.Delete guards.
+	if !veth.OwnedBy(link, containerID) {
+		slog.Info("DEL: leaving eBPF ifindex entries alone, another container has taken this attachment over",
+			"containerID", containerID, "owner", link.Attrs().Alias, "hostInterface", hostName)
 		return
 	}
 

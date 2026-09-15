@@ -5,9 +5,11 @@
 package egressroutemap
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
@@ -119,6 +122,11 @@ func sidTo16(sid net.IP) ([16]byte, error) {
 // given is a fake.
 var resolveLinkAndL2Fn = resolveLinkAndL2
 
+// uplinkIndexesFn is an override point so tests can state which links count as
+// SRv6 uplinks without a host that has any. Production always leaves it at
+// attach.UplinkIndexes.
+var uplinkIndexesFn = attach.UplinkIndexes
+
 // resolveLinkAndL2 resolves sid's immediate next hop: the link plus the
 // destination and source MAC a packet must carry to reach it, from netlink and
 // the kernel's neighbor cache.
@@ -129,7 +137,23 @@ var resolveLinkAndL2Fn = resolveLinkAndL2
 // reverse import would be a cycle. Resolving the L2 addresses as well as the
 // link is what lets usid_egress avoid resolving them per packet; see struct
 // egress_route_value in usid.c.
+//
+// A route that leaves through an interface the SRv6 datapath is not attached to
+// is rejected as no route at all. An ordinary lookup cannot fail on a node
+// whose management NIC carries an IPv6 default route, so a SID the fabric has
+// not advertised yet resolves through management instead of failing, and the
+// caller has no way to tell the two apart. Writing that result produces a
+// correctly encapsulated packet on a network that has never heard of the
+// destination locator, lost with no error at either end and no counter moving.
+// It also defeats every caller that iterates candidate SIDs expecting an
+// unreachable one to fail: with a default route in place, all of them
+// "resolve".
 func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, err error) {
+	uplinks, err := uplinkIndexesFn()
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("resolve SRv6 uplinks to validate the route to %s: %w", sid, err)
+	}
+
 	routes, err := netlink.RouteGet(sid)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("no route to %s: %w", sid, err)
@@ -138,6 +162,12 @@ func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, e
 		return 0, nil, nil, fmt.Errorf("no route to %s", sid)
 	}
 	linkIndex = routes[0].LinkIndex
+	if _, ok := uplinks[linkIndex]; !ok {
+		return 0, nil, nil, fmt.Errorf(
+			"no route to %s over an SRv6 uplink: it resolves out link %d, which the datapath is not attached to "+
+				"(the fabric has most likely not advertised this SID yet and the lookup fell through to a "+
+				"default route)", sid, linkIndex)
+	}
 	nextHop := routes[0].Gw
 	if nextHop == nil {
 		nextHop = sid // gateway itself is on-link
@@ -431,4 +461,107 @@ func (p *PublicUplink) Get() (linkIndex int, dmac, smac net.HardwareAddr, ok boo
 	dmac = append(net.HardwareAddr{}, value.Dmac[:]...)
 	smac = append(net.HardwareAddr{}, value.Smac[:]...)
 	return int(value.LinkIfindex), dmac, smac, true, nil
+}
+
+// RefreshResult reports what one Refresh sweep saw and did.
+type RefreshResult struct {
+	// Scanned is every entry the sweep read, pass-through entries included.
+	Scanned int
+	// Refreshed is the entries whose link or L2 addresses had changed and were
+	// rewritten.
+	Refreshed int
+	// Unresolved is the encapsulating entries whose SID could not be resolved
+	// this time round. Their existing value is left in place.
+	Unresolved int
+}
+
+// Refresh re-resolves every encapsulating entry's link and L2 addresses and
+// rewrites the ones that have moved, leaving each entry's prefix and SID
+// untouched.
+//
+// It exists because those addresses are resolved once, by whoever wrote the
+// entry, and an entry written by a short-lived CNI plugin process has nobody to
+// re-resolve it afterwards. A tenant VRF's ::/0 route toward an egress shard is
+// written at the first attachment's ADD, which on a freshly booted node happens
+// minutes before BGP converges a route to that shard's SID -- so it is resolved
+// against a routing table that does not have one yet, and stays that way for
+// the life of the node. The same staleness follows any later change: a
+// next-hop moving to another uplink, a neighbor's MAC changing, a link
+// flapping.
+//
+// Pass-through entries are skipped. They carry no SID and are never
+// encapsulated toward, so they have nothing to resolve; see RegisterPassThrough.
+//
+// An entry whose SID does not resolve is counted and left alone rather than
+// removed or zeroed. A transient resolution failure is not evidence that the
+// route is wrong, and a half-written entry forwards worse than a stale one.
+//
+// Writes are collected during iteration and applied after it, never inside it:
+// modifying a BPF map while iterating it can make the iterator repeat or skip
+// entries.
+//
+// A concurrent Unregister of an entry this sweep has already read is
+// resurrected by the write that follows. The window is small and the result is
+// inert -- an entry keyed on a routing table no packet reaches any more, since
+// the VRF it belonged to is being torn down -- so it is not worth a
+// compare-and-swap the map API does not offer.
+func (t *EgressRouteTable) Refresh() (RefreshResult, error) {
+	var result RefreshResult
+
+	type pending struct {
+		key   prog.UsidEgressRouteKey
+		value prog.UsidEgressRouteValue
+	}
+	var updates []pending
+
+	var (
+		key   prog.UsidEgressRouteKey
+		value prog.UsidEgressRouteValue
+	)
+	iter := t.table.Iterate()
+	for iter.Next(&key, &value) {
+		result.Scanned++
+		if value.LinkIfindex == 0 {
+			continue // pass-through: nothing was resolved, nothing to refresh
+		}
+
+		sid := make(net.IP, 16)
+		copy(sid, value.Sid[:])
+
+		linkIndex, dmac, smac, err := resolveLinkAndL2Fn(sid)
+		if err != nil {
+			result.Unresolved++
+			slog.Warn("egressroutemap: refresh: leaving entry at its current next hop, sid did not resolve",
+				"table", key.TableId, "sid", sid, "err", err)
+			continue
+		}
+		if uint32(linkIndex) == value.LinkIfindex &&
+			bytes.Equal(dmac, value.Dmac[:]) && bytes.Equal(smac, value.Smac[:]) {
+			continue
+		}
+
+		next := value
+		next.LinkIfindex = uint32(linkIndex)
+		copy(next.Dmac[:], dmac)
+		copy(next.Smac[:], smac)
+		updates = append(updates, pending{key: key, value: next})
+
+		slog.Info("egressroutemap: refresh: egress route next hop moved",
+			"table", key.TableId, "sid", sid,
+			"fromLink", value.LinkIfindex, "toLink", linkIndex,
+			// Stringified explicitly: a net.HardwareAddr is a byte slice, and
+			// slog renders it as an escaped string rather than as a MAC.
+			"fromDmac", net.HardwareAddr(value.Dmac[:]).String(), "toDmac", dmac.String())
+	}
+	if err := iter.Err(); err != nil {
+		return result, fmt.Errorf("egressroutemap: egress_route_table: refresh: iterate: %w", err)
+	}
+
+	for _, u := range updates {
+		if err := t.table.Put(u.key, u.value); err != nil {
+			return result, fmt.Errorf("egressroutemap: egress_route_table: refresh table=%d: %w", u.key.TableId, err)
+		}
+		result.Refreshed++
+	}
+	return result, nil
 }

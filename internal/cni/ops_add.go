@@ -74,6 +74,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
+		containerID:   args.ContainerID,
 	}
 	// Record the delegation intent up front, before allocation runs. Rollback
 	// needs it set on the ipam block's presence alone, not only after a
@@ -98,7 +99,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	slog.Debug("ADD: VRF ready", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 
-	if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
+	if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU); err != nil {
 		return fmt.Errorf("add veth: %w", err)
 	}
 
