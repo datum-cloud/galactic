@@ -15,12 +15,17 @@ import (
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
-// testVPC and testAttachment mirror the cnibgp tests' identifiers: a VPC and
-// attachment whose deterministic interface names are exercised against a real
-// kernel VRF/veth below.
+// testVPC and testAttachment name a VPC and attachment whose deterministic
+// kernel interface names (VRF, host veth, guest veth) the root-gated tests
+// below exercise against a real kernel. They are intentionally NOT the
+// "abc"/"def" identifiers the internal/cni and internal/cnibgp suites reuse:
+// the root-gated package binaries run concurrently against the same host
+// kernel, and internal/cni's TestCmdCheckValidConfigMissingResources asserts
+// that VRF/interface pair is absent. Creating it from here under the same
+// names would race that CHECK test into spuriously passing.
 const (
-	testVPC        = "abc"
-	testAttachment = "def"
+	testVPC        = "vethadp"
+	testAttachment = "oba"
 )
 
 // requireRoot skips the test when not running as root. VRF and veth
