@@ -1,0 +1,47 @@
+@startuml containers
+!include <C4/C4_Container>
+
+LAYOUT_TOP_DOWN()
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+skinparam backgroundColor white
+UpdateElementStyle("container", $bgColor="#E8F2FF", $fontColor="#172B4D", $borderColor="#2C5D94")
+UpdateElementStyle("external_system", $bgColor="#F2F3F5", $fontColor="#172B4D", $borderColor="#596579")
+UpdateElementStyle("external_container", $bgColor="#F2F3F5", $fontColor="#172B4D", $borderColor="#596579")
+UpdateBoundaryStyle("system", $bgColor="#FAFBFC", $fontColor="#172B4D", $borderColor="#596579")
+
+title Tenant-aware DNS64 and private DNS: proposed architecture
+
+System_Ext(compute, "Compute", "IPv6-only customer instances")
+System_Ext(galactic, "Galactic networking", "Tenant attachment, trusted network identity,\nand SRv6 routing")
+
+System_Boundary(dns, "Datum DNS service: shared regional fleet (proposed)") {
+    Container(ingress, "DNS ingress", "dnsdist", "Authorizes endpoint access, limits traffic,\nand selects ready replicas")
+    Container(resolver, "Resolver shard", "BIND replicas", "Isolates tenant views, private zones,\ncaches, upstreams, and DNS64 policy")
+    Container(controller, "DNS controller", "Go; production integration required", "Authorizes changes, assigns contexts,\nand verifies publication and readiness")
+    ContainerDb(state, "DNS desired state", "Replicated storage; selection open", "Stores versioned configuration\nand record intent")
+}
+
+Container_Ext(networkapi, "Network API", "Kubernetes API", "Publishes EgressShard status,\nincluding the shared NAT64 prefix")
+Container_Ext(nat, "NAT64 gateway", "galactic-nat", "Translates connections to IPv4;\nkeeps gateway-local session state")
+System_Ext(upstream, "DNS upstreams", "Public resolution or authorized\ntenant-private forwarding")
+System_Ext(destination, "IPv4 service", "Destination reachable from\nthe NAT64 gateway")
+
+Rel_D(compute, galactic, "Sends DNS queries and\napplication packets", "IPv6")
+Rel_D(galactic, ingress, "Delivers authorized\ncontext traffic", "DNS over UDP/TCP")
+Rel_D(ingress, resolver, "Preserves source and VIP", "DNS + trusted PROXY v2")
+Rel_D(resolver, upstream, "Resolves external names", "DNS; tenant-scoped private transport")
+Rel_R(galactic, nat, "Routes application packets", "SRv6; tenant argument")
+Rel_D(nat, destination, "Translates connections", "IPv4 TCP/UDP; symmetric return")
+Rel_U(controller, ingress, "Publishes context assignments\nand replica readiness", "Versioned configuration")
+Rel_R(controller, resolver, "Publishes views and records", "Configuration + dynamic updates")
+Rel_D(controller, state, "Reconciles durable intent", "Storage interface to be selected")
+Rel_U(controller, networkapi, "Reads prefix and status", "Kubernetes API")
+Rel_U(nat, networkapi, "Reports configuration", "Kubernetes API")
+
+Lay_R(networkapi, ingress)
+Lay_R(state, upstream)
+Lay_R(upstream, destination)
+
+footer DNS answers do not select a NAT64 shard. Endpoint delivery and trusted DNS ingress require integration.
+@enduml
