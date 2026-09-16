@@ -99,9 +99,15 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	slog.Debug("ADD: VRF ready", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 
-	if err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU); err != nil {
+	addRes, err := veth.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
+	if err != nil {
 		return fmt.Errorf("add veth: %w", err)
 	}
+	// Remember whether this ADD created the pair or took over one a
+	// predecessor left, so a later failure rolls the veth back correctly: a
+	// created pair is deleted, a taken-over one is handed back to its owner.
+	tracker.vethAdopted = addRes.Adopted
+	tracker.vethPriorOwner = addRes.PriorOwner
 
 	hostName := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
 	hostLink, err := netlink.LinkByName(hostName)

@@ -100,7 +100,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vrf.Delete(vpc) })
 
-	if err := veth.Add(vpc, testAttachment, testContainerID, 1500); err != nil {
+	if _, err := veth.Add(vpc, testAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add: %v", err)
 	}
 	t.Cleanup(func() { _ = veth.Delete(vpc, testAttachment, testContainerID) })
@@ -249,11 +249,11 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vrf.Delete(vpc) })
 
-	if err := veth.Add(vpc, firstAttachment, testContainerID, 1500); err != nil {
+	if _, err := veth.Add(vpc, firstAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add(first): %v", err)
 	}
 	t.Cleanup(func() { _ = veth.Delete(vpc, firstAttachment, testContainerID) })
-	if err := veth.Add(vpc, secondAttachment, testContainerID, 1500); err != nil {
+	if _, err := veth.Add(vpc, secondAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add(second): %v", err)
 	}
 	t.Cleanup(func() { _ = veth.Delete(vpc, secondAttachment, testContainerID) })
@@ -369,7 +369,7 @@ func TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind(t *testing.T)
 				t.Fatalf("tap.Add: %v", err)
 			}
 			t.Cleanup(func() { _ = tap.Delete(vpc, tapAttachment) })
-			if err := veth.Add(vpc, vethAttachment, testContainerID, 1500); err != nil {
+			if _, err := veth.Add(vpc, vethAttachment, testContainerID, 1500); err != nil {
 				t.Fatalf("veth.Add: %v", err)
 			}
 			t.Cleanup(func() { _ = veth.Delete(vpc, vethAttachment, testContainerID) })

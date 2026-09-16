@@ -26,6 +26,15 @@ type resourceTracker struct {
 	// nothing of the winner's.
 	containerID string
 
+	// vethAdopted and vethPriorOwner record how this ADD's veth step resolved:
+	// whether it created this attachment's pair or took over one that already
+	// existed, and, if so, who owned it before. Rollback branches on them. A
+	// pair this ADD created is ours to remove; one it took over from a
+	// still-terminating predecessor must be handed back to that owner instead,
+	// or a failed ADD would tear down a live container's interface.
+	vethAdopted    bool
+	vethPriorOwner string
+
 	// ipamDelegated, ipamType, and ipamStdin record enough to release the IPAM
 	// allocation during rollback.
 	//
@@ -66,6 +75,14 @@ func (rt *resourceTracker) cleanup() {
 	}
 
 	cnimaster.CleanupAttachment(rt.vpc, rt.vpcAttachment, "veth", func(vpc, vpcAttachment string) error {
+		// A pair this ADD created is ours to delete; one it took over from a
+		// still-terminating predecessor must be handed back to that owner so a
+		// failed ADD does not remove a live container's interface. An adopted
+		// pair with no prior owner (unowned debris) has no one to reclaim it,
+		// so it is deleted like one we created.
+		if rt.vethAdopted && rt.vethPriorOwner != "" {
+			return veth.RestoreOwner(vpc, vpcAttachment, rt.vethPriorOwner)
+		}
 		return veth.Delete(vpc, vpcAttachment, rt.containerID)
 	})
 }
