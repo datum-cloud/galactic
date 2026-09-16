@@ -72,8 +72,9 @@ func cmdStatus(args *skel.CmdArgs) error {
 // validate against.
 //
 // The device to validate is the tap derived from the attachment, not a name
-// read back out of the result: the result's interfaces are named for their
-// readers (the runtime, then kraftlet), neither of which is this check.
+// read back out of the result: the result names its interface as the runtime
+// requested it, since that is the name the runtime resolves the sandbox's
+// address by.
 func checkPrevResult(rawPrevResult map[string]interface{}, hostName string) error {
 	jsonBytes, err := json.Marshal(rawPrevResult)
 	if err != nil {
@@ -98,8 +99,7 @@ func checkPrevResult(rawPrevResult map[string]interface{}, hostName string) erro
 		if err := cnimaster.ValidateHostInterface(hostName, iface.Mac, iface.Mtu); err != nil {
 			return fmt.Errorf("interface %q (host tap): %w", hostName, err)
 		}
-		// Both host-namespace entries describe the same tap and carry the
-		// same Mac/Mtu, so the first is enough.
+		// One host-namespace interface per attachment: the tap.
 		break
 	}
 	return nil

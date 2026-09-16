@@ -314,14 +314,14 @@ NODE_NAME=` + nodeName() + ` \
 		t.Fatalf("CNI ADD output is not valid JSON: %v\noutput:\n%s", err, out)
 	}
 
-	// Tap mode produces exactly 2 interface entries for the one host tap: the
-	// runtime-facing name first, the real host device name last.
+	// Tap mode produces exactly 1 interface (the host tap) with an empty sandbox.
+	// One entry describes the one tap; its name follows the consumer.
 	ifaces, ok := result["interfaces"].([]any)
 	if !ok {
 		t.Fatalf("CNI result missing or invalid \"interfaces\" field; got: %v", result)
 	}
-	if len(ifaces) != 2 {
-		t.Fatalf("interfaces count = %d, want 2", len(ifaces))
+	if len(ifaces) != 1 {
+		t.Errorf("interfaces count = %d, want 1", len(ifaces))
 	}
 
 	iface, ok := ifaces[0].(map[string]any)
@@ -332,26 +332,15 @@ NODE_NAME=` + nodeName() + ` \
 		t.Errorf("interfaces[0].sandbox = %q, want empty (tap has no guest endpoint)", sandbox)
 	}
 
-	// The first interface carries the name the runtime asked for (CNI_IFNAME
-	// above), not the host tap device name. A container runtime resolves the
-	// sandbox's address by that name and refuses the sandbox when it finds no
-	// addressed entry under it.
-	if ifName, _ := iface["name"].(string); ifName != "eth0" {
-		t.Errorf("interfaces[0].name = %q, want %q (the requested CNI_IFNAME)", ifName, "eth0")
-	}
-
-	// The last interface names the actual host tap device, which kraftlet
-	// reads to learn which device to hand to ukpd.
-	hostIface, ok := ifaces[1].(map[string]any)
-	if !ok {
-		t.Fatalf("interfaces[1] is not an object; got: %T", ifaces[1])
-	}
-	if sandbox, _ := hostIface["sandbox"].(string); sandbox != "" {
-		t.Errorf("interfaces[1].sandbox = %q, want empty (tap has no guest endpoint)", sandbox)
-	}
-	wantHostName := intf.GenerateInterfaceNameHost("1", "1")
-	if hostName, _ := hostIface["name"].(string); hostName != wantHostName {
-		t.Errorf("interfaces[1].name = %q, want %q (the real host tap device)", hostName, wantHostName)
+	// The entry is named for whoever reads the result. This config requests no
+	// DAN, which is the kraftlet path: kraftlet reads the host device name out
+	// of the result and hands it to the platform daemon, so the entry must name
+	// the real tap, not the requested CNI_IFNAME. The containerd path, where
+	// the requested name is what the sandbox's address is resolved by, is
+	// pinned in internal/cnitap's unit tests.
+	wantIfName := intf.GenerateInterfaceNameHost("1", "1")
+	if ifName, _ := iface["name"].(string); ifName != wantIfName {
+		t.Errorf("interfaces[0].name = %q, want %q (the real host tap device)", ifName, wantIfName)
 	}
 
 	// Tap mode now runs IPAM allocation like veth mode (the guest still
@@ -470,8 +459,8 @@ NODE_NAME=` + nodeName() + ` \
 	} else if err := json.NewDecoder(strings.NewReader(addOut[jsonStart:])).Decode(&bgpResult); err != nil {
 		t.Fatalf("galactic-bgp ADD output is not valid JSON: %v\noutput:\n%s", err, addOut)
 	}
-	if bgpIfaces, _ := bgpResult["interfaces"].([]any); len(bgpIfaces) != 2 {
-		t.Errorf("galactic-bgp ADD result interfaces count = %d, want 2 (passed through from prevResult unchanged)",
+	if bgpIfaces, _ := bgpResult["interfaces"].([]any); len(bgpIfaces) != 1 {
+		t.Errorf("galactic-bgp ADD result interfaces count = %d, want 1 (passed through from prevResult unchanged)",
 			len(bgpIfaces))
 	}
 
