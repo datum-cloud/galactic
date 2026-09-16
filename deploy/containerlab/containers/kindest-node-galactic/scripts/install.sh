@@ -10,6 +10,14 @@ set -xe
 
 SRV6_PREFIX="2001:db8:ff00::/40"
 
+# The underlay's loopback ranges: every node's router-id/loopback address in
+# both families (fc00:0:1::1 .. fc00:0:c::1 and 10.255.255.1 .. .103, see the
+# tables in deploy/containerlab/README.md). Not the transit link prefixes --
+# link-local forwarding between two directly connected nodes is symmetric by
+# construction and never reaches the rules below.
+UNDERLAY_PREFIX6="fc00::/32"
+UNDERLAY_PREFIX4="10.255.255.0/24"
+
 until journalctl -q -u kubelet -g "Successfully registered node"; do
   sleep 1
 done
@@ -25,9 +33,40 @@ ip6tables -I INPUT 1 -p tcp --sport 179 -j ACCEPT
 iptables -I INPUT 1 -p tcp --dport 179 -j ACCEPT
 iptables -I INPUT 1 -p tcp --sport 179 -j ACCEPT
 
-# SRv6 prefix forwarding
+# Exempt fabric transit traffic from kube-proxy's KUBE-FORWARD
+# `ctstate INVALID -j DROP` rule, which is the first rule of that chain on a
+# stock kubeadm node and which this lab has now hit twice for two unrelated
+# reasons. Both times the symptom was the same: one half of a flow crosses a
+# node without conntrack ever seeing the other half, so the half that does
+# reach netfilter matches no tracked flow, is marked INVALID, and is dropped
+# on a node that is only forwarding it.
+#
+# The SRv6 prefix covers #554: an ingress VIP's forward half reaches the
+# backend through XDP and inside an encapsulation, both of which bypass
+# conntrack, so direct server return means the plain reply is the only half
+# netfilter ever sees.
 ip6tables -I FORWARD 1 -s ${SRV6_PREFIX} -j ACCEPT
 ip6tables -I FORWARD 1 -d ${SRV6_PREFIX} -j ACCEPT
+
+# The underlay prefixes cover the ECMP case. dfw's compute node is dual-homed
+# to both of its site's edge nodes, so a loopback-to-loopback flow crossing
+# dfw has an ECMP group in each direction -- tr1's, across its two links to
+# dfw-worker2 and dfw-worker3, and dfw-worker's own, across eth1 and eth2.
+# Each node hashes independently, so the two directions routinely pick
+# different edge nodes: confirmed live with `task verify`, where the echo
+# request reached dfw-worker over dfw-worker3 and the reply left over
+# dfw-worker2, whose conntrack had never seen the request. Nothing here is
+# broken -- asymmetric ECMP is normal, and the same reason this script
+# already sets rp_filter=0 below. Only the INVALID drop turns it into a
+# blackhole, and only for the node in the middle.
+#
+# Both families, because only the hash keeps IPv4 working: the same pair of
+# ECMP groups exists for 10.255.255.0/24 and happens to resolve symmetrically
+# today, which is luck, not a property worth depending on.
+ip6tables -I FORWARD 1 -s ${UNDERLAY_PREFIX6} -j ACCEPT
+ip6tables -I FORWARD 1 -d ${UNDERLAY_PREFIX6} -j ACCEPT
+iptables -I FORWARD 1 -s ${UNDERLAY_PREFIX4} -j ACCEPT
+iptables -I FORWARD 1 -d ${UNDERLAY_PREFIX4} -j ACCEPT
 
 modprobe --quiet --dry-run vrf && modprobe vrf
 sysctl -w net.vrf.strict_mode=1
