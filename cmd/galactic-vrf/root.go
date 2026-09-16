@@ -82,12 +82,13 @@ func runCmd(cfg *config.VRFConfig) error {
 			ingresssidecar.NetlinkGatewayAddressResolver{},
 		)
 
-		// This node's real, globally routable underlay source address. The
-		// default local auto-detection resolves to the wrong address from
-		// inside Envoy's pod namespace, which is where this sidecar always
-		// runs. Gated on the node name like the publisher above, both needing
-		// this node's identity, and the cached client is fine for the same
-		// reason.
+		// This node's own SRv6 SID, the source usid_egress stamps into every
+		// outer header it pushes and the address an egress shard sends a
+		// translated reply back to. It is read from this node's BGPRouter:
+		// nothing visible inside Envoy's pod namespace, which is where this
+		// sidecar always runs, identifies the node's SID. Gated on the node
+		// name like the publisher above, both needing this node's identity,
+		// and the cached client is fine for the same reason.
 		ingresssidecar.SetNodeSourceAddressResolver(
 			ingresssidecar.NewK8sNodeSourceAddressResolver(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
 		)

@@ -275,28 +275,23 @@ site-local `ns60` backend — one anycast service, three sites, four gateways.
 
 ## Known limitations
 
-- **Tenant egress is one-way.** The forward half works on both families and is
+- **Tenant egress is now round-trip on both families.** The forward half is
   proven end to end by `task verify:nat-datapath`: a tenant's traffic reaches
   `remote-host`, outside every cluster, masqueraded to the shard's own public
-  address. A reply now reaches the shard — each shard node's `fabric-router`
+  address. A reply reaches the shard — each shard node's `fabric-router`
   originates its own two masquerade addresses into the underlay, since the
   EVPN path `galactic-nat` advertises never leaves `galactic-router`'s iBGP
   mesh, and `verify:nat-return-route` is the check for that
-  ([#549](https://github.com/datum-cloud/galactic/issues/549), fixed) — but
-  the shard cannot forward that reply back to a tenant it does not itself
-  host ([#550](https://github.com/datum-cloud/galactic/issues/550)), which is
-  every tenant, since a node never uses its own shard. The reply is dropped
-  there, counted as `fib_no_neigh`. `verify:nat-datapath` is therefore still
-  expected to fail and is deliberately kept out of the `verify` chain; move
-  it in once #550 lands.
-
-  TCP needed one thing beyond #550, fixed in
-  [#565](https://github.com/datum-cloud/galactic/issues/565): a shard used to
-  hand its forward leg to the kernel while transmitting its return leg from
-  the driver, so conntrack saw a flow it could never see a reply to and the
-  node dropped the tenant's own ACK as `INVALID` — with every shard counter
-  flat, since the shard had dropped nothing. Both directions now leave from
-  the driver.
+  ([#549](https://github.com/datum-cloud/galactic/issues/549), fixed). The
+  shard then returns the un-translated reply to the tenant's own node: the
+  datapath stamps this node's own End.DT46 SID for the tenant's VRF, the same
+  SID the attachment already advertises, so the reply rides the site locator
+  every `fabric-router` originates and decapsulates like any other SRv6 packet
+  ([#550](https://github.com/datum-cloud/galactic/issues/550), fixed). And a
+  TCP session completes end to end because both directions now leave from the
+  driver, so conntrack sees the reply
+  ([#565](https://github.com/datum-cloud/galactic/issues/565), fixed);
+  `verify:nat-datapath` is deliberately kept out of the `verify` chain.
 - **A shard attaches to its uplinks once, at process startup.**
   `GALACTIC_NAT_UPLINK_INTERFACES` is a list and every interface in it gets
   the shard XDP program, so a dual-homed node like `dfw-worker` keeps

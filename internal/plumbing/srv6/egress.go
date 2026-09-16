@@ -10,7 +10,6 @@ import (
 	"net"
 
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
@@ -204,42 +203,6 @@ func EgressDefaultRouteDel(tableID uint32) error {
 	}
 	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
 	return table.Unregister(tableID, egressroutemap.DefaultPrefix)
-}
-
-// ResolveNodeSourceAddress returns this node's underlay-facing source address:
-// the first global-scope IPv6 address on the interface usid_ingress and
-// usid_egress are attached to. usid_egress writes it as the source of every
-// outer header it pushes. A kernel-native encapsulation would pick it through
-// ordinary source-address selection; an in-program header push has to be told.
-//
-// The interface comes from attach.ResolveInterfaces rather than a separate
-// heuristic, so this can never disagree with where the datapath is actually
-// attached. Deriving it instead from the main-table default route would pick
-// the wrong interface on any node where the default route belongs to the
-// cluster network rather than the SRv6 underlay.
-func ResolveNodeSourceAddress() (net.IP, error) {
-	names, err := attach.ResolveInterfaces()
-	if err != nil {
-		return nil, fmt.Errorf("resolve SRv6/underlay-facing interface: %w", err)
-	}
-	if len(names) == 0 {
-		return nil, errors.New("attach.ResolveInterfaces returned no interfaces")
-	}
-
-	link, err := netlink.LinkByName(names[0])
-	if err != nil {
-		return nil, fmt.Errorf("look up interface %q: %w", names[0], err)
-	}
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
-	if err != nil {
-		return nil, fmt.Errorf("list addresses on %s: %w", names[0], err)
-	}
-	for _, a := range addrs {
-		if a.Scope == unix.RT_SCOPE_UNIVERSE && !a.IP.IsUnspecified() {
-			return a.IP, nil
-		}
-	}
-	return nil, fmt.Errorf("no global-scope IPv6 address found on %s (the SRv6/underlay-facing interface)", names[0])
 }
 
 // ResolvePublicUplink returns the fabric uplink's link index and the

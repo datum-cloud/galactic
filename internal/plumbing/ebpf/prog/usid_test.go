@@ -1331,6 +1331,26 @@ func setUpEgressRouteAttachment(t *testing.T, objs *UsidObjects, block uint64, a
 	}
 }
 
+// setUpNodeSIDBase writes this node's own End.DT46 SID base into
+// node_src_addr_table and returns the SID usid_egress must stamp as the outer
+// source for an attachment on argument: the base with the Argument field
+// spliced into bits 69-80.
+//
+// Stored with a zero Argument, exactly as srv6.NodeSIDBase produces it. The
+// datapath owns that field, filling it from the attachment the packet arrived
+// on, which is what makes the source a SID the tenant's own node decapsulates
+// into the right VRF rather than an address nothing claims (#550).
+func setUpNodeSIDBase(t *testing.T, objs *UsidObjects, base netip.Addr, argument uint16) netip.Addr {
+	t.Helper()
+	if err := objs.NodeSrcAddrTable.Put(uint32(0), base.As16()); err != nil {
+		t.Fatalf("populate node_src_addr_table: %v", err)
+	}
+	want := base.As16()
+	want[8] = (want[8] & 0xF0) | byte(argument>>8)&0x0F
+	want[9] = byte(argument)
+	return netip.AddrFrom16(want)
+}
+
 // TestUsidEgress_RouteMissPassesThroughUnmodified covers the common case
 // once egress_route_table exists as a concept at all: an attachment fully
 // registered (ifindex_vrf_table + vrf_table both present, exactly as a
@@ -1459,11 +1479,7 @@ func TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader(t *testing.T) {
 		t.Fatalf("populate egress_route_table: %v", err)
 	}
 
-	nodeSrc := netip.MustParseAddr("2001:db8:1:10::2")
-	nodeSrcBytes := nodeSrc.As16()
-	if err := objs.NodeSrcAddrTable.Put(uint32(0), nodeSrcBytes); err != nil {
-		t.Fatalf("populate node_src_addr_table: %v", err)
-	}
+	wantSrc := setUpNodeSIDBase(t, objs, netip.MustParseAddr("2001:db8:ff01:1:e000::"), 0x200)
 	src := netip.MustParseAddr("fd20:70::1")
 	pkt := buildPacketWithV6Addrs(t, dst, src, src, dst)
 
@@ -1507,9 +1523,14 @@ func TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader(t *testing.T) {
 	if gotNextHdr := outer[6]; gotNextHdr != 41 {
 		t.Errorf("pushed outer header nexthdr = %d, want 41 (IPv6-in-IPv6, matching usid_ingress's decap side)", gotNextHdr)
 	}
+	// This node's own SID for this attachment's VRF, not a bare interface
+	// address: an egress shard sends a translated reply back to whatever this
+	// says, and only a SID is both routable across the fabric and decapsulated
+	// on arrival (#550).
 	gotSrc, _ := netip.AddrFromSlice(outer[8:24])
-	if gotSrc != nodeSrc {
-		t.Errorf("pushed outer header src = %s, want %s (node_src_addr_table's own entry)", gotSrc, nodeSrc)
+	if gotSrc != wantSrc {
+		t.Errorf("pushed outer header src = %s, want %s (this node's SID base with this VRF's Argument spliced in)",
+			gotSrc, wantSrc)
 	}
 	gotDst, _ := netip.AddrFromSlice(outer[24:40])
 	if gotDst != sid {
@@ -1549,10 +1570,7 @@ func TestUsidEgress_RouteHitIPv4InnerUsesIPIPNextHeader(t *testing.T) {
 		t.Fatalf("populate egress_route_table: %v", err)
 	}
 
-	nodeSrc := netip.MustParseAddr("2001:db8:1:10::2")
-	if err := objs.NodeSrcAddrTable.Put(uint32(0), nodeSrc.As16()); err != nil {
-		t.Fatalf("populate node_src_addr_table: %v", err)
-	}
+	wantSrc := setUpNodeSIDBase(t, objs, netip.MustParseAddr("2001:db8:ff01:1:e000::"), 0x300)
 
 	// usid_egress parses the packet's own single IPv6/IPv4 header
 	// directly (it is not itself decapsulating anything, unlike
@@ -1582,6 +1600,98 @@ func TestUsidEgress_RouteHitIPv4InnerUsesIPIPNextHeader(t *testing.T) {
 	gotDst, _ := netip.AddrFromSlice(outer[24:40])
 	if gotDst != sid {
 		t.Errorf("pushed outer header dst = %s, want %s (the matched egress_route_table SID)", gotDst, sid)
+	}
+	// The source is this node's own SID whichever family rides inside: a
+	// NAT64 reply comes back over IPv4 and is re-encapsulated toward this
+	// same address, so an IPv4 tenant needs it as much as an IPv6 one (#550).
+	gotSrc, _ := netip.AddrFromSlice(outer[8:24])
+	if gotSrc != wantSrc {
+		t.Errorf("pushed outer header src = %s, want %s (this node's SID base with this VRF's Argument spliced in)",
+			gotSrc, wantSrc)
+	}
+}
+
+// TestUsidEgress_EncapSourceIsPerTenantSID is the regression guard for #550.
+//
+// The outer source is not decoration: an egress shard reads it off a tenant's
+// forward packet, keeps it as that flow's connection state, and addresses the
+// translated reply to it (internal/plumbing/ebpf/natprog/nat.c). It therefore
+// has to be a SID naming the tenant's own VRF on this node, and two
+// attachments on one node must not share one, or one tenant's replies arrive
+// at the other's VRF.
+//
+// This program stores the SID with a zero Argument and splices in the one from
+// ifindex_vrf_table per packet, so the whole per-tenant part of the answer is
+// what this asserts: same node_src_addr_table entry, two attachments, two
+// distinct sources, each carrying its own Argument.
+func TestUsidEgress_EncapSourceIsPerTenantSID(t *testing.T) {
+	requireRoot(t)
+
+	base := netip.MustParseAddr("2001:db8:ff01:1:e000::")
+	dst := netip.MustParseAddr("2001:db8:ffff::3")
+	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+
+	// Two Arguments whose bits straddle the split byte, so a splice that wrote
+	// only the low byte, or clobbered the Function nibble beside it, shows up
+	// as a wrong address rather than passing by luck.
+	tenants := []struct {
+		name     string
+		argument uint16
+		tableID  uint32
+	}{
+		{"tenant A", 0x123, 21},
+		{"tenant B", 0xFFF, 22},
+	}
+
+	seen := make(map[netip.Addr]string, len(tenants))
+	for _, tt := range tenants {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := loadObjects(t)
+			setUpEgressRouteAttachment(t, objs, 0x123456, tt.argument, tt.tableID)
+			wantSrc := setUpNodeSIDBase(t, objs, base, tt.argument)
+
+			key := egressRouteKey(tt.tableID, egressRouteFamilyINET6, dst, 128)
+			if err := objs.EgressRouteTable.Put(key, UsidEgressRouteValue{
+				Sid: sid.As16(), LinkIfindex: 1,
+			}); err != nil {
+				t.Fatalf("populate egress_route_table: %v", err)
+			}
+
+			src := netip.MustParseAddr("fd20:70::1")
+			pkt := buildPacketWithV6Addrs(t, dst, src, src, dst)
+
+			ret, out, err := objs.UsidEgress.Test(pkt)
+			if err != nil {
+				t.Fatalf("program test-run: %v", err)
+			}
+			if ret != tcActRedirect {
+				t.Fatalf("verdict = %d, want TC_ACT_REDIRECT (%d)", ret, tcActRedirect)
+			}
+
+			gotSrc, _ := netip.AddrFromSlice(out[ethHeaderLen+8 : ethHeaderLen+24])
+			if gotSrc != wantSrc {
+				t.Errorf("pushed outer header src = %s, want %s", gotSrc, wantSrc)
+			}
+			// The Function nibble shares a byte with the Argument's high
+			// nibble. Losing it makes the SID miss function_table on arrival
+			// and the reply is dropped as an unknown behavior, not delivered.
+			fields, err := uformat.Decode(gotSrc)
+			if err != nil {
+				t.Fatalf("uformat.Decode(%s): %v", gotSrc, err)
+			}
+			if fields.Function != uformat.FunctionEndDT46 {
+				t.Errorf("encap source Function = %#x, want %#x (End.DT46)",
+					fields.Function, uint8(uformat.FunctionEndDT46))
+			}
+			if fields.Argument != tt.argument {
+				t.Errorf("encap source Argument = %#x, want %#x", fields.Argument, tt.argument)
+			}
+			if prev, dup := seen[gotSrc]; dup {
+				t.Errorf("encap source %s already used by %s -- two tenants sharing one source send "+
+					"one tenant's replies to the other's VRF", gotSrc, prev)
+			}
+			seen[gotSrc] = tt.name
+		})
 	}
 }
 

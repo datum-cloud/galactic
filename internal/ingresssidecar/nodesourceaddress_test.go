@@ -14,92 +14,124 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-const nodeSrcTestNode = "worker-1"
+const (
+	nodeSrcTestNode    = "worker-1"
+	nodeSrcTestLocator = "2001:db8:ff01::/48"
+	nodeSrcTestNodeID  = 9
 
-func newTestBGPPeer(name, routerRefName string, updateSource *string) *bgpv1alpha1.BGPPeer {
-	peer := &bgpv1alpha1.BGPPeer{
+	// nodeSrcTestSID is srv6.NodeSIDBase(nodeSrcTestLocator,
+	// nodeSrcTestNodeID) written out by hand: the Block, then the Node-ID in
+	// bits 49-64, then the End.DT46 Function nibble with a zero Argument
+	// beside it. Spelled literally rather than computed, so a change to the
+	// encoding has to be restated here to pass rather than tracked silently.
+	nodeSrcTestSID = "2001:db8:ff01:9:e000::"
+)
+
+// newNodeSrcTestRouter returns a BGPRouter targeting node, carrying locator
+// and nodeID. An empty locator or a zero nodeID is a router with no SRv6
+// identity, which the resolver must skip rather than derive a SID from.
+func newNodeSrcTestRouter(name, node, locator string, nodeID int32) *bgpv1alpha1.BGPRouter {
+	return &bgpv1alpha1.BGPRouter{
 		ObjectMeta: metav1.ObjectMeta{Namespace: gatewayTestNamespace, Name: name},
-		Spec: bgpv1alpha1.BGPPeerSpec{
-			PeerASN: 65000,
-			Address: "2607:f740:100::f77",
-			AddressFamilies: []bgpv1alpha1.AddressFamily{
-				{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-			},
-			UpdateSource: updateSource,
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: "Node", Name: node},
+			LocalASN:    65000,
+			RouterID:    "10.0.0.1",
+			SRv6Locator: locator,
+			NodeID:      nodeID,
 		},
 	}
-	if routerRefName != "" {
-		peer.Spec.RouterTarget = bgpv1alpha1.RouterTarget{
-			RouterRef: &bgpv1alpha1.RouterRef{Name: routerRefName},
-		}
-	}
-	return peer
 }
 
-func strPtr(s string) *string { return &s }
-
-func TestResolveNodeSourceAddress_ReturnsUpdateSource(t *testing.T) {
+func TestResolveNodeSourceAddress_ReturnsNodeSIDBase(t *testing.T) {
 	scheme := gatewayTestScheme(t)
-	peer := newTestBGPPeer("worker-1-to-rr", nodeSrcTestNode, strPtr("2607:f740:100::635"))
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(peer).Build()
+	router := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, nodeSrcTestLocator, nodeSrcTestNodeID)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router).Build()
 
 	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
 	addr, err := r.ResolveNodeSourceAddress()
 	if err != nil {
 		t.Fatalf("ResolveNodeSourceAddress: %v", err)
 	}
-	want := net.ParseIP("2607:f740:100::635")
+	want := net.ParseIP(nodeSrcTestSID)
 	if !addr.Equal(want) {
 		t.Errorf("ResolveNodeSourceAddress() = %v, want %v", addr, want)
 	}
 }
 
-func TestResolveNodeSourceAddress_IgnoresOtherNodesPeers(t *testing.T) {
+// TestResolveNodeSourceAddress_IsNotAnInterfaceAddress is the regression guard
+// for #550. The uplink address this used to return is routable nowhere in the
+// fabric and matches no node's locator_table, so an egress shard's reply to it
+// is dropped. Assert the answer sits inside the locator this node advertises.
+func TestResolveNodeSourceAddress_IsNotAnInterfaceAddress(t *testing.T) {
 	scheme := gatewayTestScheme(t)
-	other := newTestBGPPeer("psi-puborr-to-rr", "psi-puborr", strPtr("2600:9c02::2"))
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(other).Build()
-
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
-	if _, err := r.ResolveNodeSourceAddress(); err == nil {
-		t.Fatal("expected an error when no BGPPeer targets this node, got nil")
-	}
-}
-
-func TestResolveNodeSourceAddress_SkipsPeerWithNoUpdateSource(t *testing.T) {
-	scheme := gatewayTestScheme(t)
-	noSource := newTestBGPPeer("worker-1-to-fabric", nodeSrcTestNode, nil)
-	withSource := newTestBGPPeer("worker-1-to-rr", nodeSrcTestNode, strPtr("2607:f740:100::635"))
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(noSource, withSource).Build()
+	router := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, nodeSrcTestLocator, nodeSrcTestNodeID)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router).Build()
 
 	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
 	addr, err := r.ResolveNodeSourceAddress()
 	if err != nil {
 		t.Fatalf("ResolveNodeSourceAddress: %v", err)
 	}
-	want := net.ParseIP("2607:f740:100::635")
-	if !addr.Equal(want) {
-		t.Errorf("ResolveNodeSourceAddress() = %v, want %v (the peer with a usable updateSource)", addr, want)
+	_, locator, err := net.ParseCIDR(nodeSrcTestLocator)
+	if err != nil {
+		t.Fatalf("parse locator: %v", err)
+	}
+	if !locator.Contains(addr) {
+		t.Errorf("ResolveNodeSourceAddress() = %v, want an address inside %s", addr, locator)
 	}
 }
 
-func TestResolveNodeSourceAddress_SkipsUnparseableUpdateSource(t *testing.T) {
+func TestResolveNodeSourceAddress_IgnoresOtherNodesRouters(t *testing.T) {
 	scheme := gatewayTestScheme(t)
-	bad := newTestBGPPeer("worker-1-to-fabric", nodeSrcTestNode, strPtr("not-an-ip"))
+	other := newNodeSrcTestRouter("psi-puborr", "psi-puborr", "2001:db8:ff02::/48", 3)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(other).Build()
+
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	if _, err := r.ResolveNodeSourceAddress(); err == nil {
+		t.Fatal("expected an error when no BGPRouter targets this node, got nil")
+	}
+}
+
+func TestResolveNodeSourceAddress_SkipsRouterWithNoSRv6Identity(t *testing.T) {
+	scheme := gatewayTestScheme(t)
+	noIdentity := newNodeSrcTestRouter("worker-1-underlay", nodeSrcTestNode, "", 0)
+	withIdentity := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, nodeSrcTestLocator, nodeSrcTestNodeID)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(noIdentity, withIdentity).Build()
+
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	addr, err := r.ResolveNodeSourceAddress()
+	if err != nil {
+		t.Fatalf("ResolveNodeSourceAddress: %v", err)
+	}
+	want := net.ParseIP(nodeSrcTestSID)
+	if !addr.Equal(want) {
+		t.Errorf("ResolveNodeSourceAddress() = %v, want %v (the router with an SRv6 identity)", addr, want)
+	}
+}
+
+// TestResolveNodeSourceAddress_UnusableLocatorFailsLoudly covers a router
+// carrying a locator that is not a /48 uSID Block. Returning nothing rather
+// than an error would let node_src_addr_table's "all-zero means not
+// configured" convention read a garbage answer as a legitimate one.
+func TestResolveNodeSourceAddress_UnusableLocatorFailsLoudly(t *testing.T) {
+	scheme := gatewayTestScheme(t)
+	bad := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, "2001:db8:ff01::/64", nodeSrcTestNodeID)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bad).Build()
 
 	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
 	if _, err := r.ResolveNodeSourceAddress(); err == nil {
-		t.Fatal("expected an error when the only matching peer's updateSource doesn't parse, got nil")
+		t.Fatal("expected an error when the matching router's locator is not a /48, got nil")
 	}
 }
 
-func TestResolveNodeSourceAddress_NoPeersAtAll(t *testing.T) {
+func TestResolveNodeSourceAddress_NoRoutersAtAll(t *testing.T) {
 	scheme := gatewayTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
 	if _, err := r.ResolveNodeSourceAddress(); err == nil {
-		t.Fatal("expected an error with no BGPPeers at all, got nil")
+		t.Fatal("expected an error with no BGPRouters at all, got nil")
 	}
 }
 

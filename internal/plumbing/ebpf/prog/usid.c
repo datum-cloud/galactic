@@ -711,13 +711,33 @@ struct {
 	__type(value, struct egress_route_value);
 } egress_route_table SEC(".maps");
 
-// node_src_addr_table: this node's underlay-facing source address, the value
-// usid_egress writes into the outer header it pushes. A per-node constant
-// rather than a per-route one, hence a single-entry array rather than a field
-// on every egress_route_table entry, which would mean every route carrying the
-// same 16 bytes and the Go writer needing this node's address just to register
-// an unrelated destination. Rewritten idempotently on every CNI ADD, since it
-// is cheap and there is no once-per-node hook.
+// node_src_addr_table: this node's own End.DT46 SID with the Argument field
+// left zero, the base usid_egress completes per packet and writes into the
+// outer header it pushes. A per-node constant rather than a per-route one,
+// hence a single-entry array rather than a field on every egress_route_table
+// entry, which would mean every route carrying the same 16 bytes and the Go
+// writer needing this node's SID just to register an unrelated destination.
+// Rewritten idempotently on every CNI ADD, since it is cheap and there is no
+// once-per-node hook.
+//
+// A SID rather than the underlay interface's own address, which is what this
+// held until #550. The outer source is not decoration: an egress shard copies
+// it off a tenant's forward packet, stores it as that flow's connection state,
+// and sends the translated reply back to it (internal/plumbing/ebpf/natprog/
+// nat.c). An interface address fails that in two independent ways. It is a
+// point-to-point link address no node originates into the fabric, so the
+// shard's FIB lookup falls through to its own default and the reply is
+// dropped; and even reachable it would never be decapsulated, because
+// usid_ingress claims a packet only when its outer destination's high 64 bits
+// match locator_table, which an interface address never does. A SID satisfies
+// both by construction: it sits inside the locator this node already
+// advertises, and it is the same value this attachment's BGPAdvertisement
+// publishes as its own endpoint, so a shard's reply arrives exactly the way
+// any other node's traffic toward this tenant does.
+//
+// Only the Argument, which names the tenant VRF, is missing from the stored
+// value: it varies per packet and ifindex_vrf_table has already resolved it by
+// the time usid_egress encapsulates. See the splice at the encap site below.
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
@@ -1615,7 +1635,25 @@ int usid_egress(struct __sk_buff *skb)
 		src_or |= src[i];
 
 	if (src_or == 0)
-		return TC_ACT_UNSPEC; // this node's own source address isn't registered yet -- fail open rather than encapsulate with an all-zero source
+		return TC_ACT_UNSPEC; // this node's own source SID isn't registered yet -- fail open rather than encapsulate with an all-zero source
+
+	// Complete the stored base into this tenant's SID by writing the Argument
+	// into bits 69-80, the same field usid_ingress reads back out of an
+	// arriving packet's destination in step 5 above and the same layout
+	// uformat.Encode writes Go-side. The base carries zeros there, so this is
+	// the one field that makes the source a SID some node will decapsulate
+	// into a VRF rather than a bare locator address.
+	//
+	// Spliced here rather than stored per VRF because the Argument is already
+	// in hand: ifindex_vrf_table resolved it at the top of this program from
+	// the attachment this packet arrived on. Copied to the stack first --
+	// src points into a shared map value, and two CPUs completing two
+	// tenants' SIDs in place would hand each other the wrong VRF.
+	__u8 src_sid[16];
+
+	__builtin_memcpy(src_sid, src, sizeof(src_sid));
+	src_sid[8] = (__u8) ((src_sid[8] & 0xF0) | ((iv->argument >> 8) & 0x0F));
+	src_sid[9] = (__u8) (iv->argument & 0xFF);
 
 	// Push room for a new outer IPv6 header. A positive length difference grows
 	// room, the ingress strip being the same call with a negative one, and the
@@ -1664,7 +1702,7 @@ int usid_egress(struct __sk_buff *skb)
 	outer->payload_len = __builtin_bswap16(inner_len);
 	outer->nexthdr = (route_family == USID_EGRESS_ROUTE_FAMILY_INET6) ? USID_IPPROTO_IPV6 : USID_IPPROTO_IPIP;
 	outer->hop_limit = USID_EGRESS_HOP_LIMIT;
-	__builtin_memcpy(outer->saddr, src, 16);
+	__builtin_memcpy(outer->saddr, src_sid, 16);
 	__builtin_memcpy(outer->daddr, rv->sid, 16);
 	new_eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
 
