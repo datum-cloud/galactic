@@ -1,0 +1,63 @@
+@startuml resolution-sequence
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 190
+hide footbox
+
+title DNS64 and Galactic NAT64: proposed end-to-end flow
+
+participant "Compute platform\nand instance" as compute
+participant "Galactic\nCNI and routing" as galactic
+participant "DNS\ncontroller" as controller
+participant "DNS64 service\ndnsdist + BIND" as dns
+participant "Network API\nEgressShard" as api
+participant "NAT64 gateway\ngalactic-nat" as nat
+participant "IPv4\nservice" as ipv4
+
+group Provisioning: proposed DNS integration with existing Galactic routing
+    nat -> api: Publish shared /96 prefix and gateway status
+    controller -> api: Read assigned gateways and prefix
+    api --> controller: Current EgressShard status
+    note over controller, nat
+        Status alone does not prove connectivity.
+        Require CNI agreement and active route/connection checks.
+    end note
+    compute -> galactic: Platform attaches instance to tenant network
+    galactic -> galactic: Install shared-prefix route in tenant VRF
+    controller -> dns: Publish context, private zones, and synthesis policy
+    controller --> compute: Supply authorized context DNS endpoint
+    note over compute: Platform configures the instance resolver.
+end
+
+group DNS resolution: instance uses its network-specific endpoint
+    compute -> galactic: AAAA query to context DNS VIP
+    galactic -> dns: Deliver query with trusted network identity
+    dns -> dns: Select isolated view\nResolve private zone or approved upstream
+    alt Native AAAA exists
+        dns --> compute: Return native IPv6 answer through Galactic
+    else Eligible A-only result; synthesis permitted
+        dns -> dns: Combine shared /96 prefix with IPv4 address
+        dns --> compute: Return synthesized AAAA through Galactic
+    else No eligible result or synthesis unavailable
+        dns --> compute: Preserve DNS outcome; do not invent an IPv6 answer
+    end
+end
+
+group Application connection: synthesized-answer case only
+    compute -> galactic: IPv6 TCP/UDP to synthesized address
+    galactic -> nat: SRv6 to assigned shard, with tenant argument
+    nat -> nat: Create tenant-scoped session; translate IPv6 to IPv4
+    nat -> ipv4: IPv4 request from gateway public address
+    ipv4 --> nat: Reply to the same gateway
+    nat --> galactic: Reverse translation; tenant-scoped return path
+    galactic --> compute: IPv6 response
+end
+
+note over compute, ipv4
+    DNS is not in the application packet path.
+    Gateway restart loses existing sessions; DNS failover cannot preserve them.
+end note
+@enduml
