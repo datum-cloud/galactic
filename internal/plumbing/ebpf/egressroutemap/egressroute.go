@@ -473,11 +473,24 @@ type RefreshResult struct {
 	// Unresolved is the encapsulating entries whose SID could not be resolved
 	// this time round. Their existing value is left in place.
 	Unresolved int
+	// Skipped is the entries left alone because another network namespace owns
+	// them, counted separately from the pass-through entries that have nothing
+	// to resolve.
+	Skipped int
 }
 
-// Refresh re-resolves every encapsulating entry's link and L2 addresses and
-// rewrites the ones that have moved, leaving each entry's prefix and SID
-// untouched.
+// Refresh re-resolves the encapsulating entries this caller's network namespace
+// owns and rewrites the ones that have moved, leaving each entry's prefix and
+// SID untouched.
+//
+// foreignTableIDs names the Linux VRF routing tables belonging to a writer in
+// another network namespace, in practice SidecarOwnedTableIDs' result. Entries
+// keyed on them are counted and skipped. A link index and L2 pair are only
+// meaningful in the namespace that resolved them, so re-resolving another
+// writer's entry here rewrites it to an interface that does not exist where its
+// packets are forwarded, and every such packet is dropped until that writer
+// registers again. Callers that cannot determine the set must not sweep at all
+// rather than pass nil.
 //
 // It exists because those addresses are resolved once, by whoever wrote the
 // entry, and an entry written by a short-lived CNI plugin process has nobody to
@@ -505,7 +518,7 @@ type RefreshResult struct {
 // inert -- an entry keyed on a routing table no packet reaches any more, since
 // the VRF it belonged to is being torn down -- so it is not worth a
 // compare-and-swap the map API does not offer.
-func (t *EgressRouteTable) Refresh() (RefreshResult, error) {
+func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}) (RefreshResult, error) {
 	var result RefreshResult
 
 	type pending struct {
@@ -523,6 +536,10 @@ func (t *EgressRouteTable) Refresh() (RefreshResult, error) {
 		result.Scanned++
 		if value.LinkIfindex == 0 {
 			continue // pass-through: nothing was resolved, nothing to refresh
+		}
+		if _, foreign := foreignTableIDs[key.TableId]; foreign {
+			result.Skipped++
+			continue // resolved in another network namespace; not ours to rewrite
 		}
 
 		sid := make(net.IP, 16)

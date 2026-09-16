@@ -591,7 +591,7 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	existingKeys := make(map[usidmap.VRFKey]struct{}, len(existing))
 	for _, e := range existing {
 		existingKeys[e.VRFKey] = struct{}{}
-		if e.Block == uformat.BlockMax {
+		if e.Block == uformat.BlockIngressSidecar {
 			live[e.VRFKey] = struct{}{}
 		}
 	}

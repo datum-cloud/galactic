@@ -407,7 +407,7 @@ func status(cfg config, d derived) error {
 				mark = "*"
 			}
 			note := ""
-			if v.Block == uformat.BlockMax {
+			if v.Block == uformat.BlockIngressSidecar {
 				note = "  (ingresssidecar's synthetic BlockMax entry, usid_egress only)"
 			}
 			fmt.Printf("   %s block=%#x arg=%d -> table=%d egress_kind=%d pkts=%d drops=%d%s\n",

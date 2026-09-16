@@ -44,16 +44,17 @@ var ebpfPinDir = attach.PinDir
 // on this same node, and to stay consistent between this file's own two map
 // writes.
 //
-// uformat.BlockMax buys the first: as a prefix it is ffff:ffff:ffff::/48, which
-// no operator would assign as a real locator, so these entries sit in a corner
-// of the keyspace no CNI attachment can reach whatever argument it was
-// allocated. One reserved Block with per-VPC disambiguation left to argument is
-// simpler than deriving a Block per VPC and no less collision-safe, since the
-// whole Block is already carved out.
+// uformat.BlockIngressSidecar buys the first: the whole Block is carved out of
+// the keyspace no CNI attachment can reach whatever argument it was allocated.
+// One reserved Block with per-VPC disambiguation left to argument is simpler
+// than deriving a Block per VPC and no less collision-safe.
+//
+// These rows are also how the host recognises which VRF routing tables it does
+// not own; see egressroutemap.SidecarOwnedTableIDs.
 //
 // This sidecar has no BGP runtime and no per-node identity, so it cannot read a
 // real locator the way the CNI path does.
-const ingressSidecarBlock = uformat.BlockMax
+const ingressSidecarBlock = uformat.BlockIngressSidecar
 
 // argumentForTableID derives the uSID Argument for a VPC's VRF from its Linux
 // routing table ID rather than allocating a separate value. The table ID is
