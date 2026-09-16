@@ -76,11 +76,10 @@ func ConfigureFIBLookupUplinkSysctls(iface string) error {
 // IPv4 counterpart to ConfigureFIBLookupUplinkSysctls and needed only on a
 // shard that performs NAT64.
 //
-// A NAT64 forward leg hands the kernel a translated IPv4 packet to route,
-// exactly as the NAT66 leg hands it an IPv6 one. Without this the kernel drops
-// every translated packet after the datapath has already counted it as
-// successfully translated, so the shard reads as healthy while no IPv4 traffic
-// ever leaves it.
+// bpf_fib_lookup resolves a forwarding next hop, and a kernel with forwarding
+// off for the family refuses to give it one. Without this every NAT64 forward
+// packet dies at its last instruction, counted under a fib_* reason, so the
+// shard reads as healthy while no IPv4 traffic ever leaves it.
 //
 // A sysctl that does not exist is skipped silently, as elsewhere here.
 func ConfigureFIBLookupUplinkSysctlsIPv4(iface string) error {

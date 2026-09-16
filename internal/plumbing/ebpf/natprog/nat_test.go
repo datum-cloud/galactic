@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	xdpPass = 2
-	xdpDrop = 1
-	xdpTx   = 3
+	xdpPass     = 2
+	xdpDrop     = 1
+	xdpTx       = 3
+	xdpRedirect = 4
 
 	ipprotoUDP = 17
 
@@ -27,6 +28,11 @@ const (
 	// fixture below -- see that function's own doc comment.
 	encappedSrcPort = 40000
 	encappedDstPort = 443
+
+	// fixtureHopLimit is the IPv6 hop limit every packet built in this file
+	// starts out carrying. Named rather than a bare 64 because the forward
+	// legs decrement it, so tests assert against it.
+	fixtureHopLimit = 64
 )
 
 func requireRoot(t *testing.T) {
@@ -78,6 +84,36 @@ func populateProgArray(t *testing.T, objs *NatObjects) {
 	}
 }
 
+// assertLeftFromDatapath is the shared regression guard for #565: no leg of
+// this datapath may hand a packet it has translated to the kernel.
+//
+// A shard's return leg is claimed at ingress and re-encapsulated straight back
+// out of the driver, so netfilter never sees a reply. A forward leg that went
+// up opened a conntrack entry stuck in SYN_SENT, against which the tenant's own
+// ACK was INVALID and was dropped by the node's invalid-state rule -- no TCP
+// session through a shard survived its handshake.
+//
+// What the verdict actually is depends on the host: the FIB lookup each leg now
+// performs may resolve (XDP_TX, or XDP_REDIRECT when the route egresses another
+// interface) or fail (XDP_DROP against a counted reason), and a synthetic
+// program run has no control over the routes a test machine happens to hold.
+// Every one of those is the datapath transmitting or refusing on its own.
+// XDP_PASS is the only verdict that is not, so it is the only one asserted
+// against, and this stays a real assertion on any host.
+func assertLeftFromDatapath(t *testing.T, ret uint32) {
+	t.Helper()
+	switch ret {
+	case xdpTx, xdpRedirect, xdpDrop:
+		return
+	case xdpPass:
+		t.Fatalf("verdict = XDP_PASS (%d) -- a translated packet must leave from the datapath, never "+
+			"the kernel's forwarding path, or conntrack holds a flow it can never see a reply to (#565)",
+			ret)
+	default:
+		t.Fatalf("verdict = %d, want XDP_TX, XDP_REDIRECT, or a counted XDP_DROP", ret)
+	}
+}
+
 func sumPerCPU(t *testing.T, m *ebpf.Map, index uint32) uint64 {
 	t.Helper()
 	var perCPU []uint64
@@ -118,7 +154,7 @@ func buildUDPPacket(t *testing.T, dst, src netip.Addr, srcPort, dstPort uint16, 
 	udpTotalLen := uint16(len(udp))
 	pkt = append(pkt, byte(udpTotalLen>>8), byte(udpTotalLen))
 	pkt = append(pkt, ipprotoUDP)
-	pkt = append(pkt, 64)
+	pkt = append(pkt, fixtureHopLimit)
 	srcBytes := src.As16()
 	pkt = append(pkt, srcBytes[:]...)
 	dstBytes := dst.As16()
@@ -178,13 +214,25 @@ func buildEncappedUDPPacket(t *testing.T, outerDst, outerSrc, innerSrc, innerDst
 	payloadLen := uint16(len(inner))
 	pkt = append(pkt, byte(payloadLen>>8), byte(payloadLen))
 	pkt = append(pkt, 41) // outer nexthdr = IPv6-in-IPv6
-	pkt = append(pkt, 64)
+	pkt = append(pkt, fixtureHopLimit)
 	outerSrcBytes := outerSrc.As16()
 	pkt = append(pkt, outerSrcBytes[:]...)
 	outerDstBytes := outerDst.As16()
 	pkt = append(pkt, outerDstBytes[:]...)
 	pkt = append(pkt, inner...)
 
+	return pkt
+}
+
+// setInnerHopLimit rewrites the hop limit of the inner header of a packet from
+// buildEncappedUDPPacket, for the tests that need one about to expire. Done as
+// a mutation rather than a builder parameter because every other caller wants
+// the default and there are a dozen of them.
+//
+// The inner UDP checksum covers no part of the IPv6 header's hop limit, so
+// nothing has to be recomputed after this.
+func setInnerHopLimit(pkt []byte, hopLimit uint8) []byte {
+	pkt[ethLen+ip6Len+7] = hopLimit
 	return pkt
 }
 
@@ -254,17 +302,25 @@ func TestNatIngress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
-	if ret != xdpPass {
-		t.Fatalf("verdict = %d, want XDP_PASS (%d) -- SNAT'd traffic must be handed to the kernel's "+
-			"own routing, not dropped or re-encapsulated", ret, xdpPass)
-	}
+	assertLeftFromDatapath(t, ret)
 
 	// The decapsulated frame must still carry a real link header. Widening the
 	// head past it and reclaiming 14 bytes exposes the old packet's bytes at
-	// that offset unless strip_outer_header carries it across, and an XDP_PASS
-	// frame whose EtherType is those bytes reaches no protocol handler at all.
+	// that offset unless strip_outer_header carries it across, and there is
+	// then nothing well-formed for the FIB resolution to write its addresses
+	// over on the paths that reach it.
 	if got := binary.BigEndian.Uint16(out[12:14]); got != 0x86DD {
 		t.Errorf("EtherType after decap = %#04x, want 0x86DD", got)
+	}
+
+	// The hop limit belongs to this program now that the packet leaves from the
+	// driver rather than through the kernel's forwarding path, which used to
+	// perform the decrement. Without it a routing loop through a shard never
+	// expires.
+	const hopLimitOffset = ethLen + 7
+	if got := out[hopLimitOffset]; got != fixtureHopLimit-1 {
+		t.Errorf("hop limit after translation = %d, want %d (decremented exactly once)",
+			got, fixtureHopLimit-1)
 	}
 
 	// Post-decap layout: eth(14) + ip6(40) + udp -- daddr unchanged
@@ -315,6 +371,69 @@ func TestNatIngress_ForwardSNATsAndPreservesChecksum(t *testing.T) {
 	gotSrcPort2 := binary.BigEndian.Uint16(out2[udpOffset : udpOffset+2])
 	if gotSrcPort2 != gotSrcPort {
 		t.Errorf("masquerade port changed across packets on the same flow: %d then %d", gotSrcPort, gotSrcPort2)
+	}
+}
+
+// TestNatIngress_ForwardDropsExpiringHopLimit covers the loop protection the
+// forward legs took on when they stopped handing packets to the kernel.
+//
+// The kernel's forwarding path used to perform the hop decrement on its way
+// out. Nothing does once the packet leaves from the driver, so the decrement
+// and the expiry check are this program's, and a packet arriving with a hop
+// limit of 1 has to die here rather than be forwarded with 0 or wrap to 255.
+//
+// A router owes the sender an ICMPv6 Time Exceeded, which this program cannot
+// build. The drop is counted under its own reason instead, so an expiring flow
+// reads as a number rather than as silence -- the same trade the absent ICMP
+// translation makes.
+func TestNatIngress_ForwardDropsExpiringHopLimit(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	shardSID := netip.MustParseAddr("fc00:1:2::1")
+	shardPub := netip.MustParseAddr("2001:db8:9999::1")
+	if err := objs.ShardConfigTable.Put(uint32(0), NatShardConfig{
+		ShardSid: shardSID.As16(), ShardPubAddr6: shardPub.As16(), ServesV6: 1,
+	}); err != nil {
+		t.Fatalf("populate shard_config_table: %v", err)
+	}
+
+	shardSIDWithArg := shardSID.As16()
+	shardSIDWithArg[8] = (shardSIDWithArg[8] & 0xF0) | 0x01
+	shardSIDWithArg[9] = 0x23
+
+	pkt := setInnerHopLimit(buildEncappedUDPPacket(t, netip.AddrFrom16(shardSIDWithArg),
+		netip.MustParseAddr("fc00:3:4::a1b2"), netip.MustParseAddr("fd20:60::5"),
+		netip.MustParseAddr("2001:db8:9998::1"), []byte("expiring")), 1)
+
+	ret, _, err := objs.NatIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpDrop {
+		t.Fatalf("verdict = %d, want XDP_DROP (%d) -- a packet whose hop limit expires here must not "+
+			"be forwarded", ret, xdpDrop)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonNatHopLimitExceeded); got != 1 {
+		t.Errorf("drop_reasons[hop_limit_exceeded] = %d, want 1", got)
+	}
+
+	// Checked before the session lookup, so an expiring packet costs no
+	// masquerade port. Otherwise a looping flow burns the PAT range down.
+	var (
+		key   NatConnKey
+		value NatConnValue
+		rows  int
+	)
+	it := objs.NatConnTable.Iterate()
+	for it.Next(&key, &value) {
+		rows++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterate nat_conn_table: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("nat_conn_table rows = %d, want 0 -- an expiring packet must allocate nothing", rows)
 	}
 }
 
@@ -404,6 +523,11 @@ func TestNatIngress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 	const udpOffset = ethLen + ip6Len
 	masqPort := binary.BigEndian.Uint16(fwdOut[udpOffset : udpOffset+2])
 
+	// Read as a delta across the reply alone: the forward packet above resolves
+	// its own next hop now, so it contributes to this counter too, and an
+	// absolute reading here would describe both legs rather than this one.
+	fibFailedBefore := sumPerCPU(t, objs.DropReasons, DropReasonNatFibLookupFailed)
+
 	// Now the reply: from destAddr:destPort, to shardPub:masqPort.
 	replyPkt := buildUDPPacket(t, shardPub, destAddr, destPort, masqPort, []byte("reply"))
 
@@ -415,8 +539,9 @@ func TestNatIngress_ReturnUnNATsAndReencapsulates(t *testing.T) {
 		t.Fatalf("verdict = %d, want XDP_DROP (%d) (FIB lookup against a synthetic backend uSID must "+
 			"fail, not succeed, on this test host)", ret, xdpDrop)
 	}
-	if got := sumPerCPU(t, objs.DropReasons, DropReasonNatFibLookupFailed); got != 1 {
-		t.Errorf("drop_reasons[fib_lookup_failed] = %d, want 1 (push_outer_header must have run)", got)
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonNatFibLookupFailed) - fibFailedBefore; got != 1 {
+		t.Errorf("drop_reasons[fib_lookup_failed] rose by %d over the reply, want 1 "+
+			"(push_outer_header must have run)", got)
 	}
 
 	// push_outer_header writes the outer header (and handle_return already

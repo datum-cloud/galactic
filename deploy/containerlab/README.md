@@ -289,6 +289,14 @@ site-local `ns60` backend — one anycast service, three sites, four gateways.
   there, counted as `fib_no_neigh`. `verify:nat-datapath` is therefore still
   expected to fail and is deliberately kept out of the `verify` chain; move
   it in once #550 lands.
+
+  TCP needed one thing beyond #550, fixed in
+  [#565](https://github.com/datum-cloud/galactic/issues/565): a shard used to
+  hand its forward leg to the kernel while transmitting its return leg from
+  the driver, so conntrack saw a flow it could never see a reply to and the
+  node dropped the tenant's own ACK as `INVALID` — with every shard counter
+  flat, since the shard had dropped nothing. Both directions now leave from
+  the driver.
 - **A shard attaches to its uplinks once, at process startup.**
   `GALACTIC_NAT_UPLINK_INTERFACES` is a list and every interface in it gets
   the shard XDP program, so a dual-homed node like `dfw-worker` keeps

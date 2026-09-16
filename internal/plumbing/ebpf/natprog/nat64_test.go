@@ -160,14 +160,11 @@ func TestNat64Forward_TranslatesIPv6ToIPv4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
-	if ret != xdpPass {
-		t.Fatalf("verdict = %d, want XDP_PASS (%d) -- a translated packet is handed to the kernel's own "+
-			"routing, exactly as the NAT66 forward leg is", ret, xdpPass)
-	}
+	assertLeftFromDatapath(t, ret)
 
 	if got := binary.BigEndian.Uint16(out[12:14]); got != 0x0800 {
-		t.Fatalf("ethertype = %#04x, want 0x0800 -- leaving it at IPv6 hands an IPv4 packet to the "+
-			"IPv6 receive path", got)
+		t.Fatalf("ethertype = %#04x, want 0x0800 -- an IPv4 packet behind an IPv6 EtherType is "+
+			"discarded by whatever receives it", got)
 	}
 	if len(out) != ethLen+ip4Len+udpLen+len(payload) {
 		t.Fatalf("translated length = %d, want %d (IPv6's 40-byte header replaced by IPv4's 20)",
@@ -184,8 +181,12 @@ func TestNat64Forward_TranslatesIPv6ToIPv4(t *testing.T) {
 	if got := binary.BigEndian.Uint16(ip[6:8]); got != 0x4000 {
 		t.Errorf("frag_off = %#04x, want 0x4000 (DF set, offset zero)", got)
 	}
-	if ip[8] != 64 {
-		t.Errorf("TTL = %d, want 64 copied from the inner hop limit", ip[8])
+	// Decremented, not copied: this leg transmits from the driver rather than
+	// through the kernel's forwarding path, so the hop decrement every router
+	// owes is its own (RFC 7915 section 5.1).
+	if ip[8] != fixtureHopLimit-1 {
+		t.Errorf("TTL = %d, want %d -- the inner hop limit decremented exactly once",
+			ip[8], fixtureHopLimit-1)
 	}
 	if ip[9] != ipprotoUDP {
 		t.Errorf("protocol = %d, want %d", ip[9], ipprotoUDP)
@@ -497,9 +498,7 @@ func TestNat64_DisabledShardIsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
 	}
-	if ret != xdpPass {
-		t.Fatalf("verdict = %d, want XDP_PASS (%d)", ret, xdpPass)
-	}
+	assertLeftFromDatapath(t, ret)
 	if got := binary.BigEndian.Uint16(out[12:14]); got != 0x86DD {
 		t.Fatalf("ethertype = %#04x, want 0x86DD -- a shard with serves_v4 unset must never translate "+
 			"to IPv4, whatever the destination looks like", got)
@@ -563,9 +562,7 @@ func TestConnKey_EncapSourceSeparatesTenantsOnDifferentNodes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("program test-run from %s: %v", node, err)
 		}
-		if ret != xdpPass {
-			t.Fatalf("verdict from %s = %d, want XDP_PASS (%d)", node, ret, xdpPass)
-		}
+		assertLeftFromDatapath(t, ret)
 		ports[node] = binary.BigEndian.Uint16(out[ethLen+ip6Len : ethLen+ip6Len+2])
 	}
 
@@ -589,5 +586,42 @@ func TestConnKey_EncapSourceSeparatesTenantsOnDifferentNodes(t *testing.T) {
 	}
 	if rows != 4 {
 		t.Errorf("nat_conn_table rows = %d, want 4 (two flows, forward and reverse each)", rows)
+	}
+}
+
+// TestNat64Forward_DropsExpiringHopLimit is the NAT64 half of the loop
+// protection TestNatIngress_ForwardDropsExpiringHopLimit covers for NAT66.
+// Worth its own test rather than a table row on that one: this leg reads the
+// hop limit off the IPv6 header and writes it to an IPv4 TTL, so the two legs
+// check and decrement different bytes and could diverge silently.
+func TestNat64Forward_DropsExpiringHopLimit(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	shardSID := netip.MustParseAddr("fc00:1:2::1")
+	shardPub := netip.MustParseAddr("2001:db8:9999::1")
+	shardPub4 := netip.MustParseAddr("192.0.2.10")
+	if err := objs.ShardConfigTable.Put(uint32(0), nat64ShardConfig(shardSID, shardPub, shardPub4)); err != nil {
+		t.Fatalf("populate shard_config_table: %v", err)
+	}
+
+	destAddr := synthesize(nat64Prefix, netip.MustParseAddr("198.51.100.7"))
+	pkt := setInnerHopLimit(buildEncappedUDPPacket(t, sidWithArgument(shardSID, 0x123),
+		netip.MustParseAddr("fc00:3:4::a1b2"), netip.MustParseAddr("fd20:60::5"),
+		destAddr, []byte("expiring")), 1)
+
+	ret, _, err := objs.NatIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpDrop {
+		t.Fatalf("verdict = %d, want XDP_DROP (%d)", ret, xdpDrop)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonNatHopLimitExceeded); got != 1 {
+		t.Errorf("drop_reasons[hop_limit_exceeded] = %d, want 1", got)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, DropReasonNat64PatExhausted); got != 0 {
+		t.Errorf("drop_reasons[nat64_pat_exhausted] = %d, want 0 -- the expiry check runs before the "+
+			"port allocation, so an expiring packet must not have reached it", got)
 	}
 }

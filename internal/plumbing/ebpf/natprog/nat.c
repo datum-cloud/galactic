@@ -12,6 +12,24 @@
 // port allocator, and one set of drop counters rather than existing as two
 // near-duplicate programs.
 //
+// Both directions leave from the driver. A shard resolves its own next hop and
+// transmits every packet it claims, forward and return alike, and hands nothing
+// up to the kernel's forwarding path. That is a property, not an optimization:
+// a shard's return leg is claimed at ingress and re-encapsulated back out
+// before netfilter runs, so any leg that did go up would open connection
+// tracking state whose other half never arrives. The kernel would then hold a
+// TCP flow permanently in SYN_SENT and adjudicate the tenant's own ACK against
+// it -- INVALID, by the state table, and dropped by any invalid-state rule on
+// the node. Either both directions are visible to conntrack or neither is, and
+// the return leg cannot be without giving up the SRv6 re-encapsulation it
+// exists to perform. So: neither.
+//
+// The cost is that a shard node's netfilter rules do not see tenant egress at
+// all, and that routing this program performs is a bpf_fib_lookup rather than
+// the kernel's full output path -- no policy routing, no neighbour resolution
+// it can wait on, no ICMP error generated on its behalf. Each of those surfaces
+// as a named drop counter instead.
+//
 // The whole tier is deliberately separate from the gateway's ingress datapath:
 // tenant egress toward an arbitrary internet destination is a different traffic
 // pattern from ingress toward a fixed VIP and backend pool, and gets its own
@@ -43,6 +61,10 @@
 //   nat66_return   IPv6 internet -> tenant
 //   nat64_forward  tenant -> IPv4 internet    (RFC 6146/7915 translation)
 //   nat64_return   IPv4 internet -> tenant
+//
+// Each leaf ends in leave_via: XDP_TX where the route egresses the interface
+// the packet arrived on, XDP_REDIRECT where it does not. No leaf ends in
+// XDP_PASS once it has touched the packet.
 //
 // The split is not stylistic. A single program holding both families' full
 // translation paths -- each with its own header synthesis, checksum handling,
@@ -116,11 +138,13 @@ static __s64 (*bpf_csum_diff)(__be32 *from, __u32 from_size, __be32 *to, __u32 t
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 plen,
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 static long (*bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *) BPF_FUNC_tail_call;
+static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
 
 // ---------------------------------------------------------------------
 // Constants.
 // ---------------------------------------------------------------------
 
+#define NAT_AF_INET 2
 #define NAT_AF_INET6 10
 #define NAT_ETH_P_IPV6 0x86DD
 #define NAT_ETH_P_IP 0x0800
@@ -305,7 +329,13 @@ enum nat_drop_reason {
 	DROP_REASON_NAT64_V4_FRAGMENT        = 13,
 	DROP_REASON_NAT64_V4_OPTIONS         = 14,
 	DROP_REASON_NAT64_SHARD_UNAVAILABLE  = 15,
-	DROP_REASON_NAT_COUNT                = 16,
+	// 16-18 arrived with the forward legs' own transmit. Appended rather than
+	// slotted in beside the other forward-path reasons, so every counter series
+	// that existed before keeps its index.
+	DROP_REASON_NAT_HOP_LIMIT_EXCEEDED   = 16,
+	DROP_REASON_NAT_NO_EGRESS_IFINDEX    = 17,
+	DROP_REASON_NAT_REDIRECT_FAILED      = 18,
+	DROP_REASON_NAT_COUNT                = 19,
 };
 
 // ---------------------------------------------------------------------
@@ -571,9 +601,14 @@ static NAT_ALWAYS_INLINE void udp_zero_checksum_fixup(__u8 proto, __be16 *check_
 // Encapsulation helpers.
 // ---------------------------------------------------------------------
 
+// The ingress interface goes in as the lookup's scope, and the interface the
+// route egresses comes back out through egress_ifindex: bpf_fib_lookup
+// overwrites fib_params.ifindex with it on success. leave_via below needs that
+// value; discarding it is what put every encapsulated packet on the wrong wire
+// in the sibling edge datapath, which resolved it the same way.
 static NAT_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifindex, const __u8 src[16],
 							 const __u8 dst[16], __u16 tot_len,
-							 struct nat_ethhdr *eth)
+							 struct nat_ethhdr *eth, __u32 *egress_ifindex)
 {
 	struct bpf_fib_lookup fib_params;
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -590,6 +625,35 @@ static NAT_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifindex
 	__builtin_memcpy(eth->h_dest, fib_params.dmac, sizeof(eth->h_dest));
 	__builtin_memcpy(eth->h_source, fib_params.smac, sizeof(eth->h_source));
 	eth->h_proto = __builtin_bswap16(NAT_ETH_P_IPV6);
+	*egress_ifindex = fib_params.ifindex;
+	return BPF_FIB_LKUP_RET_SUCCESS;
+}
+
+// resolve_fib_and_write_eth4 is the same lookup for the one leg that leaves
+// this program as IPv4: a NAT64 forward packet, already translated. A separate
+// function rather than a family parameter, because bpf_fib_lookup reads a
+// different member of each address union depending on family and the EtherType
+// written below differs too, so the two share no line worth merging.
+static NAT_ALWAYS_INLINE long resolve_fib_and_write_eth4(void *ctx, __u32 ifindex, __be32 src,
+							  __be32 dst, __u16 tot_len,
+							  struct nat_ethhdr *eth, __u32 *egress_ifindex)
+{
+	struct bpf_fib_lookup fib_params;
+	__builtin_memset(&fib_params, 0, sizeof(fib_params));
+	fib_params.family = NAT_AF_INET;
+	fib_params.ipv4_src = src;
+	fib_params.ipv4_dst = dst;
+	fib_params.ifindex = ifindex;
+	fib_params.tot_len = tot_len;
+
+	long fib_rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), BPF_FIB_LOOKUP_DIRECT);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS)
+		return fib_rc;
+
+	__builtin_memcpy(eth->h_dest, fib_params.dmac, sizeof(eth->h_dest));
+	__builtin_memcpy(eth->h_source, fib_params.smac, sizeof(eth->h_source));
+	eth->h_proto = __builtin_bswap16(NAT_ETH_P_IP);
+	*egress_ifindex = fib_params.ifindex;
 	return BPF_FIB_LKUP_RET_SUCCESS;
 }
 
@@ -606,11 +670,42 @@ static NAT_ALWAYS_INLINE void count_fib_drop(long fib_rc)
 		count_drop(DROP_REASON_NAT_FIB_LOOKUP_FAILED);
 }
 
+// leave_via turns a resolved egress interface into this packet's verdict, for a
+// packet whose Ethernet header one of the two resolvers above has already
+// written. Every leg of this program ends here: the forward legs so the kernel
+// never sees a flow whose reply it will never see, and the return legs because
+// they always did.
+//
+// Leave over the interface the route selected, which is not in general the one
+// the packet arrived on. A shard reaches the fabric and the internet over the
+// same uplink in the simple case, and XDP_TX is both correct and cheaper there,
+// but a multi-homed shard node routes the two directions out different links.
+// XDP_TX retransmits out the ingress interface unconditionally, so on those
+// nodes it puts a frame carrying the egress link's source and next-hop MACs
+// onto the wrong wire, where the neighbour discards it -- and the FIB lookup
+// having succeeded, nothing counts that as a failure.
+static NAT_ALWAYS_INLINE int leave_via(struct xdp_md *ctx, __u32 egress_ifindex)
+{
+	if (egress_ifindex == 0) {
+		count_drop(DROP_REASON_NAT_NO_EGRESS_IFINDEX);
+		return XDP_DROP;
+	}
+	if (egress_ifindex == ctx->ingress_ifindex)
+		return XDP_TX;
+
+	if (bpf_redirect(egress_ifindex, 0) != XDP_REDIRECT) {
+		count_drop(DROP_REASON_NAT_REDIRECT_FAILED);
+		return XDP_DROP;
+	}
+	return XDP_REDIRECT;
+}
+
 // push_outer_header uses the same mechanism as the other datapath programs'
 // function of the same name. Copied rather than shared, since each program
 // defines its own surrounding header structs.
 static NAT_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16], const __u8 dst[16],
-						__be16 inner_payload_len_plus_ip6hdr)
+						__be16 inner_payload_len_plus_ip6hdr,
+						__u32 *egress_ifindex)
 {
 	if (bpf_xdp_adjust_head(ctx, -NAT_IP6HDR_LEN) != 0) {
 		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
@@ -640,7 +735,7 @@ static NAT_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 sr
 
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, src, dst,
 						 (__u16) (sizeof(*outer) + __builtin_bswap16(inner_payload_len_plus_ip6hdr)),
-						 eth);
+						 eth, egress_ifindex);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc);
 		return -1;
@@ -654,10 +749,8 @@ static NAT_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 sr
 // The link header has to be carried across the move explicitly. Widening the
 // head past it and then reclaiming 14 bytes exposes whatever the old packet
 // held at that offset -- the tail of the outer destination address and the
-// front of the inner IPv6 header -- not a link header. A caller that
-// XDP_PASSes the result hands the stack a frame whose EtherType is those
-// bytes, and eth_type_trans dispatches on them, so the decapsulated packet
-// reaches no protocol handler at all.
+// front of the inner IPv6 header -- not a link header, and there is nothing
+// for the forward leg's FIB resolution to overwrite the addresses of.
 static NAT_ALWAYS_INLINE int strip_outer_header(struct xdp_md *ctx, struct nat_ethhdr **eth_out)
 {
 	void *data = (void *) (long) ctx->data;
@@ -678,11 +771,10 @@ static NAT_ALWAYS_INLINE int strip_outer_header(struct xdp_md *ctx, struct nat_e
 	if (data + sizeof(struct nat_ethhdr) > data_end)
 		return -1;
 
-	// Restored verbatim: the frame arrived on this shard's own uplink, so its
-	// addressing is already correct for a packet the kernel is about to route,
-	// and the inner packet is IPv6 exactly as the outer one was. The NAT64
-	// forward path overwrites the EtherType afterward, that leg alone changing
-	// address family.
+	// Restored verbatim, then overwritten: each forward leg resolves its own
+	// next hop and writes real source and destination MACs over these before
+	// transmitting. What the restore buys is a well-formed header to overwrite
+	// on every path, including the ones that drop before resolution.
 	__builtin_memcpy(data, saved_eth, sizeof(saved_eth));
 
 	*eth_out = data;
@@ -730,7 +822,16 @@ static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct conn_key *rev_key,
 // nat66_forward processes a tenant's outbound IPv6 packet encapsulated toward
 // this shard. It strips the outer header, resolves the tenant key from the
 // Argument, allocates or reuses a masquerade port, translates the source, and
-// hands the now internet-routable packet to the kernel's routing.
+// transmits the now internet-routable packet over the interface its own FIB
+// lookup selected.
+//
+// It resolves and transmits rather than handing the packet up because the
+// return leg does: a reply is claimed at ingress and re-encapsulated straight
+// back out of the driver, so netfilter never sees one. Passing the forward leg
+// up opened a conntrack entry that could never leave SYN_SENT, which made the
+// tenant's own ACK arrive against a half-seen flow, be marked INVALID, and be
+// dropped by any invalid-state rule on the node -- kube-proxy installs one --
+// with every drop counter here flat, because nothing here had dropped it.
 SEC("xdp")
 int nat66_forward(struct xdp_md *ctx)
 {
@@ -780,6 +881,18 @@ int nat66_forward(struct xdp_md *ctx)
 		return XDP_DROP;
 	}
 
+	// The hop decrement is this program's job now that the packet leaves from
+	// the driver: the kernel's forwarding path used to do it, and without it a
+	// routing loop through this shard never expires. Checked before the session
+	// lookup so an expiring packet costs no port allocation. A router owes the
+	// sender an ICMPv6 Time Exceeded here, which this program cannot build --
+	// counted instead, for the same reason ICMP translation is (see Scope).
+	if (inner->hop_limit <= 1) {
+		count_drop(DROP_REASON_NAT_HOP_LIMIT_EXCEEDED);
+		return XDP_DROP;
+	}
+	inner->hop_limit--;
+
 	struct conn_key fwd_key;
 	__builtin_memset(&fwd_key, 0, sizeof(fwd_key));
 	fwd_key.family = NAT_FAMILY_V6;
@@ -827,7 +940,22 @@ int nat66_forward(struct xdp_md *ctx)
 	__builtin_memcpy(inner->saddr, cfg->shard_pub_addr6, 16);
 	*l4v.sport_ptr = cv.shard_port;
 
-	return XDP_PASS;
+	// Resolved from the translated source, not the tenant's: the reply has to
+	// come back to this shard's own masquerade address, and a route selected
+	// for any other source may leave over a different interface entirely.
+	__u8 dst_addr[16];
+	__builtin_memcpy(dst_addr, inner->daddr, 16);
+	__u16 tot_len = (__u16) (NAT_IP6HDR_LEN + __builtin_bswap16(inner->payload_len));
+
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, cfg->shard_pub_addr6,
+						 dst_addr, tot_len, eth, &egress_ifindex);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc);
+		return XDP_DROP;
+	}
+
+	return leave_via(ctx, egress_ifindex);
 }
 
 // nat66_return: a reply from the IPv6 internet, addressed to this shard's own
@@ -895,10 +1023,12 @@ int nat66_return(struct xdp_md *ctx)
 	// like any cross-node SRv6 packet and does not validate the encapsulation
 	// source, but it must still be a real address on this node rather than the
 	// internet peer's.
-	if (push_outer_header(ctx, cfg->shard_sid, backend_usid, inner_payload_len_plus_ip6hdr) != 0)
+	__u32 egress_ifindex = 0;
+	if (push_outer_header(ctx, cfg->shard_sid, backend_usid, inner_payload_len_plus_ip6hdr,
+			       &egress_ifindex) != 0)
 		return XDP_DROP;
 
-	return XDP_TX;
+	return leave_via(ctx, egress_ifindex);
 }
 
 // ---------------------------------------------------------------------
@@ -909,9 +1039,9 @@ int nat66_return(struct xdp_md *ctx)
 // nat64_forward processes a tenant's outbound packet whose destination sits
 // inside the NAT64 prefix. It strips the SRv6 outer header, allocates or reuses
 // a masquerade port against this shard's IPv4 address, rewrites the IPv6 header
-// as IPv4, and hands the result to the kernel's routing exactly as the NAT66
-// forward path does -- once translated, it is an ordinary internet-routable
-// packet and needs no FIB lookup of this program's own.
+// as IPv4, and resolves and transmits it exactly as the NAT66 forward path
+// does -- for the same reason, and with the one difference that the packet
+// leaving here is IPv4, so its FIB lookup is too.
 SEC("xdp")
 int nat64_forward(struct xdp_md *ctx)
 {
@@ -971,8 +1101,17 @@ int nat64_forward(struct xdp_md *ctx)
 	__u8 saved_eth[sizeof(struct nat_ethhdr)];
 	__builtin_memcpy(saved_eth, eth, sizeof(saved_eth));
 
+	// Decremented here rather than on the IPv4 header below, which RFC 7915
+	// section 5.1 allows either side of the translation, and which keeps the
+	// check identical to the NAT66 leg's. See that leg on why the decrement is
+	// this program's job at all, and on the ICMP error a router owes here.
+	if (inner->hop_limit <= 1) {
+		count_drop(DROP_REASON_NAT_HOP_LIMIT_EXCEEDED);
+		return XDP_DROP;
+	}
+
 	__u8 proto = inner->nexthdr;
-	__u8 hop_limit = inner->hop_limit;
+	__u8 hop_limit = (__u8) (inner->hop_limit - 1);
 	__be16 payload_len = inner->payload_len;
 	// Traffic Class spans the low nibble of vtc_flow[0] and the high nibble of
 	// vtc_flow[1]; IPv4's TOS byte is exactly that field (RFC 7915 section 5.1).
@@ -1053,8 +1192,9 @@ int nat64_forward(struct xdp_md *ctx)
 
 	struct nat_ethhdr *new_eth = data;
 	__builtin_memcpy(new_eth, saved_eth, sizeof(saved_eth));
-	// The stack reads this to pick a protocol handler after XDP_PASS; leaving it
-	// at IPv6 hands an IPv4 packet to the IPv6 receive path.
+	// Set here and again by the IPv4 resolver below, which cannot be reached
+	// from every path: a packet dropped between the two still has to carry an
+	// EtherType matching the header behind it.
 	new_eth->h_proto = __builtin_bswap16(NAT_ETH_P_IP);
 
 	struct nat_iphdr *ip4 = (void *) (new_eth + 1);
@@ -1066,9 +1206,7 @@ int nat64_forward(struct xdp_md *ctx)
 	// datagram marked DF is what makes a too-large packet surface as a PTB from
 	// the path rather than as silent truncation.
 	ip4->frag_off = __builtin_bswap16(0x4000);
-	// Copied rather than decremented: the packet leaves here via XDP_PASS and
-	// the kernel's forwarding path performs the hop decrement, exactly as it
-	// does for the NAT66 forward leg.
+	// Already decremented, on the IPv6 hop limit this was read from.
 	ip4->ttl = hop_limit;
 	ip4->protocol = proto;
 	ip4->check = 0;
@@ -1082,16 +1220,31 @@ int nat64_forward(struct xdp_md *ctx)
 		return XDP_DROP;
 	}
 
-	__be32 old_words[9];
-	__be32 new_words[9];
-	xlat_words6(old_words, src6, dst6, sport);
-	xlat_words4(new_words, cfg->shard_pub_addr4, dst4, cv.shard_port);
-	fix_l4_checksum_xlat(out_l4v.check_ptr, old_words, new_words);
+	// Scoped, not merely declared here: the two pseudo-header images are 72
+	// bytes of this program's 512-byte stack, and the FIB lookup below needs
+	// its own 64. Ending their lifetime explicitly is what lets the compiler
+	// put the two in the same slots instead of stacking them and overflowing.
+	{
+		__be32 old_words[9];
+		__be32 new_words[9];
+		xlat_words6(old_words, src6, dst6, sport);
+		xlat_words4(new_words, cfg->shard_pub_addr4, dst4, cv.shard_port);
+		fix_l4_checksum_xlat(out_l4v.check_ptr, old_words, new_words);
+	}
 	udp_zero_checksum_fixup(proto, out_l4v.check_ptr);
 
 	*out_l4v.sport_ptr = cv.shard_port;
 
-	return XDP_PASS;
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib_and_write_eth4(ctx, ctx->ingress_ifindex, cfg->shard_pub_addr4, dst4,
+						  (__u16) (NAT_IP4HDR_LEN + __builtin_bswap16(payload_len)),
+						  new_eth, &egress_ifindex);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc);
+		return XDP_DROP;
+	}
+
+	return leave_via(ctx, egress_ifindex);
 }
 
 // nat64_return: a reply from the IPv4 internet, addressed to this shard's own
@@ -1224,10 +1377,12 @@ int nat64_return(struct xdp_md *ctx)
 	__be16 inner_payload_len_plus_ip6hdr =
 		__builtin_bswap16((__u16) (sizeof(struct nat_ip6hdr) + l4_len));
 
-	if (push_outer_header(ctx, cfg->shard_sid, cv.backend_usid, inner_payload_len_plus_ip6hdr) != 0)
+	__u32 egress_ifindex = 0;
+	if (push_outer_header(ctx, cfg->shard_sid, cv.backend_usid, inner_payload_len_plus_ip6hdr,
+			       &egress_ifindex) != 0)
 		return XDP_DROP;
 
-	return XDP_TX;
+	return leave_via(ctx, egress_ifindex);
 }
 
 // ---------------------------------------------------------------------
