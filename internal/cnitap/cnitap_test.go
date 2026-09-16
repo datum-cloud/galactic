@@ -27,8 +27,8 @@ const (
 	testInvalidBase62 = "abc-def"
 	testCNIVersion    = "1.0.0"
 	// testIfName is the interface name a container runtime requests, and
-	// testHostTap the host tap device backing it. They differ on purpose: the
-	// result must report the requested name, never the device name.
+	// testHostTap the host tap device backing it. They differ on purpose: which
+	// of the two the result reports is the contract under test.
 	testIfName  = "eth0"
 	testHostTap = "G0abc123def"
 )
@@ -258,12 +258,16 @@ func TestBuildTapResultHostNetns(t *testing.T) {
 	}
 }
 
-// TestBuildTapResultNamesRequestedInterface pins the contract a container
-// runtime enforces on the sandbox's default interface: an entry under the
-// requested name, carrying at least one address. containerd refuses to start
-// the sandbox when that entry is missing or has no address, which is what a
-// result named after the host tap device produced.
-func TestBuildTapResultNamesRequestedInterface(t *testing.T) {
+// TestTapResultNamesItsReader pins which name the single interface entry
+// carries, for each consumer of the result. containerd keys the sandbox's pod
+// IP on the interface name it requested and refuses the sandbox when no entry
+// under that name carries an address, so a DAN attachment must report
+// CNI_IFNAME. kraftlet has no containerd in its path: it reads the host device
+// name back out of the result and hands it to the platform daemon, so a
+// non-DAN attachment must report the real tap device, or the guest boots
+// attached to nothing.
+func TestTapResultNamesItsReader(t *testing.T) {
+	base := `{"cniVersion":"1.0.0","name":"net","type":"galactic-tap","vpc":"a","vpcattachment":"b"`
 	subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/80")
 	gateway := net.ParseIP("fd00:10:ff01::1")
 
@@ -274,35 +278,54 @@ func TestBuildTapResultNamesRequestedInterface(t *testing.T) {
 	}
 	ipRes := &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway}
 
-	result := buildTapResult(conf, ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
+	for name, tc := range map[string]struct {
+		config string
+		want   string
+		why    string
+	}{
+		"DAN requested": {
+			config: base + `,"dan":true}`,
+			want:   testIfName,
+			why:    "containerd resolves the pod IP under the name it requested",
+		},
+		"DAN not requested": {
+			config: base + "}",
+			want:   testHostTap,
+			why:    "kraftlet hands this name to the platform as the device to attach",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ifName := testHostTap
+			if namesRuntimeInterface([]byte(tc.config)) {
+				ifName = testIfName
+			}
 
-	idx := -1
-	for i, iface := range result.Interfaces {
-		if iface.Name == testIfName {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		t.Fatalf("no interface named %q in result: %+v", testIfName, result.Interfaces)
-	}
-	if result.Interfaces[idx].Name == testHostTap {
-		t.Errorf("Interfaces[%d].Name = %q, want the requested name, not the host tap device",
-			idx, result.Interfaces[idx].Name)
-	}
-	if result.Interfaces[idx].Sandbox != "" {
-		t.Errorf("Interfaces[%d].Sandbox = %q, want empty (the tap stays in the host namespace)",
-			idx, result.Interfaces[idx].Sandbox)
-	}
+			result := buildTapResult(conf, ipRes, ifName, "aa:bb:cc:dd:ee:ff", 1500)
 
-	var addressed int
-	for _, ip := range result.IPs {
-		if ip.Interface != nil && *ip.Interface == idx {
-			addressed++
-		}
-	}
-	if addressed == 0 {
-		t.Errorf("interface %q carries no IPConfig; a runtime rejects the sandbox for this", testIfName)
+			if len(result.Interfaces) != 1 {
+				t.Fatalf("Interfaces count = %d, want 1: one entry describes the one tap, "+
+					"named for whichever consumer reads it", len(result.Interfaces))
+			}
+			if result.Interfaces[0].Name != tc.want {
+				t.Errorf("Interfaces[0].Name = %q, want %q: %s",
+					result.Interfaces[0].Name, tc.want, tc.why)
+			}
+			if result.Interfaces[0].Sandbox != "" {
+				t.Errorf("Interfaces[0].Sandbox = %q, want empty: the tap stays in the host "+
+					"namespace and has no guest endpoint", result.Interfaces[0].Sandbox)
+			}
+
+			var addressed int
+			for _, ip := range result.IPs {
+				if ip.Interface != nil && *ip.Interface == 0 {
+					addressed++
+				}
+			}
+			if addressed == 0 {
+				t.Errorf("interface %q carries no IPConfig at index 0; containerd rejects a "+
+					"sandbox whose default interface has no address", tc.want)
+			}
+		})
 	}
 }
 

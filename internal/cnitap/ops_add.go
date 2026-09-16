@@ -184,6 +184,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			"dir", cniConfig.DANDir, "tap", hostName)
 	}
 
-	result := buildTapResult(pluginConf, ipamResult, args.IfName, hostMac, hostMTU)
+	// One entry, named for whoever reads it: the requested name when a runtime
+	// resolves the sandbox's address by it, the real device otherwise.
+	resultIfName := hostName
+	if namesRuntimeInterface(args.StdinData) {
+		resultIfName = args.IfName
+	}
+	result := buildTapResult(pluginConf, ipamResult, resultIfName, hostMac, hostMTU)
 	return types.PrintResult(result, pluginConf.CNIVersion)
 }

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 const (
@@ -314,6 +315,7 @@ NODE_NAME=` + nodeName() + ` \
 	}
 
 	// Tap mode produces exactly 1 interface (the host tap) with an empty sandbox.
+	// One entry describes the one tap; its name follows the consumer.
 	ifaces, ok := result["interfaces"].([]any)
 	if !ok {
 		t.Fatalf("CNI result missing or invalid \"interfaces\" field; got: %v", result)
@@ -330,12 +332,15 @@ NODE_NAME=` + nodeName() + ` \
 		t.Errorf("interfaces[0].sandbox = %q, want empty (tap has no guest endpoint)", sandbox)
 	}
 
-	// The interface carries the name the runtime asked for (CNI_IFNAME above),
-	// not the host tap device name. A container runtime resolves the sandbox's
-	// address by that name and refuses the sandbox when it finds no addressed
-	// entry under it.
-	if ifName, _ := iface["name"].(string); ifName != "eth0" {
-		t.Errorf("interfaces[0].name = %q, want %q (the requested CNI_IFNAME)", ifName, "eth0")
+	// The entry is named for whoever reads the result. This config requests no
+	// DAN, which is the kraftlet path: kraftlet reads the host device name out
+	// of the result and hands it to the platform daemon, so the entry must name
+	// the real tap, not the requested CNI_IFNAME. The containerd path, where
+	// the requested name is what the sandbox's address is resolved by, is
+	// pinned in internal/cnitap's unit tests.
+	wantIfName := intf.GenerateInterfaceNameHost("1", "1")
+	if ifName, _ := iface["name"].(string); ifName != wantIfName {
+		t.Errorf("interfaces[0].name = %q, want %q (the real host tap device)", ifName, wantIfName)
 	}
 
 	// Tap mode now runs IPAM allocation like veth mode (the guest still

@@ -70,12 +70,17 @@ guest VM hypervisor (Kata, Firecracker, kraftlet/Unikraft), so this binary
 never delegates to host-device and never configures a guest netns. It still
 runs IPAM (if `"ipam"` is present) and configures the host gateway exactly as
 `galactic-veth` does; the CNI result carries a single interface since there's
-no guest-side interface entry. That interface carries the name the runtime
-requested (`CNI_IFNAME`, `eth0` in practice) with an empty sandbox, because the
-device is the tap and it stays in the host namespace. A container runtime looks
-the sandbox's default interface up by the requested name and refuses to start
-the sandbox when it finds no addressed entry under it, which is why the result
-does not report the host tap device name.
+no guest-side interface entry. Its sandbox is always empty, because the device
+is the tap and it stays in the host namespace.
+
+That entry is named for whichever consumer reads the result, which
+[`"dan"`](#directly-attachable-networking) selects. With `"dan": true` the
+result goes to a container runtime, which looks the sandbox's default interface
+up by the name it requested and refuses to start the sandbox when it finds no
+addressed entry under it, so the entry carries `CNI_IFNAME` (`eth0` in
+practice). Without it the result goes to kraftlet, which reads the host device
+name back out and hands it to the platform daemon, so the entry carries the
+real tap device name.
 
 #### Directly attachable networking
 
