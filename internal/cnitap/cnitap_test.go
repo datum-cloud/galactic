@@ -177,19 +177,25 @@ func TestBuildTapResult(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildTapResult(conf, tt.ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
+			result := buildTapResult(conf, tt.ipRes, testIfName, testHostTap, "aa:bb:cc:dd:ee:ff", 1500)
 
 			if result.CNIVersion != testCNIVersion {
 				t.Errorf("CNIVersion = %q, want %q", result.CNIVersion, testCNIVersion)
 			}
-			if len(result.Interfaces) != 1 {
-				t.Fatalf("Interfaces count = %d, want 1", len(result.Interfaces))
+			if len(result.Interfaces) != 2 {
+				t.Fatalf("Interfaces count = %d, want 2", len(result.Interfaces))
 			}
 			if result.Interfaces[0].Name != testIfName {
 				t.Errorf("Interfaces[0].Name = %q, want %q", result.Interfaces[0].Name, testIfName)
 			}
 			if result.Interfaces[0].Sandbox != "" {
 				t.Errorf("Interfaces[0].Sandbox = %q, want empty", result.Interfaces[0].Sandbox)
+			}
+			if result.Interfaces[1].Name != testHostTap {
+				t.Errorf("Interfaces[1].Name = %q, want %q", result.Interfaces[1].Name, testHostTap)
+			}
+			if result.Interfaces[1].Sandbox != "" {
+				t.Errorf("Interfaces[1].Sandbox = %q, want empty", result.Interfaces[1].Sandbox)
 			}
 			if len(result.IPs) != tt.wantIPs {
 				t.Errorf("IPs count = %d, want %d", len(result.IPs), tt.wantIPs)
@@ -222,7 +228,7 @@ func TestBuildTapResultIPv4Mask(t *testing.T) {
 	}
 	ipRes := &cniipam.IPAMResult{IPv4Address: ipv4Address, IPv4Gateway: ipv4Gateway, Routes: []*net.IPNet{ipv4Route}}
 
-	result := buildTapResult(conf, ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
+	result := buildTapResult(conf, ipRes, testIfName, testHostTap, "aa:bb:cc:dd:ee:ff", 1500)
 
 	if len(result.IPs) != 1 {
 		t.Fatalf("IPs count = %d, want 1", len(result.IPs))
@@ -251,18 +257,21 @@ func TestBuildTapResultHostNetns(t *testing.T) {
 	}
 	ipRes := &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway, Routes: []*net.IPNet{defaultRoute}}
 
-	result := buildTapResult(conf, ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
+	result := buildTapResult(conf, ipRes, testIfName, testHostTap, "aa:bb:cc:dd:ee:ff", 1500)
 
-	if result.Interfaces[0].Sandbox != "" {
-		t.Errorf("Interfaces[0].Sandbox = %q, want empty (host netns, no sandbox)", result.Interfaces[0].Sandbox)
+	for _, iface := range result.Interfaces {
+		if iface.Sandbox != "" {
+			t.Errorf("Interfaces[%q].Sandbox = %q, want empty (host netns, no sandbox)", iface.Name, iface.Sandbox)
+		}
 	}
 }
 
 // TestBuildTapResultNamesRequestedInterface pins the contract a container
 // runtime enforces on the sandbox's default interface: an entry under the
 // requested name, carrying at least one address. containerd refuses to start
-// the sandbox when that entry is missing or has no address, which is what a
-// result named after the host tap device produced.
+// the sandbox when that entry is missing or has no address. It also pins the
+// contract kraftlet relies on: the result's last interface names the actual
+// host tap device.
 func TestBuildTapResultNamesRequestedInterface(t *testing.T) {
 	subnet := cnitestutil.MustParseCIDR(t, "fd00:10:ff01::1234/80")
 	gateway := net.ParseIP("fd00:10:ff01::1")
@@ -274,7 +283,7 @@ func TestBuildTapResultNamesRequestedInterface(t *testing.T) {
 	}
 	ipRes := &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway}
 
-	result := buildTapResult(conf, ipRes, testIfName, "aa:bb:cc:dd:ee:ff", 1500)
+	result := buildTapResult(conf, ipRes, testIfName, testHostTap, "aa:bb:cc:dd:ee:ff", 1500)
 
 	idx := -1
 	for i, iface := range result.Interfaces {
@@ -303,6 +312,12 @@ func TestBuildTapResultNamesRequestedInterface(t *testing.T) {
 	}
 	if addressed == 0 {
 		t.Errorf("interface %q carries no IPConfig; a runtime rejects the sandbox for this", testIfName)
+	}
+
+	last := result.Interfaces[len(result.Interfaces)-1]
+	if last.Name != testHostTap {
+		t.Errorf("last interface Name = %q, want %q (kraftlet reads the last entry for the real tap device)",
+			last.Name, testHostTap)
 	}
 }
 

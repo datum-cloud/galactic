@@ -13,21 +13,23 @@ import (
 	"go.datum.net/galactic/internal/cnimaster"
 )
 
-// buildTapResult constructs the CNI result for tap mode: one interface with
-// optional address data. The guest VM manages its own interface, and the
-// address here describes the allocated subnet, which the BGP plugin chained
-// next reads back out of this result to know what to advertise. The IPv4
-// address is reported with the same mask the host side of the tap carries.
+// buildTapResult constructs the CNI result for tap mode: two entries for the
+// same host-namespace tap, plus optional address data on the first. The guest
+// VM manages its own interface, and the address here describes the allocated
+// subnet, which the BGP plugin chained next reads back out of this result to
+// know what to advertise. The IPv4 address is reported with the same mask the
+// host side of the tap carries.
 //
-// The interface is reported under the name the runtime requested, not the host
-// tap device name, because a container runtime looks the sandbox's default
-// interface up by that name and refuses the sandbox when it carries no
-// address. Its MAC and MTU are the host tap's: the device the guest attaches to
-// lives in the host namespace, which is why the sandbox field stays empty.
+// The first entry is named for the requesting runtime, since a container
+// runtime looks its sandbox's default interface up by that name and refuses
+// the sandbox when it carries no address. The second names the actual host
+// tap device, which kraftlet reads from the result's last interface. Both
+// share the host tap's MAC and MTU, and both leave Sandbox empty: the device
+// the guest attaches to lives in the host namespace.
 func buildTapResult(
 	pluginConf *PluginConf,
 	ipRes *cniipam.IPAMResult,
-	ifName, hostMac string,
+	ifName, hostName, hostMac string,
 	hostMTU int,
 ) *type100.Result {
 	result := &type100.Result{
@@ -39,8 +41,14 @@ func buildTapResult(
 				Mtu:     hostMTU,
 				Sandbox: "",
 			},
+			{
+				Name:    hostName,
+				Mac:     hostMac,
+				Mtu:     hostMTU,
+				Sandbox: "",
+			},
 		},
 	}
-	cnimaster.AppendIPConfigs(result, ipRes, 0, net.CIDRMask(25, 32)) // index into Interfaces (the tap)
+	cnimaster.AppendIPConfigs(result, ipRes, 0, net.CIDRMask(25, 32)) // index into Interfaces (the runtime-named entry)
 	return result
 }

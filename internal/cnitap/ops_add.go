@@ -184,6 +184,6 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			"dir", cniConfig.DANDir, "tap", hostName)
 	}
 
-	result := buildTapResult(pluginConf, ipamResult, args.IfName, hostMac, hostMTU)
+	result := buildTapResult(pluginConf, ipamResult, args.IfName, hostName, hostMac, hostMTU)
 	return types.PrintResult(result, pluginConf.CNIVersion)
 }
