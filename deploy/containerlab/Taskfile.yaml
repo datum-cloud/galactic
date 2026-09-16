@@ -586,12 +586,26 @@ tasks:
         before=$(printf '%s\n' "${metrics}" | conns_of)
         printf '%s\n' "${metrics}" | drops_of > "${snap}/drops.before"
 
-        docker exec sjc-worker timeout 16 tcpdump -i eth1 -nn -e -c 2 \
+        # Captured at the off-fabric host, not on the shard node, and aimed at
+        # the one destination outside the fabric rather than the shard's own
+        # link peer. Both legs of a shard now leave from the driver via XDP,
+        # which never enters the kernel's transmit path, so an AF_PACKET tap on
+        # the shard node itself sees nothing -- the packet is on the wire, but
+        # tcpdump there is blind to it (#565). Reading the far end instead
+        # proves more than the old capture did: the frame the shard's own FIB
+        # resolution addressed was accepted by every hop in between.
+        #
+        # TCP, against a port the off-fabric host actually serves. The old
+        # probe was UDP at a closed port on an address nothing answered to; the
+        # same UDP against a real host draws an ICMPv6 port-unreachable back to
+        # the shard, which a TCP/UDP-only datapath drops as malformed_return
+        # by design -- and the drop check below, rightly, fails on it.
+        docker exec clab-gvpc-remote-host timeout 16 tcpdump -i eth1 -nn -e -c 2 \
           "ip6 and src ${shard}" >/tmp/nat-egress.txt 2>&1 &
         sleep 2
         pod=$(docker exec dfw-control-plane kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
         docker exec dfw-control-plane kubectl -n ns10 exec "${pod}" -- \
-          timeout 6 bash -c 'for i in 1 2; do echo probe | nc -u -w1 2001:db8:1:10::1 9999; done' \
+          timeout 6 bash -c 'for i in 1 2; do nc -w1 2001:db8:1:40::2 80 </dev/null; done' \
           >/dev/null 2>&1 || true
         wait
 
@@ -761,6 +775,14 @@ tasks:
   # is dropped on the way back to the tenant -- visible as this task's own
   # fib_no_neigh delta, which only started moving once the reply began
   # arriving at all.
+  #
+  # #565 is fixed and is not what keeps this out of the chain. Both probes
+  # below are TCP, and a shard used to hand its forward leg to the kernel
+  # while transmitting its return leg from the driver: conntrack held the
+  # flow in SYN_SENT forever, the tenant's own ACK was INVALID against it,
+  # and the node's kube-proxy rule dropped it with every counter read here
+  # flat. Both directions leave from the driver now. If these probes fail
+  # with a forward half that works, it is #550, not that.
   "verify:nat-datapath":
     desc: Full egress round trip through a shard to the off-fabric host (IPv6 + IPv4)
     # silent: the script is long enough that echoing it buries the result.
@@ -870,13 +892,21 @@ tasks:
         # the test would keep passing after the code it covers stopped working.
         sport=$(( 20000 + ($(date +%s) % 10000) ))
         echo "source port for this run: ${sport}"
-        docker exec dfw-worker timeout 16 tcpdump -i eth1 -nn -c 4 \
-          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:10::1' >/tmp/nat-collision.txt 2>&1 &
+        # Captured at the off-fabric host, not on the shard node, and aimed at
+        # the one destination outside the fabric rather than the shard's own
+        # link peer. Both legs of a shard now leave from the driver via XDP,
+        # which never enters the kernel's transmit path, so an AF_PACKET tap on
+        # the shard node itself sees nothing -- the packet is on the wire, but
+        # tcpdump there is blind to it (#565). Reading the far end instead
+        # proves more than the old capture did: the frame the shard's own FIB
+        # resolution addressed was accepted by every hop in between.
+        docker exec clab-gvpc-remote-host timeout 16 tcpdump -i eth1 -nn -c 4 \
+          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:40::2' >/tmp/nat-collision.txt 2>&1 &
         sleep 2
         for site in iad sjc; do
           pod=$(docker exec ${site}-control-plane kubectl -n ns70 get pods -o jsonpath='{.items[0].metadata.name}')
           docker exec ${site}-control-plane kubectl -n ns70 exec "${pod}" -- \
-            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:10::1 9999" >/dev/null 2>&1 || true
+            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:40::2 9999" >/dev/null 2>&1 || true
         done
         wait
         ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision.txt | cut -d. -f2 | sort -u)
@@ -915,15 +945,23 @@ tasks:
         # earlier run already allocated instead of exercising the allocator.
         sport=$(( 30000 + ($(date +%s) % 10000) ))
         echo "source port for this run: ${sport}"
-        docker exec dfw-worker timeout 16 tcpdump -i eth1 -nn -c 4 \
-          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:10::1' >/tmp/nat-collision-samenode.txt 2>&1 &
+        # Captured at the off-fabric host, not on the shard node, and aimed at
+        # the one destination outside the fabric rather than the shard's own
+        # link peer. Both legs of a shard now leave from the driver via XDP,
+        # which never enters the kernel's transmit path, so an AF_PACKET tap on
+        # the shard node itself sees nothing -- the packet is on the wire, but
+        # tcpdump there is blind to it (#565). Reading the far end instead
+        # proves more than the old capture did: the frame the shard's own FIB
+        # resolution addressed was accepted by every hop in between.
+        docker exec clab-gvpc-remote-host timeout 16 tcpdump -i eth1 -nn -c 4 \
+          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:40::2' >/tmp/nat-collision-samenode.txt 2>&1 &
         sleep 2
         for app in private private-b; do
           pod=$(docker exec sjc-control-plane kubectl -n ns71 get pods -l app=${app} \
             -o jsonpath='{.items[0].metadata.name}')
           echo "sourcing from ns71/${pod} (app=${app})"
           docker exec sjc-control-plane kubectl -n ns71 exec "${pod}" -- \
-            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:10::1 9999" >/dev/null 2>&1 || true
+            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:40::2 9999" >/dev/null 2>&1 || true
         done
         wait
         ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision-samenode.txt | cut -d. -f2 | sort -u)

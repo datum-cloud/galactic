@@ -269,10 +269,18 @@ Metrics, exposed on `GALACTIC_NAT_METRICS_PORT` (`9182` by default):
 Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 `no_return_conn`, `malformed_return`, `pat_exhausted`,
 `malformed_forward`, `fib_no_neigh`, `fib_unreachable`,
-`fib_frag_needed`, `fib_lookup_failed`, `adjust_head_failed`. Note that
+`fib_frag_needed`, `fib_lookup_failed`, `adjust_head_failed`,
+`hop_limit_exceeded`, `no_egress_ifindex`, `redirect_failed`. Note that
 NAT66 is TCP/UDP only by design — an ICMP-based reachability test (plain
 `ping`) will surface as `malformed_forward`/`malformed_return`, not as a
 bug.
+
+The `fib_*` reasons and the three after them all mean the same class of
+thing: the shard translated a packet and then could not get rid of it.
+Every leg of this datapath resolves its own next hop and transmits from
+the driver, forward and return alike — see the constraint below — so the
+kernel's output path is doing none of that work and none of its failures
+are the kernel's to report.
 
 ```sh
 kubectl exec -n galactic-system <galactic-nat-pod> -- \
@@ -310,6 +318,20 @@ knowing before you rely on this component in production:
 - **No anti-spoofing / trust boundary on ingress to a shard.** The
   datapath trusts fabric-internal traffic; this deserves its own security
   pass before carrying untrusted traffic.
+- **A shard node's netfilter rules never see tenant egress.** Both
+  directions are claimed in XDP and leave from the driver, so nothing a
+  shard translates traverses `PREROUTING`, `FORWARD`, or connection
+  tracking. That is deliberate and not adjustable: the return leg is
+  re-encapsulated before netfilter runs and cannot be made visible without
+  giving up the SRv6 encapsulation it exists to perform, and a forward leg
+  visible on its own left conntrack holding every TCP flow in `SYN_SENT`
+  and the node dropping the tenant's own ACK as `INVALID`
+  ([#565](https://github.com/datum-cloud/galactic/issues/565)). The costs
+  are real: no host firewall or accounting applies to this traffic, the
+  routing is a `bpf_fib_lookup` against the main table rather than the
+  kernel's full output path — so `ip rule` policy routing is not consulted
+  — and no ICMP error is generated on the shard's behalf. Each of those
+  surfaces as a named drop counter instead.
 - **`ShardSID`/`ShardPubAddr6` are entirely operator-chosen.** There is no
   in-cluster allocator for either value, and no automatic check that a
   chosen SID's Node-ID doesn't collide with a real node's own — see the

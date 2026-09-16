@@ -11,7 +11,8 @@ package natprog
 //
 // Indices 0-8 are the ones this datapath used when it served NAT66 alone, kept
 // at those values through the generalization so an existing counter series
-// stays the same series.
+// stays the same series; 16-18 arrived later still, with the forward legs' own
+// transmit, and are appended for the same reason.
 const (
 	DropReasonNat66NoReturnConn     uint32 = 0
 	DropReasonNat66MalformedReturn  uint32 = 1
@@ -29,7 +30,10 @@ const (
 	DropReasonNat64V4Fragment       uint32 = 13
 	DropReasonNat64V4Options        uint32 = 14
 	DropReasonNat64ShardUnavailable uint32 = 15
-	DropReasonNatCount              uint32 = 16
+	DropReasonNatHopLimitExceeded   uint32 = 16
+	DropReasonNatNoEgressIfindex    uint32 = 17
+	DropReasonNatRedirectFailed     uint32 = 18
+	DropReasonNatCount              uint32 = 19
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
@@ -51,4 +55,7 @@ var DropReasonNames = map[uint32]string{
 	DropReasonNat64V4Fragment:       "nat64_v4_fragment",
 	DropReasonNat64V4Options:        "nat64_v4_options",
 	DropReasonNat64ShardUnavailable: "nat64_shard_unavailable",
+	DropReasonNatHopLimitExceeded:   "hop_limit_exceeded",
+	DropReasonNatNoEgressIfindex:    "no_egress_ifindex",
+	DropReasonNatRedirectFailed:     "redirect_failed",
 }

@@ -120,11 +120,11 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 			return nil, fmt.Errorf("configure IPv6 forwarding on uplink interface %q: %w", iface, err)
 		}
 	}
-	// A NAT64 forward leg hands the kernel a translated IPv4 packet to route,
-	// exactly as the NAT66 leg hands it an IPv6 one. Without IPv4 forwarding on
-	// the interface the kernel drops every translated packet after the
-	// datapath has already counted it as successfully translated, which reads
-	// as a working shard with a silently broken path.
+	// The IPv4 counterpart, needed for the same reason on the one leg that
+	// leaves this datapath as IPv4: a NAT64 forward packet resolves its next
+	// hop with an IPv4 FIB lookup, which a kernel with IPv4 forwarding off
+	// refuses. The datapath counts that refusal, but a shard whose every IPv4
+	// flow dies at the last instruction is a shard that does not work.
 	if cfg.ServesNAT64() {
 		for _, iface := range cfg.UplinkInterfaces {
 			if err := sysctl.ConfigureFIBLookupUplinkSysctlsIPv4(iface); err != nil {
