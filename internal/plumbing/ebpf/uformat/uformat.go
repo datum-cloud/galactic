@@ -54,6 +54,21 @@ const (
 	// BlockMax is the largest value that fits in the 48-bit Block field.
 	BlockMax = 1<<BlockBits - 1 // 0xFFFFFFFFFFFF
 
+	// BlockIngressSidecar is the synthetic Block the ingress sidecar registers
+	// every vrf_table and ifindex_vrf_table entry under, standing in for the
+	// locator-derived Block a genuine tenant CNI attachment uses. It is never
+	// put on the wire and never interpreted by another node.
+	//
+	// As a prefix it is ffff:ffff:ffff::/48, which no operator would assign as
+	// a real locator, so the whole Block is carved out of the keyspace no CNI
+	// attachment can reach whatever Argument it was allocated.
+	//
+	// It is named here rather than in the sidecar because it is a contract
+	// between two writers: the sidecar populates these rows from inside a pod
+	// network namespace, and the host reads them back to recognise which VRF
+	// routing tables it does not own.
+	BlockIngressSidecar = BlockMax
+
 	// NodeIDMin and NodeIDMax bound the reserved Node-ID range. 0xE000-0xFFFF
 	// belongs to the Function and Argument universe, not to Node-ID.
 	NodeIDMin = 0x0001

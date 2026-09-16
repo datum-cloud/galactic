@@ -36,6 +36,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/radv"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -548,6 +549,13 @@ func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfData
 //
 // A missing pinned map is not an error worth logging on every tick: it means
 // the datapath is not loaded on this node, and the sweep has nothing to do.
+//
+// The ingress sidecar shares these pinned maps from inside a pod network
+// namespace, so the sweep first reads back which VRF routing tables that writer
+// owns and passes them to Refresh to be left alone. Failing to read that set
+// skips the whole sweep: a sweep that cannot tell the two writers apart
+// rewrites the sidecar's entries to host interfaces the pod does not have, and
+// a stale next hop is recoverable where that is not.
 func startEgressRouteRefreshSweep(sem chan struct{}) {
 	select {
 	case sem <- struct{}{}:
@@ -559,7 +567,19 @@ func startEgressRouteRefreshSweep(sem chan struct{}) {
 			}
 			defer func() { _ = closer.Close() }()
 
-			result, err := table.Refresh()
+			registry, registryCloser, err := usidmap.OpenPinnedRegistry(attach.PinDir)
+			if err != nil {
+				return
+			}
+			defer func() { _ = registryCloser.Close() }()
+
+			foreignTableIDs, err := egressroutemap.SidecarOwnedTableIDs(registry.VRF)
+			if err != nil {
+				slog.Error("egress_route_table refresh sweep skipped: could not resolve entry ownership", "err", err)
+				return
+			}
+
+			result, err := table.Refresh(foreignTableIDs)
 			if err != nil {
 				slog.Error("egress_route_table refresh sweep failed", "err", err,
 					"scanned", result.Scanned, "refreshed", result.Refreshed)
@@ -568,7 +588,7 @@ func startEgressRouteRefreshSweep(sem chan struct{}) {
 			if result.Refreshed > 0 || result.Unresolved > 0 {
 				slog.Info("egress_route_table refresh sweep complete",
 					"scanned", result.Scanned, "refreshed", result.Refreshed,
-					"unresolved", result.Unresolved)
+					"unresolved", result.Unresolved, "skipped", result.Skipped)
 			}
 		}()
 	default:

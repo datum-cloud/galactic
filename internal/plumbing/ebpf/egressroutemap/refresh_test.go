@@ -69,7 +69,7 @@ func TestRefreshRewritesAnEntryWhoseNextHopMoved(t *testing.T) {
 		sid.String(): {link: uplinkIndex, dmac: uplinkDmac, smac: uplinkSmac},
 	})
 
-	result, err := tbl.Refresh()
+	result, err := tbl.Refresh(nil)
 	if err != nil {
 		t.Fatalf("Refresh() = %v, want success", err)
 	}
@@ -114,7 +114,7 @@ func TestRefreshLeavesAnUnresolvableEntryInPlace(t *testing.T) {
 		sid.String(): {err: errors.New("no route over an SRv6 uplink")},
 	})
 
-	result, err := tbl.Refresh()
+	result, err := tbl.Refresh(nil)
 	if err != nil {
 		t.Fatalf("Refresh() = %v, want success even with an unresolvable entry", err)
 	}
@@ -150,7 +150,7 @@ func TestRefreshSkipsPassThroughEntries(t *testing.T) {
 
 	resolverFor(t, map[string]answer{}) // any resolution attempt fails
 
-	result, err := tbl.Refresh()
+	result, err := tbl.Refresh(nil)
 	if err != nil {
 		t.Fatalf("Refresh() = %v, want success", err)
 	}
@@ -177,7 +177,7 @@ func TestRefreshLeavesAnUnchangedEntryAlone(t *testing.T) {
 		sid.String(): {link: fakeLinkIndex, dmac: fakeDmac, smac: fakeSmac},
 	})
 
-	result, err := tbl.Refresh()
+	result, err := tbl.Refresh(nil)
 	if err != nil {
 		t.Fatalf("Refresh() = %v, want success", err)
 	}
