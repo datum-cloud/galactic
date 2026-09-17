@@ -5,6 +5,7 @@
 package route
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -45,20 +46,32 @@ func assembleRoute(vrfID uint32, prefix, nextHop, dev string) (*netlink.Route, e
 	}, nil
 }
 
-func Add(vpc, prefix, nextHop, dev string) error {
+// Add installs the termination route for prefix into vpc's VRF table and
+// reports whether it created the route. It is idempotent: if an identical
+// route is already present it returns (false, nil) rather than an error.
+//
+// The VRF route table is shared by every attachment (and pod) in a VPC on a
+// node, so the same prefix can validly be installed more than once. created
+// tells the caller whether this call inserted the route, so it can avoid
+// recording a route that predated it — rolling back a shared pre-existing
+// route would remove one another pod or attachment depends on.
+func Add(vpc, prefix, nextHop, dev string) (created bool, err error) {
 	vrfID, err := vrf.TableID(vpc)
 	if err != nil {
-		return err
+		return false, err
 	}
 	route, err := assembleRoute(vrfID, prefix, nextHop, dev)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := netlink.RouteAdd(route); err != nil {
-		return err
+		if errors.Is(err, unix.EEXIST) {
+			return false, nil
+		}
+		return false, err
 	}
 	slog.Debug("route: termination route added", "prefix", prefix, "via", nextHop, "dev", dev, "vrfTable", vrfID)
-	return nil
+	return true, nil
 }
 
 func Delete(vpc, prefix, nextHop, dev string) error {

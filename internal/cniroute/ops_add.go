@@ -52,10 +52,16 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}()
 
 	for _, termination := range pluginConf.Terminations {
-		if err := route.Add(pluginConf.VPC, termination.Network, termination.Via, dev); err != nil {
+		created, err := route.Add(pluginConf.VPC, termination.Network, termination.Via, dev)
+		if err != nil {
 			return fmt.Errorf("add route %s: %w", termination.Network, err)
 		}
-		tracker.added = append(tracker.added, termination)
+		// Only routes this ADD actually inserted are rolled back. A route that
+		// was already present (another pod or attachment in the shared VPC
+		// table) is shared, and cleanup must not delete it.
+		if created {
+			tracker.added = append(tracker.added, termination)
+		}
 	}
 	if len(tracker.added) > 0 {
 		slog.Debug("ADD: termination routes installed", "count", len(tracker.added), "dev", dev)
