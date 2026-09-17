@@ -110,37 +110,10 @@ spec:
             - name: metrics
               containerPort: 9180
               protocol: TCP
-          # This container hosts the eBPF/TC-BPF uSID datapath's
-          # load/attach/pin control daemon (design plan
-          # .local/plan-ebpf-xdp-usid-datapath.md §5.4 option (a), §9
-          # "Privileges"). BPF/NET_ADMIN below and the bpf-fs volumeMount
-          # are required unconditionally by the binary's BPF loader
-          # dependencies: the datapath is unconditional (Run's own doc
-          # comment calls it "the only forwarding path") -- there is no
-          # flag to gate this grant behind, so it takes effect on every
-          # node running this manifest.
-          #
-          # NET_RAW is for internal/plumbing/radv.RunActor: it opens a raw
-          # ICMPv6 socket (mdlayher/ndp's Listen, over ip6:ipv6-icmp) to send
-          # Router Advertisements and receive Router Solicitations on each
-          # tap attachment. Without it, ndp.Listen fails "operation not
-          # permitted" for every attachment on every node -- confirmed live,
-          # continuously retried and continuously failing, on staging infra.
-          # PERFMON is required alongside BPF for the same reason
-          # config/galactic-gateway/base/daemonset.yaml and
-          # config/galactic-nat/base/daemonset.yaml already document for their
-          # own eBPF-loading containers: the verifier only permits
-          # pointer+scalar arithmetic on packet data when the loading process
-          # is perfmon_capable(). Without it the verifier applies its
-          # unprivileged ruleset and rejects the program outright, running as
-          # root notwithstanding -- "R8 has pointer with unsupported alu
-          # operation, pointer arithmetic with it prohibited for !root".
-          #
-          # usid.c did not need it until the GRO-merged decap path began
-          # offsetting a packet pointer by a computed header length, so this
-          # container ran without it for as long as the program happened to
-          # stay inside what unprivileged BPF allows. That was luck rather
-          # than a property worth depending on.
+          # The BPF/PERFMON/NET_ADMIN/NET_RAW grant and the bpf-fs
+          # volumeMount below are required unconditionally by the eBPF
+          # uSID datapath's control daemon this container hosts -- see
+          # config/galactic-cni/README.md for the per-capability rationale.
           securityContext:
             runAsUser: 0
             capabilities:
@@ -168,20 +141,9 @@ spec:
               mountPath: /host/var/log/galactic
             - name: bpf-fs
               mountPath: /sys/fs/bpf
-            # internal/plumbing/radv.DefaultStateDir ("/var/lib/cni/ra") is
-            # read unprefixed by this container's own Run loop
-            # (reconcileRadvActors), unlike HostBinDir/HostConflist/HostEtcDir
-            # above which are all deliberately under /host/... -- radv's
-            # constant is shared with galactic-tap, a separate binary invoked
-            # directly on the host by the kubelet's own CNI exec (never
-            # inside this or any other container), so it has to stay the
-            # real host-absolute path galactic-tap itself sees. Mirrors
-            # bpf-fs below: mount the hostPath at its own literal path
-            # instead of relocating it under /host/. Without this mount,
-            # reconcileRadvActors always lists an empty/missing directory --
-            # every tap attachment galactic-tap records on the host is
-            # invisible to it, so no RunActor ever starts and no guest gets
-            # an RA or a Router Solicitation reply, silently, on every node.
+            # /var/lib/cni backs radv's DefaultStateDir, shared with
+            # galactic-tap on the host -- see
+            # config/galactic-cni/README.md.
             - name: radv-state-dir
               mountPath: /var/lib/cni
               readOnly: true
@@ -226,40 +188,18 @@ spec:
           hostPath:
             path: /var/log/galactic
             type: DirectoryOrCreate
-        # Backs internal/plumbing/radv.DefaultStateDir ("/var/lib/cni/ra") --
-        # see the radv-state-dir volumeMount comment on credential-refresh
-        # above. DirectoryOrCreate, same reasoning as cni-bin-dir/cni-net-dir/
-        # galactic-etc/galactic-log: a node with no tap attachment yet may not
-        # have galactic-tap's /var/lib/cni/ra subdirectory created at all.
+        # Backs radv's DefaultStateDir -- see the radv-state-dir volumeMount
+        # comment above. DirectoryOrCreate (unlike bpf-fs): a node with no tap
+        # attachment yet may not have galactic-tap's /var/lib/cni/ra
+        # subdirectory created at all.
         - name: radv-state-dir
           hostPath:
             path: /var/lib/cni
             type: DirectoryOrCreate
         - name: bpf-fs
-          # The host's bpffs mount (design plan §4.4/§9: "All maps pinned
-          # under /sys/fs/bpf/galactic/"). credential-refresh pins the
-          # eBPF uSID datapath's maps under a galactic/ subdirectory of
-          # this mount so a container restart reuses the maps already
-          # pinned there instead of recreating them empty (pinned-map
-          # continuity). `Directory` (not DirectoryOrCreate): bpffs must
-          # already be mounted at this path by the host/kubelet node setup
-          # for pinning to actually work -- creating a plain directory
-          # here if it were missing would silently produce a regular
-          # filesystem path instead of a real bpf filesystem, and pinning
-          # would then fail at load time with a real, actionable error
-          # instead of appearing to succeed.
-          #
-          # SECURITY NOTE: this mounts the host's entire /sys/fs/bpf, not
-          # just the galactic/ subtree this container actually uses --
-          # a Kubernetes hostPath volume can't mount a subdirectory that
-          # doesn't exist yet (galactic/ is created by this container on
-          # first pin, not present beforehand), so this container has
-          # read/write visibility into every other pinned BPF object any
-          # other process on this host has placed under bpffs, not just
-          # its own. This is an accepted, largely inherent tradeoff of
-          # bpffs pinning on this platform, not an oversight -- call it
-          # out explicitly to a security reviewer rather than let it pass
-          # as a footnote.
+          # Host bpffs for pinned-map continuity; `Directory` (not
+          # DirectoryOrCreate) and its SECURITY NOTE are documented in
+          # config/galactic-cni/README.md.
           hostPath:
             path: /sys/fs/bpf
             type: Directory
