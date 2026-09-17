@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 
 	"github.com/vishvananda/netlink"
 
@@ -192,6 +193,41 @@ func EgressPrefixRouteAdd(tableID uint32, prefix *net.IPNet, shardSIDs []net.IP)
 	}
 	return fmt.Errorf("no egress shard SID is resolvable yet for %s, out of %d configured: %w",
 		prefix, len(shardSIDs), errors.Join(unresolved...))
+}
+
+// EgressDefaultRouteWithdraw removes egress_route_table's default (::/0) entry
+// for Linux VRF table tableID, for a VRF whose network no longer reaches the
+// internet through a shard.
+//
+// A node with no loaded datapath has no pinned map to withdraw from. That is
+// nothing to do rather than a failure: it is the state every node is in before
+// the datapath loads, and a network that declares no egress must behave there
+// exactly as it did when no egress existed anywhere -- which is to touch no
+// bpffs at all rather than to fail an attachment's ADD.
+func EgressDefaultRouteWithdraw(tableID uint32) error {
+	if !egressDatapathLoaded() {
+		return nil
+	}
+	return EgressDefaultRouteDel(tableID)
+}
+
+// EgressPrefixRouteWithdraw removes egress_route_table's entry for prefix on
+// Linux VRF table tableID, the counterpart to EgressPrefixRouteAdd and the
+// more-specific companion to EgressDefaultRouteWithdraw. It skips a node with
+// no loaded datapath for the same reason.
+func EgressPrefixRouteWithdraw(tableID uint32, prefix *net.IPNet) error {
+	if !egressDatapathLoaded() {
+		return nil
+	}
+	return RouteEgressDel(prefix, tableID)
+}
+
+// egressDatapathLoaded reports whether this node has a pin directory to open a
+// map from. It reads the same package var the helpers here resolve their pinned
+// maps through, so a test redirecting that var redirects this too.
+func egressDatapathLoaded() bool {
+	_, err := os.Stat(pinDir)
+	return err == nil
 }
 
 // EgressDefaultRouteDel removes egress_route_table's default (::/0) entry for

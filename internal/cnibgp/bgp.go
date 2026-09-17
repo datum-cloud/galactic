@@ -76,6 +76,9 @@ type publishConfig struct {
 	// ifaceType selects the attachment's egress kind, veth or tap. Inferred from
 	// prevResult, never a config field.
 	ifaceType string
+	// egress is this network's internet egress instruction, straight from its
+	// conflist stanza. Nil means the stanza carried none.
+	egress *Egress
 }
 
 // publishResult records what publishBGPState created, so cmdAdd can fold it
@@ -447,7 +450,7 @@ func publishBGPState(
 		// Not tracked for rollback: the vrf_table entry is shared by every
 		// attachment on this VPC and node, like the BGPVRFInstance above.
 		if _, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, prefixes,
+			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, prefixes, cfg.egress,
 		); err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
@@ -522,6 +525,7 @@ func publishBGPState(
 // nothing.
 func registerEBPFDatapath(
 	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string, prefixes []string,
+	egress *Egress,
 ) (registered bool, err error) {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return false, nil
@@ -551,12 +555,12 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
 	}
 
-	// Installs or refreshes this VRF's NAT66 default egress route. The
-	// optional routing plugin in this chain may be absent from a given
-	// conflist, and this route must exist wherever a shard is configured, so
-	// it is written here.
-	if err := installEgressRoutes(vrfTableID, argument); err != nil {
-		return false, fmt.Errorf("install NAT66 default egress route: %w", err)
+	// Installs, refreshes, or withdraws this VRF's egress routes. The optional
+	// routing plugin in this chain may be absent from a given conflist, and
+	// these routes must exist wherever this network's own stanza names a
+	// shard, so they are written here.
+	if err := installEgressRoutes(vrfTableID, argument, egress); err != nil {
+		return false, fmt.Errorf("install egress routes: %w", err)
 	}
 
 	if err := registerLocalEgressRoutes(pinDir, vrfTableID, prefixes); err != nil {
@@ -739,10 +743,17 @@ func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []stri
 	return nil
 }
 
-// installEgressRoutes installs or refreshes vrfTableID's egress routes toward
-// the configured shards: the ::/0 default that reaches the IPv6 internet, and,
-// where this fabric has NAT64, a more-specific route for the NAT64 prefix.
-// Idempotent, so it is safe on every attachment ADD sharing this VRF.
+// installEgressRoutes installs, refreshes, or withdraws vrfTableID's egress
+// routes toward the shards this network's conflist names: the ::/0 default that
+// reaches the IPv6 internet, and, where this fabric has NAT64, a more-specific
+// route for the NAT64 prefix. Idempotent, so it is safe on every attachment ADD
+// sharing this VRF.
+//
+// egress is this network's own instruction, from its own conflist stanza, not a
+// node-wide setting. A network that declares no egress gets no route, which is
+// what makes a declaration of no egress mean anything at all: the node-wide
+// list it replaces handed a default route out to every network on the node,
+// including every network that asked for none.
 //
 // argument is this attachment's VRFID, written into every shard SID these
 // routes encapsulate toward. It is what makes a shard able to tell one tenant
@@ -761,32 +772,96 @@ func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []stri
 // may offer NAT64 without NAT66, and then no default route exists for this
 // traffic to fall into.
 //
-// No shard configured is not an error: the shard list parses to an empty slice
-// and srv6.EgressDefaultRouteAdd no-ops. A shard SID that is invalid, or that
-// has no reachable route yet, fails this attachment's ADD rather than leaving
-// the VRF with no egress at all.
-func installEgressRoutes(vrfTableID uint32, argument uint16) error {
-	// cniConfig is nil until InitCNIConfig runs, which several unit tests
-	// calling registerEBPFDatapath directly never do. Treated as "no shard
-	// configured" rather than a panic.
-	if cniConfig == nil {
-		return nil
-	}
-	shardSIDs, err := parseShardSIDs(cniConfig.EgressShardSIDs)
+// No shard resolved for this network is not an error: the route is withdrawn
+// instead, and a network that never had one is unaffected. A shard SID that is
+// invalid, or that has no reachable route yet, fails this attachment's ADD
+// rather than leaving the VRF with no egress at all.
+func installEgressRoutes(vrfTableID uint32, argument uint16, egress *Egress) error {
+	shardSIDs, err := egressShardCandidates(egress)
 	if err != nil {
-		return fmt.Errorf("parse %s: %w", config.EnvCNIEgressShardSIDs, err)
+		return err
 	}
 	if len(shardSIDs) == 0 {
-		return nil
+		return withdrawEgressRoutes(vrfTableID)
 	}
 	tenantSIDs, err := shardSIDsForTenant(shardSIDs, argument)
 	if err != nil {
-		return fmt.Errorf("apply tenant argument to %s: %w", config.EnvCNIEgressShardSIDs, err)
+		return fmt.Errorf("apply tenant argument to egress shard SIDs: %w", err)
 	}
 	if err := srv6.EgressDefaultRouteAdd(vrfTableID, tenantSIDs); err != nil {
 		return err
 	}
 	return installNAT64EgressRoute(vrfTableID, tenantSIDs)
+}
+
+// egressShardCandidates resolves the ordered candidate shard SID list for this
+// network. An empty result means this network gets no egress route.
+//
+// The conflist stanza decides whenever it carries the egress key at all,
+// including when it carries an empty list: that is the network stating it has
+// no egress, and it has to override the node-wide variable rather than fall
+// through to it, or a node still carrying that variable would keep granting
+// egress to networks that opted out.
+//
+// Only a stanza with no egress key at all falls back to the deprecated
+// node-wide variable, which is what keeps a node whose conflists have not been
+// regenerated yet from losing the egress it has today.
+func egressShardCandidates(egress *Egress) ([]net.IP, error) {
+	if egress != nil {
+		sids, err := parseShardSIDList(egress.ShardSIDs)
+		if err != nil {
+			return nil, fmt.Errorf("parse egress.shardSIDs: %w", err)
+		}
+		return sids, nil
+	}
+
+	// cniConfig is nil until InitCNIConfig runs, which several unit tests
+	// calling registerEBPFDatapath directly never do. Treated as "no shard
+	// configured" rather than a panic.
+	if cniConfig == nil {
+		return nil, nil
+	}
+	sids, err := parseShardSIDs(cniConfig.EgressShardSIDs)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", config.EnvCNIEgressShardSIDs, err)
+	}
+	return sids, nil
+}
+
+// withdrawEgressRoutes removes vrfTableID's egress routes, so a network whose
+// declared intent no longer names a shard stops reaching the internet through
+// one. Both prefixes go: leaving the NAT64 route behind would withdraw a
+// network's IPv6 egress and leave its IPv4 egress running.
+//
+// This is the only withdrawal point on the attach path, and it withdraws for
+// the whole VRF, which is shared by every attachment on this VPC on this node.
+// That is sound only because the instruction is per network and the VRF is per
+// network too -- every attachment sharing this VRF reads the same network's
+// conflist. It is not a per-attachment withdrawal and cannot be: the egress
+// route key carries no attachment.
+//
+// A node with no loaded datapath has no map to withdraw from, which is nothing
+// to do rather than a failure -- see srv6.EgressDefaultRouteWithdraw. That is
+// what keeps a network with no egress byte-identical in behaviour to the
+// unset-node-wide-variable path it replaces, which touched no bpffs at all.
+func withdrawEgressRoutes(vrfTableID uint32) error {
+	if err := srv6.EgressDefaultRouteWithdraw(vrfTableID); err != nil {
+		return fmt.Errorf("withdraw default egress route: %w", err)
+	}
+	if cniConfig == nil || cniConfig.NAT64Prefix == "" {
+		return nil
+	}
+	_, prefix, err := net.ParseCIDR(cniConfig.NAT64Prefix)
+	if err != nil {
+		// Unparseable here means no route was ever installed under it, the
+		// install path having failed the ADD on the same value. Nothing to
+		// withdraw, and no second error to raise about it.
+		return nil
+	}
+	if err := srv6.EgressPrefixRouteWithdraw(vrfTableID, prefix); err != nil {
+		return fmt.Errorf("withdraw NAT64 egress route: %w", err)
+	}
+	return nil
 }
 
 // shardSIDsForTenant returns sids with each SID's 12-bit Argument replaced by
@@ -833,7 +908,7 @@ func shardSIDsForTenant(sids []net.IP, argument uint16) ([]net.IP, error) {
 // silently skipping it would leave the VRF with no IPv4 reachability and
 // nothing to say why.
 func installNAT64EgressRoute(vrfTableID uint32, shardSIDs []net.IP) error {
-	if cniConfig.NAT64Prefix == "" {
+	if cniConfig == nil || cniConfig.NAT64Prefix == "" {
 		return nil
 	}
 	_, prefix, err := net.ParseCIDR(cniConfig.NAT64Prefix)
@@ -848,9 +923,19 @@ func installNAT64EgressRoute(vrfTableID uint32, shardSIDs []net.IP) error {
 // space in the operator-supplied value does not fail every attachment ADD in
 // the cluster. An entry that survives trimming but is not a valid IP address
 // is a real misconfiguration and fails loudly.
+//
+// This is the deprecated node-wide form. A conflist-supplied list arrives
+// already split; see parseShardSIDList.
 func parseShardSIDs(raw string) ([]net.IP, error) {
+	return parseShardSIDList(strings.Split(raw, ","))
+}
+
+// parseShardSIDList parses an already-split egress shard SID list, preserving
+// its order: the candidates are tried in the order given, so this must not
+// sort or deduplicate them.
+func parseShardSIDList(parts []string) ([]net.IP, error) {
 	var sids []net.IP
-	for _, part := range strings.Split(raw, ",") {
+	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue

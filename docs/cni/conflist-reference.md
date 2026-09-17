@@ -244,11 +244,53 @@ on the same attachment, so cleanup is left to `galactic-router`'s GC controller.
 
 ## BGP Publish Fields (`galactic-bgp`)
 
-`galactic-bgp`'s own stanza carries only `vpc`, `vpcattachment`, and
-`namespace` — nothing else. It learns which interface kind was created and
-what addresses were allocated entirely from `prevResult` (the accumulated
-result of every preceding plugin in the chain), never from its own config or
-a kernel call.
+`galactic-bgp`'s own stanza carries `vpc`, `vpcattachment`, `namespace`, and
+the optional `egress` object below — nothing else. It learns which interface
+kind was created and what addresses were allocated entirely from `prevResult`
+(the accumulated result of every preceding plugin in the chain), never from its
+own config or a kernel call.
+
+### Internet egress (`egress`)
+
+| Field              | Required | Type       | Description                                                                                                 |
+| ------------------ | -------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `egress`           | No       | `object`   | This network's internet egress instruction. Absent installs no egress route (see the resolution order below). |
+| `egress.shardSIDs` | No       | `[]string` | Ordered candidate egress shard SIDs. The first entry that resolves wins; unresolvable entries are skipped.   |
+
+```json
+{ "type": "galactic-bgp", "vpc": "1", "vpcattachment": "1", "namespace": "galactic-system",
+  "egress": { "shardSIDs": ["2001:db8:ff01::"] } }
+```
+
+The instruction is per network, which is the whole point of it being here: a
+network that declared no egress must get no default route out, and the
+node-wide `GALACTIC_CNI_EGRESS_SHARD_SIDS` it replaces cannot express that —
+one list for the whole node hands a route out to every network on it.
+
+Resolution order, on every ADD:
+
+| Stanza                              | Node-wide variable | Result                                             |
+| ----------------------------------- | ------------------ | -------------------------------------------------- |
+| no `egress` key                     | unset              | No egress route; any existing one is withdrawn     |
+| no `egress` key                     | set                | The variable's list (deprecated rollout fallback)  |
+| `"egress": {}` or empty `shardSIDs` | either             | No egress route; any existing one is withdrawn     |
+| `egress.shardSIDs` non-empty        | either             | The stanza's list, in order                        |
+
+An empty list overrides the variable rather than falling through to it: that
+is a network stating it has no egress, and a node still carrying the variable
+would otherwise keep granting egress to networks that opted out.
+
+Withdrawal removes both prefixes the install path writes — `::/0` and, where
+the node has `GALACTIC_CNI_NAT64_PREFIX` set, that prefix — for this
+network's whole VRF. It happens on an ADD that observes no shard, which is the
+only point this plugin runs: `cmdDel` deletes no shared state, and the VRF's
+egress route key carries no attachment, so there is no per-attachment
+withdrawal to perform and none is attempted. A network whose intent changes
+with no attachment churn keeps its route until the next ADD in that VRF.
+
+A node with no loaded datapath has no map to withdraw from, which is nothing to
+do rather than an ADD failure — the same behaviour a network with no egress has
+always had.
 
 ### EndpointSlice publish (HTTP ingress backend discovery)
 
