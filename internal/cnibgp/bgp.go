@@ -607,18 +607,19 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("attach eBPF usid_egress to host interface %q: %w", hostName, err)
 	}
 
-	// Register this node's SRv6 source address. A per-node constant rather
-	// than a per-attachment one, but idempotent and cheap enough to redo on
-	// every ADD instead of adding a once-per-node lifecycle hook.
+	// Register this node's own SRv6 SID base. A per-node constant rather than
+	// a per-attachment one, but idempotent and cheap enough to redo on every
+	// ADD instead of adding a once-per-node lifecycle hook.
 	//
-	// Non-fatal, unlike the registrations above. Resolving the address needs a
-	// converged main-table IPv6 default route, which a node can transiently
-	// lack before its underlay session comes up. Failing every pod attach on
-	// the node until then is worse than the alternative, where only traffic
-	// needing the route fails. usid_egress fails open for exactly this gap,
-	// and a later ADD succeeds once the route exists.
-	if err := registerNodeSourceAddress(pinDir); err != nil {
-		slog.Warn("ADD: could not register this node's own SRv6 source address; "+
+	// Non-fatal, unlike the registrations above. A node whose BGPRouter names
+	// no SRv6 locator or node ID has no SID to register and no SRv6 endpoint
+	// of its own -- the same condition that leaves this attachment's own
+	// advertised SID unset above. Failing every pod attach on such a node is
+	// worse than the alternative, where only traffic needing encapsulation
+	// fails. usid_egress fails open for exactly this gap, and a later ADD
+	// succeeds once the locator is configured.
+	if err := registerNodeSourceAddress(pinDir, bgp.srv6Locator, bgp.nodeID); err != nil {
+		slog.Warn("ADD: could not register this node's own SRv6 SID; "+
 			"egress routing will fail open until this succeeds", "err", err)
 	}
 
@@ -636,17 +637,25 @@ func registerEBPFDatapath(
 	return true, nil
 }
 
-// registerNodeSourceAddress resolves this node's underlay-facing SRv6 source
-// address and writes it into node_src_addr_table, the value usid_egress stamps
-// into every outer header it pushes. While the entry is missing, every
-// egress_route_table hit fails open instead of encapsulating, so no installed
-// egress route can carry traffic. pinDir is the bpffs directory holding the
-// pinned map. Failure here does not fail the CNI ADD; see the call site.
-func registerNodeSourceAddress(pinDir string) error {
-	addr, err := srv6.ResolveNodeSourceAddress()
+// registerNodeSourceAddress derives this node's own End.DT46 SID base from
+// locator and nodeID and writes it into node_src_addr_table, the value
+// usid_egress completes with the packet's own Argument and stamps into every
+// outer header it pushes. While the entry is missing, every egress_route_table
+// hit fails open instead of encapsulating, so no installed egress route can
+// carry traffic. pinDir is the bpffs directory holding the pinned map. Failure
+// here does not fail the CNI ADD; see the call site.
+//
+// The value is this node's SID rather than its uplink interface address, which
+// is what it held until #550: the shard that translates a tenant's egress
+// traffic sends the reply back to whatever the outer source was, and only a
+// SID is both routable across the fabric and decapsulated on arrival. See
+// node_src_addr_table's own comment in internal/plumbing/ebpf/prog/usid.c.
+func registerNodeSourceAddress(pinDir, locator string, nodeID int32) error {
+	sid, err := srv6.NodeSIDBase(locator, nodeID)
 	if err != nil {
-		return fmt.Errorf("resolve node source address: %w", err)
+		return fmt.Errorf("derive node SID base: %w", err)
 	}
+	addr := net.IP(sid.AsSlice())
 	nodeSrc, closer, err := egressroutemap.OpenPinnedNodeSourceAddress(pinDir)
 	if err != nil {
 		return fmt.Errorf("open pinned node_src_addr_table: %w", err)

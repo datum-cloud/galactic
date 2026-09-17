@@ -200,8 +200,17 @@ docker exec dfw-control-plane kubectl -n ns10 exec "$pod" -- curl -sS --max-time
 docker exec dfw-control-plane kubectl -n ns10 exec "$pod" -- curl -sS --max-time 8 http://[2001:db8:64::a01:2802]/
 ```
 
-The forward half passes on both families today; the return half still fails on
-both, inside the shard (#550). See the README's Known limitations.
+The forward half passes on both families, and so does the SRv6 return path:
+#549 gave a reply a path to the shard, and #550 gave the shard a usable
+address to forward the un-translated reply on to -- the tenant node's own
+End.DT46 SID rather than its uplink interface address, which nothing in the
+underlay carries and no node decapsulates. A UDP round trip completes.
+
+A TCP session still does not. The shard's forward leg XDP_PASSes into the
+kernel and its return leg XDP_TXes around it, so conntrack sees the SYN and
+never the SYN-ACK; the entry stays `SYN_SENT [UNREPLIED]`, the tenant's ACK is
+marked INVALID, and kube-proxy's `KUBE-FORWARD` INVALID rule drops it. See
+the README's Known limitations.
 
 ### The reply's underlay path
 

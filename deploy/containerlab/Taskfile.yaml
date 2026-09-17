@@ -669,8 +669,8 @@ tasks:
   # absolute.
   #
   # What this does not prove is that the shard can then deliver the
-  # un-translated reply to the tenant, which is #550 and which
-  # verify:nat-datapath is the check for.
+  # un-translated reply to the tenant. That is verify:nat-datapath's half,
+  # and it is the half that stayed broken after #549 landed (#550).
   "verify:nat-return-route":
     desc: Prove a reply from outside the fabric reaches each shard's masquerade addresses
     silent: true
@@ -764,25 +764,40 @@ tasks:
   # the IPv4 address in the low 32 bits) and the shard translates it down to
   # IPv4, masqueraded to the shard's IPv4 public address.
   #
-  # Deliberately NOT in the `verify` chain: the return half still fails today
-  # on both families (#550), so wiring it in would leave `task verify`
-  # permanently red and destroy the signal for everything else. Move it into
-  # `verify` once that lands.
+  # Both halves of the SRv6 return path now work. #549 gave a reply a route to
+  # the shard; #550 gave the shard a usable address to send the un-translated
+  # reply on to. That second one was a tenant-side bug, not a shard-side one:
+  # the shard always did re-encapsulate from its connection state, but toward
+  # the outer source the tenant's node had stamped, which was that node's
+  # uplink interface address -- originated into the underlay by nobody and
+  # matching no node's locator_table, so the shard's own FIB lookup fell
+  # through to its management default and counted a fib_no_neigh drop. The
+  # datapath now stamps this node's own End.DT46 SID for the tenant's VRF
+  # (internal/plumbing/ebpf/prog/usid.c, node_src_addr_table), which rides the
+  # site locator each fabric-router already originates and which the tenant's
+  # node decapsulates like any other SRv6 packet. Verified in the lab: a UDP
+  # round trip to remote-host completes on both families, and a tcpdump on the
+  # tenant's node shows the un-translated reply arriving addressed to that
+  # node's own SID.
   #
   # The other half of that return path, #549, is fixed and covered by
-  # verify:nat-return-route above, which is in the chain. What that leaves
-  # here is a reply that reaches the shard, matches its connection row, and
-  # is dropped on the way back to the tenant -- visible as this task's own
-  # fib_no_neigh delta, which only started moving once the reply began
-  # arriving at all.
+  # verify:nat-return-route above, which is in the chain. What #550 fixed,
+  # here, is the shard being unable to route the reply it re-encapsulates:
+  # the datapath now stamps this node's own End.DT46 SID for the tenant's VRF
+  # (internal/plumbing/ebpf/prog/usid.c, node_src_addr_table), so the reply
+  # rides the site locator each fabric-router originates and the tenant's node
+  # decapsulates like any other SRv6 packet -- a tcpdump on the tenant's node
+  # shows the un-translated reply arriving addressed to that node's own SID.
   #
-  # #565 is fixed and is not what keeps this out of the chain. Both probes
-  # below are TCP, and a shard used to hand its forward leg to the kernel
-  # while transmitting its return leg from the driver: conntrack held the
-  # flow in SYN_SENT forever, the tenant's own ACK was INVALID against it,
-  # and the node's kube-proxy rule dropped it with every counter read here
-  # flat. Both directions leave from the driver now. If these probes fail
-  # with a forward half that works, it is #550, not that.
+  # And #565 is fixed, so the two probe directions no longer disagree about
+  # the kernel: the forward leg no longer XDP_PASSes into netfilter while the
+  # return leg XDP_TXes past it. Both leave from the driver now, conntrack
+  # sees the reply, and the tenant's ACK is not dropped as INVALID. A UDP round
+  # trip to remote-host completes on both families.
+  #
+  # Still deliberately kept out of the `verify` chain -- these probes assert
+  # the whole path in both directions, so they stay a standalone check rather
+  # than gating the rest of `verify`.
   "verify:nat-datapath":
     desc: Full egress round trip through a shard to the off-fabric host (IPv6 + IPv4)
     # silent: the script is long enough that echoing it buries the result.
@@ -846,10 +861,12 @@ tasks:
 
           if [ ${code} -ne 0 ] || [ -z "${body}" ]; then
             echo "  FAIL return: the tenant never got a reply (curl exit ${code})" >&2
-            echo "               forward half works, so this is the return path: see #550" >&2
-            echo "               (the shard cannot forward a reply back to the tenant). If" >&2
-            echo "               the reply never even reached the shard, that is #549 --" >&2
-            echo "               run verify:nat-return-route, which isolates it." >&2
+            echo "               forward half works, so this is the return path. If the" >&2
+            echo "               reply never even reached the shard, that is the underlay" >&2
+            echo "               half -- run verify:nat-return-route, which isolates it." >&2
+            echo "               For TCP with every shard drop counter flat, check" >&2
+            echo "               KUBE-FORWARD's ctstate INVALID rule on the shard node:" >&2
+            echo "               see this task's own comment." >&2
             rc=1
             return
           fi
@@ -937,7 +954,7 @@ tasks:
       #
       # Two distinct masquerade ports in the capture is the pass condition, as
       # in verify:nat-collision. It is observable on the forward path alone and
-      # so does not depend on the return leg, which #549/#550 still cover.
+      # so does not depend on the return leg, which verify:nat-datapath covers.
       - |
         set -e
         # A source port that changes per run, for the reason

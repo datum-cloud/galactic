@@ -129,9 +129,11 @@ spec:
             # originates for itself (resources/fabric-router/dfw/
             # frr.conf.dfw-worker), the IPv4 half of the same origination its
             # IPv6 counterpart above needs; without it, outbound translation
-            # works and replies never arrive (#549). The remaining half of
-            # the return path -- delivering an un-translated reply back to a
-            # tenant on another node -- is #550.
+            # works and replies never arrive (#549). The other half of the
+            # return path, delivering an un-translated reply back to a tenant
+            # on another node, is #550: the shard re-encapsulates toward the
+            # outer source the tenant's node stamped, which has to be that
+            # node's own SID.
             - name: GALACTIC_NAT_SHARD_PUB_ADDR4
               value: "192.0.2.1"
             - name: GALACTIC_NAT_NAT64_PREFIX

@@ -197,3 +197,90 @@ func TestComputeSIDDeterministic(t *testing.T) {
 		t.Errorf("ComputeSID() not deterministic: %s != %s", a, b)
 	}
 }
+
+// TestNodeSIDBaseMatchesComputeSIDWithArgumentSpliced is the contract usid.c's
+// encapsulation source rests on: the base this returns, plus the Argument the
+// datapath splices into bits 69-80, must reproduce byte for byte the SID
+// ComputeSID hands the same attachment's BGPAdvertisement. A shard's reply is
+// addressed to whatever the datapath stamped, so a divergence here sends every
+// masqueraded flow's reply to an address no node decapsulates (#550).
+func TestNodeSIDBaseMatchesComputeSIDWithArgumentSpliced(t *testing.T) {
+	const nodeID = 9
+
+	for _, argument := range []int32{
+		uformat.ArgumentMin,
+		0x123, // both nibbles of the split byte in play
+		0x0FF, // carries only in the low byte
+		uformat.ArgumentMax,
+	} {
+		base, err := NodeSIDBase(testUSIDLocator, nodeID)
+		if err != nil {
+			t.Fatalf("NodeSIDBase() error: %v", err)
+		}
+
+		// The same two byte writes usid_egress performs, in the same order.
+		spliced := base.As16()
+		spliced[8] = (spliced[8] & 0xF0) | byte(uint16(argument)>>8)&0x0F
+		spliced[9] = byte(uint16(argument))
+
+		want, err := ComputeSID(testUSIDLocator, nodeID, argument, bgpv1alpha1.SRv6FunctionEndDT46)
+		if err != nil {
+			t.Fatalf("ComputeSID() error: %v", err)
+		}
+		if got := netip.AddrFrom16(spliced); got != want {
+			t.Errorf("NodeSIDBase()+argument %#x = %s, want %s", argument, got, want)
+		}
+	}
+}
+
+// TestNodeSIDBaseLeavesArgumentZero pins the one field the datapath owns. A
+// base carrying a non-zero Argument would name some arbitrary tenant's VRF
+// wherever the splice did not overwrite it; zero is the reserved value
+// vrf_table must always miss, so a base that reached the wire unchanged is
+// dropped rather than delivered to the wrong tenant.
+func TestNodeSIDBaseLeavesArgumentZero(t *testing.T) {
+	base, err := NodeSIDBase(testUSIDLocator, 9)
+	if err != nil {
+		t.Fatalf("NodeSIDBase() error: %v", err)
+	}
+	fields, err := uformat.Decode(base)
+	if err != nil {
+		t.Fatalf("uformat.Decode() error: %v", err)
+	}
+	if fields.Argument != 0 {
+		t.Errorf("decoded Argument = %#x, want 0", fields.Argument)
+	}
+	if fields.NodeID != 9 {
+		t.Errorf("decoded NodeID = %#x, want 9", fields.NodeID)
+	}
+	if fields.Function != uformat.FunctionEndDT46 {
+		t.Errorf("decoded Function = %#x, want %#x", fields.Function, uint8(uformat.FunctionEndDT46))
+	}
+}
+
+// TestNodeSIDBaseRejectsUnusableIdentity covers the inputs that must fail
+// loudly rather than produce a plausible-looking address: without a valid
+// locator and node ID there is no SID, and node_src_addr_table's "all-zero
+// means not configured" convention would read a zero-value result as a
+// legitimate one.
+func TestNodeSIDBaseRejectsUnusableIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		locator string
+		nodeID  int32
+	}{
+		{"empty locator", "", 9},
+		{"not a prefix", "2001:db8:ff01::", 9},
+		{"IPv4 locator", "10.0.0.0/8", 9},
+		{"wrong prefix length", "2001:db8:ff01::/64", 9},
+		{"node ID below range", testUSIDLocator, uformat.NodeIDMin - 1},
+		{"node ID above range", testUSIDLocator, uformat.NodeIDMax + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NodeSIDBase(tt.locator, tt.nodeID); err == nil {
+				t.Errorf("NodeSIDBase(%q, %d) = nil error, want an error", tt.locator, tt.nodeID)
+			}
+		})
+	}
+}

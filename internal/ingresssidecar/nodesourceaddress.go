@@ -12,26 +12,27 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// NodeSourceAddressResolver resolves this node's globally routable
-// underlay-facing address, the address usid_egress's outer header must be
-// sourced from for a reply to have a real path back.
+// NodeSourceAddressResolver resolves this node's own SRv6 SID base, the value
+// usid_egress completes with each packet's Argument and writes as the source of
+// every outer header it pushes. An egress shard sends a translated reply back
+// to whatever that source was, so it decides whether a tenant's flow can
+// complete at all.
 //
-// The default resolver auto-detects the interface carrying the local default
-// IPv6 route. That is correct for a process in the host's root namespace, where
-// it really is the fabric uplink, and wrong by construction here: this sidecar
-// runs inside Envoy's pod namespace so socket binds resolve there, and inside
-// that namespace the default route belongs to the pod's cluster-managed
-// interface. Its address is a ULA drawn from the cluster's own pool, not this
-// node's address, and a ULA source is exactly what a competent network edge's
-// anti-spoofing filtering drops silently, after otherwise-working transit all
-// the way to the destination.
+// An interface address will not do, which is what this returned until #550.
+// No node originates a point-to-point link prefix into the fabric, and
+// usid_ingress decapsulates only destinations matching its locator_table, so a
+// reply addressed to one is dropped either on the way or on arrival. Reading
+// one locally is doubly wrong in this package: the sidecar runs inside Envoy's
+// pod namespace, where the interfaces on offer are the pod's cluster-managed
+// ones, not the node's uplink.
 //
-// This resolver answers the same question differently, by reading the address
-// off a BGPPeer this node's router already maintains rather than guessing from
-// local namespace state that this deployment shape makes unreliable.
+// This resolves from the node's own BGPRouter instead, the same CRD the CNI
+// computes its advertised SIDs from, so the two cannot disagree about which
+// SID this node owns.
 type NodeSourceAddressResolver interface {
 	ResolveNodeSourceAddress() (net.IP, error)
 }
@@ -43,21 +44,18 @@ type k8sNodeSourceAddressResolver struct {
 	namespace string
 }
 
-// NewK8sNodeSourceAddressResolver returns a resolver that reads BGPPeer CRDs in
-// namespace, looking for one targeting nodeName's own BGPRouter.
+// NewK8sNodeSourceAddressResolver returns a resolver that reads BGPRouter CRDs
+// in namespace, looking for the one targeting nodeName.
 func NewK8sNodeSourceAddressResolver(c client.Client, nodeName, namespace string) NodeSourceAddressResolver {
 	return &k8sNodeSourceAddressResolver{client: c, nodeName: nodeName, namespace: namespace}
 }
 
-// ResolveNodeSourceAddress reads the local source address off a BGPPeer.
+// ResolveNodeSourceAddress derives this node's SID base from its BGPRouter's
+// SRv6 locator and node ID.
 //
-// A peer's address field is the remote peer's; the update source is the local
-// one, the address used as the source for the BGP session. Every peer whose
-// router reference names this node shares the same answer, a node using one
-// consistent source for all its sessions, so the first with a usable update
-// source wins. A node with none configured yet, its sessions still converging
-// after a restart, returns an error for the caller's existing non-fatal
-// handling to log and retry.
+// A node whose router carries neither yet, its CRDs still converging after a
+// restart, returns an error for the caller's existing non-fatal handling to log
+// and retry.
 //
 // It uses a background context rather than a threaded one: the whole call chain
 // up through the VRF backend carries no context today, and adding one is a
@@ -65,24 +63,24 @@ func NewK8sNodeSourceAddressResolver(c client.Client, nodeName, namespace string
 // safe to retry on the next reconcile.
 func (r *k8sNodeSourceAddressResolver) ResolveNodeSourceAddress() (net.IP, error) {
 	ctx := context.Background()
-	peerList := &bgpv1alpha1.BGPPeerList{}
-	if err := r.client.List(ctx, peerList, client.InNamespace(r.namespace)); err != nil {
-		return nil, fmt.Errorf("list BGPPeers in namespace %s: %w", r.namespace, err)
+	routerList := &bgpv1alpha1.BGPRouterList{}
+	if err := r.client.List(ctx, routerList, client.InNamespace(r.namespace)); err != nil {
+		return nil, fmt.Errorf("list BGPRouters in namespace %s: %w", r.namespace, err)
 	}
-	for _, peer := range peerList.Items {
-		if peer.Spec.RouterRef == nil || peer.Spec.RouterRef.Name != r.nodeName {
+	for _, router := range routerList.Items {
+		if router.Spec.TargetRef.Name != r.nodeName {
 			continue
 		}
-		if peer.Spec.UpdateSource == nil || *peer.Spec.UpdateSource == "" {
+		if router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {
 			continue
 		}
-		addr := net.ParseIP(*peer.Spec.UpdateSource)
-		if addr == nil {
-			continue
+		sid, err := srv6.NodeSIDBase(router.Spec.SRv6Locator, router.Spec.NodeID)
+		if err != nil {
+			return nil, fmt.Errorf("derive node SID base from BGPRouter %s: %w", router.Name, err)
 		}
-		return addr, nil
+		return net.IP(sid.AsSlice()), nil
 	}
-	return nil, fmt.Errorf("no BGPPeer with a usable updateSource found for node %s in namespace %s",
+	return nil, fmt.Errorf("no BGPRouter with an SRv6 locator and node ID found for node %s in namespace %s",
 		r.nodeName, r.namespace)
 }
 

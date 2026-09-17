@@ -21,7 +21,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -193,23 +192,31 @@ func waitForLinkLocalAddr(link netlink.Link) (net.IP, error) {
 	}
 }
 
-// ensureNodeSourceAddress registers this node's underlay-facing SRv6 source
-// address into node_src_addr_table. Idempotent and cheap, so it is safe on
-// every call.
+// ensureNodeSourceAddress registers this node's own SRv6 SID base into
+// node_src_addr_table. Idempotent and cheap, so it is safe on every call.
 //
-// It prefers a resolver configured through SetNodeSourceAddressResolver over
-// local auto-detection, which in this sidecar resolves to the pod's own overlay
-// address rather than the node's real one.
+// The resolver configured through SetNodeSourceAddressResolver is the only
+// source. There is no local fallback: the value is this node's SID, which is
+// held in its BGPRouter and cannot be inferred from anything visible inside
+// this pod's namespace. An unwired resolver is a startup wiring bug, reported
+// here for the caller's existing non-fatal handling rather than papered over
+// with a guess that would encapsulate every tenant's traffic toward an
+// undeliverable source.
+//
+// usid_egress completes this base with the Argument from ifindex_vrf_table,
+// which on this path is argumentForTableID's value rather than a CNI-allocated
+// one, so the source it stamps names no vrf_table entry under the node's real
+// Block. That costs nothing today: this package installs only per-prefix
+// egress routes toward a DSR client's own SID (EnsureRoute), never a shard
+// default, so no egress shard ever reflects this source back. A sidecar that
+// grows a NAT66 default would need a real Argument here first -- see
+// ingressSidecarBlock above for why these entries use a synthetic Block.
 func ensureNodeSourceAddress() error {
-	var (
-		addr net.IP
-		err  error
-	)
-	if resolver := getNodeSourceAddressResolver(); resolver != nil {
-		addr, err = resolver.ResolveNodeSourceAddress()
-	} else {
-		addr, err = srv6.ResolveNodeSourceAddress()
+	resolver := getNodeSourceAddressResolver()
+	if resolver == nil {
+		return errors.New("no node source address resolver configured")
 	}
+	addr, err := resolver.ResolveNodeSourceAddress()
 	if err != nil {
 		return fmt.Errorf("resolve node source address: %w", err)
 	}
