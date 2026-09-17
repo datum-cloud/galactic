@@ -86,8 +86,8 @@ case "$COMMAND" in
     done
 
     echo "--- Installing BGP CRDs (datum-cloud/network)"
-    # Extract the datum-cloud/network commit SHA from go.mod (pseudo-version
-    # suffix after the last hyphen), same approach as
+    # Extract the datum-cloud/network git ref from go.mod (a release tag, or a
+    # pseudo-version's commit suffix after the last hyphen), same approach as
     # deploy/containerlab/scripts/deploy-system.sh. $1 must match the
     # require line's module path exactly, not just a substring, so an
     # unrelated line can't corrupt NETWORK_SHA.

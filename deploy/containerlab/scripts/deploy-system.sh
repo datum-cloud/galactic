@@ -9,9 +9,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-# Extract the datum-cloud/network commit SHA from go.mod (pseudo-version
-# suffix after the last hyphen, e.g. v0.0.0-20260708202618-77cf276d17f1 →
-# 77cf276d17f1). $1 must match the require line's module path exactly, not
+# Extract the datum-cloud/network git ref from go.mod: a release tag such as
+# v0.1.0, or a pseudo-version's commit suffix after the last hyphen (e.g.
+# v0.0.0-20260708202618-77cf276d17f1 → 77cf276d17f1). $1 must match the require line's module path exactly, not
 # just a substring, so an unrelated line can't corrupt NETWORK_SHA.
 NETWORK_SHA=$(awk '$1 == "go.datum.net/network" {print $2}' "${SCRIPT_DIR}/../../../go.mod" | sed 's/.*-//')
 NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
@@ -23,7 +23,7 @@ NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK
 # --build-context network=../network use for the identical reason (both
 # from their own, different, working directories). Used below for CRDs
 # that exist only on that local, unpublished branch (network_crds_local) --
-# NETWORK_CRD_URL above can't serve them since GitHub only has the SHA
+# NETWORK_CRD_URL above can't serve them since GitHub only has the ref
 # go.mod's require line pins, which predates them.
 NETWORK_LOCAL_CRD_DIR="${SCRIPT_DIR}/../../../../network/config/crd"
 
