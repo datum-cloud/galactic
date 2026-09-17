@@ -79,6 +79,21 @@ func updateForwardRule(interfaceName string, action string) error {
 	return nil
 }
 
+// AddResult reports whether Add created this attachment's veth pair or took
+// over one that already existed, and, in the takeover case, who owned it
+// before. cmdAdd uses it to decide how a later rollback must leave the veth:
+// a pair Add created it may delete; one it took over it must hand back to its
+// prior owner instead, so a live predecessor's own DEL reclaims it.
+type AddResult struct {
+	// Adopted is true when Add found an existing host veth under this
+	// attachment's name and took it over rather than creating a fresh pair.
+	Adopted bool
+
+	// PriorOwner is the alias (CNI container ID) stamped on the host veth Add
+	// took over, or "" if the link carried none. Meaningful only when Adopted.
+	PriorOwner string
+}
+
 // Add creates this attachment's veth pair, enslaves the host end to the VPC's
 // VRF, and records ownerID -- the CNI container ID of the container this pair
 // was created for -- on the host end.
@@ -88,23 +103,32 @@ func updateForwardRule(interfaceName string, action string) error {
 // ends are named from (vpc, vpcAttachment) alone, so a replacement container on
 // the same attachment produces the very same names, and nothing in the name
 // distinguishes the two.
-func Add(vpc, vpcAttachment, ownerID string, mtu int) error {
+//
+// A pair found under this attachment's name -- left behind by a failed ADD with
+// no matching DEL, or belonging to a predecessor still terminating -- is taken
+// over, not deleted outright on a whim: res.Adopted and res.PriorOwner record
+// that so a failed ADD's rollback can hand the pair back rather than tear down
+// a live container's interface.
+func Add(vpc, vpcAttachment, ownerID string, mtu int) (res AddResult, _ error) {
 	vrfName := intf.GenerateInterfaceNameVRF(vpc)
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	guestName := intf.GenerateInterfaceNameGuest(vpc, vpcAttachment)
 
 	// A host veth left behind by a failed ADD with no matching DEL: clean up
 	// the stale guest end and recreate the pair, so the guest side is in a
-	// known-good state.
+	// known-good state. That this takes the pair over from whatever held it is
+	// recorded (and its prior owner remembered) so a rollback can hand it back.
 	if existing, err := netlink.LinkByName(hostName); err == nil {
-		slog.Warn("veth: removing stale host veth left behind by a previous ADD attempt",
-			"host", hostName, "guest", guestName, "previousOwner", existing.Attrs().Alias, "owner", ownerID)
+		res.Adopted = true
+		res.PriorOwner = existing.Attrs().Alias
+		slog.Warn("veth: taking over host veth left behind by a previous ADD attempt",
+			"host", hostName, "guest", guestName, "priorOwner", res.PriorOwner, "owner", ownerID)
 		// Remove any stale guest endpoint that may linger from a prior run.
 		if guest, guestErr := netlink.LinkByName(guestName); guestErr == nil {
 			netlink.LinkDel(guest) //nolint:errcheck // best-effort cleanup
 		}
 		if err := netlink.LinkDel(existing); err != nil && !isLinkNotFoundError(err) {
-			return fmt.Errorf("remove stale veth %q: %w", hostName, err)
+			return res, fmt.Errorf("remove stale veth %q: %w", hostName, err)
 		}
 	}
 
@@ -117,7 +141,7 @@ func Add(vpc, vpcAttachment, ownerID string, mtu int) error {
 	}
 
 	if err := netlink.LinkAdd(veth); err != nil {
-		return fmt.Errorf("create veth pair %s/%s: %w", hostName, guestName, err)
+		return res, fmt.Errorf("create veth pair %s/%s: %w", hostName, guestName, err)
 	}
 	slog.Debug("veth: pair created", "host", hostName, "guest", guestName, "mtu", mtu)
 
@@ -128,45 +152,70 @@ func Add(vpc, vpcAttachment, ownerID string, mtu int) error {
 	// client.
 	hostLink, err := netlink.LinkByName(hostName)
 	if err != nil {
-		return fmt.Errorf("look up newly created veth %q: %w", hostName, err)
+		return res, fmt.Errorf("look up newly created veth %q: %w", hostName, err)
 	}
 	if err := netlink.LinkSetAlias(hostLink, ownerID); err != nil {
-		return fmt.Errorf("record owner %q on veth %q: %w", ownerID, hostName, err)
+		return res, fmt.Errorf("record owner %q on veth %q: %w", ownerID, hostName, err)
 	}
 
 	// iptables is not available in distroless images; skip forwarding rules
 	// gracefully so the CNI plugin can still produce a result in test environments.
 	if err := updateForwardRule(hostName, "add"); err != nil {
 		if !errors.Is(err, errIptablesMissing) {
-			return err
+			return res, err
 		}
 		slog.Warn("veth: iptables binary not available, skipping FORWARD rules", "host", hostName)
 	}
 
 	if err := sysctl.ConfigureInterfaceSysctls(hostName); err != nil {
-		return err
+		return res, err
 	}
 
 	guestLink, err := netlink.LinkByName(guestName)
 	if err != nil {
-		return err
+		return res, err
 	}
 	vrfLink, err := netlink.LinkByName(vrfName)
 	if err != nil {
-		return err
+		return res, err
 	}
 
 	if err := netlink.LinkSetUp(hostLink); err != nil {
-		return err
+		return res, err
 	}
 	if err := netlink.LinkSetUp(guestLink); err != nil {
-		return err
+		return res, err
 	}
 
 	if err := netlink.LinkSetMaster(hostLink, vrfLink); err != nil {
-		return err
+		return res, err
 	}
 	slog.Debug("veth: enslaved to VRF and up", "host", hostName, "vrf", vrfName)
+	return res, nil
+}
+
+// RestoreOwner sets the alias on this attachment's host veth back to ownerID --
+// the CNI container ID of the container that previously held it. A failed ADD
+// whose veth step took an existing pair over calls this instead of Delete, so
+// the pair is handed back to its prior owner, whose own DEL (arriving once that
+// container finishes terminating) reclaims it, rather than being torn down out
+// from under a still-live predecessor.
+//
+// It is a no-op when the host veth is already gone, which is not an error: with
+// nothing to restore, there is nothing the prior owner's DEL still depends on.
+func RestoreOwner(vpc, vpcAttachment, ownerID string) error {
+	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	hostLink, err := netlink.LinkByName(hostName)
+	if err != nil {
+		if isLinkNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	if err := netlink.LinkSetAlias(hostLink, ownerID); err != nil {
+		return fmt.Errorf("restore owner %q on veth %q: %w", ownerID, hostName, err)
+	}
+	slog.Debug("veth: restored prior owner", "host", hostName, "owner", ownerID)
 	return nil
 }
 

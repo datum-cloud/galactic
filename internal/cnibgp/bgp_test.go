@@ -465,7 +465,7 @@ func withTempPinDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = vrf.Delete(testVPC) })
 
-	if err := veth.Add(testVPC, testAttachment, testContainerID, 1500); err != nil {
+	if _, err := veth.Add(testVPC, testAttachment, testContainerID, 1500); err != nil {
 		t.Fatalf("veth.Add: %v", err)
 	}
 	t.Cleanup(func() { _ = veth.Delete(testVPC, testAttachment, testContainerID) })
