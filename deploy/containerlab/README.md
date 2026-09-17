@@ -207,26 +207,30 @@ behind it `::2`/`.2`.
 ### Cluster SRv6 addressing
 
 Each worker has a standalone blackhole route (no interface needed) covering its
-whole `/56` locator block (metric 2048, lower priority than any pod's seg6local
-route at metric 1024 — IPv6 FIB lookup is longest-prefix-match first, so a real
-`/128` decap route always wins regardless of metric). The blackhole prevents the
-default route from matching any USID this node could compute before or without
-a matching seg6local route installed, for any current or future VPC — not just
-the ones with a pod running today. The FRR fabric DaemonSet advertises the same
-`/56` into the transit mesh via a static Null0 route + BGP `network` statement.
+whole `/64` uSID space — its `/48` Block plus its own Node-ID (`metric 2048`, lower
+priority than any pod's seg6local route at metric 1024 — IPv6 FIB lookup is
+longest-prefix-match first, so a real `/128` decap route always wins regardless of
+metric). The blackhole prevents the default route from matching any USID this node
+could compute before or without a matching seg6local route installed, for any current
+or future VPC — not just the ones with a pod running today. Each worker's blackhole
+is per-node, keyed to its own Node-ID hextet (the `/64` width is
+`internal/plumbing/ebpf/uformat.go`'s `LocatorBits = BlockBits + NodeIDBits`), so it
+covers exactly the SIDs that node can issue, not a neighbour's. The FRR fabric
+DaemonSet advertises the node's locator into the transit mesh via a static Null0
+route + BGP `network` statement.
 
-Each site's compute node advertises its own `/56` SRv6 locator block into the
-fabric — never the site's full `/48` uSID Block, which would create an
-anycast ambiguity the instant a second compute node joins a site. The test VPC
-`ns10` (see [docs/tenants.md](docs/tenants.md)) gets a host address within its node's
+Each site's compute node owns the `/64` under its own Node-ID (1) inside the site
+locator — a node's own block, never the site's full `/48` uSID Block, which would
+create an anycast ambiguity the instant a second compute node joins a site. The test
+VPC `ns10` (see [docs/tenants.md](docs/tenants.md)) gets a host address within its node's
 block (illustrative only — the exact hextet depends on allocation order; see
 docs/tenants.md's [SRv6 USID Argument allocation](docs/tenants.md#srv6-usid-argument-allocation)):
 
-| Cluster | Compute node | FRR loopback    | Node locator block     | USID ns10                    |
-|---------|--------------|-----------------|------------------------|------------------------------|
-| dfw     | dfw-worker   | fc00:0:2::1/128 | 2001:db8:ff01:100::/56 | 2001:db8:ff01:100:c800::/128 |
-| sjc     | sjc-worker   | fc00:0:3::1/128 | 2001:db8:ff02:100::/56 | 2001:db8:ff02:100:c800::/128 |
-| iad     | iad-worker   | fc00:0:4::1/128 | 2001:db8:ff03:100::/56 | 2001:db8:ff03:100:c800::/128 |
+| Cluster | Compute node | FRR loopback    | Node locator block  | USID ns10                    |
+|---------|--------------|-----------------|---------------------|------------------------------|
+| dfw     | dfw-worker   | fc00:0:2::1/128 | 2001:db8:ff01:1::/64 | 2001:db8:ff01:1:e001::/128 |
+| sjc     | sjc-worker   | fc00:0:3::1/128 | 2001:db8:ff02:1::/64 | 2001:db8:ff02:1:e001::/128 |
+| iad     | iad-worker   | fc00:0:4::1/128 | 2001:db8:ff03:1::/64 | 2001:db8:ff03:1:e001::/128 |
 
 The `galactic-router address` column is no longer set explicitly in the
 per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
