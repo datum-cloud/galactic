@@ -9,8 +9,7 @@ built on the same base/per-node-overlay shape
   override for Kind's locally-built images; see `base/kustomization.yaml`
   and `base/nat-lab-patch.yaml`). Not applied directly, same reason
   `config/galactic-nat/base` itself isn't (`GALACTIC_NAT_UPLINK_INTERFACES`
-  and `_SHARD_SID` are required and must be unique per shard node, and at
-  least one address family has to be turned on).
+  and `_SHARD_SID` are required and must be unique per shard node).
 - `dfw/`, `sjc/`, `iad/` — one per-site overlay each, per the redesign
   plan's own §8 suggestion to reuse the three existing site workers
   (`dfw-worker`, `iad-worker`, `sjc-worker`) as a 3-shard DaemonSet rather
@@ -18,15 +17,24 @@ built on the same base/per-node-overlay shape
   own worker via `kubernetes.io/hostname` (`node-patch.yaml`, mirroring
   `resources/galactic-gateway/<edge-node>/`'s per-node-pin pattern) and
   sets that shard's own `GALACTIC_NAT_UPLINK_INTERFACES` and
-  `GALACTIC_NAT_SHARD_SID`/`_SHARD_PUB_ADDR6` — `dfw` names both of its
+  `GALACTIC_NAT_SHARD_SID` — `dfw` names both of its
   dual-homed compute node's uplinks (`eth1,eth2`), `sjc` and `iad` their
   single `eth1` —
   see each `node-patch.yaml`'s own comments for the exact uFMT 48+16
-  encoding and address choices, including the note on why the NAT66
-  shards use `Argument=1` rather than reusing the gateway nodes'
-  `Argument=0` on iad's shared locator. Each site directory also carries
-  a sample `EgressShard` object (`egressshard.yaml`) targeting that site's
-  worker node.
+  encoding, including the note on why the shards use `Argument=1` rather
+  than reusing the gateway nodes' `Argument=0` on iad's shared locator.
+  Each site directory also carries that shard's `EgressShard` object
+  (`egressshard.yaml`), which is where the masquerade address now lives:
+  `spec.shardAddressIPv6`, hand-written here in place of the
+  `GALACTIC_NAT_SHARD_PUB_ADDR6` env var a cell controller replaces in
+  production. `galactic-nat` rejects that variable at startup rather than
+  ignoring it, so a leftover setting fails the DaemonSet loudly.
+
+  Applying these needs the `EgressShard` CRD that carries the spec
+  addresses. `deploy-system.sh` installs it from the local `../network`
+  checkout (`network_crds_local`), so that checkout has to be on the branch
+  that has them — an older CRD has no such field and the API server prunes
+  it silently, leaving shards that never get an address.
 
 What this reuses: the three existing site workers as shard nodes (no new
 lab topology, no new containerlab nodes), and the exact
@@ -67,8 +75,9 @@ necessarily fail loudly here: each site originates its locator as a
 `/48` into the underlay (`resources/fabric-router/*/frr.conf.*-worker`),
 so an Argument-bearing SID can still resolve on the sending node and be
 discarded by that aggregate's `Null0` at the far site instead. The shard
-address (`Status.ShardAddressIPv6`) stays a `/128` — it is an ordinary
-masquerade source, not a uSID.
+address (`Status.ShardAddressIPv6`, which reports what the datapath was
+programmed with from `Spec.ShardAddressIPv6`) stays a `/128` — it is an
+ordinary masquerade source, not a uSID.
 `GALACTIC_CNI_EGRESS_SHARD_SIDS` (set identically on every site's
 `galactic-cni` DaemonSet, `resources/galactic-cni/daemonset-patch.yaml`)
 carries the fabric-wide membership list every compute node needs to build
@@ -76,15 +85,23 @@ its own default route — operator-supplied in this phase, not learned
 in-cluster; see that env var's own doc comment
 (`internal/config/cni.go`) for why.
 
+That variable is now deprecated, and this lab is deliberately left in the
+mid-rollout state it describes: it is read only by an attachment whose
+`galactic-bgp` conflist stanza carries no `egress` key, which is every
+attachment here until the conflist generator emits one. A stanza that does
+carry `egress.shardSIDs` decides for that network alone, and an empty list
+there is a network stating it has no egress — which is what makes a
+network-level opt-out mean anything. See
+[docs/cni/conflist-reference.md](../../../../docs/cni/conflist-reference.md#internet-egress-egress).
+
 `task verify:nat66-sharding` checks each site's `EgressShard` status and
 `BGPAdvertisement` list.
 
 
 ## NAT64 in this lab
 
-Every shard here is configured for NAT66 only: `GALACTIC_NAT_SHARD_PUB_ADDR6`
-is set, and `GALACTIC_NAT_SHARD_PUB_ADDR4`/`GALACTIC_NAT_NAT64_PREFIX` are
-not. That is a limitation of the topology, not a default worth copying.
+Every shard here serves IPv6 only: `spec.shardAddressIPv6` is assigned, and
+`GALACTIC_NAT_SHARD_PUB_ADDR4`/`GALACTIC_NAT_NAT64_PREFIX` are not set. That is a limitation of the topology, not a default worth copying.
 
 This lab's transit mesh is IPv6-only and has no IPv4 upstream, so there is
 nothing for a translated packet to reach and nothing to send a reply back.
@@ -109,7 +126,7 @@ so each tenant VRF gets a route toward it. Three things have to agree or the
 path is a silent blackhole: the prefix the shards translate for, the prefix
 the CNI installs a route for, and the prefix DNS64 synthesizes into.
 
-Unlike `GALACTIC_NAT_SHARD_PUB_ADDR6`, the IPv4 address is not advertised
+Unlike the assigned IPv6 address, the IPv4 address is not advertised
 into the fabric by anything in this repo — a NAT64 reply arrives from the
 IPv4 internet, so the underlay or an upstream announcement has to attract
 it to that node.

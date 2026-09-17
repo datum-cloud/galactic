@@ -61,9 +61,17 @@ const (
 	// second SID and no second route on any tenant VRF.
 	EnvNATShardSID = "GALACTIC_NAT_SHARD_SID"
 
-	// EnvNATShardPubAddr6 is this shard's publicly routable IPv6 masquerade
-	// source. Every NAT66 flow this shard translates is given an address and
-	// port within it. Optional: a shard may serve NAT64 alone.
+	// EnvNATShardPubAddr6 is removed. This shard's publicly routable IPv6
+	// masquerade source is assigned in EgressShard spec.shardAddressIPv6, by
+	// the controller that owns the cell, which keeps the addressing-service
+	// credential off every translating node.
+	//
+	// Validate rejects the variable rather than ignoring it. Two writers for
+	// one datapath row cannot be reconciled: the row is a blind overwrite, so
+	// whichever wrote last would win silently, and an operator who left this
+	// set on a node would have no way to tell which address the shard is
+	// actually translating to. The name is kept so that error can say where
+	// the value went.
 	EnvNATShardPubAddr6 = "GALACTIC_NAT_SHARD_PUB_ADDR6"
 
 	// EnvNATShardPubAddr4 is this shard's publicly routable IPv4 masquerade
@@ -110,9 +118,13 @@ type NATConfig struct {
 	UplinkInterfaces []string
 	ShardSID         string
 
-	// ShardPubAddr6 enables NAT66; ShardPubAddr4 with NAT64Prefix enables NAT64.
-	// Validate requires at least one family, and rejects half of either.
+	// ShardPubAddr6 is read only to reject it: the value moved into EgressShard
+	// spec. See EnvNATShardPubAddr6.
 	ShardPubAddr6 string
+
+	// ShardPubAddr4 with NAT64Prefix enables NAT64. Validate rejects half of
+	// either. Neither set is a shard that serves IPv6 alone, which is every
+	// shard until NAT64 ships.
 	ShardPubAddr4 string
 	NAT64Prefix   string
 }
@@ -181,11 +193,13 @@ func (c *NATConfig) readFields() {
 	c.NAT64Prefix = c.v.GetString("nat64_prefix")
 }
 
-// ServesNAT66 and ServesNAT64 report which families this shard's configuration
-// turns on. They are what the binary and the EgressShard reconciler both read,
-// so "does this shard do NAT64" has one answer rather than each caller
+// ServesNAT64 reports whether this shard's configuration turns NAT64 on, so
+// "does this shard do NAT64" has one answer rather than each caller
 // re-deriving it from which fields happen to be non-empty.
-func (c *NATConfig) ServesNAT66() bool { return c.ShardPubAddr6 != "" }
+//
+// There is no NAT66 counterpart any more: whether this shard translates IPv6
+// is decided by the address its EgressShard spec assigns, which this process
+// cannot see, and is reported by the datapath once programmed.
 func (c *NATConfig) ServesNAT64() bool { return c.ShardPubAddr4 != "" }
 
 // validateShardAddr parses and range-checks a shard identity address, rejecting
@@ -267,21 +281,19 @@ func (c *NATConfig) Validate() error {
 		return err
 	}
 	if c.ShardPubAddr6 != "" {
-		if err := validateShardAddr("shard public address", c.ShardPubAddr6); err != nil {
-			return err
-		}
+		return fmt.Errorf(
+			"%s is no longer read: assign this shard's IPv6 masquerade source in "+
+				"EgressShard spec.shardAddressIPv6 and unset the variable",
+			EnvNATShardPubAddr6)
 	}
 	if err := c.validateNAT64(); err != nil {
 		return err
 	}
-	// A shard serving neither family loads a datapath that claims no packet at
-	// all, which presents as a silent blackhole rather than as the
-	// misconfiguration it is.
-	if !c.ServesNAT66() && !c.ServesNAT64() {
-		return fmt.Errorf(
-			"a shard must serve at least one address family: set %s for NAT66, or %s and %s for NAT64",
-			EnvNATShardPubAddr6, EnvNATShardPubAddr4, EnvNAT64Prefix)
-	}
+	// No check that this shard serves an address family. It does not have to
+	// at startup: the IPv6 address arrives in EgressShard spec, and a shard
+	// waiting for one is attached, claiming no packet, and reporting
+	// Programmed=False with reason AddressUnassigned -- which is where that
+	// misconfiguration surfaces now, on the object an operator reads.
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
 		return errors.New("metrics port must be between 1 and 65535")
 	}

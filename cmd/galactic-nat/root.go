@@ -32,14 +32,33 @@ import (
 const (
 	appName = "galactic-nat"
 
+	// healthServiceProgrammed is the gRPC health service name reporting
+	// whether this shard is translating with an assigned address, as opposed
+	// to the overall "" service, which reports only that the XDP program is
+	// attached.
+	//
+	// They have to be separate. A shard attached with no address assigned
+	// claims no packet, so reporting it healthy is wrong -- but the overall
+	// service is what the startup and liveness probes read, and a shard that
+	// is killed for not having been assigned an address yet can never be
+	// assigned one. The readiness probe reads this service instead, which
+	// makes the state visible without turning it into a crash loop.
+	healthServiceProgrammed = "galactic.nat.Programmed"
+
 	appDesc = `Galactic sharded egress translation datapath (NAT66 and NAT64)
 
  Find more information at: https://www.datum.net/docs`
 )
 
-// runCmd is the application startup: it loads and attaches this shard's NAT66
-// egress datapath to its fabric-facing uplink and registers the reconciler that
-// publishes this shard's identity and health.
+// runCmd is the application startup: it loads and attaches this shard's egress
+// datapath to its fabric-facing uplinks and registers the reconciler that
+// programs the assigned address into it and publishes what it is translating
+// with.
+//
+// The order inverted when the address moved into EgressShard spec. The
+// datapath used to be configured before it was attached, because every value
+// it needed was process configuration; it is now attached first and programmed
+// from a reconcile, because the value it needs arrives through the API server.
 func runCmd(cfg *config.NATConfig) error {
 	nodeName := cfg.NodeName
 	metricsPort := cfg.MetricsPort
@@ -79,6 +98,10 @@ func runCmd(cfg *config.NATConfig) error {
 	healthSrv := grpchealth.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	// Set explicitly, rather than left unset: an unset service answers
+	// NOT_FOUND, which a probe cannot tell from a shard that is genuinely not
+	// programmed yet.
+	healthSrv.SetServingStatus(healthServiceProgrammed, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	go func() {
 		// A Serve failure is fatal rather than merely logged: with no health
 		// server left and nothing to notice, the process would carry on
@@ -112,27 +135,34 @@ func runCmd(cfg *config.NATConfig) error {
 	checkWatchPermissions(mgr)
 
 	// Load and attach the egress translation datapath. Always a real datapath:
-	// configuration validation rejects an empty uplink or SID, and a shard
-	// serving neither address family, before this is reached -- this binary
-	// exists only to run a shard.
-	datapathHealth, err := setupNatDatapath(cfg, ctrlmetrics.Registry)
+	// configuration validation rejects an empty uplink or SID before this is
+	// reached -- this binary exists only to run a shard. It is attached with
+	// an unwritten shard config row, the assigned address arriving in
+	// EgressShard spec once the manager below is running.
+	datapath, err := setupNatDatapath(cfg, ctrlmetrics.Registry)
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
 	// Only now is the datapath attached. Report serving from here on, not from
-	// process start.
+	// process start. Only attachment: whether this shard has been assigned an
+	// address it can translate with is healthServiceProgrammed's answer, which
+	// the reconciler flips once it programs the datapath.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	// Register EgressShard controller.
 	if err := (&controller.EgressShardReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		NodeName:         nodeName,
-		ShardSID:         cfg.ShardSID,
-		ShardAddressIPv6: cfg.ShardPubAddr6,
-		ShardAddressIPv4: cfg.ShardPubAddr4,
-		NAT64Prefix:      cfg.NAT64Prefix,
-		Datapath:         datapathHealth,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		NodeName: nodeName,
+		ShardSID: cfg.ShardSID,
+		Datapath: datapath,
+		SetProgrammedHealth: func(programmed bool) {
+			status := grpc_health_v1.HealthCheckResponse_NOT_SERVING
+			if programmed {
+				status = grpc_health_v1.HealthCheckResponse_SERVING
+			}
+			healthSrv.SetServingStatus(healthServiceProgrammed, status)
+		},
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EgressShard controller: %w", err)
 	}
@@ -189,7 +219,7 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringP("nat-shard-sid", "", "",
 		"This shard's own SRv6 uSID, encapsulation target for tenant egress traffic (required)")
 	cmd.Flags().StringP("nat-shard-pub-addr6", "", "",
-		"This shard's own publicly-routable IPv6 masquerade source address, enabling NAT66")
+		"Removed: assign this shard's IPv6 masquerade source in EgressShard spec.shardAddressIPv6")
 	cmd.Flags().StringP("nat-shard-pub-addr4", "", "",
 		"This shard's own publicly-routable IPv4 masquerade source address, enabling NAT64 "+
 			"together with --nat64-prefix")

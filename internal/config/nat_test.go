@@ -85,7 +85,6 @@ func TestNATConfigValidate(t *testing.T) {
 			envVars: map[string]string{
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
 			},
 			wantErr: testErrNodeNameRequired,
 		},
@@ -103,7 +102,6 @@ func TestNATConfigValidate(t *testing.T) {
 			envVars: map[string]string{
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardPubAddr6:    testNATShardPub,
 			},
 			wantErr: "shard SID is required",
 		},
@@ -113,7 +111,6 @@ func TestNATConfigValidate(t *testing.T) {
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         "not-an-ip-address",
-				EnvNATShardPubAddr6:    testNATShardPub,
 			},
 			wantErr: "is not a valid IP address",
 		},
@@ -123,20 +120,21 @@ func TestNATConfigValidate(t *testing.T) {
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testIPv4Addr,
-				EnvNATShardPubAddr6:    testNATShardPub,
 			},
 			wantErr: testErrMustBeNativeIPv6,
 		},
 		{
-			// No longer "the IPv6 address is required" -- a shard may serve
-			// NAT64 alone. What is still required is that it serve something.
-			name: "serving neither address family",
+			// No longer an error, and the reason this table has no
+			// "serving neither address family" case any more: the IPv6
+			// address is assigned in EgressShard spec, so every shard starts
+			// serving nothing and is programmed from a reconcile.
+			name: "no address family configured",
 			envVars: map[string]string{
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
 			},
-			wantErr: "must serve at least one address family",
+			wantErr: "",
 		},
 		{
 			name: "NAT64 prefix without a public IPv4 address",
@@ -144,7 +142,6 @@ func TestNATConfigValidate(t *testing.T) {
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
 				EnvNAT64Prefix:         testNAT64Prefix,
 			},
 			wantErr: "shard public IPv4 address is not",
@@ -155,7 +152,6 @@ func TestNATConfigValidate(t *testing.T) {
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
 				EnvNATShardPubAddr4:    testNATShardPub4,
 			},
 			wantErr: "NAT64 prefix is not",
@@ -196,14 +192,28 @@ func TestNATConfigValidate(t *testing.T) {
 			wantErr: "bits set below its prefix length",
 		},
 		{
-			name: "ipv4 shard public address is wrong family",
+			// Rejected rather than ignored, and rejected whatever it holds:
+			// two writers for one datapath row cannot be reconciled, and an
+			// operator who left this set would have no way to tell which
+			// address the shard actually translates to.
+			name: "removed shard public IPv6 address is rejected",
+			envVars: map[string]string{
+				EnvNATNodeName:         testNATNodeName,
+				EnvNATUplinkInterfaces: testNATIface,
+				EnvNATShardSID:         testNATShardSID,
+				EnvNATShardPubAddr6:    testNATShardPub,
+			},
+			wantErr: "no longer read",
+		},
+		{
+			name: "removed shard public IPv6 address is rejected whatever its family",
 			envVars: map[string]string{
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
 				EnvNATShardPubAddr6:    testIPv4Addr,
 			},
-			wantErr: testErrMustBeNativeIPv6,
+			wantErr: "no longer read",
 		},
 		{
 			name: testCaseInvalidMetricsPort,
@@ -211,7 +221,6 @@ func TestNATConfigValidate(t *testing.T) {
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
 				EnvNATMetricsPort:      "0",
 			},
 			wantErr: testErrMetricsPortRange,
@@ -222,7 +231,6 @@ func TestNATConfigValidate(t *testing.T) {
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
 				EnvNATGRPCHealthPort:   "0",
 			},
 			wantErr: testErrGRPCHealthPortRange,
@@ -233,7 +241,6 @@ func TestNATConfigValidate(t *testing.T) {
 				EnvNATNodeName:         testNATNodeName,
 				EnvNATUplinkInterfaces: testNATIface,
 				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
 			},
 			wantErr: "",
 		},
@@ -263,45 +270,34 @@ func TestNATConfigValidate(t *testing.T) {
 	}
 }
 
-// TestNATConfigValidateAcceptsEachFamilyCombination pins the three shard shapes
-// the generalization is for: NAT66 alone (what every shard was before this),
-// NAT64 alone, and both at once. The negative table above proves half a NAT64
-// configuration is rejected; this proves a whole one is not.
+// TestNATConfigValidateAcceptsEachFamilyCombination pins the two shard shapes
+// process configuration can still describe: no family at all, which is every
+// shard awaiting an assigned IPv6 address, and NAT64, which is still
+// configured here. The negative table above proves half a NAT64 configuration
+// is rejected; this proves a whole one is not.
+//
+// There is no NAT66 shape any more. That address arrives in EgressShard spec,
+// so no environment combination can turn it on.
 func TestNATConfigValidateAcceptsEachFamilyCombination(t *testing.T) {
 	tests := []struct {
 		name        string
 		envVars     map[string]string
-		wantNAT66   bool
 		wantNAT64   bool
 		description string
 	}{
 		{
-			name: "NAT66 only",
-			envVars: map[string]string{
-				EnvNATShardPubAddr6: testNATShardPub,
-			},
-			wantNAT66:   true,
-			description: "the shape every shard had before NAT64 existed",
+			name:        "no configured family",
+			envVars:     map[string]string{},
+			description: "a shard awaiting the IPv6 address its spec assigns",
 		},
 		{
-			name: "NAT64 only",
+			name: "NAT64",
 			envVars: map[string]string{
 				EnvNATShardPubAddr4: testNATShardPub4,
 				EnvNAT64Prefix:      testNAT64Prefix,
 			},
 			wantNAT64:   true,
-			description: "a shard dedicated to IPv4 reachability",
-		},
-		{
-			name: "both families",
-			envVars: map[string]string{
-				EnvNATShardPubAddr6: testNATShardPub,
-				EnvNATShardPubAddr4: testNATShardPub4,
-				EnvNAT64Prefix:      testNAT64Prefix,
-			},
-			wantNAT66:   true,
-			wantNAT64:   true,
-			description: "one shard, one session table, both families",
+			description: "a shard whose IPv4 reachability is still process configuration",
 		},
 	}
 
@@ -317,9 +313,6 @@ func TestNATConfigValidateAcceptsEachFamilyCombination(t *testing.T) {
 			cfg := NewNATConfig()
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate() = %v, want nil (%s)", err, tt.description)
-			}
-			if got := cfg.ServesNAT66(); got != tt.wantNAT66 {
-				t.Errorf("ServesNAT66() = %v, want %v", got, tt.wantNAT66)
 			}
 			if got := cfg.ServesNAT64(); got != tt.wantNAT64 {
 				t.Errorf("ServesNAT64() = %v, want %v", got, tt.wantNAT64)
@@ -367,7 +360,6 @@ func TestNATConfigUplinkInterfaces(t *testing.T) {
 			t.Setenv(EnvNATNodeName, testNATNodeName)
 			t.Setenv(EnvNATUplinkInterfaces, tt.value)
 			t.Setenv(EnvNATShardSID, testNATShardSID)
-			t.Setenv(EnvNATShardPubAddr6, testNATShardPub)
 
 			cfg := NewNATConfig()
 			if err := cfg.Validate(); err != nil {
@@ -389,7 +381,6 @@ func TestNATConfigUplinkInterfacesRequired(t *testing.T) {
 			t.Setenv(EnvNATNodeName, testNATNodeName)
 			t.Setenv(EnvNATUplinkInterfaces, value)
 			t.Setenv(EnvNATShardSID, testNATShardSID)
-			t.Setenv(EnvNATShardPubAddr6, testNATShardPub)
 
 			cfg := NewNATConfig()
 			err := cfg.Validate()
