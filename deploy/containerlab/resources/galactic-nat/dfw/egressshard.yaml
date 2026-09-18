@@ -1,11 +1,25 @@
 # Sample EgressShard for dfw-worker, this cluster's own shard node --
 # alongside node-patch.yaml the same way resources/galactic-gateway/
 # <edge-node>/networkgateway.yaml sits alongside its own node-patch.yaml.
-# Status is left empty: EgressShardReconciler (running inside the
-# galactic-nat process on dfw-worker itself, per node-patch.yaml's
-# GALACTIC_NAT_SHARD_SID/_SHARD_PUB_ADDR6) fills in
-# status.shardAddress/status.shardSID from its own config at startup --
-# this object only needs to exist and target the right node.
+#
+# spec.shardAddressIPv6 is the shard's masquerade source, and it is written
+# here rather than set as GALACTIC_NAT_SHARD_PUB_ADDR6 on the DaemonSet: a
+# cell controller claims the address and writes it into spec in production, so
+# a lab operator hand-writes the same field the controller would. galactic-nat
+# rejects the old variable outright rather than ignoring it -- two writers for
+# one datapath row cannot be reconciled.
+#
+# Status is left empty. The galactic-nat process on dfw-worker itself
+# programs its datapath from this spec and reports back what it programmed:
+# status.shardAddressIPv6, status.shardSID (still process configuration, per
+# node-patch.yaml's GALACTIC_NAT_SHARD_SID), and the Ready and Programmed
+# conditions. A shard applied without an address here attaches, translates
+# nothing, and says so as Programmed=False/AddressUnassigned.
+#
+# Applying this needs the EgressShard CRD that carries the spec addresses,
+# which deploy-system.sh installs from the local ../network checkout
+# (network_crds_local). An older CRD has no such field, and the API server
+# would prune it silently, leaving a shard that never gets an address.
 apiVersion: network.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
@@ -15,3 +29,17 @@ spec:
   targetRef:
     kind: Node
     name: dfw-worker
+  # Lab-only placeholder, in the 2001:db8:9966::/32 documentation-range block
+  # this topology reserves for shard masquerade addresses ("9966" for NAT66);
+  # ::1 is dfw's shard (shard 1 of 3). Reachable from outside the fabric only
+  # because this node's fabric-router originates 2001:db8:9966:1::/64 into the
+  # underlay (resources/fabric-router/dfw/frr.conf.dfw-worker): the EVPN path
+  # the shard advertises for this address never leaves galactic-router's iBGP
+  # mesh, so without that origination a reply from the off-fabric host is
+  # discarded by the first transit router holding no route for it (#549).
+  #
+  # Write-once: the datapath claims a reply by exact match on this address, so
+  # changing it strands the return traffic of every established flow. Delete
+  # and recreate the shard instead, which breaks those flows at a moment
+  # someone chose.
+  shardAddressIPv6: "2001:db8:9966:1::1"

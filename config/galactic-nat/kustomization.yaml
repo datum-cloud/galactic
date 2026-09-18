@@ -3,10 +3,11 @@
 # deliberately does NOT include base/: base/daemonset.yaml's
 # galactic-nat container has no generic default for
 # GALACTIC_NAT_UPLINK_INTERFACES or _SHARD_SID (both required, and the
-# shard SID must be unique per shard node), nor for the per-family
-# addresses that decide whether a shard serves NAT66, NAT64, or both --
-# config.NATConfig.Validate requires at least one family. Applying it as
-# shipped here would produce a crash-looping container.
+# shard SID must be unique per shard node). Applying it as shipped here
+# would produce a crash-looping container. The IPv6 masquerade address is
+# not among the missing values: it is assigned in EgressShard
+# spec.shardAddressIPv6 rather than configured here, and a shard with none
+# assigned starts fine and reports Programmed=False/AddressUnassigned.
 # config/galactic-gateway/ and config/fabric-router/ have the same
 # exemption for the same reason.
 #

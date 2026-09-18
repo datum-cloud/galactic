@@ -76,7 +76,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		return fmt.Errorf("decode VPC: %w", err)
 	}
 
-	cfg := publishConfig{vpc: pluginConf.VPC, vpcAttachment: pluginConf.VPCAttachment, ifaceType: ifaceType}
+	cfg := publishConfig{
+		vpc:           pluginConf.VPC,
+		vpcAttachment: pluginConf.VPCAttachment,
+		ifaceType:     ifaceType,
+		egress:        pluginConf.Egress,
+	}
 	result, err := publishBGPState(args, cfg, nodeName, namespace, ipamResult, vpcHex, k8sClient)
 	tracker.publishResult = result
 	if err != nil {

@@ -107,3 +107,5 @@ require (
 )
 
 tool github.com/cilium/ebpf/cmd/bpf2go
+
+replace go.datum.net/network => github.com/datum-cloud/network v0.1.1-0.20260917203135-45eb71a1eb0c

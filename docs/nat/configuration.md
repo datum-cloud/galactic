@@ -28,7 +28,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | Node name           | `GALACTIC_NAT_NODE_NAME`          | `--node-name`              | —       | Yes            |
 | Uplink interfaces   | `GALACTIC_NAT_UPLINK_INTERFACES`  | `--nat-uplink-interfaces`  | —       | Yes            |
 | Shard SID           | `GALACTIC_NAT_SHARD_SID`          | `--nat-shard-sid`          | —       | Yes            |
-| IPv6 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR6`    | `--nat-shard-pub-addr6`    | —       | Enables NAT66  |
+| IPv6 masquerade src | _(removed — assigned in `EgressShard` `spec.shardAddressIPv6`)_ |          | —       | —              |
 | IPv4 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR4`    | `--nat-shard-pub-addr4`    | —       | Enables NAT64  |
 | NAT64 prefix        | `GALACTIC_NAT_NAT64_PREFIX`       | `--nat64-prefix`           | —       | With the above |
 | Metrics port        | `GALACTIC_NAT_METRICS_PORT`       | `--metrics-port`           | `9182`  | No             |
@@ -39,16 +39,25 @@ deployed wrong crash-loops immediately with an actionable message rather
 than running degraded. Specifically:
 
 - The node name, at least one uplink, and the shard SID are always required.
-- **At least one address family must be turned on.** A shard serving
-  neither loads a datapath that claims no packet at all, which presents as
-  a silent blackhole rather than as the misconfiguration it is.
+- **`GALACTIC_NAT_SHARD_PUB_ADDR6` is rejected outright.** The IPv6
+  masquerade source is assigned in `EgressShard` `spec.shardAddressIPv6` by
+  the controller that owns the cell, which keeps the addressing-service
+  credential off every translating node. The variable is rejected rather than
+  ignored because two writers for one datapath row cannot be reconciled: the
+  row is a blind overwrite, so whichever wrote last would win silently.
+- **No address family need be configured.** A shard starts with an unwritten
+  shard config row, attaches, claims no packet, and reports
+  `Programmed=False` with reason `AddressUnassigned` until a controller
+  assigns it an address. That is a real state a shard can sit in
+  indefinitely, and it is visible on the object rather than presenting as a
+  silent blackhole.
 - **The NAT64 pair is all-or-nothing.** An IPv4 address with no prefix has
   nothing to translate for; a prefix with no IPv4 address has nothing to
   translate into. Either alone would drop every NAT64 packet sent to it, so
   both are rejected up front rather than at the first packet.
 
-A shard may serve NAT66 only (the shape every shard had before NAT64
-existed), NAT64 only, or both. `9182`/`5182` are
+A shard may serve IPv6 only (the shape every shard has until NAT64 ships),
+IPv4 only, or both. `9182`/`5182` are
 chosen to avoid every other `hostNetwork: true` galactic process already
 running on a compute node (`fabric-router`'s `179`, `galactic-router`'s
 `9179`/`5179`, `galactic-cni`'s `9180`/`5180`, `galactic-gateway`'s
@@ -98,14 +107,24 @@ the same gap `BGPRouter.Spec.SRv6Locator`/`NodeID` assignment and
 > `deploy/containerlab/resources/galactic-nat/dfw/node-patch.yaml`'s
 > comment for the exact encoding the lab uses.
 
-**`--nat-shard-pub-addr6` / `GALACTIC_NAT_SHARD_PUB_ADDR6`**
-This shard's own dedicated, publicly-routable IPv6 address
-(`EgressShardStatus.ShardAddressIPv6`) — every flow this shard NATs is SNAT'd
-to an address:port within it. Must also be a native IPv6 address. Must be
-unique per shard: a flow's reply is routed back to the correct shard by
-ordinary unicast routing on this address alone, with no hashing on the
-return path — two shards sharing an address would make replies
+**`EgressShard` `spec.shardAddressIPv6`** (was
+`--nat-shard-pub-addr6` / `GALACTIC_NAT_SHARD_PUB_ADDR6`)
+This shard's own dedicated, publicly-routable IPv6 address — every flow this
+shard NATs is SNAT'd to an address:port within it. Assigned in spec, not
+configured on the process: the controller that owns the cell claims it and
+writes it there, and the shard programs it into the datapath from a reconcile
+and reports what it programmed in `status.shardAddressIPv6`. Must be a native
+IPv6 address, and must be unique per shard: a flow's reply is routed back to
+the correct shard by ordinary unicast routing on this address alone, with no
+hashing on the return path — two shards sharing an address would make replies
 undeliverable or misdelivered.
+
+Write-once, enforced by CEL on the CRD. The datapath claims a reply by exact
+match on the address it translated to, so reassigning one strands the return
+traffic of every flow already established through it, with no drain and no
+dual-address grace period available. A shard holding the wrong address is
+deleted and recreated instead, which breaks those flows at a moment someone
+chose.
 
 > **The underlay has to carry both masquerade addresses, and nothing in
 > this repo puts them there.** `EgressShardReconciler` advertises this
@@ -151,19 +170,31 @@ One object per shard node, in the `galactic-system` namespace.
 | Field                 | Required | Type     | Description                                                                                   |
 | --------------------- | -------- | -------- | --------------------------------------------------------------------------------------------- |
 | `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this shard's `galactic-nat` process runs on.                           |
+| `spec.shardAddressIPv6`   | No       | `string` | The IPv6 masquerade source assigned to this shard. Write-once. Empty means none is assigned yet, and the shard translates nothing. |
 | `status.shardSID`         | —        | `string` | This shard's uSID, published by the reconciler from `GALACTIC_NAT_SHARD_SID`; not user-set. |
-| `status.shardAddressIPv6` | —        | `string` | This shard's IPv6 masquerade address, from `GALACTIC_NAT_SHARD_PUB_ADDR6`. Empty means no NAT66. |
-| `status.shardAddressIPv4` | —        | `string` | This shard's IPv4 masquerade address, from `GALACTIC_NAT_SHARD_PUB_ADDR4`. Empty means no NAT64. |
-| `status.nat64Prefix`      | —        | `string` | The `/96` this shard translates for, from `GALACTIC_NAT_NAT64_PREFIX`.                        |
-| `status.conditions`       | —        | —        | `Ready` condition, reason `DatapathAttached` or `DatapathNotAttached`.                        |
+| `status.shardAddressIPv6` | —        | `string` | The IPv6 masquerade address this node's datapath is **programmed** with. Empty means it translates no IPv6 flow. |
+| `status.shardAddressIPv4` | —        | `string` | The IPv4 masquerade address the datapath is programmed with, still from `GALACTIC_NAT_SHARD_PUB_ADDR4`. Empty means no NAT64. |
+| `status.nat64Prefix`      | —        | `string` | The `/96` the datapath is programmed to translate, still from `GALACTIC_NAT_NAT64_PREFIX`.   |
+| `status.conditions`       | —        | —        | `Ready`, reason `DatapathAttached`/`DatapathNotAttached`, and `Programmed`, reason `AddressesProgrammed`/`AddressUnassigned`/`ProgrammingFailed`. |
 
 Leave `status` empty when creating the object — `EgressShardReconciler`
-(running inside that node's own `galactic-nat` pod) fills it in from the
-pod's own resolved config at startup and publishes a `/128`
-`BGPAdvertisement` for each of `shardSID`/`shardAddressIPv6` (the same
-RT-less, no-`VRFID`/`Function` shape `NetworkGatewayReconciler` uses for
-its own VIP advertisements), so every other node in the mesh learns a
-real kernel route to it.
+(running inside that node's own `galactic-nat` pod) programs the assigned
+address into the datapath, fills status in from what the datapath reports it
+holds, and publishes a `BGPAdvertisement` carrying the SID's covering `/64`
+and the address's `/128` (the same RT-less, no-`VRFID`/`Function` shape
+`NetworkGatewayReconciler` uses for its own VIP advertisements), so every
+other node in the mesh learns a real kernel route to it.
+
+The two conditions answer different questions, and both are needed. `Ready`
+reports that the XDP program is attached, which it is from the moment the
+process starts — including on a shard that has been assigned no address and
+therefore claims no packet at all. `Programmed` is what reports whether this
+shard is translating. The gRPC health service follows the same split: the
+overall service, which the startup and liveness probes read, reports
+attachment, and the `galactic.nat.Programmed` service, which the readiness
+probe reads, reports translation. A shard cannot be killed for not having
+been assigned an address yet, or it could never survive long enough to be
+assigned one.
 
 `shardAddressIPv4` is deliberately **not** advertised. A NAT64 reply
 arrives from the IPv4 internet rather than across this fabric, so a

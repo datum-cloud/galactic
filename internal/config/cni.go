@@ -34,8 +34,21 @@ const (
 	// where a deployment needs this filter ordered differently.
 	EnvCNIEBPFFilterPriority = "GALACTIC_CNI_EBPF_FILTER_PRIORITY"
 
-	// EnvCNIEgressShardSIDs is a comma-separated list of every live egress
-	// shard's SID: the fabric-wide membership a tenant VRF's egress routes need.
+	// EnvCNIEgressShardSIDs is deprecated: egress is per network, and this is
+	// per node. A network's own conflist stanza carries its egress instruction
+	// (see the galactic-bgp plugin's "egress" object), and this variable is
+	// read only by an attachment whose stanza carries no egress key at all, so
+	// that a node whose conflists have not been regenerated yet keeps the
+	// egress it has today. Remove it once every conflist on the node carries
+	// its own instruction.
+	//
+	// It cannot express what it is now asked to express: one list for the whole
+	// node gives a default route out to every network on that node, including
+	// every network that declared no egress, so a network that opted out has no
+	// way to say so.
+	//
+	// A comma-separated list of every live egress shard's SID: the fabric-wide
+	// membership a tenant VRF's egress routes need.
 	// One SID per shard covers both address families -- a shard decides which
 	// translation a packet gets from its inner destination -- so enabling NAT64
 	// adds no entry here.

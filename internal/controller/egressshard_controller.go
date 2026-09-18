@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 
@@ -23,13 +24,42 @@ import (
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// EgressDatapathHealth reports whether this node's egress translation XDP datapath is
-// attached and serving traffic. EgressShardReconciler uses it to decide whether
-// to set its Ready condition, and it is an interface so tests can fake it.
-type EgressDatapathHealth interface {
+// EgressDatapath is this node's egress translation XDP datapath as the
+// reconciler sees it: whether it is attached, and what masquerade identity it
+// is programmed with. An interface so tests can fake it.
+type EgressDatapath interface {
 	// Attached reports whether the datapath is loaded and attached.
 	Attached() bool
+
+	// Program writes addressIPv6 into the datapath's shard config row and
+	// reports the identity the datapath holds afterwards.
+	//
+	// An invalid addressIPv6 means the spec assigns this shard no IPv6
+	// address. That programs nothing and is not an error: the XDP program
+	// fails open on a row it has never been given, claiming no packet at all,
+	// which is the state a shard sits in between attaching and being assigned
+	// an address.
+	Program(addressIPv6 netip.Addr) (EgressShardIdentity, error)
 }
+
+// EgressShardIdentity is the masquerade identity a datapath reports it is
+// programmed with, as opposed to the one its spec asks for. Every field is the
+// string form the status fields of the same name carry, and an empty one means
+// the datapath translates nothing for that family.
+//
+// The shard SID is absent: it is still process configuration rather than
+// something a controller assigns, so the reconciler publishes it from its own
+// field. See EgressShardStatus.ShardSID.
+type EgressShardIdentity struct {
+	ShardAddressIPv6 string
+	ShardAddressIPv4 string
+	NAT64Prefix      string
+}
+
+// errNoDatapath is the programming failure a nil Datapath produces. It is
+// reported as a condition and never returned from Reconcile: no retry can
+// conjure a datapath into a process that failed to load one.
+var errNoDatapath = errors.New("no egress translation datapath is available on this node")
 
 const (
 	// reasonEgressDatapathAttached is the Ready condition reason once the
@@ -42,10 +72,16 @@ const (
 )
 
 // EgressShardReconciler reconciles the single EgressShard object whose
-// spec.targetRef.name is this node. It publishes the shard address and SID this
-// node's datapath process was started with, echoing the operator-configured
-// values rather than deriving them, sets Ready once the datapath is confirmed
-// attached, and maintains one BGPAdvertisement carrying a /128 for each.
+// spec.targetRef.name is this node. It programs the masquerade address the
+// spec assigns into this node's datapath, publishes what that datapath is
+// actually translating with, sets Ready once the datapath is confirmed
+// attached and Programmed once it holds an assigned address, and maintains one
+// BGPAdvertisement carrying a route for each.
+//
+// The address arrives in spec because the controller that owns the cell claims
+// it, which keeps the addressing-service credential off every translating
+// node. The SID does not: nothing allocates one yet, so it stays process
+// configuration and is echoed into status the way both addresses used to be.
 //
 // That advertisement is what makes both addresses reachable across the fabric,
 // in the same route-target-less, VRFID-less shape the gateway's VIP
@@ -61,20 +97,23 @@ type EgressShardReconciler struct {
 
 	NodeName string
 
-	// ShardSID and the ShardAddress fields are this node's operator-configured
-	// shard identity, the same values the running datapath was configured with.
-	// This reconciler publishes them; it does not compute them.
-	//
-	// ShardAddressIPv4 and NAT64Prefix are set together or not at all, and only
-	// on a shard performing NAT64.
-	ShardSID         string
-	ShardAddressIPv6 string
-	ShardAddressIPv4 string
-	NAT64Prefix      string
+	// ShardSID is this node's operator-configured uSID. It stays process
+	// configuration because nothing allocates one yet, unlike the masquerade
+	// addresses, which a controller assigns in spec. This reconciler
+	// publishes it; it does not compute it.
+	ShardSID string
 
-	// Datapath reports whether this node's egress translation datapath is
-	// currently attached -- see EgressDatapathHealth's doc comment.
-	Datapath EgressDatapathHealth
+	// Datapath is this node's egress translation datapath: what the assigned
+	// address is programmed into, and what reports back what it holds.
+	Datapath EgressDatapath
+
+	// SetProgrammedHealth reports whether this shard is translating with an
+	// assigned address, for the gRPC health service a readiness probe reads.
+	// Distinct from attachment, which the process reports as soon as the XDP
+	// program is on the wire: a shard attached with no address assigned is a
+	// live datapath that claims no packet, and a probe that cannot tell the
+	// two apart calls it healthy. Optional; nil in tests.
+	SetProgrammedHealth func(programmed bool)
 }
 
 // Reconcile reconciles a single EgressShard.
@@ -115,21 +154,36 @@ func (r *EgressShardReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
+	// The datapath is programmed before status is written, so status reports
+	// what this node is translating with rather than what it was asked for.
+	identity, progErr := r.programDatapath(shard)
+	if progErr != nil {
+		logger.Error(progErr, "program egress translation datapath", "egressShard", req.NamespacedName)
+	}
+	if r.SetProgrammedHealth != nil {
+		r.SetProgrammedHealth(progErr == nil && identity.serves())
+	}
+
 	shardCopy := shard.DeepCopy()
 	shardCopy.Status.ObservedGeneration = shard.Generation
 	if r.ShardSID != "" {
 		shardCopy.Status.ShardSID = r.ShardSID
 	}
-	if r.ShardAddressIPv6 != "" {
-		shardCopy.Status.ShardAddressIPv6 = r.ShardAddressIPv6
+	// Each published only when the datapath reports one, never cleared to an
+	// empty string. The shard config row is a blind overwrite that nothing
+	// ever deletes, so an address this datapath once programmed is an address
+	// it is still translating with, whatever the spec says now.
+	if identity.ShardAddressIPv6 != "" {
+		shardCopy.Status.ShardAddressIPv6 = identity.ShardAddressIPv6
 	}
-	if r.ShardAddressIPv4 != "" {
-		shardCopy.Status.ShardAddressIPv4 = r.ShardAddressIPv4
+	if identity.ShardAddressIPv4 != "" {
+		shardCopy.Status.ShardAddressIPv4 = identity.ShardAddressIPv4
 	}
-	if r.NAT64Prefix != "" {
-		shardCopy.Status.NAT64Prefix = r.NAT64Prefix
+	if identity.NAT64Prefix != "" {
+		shardCopy.Status.NAT64Prefix = identity.NAT64Prefix
 	}
 	setEgressShardCondition(shardCopy, r.readyCondition())
+	setEgressShardCondition(shardCopy, programmedCondition(identity, progErr))
 
 	if err := r.Status().Update(ctx, shardCopy); err != nil {
 		logger.Error(err, "update EgressShard status", "egressShard", req.NamespacedName)
@@ -141,7 +195,79 @@ func (r *EgressShardReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Returned after status, so a failed map write is visible on the object
+	// before the retry. errNoDatapath is excluded: it is the one programming
+	// failure no retry can fix.
+	if progErr != nil && !errors.Is(progErr, errNoDatapath) {
+		return ctrl.Result{}, progErr
+	}
+
 	return ctrl.Result{}, nil
+}
+
+// programDatapath writes the address this shard's spec assigns into the
+// datapath and returns what the datapath holds afterwards.
+//
+// An unassigned address is passed through as an invalid netip.Addr rather than
+// skipped, so the datapath decides what an unassigned family means for the row
+// it holds. An unparseable one is a programming failure: CEL rejects it on the
+// way in, so reaching here means something wrote around the API server.
+func (r *EgressShardReconciler) programDatapath(shard *bgpv1alpha1.EgressShard) (EgressShardIdentity, error) {
+	if r.Datapath == nil {
+		return EgressShardIdentity{}, errNoDatapath
+	}
+
+	var address netip.Addr
+	if raw := shard.Spec.ShardAddressIPv6; raw != "" {
+		parsed, err := netip.ParseAddr(raw)
+		if err != nil {
+			return EgressShardIdentity{}, fmt.Errorf("parse spec.shardAddressIPv6 %q: %w", raw, err)
+		}
+		address = parsed
+	}
+
+	identity, err := r.Datapath.Program(address)
+	if err != nil {
+		return identity, fmt.Errorf("program egress translation datapath: %w", err)
+	}
+	return identity, nil
+}
+
+// serves reports whether this identity translates for any address family.
+func (i EgressShardIdentity) serves() bool {
+	return i.ShardAddressIPv6 != "" || i.ShardAddressIPv4 != ""
+}
+
+// programmedCondition computes the Programmed condition from what the datapath
+// reports it holds. It is deliberately separate from Ready, which reports only
+// that the XDP program is attached: an attached shard whose spec assigns it no
+// address is on the wire, counting nothing and claiming nothing, and a single
+// condition covering both states cannot say so.
+func programmedCondition(identity EgressShardIdentity, err error) metav1.Condition {
+	switch {
+	case err != nil:
+		return metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeProgrammed,
+			Status:  metav1.ConditionFalse,
+			Reason:  bgpv1alpha1.ProgrammedReasonProgrammingFailed,
+			Message: err.Error(),
+		}
+	case !identity.serves():
+		return metav1.Condition{
+			Type:   bgpv1alpha1.ConditionTypeProgrammed,
+			Status: metav1.ConditionFalse,
+			Reason: bgpv1alpha1.ProgrammedReasonAddressUnassigned,
+			Message: "No egress address is assigned to this shard, so its datapath claims no packet " +
+				"(assign spec.shardAddressIPv6)",
+		}
+	default:
+		return metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeProgrammed,
+			Status:  metav1.ConditionTrue,
+			Reason:  bgpv1alpha1.ProgrammedReasonAddressesProgrammed,
+			Message: "Egress translation datapath is programmed with every assigned address",
+		}
+	}
 }
 
 // shardAdvertisementName derives the deterministic BGPAdvertisement name for a
@@ -284,15 +410,16 @@ func withdrawShardAdvertisement(ctx context.Context, c client.Client, namespace,
 }
 
 // readyCondition computes the Ready condition from the datapath's current
-// attachment state. A nil datapath, not expected in production, is treated as
-// not attached rather than a panic.
+// attachment state alone. Whether that attached datapath translates anything
+// is the Programmed condition's job. A nil datapath, not expected in
+// production, is treated as not attached rather than a panic.
 func (r *EgressShardReconciler) readyCondition() metav1.Condition {
 	if r.Datapath != nil && r.Datapath.Attached() {
 		return metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionTrue,
 			Reason:  reasonEgressDatapathAttached,
-			Message: "Egress translation datapath is attached and serving traffic",
+			Message: "Egress translation datapath is attached",
 		}
 	}
 	return metav1.Condition{

@@ -29,6 +29,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
@@ -1147,8 +1148,127 @@ func TestInstallNAT66EgressRoute_NilCNIConfigIsANoop(t *testing.T) {
 	cniConfig = nil
 	defer func() { cniConfig = original }()
 
-	if err := installEgressRoutes(1, 0x005); err != nil {
-		t.Errorf("installEgressRoutes(1, 0x005) = %v, want nil with cniConfig == nil", err)
+	if err := installEgressRoutes(1, 0x005, nil); err != nil {
+		t.Errorf("installEgressRoutes(1, 0x005, nil) = %v, want nil with cniConfig == nil", err)
+	}
+}
+
+// TestEgressShardCandidates_ConflistDecides covers the per-network egress
+// contract, the whole point of which is that a network that declared no egress
+// gets no route even on a node that has shards.
+//
+// The node-wide variable cannot express that: one list for the whole node
+// hands a default route out to every network on it. So the conflist stanza
+// decides whenever it is present at all -- including when it is present and
+// empty, which is a network stating it has no egress and must override the
+// variable rather than fall through to it. Only a stanza with no egress key at
+// all falls back, which is what keeps a node whose conflists have not been
+// regenerated yet from losing the egress it has today.
+func TestEgressShardCandidates_ConflistDecides(t *testing.T) {
+	const (
+		nodeWideSID = "2001:db8:ff01:1:e001::"
+		networkSID1 = "2001:db8:ff02:2:e001::"
+		networkSID2 = "2001:db8:ff03:3:e001::"
+	)
+
+	tests := []struct {
+		name    string
+		egress  *Egress
+		nodeEnv string
+		want    []string
+	}{
+		{
+			name:    "no egress key falls back to the deprecated node-wide list",
+			egress:  nil,
+			nodeEnv: nodeWideSID,
+			want:    []string{nodeWideSID},
+		},
+		{
+			name:   "no egress key and no node-wide list installs nothing",
+			egress: nil,
+		},
+		{
+			name:    "an empty egress object overrides the node-wide list",
+			egress:  &Egress{},
+			nodeEnv: nodeWideSID,
+		},
+		{
+			name:    "an empty shardSIDs list overrides the node-wide list",
+			egress:  &Egress{ShardSIDs: []string{}},
+			nodeEnv: nodeWideSID,
+		},
+		{
+			name:    "a network's own list wins over the node-wide one",
+			egress:  &Egress{ShardSIDs: []string{networkSID1}},
+			nodeEnv: nodeWideSID,
+			want:    []string{networkSID1},
+		},
+		{
+			name:   "candidate order is preserved",
+			egress: &Egress{ShardSIDs: []string{networkSID2, networkSID1}},
+			want:   []string{networkSID2, networkSID1},
+		},
+		{
+			name:   "a blank entry is skipped, not rejected",
+			egress: &Egress{ShardSIDs: []string{" ", networkSID1}},
+			want:   []string{networkSID1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := cniConfig
+			cniConfig = &config.CNIConfig{EgressShardSIDs: tt.nodeEnv}
+			defer func() { cniConfig = original }()
+
+			got, err := egressShardCandidates(tt.egress)
+			if err != nil {
+				t.Fatalf("egressShardCandidates() error = %v, want nil", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("egressShardCandidates() = %v, want %v", got, tt.want)
+			}
+			for i, want := range tt.want {
+				if !got[i].Equal(net.ParseIP(want)) {
+					t.Errorf("egressShardCandidates()[%d] = %s, want %s", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestEgressShardCandidates_RejectsAnInvalidConflistEntry keeps a conflist
+// typo loud. A silently skipped entry would leave a network that asked for
+// egress with none and nothing to say why.
+func TestEgressShardCandidates_RejectsAnInvalidConflistEntry(t *testing.T) {
+	original := cniConfig
+	cniConfig = &config.CNIConfig{}
+	defer func() { cniConfig = original }()
+
+	_, err := egressShardCandidates(&Egress{ShardSIDs: []string{"2001:db8:ff01:1:e001::", "not-an-ip"}})
+	if err == nil {
+		t.Fatal("egressShardCandidates() error = nil, want an error for the invalid entry")
+	}
+	if !strings.Contains(err.Error(), "not-an-ip") {
+		t.Errorf("egressShardCandidates() error = %q, want it to name the invalid entry", err)
+	}
+}
+
+// TestInstallEgressRoutes_NoShardTouchesNoBPFFS pins the behaviour that makes
+// a network with no egress safe on any node: it must be byte-identical to the
+// unset-node-wide-variable path it replaces, which touched no pinned map at
+// all. These tests run with no loaded datapath, so a withdrawal that opened
+// bpffs unconditionally would fail here -- and would fail an ADD on every node
+// whose datapath has not loaded yet.
+func TestInstallEgressRoutes_NoShardTouchesNoBPFFS(t *testing.T) {
+	original := cniConfig
+	cniConfig = &config.CNIConfig{}
+	defer func() { cniConfig = original }()
+
+	for _, egress := range []*Egress{nil, {}, {ShardSIDs: []string{}}} {
+		if err := installEgressRoutes(1, 0x005, egress); err != nil {
+			t.Errorf("installEgressRoutes(1, 0x005, %+v) = %v, want nil", egress, err)
+		}
 	}
 }
 

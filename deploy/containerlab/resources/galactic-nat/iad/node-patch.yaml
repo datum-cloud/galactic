@@ -83,27 +83,13 @@ spec:
             # own doc comment both flag today) before production.
             - name: GALACTIC_NAT_SHARD_SID
               value: "2001:db8:ff03:9:e001::"
-            # Lab-only placeholder masquerade source address, same
-            # "operator-supplied, no in-cluster derivation yet" status as
-            # GALACTIC_GATEWAY_SRV6_ADDRESS (see
-            # internal/config/gateway.go's doc comment). 2001:db8:9966::/32
-            # is a new documentation-range (RFC 3849) block reserved here
-            # for NAT66 shard public addresses specifically, picked to
-            # avoid colliding with any address already in use elsewhere
-            # in this topology (transit mesh: 2001:db8:0:*::/64 and
-            # 2001:db8:1:*::/64; SRv6 locators: 2001:db8:ff0X::/48; the
-            # ns60 ingress VIP: 2001:db8:6060::1) -- "9966" as a mnemonic
-            # for "NAT66". ::2 here is iad's shard (shard 2 of 3).
-            #
-            # Reachable from outside the fabric only because this node's
-            # fabric-router originates 2001:db8:9966:2::/64 into the underlay
-            # (resources/fabric-router/iad/frr.conf.iad-worker): the EVPN path
-            # EgressShardReconciler advertises for this address never leaves
-            # galactic-router's iBGP mesh, so without that origination a
-            # reply from the off-fabric host is discarded by the first
-            # transit router holding no route for it (#549).
-            - name: GALACTIC_NAT_SHARD_PUB_ADDR6
-              value: "2001:db8:9966:2::1"
+            # GALACTIC_NAT_SHARD_PUB_ADDR6 is gone from here on purpose.
+            # The masquerade source is assigned in this site's
+            # egressshard.yaml as spec.shardAddressIPv6, which is where
+            # the address, its documentation-range rationale, and the
+            # underlay origination it depends on are all now documented.
+            # galactic-nat rejects the variable at startup rather than
+            # ignoring it, so re-adding it here fails the DaemonSet loudly.
             # Turning NAT64 on for this shard takes both of the next two
             # together: the IPv4 masquerade source an IPv4-only destination
             # sees, and the /96 whose synthesized addresses this shard

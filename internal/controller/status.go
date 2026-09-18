@@ -132,8 +132,8 @@ func setRuleCondition(rule *bgpv1alpha1.NetworkRule, condition metav1.Condition)
 	meta.SetStatusCondition(&rule.Status.Conditions, condition)
 }
 
-// setEgressShardCondition sets or updates a condition on an EgressShard. Ready is
-// the only type it currently uses.
+// setEgressShardCondition sets or updates a condition on an EgressShard,
+// Ready and Programmed being the types it currently uses.
 func setEgressShardCondition(shard *bgpv1alpha1.EgressShard, condition metav1.Condition) {
 	condition.ObservedGeneration = shard.Generation
 	meta.SetStatusCondition(&shard.Status.Conditions, condition)
