@@ -1,13 +1,3 @@
-# ns40 is single-site (iad only, see ../iad/), landing on iad-worker (the
-# only untainted worker in that cluster). This is the first of its two
-# attachments — ../iad/pod-b.yaml is the second, on its own NAD
-# (ns40/private-b). They deliberately use two distinct vpcattachment values
-# under the same vpc rather than one NAD scaled to replicas: 2 — see
-# ../../ns30/base/kustomization.yaml's doc comment for why (galactic-veth's
-# host/guest veth naming collides when two pods share one vpcattachment on
-# the same node). Two distinct vpcattachments avoids that collision and
-# lands both pods in one shared VRF for same-node, same-VPC pod-to-pod
-# connectivity testing rather than cross-site.
 namespace: ns40
 resources:
   - ../../base

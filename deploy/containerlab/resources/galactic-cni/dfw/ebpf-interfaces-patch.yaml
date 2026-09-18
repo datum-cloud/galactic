@@ -5,17 +5,7 @@ metadata:
 spec:
   template:
     spec:
-      # Both of dfw-worker's uplinks. dfw-worker2/dfw-worker3 also have an
-      # eth2 (facing the compute node), so this value is valid on every node
-      # in this cluster -- which matters, since the list is DaemonSet-wide
-      # and an interface a node does not have fails that node's attach.
-      #
-      # This covers the SRv6 uSID decap hook only. galactic-nat's shard XDP
-      # program is configured separately and names the same two uplinks
-      # (GALACTIC_NAT_UPLINK_INTERFACES, resources/galactic-nat/dfw/
-      # node-patch.yaml) -- the two lists have to agree on a dual-homed node,
-      # or traffic arriving on an uplink only one of them covers is
-      # decapsulated but never translated, or vice versa.
+      # Both uplinks
       initContainers:
         - name: install-cni
           env:

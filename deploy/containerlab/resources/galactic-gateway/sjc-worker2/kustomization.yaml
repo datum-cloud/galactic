@@ -1,6 +1,4 @@
-# sjc-worker2's instantiation of config/galactic-gateway/base (see that dir's
-# kustomization.yaml doc comment for why this role needs one instance per
-# gateway node rather than one shared DaemonSet).
+# sjc-worker2's edge gateway overlay.
 namespace: galactic-system
 resources:
   - ../base
@@ -12,13 +10,7 @@ patches:
     target:
       kind: DaemonSet
       name: galactic-gateway
-  # Strategic-merge patches can't rename a resource (Kustomize keeps the
-  # target's original identity regardless of what metadata.name the patch
-  # body says), so the rename needs a JSON6902 patch: without a distinct
-  # name, a site with two edge nodes would have both DaemonSets named
-  # "galactic-gateway" in the same namespace, silently clobbering each
-  # other. Applied uniformly even where a site has only one edge node, so
-  # the DaemonSet name always names the node it runs on.
+  # Renames the DaemonSet to this node's name.
   - target:
       kind: DaemonSet
       name: galactic-gateway

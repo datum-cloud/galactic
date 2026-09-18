@@ -1,8 +1,4 @@
-# Reflector-side session toward dfw-worker2 (dfw edge). The client side of
-# this same session lives in resources/galactic-gateway/, pointed
-# back at this node's fc00:0:8::1:1790. Every galactic-router in the lab --
-# compute and edge alike, in all three clusters -- is a client of this one
-# reflector; compute and edge nodes never peer with each other directly.
+# Reflector-side session toward dfw-worker2 (dfw edge)
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:

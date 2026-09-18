@@ -5,19 +5,6 @@ metadata:
 spec:
   template:
     spec:
-      # Image override only -- this overlay deliberately inherits
-      # config/fabric-router/'s own affinity (galactic.datumapis.com/fabric=router,
-      # which every lab worker carries) rather than narrowing it. It used to
-      # narrow to node in (compute, edge) so that iad's route-reflector node
-      # could be served by a second DaemonSet (resources/fabric-control/iad/,
-      # removed) carrying its own frr.conf; that split existed only because a
-      # shared fabric-config ConfigMap couldn't serve two nodes' configs.
-      # frr-init now selects a frr.conf.<nodename> key via NODE_NAME, so one
-      # DaemonSet plus one ConfigMap covers every role -- the route
-      # reflector included (../iad/kustomization.yaml's configMapGenerator
-      # carries iad-worker3's key alongside the compute and edge nodes').
-      # Nothing about FRR itself differs by role; only the per-node
-      # frr.conf each pod picks.
       initContainers:
         - name: frr-init
           image: fabric-router:latest

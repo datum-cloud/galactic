@@ -2,7 +2,7 @@ namespace: galactic-system
 resources:
   - ../base
 
-# One key per fabric-carrying node -- see ../dfw/kustomization.yaml.
+# One key per fabric-carrying node
 configMapGenerator:
   - name: fabric-config
     files:

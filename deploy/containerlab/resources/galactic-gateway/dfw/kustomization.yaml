@@ -1,8 +1,5 @@
-# The single entry point for dfw's edge tier: every edge node's
-# DaemonSet+BGP+NetworkGateway instantiation, plus this site's own ns60
-# NetworkRule and its backend's ServiceVIPBinding.
-# scripts/deploy-galactic-router.sh applies this one path per site rather
-# than each node overlay separately.
+# Single entry point for dfw's edge tier: per-edge-node DaemonSet+BGP+
+# NetworkGateway, plus this site's ns60 NetworkRule and ServiceVIPBinding.
 namespace: galactic-system
 resources:
   - ../dfw-worker2

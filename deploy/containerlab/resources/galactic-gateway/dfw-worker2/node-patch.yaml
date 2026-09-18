@@ -5,12 +5,7 @@ metadata:
 spec:
   template:
     spec:
-      # kubernetes.io/hostname pins this DaemonSet instance to exactly one
-      # node: GALACTIC_GATEWAY_SRV6_ADDRESS below must be unique per gateway
-      # node (see config/galactic-gateway/base/kustomization.yaml's doc
-      # comment), so every edge node gets its own DaemonSet rather than one
-      # DaemonSet matching every edge-labeled node with identical env. dfw
-      # has two edge nodes and so two instances; sjc and iad have one each.
+      # Hostname pin: one DaemonSet instance per edge node.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -29,36 +24,12 @@ spec:
       containers:
         - name: galactic-gateway
           env:
-            # eth1 is this lab's dedicated transit-fabric-facing uplink on
-            # every node (see resources/galactic-cni/daemonset-patch.yaml's
-            # comment) -- the same interface edgedsr.c's edge_lb XDP program
-            # attaches to for both underlay BGP and ingress traffic.
+            # Transit-fabric-facing uplink (underlay BGP + ingress).
             - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
               value: eth1
-            # eth2 is this node's compute-facing link (see
-            # gvpc.clab.yaml's links section): dfw's compute node is
-            # dual-homed to both of dfw's edge nodes, and every site's
-            # compute node reaches the fabric only through its edge tier.
-            # A backend's reply to a VIP therefore crosses this node,
-            # where connection tracking holds no record of the forward
-            # half -- which went to the backend encapsulated, through XDP
-            # -- and kube-proxy drops it as invalid. edge_return forwards
-            # those replies before netfilter sees them.
+            # Compute-facing link.
             - name: GALACTIC_GATEWAY_INTERNAL_INTERFACES
               value: eth2
-            # uFMT 48+16 uSID over this site's shared locator (2001:db8:ff01::/48,
-            # see bgprouter.yaml's srv6Locator). nodeID=2,
-            # Function=End.DT46 (arbitrary -- Argument 0 always misses
-            # vrf_table, so no Function value is ever consulted for it; see
-            # internal/plumbing/ebpf/prog/usid.c), Argument=0 (reserved).
-            # Computed via internal/plumbing/ebpf/uformat.Encode directly,
-            # bypassing srv6.ComputeSID's argument==0 guard (that guard
-            # exists for tenant-VRF SID derivation specifically). This is
-            # this node's own plain SRv6-reachable address, used only as the
-            # DSR datapath's outer-header encap source -- never a NAT/SNAT
-            # source and never compared against anything on a receive path
-            # (see internal/config/gateway.go's EnvGatewaySRv6Address doc
-            # comment). No in-cluster mechanism yet derives this
-            # automatically, so it is supplied statically per node here.
+            # This node's SRv6 address: DSR outer-header encap source.
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
               value: "2001:db8:ff01:2:e000::"
