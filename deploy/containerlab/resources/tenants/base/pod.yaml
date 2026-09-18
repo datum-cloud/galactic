@@ -14,11 +14,6 @@ spec:
       labels:
         app: private
       annotations:
-        # Placeholder — Multus resolves an unqualified default-network name
-        # against the pod's own namespace only when nothing else claims that
-        # role; in this lab it resolves against kube-system instead (verified
-        # empirically), so every tenant's base/kustomization.yaml patches
-        # this to the namespace-qualified "<namespace>/private" form.
         v1.multus-cni.io/default-network: private
     spec:
       affinity:

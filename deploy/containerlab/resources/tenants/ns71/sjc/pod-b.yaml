@@ -1,13 +1,3 @@
-# The second of ns71's two tenants -- see ../base/kustomization.yaml's doc
-# comment for what this fixture is for. Mirrors ../../base/pod.yaml (the
-# shared tenant Deployment template) directly rather than composing it
-# through kustomize, for the same reason ns30/dfw/pod-b.yaml does: a second
-# copy needs a different name/label/annotation than kustomize's nameSuffix +
-# patch ordering can reliably guarantee.
-#
-# The nodeSelector is the point of the fixture, not a scheduling
-# convenience: both pods must land on one node for their flows to reach the
-# shard with an identical encapsulation source.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

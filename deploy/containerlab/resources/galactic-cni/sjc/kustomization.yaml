@@ -1,5 +1,4 @@
-# sjc: single-homed compute node, so the shared eth1-only interface list
-# applies unchanged. See ../dfw/ for the dual-homed case.
+# sjc: single-homed compute node
 namespace: galactic-system
 resources:
   - ../shared

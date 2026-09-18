@@ -2,9 +2,7 @@ namespace: galactic-system
 resources:
   - ../base
 
-# One frr.conf.<nodename> key per node this cluster's fabric DaemonSet
-# matches -- frr-init selects its own via the NODE_NAME downward-API env
-# var. dfw has three: one compute worker and two edge workers.
+# One frr.conf.<nodename> key per node (dfw: compute, two edge workers)
 configMapGenerator:
   - name: fabric-config
     files:

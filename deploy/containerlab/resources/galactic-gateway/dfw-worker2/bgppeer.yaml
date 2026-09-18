@@ -1,7 +1,4 @@
-# This edge node's own client session to the lab's single EVPN route
-# reflector (iad-worker3, fc00:0:8::1 port 1790) -- the same reflector every
-# compute node peers with. Edge and compute exchange EVPN paths through it,
-# never directly.
+# Client session to the lab's single EVPN route reflector.
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:

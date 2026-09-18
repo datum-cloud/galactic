@@ -1,15 +1,3 @@
-# ns30 is single-site (dfw only, see ../dfw/). This is the first of its two
-# attachments — ../dfw/pod-b.yaml is the second, on its own NAD
-# (ns30/private-b). They deliberately use two distinct vpcattachment values
-# under the same vpc rather than one NAD scaled to replicas: 2: galactic-veth
-# derives its host/guest veth interface names from (vpc, vpcAttachment)
-# alone (internal/plumbing/intf), so two pods sharing one vpcAttachment on
-# the same node collide on that name — internal/cni/veth's "stale veth"
-# self-heal would delete whichever pod's veth got there second, silently
-# breaking it (see the incident this fixture layout replaced). Two distinct
-# vpcattachments avoids that collision and lands both pods in one shared VRF
-# (internal/plumbing/vrf is keyed by vpc alone) for same-node, same-VPC
-# pod-to-pod connectivity testing rather than cross-site.
 namespace: ns30
 resources:
   - ../../base

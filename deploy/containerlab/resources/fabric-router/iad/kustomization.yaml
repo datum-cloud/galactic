@@ -2,8 +2,7 @@ namespace: galactic-system
 resources:
   - ../base
 
-# One key per fabric-carrying node -- see ../dfw/kustomization.yaml. iad
-# has three: compute, edge, and the lab's single EVPN route reflector.
+# One key per fabric-carrying node (iad: compute, edge, route reflector)
 configMapGenerator:
   - name: fabric-config
     files:

@@ -5,135 +5,19 @@ metadata:
 spec:
   template:
     spec:
-      # config/galactic-nat/base/daemonset.yaml's own affinity requires
-      # galactic.datumapis.com/node: compute -- dfw-worker
-      # (node_files/dfw/config.yaml) carries it, reusing that existing
-      # compute worker as this site's shard rather than introducing a
-      # dedicated node, per the redesign plan's own §8 suggestion. No
-      # affinity override needed here: dfw-worker is the only node in
-      # this cluster carrying that label, so the base's own affinity
-      # already resolves to exactly it -- unlike
-      # resources/galactic-gateway/dfw-worker2/, which needs a
-      # kubernetes.io/hostname pin because iad has *two* edge-labeled
-      # nodes needing different per-node env. GALACTIC_NAT_SHARD_SID/
-      # _SHARD_PUB_ADDR6 below must be unique per shard node (see
-      # config/galactic-nat/kustomization.yaml's doc comment), so
-      # dfw/iad/sjc are three separate per-node overlays rather than one
-      # overlay matching all three site workers with identical env.
       containers:
         - name: galactic-nat
           env:
-            # dfw-worker is the lab's one dual-homed compute node: eth1 to
-            # dfw-worker2 and eth2 to dfw-worker3 (gvpc.clab.yaml), so it
-            # names both here. internal/plumbing/ebpf/natprog's XDP program
-            # attaches to every interface in this list.
-            #
-            # Both, not just eth1, and this is the whole point of the list
-            # (#545): the datapath claims a packet only on an interface it
-            # is attached to, so an encapsulated tenant packet arriving on
-            # an unattached uplink would reach no translation program and be
-            # forwarded untranslated and uncounted. While this took a single
-            # name, dfw's FRR config had to de-prefer eth2 to keep egress-
-            # shard traffic off it -- that workaround is gone now (see
-            # resources/fabric-router/dfw/frr.conf.dfw-worker), and losing
-            # either edge node no longer degrades this node's shard role.
-            #
-            # Matches GALACTIC_CNI_EBPF_INTERFACES on this same site, which
-            # has always named both uplinks
-            # (resources/galactic-cni/dfw/ebpf-interfaces-patch.yaml).
-            # sjc and iad are single-homed and name eth1 alone.
+            # dual-homed node: eth1, eth2 uplinks
             - name: GALACTIC_NAT_UPLINK_INTERFACES
               value: eth1,eth2
-            # uFMT 48+16 uSID over dfw's own locator (2001:db8:ff01::/48,
-            # see resources/galactic-router/dfw/bgprouter.yaml's
-            # srv6Locator), nodeID=9 -- a dedicated Node-ID reserved for
-            # this shard, deliberately NOT dfw-worker's own real nodeID=1
-            # (an earlier version of this file reused it, on the theory
-            # that this shard "runs on that exact physical node, not a
-            # separate dedicated node"). That reuse was a real bug, found
-            # live: internal/plumbing/ebpf/natprog/nat.c's own
-            # locator_matches only checks the top 64 bits (Block+Node-ID)
-            # of a packet's outer destination against shard_sid -- see
-            # that function's own doc comment -- so reusing dfw-worker's
-            # Node-ID meant this shard's XDP program silently hijacked
-            # *every* ordinary tenant ingress packet addressed to
-            # dfw-worker's own real delivery uSIDs (same Block+Node-ID,
-            # nexthdr also 41) before usid_ingress's TC hook ever saw
-            # them. Physical co-location (which node this pod is
-            # scheduled to) and uSID identity (which Node-ID a shard's own
-            # address claims) are independent; nodeID=9 is free at this
-            # site (dfw-worker is the only BGPRouter on this locator,
-            # nodeID=1 -- see resources/galactic-router/dfw/bgprouter.yaml).
-            # Function=End.DT46 (0xE), matching resources/galactic-gateway/
-            # the edge nodes' node-patch.yaml convention, even though this
-            # address is never actually looked up through
-            # function_table/vrf_table the way a real uSID is --
-            # EgressShardStatus.ShardSID's own doc comment says it's
-            # advertised as a plain node-reachability route "no
-            # VRFID/Function" -- the uFMT encoding here only keeps the
-            # address inside dfw's locator block.
-            #
-            # Argument=1 is a placeholder and carries no meaning: it names
-            # no tenant and never could, this one configured value being
-            # shared by every VRF on every node. Each CNI ADD overwrites
-            # it with that attachment's own VRFID before installing the
-            # tenant's egress route (internal/cnibgp's
-            # shardSIDsForTenant), which is what lets this shard tell two
-            # same-node tenants apart. What this address does have to
-            # reserve for itself is its whole Block+Node-ID: that /64 is
-            # what EgressShardReconciler advertises and what
-            # locator_matches compares against.
-            #
-            # Still a lab-only value needing real allocation logic (the
-            # same gap GALACTIC_GATEWAY_SRV6_ADDRESS and EnvNATShardSID's
-            # own doc comment both flag today) before production.
+            # shard SID: uFMT uSID over dfw's locator (2001:db8:ff01::/48), nodeID=9
             - name: GALACTIC_NAT_SHARD_SID
               value: "2001:db8:ff01:9:e001::"
-            # Lab-only placeholder masquerade source address, same
-            # "operator-supplied, no in-cluster derivation yet" status as
-            # GALACTIC_GATEWAY_SRV6_ADDRESS (see
-            # internal/config/gateway.go's doc comment). 2001:db8:9966::/32
-            # is a new documentation-range (RFC 3849) block reserved here
-            # for NAT66 shard public addresses specifically, picked to
-            # avoid colliding with any address already in use elsewhere
-            # in this topology (transit mesh: 2001:db8:0:*::/64 and
-            # 2001:db8:1:*::/64; SRv6 locators: 2001:db8:ff0X::/48; the
-            # ns60 ingress VIP: 2001:db8:6060::1) -- "9966" as a mnemonic
-            # for "NAT66". ::1 here is dfw's shard (shard 1 of 3).
-            #
-            # Reachable from outside the fabric only because this node's
-            # fabric-router originates 2001:db8:9966:1::/64 into the underlay
-            # (resources/fabric-router/dfw/frr.conf.dfw-worker): the EVPN path
-            # EgressShardReconciler advertises for this address never leaves
-            # galactic-router's iBGP mesh, so without that origination a
-            # reply from the off-fabric host is discarded by the first
-            # transit router holding no route for it (#549).
+            # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block
             - name: GALACTIC_NAT_SHARD_PUB_ADDR6
               value: "2001:db8:9966:1::1"
-            # Turning NAT64 on for this shard takes both of the next two
-            # together: the IPv4 masquerade source an IPv4-only destination
-            # sees, and the /96 whose synthesized addresses this shard
-            # translates down to IPv4. The prefix is fabric-wide and identical
-            # on every shard and on galactic-cni (which installs the tenant
-            # VRF's route for it); only the address is per-shard.
-            #
-            # 192.0.2.0/24 is RFC 5737 TEST-NET-1, picked for the same reason
-            # 2001:db8:9966::/32 was picked above -- a documentation range
-            # that cannot collide with anything real. ::1 is this site's
-            # shard, matching its IPv6 counterpart's numbering.
-            #
-            # A NAT64 reply arrives from the IPv4 internet rather than
-            # across the fabric, so nothing galactic-nat advertises can make
-            # this address reachable -- the underlay has to attract it to
-            # this node. That is exactly what this site's shard node now
-            # originates for itself (resources/fabric-router/dfw/
-            # frr.conf.dfw-worker), the IPv4 half of the same origination its
-            # IPv6 counterpart above needs; without it, outbound translation
-            # works and replies never arrive (#549). The other half of the
-            # return path, delivering an un-translated reply back to a tenant
-            # on another node, is #550: the shard re-encapsulates toward the
-            # outer source the tenant's node stamped, which has to be that
-            # node's own SID.
+            # NAT64 masquerade source address (RFC 5737 TEST-NET-1)
             - name: GALACTIC_NAT_SHARD_PUB_ADDR4
               value: "192.0.2.1"
             - name: GALACTIC_NAT_NAT64_PREFIX

@@ -1,11 +1,3 @@
-# sjc is the site on purpose, for two independent reasons. It has exactly
-# one schedulable worker -- sjc-worker, the compute node; sjc-worker2 is
-# edge-labeled and NoSchedule-tainted (node_files/sjc/config.yaml) -- so
-# "same node" is structural here rather than a scheduling coincidence, and
-# the nodeSelector in ../base/kustomization.yaml states it anyway. And a
-# node cannot resolve its own site's self-originated shard SID, so both
-# pods land on dfw's shard, which is where verify:nat-collision-samenode
-# captures.
 resources:
   - ../base
   - nad.yaml

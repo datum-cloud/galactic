@@ -1,5 +1,4 @@
-# dfw: the one site whose compute node is dual-homed, so the uSID decap hook
-# has to attach to both of its uplinks.
+# dfw: dual-homed compute node
 namespace: galactic-system
 resources:
   - ../shared
