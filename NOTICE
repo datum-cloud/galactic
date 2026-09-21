@@ -2568,7 +2568,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## github.com/mdlayher/netlink
 
 * Name: github.com/mdlayher/netlink
-* Version: v1.9.0
+* Version: v1.11.2
 * License: MIT
 
 ```
@@ -7463,7 +7463,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## google.golang.org/genproto/googleapis/rpc/status
 
 * Name: google.golang.org/genproto/googleapis/rpc/status
-* Version: v0.0.0-20260526163538-3dc84a4a5aaa
+* Version: v0.0.0-20260706201446-f0a921348800
 * License: Apache-2.0
 
 ```
@@ -7675,7 +7675,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## google.golang.org/grpc
 
 * Name: google.golang.org/grpc
-* Version: v1.83.2
+* Version: v1.84.0
 * License: Apache-2.0
 
 ```
