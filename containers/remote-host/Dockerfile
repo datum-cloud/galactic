@@ -8,7 +8,7 @@
 # Pinned to a digest-free alpine tag deliberately: this image is built
 # locally by `task build:remote-host` and never pushed anywhere, matching
 # fabric-router:latest's own lab-only status.
-FROM alpine:3.21
+FROM alpine:3.24
 
 # iproute2: the startup script configures addresses and routes itself
 # (containerlab assigns nothing on a p2p link, and the FRR-based nodes get
