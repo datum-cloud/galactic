@@ -153,6 +153,10 @@ func ResolveTargets(ifaceName string) ([]string, error) {
 // through ResolveTargets first, so this is usually a single interface and never
 // a bond master.
 //
+// Every interface is checked for native XDP support before any of them is
+// touched, and a bond slave is waited back into its aggregate before the next
+// interface is attached, so a bonded uplink never loses every member at once.
+//
 // If attaching one interface fails partway through, every link already attached
 // in this call is closed before returning, so a caller that gets an error holds
 // no partial attachment to clean up.
@@ -164,18 +168,47 @@ func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 		return nil, errors.New("edgeattach: no interfaces to attach to")
 	}
 
+	return attachSequentially(ifaceNames, func(ifaceName string) (link.Link, error) {
+		return attachOne(program, ifaceName)
+	})
+}
+
+// attachSequentially is Attach's ordering, with the attach step itself passed
+// in so tests can drive the sequence without a real program or a real NIC.
+//
+// Nothing is attached until every interface has been checked, and each bond
+// slave is waited back into its aggregate before the next interface is
+// touched. Both orderings are load-bearing on a bonded uplink.
+func attachSequentially(ifaceNames []string, attach func(string) (link.Link, error)) ([]link.Link, error) {
+	if err := checkNativeXDPSupport(ifaceNames); err != nil {
+		return nil, err
+	}
+
 	links := make([]link.Link, 0, len(ifaceNames))
 	for _, ifaceName := range ifaceNames {
-		xdpLink, err := attachOne(program, ifaceName)
+		xdpLink, err := attach(ifaceName)
 		if err != nil {
-			for _, already := range links {
-				_ = already.Close()
-			}
+			closeAttached(links)
 			return nil, err
 		}
 		links = append(links, xdpLink)
+
+		if err := waitBondSlaveReady(ifaceName, BondReadyTimeout); err != nil {
+			closeAttached(links)
+			return nil, err
+		}
 	}
 	return links, nil
+}
+
+// closeAttached unwinds the links attached so far in one Attach call.
+func closeAttached(links []link.Link) {
+	for _, already := range links {
+		if already == nil {
+			continue
+		}
+		_ = already.Close()
+	}
 }
 
 // attachOne attaches program to ifaceName's XDP hook in native driver mode, the
