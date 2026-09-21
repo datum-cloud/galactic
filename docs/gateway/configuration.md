@@ -282,12 +282,12 @@ spec:
             - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
               value: eth1
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
-              value: "2001:db8:ff01:2:e000::"
+              value: "2001:db8:ff01:3002:e000::"
 ```
 
 `dfw-worker3`'s own `node-patch.yaml` repeats this shape with its own
 hostname and a distinct `GALACTIC_GATEWAY_SRV6_ADDRESS`
-(`2001:db8:ff01:3:e000::`) — every gateway node needs its own unique value.
+(`2001:db8:ff01:3003:e000::`) — every gateway node needs its own unique value.
 `dfw-worker2/kustomization.yaml` additionally JSON6902-patches the
 DaemonSet's own `metadata.name` to `galactic-gateway-dfw-worker2` (a
 strategic-merge patch can't rename a resource), so two gateway nodes in the
@@ -323,7 +323,7 @@ spec:
   localASN: 65000
   routerID: "10.0.1.2"
   srv6Locator: "2001:db8:ff01::/48"
-  nodeID: 2
+  nodeID: 4098
   addressFamilies:
     - afi: l2vpn
       safi: evpn

@@ -59,7 +59,7 @@ RT-less-EVPN main-table import path
 (`internal/runtime/gobgp/monitor.go`'s `matchTableID`/`RouteMainAdd`).
 
 It is the SID's covering `/64` (Block + Node-ID, e.g.
-`2001:db8:ff01:9::/64` for dfw's shard), not a `/128`. Each tenant VRF
+`2001:db8:ff01:2001::/64` for dfw's shard), not a `/128`. Each tenant VRF
 encapsulates toward this shard with its own 12-bit Argument written into
 the SID, so the destination differs per tenant and a host route would
 cover exactly one of them. Note that a missing `/64` does not

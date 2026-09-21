@@ -31,5 +31,6 @@ spec:
             - name: GALACTIC_GATEWAY_INTERNAL_INTERFACES
               value: eth2
             # This node's SRv6 address: DSR outer-header encap source.
+            # nodeID=0x3003 (service 3 = edge gateway, node index 003)
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
-              value: "2001:db8:ff01:3:e000::"
+              value: "2001:db8:ff01:3003:e000::"

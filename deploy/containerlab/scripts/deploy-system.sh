@@ -39,7 +39,6 @@ network_crds=(
   network.datumapis.com_bgpadvertisements.yaml
   network.datumapis.com_bgppeers.yaml
   network.datumapis.com_bgppolicies.yaml
-  network.datumapis.com_bgprouters.yaml
   network.datumapis.com_networkgateways.yaml
   network.datumapis.com_networkrules.yaml
 )
@@ -67,7 +66,17 @@ network_crds=(
 # controller at all, not just the ones this redesign added. Installed on
 # every site, matching network_crds' own blanket per-site loop, for that
 # second reason -- (1) alone would only need iad.
+#
+# BGPRouter is here for the same reason BGPVRFInstance is -- it exists at
+# NETWORK_SHA, but with a stale schema. That version still bounds
+# spec.nodeID at 254, from when Node-ID was an 8-bit field; it is 16 bits
+# wide today (uformat.NodeIDMin/NodeIDMax, 0x0001-0xDFFF), which is what
+# this lab's service-classed Node-ID allocation needs (README.md's
+# "Node-ID allocation"). Fetching it from GitHub rejects every BGPRouter
+# in resources/ with "spec.nodeID in body should be less than or equal to
+# 254" and fails deploy:galactic-router outright.
 network_crds_local=(
+  network.datumapis.com_bgprouters.yaml
   network.datumapis.com_bgpvrfinstances.yaml
   network.datumapis.com_servicevipbindings.yaml
   network.datumapis.com_egressshards.yaml

@@ -11,9 +11,10 @@ spec:
             # single-homed node: eth1 uplink
             - name: GALACTIC_NAT_UPLINK_INTERFACES
               value: eth1
-            # shard SID: uFMT uSID over sjc's locator (2001:db8:ff02::/48), nodeID=9
+            # shard SID: uFMT uSID over sjc's locator (2001:db8:ff02::/48),
+            # nodeID=0x2001 (service 2 = NAT shard, node index 001)
             - name: GALACTIC_NAT_SHARD_SID
-              value: "2001:db8:ff02:9:e001::"
+              value: "2001:db8:ff02:2001:e001::"
             # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block
             - name: GALACTIC_NAT_SHARD_PUB_ADDR6
               value: "2001:db8:9966:3::1"

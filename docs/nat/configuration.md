@@ -237,7 +237,7 @@ shards):
 
 ```yaml
 - name: GALACTIC_CNI_EGRESS_SHARD_SIDS
-  value: "2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::,2001:db8:ff03:9:e001::"
+  value: "2001:db8:ff01:2001:e001::,2001:db8:ff02:2001:e001::,2001:db8:ff03:2001:e001::"
 ```
 
 **Must be set on the init container specifically, not the long-running

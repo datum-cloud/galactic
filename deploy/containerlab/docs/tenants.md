@@ -249,13 +249,14 @@ docker exec dfw-worker dmesg | grep galactic
    docker exec dfw-control-plane kubectl get bgprouters -A -o yaml | grep -A 5 advertised
    ```
 
-2. Check the SRv6 underlay — transit routers should have each site's per-node
-   `/56` locator block:
+2. Check the SRv6 underlay — transit routers should have each site's locator
+   `/48`, the aggregate that site's compute node originates (no `/56` is
+   advertised anywhere; every node's `/64` is covered by this one prefix):
 
    ```bash
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01:100::/56"
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02:100::/56"
-   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03:100::/56"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
+   docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
    ```
 
 3. Verify the pod's VRF and SRv6 route on the worker, using that VPC's VRF
