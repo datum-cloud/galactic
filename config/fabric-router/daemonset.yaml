@@ -49,11 +49,14 @@ spec:
       # silently never got fabric, even though NAT66 shards need underlay
       # BGP to advertise their own SID just as much as any other role.)
       # "router" (not a bare boolean) mirrors galactic.datumapis.com/galactic's
-      # own router/control pair: "control" is reserved for fabric-router-rr
-      # (the underlay's own route reflector, future, not yet implemented --
-      # distinct from galactic-router-rr's EVPN reflector, which lives on
-      # galactic.datumapis.com/galactic=control instead), and the two values
-      # are mutually exclusive by construction the same way. The gateway
+      # own router/control pair: "control" is the underlay's own route
+      # reflector (distinct from galactic-router-rr's EVPN reflector, which
+      # lives on galactic.datumapis.com/galactic=control instead), and the
+      # two values are mutually exclusive by construction the same way.
+      # It runs the identical fabric-router image -- the reflector-vs-plain
+      # distinction lives entirely in the per-node frr.conf infra's own
+      # renderer produces (a route-reflector-client peer-group vs. the four
+      # canonical ones), not in this manifest or this binary. The gateway
       # role's own XDP datapath attaches to this same interface (see
       # internal/gateway's doc.go) and depends on FRR having already
       # brought it up and established the eBGP underlay session. New node
@@ -69,6 +72,7 @@ spec:
                     operator: In
                     values:
                       - router
+                      - control
       initContainers:
         - name: frr-init
           # ":latest" is a placeholder only: no such tag is ever pushed to

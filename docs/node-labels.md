@@ -20,8 +20,8 @@ for everything else about a given binary.
 | `galactic.datumapis.com/node=edge`               | `galactic-gateway` (standalone — see below)           | primary role enum |
 | `galactic.datumapis.com/galactic=router`         | `galactic-cni`, `galactic-router` (plain/tenant mode) | mode enum         |
 | `galactic.datumapis.com/galactic=control`        | `galactic-router-rr`                                  | mode enum         |
-| `galactic.datumapis.com/fabric=router`           | `fabric-router`                                       | mode enum         |
-| `galactic.datumapis.com/fabric=control` (future) | `fabric-router-rr` — not yet implemented              | mode enum         |
+| `galactic.datumapis.com/fabric=router`           | `fabric-router` (plain mode)                          | mode enum         |
+| `galactic.datumapis.com/fabric=control`          | `fabric-router` (reflector mode, same image)          | mode enum         |
 
 Every affinity also excludes Kubernetes control-plane nodes
 (`node-role.kubernetes.io/control-plane: DoesNotExist`), independently of
@@ -58,10 +58,10 @@ values of one key, rather than two separately-settable booleans, makes that
 exclusivity structural instead of a convention someone has to maintain.
 `galactic.datumapis.com/fabric` mirrors the same shape for the underlay:
 `router` is the ordinary underlay eBGP participant (every current role),
-`control` is reserved for the underlay's own route reflector
-(`fabric-router-rr`, distinct from the EVPN reflector above — see the two
-separate listener ports, 1179 vs. 2179, in the production POP architecture
-this mirrors) — not yet implemented.
+`control` is the underlay's own route reflector — distinct from the EVPN
+reflector above, and on the standard BGP port rather than a dedicated one,
+since `fabric-router` and `galactic-router-rr` are already two independent
+processes on any node that runs both.
 
 `galactic.datumapis.com/galactic` and `galactic.datumapis.com/fabric` are
 independent keys, so a node can mix values across them — e.g. an EVPN route
@@ -173,14 +173,18 @@ whatever `node` or `galactic` value a node also carries. See
 `config/fabric-router/daemonset.yaml`'s own affinity comment for the full
 history of why this is a dedicated label rather than an enumerated list.
 
-### `galactic.datumapis.com/fabric=control` (future)
+### `galactic.datumapis.com/fabric=control`
 
-Reserved for `fabric-router-rr` — the underlay's own iBGP route reflector,
-distinct from the EVPN one above (see the two separate listener ports, 1179
-vs. 2179, in the production POP architecture this mirrors). Not implemented:
-`fabric-router` today has no route-reflector variant, and `config/` has no
-`fabric-router-rr` overlay. Mutually exclusive with `fabric=router` on the
-same node, the same way `galactic`'s two values are, once implemented.
+The underlay's own iBGP route reflector, distinct from the EVPN one above.
+Unlike `galactic=control`, this has no separate binary or overlay to run --
+`fabric-router` has no Go code of its own at all (it's a plain FRR
+container), so `control` runs the identical image `router` does. The
+reflector-vs-plain distinction lives entirely in the per-node `frr.conf`
+`infra`'s own renderer produces for this node: a `route-reflector-client`
+peer-group instead of the four canonical ones. This DaemonSet's affinity
+matches both values identically; only the rendered config differs.
+Mutually exclusive with `fabric=router` on the same node, the same way
+`galactic`'s two values are.
 
 ---
 
