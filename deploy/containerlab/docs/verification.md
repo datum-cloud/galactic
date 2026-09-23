@@ -14,11 +14,12 @@ link, so each summary below has an IPv4 counterpart — both should be Establish
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast summary"
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv4 unicast summary"
 
-# Each site's per-node /56 SRv6 locator block should be present on all TR nodes
-# (covers ns10's USID on that node — see docs/tenants.md)
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01:100::/56"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02:100::/56"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03:100::/56"
+# Each site's SRv6 locator /48 should be present on all TR nodes. This is the
+# aggregate the site's compute node originates; it covers every node's /64 in
+# that site, including ns10's USID (see docs/tenants.md).
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 ```
 
 ## Dual-stack underlay reachability

@@ -10,7 +10,7 @@ spec:
   localASN: 65000
   routerID: "10.0.1.3"
   srv6Locator: "2001:db8:ff01::/48"
-  nodeID: 3
+  nodeID: 4099
   addressFamilies:
     - afi: l2vpn
       safi: evpn

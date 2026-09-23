@@ -12,7 +12,7 @@ spec:
           env:
             # Fabric-wide NAT66 shard SIDs
             - name: GALACTIC_CNI_EGRESS_SHARD_SIDS
-              value: "2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::,2001:db8:ff03:9:e001::"
+              value: "2001:db8:ff01:2001:e001::,2001:db8:ff02:2001:e001::,2001:db8:ff03:2001:e001::"
             # Fabric-wide NAT64 prefix
             - name: GALACTIC_CNI_NAT64_PREFIX
               value: "2001:db8:64::/96"

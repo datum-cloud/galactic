@@ -127,7 +127,8 @@ overlay (galactic-router, l2vpn/evpn)
 - The IPv4 address family carries per-node `/32` loopbacks only. There is no IPv4 counterpart to the
   SRv6 locator block, and the numbered link subnets are never redistributed — so a ping between
   underlay nodes must be sourced from a loopback (`task verify:underlay` does this).
-- FRR PE nodes originate their per-node SRv6 locator block (`2001:db8:ffXX:100::/56`) and BGP peering loopback (`fc00:0:X::1/128`) toward the transit layer via eBGP over numbered links — never the site's full `/48` uSID Block or loopback pool, which would create an anycast ambiguity once a second worker joins a site.
+- Each site's **compute** node originates that site's covering SRv6 locator `2001:db8:ff0X::/48` and its `fc00:0:X::/48` loopback pool; its edge nodes originate the shared anycast ingress VIP aggregate (`2001:db8:6060::/48`) and their own `/128` peering loopback. No node originates a locator prefix longer than that `/48`, so every per-node `/64` in [Node-ID allocation](#node-id-allocation) is reachable only via the one site aggregate.
+- **Known gap:** the addressing plan's `fabric.md` calls for per-node `/64` origination instead of one site-wide `/48`. Originating the covering aggregate from a single compute node means a second compute node joining a site would create an anycast ambiguity — the `/48` would attract its `/64` too, to a node that cannot deliver it. The lab has not hit this (one compute node per site) and the renumber onto service-classed Node-IDs deliberately did not change origination.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - **Only edge nodes are transit-facing.** They alone hold eBGP sessions to AS 65100; a compute node or the route reflector has no link to a transit router and no eBGP session anywhere. Each site's edge node is its border router.
 - Everything behind an edge node reaches the fabric over an iBGP session to it. The edge node sets `next-hop-self force` on those sessions (a path learned from the transit carries the transit router's own address as next hop, which the node behind it has no route to; `force` is required because plain `next-hop-self` is not applied to *reflected* paths — a route reflector preserves the originator's NEXT_HOP by design, RFC 4456 §10) and `route-reflector-client` (iBGP split horizon would otherwise stop it passing one client's prefixes to another — iad has two behind it).
@@ -219,18 +220,54 @@ covers exactly the SIDs that node can issue, not a neighbour's. The FRR fabric
 DaemonSet advertises the node's locator into the transit mesh via a static Null0
 route + BGP `network` statement.
 
-Each site's compute node owns the `/64` under its own Node-ID (1) inside the site
-locator — a node's own block, never the site's full `/48` uSID Block, which would
-create an anycast ambiguity the instant a second compute node joins a site. The test
-VPC `ns10` (see [docs/tenants.md](docs/tenants.md)) gets a host address within its node's
-block (illustrative only — the exact hextet depends on allocation order; see
-docs/tenants.md's [SRv6 USID Argument allocation](docs/tenants.md#srv6-usid-argument-allocation)):
+#### Node-ID allocation
 
-| Cluster | Compute node | FRR loopback    | Node locator block  | USID ns10                    |
-|---------|--------------|-----------------|---------------------|------------------------------|
-| dfw     | dfw-worker   | fc00:0:2::1/128 | 2001:db8:ff01:1::/64 | 2001:db8:ff01:1:e001::/128 |
-| sjc     | sjc-worker   | fc00:0:3::1/128 | 2001:db8:ff02:1::/64 | 2001:db8:ff02:1:e001::/128 |
-| iad     | iad-worker   | fc00:0:4::1/128 | 2001:db8:ff03:1::/64 | 2001:db8:ff03:1:e001::/128 |
+The 16-bit Node-ID is split into a 4-bit service selector (bits 49–52) and a
+12-bit node index (bits 53–64), so one physical node can hold several datapath
+identities without them colliding. The `/64` locator is the unit of ownership —
+`locator_matches` (`internal/plumbing/ebpf/natprog/nat.c`) and `locator_table`
+(`uformat.LocatorKey`) both key on Block + Node-ID and nothing below it — so a
+node running both tenant delivery and an egress shard needs two Node-IDs, not
+one. Sharing one would let `galactic-nat`'s XDP program claim that node's own
+tenant ingress before the TC decap hook ever ran, silently.
+
+| Service     | Node-ID range     | Identity                                       |
+|-------------|-------------------|------------------------------------------------|
+| `0x1`       | `0x1000`–`0x1FFF` | Tenant delivery — every node's `BGPRouter`     |
+| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`GALACTIC_NAT_SHARD_SID`)    |
+| `0x3`       | `0x3000`–`0x3FFF` | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`) |
+| `0x4`–`0xD` | —                 | Unallocated                                    |
+
+`0x0` is left reserved (it is the one short range, since Node-ID `0x0000` is
+invalid), and `0xE`–`0xF` are the LIB — Function space, not Node-ID space. See
+`uformat.go`'s `NodeIDMin`/`NodeIDMax`.
+
+The node index is per site and stable across services: `*-worker` is `001`,
+`*-worker2` is `002`, `*-worker3` is `003`.
+
+| Node        | BGPRouter nodeID | Shard SID                   | Gateway SRv6 address        |
+|-------------|------------------|-----------------------------|-----------------------------|
+| dfw-worker  | 4097 (`0x1001`)  | `2001:db8:ff01:2001:e001::` | —                           |
+| dfw-worker2 | 4098 (`0x1002`)  | —                           | `2001:db8:ff01:3002:e000::` |
+| dfw-worker3 | 4099 (`0x1003`)  | —                           | `2001:db8:ff01:3003:e000::` |
+| sjc-worker  | 4097 (`0x1001`)  | `2001:db8:ff02:2001:e001::` | —                           |
+| sjc-worker2 | 4098 (`0x1002`)  | —                           | `2001:db8:ff02:3002:e000::` |
+| iad-worker  | 4097 (`0x1001`)  | `2001:db8:ff03:2001:e001::` | —                           |
+| iad-worker2 | 4098 (`0x1002`)  | —                           | `2001:db8:ff03:3002:e000::` |
+| iad-worker3 | 4099 (`0x1003`)  | — (route reflector)         | —                           |
+
+Each site's compute node owns the `/64` under its own delivery Node-ID inside the
+site locator — a node's own block, never the site's full `/48` uSID Block, which
+would create an anycast ambiguity the instant a second compute node joins a site.
+The test VPC `ns10` (see [docs/tenants.md](docs/tenants.md)) gets a host address
+within its node's block (illustrative only — the exact hextet depends on allocation
+order; see docs/tenants.md's [SRv6 USID Argument allocation](docs/tenants.md#srv6-usid-argument-allocation)):
+
+| Cluster | Compute node | FRR loopback    | Node locator block      | USID ns10                       |
+|---------|--------------|-----------------|-------------------------|---------------------------------|
+| dfw     | dfw-worker   | fc00:0:2::1/128 | 2001:db8:ff01:1001::/64 | 2001:db8:ff01:1001:e001::/128   |
+| sjc     | sjc-worker   | fc00:0:3::1/128 | 2001:db8:ff02:1001::/64 | 2001:db8:ff02:1001:e001::/128   |
+| iad     | iad-worker   | fc00:0:4::1/128 | 2001:db8:ff03:1001::/64 | 2001:db8:ff03:1001:e001::/128   |
 
 The `galactic-router address` column is no longer set explicitly in the
 per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
@@ -247,15 +284,18 @@ were computed directly via `internal/plumbing/ebpf/uformat.Encode` and are suppl
 statically through `GALACTIC_GATEWAY_SRV6_ADDRESS` — see
 `resources/galactic-gateway/<node>/node-patch.yaml`.
 
-Node-IDs are per site, and a site's compute worker always takes 1: within `2001:db8:ff01::/48`,
-`dfw-worker` is nodeID 1, its two edge nodes are 2 and 3, and the egress shard is 9.
+An edge node's gateway address takes a service-`0x3` Node-ID, distinct from the
+service-`0x1` Node-ID its own `BGPRouter` uses — see
+[Node-ID allocation](#node-id-allocation) above. The two are independent:
+`GALACTIC_GATEWAY_SRV6_ADDRESS` is validated only as a native IPv6 address
+(`internal/config/gateway.go`), never cross-checked against the `BGPRouter`.
 
-| Node        | Site locator       | nodeID | SRv6 self-address (Argument 0) |
-|-------------|--------------------|--------|--------------------------------|
-| dfw-worker2 | 2001:db8:ff01::/48 | 2      | 2001:db8:ff01:2:e000::         |
-| dfw-worker3 | 2001:db8:ff01::/48 | 3      | 2001:db8:ff01:3:e000::         |
-| sjc-worker2 | 2001:db8:ff02::/48 | 2      | 2001:db8:ff02:2:e000::         |
-| iad-worker2 | 2001:db8:ff03::/48 | 2      | 2001:db8:ff03:2:e000::         |
+| Node        | Site locator       | Gateway Node-ID  | SRv6 self-address (Argument 0) |
+|-------------|--------------------|------------------|--------------------------------|
+| dfw-worker2 | 2001:db8:ff01::/48 | 12290 (`0x3002`) | 2001:db8:ff01:3002:e000::      |
+| dfw-worker3 | 2001:db8:ff01::/48 | 12291 (`0x3003`) | 2001:db8:ff01:3003:e000::      |
+| sjc-worker2 | 2001:db8:ff02::/48 | 12290 (`0x3002`) | 2001:db8:ff02:3002:e000::      |
+| iad-worker2 | 2001:db8:ff03::/48 | 12290 (`0x3002`) | 2001:db8:ff03:3002:e000::      |
 
 All four originate the same anycast ingress VIP aggregate (`2001:db8:6060::/48`) into the
 underlay, and each site's `NetworkRule` binds the same VIP `2001:db8:6060::1` to its own
@@ -399,7 +439,7 @@ task deploy
 | `deploy:topology`         | Deploy the ContainerLab topology (transit routers)                              |
 | `deploy:clusters`         | Create the three Kind clusters and export their kubeconfigs                     |
 | `deploy:images`           | Load container images into Kind clusters                                        |
-| `deploy:system`           | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC   |
+| `deploy:system`           | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC¹  |
 | `deploy:cni`              | Install Cilium and Multus, then the galactic-cni DaemonSet                      |
 | `deploy:fabric`           | Apply FRR DaemonSets to all clusters                                            |
 | `deploy:galactic-router`  | Apply galactic-router DaemonSets and BGP CRs                                    |
@@ -425,6 +465,10 @@ task deploy
 | `host-setup`              | Apply required host sysctls (IPv6 forwarding, inotify limits)                   |
 | `clean`                   | Destroy lab, delete built images, and remove lab artifacts                      |
 | `test`                    | Run all verification checks                                                     |
+
+¹ Network CRDs come from the latest commit on `datum-cloud/network`'s `main`,
+not the version `go.mod` requires. Set `NETWORK_REF=<branch>` to track a
+different branch, or `NETWORK_SHA=<commit>` to pin one commit.
 
 ## Verification
 
