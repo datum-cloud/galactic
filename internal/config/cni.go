@@ -5,7 +5,10 @@
 package config
 
 import (
+	"fmt"
+	"net"
 	"os"
+	"strings"
 
 	"go.datum.net/galactic/internal/plumbing/dan"
 )
@@ -183,4 +186,29 @@ type ConflistValues struct {
 	NAT64Prefix     string
 	EBPFInterfaces  string
 	DANDir          string
+}
+
+// ParseEgressShardSIDs splits a comma-separated egress shard SID list into addresses,
+// trimming whitespace and skipping blank entries, so a trailing comma or stray
+// space in the operator-supplied value does not fail every attachment ADD in
+// the cluster. An entry that survives trimming but is not a valid IP address
+// is a real misconfiguration and fails loudly.
+//
+// Shared by CNI ADD, which picks a VRF's shard from this list, and the
+// installer's egress route sweep, which keeps that pick honouring the list's
+// order afterwards -- both must read one list the same way.
+func ParseEgressShardSIDs(raw string) ([]net.IP, error) {
+	var sids []net.IP
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		sid := net.ParseIP(part)
+		if sid == nil {
+			return nil, fmt.Errorf("invalid egress shard SID %q", part)
+		}
+		sids = append(sids, sid)
+	}
+	return sids, nil
 }

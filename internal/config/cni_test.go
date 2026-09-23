@@ -202,3 +202,35 @@ func TestCNIConfigDANDir(t *testing.T) {
 		t.Errorf("DANDir = %q, want the env value", cfg.DANDir)
 	}
 }
+
+func TestParseEgressShardSIDs_Empty(t *testing.T) {
+	sids, err := ParseEgressShardSIDs("")
+	if err != nil {
+		t.Fatalf("ParseEgressShardSIDs(\"\") error = %v, want nil", err)
+	}
+	if len(sids) != 0 {
+		t.Errorf("ParseEgressShardSIDs(\"\") = %v, want empty", sids)
+	}
+}
+
+func TestParseEgressShardSIDs_TrimsWhitespaceAndSkipsBlankEntries(t *testing.T) {
+	sids, err := ParseEgressShardSIDs(" 2001:db8:ff01:1:e001:: , 2001:db8:ff03:1:e001::, ,")
+	if err != nil {
+		t.Fatalf("ParseEgressShardSIDs() error = %v, want nil", err)
+	}
+	want := []string{"2001:db8:ff01:1:e001::", "2001:db8:ff03:1:e001::"}
+	if len(sids) != len(want) {
+		t.Fatalf("ParseEgressShardSIDs() = %v, want %v", sids, want)
+	}
+	for i, w := range want {
+		if sids[i].String() != w {
+			t.Errorf("ParseEgressShardSIDs()[%d] = %v, want %s", i, sids[i], w)
+		}
+	}
+}
+
+func TestParseEgressShardSIDs_InvalidEntryFailsLoudly(t *testing.T) {
+	if _, err := ParseEgressShardSIDs("2001:db8:ff01:1:e001::,not-an-ip"); err == nil {
+		t.Error("ParseEgressShardSIDs() error = nil, want an error for the invalid entry")
+	}
+}

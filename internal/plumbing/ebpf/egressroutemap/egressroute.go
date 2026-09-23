@@ -19,6 +19,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
@@ -468,8 +469,12 @@ type RefreshResult struct {
 	// Scanned is every entry the sweep read, pass-through entries included.
 	Scanned int
 	// Refreshed is the entries whose link or L2 addresses had changed and were
-	// rewritten.
+	// rewritten, Reselected entries included.
 	Refreshed int
+	// Reselected is the entries moved to a different egress shard, because a
+	// shard ahead of the one they pointed at became reachable or the one they
+	// pointed at stopped being.
+	Reselected int
 	// Unresolved is the encapsulating entries whose SID could not be resolved
 	// this time round. Their existing value is left in place.
 	Unresolved int
@@ -480,8 +485,8 @@ type RefreshResult struct {
 }
 
 // Refresh re-resolves the encapsulating entries this caller's network namespace
-// owns and rewrites the ones that have moved, leaving each entry's prefix and
-// SID untouched.
+// owns and rewrites the ones that have moved. An entry keeps its prefix, and
+// keeps its SID unless that SID is an egress shard's; see shardSIDs below.
 //
 // foreignTableIDs names the Linux VRF routing tables belonging to a writer in
 // another network namespace, in practice SidecarOwnedTableIDs' result. Entries
@@ -491,6 +496,21 @@ type RefreshResult struct {
 // packets are forwarded, and every such packet is dropped until that writer
 // registers again. Callers that cannot determine the set must not sweep at all
 // rather than pass nil.
+//
+// shardSIDs is the configured egress shard list, in the operator's order of
+// preference -- the same list, in the same order, CNI ADD chose from. An entry
+// whose SID is one of those shards, whatever its Argument, is re-pointed at the
+// first shard in the list that resolves now, carrying its own Argument across
+// unchanged since that is what identifies its tenant to the shard. ADD picks
+// the first shard that resolves at the moment it runs and nothing revisited
+// that choice, so an ADD landing while the fabric had advertised only some
+// shards pinned its VRF to whichever arrived first, for the life of the node:
+// shard routes arrive in no particular order, and one ahead in the list showing
+// up a moment later changed nothing. The same rule moves an entry off a shard
+// whose route has been withdrawn, and back again once it returns. A move
+// strands the entry's existing connections, their state living on the shard it
+// left; that is the cost of honouring the order, and a failover strands them
+// anyway. nil keeps every entry's SID as it is.
 //
 // It exists because those addresses are resolved once, by whoever wrote the
 // entry, and an entry written by a short-lived CNI plugin process has nobody to
@@ -505,9 +525,10 @@ type RefreshResult struct {
 // Pass-through entries are skipped. They carry no SID and are never
 // encapsulated toward, so they have nothing to resolve; see RegisterPassThrough.
 //
-// An entry whose SID does not resolve is counted and left alone rather than
-// removed or zeroed. A transient resolution failure is not evidence that the
-// route is wrong, and a half-written entry forwards worse than a stale one.
+// An entry whose SID does not resolve -- for a shard entry, one for which no
+// configured shard resolves -- is counted and left alone rather than removed or
+// zeroed. A transient resolution failure is not evidence that the route is
+// wrong, and a half-written entry forwards worse than a stale one.
 //
 // Writes are collected during iteration and applied after it, never inside it:
 // modifying a BPF map while iterating it can make the iterator repeat or skip
@@ -518,8 +539,10 @@ type RefreshResult struct {
 // inert -- an entry keyed on a routing table no packet reaches any more, since
 // the VRF it belonged to is being torn down -- so it is not worth a
 // compare-and-swap the map API does not offer.
-func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}) (RefreshResult, error) {
+func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}, shardSIDs []net.IP) (RefreshResult, error) {
 	var result RefreshResult
+
+	shards := newShardSelector(shardSIDs)
 
 	type pending struct {
 		key   prog.UsidEgressRouteKey
@@ -545,30 +568,38 @@ func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}) (Refresh
 		sid := make(net.IP, 16)
 		copy(sid, value.Sid[:])
 
-		linkIndex, dmac, smac, err := resolveLinkAndL2Fn(sid)
+		target, next, err := shards.resolve(sid)
 		if err != nil {
 			result.Unresolved++
 			slog.Warn("egressroutemap: refresh: leaving entry at its current next hop, sid did not resolve",
 				"table", key.TableId, "sid", sid, "err", err)
 			continue
 		}
-		if uint32(linkIndex) == value.LinkIfindex &&
-			bytes.Equal(dmac, value.Dmac[:]) && bytes.Equal(smac, value.Smac[:]) {
+		reselected := !target.Equal(sid)
+		if !reselected && uint32(next.link) == value.LinkIfindex &&
+			bytes.Equal(next.dmac, value.Dmac[:]) && bytes.Equal(next.smac, value.Smac[:]) {
 			continue
 		}
 
-		next := value
-		next.LinkIfindex = uint32(linkIndex)
-		copy(next.Dmac[:], dmac)
-		copy(next.Smac[:], smac)
-		updates = append(updates, pending{key: key, value: next})
+		updated := value
+		copy(updated.Sid[:], target.To16())
+		updated.LinkIfindex = uint32(next.link)
+		copy(updated.Dmac[:], next.dmac)
+		copy(updated.Smac[:], next.smac)
+		updates = append(updates, pending{key: key, value: updated})
 
+		if reselected {
+			result.Reselected++
+			slog.Info("egressroutemap: refresh: egress route moved to a preferred egress shard",
+				"table", key.TableId, "fromSid", sid, "toSid", target, "toLink", next.link)
+			continue
+		}
 		slog.Info("egressroutemap: refresh: egress route next hop moved",
 			"table", key.TableId, "sid", sid,
-			"fromLink", value.LinkIfindex, "toLink", linkIndex,
+			"fromLink", value.LinkIfindex, "toLink", next.link,
 			// Stringified explicitly: a net.HardwareAddr is a byte slice, and
 			// slog renders it as an escaped string rather than as a MAC.
-			"fromDmac", net.HardwareAddr(value.Dmac[:]).String(), "toDmac", dmac.String())
+			"fromDmac", net.HardwareAddr(value.Dmac[:]).String(), "toDmac", next.dmac.String())
 	}
 	if err := iter.Err(); err != nil {
 		return result, fmt.Errorf("egressroutemap: egress_route_table: refresh: iterate: %w", err)
@@ -581,4 +612,117 @@ func (t *EgressRouteTable) Refresh(foreignTableIDs map[uint32]struct{}) (Refresh
 		result.Refreshed++
 	}
 	return result, nil
+}
+
+// nextHop is one resolveLinkAndL2Fn answer.
+type nextHop struct {
+	link       int
+	dmac, smac net.HardwareAddr
+}
+
+// shardSelector picks the egress shard a shard-bound entry should point at, for
+// one Refresh sweep.
+//
+// Shards are compared on everything but the Argument: Block, Node-ID and
+// Function name a shard, and the Argument is the tenant's VRFID that ADD wrote
+// into its copy of the shard's SID. See internal/cnibgp's shardSIDsForTenant.
+//
+// A shard's resolution is cached for the sweep by its locator, Block plus
+// Node-ID, rather than per SID. Every VRF's copy of a shard differs only below
+// that, the fabric routes a shard on exactly that /64, and an unresolvable
+// neighbor costs a solicit plus a poll, so resolving each VRF's copy
+// separately would multiply the cost of one unreachable shard by the number
+// of VRFs on the node.
+type shardSelector struct {
+	shards []uformat.Fields
+	cache  map[uformat.LocatorKey]resolution
+}
+
+// resolution is a cached resolveLinkAndL2Fn outcome.
+type resolution struct {
+	hop nextHop
+	err error
+}
+
+// newShardSelector decodes shardSIDs once for the sweep. An entry that is not a
+// well-formed uSID is dropped: ADD already refuses to install a route toward
+// one, so no entry in the map can be bound to it.
+func newShardSelector(shardSIDs []net.IP) *shardSelector {
+	s := &shardSelector{cache: make(map[uformat.LocatorKey]resolution)}
+	for _, sid := range shardSIDs {
+		fields, err := decodeSID(sid)
+		if err != nil {
+			slog.Warn("egressroutemap: refresh: ignoring malformed egress shard SID", "sid", sid, "err", err)
+			continue
+		}
+		s.shards = append(s.shards, fields)
+	}
+	return s
+}
+
+// resolve returns the SID an entry currently pointing at sid should point at,
+// and its next hop. For an entry bound to a configured shard, that is the
+// first shard in preference order that resolves, with sid's Argument. For any
+// other entry it is sid itself.
+func (s *shardSelector) resolve(sid net.IP) (net.IP, nextHop, error) {
+	fields, err := decodeSID(sid)
+	if err != nil || !s.isShard(fields) {
+		link, dmac, smac, err := resolveLinkAndL2Fn(sid)
+		return sid, nextHop{link: link, dmac: dmac, smac: smac}, err
+	}
+
+	var errs []error
+	for _, shard := range s.shards {
+		shard.Argument = fields.Argument
+		addr, err := uformat.Encode(shard)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		candidate := net.IP(addr.AsSlice())
+		res := s.lookup(addr, candidate)
+		if res.err != nil {
+			errs = append(errs, fmt.Errorf("shard %s: %w", candidate, res.err))
+			continue
+		}
+		return candidate, res.hop, nil
+	}
+	return nil, nextHop{}, fmt.Errorf("no configured egress shard resolves: %w", errors.Join(errs...))
+}
+
+// lookup resolves candidate, reusing the answer for any earlier candidate on
+// the same locator this sweep.
+func (s *shardSelector) lookup(addr netip.Addr, candidate net.IP) resolution {
+	// Encode's output is always 16 bytes, so this cannot fail in practice;
+	// an uncached lookup is the safe answer if it ever does.
+	locator, keyErr := uformat.LocatorKeyFromAddr(addr)
+	if res, ok := s.cache[locator]; ok && keyErr == nil {
+		return res
+	}
+	link, dmac, smac, err := resolveLinkAndL2Fn(candidate)
+	res := resolution{hop: nextHop{link: link, dmac: dmac, smac: smac}, err: err}
+	if keyErr == nil {
+		s.cache[locator] = res
+	}
+	return res
+}
+
+// isShard reports whether fields names one of the configured shards, ignoring
+// the Argument.
+func (s *shardSelector) isShard(fields uformat.Fields) bool {
+	for _, shard := range s.shards {
+		if shard.Block == fields.Block && shard.NodeID == fields.NodeID && shard.Function == fields.Function {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeSID decodes a uSID held as a net.IP.
+func decodeSID(sid net.IP) (uformat.Fields, error) {
+	addr, ok := netip.AddrFromSlice(sid.To16())
+	if !ok {
+		return uformat.Fields{}, fmt.Errorf("%s is not a 16-byte address", sid)
+	}
+	return uformat.Decode(addr.Unmap())
 }

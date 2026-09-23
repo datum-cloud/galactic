@@ -99,7 +99,7 @@ func TestRefreshSkipsSidecarOwnedEntries(t *testing.T) {
 		t.Fatalf("SidecarOwnedTableIDs = %v, want success", err)
 	}
 
-	result, err := tbl.Refresh(foreign)
+	result, err := tbl.Refresh(foreign, nil)
 	if err != nil {
 		t.Fatalf("Refresh() = %v, want success", err)
 	}
@@ -158,7 +158,7 @@ func TestRefreshStillRewritesHostOwnedEntriesAlongsideSidecarOnes(t *testing.T) 
 		t.Fatalf("SidecarOwnedTableIDs = %v, want success", err)
 	}
 
-	result, err := tbl.Refresh(foreign)
+	result, err := tbl.Refresh(foreign, nil)
 	if err != nil {
 		t.Fatalf("Refresh() = %v, want success", err)
 	}
