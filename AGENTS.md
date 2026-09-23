@@ -77,7 +77,7 @@ Summary:
 | `galactic.datumapis.com/galactic=router` | `galactic-cni`, `galactic-router` (plain/tenant mode) — runs on both `compute` and `edge` nodes |
 | `galactic.datumapis.com/galactic=control` | `galactic-router-rr`; mutually exclusive with `galactic=router` on the same node |
 | `galactic.datumapis.com/fabric=router` | `fabric-router` |
-| `galactic.datumapis.com/fabric=control` | `fabric-router-rr` (**future** — not yet implemented; `fabric-router` has no route-reflector variant today) |
+| `galactic.datumapis.com/fabric=control` | `fabric-router`, same image as `fabric=router` — reflector-vs-plain is driven entirely by the per-node `frr.conf` infra's own renderer produces, not a separate binary or overlay |
 
 See [docs/node-labels.md](docs/node-labels.md) for the full strategy — why `galactic`/`fabric` are each a mode enum rather than independent booleans, the naming collision between `node=edge` and `galactic-gateway`'s pre-existing "edge XDP" terminology, and the specific bugs this scheme replaced.
 
