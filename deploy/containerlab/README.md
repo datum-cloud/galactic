@@ -439,7 +439,7 @@ task deploy
 | `deploy:topology`         | Deploy the ContainerLab topology (transit routers)                              |
 | `deploy:clusters`         | Create the three Kind clusters and export their kubeconfigs                     |
 | `deploy:images`           | Load container images into Kind clusters                                        |
-| `deploy:system`           | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC   |
+| `deploy:system`           | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC¹  |
 | `deploy:cni`              | Install Cilium and Multus, then the galactic-cni DaemonSet                      |
 | `deploy:fabric`           | Apply FRR DaemonSets to all clusters                                            |
 | `deploy:galactic-router`  | Apply galactic-router DaemonSets and BGP CRs                                    |
@@ -465,6 +465,10 @@ task deploy
 | `host-setup`              | Apply required host sysctls (IPv6 forwarding, inotify limits)                   |
 | `clean`                   | Destroy lab, delete built images, and remove lab artifacts                      |
 | `test`                    | Run all verification checks                                                     |
+
+¹ Network CRDs come from the latest commit on `datum-cloud/network`'s `main`,
+not the version `go.mod` requires. Set `NETWORK_REF=<branch>` to track a
+different branch, or `NETWORK_SHA=<commit>` to pin one commit.
 
 ## Verification
 

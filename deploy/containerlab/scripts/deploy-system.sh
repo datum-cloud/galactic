@@ -9,23 +9,23 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-# Extract the datum-cloud/network git ref from go.mod: a release tag such as
-# v0.1.0, or a pseudo-version's commit suffix after the last hyphen (e.g.
-# v0.0.0-20260708202618-77cf276d17f1 → 77cf276d17f1). $1 must match the require line's module path exactly, not
-# just a substring, so an unrelated line can't corrupt NETWORK_SHA.
-NETWORK_SHA=$(awk '$1 == "go.datum.net/network" {print $2}' "${SCRIPT_DIR}/../../../go.mod" | sed 's/.*-//')
+# Network CRDs track datum-cloud/network's latest commit on NETWORK_REF
+# (default main), not the version go.mod requires -- the lab exercises
+# galactic against network's current API, and a go.mod pin routinely lags
+# the schema changes the lab needs (e.g. BGPRouter's 16-bit spec.nodeID).
+# The ref is resolved to a SHA once up front so every site installs the
+# same schema even if the branch moves mid-deploy; set NETWORK_SHA to pin
+# a specific commit instead.
+NETWORK_REF="${NETWORK_REF:-main}"
+if [[ -z "${NETWORK_SHA:-}" ]]; then
+  NETWORK_SHA=$(git ls-remote https://github.com/datum-cloud/network.git "refs/heads/${NETWORK_REF}" | cut -f1)
+  if [[ -z "${NETWORK_SHA}" ]]; then
+    echo "error: could not resolve datum-cloud/network ref ${NETWORK_REF}" >&2
+    exit 1
+  fi
+fi
+echo "Using datum-cloud/network CRDs at ${NETWORK_SHA} (${NETWORK_REF})"
 NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
-
-# go.mod's own local `replace go.datum.net/network => ../network` (see that
-# line's comment) resolves from the galactic repo root, i.e. one level
-# above SCRIPT_DIR's ../../.. -- same relative path the containerlab
-# Taskfile's --build-context network=../../../network and scripts/ci.sh's
-# --build-context network=../network use for the identical reason (both
-# from their own, different, working directories). Used below for CRDs
-# that exist only on that local, unpublished branch (network_crds_local) --
-# NETWORK_CRD_URL above can't serve them since GitHub only has the ref
-# go.mod's require line pins, which predates them.
-NETWORK_LOCAL_CRD_DIR="${SCRIPT_DIR}/../../../../network/config/crd"
 
 # VPC/VPCAttachment CRDs come from the separate companion VPC operator,
 # datum-cloud/cloud. Nothing in this repo's Go code imports it (the CNI
@@ -35,52 +35,19 @@ NETWORK_LOCAL_CRD_DIR="${SCRIPT_DIR}/../../../../network/config/crd"
 CLOUD_SHA="71a4f0f9c12166a758da4e2b90c80a17709804f2"
 CLOUD_CRD_URL="https://raw.githubusercontent.com/datum-cloud/cloud/${CLOUD_SHA}/config/crd"
 
-network_crds=(
-  network.datumapis.com_bgpadvertisements.yaml
-  network.datumapis.com_bgppeers.yaml
-  network.datumapis.com_bgppolicies.yaml
-  network.datumapis.com_networkgateways.yaml
-  network.datumapis.com_networkrules.yaml
+# Install whatever network's own config/crd/kustomization.yaml lists at
+# NETWORK_SHA, so a CRD added upstream is picked up without editing this
+# script. A missing CRD isn't benign: galactic-router's manager registers
+# watches unconditionally and crash-loops on a cache-sync timeout if any
+# watched kind is absent.
+mapfile -t network_crds < <(
+  curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "${NETWORK_CRD_URL}/kustomization.yaml" |
+    awk '$1 == "-" && $2 ~ /\.yaml$/ {print $2}'
 )
-
-# ServiceVIPBinding and EgressShard are the DSR/Maglev redesign's own CRDs
-# (design plan §1/§3), added on network's local feat/dsr-maglev-crds
-# branch alongside this repo's feat/dsr-maglev-gateway -- never pushed, so
-# neither exists at NETWORK_SHA on GitHub the way network_crds above does.
-# BGPVRFInstance moved here too for the same reason, even though it *does*
-# exist at NETWORK_SHA: that pre-redesign schema predates NPTv6Spec being
-# added to BGPVRFInstanceSpec (design plan §2) -- fetching it from GitHub
-# would install a real CRD with no nptv6 field at all, silently dropping
-# every NPTv6 config an operator applies rather than erroring loudly.
-#
-# Missing ServiceVIPBinding specifically breaks two different things,
-# discovered live in this lab: (1)
-# resources/galactic-gateway/iad/servicevipbinding-ns60.yaml fails
-# deploy-galactic-router.sh's apply_k of that directory with kubectl's
-# "ensure CRDs are installed first" (the DaemonSet/BGP resources in the
-# same kustomization still get applied, but the script's overall exit
-# code still goes non-zero); (2), the more serious one -- galactic-router's
-# manager registers a ServiceVIPBinding watch unconditionally, on every
-# site, so without this CRD it crash-loops everywhere on "failed to wait
-# for servicevipbinding caches to sync ... timed out" and never starts any
-# controller at all, not just the ones this redesign added. Installed on
-# every site, matching network_crds' own blanket per-site loop, for that
-# second reason -- (1) alone would only need iad.
-#
-# BGPRouter is here for the same reason BGPVRFInstance is -- it exists at
-# NETWORK_SHA, but with a stale schema. That version still bounds
-# spec.nodeID at 254, from when Node-ID was an 8-bit field; it is 16 bits
-# wide today (uformat.NodeIDMin/NodeIDMax, 0x0001-0xDFFF), which is what
-# this lab's service-classed Node-ID allocation needs (README.md's
-# "Node-ID allocation"). Fetching it from GitHub rejects every BGPRouter
-# in resources/ with "spec.nodeID in body should be less than or equal to
-# 254" and fails deploy:galactic-router outright.
-network_crds_local=(
-  network.datumapis.com_bgprouters.yaml
-  network.datumapis.com_bgpvrfinstances.yaml
-  network.datumapis.com_servicevipbindings.yaml
-  network.datumapis.com_egressshards.yaml
-)
+if [[ ${#network_crds[@]} -eq 0 ]]; then
+  echo "error: no CRDs listed in ${NETWORK_CRD_URL}/kustomization.yaml" >&2
+  exit 1
+fi
 
 cloud_crds=(
   cloud.datumapis.com_vpcs.yaml
@@ -98,9 +65,6 @@ for site in dfw sjc iad; do
   # hiccups (rate-limits, cold CDN cache) instead of failing the deploy.
   for crd in "${network_crds[@]}"; do
     curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "${NETWORK_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
-  done
-  for crd in "${network_crds_local[@]}"; do
-    docker exec -i "${node}" kubectl apply -f - < "${NETWORK_LOCAL_CRD_DIR}/${crd}"
   done
   for crd in "${cloud_crds[@]}"; do
     curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "${CLOUD_CRD_URL}/${crd}" | docker exec -i "${node}" kubectl apply -f -
