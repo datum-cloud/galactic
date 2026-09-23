@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -66,13 +68,13 @@ type GoBGPRuntime struct {
 	// it, so the shared watcher dispatches a best-path event in constant time
 	// rather than scanning every VRF. A node can host thousands.
 	rtIndex map[string]uint32
-	// appliedAdvertisements tracks the last-applied advertisement per name, so a
-	// changed one's previous EVPN paths can be withdrawn. The route's gateway
-	// address, the SRv6 SID, is part of the NLRI rather than a mutable
-	// attribute, so re-adding a path with a new SID creates a structurally
-	// different route instead of replacing the old one, which then stays
-	// advertised until withdrawn explicitly.
+	// appliedAdvertisements holds the EVPN advertisements, by name, whose
+	// routes the last successful applyEVPN converged, for status reporting.
 	appliedAdvertisements map[string]model.DesiredAdvertisement
+	// appliedRoutes tracks each EVPN route currently announced, by route rather
+	// than by advertisement, since several advertisements can claim one route
+	// and withdrawing it on behalf of one would drop it for all.
+	appliedRoutes map[evpnRouteKey]evpnRoute
 	// serverCtxCancel cancels the goroutine running server.Start.
 	serverCtxCancel context.CancelFunc
 	// srvCtx is the context passed to server.Start; monitor goroutines use it.
@@ -139,6 +141,7 @@ func NewRuntimeFactory(
 			appliedVRFImportRTs:   make(map[string][]string),
 			rtIndex:               make(map[string]uint32),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
+			appliedRoutes:         make(map[evpnRouteKey]evpnRoute),
 			observer:              observer,
 		}, nil
 	}
@@ -404,41 +407,97 @@ func equalRTSets(a, b []string) bool {
 	return true
 }
 
-// applyEVPN advertises EVPN paths for all relevant advertisements, withdrawing
-// each advertisement's previous paths first when its content has changed.
-func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredAdvertisement, routerID string) error {
-	desiredNames := make(map[string]struct{}, len(advs))
-	for _, adv := range advs {
-		if adv.AddressFamily.AFI != afiL2VPN {
-			continue
-		}
-		desiredNames[adv.Name] = struct{}{}
+// evpnRouteKey identifies one EVPN Type 5 route by the fields its NLRI is
+// built from. GoBGP holds a single local path per NLRI, so every advertisement
+// yielding the same key shares that one path.
+type evpnRouteKey struct {
+	rd     string
+	prefix netip.Prefix
+}
 
-		if oldAdv, ok := r.appliedAdvertisements[adv.Name]; ok {
-			if reflect.DeepEqual(oldAdv, adv) {
+// evpnRoute is the single-prefix advertisement and router ID a route was, or is
+// to be, built from.
+type evpnRoute struct {
+	adv      model.DesiredAdvertisement
+	routerID string
+}
+
+// sameEVPNRoute reports whether a and b build an identical path. The owning
+// advertisement's name is not part of the path.
+func sameEVPNRoute(a, b evpnRoute) bool {
+	a.adv.Name, b.adv.Name = "", ""
+	return a.routerID == b.routerID && reflect.DeepEqual(a.adv, b.adv)
+}
+
+// desiredEVPNRoutes returns every EVPN route the l2vpn advertisements in advs
+// claim, keyed by route, along with those advertisements. When several claim
+// the same route, the one sorting first by name supplies its attributes.
+func desiredEVPNRoutes(
+	advs []model.DesiredAdvertisement, routerID string,
+) (map[evpnRouteKey]evpnRoute, map[string]model.DesiredAdvertisement, error) {
+	evpn := make([]model.DesiredAdvertisement, 0, len(advs))
+	for _, adv := range advs {
+		if adv.AddressFamily.AFI == afiL2VPN {
+			evpn = append(evpn, adv)
+		}
+	}
+	slices.SortFunc(evpn, func(a, b model.DesiredAdvertisement) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	routes := make(map[evpnRouteKey]evpnRoute)
+	byName := make(map[string]model.DesiredAdvertisement, len(evpn))
+	for _, adv := range evpn {
+		byName[adv.Name] = adv
+		rd := deriveRD(routerID, adv.VRFID)
+		for _, prefixStr := range adv.Prefixes {
+			prefix, err := netip.ParsePrefix(prefixStr)
+			if err != nil {
+				return nil, nil, fmt.Errorf("parse prefix %q of EVPN advertisement %s: %w", prefixStr, adv.Name, err)
+			}
+			key := evpnRouteKey{rd: rd, prefix: prefix}
+			if _, claimed := routes[key]; claimed {
 				continue
 			}
-			if err := buildEVPNPaths(b, oldAdv, routerID, true); err != nil {
-				return fmt.Errorf("withdraw stale EVPN paths for %s: %w", adv.Name, err)
-			}
+			single := adv
+			single.Prefixes = []string{prefixStr}
+			routes[key] = evpnRoute{adv: single, routerID: routerID}
 		}
+	}
+	return routes, byName, nil
+}
 
-		if err := buildEVPNPaths(b, adv, routerID, false); err != nil {
-			return fmt.Errorf("advertise EVPN paths for %s: %w", adv.Name, err)
-		}
-		r.appliedAdvertisements[adv.Name] = adv
+// applyEVPN converges the local EVPN paths to the routes claimed by the desired
+// advertisements. A route is withdrawn only once no advertisement claims it,
+// since advertisements that share a route share its single path, and
+// withdrawals run before announcements.
+func (r *GoBGPRuntime) applyEVPN(b *gobgpserver.BgpServer, advs []model.DesiredAdvertisement, routerID string) error {
+	desired, byName, err := desiredEVPNRoutes(advs, routerID)
+	if err != nil {
+		return err
 	}
 
-	// Withdraw advertisements that no longer exist in desired state.
-	for name, oldAdv := range r.appliedAdvertisements {
-		if _, ok := desiredNames[name]; ok {
+	for key, applied := range r.appliedRoutes {
+		if _, ok := desired[key]; ok {
 			continue
 		}
-		if err := buildEVPNPaths(b, oldAdv, routerID, true); err != nil {
-			return fmt.Errorf("withdraw removed EVPN advertisement %s: %w", name, err)
+		if err := buildEVPNPaths(b, applied.adv, applied.routerID, true); err != nil {
+			return fmt.Errorf("withdraw EVPN route %s %s: %w", key.rd, key.prefix, err)
 		}
-		delete(r.appliedAdvertisements, name)
+		delete(r.appliedRoutes, key)
 	}
+
+	for key, route := range desired {
+		if applied, ok := r.appliedRoutes[key]; ok && sameEVPNRoute(applied, route) {
+			continue
+		}
+		if err := buildEVPNPaths(b, route.adv, route.routerID, false); err != nil {
+			return fmt.Errorf("advertise EVPN route %s %s for %s: %w", key.rd, key.prefix, route.adv.Name, err)
+		}
+		r.appliedRoutes[key] = route
+	}
+
+	r.appliedAdvertisements = byName
 	return nil
 }
 
