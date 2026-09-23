@@ -29,6 +29,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
@@ -1101,38 +1102,6 @@ func TestRetryK8sOpsExhaustsDeadline(t *testing.T) {
 	}
 }
 
-func TestParseShardSIDs_Empty(t *testing.T) {
-	sids, err := parseShardSIDs("")
-	if err != nil {
-		t.Fatalf("parseShardSIDs(\"\") error = %v, want nil", err)
-	}
-	if len(sids) != 0 {
-		t.Errorf("parseShardSIDs(\"\") = %v, want empty", sids)
-	}
-}
-
-func TestParseShardSIDs_TrimsWhitespaceAndSkipsBlankEntries(t *testing.T) {
-	sids, err := parseShardSIDs(" 2001:db8:ff01:1:e001:: , 2001:db8:ff03:1:e001::, ,")
-	if err != nil {
-		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
-	}
-	want := []string{"2001:db8:ff01:1:e001::", "2001:db8:ff03:1:e001::"}
-	if len(sids) != len(want) {
-		t.Fatalf("parseShardSIDs() = %v, want %v", sids, want)
-	}
-	for i, w := range want {
-		if sids[i].String() != w {
-			t.Errorf("parseShardSIDs()[%d] = %v, want %s", i, sids[i], w)
-		}
-	}
-}
-
-func TestParseShardSIDs_InvalidEntryFailsLoudly(t *testing.T) {
-	if _, err := parseShardSIDs("2001:db8:ff01:1:e001::,not-an-ip"); err == nil {
-		t.Error("parseShardSIDs() error = nil, want an error for the invalid entry")
-	}
-}
-
 // TestInstallNAT66EgressRoute_NilCNIConfigIsANoop is the regression test
 // for a real panic found live: several tests in this package (and, before
 // this guard, installEgressRoutes itself) call registerEBPFDatapath
@@ -1157,9 +1126,9 @@ func TestInstallNAT66EgressRoute_NilCNIConfigIsANoop(t *testing.T) {
 // a shard read one constant Argument for all of them and two same-node tenants
 // with overlapping ULAs shared a connection row.
 func TestShardSIDsForTenant_WritesTheArgument(t *testing.T) {
-	sids, err := parseShardSIDs("2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::")
+	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::")
 	if err != nil {
-		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
 	}
 
 	got, err := shardSIDsForTenant(sids, 0x2a5)
@@ -1181,9 +1150,9 @@ func TestShardSIDsForTenant_WritesTheArgument(t *testing.T) {
 // TestShardSIDsForTenant_DistinctPerTenant states the property #538 is about
 // directly: two VRFIDs on one node must not produce the same destination.
 func TestShardSIDsForTenant_DistinctPerTenant(t *testing.T) {
-	sids, err := parseShardSIDs("2001:db8:ff01:9:e001::")
+	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:e001::")
 	if err != nil {
-		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
 	}
 
 	a, err := shardSIDsForTenant(sids, 0x001)
@@ -1204,9 +1173,9 @@ func TestShardSIDsForTenant_DistinctPerTenant(t *testing.T) {
 // identifies no tenant -- one configured value is shared by every VRF on every
 // node -- so it is replaced, not honoured or treated as a conflict.
 func TestShardSIDsForTenant_OverwritesAConfiguredArgument(t *testing.T) {
-	sids, err := parseShardSIDs("2001:db8:ff01:9:efff::")
+	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:efff::")
 	if err != nil {
-		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
 	}
 
 	got, err := shardSIDsForTenant(sids, 0x007)
@@ -1222,9 +1191,9 @@ func TestShardSIDsForTenant_OverwritesAConfiguredArgument(t *testing.T) {
 // Argument rewrite must leave alone: get any of them wrong and the packet is
 // addressed to a different shard, or to no shard at all.
 func TestShardSIDsForTenant_PreservesBlockNodeIDAndFunction(t *testing.T) {
-	sids, err := parseShardSIDs("2001:db8:ff01:9:e001::")
+	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:e001::")
 	if err != nil {
-		t.Fatalf("parseShardSIDs() error = %v, want nil", err)
+		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
 	}
 
 	got, err := shardSIDsForTenant(sids, 0x123)
@@ -1253,7 +1222,7 @@ func TestShardSIDsForTenant_PreservesBlockNodeIDAndFunction(t *testing.T) {
 	}
 }
 
-// TestShardSIDsForTenant_RejectsAMalformedSID covers the entries parseShardSIDs
+// TestShardSIDsForTenant_RejectsAMalformedSID covers the entries config.ParseEgressShardSIDs
 // accepts as valid IP addresses but that are not uSIDs. Writing an Argument
 // into one produces a plausible-looking destination that addresses nothing, so
 // it fails the ADD instead of being passed through unchanged.
@@ -1262,9 +1231,9 @@ func TestShardSIDsForTenant_RejectsAMalformedSID(t *testing.T) {
 		"2001:db8:ff01:9:e001::1", // non-zero padding: not a uFMT 48+16 address
 		"192.0.2.1",               // IPv4: not an SRv6 SID at all
 	} {
-		sids, err := parseShardSIDs(raw)
+		sids, err := config.ParseEgressShardSIDs(raw)
 		if err != nil {
-			t.Fatalf("parseShardSIDs(%q) error = %v, want nil", raw, err)
+			t.Fatalf("config.ParseEgressShardSIDs(%q) error = %v, want nil", raw, err)
 		}
 		if _, err := shardSIDsForTenant(sids, 0x005); err == nil {
 			t.Errorf("shardSIDsForTenant(%q) error = nil, want an error", raw)

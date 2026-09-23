@@ -442,6 +442,11 @@ type ebpfDatapathState struct {
 	k8sClient client.Client
 	namespace string
 	nodeName  string
+
+	// egressShardSIDs is the configured egress shard list, in preference
+	// order, from the same host conflist CNI ADD reads it from. The egress
+	// route sweep uses it to keep each VRF on the first reachable shard.
+	egressShardSIDs []net.IP
 }
 
 // startEBPFDatapath loads and attaches the eBPF datapath and returns the state
@@ -476,15 +481,33 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	// above, a failure is not fatal: GC is background maintenance, not a
 	// requirement for forwarding, so the sweep ticker just stays inert until
 	// the next restart.
-	if hostConf, err := hostconf.Load(HostConflist, hostconf.PluginType); err != nil {
-		slog.Warn("eBPF vrf_table GC sweep disabled: failed to load host conf", "err", err)
-	} else if k8sClient, err := newK8sClientFn(); err != nil {
+	hostConf, err := hostconf.Load(HostConflist, hostconf.PluginType)
+	if err != nil {
+		slog.Warn("eBPF vrf_table GC sweep and egress shard re-selection disabled: failed to load host conf",
+			"err", err)
+		return state, datapath, nil
+	}
+	state.egressShardSIDs = loadEgressShardSIDs(hostConf.EgressShardSIDs)
+	if k8sClient, err := newK8sClientFn(); err != nil {
 		slog.Warn("eBPF vrf_table GC sweep disabled: failed to create k8s client", "err", err)
 	} else {
 		state.k8sClient, state.namespace, state.nodeName = k8sClient, hostConf.Namespace, hostConf.NodeName
 	}
 
 	return state, datapath, nil
+}
+
+// loadEgressShardSIDs parses the host conflist's egress shard list for the
+// egress route sweep. A list that fails to parse also fails every ADD on this
+// node, which is where it gets reported; the sweep just keeps each entry's
+// shard as ADD wrote it.
+func loadEgressShardSIDs(raw string) []net.IP {
+	sids, err := config.ParseEgressShardSIDs(raw)
+	if err != nil {
+		slog.Warn("Egress shard re-selection disabled: failed to parse egress shard list", "err", err)
+		return nil
+	}
+	return sids
 }
 
 // cleanupOldBinaryWrapper removes the stale .bin wrapper file. Split out of
@@ -538,8 +561,9 @@ func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfData
 	}
 }
 
-// startEgressRouteRefreshSweep runs one egress_route_table re-resolution pass
-// off Run's goroutine, for the same reason the two sweeps above run off it: an
+// startEgressRouteRefreshSweep runs one egress_route_table re-resolution pass,
+// which also moves each VRF onto the first reachable of shardSIDs, off Run's
+// goroutine, for the same reason the two sweeps above run off it: an
 // entry whose next hop has no neighbor costs a solicit plus a poll, so a node
 // that has lost its fabric uplink would hold the select loop past the next tick
 // and starve the credential refresh, GC sweeps, and health check with it.
@@ -556,7 +580,7 @@ func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfData
 // skips the whole sweep: a sweep that cannot tell the two writers apart
 // rewrites the sidecar's entries to host interfaces the pod does not have, and
 // a stale next hop is recoverable where that is not.
-func startEgressRouteRefreshSweep(sem chan struct{}) {
+func startEgressRouteRefreshSweep(sem chan struct{}, shardSIDs []net.IP) {
 	select {
 	case sem <- struct{}{}:
 		go func() {
@@ -579,7 +603,7 @@ func startEgressRouteRefreshSweep(sem chan struct{}) {
 				return
 			}
 
-			result, err := table.Refresh(foreignTableIDs)
+			result, err := table.Refresh(foreignTableIDs, shardSIDs)
 			if err != nil {
 				slog.Error("egress_route_table refresh sweep failed", "err", err,
 					"scanned", result.Scanned, "refreshed", result.Refreshed)
@@ -587,7 +611,7 @@ func startEgressRouteRefreshSweep(sem chan struct{}) {
 			}
 			if result.Refreshed > 0 || result.Unresolved > 0 {
 				slog.Info("egress_route_table refresh sweep complete",
-					"scanned", result.Scanned, "refreshed", result.Refreshed,
+					"scanned", result.Scanned, "refreshed", result.Refreshed, "reselected", result.Reselected,
 					"unresolved", result.Unresolved, "skipped", result.Skipped)
 			}
 		}()
@@ -899,8 +923,11 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// writer of a tenant VRF's route toward an egress shard is a CNI
 			// plugin process that has since exited -- so an entry resolved
 			// before the fabric advertised that shard's SID would otherwise
-			// stay wrong for the life of the node.
-			startEgressRouteRefreshSweep(egressRouteRefreshSem)
+			// stay wrong for the life of the node. The same pass moves each
+			// VRF onto the first reachable shard in the configured order,
+			// since the one ADD picked may just have been the first whose
+			// route happened to arrive.
+			startEgressRouteRefreshSweep(egressRouteRefreshSem, ebpfState.egressShardSIDs)
 
 		case iface := <-radvActors.failed:
 			radvActorFailed(radvActors, iface)

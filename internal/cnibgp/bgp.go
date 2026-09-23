@@ -772,7 +772,7 @@ func installEgressRoutes(vrfTableID uint32, argument uint16) error {
 	if cniConfig == nil {
 		return nil
 	}
-	shardSIDs, err := parseShardSIDs(cniConfig.EgressShardSIDs)
+	shardSIDs, err := config.ParseEgressShardSIDs(cniConfig.EgressShardSIDs)
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", config.EnvCNIEgressShardSIDs, err)
 	}
@@ -841,27 +841,6 @@ func installNAT64EgressRoute(vrfTableID uint32, shardSIDs []net.IP) error {
 		return fmt.Errorf("parse %s %q: %w", config.EnvCNINAT64Prefix, cniConfig.NAT64Prefix, err)
 	}
 	return srv6.EgressPrefixRouteAdd(vrfTableID, prefix, shardSIDs)
-}
-
-// parseShardSIDs splits a comma-separated egress shard SID list into addresses,
-// trimming whitespace and skipping blank entries, so a trailing comma or stray
-// space in the operator-supplied value does not fail every attachment ADD in
-// the cluster. An entry that survives trimming but is not a valid IP address
-// is a real misconfiguration and fails loudly.
-func parseShardSIDs(raw string) ([]net.IP, error) {
-	var sids []net.IP
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		sid := net.ParseIP(part)
-		if sid == nil {
-			return nil, fmt.Errorf("invalid egress shard SID %q", part)
-		}
-		sids = append(sids, sid)
-	}
-	return sids, nil
 }
 
 // hostInterfaceIndex resolves this attachment's host-side veth or tap
