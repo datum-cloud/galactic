@@ -76,15 +76,24 @@ func TestDaemonsetManifest_RunContainerMountsHostConflistDir(t *testing.T) {
 // unnoticed the same way HostConflist's own gap did, confirmed live on
 // staging infra.
 func TestDaemonsetManifest_RunContainerMountsRadvStateDir(t *testing.T) {
-	runContainerName, mountPaths := runContainerMountPaths(t)
+	c := findRunContainer(t)
 
-	radvStateDir := filepath.Dir(radv.DefaultStateDir)
-	if !slices.Contains(mountPaths, radvStateDir) {
-		t.Errorf("container %q in %s does not mount %s (needed to read radv.DefaultStateDir=%s via "+
-			"radv.ListAttachments; without it no tap attachment's Router Advertisement/Solicitation "+
-			"actor ever starts on any node); mounted paths: %v",
-			runContainerName, manifestPath, radvStateDir, radv.DefaultStateDir, mountPaths)
+	for _, vm := range c.VolumeMounts {
+		if vm.MountPath != radv.DefaultStateDir {
+			continue
+		}
+		// reconcileRadvActors removes the record of a tap that has gone
+		// missing, which fails on a read-only mount.
+		if vm.ReadOnly {
+			t.Errorf("container %q in %s mounts %s read-only; reconcileRadvActors must be able to "+
+				"remove stale records there", c.Name, manifestPath, radv.DefaultStateDir)
+		}
+		return
 	}
+	_, mountPaths := runContainerMountPaths(t)
+	t.Errorf("container %q in %s does not mount %s (needed to read it via radv.ListAttachments; "+
+		"without it no tap attachment's Router Advertisement/Solicitation actor ever starts on any "+
+		"node); mounted paths: %v", c.Name, manifestPath, radv.DefaultStateDir, mountPaths)
 }
 
 // TestDaemonsetManifest_RunContainerHasNetRawCapability is a regression test

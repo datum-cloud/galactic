@@ -920,3 +920,46 @@ func TestReconcileRadvActors(t *testing.T) {
 		})
 	}
 }
+
+// A removal that keeps failing, as on a read-only state directory, is retried
+// on every tick and warned about once.
+func TestReconcileRadvActors_FailedRemovalIsRetried(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so the removal cannot be made to fail")
+	}
+	env := newRadvTestEnv(t)
+	recordRadvAttachment(t)
+	if err := os.Chmod(radv.DefaultStateDir, 0o500); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(radv.DefaultStateDir, 0o700) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	actors := &radvActorSet{}
+	t.Cleanup(func() {
+		cancel()
+		actors.wg.Wait()
+	})
+
+	env.now = time.Now().Add(time.Minute)
+	reconcileRadvActors(ctx, actors)
+	for range 3 {
+		env.now = env.now.Add(radvStaleRecordGrace)
+		reconcileRadvActors(ctx, actors)
+	}
+	if !radvRecordExists(t) {
+		t.Fatalf("record for %q removed from a read-only directory", radvTestIface)
+	}
+	if !actors.pending[radvTestIface].removeFailed {
+		t.Errorf("pending[%q].removeFailed = false, want true after a failed removal", radvTestIface)
+	}
+
+	if err := os.Chmod(radv.DefaultStateDir, 0o700); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	env.now = env.now.Add(radvReconcileInterval)
+	reconcileRadvActors(ctx, actors)
+	if radvRecordExists(t) {
+		t.Fatalf("record for %q kept once the directory became writable", radvTestIface)
+	}
+}

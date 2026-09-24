@@ -650,6 +650,9 @@ type radvPending struct {
 	// missingSince is when a reconcile first found the interface absent, zero
 	// while it exists.
 	missingSince time.Time
+	// removeFailed records that removing the stale record has failed, so the
+	// failure is warned about once rather than on every tick.
+	removeFailed bool
 }
 
 // radvActorFailure is an actor goroutine's report that radv.RunActor could not
@@ -801,8 +804,14 @@ func removeStaleRadvRecord(p *radvPending, iface string, now time.Time) bool {
 	// stale. A newer one comes from an ADD that is creating the interface again.
 	removed, err := radv.RemoveStaleAttachment(radv.DefaultStateDir, iface, p.missingSince)
 	if err != nil {
-		slog.Warn("Failed to remove router advertisement record for missing interface",
-			"err", err, "hostInterface", iface)
+		if !p.removeFailed {
+			slog.Warn("Failed to remove router advertisement record for missing interface, will keep retrying",
+				"err", err, "hostInterface", iface)
+		} else {
+			slog.Debug("Failed to remove router advertisement record for missing interface",
+				"err", err, "hostInterface", iface)
+		}
+		p.removeFailed = true
 		return false
 	}
 	if !removed {

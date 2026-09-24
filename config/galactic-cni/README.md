@@ -83,9 +83,8 @@ reviewer rather than let it pass as a footnote.
 
 ## The `radv-state-dir` mount
 
-`/var/lib/cni` backs `internal/plumbing/radv.DefaultStateDir`
-("/var/lib/cni/ra"). It is read unprefixed by `credential-refresh`'s own
-`reconcileRadvActors` loop, unlike the other host dirs which are mounted
+`/var/lib/cni/ra` backs `internal/plumbing/radv.DefaultStateDir`. It is
+read unprefixed by `credential-refresh`'s own `reconcileRadvActors` loop, unlike the other host dirs which are mounted
 under `/host/...`: radv's constant is shared with `galactic-tap`, a
 separate binary invoked directly on the host by the kubelet's own CNI exec
 (never inside this or any other container), so it has to stay the real
@@ -95,6 +94,12 @@ hostPath is mounted at its own literal path rather than relocated under
 empty/missing directory — every tap attachment `galactic-tap` records on
 the host is invisible to it, so no RunActor ever starts and no guest gets
 an RA or a Router Solicitation reply, silently, on every node.
+
+The mount is writable, and covers only `/var/lib/cni/ra`, not the rest of the
+host's CNI state. `reconcileRadvActors` removes the record of a tap whose
+interface has been missing for 30 seconds, since nothing else would ever
+remove it once that tap's DEL has been missed. On a read-only mount every
+removal fails.
 
 ## Further reading
 
