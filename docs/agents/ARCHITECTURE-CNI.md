@@ -85,6 +85,34 @@ All nodes in the same VPC derive the same BGP Route Target by truncating the
 configuration. The RT is also used as the `BGPVRFInstance`'s Route
 Distinguisher and import/export Route Target.
 
+### SRv6 ingress source filter
+
+`usid_ingress` can check each claimed packet's outer source before any tenant
+delivery. The check runs only after the destination matches `locator_table`,
+so traffic not addressed to this node's locator (BGP, BFD, everything else)
+never reaches it. The source must match an allowed prefix, and unless that
+entry accepts any interface, the packet must arrive on an uplink whose slot bit
+is set in the entry's mask.
+
+- `off` (the default, and what a never-written config reads as) is a single
+  array read with no other effect. `audit` counts and records rejections but
+  still delivers. `enforce` drops them.
+- Until the control plane marks the allow-list populated, every packet passes
+  and is counted as a bypass, so the filter cannot drop traffic before its
+  first complete sync.
+- All state lives in new maps, so upgrading never trips the loader's
+  incompatible-pin recreation of the existing uSID maps.
+- `internal/plumbing/ebpf/srcfiltermap` is the typed read/write API over these
+  maps, with an in-memory fake for tests.
+
+| Map                       | Type              | Holds                                                                                |
+|---------------------------|-------------------|--------------------------------------------------------------------------------------|
+| `src_allow_table`         | LPM trie (4096)   | Allowed outer source prefixes, each with an uplink bitmask and an any-interface flag |
+| `uplink_slot_table`       | Hash (64)         | Uplink ifindex to its bit (0-31) in the bitmask                                      |
+| `src_filter_config_table` | Array (1)         | Mode (`off`/`audit`/`enforce`), populated flag, generation                           |
+| `src_filter_stats`        | Per-CPU array (8) | Checked, allowed, denied by prefix, denied by interface, bypassed before first sync  |
+| `src_filter_denied`       | LRU hash (1024)   | Denied source /64s with count, last interface, last reason and time, for triage      |
+
 ---
 
 ## Repository Layout
@@ -133,7 +161,8 @@ galactic/
 │   └── plumbing/            # Low-level kernel and network primitives
 │       ├── intf/            # Interface naming, base62↔hex encoding
 │       ├── ebpf/             # TC-BPF uSID datapath: preflight, uformat,
-│       │                    #   prog (usid.c), attach, usidmap, metrics —
+│       │                    #   prog (usid.c), attach, usidmap,
+│       │                    #   srcfiltermap, metrics —
 │       │                    #   see internal/plumbing/ebpf/doc.go. (Two
 │       │                    #   sibling datapaths live in this same
 │       │                    #   umbrella but are out of scope here: the edge

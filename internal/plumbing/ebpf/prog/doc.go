@@ -40,4 +40,4 @@ package prog
 // -cc is deliberately omitted: bpf2go defaults to $BPF2GO_CC or "clang", so CI
 // can pin an exact version without this directive changing.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type locator_value -type function_value -type vrf_value -type ifindex_vrf_value -type nptv6_value -type vip_xlat_key -type vip_xlat_value -type egress_route_key -type egress_route_value -type public_uplink_value Usid usid.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type locator_value -type function_value -type vrf_value -type ifindex_vrf_value -type nptv6_value -type vip_xlat_key -type vip_xlat_value -type egress_route_key -type egress_route_value -type public_uplink_value -type src_allow_key -type src_allow_value -type src_filter_config -type src_denied_key -type src_denied_value Usid usid.c
