@@ -33,7 +33,7 @@ tasks:
   "build:fabric-router":
     desc: Build the fabric-router image (FRR v{{.FRR_VERSION}})
     cmds:
-      - docker build --network=host --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
   # --build-context network=../../../network satisfies go.mod's local
   # `replace go.datum.net/network => ../network` (see that line's own

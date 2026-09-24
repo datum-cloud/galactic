@@ -1,2 +1,4 @@
 resources:
+  - serviceaccount.yaml
+  - rbac.yaml
   - daemonset.yaml

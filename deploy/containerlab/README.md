@@ -428,7 +428,7 @@ deploy/containerlab/
 ├── resources/
 │   ├── galactic-cni/            # galactic-cni installer DaemonSet + ConfigMap
 │   ├── fabric-router/           # FRR DaemonSet per-site overlays (dfw, iad, sjc),
-│   │                            #   one frr.conf.<nodename> per worker
+│   │                            #   one fabric-router.<nodename> ConfigMap per worker
 │   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs, compute nodes
 │   ├── galactic-control/iad/    # the EVPN route reflector + one BGPPeer per client
 │   ├── galactic-gateway/        # per-edge-node overlays (dfw-worker2, dfw-worker3,
@@ -560,7 +560,7 @@ task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
 - Every link is dual-stack: numbered IPv6 (/64) and IPv4 (/24) subnets, each carrying its own
   BGP session — eBGP on the edge uplinks, iBGP on the site-internal links.
 - Kind worker names are used exactly as Kind assigns them. Nothing renames a container or a
-  node after creation, so `frr.conf.<nodename>` keys, `targetRef` names, `kubernetes.io/hostname`
+  node after creation, so `fabric-router.<nodename>` ConfigMap names, `targetRef` names, `kubernetes.io/hostname`
   pins and container names never drift apart.
 - Cilium's iptables rules block BGP by default; the worker bootstrap script
   (`install.sh`) inserts `ip6tables -I INPUT` *and* `iptables -I INPUT` rules for TCP/179 before

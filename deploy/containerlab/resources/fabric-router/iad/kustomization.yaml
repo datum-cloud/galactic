@@ -2,10 +2,21 @@ namespace: galactic-system
 resources:
   - ../base
 
-# One key per fabric-carrying node (iad: compute, edge, route reflector)
+# One fabric-router.<nodename> ConfigMap per fabric-carrying node (iad: compute, edge, route reflector),
+# each carrying that node's frr.conf. Names must match exactly what
+# fabric-config-agent looks up, so no hash suffix; a change is applied live
+# by the agent's config-agent sidecar instead of by a rollout.
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/name: fabric-router
 configMapGenerator:
-  - name: fabric-config
+  - name: fabric-router.iad-worker
     files:
-      - frr.conf.iad-worker
-      - frr.conf.iad-worker2
-      - frr.conf.iad-worker3
+      - frr.conf=frr.conf.iad-worker
+  - name: fabric-router.iad-worker2
+    files:
+      - frr.conf=frr.conf.iad-worker2
+  - name: fabric-router.iad-worker3
+    files:
+      - frr.conf=frr.conf.iad-worker3
