@@ -1897,3 +1897,136 @@ func TestUsidEgress_LinkLocalAndMulticastDestinationsNeverMatchEgressRoute(t *te
 		})
 	}
 }
+
+// TestUsidEgress_NeighborDiscoveryNeverMatchesEgressRoute covers the gap
+// TestUsidEgress_LinkLocalAndMulticastDestinationsNeverMatchEgressRoute's own
+// carve-out left open: a solicited Neighbor Advertisement replying to this
+// VRF's own gateway address is unicast to a ULA, neither multicast nor
+// link-local, so that destination-scope carve-out alone does not exempt it.
+// Before usid_egress also bailed on the ICMPv6 message type, such a reply hit
+// this same ::/0 default and never reached the host-side NDP handling that
+// must answer it -- the tenant's gateway neighbor entry went to FAILED and
+// every packet through it died with a locally synthesized unreachable.
+func TestUsidEgress_NeighborDiscoveryNeverMatchesEgressRoute(t *testing.T) {
+	requireRoot(t)
+
+	const tableID = 12
+	sid := netip.MustParseAddr("2001:db8:ff09:9:e001::")
+	// gateway is this VRF's own ULA gateway address, the shape a solicited
+	// NA's destination takes -- not link-local, so the multicast/link-local
+	// carve-out does not exempt it.
+	gateway := netip.MustParseAddr("fd20:0:7::1")
+	guest := netip.MustParseAddr("fd20:0:7::1:0:0")
+
+	ndpTypes := []struct {
+		name string
+		typ  uint8
+	}{
+		{name: "router solicitation", typ: 133},
+		{name: "router advertisement", typ: 134},
+		{name: "neighbor solicitation", typ: 135},
+		{name: "neighbor advertisement", typ: 136},
+		{name: "redirect", typ: 137},
+	}
+	for _, tt := range ndpTypes {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := loadObjects(t)
+			setUpEgressRouteAttachment(t, objs, 0xaabbcc, 0x600, tableID)
+
+			// A ::/0 default entry -- the exact shape EgressDefaultRouteAdd
+			// installs -- so this test proves the exclusion, not just "no
+			// route happened to match."
+			if err := objs.EgressRouteTable.Put(
+				egressRouteKey(tableID, egressRouteFamilyINET6, netip.IPv6Unspecified(), 0),
+				UsidEgressRouteValue{Sid: sid.As16()},
+			); err != nil {
+				t.Fatalf("populate egress_route_table default entry: %v", err)
+			}
+			if err := objs.NodeSrcAddrTable.Put(uint32(0), netip.MustParseAddr("2001:db8:1:10::2").As16()); err != nil {
+				t.Fatalf("populate node_src_addr_table: %v", err)
+			}
+
+			pkt := buildPlainV6PacketWithICMPv6Type(t, guest, gateway, tt.typ)
+			ret, out, err := objs.UsidEgress.Test(pkt)
+			if err != nil {
+				t.Fatalf("program test-run: %v", err)
+			}
+			if ret != tcActUnspec {
+				t.Errorf("verdict = %d, want TC_ACT_UNSPEC (%d) -- must never be claimed by the default route", ret, tcActUnspec)
+			}
+			if string(out) != string(pkt) {
+				t.Errorf("packet mutated for excluded ICMPv6 type %d:\n in: % x\nout: % x", tt.typ, pkt, out)
+			}
+		})
+	}
+
+	// A non-NDP ICMPv6 message to the same gateway address is ordinary
+	// traffic and must still be free to match the default route, proving the
+	// carve-out is scoped to Neighbor Discovery's message types and not
+	// ICMPv6 wholesale.
+	t.Run("echo request is not exempted", func(t *testing.T) {
+		objs := loadObjects(t)
+		setUpEgressRouteAttachment(t, objs, 0xaabbcc, 0x600, tableID)
+
+		// A route entry with no link_ifindex is a local pass-through, deferring
+		// to the kernel regardless of message type -- see
+		// TestUsidEgress_RouteMissPassesThroughUnmodified's neighbor,
+		// TestUsidEgress_PassThroughEntryDefersToKernel. Proving this packet is
+		// *not* exempted needs a real redirect target, so it takes the same
+		// fully-populated entry TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader
+		// uses, not the bare Sid-only entry the exclusion cases above use, which
+		// would return TC_ACT_UNSPEC for this packet too, just for the
+		// unrelated reason of being a pass-through entry.
+		dmac := [6]byte{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}
+		smac := [6]byte{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}
+		// loopback always exists; redirect delivery itself is a live-cluster
+		// concern, see the neighbor test above
+		const linkIfindex = 1
+		if err := objs.EgressRouteTable.Put(
+			egressRouteKey(tableID, egressRouteFamilyINET6, netip.IPv6Unspecified(), 0),
+			UsidEgressRouteValue{Sid: sid.As16(), LinkIfindex: linkIfindex, Dmac: dmac, Smac: smac},
+		); err != nil {
+			t.Fatalf("populate egress_route_table default entry: %v", err)
+		}
+		setUpNodeSIDBase(t, objs, netip.MustParseAddr("2001:db8:ff01:1:e000::"), 0x600)
+
+		const icmpv6EchoRequest = 128
+		pkt := buildPlainV6PacketWithICMPv6Type(t, guest, gateway, icmpv6EchoRequest)
+		ret, _, err := objs.UsidEgress.Test(pkt)
+		if err != nil {
+			t.Fatalf("program test-run: %v", err)
+		}
+		if ret != tcActRedirect {
+			t.Errorf("verdict = %d, want TC_ACT_REDIRECT (%d) -- the default route must still claim ordinary traffic",
+				ret, tcActRedirect)
+		}
+	})
+}
+
+// buildPlainV6PacketWithICMPv6Type builds a single-level Ethernet+IPv6 packet
+// whose payload is a minimal ICMPv6 header of the given type, for
+// usid_egress's NDP carve-out. code and checksum are left zero; nothing under
+// test reads them.
+func buildPlainV6PacketWithICMPv6Type(t *testing.T, src, dst netip.Addr, icmpv6Type uint8) []byte {
+	t.Helper()
+	const icmpv6HeaderLen = 4
+	const icmpv6NextHeader = 58
+
+	pkt := make([]byte, 0, ethHeaderLen+ip6HeaderLen+icmpv6HeaderLen)
+	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
+	pkt = append(pkt, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB)
+	pkt = append(pkt, 0x86, 0xDD)
+
+	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00)
+	pkt = append(pkt, byte(icmpv6HeaderLen>>8), byte(icmpv6HeaderLen))
+	pkt = append(pkt, icmpv6NextHeader)
+	pkt = append(pkt, 255) // hop_limit -- NDP requires 255, irrelevant to this program but kept realistic
+	srcBytes := src.As16()
+	pkt = append(pkt, srcBytes[:]...)
+	dstBytes := dst.As16()
+	pkt = append(pkt, dstBytes[:]...)
+
+	pkt = append(pkt, icmpv6Type, 0x00, 0x00, 0x00) // type, code, checksum(2)
+
+	return pkt
+}
