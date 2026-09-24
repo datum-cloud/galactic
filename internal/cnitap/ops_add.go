@@ -168,6 +168,8 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		if err := radv.RecordAttachment(radv.DefaultStateDir, hostName, hostMTU); err != nil {
 			slog.Warn("ADD: failed to record attachment for router advertisement (non-fatal)",
 				"err", err, "name", hostName)
+		} else {
+			tracker.radvHostInterface = hostName
 		}
 	}
 

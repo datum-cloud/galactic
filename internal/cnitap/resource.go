@@ -12,6 +12,7 @@ import (
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/plumbing/dan"
+	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
 // resourceTracker tracks the resources cmdAdd created, for selective rollback.
@@ -33,6 +34,11 @@ type resourceTracker struct {
 	// They are empty for an attachment that did not ask for one, and cleanup
 	// tolerates a file that was never written.
 	danDir, danSandboxID string
+
+	// radvHostInterface names the Router Advertisement record ADD wrote, empty
+	// until it is written. The record names the tap, so it must go with it: one
+	// left behind has the node daemon waiting on an interface that is gone.
+	radvHostInterface string
 }
 
 // cleanup rolls back the tracked resources in reverse creation order.
@@ -60,6 +66,15 @@ func (rt *resourceTracker) cleanup() {
 	if rt.danDir != "" && rt.danSandboxID != "" {
 		if err := dan.Remove(rt.danDir, rt.danSandboxID); err != nil {
 			slog.Error("Rollback: failed to remove DAN file", "err", err, "dir", rt.danDir)
+		}
+	}
+
+	// Remove the Router Advertisement record before the tap it names, matching
+	// DEL's order.
+	if rt.radvHostInterface != "" {
+		if err := radv.RemoveAttachment(radv.DefaultStateDir, rt.radvHostInterface); err != nil {
+			slog.Error("Rollback: failed to remove router advertisement record", "err", err,
+				"name", rt.radvHostInterface)
 		}
 	}
 

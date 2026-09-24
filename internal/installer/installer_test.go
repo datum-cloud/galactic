@@ -653,76 +653,270 @@ func TestRun_EBPFDatapathEnabled_MetricsAndHealthReflectRealDatapath(t *testing.
 	checkStatus(t, grpc_health_v1.HealthCheckResponse_SERVING)
 }
 
-// TestReconcileRadvActors_FailedStartupIsRetried covers radvActorFailed's
-// whole reason for existing: an attachment whose radv.RunActor can't even
-// open its Conn (here, because "does-not-exist0" is never a real
-// interface) must not get stuck "running" forever in actors.cancel --
-// reconcileRadvActors is expected to try it again on a later reconcile once
-// radvActorFailed has cleared its entry.
-func TestReconcileRadvActors_FailedStartupIsRetried(t *testing.T) {
-	origRadvStateDir := radv.DefaultStateDir
-	t.Cleanup(func() { radv.DefaultStateDir = origRadvStateDir })
-	radv.DefaultStateDir = t.TempDir()
+// radvTestEnv points reconcileRadvActors at a temporary state directory, a
+// fake kernel reporting links[iface] for each interface, and a clock the test
+// moves by hand. An interface absent from links does not exist.
+type radvTestEnv struct {
+	links map[string]radvTestLink
+	now   time.Time
+}
 
-	const iface = "does-not-exist0"
-	if err := radv.RecordAttachment(radv.DefaultStateDir, iface, 1500); err != nil {
+type radvTestLink struct{ carrier bool }
+
+func newRadvTestEnv(t *testing.T) *radvTestEnv {
+	t.Helper()
+	env := &radvTestEnv{links: map[string]radvTestLink{}, now: time.Now()}
+
+	origStateDir, origLinkState, origNow := radv.DefaultStateDir, radvLinkState, radvNow
+	t.Cleanup(func() {
+		radv.DefaultStateDir, radvLinkState, radvNow = origStateDir, origLinkState, origNow
+	})
+	radv.DefaultStateDir = t.TempDir()
+	radvLinkState = func(iface string) (bool, bool, error) {
+		link, ok := env.links[iface]
+		return ok, link.carrier, nil
+	}
+	radvNow = func() time.Time { return env.now }
+	return env
+}
+
+// radvTestIface is the one attachment these tests record. The real kernel has no
+// such device, so radv.RunActor started on it always fails.
+const radvTestIface = "does-not-exist0"
+
+func recordRadvAttachment(t *testing.T) {
+	t.Helper()
+	if err := radv.RecordAttachment(radv.DefaultStateDir, radvTestIface, 1500); err != nil {
 		t.Fatalf("RecordAttachment: %v", err)
 	}
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actors := &radvActorSet{}
-	reconcileRadvActors(ctx, actors)
-
-	if _, ok := actors.cancel[iface]; !ok {
-		t.Fatalf("actors.cancel[%q] missing right after reconcile, want an entry (even if doomed to fail)", iface)
+func radvRecordExists(t *testing.T) bool {
+	t.Helper()
+	records, err := radv.ListAttachments(radv.DefaultStateDir)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
 	}
-
-	select {
-	case failedIface := <-actors.failed:
-		if failedIface != iface {
-			t.Fatalf("actors.failed sent %q, want %q", failedIface, iface)
+	for _, r := range records {
+		if r.HostInterface == radvTestIface {
+			return true
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("actors.failed never received a report for the interface that can't exist")
 	}
-	// Cancelling releases the attempt's context from the daemon's own, so a
-	// retry loop cannot grow memory without bound.
-	recorded, ok := actors.cancel[iface]
-	if !ok {
-		t.Fatalf("actors.cancel[%q] missing before radvActorFailed", iface)
-	}
-	cancelled := false
-	actors.cancel[iface] = func() {
-		cancelled = true
-		recorded()
-	}
+	return false
+}
 
-	radvActorFailed(actors, iface)
-
-	if !cancelled {
-		t.Fatalf("radvActorFailed did not cancel %q's context, leaving it attached to "+
-			"the daemon's context for the life of the process", iface)
-	}
-
-	if _, ok := actors.cancel[iface]; ok {
-		t.Fatalf("actors.cancel[%q] still present after radvActorFailed, want it cleared so the next reconcile retries",
-			iface)
-	}
-
-	// Retry: reconcile again now that the failed entry is cleared -- same
-	// record is still there, so it should be picked up and fail (and
-	// report) the same way, proving this isn't a one-shot fluke.
-	reconcileRadvActors(ctx, actors)
+// awaitRadvFailure waits for the actor started on radvTestIface to report that
+// it could not start.
+func awaitRadvFailure(t *testing.T, actors *radvActorSet) radvActorFailure {
+	t.Helper()
 	select {
-	case failedIface := <-actors.failed:
-		if failedIface != iface {
-			t.Fatalf("retry: actors.failed sent %q, want %q", failedIface, iface)
+	case failure := <-actors.failed:
+		if failure.iface != radvTestIface {
+			t.Fatalf("actors.failed sent %q, want %q", failure.iface, radvTestIface)
 		}
+		return failure
 	case <-time.After(2 * time.Second):
-		t.Fatal("retry: actors.failed never received a report on the second reconcile")
+		t.Fatalf("actors.failed never received a report for %q", radvTestIface)
+	}
+	return radvActorFailure{}
+}
+
+func TestReconcileRadvActors(t *testing.T) {
+	const iface = radvTestIface
+
+	tests := []struct {
+		name string
+		run  func(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet)
+	}{
+		{
+			// A tap whose VMM never opened it has no carrier and never gets a
+			// link-local address, so starting an actor on it can only fail.
+			name: "NoCarrierIsNotStarted",
+			run: func(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+				env.links[iface] = radvTestLink{carrier: false}
+
+				for range 3 {
+					reconcileRadvActors(ctx, actors)
+					env.now = env.now.Add(radvReconcileInterval)
+				}
+
+				if _, running := actors.cancel[iface]; running {
+					t.Fatalf("actor started on %q without carrier", iface)
+				}
+				if !actors.pending[iface].noCarrier {
+					t.Errorf("pending[%q].noCarrier = false, want true", iface)
+				}
+				if !radvRecordExists(t) {
+					t.Errorf("record for %q removed, want it kept while its interface exists", iface)
+				}
+			},
+		},
+		{
+			// A start that fails on an interface with carrier is retried, but
+			// only once its backoff has elapsed, and the backoff doubles up to
+			// its cap.
+			name: "FailedStartBacksOff",
+			run: func(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+				env.links[iface] = radvTestLink{carrier: true}
+
+				reconcileRadvActors(ctx, actors)
+				recorded, running := actors.cancel[iface]
+				if !running {
+					t.Fatalf("no actor started on %q with carrier", iface)
+				}
+				failure := awaitRadvFailure(t, actors)
+
+				// Cancelling releases the attempt's context from the daemon's
+				// own, so a retry loop cannot grow memory without bound.
+				cancelled := false
+				actors.cancel[iface] = func() {
+					cancelled = true
+					recorded()
+				}
+				radvActorFailed(actors, failure)
+				if !cancelled {
+					t.Fatalf("radvActorFailed did not cancel %q's context", iface)
+				}
+				if _, running := actors.cancel[iface]; running {
+					t.Fatalf("actors.cancel[%q] still present after radvActorFailed", iface)
+				}
+
+				// Still inside the first backoff: not retried.
+				env.now = env.now.Add(radvReconcileInterval - time.Millisecond)
+				reconcileRadvActors(ctx, actors)
+				if _, running := actors.cancel[iface]; running {
+					t.Fatalf("actor on %q retried before its backoff elapsed", iface)
+				}
+
+				// Each later failure doubles the wait, up to the cap.
+				want := radvReconcileInterval
+				for failures := 1; failures <= 12; failures++ {
+					env.now = actors.pending[iface].retryAt
+					reconcileRadvActors(ctx, actors)
+					if _, running := actors.cancel[iface]; !running {
+						t.Fatalf("failure %d: actor on %q not retried once its backoff elapsed", failures, iface)
+					}
+					radvActorFailed(actors, awaitRadvFailure(t, actors))
+
+					want = min(want*2, radvMaxRetryBackoff)
+					if got := actors.pending[iface].retryAt.Sub(env.now); got != want {
+						t.Fatalf("failure %d: backoff = %v, want %v", failures+1, got, want)
+					}
+				}
+				if got := actors.pending[iface].retryAt.Sub(env.now); got != radvMaxRetryBackoff {
+					t.Errorf("backoff after many failures = %v, want the %v cap", got, radvMaxRetryBackoff)
+				}
+			},
+		},
+		{
+			// Losing carrier, as a guest restarting does, resets the backoff
+			// so the guest is served as soon as it is back.
+			name: "LosingCarrierResetsBackoff",
+			run: func(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+				env.links[iface] = radvTestLink{carrier: true}
+				for range 4 {
+					if p, ok := actors.pending[iface]; ok {
+						env.now = p.retryAt
+					}
+					reconcileRadvActors(ctx, actors)
+					radvActorFailed(actors, awaitRadvFailure(t, actors))
+				}
+
+				env.links[iface] = radvTestLink{carrier: false}
+				reconcileRadvActors(ctx, actors)
+				env.links[iface] = radvTestLink{carrier: true}
+				reconcileRadvActors(ctx, actors)
+
+				if _, running := actors.cancel[iface]; !running {
+					t.Fatalf("actor on %q not started right after carrier returned", iface)
+				}
+				awaitRadvFailure(t, actors)
+			},
+		},
+		{
+			// A record whose interface is gone is removed once the grace
+			// period has passed, since no DEL is left to remove it.
+			name: "MissingInterfaceRecordIsRemoved",
+			run: func(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+				// Found missing after the record was written.
+				env.now = time.Now().Add(time.Minute)
+				reconcileRadvActors(ctx, actors)
+				if !radvRecordExists(t) {
+					t.Fatalf("record for %q removed on the first tick, want it kept for the grace period", iface)
+				}
+
+				env.now = env.now.Add(radvStaleRecordGrace - time.Millisecond)
+				reconcileRadvActors(ctx, actors)
+				if !radvRecordExists(t) {
+					t.Fatalf("record for %q removed before the grace period passed", iface)
+				}
+
+				env.now = env.now.Add(time.Millisecond)
+				reconcileRadvActors(ctx, actors)
+				if radvRecordExists(t) {
+					t.Fatalf("record for %q kept after its interface stayed missing past the grace period", iface)
+				}
+				if _, ok := actors.pending[iface]; ok {
+					t.Errorf("pending[%q] kept after its record was removed", iface)
+				}
+				if _, running := actors.cancel[iface]; running {
+					t.Errorf("actor started on missing interface %q", iface)
+				}
+			},
+		},
+		{
+			// A record written after the interface was first found missing
+			// comes from an ADD creating it again, so it is kept.
+			name: "RecordRewrittenWhileMissingIsKept",
+			run: func(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+				env.now = time.Now().Add(-time.Hour)
+				reconcileRadvActors(ctx, actors)
+
+				env.now = env.now.Add(radvStaleRecordGrace)
+				reconcileRadvActors(ctx, actors)
+				if !radvRecordExists(t) {
+					t.Fatalf("record for %q removed although it was written after the interface went missing", iface)
+				}
+				if !actors.pending[iface].missingSince.IsZero() {
+					t.Errorf("pending[%q].missingSince not reset after keeping a newer record", iface)
+				}
+			},
+		},
+		{
+			// An interface that comes back within the grace period keeps its
+			// record.
+			name: "InterfaceReturningWithinGraceIsKept",
+			run: func(t *testing.T, env *radvTestEnv, ctx context.Context, actors *radvActorSet) {
+				env.now = time.Now().Add(time.Minute)
+				reconcileRadvActors(ctx, actors)
+
+				env.links[iface] = radvTestLink{carrier: false}
+				env.now = env.now.Add(radvStaleRecordGrace / 2)
+				reconcileRadvActors(ctx, actors)
+
+				delete(env.links, iface)
+				env.now = env.now.Add(radvStaleRecordGrace / 2)
+				reconcileRadvActors(ctx, actors)
+				if !radvRecordExists(t) {
+					t.Fatalf("record for %q removed although its interface was only missing briefly", iface)
+				}
+			},
+		},
 	}
 
-	actors.wg.Wait()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newRadvTestEnv(t)
+			recordRadvAttachment(t)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			actors := &radvActorSet{}
+			t.Cleanup(func() {
+				cancel()
+				actors.wg.Wait()
+			})
+
+			tt.run(t, env, ctx, actors)
+		})
+	}
 }

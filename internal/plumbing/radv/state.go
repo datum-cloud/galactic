@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // DefaultStateDir is the node-local parent directory recording which tap host
@@ -67,6 +68,28 @@ func RemoveAttachment(stateDir, hostInterface string) error {
 		return fmt.Errorf("remove radv record for %q: %w", hostInterface, err)
 	}
 	return nil
+}
+
+// RemoveStaleAttachment deletes hostInterface's record from stateDir only if it
+// was last written before cutoff, and reports whether it did. A record written
+// at or after cutoff belongs to an ADD that ran since the caller last looked,
+// so it is left alone. A missing record is not an error and reports false.
+func RemoveStaleAttachment(stateDir, hostInterface string, cutoff time.Time) (bool, error) {
+	path := filepath.Join(stateDir, hostInterface)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat radv record %q: %w", path, err)
+	}
+	if !info.ModTime().Before(cutoff) {
+		return false, nil
+	}
+	if err := RemoveAttachment(stateDir, hostInterface); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ListAttachments returns every recorded tap attachment under stateDir. A
