@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/srcfiltermap"
 	"go.datum.net/galactic/internal/srcfilter"
@@ -79,7 +80,11 @@ func startSourceFilter(ctx context.Context, st ebpfDatapathState, healthSrv *hea
 
 	slog.Info("SRv6 source filter reconciler starting", "mode", settings.Mode.String(),
 		"binding", settings.Binding.String(), "domainPrefixes", settings.DomainPrefixes,
-		"extraSources", settings.ExtraSources)
+		"extraSources", settings.ExtraSources, "fabricNextHops", settings.FabricNextHops)
+	if len(settings.FabricNextHops) == 0 {
+		slog.Warn("SRv6 source filter next-hop check is off: routes from the fabric's routing are accepted " +
+			"whatever their gateway; set " + config.EnvCNISRv6FabricNextHops + " to require a fabric peer")
+	}
 	healthSrv.SetServingStatus(srcFilterHealthServiceName, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	go runSourceFilter(ctx, r, filter, st.watcher, healthSrv)
 }
@@ -134,7 +139,8 @@ func sourceFilterPass(ctx context.Context, r *srcfilter.Reconciler, healthSrv *h
 	}
 	if res.Changed {
 		slog.Info("SRv6 source filter allow-list updated", "entries", res.Entries, "added", res.Added,
-			"updated", res.Updated, "removed", res.Removed, "unbound", res.Unbound, "uplinks", res.SlotCount,
+			"updated", res.Updated, "removed", res.Removed, "unbound", res.Unbound,
+			"foreignNextHop", res.ForeignNextHop, "uplinks", res.SlotCount,
 			"mode", res.State.Mode.String(), "generation", res.State.Generation)
 	}
 	return ""

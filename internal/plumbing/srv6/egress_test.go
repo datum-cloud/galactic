@@ -361,6 +361,15 @@ func TestRouteMainAdd_InstallsPlainRouteNoEncap(t *testing.T) {
 	}
 	gw := net.ParseIP(gateway)
 
+	// A route an older galactic-router installed carries the kernel's default
+	// boot protocol; RouteMainAdd must re-tag it rather than add a second one.
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		return netlink.RouteAdd(&netlink.Route{Dst: prefix, Gw: gw, Table: table})
+	})
+	if err != nil {
+		t.Fatalf("pre-install untagged route: %v", err)
+	}
+
 	err = nsObj.Do(func(_ ns.NetNS) error {
 		return RouteMainAdd(prefix, gw, table)
 	})
@@ -374,19 +383,26 @@ func TestRouteMainAdd_InstallsPlainRouteNoEncap(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		matches := 0
 		for i := range routes {
 			if routes[i].Dst != nil && routes[i].Dst.String() == prefix.String() {
 				installed = &routes[i]
-				return nil
+				matches++
 			}
 		}
-		return fmt.Errorf("no route to %s found in table %d", prefix, table)
+		if matches != 1 {
+			return fmt.Errorf("%d routes to %s in table %d, want exactly 1", matches, prefix, table)
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("verify installed route: %v", err)
 	}
 	if installed.Encap != nil {
 		t.Errorf("installed route for %s has Encap %+v, want no encapsulation at all", vipPrefix, installed.Encap)
+	}
+	if installed.Protocol != RouteProtocolGalactic {
+		t.Errorf("installed route for %s has protocol %d, want %d", vipPrefix, installed.Protocol, RouteProtocolGalactic)
 	}
 	if installed.Gw == nil || !installed.Gw.Equal(gw) {
 		t.Errorf("installed route for %s has Gw %v, want %v", vipPrefix, installed.Gw, gw)

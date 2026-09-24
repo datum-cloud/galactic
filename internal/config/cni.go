@@ -57,6 +57,14 @@ const (
 	// the main table.
 	EnvCNISRv6SourceAllowExtra = "GALACTIC_CNI_SRV6_SOURCE_ALLOW_EXTRA"
 
+	// EnvCNISRv6FabricNextHops is a comma-separated list of IPv6 prefixes
+	// holding the addresses of this fabric's BGP peers as they appear as route
+	// gateways: link and transit addresses, and fe80::/10 for unnumbered
+	// sessions. When set, a route becomes an allowed source only through a
+	// hop whose gateway lies inside it and that leaves through an uplink.
+	// Unset skips the next-hop check.
+	EnvCNISRv6FabricNextHops = "GALACTIC_CNI_SRV6_FABRIC_NEXTHOPS"
+
 	// EnvCNIEgressShardSIDs is a comma-separated list of every live egress
 	// shard's SID: the fabric-wide membership a tenant VRF's egress routes need.
 	// One SID per shard covers both address families -- a shard decides which

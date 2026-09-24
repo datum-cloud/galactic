@@ -45,14 +45,17 @@ type Options struct {
 
 // Result reports what one pass did.
 type Result struct {
-	Entries   int
-	Added     int
-	Updated   int
-	Removed   int
-	Unbound   int
-	Changed   bool
-	State     State
-	SlotCount int
+	Entries int
+	Added   int
+	Updated int
+	Removed int
+	Unbound int
+	// ForeignNextHop counts in-domain fabric routes left out because no hop
+	// used a fabric next hop.
+	ForeignNextHop int
+	Changed        bool
+	State          State
+	SlotCount      int
 }
 
 // Reconciler keeps a Target's allow-list, uplink slots and state in step with
@@ -149,8 +152,16 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Result, error) {
 		minPrefixLen: r.opts.MinPrefixLen,
 		binding:      r.opts.Settings.Binding,
 		extra:        r.opts.Settings.ExtraSources,
+		nextHops:     r.opts.Settings.FabricNextHops,
+		uplinks:      uplinkSet(uplinks),
 	})
-	res := Result{Entries: len(desired.entries), Unbound: desired.unbound, SlotCount: len(slots), State: r.state}
+	res := Result{
+		Entries:        len(desired.entries),
+		Unbound:        desired.unbound,
+		ForeignNextHop: desired.foreignNextHop,
+		SlotCount:      len(slots),
+		State:          r.state,
+	}
 	if desired.fromRoutes == 0 {
 		return res, fmt.Errorf("srcfilter: %w", ErrNoFabricRoutes)
 	}
@@ -251,6 +262,14 @@ func (r *Reconciler) syncAllow(desired []Entry, res *Result) error {
 		return fmt.Errorf("srcfilter: remove stale allow entries: %w", errors.Join(errs...))
 	}
 	return nil
+}
+
+func uplinkSet(uplinks []uint32) map[int]bool {
+	out := make(map[int]bool, len(uplinks))
+	for _, idx := range uplinks {
+		out[int(idx)] = true
+	}
+	return out
 }
 
 // uplinkIndexes resolves uplink names against links. A name with no link is

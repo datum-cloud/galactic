@@ -105,6 +105,9 @@ type Settings struct {
 	DomainPrefixes []netip.Prefix
 	Binding        Binding
 	ExtraSources   []netip.Prefix
+	// FabricNextHops, when set, are the only route gateways that count as a
+	// fabric BGP peer. Empty skips the next-hop check.
+	FabricNextHops []netip.Prefix
 }
 
 // LoadSettings reads Settings from the GALACTIC_CNI_SRV6_* variables through
@@ -133,6 +136,9 @@ func LoadSettings(getenv func(string) string) (Settings, error) {
 	}
 	if s.ExtraSources, err = ParsePrefixList(getenv(config.EnvCNISRv6SourceAllowExtra)); err != nil {
 		errs = append(errs, fmt.Errorf("%s: %w", config.EnvCNISRv6SourceAllowExtra, err))
+	}
+	if s.FabricNextHops, err = ParsePrefixList(getenv(config.EnvCNISRv6FabricNextHops)); err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", config.EnvCNISRv6FabricNextHops, err))
 	}
 	if len(errs) > 0 {
 		return Settings{}, errors.Join(errs...)

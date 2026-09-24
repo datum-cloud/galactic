@@ -120,11 +120,21 @@ container) owns the allow-list through `internal/srcfilter`. It is started only
 when `GALACTIC_CNI_SRV6_SOURCE_FILTER` is `audit` or `enforce`; with `off`, or
 an invalid configuration, the container writes mode `off` and starts nothing.
 
-- **Inputs.** Every main-table IPv6 route of any protocol that forwards: peer
-  locators arrive from FRR as BGP routes, egress shard SIDs as boot-protocol
-  routes. A route counts only if it lies inside a configured SR domain prefix,
-  is at least a /64 (so an aggregate never allows unassigned node IDs), and is
-  not inside this node's own locator from its `BGPRouter`.
+- **Inputs.** Main-table IPv6 routes that forward and were installed by the
+  fabric's own routing: protocol `bgp` (FRR's underlay) or protocol 214
+  (`srv6.RouteProtocolGalactic`, which `galactic-router` tags its gateway and
+  egress shard routes with). Static, boot, kernel and other routes never
+  count. A route must also lie inside a configured SR domain prefix, be at
+  least a /64 (so an aggregate never allows unassigned node IDs), and not lie
+  inside this node's own locator from its `BGPRouter`.
+- **Fabric next hop.** When `GALACTIC_CNI_SRV6_FABRIC_NEXTHOPS` is set, only
+  hops whose gateway lies inside it and that leave through an uplink count,
+  and a route with no such hop is left out. Kernel routes carry the resolved,
+  directly connected gateway even for recursive or iBGP routes, so the list
+  names peer link and transit addresses (and `fe80::/10` for unnumbered
+  sessions), not loopbacks. The peer set lives in the underlay's own
+  configuration, which galactic does not read, so this is operator-supplied;
+  unset skips the check.
 - **Interface binding.** An entry's mask is the union of the slots of every
   hop's link, a bond master or a VLAN on a bond counting as the bond's slaves.
   Uplinks are what `attach.ResolveInterfaces` returns, each keeping its slot

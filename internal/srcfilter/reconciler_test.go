@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/srcfiltermap"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
 const (
@@ -41,6 +42,10 @@ var (
 	discard    = netip.MustParsePrefix("2001:db8:0:8::/64")
 	outside    = netip.MustParsePrefix("2001:db9:0:1::/64")
 	extra      = netip.MustParsePrefix("2001:db8:ffff:1::/64")
+	staticP    = netip.MustParsePrefix("2001:db8:0:9::/64")
+	bootP      = netip.MustParsePrefix("2001:db8:0:a::/64")
+	kernelP    = netip.MustParsePrefix("2001:db8:0:b::/64")
+	peerGw     = net.ParseIP("fe80::1")
 )
 
 func testLinks() []netlink.Link {
@@ -66,13 +71,15 @@ func ipnet(p netip.Prefix) *net.IPNet {
 
 func route(p netip.Prefix, link int, proto netlink.RouteProtocol) netlink.Route {
 	return netlink.Route{
-		Dst: ipnet(p), LinkIndex: link, Table: unix.RT_TABLE_MAIN, Type: unix.RTN_UNICAST, Protocol: proto,
+		Dst: ipnet(p), Gw: peerGw, LinkIndex: link, Table: unix.RT_TABLE_MAIN, Type: unix.RTN_UNICAST,
+		Protocol: proto,
 	}
 }
 
 func testRoutes() []netlink.Route {
 	multipath := route(peerB, 0, unix.RTPROT_BGP)
-	multipath.MultiPath = []*netlink.NexthopInfo{{LinkIndex: idxEth0}, {LinkIndex: idxEth1}}
+	multipath.Gw = nil
+	multipath.MultiPath = []*netlink.NexthopInfo{{LinkIndex: idxEth0, Gw: peerGw}, {LinkIndex: idxEth1, Gw: peerGw}}
 	blackhole := route(discard, 0, unix.RTPROT_BGP)
 	blackhole.Type = unix.RTN_BLACKHOLE
 	otherTable := route(peerA, idxMgmt, unix.RTPROT_BGP)
@@ -82,7 +89,10 @@ func testRoutes() []netlink.Route {
 		multipath,
 		route(peerC, idxBond0, unix.RTPROT_BGP),
 		route(peerD, idxVlan, unix.RTPROT_BGP),
-		route(shard, idxEth1, unix.RTPROT_BOOT),
+		route(shard, idxEth1, srv6.RouteProtocolGalactic),
+		route(staticP, idxEth0, unix.RTPROT_STATIC),
+		route(bootP, idxEth0, unix.RTPROT_BOOT),
+		route(kernelP, idxEth0, unix.RTPROT_KERNEL),
 		route(unboundP, 99, unix.RTPROT_BGP),
 		route(aggregate, idxEth0, unix.RTPROT_BGP),
 		route(ownLocator, idxEth0, unix.RTPROT_BGP),
@@ -421,4 +431,61 @@ func TestDisable(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertConfig(t, f, srcfiltermap.Config{Mode: srcfiltermap.ModeOff, Generation: 5})
+}
+
+func TestReconcileFabricNextHops(t *testing.T) {
+	transit := netip.MustParsePrefix("fd00:f::/64")
+	onTransit := net.ParseIP("fd00:f::1")
+	foreign := net.ParseIP("2001:db8:9::1")
+
+	withGw := func(r netlink.Route, gw net.IP) netlink.Route {
+		r.Gw = gw
+		return r
+	}
+	multipath := route(peerB, 0, unix.RTPROT_BGP)
+	multipath.Gw = nil
+	multipath.MultiPath = []*netlink.NexthopInfo{
+		{LinkIndex: idxEth0, Gw: onTransit},
+		{LinkIndex: idxEth1, Gw: foreign},
+	}
+
+	fx := newFixture()
+	fx.settings.FabricNextHops = []netip.Prefix{transit}
+	fx.settings.ExtraSources = nil
+	fx.routes = []netlink.Route{
+		withGw(route(peerA, idxEth0, unix.RTPROT_BGP), onTransit),
+		multipath,
+		withGw(route(peerC, idxMgmt, unix.RTPROT_BGP), onTransit),
+		withGw(route(peerD, idxEth0, unix.RTPROT_BGP), nil),
+		withGw(route(shard, idxEth1, srv6.RouteProtocolGalactic), onTransit),
+		withGw(route(unboundP, 99, unix.RTPROT_BGP), onTransit),
+		withGw(route(staticP, idxEth0, unix.RTPROT_STATIC), onTransit),
+	}
+
+	res, err := fx.reconciler(t).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertAllow(t, fx.filter, []srcfiltermap.Entry{
+		{Prefix: peerA, IfaceMask: mask(t, 0)},
+		{Prefix: peerB, IfaceMask: mask(t, 0)},
+		{Prefix: shard, IfaceMask: mask(t, 1)},
+	})
+	if res.ForeignNextHop != 3 {
+		t.Errorf("ForeignNextHop = %d, want 3 (mgmt link, no gateway, unknown link)", res.ForeignNextHop)
+	}
+}
+
+func TestReconcileNoFabricNextHopKeepsAllowList(t *testing.T) {
+	fx := newFixture()
+	r := fx.reconciler(t)
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fx.settings.FabricNextHops = []netip.Prefix{netip.MustParsePrefix("fd00:dead::/64")}
+	r = fx.reconciler(t)
+	if _, err := r.Reconcile(context.Background()); !errors.Is(err, ErrNoFabricRoutes) {
+		t.Fatalf("err = %v, want ErrNoFabricRoutes", err)
+	}
+	assertAllow(t, fx.filter, wantEntries(t))
 }

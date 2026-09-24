@@ -57,6 +57,20 @@ func TestLoadSettings(t *testing.T) {
 			config.EnvCNISRv6SourceFilter:   modeNameAudit,
 			config.EnvCNISRv6DomainPrefixes: "10.0.0.0/8",
 		}, Settings{}, true},
+		{"FabricNextHops", map[string]string{
+			config.EnvCNISRv6SourceFilter:   modeNameAudit,
+			config.EnvCNISRv6DomainPrefixes: testDomain,
+			config.EnvCNISRv6FabricNextHops: "fe80::/10,fd00:f::/64",
+		}, Settings{
+			Mode:           ModeAudit,
+			DomainPrefixes: []netip.Prefix{netip.MustParsePrefix(testDomain)},
+			FabricNextHops: []netip.Prefix{netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("fd00:f::/64")},
+		}, false},
+		{"BadFabricNextHops", map[string]string{
+			config.EnvCNISRv6SourceFilter:   modeNameAudit,
+			config.EnvCNISRv6DomainPrefixes: testDomain,
+			config.EnvCNISRv6FabricNextHops: "10.0.0.0/8",
+		}, Settings{}, true},
 		{"BadExtra", map[string]string{
 			config.EnvCNISRv6SourceFilter:     modeNameAudit,
 			config.EnvCNISRv6DomainPrefixes:   testDomain,
@@ -74,7 +88,8 @@ func TestLoadSettings(t *testing.T) {
 			}
 			if got.Mode != tt.want.Mode || got.Binding != tt.want.Binding ||
 				!slices.Equal(got.DomainPrefixes, tt.want.DomainPrefixes) ||
-				!slices.Equal(got.ExtraSources, tt.want.ExtraSources) {
+				!slices.Equal(got.ExtraSources, tt.want.ExtraSources) ||
+				!slices.Equal(got.FabricNextHops, tt.want.FabricNextHops) {
 				t.Errorf("LoadSettings() = %+v, want %+v", got, tt.want)
 			}
 		})

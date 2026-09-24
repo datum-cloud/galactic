@@ -38,6 +38,7 @@ func TestSourceFilterPassReportsHealth(t *testing.T) {
 		LinkIndex: 1,
 		Table:     unix.RT_TABLE_MAIN,
 		Type:      unix.RTN_UNICAST,
+		Protocol:  unix.RTPROT_BGP,
 	}}
 	var routesErr error
 
