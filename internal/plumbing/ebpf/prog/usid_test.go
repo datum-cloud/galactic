@@ -1968,15 +1968,27 @@ func TestUsidEgress_NeighborDiscoveryNeverMatchesEgressRoute(t *testing.T) {
 		objs := loadObjects(t)
 		setUpEgressRouteAttachment(t, objs, 0xaabbcc, 0x600, tableID)
 
+		// A route entry with no link_ifindex is a local pass-through, deferring
+		// to the kernel regardless of message type -- see
+		// TestUsidEgress_RouteMissPassesThroughUnmodified's neighbor,
+		// TestUsidEgress_PassThroughEntryDefersToKernel. Proving this packet is
+		// *not* exempted needs a real redirect target, so it takes the same
+		// fully-populated entry TestUsidEgress_RouteHitPushesIPv6InIPv6OuterHeader
+		// uses, not the bare Sid-only entry the exclusion cases above use, which
+		// would return TC_ACT_UNSPEC for this packet too, just for the
+		// unrelated reason of being a pass-through entry.
+		dmac := [6]byte{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}
+		smac := [6]byte{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}
+		// loopback always exists; redirect delivery itself is a live-cluster
+		// concern, see the neighbor test above
+		const linkIfindex = 1
 		if err := objs.EgressRouteTable.Put(
 			egressRouteKey(tableID, egressRouteFamilyINET6, netip.IPv6Unspecified(), 0),
-			UsidEgressRouteValue{Sid: sid.As16()},
+			UsidEgressRouteValue{Sid: sid.As16(), LinkIfindex: linkIfindex, Dmac: dmac, Smac: smac},
 		); err != nil {
 			t.Fatalf("populate egress_route_table default entry: %v", err)
 		}
-		if err := objs.NodeSrcAddrTable.Put(uint32(0), netip.MustParseAddr("2001:db8:1:10::2").As16()); err != nil {
-			t.Fatalf("populate node_src_addr_table: %v", err)
-		}
+		setUpNodeSIDBase(t, objs, netip.MustParseAddr("2001:db8:ff01:1:e000::"), 0x600)
 
 		const icmpv6EchoRequest = 128
 		pkt := buildPlainV6PacketWithICMPv6Type(t, guest, gateway, icmpv6EchoRequest)
@@ -1984,8 +1996,9 @@ func TestUsidEgress_NeighborDiscoveryNeverMatchesEgressRoute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("program test-run: %v", err)
 		}
-		if ret == tcActUnspec {
-			t.Errorf("verdict = TC_ACT_UNSPEC, want the default route to still claim ordinary ICMPv6 traffic")
+		if ret != tcActRedirect {
+			t.Errorf("verdict = %d, want TC_ACT_REDIRECT (%d) -- the default route must still claim ordinary traffic",
+				ret, tcActRedirect)
 		}
 	})
 }
