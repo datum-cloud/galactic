@@ -18,6 +18,7 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/cnitestutil"
+	"go.datum.net/galactic/internal/plumbing/radv"
 )
 
 const (
@@ -388,4 +389,28 @@ func TestCmdStatusAPIProbeFailure(t *testing.T) {
 func TestResourceTrackerCleanupZeroValue(t *testing.T) {
 	tracker := &resourceTracker{}
 	tracker.cleanup() // should not panic
+}
+
+// A failed ADD that already recorded its tap for Router Advertisements must
+// remove that record along with the tap, or the node daemon keeps a record for
+// an interface that no longer exists.
+func TestResourceTrackerCleanupRemovesRadvRecord(t *testing.T) {
+	origStateDir := radv.DefaultStateDir
+	t.Cleanup(func() { radv.DefaultStateDir = origStateDir })
+	radv.DefaultStateDir = t.TempDir()
+
+	if err := radv.RecordAttachment(radv.DefaultStateDir, testHostTap, 1500); err != nil {
+		t.Fatalf("RecordAttachment: %v", err)
+	}
+
+	tracker := &resourceTracker{radvHostInterface: testHostTap}
+	tracker.cleanup()
+
+	records, err := radv.ListAttachments(radv.DefaultStateDir)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("ListAttachments() after rollback = %v, want no records", records)
+	}
 }

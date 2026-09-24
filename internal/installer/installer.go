@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -620,23 +621,91 @@ func startEgressRouteRefreshSweep(sem chan struct{}, shardSIDs []net.IP) {
 }
 
 // radvActorSet tracks the running radv.RunActor goroutines, keyed by host
-// interface name. It is Run's local state, reconciled against the recorded
-// attachments on every tick. The zero value is ready to use.
+// interface name, plus the retry state of attachments not currently served. It
+// is Run's local state, reconciled against the recorded attachments on every
+// tick. The zero value is ready to use.
 //
-// cancel is touched only from Run's own goroutine and is deliberately
-// unguarded, since single ownership is simpler than synchronizing with the
-// actor goroutines. Those goroutines report a failed startup on failed
+// cancel and pending are touched only from Run's own goroutine and are
+// deliberately unguarded, since single ownership is simpler than synchronizing
+// with the actor goroutines. Those goroutines report a failed startup on failed
 // instead, which Run's select drains on its own turn.
 type radvActorSet struct {
-	cancel map[string]context.CancelFunc
-	failed chan string
-	wg     sync.WaitGroup
+	cancel  map[string]context.CancelFunc
+	pending map[string]*radvPending
+	failed  chan radvActorFailure
+	wg      sync.WaitGroup
 }
 
-// reconcileRadvActors starts one radv.RunActor per newly recorded tap
-// attachment and cancels one for each attachment that has disappeared. It is
-// also called once before Run's loop starts, so attachments already recorded
-// when this daemon starts are served immediately.
+// radvPending is the retry state of one recorded attachment that has no running
+// actor, or whose host interface has gone missing.
+type radvPending struct {
+	// failures counts consecutive failed starts, and retryAt is the earliest
+	// time the next one may run. Both reset whenever the interface loses
+	// carrier, so a guest that restarts gets a fresh, fast retry cycle.
+	failures int
+	retryAt  time.Time
+	// noCarrier records that the last reconcile found the interface without
+	// carrier, so the wait is logged once rather than on every tick.
+	noCarrier bool
+	// missingSince is when a reconcile first found the interface absent, zero
+	// while it exists.
+	missingSince time.Time
+}
+
+// radvActorFailure is an actor goroutine's report that radv.RunActor could not
+// start.
+type radvActorFailure struct {
+	iface string
+	err   error
+}
+
+// radvStaleRecordGrace is how long a recorded attachment's host interface must
+// stay missing before its record is removed. DEL removes the record before the
+// tap, and ADD creates the tap before the record, so a missing interface with a
+// record is always stale; the grace only keeps the removal from racing a DEL
+// that is still running.
+var radvStaleRecordGrace = 30 * time.Second
+
+// radvMaxRetryBackoff caps the delay between failed starts on an interface that
+// has carrier. Failures double the delay from radvReconcileInterval upward.
+var radvMaxRetryBackoff = 5 * time.Minute
+
+// radvWarnAfterFailures is the consecutive failed start that is logged as a
+// warning. Earlier failures are routine, since a freshly attached guest's
+// link-local address is still completing duplicate address detection, and later
+// ones would repeat the same warning for as long as the failure lasts.
+const radvWarnAfterFailures = 3
+
+// radvNow is the clock reconcileRadvActors reads. A var so tests can move it.
+var radvNow = time.Now
+
+// radvLinkState reports whether iface exists and whether it has carrier. A tap
+// has carrier only while a VMM holds it open, and until then the kernel never
+// assigns it a link-local address, so an actor started on it cannot open its
+// NDP connection. A var so tests can fake the kernel.
+var radvLinkState = func(iface string) (exists, carrier bool, err error) {
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	return true, link.Attrs().RawFlags&unix.IFF_LOWER_UP != 0, nil
+}
+
+// reconcileRadvActors starts one radv.RunActor per recorded tap attachment that
+// is ready to be served and cancels one for each attachment that has
+// disappeared. It is also called once before Run's loop starts, so attachments
+// already recorded when this daemon starts are served immediately.
+//
+// An attachment is ready once its host interface has carrier and any backoff
+// from earlier failed starts has elapsed. A tap without carrier belongs to a
+// guest whose VMM has not opened it, whether because it is still booting or
+// because it never will, so it is waited on quietly rather than retried. A
+// record whose host interface stays missing past radvStaleRecordGrace is
+// removed, since nothing else would ever remove it once its DEL has been missed.
 //
 // A listing failure is never fatal. Resending and soliciting is best-effort
 // maintenance for already-attached guests, so running actors are left alone
@@ -651,17 +720,39 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 
 	if actors.cancel == nil {
 		actors.cancel = make(map[string]context.CancelFunc)
+		actors.pending = make(map[string]*radvPending)
 		// Buffered well past any realistic node's attachment count, so a run
 		// of startup failures cannot block an actor goroutine on this send.
-		// radvActorFailed sends non-blocking anyway, so a full channel only
+		// The goroutine sends non-blocking anyway, so a full channel only
 		// delays a retry.
-		actors.failed = make(chan string, 256)
+		actors.failed = make(chan radvActorFailure, 256)
 	}
 
+	now := radvNow()
 	seen := make(map[string]struct{}, len(records))
 	for _, r := range records {
+		exists, carrier, err := radvLinkState(r.HostInterface)
+		if err != nil {
+			// Unknown, so leave the attachment as it is until a tick can tell.
+			slog.Debug("Failed to look up router advertisement interface",
+				"err", err, "hostInterface", r.HostInterface)
+			seen[r.HostInterface] = struct{}{}
+			continue
+		}
+		p := radvPendingFor(actors, r.HostInterface)
+		if !exists {
+			if !removeStaleRadvRecord(p, r.HostInterface, now) {
+				seen[r.HostInterface] = struct{}{}
+			}
+			continue
+		}
+		p.missingSince = time.Time{}
 		seen[r.HostInterface] = struct{}{}
+
 		if _, running := actors.cancel[r.HostInterface]; running {
+			continue
+		}
+		if !radvReadyToStart(p, r.HostInterface, carrier, now) {
 			continue
 		}
 
@@ -671,13 +762,11 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 		go func(iface string, mtu int) {
 			defer actors.wg.Done()
 			if err := radv.RunActor(actorCtx, iface, mtu); err != nil {
-				slog.Warn("Router advertisement actor failed to start, will retry next reconcile",
-					"err", err, "hostInterface", iface)
 				select {
-				case actors.failed <- iface:
+				case actors.failed <- radvActorFailure{iface: iface, err: err}:
 				default:
 					slog.Warn("Router advertisement failed-actor channel full, retry may be delayed",
-						"hostInterface", iface)
+						"err", err, "hostInterface", iface)
 				}
 			}
 		}(r.HostInterface, r.MTU)
@@ -690,24 +779,103 @@ func reconcileRadvActors(ctx context.Context, actors *radvActorSet) {
 		cancel()
 		delete(actors.cancel, iface)
 	}
+	for iface := range actors.pending {
+		if _, ok := seen[iface]; !ok {
+			delete(actors.pending, iface)
+		}
+	}
 }
 
-// radvActorFailed clears the map entry for an actor that could not start, so
-// the next reconcile sees the attachment as unserved and retries it. Without
-// it, reconcileRadvActors would stay convinced the actor is running. Deleting a
-// key that is already gone, because the attachment itself disappeared, is a
-// safe no-op.
+// removeStaleRadvRecord handles a record whose host interface is missing. It
+// notes when the interface was first found missing, and once it has stayed
+// missing past radvStaleRecordGrace removes the record, reporting true.
+func removeStaleRadvRecord(p *radvPending, iface string, now time.Time) bool {
+	if p.missingSince.IsZero() {
+		p.missingSince = now
+		return false
+	}
+	if now.Sub(p.missingSince) < radvStaleRecordGrace {
+		return false
+	}
+	// Only a record written before the interface was first found missing is
+	// stale. A newer one comes from an ADD that is creating the interface again.
+	removed, err := radv.RemoveStaleAttachment(radv.DefaultStateDir, iface, p.missingSince)
+	if err != nil {
+		slog.Warn("Failed to remove router advertisement record for missing interface",
+			"err", err, "hostInterface", iface)
+		return false
+	}
+	if !removed {
+		p.missingSince = time.Time{}
+		return false
+	}
+	slog.Info("Removed router advertisement record for missing interface",
+		"hostInterface", iface, "missingFor", now.Sub(p.missingSince).Round(time.Second))
+	return true
+}
+
+// radvReadyToStart reports whether an actor should be started on an existing
+// interface now: it has carrier and any backoff from earlier failures has
+// elapsed. Losing carrier resets the backoff, so a guest that restarts is
+// served as soon as its VMM opens the tap again.
+func radvReadyToStart(p *radvPending, iface string, carrier bool, now time.Time) bool {
+	if !carrier {
+		if !p.noCarrier {
+			slog.Debug("Router advertisement interface has no carrier, waiting for its guest",
+				"hostInterface", iface)
+		}
+		p.noCarrier = true
+		p.failures = 0
+		p.retryAt = time.Time{}
+		return false
+	}
+	p.noCarrier = false
+
+	return !now.Before(p.retryAt)
+}
+
+// radvPendingFor returns iface's retry state, creating it on first use.
+func radvPendingFor(actors *radvActorSet, iface string) *radvPending {
+	p, ok := actors.pending[iface]
+	if !ok {
+		p = &radvPending{}
+		actors.pending[iface] = p
+	}
+	return p
+}
+
+// radvActorFailed clears the map entry for an actor that could not start, so a
+// later reconcile sees the attachment as unserved and retries it once its
+// backoff has elapsed. Without it, reconcileRadvActors would stay convinced the
+// actor is running. A report for an attachment that is already gone is a safe
+// no-op.
 //
 // Each attempt derives its context from one that lives as long as the process.
 // Only cancelling detaches the derived context. Deleting the entry alone leaves
 // it attached, so a retry loop grows this daemon's memory without bound.
-func radvActorFailed(actors *radvActorSet, iface string) {
-	cancel, ok := actors.cancel[iface]
+func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
+	cancel, ok := actors.cancel[failure.iface]
 	if !ok {
 		return
 	}
 	cancel()
-	delete(actors.cancel, iface)
+	delete(actors.cancel, failure.iface)
+
+	p := radvPendingFor(actors, failure.iface)
+	p.failures++
+	backoff := radvReconcileInterval << min(p.failures-1, 16)
+	if backoff <= 0 || backoff > radvMaxRetryBackoff {
+		backoff = radvMaxRetryBackoff
+	}
+	p.retryAt = radvNow().Add(backoff)
+
+	if p.failures == radvWarnAfterFailures {
+		slog.Warn("Router advertisement actor keeps failing to start, backing off",
+			"err", failure.err, "hostInterface", failure.iface, "failures", p.failures, "maxBackoff", radvMaxRetryBackoff)
+		return
+	}
+	slog.Debug("Router advertisement actor failed to start, will retry",
+		"err", failure.err, "hostInterface", failure.iface, "failures", p.failures, "retryIn", backoff)
 }
 
 // Run executes the CNI installer main container tasks:
@@ -929,8 +1097,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// route happened to arrive.
 			startEgressRouteRefreshSweep(egressRouteRefreshSem, ebpfState.egressShardSIDs)
 
-		case iface := <-radvActors.failed:
-			radvActorFailed(radvActors, iface)
+		case failure := <-radvActors.failed:
+			radvActorFailed(radvActors, failure)
 		}
 	}
 }

@@ -7,6 +7,7 @@ package radv
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestRecordAttachmentThenListAttachments(t *testing.T) {
@@ -85,6 +86,51 @@ func TestRemoveAttachmentMissingIsNotError(t *testing.T) {
 
 	if err := RemoveAttachment(stateDir, "tap-never-existed-H"); err != nil {
 		t.Errorf("RemoveAttachment() on a never-recorded interface error = %v, want nil", err)
+	}
+}
+
+func TestRemoveStaleAttachment(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      bool
+		cutoff      time.Duration // relative to when the record is written
+		wantRemoved bool
+	}{
+		{name: "WrittenBeforeCutoffIsRemoved", record: true, cutoff: time.Minute, wantRemoved: true},
+		{name: "WrittenAfterCutoffIsKept", record: true, cutoff: -time.Minute, wantRemoved: false},
+		{name: "MissingIsNotError", record: false, cutoff: time.Minute, wantRemoved: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			const iface = "tap-abc123H"
+			if tt.record {
+				if err := RecordAttachment(stateDir, iface, 1500); err != nil {
+					t.Fatalf("RecordAttachment() error = %v", err)
+				}
+			}
+
+			removed, err := RemoveStaleAttachment(stateDir, iface, time.Now().Add(tt.cutoff))
+			if err != nil {
+				t.Fatalf("RemoveStaleAttachment() error = %v", err)
+			}
+			if removed != tt.wantRemoved {
+				t.Errorf("RemoveStaleAttachment() removed = %v, want %v", removed, tt.wantRemoved)
+			}
+
+			records, err := ListAttachments(stateDir)
+			if err != nil {
+				t.Fatalf("ListAttachments() error = %v", err)
+			}
+			wantRecords := 0
+			if tt.record && !tt.wantRemoved {
+				wantRecords = 1
+			}
+			if len(records) != wantRecords {
+				t.Errorf("ListAttachments() returned %d records, want %d", len(records), wantRecords)
+			}
+		})
 	}
 }
 
