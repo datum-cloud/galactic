@@ -17,6 +17,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/natattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natsrcfiltermap"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -152,6 +153,11 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 		return nil, fmt.Errorf("write shard_config_table: %w", err)
 	}
 
+	if err := setupSourceFilter(cfg, natsrcfiltermap.NewKernelFilter(objs)); err != nil {
+		_ = objs.Close()
+		return nil, fmt.Errorf("configure SRv6 source filter: %w", err)
+	}
+
 	xdpLinks, err := natattach.Attach(objs.NatIngress, cfg.UplinkInterfaces)
 	if err != nil {
 		_ = objs.Close()
@@ -174,6 +180,7 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 		"shardSID", cfg.ShardSID,
 		"nat66", cfg.ServesNAT66(),
 		"nat64", cfg.ServesNAT64(),
+		"srv6SourceFilter", cfg.SRv6SourceFilter,
 	)
 
 	status := &natDatapathStatus{}

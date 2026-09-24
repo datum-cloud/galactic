@@ -48,19 +48,56 @@ type NatShardConfig struct {
 	Pad           [2]uint8
 }
 
+type NatSrcAllowKey struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Addr      [16]uint8
+}
+
+type NatSrcAllowValue struct {
+	_         structs.HostLayout
+	IfaceMask uint32
+	Flags     uint32
+}
+
+type NatSrcDeniedKey struct {
+	_       structs.HostLayout
+	Locator [8]uint8
+}
+
+type NatSrcDeniedValue struct {
+	_           structs.HostLayout
+	Packets     uint64
+	LastSeenNs  uint64
+	LastReason  uint32
+	LastIfindex uint32
+}
+
+type NatSrcFilterConfig struct {
+	_          structs.HostLayout
+	Mode       uint32
+	Populated  uint32
+	Generation uint64
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	NatMapDropReasons      = "drop_reasons"
-	NatMapNatConnTable     = "nat_conn_table"
-	NatMapNatProgs         = "nat_progs"
-	NatMapShardConfigTable = "shard_config_table"
-	NatProgNat64Forward    = "nat64_forward"
-	NatProgNat64Return     = "nat64_return"
-	NatProgNat66Forward    = "nat66_forward"
-	NatProgNat66Return     = "nat66_return"
-	NatProgNatIngress      = "nat_ingress"
+	NatMapDropReasons        = "drop_reasons"
+	NatMapNatConnTable       = "nat_conn_table"
+	NatMapNatProgs           = "nat_progs"
+	NatMapNatSrcAllow        = "nat_src_allow"
+	NatMapNatSrcDenied       = "nat_src_denied"
+	NatMapNatSrcFilterConfig = "nat_src_filter_config"
+	NatMapNatSrcFilterStats  = "nat_src_filter_stats"
+	NatMapNatUplinkSlot      = "nat_uplink_slot"
+	NatMapShardConfigTable   = "shard_config_table"
+	NatProgNat64Forward      = "nat64_forward"
+	NatProgNat64Return       = "nat64_return"
+	NatProgNat66Forward      = "nat66_forward"
+	NatProgNat66Return       = "nat66_return"
+	NatProgNatIngress        = "nat_ingress"
 )
 
 // LoadNat returns the embedded CollectionSpec for Nat.
@@ -116,10 +153,15 @@ type NatProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type NatMapSpecs struct {
-	DropReasons      *ebpf.MapSpec `ebpf:"drop_reasons"`
-	NatConnTable     *ebpf.MapSpec `ebpf:"nat_conn_table"`
-	NatProgs         *ebpf.MapSpec `ebpf:"nat_progs"`
-	ShardConfigTable *ebpf.MapSpec `ebpf:"shard_config_table"`
+	DropReasons        *ebpf.MapSpec `ebpf:"drop_reasons"`
+	NatConnTable       *ebpf.MapSpec `ebpf:"nat_conn_table"`
+	NatProgs           *ebpf.MapSpec `ebpf:"nat_progs"`
+	NatSrcAllow        *ebpf.MapSpec `ebpf:"nat_src_allow"`
+	NatSrcDenied       *ebpf.MapSpec `ebpf:"nat_src_denied"`
+	NatSrcFilterConfig *ebpf.MapSpec `ebpf:"nat_src_filter_config"`
+	NatSrcFilterStats  *ebpf.MapSpec `ebpf:"nat_src_filter_stats"`
+	NatUplinkSlot      *ebpf.MapSpec `ebpf:"nat_uplink_slot"`
+	ShardConfigTable   *ebpf.MapSpec `ebpf:"shard_config_table"`
 }
 
 // NatVariableSpecs contains global variables before they are loaded into the kernel.
@@ -148,10 +190,15 @@ func (o *NatObjects) Close() error {
 //
 // It can be passed to LoadNatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type NatMaps struct {
-	DropReasons      *ebpf.Map `ebpf:"drop_reasons"`
-	NatConnTable     *ebpf.Map `ebpf:"nat_conn_table"`
-	NatProgs         *ebpf.Map `ebpf:"nat_progs"`
-	ShardConfigTable *ebpf.Map `ebpf:"shard_config_table"`
+	DropReasons        *ebpf.Map `ebpf:"drop_reasons"`
+	NatConnTable       *ebpf.Map `ebpf:"nat_conn_table"`
+	NatProgs           *ebpf.Map `ebpf:"nat_progs"`
+	NatSrcAllow        *ebpf.Map `ebpf:"nat_src_allow"`
+	NatSrcDenied       *ebpf.Map `ebpf:"nat_src_denied"`
+	NatSrcFilterConfig *ebpf.Map `ebpf:"nat_src_filter_config"`
+	NatSrcFilterStats  *ebpf.Map `ebpf:"nat_src_filter_stats"`
+	NatUplinkSlot      *ebpf.Map `ebpf:"nat_uplink_slot"`
+	ShardConfigTable   *ebpf.Map `ebpf:"shard_config_table"`
 }
 
 func (m *NatMaps) Close() error {
@@ -159,6 +206,11 @@ func (m *NatMaps) Close() error {
 		m.DropReasons,
 		m.NatConnTable,
 		m.NatProgs,
+		m.NatSrcAllow,
+		m.NatSrcDenied,
+		m.NatSrcFilterConfig,
+		m.NatSrcFilterStats,
+		m.NatUplinkSlot,
 		m.ShardConfigTable,
 	)
 }

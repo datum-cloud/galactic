@@ -139,8 +139,9 @@ galactic/
 │       │                    #   umbrella but are out of scope here: the edge
 │       │                    #   gateway's edgeprog/edgemap/edgeattach — see
 │       │                    #   ARCHITECTURE-GATEWAY.md — and galactic-nat's
-│       │                    #   natprog/natmap/natattach, which has no
-│       │                    #   architecture doc of its own yet.)
+│       │                    #   natprog/natmap/natsrcfiltermap/natattach,
+│       │                    #   which has no architecture doc of its own
+│       │                    #   yet.)
 │       ├── sysctl/          # Interface sysctl helpers
 │       └── vrf/             # Linux VRF create/delete/lookup
 ├── config/

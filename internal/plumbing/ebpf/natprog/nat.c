@@ -85,6 +85,7 @@
 //     way any cross-node SRv6 destination is. The *inner* destination decides
 //     the family: inside nat64_prefix -> nat64_forward, otherwise
 //     nat66_forward.
+//     The source filter, when on, runs first; see its section below.
 //  4. IPv4 destination equal to shard_pub_addr4 is a reply from the IPv4
 //     internet -> nat64_return.
 //  5. Anything else: XDP_PASS.
@@ -109,9 +110,34 @@
 //
 // There is no tenant-identity check beyond the Argument itself. A forged
 // Argument misdirects only the forger's own isolation bucket, never a
-// legitimate tenant's, but this program trusts that only fabric-internal
-// traffic reaches it at all. The trust boundary is a separate security
-// question, not something this file resolves.
+// legitimate tenant's.
+//
+// ---------------------------------------------------------------------
+// SRv6 source filtering.
+// ---------------------------------------------------------------------
+//
+// Before either forward leg, the dispatcher can verify the outer source of an
+// encapsulated tenant packet, as a second check alongside the underlay's own
+// isolation. nat_src_filter_config selects the mode: off (the default, a
+// single array read and no other change), audit (count every decision,
+// forward everything), or enforce (drop what fails).
+//
+// The source must first be a well-formed tenant SID: Function End.DT46, a
+// non-zero Argument, and zero padding. The return leg re-encapsulates toward
+// that exact address, so a source that fails this could never receive a reply
+// and loses nothing by being refused. This part needs no control-plane state
+// and applies from the moment the mode leaves off.
+//
+// Once the control plane marks the allow-list populated, the source must also
+// fall inside a prefix in nat_src_allow, and arrive on an uplink that prefix is
+// bound to: nat_uplink_slot maps an ingress ifindex to a slot, and the entry's
+// iface_mask names the slots it is reachable through. Until the first
+// complete sync the prefix and interface checks are bypassed and counted as
+// such, so a control plane that has not run yet cannot black-hole egress.
+//
+// Denied sources are recorded by locator (their top 64 bits) in an LRU for
+// triage. None of this state shares a map with the translation paths, so
+// adding it leaves every existing pinned map as it was.
 #include <linux/bpf.h>
 
 #define SEC(name) __attribute__((section(name), used))
@@ -139,6 +165,7 @@ static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 pl
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 static long (*bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *) BPF_FUNC_tail_call;
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
+static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 
 // ---------------------------------------------------------------------
 // Constants.
@@ -338,6 +365,76 @@ enum nat_drop_reason {
 	DROP_REASON_NAT_COUNT                = 19,
 };
 
+// Source filter modes, stored in src_filter_config.mode. The array's zero
+// value is off, so a datapath whose control plane never writes the map
+// behaves exactly as it did before the filter existed.
+#define NAT_SRC_FILTER_OFF 0
+#define NAT_SRC_FILTER_AUDIT 1
+#define NAT_SRC_FILTER_ENFORCE 2
+
+// src_allow_value.flags. ANY_IFACE accepts the prefix on every uplink, for a
+// peer whose reachability is not tied to one link.
+#define NAT_SRC_ALLOW_ANY_IFACE 0x1
+
+// nat_uplink_slot values index a 32-bit mask, so slots run 0-31.
+#define NAT_SRC_MAX_SLOT 31
+
+// uFMT 48+16 field constants, matching internal/plumbing/ebpf/uformat.
+#define NAT_USID_FUNCTION_END_DT46 0xE
+
+// Indices into nat_src_filter_stats. The map is sized NAT_SRC_STAT_SLOTS rather
+// than to the count in use, so a later counter is an append that leaves the
+// pinned map's layout, and so every other pinned map, untouched.
+enum nat_src_stat {
+	NAT_SRC_STAT_CHECKED            = 0,
+	NAT_SRC_STAT_ALLOWED            = 1,
+	NAT_SRC_STAT_DENY_PREFIX        = 2,
+	NAT_SRC_STAT_DENY_IFACE         = 3,
+	NAT_SRC_STAT_DENY_STRUCTURE     = 4,
+	NAT_SRC_STAT_BYPASS_UNPOPULATED = 5,
+	NAT_SRC_STAT_COUNT              = 6,
+	NAT_SRC_STAT_SLOTS              = 16,
+};
+
+// struct src_allow_key is nat_src_allow's LPM key: prefixlen in bits, then the
+// address in network order.
+struct src_allow_key {
+	__u32 prefixlen;
+	__u8 addr[16];
+};
+
+// struct src_allow_value binds an allowed prefix to the uplinks it may arrive
+// on: bit N of iface_mask is uplink slot N.
+struct src_allow_value {
+	__u32 iface_mask;
+	__u32 flags;
+};
+
+// struct src_filter_config is nat_src_filter_config's single entry. populated
+// is set once the control plane has completed a full sync of nat_src_allow;
+// generation is the control plane's own sync counter, exposed for
+// observability and never read by the datapath.
+struct src_filter_config {
+	__u32 mode;
+	__u32 populated;
+	__u64 generation;
+};
+
+// struct src_denied_key is a denied source's locator: its top 64 bits, Block
+// and Node-ID, which identify the sending node whatever its Argument.
+struct src_denied_key {
+	__u8 locator[8];
+};
+
+// struct src_denied_value records the most recent denial for one locator.
+// packets is approximate under concurrent updates from several CPUs.
+struct src_denied_value {
+	__u64 packets;
+	__u64 last_seen_ns;
+	__u32 last_reason;
+	__u32 last_ifindex;
+};
+
 // ---------------------------------------------------------------------
 // Maps.
 // ---------------------------------------------------------------------
@@ -370,11 +467,142 @@ struct {
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 4096);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct src_allow_key);
+	__type(value, struct src_allow_value);
+} nat_src_allow SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, NAT_SRC_MAX_SLOT + 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} nat_uplink_slot SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct src_filter_config);
+} nat_src_filter_config SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, NAT_SRC_STAT_SLOTS);
+	__type(key, __u32);
+	__type(value, __u64);
+} nat_src_filter_stats SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 1024);
+	__type(key, struct src_denied_key);
+	__type(value, struct src_denied_value);
+} nat_src_denied SEC(".maps");
+
 static NAT_ALWAYS_INLINE void count_drop(__u32 reason)
 {
 	__u64 *counter = bpf_map_lookup_elem(&drop_reasons, &reason);
 	if (counter)
 		*counter += 1;
+}
+
+static NAT_ALWAYS_INLINE void count_src_stat(__u32 stat)
+{
+	__u64 *counter = bpf_map_lookup_elem(&nat_src_filter_stats, &stat);
+	if (counter)
+		*counter += 1;
+}
+
+static NAT_ALWAYS_INLINE void record_src_denied(const __u8 saddr[16], __u32 reason, __u32 ifindex)
+{
+	struct src_denied_key key;
+	__builtin_memcpy(key.locator, saddr, sizeof(key.locator));
+
+	__u64 now = bpf_ktime_get_ns();
+	struct src_denied_value *seen = bpf_map_lookup_elem(&nat_src_denied, &key);
+	if (seen) {
+		seen->packets += 1;
+		seen->last_seen_ns = now;
+		seen->last_reason = reason;
+		seen->last_ifindex = ifindex;
+		return;
+	}
+
+	struct src_denied_value fresh = {
+		.packets = 1,
+		.last_seen_ns = now,
+		.last_reason = reason,
+		.last_ifindex = ifindex,
+	};
+	bpf_map_update_elem(&nat_src_denied, &key, &fresh, BPF_ANY);
+}
+
+// src_well_formed reports whether saddr is a tenant SID a reply can be
+// re-encapsulated toward: Function End.DT46, a non-zero Argument, and a zero
+// padding tail.
+static NAT_ALWAYS_INLINE int src_well_formed(const __u8 saddr[16])
+{
+	if ((saddr[8] >> 4) != NAT_USID_FUNCTION_END_DT46)
+		return 0;
+	if ((saddr[8] & 0x0F) == 0 && saddr[9] == 0)
+		return 0;
+	for (int i = 10; i < 16; i++) {
+		if (saddr[i] != 0)
+			return 0;
+	}
+	return 1;
+}
+
+// src_filter_check classifies one encapsulated packet's outer source, counts
+// the decision, and returns the stat index it landed on. Callers treat
+// NAT_SRC_STAT_ALLOWED and NAT_SRC_STAT_BYPASS_UNPOPULATED as a pass and every
+// other value as a denial.
+static NAT_ALWAYS_INLINE __u32 src_filter_check(struct xdp_md *ctx, const __u8 saddr[16],
+						const struct src_filter_config *fcfg)
+{
+	__u32 verdict;
+
+	count_src_stat(NAT_SRC_STAT_CHECKED);
+
+	if (!src_well_formed(saddr)) {
+		verdict = NAT_SRC_STAT_DENY_STRUCTURE;
+		goto denied;
+	}
+
+	if (!fcfg->populated) {
+		count_src_stat(NAT_SRC_STAT_BYPASS_UNPOPULATED);
+		return NAT_SRC_STAT_BYPASS_UNPOPULATED;
+	}
+
+	struct src_allow_key key;
+	key.prefixlen = 128;
+	__builtin_memcpy(key.addr, saddr, sizeof(key.addr));
+	struct src_allow_value *allow = bpf_map_lookup_elem(&nat_src_allow, &key);
+	if (!allow) {
+		verdict = NAT_SRC_STAT_DENY_PREFIX;
+		goto denied;
+	}
+
+	if (!(allow->flags & NAT_SRC_ALLOW_ANY_IFACE)) {
+		__u32 ifindex = ctx->ingress_ifindex;
+		__u32 *slot = bpf_map_lookup_elem(&nat_uplink_slot, &ifindex);
+		if (!slot || *slot > NAT_SRC_MAX_SLOT || !(allow->iface_mask & (1u << *slot))) {
+			verdict = NAT_SRC_STAT_DENY_IFACE;
+			goto denied;
+		}
+	}
+
+	count_src_stat(NAT_SRC_STAT_ALLOWED);
+	return NAT_SRC_STAT_ALLOWED;
+
+denied:
+	count_src_stat(verdict);
+	record_src_denied(saddr, verdict, ctx->ingress_ifindex);
+	return verdict;
 }
 
 static NAT_ALWAYS_INLINE int addr6_eq(const __u8 a[16], const __u8 b[16])
@@ -1420,6 +1648,15 @@ int nat_ingress(struct xdp_md *ctx)
 		}
 
 		if (locator_matches(ip6->daddr, cfg->shard_sid) && ip6->nexthdr == NAT_IPPROTO_IPV6) {
+			__u32 fcfg_key = 0;
+			struct src_filter_config *fcfg = bpf_map_lookup_elem(&nat_src_filter_config, &fcfg_key);
+			if (fcfg && fcfg->mode != NAT_SRC_FILTER_OFF) {
+				__u32 verdict = src_filter_check(ctx, ip6->saddr, fcfg);
+				if (verdict != NAT_SRC_STAT_ALLOWED && verdict != NAT_SRC_STAT_BYPASS_UNPOPULATED &&
+				    fcfg->mode == NAT_SRC_FILTER_ENFORCE)
+					return XDP_DROP;
+			}
+
 			// The inner destination, not the outer one, decides the family.
 			// A shard not serving IPv4 skips the test entirely, which is what
 			// keeps its dispatch identical to the NAT66-only program's.
