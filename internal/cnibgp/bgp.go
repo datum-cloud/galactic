@@ -76,6 +76,7 @@ type publishConfig struct {
 	// ifaceType selects the attachment's egress kind, veth or tap. Inferred from
 	// prevResult, never a config field.
 	ifaceType string
+	egress    *Egress
 }
 
 // publishResult records what publishBGPState created, so cmdAdd can fold it
@@ -447,7 +448,7 @@ func publishBGPState(
 		// Not tracked for rollback: the vrf_table entry is shared by every
 		// attachment on this VPC and node, like the BGPVRFInstance above.
 		if _, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, prefixes,
+			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, prefixes, cfg.egress,
 		); err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
@@ -522,6 +523,7 @@ func publishBGPState(
 // nothing.
 func registerEBPFDatapath(
 	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string, prefixes []string,
+	egress *Egress,
 ) (registered bool, err error) {
 	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
 		return false, nil
@@ -551,12 +553,12 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
 	}
 
-	// Installs or refreshes this VRF's NAT66 default egress route. The
-	// optional routing plugin in this chain may be absent from a given
-	// conflist, and this route must exist wherever a shard is configured, so
-	// it is written here.
-	if err := installEgressRoutes(vrfTableID, argument); err != nil {
-		return false, fmt.Errorf("install NAT66 default egress route: %w", err)
+	// Installs, refreshes, or withdraws this VRF's egress routes. The optional
+	// routing plugin in this chain may be absent from a given conflist, and
+	// these routes must exist wherever this network declares egress, so they
+	// are written here.
+	if err := installEgressRoutes(vrfTableID, argument, egress); err != nil {
+		return false, fmt.Errorf("install egress routes: %w", err)
 	}
 
 	if err := registerLocalEgressRoutes(pinDir, vrfTableID, prefixes); err != nil {
@@ -761,11 +763,20 @@ func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []stri
 // may offer NAT64 without NAT66, and then no default route exists for this
 // traffic to fall into.
 //
-// No shard configured is not an error: the shard list parses to an empty slice
-// and srv6.EgressDefaultRouteAdd no-ops. A shard SID that is invalid, or that
-// has no reachable route yet, fails this attachment's ADD rather than leaving
-// the VRF with no egress at all.
-func installEgressRoutes(vrfTableID uint32, argument uint16) error {
+// egress is this network's own declaration, from its own conflist stanza. A
+// network that declares no egress gets no route, and loses one it has, which is
+// what makes a declaration of no egress mean anything: the node-wide list on
+// its own handed a default route out to every network on the node.
+//
+// A network that declares egress on a node naming no shard fails this
+// attachment's ADD. A node without a shard is an operator error, and failing
+// the first instance surfaces it where an attach that succeeded without egress
+// would hide it. A shard SID that is invalid, or that has no reachable route
+// yet, fails the ADD for the same reason.
+func installEgressRoutes(vrfTableID uint32, argument uint16, egress *Egress) error {
+	if !egress.Enabled() {
+		return withdrawEgressRoutes(vrfTableID)
+	}
 	// cniConfig is nil until InitCNIConfig runs, which several unit tests
 	// calling registerEBPFDatapath directly never do. Treated as "no shard
 	// configured" rather than a panic.
@@ -777,7 +788,8 @@ func installEgressRoutes(vrfTableID uint32, argument uint16) error {
 		return fmt.Errorf("parse %s: %w", config.EnvCNIEgressShardSIDs, err)
 	}
 	if len(shardSIDs) == 0 {
-		return nil
+		return fmt.Errorf("this network declares internet egress and this node names no egress shard (%s is empty)",
+			config.EnvCNIEgressShardSIDs)
 	}
 	tenantSIDs, err := shardSIDsForTenant(shardSIDs, argument)
 	if err != nil {
@@ -896,4 +908,25 @@ func egressKindForInterfaceType(ifaceType string) (uint32, error) {
 	default:
 		return 0, fmt.Errorf("unknown interface type %q", ifaceType)
 	}
+}
+
+// withdrawEgressRoutes removes vrfTableID's egress routes, so a network whose
+// declaration withdrew egress, or never declared it, carries none however the
+// node is configured. Idempotent, and a no-op on a node whose datapath has not
+// loaded, so an attachment there never fails its ADD over a route it never had.
+func withdrawEgressRoutes(vrfTableID uint32) error {
+	if err := srv6.EgressDefaultRouteWithdraw(vrfTableID); err != nil {
+		return fmt.Errorf("withdraw default egress route: %w", err)
+	}
+	if cniConfig == nil || cniConfig.NAT64Prefix == "" {
+		return nil
+	}
+	_, prefix, err := net.ParseCIDR(cniConfig.NAT64Prefix)
+	if err != nil {
+		return fmt.Errorf("parse %s %q: %w", config.EnvCNINAT64Prefix, cniConfig.NAT64Prefix, err)
+	}
+	if err := srv6.EgressPrefixRouteWithdraw(vrfTableID, prefix); err != nil {
+		return fmt.Errorf("withdraw NAT64 egress route: %w", err)
+	}
+	return nil
 }

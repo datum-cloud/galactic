@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
@@ -718,5 +719,92 @@ func TestResolvePublicUplink_NoResolvedNeighborFailsLoudly(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("ResolvePublicUplink() = nil error with no resolved neighbor, want an error")
+	}
+}
+
+// TestEgressDefaultRouteWithdraw_NoDatapathIsANoop covers the guard that keeps
+// a network with no egress behaving exactly as it did before egress existed.
+// A node whose datapath has not loaded has no pinned map to open, and an
+// attachment there must not fail its ADD over a route it never had.
+func TestEgressDefaultRouteWithdraw_NoDatapathIsANoop(t *testing.T) {
+	prevPinDir := pinDir
+	pinDir = filepath.Join(t.TempDir(), "no-such-datapath")
+	t.Cleanup(func() { pinDir = prevPinDir })
+
+	if err := EgressDefaultRouteWithdraw(1); err != nil {
+		t.Errorf("EgressDefaultRouteWithdraw(1) = %v, want nil with no loaded datapath", err)
+	}
+	_, prefix, err := net.ParseCIDR("2001:db8:64::/96")
+	if err != nil {
+		t.Fatalf("parse test prefix: %v", err)
+	}
+	if err := EgressPrefixRouteWithdraw(1, prefix); err != nil {
+		t.Errorf("EgressPrefixRouteWithdraw(1, %s) = %v, want nil with no loaded datapath", prefix, err)
+	}
+}
+
+// TestEgressDefaultRouteWithdraw_RemovesBothPrefixes is the withdrawal half of
+// a per-network egress declaration: a network that stops declaring egress must
+// lose both routes, the ::/0 default and the more-specific NAT64 prefix.
+// Leaving the second behind would withdraw a network's IPv6 egress and leave
+// its IPv4 egress running.
+//
+// It also covers the idempotence the attach path relies on: withdrawing twice,
+// and withdrawing an entry that was never installed, are both successes.
+func TestEgressDefaultRouteWithdraw_RemovesBothPrefixes(t *testing.T) {
+	requireRoot(t)
+	testPinDir := setUpTestPinDir(t)
+
+	const (
+		ifaceName = "srv6egtest5"
+		ifaceAddr = "2001:db8:7::1/64"
+		shardSID  = "2001:db8:ff01:1:e001::"
+		table     = 77
+	)
+	nsObj := setUpResolvableSID(t, ifaceName, ifaceAddr, shardSID)
+	shardSIDs := []net.IP{net.ParseIP(shardSID)}
+	_, nat64Prefix, err := net.ParseCIDR("2001:db8:64::/96")
+	if err != nil {
+		t.Fatalf("parse NAT64 prefix: %v", err)
+	}
+
+	if err := nsObj.Do(func(_ ns.NetNS) error {
+		if addErr := EgressDefaultRouteAdd(table, shardSIDs); addErr != nil {
+			return addErr
+		}
+		return EgressPrefixRouteAdd(table, nat64Prefix, shardSIDs)
+	}); err != nil {
+		t.Fatalf("install egress routes: %v", err)
+	}
+
+	entryTable, closer, err := egressroutemap.OpenPinnedEgressRouteTable(testPinDir)
+	if err != nil {
+		t.Fatalf("open pinned egress_route_table: %v", err)
+	}
+	defer func() { _ = closer.Close() }()
+
+	for _, prefix := range []*net.IPNet{egressroutemap.DefaultPrefix, nat64Prefix} {
+		if _, ok, lookupErr := entryTable.Lookup(table, prefix); lookupErr != nil {
+			t.Fatalf("lookup %s before withdrawal: %v", prefix, lookupErr)
+		} else if !ok {
+			t.Fatalf("no entry installed for %s", prefix)
+		}
+	}
+
+	for range 2 {
+		if err := EgressDefaultRouteWithdraw(table); err != nil {
+			t.Fatalf("EgressDefaultRouteWithdraw(%d) = %v, want success", table, err)
+		}
+		if err := EgressPrefixRouteWithdraw(table, nat64Prefix); err != nil {
+			t.Fatalf("EgressPrefixRouteWithdraw(%d, %s) = %v, want success", table, nat64Prefix, err)
+		}
+	}
+
+	for _, prefix := range []*net.IPNet{egressroutemap.DefaultPrefix, nat64Prefix} {
+		if _, ok, lookupErr := entryTable.Lookup(table, prefix); lookupErr != nil {
+			t.Fatalf("lookup %s after withdrawal: %v", prefix, lookupErr)
+		} else if ok {
+			t.Errorf("entry for %s still present after withdrawal", prefix)
+		}
 	}
 }
