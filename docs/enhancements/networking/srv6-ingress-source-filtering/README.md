@@ -70,10 +70,25 @@ SRv6 packet ─► uSID ingress: destination is ours? ─► source allowed on t
   through. The NAT gateway program gets the same check before it forwards,
   and additionally rejects sources that are not well-formed tenant addresses.
 - **Control plane.** A reconciler in `galactic-cni` (and in `galactic-nat` for
-  gateway nodes) builds the allow-list from the node's main routing table: the
-  routes to peer locators that fall inside the configured SR domain prefixes,
-  with the interfaces those routes use. It reuses the existing netlink route
-  and link watch, applies changes as diffs, and resyncs periodically.
+  gateway nodes) builds the allow-list from the routes the fabric's BGP has
+  installed. A route becomes an allow-list entry only when all of these hold:
+  - it was installed by the fabric's own routing (the underlay BGP, or
+    `galactic-router` for gateway routes), not by a static or other route
+    source;
+  - its next hop is a configured fabric BGP peer;
+  - it falls inside the configured SR domain prefixes, at node-locator length
+    or longer, and is not the node's own locator.
+
+  Each entry is bound to the interfaces its route uses. The reconciler reuses
+  the existing netlink route and link watch, applies changes as diffs, and
+  resyncs periodically.
+
+  The allow-list is built from these routes rather than from the BGP peer list
+  itself because the two carry different addresses. A peer's BGP session runs
+  between link or private addresses, but its SRv6 traffic is sourced from its
+  locator. BGP is how each node learns which locator belongs to which peer, and
+  the resulting route also records the link that peer is reachable through,
+  which is what interface binding needs.
 - **Modes.** `off` (default, no behaviour change), `audit` (count and log
   would-be drops, deliver everything) and `enforce` (drop). The filter stays
   open until its first complete sync, and a stale allow-list is kept rather
