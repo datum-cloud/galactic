@@ -734,6 +734,9 @@ func radvActorFailed(actors *radvActorSet, iface string) {
 //     and replies to that guest's solicitations. This runs here, not from
 //     galactic-tap's cmdAdd, because a guest's boot outlives that short-lived
 //     process. It is independent of the eBPF datapath and runs regardless.
+//  9. Keeps the SRv6 ingress source filter's allow-list in step with this
+//     node's routes when it is enabled, reporting on its own
+//     srcFilterHealthServiceName health service.
 func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	slog.Info("Starting CNI installer run daemon", "grpcHealthPort", grpcHealthPort, "metricsPort", metricsPort)
 
@@ -790,6 +793,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	if ebpfState.objs != nil {
 		healthSrv.SetServingStatus(ebpfHealthServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
 	}
+
+	startSourceFilter(ctx, ebpfState, healthSrv)
 
 	go func() {
 		if err := grpcSrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {

@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/srcfiltermap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
@@ -24,13 +25,23 @@ type DropReasonsReader interface {
 	Lookup(key, valueOut any) error
 }
 
+// SourceFilterReader is the read side of the SRv6 ingress source filter that
+// Collector needs. *srcfiltermap.Filter satisfies it.
+type SourceFilterReader interface {
+	Stats() (srcfiltermap.Stats, error)
+	Config() (srcfiltermap.Config, error)
+	ListAllow() ([]srcfiltermap.Entry, error)
+	DeniedSources() ([]srcfiltermap.DeniedSource, error)
+}
+
 // Collector reads the uSID datapath's live map state at every scrape:
-// per-Argument packet and byte counters, drops by reason, and Argument-space
-// utilization per Block.
+// per-Argument packet and byte counters, drops by reason, Argument-space
+// utilization per Block, and the source filter's decisions and state.
 type Collector struct {
 	vrf         *usidmap.VRFTable
 	locator     *usidmap.LocatorTable
 	dropReasons DropReasonsReader
+	srcFilter   SourceFilterReader
 }
 
 // NewCollector builds a Collector from already-constructed tables and reader.
@@ -40,6 +51,13 @@ func NewCollector(vrf *usidmap.VRFTable, locator *usidmap.LocatorTable, dropReas
 	return &Collector{vrf: vrf, locator: locator, dropReasons: dropReasons}
 }
 
+// WithSourceFilter makes c also report the source filter read through r, and
+// returns c.
+func (c *Collector) WithSourceFilter(r SourceFilterReader) *Collector {
+	c.srcFilter = r
+	return c
+}
+
 // NewCollectorFromObjects builds a Collector reading directly from a loaded
 // object set's maps.
 func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
@@ -47,12 +65,16 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 		usidmap.NewVRFTable(usidmap.KernelTable{Map: objs.VrfTable}),
 		usidmap.NewLocatorTable(usidmap.KernelTable{Map: objs.LocatorTable}),
 		objs.DropReasons,
-	)
+	).WithSourceFilter(srcfiltermap.NewFromObjects(objs))
 }
 
 // labelBlock is the Prometheus label name for a uSID Block, shared by every
 // metric below that carries one.
 const labelBlock = "block"
+
+// labelResult is the Prometheus label name for an outcome, shared by the event
+// counters and the source filter's decision counter.
+const labelResult = "result"
 
 var (
 	vrfPacketsDesc = prometheus.NewDesc(
@@ -81,6 +103,32 @@ var (
 			"design plan §2's Option 2 -- an exhaustion-alerting input.",
 		[]string{labelBlock}, nil,
 	)
+	srcFilterPacketsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "src_filter", "packets_total"),
+		"SRv6 ingress source filter decisions, by result: checked, allowed, deny_prefix, deny_iface "+
+			"or bypass_unpopulated. Denials are also counted in audit mode, where the packet is still delivered.",
+		[]string{labelResult}, nil,
+	)
+	srcFilterEntriesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "src_filter", "entries"),
+		"Allowed source prefixes currently in the SRv6 ingress source filter.",
+		nil, nil,
+	)
+	srcFilterModeDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "src_filter", "mode"),
+		"SRv6 ingress source filter mode: 0 off, 1 audit, 2 enforce.",
+		nil, nil,
+	)
+	srcFilterPopulatedDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "src_filter", "populated"),
+		"1 once the source filter's allow-list reflects a complete sync; until then every packet bypasses it.",
+		nil, nil,
+	)
+	srcFilterDeniedSourcesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "src_filter", "denied_sources"),
+		"Distinct source /64s the source filter has recorded as denied, bounded by the record's capacity.",
+		nil, nil,
+	)
 )
 
 // Describe implements prometheus.Collector.
@@ -90,12 +138,18 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dropsDesc
 	ch <- blockArgumentsUsedDesc
 	ch <- blockArgumentUtilizationDesc
+	ch <- srcFilterPacketsDesc
+	ch <- srcFilterEntriesDesc
+	ch <- srcFilterModeDesc
+	ch <- srcFilterPopulatedDesc
+	ch <- srcFilterDeniedSourcesDesc
 }
 
 // Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectVRF(ch)
 	c.collectDrops(ch)
+	c.collectSrcFilter(ch)
 }
 
 // formatBlock renders a Block as a metric label, in hex, matching how Block
@@ -166,5 +220,52 @@ func (c *Collector) collectDrops(ch chan<- prometheus.Metric) {
 			name = fmt.Sprintf("unknown_%d", i)
 		}
 		ch <- prometheus.MustNewConstMetric(dropsDesc, prometheus.CounterValue, float64(total), name)
+	}
+}
+
+func (c *Collector) collectSrcFilter(ch chan<- prometheus.Metric) {
+	if c.srcFilter == nil {
+		return
+	}
+
+	if st, err := c.srcFilter.Stats(); err != nil {
+		ch <- prometheus.NewInvalidMetric(srcFilterPacketsDesc, fmt.Errorf("read src_filter_stats: %w", err))
+	} else {
+		for _, v := range []struct {
+			slot  uint32
+			count uint64
+		}{
+			{prog.SrcFilterStatChecked, st.Checked},
+			{prog.SrcFilterStatAllowed, st.Allowed},
+			{prog.SrcFilterStatDenyPrefix, st.DenyPrefix},
+			{prog.SrcFilterStatDenyIface, st.DenyIface},
+			{prog.SrcFilterStatBypassUnpopulated, st.BypassUnpopulated},
+		} {
+			ch <- prometheus.MustNewConstMetric(srcFilterPacketsDesc, prometheus.CounterValue,
+				float64(v.count), prog.SrcFilterStatNames[v.slot])
+		}
+	}
+
+	if cfg, err := c.srcFilter.Config(); err != nil {
+		ch <- prometheus.NewInvalidMetric(srcFilterModeDesc, fmt.Errorf("read src_filter_config_table: %w", err))
+	} else {
+		populated := 0.0
+		if cfg.Populated {
+			populated = 1
+		}
+		ch <- prometheus.MustNewConstMetric(srcFilterModeDesc, prometheus.GaugeValue, float64(cfg.Mode))
+		ch <- prometheus.MustNewConstMetric(srcFilterPopulatedDesc, prometheus.GaugeValue, populated)
+	}
+
+	if entries, err := c.srcFilter.ListAllow(); err != nil {
+		ch <- prometheus.NewInvalidMetric(srcFilterEntriesDesc, fmt.Errorf("list src_allow_table: %w", err))
+	} else {
+		ch <- prometheus.MustNewConstMetric(srcFilterEntriesDesc, prometheus.GaugeValue, float64(len(entries)))
+	}
+
+	if denied, err := c.srcFilter.DeniedSources(); err != nil {
+		ch <- prometheus.NewInvalidMetric(srcFilterDeniedSourcesDesc, fmt.Errorf("list src_filter_denied: %w", err))
+	} else {
+		ch <- prometheus.MustNewConstMetric(srcFilterDeniedSourcesDesc, prometheus.GaugeValue, float64(len(denied)))
 	}
 }

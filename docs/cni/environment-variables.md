@@ -58,6 +58,7 @@ they resolve only `LogFile`/`LogLevel` from `HostConf` — never `NodeName` or
 | eBPF interfaces      | `GALACTIC_CNI_EBPF_INTERFACES` env → `HostConf.EBPFInterfaces` (bridged back into the env var for `galactic-bgp`'s own process, see below) → auto-detect (interface(s) carrying the default IPv6 route)                          | _(auto-detected)_                    | `galactic-cni init`/`run`, `galactic-bgp`       |
 | DAN directory        | `GALACTIC_CNI_DAN_DIR` env → `HostConf.DANDir`                                                                                                                                                                                  | `/run/kata-containers/dans-rs`       | `galactic-cni init`, `galactic-tap`             |
 | eBPF filter priority | `GALACTIC_CNI_EBPF_FILTER_PRIORITY` env (plain `os.Getenv`, no `HostConf`/conflist tier)                                                                                                                                         | `1`                                  | `galactic-cni init`/`run`                       |
+| SRv6 source filter   | `GALACTIC_CNI_SRV6_*` env (plain `os.Getenv`, `galactic-cni run` only)                                                                                                                                                           | `off`                                | `galactic-cni run`                              |
 
 `GALACTIC_CNI_*` env var names are shared as-is across every binary that
 resolves node-level settings — there's no per-binary prefix for these, since
@@ -136,6 +137,29 @@ field; as of this writing it is still env-only.
 
   **Type:** `uint16` · **Default:** `1` (highest/lowest-numbered priority
   `tc` allows)
+
+## SRv6 ingress source filter
+
+Controls the uSID datapath's SRv6 ingress source filter: a node accepts SRv6 traffic for its tenant networks only from sources inside a fabric peer's locator, and only on the uplinks its route to that peer uses. `galactic-cni run` builds the allow-list from the node's main routing table and keeps it current. Read only by that container, with no conflist tier.
+
+| Variable                               | Values                        | Default  | Effect                                                                                                                                       |
+| -------------------------------------- | ----------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GALACTIC_CNI_SRV6_SOURCE_FILTER`      | `off`, `audit`, `enforce`     | `off`    | `off` leaves traffic untouched and starts no reconciler. `audit` counts and records sources it would reject. `enforce` drops them.           |
+| `GALACTIC_CNI_SRV6_DOMAIN_PREFIXES`    | comma-separated IPv6 prefixes | _(none)_ | The prefixes fabric locators are allocated from. Only routes inside them, and at least a /64, become allowed sources. Required unless `off`. |
+| `GALACTIC_CNI_SRV6_SOURCE_BINDING`     | `strict`, `loose`             | `strict` | `strict` accepts a source only on the uplinks this node's route to it uses. `loose` accepts a known source on any uplink.                    |
+| `GALACTIC_CNI_SRV6_SOURCE_ALLOW_EXTRA` | comma-separated IPv6 prefixes | _(none)_ | Extra sources allowed on any uplink, for senders with no route in the main table.                                                            |
+
+- An invalid value, or `audit`/`enforce` without domain prefixes, logs an error, writes `off` and reports the `srv6-source-filter` health service as not serving. The filter is never enforced on a configuration it could not read.
+- The filter lets every packet through until the first complete sync, and a sync that cannot read routes, or finds no fabric route at all, keeps the previous allow-list rather than clearing it.
+- Roll out with `audit` first and watch `galactic_usid_src_filter_packets_total{result=~"deny_.*"}` before switching to `enforce`. Debug logging lists the most-denied sources every minute.
+
+| Metric                                    | Type    | Meaning                                                                                        |
+| ----------------------------------------- | ------- | ---------------------------------------------------------------------------------------------- |
+| `galactic_usid_src_filter_packets_total`  | counter | Decisions by `result`: `checked`, `allowed`, `deny_prefix`, `deny_iface`, `bypass_unpopulated` |
+| `galactic_usid_src_filter_entries`        | gauge   | Allowed source prefixes                                                                        |
+| `galactic_usid_src_filter_mode`           | gauge   | 0 off, 1 audit, 2 enforce                                                                      |
+| `galactic_usid_src_filter_populated`      | gauge   | 1 once the allow-list reflects a complete sync                                                 |
+| `galactic_usid_src_filter_denied_sources` | gauge   | Distinct denied source /64s recorded for triage                                                |
 
 ## `GALACTIC_CNI_EGRESS_SHARD_SIDS`
 

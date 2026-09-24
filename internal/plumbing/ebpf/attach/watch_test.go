@@ -697,3 +697,35 @@ func TestWatch_HealsExternallyClearedFilterViaWatcherReconcile(t *testing.T) {
 		t.Fatalf("post-watch verification: %v", err)
 	}
 }
+
+// TestWatcher_ReevaluatedSignalsEveryPass covers Reevaluated receiving after a
+// debounced re-evaluation, including one whose resolution failed, and a nil
+// Watcher returning a channel that never receives.
+func TestWatcher_ReevaluatedSignalsEveryPass(t *testing.T) {
+	withWatchTestDefaults(t)
+	resolveInterfacesFn = func() ([]string, error) { return nil, errors.New("no default route") }
+
+	var nilWatcher *Watcher
+	if nilWatcher.Reevaluated() != nil {
+		t.Error("nil Watcher.Reevaluated() is non-nil")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := newWatcher()
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, &ebpf.Program{}, nil, w) }()
+
+	for range 2 {
+		w.Reconcile()
+		select {
+		case <-w.Reevaluated():
+		case <-time.After(5 * time.Second):
+			t.Fatal("Reevaluated did not receive after a nudge")
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+}

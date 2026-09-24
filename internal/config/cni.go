@@ -37,6 +37,26 @@ const (
 	// where a deployment needs this filter ordered differently.
 	EnvCNIEBPFFilterPriority = "GALACTIC_CNI_EBPF_FILTER_PRIORITY"
 
+	// EnvCNISRv6SourceFilter sets the uSID datapath's SRv6 ingress source
+	// filter mode: off (the default), audit or enforce. Read only by
+	// galactic-cni run.
+	EnvCNISRv6SourceFilter = "GALACTIC_CNI_SRV6_SOURCE_FILTER"
+
+	// EnvCNISRv6DomainPrefixes is a comma-separated list of the IPv6 prefixes
+	// the fabric's locators are allocated from. Only routes inside them become
+	// allowed sources. Required unless the source filter is off.
+	EnvCNISRv6DomainPrefixes = "GALACTIC_CNI_SRV6_DOMAIN_PREFIXES"
+
+	// EnvCNISRv6SourceBinding is strict (the default), accepting a source only
+	// on the uplinks this node's route to it uses, or loose, accepting a known
+	// source on any uplink.
+	EnvCNISRv6SourceBinding = "GALACTIC_CNI_SRV6_SOURCE_BINDING"
+
+	// EnvCNISRv6SourceAllowExtra is a comma-separated list of extra IPv6
+	// source prefixes to allow on any uplink, for senders with no route in
+	// the main table.
+	EnvCNISRv6SourceAllowExtra = "GALACTIC_CNI_SRV6_SOURCE_ALLOW_EXTRA"
+
 	// EnvCNIEgressShardSIDs is a comma-separated list of every live egress
 	// shard's SID: the fabric-wide membership a tenant VRF's egress routes need.
 	// One SID per shard covers both address families -- a shard decides which
