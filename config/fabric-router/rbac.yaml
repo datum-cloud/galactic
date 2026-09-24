@@ -1,0 +1,40 @@
+# fabric-config-agent's RBAC (both the frr-init init container and the
+# config-agent sidecar in daemonset.yaml). Namespaced, not cluster-wide: the
+# agent only ever reads its own node's fabric-router.<nodename> ConfigMap
+# (plus, during the migration off it, the legacy shared fabric-config), both
+# in galactic-system.
+#
+# RBAC can't scope resourceNames to "whichever node this pod landed on"
+# without listing every node's ConfigMap name here, so read access is
+# namespace-wide. list/watch are needed for the sidecar's single-object
+# informer (a metadata.name field-selector watch).
+#
+# events: the agent raises Applied/Rejected/ReloadFailed/RestartRequired
+# events on the ConfigMap and ConfigMissing/DeprecatedConfigSource on its own
+# Pod, via the events.k8s.io/v1 API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fabric-router
+  namespace: galactic-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-router
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fabric-router
+subjects:
+  - kind: ServiceAccount
+    name: fabric-router
+    namespace: galactic-system

@@ -11,9 +11,11 @@ source "${SCRIPT_DIR}/lib.sh"
 # galactic.datumapis.com/galactic mode. resources/fabric-router/base/ builds
 # on a copy of it and patches in nothing but the lab-only
 # image/imagePullPolicy -- one DaemonSet per cluster covers every role,
-# since frr-init selects a per-node frr.conf.<nodename> key from
-# fabric-config via NODE_NAME and each site's kustomization generates one
-# key per matching node. Copied onto the node at deploy time nested under
+# since fabric-config-agent reads each node's own fabric-router.<nodename>
+# ConfigMap via NODE_NAME and each site's kustomization generates one such
+# ConfigMap per matching node. Re-running this after editing one node's
+# frr.conf changes only that node's ConfigMap, which its config-agent
+# sidecar reloads in place -- no pod restarts. Copied onto the node at deploy time nested under
 # the overlay's own root so its "fabric" resource reference resolves
 # (kustomize requires resources in or below the overlay root).
 FABRIC_DIR=$(cd "${SCRIPT_DIR}/../../../config/fabric-router" && pwd)

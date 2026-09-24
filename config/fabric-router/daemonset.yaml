@@ -73,6 +73,10 @@ spec:
                     values:
                       - router
                       - control
+      # fabric-config-agent reads this node's own fabric-router.<nodename>
+      # ConfigMap from the API (a DaemonSet can't vary a volume's ConfigMap
+      # name per node), so the pod needs a ServiceAccount; see rbac.yaml.
+      serviceAccountName: fabric-router
       initContainers:
         - name: frr-init
           # ":latest" is a placeholder only: no such tag is ever pushed to
@@ -88,23 +92,36 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          # Installs this node's frr.conf from ConfigMap
+          # fabric-router.<nodename> (daemons/vtysh.conf come from the
+          # image's /etc/frr-defaults unless that ConfigMap overrides them),
+          # after validating it with `vtysh -C`. A missing or invalid
+          # ConfigMap holds the pod in Init -- with a ConfigMissing/Rejected
+          # event on the pod or ConfigMap saying why -- rather than starting
+          # FRR with no underlay config. Falls back, with a
+          # DeprecatedConfigSource warning, to key frr.conf.<nodename> of the
+          # legacy shared fabric-config ConfigMap when the node has no
+          # ConfigMap of its own.
           command:
             - sh
-            - -c
+            - -ec
             - |
-              cp /etc/frr-defaults/* /etc/frr/
-              cp /tmp/frr-config/daemons /tmp/frr-config/vtysh.conf /etc/frr/
-              cp "/tmp/frr-config/frr.conf.${NODE_NAME}" /etc/frr/frr.conf
               install -d -o frr -g frr -m 775 /run/frr
               install -d -o frr -g frr -m 775 /var/log/frr
-          securityContext:
-            capabilities:
-              add:
-                - NET_ADMIN
+              exec fabric-config-agent init
           volumeMounts:
-            - name: frr-config-source
-              mountPath: /tmp/frr-config
-              readOnly: true
             - name: frr-etc
               mountPath: /etc/frr
             - name: frr-run
@@ -116,10 +133,9 @@ spec:
           image: ghcr.io/datum-cloud/fabric-router:latest
           # Documentation only (hostNetwork: true, so this doesn't change
           # behavior): the standard BGP port, opened by bgpd itself once
-          # the per-node frr.conf.<nodename> (see fabric-config's
-          # frr-init above) enables it -- nothing here actually declares
-          # or gates it, this just makes it visible without reading FRR's
-          # own config.
+          # this node's frr.conf (installed by frr-init above) enables it --
+          # nothing here actually declares or gates it, this just makes it
+          # visible without reading FRR's own config.
           ports:
             - name: bgp
               containerPort: 179
@@ -167,21 +183,57 @@ spec:
               mountPath: /run/frr
             - name: frr-log
               mountPath: /var/log/frr
+        # Watches this node's fabric-router.<nodename> ConfigMap and applies
+        # each change to the running FRR with frr-reload.py, which pushes
+        # only the difference, so an edit to one node's config neither
+        # restarts this pod nor touches any other node. A change that fails
+        # `vtysh -C` is rejected (Rejected event on the ConfigMap) and the
+        # running config is kept; an applied one raises an Applied event
+        # carrying its hash. A change to `daemons` can't be applied live and
+        # raises RestartRequired instead.
+        - name: config-agent
+          image: ghcr.io/datum-cloud/fabric-router:latest
+          command:
+            - fabric-config-agent
+            - watch
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: frr-etc
+              mountPath: /etc/frr
+            # vtysh (used by frr-reload.py) reaches the daemons over the
+            # sockets in /run/frr.
+            - name: frr-run
+              mountPath: /run/frr
       volumes:
-        # fabric-config is NOT generated by this kustomization — the deployer
-        # must create it themselves with a site-specific frr.conf per node
-        # (interface addresses, remote-AS, etc. for the local underlay
-        # fabric). There is no generic default that peers correctly
-        # everywhere, and BGP underlay config inherently differs per
-        # physical node — so this DaemonSet's nodeAffinity can match more
-        # than one node per cluster, and the ConfigMap must carry one
-        # frr.conf.<nodename> key per matching node (frr-init selects the
-        # right one via the pod's NODE_NAME downward-API env var) rather
-        # than a single shared frr.conf. See the README's "Production
-        # Deployment" section.
-        - name: frr-config-source
-          configMap:
-            name: fabric-config
+        # No ConfigMap volume: each node's config lives in its own
+        # fabric-router.<nodename> ConfigMap, which this kustomization does
+        # NOT generate -- the deployer must create one per node matching the
+        # affinity above, with a frr.conf key holding that node's
+        # site-specific underlay config (interface addresses, remote-AS,
+        # etc.), and optionally daemons/vtysh.conf keys to override the
+        # image defaults. See the README's "Production Deployment" section.
         - name: frr-etc
           emptyDir: {}
         - name: frr-run

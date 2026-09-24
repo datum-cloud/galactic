@@ -13,3 +13,6 @@ spec:
         - name: frr
           image: fabric-router:latest
           imagePullPolicy: Never
+        - name: config-agent
+          image: fabric-router:latest
+          imagePullPolicy: Never

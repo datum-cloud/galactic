@@ -2,9 +2,18 @@ namespace: galactic-system
 resources:
   - ../base
 
-# One key per fabric-carrying node
+# One fabric-router.<nodename> ConfigMap per fabric-carrying node (sjc: compute, edge),
+# each carrying that node's frr.conf. Names must match exactly what
+# fabric-config-agent looks up, so no hash suffix; a change is applied live
+# by the agent's config-agent sidecar instead of by a rollout.
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/name: fabric-router
 configMapGenerator:
-  - name: fabric-config
+  - name: fabric-router.sjc-worker
     files:
-      - frr.conf.sjc-worker
-      - frr.conf.sjc-worker2
+      - frr.conf=frr.conf.sjc-worker
+  - name: fabric-router.sjc-worker2
+    files:
+      - frr.conf=frr.conf.sjc-worker2
