@@ -60,3 +60,5 @@ above for that.
 - [enhancements/networking/latency-aware-routing/README.md](enhancements/networking/latency-aware-routing/README.md)
   — latency-aware SRv6 path selection as a tenant-facing routing policy.
   `status: provisional`, `stage: alpha`.
+- [enhancements/networking/srv6-ingress-source-filtering/README.md](enhancements/networking/srv6-ingress-source-filtering/README.md)
+  — accept SRv6 traffic only from known fabric peers, in the uSID ingress and NAT gateway datapaths.
