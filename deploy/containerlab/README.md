@@ -15,16 +15,18 @@ tenant traffic.
 ## Topology
 
 ```
-   dfw-worker ─┬─┐                              ┌─ sjc-worker
-     (compute) │ │                              │   (compute)
+   dfw-worker ═╦═╗                              ╔═ sjc-worker
+     (compute) ║ ║                              ║   (compute)
                 ▼ ▼                            ▼
-        dfw-worker2 ─eth1─ tr1 ────────── tr2 ─eth1─ sjc-worker2
-        dfw-worker3 ─eth5─  │ ╲          ╱ │             (edge)
-             (edge)         │  tr3 ─ tr4   │
-                            │ ╱         ╲  │ ─eth4─ remote-host
-                           (mesh)      (mesh)           (nginx)
-                       tr3 ─eth4─ iad-worker2 ◀─ iad-worker  (compute)
-                                     (edge)   ◀─ iad-worker3 (EVPN RR)
+        dfw-worker2 ═bond1═ tr1 ───────── tr2 ═bond1═ sjc-worker2
+        dfw-worker3 ═bond2═  │ ╲          ╱ │              (edge)
+             (edge)          │  tr3 ─ tr4   │
+                             │ ╱         ╲  │ ─eth4─ remote-host
+                            (mesh)      (mesh)           (nginx)
+                       tr3 ═bond1═ iad-worker2 ◀═ iad-worker  (compute)
+                                      (edge)   ◀─ iad-worker3 (EVPN RR)
+
+   ═  two-member LACP bond        ─  single link
 ```
 
 Only edge nodes touch the transit. Each holds the eBGP session to its site's
@@ -32,11 +34,72 @@ transit router, and every other worker in the site sits behind it, reaching
 the fabric over an iBGP session to that edge node — compute nodes and the
 route reflector have no transit uplink and no eBGP session anywhere.
 
-`dfw-worker` is **dual-homed**, one link to each of dfw's two edge nodes, so
+`dfw-worker` is **dual-homed**, one bond to each of dfw's two edge nodes, so
 losing an edge node does not take the site's compute node off the fabric with
 it. sjc and iad have a single edge node each and nothing to dual-home to. The
-second link is a backup rather than an equal path — see the BGP design below
-for why.
+two bonds are equal paths — see the BGP design below.
+
+### Bonded links
+
+Every link that carries a datapath is an 802.3ad (LACP) bond of two veths: each
+edge node's transit uplink, and each compute node's uplink to its edge node.
+Production gateway uplinks are bonds, and each datapath resolves a bond to its
+members before attaching — `galactic-gateway` and `galactic-nat` attach XDP to
+the members only, `galactic-cni` attaches TC to the master and its members —
+so the lab presents bonds to exercise those code paths rather than leaving them
+to be found out in production. The route reflector's link, the `remote-host`
+link and the transit mesh stay single links: nothing attaches to them.
+
+- **Both ends run `group_files/common/mkbond.sh`** — the Kind nodes from
+  `gvpc.clab.yaml`'s `exec`, the transit routers from
+  `node_files/tr*/startup.sh` — so the two ends of an aggregate share one
+  definition: `mode 802.3ad miimon 100 lacp_rate fast xmit_hash_policy
+  layer3+4`. `miimon` must stay non-zero: with it at 0 a member that bounces
+  while an XDP program attaches never comes back.
+- **Addresses live on the bond**, never a member. On the Kind nodes the names
+  are uniform per role, which is what lets one cluster-wide `galactic-cni`
+  DaemonSet name the same interfaces on every node in a site:
+  - `bond0` is the node's first uplink: the transit uplink on an edge node,
+    the uplink to the site's first edge node on a compute node.
+  - `bond1` is an edge node's compute-facing link, and on `dfw-worker` its
+    uplink to the second edge node.
+
+  On the transit routers the bonds are `bond1`/`bond2`, per edge node faced.
+- **A bond's members go to one peer.** LACP aggregates links between two
+  systems, so `dfw-worker`'s dual-homing is two bonds with ECMP across them,
+  not one bond split across two edge nodes, which would need MLAG or EVPN
+  multihoming.
+- **The original link keeps its interface number** and the second member takes
+  the next free one, so `eth1` is still the transit-facing member on every edge
+  node. The table below lists the members.
+
+| Node        | Bond  | Members   | Peer                     |
+|-------------|-------|-----------|--------------------------|
+| dfw-worker  | bond0 | eth1 eth3 | dfw-worker2 bond1        |
+| dfw-worker  | bond1 | eth2 eth4 | dfw-worker3 bond1        |
+| dfw-worker2 | bond0 | eth1 eth3 | tr1 bond1 (eth1 eth6)    |
+| dfw-worker2 | bond1 | eth2 eth4 | dfw-worker bond0         |
+| dfw-worker3 | bond0 | eth1 eth3 | tr1 bond2 (eth5 eth7)    |
+| dfw-worker3 | bond1 | eth2 eth4 | dfw-worker bond1         |
+| sjc-worker  | bond0 | eth1 eth2 | sjc-worker2 bond1        |
+| sjc-worker2 | bond0 | eth1 eth3 | tr2 bond1 (eth1 eth5)    |
+| sjc-worker2 | bond1 | eth2 eth4 | sjc-worker bond0         |
+| iad-worker  | bond0 | eth1 eth2 | iad-worker2 bond1        |
+| iad-worker2 | bond0 | eth1 eth4 | tr3 bond1 (eth4 eth5)    |
+| iad-worker2 | bond1 | eth2 eth5 | iad-worker bond0         |
+
+`task verify:bonds` (part of `task verify`) checks every member on both ends is
+collecting and distributing in its bond's active aggregator. `task
+verify:bond-failover` takes each member down in turn and checks the BGP session
+over the bond holds and the loopback behind it stays reachable; it is not part
+of `task verify`, since it deliberately takes links down.
+
+The veth members make this a test of the attach *plumbing*, not of the hardware
+behaviour it guards against. A veth never drops carrier when a native XDP
+program attaches, and always reports native XDP support, so `galactic-gateway`'s
+wait-for-rejoin gate is satisfied at once and its XDP-support preflight never
+refuses. A NIC whose driver bounces the link, or lacks native XDP entirely, can
+only be tested on real hardware.
 
 Every worker's role comes from its labels alone — Kind's sequential names
 (`<cluster>-worker`, `-worker2`, `-worker3`) are used as-is, with no renaming
@@ -104,8 +167,8 @@ topology nodes. Each cluster's `control-plane`/`worker` nodes above are its memb
 ```
 underlay (FRR fabric, IPv6 + IPv4 unicast)
   edge nodes only     ──eBGP──▶  their own site's TR (AS 65100)
-    dfw-worker2 ── tr1:eth1     dfw-worker3 ── tr1:eth5
-    sjc-worker2 ── tr2:eth1     iad-worker2 ── tr3:eth4
+    dfw-worker2 ══ tr1:bond1    dfw-worker3 ══ tr1:bond2
+    sjc-worker2 ══ tr2:bond1    iad-worker2 ══ tr3:bond1
 
   everything else     ──iBGP──▶  its own site's edge node (AS 65000)
     dfw-worker  ──▶ dfw-worker2     sjc-worker  ──▶ sjc-worker2
@@ -132,7 +195,7 @@ overlay (galactic-router, l2vpn/evpn)
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - **Only edge nodes are transit-facing.** They alone hold eBGP sessions to AS 65100; a compute node or the route reflector has no link to a transit router and no eBGP session anywhere. Each site's edge node is its border router.
 - Everything behind an edge node reaches the fabric over an iBGP session to it. The edge node sets `next-hop-self force` on those sessions (a path learned from the transit carries the transit router's own address as next hop, which the node behind it has no route to; `force` is required because plain `next-hop-self` is not applied to *reflected* paths — a route reflector preserves the originator's NEXT_HOP by design, RFC 4456 §10) and `route-reflector-client` (iBGP split horizon would otherwise stop it passing one client's prefixes to another — iad has two behind it).
-- **`dfw-worker`'s two uplinks are equal paths**, plain ECMP with no steering policy. Both of its datapaths attach to both uplinks: the uSID decap hook via `GALACTIC_CNI_EBPF_INTERFACES` (`eth1,eth2` in dfw, `eth1` elsewhere) and the egress shard via `GALACTIC_NAT_UPLINK_INTERFACES` (likewise `eth1,eth2` in dfw), so losing either edge node costs this node neither its fabric connectivity nor its shard role. This used to be a primary/backup pair — `dfw-worker` tagged what it advertised over `eth2` with community `65000:900`, `dfw-worker3` re-advertised that to `tr1` with `MED 100`, and `dfw-worker` set `local-preference 90` on what it learned over `eth2` — purely because `galactic-nat` attached to one interface and traffic reaching `eth2` would have missed translation ([#545](https://github.com/datum-cloud/galactic/issues/545)). The shard now attaches to both, so all of that policy is gone.
+- **`dfw-worker`'s two uplinks are equal paths**, plain ECMP with no steering policy. Both of its datapaths attach to both uplinks, each a bond: the uSID decap hook via `GALACTIC_CNI_EBPF_INTERFACES` (`bond0,bond1` in dfw, `bond0` elsewhere) and the egress shard via `GALACTIC_NAT_UPLINK_INTERFACES` (likewise `bond0,bond1` in dfw), so losing either edge node costs this node neither its fabric connectivity nor its shard role. This used to be a primary/backup pair, from before the links were bonded — `dfw-worker` tagged what it advertised over `eth2` with community `65000:900`, `dfw-worker3` re-advertised that to `tr1` with `MED 100`, and `dfw-worker` set `local-preference 90` on what it learned over `eth2` — purely because `galactic-nat` attached to one interface and traffic reaching `eth2` would have missed translation ([#545](https://github.com/datum-cloud/galactic/issues/545)). The shard now attaches to both, so all of that policy is gone.
 - Edge and compute nodes exchange EVPN paths over iBGP **through the reflector**, never as direct sessions between them: `iad-worker3` is the lab's single route reflector and every galactic-router in all three clusters is a client of it. A node cannot be both a reflector and a compute/edge node, since `galactic=control` and `galactic=router` are two values of one label key.
 - galactic-router runs with outbound-only mode (`listenPort=-1`) on every client; only the reflector listens, on port `1790`. All sessions are initiated outbound toward it.
 
@@ -184,13 +247,13 @@ site (`1x` dfw, `2x` sjc, `3x` iad) and the node within it; the IPv4 third octet
 exactly. `remote-host` is not a worker and runs no BGP — `tr4` originates its subnets on
 its behalf.
 
-| Link                   | IPv6 subnet        | TR address       | Edge address     | IPv4 subnet  | TR address | Edge address |
-|------------------------|--------------------|------------------|------------------|--------------|------------|--------------|
-| dfw-worker2 – tr1:eth1 | 2001:db8:1:11::/64 | 2001:db8:1:11::1 | 2001:db8:1:11::2 | 10.1.11.0/24 | 10.1.11.1  | 10.1.11.2    |
-| dfw-worker3 – tr1:eth5 | 2001:db8:1:12::/64 | 2001:db8:1:12::1 | 2001:db8:1:12::2 | 10.1.12.0/24 | 10.1.12.1  | 10.1.12.2    |
-| sjc-worker2 – tr2:eth1 | 2001:db8:1:21::/64 | 2001:db8:1:21::1 | 2001:db8:1:21::2 | 10.1.21.0/24 | 10.1.21.1  | 10.1.21.2    |
-| iad-worker2 – tr3:eth4 | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 | 10.1.32.0/24 | 10.1.32.1  | 10.1.32.2    |
-| remote-host – tr4:eth4 | 2001:db8:1:40::/64 | 2001:db8:1:40::1 | 2001:db8:1:40::2 | 10.1.40.0/24 | 10.1.40.1  | 10.1.40.2    |
+| Link                    | IPv6 subnet        | TR address       | Edge address     | IPv4 subnet  | TR address | Edge address |
+|-------------------------|--------------------|------------------|------------------|--------------|------------|--------------|
+| dfw-worker2 – tr1:bond1 | 2001:db8:1:11::/64 | 2001:db8:1:11::1 | 2001:db8:1:11::2 | 10.1.11.0/24 | 10.1.11.1  | 10.1.11.2    |
+| dfw-worker3 – tr1:bond2 | 2001:db8:1:12::/64 | 2001:db8:1:12::1 | 2001:db8:1:12::2 | 10.1.12.0/24 | 10.1.12.1  | 10.1.12.2    |
+| sjc-worker2 – tr2:bond1 | 2001:db8:1:21::/64 | 2001:db8:1:21::1 | 2001:db8:1:21::2 | 10.1.21.0/24 | 10.1.21.1  | 10.1.21.2    |
+| iad-worker2 – tr3:bond1 | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 | 10.1.32.0/24 | 10.1.32.1  | 10.1.32.2    |
+| remote-host – tr4:eth4  | 2001:db8:1:40::/64 | 2001:db8:1:40::1 | 2001:db8:1:40::2 | 10.1.40.0/24 | 10.1.40.1  | 10.1.40.2    |
 
 ### Site-internal links (numbered, iBGP to the site's edge node)
 
@@ -199,10 +262,10 @@ behind it `::2`/`.2`.
 
 | Link                           | IPv6 subnet        | Edge address     | Node address     | IPv4 subnet  | Edge address | Node address |
 |--------------------------------|--------------------|------------------|------------------|--------------|--------------|--------------|
-| dfw-worker – dfw-worker2:eth2  | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 | 10.1.10.0/24 | 10.1.10.1    | 10.1.10.2    |
-| dfw-worker – dfw-worker3:eth2  | 2001:db8:1:13::/64 | 2001:db8:1:13::1 | 2001:db8:1:13::2 | 10.1.13.0/24 | 10.1.13.1    | 10.1.13.2    |
-| sjc-worker – sjc-worker2:eth2  | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 | 10.1.20.0/24 | 10.1.20.1    | 10.1.20.2    |
-| iad-worker – iad-worker2:eth2  | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 | 10.1.30.0/24 | 10.1.30.1    | 10.1.30.2    |
+| dfw-worker – dfw-worker2:bond1 | 2001:db8:1:10::/64 | 2001:db8:1:10::1 | 2001:db8:1:10::2 | 10.1.10.0/24 | 10.1.10.1    | 10.1.10.2    |
+| dfw-worker – dfw-worker3:bond1 | 2001:db8:1:13::/64 | 2001:db8:1:13::1 | 2001:db8:1:13::2 | 10.1.13.0/24 | 10.1.13.1    | 10.1.13.2    |
+| sjc-worker – sjc-worker2:bond1 | 2001:db8:1:20::/64 | 2001:db8:1:20::1 | 2001:db8:1:20::2 | 10.1.20.0/24 | 10.1.20.1    | 10.1.20.2    |
+| iad-worker – iad-worker2:bond1 | 2001:db8:1:30::/64 | 2001:db8:1:30::1 | 2001:db8:1:30::2 | 10.1.30.0/24 | 10.1.30.1    | 10.1.30.2    |
 | iad-worker3 – iad-worker2:eth3 | 2001:db8:1:31::/64 | 2001:db8:1:31::1 | 2001:db8:1:31::2 | 10.1.31.0/24 | 10.1.31.1    | 10.1.31.2    |
 
 ### Cluster SRv6 addressing
@@ -504,5 +567,5 @@ task verify  # automated: bgp-transit, bgp-fabric, bgp-peers, srv6, evpn
   Cilium starts — one per address family, since the underlay runs a session on each. Changing
   `install.sh` requires rebuilding the node image (`task build:node`).
 - Cilium itself is installed with `ipv4.enabled=false` (the clusters are `ipFamily: ipv6`), so the
-  IPv4 addresses FRR puts on `lo`/`eth1` are underlay-only and invisible to the cluster network.
+  IPv4 addresses FRR puts on `lo` and the fabric links are underlay-only and invisible to the cluster network.
 - iad-worker3, the EVPN route reflector, peers with tr3 as AS 65000 like every other worker — its reflector role is an overlay concern only, invisible to the underlay.

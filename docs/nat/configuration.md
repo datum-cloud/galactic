@@ -71,6 +71,14 @@ there's no "not this role, skip the datapath" case to fall back to.
 > multi-homed shard node, naming one uplink therefore makes the shard role
 > last only as long as that uplink does.
 
+A bonding master can be named in place of its members. It is expanded to
+its slaves at startup and the program attached to each of them, never to
+the master itself, the same way `galactic-gateway` treats a bonded public
+interface. Unlike the gateway, the slaves are attached back to back
+without waiting for each to rejoin its LACP aggregate, so on a NIC whose
+driver drops carrier to attach a native XDP program, every member of the
+bond bounces at once when the shard starts.
+
 Attachment is all-or-nothing: a shard that cannot attach to every
 interface in the list fails to start, rather than coming up with a hole in
 its coverage. It happens once, at process startup, so an interface that

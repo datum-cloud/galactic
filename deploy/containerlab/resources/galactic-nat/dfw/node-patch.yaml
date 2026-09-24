@@ -8,9 +8,10 @@ spec:
       containers:
         - name: galactic-nat
           env:
-            # dual-homed node: eth1, eth2 uplinks
+            # dual-homed node: two uplinks, one LACP bond to each edge node;
+            # the shard attaches to every member of both
             - name: GALACTIC_NAT_UPLINK_INTERFACES
-              value: eth1,eth2
+              value: bond0,bond1
             # shard SID: uFMT uSID over dfw's locator (2001:db8:ff01::/48),
             # nodeID=0x2001 (service 2 = NAT shard, node index 001)
             - name: GALACTIC_NAT_SHARD_SID

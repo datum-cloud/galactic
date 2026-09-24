@@ -19,8 +19,9 @@ built on the same base/per-node-overlay shape
   `resources/galactic-gateway/<edge-node>/`'s per-node-pin pattern) and
   sets that shard's own `GALACTIC_NAT_UPLINK_INTERFACES` and
   `GALACTIC_NAT_SHARD_SID`/`_SHARD_PUB_ADDR6` — `dfw` names both of its
-  dual-homed compute node's uplinks (`eth1,eth2`), `sjc` and `iad` their
-  single `eth1` —
+  dual-homed compute node's uplinks (`bond0,bond1`, one LACP bond to
+  each edge node), `sjc` and `iad` their single `bond0` — each a bond
+  the shard attaches to through its members —
   see each `node-patch.yaml`'s own comments for the exact uFMT 48+16
   encoding and address choices, including the note on why the NAT66
   shards use `Argument=1` rather than reusing the gateway nodes'

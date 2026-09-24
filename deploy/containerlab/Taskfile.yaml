@@ -136,10 +136,15 @@ tasks:
     cmds:
       # Every transit port facing an edge node, and only those: edge nodes
       # are the lab's only transit-facing nodes, so these are exactly the
-      # links an edge XDP_TX redirect ever lands on. tr1:eth1/eth5 face
-      # dfw-worker2/dfw-worker3, tr2:eth1 faces sjc-worker2, tr3:eth4 faces
-      # iad-worker2 -- keep this list in step with gvpc.clab.yaml's edge
-      # uplinks and node_files/tr*/frr.conf's interface descriptions. The
+      # links an edge XDP_TX redirect ever lands on. Each is a *member* of
+      # a transit-side LACP bond, never the bond itself: the edge program
+      # runs on the far end's members and transmits back out whichever
+      # member a packet arrived on, so the veth peer that has to be ready
+      # for an XDP frame is always a member. tr1:eth1/eth6 (bond1) face
+      # dfw-worker2, tr1:eth5/eth7 (bond2) dfw-worker3, tr2:eth1/eth5
+      # (bond1) sjc-worker2, tr3:eth4/eth5 (bond1) iad-worker2 -- keep this
+      # list in step with gvpc.clab.yaml's edge uplinks and
+      # node_files/tr*/startup.sh's mkbond.sh calls. The
       # transit routers are real containerlab-managed nodes (kind: linux),
       # unlike the Kind-cluster nodes elsewhere in this Taskfile (kind:
       # ext-container, which keep their bare Kind-assigned names) --
@@ -147,7 +152,7 @@ tasks:
       # "clab-{{.LAB}}-".
       - |
         set -e
-        for pair in tr1:eth1 tr1:eth5 tr2:eth1 tr3:eth4; do
+        for pair in tr1:eth1 tr1:eth6 tr1:eth5 tr1:eth7 tr2:eth1 tr2:eth5 tr3:eth4 tr3:eth5; do
           tr=${pair%%:*}; iface=${pair##*:}
           container="clab-{{.LAB}}-${tr}"
           docker cp node_files/common/xdp-passthrough.o "${container}:/xdp-passthrough.o"
@@ -292,6 +297,7 @@ tasks:
   verify:
     desc: Run all verification checks
     cmds:
+      - task: "verify:bonds"
       - task: "verify:bgp-transit"
       - task: "verify:bgp-fabric"
       - task: "verify:bgp-peers"
@@ -306,6 +312,21 @@ tasks:
       - task: "verify:nat-collision"
       - task: "verify:nat-collision-samenode"
       - task: "verify:scenarios"
+
+  # First, because every check after it rides these bonds: a member that
+  # never joined its aggregate leaves everything else passing over the
+  # other member, with the datapath attachments on the missing one
+  # unexercised.
+  "verify:bonds":
+    desc: Verify every LACP bond has aggregated on both ends
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-bonds.sh
+
+  # Not part of `verify`: it takes links down, briefly but on purpose.
+  "verify:bond-failover":
+    desc: Take each bond member down in turn and confirm BGP and reachability hold
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-bond-failover.sh
 
   "verify:bgp-transit":
     desc: Verify transit router BGP sessions (both address families)

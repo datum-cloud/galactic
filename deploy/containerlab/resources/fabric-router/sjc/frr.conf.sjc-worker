@@ -6,8 +6,8 @@ interface lo
  ip address 10.255.255.3/32
  ipv6 address fc00:0:3::1/128
 !
-interface eth1
- description sjc-worker2-facing (site edge node)
+interface bond0
+ description sjc-worker2-facing (site edge node) -- LACP bond of eth1 + eth2
  ip address 10.1.20.2/24
  ipv6 address 2001:db8:1:20::2/64
 !

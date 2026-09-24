@@ -16,9 +16,11 @@ spec:
             # Fabric-wide NAT64 prefix
             - name: GALACTIC_CNI_NAT64_PREFIX
               value: "2001:db8:64::/96"
-            # Fabric uplink the eBPF hook attaches to
+            # Fabric uplink the eBPF hook attaches to: bond0, the first
+            # uplink on every node (see gvpc.clab.yaml's links comment). A
+            # bond expands to its master plus members.
             - name: GALACTIC_CNI_EBPF_INTERFACES
-              value: eth1
+              value: bond0
       containers:
         - name: credential-refresh
           image: galactic-cni:latest
@@ -26,4 +28,4 @@ spec:
           env:
             # Fabric uplink the eBPF hook attaches to
             - name: GALACTIC_CNI_EBPF_INTERFACES
-              value: eth1
+              value: bond0

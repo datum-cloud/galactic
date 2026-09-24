@@ -9,13 +9,13 @@ interface lo
  # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS.
  ipv6 address fc00:0:b::1/128
 !
-interface eth1
- description tr1-facing (transit uplink)
+interface bond0
+ description tr1-facing (transit uplink) -- LACP bond of eth1 + eth3
  ip address 10.1.12.2/24
  ipv6 address 2001:db8:1:12::2/64
 !
-interface eth2
- description dfw-worker-facing (compute, backup path)
+interface bond1
+ description dfw-worker-facing (compute, backup path) -- LACP bond of eth2 + eth4
  ip address 10.1.13.1/24
  ipv6 address 2001:db8:1:13::1/64
 !
@@ -36,7 +36,7 @@ ipv6 route 2001:db8:6060::/48 Null0
 # compute node (eth1, facing dfw-worker2), so egress-shard traffic arriving
 # via this node reached no translation program at all. The shard now
 # attaches to both of that node's uplinks
-# (GALACTIC_NAT_UPLINK_INTERFACES="eth1,eth2",
+# (GALACTIC_NAT_UPLINK_INTERFACES="bond0,bond1",
 # resources/galactic-nat/dfw/node-patch.yaml), so there is nothing left to
 # de-prefer and the MED policy, its BACKUP_UPLINK community-list, and the
 # 65000:900 tag dfw-worker used to set are all gone.

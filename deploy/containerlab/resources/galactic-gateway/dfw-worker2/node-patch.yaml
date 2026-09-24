@@ -24,12 +24,15 @@ spec:
       containers:
         - name: galactic-gateway
           env:
-            # Transit-fabric-facing uplink (underlay BGP + ingress).
+            # Transit-fabric-facing uplink (underlay BGP + ingress): an
+            # LACP bond, so edge_lb attaches to each of its members in turn,
+            # waiting for each to rejoin the aggregate before the next.
             - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
-              value: eth1
-            # Compute-facing link.
+              value: bond0
+            # Compute-facing link, also a bond; edge_return attaches to its
+            # members the same way.
             - name: GALACTIC_GATEWAY_INTERNAL_INTERFACES
-              value: eth2
+              value: bond1
             # This node's SRv6 address: DSR outer-header encap source.
             # nodeID=0x3002 (service 3 = edge gateway, node index 002)
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS

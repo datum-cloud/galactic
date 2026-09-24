@@ -109,13 +109,21 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 		return nil, err
 	}
 
+	// A bonding master is attached through its slaves, so every step below
+	// works on the resolved targets rather than the configured names.
+	targets, err := natattach.ResolveTargets(cfg.UplinkInterfaces)
+	if err != nil {
+		return nil, fmt.Errorf("resolve uplink interfaces %v: %w", cfg.UplinkInterfaces, err)
+	}
+
 	// Required for the FIB lookup in both the forward and return paths to
 	// succeed on the interface the program actually runs on. The lookup uses
-	// the ingress interface, meaning whichever uplink the packet arrived on, so
-	// this must be applied to every one of them rather than to a primary.
-	// Best-effort and non-fatal, matching how the gateway binary configures the
-	// same sysctls.
-	for _, iface := range cfg.UplinkInterfaces {
+	// the ingress interface, meaning whichever resolved target the packet
+	// arrived on, so this must be applied to every one of them rather than to
+	// a primary: once an uplink is a bond, its slaves rather than the master
+	// are what the kernel reports as ingress. Best-effort and non-fatal,
+	// matching how the gateway binary configures the same sysctls.
+	for _, iface := range targets {
 		if err := sysctl.ConfigureFIBLookupUplinkSysctls(iface); err != nil {
 			return nil, fmt.Errorf("configure IPv6 forwarding on uplink interface %q: %w", iface, err)
 		}
@@ -126,7 +134,7 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 	// refuses. The datapath counts that refusal, but a shard whose every IPv4
 	// flow dies at the last instruction is a shard that does not work.
 	if cfg.ServesNAT64() {
-		for _, iface := range cfg.UplinkInterfaces {
+		for _, iface := range targets {
 			if err := sysctl.ConfigureFIBLookupUplinkSysctlsIPv4(iface); err != nil {
 				return nil, fmt.Errorf(
 					"configure IPv4 forwarding on uplink interface %q: %w", iface, err)
@@ -152,7 +160,7 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 		return nil, fmt.Errorf("write shard_config_table: %w", err)
 	}
 
-	xdpLinks, err := natattach.Attach(objs.NatIngress, cfg.UplinkInterfaces)
+	xdpLinks, err := natattach.Attach(objs.NatIngress, targets)
 	if err != nil {
 		_ = objs.Close()
 		return nil, fmt.Errorf("attach egress translation datapath to uplink interfaces %v: %w",
@@ -171,6 +179,7 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 
 	slog.Info("Egress translation datapath attached",
 		"interfaces", cfg.UplinkInterfaces,
+		"targets", targets,
 		"shardSID", cfg.ShardSID,
 		"nat66", cfg.ServesNAT66(),
 		"nat64", cfg.ServesNAT64(),

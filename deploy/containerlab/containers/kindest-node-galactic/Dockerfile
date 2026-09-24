@@ -14,6 +14,9 @@ WORKDIR /galactic
 
 COPY deploy/containerlab/resources/ ./resources/
 COPY --chmod=0755 deploy/containerlab/containers/kindest-node-galactic/scripts/ ./scripts/
+# The same bond helper the transit routers bind-mount, so both ends of every
+# bonded link build their aggregate from one definition (see mkbond.sh).
+COPY --chmod=0755 deploy/containerlab/group_files/common/mkbond.sh ./scripts/mkbond.sh
 
 # Wrap kubectl to work around OrbStack DooD: kind runs `kubectl apply` for the
 # StorageClass step immediately after kubeadm init, but the apiserver briefly
