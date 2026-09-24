@@ -25,7 +25,8 @@ spec:
           "type": "galactic-bgp",
           "vpc": "40",
           "vpcattachment": "40",
-          "namespace": "galactic-system"
+          "namespace": "galactic-system",
+          "egress": { "internet": { "mode": "Enabled" } }
         }
       ]
     }

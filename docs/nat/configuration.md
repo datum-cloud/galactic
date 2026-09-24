@@ -212,6 +212,12 @@ to an earlier, superseded design this sharded egress tier replaced.
 
 ## Shard membership (`galactic-cni` side)
 
+The list below is where a node may route toward. Whether a given network gets
+that route is the `egress` declaration in the attachment's own `galactic-bgp`
+conflist stanza, rendered from what the network declared; a network that
+declares none gets no route however the node is configured. See the
+[conflist reference](../cni/conflist-reference.md#egress-declaration).
+
 A tenant's compute node needs to know the fabric-wide list of live shard
 SIDs to install its own tenant VRFs' egress routes, and the NAT64 prefix to
 install a route toward IPv4 reachability. Both are separate from anything

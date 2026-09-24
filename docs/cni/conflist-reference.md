@@ -244,11 +244,27 @@ on the same attachment, so cleanup is left to `galactic-router`'s GC controller.
 
 ## BGP Publish Fields (`galactic-bgp`)
 
-`galactic-bgp`'s own stanza carries only `vpc`, `vpcattachment`, and
-`namespace` — nothing else. It learns which interface kind was created and
-what addresses were allocated entirely from `prevResult` (the accumulated
+`galactic-bgp`'s own stanza carries `vpc`, `vpcattachment`, `namespace`, and
+an optional `egress` declaration. It learns which interface kind was created
+and what addresses were allocated entirely from `prevResult` (the accumulated
 result of every preceding plugin in the chain), never from its own config or
 a kernel call.
+
+### Egress declaration
+
+```json
+"egress": { "internet": { "mode": "Enabled" } }
+```
+
+The declaration says whether this network reaches the internet. It names no
+shard: the node routes toward the shard its own configuration names (see
+[`GALACTIC_CNI_EGRESS_SHARD_SIDS`](environment-variables.md#galactic_cni_egress_shard_sids)),
+so the declaration decides only whether this VRF gets that route.
+
+`Enabled` installs the VRF's egress routes, and fails the ADD if the node
+names no shard or none of its shards resolves. Anything else, including an
+absent `egress` key, installs no route and withdraws one that is there, so a
+network that declared no egress gets none even on a node that has shards.
 
 ### EndpointSlice publish (HTTP ingress backend discovery)
 

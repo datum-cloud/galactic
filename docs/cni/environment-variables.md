@@ -139,6 +139,12 @@ field; as of this writing it is still env-only.
 
 ## `GALACTIC_CNI_EGRESS_SHARD_SIDS`
 
+> **This list no longer decides which networks get egress.** It names the
+> shards a node may route toward. Whether a given VRF gets that route is the
+> `egress` declaration in the attachment's own `galactic-bgp` stanza (see the
+> [conflist reference](conflist-reference.md#egress-declaration)), so a node
+> holding this list installs a route only for a network that declared one.
+
 Comma-separated list of every live `galactic-nat` shard's
 `Status.ShardSID` — the fabric-wide membership list
 `internal/plumbing/srv6.EgressDefaultRouteAdd` needs to install a tenant

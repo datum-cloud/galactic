@@ -1116,8 +1116,8 @@ func TestInstallNAT66EgressRoute_NilCNIConfigIsANoop(t *testing.T) {
 	cniConfig = nil
 	defer func() { cniConfig = original }()
 
-	if err := installEgressRoutes(1, 0x005); err != nil {
-		t.Errorf("installEgressRoutes(1, 0x005) = %v, want nil with cniConfig == nil", err)
+	if err := installEgressRoutes(1, 0x005, enabledEgress()); err != nil {
+		t.Errorf("installEgressRoutes(1, 0x005, enabled) = %v, want nil with cniConfig == nil", err)
 	}
 }
 
@@ -1237,6 +1237,70 @@ func TestShardSIDsForTenant_RejectsAMalformedSID(t *testing.T) {
 		}
 		if _, err := shardSIDsForTenant(sids, 0x005); err == nil {
 			t.Errorf("shardSIDsForTenant(%q) error = nil, want an error", raw)
+		}
+	}
+}
+
+// enabledEgress is the declaration a network that reaches the internet
+// carries in its stanza.
+func enabledEgress() *Egress {
+	return &Egress{Internet: &InternetEgress{Mode: InternetEgressEnabled}}
+}
+
+// TestInstallEgressRoutes_NoDeclarationTouchesNoBPFFS pins the behaviour that
+// makes a network with no egress safe on any node: it must behave exactly as
+// the path it replaces did before egress existed, which touched no pinned map
+// at all. These tests run with no loaded datapath, so a withdrawal that opened
+// bpffs unconditionally would fail here, and would fail an ADD on every node
+// whose datapath has not loaded yet.
+func TestInstallEgressRoutes_NoDeclarationTouchesNoBPFFS(t *testing.T) {
+	original := cniConfig
+	cniConfig = &config.CNIConfig{EgressShardSIDs: "2001:db8:ff01:2001:e001::"}
+	defer func() { cniConfig = original }()
+
+	for name, egress := range map[string]*Egress{
+		"absent":   nil,
+		"empty":    {},
+		"no mode":  {Internet: &InternetEgress{}},
+		"disabled": {Internet: &InternetEgress{Mode: "Disabled"}},
+	} {
+		if err := installEgressRoutes(1, 0x005, egress); err != nil {
+			t.Errorf("installEgressRoutes(%s) = %v, want nil with no loaded datapath", name, err)
+		}
+	}
+}
+
+// TestInstallEgressRoutes_EnabledWithNoShardFails is the other half of the
+// declaration: a network that asked for egress on a node naming no shard is an
+// operator error, and it fails the first attach rather than succeeding
+// without egress.
+func TestInstallEgressRoutes_EnabledWithNoShardFails(t *testing.T) {
+	original := cniConfig
+	cniConfig = &config.CNIConfig{}
+	defer func() { cniConfig = original }()
+
+	err := installEgressRoutes(1, 0x005, enabledEgress())
+	if err == nil {
+		t.Fatal("installEgressRoutes(enabled) = nil, want an error on a node naming no shard")
+	}
+	if !strings.Contains(err.Error(), config.EnvCNIEgressShardSIDs) {
+		t.Errorf("installEgressRoutes(enabled) error = %q, want it to name %s", err, config.EnvCNIEgressShardSIDs)
+	}
+}
+
+// TestEgressEnabled pins which declarations a node acts on: exactly one.
+func TestEgressEnabled(t *testing.T) {
+	for name, tt := range map[string]struct {
+		egress *Egress
+		want   bool
+	}{
+		"nil":      {nil, false},
+		"empty":    {&Egress{}, false},
+		"disabled": {&Egress{Internet: &InternetEgress{Mode: "Disabled"}}, false},
+		"enabled":  {enabledEgress(), true},
+	} {
+		if got := tt.egress.Enabled(); got != tt.want {
+			t.Errorf("%s: Enabled() = %v, want %v", name, got, tt.want)
 		}
 	}
 }
