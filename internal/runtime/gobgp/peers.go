@@ -35,6 +35,28 @@ func familyToGlobalInt(af model.AddressFamily) uint32 {
 	}
 }
 
+// globalFamilyRTC is GoBGP's global-configuration integer for the RFC 4684
+// route-target membership (RTC) family.
+const globalFamilyRTC uint32 = 12
+
+// globalFamilies maps the desired address families to GoBGP's global family
+// list, always including RTC when the list is non-empty. GoBGP builds its RIB
+// tables from this list, and its DeleteVrf unconditionally dereferences the
+// RTC table, so a list without RTC panics the whole process on the first VRF
+// deletion (issue #599). An empty list is left empty: GoBGP then enables
+// every family, RTC included. Peers negotiate only their own configured
+// families, so the extra local table never puts RTC on the wire.
+func globalFamilies(afs []model.AddressFamily) []uint32 {
+	if len(afs) == 0 {
+		return nil
+	}
+	families := make([]uint32, 0, len(afs)+1)
+	for _, af := range afs {
+		families = append(families, familyToGlobalInt(af))
+	}
+	return append(families, globalFamilyRTC)
+}
+
 // familyFromModel maps a model.AddressFamily to a GoBGP api.Family.
 func familyFromModel(af model.AddressFamily) *api.Family {
 	f := &api.Family{}

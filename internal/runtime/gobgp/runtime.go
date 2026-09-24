@@ -230,9 +230,7 @@ func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer
 			Asn:        uint32(desired.LocalASN),
 			RouterId:   desired.RouterID,
 			ListenPort: listenPort,
-		}
-		for _, af := range desired.AddressFamilies {
-			global.Families = append(global.Families, familyToGlobalInt(af))
+			Families:   globalFamilies(desired.AddressFamilies),
 		}
 		if err := b.StartBgp(ctx, &api.StartBgpRequest{Global: global}); err != nil {
 			return fmt.Errorf("start bgp: %w", err)
