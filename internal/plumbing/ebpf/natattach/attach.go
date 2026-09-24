@@ -16,7 +16,16 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
+)
+
+// linkByNameFn and linkListFn are override points, as elsewhere in this
+// codebase, so ResolveTargets' tests can substitute a fake netlink view without
+// touching the host network stack.
+var (
+	linkByNameFn = netlink.LinkByName
+	linkListFn   = netlink.LinkList
 )
 
 // PinDir is the default bpffs directory every NAT66 map is pinned under,
@@ -118,11 +127,64 @@ func PopulateProgArray(objs *natprog.NatObjects) error {
 	return nil
 }
 
+// ResolveTargets resolves the configured uplink names to the interface names
+// Attach should actually attach the XDP program to.
+//
+// An uplink that is not a bonding master resolves to itself. A bonding master
+// resolves to its slaves instead, the master excluded, for the reason the edge
+// attach package's ResolveTargets gives: native XDP against a bonding master is
+// not reliable, and some kernels' bonding driver accepts it only by forwarding
+// it to slaves whose support nothing here has checked. A master with no slaves
+// is an error, since it would leave that uplink with no attachment at all.
+//
+// A name listed twice, or a slave listed alongside its own master, resolves to
+// one target: attaching the same program to one hook twice fails outright.
+func ResolveTargets(ifaceNames []string) ([]string, error) {
+	var (
+		targets []string
+		links   []netlink.Link
+	)
+	seen := make(map[string]bool)
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			targets = append(targets, name)
+		}
+	}
+
+	for _, ifaceName := range ifaceNames {
+		iface, err := linkByNameFn(ifaceName)
+		if err != nil {
+			return nil, fmt.Errorf("natattach: find link %q: %w", ifaceName, err)
+		}
+		if !bond.IsMaster(iface) {
+			add(ifaceName)
+			continue
+		}
+
+		if links == nil {
+			if links, err = linkListFn(); err != nil {
+				return nil, fmt.Errorf("natattach: enumerate slaves of bonding master %q: %w", ifaceName, err)
+			}
+		}
+		slaves := bond.SlaveNames(iface, links)
+		if len(slaves) == 0 {
+			return nil, fmt.Errorf(
+				"natattach: bonding master %q has no slave interfaces to attach the XDP program to", ifaceName)
+		}
+		for _, slave := range slaves {
+			add(slave)
+		}
+	}
+	return targets, nil
+}
+
 // Attach attaches program to the XDP hook of every interface in ifaceNames, in
 // native driver mode, returning the resulting link for each in the same order
-// for the caller to hold open and close on shutdown. See the package doc
-// comment for why native mode is required and why no pinning or re-attachment
-// is needed.
+// for the caller to hold open and close on shutdown. Callers resolve ifaceNames
+// through ResolveTargets first, so a bonding master never reaches here. See the
+// package doc comment for why native mode is required and why no pinning or
+// re-attachment is needed.
 //
 // Every fabric uplink is attached, not only the one a shard node's traffic uses
 // today: a packet arriving on an interface this program is not attached to

@@ -10,11 +10,13 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 
+	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 )
 
@@ -44,6 +46,106 @@ func TestAttach_EmptyInterfaceListIsError(t *testing.T) {
 			t.Errorf("Attach(_, %v) error = nil, want an error", names)
 		}
 	}
+}
+
+// fakeLink is a minimal netlink.Link implementation for tests -- mirrors
+// internal/plumbing/ebpf/edgeattach's identical test fixture.
+type fakeLink struct {
+	attrs    netlink.LinkAttrs
+	linkType string
+}
+
+func (f *fakeLink) Attrs() *netlink.LinkAttrs { return &f.attrs }
+func (f *fakeLink) Type() string {
+	if f.linkType == "" {
+		return "fake"
+	}
+	return f.linkType
+}
+
+var errFixtureNotFound = errors.New("natattach: fixture link not found")
+
+// TestResolveTargets exercises ResolveTargets against a faked netlink view. A
+// bonding master must resolve to its slaves with the master itself excluded,
+// matching the edge attach package, and the list form adds two cases that
+// package does not have: several configured uplinks flatten into one target
+// list, and an interface named twice is attached once.
+func TestResolveTargets(t *testing.T) {
+	origLinkByNameFn, origLinkListFn := linkByNameFn, linkListFn
+	t.Cleanup(func() { linkByNameFn, linkListFn = origLinkByNameFn, origLinkListFn })
+
+	const (
+		plain          = "eth0"
+		plain2         = "eth9"
+		bondName       = "bond0"
+		emptyBond      = "bond1"
+		slave1         = "eth1"
+		slave2         = "eth2"
+		bondIndex      = 10
+		emptyBondIndex = 20
+	)
+	links := map[string]netlink.Link{
+		plain:     &fakeLink{attrs: netlink.LinkAttrs{Name: plain, Index: 2}},
+		plain2:    &fakeLink{attrs: netlink.LinkAttrs{Name: plain2, Index: 3}},
+		bondName:  &fakeLink{attrs: netlink.LinkAttrs{Name: bondName, Index: bondIndex}, linkType: bond.LinkType},
+		emptyBond: &fakeLink{attrs: netlink.LinkAttrs{Name: emptyBond, Index: emptyBondIndex}, linkType: bond.LinkType},
+		slave1:    &fakeLink{attrs: netlink.LinkAttrs{Name: slave1, Index: 11, MasterIndex: bondIndex}},
+		slave2:    &fakeLink{attrs: netlink.LinkAttrs{Name: slave2, Index: 12, MasterIndex: bondIndex}},
+	}
+	allLinks := []netlink.Link{
+		links[plain], links[plain2], links[bondName], links[emptyBond], links[slave1], links[slave2],
+		// A link enslaved to some other, unrelated master must never leak in.
+		&fakeLink{attrs: netlink.LinkAttrs{Name: "unrelated-slave", Index: 13, MasterIndex: 999}},
+	}
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		if l, ok := links[name]; ok {
+			return l, nil
+		}
+		return nil, errFixtureNotFound
+	}
+	linkListFn = func() ([]netlink.Link, error) { return allLinks, nil }
+
+	tests := []struct {
+		name    string
+		in      []string
+		want    []string
+		wantErr bool
+	}{
+		{name: "NonBondPassthrough", in: []string{plain}, want: []string{plain}},
+		{name: "SeveralNonBondUplinks", in: []string{plain, plain2}, want: []string{plain, plain2}},
+		{name: "BondExpandsToSlavesOnly", in: []string{bondName}, want: []string{slave1, slave2}},
+		{name: "BondAlongsidePlainUplink", in: []string{plain, bondName}, want: []string{plain, slave1, slave2}},
+		{name: "SlaveListedWithItsMasterAttachesOnce", in: []string{slave1, bondName}, want: []string{slave1, slave2}},
+		{name: "DuplicateNameAttachesOnce", in: []string{plain, plain}, want: []string{plain}},
+		{name: "UnresolvableInterfaceIsError", in: []string{"does-not-exist"}, wantErr: true},
+		{name: "BondWithNoSlavesIsError", in: []string{emptyBond}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveTargets(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveTargets(%v) = %v, want an error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveTargets(%v) error = %v", tt.in, err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("ResolveTargets(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("LinkListErrorPropagated", func(t *testing.T) {
+		linkListFn = func() ([]netlink.Link, error) { return nil, errFixtureNotFound }
+		defer func() { linkListFn = func() ([]netlink.Link, error) { return allLinks, nil } }()
+
+		if _, err := ResolveTargets([]string{bondName}); !errors.Is(err, errFixtureNotFound) {
+			t.Fatalf("ResolveTargets() error = %v, want the underlying link-list error surfaced", err)
+		}
+	})
 }
 
 // TestLoadAttach_SurvivesRestartWithMapsIntact is the real, root-gated
@@ -258,5 +360,90 @@ func TestAttach_MultipleUplinksRollsBackOnPartialFailure(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("multi-uplink attach/rollback: %v", err)
+	}
+}
+
+// TestResolveTargetsAndAttach_RealBondDevice runs ResolveTargets and Attach
+// against a genuine Linux bonding master, resolving it to its real slaves and
+// attaching the NAT66 program to each one. It mirrors the edge attach
+// package's identical test, including its reason for not asserting that an
+// attach to the master itself fails: whether it does depends on the kernel's
+// bonding driver and the slaves' own drivers, not on anything here.
+func TestResolveTargetsAndAttach_RealBondDevice(t *testing.T) {
+	requireRoot(t)
+
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-nat-test-bond-%d", os.Getpid()))
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	const (
+		bondName = "bond0"
+		slave0   = "natbond0"
+		slave1   = "natbond1"
+	)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	defer func() { _ = nsObj.Close() }()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		bondLink := netlink.NewLinkBond(netlink.LinkAttrs{Name: bondName})
+		if err := netlink.LinkAdd(bondLink); err != nil {
+			return fmt.Errorf("add bond master: %w", err)
+		}
+
+		for i, name := range []string{slave0, slave1} {
+			veth := &netlink.Veth{
+				LinkAttrs: netlink.LinkAttrs{Name: name},
+				PeerName:  fmt.Sprintf("%s-peer%d", bondName, i),
+			}
+			if err := netlink.LinkAdd(veth); err != nil {
+				return fmt.Errorf("add veth %q: %w", name, err)
+			}
+			slave, err := netlink.LinkByName(name)
+			if err != nil {
+				return err
+			}
+			if err := netlink.LinkSetMaster(slave, bondLink); err != nil {
+				return fmt.Errorf("enslave %q to %q: %w", name, bondName, err)
+			}
+			if err := netlink.LinkSetUp(slave); err != nil {
+				return err
+			}
+		}
+		return netlink.LinkSetUp(bondLink)
+	})
+	if err != nil {
+		t.Fatalf("setup bond0 with two real slaves: %v", err)
+	}
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		got, err := ResolveTargets([]string{bondName})
+		if err != nil {
+			return fmt.Errorf("ResolveTargets(%q): %w", bondName, err)
+		}
+		slices.Sort(got)
+		if want := []string{slave0, slave1}; !slices.Equal(got, want) {
+			return fmt.Errorf("ResolveTargets(%q) = %v, want %v", bondName, got, want)
+		}
+
+		objs, err := Load(pinDir)
+		if err != nil {
+			return fmt.Errorf("load: %w", err)
+		}
+		defer func() { _ = objs.Close() }()
+
+		links, err := Attach(objs.NatIngress, got)
+		if err != nil {
+			return fmt.Errorf("attach to bond slaves %v: %w", got, err)
+		}
+		for _, l := range links {
+			_ = l.Close()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("resolve/attach against a real bond device: %v", err)
 	}
 }

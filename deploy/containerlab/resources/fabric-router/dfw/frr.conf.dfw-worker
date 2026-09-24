@@ -6,13 +6,13 @@ interface lo
  ip address 10.255.255.2/32
  ipv6 address fc00:0:2::1/128
 !
-interface eth1
- description dfw-worker2-facing (primary site edge node)
+interface bond0
+ description dfw-worker2-facing (primary site edge node) -- LACP bond of eth1 + eth3
  ip address 10.1.10.2/24
  ipv6 address 2001:db8:1:10::2/64
 !
-interface eth2
- description dfw-worker3-facing (backup site edge node)
+interface bond1
+ description dfw-worker3-facing (backup site edge node) -- LACP bond of eth2 + eth4
  ip address 10.1.13.2/24
  ipv6 address 2001:db8:1:13::2/64
 !
@@ -42,7 +42,7 @@ ipv6 route fc00:0:2::/48 Null0
 # from the edge. The address must be attracted the whole way to the node
 # whose XDP program holds that flow's connection state; an aggregate
 # originated at an edge node would pull replies to a node with no route
-# onward to the shard. Arriving here ECMP over eth1 and eth2 is fine -- the
+# onward to the shard. Arriving here ECMP over bond0 and bond1 is fine -- the
 # shard attaches to both uplinks (#545, see this file's comment below).
 #
 # A per-shard /64 and /32 rather than the covering 2001:db8:9966::/32 and
@@ -55,18 +55,18 @@ ipv6 route fc00:0:2::/48 Null0
 #
 # Null0 because a `network` statement needs a matching route in the RIB and
 # nothing else on this node installs one. It cannot blackhole a real reply:
-# galactic-nat's XDP program runs at ingress on eth1/eth2 and rewrites the
-# destination before any FIB lookup (internal/plumbing/ebpf/natprog). A
-# packet that reaches this static is one no shard claimed, which is a drop
-# either way.
+# galactic-nat's XDP program runs at ingress on every member of bond0/bond1
+# and rewrites the destination before any FIB lookup
+# (internal/plumbing/ebpf/natprog). A packet that reaches this static is one
+# no shard claimed, which is a drop either way.
 ipv6 route 2001:db8:9966:1::/64 Null0
 ip route 192.0.2.1/32 Null0
 
-# eth1 and eth2 are equal paths, deliberately. This node is dual-homed to
+# bond0 and bond1 are equal paths, deliberately. This node is dual-homed to
 # both of dfw's edge nodes and every datapath on it attaches to both
-# uplinks: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="eth1,eth2"
+# uplinks: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="bond0,bond1"
 # (resources/galactic-cni/dfw/ebpf-interfaces-patch.yaml) and, since #545,
-# the egress shard via GALACTIC_NAT_UPLINK_INTERFACES="eth1,eth2"
+# the egress shard via GALACTIC_NAT_UPLINK_INTERFACES="bond0,bond1"
 # (resources/galactic-nat/dfw/node-patch.yaml). Traffic arriving on either
 # uplink is decapsulated and translated identically, so losing an edge node
 # costs this node neither its fabric connectivity nor its shard role.

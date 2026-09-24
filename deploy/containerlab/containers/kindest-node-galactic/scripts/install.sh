@@ -51,7 +51,7 @@ ip6tables -I FORWARD 1 -d ${SRV6_PREFIX} -j ACCEPT
 # The underlay prefixes cover the ECMP case. dfw's compute node is dual-homed
 # to both of its site's edge nodes, so a loopback-to-loopback flow crossing
 # dfw has an ECMP group in each direction -- tr1's, across its two links to
-# dfw-worker2 and dfw-worker3, and dfw-worker's own, across eth1 and eth2.
+# dfw-worker2 and dfw-worker3, and dfw-worker's own, across bond0 and bond1.
 # Each node hashes independently, so the two directions routinely pick
 # different edge nodes: confirmed live with `task verify`, where the echo
 # request reached dfw-worker over dfw-worker3 and the reply left over
@@ -72,10 +72,17 @@ modprobe --quiet --dry-run vrf && modprobe vrf
 sysctl -w net.vrf.strict_mode=1
 
 # Every fabric-facing interface this node actually has, not just eth1: dfw's
-# compute node is dual-homed to both of its site's edge nodes and so has eth2
-# as well (see deploy/containerlab/gvpc.clab.yaml). Enumerated rather than
-# hardcoded so a node with one uplink and a node with two both work here.
-FABRIC_IFACES=$(ls -1 /sys/class/net | grep -E '^eth[1-9]$' || true)
+# compute node is dual-homed to both of its site's edge nodes and so has two
+# uplinks (see deploy/containerlab/gvpc.clab.yaml). Enumerated rather than
+# hardcoded so a node with one uplink and a node with several both work here.
+#
+# Bond masters as well as their members. Most fabric links are LACP bonds,
+# built by mkbond.sh from gvpc.clab.yaml's exec before this script runs, and
+# the bond master is where the addresses and routes live -- so the forwarding,
+# rp_filter and seg6 sysctls matter on it at least as much as on its members.
+# The members keep them too: an XDP program attached to a member does its FIB
+# lookup with that member as the ingress interface.
+FABRIC_IFACES=$(ls -1 /sys/class/net | grep -E '^(eth|bond)[0-9]+$' | grep -vx eth0 || true)
 
 for iface in ${FABRIC_IFACES} all default; do
   sysctl -w net.ipv4.conf.$iface.forwarding=1

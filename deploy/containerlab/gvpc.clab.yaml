@@ -52,6 +52,8 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff01:1001::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth3
+        - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
 
     dfw-worker2:
@@ -73,6 +75,8 @@ topology:
       exec:
         - ip -6 route add blackhole 2001:db8:ff01:1002::/64 metric 2048
         - ip -6 route add blackhole 2001:db8:ff01:3002::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth3
+        - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
 
     dfw-worker3:
@@ -94,6 +98,8 @@ topology:
       exec:
         - ip -6 route add blackhole 2001:db8:ff01:1003::/64 metric 2048
         - ip -6 route add blackhole 2001:db8:ff01:3003::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth3
+        - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
 
     sjc-control-plane:
@@ -130,6 +136,7 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff02:1001::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth2
         - /galactic/scripts/install.sh
 
     sjc-worker2:
@@ -151,6 +158,8 @@ topology:
       exec:
         - ip -6 route add blackhole 2001:db8:ff02:1002::/64 metric 2048
         - ip -6 route add blackhole 2001:db8:ff02:3002::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth3
+        - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
 
     iad-control-plane:
@@ -187,6 +196,7 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff03:1001::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth2
         - /galactic/scripts/install.sh
 
     iad-worker2:
@@ -208,6 +218,8 @@ topology:
       exec:
         - ip -6 route add blackhole 2001:db8:ff03:1002::/64 metric 2048
         - ip -6 route add blackhole 2001:db8:ff03:3002::/64 metric 2048
+        - /galactic/scripts/mkbond.sh bond0 eth1 eth4
+        - /galactic/scripts/mkbond.sh bond1 eth2 eth5
         - /galactic/scripts/install.sh
 
     iad-worker3:
@@ -240,6 +252,7 @@ topology:
         - group_files/transit/daemons:/etc/frr/daemons:ro
         - node_files/tr1/startup.sh:/node_files/startup.sh:ro
         - node_files/tr1/frr.conf:/etc/frr/frr.conf:ro
+        - group_files/common/mkbond.sh:/opt/lab/mkbond.sh:ro
 
     tr2:
       group: transit
@@ -252,6 +265,7 @@ topology:
         - group_files/transit/daemons:/etc/frr/daemons:ro
         - node_files/tr2/startup.sh:/node_files/startup.sh:ro
         - node_files/tr2/frr.conf:/etc/frr/frr.conf:ro
+        - group_files/common/mkbond.sh:/opt/lab/mkbond.sh:ro
 
     tr3:
       group: transit
@@ -264,6 +278,7 @@ topology:
         - group_files/transit/daemons:/etc/frr/daemons:ro
         - node_files/tr3/startup.sh:/node_files/startup.sh:ro
         - node_files/tr3/frr.conf:/etc/frr/frr.conf:ro
+        - group_files/common/mkbond.sh:/opt/lab/mkbond.sh:ro
 
     tr4:
       group: transit
@@ -300,6 +315,35 @@ topology:
         - node_files/remote-host/startup.sh:/node_files/startup.sh:ro
 
   links:
+    # Bonding. Every link below that carries a datapath -- each edge node's
+    # transit uplink and each compute node's uplink to its edge node -- is a
+    # pair of veths, not one, and both ends aggregate the pair into an 802.3ad
+    # (LACP) bond: each Kind node's exec above runs mkbond.sh (baked into
+    # the node image from group_files/common/), and node_files/tr*/startup.sh
+    # runs the same script on the transit routers. Production gateway uplinks are bonds, and
+    # galactic-gateway, galactic-nat and galactic-cni each resolve a bond to
+    # its members before attaching (XDP to the members only, TC to the master
+    # and its members), so the lab has to present them one to exercise that.
+    #
+    # Every addressed interface is the bond, never a member: FRR configs and
+    # every datapath env var name bond0/bond1 (Kind nodes) or bondN (transit
+    # routers). Naming is uniform per role on the Kind nodes, which is what
+    # lets one cluster-wide galactic-cni DaemonSet name the same interfaces on
+    # every node in a site:
+    #   bond0  the node's first uplink -- the transit uplink on an edge node,
+    #          the uplink to the site's first edge node on a compute node
+    #   bond1  an edge node's compute-facing link; on dfw-worker, its uplink
+    #          to the second edge node
+    #
+    # A bond's members go to one peer, never two -- LACP aggregates links
+    # between two systems, and splitting one across two edge nodes would need
+    # MLAG or EVPN multihoming. dfw-worker's dual-homing is therefore two
+    # bonds, one per edge node, with ECMP across them exactly as before.
+    #
+    # Member numbering: the original single link keeps its interface number
+    # and the second member takes the next free one, so eth1 is still the
+    # transit-facing member on every edge node.
+
     # Edge uplinks to the transit. Edge nodes are the only transit-facing
     # ("fabric") nodes in this lab: they alone hold eBGP sessions to their
     # site's transit router, and every other worker in the site sits behind
@@ -307,67 +351,88 @@ topology:
     #
     # mtu: 1500 on both ends, unlike containerlab's jumbo-frame veth default
     # (~9500) -- required, not cosmetic: galactic-gateway attaches its XDP
-    # program to eth1 in native/driver mode (edgeattach.go, XDPDriverMode;
-    # generic/SKB mode is deliberately not attempted, see that package's doc
-    # comment), and the kernel's veth_xdp_set() rejects native XDP with
-    # -ERANGE whenever the *peer's* MTU exceeds what fits in one page-sized
-    # buffer (SKB_WITH_OVERHEAD(PAGE_SIZE - VETH_XDP_HEADROOM), ~3.5-3.8KB on
-    # a 4K-page host) -- 9500 blows well past that regardless of which end
-    # asks. Confirmed live: the gateway crash-looped with exactly this
-    # ERANGE until both ends were dropped to 1500.
-    - endpoints: ["dfw-worker2:eth1", "tr1:eth1"]
+    # program to every member of bond0 in native/driver mode (edgeattach.go,
+    # XDPDriverMode; generic/SKB mode is deliberately not attempted, see that
+    # package's doc comment), and the kernel's veth_xdp_set() rejects native
+    # XDP with -ERANGE whenever the *peer's* MTU exceeds what fits in one
+    # page-sized buffer (SKB_WITH_OVERHEAD(PAGE_SIZE - VETH_XDP_HEADROOM),
+    # ~3.5-3.8KB on a 4K-page host) -- 9500 blows well past that regardless
+    # of which end asks. Confirmed live: the gateway crash-looped with
+    # exactly this ERANGE until both ends were dropped to 1500.
+    - endpoints: ["dfw-worker2:eth1", "tr1:eth1"]    # dfw-worker2 bond0 / tr1 bond1
       mtu: 1500
-    - endpoints: ["dfw-worker3:eth1", "tr1:eth5"]
+    - endpoints: ["dfw-worker2:eth3", "tr1:eth6"]
       mtu: 1500
-    - endpoints: ["sjc-worker2:eth1", "tr2:eth1"]
+    - endpoints: ["dfw-worker3:eth1", "tr1:eth5"]    # dfw-worker3 bond0 / tr1 bond2
       mtu: 1500
-    - endpoints: ["iad-worker2:eth1", "tr3:eth4"]
+    - endpoints: ["dfw-worker3:eth3", "tr1:eth7"]
+      mtu: 1500
+    - endpoints: ["sjc-worker2:eth1", "tr2:eth1"]    # sjc-worker2 bond0 / tr2 bond1
+      mtu: 1500
+    - endpoints: ["sjc-worker2:eth3", "tr2:eth5"]
+      mtu: 1500
+    - endpoints: ["iad-worker2:eth1", "tr3:eth4"]    # iad-worker2 bond0 / tr3 bond1
+      mtu: 1500
+    - endpoints: ["iad-worker2:eth4", "tr3:eth5"]
       mtu: 1500
 
     # Site-internal links. Each compute node hangs off its own site's first
     # edge node, which routes for it: a compute node has no transit uplink
     # and no eBGP session anywhere. It reaches the rest of the fabric over a
-    # single iBGP session to that edge node across this link (see
+    # single iBGP session to that edge node across this bond (see
     # resources/fabric-router/*/frr.conf.*).
     #
     # mtu: 1500 for the same -ERANGE reason as the edge uplinks above, on
     # the compute side this time: galactic-nat's own XDP program
-    # (natattach.go, also native/driver-mode-only) attaches to this exact
-    # interface (eth1, shared with the TC-BPF SRv6 uSID datapath, which has
+    # (natattach.go, also native/driver-mode-only) attaches to every member
+    # of these bonds (shared with the TC-BPF SRv6 uSID datapath, which has
     # no such restriction), and every compute worker is also an egress
     # shard. Confirmed live: galactic-nat crash-looped on every compute
-    # worker with this ERANGE until these links were dropped to 1500.
+    # worker with this ERANGE until these links were dropped to 1500. The
+    # edge end runs galactic-gateway's return program (edge_return) on the
+    # same members, so it needs the same limit.
     #
     # Accepted trade-off, not risk-free: a packet whose SRv6-encapsulated
     # size would land between 1500 and 9500 bytes now needs source
     # fragmentation/PMTU handling instead of transiting whole. Every
     # scenario test uses small ping payloads well under 1500.
-    - endpoints: ["dfw-worker:eth1", "dfw-worker2:eth2"]
-      mtu: 1500
-    # dfw's compute node is dual-homed, one link to each of the site's two
+    #
+    # dfw's compute node is dual-homed, one bond to each of the site's two
     # edge nodes, so losing an edge node does not take the site's compute
     # node off the fabric with it. sjc and iad have a single edge node each
     # and so have nothing to dual-home to.
     #
-    # Both uplinks are equal paths. Every datapath on this node attaches to
-    # both: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="eth1,eth2"
+    # Both bonds are equal paths. Every datapath on this node attaches to
+    # both: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="bond0,bond1"
     # and, since #545, galactic-nat's shard XDP program via
-    # GALACTIC_NAT_UPLINK_INTERFACES="eth1,eth2". While the shard took a
-    # single interface name it was attached to eth1 alone and egress-shard
-    # traffic arriving on eth2 missed translation entirely, so BGP policy in
-    # resources/fabric-router/dfw/frr.conf.dfw-worker{,3} had to keep traffic
-    # off eth2; that policy is gone and the pair runs plain ECMP.
-    - endpoints: ["dfw-worker:eth2", "dfw-worker3:eth2"]
+    # GALACTIC_NAT_UPLINK_INTERFACES="bond0,bond1". While the shard took a
+    # single interface name it was attached to one uplink alone and
+    # egress-shard traffic arriving on the other missed translation
+    # entirely, so BGP policy in resources/fabric-router/dfw/
+    # frr.conf.dfw-worker{,3} had to keep traffic off it; that policy is
+    # gone and the pair runs plain ECMP.
+    - endpoints: ["dfw-worker:eth1", "dfw-worker2:eth2"]   # dfw-worker bond0 / dfw-worker2 bond1
       mtu: 1500
-    - endpoints: ["sjc-worker:eth1", "sjc-worker2:eth2"]
+    - endpoints: ["dfw-worker:eth3", "dfw-worker2:eth4"]
       mtu: 1500
-    - endpoints: ["iad-worker:eth1", "iad-worker2:eth2"]
+    - endpoints: ["dfw-worker:eth2", "dfw-worker3:eth2"]   # dfw-worker bond1 / dfw-worker3 bond1
+      mtu: 1500
+    - endpoints: ["dfw-worker:eth4", "dfw-worker3:eth4"]
+      mtu: 1500
+    - endpoints: ["sjc-worker:eth1", "sjc-worker2:eth2"]   # sjc-worker bond0 / sjc-worker2 bond1
+      mtu: 1500
+    - endpoints: ["sjc-worker:eth2", "sjc-worker2:eth4"]
+      mtu: 1500
+    - endpoints: ["iad-worker:eth1", "iad-worker2:eth2"]   # iad-worker bond0 / iad-worker2 bond1
+      mtu: 1500
+    - endpoints: ["iad-worker:eth2", "iad-worker2:eth5"]
       mtu: 1500
 
     # The route reflector sits behind iad's edge node exactly the way a
     # compute node does -- one iBGP session to it, no transit uplink of its
     # own. It keeps the jumbo default: it runs neither galactic-nat nor
-    # galactic-gateway, so no XDP program ever attaches to its eth1.
+    # galactic-gateway, so no XDP program ever attaches to its eth1. Nor is
+    # it bonded -- with no datapath on it, a bond would exercise nothing.
     - endpoints: ["iad-worker3:eth1", "iad-worker2:eth3"]
 
     # The off-fabric host on tr4, the one transit router with no site behind

@@ -9,13 +9,13 @@ interface lo
  # GALACTIC_ROUTER_BGP_LOCAL_ADDRESS.
  ipv6 address fc00:0:9::1/128
 !
-interface eth1
- description tr3-facing (transit uplink)
+interface bond0
+ description tr3-facing (transit uplink) -- LACP bond of eth1 + eth4
  ip address 10.1.32.2/24
  ipv6 address 2001:db8:1:32::2/64
 !
-interface eth2
- description iad-worker-facing (compute)
+interface bond1
+ description iad-worker-facing (compute) -- LACP bond of eth2 + eth5
  ip address 10.1.30.1/24
  ipv6 address 2001:db8:1:30::1/64
 !

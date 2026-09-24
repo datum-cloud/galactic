@@ -24,7 +24,14 @@
 // Every uplink in the operator-configured list is attached at process startup,
 // so a multi-homed shard node translates on all of them and losing one uplink
 // does not stop translation on the rest. A single uplink is simply a
-// one-element list.
+// one-element list, and one naming a bonding master is expanded to that bond's
+// slaves by ResolveTargets, native XDP against a bonding master being
+// unreliable.
+//
+// Unlike the edge attach package, slaves are attached back to back, without
+// waiting for each to rejoin its aggregate first. On a NIC whose driver drops
+// carrier to reallocate its rings for a native program, that briefly takes
+// every member of the bond down together.
 //
 // Attachment happens once, though, and nothing here watches for link changes
 // afterwards: an interface that appears after startup gets no program until

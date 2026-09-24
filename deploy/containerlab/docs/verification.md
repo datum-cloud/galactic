@@ -4,6 +4,38 @@ Run these checks after `task deploy` to confirm the lab is healthy end-to-end. F
 deploying and verifying the `ns10`/`ns20`/`ns30`/`ns40` test workloads,
 see [docs/tenants.md](tenants.md).
 
+## Bonds
+
+Every datapath-carrying link is a two-member LACP bond (see the README's "Bonded
+links"). Check these first: a member that never joined its aggregate leaves
+everything below passing over the other member, with the datapath attachments
+on the missing one never exercised.
+
+```bash
+# Every bond on both ends: two members, both collecting+distributing in the
+# bond's active aggregator, with a real LACP partner
+task verify:bonds
+
+# One bond by hand -- expect both members "MII Status: up" with the same
+# Aggregator ID, and a non-zero partner system MAC
+docker exec dfw-worker2 cat /proc/net/bonding/bond0
+docker exec clab-gvpc-tr1 cat /proc/net/bonding/bond1
+
+# A member's LACP actor state: 63 (0x3f) is fully up; bits 0x30 are
+# collecting+distributing, which is what galactic-gateway's attach gate waits on
+docker exec dfw-worker2 ip -d link show dev eth1 | grep -o 'ad_actor_oper_port_state [0-9]*'
+
+# The datapaths attach to the members, never the master: expect an xdp
+# program on eth1 and eth3 and none on bond0
+docker exec dfw-worker2 ip -d link show dev eth1 | grep -o 'prog/xdp id [0-9]*'
+docker exec dfw-worker2 ip -d link show dev eth3 | grep -o 'prog/xdp id [0-9]*'
+docker exec dfw-worker2 ip -d link show dev bond0 | grep -o 'prog/xdp id [0-9]*' || echo "none on bond0"
+
+# Take each member down in turn; BGP over the bond and reachability through
+# it must hold. Disruptive, briefly -- not part of `task verify`
+task verify:bond-failover
+```
+
 ## Transit fabric
 
 The transit underlay is dual-stack and runs one BGP session per address family on every

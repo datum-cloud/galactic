@@ -49,6 +49,10 @@ const (
 	// uplink on a multi-homed node therefore makes the shard role survive only
 	// as long as that uplink does, which is what this taking a list rather than
 	// a single name exists to prevent.
+	//
+	// A bonding master may be named in place of its members: it is expanded
+	// to its slaves at startup and the program attached to each, never to the
+	// master itself.
 	EnvNATUplinkInterfaces = "GALACTIC_NAT_UPLINK_INTERFACES"
 
 	// EnvNATShardSID is this shard's own SRv6 uSID, the outer destination a

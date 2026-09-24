@@ -5,14 +5,16 @@ metadata:
 spec:
   template:
     spec:
-      # Both uplinks
+      # Both uplinks. bond0/bond1 name the same roles on every dfw node --
+      # dfw-worker's bonds to each edge node, and each edge node's transit
+      # and compute-facing bonds -- so one list is right for the whole site.
       initContainers:
         - name: install-cni
           env:
             - name: GALACTIC_CNI_EBPF_INTERFACES
-              value: eth1,eth2
+              value: bond0,bond1
       containers:
         - name: credential-refresh
           env:
             - name: GALACTIC_CNI_EBPF_INTERFACES
-              value: eth1,eth2
+              value: bond0,bond1
