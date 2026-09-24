@@ -166,6 +166,17 @@ static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const vo
 #define USID_IPPROTO_TCP 6
 #define USID_IPPROTO_UDP 17
 
+// ICMPv6, needed to recognize Neighbor Discovery messages regardless of their
+// destination address. See usid_egress's NDP carve-out.
+#define USID_IPPROTO_ICMPV6 58
+
+// ICMPv6 types that are Neighbor Discovery (RFC 4861): Router Solicitation,
+// Router Advertisement, Neighbor Solicitation, Neighbor Advertisement, and
+// Redirect. usid_egress must never route any of these into
+// egress_route_table, whatever their destination.
+#define USID_ICMPV6_TYPE_RS 133
+#define USID_ICMPV6_TYPE_REDIRECT 137
+
 // TCP checksum field offset (bytes 16-17 of a TCP header); UDP's is at
 // bytes 6-7. Used only by apply_vip_xlat's bpf_l4_csum_replace calls.
 #define USID_TCP_CSUM_OFFSET 16
@@ -243,6 +254,14 @@ struct usid_ip6hdr {
 struct usid_l4ports {
 	__be16 source;
 	__be16 dest;
+} __attribute__((packed));
+
+// struct usid_icmp6hdr covers only the one field usid_egress's NDP carve-out
+// needs, the message type. Code and checksum are read by nothing here.
+struct usid_icmp6hdr {
+	__u8 type;
+	__u8 code;
+	__be16 checksum;
 } __attribute__((packed));
 
 struct usid_iphdr {
@@ -591,6 +610,14 @@ enum drop_reason {
 	DROP_REASON_TRACE_ING_ETHERTYPE_MISMATCH = 36,
 	DROP_REASON_TRACE_ING_IP6_BOUNDS_FAILED = 37,
 	DROP_REASON_TRACE_ING_LOCATOR_MISS = 38,
+	// TEMPORARY diagnostic checkpoint: usid_egress bailed a packet out of
+	// egress-routing because it is Neighbor Discovery, the fix for the gap the
+	// MULTICAST_LL_BAIL carve-out left open -- an NDP message unicast to a
+	// ULA gateway address is neither multicast nor link-local, so it fell
+	// through to egress_route_table and, once a route matched, never reached
+	// the host-side NDP handling that must answer it, and the container's
+	// gateway neighbor entry went to FAILED. Remove once resolved.
+	DROP_REASON_TRACE_NDP_BAIL = 39,
 	__DROP_REASON_MAX,
 };
 
@@ -1567,6 +1594,32 @@ int usid_egress(struct __sk_buff *skb)
 		if (ip6->daddr[0] == 0xFF || (ip6->daddr[0] == 0xFE && (ip6->daddr[1] & 0xC0) == 0x80)) {
 			count_drop(DROP_REASON_TRACE_MULTICAST_LL_BAIL);
 			return TC_ACT_UNSPEC;
+		}
+
+		// The carve-out above only catches Neighbor Discovery by destination
+		// scope, but a reply to a solicitation is unicast to whatever address
+		// asked, and this VRF's gateways are ULA, not link-local. That reply
+		// is exactly the traffic the comment above warns about: neither
+		// multicast nor link-local, so it fell through to egress_route_table,
+		// and once a route matched -- this node's own connected subnet is
+		// ordinary BGP-redistributed content, not a special case to that
+		// table -- the packet never reached the host-side NDP handling that
+		// must answer it. The container's gateway neighbor entry went to
+		// FAILED and every packet through it died with a locally synthesized
+		// unreachable.
+		//
+		// So bail on the message type directly, regardless of destination:
+		// Neighbor Discovery (RFC 4861) is host-local signaling between this
+		// node and its directly attached guest, never something a route in
+		// this table should ever carry.
+		if (ip6->nexthdr == USID_IPPROTO_ICMPV6) {
+			struct usid_icmp6hdr *icmp6 = (void *) (ip6 + 1);
+
+			if ((void *) (icmp6 + 1) <= data_end &&
+			    icmp6->type >= USID_ICMPV6_TYPE_RS && icmp6->type <= USID_ICMPV6_TYPE_REDIRECT) {
+				count_drop(DROP_REASON_TRACE_NDP_BAIL);
+				return TC_ACT_UNSPEC;
+			}
 		}
 
 		route_family = USID_EGRESS_ROUTE_FAMILY_INET6;
