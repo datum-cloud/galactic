@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -86,6 +87,20 @@ const (
 	// symptom on either side, which is why this value is echoed into
 	// EgressShard status rather than living only here.
 	EnvNAT64Prefix = "GALACTIC_NAT_NAT64_PREFIX"
+
+	// EnvNATSRv6SourceFilter selects the datapath's SRv6 source filter mode:
+	// off, audit or enforce. Optional, defaulting to off, which leaves the
+	// datapath's behaviour unchanged. audit counts every decision without
+	// dropping; enforce drops encapsulated tenant packets whose outer source
+	// fails the check.
+	EnvNATSRv6SourceFilter = "GALACTIC_NAT_SRV6_SOURCE_FILTER"
+)
+
+// SRv6 source filter modes accepted by EnvNATSRv6SourceFilter.
+const (
+	NATSRv6SourceFilterOff     = "off"
+	NATSRv6SourceFilterAudit   = "audit"
+	NATSRv6SourceFilterEnforce = "enforce"
 )
 
 // --- NATConfig ---------------------------------------------------------
@@ -115,6 +130,10 @@ type NATConfig struct {
 	ShardPubAddr6 string
 	ShardPubAddr4 string
 	NAT64Prefix   string
+
+	// SRv6SourceFilter is the source filter mode, one of the
+	// NATSRv6SourceFilter* values, normalised to lower case.
+	SRv6SourceFilter string
 }
 
 // NewNATConfig creates a config resolver reading the GALACTIC_NAT
@@ -133,6 +152,7 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault("shard_pub_addr6", "")
 	v.SetDefault("shard_pub_addr4", "")
 	v.SetDefault("nat64_prefix", "")
+	v.SetDefault("srv6_source_filter", NATSRv6SourceFilterOff)
 
 	cfg := &NATConfig{
 		v:      v,
@@ -179,6 +199,7 @@ func (c *NATConfig) readFields() {
 	c.ShardPubAddr6 = c.v.GetString("shard_pub_addr6")
 	c.ShardPubAddr4 = c.v.GetString("shard_pub_addr4")
 	c.NAT64Prefix = c.v.GetString("nat64_prefix")
+	c.SRv6SourceFilter = strings.ToLower(strings.TrimSpace(c.v.GetString("srv6_source_filter")))
 }
 
 // ServesNAT66 and ServesNAT64 report which families this shard's configuration
@@ -281,6 +302,13 @@ func (c *NATConfig) Validate() error {
 		return fmt.Errorf(
 			"a shard must serve at least one address family: set %s for NAT66, or %s and %s for NAT64",
 			EnvNATShardPubAddr6, EnvNATShardPubAddr4, EnvNAT64Prefix)
+	}
+	switch c.SRv6SourceFilter {
+	case NATSRv6SourceFilterOff, NATSRv6SourceFilterAudit, NATSRv6SourceFilterEnforce:
+	default:
+		return fmt.Errorf("SRv6 source filter mode %q must be %s, %s or %s (%s env var)",
+			c.SRv6SourceFilter, NATSRv6SourceFilterOff, NATSRv6SourceFilterAudit,
+			NATSRv6SourceFilterEnforce, EnvNATSRv6SourceFilter)
 	}
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
 		return errors.New("metrics port must be between 1 and 65535")

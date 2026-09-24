@@ -33,6 +33,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | NAT64 prefix        | `GALACTIC_NAT_NAT64_PREFIX`       | `--nat64-prefix`           | —       | With the above |
 | Metrics port        | `GALACTIC_NAT_METRICS_PORT`       | `--metrics-port`           | `9182`  | No             |
 | gRPC health port    | `GALACTIC_NAT_GRPC_HEALTH_PORT`   | `--grpc-health-port`       | `5182`  | No             |
+| SRv6 source filter  | `GALACTIC_NAT_SRV6_SOURCE_FILTER` | —                          | `off`   | No             |
 
 `NATConfig.Validate` enforces all of this at startup — a shard node
 deployed wrong crash-loops immediately with an actionable message rather
@@ -128,6 +129,33 @@ undeliverable or misdelivered.
 > and `task -d deploy/containerlab verify:nat-return-route` for the check
 > that proves it. Where those addresses come from in the first place is
 > #409.
+
+**`GALACTIC_NAT_SRV6_SOURCE_FILTER`**
+The datapath's SRv6 source filter mode: `off`, `audit` or `enforce`.
+Environment-only. Before a tenant's encapsulated packet reaches either
+forward leg, the filter checks its outer source:
+
+- It must be a well-formed tenant SID: Function End.DT46, a non-zero
+  Argument and zero padding. The reply is re-encapsulated toward exactly
+  that address, so nothing that fails this could have been answered.
+- Once the allow-list is populated, it must fall inside an allowed fabric
+  prefix and arrive on an uplink that prefix is bound to. Until then these
+  two checks are bypassed and counted as such.
+
+| Mode      | Behaviour                                                                 |
+| --------- | ------------------------------------------------------------------------- |
+| `off`     | No check; the datapath behaves exactly as without the filter.             |
+| `audit`   | Every decision is counted and denied sources are recorded; nothing drops. |
+| `enforce` | Packets whose source fails a check are dropped.                           |
+
+`galactic-nat` numbers its uplinks into slots in the order
+`GALACTIC_NAT_UPLINK_INTERFACES` lists them, for allow-list entries to
+bind to. Nothing populates the allow-list yet, so today `audit` and
+`enforce` apply only the structural check. Decisions are exported as
+`galactic_nat_srv6_source_filter_decisions_total{decision}`, with
+`galactic_nat_srv6_source_filter_populated{mode}` and
+`galactic_nat_srv6_source_filter_allow_entries` alongside. Roll out with
+`audit` first and move to `enforce` once the denials are understood.
 
 ### Capabilities and host requirements
 
@@ -315,9 +343,11 @@ knowing before you rely on this component in production:
   deployment needs its own redistribution/border design for this.
 - **IPv4 is out of scope.** `nat.c` rejects non-IPv6 inner packets
   outright; there is no IPv4 masquerade path.
-- **No anti-spoofing / trust boundary on ingress to a shard.** The
-  datapath trusts fabric-internal traffic; this deserves its own security
-  pass before carrying untrusted traffic.
+- **Source filtering is structural only until its allow-list is
+  populated.** `GALACTIC_NAT_SRV6_SOURCE_FILTER` checks that an
+  encapsulated packet's source is a well-formed tenant SID; the fabric-peer
+  allow-list and uplink binding it also supports are not yet populated by
+  anything in this repo. The filter is `off` by default.
 - **A shard node's netfilter rules never see tenant egress.** Both
   directions are claimed in XDP and leave from the driver, so nothing a
   shard translates traverses `PREROUTING`, `FORWARD`, or connection

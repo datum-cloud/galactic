@@ -11,6 +11,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/natmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natsrcfiltermap"
 )
 
 const metricsNamespace = "galactic_nat"
@@ -22,6 +23,7 @@ const metricsNamespace = "galactic_nat"
 type natCollector struct {
 	connTable   *natmap.ConnTable
 	dropReasons natmap.DropReasonsReader
+	srcFilter   *natsrcfiltermap.Filter
 }
 
 // newNatCollector builds a collector reading directly from a loaded object
@@ -30,6 +32,7 @@ func newNatCollector(objs *natprog.NatObjects) *natCollector {
 	return &natCollector{
 		connTable:   natmap.NewConnTable(natmap.KernelTable{Map: objs.NatConnTable}),
 		dropReasons: objs.DropReasons,
+		srcFilter:   natsrcfiltermap.NewKernelFilter(objs),
 	}
 }
 
@@ -46,18 +49,39 @@ var (
 		"Packets dropped by this shard's datapath, by reason (drop_reasons map).",
 		[]string{"reason"}, nil,
 	)
+	srcFilterDecisionsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "srv6_source_filter", "decisions_total"),
+		"SRv6 source filter decisions on encapsulated tenant packets, by decision. Denials are counted "+
+			"in audit mode too, where the packet is still forwarded.",
+		[]string{"decision"}, nil,
+	)
+	srcFilterStateDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "srv6_source_filter", "populated"),
+		"1 once the SRv6 source filter's allow-list has completed a full sync, else 0, labelled with "+
+			"the filter's mode.",
+		[]string{"mode"}, nil,
+	)
+	srcFilterAllowEntriesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "srv6_source_filter", "allow_entries"),
+		"Current number of prefixes in the SRv6 source filter's allow-list.",
+		nil, nil,
+	)
 )
 
 // Describe implements prometheus.Collector.
 func (c *natCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- connsDesc
 	ch <- dropsDesc
+	ch <- srcFilterDecisionsDesc
+	ch <- srcFilterStateDesc
+	ch <- srcFilterAllowEntriesDesc
 }
 
 // Collect implements prometheus.Collector.
 func (c *natCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectConns(ch)
 	c.collectDrops(ch)
+	c.collectSrcFilter(ch)
 }
 
 func familyLabel(family uint8) string {
@@ -104,5 +128,42 @@ func (c *natCollector) collectDrops(ch chan<- prometheus.Metric) {
 			name = fmt.Sprintf("unknown_%d", i)
 		}
 		ch <- prometheus.MustNewConstMetric(dropsDesc, prometheus.CounterValue, float64(total), name)
+	}
+}
+
+func (c *natCollector) collectSrcFilter(ch chan<- prometheus.Metric) {
+	if c.srcFilter == nil {
+		return
+	}
+
+	if stats, err := c.srcFilter.Stats(); err != nil {
+		ch <- prometheus.NewInvalidMetric(srcFilterDecisionsDesc, fmt.Errorf("read source filter stats: %w", err))
+	} else {
+		for decision, value := range map[string]uint64{
+			natprog.SrcStatNames[natprog.SrcStatChecked]:           stats.Checked,
+			natprog.SrcStatNames[natprog.SrcStatAllowed]:           stats.Allowed,
+			natprog.SrcStatNames[natprog.SrcStatDenyPrefix]:        stats.DenyPrefix,
+			natprog.SrcStatNames[natprog.SrcStatDenyInterface]:     stats.DenyInterface,
+			natprog.SrcStatNames[natprog.SrcStatDenyStructure]:     stats.DenyStructure,
+			natprog.SrcStatNames[natprog.SrcStatBypassUnpopulated]: stats.BypassUnpopulated,
+		} {
+			ch <- prometheus.MustNewConstMetric(srcFilterDecisionsDesc, prometheus.CounterValue, float64(value), decision)
+		}
+	}
+
+	if cfg, err := c.srcFilter.Config(); err != nil {
+		ch <- prometheus.NewInvalidMetric(srcFilterStateDesc, fmt.Errorf("read source filter config: %w", err))
+	} else {
+		populated := 0.0
+		if cfg.Populated {
+			populated = 1
+		}
+		ch <- prometheus.MustNewConstMetric(srcFilterStateDesc, prometheus.GaugeValue, populated, cfg.Mode.String())
+	}
+
+	if entries, err := c.srcFilter.ListAllow(); err != nil {
+		ch <- prometheus.NewInvalidMetric(srcFilterAllowEntriesDesc, fmt.Errorf("list source filter allow-list: %w", err))
+	} else {
+		ch <- prometheus.MustNewConstMetric(srcFilterAllowEntriesDesc, prometheus.GaugeValue, float64(len(entries)))
 	}
 }
