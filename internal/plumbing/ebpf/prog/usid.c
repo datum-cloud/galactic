@@ -7,14 +7,19 @@
 // usid.c implements the TC-BPF ingress datapath for the uFMT 48+16 SRv6 uSID
 // carrier format.
 //
-// Packet path. Every lookup is an exact hash match; nothing here matches looser
-// than a full /64, and none of the lookup maps below is an LPM trie:
+// Packet path. Every uSID decode lookup is an exact hash match; nothing in
+// steps 2 through 6 matches looser than a full /64. The source filter at step
+// 2a is the one longest-prefix match on this path:
 //
 //  1. Parse the outer Ethernet and IPv6 header, bounds-checked. Not IPv6, or
 //     too short to parse: TC_ACT_UNSPEC, handed to the next tc filter
 //     unmodified.
 //  2. Exact-match the destination's top 64 bits, Block and Node-ID read with no
 //     shift, against locator_table. No match: TC_ACT_UNSPEC.
+//  2a. Source filter, when enabled: the outer source must fall inside an
+//     allowed fabric prefix, and the packet must arrive on an uplink that
+//     prefix is bound to. A rejected packet is dropped in enforce mode and
+//     only counted in audit mode. See src_filter_config_table.
 //  3. Read Function from the unmutated packet at its fixed offset.
 //  4. Exact-match (Block, Function) against function_table. No match: drop,
 //     counted, because step 2 already claimed this packet and passing it
@@ -115,6 +120,9 @@ static long (*bpf_redirect_peer)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
 
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
+
+static long (*bpf_map_update_elem)(void *map, const void *key, const void *value,
+				    __u64 flags) = (void *) BPF_FUNC_map_update_elem;
 
 // vip_xlat_table's rewrite is a genuine address and port substitution with no
 // checksum-neutral shortcut, so it needs the incremental L4 checksum update any
@@ -694,8 +702,8 @@ struct {
 	__type(value, struct vip_xlat_value);
 } vip_xlat_table SEC(".maps");
 
-// egress_route_table: see struct egress_route_key. The only LPM trie in this
-// file. Everything above is a hash map because uSID decode is always a
+// egress_route_table: see struct egress_route_key. One of two LPM tries in this
+// file, with src_allow_table. Everything above is a hash map because uSID decode is always a
 // fixed-width exact match, but egress routing is inherently a longest-prefix
 // problem: an intra-VPC peer's specific prefix must win over a VRF's ::/0
 // default. BPF_F_NO_PREALLOC is required by the kernel for this map type, not a
@@ -783,6 +791,117 @@ struct {
 } public_uplink_table SEC(".maps");
 
 // ---------------------------------------------------------------------
+// SRv6 ingress source filter, step 2a. Every map here is new rather than a
+// field on an existing one, so the loader never treats an upgrade as an
+// incompatible pin and recreates the uSID decode maps.
+// ---------------------------------------------------------------------
+
+// enum src_filter_mode is src_filter_config.mode. Any value other than
+// SRC_FILTER_MODE_ENFORCE counts but never drops.
+enum src_filter_mode {
+	SRC_FILTER_MODE_OFF = 0,
+	SRC_FILTER_MODE_AUDIT = 1,
+	SRC_FILTER_MODE_ENFORCE = 2,
+};
+
+// SRCF_ANY_IFACE marks an allow entry that is accepted on any interface,
+// skipping the uplink binding check.
+#define SRCF_ANY_IFACE (1U << 0)
+
+// SRC_FILTER_MAX_SLOTS is the number of uplink slots iface_mask can name.
+#define SRC_FILTER_MAX_SLOTS 32
+
+// struct src_allow_key keys src_allow_table. prefixlen counts only addr's
+// significant bits; a packet lookup uses 128.
+struct src_allow_key {
+	__u32 prefixlen;
+	__u8 addr[16];
+};
+
+// struct src_allow_value is one allowed source prefix: iface_mask has bit N set
+// for every uplink whose uplink_slot_table slot is N, and flags holds SRCF_*.
+struct src_allow_value {
+	__u32 iface_mask;
+	__u32 flags;
+};
+
+// struct src_filter_config is src_filter_config_table's single value.
+// populated stays zero until the control plane completes its first full sync
+// of src_allow_table; until then every packet passes, counted as a bypass.
+// generation is written by the control plane and never read here.
+struct src_filter_config {
+	__u32 mode;
+	__u32 populated;
+	__u32 generation;
+};
+
+// enum src_filter_stat indexes src_filter_stats. Slots past
+// SRC_FILTER_STAT_BYPASS_UNPOPULATED are reserved.
+enum src_filter_stat {
+	SRC_FILTER_STAT_CHECKED = 0,
+	SRC_FILTER_STAT_ALLOWED = 1,
+	SRC_FILTER_STAT_DENY_PREFIX = 2,
+	SRC_FILTER_STAT_DENY_IFACE = 3,
+	SRC_FILTER_STAT_BYPASS_UNPOPULATED = 4,
+	__SRC_FILTER_STAT_SLOTS = 8,
+};
+
+// struct src_denied_key keys src_filter_denied: the top 64 bits of a denied
+// outer source, in wire order.
+struct src_denied_key {
+	__u8 prefix[8];
+};
+
+// struct src_denied_value records one denied source /64 for triage. last_reason
+// is the enum src_filter_stat deny slot of the most recent denial.
+struct src_denied_value {
+	__u64 count;
+	__u64 last_ns;
+	__u32 last_ifindex;
+	__u32 last_reason;
+};
+
+// src_allow_table: allowed outer source prefixes. BPF_F_NO_PREALLOC is required
+// by the kernel for this map type.
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 4096);
+	__type(key, struct src_allow_key);
+	__type(value, struct src_allow_value);
+} src_allow_table SEC(".maps");
+
+// uplink_slot_table: uplink ifindex to its bit position in iface_mask.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u32);
+	__type(value, __u32);
+} uplink_slot_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct src_filter_config);
+} src_filter_config_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, __SRC_FILTER_STAT_SLOTS);
+	__type(key, __u32);
+	__type(value, __u64);
+} src_filter_stats SEC(".maps");
+
+// src_filter_denied: a bounded, least-recently-used record of denied sources.
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 1024);
+	__type(key, struct src_denied_key);
+	__type(value, struct src_denied_value);
+} src_filter_denied SEC(".maps");
+
+// ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
 
@@ -814,6 +933,83 @@ static USID_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vrf_value
 {
 	count_drop(reason);
 	__sync_fetch_and_add(&vrf->dropped_packets, 1);
+}
+
+static USID_ALWAYS_INLINE void count_src_filter(__u32 stat)
+{
+	__u64 *count = bpf_map_lookup_elem(&src_filter_stats, &stat);
+
+	if (count)
+		__sync_fetch_and_add(count, 1);
+}
+
+static USID_ALWAYS_INLINE void record_src_denial(const struct src_allow_key *src, __u32 ifindex,
+						 __u32 reason)
+{
+	struct src_denied_key key;
+	__u64 now = bpf_ktime_get_ns();
+
+	__builtin_memcpy(key.prefix, src->addr, sizeof(key.prefix));
+
+	struct src_denied_value *seen = bpf_map_lookup_elem(&src_filter_denied, &key);
+
+	if (seen) {
+		__sync_fetch_and_add(&seen->count, 1);
+		seen->last_ns = now;
+		seen->last_ifindex = ifindex;
+		seen->last_reason = reason;
+		return;
+	}
+
+	struct src_denied_value fresh = {
+		.count = 1,
+		.last_ns = now,
+		.last_ifindex = ifindex,
+		.last_reason = reason,
+	};
+
+	bpf_map_update_elem(&src_filter_denied, &key, &fresh, BPF_NOEXIST);
+}
+
+// src_filter_allows reports whether an outer source may deliver into a tenant
+// network through the uplink at ifindex, counting the decision. An unpopulated
+// filter allows everything, counted as a bypass. A denial is also recorded in
+// src_filter_denied.
+static USID_ALWAYS_INLINE int src_filter_allows(const struct src_filter_config *cfg,
+						const __u8 *saddr, __u32 ifindex)
+{
+	count_src_filter(SRC_FILTER_STAT_CHECKED);
+
+	if (!cfg->populated) {
+		count_src_filter(SRC_FILTER_STAT_BYPASS_UNPOPULATED);
+		return 1;
+	}
+
+	struct src_allow_key key = { .prefixlen = 128 };
+
+	__builtin_memcpy(key.addr, saddr, sizeof(key.addr));
+
+	struct src_allow_value *allow = bpf_map_lookup_elem(&src_allow_table, &key);
+
+	if (!allow) {
+		count_src_filter(SRC_FILTER_STAT_DENY_PREFIX);
+		record_src_denial(&key, ifindex, SRC_FILTER_STAT_DENY_PREFIX);
+		return 0;
+	}
+
+	if (!(allow->flags & SRCF_ANY_IFACE)) {
+		__u32 *slot = bpf_map_lookup_elem(&uplink_slot_table, &ifindex);
+
+		if (!slot || *slot >= SRC_FILTER_MAX_SLOTS ||
+		    !(allow->iface_mask & (1U << (*slot & (SRC_FILTER_MAX_SLOTS - 1))))) {
+			count_src_filter(SRC_FILTER_STAT_DENY_IFACE);
+			record_src_denial(&key, ifindex, SRC_FILTER_STAT_DENY_IFACE);
+			return 0;
+		}
+	}
+
+	count_src_filter(SRC_FILTER_STAT_ALLOWED);
+	return 1;
 }
 
 // read_be64 composes an 8-byte big-endian buffer into a host-native u64 byte by
@@ -1037,6 +1233,17 @@ int usid_ingress(struct __sk_buff *skb)
 		count_drop(DROP_REASON_TRACE_ING_LOCATOR_MISS); // TEMPORARY
 		return TC_ACT_UNSPEC;
 	}
+
+	// Step 2a: source filter. Only packets already claimed by step 2 reach
+	// it, so traffic for any other destination is untouched. With the filter
+	// off this is a single array read.
+	__u32 src_filter_key = 0;
+	struct src_filter_config *src_cfg = bpf_map_lookup_elem(&src_filter_config_table, &src_filter_key);
+
+	if (src_cfg && src_cfg->mode != SRC_FILTER_MODE_OFF &&
+	    !src_filter_allows(src_cfg, ip6->saddr, skb->ifindex) &&
+	    src_cfg->mode == SRC_FILTER_MODE_ENFORCE)
+		return TC_ACT_SHOT;
 
 	__u64 block = locator_key >> 16;
 

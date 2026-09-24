@@ -20,6 +20,8 @@
 //     external event silently clearing the filter, requires it.
 //   - usidmap: the read/write API that populates and reconciles the three
 //     control-plane maps, used by the CNI ADD path and by garbage collection.
+//   - srcfiltermap: the read/write API for the SRv6 ingress source filter's
+//     allow-list, uplink slots, mode, counters, and denied-source record.
 //   - metrics: Prometheus metrics and health event hooks spanning the whole
 //     datapath.
 //
