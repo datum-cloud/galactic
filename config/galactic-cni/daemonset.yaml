@@ -141,12 +141,11 @@ spec:
               mountPath: /host/var/log/galactic
             - name: bpf-fs
               mountPath: /sys/fs/bpf
-            # /var/lib/cni backs radv's DefaultStateDir, shared with
-            # galactic-tap on the host -- see
-            # config/galactic-cni/README.md.
+            # radv's DefaultStateDir, shared with galactic-tap on the host --
+            # see config/galactic-cni/README.md. Writable: the run daemon
+            # removes the record of a tap that has gone missing.
             - name: radv-state-dir
-              mountPath: /var/lib/cni
-              readOnly: true
+              mountPath: /var/lib/cni/ra
           # BPF map creation under load (image pull + verifier work on a
           # slow node) can outrun readinessProbe/livenessProbe's short
           # initialDelaySeconds, risking a liveness-triggered restart loop
@@ -190,11 +189,12 @@ spec:
             type: DirectoryOrCreate
         # Backs radv's DefaultStateDir -- see the radv-state-dir volumeMount
         # comment above. DirectoryOrCreate (unlike bpf-fs): a node with no tap
-        # attachment yet may not have galactic-tap's /var/lib/cni/ra
-        # subdirectory created at all.
+        # attachment yet may not have galactic-tap's /var/lib/cni/ra created
+        # at all. Only this subdirectory is mounted, so the rest of the host's
+        # CNI state under /var/lib/cni stays out of the container.
         - name: radv-state-dir
           hostPath:
-            path: /var/lib/cni
+            path: /var/lib/cni/ra
             type: DirectoryOrCreate
         - name: bpf-fs
           # Host bpffs for pinned-map continuity; `Directory` (not
