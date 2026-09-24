@@ -113,6 +113,48 @@ is set in the entry's mask.
 | `src_filter_stats`        | Per-CPU array (8) | Checked, allowed, denied by prefix, denied by interface, bypassed before first sync  |
 | `src_filter_denied`       | LRU hash (1024)   | Denied source /64s with count, last interface, last reason and time, for triage      |
 
+#### Control plane
+
+`galactic-cni run` (the DaemonSet's long-running `credential-refresh`
+container) owns the allow-list through `internal/srcfilter`. It is started only
+when `GALACTIC_CNI_SRV6_SOURCE_FILTER` is `audit` or `enforce`; with `off`, or
+an invalid configuration, the container writes mode `off` and starts nothing.
+
+- **Inputs.** Main-table IPv6 routes that forward and were installed by the
+  fabric's own routing: protocol `bgp` (FRR's underlay) or protocol 214
+  (`srv6.RouteProtocolGalactic`, which `galactic-router` tags its gateway and
+  egress shard routes with). Static, boot, kernel and other routes never
+  count. A route must also lie inside a configured SR domain prefix, be at
+  least a /64 (so an aggregate never allows unassigned node IDs), and not lie
+  inside this node's own locator from its `BGPRouter`.
+- **Fabric next hop.** When `GALACTIC_CNI_SRV6_FABRIC_NEXTHOPS` is set, only
+  hops whose gateway lies inside it and that leave through an uplink count,
+  and a route with no such hop is left out. Kernel routes carry the resolved,
+  directly connected gateway even for recursive or iBGP routes, so the list
+  names peer link and transit addresses (and `fe80::/10` for unnumbered
+  sessions), not loopbacks. The peer set lives in the underlay's own
+  configuration, which galactic does not read, so this is operator-supplied;
+  unset skips the check.
+- **Interface binding.** An entry's mask is the union of the slots of every
+  hop's link, a bond master or a VLAN on a bond counting as the bond's slaves.
+  Uplinks are what `attach.ResolveInterfaces` returns, each keeping its slot
+  for as long as it exists (at most 32). Loose binding, or a hop whose link is
+  unknown, accepts the entry on any interface. Static extra sources always do.
+- **Apply.** Uplink slots first, then new and changed entries, then removals,
+  then the config with `populated` set and the generation bumped. `populated`
+  is set only after a pass with no error, and the configured mode is written
+  as soon as the reconciler starts.
+- **Failure.** A pass that cannot read routes, links, uplinks or the node's
+  locator, or that finds no fabric route at all, changes nothing, so the last
+  allow-list stays in force. The outcome is reported on the
+  `srv6-source-filter` gRPC health service, which no probe checks.
+- **Triggers.** Startup, every debounced re-evaluation of the attach watch loop
+  (`Watcher.Reevaluated`), and a 60 s resync that keeps running if the watch
+  loop dies. The resync also logs the most-denied sources at debug level.
+- **Reuse.** The reconciler writes through the `srcfilter.Target` interface;
+  `USIDTarget` adapts `srcfiltermap`. `SlotAssigner` lets a datapath that owns
+  its own uplink slots (`KeepSlots`) reuse it unchanged.
+
 ---
 
 ## Repository Layout
@@ -158,6 +200,8 @@ galactic/
 │   │                        #   staging (all binaries above, one init
 │   │                        #   container/image), conflist templating,
 │   │                        #   kubeconfig refresh, gRPC health server
+│   ├── srcfilter/           # SRv6 ingress source filter reconciler: builds
+│   │                        #   the allow-list from fabric routes
 │   └── plumbing/            # Low-level kernel and network primitives
 │       ├── intf/            # Interface naming, base62↔hex encoding
 │       ├── ebpf/             # TC-BPF uSID datapath: preflight, uformat,
@@ -207,6 +251,7 @@ See [docs/cni-cmd-sequence.md](../cni/cni-cmd-sequence.md) for the full CNI ADD/
 | `internal/cnibgp`          | `galactic-bgp`                                                           | BGP/SRv6/eBPF publish plugin (zero kernel-interface dependency)                                                                           |
 | `internal/cniroute`        | `galactic-route`                                                         | Termination-route plugin (no k8s dependency)                                                                                              |
 | `internal/installer`       | `galactic-cni`                                                           | DaemonSet `init`/`run` logic: binary staging (every chain binary), conflist/kubeconfig templating, credential refresh, gRPC health server |
+| `internal/srcfilter`       | `galactic-cni`                                                           | SRv6 ingress source filter reconciler: builds the allow-list from fabric routes                                                           |
 | `internal/plumbing/intf`   | every CNI-chain binary                                                   | Interface naming, base62↔hex encoding                                                                                                     |
 | `internal/plumbing/ebpf`   | `galactic-cni` (attach/metrics via `run`), `galactic-bgp` (registration) | TC-BPF uSID datapath: preflight, uformat, prog, attach, usidmap, metrics                                                                  |
 | `internal/plumbing/vrf`    | every CNI-chain binary                                                   | Linux VRF create/delete/lookup                                                                                                            |
@@ -458,6 +503,7 @@ any shared, per-attachment kernel/CRD state — see the `cmdDel` note in
 | `internal/cnibgp`          | galactic-bgp                                                         | BGP/SRv6/eBPF publish: SID/Argument allocation + collision detection, `registerEBPFDatapath`/`unregisterEBPFDatapath`, `BGPVRFInstance`/`BGPAdvertisement` CRUD with retry, per-pod EndpointSlice publish/delete/CHECK for HTTP-ingress backend discovery (`endpointslice.go`); learns everything from `prevResult` | No                                    |
 | `internal/cniroute`        | galactic-route                                                       | Termination-route plugin: installs/rolls-back VRF-table routes; no k8s dependency                                                                                                                               | No                                    |
 | `internal/installer`       | galactic-cni                                                         | DaemonSet `init`/`run` support: binary staging (every chain binary), node-identity check, conflist/kubeconfig templating, credential refresh ticker, log rotation, eBPF datapath lifecycle, gRPC health server  | No                                    |
+| `internal/srcfilter`       | galactic-cni                                                         | SRv6 ingress source filter reconciler: computes the allow-list from main-table routes and applies it through a `Target`                                                                                         | No                                    |
 | `internal/plumbing/intf`   | every CNI-chain binary                                               | Deterministic interface naming (`G{vpc9}{att3}V/H/G`); base62↔hex encoding                                                                                                                                      | No                                    |
 | `internal/plumbing/ebpf`   | galactic-cni (attach/metrics via `run`), galactic-bgp (registration) | TC-BPF uSID datapath: kernel preflight, uFMT bit-layout codec, compiled program + bindings, load/pin/attach lifecycle, map read/write API, Prometheus metrics                                                   | Yes (pinned BPF maps)                 |
 | `internal/plumbing/vrf`    | every CNI-chain binary                                               | Linux VRF create/delete/lookup via netlink                                                                                                                                                                      | No                                    |

@@ -79,9 +79,18 @@ func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
 	return table.Unregister(tableID, prefix)
 }
 
+// RouteProtocolGalactic is the kernel route protocol galactic-router tags its
+// plain routes with, so a reader of the routing table can tell a route the
+// fabric's own control plane installed from a static or hand-added one. It
+// sits outside the kernel's reserved values and the range routing daemons
+// such as FRR use.
+const RouteProtocolGalactic netlink.RouteProtocol = 214
+
 // RouteMainAdd installs a plain kernel route for prefix in routing table
 // tableID, forwarding to gateway through ordinary recursive next-hop
-// resolution and no encapsulation at all.
+// resolution and no encapsulation at all. The route is tagged with
+// RouteProtocolGalactic, and replacing an existing route for prefix at the
+// same metric re-tags it.
 //
 // It exists for EVPN Type 5 paths carrying no Route Target extended community,
 // which today means the anycast ingress-VIP advertisements that name no tenant
@@ -104,6 +113,7 @@ func RouteMainAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 		Dst:       prefix,
 		Table:     int(tableID),
 		LinkIndex: linkIndex,
+		Protocol:  RouteProtocolGalactic,
 	}
 	if len(nextHop) > 0 {
 		if prefix.IP.To4() != nil {

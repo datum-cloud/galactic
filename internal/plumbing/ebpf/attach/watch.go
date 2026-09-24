@@ -51,15 +51,38 @@ var onReconcileDone = func() {}
 // and ask it to re-evaluate the attachment set out of band, without waiting for
 // the next netlink event or a container restart.
 type Watcher struct {
-	alive atomic.Bool
-	nudge chan struct{}
+	alive       atomic.Bool
+	nudge       chan struct{}
+	reevaluated chan struct{}
 }
 
 // newWatcher creates a Watcher in its not-yet-started state. It is marked alive
 // once the Watch loop it is passed to starts running, and dead again once that
 // loop exits for any reason.
 func newWatcher() *Watcher {
-	return &Watcher{nudge: make(chan struct{}, 1)}
+	return &Watcher{nudge: make(chan struct{}, 1), reevaluated: make(chan struct{}, 1)}
+}
+
+// Reevaluated returns a channel that receives after every debounced
+// re-evaluation, whether or not it changed anything or succeeded, so a consumer
+// of the same link and route events can react without subscribing again.
+// Signals coalesce: a consumer that falls behind sees one pending signal, not
+// a backlog. A nil Watcher returns a nil channel, which never receives.
+func (w *Watcher) Reevaluated() <-chan struct{} {
+	if w == nil {
+		return nil
+	}
+	return w.reevaluated
+}
+
+func (w *Watcher) signalReevaluated() {
+	if w == nil {
+		return
+	}
+	select {
+	case w.reevaluated <- struct{}{}:
+	default:
+	}
 }
 
 // Alive reports whether the Watch loop this Watcher was passed to is still
@@ -232,6 +255,7 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 			next, err := resolveInterfacesFn()
 			if err != nil {
 				slog.Warn("attach: re-evaluate interface set failed, keeping previous attachment", "err", err)
+				w.signalReevaluated()
 				onReconcileDone()
 				continue
 			}
@@ -241,6 +265,7 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 			// right after an interface appears is judged against the new set
 			// rather than waiting out the TTL.
 			InvalidateUplinkIndexes()
+			w.signalReevaluated()
 			onReconcileDone()
 		}
 	}
