@@ -28,7 +28,9 @@
 //   - backend.go: the kernel-facing interface Store converges against, and its
 //     production implementation.
 //   - store.go: the mutex-protected, two-granularity, grace-period-aware
-//     reconciler at this package's core.
+//     reconciler at this package's core, which also reapplies every live VRF
+//     and route whenever the CNI control daemon reloads the shared eBPF
+//     datapath out from under it.
 //   - metrics.go: Prometheus metrics.
 //   - controller.go: the controller-runtime glue turning watch events into
 //     desired-state updates, plus the startup inventory and periodic sweep

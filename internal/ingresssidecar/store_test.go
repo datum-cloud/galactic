@@ -6,6 +6,7 @@ package ingresssidecar
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -302,5 +303,171 @@ func TestStoreSharedPrefixSurvivesSiblingTeardown(t *testing.T) {
 	}
 	if got := backend.vrfCount(); got != 1 {
 		t.Errorf("vrfCount = %d, want 1", got)
+	}
+}
+
+// testGenLoaded and testGenReloaded are fake DatapathGeneration values for a
+// datapath before and after the CNI control daemon reloads it.
+const (
+	testGenLoaded   = "1/1"
+	testGenReloaded = "2/2"
+)
+
+// callsSince returns the backend calls logged after the first n.
+func (f *fakeBackend) callsSince(n int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls[n:]...)
+}
+
+func (f *fakeBackend) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+// TestStoreSweepReappliesAfterDatapathReload is issue #609's regression
+// test: a reload that empties the shared eBPF maps while the route's
+// EndpointSlice stays unchanged must be repaired by the next Sweep, not left
+// missing until this process restarts.
+func TestStoreSweepReappliesAfterDatapathReload(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.generation = testGenLoaded
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
+		t.Fatalf("SetDesired: %v", err)
+	}
+
+	backend.reloadDatapath()
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now())
+
+	got := backend.callsSince(before)
+	want := []string{"EnsureVRF:" + testVPC1, "EnsureRoute:1/fd00::1/128"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("calls after reload = %v, want %v", got, want)
+	}
+	if n := backend.routeCount(); n != 1 {
+		t.Errorf("routeCount after reapply = %d, want 1", n)
+	}
+}
+
+// TestStoreSweepNoReapplyWhenGenerationStable verifies an unchanged
+// datapath costs no backend writes on any Sweep.
+func TestStoreSweepNoReapplyWhenGenerationStable(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.generation = testGenLoaded
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
+		t.Fatalf("SetDesired: %v", err)
+	}
+
+	before := backend.callCount()
+	for range 3 {
+		store.Sweep(ctx, time.Now())
+	}
+	if got := backend.callsSince(before); len(got) != 0 {
+		t.Errorf("calls with a stable generation = %v, want none", got)
+	}
+}
+
+// TestStoreSweepGenerationReadFailureDoesNothing verifies an unreadable
+// generation, meaning no datapath is loaded at all, neither reapplies nor
+// disturbs the stored generation, so the reapply fires once it loads again.
+func TestStoreSweepGenerationReadFailureDoesNothing(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.generation = testGenLoaded
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
+		t.Fatalf("SetDesired: %v", err)
+	}
+
+	backend.reloadDatapath()
+	backend.failGeneration = errors.New("pinned map not found")
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now())
+	if got := backend.callsSince(before); len(got) != 0 {
+		t.Fatalf("calls with an unreadable generation = %v, want none", got)
+	}
+
+	backend.failGeneration = nil
+	store.Sweep(ctx, time.Now())
+	if n := backend.routeCount(); n != 1 {
+		t.Errorf("routeCount once the generation is readable again = %d, want 1", n)
+	}
+}
+
+// TestStoreReapplySkipsRoutesInGrace verifies a reload does not reinstall a
+// route already waiting out its teardown grace period.
+func TestStoreReapplySkipsRoutesInGrace(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.generation = testGenLoaded
+	store := NewStore(backend, testGrace, nil)
+
+	live := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	leaving := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::2"), SID: net.ParseIP("fd00:99::2")}
+	for key, d := range map[string]*DesiredRoute{"ns/pod-a": live, "ns/pod-b": leaving} {
+		if err := store.SetDesired(ctx, key, d); err != nil {
+			t.Fatalf("SetDesired %s: %v", key, err)
+		}
+	}
+	if err := store.SetDesired(ctx, "ns/pod-b", nil); err != nil {
+		t.Fatalf("SetDesired nil: %v", err)
+	}
+
+	backend.reloadDatapath()
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now())
+
+	for _, c := range backend.callsSince(before) {
+		if c == "EnsureRoute:1/fd00::2/128" {
+			t.Errorf("reapply reinstalled a route within its grace period: %v", backend.callsSince(before))
+		}
+	}
+	if n := backend.routeCount(); n != 1 {
+		t.Errorf("routeCount after reapply = %d, want 1 (the live route only)", n)
+	}
+}
+
+// TestStoreReapplyRetriesOnFailure verifies a reapply pass that fails is
+// retried on the next Sweep even though the generation has not moved again.
+func TestStoreReapplyRetriesOnFailure(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.generation = testGenLoaded
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
+		t.Fatalf("SetDesired: %v", err)
+	}
+
+	backend.reloadDatapath()
+	backend.failEnsureRoute = errors.New("map write failed")
+	store.Sweep(ctx, time.Now())
+	if n := backend.routeCount(); n != 0 {
+		t.Fatalf("routeCount after failed reapply = %d, want 0", n)
+	}
+
+	backend.failEnsureRoute = nil
+	store.Sweep(ctx, time.Now())
+	if n := backend.routeCount(); n != 1 {
+		t.Fatalf("routeCount after retried reapply = %d, want 1", n)
+	}
+
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now())
+	if got := backend.callsSince(before); len(got) != 0 {
+		t.Errorf("calls once the retry succeeded = %v, want none", got)
 	}
 }

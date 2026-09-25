@@ -221,3 +221,35 @@ func TestEnsureEgressDatapath_AttachesToVethPeerNotVRF(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestDatapathGeneration_ChangesOnReload verifies the generation Store keys
+// its reapply on moves when the CNI control daemon reloads the datapath:
+// every attach.Load re-pins usid_egress, and a map recreated after a schema
+// change gets a new kernel ID too.
+func TestDatapathGeneration_ChangesOnReload(t *testing.T) {
+	requireRoot(t)
+	setUpTestPinDir(t)
+
+	first, err := datapathGeneration()
+	if err != nil {
+		t.Fatalf("datapathGeneration: %v", err)
+	}
+	if again, err := datapathGeneration(); err != nil || again != first {
+		t.Fatalf("datapathGeneration with no reload = %q, %v; want %q", again, err, first)
+	}
+
+	reloaded, err := attach.Load(ebpfPinDir)
+	if err != nil {
+		t.Fatalf("attach.Load (reload): %v", err)
+	}
+	t.Cleanup(func() { _ = reloaded.Close() })
+
+	second, err := datapathGeneration()
+	if err != nil {
+		t.Fatalf("datapathGeneration after reload: %v", err)
+	}
+	if second == first {
+		t.Fatalf("datapathGeneration after reload = %q, want it to differ from %q", second, first)
+	}
+	t.Logf("generation %s -> %s", first, second)
+}

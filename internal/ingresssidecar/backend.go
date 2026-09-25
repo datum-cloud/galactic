@@ -39,6 +39,11 @@ type Backend interface {
 	// ListRoutes returns every seg6-encapsulated route currently installed
 	// in tableID — the route half of the same startup-inventory step.
 	ListRoutes(tableID uint32) ([]RouteInfo, error)
+	// DatapathGeneration returns an opaque value that changes whenever the
+	// shared eBPF datapath this sidecar writes into is reloaded out from under
+	// it. Store compares successive values to know when every VRF and route
+	// must be reapplied.
+	DatapathGeneration() (string, error)
 }
 
 // VRFInfo describes one kernel VRF device discovered by Backend.ListVRFs.
@@ -115,6 +120,10 @@ func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
 		return fmt.Errorf("remove seg6 route for %s: %w", prefix, err)
 	}
 	return nil
+}
+
+func (kernelBackend) DatapathGeneration() (string, error) {
+	return datapathGeneration()
 }
 
 // vrfNameRegex matches the interface name generated for a VPC: a leading

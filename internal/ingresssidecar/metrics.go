@@ -18,6 +18,7 @@ type Metrics struct {
 	RoutePending  prometheus.Gauge
 	ReconcileErrs *prometheus.CounterVec
 	ReconcileTime prometheus.Histogram
+	Reapplies     prometheus.Counter
 }
 
 // NewMetrics builds a fresh, unregistered Metrics. Call MustRegister once
@@ -47,7 +48,8 @@ func NewMetrics() *Metrics {
 		ReconcileErrs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "reconcile_errors_total",
-			Help:      "Reconcile errors, by kind (ensure_vrf, ensure_route, remove_vrf, remove_route).",
+			Help: "Reconcile errors, by kind " +
+				"(ensure_vrf, ensure_route, remove_vrf, remove_route, reapply_vrf, reapply_route).",
 		}, []string{"kind"}),
 		ReconcileTime: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
@@ -55,11 +57,17 @@ func NewMetrics() *Metrics {
 			Help:      "Time taken by each Store.SetDesired call.",
 			Buckets:   prometheus.DefBuckets,
 		}),
+		Reapplies: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Name:      "reapply_total",
+			Help:      "Times every tracked VRF and route was reapplied after the shared eBPF datapath was reloaded.",
+		}),
 	}
 }
 
 // MustRegister registers every metric this type owns against reg, panicking on
 // a duplicate. Callers do this once per process, at startup.
 func (m *Metrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.VRFActive, m.RouteActive, m.VRFPending, m.RoutePending, m.ReconcileErrs, m.ReconcileTime)
+	reg.MustRegister(m.VRFActive, m.RouteActive, m.VRFPending, m.RoutePending,
+		m.ReconcileErrs, m.ReconcileTime, m.Reapplies)
 }
