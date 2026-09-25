@@ -165,8 +165,8 @@ docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv4 unicast 10.1.40.0/24"
 docker exec dfw-control-plane kubectl exec -n galactic-system ds/fabric-router \
   -- vtysh -c "show bgp ipv6 unicast 2001:db8:1:40::/64"
 
-# Reachable from a compute node (the NAT66 shard's own vantage point)
-docker exec dfw-worker curl -sS --max-time 5 http://[2001:db8:1:40::2]/
+# Reachable from an edge node (an egress shard's own vantage point)
+docker exec dfw-worker2 curl -sS --max-time 5 http://[2001:db8:1:40::2]/
 
 # And the reverse direction: the off-fabric client curling an anycast
 # ingress VIP, which is what the edge gateways exist to answer
@@ -218,6 +218,11 @@ both directions on both families.
 task verify:nat-datapath
 ```
 
+The shard is the sender's own site's: every site's compute node egresses only
+through that site's edge shards, so dfw's tenant leaves through
+`dfw-worker2`'s. `verify:nat-local` asserts that for every site, by the
+masquerade source `remote-host` sees.
+
 IPv6 leaves as NAT66, masqueraded to the shard's IPv6 public address. IPv4
 leaves as NAT64: an IPv6-only tenant addresses the destination's synthesized
 form (the fabric NAT64 prefix with the IPv4 address in the low 32 bits) and the
@@ -249,10 +254,11 @@ the README's Known limitations.
 
 A reply is addressed to the shard's masquerade address, and only the IPv6 one
 is advertised anywhere — as an EVPN Type 5 path, inside `galactic-router`'s
-iBGP mesh, which the plain-unicast transit never sees. Each shard node's
-`fabric-router` therefore originates both of its own masquerade addresses into
-the underlay (a `/64` and a `/32`, see
-`resources/fabric-router/dfw/frr.conf.dfw-worker`). `verify:nat-return-route`
+iBGP mesh, which the plain-unicast transit never sees. Each shard node — an
+edge node — therefore has its `fabric-router` originate both of its own
+masquerade addresses into the underlay (a `/64` and a `/32`), along with its
+shard SID's covering `/64`; see
+`resources/fabric-router/dfw/frr.conf.dfw-worker2`. `verify:nat-return-route`
 isolates that half of the return path from what the shard then does with the
 packet: it asserts every transit router resolves both addresses to a BGP path
 rather than to its own default, and that a probe from `remote-host` reaches

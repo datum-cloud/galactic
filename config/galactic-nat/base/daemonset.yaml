@@ -18,22 +18,22 @@ spec:
       labels:
         app.kubernetes.io/name: galactic-nat
     spec:
-      # galactic-nat is compute's role-differentiating component --
-      # every compute node runs it unconditionally, no separate opt-in
-      # capability label, the same way galactic-gateway is edge's
-      # role-differentiating component (config/galactic-gateway/base/
-      # daemonset.yaml). Egress translation isn't a thing some compute
-      # nodes opt out of -- it's simply part of what "compute" means. galactic-cni and
-      # galactic-router run here too, but via the separate, independent
-      # galactic.datumapis.com/galactic=router flag every compute *and*
-      # edge node carries (config/galactic-cni/daemonset.yaml,
-      # config/galactic-router/overlays/router/daemonset-patch.yaml) --
-      # not via this label, since those two aren't compute-specific
-      # anymore. A shard's own SID/public addresses must still be
-      # unique per node, but they live in each node's EgressShard spec,
-      # not in this DaemonSet, so no per-node overlay is needed for them.
-      # Excludes control-plane outright for the same reason the other
-      # roles do.
+      # galactic-nat is an edge component: every edge node runs it
+      # unconditionally, alongside galactic-gateway, with no separate opt-in
+      # label. The gateway handles ingress and the shard handles egress, and
+      # both belong where the node meets the transit: a shard's masquerade
+      # address is originated there and each reply lands there, so an edge
+      # shard is one hop from the internet instead of behind the edge node.
+      # Compute nodes reach their site's edge shards over SRv6
+      # (GALACTIC_CNI_EGRESS_SHARD_SIDS). galactic-cni and galactic-router run
+      # here too, but via the separate galactic.datumapis.com/galactic=router
+      # flag every compute *and* edge node carries
+      # (config/galactic-cni/daemonset.yaml,
+      # config/galactic-router/overlays/router/daemonset-patch.yaml). A
+      # shard's own SID and public addresses must be unique per node, but they
+      # live in each node's EgressShard spec, not in this DaemonSet, so no
+      # per-node overlay is needed for them. Excludes control-plane outright
+      # for the same reason the other roles do.
       #
       # A shard advertises its own SID over BGP just like any other
       # role, so a real shard node also needs galactic.datumapis.com/fabric=router
@@ -50,7 +50,7 @@ spec:
                   - key: galactic.datumapis.com/node
                     operator: In
                     values:
-                      - compute
+                      - edge
       serviceAccountName: galactic-nat
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -86,6 +86,17 @@ spec:
             # Set explicitly here anyway so it can't silently drift.
             - name: GALACTIC_NAT_GRPC_HEALTH_PORT
               value: "5182"
+            # Chained behind galactic-gateway rather than attached: the
+            # gateway already holds the native XDP hook on every edge node's
+            # uplinks, and an interface takes one native program. The shard
+            # installs itself in the gateway's pinned xdp_chain slot and
+            # receives every packet the gateway does not claim -- the two
+            # claim disjoint traffic. It waits for that map at startup, so
+            # the gateway must run on this node too. See internal/config/
+            # nat.go's EnvNATXDPAttach; "direct" is for a node with no
+            # gateway.
+            - name: GALACTIC_NAT_XDP_ATTACH
+              value: chain
             # Nothing about this shard's identity is set here. Its SID,
             # masquerade addresses and NAT64 prefix come from the
             # EgressShard whose spec.targetRef names this node, which the

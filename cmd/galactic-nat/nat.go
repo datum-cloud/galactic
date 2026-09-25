@@ -5,10 +5,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
+	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -151,10 +156,17 @@ func (d *natDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 // work -- so a shard that cannot claim every uplink fails to start rather than
 // running with a hole in its coverage.
 //
+// In chain mode (config.NATXDPAttachChain) nothing is attached: the program is
+// installed in the edge gateway's xdp_chain slot instead, waiting for the
+// gateway to create it, and kept there for the life of the process by
+// keepChain. The uplinks are still resolved, for the forwarding sysctls and to
+// warn about one the gateway does not hook.
+//
 // The loaded objects and every returned link are stashed in natDatapathKeepAlive
 // rather than closed here: they, and the attachment itself, must survive for the
 // life of this process.
-func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (*natDatapath, error) {
+func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
+	metricsReg prometheus.Registerer) (*natDatapath, error) {
 	uplinks, err := natattach.ResolveUplinks(cfg.UplinkInterfaces)
 	if err != nil {
 		return nil, fmt.Errorf("resolve uplink interfaces: %w", err)
@@ -192,10 +204,20 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 	// from the EgressShard spec -- or clears it, if that shard is gone.
 	shardConfig := natmap.NewShardConfigTable(natmap.KernelTable{Map: objs.ShardConfigTable})
 
-	xdpLinks, err := natattach.Attach(objs.NatIngress, uplinks)
-	if err != nil {
-		_ = objs.Close()
-		return nil, fmt.Errorf("attach egress translation datapath to uplink interfaces %v: %w", uplinks, err)
+	var xdpLinks []link.Link
+	if cfg.XDPAttach == config.NATXDPAttachChain {
+		if err := waitForChain(ctx, objs.NatIngress, natattach.EdgeChainMapPath); err != nil {
+			_ = objs.Close()
+			return nil, err
+		}
+		natattach.WarnUnhookedUplinks(uplinks)
+		go keepChain(ctx, objs.NatIngress, natattach.EdgeChainMapPath)
+	} else {
+		xdpLinks, err = natattach.Attach(objs.NatIngress, uplinks)
+		if err != nil {
+			_ = objs.Close()
+			return nil, fmt.Errorf("attach egress translation datapath to uplink interfaces %v: %w", uplinks, err)
+		}
 	}
 
 	collector := newNatCollector(objs)
@@ -211,9 +233,77 @@ func setupNatDatapath(cfg *config.NATConfig, metricsReg prometheus.Registerer) (
 	slog.Info("Egress translation datapath attached",
 		"interfaces", uplinks,
 		"autoDetected", len(cfg.UplinkInterfaces) == 0,
+		"xdpAttach", cfg.XDPAttach,
 	)
 
 	return &natDatapath{uplinks: uplinks, shardConfig: shardConfig, attached: true}, nil
+}
+
+// chainRetryInterval is how often waitForChain looks for the gateway's map,
+// and chainCheckInterval how often keepChain confirms the slot still holds
+// this process's program.
+const (
+	chainRetryInterval = 2 * time.Second
+	chainCheckInterval = 10 * time.Second
+)
+
+// waitForChain installs program in the gateway's xdp_chain at mapPath,
+// retrying while the map does not exist yet -- the gateway loading after this
+// process on a fresh node is ordinary, and the startup probe bounds the wait.
+// Any other failure, an incompatible program above all, is returned at once:
+// retrying cannot fix it.
+func waitForChain(ctx context.Context, program *ebpf.Program, mapPath string) error {
+	logged := false
+	for {
+		err := natattach.AttachChain(program, mapPath)
+		if err == nil {
+			slog.Info("Egress translation datapath installed in the edge gateway's XDP chain", "map", mapPath)
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("install egress translation datapath in the edge gateway's XDP chain: %w", err)
+		}
+		if !logged {
+			slog.Info("Waiting for the edge gateway to create its XDP chain map", "map", mapPath)
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for the edge gateway's XDP chain map %q: %w", mapPath, ctx.Err())
+		case <-time.After(chainRetryInterval):
+		}
+	}
+}
+
+// keepChain re-installs program whenever the slot stops holding it, until ctx
+// is done. A gateway restart normally reuses its pinned map and leaves the
+// slot alone, but one that had to recreate the map (a layout change) leaves it
+// empty, and without this the shard would stop translating with nothing
+// reporting it.
+func keepChain(ctx context.Context, program *ebpf.Program, mapPath string) {
+	ticker := time.NewTicker(chainCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		held, err := natattach.ChainHolds(program, mapPath)
+		if err != nil {
+			slog.Warn("Cannot read the edge gateway's XDP chain slot", "map", mapPath, "err", err)
+			continue
+		}
+		if held {
+			continue
+		}
+		if err := natattach.AttachChain(program, mapPath); err != nil {
+			slog.Error("Egress translation datapath is out of the edge gateway's XDP chain and cannot be "+
+				"re-installed; this shard translates nothing until it is", "map", mapPath, "err", err)
+			continue
+		}
+		slog.Warn("Re-installed the egress translation datapath in the edge gateway's XDP chain", "map", mapPath)
+	}
 }
 
 // closeAll best-effort closes every link, to unwind a partially set-up datapath

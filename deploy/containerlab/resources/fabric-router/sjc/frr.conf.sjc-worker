@@ -15,21 +15,6 @@ interface bond0
 ipv6 route 2001:db8:ff02::/48 Null0
 ipv6 route fc00:0:3::/48 Null0
 
-# This node's egress shard's two masquerade addresses
-# (spec.shardAddressIPv6 and spec.shardAddressIPv4,
-# resources/galactic-nat/sjc/egressshard.yaml), originated into the underlay so a reply from outside the
-# fabric can reach the shard that sent the request (#549). galactic-nat
-# advertises the IPv6 one as an EVPN Type 5 path, which the plain-IPv6-
-# unicast transit never sees, and the IPv4 one is advertised by nothing at
-# all -- so a reply from the off-fabric host (remote-host on tr4) hit the
-# transit's own management default and was discarded. The shard's own node
-# has to originate these, not this site's edge node, and each shard needs
-# its own prefix rather than one aggregate covering all three sites: see
-# resources/fabric-router/dfw/frr.conf.dfw-worker's fuller rationale, which
-# also covers the prefix lengths and why Null0 here is safe.
-ipv6 route 2001:db8:9966:3::/64 Null0
-ip route 192.0.2.3/32 Null0
-
 router bgp 65000
  bgp router-id 10.255.255.3
  no bgp default ipv4-unicast
@@ -51,26 +36,17 @@ router bgp 65000
   neighbor 2001:db8:1:20::1 allowas-in 1
   network 2001:db8:ff02::/48
   network fc00:0:3::/48
-  # This node's shard's IPv6 masquerade address -- see this file's own
-  # comment above.
-  network 2001:db8:9966:3::/64
  exit-address-family
 
- # IPv4 underlay -- this node's own /32 loopback, plus the one /32 below
- # that is not a loopback: this node's shard's NAT64 masquerade address.
- # There is no IPv4 counterpart to the SRv6 locator block, because tenant
- # IPv4 (ns20/ns40) rides inside SRv6 and never touches the IPv4 transit
- # FIB -- a NAT64 reply is the exception, arriving from an IPv4-only
- # destination outside the fabric.
+ # IPv4 underlay -- this node's own /32 loopback only. There is no IPv4
+ # counterpart to the SRv6 locator block, because tenant IPv4 (ns20/ns40)
+ # rides inside SRv6 and never touches the IPv4 transit FIB. NAT64 replies
+ # do, but they land on this site's edge nodes, which run the egress shards
+ # and originate their masquerade addresses.
  address-family ipv4 unicast
   neighbor 10.1.20.1 activate
   neighbor 10.1.20.1 allowas-in 1
   network 10.255.255.3/32
-  # This node's shard's IPv4 (NAT64) masquerade address. The one IPv4
-  # prefix here that is not a loopback: a NAT64 reply arrives from an
-  # IPv4-only destination, so unlike tenant IPv4 it does not ride inside
-  # SRv6 and does need a route in the transit FIB.
-  network 192.0.2.3/32
  exit-address-family
 
 ip forwarding

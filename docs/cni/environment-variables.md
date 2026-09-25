@@ -139,12 +139,16 @@ field; as of this writing it is still env-only.
 
 ## `GALACTIC_CNI_EGRESS_SHARD_SIDS`
 
-Comma-separated list of every live `galactic-nat` shard's
-`Status.ShardSID` — the fabric-wide membership list
-`internal/plumbing/srv6.EgressDefaultRouteAdd` needs to install a tenant
-VRF's default egress route across every shard, since no single Kubernetes
-CRD is visible across this multi-cluster fabric's separate clusters/API
-servers the way BGP itself is. Same "operator-supplied, no in-cluster
+Comma-separated list of the `galactic-nat` shards' `Status.ShardSID`s this
+node's tenant VRFs egress through —
+`internal/plumbing/srv6.EgressDefaultRouteAdd` installs a VRF's default
+egress route toward the first one that resolves, at CNI ADD. It is
+operator-supplied since no single Kubernetes CRD is visible across this
+multi-cluster fabric's separate clusters/API servers the way BGP itself is.
+Shards run on edge nodes; set this per site to that site's own edge shards,
+in preference order, with no other site's as a fallback, so a site's egress
+never hairpins through another site's edge (the containerlab lab's
+`resources/galactic-cni/<site>/egress-shards-patch.yaml`). Same "operator-supplied, no in-cluster
 derivation yet" status as `GALACTIC_GATEWAY_SRV6_ADDRESS`.
 
 Resolved the same way as `GALACTIC_CNI_EBPF_INTERFACES` above: `galactic-cni

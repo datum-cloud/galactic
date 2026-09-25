@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-cni
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: install-cni
+          env:
+            # sjc's own edge shards, and no other site's
+            # (resources/galactic-nat/sjc/egressshard.yaml). sjc-worker2
+            # is the site's only edge node.
+            # Local only, deliberately: with no remote entry, a local shard
+            # that cannot be resolved fails the attachment instead of sending
+            # this site's egress out through another site's edge.
+            - name: GALACTIC_CNI_EGRESS_SHARD_SIDS
+              value: "2001:db8:ff02:2002:e001::"

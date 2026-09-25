@@ -52,6 +52,23 @@ const (
 	// The shard's identity -- its SID, masquerade addresses and NAT64 prefix --
 	// is not process configuration: it comes from its EgressShard's spec.
 	EnvNATUplinkInterfaces = "GALACTIC_NAT_UPLINK_INTERFACES"
+
+	// EnvNATXDPAttach selects how the datapath reaches its uplinks' XDP hook:
+	// NATXDPAttachDirect or NATXDPAttachChain. Optional, defaulting to direct.
+	//
+	// An interface takes one native XDP program. On an edge node the gateway
+	// already holds that hook on the interfaces this shard needs, so the shard
+	// runs chained -- installed in the gateway's xdp_chain slot, receiving
+	// every packet the gateway does not claim -- instead of attaching itself.
+	// Direct mode there fails at attach; chain mode on a node with no gateway
+	// waits for a map that never appears.
+	EnvNATXDPAttach = "GALACTIC_NAT_XDP_ATTACH"
+)
+
+// NATXDPAttachDirect and NATXDPAttachChain are EnvNATXDPAttach's values.
+const (
+	NATXDPAttachDirect = "direct"
+	NATXDPAttachChain  = "chain"
 )
 
 // --- NATConfig ---------------------------------------------------------
@@ -72,6 +89,10 @@ type NATConfig struct {
 	// UplinkInterfaces is the optional override parsed from the
 	// comma-separated EnvNATUplinkInterfaces. Empty means auto-detect.
 	UplinkInterfaces []string
+
+	// XDPAttach is NATXDPAttachDirect or NATXDPAttachChain, from
+	// EnvNATXDPAttach.
+	XDPAttach string
 }
 
 // NewNATConfig creates a config resolver reading the GALACTIC_NAT
@@ -86,6 +107,7 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault(KeyMetricsPort, DefaultNATMetricsPort)
 	v.SetDefault(KeyGRPCHealthPort, DefaultNATGRPCHealthPort)
 	v.SetDefault("uplink_interfaces", "")
+	v.SetDefault("xdp_attach", NATXDPAttachDirect)
 
 	cfg := &NATConfig{
 		v:      v,
@@ -106,6 +128,7 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{FlagMetricsPort, KeyMetricsPort},
 		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"nat-uplink-interfaces", "uplink_interfaces"},
+		{"nat-xdp-attach", "xdp_attach"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -124,6 +147,7 @@ func (c *NATConfig) readFields() {
 	c.MetricsPort = c.v.GetInt(KeyMetricsPort)
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.UplinkInterfaces = splitInterfaceList(c.v.GetString("uplink_interfaces"))
+	c.XDPAttach = c.v.GetString("xdp_attach")
 }
 
 // Validate checks that the required configuration fields are set.
@@ -136,6 +160,10 @@ func (c *NATConfig) Validate() error {
 	}
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
+	}
+	if c.XDPAttach != NATXDPAttachDirect && c.XDPAttach != NATXDPAttachChain {
+		return fmt.Errorf("%s must be %q or %q, got %q",
+			EnvNATXDPAttach, NATXDPAttachDirect, NATXDPAttachChain, c.XDPAttach)
 	}
 	return nil
 }

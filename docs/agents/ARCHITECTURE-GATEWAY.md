@@ -24,7 +24,10 @@ VPC-attached workloads reaching the internet — see `cmd/galactic-nat`,
 (`internal/controller/egressshard_controller.go`, which registers with
 `galactic-nat`'s own manager (`cmd/galactic-nat/root.go`) — a separate
 binary from both this one and `galactic-router`) rather than this file for
-egress. This file,
+egress. It runs on the same edge nodes as this binary, chained behind its
+XDP programs through `xdp_chain` — see
+[Chaining the egress shard](#chaining-the-egress-shard-xdp_chain) below for
+the part of that contract this binary owns. This file,
 together with the other two architecture docs, supersedes the former
 monolithic `ARCHITECTURE.md` — see [AGENTS.md](../../AGENTS.md) for which
 document to start from for a given task.
@@ -260,14 +263,16 @@ exactly one branch, not two. Replies are `edge_return`'s, on a different
 attach point — see below.
 
 1. **Parse** the outer Ethernet + IPv6 header, then the L4 header (TCP or
-   UDP only). Not IPv6, unparseable, or not TCP/UDP — `XDP_PASS` (falls
-   through to the kernel stack, e.g. BGP/SSH to the node itself). Only the
+   UDP only). Not IPv6, unparseable, or not TCP/UDP — unclaimed: handed to
+   the program in `xdp_chain`'s slot if one is installed (see
+   [below](#chaining-the-egress-shard-xdp_chain)), otherwise `XDP_PASS` to
+   the kernel stack, e.g. BGP/SSH to the node itself. Only the
    source/destination port are ever read; nothing is rewritten, so there is
    no pointer-to-field resolution the way a rewrite would need.
 2. **Match** `(proto, dst port, dst addr)` against `vip_table` (keyed
    identically to the removed `rule_table` — a VIP is globally unique by
-   construction, no tenant dimension). No match — `XDP_PASS` (not one of
-   this gateway's VIPs).
+   construction, no tenant dimension). No match — unclaimed, as above (not
+   one of this gateway's VIPs).
 3. **Claimed past this point** — every subsequent failure is a drop, not a
    pass-through (this gateway owns this VIP+port+protocol). Bump
    `vip_stats_table`'s hit counters (packets/bytes/last-seen), lazily
@@ -315,6 +320,41 @@ validating either field) but would have caused any version- or
 length-validating intermediate hop or receiver to reject every packet this
 datapath ever pushed — found via live-kernel investigation, not
 `BPF_PROG_TEST_RUN`, and covered by regression tests in `edgedsr_test.go`.
+
+### Chaining the egress shard (`xdp_chain`)
+
+An interface takes one native XDP program, and `galactic-nat`'s egress shard
+runs on the same edge nodes and needs the same interfaces: tenant egress
+arrives on the compute-facing bond (`edge_return`'s) and its replies on the
+public uplink (`edge_lb`'s). Rather than attach, the shard runs as a tail
+call from this datapath.
+
+- `edgedsr.c` declares `xdp_chain`, a one-slot `BPF_MAP_TYPE_PROG_ARRAY`.
+  Every unclaimed exit in both `edge_lb` and `edge_return` —
+  including the non-IPv6 early returns, which is how NAT64's IPv4 replies
+  reach the shard — goes through `pass_unclaimed`:
+  `bpf_tail_call(ctx, &xdp_chain, 0)`, then `XDP_PASS` if the slot is
+  empty. A claimed packet never reaches the slot.
+- This binary owns and pins the map: `edgeattach.Load` pins every map by
+  name, so it lives at `/sys/fs/bpf/galactic-edge/xdp_chain` and survives a
+  gateway restart with its slot intact. An incompatible pin is recreated
+  like any other map here, which empties the slot; the shard notices and
+  re-installs itself.
+- `galactic-nat` fills the slot from its own process
+  (`GALACTIC_NAT_XDP_ATTACH=chain`, `natattach.AttachChain`), waiting for
+  the map at startup and re-checking it every 10s. The path is spelled out
+  in `natattach.EdgeChainMapPath` rather than imported;
+  `edgeattach`'s `TestChainMapPathMatchesTheShardsCopy` holds the two in
+  step.
+- The two datapaths claim disjoint traffic — a VIP destination or source
+  here, a shard SID or masquerade-address destination there — so running
+  the shard second changes no verdict.
+- The kernel ties a program array to its first user's program type, JIT
+  state, frags support and expected attach type, and rejects any other
+  program with a bare `EINVAL`. `edge_lb`/`edge_return` and the shard's
+  `nat_ingress` are all ELF `SEC("xdp")` programs (`AttachXDP`), so they
+  match; a hand-built program needs `AttachType: ebpf.AttachXDP` to be
+  accepted (see `edgedsr_chain_test.go`).
 
 ### Return path (`edgedsr.c`, program `edge_return`)
 
@@ -746,6 +786,7 @@ single-container and references no `galactic-router` image at all — see
 | Quota enforcement                                                                                    | `internal/gateway/quota.go:NodeQuotaEnforcer.CheckAndReserve`                                             |
 | XDP packet path                                                                                      | `internal/plumbing/ebpf/edgeprog/edgedsr.c` (start with its own header comment)                          |
 | Datapath load/attach lifecycle                                                                       | `internal/plumbing/ebpf/edgeattach/attach.go`, `cmd/galactic-gateway/gateway.go:setupGatewayDatapath`    |
+| Egress shard chained behind this datapath                                                            | `edgedsr.c`'s `xdp_chain`/`pass_unclaimed`, `internal/plumbing/ebpf/natattach/chain.go`                   |
 | Startup sequencing / gRPC health ordering                                                            | `cmd/galactic-gateway/root.go:runCmd`                                                                    |
 
 **Stable vs. frequently changed:**

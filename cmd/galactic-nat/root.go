@@ -115,11 +115,12 @@ func runCmd(cfg *config.NATConfig) error {
 	// Load and attach the egress translation datapath. It needs no identity to
 	// attach: that comes from this node's EgressShard spec, which the
 	// reconciler below programs on its first reconcile.
-	datapath, err := setupNatDatapath(cfg, ctrlmetrics.Registry)
+	datapath, err := setupNatDatapath(ctx, cfg, ctrlmetrics.Registry)
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
-	// Only now is the datapath attached. Report serving from here on, not from
+	// Only now is the datapath attached, or in chain mode installed in the
+	// edge gateway's XDP chain. Report serving from here on, not from
 	// process start. Serving does not wait for an identity to be programmed:
 	// a node whose shard has not been assigned one yet would otherwise never
 	// turn ready and would block the DaemonSet's rollout. The EgressShard's
@@ -185,6 +186,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringP("nat-uplink-interfaces", "", "",
 		"Comma-separated fabric-facing uplink interfaces this shard's XDP datapath attaches to, "+
 			"overriding auto-detection; name every fabric uplink, not just the primary")
+	cmd.Flags().StringP("nat-xdp-attach", "", config.NATXDPAttachDirect,
+		"How the datapath reaches its uplinks' XDP hook: \"direct\" attaches it, \"chain\" installs it "+
+			"behind the edge gateway's programs on a node where the gateway holds the hook")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

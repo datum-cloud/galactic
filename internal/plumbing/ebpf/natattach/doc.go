@@ -10,6 +10,17 @@
 // native-driver-mode attach with no generic-mode fallback. See that package for
 // the rationale behind each, which applies here unchanged.
 //
+// # Chained behind the edge gateway
+//
+// On an edge node the gateway's programs already hold the native XDP hook on
+// the interfaces a shard needs, and an interface takes one native program.
+// There the shard is not attached at all: AttachChain installs its dispatcher
+// in the gateway's pinned xdp_chain slot, and the gateway tail-calls it with
+// every packet it does not claim. The two datapaths claim disjoint traffic, so
+// the shard sees what it would have seen attached, on exactly the interfaces
+// the gateway is attached to. The caller keeps the slot filled with
+// ChainHolds, since a gateway that recreates its map empties it.
+//
 // # No kernel preflight check
 //
 // Unlike its sibling, Load runs no preflight check first. The edge preflight

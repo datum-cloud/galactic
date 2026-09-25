@@ -9,11 +9,26 @@ of standing this up from nothing, see
 [docs/nat/getting-started.md](getting-started.md); this document only
 covers the "what", not the "why" or the step-by-step.
 
-> Last verified: 2026-09-23 against the current working tree of
+> Last verified: 2026-09-25 against the current working tree of
 > `internal/config/nat.go`, `internal/config/cni.go`,
 > `cmd/galactic-nat/`, `config/galactic-nat/`,
+> `internal/plumbing/ebpf/natattach/`,
 > `internal/controller/egressshard_controller.go`, and
 > `deploy/containerlab/resources/galactic-nat/`.
+
+## Placement
+
+`galactic-nat` runs on every `galactic.datumapis.com/node: edge` node, one
+DaemonSet per cluster, alongside `galactic-gateway` (see
+[docs/node-labels.md](../node-labels.md)). A shard there is one hop from the
+transit its masquerade addresses are originated into. Compute nodes run no
+shard: each compute node's tenant egress is SRv6-encapsulated toward its own
+site's edge shards (`GALACTIC_CNI_EGRESS_SHARD_SIDS`, [below](#shard-membership-galactic-cni-side)).
+
+`galactic-nat` used to run on compute nodes, one shard each. It moved because
+an edge node is where both a masquerade address and its replies belong; the
+move is also why it now shares that node's XDP hook with the gateway (see
+`GALACTIC_NAT_XDP_ATTACH`, under Option details below).
 
 ## `galactic-nat` configuration (`internal/config/nat.go`)
 
@@ -27,8 +42,13 @@ flags, or a combination of both (CLI flags take precedence), with the
 | ----------------- | -------------------------------- | ------------------------- | ------------- | -------- |
 | Node name         | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |
 | Uplink interfaces | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected | No       |
+| XDP attach mode   | `GALACTIC_NAT_XDP_ATTACH`        | `--nat-xdp-attach`        | `direct`      | No       |
 | Metrics port      | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`        | No       |
 | gRPC health port  | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`        | No       |
+
+`config/galactic-nat/base/daemonset.yaml` sets `GALACTIC_NAT_XDP_ATTACH=chain`,
+since every edge node runs `galactic-gateway`; the binary's own default is
+`direct`.
 
 That is the whole process configuration. The shard's identity — its SID,
 masquerade addresses and NAT64 prefix — is not process configuration: it
@@ -39,7 +59,7 @@ node without an `EgressShard` runs attached but claims no packet rather than
 crash-looping.
 
 `9182`/`5182` are chosen to avoid every other `hostNetwork: true` galactic
-process already running on a compute node (`fabric-router`'s `179`,
+process already running on an edge node (`fabric-router`'s `179`,
 `galactic-router`'s `9179`/`5179`, `galactic-cni`'s `9180`/`5180`,
 `galactic-gateway`'s `8081`/`5181`).
 
@@ -81,6 +101,41 @@ resolved interface fails to start, rather than coming up with a hole in
 its coverage. It happens once, at process startup, so an interface that
 appears later is not picked up until the process restarts.
 
+In chain mode nothing is attached, so the uplinks are used only for the
+forwarding sysctls and for a startup warning about any uplink that carries
+no XDP program — traffic the gateway never hooks is traffic the chained
+shard never sees.
+
+**`--nat-xdp-attach` / `GALACTIC_NAT_XDP_ATTACH`**
+How the datapath reaches its uplinks' XDP hook: `direct` or `chain`. Any
+other value fails validation at startup.
+
+- **`direct`** (the binary's default) attaches `nat_ingress` to every
+  resolved uplink in native driver mode, as described above. Use it on a
+  node with no `galactic-gateway`.
+- **`chain`** attaches nothing. An interface takes one native XDP program,
+  and on an edge node `galactic-gateway` already holds that hook on the
+  interfaces the shard needs (a direct attach there fails outright). The
+  gateway pins a one-slot program array, `xdp_chain`, at
+  `/sys/fs/bpf/galactic-edge/xdp_chain`, and both of its programs
+  (`edge_lb`, `edge_return`) tail-call into it with every packet they do not
+  claim — non-IPv6 frames included, so NAT64 replies reach the shard. The
+  shard installs `nat_ingress` in that slot (`natattach.AttachChain`). The
+  two datapaths claim disjoint traffic — a VIP destination or source for the
+  gateway, a shard SID or masquerade address for the shard — so the order
+  they run in changes no verdict.
+
+  At startup the shard waits for the map, retrying every 2s while it does
+  not exist (the startup probe bounds the wait), and reports healthy once its
+  program is in the slot. Any other install failure is fatal: the kernel
+  refuses a program whose type, JIT state, frags support or expected attach
+  type differ from the array owner's, with a bare `EINVAL`. After that it
+  re-checks the slot every 10s and re-installs its program if the slot no
+  longer holds it — a gateway restart normally reuses its pinned map, but one
+  that had to recreate the map empties the slot. The slot keeps the program
+  alive across a `galactic-nat` restart, and the next process replaces it in
+  place, so a shard restart leaves no gap in translation.
+
 ### Capabilities and host requirements
 
 `galactic-nat` runs `hostNetwork: true` and needs:
@@ -94,7 +149,9 @@ appears later is not picked up until the process restarts.
 It also needs a real bpffs already mounted at `/sys/fs/bpf` on the host
 (`type: Directory`, not `DirectoryOrCreate` — a missing mount must fail
 loudly, not silently pin maps to a plain directory). Every map is pinned
-under `/sys/fs/bpf/galactic-nat`.
+under `/sys/fs/bpf/galactic-nat`. In chain mode it also opens the gateway's
+`/sys/fs/bpf/galactic-edge/xdp_chain`, which the same `/sys/fs/bpf` mount
+covers.
 
 ## `EgressShard` CRD (`network.datumapis.com/v1alpha1`)
 
@@ -179,9 +236,10 @@ correctly and never sees a single reply.
 > Origination has to come from the shard's own node, not from an
 > aggregate elsewhere: the address must reach the node whose datapath
 > holds that flow's connection state. The lab does it by having each
-> shard node's `fabric-router` originate its own two addresses (a `/64`
-> and a `/32`) — see
-> `deploy/containerlab/resources/fabric-router/dfw/frr.conf.dfw-worker`,
+> shard node — an edge node — originate its own two addresses (a `/64`
+> and a `/32`) through its `fabric-router`, along with its SID's covering
+> `/64` — see
+> `deploy/containerlab/resources/fabric-router/dfw/frr.conf.dfw-worker2`,
 > and `task -d deploy/containerlab verify:nat-return-route` for the check
 > that proves it. Where those addresses come from in the first place is
 > #409.
@@ -196,13 +254,13 @@ Example:
 apiVersion: network.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
-  name: dfw-worker-egress
+  name: dfw-worker2-egress
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
-    name: dfw-worker
-  shardSID: "2001:db8:ff01:2001:e001::"
+    name: dfw-worker2
+  shardSID: "2001:db8:ff01:2002:e001::"
   shardAddressIPv6: "2001:db8:9966:1::1"
   shardAddressIPv4: "192.0.2.1"
   nat64Prefix: "2001:db8:64::/96"
@@ -219,8 +277,8 @@ to an earlier, superseded design this sharded egress tier replaced.
 
 ## Shard membership (`galactic-cni` side)
 
-A tenant's compute node needs to know the fabric-wide list of live shard
-SIDs to install its own tenant VRFs' egress routes, and the NAT64 prefix to
+A tenant's compute node needs to know which shard SIDs to install its own
+tenant VRFs' egress routes toward — in practice its own site's edge shards, and the NAT64 prefix to
 install a route toward IPv4 reachability. Both are separate from anything
 on the shard nodes themselves.
 
@@ -247,12 +305,19 @@ precedence by `internal/config.CNIConfig`, written into the static
 conflist by `internal/installer.Bootstrap`, and read back by
 `internal/cnibgp` on every CNI ADD. An empty value means "no NAT66
 configured for this fabric" — not an error; pods simply get no egress
-default route toward any shard. Example (containerlab lab value, three
-shards):
+default route toward any shard.
+
+Set it per site, to that site's own edge shards only. The first SID that
+resolves at CNI ADD wins, so the list is ordered: the first entry is the
+active shard and any later one is taken only by an attachment made while the
+earlier ones cannot be resolved. With no other site's shard in the list, a
+site whose shards are all unreachable fails the attachment instead of
+sending its egress out through another site's edge. Example (containerlab
+lab, dfw's two edge shards; sjc and iad list their single edge shard):
 
 ```yaml
 - name: GALACTIC_CNI_EGRESS_SHARD_SIDS
-  value: "2001:db8:ff01:2001:e001::,2001:db8:ff02:2001:e001::,2001:db8:ff03:2001:e001::"
+  value: "2001:db8:ff01:2002:e001::,2001:db8:ff01:2003:e001::"
 ```
 
 **Must be set on the init container specifically, not the long-running
@@ -302,9 +367,10 @@ kubectl exec -n galactic-system <galactic-nat-pod> -- \
   wget -qO- http://localhost:9182/metrics | grep galactic_nat_
 ```
 
-Confirm the eBPF program is attached and translating — on the
-`EgressShard` object, `Ready` should read `DatapathAttached` and
-`Programmed` should read `AddressesProgrammed`:
+Confirm the eBPF program is attached (in chain mode, installed in the
+gateway's `xdp_chain` slot) and translating — on the `EgressShard` object,
+`Ready` should read `DatapathAttached` and `Programmed` should read
+`AddressesProgrammed`:
 
 ```sh
 kubectl get egressshard <name> -n galactic-system -o jsonpath='{.status.conditions}'
@@ -319,7 +385,9 @@ knowing before you rely on this component in production:
   (`internal/plumbing/srv6/egress.go`) installs only the **first
   resolvable** SID from `GALACTIC_CNI_EGRESS_SHARD_SIDS` as a tenant VRF's
   default egress route — every other configured shard sits as cold
-  standby, not sharing load. An earlier version of this mechanism did
+  standby, not sharing load. Selection happens only at CNI ADD: a shard
+  that becomes unreachable later is not replaced on attachments already
+  made. An earlier version of this mechanism did
   spread load across all shards via ECMP; that capability was dropped
   during a later datapath migration and has not been reintroduced.
 - **No mechanism announces a shard's public address to the actual
@@ -351,6 +419,11 @@ knowing before you rely on this component in production:
   allocates `spec.shardSID` or the masquerade addresses, and nothing checks
   that a chosen SID's Node-ID doesn't collide with a real node's own — see
   the "Node-ID collision hazard" callout above.
+- **A chained shard depends on the gateway on its node.** In chain mode
+  the shard sees only what `galactic-gateway`'s programs see, on exactly the
+  interfaces the gateway attaches to, and waits at startup for a map only
+  the gateway creates. With the gateway gone, the slot keeps the shard's
+  program alive but nothing calls it.
 - **The CNI's shard list is a second copy of every shard SID.**
   `GALACTIC_CNI_EGRESS_SHARD_SIDS` is set by hand and is not derived from
   `EgressShard` status, so the two can disagree.
@@ -364,6 +437,8 @@ knowing before you rely on this component in production:
 - [docs/router/configuration.md](../router/configuration.md) — the
   `GALACTIC_ROUTER_*` environment variables a NAT66 shard node's
   co-located `galactic-router` process also needs.
+- [docs/agents/ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) —
+  the edge XDP programs the shard is chained behind.
 - [docs/cni/configuration.md](../cni/configuration.md) — the full
   `galactic-cni` conflist/runtime configuration surface
   `GALACTIC_CNI_EGRESS_SHARD_SIDS` is one part of.

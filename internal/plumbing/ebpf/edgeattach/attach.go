@@ -69,8 +69,10 @@ func Load(pinDir string) (*edgeprog.EdgedsrObjects, error) {
 		// table is repopulated from live CRDs, the statistics map is a
 		// pure cache the datapath refills from traffic, and the
 		// encapsulation config is a single entry rewritten at process
-		// startup. A stale pin from an incompatible layout is safe to
-		// recreate rather than fatal.
+		// startup. xdp_chain is filled by another process, the egress
+		// shard, which re-asserts its slot periodically and so refills a
+		// recreated one on its own. A stale pin from an incompatible layout
+		// is safe to recreate rather than fatal.
 		slog.Warn("edgeattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate on the next NetworkRule reconcile)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {

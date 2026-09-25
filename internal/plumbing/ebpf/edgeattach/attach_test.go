@@ -19,6 +19,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/natattach"
 )
 
 func requireRoot(t *testing.T) {
@@ -497,5 +498,15 @@ func TestResolveTargetsAndAttach_RealBondDevice(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("resolve/attach against a real bond device: %v", err)
+	}
+}
+
+// TestChainMapPathMatchesTheShardsCopy holds natattach's spelled-out copy of
+// where this package pins xdp_chain in step with the real thing. The egress
+// shard opens that path to install itself; a drift here leaves it retrying
+// against a map that is never created.
+func TestChainMapPathMatchesTheShardsCopy(t *testing.T) {
+	if got := filepath.Join(PinDir, edgeprog.EdgedsrMapXdpChain); got != natattach.EdgeChainMapPath {
+		t.Errorf("xdp_chain pins at %q, natattach.EdgeChainMapPath = %q", got, natattach.EdgeChainMapPath)
 	}
 }

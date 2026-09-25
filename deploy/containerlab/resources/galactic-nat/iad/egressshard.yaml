@@ -1,16 +1,17 @@
 apiVersion: network.datumapis.com/v1alpha1
 kind: EgressShard
 metadata:
-  name: iad-worker-egress
+  name: iad-worker2-egress
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
-    name: iad-worker
-  # uFMT uSID over iad's locator (2001:db8:ff03::/48), nodeID=0x2001
-  # (service 2 = NAT shard, node index 001). Write-once, like every
+    name: iad-worker2
+  # uFMT uSID over iad's locator (2001:db8:ff03::/48), nodeID=0x2002
+  # (service 2 = NAT shard, node index 002, the edge node's own index --
+  # its router is 0x1002 and its gateway 0x3002). Write-once, like every
   # identity field below.
-  shardSID: "2001:db8:ff03:2001:e001::"
+  shardSID: "2001:db8:ff03:2002:e001::"
   # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block
   shardAddressIPv6: "2001:db8:9966:2::1"
   # NAT64 masquerade source address (RFC 5737 TEST-NET-1) and the
