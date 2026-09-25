@@ -40,10 +40,14 @@ The four separately-built, separately-deployed applications — the
 CRDs that connect them. `galactic-gateway` is deployed as its own
 single-container DaemonSet on gateway-role (`edge`) nodes; `galactic-router`
 runs there too, as its own independent DaemonSet (the same one that runs on
-`compute` nodes), not co-located in the same pod. `galactic-nat` is the
-`compute`-node equivalent: its own single-container DaemonSet running
-unconditionally on every compute node, alongside — again not co-located
-with — that same `galactic-router` DaemonSet. The diagram shows each pairing
+`compute` nodes), not co-located in the same pod. `galactic-nat` runs on those same
+`edge` nodes: its own single-container DaemonSet running unconditionally
+on every edge node, alongside — again not co-located with — both of them.
+It shares the node's XDP hook with `galactic-gateway` by running chained
+behind the gateway's programs (`GALACTIC_NAT_XDP_ATTACH=chain`, through
+the gateway's pinned `xdp_chain` program array), and each site's compute
+nodes send their egress to that site's edge shards over SRv6. It used to
+run on compute nodes instead. The diagram shows each pairing
 co-located on the node but connected by no direct RPC — a crash in one does
 not take down the other; both `galactic-gateway` and `galactic-nat`
 publish their own BGP reachability by writing a `BGPAdvertisement` CRD that

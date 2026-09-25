@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-cni
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: install-cni
+          env:
+            # dfw's own edge shards, and no other site's
+            # (resources/galactic-nat/dfw/egressshard.yaml). The first
+            # that resolves wins at attach time, so dfw-worker2's is active and
+            # dfw-worker3's takes over only for an attachment made while
+            # dfw-worker2's cannot be resolved.
+            # Local only, deliberately: with no remote entry, a local shard
+            # that cannot be resolved fails the attachment instead of sending
+            # this site's egress out through another site's edge.
+            - name: GALACTIC_CNI_EGRESS_SHARD_SIDS
+              value: "2001:db8:ff01:2002:e001::,2001:db8:ff01:2003:e001::"

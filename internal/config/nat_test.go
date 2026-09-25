@@ -188,3 +188,37 @@ func TestNATConfigUplinkInterfacesOptional(t *testing.T) {
 		})
 	}
 }
+
+// TestNATConfigXDPAttach covers the attach mode: direct unless set, chain when
+// asked for, and anything else refused at startup rather than read as one of
+// the two -- a shard on the wrong mode either fails to attach or waits forever.
+func TestNATConfigXDPAttach(t *testing.T) {
+	tests := []struct {
+		value   string
+		set     bool
+		want    string
+		wantErr bool
+	}{
+		{want: NATXDPAttachDirect},
+		{value: NATXDPAttachDirect, set: true, want: NATXDPAttachDirect},
+		{value: NATXDPAttachChain, set: true, want: NATXDPAttachChain},
+		{value: "tc", set: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%q", tt.value), func(t *testing.T) {
+			t.Setenv(EnvNATNodeName, testNATNodeName)
+			if tt.set {
+				t.Setenv(EnvNATXDPAttach, tt.value)
+			}
+
+			cfg := NewNATConfig()
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && cfg.XDPAttach != tt.want {
+				t.Errorf("XDPAttach = %q, want %q", cfg.XDPAttach, tt.want)
+			}
+		})
+	}
+}

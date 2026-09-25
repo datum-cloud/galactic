@@ -1,4 +1,9 @@
-# sjc: single-homed compute node
+# sjc: single-homed compute node, one edge shard
 namespace: galactic-system
 resources:
   - ../shared
+patches:
+  - path: egress-shards-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-cni

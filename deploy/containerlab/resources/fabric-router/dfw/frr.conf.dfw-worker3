@@ -25,25 +25,25 @@ interface bond1
 # Originated identically by every edge node in the lab.
 ipv6 route 2001:db8:6060::/48 Null0
 
+# This node's egress shard (resources/galactic-nat/dfw/egressshard.yaml),
+# originated into the underlay: its SID's covering /64 and its two masquerade
+# addresses. See resources/fabric-router/dfw/frr.conf.dfw-worker2 for the
+# full rationale, including why the shard's own node originates them and why
+# Null0 is safe here.
+ipv6 route 2001:db8:ff01:2003::/64 Null0
+ipv6 route 2001:db8:9966:4::/64 Null0
+ip route 192.0.2.4/32 Null0
+
 # This node is dfw-worker's second uplink, an equal one rather than a
 # backup. It carries that node's prefixes to the transit on the same terms
 # dfw-worker2 does, so either edge node can be lost without taking dfw's
-# compute node off the fabric or costing it its egress-shard role.
+# compute node off the fabric. It also runs dfw's second egress shard, the
+# one dfw's compute node falls back to when dfw-worker2's cannot be resolved
+# (resources/galactic-cni/dfw/egress-shards-patch.yaml).
 #
-# It advertised those prefixes with a higher MED until #545, so the fabric
-# would keep using dfw-worker2 while that path was up. The reason was
-# galactic-nat: its shard XDP program attached to a single interface on the
-# compute node (eth1, facing dfw-worker2), so egress-shard traffic arriving
-# via this node reached no translation program at all. The shard now
-# attaches to both of that node's uplinks
-# (GALACTIC_NAT_UPLINK_INTERFACES="bond0,bond1",
-# resources/galactic-nat/dfw/node-patch.yaml), so there is nothing left to
-# de-prefer and the MED policy, its BACKUP_UPLINK community-list, and the
-# 65000:900 tag dfw-worker used to set are all gone.
-#
-# Nothing this node originates was ever de-preferred even then, and nothing
-# should be: the anycast ingress VIP below has to stay equal-cost from both
-# edge nodes, which is the whole point of the pair.
+# Nothing this node originates is de-preferred, and nothing should be: the
+# anycast ingress VIP below has to stay equal-cost from both edge nodes,
+# which is the whole point of the pair, and its shard's prefixes are its own.
 router bgp 65000
  bgp router-id 10.255.255.7
  no bgp default ipv4-unicast
@@ -74,12 +74,17 @@ router bgp 65000
   network fc00:0:b::1/128
   # Anycast ingress VIP aggregate -- see this file's own comment above.
   network 2001:db8:6060::/48
+  # This node's egress shard's SID /64 and IPv6 masquerade address -- see
+  # this file's own comment above.
+  network 2001:db8:ff01:2003::/64
+  network 2001:db8:9966:4::/64
  exit-address-family
  !
- # IPv4 underlay -- per-node /32 loopbacks only. There is no IPv4
- # counterpart to the SRv6 locator block, and the ingress VIP aggregate
- # stays IPv6-only: this lab's NetworkRule VIPs are IPv6, matching the
- # edge datapath's own scope (see edgedsr.c).
+ # IPv4 underlay -- this node's /32 loopback, plus its egress shard's
+ # NAT64 masquerade address. There is no IPv4 counterpart to the SRv6
+ # locator block, and the ingress VIP aggregate stays IPv6-only: this lab's
+ # NetworkRule VIPs are IPv6, matching the edge datapath's own scope (see
+ # edgedsr.c).
  address-family ipv4 unicast
   neighbor 10.1.12.1 activate
   neighbor 10.1.12.1 allowas-in 1
@@ -87,6 +92,10 @@ router bgp 65000
   neighbor 10.1.13.2 next-hop-self force
   neighbor 10.1.13.2 route-reflector-client
   network 10.255.255.7/32
+  # This node's egress shard's IPv4 (NAT64) masquerade address. A NAT64
+  # reply arrives from an IPv4-only destination, so unlike tenant IPv4 it
+  # does not ride inside SRv6 and does need a route in the transit FIB.
+  network 192.0.2.4/32
  exit-address-family
 !
 

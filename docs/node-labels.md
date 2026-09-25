@@ -2,7 +2,7 @@
 
 > How Galactic decides which DaemonSets run on which nodes.
 
-_Last updated: 2026-08-28_
+_Last updated: 2026-09-25_
 
 This document is cross-cutting — it covers the node-selection contract shared
 by `galactic-cni`, `galactic-router`, `galactic-gateway`, `galactic-nat`,
@@ -16,8 +16,8 @@ for everything else about a given binary.
 
 | Label                                            | Deploys                                               | Kind              |
 |--------------------------------------------------|-------------------------------------------------------|-------------------|
-| `galactic.datumapis.com/node=compute`            | `galactic-nat`                                        | primary role enum |
-| `galactic.datumapis.com/node=edge`               | `galactic-gateway` (standalone — see below)           | primary role enum |
+| `galactic.datumapis.com/node=compute`            | nothing exclusively (see below)                       | primary role enum |
+| `galactic.datumapis.com/node=edge`               | `galactic-gateway` (standalone), `galactic-nat`       | primary role enum |
 | `galactic.datumapis.com/galactic=router`         | `galactic-cni`, `galactic-router` (plain/tenant mode) | mode enum         |
 | `galactic.datumapis.com/galactic=control`        | `galactic-router-rr`                                  | mode enum         |
 | `galactic.datumapis.com/fabric=router`           | `fabric-router` (plain mode)                          | mode enum         |
@@ -36,10 +36,13 @@ one value — `compute` or `edge` — because a Kubernetes label key is
 single-valued, and these two are genuinely mutually exclusive by design:
 `edge` nodes are tainted specifically to keep tenant workloads off them (see
 `deploy/containerlab/node_files/iad/config.yaml`'s gateway-node taints), so a
-node is never both at once. Each value now deploys only the one component
-that actually differs between the two roles — `galactic-nat` for
-`compute`, `galactic-gateway` for `edge` — not everything that role runs
-(see the worked example below for the full per-node picture).
+node is never both at once. Each value deploys only what actually differs
+between the two roles, not everything that role runs (see the worked example
+below for the full per-node picture). Today that is all on the `edge` side:
+`galactic-gateway` (ingress) and `galactic-nat` (egress). `compute` deploys
+nothing exclusively since `galactic-nat` moved to `edge`, but the label stays:
+it is still the tenant-serving role, it keeps `edge`'s mutual exclusivity
+meaningful, and it is where the next compute-only component would key.
 
 **`galactic.datumapis.com/galactic` and `galactic.datumapis.com/fabric` are
 each a mode enum: "plain" vs. "control."** `galactic-cni` and
@@ -86,8 +89,11 @@ bug, not a hypothetical:
   made it impossible for a node to be both `edge` (i.e. `compute`, in
   today's naming — see below) and a NAT66 shard at once, which is the only
   configuration that's ever actually used. Fixed by dropping `nat66` from
-  the enum and folding shard duty into `node=compute` directly — every
-  compute node now runs `galactic-nat` unconditionally.
+  the enum and folding shard duty into `node=compute` directly. It has since
+  moved to `node=edge`, where a shard is one hop from the transit its
+  masquerade addresses are originated into — every edge node now runs
+  `galactic-nat` unconditionally, chained behind `galactic-gateway`'s XDP
+  programs.
 - `galactic-router-rr` used to require a dedicated
   `galactic.datumapis.com/galactic-route-reflector=true` boolean flag,
   independent of everything else. Once `galactic-cni`/`galactic-router`
@@ -102,8 +108,9 @@ bug, not a hypothetical:
 
 ## Naming collision, read this before anything else
 
-**`galactic.datumapis.com/node=edge` deploys `galactic-gateway` — it does
-*not* mean "the per-node tenant/compute role."** That's `node=compute`.
+**`galactic.datumapis.com/node=edge` deploys `galactic-gateway` and
+`galactic-nat` — it does *not* mean "the per-node tenant/compute role."**
+That's `node=compute`.
 
 This is a deliberate rename, not an inconsistency to double-check: "edge"
 now means the actual network edge — the ingress/egress boundary
@@ -127,20 +134,29 @@ If you're reading an older comment, commit, or diagram that says
 
 ### `galactic.datumapis.com/node=compute`
 
-The ordinary tenant-serving node. Runs `galactic-nat` — the one component
-that differs between `compute` and `edge` — plus (via
+The ordinary tenant-serving node. Runs (via
 `galactic.datumapis.com/galactic=router`, below) `galactic-cni` and
-`galactic-router`.
+`galactic-router`, and nothing keyed on this label itself.
 
-- `config/galactic-nat/base/daemonset.yaml`
+`galactic-nat` used to run here, one egress shard per compute node. It now
+runs on `edge` (below): a compute node's tenant egress is encapsulated toward
+its own site's edge shards instead (`GALACTIC_CNI_EGRESS_SHARD_SIDS`, set per
+site, with no other site's shard as a fallback).
 
 ### `galactic.datumapis.com/node=edge`
 
-Runs `galactic-gateway`'s standalone, single-container pod — the other
-component that differs between `compute` and `edge` — plus (via
-`galactic.datumapis.com/galactic=router`) `galactic-cni` and
-`galactic-router`. Dedicated, opt-in, tainted to keep ordinary tenant pods
-off — see `config/galactic-gateway/base/daemonset.yaml`.
+Runs `galactic-gateway`'s standalone, single-container pod and
+`galactic-nat`, the egress shard — the two components that differ between
+`compute` and `edge` — plus (via `galactic.datumapis.com/galactic=router`)
+`galactic-cni` and `galactic-router`. Dedicated, opt-in, tainted to keep
+ordinary tenant pods off — see `config/galactic-gateway/base/daemonset.yaml`
+and `config/galactic-nat/base/daemonset.yaml`.
+
+The two share the edge node's native XDP hook, which an interface allows
+only one program on: `galactic-gateway` attaches, and `galactic-nat` runs in
+`GALACTIC_NAT_XDP_ATTACH=chain` mode, installed in the gateway's pinned
+`xdp_chain` program array so it receives every packet the gateway does not
+claim. `galactic-nat` therefore requires `galactic-gateway` on the same node.
 
 `galactic-router` used to run as a second container inside this same pod
 (`galactic-router` + `galactic-gateway`, sharing one ServiceAccount). It's
@@ -190,11 +206,11 @@ Mutually exclusive with `fabric=router` on the same node, the same way
 
 ## Worked example: the containerlab lab
 
-| Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                   |
-|------------------------------------------------------------|-----------|------------|----------|------------------------------------------------------------------------|
-| `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-nat`, `galactic-cni`, `galactic-router`, `fabric-router`     |
-| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | `edge`    | `router`   | `router` | `galactic-gateway`, `galactic-cni`, `galactic-router`, `fabric-router` |
-| `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                  |
+| Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                                   |
+|------------------------------------------------------------|-----------|------------|----------|----------------------------------------------------------------------------------------|
+| `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-cni`, `galactic-router`, `fabric-router`                                     |
+| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | `edge`    | `router`   | `router` | `galactic-gateway`, `galactic-nat`, `galactic-cni`, `galactic-router`, `fabric-router` |
+| `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                                  |
 
 The reflector row is the one that shows why `galactic` is a mode enum rather
 than a boolean: `iad-worker3` carries no `node` value at all. Both `node`

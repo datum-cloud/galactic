@@ -30,6 +30,15 @@ interface eth3
 # Originated identically by every edge node in the lab.
 ipv6 route 2001:db8:6060::/48 Null0
 
+# This node's egress shard (resources/galactic-nat/iad/egressshard.yaml),
+# originated into the underlay: its SID's covering /64 and its two masquerade
+# addresses. See resources/fabric-router/dfw/frr.conf.dfw-worker2 for the
+# full rationale, including why the shard's own node originates them and why
+# Null0 is safe here.
+ipv6 route 2001:db8:ff03:2002::/64 Null0
+ipv6 route 2001:db8:9966:2::/64 Null0
+ip route 192.0.2.2/32 Null0
+
 router bgp 65000
  bgp router-id 10.255.255.5
  no bgp default ipv4-unicast
@@ -84,12 +93,17 @@ router bgp 65000
   network fc00:0:9::1/128
   # Anycast ingress VIP aggregate -- see this file's own comment above.
   network 2001:db8:6060::/48
+  # This node's egress shard's SID /64 and IPv6 masquerade address -- see
+  # this file's own comment above.
+  network 2001:db8:ff03:2002::/64
+  network 2001:db8:9966:2::/64
  exit-address-family
  !
- # IPv4 underlay -- per-node /32 loopbacks only. There is no IPv4
- # counterpart to the SRv6 locator block, and the ingress VIP aggregate
- # stays IPv6-only: this lab's NetworkRule VIPs are IPv6, matching the
- # edge datapath's own scope (see edgedsr.c).
+ # IPv4 underlay -- this node's /32 loopback, plus its egress shard's
+ # NAT64 masquerade address. There is no IPv4 counterpart to the SRv6
+ # locator block, and the ingress VIP aggregate stays IPv6-only: this lab's
+ # NetworkRule VIPs are IPv6, matching the edge datapath's own scope (see
+ # edgedsr.c).
  address-family ipv4 unicast
   neighbor 10.1.32.1 activate
   neighbor 10.1.32.1 allowas-in 1
@@ -100,6 +114,10 @@ router bgp 65000
   neighbor 10.1.31.2 next-hop-self force
   neighbor 10.1.31.2 route-reflector-client
   network 10.255.255.5/32
+  # This node's egress shard's IPv4 (NAT64) masquerade address. A NAT64
+  # reply arrives from an IPv4-only destination, so unlike tenant IPv4 it
+  # does not ride inside SRv6 and does need a route in the transit FIB.
+  network 192.0.2.2/32
  exit-address-family
 !
 

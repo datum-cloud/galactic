@@ -6,8 +6,8 @@
 
 _Last updated: 2026-09-09_
 
-Galactic now ships four binaries per node (the third only on dedicated
-gateway-role nodes, the fourth on every compute node); three of them have
+Galactic now ships four binaries per node (the third and fourth only on
+dedicated gateway-role `edge` nodes); three of them have
 their own architecture document:
 
 | Document                                           | Covers                                                                                                                                             |

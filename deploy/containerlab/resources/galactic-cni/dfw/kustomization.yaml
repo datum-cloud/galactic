@@ -1,9 +1,13 @@
-# dfw: dual-homed compute node
+# dfw: dual-homed compute node, two edge shards
 namespace: galactic-system
 resources:
   - ../shared
 patches:
   - path: ebpf-interfaces-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-cni
+  - path: egress-shards-patch.yaml
     target:
       kind: DaemonSet
       name: galactic-cni

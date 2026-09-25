@@ -83,6 +83,7 @@ tasks:
       - task: "deploy:images"
       - task: "deploy:system"
       - task: "deploy:cni"
+      - task: "deploy:lab-xdp-passthrough-compute"
       - task: "deploy:fabric"
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
@@ -125,11 +126,12 @@ tasks:
     cmds:
       - clang -O2 -g -target bpf -c node_files/common/xdp-passthrough.c -o node_files/common/xdp-passthrough.o
 
-  # Loads the pass-through XDP program on every transit port facing an
-  # edge node -- makes those veth links behave like a real gateway's
-  # physical NIC uplink for edgedsr.c's XDP_TX redirect (see
-  # xdp-passthrough.c's own doc comment). Idempotent: `ip link set ... xdp
-  # obj` replaces whatever program (if any) is already attached.
+  # Loads the pass-through XDP program on every transit port facing an edge
+  # node -- makes those veth links behave like a real gateway's physical NIC
+  # uplink for edgedsr.c's XDP_TX redirect (see xdp-passthrough.c's own doc
+  # comment). Idempotent: `ip link set ... xdp obj` replaces whatever
+  # program (if any) is already attached. The compute side is
+  # deploy:lab-xdp-passthrough-compute, which has to run later.
   "deploy:lab-xdp-passthrough":
     desc: Load the pass-through XDP program on edge-facing transit ports
     deps: [build:lab-xdp-passthrough]
@@ -162,6 +164,50 @@ tasks:
           docker exec "${container}" ip -force link set dev "${iface}" xdp obj /xdp-passthrough.o sec xdp
         done
 
+  # The compute half of deploy:lab-xdp-passthrough: every compute-node port
+  # facing an edge node, where edge_lb's XDP_REDIRECT toward a backend lands
+  # (see xdp-passthrough.c). Without it gateway ingress to every backend
+  # fails. galactic-nat used to hold these hooks while its shards ran on the
+  # compute nodes; nothing else attaches XDP here now that they run on the
+  # edge.
+  #
+  # Separate from, and later than, the transit half because these are Kind
+  # nodes, and it must run after deploy:cni. Loading an object with `ip`
+  # mounts a bpffs of its own on /sys/fs/bpf when none is there yet, and
+  # that mount is private. Cilium's pods mount /sys/fs/bpf with
+  # bidirectional propagation and refuse to start on a node whose
+  # /sys/fs/bpf is not a shared mount ("path /sys/fs/bpf is mounted on
+  # /sys/fs/bpf but it is not a shared or slave mount") -- confirmed live,
+  # when this ran before deploy:cni and wedged Cilium on every compute node.
+  # After deploy:cni, Cilium's own shared bpffs is already there and `ip`
+  # reuses it, so the guard below refuses to run on a node without one
+  # rather than create the private mount.
+  #
+  # Each port is a bond member, as on the transit side. dfw-worker's
+  # eth1/eth3 (bond0) face dfw-worker2 and eth2/eth4 (bond1) dfw-worker3;
+  # sjc-worker's and iad-worker's eth1/eth2 (bond0) face their site's edge
+  # node -- keep this in step with gvpc.clab.yaml's site-internal links.
+  # Kind nodes' containers carry bare names.
+  "deploy:lab-xdp-passthrough-compute":
+    desc: Load the pass-through XDP program on edge-facing compute ports (after deploy:cni)
+    deps: [build:lab-xdp-passthrough]
+    cmds:
+      - |
+        set -e
+        for node in dfw-worker sjc-worker iad-worker; do
+          if ! docker exec "${node}" sh -c '[ "$(stat -f -c %T /sys/fs/bpf)" = bpf_fs ]'; then
+            echo "ERROR: ${node} has no bpffs on /sys/fs/bpf yet; run deploy:cni first." >&2
+            echo "       Loading an XDP object now would mount a private one and break Cilium." >&2
+            exit 1
+          fi
+        done
+        for pair in dfw-worker:eth1 dfw-worker:eth3 dfw-worker:eth2 dfw-worker:eth4 \
+            sjc-worker:eth1 sjc-worker:eth2 iad-worker:eth1 iad-worker:eth2; do
+          container=${pair%%:*}; iface=${pair##*:}
+          docker cp node_files/common/xdp-passthrough.o "${container}:/xdp-passthrough.o"
+          docker exec "${container}" ip -force link set dev "${iface}" xdp obj /xdp-passthrough.o sec xdp
+        done
+
   "deploy:images":
     desc: Load all container images into Kind
     vars:
@@ -181,8 +227,8 @@ tasks:
         iad-worker iad-worker2
       # The edge XDP DSR/Maglev datapath: one instance per edge node.
       GATEWAY_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
-      # Egress shards reuse each site's compute worker (design plan §8).
-      NAT_NODES: "dfw-worker sjc-worker iad-worker"
+      # Egress shards: one per edge node, chained behind that node's gateway.
+      NAT_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
     cmds:
       - |
         set -e
@@ -256,7 +302,6 @@ tasks:
       - task: "deploy:ns30"
       - task: "deploy:ns40"
       - task: "deploy:ns60"
-      - task: "deploy:ns70"
       - task: "deploy:ns71"
 
   "deploy:ns10":
@@ -278,11 +323,6 @@ tasks:
     desc: Deploy ns40 test VPC (iad only, 2 pods)
     cmds:
       - ./scripts/deploy-ns.sh ns40 iad
-
-  "deploy:ns70":
-    desc: Deploy ns70 test VPC (overlapping ULA on two sites, collision fixture)
-    cmds:
-      - ./scripts/deploy-ns.sh ns70 iad sjc
 
   "deploy:ns71":
     desc: Deploy ns71 test VPCs (overlapping ULA on one node, same-node collision fixture)
@@ -309,8 +349,8 @@ tasks:
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
       - task: "verify:nat-return-route"
+      - task: "verify:nat-local"
       - task: "verify:nat-collision"
-      - task: "verify:nat-collision-samenode"
       - task: "verify:scenarios"
 
   # First, because every check after it rides these bonds: a member that
@@ -551,14 +591,35 @@ tasks:
         echo "PASS: VIP answered 200, backend saw the real client, both halves counted, no invalid drops"
 
   "verify:nat-sharding":
-    desc: Verify each site's EgressShard and shard SID
+    desc: Verify every edge node's EgressShard is programmed and advertised
     cmds:
+      # One shard per edge node: two in dfw, one each in sjc and iad. Each
+      # must report Programmed=True -- attached is not enough, since a shard
+      # with no programmed identity claims no packet -- and must target an
+      # edge node, the only role the shard runs on.
       - |
+        set -e
+        rc=0
+        for pair in "dfw dfw-worker2" "dfw dfw-worker3" "sjc sjc-worker2" "iad iad-worker2"; do
+          set -- ${pair}; site=$1; node=$2
+          cp=${site}-control-plane
+          programmed=$(docker exec ${cp} kubectl -n galactic-system get egressshard ${node}-egress \
+            -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || true)
+          role=$(docker exec ${cp} kubectl get node ${node} \
+            -o jsonpath='{.metadata.labels.galactic\.datumapis\.com/node}')
+          if [ "${programmed}" != "True" ] || [ "${role}" != "edge" ]; then
+            echo "FAIL ${site}/${node}-egress: Programmed=${programmed:-missing}, node role=${role:-none}" >&2
+            rc=1
+          else
+            echo "ok   ${site}/${node}-egress programmed on an edge node"
+          fi
+        done
         for site in dfw sjc iad; do
           echo "--- ${site} ---"
           docker exec ${site}-control-plane kubectl get egressshards -n galactic-system -o wide
           docker exec ${site}-control-plane kubectl get bgpadvertisements -n galactic-system
         done
+        exit ${rc}
 
   "verify:nat-egress":
     desc: Prove a tenant's packet is actually translated, not just that the shards exist
@@ -567,9 +628,8 @@ tasks:
       # plane agrees with itself. This drives a real packet through the
       # datapath and reads what came out on the wire.
       #
-      # dfw's tenants egress through sjc's shard: a node cannot resolve its own
-      # self-originated shard SID, so dfw falls through to the next configured
-      # one. That is why the sender and the capture are on different sites.
+      # dfw's tenant egresses through dfw's own edge shard on dfw-worker2, the
+      # first entry in dfw's shard list (resources/galactic-cni/dfw/).
       #
       # Three things are checked, each of which has been broken at some point:
       # the EtherType (the decapsulated frame needs a rebuilt link header, or
@@ -587,13 +647,13 @@ tasks:
       # a counter that moves while this task is probing means anything.
       - |
         set -e
-        shard=$(docker exec sjc-control-plane kubectl -n galactic-system get egressshard \
-          -o jsonpath='{.items[0].status.shardAddressIPv6}')
+        shard=$(docker exec dfw-control-plane kubectl -n galactic-system get egressshard \
+          dfw-worker2-egress -o jsonpath='{.status.shardAddressIPv6}')
         if [ -z "${shard}" ]; then
-          echo "FAIL: sjc's EgressShard publishes no IPv6 masquerade address" >&2
+          echo "FAIL: dfw-worker2's EgressShard publishes no IPv6 masquerade address" >&2
           exit 1
         fi
-        echo "sjc shard masquerade address: ${shard}"
+        echo "dfw-worker2 shard masquerade address: ${shard}"
 
         snap=$(mktemp -d)
         trap 'rm -rf "${snap}"' EXIT
@@ -603,7 +663,7 @@ tasks:
         conns_of() { awk -F' ' '/^galactic_nat_conns\{family="nat66"\}/ {print $2}'; }
         drops_of() { awk '/^galactic_nat_drops_total/ {print $1, $2}' | sort; }
 
-        metrics=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics)
+        metrics=$(docker exec dfw-worker2 curl -s --max-time 4 http://localhost:9182/metrics)
         before=$(printf '%s\n' "${metrics}" | conns_of)
         printf '%s\n' "${metrics}" | drops_of > "${snap}/drops.before"
 
@@ -641,7 +701,7 @@ tasks:
           exit 1
         fi
 
-        metrics=$(docker exec sjc-worker curl -s --max-time 4 http://localhost:9182/metrics)
+        metrics=$(docker exec dfw-worker2 curl -s --max-time 4 http://localhost:9182/metrics)
         after=$(printf '%s\n' "${metrics}" | conns_of)
         printf '%s\n' "${metrics}" | drops_of > "${snap}/drops.after"
         if [ "${after}" -le "${before}" ]; then
@@ -672,7 +732,8 @@ tasks:
   # took that router's own management default, so every masqueraded flow was
   # one-way while every forward-path counter stayed green (#549). Each shard
   # node's fabric-router now originates its own two addresses into the
-  # underlay (resources/fabric-router/*/frr.conf.*-worker).
+  # underlay (resources/fabric-router/*/frr.conf.*-worker{2,3}, the edge
+  # nodes the shards run on).
   #
   # Two assertions per family, because either half alone is satisfiable by a
   # datapath that still cannot complete a session: the transit resolves the
@@ -724,13 +785,13 @@ tasks:
             | tr -d ' '
         }
 
-        for pair in "dfw dfw-worker" "iad iad-worker" "sjc sjc-worker"; do
+        for pair in "dfw dfw-worker2" "dfw dfw-worker3" "iad iad-worker2" "sjc sjc-worker2"; do
           set -- ${pair}; site=$1; node=$2
           cp=${site}-control-plane
-          shard6=$(docker exec ${cp} kubectl -n galactic-system get egressshard \
-            -o jsonpath='{.items[0].status.shardAddressIPv6}')
-          shard4=$(docker exec ${cp} kubectl -n galactic-system get egressshard \
-            -o jsonpath='{.items[0].status.shardAddressIPv4}')
+          shard6=$(docker exec ${cp} kubectl -n galactic-system get egressshard ${node}-egress \
+            -o jsonpath='{.status.shardAddressIPv6}')
+          shard4=$(docker exec ${cp} kubectl -n galactic-system get egressshard ${node}-egress \
+            -o jsonpath='{.status.shardAddressIPv4}')
           echo "--- ${site} (${node}): ${shard6} / ${shard4} ---"
           if [ -z "${shard6}" ] || [ -z "${shard4}" ]; then
             echo "  FAIL: shard publishes no masquerade address pair" >&2
@@ -828,20 +889,19 @@ tasks:
       # {{.HOST4}} synthesized into the fabric NAT64 prefix: 10.1.40.2 is
       # 0a01:2802, so the tenant addresses 2001:db8:64::a01:2802.
       HOST4_SYNTH: "2001:db8:64::a01:2802"
-      # dfw's tenant egresses through sjc's shard -- a node cannot resolve its
-      # own self-originated shard SID, so it falls through to the next one.
+      # dfw's tenant egresses through dfw's own first edge shard.
       SENDER_SITE: dfw
-      SHARD_NODE: sjc-worker
-      SHARD_SITE: sjc
+      SHARD_NODE: dfw-worker2
+      SHARD_SITE: dfw
     cmds:
       - |
         set -e
         cp={{.SENDER_SITE}}-control-plane
         pod=$(docker exec ${cp} kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
         shard6=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system \
-          get egressshard -o jsonpath='{.items[0].status.shardAddressIPv6}')
+          get egressshard {{.SHARD_NODE}}-egress -o jsonpath='{.status.shardAddressIPv6}')
         shard4=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system \
-          get egressshard -o jsonpath='{.items[0].status.shardAddressIPv4}')
+          get egressshard {{.SHARD_NODE}}-egress -o jsonpath='{.status.shardAddressIPv4}')
         if [ -z "${shard6}" ]; then echo "FAIL: shard publishes no IPv6 masquerade address" >&2; exit 1; fi
         if [ -z "${shard4}" ]; then echo "FAIL: shard publishes no IPv4 masquerade address" >&2; exit 1; fi
         echo "sender ${pod} (${cp})  shard ${shard6} / ${shard4}"
@@ -906,64 +966,68 @@ tasks:
         fi
         echo "PASS: both families completed a round trip through the shard"
 
-  "verify:nat-collision":
-    desc: Prove two tenants sharing a ULA on different nodes do not share a translation
+  # Proves each compute node egresses through its own site's edge shard, and
+  # no other site's. Each site's compute node lists only its site's shards
+  # (resources/galactic-cni/<site>/egress-shards-patch.yaml), so a tenant's
+  # translated packet must reach the off-fabric host from that site's first
+  # shard's masquerade address -- one hop from the transit, never hairpinned
+  # through another site's edge. A missing capture means the site has no
+  # working egress at all; the wrong source means the shard list or the
+  # route installation is not what the site configured.
+  "verify:nat-local":
+    desc: Prove each site's tenants egress through that site's own edge shard
+    silent: true
     cmds:
-      # ns70's iad and sjc pods hold the same address by construction, and both
-      # egress through dfw's shard because neither site can resolve its own
-      # self-originated shard SID. Sending an identical 5-tuple from each makes
-      # every field of the connection key identical except the encapsulation
-      # source, so a shard that keyed on the SRv6 Argument alone would collapse
-      # them into one row -- and then deliver one tenant's replies to the other.
-      #
-      # Two distinct masquerade ports in the capture is the pass condition.
-      # They are normally adjacent: identical hash inputs give both flows the
-      # same probe starting point, so the second claims the next candidate.
       - |
         set -e
-        # A source port that changes per run, so each run creates genuinely new
-        # flows. With a fixed port the connection rows survive in the pinned
-        # map across a DaemonSet restart, and a rerun re-asserts the ports an
-        # earlier run allocated instead of exercising the allocator at all --
-        # the test would keep passing after the code it covers stopped working.
-        sport=$(( 20000 + ($(date +%s) % 10000) ))
-        echo "source port for this run: ${sport}"
-        # Captured at the off-fabric host, not on the shard node, and aimed at
-        # the one destination outside the fabric rather than the shard's own
-        # link peer. Both legs of a shard now leave from the driver via XDP,
-        # which never enters the kernel's transmit path, so an AF_PACKET tap on
-        # the shard node itself sees nothing -- the packet is on the wire, but
-        # tcpdump there is blind to it (#565). Reading the far end instead
-        # proves more than the old capture did: the frame the shard's own FIB
-        # resolution addressed was accepted by every hop in between.
-        docker exec clab-gvpc-remote-host timeout 16 tcpdump -i eth1 -nn -c 4 \
-          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:40::2' >/tmp/nat-collision.txt 2>&1 &
-        sleep 2
-        for site in iad sjc; do
-          pod=$(docker exec ${site}-control-plane kubectl -n ns70 get pods -o jsonpath='{.items[0].metadata.name}')
-          docker exec ${site}-control-plane kubectl -n ns70 exec "${pod}" -- \
-            timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:40::2 9999" >/dev/null 2>&1 || true
+        rc=0
+        for pair in "dfw dfw-worker2" "sjc sjc-worker2" "iad iad-worker2"; do
+          set -- ${pair}; site=$1; node=$2
+          cp=${site}-control-plane
+          want=$(docker exec ${cp} kubectl -n galactic-system get egressshard ${node}-egress \
+            -o jsonpath='{.status.shardAddressIPv6}')
+          docker exec clab-gvpc-remote-host timeout 12 tcpdump -i eth1 -nn -c 1 \
+            'ip6 and dst 2001:db8:1:40::2 and tcp dst port 80' >/tmp/nat-local.txt 2>&1 &
+          dumper=$!
+          sleep 2
+          pod=$(docker exec ${cp} kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
+          docker exec ${cp} kubectl -n ns10 exec "${pod}" -- \
+            timeout 6 bash -c 'nc -w2 2001:db8:1:40::2 80 </dev/null' >/dev/null 2>&1 || true
+          wait ${dumper} || true
+          # tcpdump -nn prints "IP6 <src>.<port> > <dst>.<port>: ..."
+          got=$(grep -oE 'IP6 [0-9a-f:]+\.[0-9]+ >' /tmp/nat-local.txt \
+            | sed -E 's/^IP6 ([0-9a-f:]+)\.[0-9]+ >$/\1/' | head -1)
+          if [ "${got}" = "${want}" ]; then
+            echo "ok   ${site}: egress masqueraded to ${node}'s ${want}"
+          else
+            echo "FAIL ${site}: egress reached the off-fabric host from '${got:-nothing}'," \
+                 "want ${node}'s ${want}" >&2
+            rc=1
+          fi
         done
-        wait
-        ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision.txt | cut -d. -f2 | sort -u)
-        echo "masquerade ports allocated: $(echo ${ports} | tr '\n' ' ')"
-        if [ "$(echo "${ports}" | wc -l)" -lt 2 ]; then
-          echo "FAIL: both tenants share one masquerade port -- their flows collided" >&2
+        if [ ${rc} -ne 0 ]; then
+          echo "FAIL: not every site egresses through its own edge shard" >&2
           exit 1
         fi
-        echo "PASS: each tenant received its own translation"
+        echo "PASS: every site egresses through its own edge shard"
 
-  "verify:nat-collision-samenode":
-    desc: Prove two tenants sharing a ULA on the SAME node do not share a translation
+  "verify:nat-collision":
+    desc: Prove two tenants sharing a ULA on one node do not share a translation
     cmds:
-      # The same-node half of #538, and the counterpart to verify:nat-collision
-      # above. There, the two tenants sit on different nodes and the connection
-      # key's encapsulation source separates them on its own. Here both flows
-      # reach the shard from sjc-worker and carry an identical encapsulation
-      # source, so the SRv6 Argument is the only field left that can: ns71's two
-      # pods are two distinct VPCs on one node holding one address by
-      # construction (resources/tenants/ns71/), and an identical 5-tuple from
-      # each makes every remaining field of the connection key match too.
+      # #538. Both flows reach sjc's edge shard from sjc-worker and carry an
+      # identical encapsulation source, so the SRv6 Argument is the only field
+      # of the connection key left that can separate them: ns71's two pods are
+      # two distinct VPCs on one node holding one address by construction
+      # (resources/tenants/ns71/), and an identical 5-tuple from each makes
+      # every remaining field match too.
+      #
+      # This is the lab's only collision check. Its cross-node counterpart --
+      # two tenants on different nodes, separated by the encapsulation source
+      # alone -- needed two compute nodes sharing one shard, which no longer
+      # happens now that every site egresses through its own edge shards and
+      # each site has one compute node. The datapath half of it stays covered
+      # by internal/plumbing/ebpf/natprog's tests, which build packets with an
+      # explicit encapsulation source.
       #
       # Before the fix, installEgressRoutes registered the operator-configured
       # shard SID verbatim, every VRF on the node encapsulated toward a
@@ -971,15 +1035,22 @@ tasks:
       # both -- one connection row, one masquerade port, and the second tenant's
       # replies delivered to the first.
       #
-      # Two distinct masquerade ports in the capture is the pass condition, as
-      # in verify:nat-collision. It is observable on the forward path alone and
-      # so does not depend on the return leg, which verify:nat-datapath covers.
+      # Two distinct masquerade ports in the capture is the pass condition.
+      # They are normally adjacent: identical hash inputs give both flows the
+      # same probe starting point, so the second claims the next candidate. It
+      # is observable on the forward path alone and so does not depend on the
+      # return leg, which verify:nat-datapath covers.
       - |
         set -e
-        # A source port that changes per run, for the reason
-        # verify:nat-collision states at length: a fixed one re-asserts ports an
-        # earlier run already allocated instead of exercising the allocator.
+        # A source port that changes per run, so each run creates genuinely new
+        # flows. With a fixed port the connection rows survive in the pinned
+        # map across a DaemonSet restart, and a rerun re-asserts the ports an
+        # earlier run allocated instead of exercising the allocator at all --
+        # the test would keep passing after the code it covers stopped working.
         sport=$(( 30000 + ($(date +%s) % 10000) ))
+        shard=$(docker exec sjc-control-plane kubectl -n galactic-system get egressshard \
+          sjc-worker2-egress -o jsonpath='{.status.shardAddressIPv6}')
+        echo "sjc-worker2 shard masquerade address: ${shard}"
         echo "source port for this run: ${sport}"
         # Captured at the off-fabric host, not on the shard node, and aimed at
         # the one destination outside the fabric rather than the shard's own
@@ -990,7 +1061,7 @@ tasks:
         # proves more than the old capture did: the frame the shard's own FIB
         # resolution addressed was accepted by every hop in between.
         docker exec clab-gvpc-remote-host timeout 16 tcpdump -i eth1 -nn -c 4 \
-          'ip6 and src 2001:db8:9966:1::1 and dst 2001:db8:1:40::2' >/tmp/nat-collision-samenode.txt 2>&1 &
+          "ip6 and src ${shard} and dst 2001:db8:1:40::2" >/tmp/nat-collision.txt 2>&1 &
         sleep 2
         for app in private private-b; do
           pod=$(docker exec sjc-control-plane kubectl -n ns71 get pods -l app=${app} \
@@ -1000,7 +1071,7 @@ tasks:
             timeout 5 bash -c "echo collide | nc -u -w1 -p ${sport} 2001:db8:1:40::2 9999" >/dev/null 2>&1 || true
         done
         wait
-        ports=$(grep -oE '2001:db8:9966:1::1\.[0-9]+' /tmp/nat-collision-samenode.txt | cut -d. -f2 | sort -u)
+        ports=$(grep -oE "${shard}\.[0-9]+" /tmp/nat-collision.txt | cut -d. -f2 | sort -u)
         echo "masquerade ports allocated: $(echo ${ports} | tr '\n' ' ')"
         if [ "$(echo "${ports}" | wc -l)" -lt 2 ]; then
           echo "FAIL: both tenants share one masquerade port -- their flows collided" >&2

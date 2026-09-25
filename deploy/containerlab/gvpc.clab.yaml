@@ -382,15 +382,16 @@ topology:
     # single iBGP session to that edge node across this bond (see
     # resources/fabric-router/*/frr.conf.*).
     #
-    # mtu: 1500 for the same -ERANGE reason as the edge uplinks above, on
-    # the compute side this time: galactic-nat's own XDP program
-    # (natattach.go, also native/driver-mode-only) attaches to every member
-    # of these bonds (shared with the TC-BPF SRv6 uSID datapath, which has
-    # no such restriction), and every compute worker is also an egress
-    # shard. Confirmed live: galactic-nat crash-looped on every compute
-    # worker with this ERANGE until these links were dropped to 1500. The
-    # edge end runs galactic-gateway's return program (edge_return) on the
-    # same members, so it needs the same limit.
+    # mtu: 1500 for the same -ERANGE reason as the edge uplinks above. The
+    # edge end runs galactic-gateway's return program (edge_return), with
+    # the egress shard chained behind it, on every member of these bonds,
+    # and the compute end runs the lab's pass-through XDP program on its
+    # members (Taskfile.yaml's deploy:lab-xdp-passthrough-compute) so that
+    # edge_lb's redirects toward a backend are received at all. Both native
+    # XDP, both subject to the peer-MTU limit. (galactic-nat used to attach
+    # here from the compute end, while its shards ran on the compute nodes;
+    # it crash-looped with this ERANGE until these links were dropped to
+    # 1500.)
     #
     # Accepted trade-off, not risk-free: a packet whose SRv6-encapsulated
     # size would land between 1500 and 9500 bytes now needs source
@@ -402,15 +403,11 @@ topology:
     # node off the fabric with it. sjc and iad have a single edge node each
     # and so have nothing to dual-home to.
     #
-    # Both bonds are equal paths. Every datapath on this node attaches to
-    # both: the uSID decap hook via GALACTIC_CNI_EBPF_INTERFACES="bond0,bond1"
-    # and, since #545, galactic-nat's shard XDP program via
-    # GALACTIC_NAT_UPLINK_INTERFACES="bond0,bond1". While the shard took a
-    # single interface name it was attached to one uplink alone and
-    # egress-shard traffic arriving on the other missed translation
-    # entirely, so BGP policy in resources/fabric-router/dfw/
-    # frr.conf.dfw-worker{,3} had to keep traffic off it; that policy is
-    # gone and the pair runs plain ECMP.
+    # Both bonds are equal paths. The uSID decap hook attaches to both
+    # (GALACTIC_CNI_EBPF_INTERFACES="bond0,bond1"), and the node's egress
+    # leaves through dfw's edge shards, which run on the edge nodes, so
+    # nothing on this node prefers either uplink and the pair runs plain
+    # ECMP.
     - endpoints: ["dfw-worker:eth1", "dfw-worker2:eth2"]   # dfw-worker bond0 / dfw-worker2 bond1
       mtu: 1500
     - endpoints: ["dfw-worker:eth3", "dfw-worker2:eth4"]
