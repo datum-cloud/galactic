@@ -157,8 +157,21 @@ func (c ShardConfig) toWire() (natprog.NatShardConfig, error) {
 	return value, nil
 }
 
-// Get reads the single entry and reports whether it has been written yet. Until
-// it has, the datapath fails open and claims no packets.
+// Clear overwrites the single entry with the all-zero row, which serves no
+// family and so is what the datapath reads as unconfigured: it fails open and
+// claims no packets. An array map has no entry to delete, so this is how a
+// shard that no longer has an identity stops translating.
+func (t *ShardConfigTable) Clear() error {
+	if err := t.table.Put(shardConfigKey, natprog.NatShardConfig{}); err != nil {
+		return fmt.Errorf("natmap: shard_config_table: clear: %w", err)
+	}
+	return nil
+}
+
+// Get reads the single entry and reports whether it holds a configuration.
+// Until one is written, and after Clear, the datapath fails open and claims no
+// packets. A row serving no family counts as unconfigured: the kernel's array
+// map always returns a row, zeroed until first written.
 func (t *ShardConfigTable) Get() (ShardConfig, bool, error) {
 	var value natprog.NatShardConfig
 	if err := t.table.Lookup(shardConfigKey, &value); err != nil {
@@ -166,6 +179,9 @@ func (t *ShardConfigTable) Get() (ShardConfig, bool, error) {
 			return ShardConfig{}, false, nil
 		}
 		return ShardConfig{}, false, fmt.Errorf("natmap: shard_config_table: get: %w", err)
+	}
+	if value.ServesV6 == 0 && value.ServesV4 == 0 {
+		return ShardConfig{}, false, nil
 	}
 	cfg := ShardConfig{
 		ShardSID: netip.AddrFrom16(value.ShardSid),

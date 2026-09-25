@@ -1,10 +1,9 @@
 # The single-container egress translation shard pod's shared base -- see
-# ../kustomization.yaml for why this isn't applied as-is: this is meant to
-# be instantiated once per shard node by a further overlay that pins it to
-# one node (kubernetes.io/hostname) and sets that node's own
-# GALACTIC_NAT_UPLINK_INTERFACES, _SHARD_SID, and per-family masquerade
-# address values,
-# mirroring config/galactic-gateway/base/kustomization.yaml's identical
+# ../kustomization.yaml for why this isn't applied as-is: a deployer whose
+# nodes' uplinks auto-detection cannot pick out applies it through an
+# overlay setting GALACTIC_NAT_UPLINK_INTERFACES. The shard's identity is
+# never set here; it comes from each node's EgressShard spec. The overlay
+# shape mirrors config/galactic-gateway/base/kustomization.yaml's identical
 # per-node overlay pattern (see
 # deploy/containerlab/resources/galactic-gateway/ for a worked example of
 # that pattern applied to a sibling component).

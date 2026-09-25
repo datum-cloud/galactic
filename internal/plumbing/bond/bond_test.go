@@ -25,11 +25,14 @@ func (f *fakeLink) Type() string {
 	return f.linkType
 }
 
-const testBondName = "bond0"
+const (
+	testBondName    = "bond0"
+	testNonBondName = "eth0"
+)
 
 func TestIsMaster(t *testing.T) {
 	bondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: testBondName}, linkType: LinkType}
-	nonBondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: "eth0"}}
+	nonBondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: testNonBondName}}
 
 	if !IsMaster(bondLink) {
 		t.Error("IsMaster(bond link) = false, want true")
@@ -69,5 +72,44 @@ func TestSlaveNames_NoSlaves(t *testing.T) {
 	master := &fakeLink{attrs: netlink.LinkAttrs{Name: testBondName, Index: 10}, linkType: LinkType}
 	if got := SlaveNames(master, nil); got != nil {
 		t.Errorf("SlaveNames() = %v, want nil", got)
+	}
+}
+
+func TestXDPTargets(t *testing.T) {
+	bondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: testBondName, Index: 10}, linkType: LinkType}
+	nonBondLink := &fakeLink{attrs: netlink.LinkAttrs{Name: testNonBondName, Index: 2}}
+	links := []netlink.Link{
+		bondLink,
+		nonBondLink,
+		&fakeLink{attrs: netlink.LinkAttrs{Name: "eth1", Index: 3, MasterIndex: 10}},
+		&fakeLink{attrs: netlink.LinkAttrs{Name: "eth2", Index: 4, MasterIndex: 10}},
+	}
+
+	tests := []struct {
+		name    string
+		link    netlink.Link
+		links   []netlink.Link
+		want    []string
+		wantErr bool
+	}{
+		{name: "non-bond resolves to itself", link: nonBondLink, links: links, want: []string{testNonBondName}},
+		{name: "bond resolves to its slaves only", link: bondLink, links: links, want: []string{"eth1", "eth2"}},
+		{name: "bond with no slaves is an error", link: bondLink, links: links[:2], wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := XDPTargets(tt.link, tt.links)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("XDPTargets() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("XDPTargets() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("XDPTargets() = %v, want %v", got, tt.want)
+				}
+			}
+		})
 	}
 }

@@ -31,7 +31,7 @@ func requireRoot(t *testing.T) {
 // TestAttach_NilProgramIsError covers Attach's defensive nil-program
 // guard directly, without needing root.
 func TestAttach_NilProgramIsError(t *testing.T) {
-	if _, err := Attach(nil, []string{"eth0"}); err == nil {
+	if _, err := Attach(nil, []string{testUplink}); err == nil {
 		t.Error("Attach(nil program, ...) error = nil, want an error")
 	}
 }

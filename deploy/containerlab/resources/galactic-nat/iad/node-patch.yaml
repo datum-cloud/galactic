@@ -9,18 +9,10 @@ spec:
         - name: galactic-nat
           env:
             # single-homed node: one uplink, an LACP bond the shard attaches
-            # to through its members
+            # to through its members. Named explicitly rather than
+            # auto-detected: Kind's eth0 carries this node's IPv6 default
+            # route, so detection would also claim the management bridge. The
+            # same override galactic-cni's GALACTIC_CNI_EBPF_INTERFACES
+            # carries here.
             - name: GALACTIC_NAT_UPLINK_INTERFACES
               value: bond0
-            # shard SID: uFMT uSID over iad's locator (2001:db8:ff03::/48),
-            # nodeID=0x2001 (service 2 = NAT shard, node index 001)
-            - name: GALACTIC_NAT_SHARD_SID
-              value: "2001:db8:ff03:2001:e001::"
-            # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block
-            - name: GALACTIC_NAT_SHARD_PUB_ADDR6
-              value: "2001:db8:9966:2::1"
-            # NAT64 masquerade source address (RFC 5737 TEST-NET-1)
-            - name: GALACTIC_NAT_SHARD_PUB_ADDR4
-              value: "192.0.2.2"
-            - name: GALACTIC_NAT_NAT64_PREFIX
-              value: "2001:db8:64::/96"

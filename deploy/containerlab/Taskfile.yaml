@@ -729,9 +729,8 @@ tasks:
           cp=${site}-control-plane
           shard6=$(docker exec ${cp} kubectl -n galactic-system get egressshard \
             -o jsonpath='{.items[0].status.shardAddressIPv6}')
-          shard4=$(docker exec ${cp} kubectl -n galactic-system get ds galactic-nat \
-            -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{"\n"}{end}' \
-            | awk -F= '/GALACTIC_NAT_SHARD_PUB_ADDR4/ {print $2}')
+          shard4=$(docker exec ${cp} kubectl -n galactic-system get egressshard \
+            -o jsonpath='{.items[0].status.shardAddressIPv4}')
           echo "--- ${site} (${node}): ${shard6} / ${shard4} ---"
           if [ -z "${shard6}" ] || [ -z "${shard4}" ]; then
             echo "  FAIL: shard publishes no masquerade address pair" >&2
@@ -841,11 +840,10 @@ tasks:
         pod=$(docker exec ${cp} kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
         shard6=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system \
           get egressshard -o jsonpath='{.items[0].status.shardAddressIPv6}')
-        shard4=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system get ds galactic-nat \
-          -o jsonpath='{range .spec.template.spec.containers[*].env[*]}{.name}={.value}{"\n"}{end}' \
-          | awk -F= '/GALACTIC_NAT_SHARD_PUB_ADDR4/ {print $2}')
+        shard4=$(docker exec {{.SHARD_SITE}}-control-plane kubectl -n galactic-system \
+          get egressshard -o jsonpath='{.items[0].status.shardAddressIPv4}')
         if [ -z "${shard6}" ]; then echo "FAIL: shard publishes no IPv6 masquerade address" >&2; exit 1; fi
-        if [ -z "${shard4}" ]; then echo "FAIL: shard has no IPv4 masquerade address configured" >&2; exit 1; fi
+        if [ -z "${shard4}" ]; then echo "FAIL: shard publishes no IPv4 masquerade address" >&2; exit 1; fi
         echo "sender ${pod} (${cp})  shard ${shard6} / ${shard4}"
         rc=0
 

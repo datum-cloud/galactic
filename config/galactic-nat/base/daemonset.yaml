@@ -30,10 +30,8 @@ spec:
       # config/galactic-router/overlays/router/daemonset-patch.yaml) --
       # not via this label, since those two aren't compute-specific
       # anymore. A shard's own SID/public addresses must still be
-      # unique per node (see ../kustomization.yaml), which is why this
-      # base is meant to be instantiated once per shard node rather than
-      # applied as-is -- that per-node uniqueness is handled by the
-      # per-node overlay's env vars, not by the scheduling gate here.
+      # unique per node, but they live in each node's EgressShard spec,
+      # not in this DaemonSet, so no per-node overlay is needed for them.
       # Excludes control-plane outright for the same reason the other
       # roles do.
       #
@@ -88,54 +86,38 @@ spec:
             # Set explicitly here anyway so it can't silently drift.
             - name: GALACTIC_NAT_GRPC_HEALTH_PORT
               value: "5182"
-            # GALACTIC_NAT_UPLINK_INTERFACES and _SHARD_SID are
-            # intentionally left unset here: the interface names are
-            # deployment-specific and the shard SID must be unique per
-            # shard node (no in-cluster mechanism yet derives them
-            # automatically -- see internal/config/nat.go's EnvNATShardSID
-            # doc comment, the same gap GALACTIC_GATEWAY_SRV6_ADDRESS has
-            # today).
+            # Nothing about this shard's identity is set here. Its SID,
+            # masquerade addresses and NAT64 prefix come from the
+            # EgressShard whose spec.targetRef names this node, which the
+            # process programs into its datapath on reconcile. Until one
+            # exists and assigns them, the datapath is attached but claims
+            # no packet, and the EgressShard's Programmed condition says
+            # why.
             #
-            # GALACTIC_NAT_UPLINK_INTERFACES is a comma-separated list, and
-            # a multi-homed shard node must name every fabric uplink rather
-            # than only the one its traffic uses today: the datapath claims
-            # a packet only on an interface it is attached to, so an uplink
-            # left out is one whose tenant traffic is forwarded untranslated
-            # and uncounted the moment routing moves to it.
-            #
-            # So is every address that selects which families this shard
-            # serves. config.NATConfig.Validate requires the uplink, the
-            # SID, and at least one family, so applying this base as-is
-            # produces a crash-looping container. The deployer's per-node
-            # overlay must set:
-            #
-            #   GALACTIC_NAT_SHARD_PUB_ADDR6    IPv6 masquerade source,
-            #                                  enabling NAT66
-            #   GALACTIC_NAT_SHARD_PUB_ADDR4   IPv4 masquerade source, and
-            #   GALACTIC_NAT_NAT64_PREFIX      the fabric-wide /96,
-            #                                  together enabling NAT64
-            #
-            # The NAT64 pair is all-or-nothing and the prefix must match
-            # what DNS64 synthesizes into, or the shard translates for a
-            # prefix nothing resolves to.
+            # GALACTIC_NAT_UPLINK_INTERFACES is optional: unset, the
+            # uplinks are auto-detected the way galactic-cni detects its
+            # own. Set it, comma-separated, on a node where that is
+            # ambiguous -- typically one whose management NIC carries the
+            # IPv6 default route -- and name every fabric uplink rather
+            # than only the one its traffic uses today: the datapath
+            # claims a packet only on an interface it is attached to, so
+            # an uplink left out is one whose tenant traffic is forwarded
+            # untranslated and uncounted the moment routing moves to it.
             #
             # Note that nothing in this repo makes either masquerade
             # address reachable from outside the fabric. A reply comes back
             # from a host that is not on the fabric, so the underlay or an
             # upstream announcement has to attract each address to this
-            # node -- EgressShardReconciler's EVPN advertisement of
-            # _PUB_ADDR6 reaches other fabric nodes and nothing beyond
-            # them, and _PUB_ADDR4 is advertised by nothing at all.
-            # Setting either without that in place yields a shard that
+            # node -- EgressShardReconciler's EVPN advertisement of the
+            # IPv6 address reaches other fabric nodes and nothing beyond
+            # them, and the IPv4 address is advertised by nothing at all.
+            # Assigning either without that in place yields a shard that
             # translates outbound traffic and never sees a reply (#549),
             # with every forward-path counter still green. The origination
             # has to be for this node specifically: the address must reach
             # the node whose datapath holds that flow's connection state.
             # deploy/containerlab/resources/fabric-router/*/frr.conf.*-worker
             # is a worked example.
-            #
-            # See deploy/containerlab/resources/galactic-gateway/ for a
-            # worked example of the equivalent per-node overlay pattern.
           ports:
             - name: metrics
               containerPort: 9182

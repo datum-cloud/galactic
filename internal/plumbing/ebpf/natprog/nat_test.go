@@ -265,6 +265,30 @@ func TestNatIngress_UnclaimedTrafficPassesThrough(t *testing.T) {
 	}
 }
 
+// TestNatIngress_UnconfiguredClaimsNothing covers the all-zero row an array
+// map holds before the shard is programmed, or after it is cleared. Its zero
+// shard_sid matches any outer destination whose top 64 bits are zero, so the
+// dispatcher must reject the row for serving no family before comparing it.
+func TestNatIngress_UnconfiguredClaimsNothing(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	populateProgArray(t, objs)
+
+	pkt := buildEncappedUDPPacket(t, netip.MustParseAddr("::1:0:0:1"),
+		netip.MustParseAddr("fc00:9::1"), netip.MustParseAddr("fd00::10"),
+		netip.MustParseAddr("2001:db8::9999"), []byte("hi"))
+	ret, out, err := objs.NatIngress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpPass {
+		t.Errorf("verdict = %d, want XDP_PASS (%d) from an unconfigured shard", ret, xdpPass)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("unconfigured shard mutated a packet:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
 // TestNatIngress_ForwardSNATsAndPreservesChecksum covers handle_forward:
 // a tenant's own SRv6-encapsulated egress packet must be decapsulated,
 // SNAT'd to shard_pub_addr6 with an allocated port, and passed through

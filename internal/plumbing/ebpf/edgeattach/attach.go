@@ -139,12 +139,11 @@ func ResolveTargets(ifaceName string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("edgeattach: enumerate slaves of bonding master %q: %w", ifaceName, err)
 	}
-	slaves := bond.SlaveNames(iface, links)
-	if len(slaves) == 0 {
-		return nil, fmt.Errorf(
-			"edgeattach: bonding master %q has no slave interfaces to attach the XDP program to", ifaceName)
+	targets, err := bond.XDPTargets(iface, links)
+	if err != nil {
+		return nil, fmt.Errorf("edgeattach: %w", err)
 	}
-	return slaves, nil
+	return targets, nil
 }
 
 // Attach attaches program to the XDP hook of every interface in ifaceNames, in

@@ -12,13 +12,9 @@ import (
 )
 
 const (
-	testNATNodeName  = "test-nat-node"
-	testNATIface     = "eth1"
-	testNATIface2    = "eth2"
-	testNATShardSID  = "fc00:1:2::1"
-	testNATShardPub4 = "192.0.2.10"
-	testNAT64Prefix  = "2001:db8:64::/96"
-	testNATShardPub  = "2001:db8:9999::1"
+	testNATNodeName = "test-nat-node"
+	testNATIface    = "eth1"
+	testNATIface2   = "eth2"
 )
 
 func TestNATConfigDefaults(t *testing.T) {
@@ -36,12 +32,6 @@ func TestNATConfigDefaults(t *testing.T) {
 	if len(cfg.UplinkInterfaces) != 0 {
 		t.Errorf("UplinkInterfaces = %q, want empty", cfg.UplinkInterfaces)
 	}
-	if cfg.ShardSID != "" {
-		t.Errorf("ShardSID = %q, want empty", cfg.ShardSID)
-	}
-	if cfg.ShardPubAddr6 != "" {
-		t.Errorf("ShardPubAddr6 = %q, want empty", cfg.ShardPubAddr6)
-	}
 }
 
 func TestNATConfigEnvOverride(t *testing.T) {
@@ -49,8 +39,6 @@ func TestNATConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvNATMetricsPort, "9090")
 	t.Setenv(EnvNATGRPCHealthPort, "9091")
 	t.Setenv(EnvNATUplinkInterfaces, testNATIface)
-	t.Setenv(EnvNATShardSID, testNATShardSID)
-	t.Setenv(EnvNATShardPubAddr6, testNATShardPub)
 
 	cfg := NewNATConfig()
 
@@ -66,12 +54,6 @@ func TestNATConfigEnvOverride(t *testing.T) {
 	if len(cfg.UplinkInterfaces) != 1 || cfg.UplinkInterfaces[0] != testNATIface {
 		t.Errorf("UplinkInterfaces = %q, want [%q]", cfg.UplinkInterfaces, testNATIface)
 	}
-	if cfg.ShardSID != testNATShardSID {
-		t.Errorf("ShardSID = %q, want %q", cfg.ShardSID, testNATShardSID)
-	}
-	if cfg.ShardPubAddr6 != testNATShardPub {
-		t.Errorf("ShardPubAddr6 = %q, want %q", cfg.ShardPubAddr6, testNATShardPub)
-	}
 }
 
 func TestNATConfigValidate(t *testing.T) {
@@ -81,160 +63,32 @@ func TestNATConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: testCaseMissingNodeName,
-			envVars: map[string]string{
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
-			},
+			name:    testCaseMissingNodeName,
+			envVars: map[string]string{EnvNATUplinkInterfaces: testNATIface},
 			wantErr: testErrNodeNameRequired,
-		},
-		{
-			name: "missing uplink interface",
-			envVars: map[string]string{
-				EnvNATNodeName:      testNATNodeName,
-				EnvNATShardSID:      testNATShardSID,
-				EnvNATShardPubAddr6: testNATShardPub,
-			},
-			wantErr: "uplink interface is required",
-		},
-		{
-			name: "missing shard SID",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardPubAddr6:    testNATShardPub,
-			},
-			wantErr: "shard SID is required",
-		},
-		{
-			name: "unparseable shard SID",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         "not-an-ip-address",
-				EnvNATShardPubAddr6:    testNATShardPub,
-			},
-			wantErr: "is not a valid IP address",
-		},
-		{
-			name: "ipv4 shard SID is wrong family",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testIPv4Addr,
-				EnvNATShardPubAddr6:    testNATShardPub,
-			},
-			wantErr: testErrMustBeNativeIPv6,
-		},
-		{
-			// No longer "the IPv6 address is required" -- a shard may serve
-			// NAT64 alone. What is still required is that it serve something.
-			name: "serving neither address family",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-			},
-			wantErr: "must serve at least one address family",
-		},
-		{
-			name: "NAT64 prefix without a public IPv4 address",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
-				EnvNAT64Prefix:         testNAT64Prefix,
-			},
-			wantErr: "shard public IPv4 address is not",
-		},
-		{
-			name: "public IPv4 address without a NAT64 prefix",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
-				EnvNATShardPubAddr4:    testNATShardPub4,
-			},
-			wantErr: "NAT64 prefix is not",
-		},
-		{
-			name: "ipv6 shard public IPv4 address is wrong family",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr4:    testNATShardPub,
-				EnvNAT64Prefix:         testNAT64Prefix,
-			},
-			wantErr: "must be an IPv4 address",
-		},
-		{
-			// The datapath extracts the embedded IPv4 address from one aligned
-			// four-byte run, which only a /96 guarantees.
-			name: "NAT64 prefix of the wrong length",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr4:    testNATShardPub4,
-				EnvNAT64Prefix:         "2001:db8:64::/64",
-			},
-			wantErr: "must be a /96",
-		},
-		{
-			name: "NAT64 prefix with bits below its length",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr4:    testNATShardPub4,
-				EnvNAT64Prefix:         "2001:db8:64::1/96",
-			},
-			wantErr: "bits set below its prefix length",
-		},
-		{
-			name: "ipv4 shard public address is wrong family",
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testIPv4Addr,
-			},
-			wantErr: testErrMustBeNativeIPv6,
 		},
 		{
 			name: testCaseInvalidMetricsPort,
 			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
-				EnvNATMetricsPort:      "0",
+				EnvNATNodeName:    testNATNodeName,
+				EnvNATMetricsPort: "0",
 			},
 			wantErr: testErrMetricsPortRange,
 		},
 		{
 			name: testCaseInvalidGRPCHealthPort,
 			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
-				EnvNATGRPCHealthPort:   "0",
+				EnvNATNodeName:       testNATNodeName,
+				EnvNATGRPCHealthPort: "0",
 			},
 			wantErr: testErrGRPCHealthPortRange,
 		},
 		{
-			name: testCaseValidConfig,
-			envVars: map[string]string{
-				EnvNATNodeName:         testNATNodeName,
-				EnvNATUplinkInterfaces: testNATIface,
-				EnvNATShardSID:         testNATShardSID,
-				EnvNATShardPubAddr6:    testNATShardPub,
-			},
+			// The node name is the only required value. Uplinks are
+			// auto-detected when unset, and the shard's identity comes from
+			// its EgressShard's spec, not from process configuration.
+			name:    testCaseValidConfig,
+			envVars: map[string]string{EnvNATNodeName: testNATNodeName},
 			wantErr: "",
 		},
 	}
@@ -263,75 +117,11 @@ func TestNATConfigValidate(t *testing.T) {
 	}
 }
 
-// TestNATConfigValidateAcceptsEachFamilyCombination pins the three shard shapes
-// the generalization is for: NAT66 alone (what every shard was before this),
-// NAT64 alone, and both at once. The negative table above proves half a NAT64
-// configuration is rejected; this proves a whole one is not.
-func TestNATConfigValidateAcceptsEachFamilyCombination(t *testing.T) {
-	tests := []struct {
-		name        string
-		envVars     map[string]string
-		wantNAT66   bool
-		wantNAT64   bool
-		description string
-	}{
-		{
-			name: "NAT66 only",
-			envVars: map[string]string{
-				EnvNATShardPubAddr6: testNATShardPub,
-			},
-			wantNAT66:   true,
-			description: "the shape every shard had before NAT64 existed",
-		},
-		{
-			name: "NAT64 only",
-			envVars: map[string]string{
-				EnvNATShardPubAddr4: testNATShardPub4,
-				EnvNAT64Prefix:      testNAT64Prefix,
-			},
-			wantNAT64:   true,
-			description: "a shard dedicated to IPv4 reachability",
-		},
-		{
-			name: "both families",
-			envVars: map[string]string{
-				EnvNATShardPubAddr6: testNATShardPub,
-				EnvNATShardPubAddr4: testNATShardPub4,
-				EnvNAT64Prefix:      testNAT64Prefix,
-			},
-			wantNAT66:   true,
-			wantNAT64:   true,
-			description: "one shard, one session table, both families",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(EnvNATNodeName, testNATNodeName)
-			t.Setenv(EnvNATUplinkInterfaces, testNATIface)
-			t.Setenv(EnvNATShardSID, testNATShardSID)
-			for k, v := range tt.envVars {
-				t.Setenv(k, v)
-			}
-
-			cfg := NewNATConfig()
-			if err := cfg.Validate(); err != nil {
-				t.Fatalf("Validate() = %v, want nil (%s)", err, tt.description)
-			}
-			if got := cfg.ServesNAT66(); got != tt.wantNAT66 {
-				t.Errorf("ServesNAT66() = %v, want %v", got, tt.wantNAT66)
-			}
-			if got := cfg.ServesNAT64(); got != tt.wantNAT64 {
-				t.Errorf("ServesNAT64() = %v, want %v", got, tt.wantNAT64)
-			}
-		})
-	}
-}
-
 // TestNATConfigUplinkInterfaces is the regression test for a shard that could
-// only ever attach to one uplink (#545). A multi-homed shard node needs every
-// fabric uplink named here: one an operator cannot express is one the datapath
-// never claims, and traffic arriving there leaves untranslated and uncounted.
+// only ever attach to one uplink (#545). The override must be able to name
+// every fabric uplink of a multi-homed node: one an operator cannot express is
+// one the datapath never claims, and traffic arriving there leaves untranslated
+// and uncounted.
 //
 // Before the field became a list, the comma-separated form below resolved to a
 // single interface literally named "eth1,eth2", which Validate accepted and no
@@ -366,8 +156,6 @@ func TestNATConfigUplinkInterfaces(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(EnvNATNodeName, testNATNodeName)
 			t.Setenv(EnvNATUplinkInterfaces, tt.value)
-			t.Setenv(EnvNATShardSID, testNATShardSID)
-			t.Setenv(EnvNATShardPubAddr6, testNATShardPub)
 
 			cfg := NewNATConfig()
 			if err := cfg.Validate(); err != nil {
@@ -380,24 +168,22 @@ func TestNATConfigUplinkInterfaces(t *testing.T) {
 	}
 }
 
-// TestNATConfigUplinkInterfacesRequired covers the other half: a shard with no
-// usable uplink must fail at startup naming the field, not load a datapath it
-// then attaches nowhere.
-func TestNATConfigUplinkInterfacesRequired(t *testing.T) {
+// TestNATConfigUplinkInterfacesOptional covers the other half: an override
+// that is unset or names nothing usable means auto-detect, not an error.
+// Treating it as required is what forced a hand-written per-node patch onto
+// every shard (#581).
+func TestNATConfigUplinkInterfacesOptional(t *testing.T) {
 	for _, value := range []string{"", "  ", ",", " , "} {
 		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
 			t.Setenv(EnvNATNodeName, testNATNodeName)
 			t.Setenv(EnvNATUplinkInterfaces, value)
-			t.Setenv(EnvNATShardSID, testNATShardSID)
-			t.Setenv(EnvNATShardPubAddr6, testNATShardPub)
 
 			cfg := NewNATConfig()
-			err := cfg.Validate()
-			if err == nil {
-				t.Fatal("Validate() = nil, want an error for a shard with no uplink")
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want nil (an empty override means auto-detect)", err)
 			}
-			if !strings.Contains(err.Error(), EnvNATUplinkInterfaces) {
-				t.Errorf("Validate() = %v, want an error naming %s", err, EnvNATUplinkInterfaces)
+			if len(cfg.UplinkInterfaces) != 0 {
+				t.Errorf("UplinkInterfaces = %q, want empty", cfg.UplinkInterfaces)
 			}
 		})
 	}
