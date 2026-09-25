@@ -26,6 +26,6 @@ spec:
                     operator: DoesNotExist
       containers:
         - name: netshoot
-          image: nicolaka/netshoot:latest
+          image: ghcr.io/datum-cloud/galactic-debug:latest
           imagePullPolicy: IfNotPresent
           command: ["sleep", "infinity"]
