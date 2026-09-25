@@ -24,6 +24,13 @@ type fakeBackend struct {
 	routes      map[string]routeRecord // "vpc/prefix" -> record
 	calls       []string               // ordered call log, for assertions
 
+	// generation is what DatapathGeneration returns, and failGeneration, if
+	// set, the error it returns instead. Tests change generation to simulate
+	// the shared eBPF datapath being reloaded. Reads are not logged in calls,
+	// since Store makes them on every Sweep.
+	generation     string
+	failGeneration error
+
 	// failEnsureVRF/failEnsureRoute/failRemoveVRF/failRemoveRoute, if set,
 	// make the matching method return this error instead of succeeding.
 	failEnsureVRF   error
@@ -117,6 +124,22 @@ func (f *fakeBackend) ListRoutes(tableID uint32) ([]RouteInfo, error) {
 		}
 	}
 	return infos, nil
+}
+
+func (f *fakeBackend) DatapathGeneration() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.generation, f.failGeneration
+}
+
+// reloadDatapath simulates the CNI control daemon recreating the shared eBPF
+// maps empty: every route entry is lost and the generation moves to
+// testGenReloaded.
+func (f *fakeBackend) reloadDatapath() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.generation = testGenReloaded
+	f.routes = make(map[string]routeRecord)
 }
 
 // routeCount/vrfCount let tests assert on the fake's installed state

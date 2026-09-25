@@ -63,6 +63,14 @@ type Store struct {
 
 	routes map[string]*routeState
 	vrfs   map[string]*vrfState
+
+	// generation is the backend's DatapathGeneration as of the last time every
+	// tracked VRF and route was known to be written against it, or empty
+	// before the first successful read. reapplyPending is set when a reapply
+	// pass left something unapplied, so the next Sweep retries it even though
+	// the generation has not moved again.
+	generation     string
+	reapplyPending bool
 }
 
 // NewStore returns a Store that converges against backend, delaying teardown of
@@ -162,6 +170,15 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 		return nil
 	}
 
+	// Read before the first write rather than after it: a reload landing
+	// between the two then shows up on the next Sweep as a changed generation
+	// instead of being mistaken for the one those writes went into.
+	if s.generation == "" {
+		if gen, gerr := s.backend.DatapathGeneration(); gerr == nil {
+			s.generation = gen
+		}
+	}
+
 	v, ok := s.vrfs[desired.VPC]
 	if !ok {
 		v = &vrfState{}
@@ -210,11 +227,16 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 // grace, so the two timers can never overlap and a VPC is never torn down while
 // one of its routes might still come back.
 //
+// Sweep first reapplies every live VRF and route if the shared eBPF datapath
+// has been reloaded since they were written; see checkDatapathLocked.
+//
 // Call this periodically, never reactively: VRF teardown is an aggregate
 // condition over many routes, not one watched object's transition.
 func (s *Store) Sweep(ctx context.Context, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.checkDatapathLocked()
 
 	pendingRoutes, pendingVRFs := 0, 0
 
@@ -333,6 +355,103 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// checkDatapathLocked reapplies every live VRF and route when the backend's
+// DatapathGeneration has changed since they were written, or when an earlier
+// reapply pass left something unapplied. Callers must hold s.mu.
+//
+// Nothing else would notice. The CNI control daemon reloads the shared eBPF
+// datapath independently of this sidecar, recreating its maps empty on a
+// schema change and re-pinning usid_egress on every load, while this sidecar
+// writes kernel state only on an EndpointSlice change, and ensures a VRF's
+// datapath only when first creating it. Without this, a route lost to a reload
+// stays lost until this process restarts, and usid_egress's miss on it falls
+// through to the VRF's default route, looping traffic back into the VRF.
+//
+// A failed generation read is not acted on: it means the datapath is not
+// loaded at all, which nothing here can repair, and the next successful read
+// after it is loaded again will differ and trigger the reapply.
+func (s *Store) checkDatapathLocked() {
+	gen, err := s.backend.DatapathGeneration()
+	if err != nil {
+		slog.Debug("ingresssidecar: read eBPF datapath generation", "err", err)
+		return
+	}
+	if gen == s.generation && !s.reapplyPending {
+		return
+	}
+	if s.generation == "" && !s.anyInstalledLocked() {
+		s.generation = gen // nothing written yet, so nothing to reapply
+		return
+	}
+
+	slog.Info("ingresssidecar: eBPF datapath changed, reapplying every VRF and route",
+		"previous", s.generation, "current", gen, "retry", s.reapplyPending)
+	if s.metrics != nil {
+		s.metrics.Reapplies.Inc()
+	}
+	s.generation = gen
+	s.reapplyPending = !s.reapplyLocked()
+}
+
+// reapplyLocked re-runs EnsureVRF for every installed VRF with a live route,
+// then EnsureRoute for every installed route still desired, reporting whether
+// all of them succeeded. State within its teardown grace period is left alone:
+// reinstalling it would only extend the life of something already on its way
+// out. Callers must hold s.mu.
+func (s *Store) reapplyLocked() bool {
+	ok := true
+	failedVPCs := make(map[string]struct{})
+	for vpc, v := range s.vrfs {
+		if !v.installed || !v.absentSince.IsZero() {
+			continue
+		}
+		tableID, err := s.backend.EnsureVRF(vpc)
+		if err != nil {
+			s.countError("reapply_vrf")
+			slog.Error("ingresssidecar: reapply VRF", "vpc", vpc, "error", err)
+			failedVPCs[vpc] = struct{}{}
+			ok = false
+			continue
+		}
+		if tableID != v.tableID {
+			slog.Warn("ingresssidecar: VRF table ID changed on reapply", "vpc", vpc,
+				"previous", v.tableID, "current", tableID)
+			v.tableID = tableID
+		}
+	}
+
+	for key, r := range s.routes {
+		if !r.installed || !r.absentSince.IsZero() {
+			continue
+		}
+		if _, failed := failedVPCs[r.vpc]; failed {
+			continue // already counted against this pass; retried with its VRF
+		}
+		v, found := s.vrfs[r.vpc]
+		if !found {
+			slog.Error("ingresssidecar: reapply found route with no tracked VRF", "key", key, "vpc", r.vpc)
+			continue
+		}
+		if err := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID); err != nil {
+			s.countError("reapply_route")
+			slog.Error("ingresssidecar: reapply route", "key", key, "vpc", r.vpc, "error", err)
+			ok = false
+		}
+	}
+	return ok
+}
+
+// anyInstalledLocked reports whether this Store has written any VRF to the
+// backend. Callers must hold s.mu.
+func (s *Store) anyInstalledLocked() bool {
+	for _, v := range s.vrfs {
+		if v.installed {
+			return true
+		}
+	}
+	return false
 }
 
 // prefixClaimedElsewhereLocked reports whether some other tracked route still

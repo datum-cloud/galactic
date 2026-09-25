@@ -19,6 +19,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -327,6 +328,45 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 		return fmt.Errorf("attach usid_egress to VRF %d's veth peer %q: %w", tableID, peerLink.Attrs().Name, err)
 	}
 	return nil
+}
+
+// datapathGeneration identifies the eBPF objects currently pinned under
+// ebpfPinDir by the kernel IDs of usid_egress and egress_route_table. Both
+// change when the CNI control daemon reloads the datapath: the program is
+// re-pinned on every load, and the maps are recreated empty when their schema
+// changes. Either change strands this sidecar's state, since its veths keep
+// running the program they were attached with, reading the maps it was loaded
+// against, and a map recreated empty has lost every entry written to it.
+func datapathGeneration() (string, error) {
+	program, err := ebpf.LoadPinnedProgram(filepath.Join(ebpfPinDir, attach.UsidEgressPinName), nil)
+	if err != nil {
+		return "", fmt.Errorf("load pinned usid_egress program: %w", err)
+	}
+	defer func() { _ = program.Close() }()
+	progInfo, err := program.Info()
+	if err != nil {
+		return "", fmt.Errorf("read pinned usid_egress program info: %w", err)
+	}
+	progID, ok := progInfo.ID()
+	if !ok {
+		return "", errors.New("kernel does not report a program ID for usid_egress")
+	}
+
+	routeTable, err := ebpf.LoadPinnedMap(filepath.Join(ebpfPinDir, prog.UsidMapEgressRouteTable), nil)
+	if err != nil {
+		return "", fmt.Errorf("load pinned %s: %w", prog.UsidMapEgressRouteTable, err)
+	}
+	defer func() { _ = routeTable.Close() }()
+	mapInfo, err := routeTable.Info()
+	if err != nil {
+		return "", fmt.Errorf("read pinned %s info: %w", prog.UsidMapEgressRouteTable, err)
+	}
+	mapID, ok := mapInfo.ID()
+	if !ok {
+		return "", fmt.Errorf("kernel does not report a map ID for %s", prog.UsidMapEgressRouteTable)
+	}
+
+	return fmt.Sprintf("%d/%d", progID, mapID), nil
 }
 
 // removeEgressDatapath undoes ensureEgressDatapath's registrations for the VPC
