@@ -21,8 +21,8 @@ ipv6 route 2001:db8:ff01::/48 Null0
 ipv6 route fc00:0:2::/48 Null0
 
 # This node's egress shard's two masquerade addresses
-# (GALACTIC_NAT_SHARD_PUB_ADDR6 and _ADDR4, resources/galactic-nat/dfw/
-# node-patch.yaml), originated into the underlay so a reply from outside the
+# (spec.shardAddressIPv6 and spec.shardAddressIPv4,
+# resources/galactic-nat/dfw/egressshard.yaml), originated into the underlay so a reply from outside the
 # fabric can reach the shard that sent the request (#549).
 #
 # galactic-nat's EgressShardReconciler advertises the IPv6 address as an EVPN

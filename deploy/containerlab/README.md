@@ -297,7 +297,7 @@ tenant ingress before the TC decap hook ever ran, silently.
 | Service     | Node-ID range     | Identity                                       |
 |-------------|-------------------|------------------------------------------------|
 | `0x1`       | `0x1000`–`0x1FFF` | Tenant delivery — every node's `BGPRouter`     |
-| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`GALACTIC_NAT_SHARD_SID`)    |
+| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`EgressShard.spec.shardSID`) |
 | `0x3`       | `0x3000`–`0x3FFF` | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`) |
 | `0x4`–`0xD` | —                 | Unallocated                                    |
 
@@ -401,7 +401,8 @@ site-local `ns60` backend — one anycast service, three sites, four gateways.
   `verify:nat-datapath` is deliberately kept out of the `verify` chain.
 - **A shard attaches to its uplinks once, at process startup.**
   `GALACTIC_NAT_UPLINK_INTERFACES` is a list and every interface in it gets
-  the shard XDP program, so a dual-homed node like `dfw-worker` keeps
+  the shard XDP program (set explicitly in this lab: auto-detection would
+  also claim Kind's `eth0`, which carries each node's IPv6 default route), so a dual-homed node like `dfw-worker` keeps
   translating across an uplink failure. Nothing watches for link changes
   afterwards, though: an interface that appears after the process started
   gets no program until it restarts.

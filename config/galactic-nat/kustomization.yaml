@@ -1,14 +1,14 @@
 # The sharded egress translation datapath control plane. Unlike
 # config/galactic-router/'s equivalent kustomization.yaml, this
-# deliberately does NOT include base/: base/daemonset.yaml's
-# galactic-nat container has no generic default for
-# GALACTIC_NAT_UPLINK_INTERFACES or _SHARD_SID (both required, and the
-# shard SID must be unique per shard node), nor for the per-family
-# addresses that decide whether a shard serves NAT66, NAT64, or both --
-# config.NATConfig.Validate requires at least one family. Applying it as
-# shipped here would produce a crash-looping container.
-# config/galactic-gateway/ and config/fabric-router/ have the same
-# exemption for the same reason.
+# deliberately does NOT include base/. A shard's identity -- its SID and
+# per-family masquerade addresses -- comes from its EgressShard's spec, and
+# its uplinks are auto-detected, so base/daemonset.yaml no longer needs any
+# per-node value to start. But auto-detection attaches native XDP to every
+# interface carrying the IPv6 default route or a BGP-learned route, and on a
+# node where that includes a management NIC the deployer has to name the
+# fabric uplinks with GALACTIC_NAT_UPLINK_INTERFACES instead, which only
+# they know. config/galactic-gateway/ and config/fabric-router/ have the
+# same exemption.
 #
 # serviceaccount.yaml/rbac.yaml have no such per-node uniqueness problem --
 # they're safe and idempotent to apply cluster-wide regardless of how many

@@ -5,6 +5,7 @@
 package attach
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -73,10 +74,20 @@ func ResolveInterfaces() ([]string, error) {
 	} else {
 		names, err = autoDetectInterfaces()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w; set %s to override", err, config.EnvCNIEBPFInterfaces)
 		}
 	}
 	return expandBondSlaves(names)
+}
+
+// DetectUplinks returns the interfaces carrying the IPv6 default route or a
+// BGP-learned route, in the order and with the exclusions ResolveInterfaces'
+// auto-detection applies. Unlike ResolveInterfaces it reads no override and
+// expands no bond, so a caller attaching some other hook applies its own: the
+// egress translation datapath attaches native XDP, which must land on a bond's
+// slaves and never on its master, where the TC-BPF path attaches to both.
+func DetectUplinks() ([]string, error) {
+	return autoDetectInterfaces()
 }
 
 // parseInterfaceList splits a comma-separated interface list, trimming
@@ -163,9 +174,9 @@ func autoDetectInterfaces() ([]string, error) {
 	collect(isFabricPeerRoute)
 
 	if len(names) == 0 {
-		return nil, fmt.Errorf(
-			"attach: no default or BGP-learned IPv6 route found to auto-detect the "+
-				"SRv6/underlay-facing interface; set %s to override", config.EnvCNIEBPFInterfaces)
+		return nil, errors.New(
+			"attach: no default or BGP-learned IPv6 route found to auto-detect the " +
+				"SRv6/underlay-facing interface")
 	}
 	return names, nil
 }

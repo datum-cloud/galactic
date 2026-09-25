@@ -16,7 +16,11 @@
 // test-only indirection.
 package bond
 
-import "github.com/vishvananda/netlink"
+import (
+	"fmt"
+
+	"github.com/vishvananda/netlink"
+)
 
 // LinkType is the vishvananda/netlink Link.Type() value reported for a
 // Linux bonding master.
@@ -39,4 +43,24 @@ func SlaveNames(master netlink.Link, links []netlink.Link) []string {
 		}
 	}
 	return slaves
+}
+
+// XDPTargets returns the interface names a native XDP program should attach to
+// in place of link: link itself when it is not a bonding master, and its slaves
+// in links, never the master, when it is. See the package doc comment for why
+// the master is excluded.
+//
+// A bonding master with no slaves is an error. Attaching nothing leaves the
+// datapath with no ingress on that uplink, and attaching the master risks the
+// failure excluding it avoids.
+func XDPTargets(link netlink.Link, links []netlink.Link) ([]string, error) {
+	if !IsMaster(link) {
+		return []string{link.Attrs().Name}, nil
+	}
+	slaves := SlaveNames(link, links)
+	if len(slaves) == 0 {
+		return nil, fmt.Errorf(
+			"bonding master %q has no slave interfaces to attach the XDP program to", link.Attrs().Name)
+	}
+	return slaves, nil
 }

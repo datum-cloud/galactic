@@ -37,9 +37,10 @@ const (
  Find more information at: https://www.datum.net/docs`
 )
 
-// runCmd is the application startup: it loads and attaches this shard's NAT66
-// egress datapath to its fabric-facing uplink and registers the reconciler that
-// publishes this shard's identity and health.
+// runCmd is the application startup: it loads and attaches this node's egress
+// translation datapath to its fabric-facing uplinks and registers the
+// reconciler that programs it from this node's EgressShard and publishes the
+// result.
 func runCmd(cfg *config.NATConfig) error {
 	nodeName := cfg.NodeName
 	metricsPort := cfg.MetricsPort
@@ -111,28 +112,26 @@ func runCmd(cfg *config.NATConfig) error {
 	// Pre-flight RBAC check.
 	checkWatchPermissions(mgr)
 
-	// Load and attach the egress translation datapath. Always a real datapath:
-	// configuration validation rejects an empty uplink or SID, and a shard
-	// serving neither address family, before this is reached -- this binary
-	// exists only to run a shard.
-	datapathHealth, err := setupNatDatapath(cfg, ctrlmetrics.Registry)
+	// Load and attach the egress translation datapath. It needs no identity to
+	// attach: that comes from this node's EgressShard spec, which the
+	// reconciler below programs on its first reconcile.
+	datapath, err := setupNatDatapath(cfg, ctrlmetrics.Registry)
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
 	// Only now is the datapath attached. Report serving from here on, not from
-	// process start.
+	// process start. Serving does not wait for an identity to be programmed:
+	// a node whose shard has not been assigned one yet would otherwise never
+	// turn ready and would block the DaemonSet's rollout. The EgressShard's
+	// Programmed condition reports that instead.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	// Register EgressShard controller.
 	if err := (&controller.EgressShardReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		NodeName:         nodeName,
-		ShardSID:         cfg.ShardSID,
-		ShardAddressIPv6: cfg.ShardPubAddr6,
-		ShardAddressIPv4: cfg.ShardPubAddr4,
-		NAT64Prefix:      cfg.NAT64Prefix,
-		Datapath:         datapathHealth,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		NodeName: nodeName,
+		Datapath: datapath,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EgressShard controller: %w", err)
 	}
@@ -184,17 +183,8 @@ func newRootCommand() *cobra.Command {
 		config.DefaultNATGRPCHealthPort,
 		"gRPC health check port")
 	cmd.Flags().StringP("nat-uplink-interfaces", "", "",
-		"Comma-separated fabric-facing uplink interfaces this shard's XDP datapath attaches to; "+
-			"name every fabric uplink, not just the primary (required)")
-	cmd.Flags().StringP("nat-shard-sid", "", "",
-		"This shard's own SRv6 uSID, encapsulation target for tenant egress traffic (required)")
-	cmd.Flags().StringP("nat-shard-pub-addr6", "", "",
-		"This shard's own publicly-routable IPv6 masquerade source address, enabling NAT66")
-	cmd.Flags().StringP("nat-shard-pub-addr4", "", "",
-		"This shard's own publicly-routable IPv4 masquerade source address, enabling NAT64 "+
-			"together with --nat64-prefix")
-	cmd.Flags().StringP("nat64-prefix", "", "",
-		"Fabric-wide NAT64 /96 this shard translates for; must match what DNS64 synthesizes into")
+		"Comma-separated fabric-facing uplink interfaces this shard's XDP datapath attaches to, "+
+			"overriding auto-detection; name every fabric uplink, not just the primary")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

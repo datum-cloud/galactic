@@ -45,6 +45,31 @@ func TestShardConfigTable_GetBeforeSet(t *testing.T) {
 	}
 }
 
+// TestShardConfigTable_ClearReadsAsUnconfigured covers the zero row Clear
+// writes, which is also what a real array map holds before its first write:
+// Get must report it as unconfigured, not as a shard with an all-zero SID.
+func TestShardConfigTable_ClearReadsAsUnconfigured(t *testing.T) {
+	table := NewShardConfigTable(newFakeTable())
+
+	if err := table.Set(ShardConfig{
+		ShardSID:      netip.MustParseAddr("fc00:1:2::1"),
+		ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1"),
+	}); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if err := table.Clear(); err != nil {
+		t.Fatalf("Clear() error = %v", err)
+	}
+
+	got, ok, err := table.Get()
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if ok {
+		t.Errorf("Get() ok = true after Clear, want false; got %+v", got)
+	}
+}
+
 func TestShardConfigTable_SetOverwrites(t *testing.T) {
 	table := NewShardConfigTable(newFakeTable())
 

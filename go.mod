@@ -19,7 +19,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20260831221819-dcee5577542a
-	go.datum.net/network v0.1.0
+	go.datum.net/network v0.1.1-0.20260923215140-1ed44c853eea
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
 	google.golang.org/grpc v1.84.0

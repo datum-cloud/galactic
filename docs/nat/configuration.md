@@ -9,7 +9,7 @@ of standing this up from nothing, see
 [docs/nat/getting-started.md](getting-started.md); this document only
 covers the "what", not the "why" or the step-by-step.
 
-> Last verified: 2026-09-11 against the current working tree of
+> Last verified: 2026-09-23 against the current working tree of
 > `internal/config/nat.go`, `internal/config/cni.go`,
 > `cmd/galactic-nat/`, `config/galactic-nat/`,
 > `internal/controller/egressshard_controller.go`, and
@@ -23,44 +23,41 @@ flags, or a combination of both (CLI flags take precedence), with the
 `galactic-router` and `galactic-gateway` use (see
 [docs/router/configuration.md](../router/configuration.md)).
 
-| Option              | Environment Variable              | CLI Flag                   | Default | Required       |
-| ------------------- | --------------------------------- | -------------------------- | ------- | -------------- |
-| Node name           | `GALACTIC_NAT_NODE_NAME`          | `--node-name`              | —       | Yes            |
-| Uplink interfaces   | `GALACTIC_NAT_UPLINK_INTERFACES`  | `--nat-uplink-interfaces`  | —       | Yes            |
-| Shard SID           | `GALACTIC_NAT_SHARD_SID`          | `--nat-shard-sid`          | —       | Yes            |
-| IPv6 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR6`    | `--nat-shard-pub-addr6`    | —       | Enables NAT66  |
-| IPv4 masquerade src | `GALACTIC_NAT_SHARD_PUB_ADDR4`    | `--nat-shard-pub-addr4`    | —       | Enables NAT64  |
-| NAT64 prefix        | `GALACTIC_NAT_NAT64_PREFIX`       | `--nat64-prefix`           | —       | With the above |
-| Metrics port        | `GALACTIC_NAT_METRICS_PORT`       | `--metrics-port`           | `9182`  | No             |
-| gRPC health port    | `GALACTIC_NAT_GRPC_HEALTH_PORT`   | `--grpc-health-port`       | `5182`  | No             |
+| Option            | Environment Variable             | CLI Flag                  | Default       | Required |
+| ----------------- | -------------------------------- | ------------------------- | ------------- | -------- |
+| Node name         | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |
+| Uplink interfaces | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected | No       |
+| Metrics port      | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`        | No       |
+| gRPC health port  | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`        | No       |
 
-`NATConfig.Validate` enforces all of this at startup — a shard node
-deployed wrong crash-loops immediately with an actionable message rather
-than running degraded. Specifically:
+That is the whole process configuration. The shard's identity — its SID,
+masquerade addresses and NAT64 prefix — is not process configuration: it
+comes from the spec of the `EgressShard` targeting this node (see
+[below](#egressshard-crd-networkdatumapiscomv1alpha1)). The process attaches
+its datapath at startup with no identity and programs one on reconcile, so a
+node without an `EgressShard` runs attached but claims no packet rather than
+crash-looping.
 
-- The node name, at least one uplink, and the shard SID are always required.
-- **At least one address family must be turned on.** A shard serving
-  neither loads a datapath that claims no packet at all, which presents as
-  a silent blackhole rather than as the misconfiguration it is.
-- **The NAT64 pair is all-or-nothing.** An IPv4 address with no prefix has
-  nothing to translate for; a prefix with no IPv4 address has nothing to
-  translate into. Either alone would drop every NAT64 packet sent to it, so
-  both are rejected up front rather than at the first packet.
-
-A shard may serve NAT66 only (the shape every shard had before NAT64
-existed), NAT64 only, or both. `9182`/`5182` are
-chosen to avoid every other `hostNetwork: true` galactic process already
-running on a compute node (`fabric-router`'s `179`, `galactic-router`'s
-`9179`/`5179`, `galactic-cni`'s `9180`/`5180`, `galactic-gateway`'s
-`8081`/`5181`).
+`9182`/`5182` are chosen to avoid every other `hostNetwork: true` galactic
+process already running on a compute node (`fabric-router`'s `179`,
+`galactic-router`'s `9179`/`5179`, `galactic-cni`'s `9180`/`5180`,
+`galactic-gateway`'s `8081`/`5181`).
 
 ### Option details
 
 **`--nat-uplink-interfaces` / `GALACTIC_NAT_UPLINK_INTERFACES`**
-Comma-separated names of this shard's fabric-facing uplink interfaces —
+Comma-separated override for this shard's fabric-facing uplink interfaces —
 `internal/plumbing/ebpf/natprog`'s XDP program attaches to every one of
-them. Required: `galactic-nat` only ever runs as a dedicated shard, so
-there's no "not this role, skip the datapath" case to fall back to.
+them. Unset, they are auto-detected with the same derivation
+`galactic-cni`'s SRv6 datapath uses: every interface carrying the IPv6
+default route or a BGP-learned route, skipping tunnels, VRF slaves and
+loopback (`attach.DetectUplinks`). Either way a bonding master resolves to
+its slaves, never to itself, since native XDP on a master is unreliable
+(`natattach.ResolveUplinks`).
+
+Set it on a node where detection is ambiguous — typically one whose
+management NIC carries the IPv6 default route, as Kind's `eth0` does in the
+containerlab lab. Detection would attach there too.
 
 > **Name every fabric uplink, not just the primary.** The datapath claims
 > a packet only on an interface its program is attached to. An
@@ -80,62 +77,9 @@ driver drops carrier to attach a native XDP program, every member of the
 bond bounces at once when the shard starts.
 
 Attachment is all-or-nothing: a shard that cannot attach to every
-interface in the list fails to start, rather than coming up with a hole in
+resolved interface fails to start, rather than coming up with a hole in
 its coverage. It happens once, at process startup, so an interface that
 appears later is not picked up until the process restarts.
-
-**`--nat-shard-sid` / `GALACTIC_NAT_SHARD_SID`**
-This shard's own SRv6 uSID (`EgressShardStatus.ShardSID`) — the outer
-destination a tenant's egress packet is encapsulated toward. One SID
-serves both address families: the datapath decides which translation a
-packet gets from its inner destination, so enabling NAT64 needs no second
-SID and no second route on any tenant VRF. Must be a
-native IPv6 address (`NATConfig.Validate` rejects IPv4 and 4-in-6).
-Operator-supplied today; nothing in this repo derives it automatically —
-the same gap `BGPRouter.Spec.SRv6Locator`/`NodeID` assignment and
-`GALACTIC_GATEWAY_SRV6_ADDRESS` both have.
-
-> **Node-ID collision hazard.** The datapath's `locator_matches` check
-> (`internal/plumbing/ebpf/natprog/nat.c`) only compares the top 64
-> bits (Block + Node-ID) of a packet's outer destination against this
-> value — it does **not** check that the Node-ID is actually reserved for
-> the shard. Reusing the physical node's own real `BGPRouter.Spec.NodeID`
-> here means the shard's XDP program hijacks that node's own ordinary
-> tenant ingress traffic before `usid_ingress` ever gets to it. Reserve a
-> distinct Node-ID on the shard's locator for this purpose alone — see
-> `deploy/containerlab/resources/galactic-nat/dfw/node-patch.yaml`'s
-> comment for the exact encoding the lab uses.
-
-**`--nat-shard-pub-addr6` / `GALACTIC_NAT_SHARD_PUB_ADDR6`**
-This shard's own dedicated, publicly-routable IPv6 address
-(`EgressShardStatus.ShardAddressIPv6`) — every flow this shard NATs is SNAT'd
-to an address:port within it. Must also be a native IPv6 address. Must be
-unique per shard: a flow's reply is routed back to the correct shard by
-ordinary unicast routing on this address alone, with no hashing on the
-return path — two shards sharing an address would make replies
-undeliverable or misdelivered.
-
-> **The underlay has to carry both masquerade addresses, and nothing in
-> this repo puts them there.** `EgressShardReconciler` advertises this
-> address as an EVPN Type 5 path, which makes it reachable from other
-> nodes on the fabric and from nowhere else — the plain-unicast underlay
-> carries no EVPN, and a masqueraded flow's reply comes back from a host
-> that is not on the fabric at all. Unless the underlay holds a route
-> attracting this address to *this* node, that reply is forwarded on
-> whatever default the first router holding no route for it has, and the
-> flow is one-way while every forward-path counter stays green (#549).
-> `--nat-shard-pub-addr4` below needs the same thing over IPv4, where
-> there is no advertisement of any kind.
->
-> Origination has to come from the shard's own node, not from an
-> aggregate elsewhere: the address must reach the node whose datapath
-> holds that flow's connection state. The lab does it by having each
-> shard node's `fabric-router` originate its own two addresses (a `/64`
-> and a `/32`) — see
-> `deploy/containerlab/resources/fabric-router/dfw/frr.conf.dfw-worker`,
-> and `task -d deploy/containerlab verify:nat-return-route` for the check
-> that proves it. Where those addresses come from in the first place is
-> #409.
 
 ### Capabilities and host requirements
 
@@ -154,24 +98,64 @@ under `/sys/fs/bpf/galactic-nat`.
 
 ## `EgressShard` CRD (`network.datumapis.com/v1alpha1`)
 
-One object per shard node, in the `galactic-system` namespace.
+One object per shard node, in the `galactic-system` namespace. The spec
+assigns the shard's identity; the `galactic-nat` process on the target node
+programs its datapath from it and reports what it is actually programmed
+with in status.
 
-| Field                 | Required | Type     | Description                                                                                   |
-| --------------------- | -------- | -------- | --------------------------------------------------------------------------------------------- |
-| `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this shard's `galactic-nat` process runs on.                           |
-| `status.shardSID`         | —        | `string` | This shard's uSID, published by the reconciler from `GALACTIC_NAT_SHARD_SID`; not user-set. |
-| `status.shardAddressIPv6` | —        | `string` | This shard's IPv6 masquerade address, from `GALACTIC_NAT_SHARD_PUB_ADDR6`. Empty means no NAT66. |
-| `status.shardAddressIPv4` | —        | `string` | This shard's IPv4 masquerade address, from `GALACTIC_NAT_SHARD_PUB_ADDR4`. Empty means no NAT64. |
-| `status.nat64Prefix`      | —        | `string` | The `/96` this shard translates for, from `GALACTIC_NAT_NAT64_PREFIX`.                        |
-| `status.conditions`       | —        | —        | `Ready` condition, reason `DatapathAttached` or `DatapathNotAttached`.                        |
+| Field                     | Required | Type     | Description                                                                                            |
+| ------------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------ |
+| `spec.targetRef.name`     | Yes      | `string` | Kubernetes node name this shard's `galactic-nat` process runs on.                                      |
+| `spec.shardSID`           | No       | `string` | This shard's SRv6 uSID. Write-once.                                                                    |
+| `spec.shardAddressIPv6`   | No       | `string` | IPv6 masquerade source. Setting it enables NAT66. Write-once.                                          |
+| `spec.shardAddressIPv4`   | No       | `string` | IPv4 masquerade source. Setting it, with `nat64Prefix`, enables NAT64. Write-once.                     |
+| `spec.nat64Prefix`        | No       | `string` | The fabric-wide `/96` this shard translates to IPv4. Set together with `shardAddressIPv4`. Write-once. |
+| `status.shardSID`         | —        | `string` | The SID the datapath is programmed with.                                                               |
+| `status.shardAddressIPv6` | —        | `string` | The IPv6 masquerade source the datapath is programmed with. Empty means no NAT66.                      |
+| `status.shardAddressIPv4` | —        | `string` | The IPv4 masquerade source the datapath is programmed with. Empty means no NAT64.                      |
+| `status.nat64Prefix`      | —        | `string` | The `/96` the datapath is programmed to translate.                                                     |
+| `status.conditions`       | —        | —        | `Ready` (datapath attached) and `Programmed` (datapath translating with the spec's identity).          |
 
-Leave `status` empty when creating the object — `EgressShardReconciler`
-(running inside that node's own `galactic-nat` pod) fills it in from the
-pod's own resolved config at startup and publishes a `/128`
-`BGPAdvertisement` for each of `shardSID`/`shardAddressIPv6` (the same
-RT-less, no-`VRFID`/`Function` shape `NetworkGatewayReconciler` uses for
-its own VIP advertisements), so every other node in the mesh learns a
-real kernel route to it.
+Every identity field is optional and write-once. A shard can exist before
+its identity is assigned, and gains it later with a spec update; once
+assigned, a value cannot change or be cleared, because the datapath claims
+return traffic by exact match on it and a change strands every established
+flow. A shard holding the wrong identity is deleted and recreated instead.
+
+The datapath needs a SID and at least one family before it translates
+anything:
+
+| `Programmed` reason   | Meaning                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `AddressesProgrammed` | The datapath translates with the identity the spec assigns.                                                      |
+| `AddressUnassigned`   | The spec assigns no SID, or no masquerade address for either family. The datapath is cleared and claims nothing. |
+| `ProgrammingFailed`   | The datapath rejected the identity, for example a NAT64 prefix that is not a `/96`. The message says why.        |
+| `ShardConflict`       | More than one `EgressShard` targets this node. None is programmed until only one does.                           |
+
+`EgressShardReconciler` (running inside that node's own `galactic-nat` pod)
+publishes one `BGPAdvertisement` per shard, built from status rather than
+spec so the fabric only learns an identity the node actually translates
+with: the SID's covering `/64` and `shardAddressIPv6` as a `/128`, in the
+same RT-less, no-`VRFID`/`Function` shape `NetworkGatewayReconciler` uses
+for its own VIP advertisements. Every other node in the mesh learns a real
+kernel route to both. Deleting the shard, or leaving it with no usable
+identity, clears the datapath and withdraws the advertisement.
+
+> **Node-ID collision hazard.** The datapath's `locator_matches` check
+> (`internal/plumbing/ebpf/natprog/nat.c`) only compares the top 64
+> bits (Block + Node-ID) of a packet's outer destination against
+> `shardSID` — it does **not** check that the Node-ID is actually reserved
+> for the shard. Reusing the physical node's own real `BGPRouter.Spec.NodeID`
+> here means the shard's XDP program hijacks that node's own ordinary
+> tenant ingress traffic before `usid_ingress` ever gets to it. Reserve a
+> distinct Node-ID on the shard's locator for this purpose alone — see
+> `deploy/containerlab/resources/galactic-nat/dfw/egressshard.yaml` for
+> the exact encoding the lab uses.
+
+`shardAddressIPv6` must be unique per shard: a flow's reply is routed back
+to the correct shard by ordinary unicast routing on this address alone, with
+no hashing on the return path — two shards sharing an address would make
+replies undeliverable or misdelivered.
 
 `shardAddressIPv4` is deliberately **not** advertised. A NAT64 reply
 arrives from the IPv4 internet rather than across this fabric, so a
@@ -182,10 +166,29 @@ makes that prerequisite checkable rather than implicit; a shard whose
 `shardAddressIPv4` is set but unreachable translates outbound traffic
 correctly and never sees a single reply.
 
-`nat64Prefix` is echoed here for the same class of reason: it is the one
-value DNS64 synthesis has to agree with, and a shard translating for a
-different prefix than the resolver hands out is a blackhole with no
-symptom on either side.
+> **The underlay has to carry both masquerade addresses, and nothing in
+> this repo puts them there.** The EVPN Type 5 path for
+> `shardAddressIPv6` makes it reachable from other nodes on the fabric and
+> from nowhere else — the plain-unicast underlay carries no EVPN, and a
+> masqueraded flow's reply comes back from a host that is not on the
+> fabric at all. Unless the underlay holds a route attracting each address
+> to *this* node, that reply is forwarded on whatever default the first
+> router holding no route for it has, and the flow is one-way while every
+> forward-path counter stays green (#549).
+>
+> Origination has to come from the shard's own node, not from an
+> aggregate elsewhere: the address must reach the node whose datapath
+> holds that flow's connection state. The lab does it by having each
+> shard node's `fabric-router` originate its own two addresses (a `/64`
+> and a `/32`) — see
+> `deploy/containerlab/resources/fabric-router/dfw/frr.conf.dfw-worker`,
+> and `task -d deploy/containerlab verify:nat-return-route` for the check
+> that proves it. Where those addresses come from in the first place is
+> #409.
+
+`nat64Prefix` has to agree with DNS64 synthesis: a shard translating for a
+different prefix than the resolver hands out is a blackhole with no symptom
+on either side.
 
 Example:
 
@@ -199,6 +202,10 @@ spec:
   targetRef:
     kind: Node
     name: dfw-worker
+  shardSID: "2001:db8:ff01:2001:e001::"
+  shardAddressIPv6: "2001:db8:9966:1::1"
+  shardAddressIPv4: "192.0.2.1"
+  nat64Prefix: "2001:db8:64::/96"
 ```
 
 ### RBAC
@@ -235,7 +242,7 @@ fabric may offer NAT64 without NAT66, and then there is no default for that
 traffic to fall into.
 
 `GALACTIC_CNI_EGRESS_SHARD_SIDS` is a comma-separated list of every live
-shard's `Status.ShardSID`, resolved with env > conflist > default
+shard's `status.shardSID`, resolved with env > conflist > default
 precedence by `internal/config.CNIConfig`, written into the static
 conflist by `internal/installer.Bootstrap`, and read back by
 `internal/cnibgp` on every CNI ADD. An empty value means "no NAT66
@@ -295,9 +302,9 @@ kubectl exec -n galactic-system <galactic-nat-pod> -- \
   wget -qO- http://localhost:9182/metrics | grep galactic_nat_
 ```
 
-Confirm the eBPF program is actually attached — `Ready`'s condition
-reason on the `EgressShard` object should read `DatapathAttached`, not
-`DatapathNotAttached`:
+Confirm the eBPF program is attached and translating — on the
+`EgressShard` object, `Ready` should read `DatapathAttached` and
+`Programmed` should read `AddressesProgrammed`:
 
 ```sh
 kubectl get egressshard <name> -n galactic-system -o jsonpath='{.status.conditions}'
@@ -340,10 +347,13 @@ knowing before you rely on this component in production:
   kernel's full output path — so `ip rule` policy routing is not consulted
   — and no ICMP error is generated on the shard's behalf. Each of those
   surfaces as a named drop counter instead.
-- **`ShardSID`/`ShardPubAddr6` are entirely operator-chosen.** There is no
-  in-cluster allocator for either value, and no automatic check that a
-  chosen SID's Node-ID doesn't collide with a real node's own — see the
-  "Node-ID collision hazard" callout above.
+- **A shard's identity is entirely operator-chosen.** Nothing in this repo
+  allocates `spec.shardSID` or the masquerade addresses, and nothing checks
+  that a chosen SID's Node-ID doesn't collide with a real node's own — see
+  the "Node-ID collision hazard" callout above.
+- **The CNI's shard list is a second copy of every shard SID.**
+  `GALACTIC_CNI_EGRESS_SHARD_SIDS` is set by hand and is not derived from
+  `EgressShard` status, so the two can disagree.
 
 ## See also
 

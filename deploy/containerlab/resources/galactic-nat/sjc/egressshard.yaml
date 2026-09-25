@@ -7,3 +7,13 @@ spec:
   targetRef:
     kind: Node
     name: sjc-worker
+  # uFMT uSID over sjc's locator (2001:db8:ff02::/48), nodeID=0x2001
+  # (service 2 = NAT shard, node index 001). Write-once, like every
+  # identity field below.
+  shardSID: "2001:db8:ff02:2001:e001::"
+  # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block
+  shardAddressIPv6: "2001:db8:9966:3::1"
+  # NAT64 masquerade source address (RFC 5737 TEST-NET-1) and the
+  # fabric-wide /96 it translates for
+  shardAddressIPv4: "192.0.2.3"
+  nat64Prefix: "2001:db8:64::/96"

@@ -75,8 +75,9 @@
 //
 // Dispatch, on the outer header:
 //
-//  1. Not IPv6 and not IPv4: XDP_PASS. Not configured yet: XDP_PASS, this
-//     shard claiming nothing until it knows its own identity.
+//  1. Not IPv6 and not IPv4: XDP_PASS. Not configured yet, serving neither
+//     family: XDP_PASS, this shard claiming nothing until it knows its own
+//     identity.
 //  2. IPv6 destination equal to shard_pub_addr6 is a reply from the IPv6
 //     internet addressed to a masquerade source this shard allocated ->
 //     nat66_return.
@@ -1407,6 +1408,12 @@ int nat_ingress(struct xdp_md *ctx)
 	__u32 cfg_key = 0;
 	struct shard_config *cfg = bpf_map_lookup_elem(&shard_config_table, &cfg_key);
 	if (!cfg)
+		return XDP_PASS;
+	// An array map's lookup never misses, so an unconfigured shard reads its
+	// all-zero row rather than NULL. Serving no family is what "not configured"
+	// looks like, and it has to be tested here: a zero shard_sid still matches
+	// every destination whose top 64 bits are zero.
+	if (!cfg->serves_v6 && !cfg->serves_v4)
 		return XDP_PASS; // not yet configured -- fail open, not claimed
 
 	if (eth->h_proto == __builtin_bswap16(NAT_ETH_P_IPV6)) {
