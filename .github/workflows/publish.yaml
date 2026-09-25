@@ -88,6 +88,24 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  # galactic-debug has no config/galactic-debug base and no entry in
+  # publish-kustomize-bundles below: it is never deployed as a standing
+  # workload, only attached on demand via `kubectl debug` (see
+  # containers/galactic-debug/README.md), so there is no manifest for it
+  # to stamp a tag into.
+  publish-galactic-debug-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.21.0
+    with:
+      image-name: galactic-debug
+      dockerfile-path: containers/galactic-debug/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   publish-kustomize-bundles:
     needs:
       [
