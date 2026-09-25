@@ -83,6 +83,7 @@ tasks:
       - task: "deploy:images"
       - task: "deploy:system"
       - task: "deploy:cni"
+      - task: "deploy:lab-xdp-passthrough-compute"
       - task: "deploy:fabric"
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
@@ -125,13 +126,14 @@ tasks:
     cmds:
       - clang -O2 -g -target bpf -c node_files/common/xdp-passthrough.c -o node_files/common/xdp-passthrough.o
 
-  # Loads the pass-through XDP program on every port facing an edge node,
-  # transit and compute side alike -- makes those veth links behave like a
-  # real gateway's physical NIC for edgedsr.c's XDP_TX/XDP_REDIRECT (see
-  # xdp-passthrough.c's own doc comment). Idempotent: `ip link set ... xdp
-  # obj` replaces whatever program (if any) is already attached.
+  # Loads the pass-through XDP program on every transit port facing an edge
+  # node -- makes those veth links behave like a real gateway's physical NIC
+  # uplink for edgedsr.c's XDP_TX redirect (see xdp-passthrough.c's own doc
+  # comment). Idempotent: `ip link set ... xdp obj` replaces whatever
+  # program (if any) is already attached. The compute side is
+  # deploy:lab-xdp-passthrough-compute, which has to run later.
   "deploy:lab-xdp-passthrough":
-    desc: Load the pass-through XDP program on every port facing an edge node
+    desc: Load the pass-through XDP program on edge-facing transit ports
     deps: [build:lab-xdp-passthrough]
     cmds:
       # Every transit port facing an edge node, and only those: edge nodes
@@ -161,18 +163,44 @@ tasks:
           # (verified live) -- needed for this task to be idempotent.
           docker exec "${container}" ip -force link set dev "${iface}" xdp obj /xdp-passthrough.o sec xdp
         done
-      # Every compute-node port facing an edge node, for the same reason on
-      # the other side: edge_lb redirects a load-balanced request out the
-      # edge node's compute-facing bond, onto these veths' peers. Each is a
-      # bond member, as above. dfw-worker's eth1/eth3 (bond0) face
-      # dfw-worker2 and eth2/eth4 (bond1) dfw-worker3; sjc-worker's and
-      # iad-worker's eth1/eth2 (bond0) face their site's edge node -- keep
-      # this in step with gvpc.clab.yaml's site-internal links. galactic-nat
-      # used to hold these hooks while its shards ran on the compute nodes,
-      # and nothing else attaches XDP here now that they run on the edge.
-      # These are Kind nodes, so their containers carry bare names.
+
+  # The compute half of deploy:lab-xdp-passthrough: every compute-node port
+  # facing an edge node, where edge_lb's XDP_REDIRECT toward a backend lands
+  # (see xdp-passthrough.c). Without it gateway ingress to every backend
+  # fails. galactic-nat used to hold these hooks while its shards ran on the
+  # compute nodes; nothing else attaches XDP here now that they run on the
+  # edge.
+  #
+  # Separate from, and later than, the transit half because these are Kind
+  # nodes, and it must run after deploy:cni. Loading an object with `ip`
+  # mounts a bpffs of its own on /sys/fs/bpf when none is there yet, and
+  # that mount is private. Cilium's pods mount /sys/fs/bpf with
+  # bidirectional propagation and refuse to start on a node whose
+  # /sys/fs/bpf is not a shared mount ("path /sys/fs/bpf is mounted on
+  # /sys/fs/bpf but it is not a shared or slave mount") -- confirmed live,
+  # when this ran before deploy:cni and wedged Cilium on every compute node.
+  # After deploy:cni, Cilium's own shared bpffs is already there and `ip`
+  # reuses it, so the guard below refuses to run on a node without one
+  # rather than create the private mount.
+  #
+  # Each port is a bond member, as on the transit side. dfw-worker's
+  # eth1/eth3 (bond0) face dfw-worker2 and eth2/eth4 (bond1) dfw-worker3;
+  # sjc-worker's and iad-worker's eth1/eth2 (bond0) face their site's edge
+  # node -- keep this in step with gvpc.clab.yaml's site-internal links.
+  # Kind nodes' containers carry bare names.
+  "deploy:lab-xdp-passthrough-compute":
+    desc: Load the pass-through XDP program on edge-facing compute ports (after deploy:cni)
+    deps: [build:lab-xdp-passthrough]
+    cmds:
       - |
         set -e
+        for node in dfw-worker sjc-worker iad-worker; do
+          if ! docker exec "${node}" sh -c '[ "$(stat -f -c %T /sys/fs/bpf)" = bpf_fs ]'; then
+            echo "ERROR: ${node} has no bpffs on /sys/fs/bpf yet; run deploy:cni first." >&2
+            echo "       Loading an XDP object now would mount a private one and break Cilium." >&2
+            exit 1
+          fi
+        done
         for pair in dfw-worker:eth1 dfw-worker:eth3 dfw-worker:eth2 dfw-worker:eth4 \
             sjc-worker:eth1 sjc-worker:eth2 iad-worker:eth1 iad-worker:eth2; do
           container=${pair%%:*}; iface=${pair##*:}

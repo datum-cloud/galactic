@@ -145,9 +145,11 @@ packet counter, not just `tcpdump` invisibility. Worked around for this lab spec
 not by converting `edgedsr.c`'s production datapath from XDP to TC (a real gateway's public
 uplink is a physical NIC, where this veth-specific behavior doesn't apply, and XDP's
 throughput advantage is exactly why that datapath uses it): `task deploy:lab-xdp-passthrough`
-loads a trivial pass-through XDP program on every port facing an edge node — the
-transit ports, and the compute-node bond members `edge_lb` redirects backend traffic onto
-(`node_files/common/xdp-passthrough.c`), already wired into `task deploy`. (3)
+loads a trivial pass-through XDP program on every transit port facing an edge node, and
+`task deploy:lab-xdp-passthrough-compute` on the compute-node bond members `edge_lb`
+redirects backend traffic onto (`node_files/common/xdp-passthrough.c`), both already wired
+into `task deploy`. The compute half runs after `deploy:cni`: loaded before Cilium, `ip`
+mounts a private bpffs on `/sys/fs/bpf` and Cilium then refuses to start on that node. (3)
 `vip_xlat_table`'s veth-kind delivery gap and its identical-VIP/backend-port key collision,
 both fixed in galactic. See the redesign plan's
 [§8](../../docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md#8-containerlab-validation) for

@@ -51,8 +51,9 @@ full mechanism.
 
 Moving the shards off the compute nodes left those nodes' bond members
 with no XDP program, which `edge_lb`'s redirects toward a backend need on
-the far end of a veth. `task deploy:lab-xdp-passthrough` now loads the
-lab's pass-through program there too.
+the far end of a veth. `task deploy:lab-xdp-passthrough-compute` now loads
+the lab's pass-through program there too, after `deploy:cni` (see that
+task's comment for why the order matters).
 
 ## Wired up
 
@@ -89,7 +90,7 @@ in this order:
 3. The galactic-cni overlays (the tail of `scripts/deploy-cni.sh`), so
    each compute node's conflist carries its site's shard list.
 4. `task deploy:galactic-nat`.
-5. `task deploy:lab-xdp-passthrough`. The compute bond members lose their
+5. `task deploy:lab-xdp-passthrough-compute`. The compute bond members lose their
    XDP program when galactic-nat leaves them, and without one, gateway
    ingress to every backend fails: confirmed live, three failures in a row
    until it was reattached.

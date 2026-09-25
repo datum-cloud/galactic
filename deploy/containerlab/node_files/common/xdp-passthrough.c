@@ -26,7 +26,8 @@
 // a gateway-role node: the transit ports facing each edge node's public
 // bond, and the compute-node ports facing each edge node's compute-facing
 // bond, where edge_lb's XDP_REDIRECT toward a backend lands. See
-// deploy:lab-xdp-passthrough for the exact list. Not applied anywhere else
+// deploy:lab-xdp-passthrough and deploy:lab-xdp-passthrough-compute for the
+// exact lists. Not applied anywhere else
 // in this topology: usid_ingress/usid_egress (usid.c) are TC-BPF, not XDP,
 // so ordinary tenant traffic never needed this.
 //

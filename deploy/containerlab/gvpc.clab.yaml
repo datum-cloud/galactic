@@ -386,7 +386,7 @@ topology:
     # edge end runs galactic-gateway's return program (edge_return), with
     # the egress shard chained behind it, on every member of these bonds,
     # and the compute end runs the lab's pass-through XDP program on its
-    # members (Taskfile.yaml's deploy:lab-xdp-passthrough) so that
+    # members (Taskfile.yaml's deploy:lab-xdp-passthrough-compute) so that
     # edge_lb's redirects toward a backend are received at all. Both native
     # XDP, both subject to the peer-MTU limit. (galactic-nat used to attach
     # here from the compute end, while its shards ran on the compute nodes;
