@@ -46,6 +46,7 @@ import (
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/egressroutes"
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
@@ -741,38 +742,24 @@ func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []stri
 	return nil
 }
 
-// installEgressRoutes installs or refreshes vrfTableID's egress routes toward
-// the configured shards: the ::/0 default that reaches the IPv6 internet, and,
-// where this fabric has NAT64, a more-specific route for the NAT64 prefix.
+// installEgressRoutes installs, refreshes or withdraws vrfTableID's egress
+// routes from this network's own declaration, taken from its conflist stanza.
 // Idempotent, so it is safe on every attachment ADD sharing this VRF.
 //
-// argument is this attachment's VRFID, written into every shard SID these
-// routes encapsulate toward. It is what makes a shard able to tell one tenant
-// on this node from another: the shard reads it back out of the outer
-// destination and composes it with the encapsulation source into its session
-// table key. Without it every VRF on this node encapsulates toward a byte-
-// identical destination, and two tenants whose inner tuples also match -- an
-// ordinary occurrence with overlapping RFC 4193 ULAs -- share one connection
-// row and one masquerade port, so the second tenant's replies are delivered to
-// the first. See struct conn_key in internal/plumbing/ebpf/natprog/nat.c.
-//
-// Both routes point at the same shard SID, argument included. A shard decides
-// which translation a packet gets from its inner destination, so the second
-// route exists to make the NAT64 prefix reachable at all rather than to steer
-// it somewhere else -- which matters because the two are independent: a fabric
-// may offer NAT64 without NAT66, and then no default route exists for this
-// traffic to fall into.
-//
-// egress is this network's own declaration, from its own conflist stanza. A
-// network that declares no egress gets no route, and loses one it has, which is
-// what makes a declaration of no egress mean anything: the node-wide list on
-// its own handed a default route out to every network on the node.
+// egress is this network's own declaration. A network that declares no
+// egress gets no route, and loses one it has, which is what makes a
+// declaration of no egress mean anything: the node-wide list on its own
+// handed a default route out to every network on the node.
 //
 // A network that declares egress on a node naming no shard fails this
 // attachment's ADD. A node without a shard is an operator error, and failing
 // the first instance surfaces it where an attach that succeeded without egress
 // would hide it. A shard SID that is invalid, or that has no reachable route
 // yet, fails the ADD for the same reason.
+//
+// This is the first of the two writers of these routes. The installer's claim
+// sweep is the second, and keeps a running VRF in step with the claims the
+// cell records against this node after ADD has returned.
 func installEgressRoutes(vrfTableID uint32, argument uint16, egress *Egress) error {
 	if !egress.Enabled() {
 		return withdrawEgressRoutes(vrfTableID)
@@ -791,68 +778,26 @@ func installEgressRoutes(vrfTableID uint32, argument uint16, egress *Egress) err
 		return fmt.Errorf("this network declares internet egress and this node names no egress shard (%s is empty)",
 			config.EnvCNIEgressShardSIDs)
 	}
-	tenantSIDs, err := shardSIDsForTenant(shardSIDs, argument)
+	nat64Prefix, err := nat64EgressPrefix()
 	if err != nil {
-		return fmt.Errorf("apply tenant argument to %s: %w", config.EnvCNIEgressShardSIDs, err)
-	}
-	if err := srv6.EgressDefaultRouteAdd(vrfTableID, tenantSIDs); err != nil {
 		return err
 	}
-	return installNAT64EgressRoute(vrfTableID, tenantSIDs)
+	return egressroutes.Install(vrfTableID, argument, shardSIDs, nat64Prefix)
 }
 
-// shardSIDsForTenant returns sids with each SID's 12-bit Argument replaced by
-// argument, leaving Block, Node-ID and Function as the operator configured
-// them. Whatever Argument an operator baked into a configured SID is therefore
-// overwritten rather than honoured; it identifies no tenant and never could,
-// one configured value being shared by every VRF on every node.
-//
-// A SID that is not a well-formed uFMT 48+16 address fails here rather than
-// being passed through unchanged. uformat.Decode's padding check is what
-// catches it -- an address with anything in bits 81-128 is not a uSID, and
-// writing an Argument into it would produce a plausible-looking destination
-// that addresses nothing. An IPv4 entry is unmapped first so it fails as "not
-// an IPv6 address" rather than as stray padding, which is what it actually is.
-//
-// The shard must have a route covering its whole Block and Node-ID for these
-// destinations to be reachable, not just a host route for the one SID the
-// operator configured. EgressShardReconciler advertises that /64; see
-// shardAdvertisementPrefixes.
-func shardSIDsForTenant(sids []net.IP, argument uint16) ([]net.IP, error) {
-	out := make([]net.IP, 0, len(sids))
-	for _, sid := range sids {
-		addr, ok := netip.AddrFromSlice(sid.To16())
-		if !ok {
-			return nil, fmt.Errorf("egress shard SID %s is not a 16-byte address", sid)
-		}
-		fields, err := uformat.Decode(addr.Unmap())
-		if err != nil {
-			return nil, fmt.Errorf("decode egress shard SID %s: %w", sid, err)
-		}
-		fields.Argument = argument
-		tenant, err := uformat.Encode(fields)
-		if err != nil {
-			return nil, fmt.Errorf("encode egress shard SID %s with argument %#x: %w", sid, argument, err)
-		}
-		out = append(out, net.IP(tenant.AsSlice()))
-	}
-	return out, nil
-}
-
-// installNAT64EgressRoute installs vrfTableID's route for the fabric's NAT64
-// prefix. An unset prefix means this fabric has no NAT64 and is not an error; a
-// set but unparseable one is a misconfiguration and fails the ADD, since
-// silently skipping it would leave the VRF with no IPv4 reachability and
-// nothing to say why.
-func installNAT64EgressRoute(vrfTableID uint32, shardSIDs []net.IP) error {
-	if cniConfig.NAT64Prefix == "" {
-		return nil
+// nat64EgressPrefix is the fabric's NAT64 prefix, or nil when this fabric has
+// none. An unset prefix is not an error; a set but unparseable one is a
+// misconfiguration and fails the ADD, since silently skipping it would leave
+// the VRF with no IPv4 reachability and nothing to say why.
+func nat64EgressPrefix() (*net.IPNet, error) {
+	if cniConfig == nil || cniConfig.NAT64Prefix == "" {
+		return nil, nil
 	}
 	_, prefix, err := net.ParseCIDR(cniConfig.NAT64Prefix)
 	if err != nil {
-		return fmt.Errorf("parse %s %q: %w", config.EnvCNINAT64Prefix, cniConfig.NAT64Prefix, err)
+		return nil, fmt.Errorf("parse %s %q: %w", config.EnvCNINAT64Prefix, cniConfig.NAT64Prefix, err)
 	}
-	return srv6.EgressPrefixRouteAdd(vrfTableID, prefix, shardSIDs)
+	return prefix, nil
 }
 
 // hostInterfaceIndex resolves this attachment's host-side veth or tap
@@ -915,18 +860,9 @@ func egressKindForInterfaceType(ifaceType string) (uint32, error) {
 // node is configured. Idempotent, and a no-op on a node whose datapath has not
 // loaded, so an attachment there never fails its ADD over a route it never had.
 func withdrawEgressRoutes(vrfTableID uint32) error {
-	if err := srv6.EgressDefaultRouteWithdraw(vrfTableID); err != nil {
-		return fmt.Errorf("withdraw default egress route: %w", err)
-	}
-	if cniConfig == nil || cniConfig.NAT64Prefix == "" {
-		return nil
-	}
-	_, prefix, err := net.ParseCIDR(cniConfig.NAT64Prefix)
+	nat64Prefix, err := nat64EgressPrefix()
 	if err != nil {
-		return fmt.Errorf("parse %s %q: %w", config.EnvCNINAT64Prefix, cniConfig.NAT64Prefix, err)
+		return err
 	}
-	if err := srv6.EgressPrefixRouteWithdraw(vrfTableID, prefix); err != nil {
-		return fmt.Errorf("withdraw NAT64 egress route: %w", err)
-	}
-	return nil
+	return egressroutes.Withdraw(vrfTableID, nat64Prefix)
 }

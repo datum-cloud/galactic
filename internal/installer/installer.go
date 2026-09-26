@@ -448,6 +448,11 @@ type ebpfDatapathState struct {
 	// order, from the same host conflist CNI ADD reads it from. The egress
 	// route sweep uses it to keep each VRF on the first reachable shard.
 	egressShardSIDs []net.IP
+
+	// nat64Prefix is the fabric's NAT64 prefix from the same host conflist, or
+	// nil where the fabric has none. The claim sweep installs and withdraws the
+	// route toward it alongside the default.
+	nat64Prefix *net.IPNet
 }
 
 // startEBPFDatapath loads and attaches the eBPF datapath and returns the state
@@ -489,6 +494,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 		return state, datapath, nil
 	}
 	state.egressShardSIDs = loadEgressShardSIDs(hostConf.EgressShardSIDs)
+	state.nat64Prefix = loadNAT64Prefix(hostConf.NAT64Prefix)
 	if k8sClient, err := newK8sClientFn(); err != nil {
 		slog.Warn("eBPF vrf_table GC sweep disabled: failed to create k8s client", "err", err)
 	} else {
@@ -509,6 +515,22 @@ func loadEgressShardSIDs(raw string) []net.IP {
 		return nil
 	}
 	return sids
+}
+
+// loadNAT64Prefix parses the host conflist's NAT64 prefix for the claim sweep.
+// An empty prefix means this fabric has no NAT64. One that fails to parse also
+// fails every ADD on this node, which is where it gets reported; the sweep then
+// programs the default route alone.
+func loadNAT64Prefix(raw string) *net.IPNet {
+	if raw == "" {
+		return nil
+	}
+	_, prefix, err := net.ParseCIDR(raw)
+	if err != nil {
+		slog.Warn("Egress claim sweep will not program the NAT64 route: failed to parse prefix", "prefix", raw, "err", err)
+		return nil
+	}
+	return prefix
 }
 
 // cleanupOldBinaryWrapper removes the stale .bin wrapper file. Split out of
@@ -1022,6 +1044,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	egressRouteRefreshTicker := time.NewTicker(egressRouteRefreshInterval)
 	defer egressRouteRefreshTicker.Stop()
 	egressRouteRefreshSem := make(chan struct{}, 1)
+	egressClaimSem := make(chan struct{}, 1)
 
 	for {
 		select {
@@ -1105,6 +1128,12 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// since the one ADD picked may just have been the first whose
 			// route happened to arrive.
 			startEgressRouteRefreshSweep(egressRouteRefreshSem, ebpfState.egressShardSIDs)
+			// Then bring each VRF's egress into step with the claims the cell
+			// recorded against this node, so a network's egress can be turned
+			// on or off under a running workload. ADD wrote the route from the
+			// declaration it was handed, and nothing re-reads that once the
+			// plugin process exits.
+			startEgressClaimSweep(ctx, egressClaimSem, ebpfState)
 
 		case failure := <-radvActors.failed:
 			radvActorFailed(radvActors, failure)

@@ -266,6 +266,15 @@ names no shard or none of its shards resolves. Anything else, including an
 absent `egress` key, installs no route and withdraws one that is there, so a
 network that declared no egress gets none even on a node that has shards.
 
+The declaration is read once, at ADD. After that the node follows the
+`EgressShardClaim` the cell records against it for each attachment whose
+network declares egress: the installer lists the claims naming its node every
+30 seconds and installs the route for a claimed VRF that lacks one, or
+withdraws it from a VRF whose claim is gone. That is how egress is turned on
+or off for a running workload without re-attaching it. A route ADD wrote is
+left alone for two minutes before the sweep will withdraw it, which covers the
+gap between ADD returning and the cell recording the claim.
+
 ### EndpointSlice publish (HTTP ingress backend discovery)
 
 Alongside the `BGPVRFInstance`/`BGPAdvertisement` CRDs, `galactic-bgp`
