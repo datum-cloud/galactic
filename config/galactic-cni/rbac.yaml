@@ -7,6 +7,13 @@ rules:
     resources:
       - bgprouters
     verbs: ["get", "list"]
+  # egressshardclaims (read only): the installer's claim sweep lists the
+  # claims the cell recorded against this node to keep each tenant VRF's
+  # egress route in step with what its network declares.
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - egressshardclaims
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
       - bgpadvertisements

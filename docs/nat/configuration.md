@@ -218,6 +218,15 @@ conflist stanza, rendered from what the network declared; a network that
 declares none gets no route however the node is configured. See the
 [conflist reference](../cni/conflist-reference.md#egress-declaration).
 
+After ADD, the declaration is carried by the `EgressShardClaim` the cell
+records against the node for each attachment whose network declares egress.
+The `galactic-cni` installer lists the claims naming its node on the same
+30-second sweep that re-resolves egress routes, installing the route for a
+claimed VRF and withdrawing it from an unclaimed one, so enabling or disabling
+egress on a network takes effect on running workloads within one sweep. The
+installer needs `get`/`list`/`watch` on `egressshardclaims` for this, granted
+in `config/galactic-cni/rbac.yaml`.
+
 A tenant's compute node needs to know the fabric-wide list of live shard
 SIDs to install its own tenant VRFs' egress routes, and the NAT64 prefix to
 install a route toward IPv4 reachability. Both are separate from anything
