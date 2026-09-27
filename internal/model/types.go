@@ -134,6 +134,45 @@ type RuntimeStatus struct {
 	Healthy        bool
 	Peers          []PeerStatus
 	Advertisements []AdvertisementStatus
+	// VRFs reports, per desired VRF instance, whether its kernel routing is
+	// wired up on this node. It is what lets status tell a VRF that carries
+	// traffic apart from one GoBGP accepted but whose routes cannot be
+	// installed.
+	VRFs []VRFStatus
+}
+
+// VRFState is the outcome of wiring one VRF instance into this node's kernel.
+type VRFState string
+
+const (
+	// VRFStateApplied means the VRF's kernel table resolved and its routes
+	// can be installed.
+	VRFStateApplied VRFState = "Applied"
+	// VRFStateNotInNetns means no kernel VRF for this instance exists in the
+	// router's network namespace. That is expected for a VPC served only by
+	// the ingress sidecar on this node, but it is also what a VRF the CNI has
+	// not created yet looks like, so the runtime keeps retrying it.
+	VRFStateNotInNetns VRFState = "NotInNetns"
+	// VRFStateFailed means wiring the VRF failed and its routes will not be
+	// installed until a later apply succeeds.
+	VRFStateFailed VRFState = "Failed"
+)
+
+// Condition reasons a VRFStatus carries when State is not VRFStateApplied.
+const (
+	VRFReasonNotInRouterNetns    = "NotInRouterNetns"
+	VRFReasonKernelVRFUnresolved = "KernelVRFUnresolved"
+	VRFReasonDatapathProbeFailed = "DatapathProbeFailed"
+)
+
+// VRFStatus holds the observed state of a single VRF instance.
+type VRFStatus struct {
+	Name  string
+	State VRFState
+	// Reason is a CamelCase condition reason, and Message the error behind it
+	// when State is not VRFStateApplied.
+	Reason  string
+	Message string
 }
 
 // PeerStatus holds the observed state of a single BGP peer session.

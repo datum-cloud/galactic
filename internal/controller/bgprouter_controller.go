@@ -135,8 +135,15 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	//
 	// An unhealthy runtime, such as after a restart where GoBGP is not yet
 	// running, must also re-apply even when the hash matches.
+	//
+	// So must a VRF the runtime has not yet wired into the kernel. Apply does
+	// not fail for one, so as not to hold every other VRF back, and the hash
+	// is persisted regardless; without this check a VRF whose first attempt
+	// failed would never be retried until some unrelated change moved the
+	// hash.
 	if router.Annotations[annotationConfigHash] == newHash && runtimeStatus.Healthy &&
-		allDesiredPeersPresent(desired.Peers, runtimeStatus) {
+		allDesiredPeersPresent(desired.Peers, runtimeStatus) &&
+		allDesiredVRFsApplied(desired.VRFInstances, runtimeStatus) {
 		// True no-op: runtime is healthy with the current config.
 		routerCopy := router.DeepCopy()
 		routerCopy.Status.ObservedGeneration = router.Generation
@@ -201,7 +208,7 @@ func (r *BGPRouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	r.updatePolicyStatuses(ctx, router)
 
 	// Update per-VRF-instance BGPVRFInstance statuses.
-	r.updateVRFInstanceStatuses(ctx, router)
+	r.updateVRFInstanceStatuses(ctx, router, postApplyStatus)
 
 	return ctrl.Result{RequeueAfter: peerStatusRequeue}, nil
 }
@@ -422,32 +429,67 @@ func (r *BGPRouterReconciler) updatePolicyStatuses(ctx context.Context, router *
 	}
 }
 
-// updateVRFInstanceStatuses updates BGPVRFInstance status.
-func (r *BGPRouterReconciler) updateVRFInstanceStatuses(ctx context.Context, router *bgpv1alpha1.BGPRouter) {
+// updateVRFInstanceStatuses updates BGPVRFInstance status from the runtime's
+// per-VRF outcome, so a VRF whose routes cannot be installed reads Ready=False
+// rather than looking healthy while carrying no traffic.
+func (r *BGPRouterReconciler) updateVRFInstanceStatuses(
+	ctx context.Context, router *bgpv1alpha1.BGPRouter, rs model.RuntimeStatus,
+) {
 	logger := log.FromContext(ctx)
 
 	vrfList := &bgpv1alpha1.BGPVRFInstanceList{}
 	if err := r.List(ctx, vrfList,
 		client.InNamespace(router.Namespace),
-		client.MatchingFields{BGPPeerByRouterName: router.Name},
+		client.MatchingFields{BGPVRFInstanceByRouterName: router.Name},
 	); err != nil {
 		logger.Error(err, "list BGPVRFInstances for status update")
 		return
 	}
+	vrfByName := make(map[string]model.VRFStatus, len(rs.VRFs))
+	for _, vs := range rs.VRFs {
+		vrfByName[vs.Name] = vs
+	}
 	for i := range vrfList.Items {
 		vrf := &vrfList.Items[i]
 		vrfCopy := vrf.DeepCopy()
-		setVRFInstanceCondition(vrfCopy, metav1.Condition{
-			Type:    ConditionReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  reasonAccepted,
-			Message: "VRF instance accepted",
-		})
+		vs, ok := vrfByName[vrf.Name]
+		setVRFInstanceCondition(vrfCopy, vrfReadyCondition(vs, ok))
 		if vrfCopy.Spec.NPTv6 != nil {
 			setVRFInstanceCondition(vrfCopy, nptv6ConfiguredCondition(vrfCopy.Spec.NPTv6))
 		}
 		if updateErr := r.Status().Update(ctx, vrfCopy); updateErr != nil {
 			logger.Error(updateErr, "update BGPVRFInstance status", "vrf", vrf.Name)
+		}
+	}
+}
+
+// vrfReadyCondition returns the Ready condition for a VRF instance whose
+// runtime outcome is vs, ok being false when the runtime reported none.
+func vrfReadyCondition(vs model.VRFStatus, ok bool) metav1.Condition {
+	if !ok {
+		return metav1.Condition{
+			Type: ConditionReady, Status: metav1.ConditionUnknown,
+			Reason: "Pending", Message: "VRF instance not yet applied by the runtime",
+		}
+	}
+	switch vs.State {
+	case model.VRFStateApplied:
+		return metav1.Condition{
+			Type: ConditionReady, Status: metav1.ConditionTrue,
+			Reason: reasonAccepted, Message: "VRF instance wired into the kernel",
+		}
+	case model.VRFStateNotInNetns:
+		// Expected where only the ingress sidecar serves this VPC, which wires
+		// the VRF inside its own pod's namespace, out of this process's sight.
+		return metav1.Condition{
+			Type: ConditionReady, Status: metav1.ConditionTrue,
+			Reason: vs.Reason, Message: "VRF accepted; its kernel interface is not in the router's network " +
+				"namespace, as expected for a VPC served only by the ingress sidecar on this node",
+		}
+	default:
+		return metav1.Condition{
+			Type: ConditionReady, Status: metav1.ConditionFalse,
+			Reason: vs.Reason, Message: vs.Message,
 		}
 	}
 }
@@ -534,6 +576,22 @@ func allDesiredPeersPresent(peers []model.DesiredPeer, rs model.RuntimeStatus) b
 	}
 	for _, p := range peers {
 		if !present[normalizeIP(p.Address)] {
+			return false
+		}
+	}
+	return true
+}
+
+// allDesiredVRFsApplied reports whether the runtime has wired every desired VRF
+// into the kernel. A VRF that failed, is not in this netns, or has no reported
+// outcome yet sends the reconcile through Apply, which retries it.
+func allDesiredVRFsApplied(vrfs []model.DesiredVRFInstance, rs model.RuntimeStatus) bool {
+	applied := make(map[string]bool, len(rs.VRFs))
+	for _, vs := range rs.VRFs {
+		applied[vs.Name] = vs.State == model.VRFStateApplied
+	}
+	for _, v := range vrfs {
+		if !applied[v.Name] {
 			return false
 		}
 	}

@@ -31,11 +31,20 @@ import (
 // root.
 var pinDir = attach.PinDir
 
-// errVRFNotInThisNetns marks the one vrfTableID failure that is an ordinary
-// condition rather than a fault: the VRF exists, but not in this process's
-// network namespace. applyVRFs skips such a VRF at debug level, since there is
-// nothing for this process to install for it anyway.
+// errVRFNotInThisNetns marks the vrfTableID failure that is usually an ordinary
+// condition rather than a fault: no kernel VRF exists in this process's network
+// namespace, typically because the ingress sidecar created it inside an Envoy
+// pod's. applyVRFs skips such a VRF without failing it, but keeps retrying,
+// since a VRF the CNI has not created yet looks exactly the same.
 var errVRFNotInThisNetns = errors.New("kernel VRF interface is not in this process's network namespace")
+
+// resolveVRFTable and probeVRFDatapath are the kernel-facing steps applyVRFs
+// runs for a VRF not yet applied. Package vars so tests can make them fail
+// and then succeed without real VRF devices or bpffs.
+var (
+	resolveVRFTable  = vrfTableID
+	probeVRFDatapath = probeEgressRouteWrite
+)
 
 // startRIBMonitor starts the shared EVPN best-path watcher goroutine, once per
 // runtime lifetime however many VRFs exist. It installs and removes routes in
@@ -238,7 +247,7 @@ func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeIn
 // there. On a node running only the sidecar for a VPC, that lookup fails on
 // every reconcile and no restart or wait changes it.
 //
-// Skipping quietly is the honest handling. On such a node the egress routes
+// Skipping without failing the VRF is the honest handling. On such a node the egress routes
 // this table ID would install are already written per-EndpointSlice by the
 // sidecar itself, and Envoy only connects to backends those slices published,
 // so there is nothing for this process to add.
