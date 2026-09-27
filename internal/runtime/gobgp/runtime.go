@@ -59,6 +59,11 @@ type GoBGPRuntime struct {
 	// change, not only when a VRF is first registered, and trigger a RIB
 	// backfill for it.
 	appliedVRFImportRTs map[string][]string
+	// vrfStatus records the outcome of wiring each desired VRF into the kernel
+	// on the last apply, keyed by VRF name, so Status can report a VRF whose
+	// routes cannot be installed instead of leaving it looking healthy, and
+	// the controller keeps re-applying until it resolves.
+	vrfStatus map[string]model.VRFStatus
 	// rtIndexMu guards rtIndex, which is read concurrently by the shared EVPN
 	// RIB watcher goroutine.
 	rtIndexMu sync.RWMutex
@@ -137,6 +142,7 @@ func NewRuntimeFactory(
 			appliedPolicies:       make(map[string]model.BGPPolicyDirection),
 			appliedVRFs:           make(map[string]uint32),
 			appliedVRFImportRTs:   make(map[string][]string),
+			vrfStatus:             make(map[string]model.VRFStatus),
 			rtIndex:               make(map[string]uint32),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 			observer:              observer,
@@ -315,6 +321,12 @@ func (r *GoBGPRuntime) applyVRFs(
 		}
 	}
 
+	for name := range r.vrfStatus {
+		if _, ok := desired[name]; !ok {
+			delete(r.vrfStatus, name)
+		}
+	}
+
 	rtIndex := make(map[string]uint32, len(vrfs))
 	needsBackfill := false
 	for _, v := range vrfs {
@@ -324,28 +336,10 @@ func (r *GoBGPRuntime) applyVRFs(
 
 		tableID, ok := r.appliedVRFs[v.Name]
 		if !ok {
-			var err error
-			tableID, err = vrfTableID(v.Name)
-			if err != nil {
-				// A VRF whose interface is not in this process's namespace is
-				// the ordinary case for a VPC served only by the ingress
-				// sidecar on this node, and there is nothing for this process
-				// to install for it either way. Skip quietly rather than
-				// report a failure on every reconcile.
-				if errors.Is(err, errVRFNotInThisNetns) {
-					slog.Debug("applyVRFs: skipping VRF whose kernel interface is not in this netns",
-						"vrf", v.Name, "err", err)
-					continue
-				}
-				slog.Error("applyVRFs: failed to resolve kernel VRF table; this VRF's routes will not be installed",
-					"vrf", v.Name, "err", err)
-				continue
-			}
-			if err := probeEgressRouteWrite(tableID); err != nil {
-				slog.Error("applyVRFs: egress_route_table write probe failed; this VRF's routes will not be installed",
-					"vrf", v.Name, "err", err,
-					"hint", "set runAsUser: 0 and capabilities.add: [BPF] in the container securityContext, "+
-						"and mount bpffs at "+pinDir)
+			var st model.VRFStatus
+			tableID, st = resolveVRF(v.Name)
+			r.recordVRFStatus(st)
+			if st.State != model.VRFStateApplied {
 				continue
 			}
 			r.appliedVRFs[v.Name] = tableID
@@ -380,6 +374,68 @@ func (r *GoBGPRuntime) applyVRFs(
 	}
 
 	return nil
+}
+
+// resolveVRF resolves the kernel table of a VRF not yet applied and probes
+// that its routes can be written, returning the table ID and the outcome. A
+// failure is not returned as an error, because one unwired VRF must not stop
+// every other VRF on this node from converging, but it is recorded so status
+// reports it and the controller keeps retrying.
+func resolveVRF(name string) (uint32, model.VRFStatus) {
+	tableID, err := resolveVRFTable(name)
+	if err != nil {
+		// A VRF whose interface is not in this process's namespace is the
+		// ordinary case for a VPC served only by the ingress sidecar on this
+		// node, and there is nothing for this process to install for it. It
+		// is also what a VRF the CNI has not created yet looks like, so it is
+		// retried rather than given up on.
+		if errors.Is(err, errVRFNotInThisNetns) {
+			return 0, model.VRFStatus{
+				Name: name, State: model.VRFStateNotInNetns,
+				Reason: model.VRFReasonNotInRouterNetns, Message: err.Error(),
+			}
+		}
+		return 0, model.VRFStatus{
+			Name: name, State: model.VRFStateFailed,
+			Reason: model.VRFReasonKernelVRFUnresolved, Message: err.Error(),
+		}
+	}
+	if err := probeVRFDatapath(tableID); err != nil {
+		return 0, model.VRFStatus{
+			Name: name, State: model.VRFStateFailed,
+			Reason: model.VRFReasonDatapathProbeFailed, Message: err.Error(),
+		}
+	}
+	return tableID, model.VRFStatus{Name: name, State: model.VRFStateApplied}
+}
+
+// recordVRFStatus stores st as the VRF's current outcome, logging only when it
+// changes. The controller re-applies every reconcile while a VRF is unwired,
+// so logging each attempt would repeat the same line every 30 seconds.
+func (r *GoBGPRuntime) recordVRFStatus(st model.VRFStatus) {
+	prev, seen := r.vrfStatus[st.Name]
+	r.vrfStatus[st.Name] = st
+	if seen && prev.State == st.State && prev.Message == st.Message {
+		return
+	}
+	switch st.State {
+	case model.VRFStateApplied:
+		if seen {
+			slog.Info("applyVRFs: VRF resolved after an earlier failed attempt",
+				"vrf", st.Name, "previous", prev.Reason)
+		}
+	case model.VRFStateNotInNetns:
+		slog.Info("applyVRFs: VRF's kernel interface is not in this netns; skipping until it appears",
+			"vrf", st.Name, "err", st.Message)
+	case model.VRFStateFailed:
+		attrs := []any{"vrf", st.Name, "reason", st.Reason, "err", st.Message}
+		if st.Reason == model.VRFReasonDatapathProbeFailed {
+			attrs = append(attrs, "hint", "set runAsUser: 0 and capabilities.add: [BPF] in the container "+
+				"securityContext, and mount bpffs at "+pinDir)
+		}
+		slog.Error("applyVRFs: failed to wire VRF; its routes will not be installed until a retry succeeds",
+			attrs...)
+	}
 }
 
 // equalRTSets reports whether a and b hold the same route targets, ignoring
@@ -510,6 +566,10 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 		status.Peers = append(status.Peers, ps)
 	}); listErr != nil {
 		return model.RuntimeStatus{Healthy: false}, fmt.Errorf("list peers: %w", listErr)
+	}
+
+	for _, st := range r.vrfStatus {
+		status.VRFs = append(status.VRFs, st)
 	}
 
 	// Collect advertisement statuses from the applied advertisements map.
