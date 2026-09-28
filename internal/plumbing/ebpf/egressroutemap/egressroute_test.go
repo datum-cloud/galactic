@@ -5,11 +5,8 @@
 package egressroutemap
 
 import (
-	"bytes"
-	"log/slog"
 	"net"
 	"net/netip"
-	"strings"
 	"testing"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -81,82 +78,6 @@ func TestEgressRouteTable_RegisterThenLookupRoundTrips(t *testing.T) {
 	}
 	if string(got.Smac[:]) != string(fakeSmac) {
 		t.Errorf("stored smac = % x, want % x", got.Smac, fakeSmac)
-	}
-}
-
-// captureLogs redirects the package-level default logger to buf for the
-// calling test's duration, restoring it on cleanup. egressroutemap logs
-// through the bare slog package functions rather than an injectable logger,
-// matching Refresh's own existing convention, so redirecting the default is
-// what a test needs to observe them.
-func captureLogs(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(orig) })
-	return &buf
-}
-
-// TestEgressRouteTable_RegisterLogsWhenNextHopChanges covers Register's
-// staleness signal: a second Register call whose fresh resolution differs
-// from what is already stored must log the change, since this is the only
-// place both the old and the newly resolved value are ever in hand together.
-// A resolution that comes back identical must log nothing, so the common,
-// idempotent reapply case stays quiet.
-func TestEgressRouteTable_RegisterLogsWhenNextHopChanges(t *testing.T) {
-	prefix := mustCIDR(t, "2001:db8:ffff::/96")
-	sid := net.ParseIP("2001:db8:ff01:1:e001::")
-	tbl := NewEgressRouteTable(newFakeTable())
-
-	resolutions := []struct {
-		link       int
-		dmac, smac net.HardwareAddr
-	}{
-		{42, net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}, net.HardwareAddr{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}},
-		{99, net.HardwareAddr{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}, net.HardwareAddr{0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}},
-		{99, net.HardwareAddr{0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC}, net.HardwareAddr{0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}},
-	}
-	i := 0
-	prev := resolveLinkAndL2Fn
-	resolveLinkAndL2Fn = func(net.IP) (int, net.HardwareAddr, net.HardwareAddr, error) {
-		r := resolutions[i]
-		i++
-		return r.link, r.dmac, r.smac, nil
-	}
-	t.Cleanup(func() { resolveLinkAndL2Fn = prev })
-
-	// First install: nothing stored yet, so nothing changed.
-	buf := captureLogs(t)
-	if err := tbl.Register(7, prefix, sid); err != nil {
-		t.Fatalf("first Register(%v) = %v, want success", prefix, err)
-	}
-	if logs := buf.String(); strings.Contains(logs, "next hop changed") {
-		t.Errorf("first Register logged a change with no prior entry: %s", logs)
-	}
-
-	// Second install: the fresh resolution differs (link 42 -> 99), so it
-	// must log.
-	buf = captureLogs(t)
-	if err := tbl.Register(7, prefix, sid); err != nil {
-		t.Fatalf("second Register(%v) = %v, want success", prefix, err)
-	}
-	logs := buf.String()
-	if !strings.Contains(logs, "next hop changed") {
-		t.Errorf("second Register did not log a next-hop change: %s", logs)
-	}
-	if !strings.Contains(logs, "fromLink=42") || !strings.Contains(logs, "toLink=99") {
-		t.Errorf("change log missing expected link transition: %s", logs)
-	}
-
-	// Third install: the fresh resolution is identical to what is already
-	// stored, so it must not log.
-	buf = captureLogs(t)
-	if err := tbl.Register(7, prefix, sid); err != nil {
-		t.Fatalf("third Register(%v) = %v, want success", prefix, err)
-	}
-	if logs := buf.String(); strings.Contains(logs, "next hop changed") {
-		t.Errorf("third Register logged a change for an identical resolution: %s", logs)
 	}
 }
 

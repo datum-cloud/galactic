@@ -70,7 +70,7 @@ func runCmd(cfg *config.VRFConfig) error {
 	metrics.MustRegister(ctrlmetrics.Registry)
 
 	backend := ingresssidecar.NewKernelBackend()
-	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, cfg.ResolveInterval, metrics)
+	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, metrics)
 
 	// Return-path gateway advertisement is opt-in on the node name alone,
 	// and leaving it unset is fully inert. The cached client is fine here:
@@ -189,9 +189,6 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().DurationP("sweep-interval", "",
 		config.DefaultVRFSweepInterval,
 		"How often to re-check pending teardowns")
-	cmd.Flags().DurationP("resolve-interval", "",
-		config.DefaultVRFResolveInterval,
-		"How often to re-resolve every installed route's link and L2 addresses, independent of eBPF datapath reloads")
 	cmd.Flags().StringP("node-name", "", "",
 		"This node's name, as it appears in a BGPRouter's spec.targetRef.name -- "+
 			"enables return-path gateway advertisement publishing when set (env "+config.EnvVRFNodeName+" or legacy NODE_NAME)")

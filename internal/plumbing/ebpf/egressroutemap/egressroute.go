@@ -288,24 +288,6 @@ func (t *EgressRouteTable) Register(tableID uint32, prefix *net.IPNet, sid net.I
 	copy(value.Dmac[:], dmac)
 	copy(value.Smac[:], smac)
 
-	// A prior entry whose link or L2 addresses differ from this fresh
-	// resolution was stale: its next hop moved, or the interface it named is
-	// gone, since the last time something wrote it. Logged here rather than
-	// left to whichever caller happens to overwrite it first, since Register
-	// is the only place both the old and the newly resolved value are ever in
-	// hand together. An absent prior entry is a first-time install, not a
-	// staleness event, and so is a pass-through entry (LinkIfindex == 0),
-	// which was never resolved in the first place.
-	var previous prog.UsidEgressRouteValue
-	if err := t.table.Lookup(key, &previous); err == nil && previous.LinkIfindex != 0 &&
-		(previous.LinkIfindex != value.LinkIfindex ||
-			!bytes.Equal(previous.Dmac[:], value.Dmac[:]) || !bytes.Equal(previous.Smac[:], value.Smac[:])) {
-		slog.Info("egressroutemap: register: egress route next hop changed since it was last resolved",
-			"table", tableID, "prefix", prefix, "sid", sid,
-			"fromLink", previous.LinkIfindex, "toLink", value.LinkIfindex,
-			"fromDmac", net.HardwareAddr(previous.Dmac[:]).String(), "toDmac", net.HardwareAddr(value.Dmac[:]).String())
-	}
-
 	if err := t.table.Put(key, value); err != nil {
 		return fmt.Errorf("egressroutemap: egress_route_table: register table=%d prefix=%s: %w", tableID, prefix, err)
 	}

@@ -23,8 +23,6 @@ func mustPrefix(t *testing.T, s string) *net.IPNet {
 
 const testGrace = 10 * time.Second
 
-const testResolveInterval = time.Minute
-
 // testVPC1, testPodName, and testMalformedTenantID are fixture values
 // shared across this package's tests.
 const (
@@ -42,7 +40,7 @@ const (
 func TestStoreRouteAndVRFAppear(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -64,7 +62,7 @@ func TestStoreRouteAndVRFAppear(t *testing.T) {
 func TestStoreSecondAttachmentSharesVRF(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	first := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	second := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::2"), SID: net.ParseIP("fd00:99::2")}
@@ -102,7 +100,7 @@ func TestStoreSecondAttachmentSharesVRF(t *testing.T) {
 func TestStoreRouteTeardownGrace(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -141,7 +139,7 @@ func TestStoreRouteTeardownGrace(t *testing.T) {
 func TestStoreVRFOutlivesRouteGrace(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -168,7 +166,7 @@ func TestStoreVRFOutlivesRouteGrace(t *testing.T) {
 func TestStoreReactivationCancelsTeardown(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -197,7 +195,7 @@ func TestStoreReactivationCancelsTeardown(t *testing.T) {
 func TestStoreInventorySeedsOrphan(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	prefix := mustPrefix(t, "fd00::1")
 	backend.seedRoute(testVPC1, 5, prefix, net.ParseIP("fd00:99::1"))
@@ -230,7 +228,7 @@ func TestStoreInventorySeedsOrphan(t *testing.T) {
 func TestStoreInventorySkipsKnownRoute(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	prefix := mustPrefix(t, "fd00::1")
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: prefix, SID: net.ParseIP("fd00:99::1")}
@@ -259,7 +257,7 @@ func TestStoreEnsureVRFErrorNotTracked(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
 	backend.failEnsureVRF = errTest
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err == nil {
@@ -283,7 +281,7 @@ func (e *testError) Error() string { return e.msg }
 func TestStoreSharedPrefixSurvivesSiblingTeardown(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	shared := func() *DesiredRoute {
 		return &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
@@ -336,7 +334,7 @@ func TestStoreSweepReappliesAfterDatapathReload(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
 	backend.generation = testGenLoaded
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -357,48 +355,13 @@ func TestStoreSweepReappliesAfterDatapathReload(t *testing.T) {
 	}
 }
 
-// TestStoreSweepReappliesOnResolveInterval verifies a route whose next hop
-// goes stale for a reason other than a datapath reload -- the host's own
-// egress-route refresh sweep does not cover this sidecar's tables, so nothing
-// else would notice -- is still re-resolved once resolveInterval has elapsed,
-// with a stable generation throughout.
-func TestStoreSweepReappliesOnResolveInterval(t *testing.T) {
-	ctx := context.Background()
-	backend := newFakeBackend()
-	backend.generation = testGenLoaded
-	store := NewStore(backend, testGrace, testResolveInterval, nil)
-
-	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
-	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
-		t.Fatalf("SetDesired: %v", err)
-	}
-
-	now := time.Now()
-	store.Sweep(ctx, now)
-
-	before := backend.callCount()
-	store.Sweep(ctx, now.Add(testResolveInterval/2))
-	if got := backend.callsSince(before); len(got) != 0 {
-		t.Errorf("calls before resolveInterval elapsed = %v, want none", got)
-	}
-
-	before = backend.callCount()
-	store.Sweep(ctx, now.Add(testResolveInterval+time.Second))
-
-	got := backend.callsSince(before)
-	want := []string{"EnsureVRF:" + testVPC1, "EnsureRoute:1/fd00::1/128"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("calls after resolveInterval elapsed = %v, want %v", got, want)
-	}
-}
-
 // TestStoreSweepNoReapplyWhenGenerationStable verifies an unchanged
 // datapath costs no backend writes on any Sweep.
 func TestStoreSweepNoReapplyWhenGenerationStable(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
 	backend.generation = testGenLoaded
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -421,7 +384,7 @@ func TestStoreSweepGenerationReadFailureDoesNothing(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
 	backend.generation = testGenLoaded
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -449,7 +412,7 @@ func TestStoreReapplySkipsRoutesInGrace(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
 	backend.generation = testGenLoaded
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	live := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	leaving := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::2"), SID: net.ParseIP("fd00:99::2")}
@@ -482,7 +445,7 @@ func TestStoreReapplyRetriesOnFailure(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
 	backend.generation = testGenLoaded
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {

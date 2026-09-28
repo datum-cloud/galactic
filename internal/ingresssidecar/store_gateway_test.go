@@ -19,7 +19,7 @@ import (
 func TestStoreNoGatewayPublisherIsNoop(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 
 	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
 	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
@@ -36,7 +36,7 @@ func TestStoreNoGatewayPublisherIsNoop(t *testing.T) {
 func TestStorePublishesGatewayOnceOnFirstVRFCreation(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 	pub := newFakeGatewayPublisher()
 	resolver := newFakeGatewayResolver()
 	gatewayAddr := net.ParseIP("fd00:99::4")
@@ -70,7 +70,7 @@ func TestStorePublishesGatewayOnceOnFirstVRFCreation(t *testing.T) {
 func TestStoreGatewayNotProvisionedYetIsNotAReconcileError(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 	pub := newFakeGatewayPublisher()
 	resolver := newFakeGatewayResolver() // no address seeded for testVPC1
 
@@ -108,7 +108,7 @@ func TestStoreGatewayNotProvisionedYetIsNotAReconcileError(t *testing.T) {
 func TestStorePublishErrorDoesNotFailRouteReconcile(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 	pub := newFakeGatewayPublisher()
 	pub.publishErr = errors.New("simulated transient k8s API failure")
 	resolver := newFakeGatewayResolver()
@@ -133,7 +133,7 @@ func TestStorePublishErrorDoesNotFailRouteReconcile(t *testing.T) {
 func TestStoreWithdrawsGatewayOnVRFTeardown(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, 0, nil)
+	store := NewStore(backend, testGrace, nil)
 	pub := newFakeGatewayPublisher()
 	resolver := newFakeGatewayResolver()
 	resolver.addrs[testVPC1] = net.ParseIP("fd00:99::4")
