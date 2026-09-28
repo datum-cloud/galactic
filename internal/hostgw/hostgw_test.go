@@ -6,11 +6,20 @@ package hostgw
 
 import (
 	"net"
+	"os"
 	"testing"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
+
+// requireRoot skips the test when not running as root.
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Getuid() != 0 {
+		t.Skip("skipping: requires root")
+	}
+}
 
 func mustParseCIDR(t *testing.T, cidr string) *net.IPNet {
 	t.Helper()
@@ -112,4 +121,83 @@ func TestRouteConflicts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInstallPodSubnetRouteReplacesStaleRoute models the tap-reuse scenario
+// that let a stale route survive a container replacement: a host device
+// carries a route from a previous container's subnet, kept only because
+// installPodSubnetRoute used to check for a matching destination and never
+// for a matching interface. It must remove that route and install the new
+// container's, and must leave alone a route in the same table that belongs
+// to a different interface entirely.
+func TestInstallPodSubnetRouteReplacesStaleRoute(t *testing.T) {
+	requireRoot(t)
+
+	const tableID = 250
+
+	ownLink := addDummyLink(t, "hgwtestown0")
+	otherLink := addDummyLink(t, "hgwtestoth0")
+
+	staleSubnet := mustParseCIDR(t, "fd00:aa:bb::1/96")
+	desiredSubnet := mustParseCIDR(t, "fd00:aa:cc::1/96")
+	otherSubnet := mustParseCIDR(t, "fd00:aa:dd::1/96")
+
+	// A route left behind on this device by a previous container's attachment.
+	if err := netlink.RouteAdd(&netlink.Route{
+		Dst: staleSubnet, LinkIndex: ownLink.Attrs().Index, Table: tableID,
+	}); err != nil {
+		t.Fatalf("seed stale route: %v", err)
+	}
+	// A route in the same table but on a different interface, standing in for
+	// a sibling attachment's own subnet route that must not be touched.
+	if err := netlink.RouteAdd(&netlink.Route{
+		Dst: otherSubnet, LinkIndex: otherLink.Attrs().Index, Table: tableID,
+	}); err != nil {
+		t.Fatalf("seed sibling route: %v", err)
+	}
+
+	if err := installPodSubnetRoute(ownLink, desiredSubnet, netlink.FAMILY_V6, tableID); err != nil {
+		t.Fatalf("installPodSubnetRoute: %v", err)
+	}
+
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: tableID}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	have := map[string]bool{}
+	for _, r := range routes {
+		if r.Dst != nil {
+			have[r.Dst.String()] = true
+		}
+	}
+	if have[staleSubnet.String()] {
+		t.Errorf("stale route %s still present, want removed", staleSubnet)
+	}
+	if !have[desiredSubnet.String()] {
+		t.Errorf("desired route %s not installed", desiredSubnet)
+	}
+	if !have[otherSubnet.String()] {
+		t.Errorf("sibling route %s on another interface was removed, want left alone", otherSubnet)
+	}
+}
+
+// addDummyLink creates an up dummy link named name, cleaned up at test end.
+func addDummyLink(t *testing.T, name string) netlink.Link {
+	t.Helper()
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}); err != nil {
+		t.Fatalf("create dummy link %q: %v", name, err)
+	}
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		t.Fatalf("find dummy link %q: %v", name, err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		t.Fatalf("bring up dummy link %q: %v", name, err)
+	}
+	t.Cleanup(func() {
+		if l, err := netlink.LinkByName(name); err == nil {
+			_ = netlink.LinkDel(l)
+		}
+	})
+	return link
 }
