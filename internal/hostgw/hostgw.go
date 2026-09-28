@@ -158,6 +158,15 @@ func installGatewayAddress(hostLink netlink.Link, gwNet *net.IPNet, addrFlags in
 // table, pointing at hostLink, for one address family. Idempotent: a matching
 // route is left alone, and a conflicting one is an error rather than being
 // overwritten.
+//
+// It is also authoritative for hostLink: any other route already in this
+// table on hostLink, for a destination that isn't subnet, is removed first. A
+// tap's host-side name is keyed by (vpc, vpcAttachment) alone, so a container
+// replacing another on the same attachment reuses the very same device and
+// the very same call finds it "already exists" and adopts it in place rather
+// than recreating it fresh. Left on its own, a route this device carried for
+// its previous container's subnet would keep routing to that address forever,
+// while the new container's own subnet never gets a route at all.
 func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tableID int) error {
 	desiredRoute := &netlink.Route{
 		Dst:       subnet,
@@ -173,19 +182,34 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 	if err != nil {
 		return fmt.Errorf("list routes in VRF table: %w", err)
 	}
+
+	alreadyPresent := false
 	for _, r := range existingRoutes {
 		if r.Dst == nil {
 			continue
 		}
-		if r.Dst.String() != desiredRoute.Dst.String() {
+		if r.Dst.String() == desiredRoute.Dst.String() {
+			if routeConflicts(&r, desiredRoute) {
+				return fmt.Errorf(
+					"existing route %v to %s conflicts with desired route %v",
+					r, desiredRoute.Dst, desiredRoute,
+				)
+			}
+			alreadyPresent = true
 			continue
 		}
-		if routeConflicts(&r, desiredRoute) {
-			return fmt.Errorf(
-				"existing route %v to %s conflicts with desired route %v",
-				r, desiredRoute.Dst, desiredRoute,
-			)
+
+		if r.LinkIndex != desiredRoute.LinkIndex {
+			continue
 		}
+		stale := r
+		if err := netlink.RouteDel(&stale); err != nil &&
+			!errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.ENOENT) {
+			return fmt.Errorf("remove stale route %s on %q: %w", stale.Dst, hostLink.Attrs().Name, err)
+		}
+	}
+
+	if alreadyPresent {
 		return nil
 	}
 

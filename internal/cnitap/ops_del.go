@@ -68,14 +68,17 @@ func cmdDel(args *skel.CmdArgs) error {
 			"containerID", args.ContainerID, "dir", cniConfig.DANDir)
 	}
 
-	// Delete this attachment's tap device. Unlike the VRF and CRDs below it is
-	// private to this attachment, so no sibling VM can still depend on it and
-	// there is no race to defer to GC.
+	// Delete this attachment's tap device, but only while it still belongs to
+	// this container: the host name is keyed by (vpc, vpcAttachment) alone, so
+	// a replacement container's ADD can already have taken this same device
+	// over by the time this DEL, for a predecessor still terminating, arrives.
+	// tap.Delete checks the ownership stamp Add leaves and leaves a
+	// successor's tap alone rather than tearing it down by name.
 	//
 	// A VMM still holding the device's descriptor open can make the kernel
 	// delete lazily rather than immediately, but never blocks or fails this
 	// call.
-	if err := tap.Delete(vpc, vpcAtt); err != nil {
+	if err := tap.Delete(vpc, vpcAtt, args.ContainerID); err != nil {
 		slog.Warn("DEL: failed to delete tap device", "err", err,
 			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAtt)
 	}

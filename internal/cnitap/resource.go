@@ -22,6 +22,22 @@ import (
 type resourceTracker struct {
 	vpc, vpcAttachment string
 
+	// containerID is the CNI container ID this ADD is running for, and so the
+	// owner stamped on any tap it created or adopted. Rollback passes it to
+	// tap.Delete so a failed ADD that lost the attachment to a concurrent one
+	// tears down nothing of the winner's.
+	containerID string
+
+	// tapAdopted and tapPriorOwner record how this ADD's tap step resolved:
+	// whether it created this attachment's tap or took over one that already
+	// existed, and, if so, who owned it before. Rollback branches on them,
+	// mirroring the veth plugin's tracker: a tap this ADD created is ours to
+	// remove; one it took over from a still-terminating predecessor must be
+	// handed back to that owner instead, or a failed ADD would tear down a
+	// live container's interface.
+	tapAdopted    bool
+	tapPriorOwner string
+
 	// ipamDelegated, ipamType, and ipamStdin record enough to release the IPAM
 	// allocation during rollback. They are set on the ipam block's presence
 	// alone, not only after a confirmed delegated add; see the veth plugin's
@@ -78,5 +94,15 @@ func (rt *resourceTracker) cleanup() {
 		}
 	}
 
-	cnimaster.CleanupAttachment(rt.vpc, rt.vpcAttachment, "tap", tap.Delete)
+	cnimaster.CleanupAttachment(rt.vpc, rt.vpcAttachment, "tap", func(vpc, vpcAttachment string) error {
+		// A tap this ADD created is ours to delete; one it adopted from a
+		// still-terminating predecessor must be handed back to that owner so
+		// a failed ADD does not remove a live container's interface. An
+		// adopted tap with no prior owner (unowned debris) has no one to
+		// reclaim it, so it is deleted like one we created.
+		if rt.tapAdopted && rt.tapPriorOwner != "" {
+			return tap.RestoreOwner(vpc, vpcAttachment, rt.tapPriorOwner)
+		}
+		return tap.Delete(vpc, vpcAttachment, rt.containerID)
+	})
 }

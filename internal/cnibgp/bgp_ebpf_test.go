@@ -365,10 +365,10 @@ func TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind(t *testing.T)
 				t.Fatalf("vrf.Add: %v", err)
 			}
 			t.Cleanup(func() { _ = vrf.Delete(vpc) })
-			if err := tap.Add(vpc, tapAttachment, 1500); err != nil {
+			if _, err := tap.Add(vpc, tapAttachment, testContainerID, 1500); err != nil {
 				t.Fatalf("tap.Add: %v", err)
 			}
-			t.Cleanup(func() { _ = tap.Delete(vpc, tapAttachment) })
+			t.Cleanup(func() { _ = tap.Delete(vpc, tapAttachment, testContainerID) })
 			if _, err := veth.Add(vpc, vethAttachment, testContainerID, 1500); err != nil {
 				t.Fatalf("veth.Add: %v", err)
 			}

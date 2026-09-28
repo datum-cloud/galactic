@@ -80,7 +80,7 @@ func TestDeleteNonExistent(t *testing.T) {
 	requireRoot(t)
 
 	// Delete with a name that definitely doesn't exist.
-	err := Delete("zz", "zz9")
+	err := Delete("zz", "zz9", testOwnerID)
 	if err != nil {
 		t.Errorf("Delete(nonexistent) = %v, want nil", err)
 	}
@@ -91,9 +91,9 @@ func TestAddCreatesTapLink(t *testing.T) {
 
 	vpc, att := "at", "b1"
 	addVRFStandIn(t, vpc)
-	t.Cleanup(func() { _ = Delete(vpc, att) })
+	t.Cleanup(func() { _ = Delete(vpc, att, testOwnerID) })
 
-	err := Add(vpc, att, 1500)
+	_, err := Add(vpc, att, testOwnerID, 1500)
 	if err != nil {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
@@ -111,6 +111,10 @@ func TestAddCreatesTapLink(t *testing.T) {
 // testMTU differs from the kernel's 1500 default, so a tap that silently kept
 // the default fails the assertion.
 const testMTU = 1460
+
+// testOwnerID stands in for a CNI container ID across tests that don't
+// exercise ownership handoff themselves.
+const testOwnerID = "test-owner"
 
 // addVRFStandIn creates the master device Add enslaves the tap to. A bridge
 // stands in for the VRF because Add only needs a master-capable link under the
@@ -133,9 +137,9 @@ func TestAddAppliesConfiguredMTU(t *testing.T) {
 
 	vpc, att := "mt", "a1"
 	addVRFStandIn(t, vpc)
-	t.Cleanup(func() { _ = Delete(vpc, att) })
+	t.Cleanup(func() { _ = Delete(vpc, att, testOwnerID) })
 
-	if err := Add(vpc, att, testMTU); err != nil {
+	if _, err := Add(vpc, att, testOwnerID, testMTU); err != nil {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
 
@@ -153,9 +157,9 @@ func TestAddRepairRestoresConfiguredMTU(t *testing.T) {
 
 	vpc, att := "mr", "b1"
 	addVRFStandIn(t, vpc)
-	t.Cleanup(func() { _ = Delete(vpc, att) })
+	t.Cleanup(func() { _ = Delete(vpc, att, testOwnerID) })
 
-	if err := Add(vpc, att, testMTU); err != nil {
+	if _, err := Add(vpc, att, testOwnerID, testMTU); err != nil {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
 	hostName := intf.GenerateInterfaceNameHost(vpc, att)
@@ -168,7 +172,7 @@ func TestAddRepairRestoresConfiguredMTU(t *testing.T) {
 		t.Fatalf("LinkSetMTU: %v", err)
 	}
 
-	if err := Add(vpc, att, testMTU); err != nil {
+	if _, err := Add(vpc, att, testOwnerID, testMTU); err != nil {
 		t.Fatalf("repeat Add(%q, %q) = %v", vpc, att, err)
 	}
 	link, err = findLink(t, hostName)
@@ -185,9 +189,9 @@ func TestAddEnslavesToVRF(t *testing.T) {
 
 	vpc, att := "ct", "d1"
 	addVRFStandIn(t, vpc)
-	t.Cleanup(func() { _ = Delete(vpc, att) })
+	t.Cleanup(func() { _ = Delete(vpc, att, testOwnerID) })
 
-	err := Add(vpc, att, 1500)
+	_, err := Add(vpc, att, testOwnerID, 1500)
 	if err != nil {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
@@ -215,9 +219,9 @@ func TestAddBidirectionalRules(t *testing.T) {
 
 	vpc, att := "et", "f1"
 	addVRFStandIn(t, vpc)
-	t.Cleanup(func() { _ = Delete(vpc, att) })
+	t.Cleanup(func() { _ = Delete(vpc, att, testOwnerID) })
 
-	err := Add(vpc, att, 1500)
+	_, err := Add(vpc, att, testOwnerID, 1500)
 	if err != nil {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
@@ -259,7 +263,7 @@ func TestDeleteRemovesLink(t *testing.T) {
 	vpc, att := "gt", "h1"
 	addVRFStandIn(t, vpc)
 
-	err := Add(vpc, att, 1500)
+	_, err := Add(vpc, att, testOwnerID, 1500)
 	if err != nil {
 		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
 	}
@@ -269,13 +273,154 @@ func TestDeleteRemovesLink(t *testing.T) {
 		t.Fatalf("link not found after Add: %v", err)
 	}
 
-	if err := Delete(vpc, att); err != nil {
+	if err := Delete(vpc, att, testOwnerID); err != nil {
 		t.Fatalf("Delete(%q, %q) = %v", vpc, att, err)
 	}
 
 	_, err = findLink(t, hostName)
 	if err == nil {
 		t.Error("link still exists after Delete, want removed")
+	}
+}
+
+func TestAddStampsOwner(t *testing.T) {
+	requireRoot(t)
+
+	vpc, att := "ow", "o1"
+	addVRFStandIn(t, vpc)
+	t.Cleanup(func() { _ = Delete(vpc, att, testOwnerID) })
+
+	if _, err := Add(vpc, att, testOwnerID, 1500); err != nil {
+		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
+	}
+
+	link, err := findLink(t, intf.GenerateInterfaceNameHost(vpc, att))
+	if err != nil {
+		t.Fatalf("link not found: %v", err)
+	}
+	if got := link.Attrs().Alias; got != testOwnerID {
+		t.Errorf("tap alias = %q, want %q", got, testOwnerID)
+	}
+}
+
+// TestAddAdoptsAndRestampsOwner models a container replacing another on the
+// same attachment: the host tap survives under the same deterministic name,
+// still carrying the predecessor's alias, and the new ADD must claim it for
+// itself so a later DEL can tell the two containers apart.
+func TestAddAdoptsAndRestampsOwner(t *testing.T) {
+	requireRoot(t)
+
+	vpc, att := "ow", "o2"
+	addVRFStandIn(t, vpc)
+	t.Cleanup(func() { _ = Delete(vpc, att, "new-owner") })
+
+	if _, err := Add(vpc, att, "old-owner", 1500); err != nil {
+		t.Fatalf("first Add(%q, %q) = %v", vpc, att, err)
+	}
+
+	res, err := Add(vpc, att, "new-owner", 1500)
+	if err != nil {
+		t.Fatalf("second Add(%q, %q) = %v", vpc, att, err)
+	}
+	if !res.Adopted {
+		t.Error("res.Adopted = false, want true")
+	}
+	if res.PriorOwner != "old-owner" {
+		t.Errorf("res.PriorOwner = %q, want %q", res.PriorOwner, "old-owner")
+	}
+
+	link, err := findLink(t, intf.GenerateInterfaceNameHost(vpc, att))
+	if err != nil {
+		t.Fatalf("link not found: %v", err)
+	}
+	if got := link.Attrs().Alias; got != "new-owner" {
+		t.Errorf("tap alias after adoption = %q, want %q", got, "new-owner")
+	}
+}
+
+// TestDeleteLeavesSuccessorsTapAlone models a predecessor's delayed DEL
+// arriving after a successor has already taken the attachment over: it must
+// not remove the device a live container depends on.
+func TestDeleteLeavesSuccessorsTapAlone(t *testing.T) {
+	requireRoot(t)
+
+	vpc, att := "ow", "o3"
+	addVRFStandIn(t, vpc)
+	t.Cleanup(func() { _ = Delete(vpc, att, "new-owner") })
+
+	if _, err := Add(vpc, att, "old-owner", 1500); err != nil {
+		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
+	}
+	hostName := intf.GenerateInterfaceNameHost(vpc, att)
+	link, err := findLink(t, hostName)
+	if err != nil {
+		t.Fatalf("link not found: %v", err)
+	}
+	if err := netlink.LinkSetAlias(link, "new-owner"); err != nil {
+		t.Fatalf("simulate successor's adoption: %v", err)
+	}
+
+	if err := Delete(vpc, att, "old-owner"); err != nil {
+		t.Fatalf("Delete(%q, %q, old-owner) = %v", vpc, att, err)
+	}
+
+	if _, err := findLink(t, hostName); err != nil {
+		t.Error("tap removed by a non-owning DEL, want left alone")
+	}
+}
+
+func TestRestoreOwner(t *testing.T) {
+	requireRoot(t)
+
+	vpc, att := "ow", "o4"
+	addVRFStandIn(t, vpc)
+	t.Cleanup(func() { _ = Delete(vpc, att, "restored-owner") })
+
+	if _, err := Add(vpc, att, "some-owner", 1500); err != nil {
+		t.Fatalf("Add(%q, %q) = %v", vpc, att, err)
+	}
+
+	if err := RestoreOwner(vpc, att, "restored-owner"); err != nil {
+		t.Fatalf("RestoreOwner: %v", err)
+	}
+
+	link, err := findLink(t, intf.GenerateInterfaceNameHost(vpc, att))
+	if err != nil {
+		t.Fatalf("link not found: %v", err)
+	}
+	if got := link.Attrs().Alias; got != "restored-owner" {
+		t.Errorf("tap alias = %q, want %q", got, "restored-owner")
+	}
+}
+
+func TestRestoreOwnerNonExistent(t *testing.T) {
+	requireRoot(t)
+
+	err := RestoreOwner("zz", "zz9", testOwnerID)
+	if err != nil {
+		t.Errorf("RestoreOwner(nonexistent) = %v, want nil", err)
+	}
+}
+
+func TestOwnedBy(t *testing.T) {
+	const ownerAlias = "abc123"
+	tests := []struct {
+		name  string
+		alias string
+		owner string
+		want  bool
+	}{
+		{"empty alias is owned by anyone", "", "someone", true},
+		{"matching alias", ownerAlias, ownerAlias, true},
+		{"mismatched alias", ownerAlias, "def456", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			link := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Alias: tt.alias}}
+			if got := OwnedBy(link, tt.owner); got != tt.want {
+				t.Errorf("OwnedBy(alias=%q, owner=%q) = %v, want %v", tt.alias, tt.owner, got, tt.want)
+			}
+		})
 	}
 }
 

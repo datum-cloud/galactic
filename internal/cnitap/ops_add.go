@@ -77,6 +77,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	tracker := &resourceTracker{
 		vpc:           pluginConf.VPC,
 		vpcAttachment: pluginConf.VPCAttachment,
+		containerID:   args.ContainerID,
 	}
 	// Record IPAM delegation intent up front, before the ExecAdd call
 	// below ever runs — see resourceTracker's ipamDelegated doc comment.
@@ -99,9 +100,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	slog.Debug("ADD: VRF ready", "vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment)
 
-	if err := tap.Add(pluginConf.VPC, pluginConf.VPCAttachment, pluginConf.MTU); err != nil {
+	addRes, err := tap.Add(pluginConf.VPC, pluginConf.VPCAttachment, args.ContainerID, pluginConf.MTU)
+	if err != nil {
 		return fmt.Errorf("add tap: %w", err)
 	}
+	tracker.tapAdopted = addRes.Adopted
+	tracker.tapPriorOwner = addRes.PriorOwner
 
 	hostName := intf.GenerateInterfaceNameHost(pluginConf.VPC, pluginConf.VPCAttachment)
 	hostLink, err := netlink.LinkByName(hostName)
