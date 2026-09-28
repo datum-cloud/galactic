@@ -71,32 +71,18 @@ type Store struct {
 	// the generation has not moved again.
 	generation     string
 	reapplyPending bool
-
-	// resolveInterval and lastResolve drive a reapply independent of
-	// generation change: the host's own egress-route refresh sweep
-	// deliberately skips every table this sidecar owns (see
-	// egressroutemap.Refresh's doc comment), so a route whose next hop goes
-	// stale for a reason other than a datapath reload -- a link flapping, a
-	// next hop moving to another uplink -- has nothing else to notice. A zero
-	// resolveInterval disables this trigger; the generation-change path is
-	// unaffected either way.
-	resolveInterval time.Duration
-	lastResolve     time.Time
 }
 
 // NewStore returns a Store that converges against backend, delaying teardown of
-// any route or VRF by grace after it leaves desired state, and re-resolving
-// every installed route at least once per resolveInterval regardless of
-// whether the shared eBPF datapath has reloaded. metrics may be nil, as tests
-// commonly pass.
-func NewStore(backend Backend, grace, resolveInterval time.Duration, metrics *Metrics) *Store {
+// any route or VRF by grace after it leaves desired state. metrics may be nil,
+// as tests commonly pass.
+func NewStore(backend Backend, grace time.Duration, metrics *Metrics) *Store {
 	return &Store{
-		backend:         backend,
-		grace:           grace,
-		resolveInterval: resolveInterval,
-		metrics:         metrics,
-		routes:          make(map[string]*routeState),
-		vrfs:            make(map[string]*vrfState),
+		backend: backend,
+		grace:   grace,
+		metrics: metrics,
+		routes:  make(map[string]*routeState),
+		vrfs:    make(map[string]*vrfState),
 	}
 }
 
@@ -250,7 +236,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.checkDatapathLocked(now)
+	s.checkDatapathLocked()
 
 	pendingRoutes, pendingVRFs := 0, 0
 
@@ -372,59 +358,40 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 }
 
 // checkDatapathLocked reapplies every live VRF and route when the backend's
-// DatapathGeneration has changed since they were written, when resolveInterval
-// has elapsed since the last reapply, or when an earlier reapply pass left
-// something unapplied. Callers must hold s.mu.
+// DatapathGeneration has changed since they were written, or when an earlier
+// reapply pass left something unapplied. Callers must hold s.mu.
 //
-// The generation change covers one cause of staleness: the CNI control daemon
-// reloads the shared eBPF datapath independently of this sidecar, recreating
-// its maps empty on a schema change and re-pinning usid_egress on every load,
-// while this sidecar writes kernel state only on an EndpointSlice change, and
-// ensures a VRF's datapath only when first creating it. Without this, a route
-// lost to a reload stays lost until this process restarts, and usid_egress's
-// miss on it falls through to the VRF's default route, looping traffic back
-// into the VRF.
-//
-// The interval covers every other cause: a link flapping, a next hop moving to
-// another uplink, a neighbor's MAC changing. The host's own egress-route
-// refresh sweep would ordinarily catch those, but it deliberately skips every
-// table this sidecar owns -- see egressroutemap.Refresh's doc comment -- so
-// nothing else re-resolves a route whose next hop has moved for a reason other
-// than a datapath reload. Left alone, that route stays wrong for the rest of
-// this process's life: resolveLinkAndL2 does a real, unconditional netlink
-// lookup on every call, so a fresh reapply corrects it the moment the
-// underlying routing table does, without needing the datapath to reload first.
+// Nothing else would notice. The CNI control daemon reloads the shared eBPF
+// datapath independently of this sidecar, recreating its maps empty on a
+// schema change and re-pinning usid_egress on every load, while this sidecar
+// writes kernel state only on an EndpointSlice change, and ensures a VRF's
+// datapath only when first creating it. Without this, a route lost to a reload
+// stays lost until this process restarts, and usid_egress's miss on it falls
+// through to the VRF's default route, looping traffic back into the VRF.
 //
 // A failed generation read is not acted on: it means the datapath is not
 // loaded at all, which nothing here can repair, and the next successful read
 // after it is loaded again will differ and trigger the reapply.
-func (s *Store) checkDatapathLocked(now time.Time) {
+func (s *Store) checkDatapathLocked() {
 	gen, err := s.backend.DatapathGeneration()
 	if err != nil {
 		slog.Debug("ingresssidecar: read eBPF datapath generation", "err", err)
 		return
 	}
-
-	generationChanged := gen != s.generation
-	intervalElapsed := s.resolveInterval > 0 && now.Sub(s.lastResolve) >= s.resolveInterval
-
-	if !generationChanged && !intervalElapsed && !s.reapplyPending {
+	if gen == s.generation && !s.reapplyPending {
 		return
 	}
 	if s.generation == "" && !s.anyInstalledLocked() {
 		s.generation = gen // nothing written yet, so nothing to reapply
-		s.lastResolve = now
 		return
 	}
 
-	slog.Info("ingresssidecar: reapplying every VRF and route",
-		"previous", s.generation, "current", gen,
-		"generationChanged", generationChanged, "intervalElapsed", intervalElapsed, "retry", s.reapplyPending)
+	slog.Info("ingresssidecar: eBPF datapath changed, reapplying every VRF and route",
+		"previous", s.generation, "current", gen, "retry", s.reapplyPending)
 	if s.metrics != nil {
 		s.metrics.Reapplies.Inc()
 	}
 	s.generation = gen
-	s.lastResolve = now
 	s.reapplyPending = !s.reapplyLocked()
 }
 

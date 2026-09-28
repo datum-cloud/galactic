@@ -34,16 +34,6 @@ const (
 	// grace period itself, so it is deliberately much shorter than
 	// DefaultVRFTeardownGracePeriod.
 	DefaultVRFSweepInterval = 5 * time.Second
-
-	// DefaultVRFResolveInterval controls how often every installed route's
-	// link and L2 resolution is refreshed, independent of whether the shared
-	// eBPF datapath has reloaded. It stands in for the host-side refresh sweep
-	// (internal/installer's 30-second one), which deliberately skips every
-	// table this sidecar owns -- see egressroutemap.Refresh's own doc comment.
-	// Minutes rather than seconds: unlike SweepInterval's map lookups, each
-	// tick here does a real netlink.RouteGet plus a possible neighbor solicit
-	// per tracked route.
-	DefaultVRFResolveInterval = 5 * time.Minute
 )
 
 // --- VRF sidecar environment variable keys -----------------------------
@@ -52,7 +42,6 @@ const (
 	EnvVRFMetricsPort         = "GALACTIC_VRF_METRICS_PORT"
 	EnvVRFTeardownGracePeriod = "GALACTIC_VRF_TEARDOWN_GRACE_PERIOD"
 	EnvVRFSweepInterval       = "GALACTIC_VRF_SWEEP_INTERVAL"
-	EnvVRFResolveInterval     = "GALACTIC_VRF_RESOLVE_INTERVAL"
 
 	// EnvVRFNodeName and EnvVRFNamespace configure the return-path gateway
 	// advertisement publisher. Unset by default, and unlike the others
@@ -89,10 +78,6 @@ type VRFConfig struct {
 	MetricsPort         int
 	TeardownGracePeriod time.Duration
 	SweepInterval       time.Duration
-	// ResolveInterval is how often every installed route is re-resolved
-	// (link index, destination and source MAC) regardless of whether the
-	// shared eBPF datapath has reloaded. See DefaultVRFResolveInterval.
-	ResolveInterval time.Duration
 	// NodeName is this node's name as it appears in a BGPRouter's target
 	// reference. It is required only to enable the gateway-advertisement
 	// publisher; "" leaves that disabled. Resolved from EnvVRFNodeName, falling
@@ -133,7 +118,6 @@ func NewVRFConfig() *VRFConfig {
 	v.SetDefault(keyMetricsPort, DefaultVRFMetricsPort)
 	v.SetDefault("teardown_grace_period", DefaultVRFTeardownGracePeriod.String())
 	v.SetDefault("sweep_interval", DefaultVRFSweepInterval.String())
-	v.SetDefault("resolve_interval", DefaultVRFResolveInterval.String())
 	v.SetDefault("namespace", DefaultNamespace)
 
 	cfg := &VRFConfig{
@@ -154,7 +138,6 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		{flagMetricsPort, keyMetricsPort},
 		{"teardown-grace-period", "teardown_grace_period"},
 		{"sweep-interval", "sweep_interval"},
-		{"resolve-interval", "resolve_interval"},
 		{"node-name", "node_name"},
 		{"namespace", "namespace"},
 		{"gateway-prefix", "gateway_prefix"},
@@ -175,7 +158,6 @@ func (c *VRFConfig) readFields() {
 	c.MetricsPort = c.v.GetInt(keyMetricsPort)
 	c.TeardownGracePeriod = c.v.GetDuration("teardown_grace_period")
 	c.SweepInterval = c.v.GetDuration("sweep_interval")
-	c.ResolveInterval = c.v.GetDuration("resolve_interval")
 	c.Namespace = c.v.GetString("namespace")
 
 	c.NodeName = c.v.GetString("node_name")
@@ -201,9 +183,6 @@ func (c *VRFConfig) Validate() error {
 	}
 	if c.SweepInterval > c.TeardownGracePeriod {
 		return errors.New("sweep interval must not be greater than the teardown grace period")
-	}
-	if c.ResolveInterval <= 0 {
-		return errors.New("resolve interval must be positive")
 	}
 	if c.GatewayPrefix != "" {
 		ip, network, err := net.ParseCIDR(c.GatewayPrefix)
