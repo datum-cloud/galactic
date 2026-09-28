@@ -37,7 +37,7 @@ func TestReconcilerAppliesDesiredRoute(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 	r := &Reconciler{Client: c, Store: store}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -62,7 +62,7 @@ func TestReconcilerDeletedSliceStartsGrace(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 	if err := store.SetDesired(context.Background(), "ns/pod-a",
 		&DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}); err != nil {
 		t.Fatalf("seed SetDesired: %v", err)
@@ -95,7 +95,7 @@ func TestReconcilerMalformedSliceDoesNotError(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 	r := &Reconciler{Client: c, Store: store}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{

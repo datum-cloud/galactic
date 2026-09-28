@@ -25,7 +25,7 @@ func TestSeedFromAPIAppliesReadySlice(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 
 	if err := SeedFromAPI(context.Background(), c, store); err != nil {
 		t.Fatalf("SeedFromAPI: %v", err)
@@ -47,7 +47,7 @@ func TestSeedFromAPISkipsNotYetReady(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 
 	if err := SeedFromAPI(context.Background(), c, store); err != nil {
 		t.Fatalf("SeedFromAPI: %v", err)
@@ -72,7 +72,7 @@ func TestSeedFromAPISkipsMalformedSlice(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 
 	if err := SeedFromAPI(context.Background(), c, store); err != nil {
 		t.Fatalf("SeedFromAPI: want nil error for malformed-but-selected slice, got %v", err)
@@ -95,7 +95,7 @@ func TestSeedFromAPIIgnoresUnlabeledSlices(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 
 	if err := SeedFromAPI(context.Background(), c, store); err != nil {
 		t.Fatalf("SeedFromAPI: %v", err)
@@ -129,7 +129,7 @@ func TestSeedFromAPIThenInventoryDoesNotOrphanLiveRoute(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice).Build()
 
 	backend := newFakeBackend()
-	store := NewStore(backend, testGrace, nil)
+	store := NewStore(backend, testGrace, 0, nil)
 
 	ctx := context.Background()
 	if err := SeedFromAPI(ctx, c, store); err != nil {
