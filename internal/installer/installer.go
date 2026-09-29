@@ -961,9 +961,11 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 //     reports SERVING once the process is up, since credential refresh and log
 //     rotation have no meaningful unhealthy state; a separate
 //     ebpfHealthServiceName service reports the polled result of attach.Health.
-//  7. Sweeps stale vrf_table entries and reconciles nptv6_table entries on a
-//     ticker. Both run here rather than in galactic-router's GC controller
-//     because the pinned maps exist only inside this container.
+//  7. Sweeps stale vrf_table and vpc_attribution_table entries (reconciled
+//     together against the same live set) and reconciles nptv6_table
+//     entries on a ticker. All three run here rather than in
+//     galactic-router's GC controller because the pinned maps exist only
+//     inside this container.
 //  8. Runs one radv.RunActor per recorded tap attachment, reconciled on a short
 //     ticker. Each actor resends Router Advertisements on a jittered schedule
 //     and replies to that guest's solicitations. This runs here, not from

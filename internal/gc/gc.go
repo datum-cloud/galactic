@@ -56,7 +56,12 @@ type CleanupResult struct {
 	// EBPFNPTv6EntriesRemoved counts stale eBPF uSID datapath nptv6_table
 	// map entries removed by SweepEBPFNPTv6Table.
 	EBPFNPTv6EntriesRemoved int
-	Errors                  int
+	// EBPFVPCAttributionEntriesRemoved counts stale eBPF
+	// vpc_attribution_table entries removed by SweepEBPFVRFTable,
+	// reconciled against the same live set as EBPFVRFEntriesRemoved since
+	// the two tables share the same (Block, Argument) key and lifecycle.
+	EBPFVPCAttributionEntriesRemoved int
+	Errors                           int
 }
 
 // vrfNameRegex matches the deterministic VRF interface name Galactic
@@ -638,6 +643,23 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	result.EBPFVRFEntriesRemoved = len(removed)
 	if err != nil {
 		slog.Error("GC: errors while reconciling eBPF vrf_table", "err", err)
+		result.Errors++
+	}
+
+	// vpc_attribution_table shares vrf_table's exact (Block, Argument) key
+	// and lifecycle (see its own doc comment in usid.c), so it reconciles
+	// against the same live set and cutoff captured above. It has no repair
+	// step of its own: unlike vrf_table, an incompatible-schema wipe of this
+	// brand-new map cannot happen on a fresh rollout, and a missing row
+	// simply reports as unattributed (internal/plumbing/ebpf/metrics) until
+	// the next CNI ADD/DEL repopulates it.
+	attrRemoved, attrErr := reg.VPCAttribution.Reconcile(live, cutoff)
+	for _, e := range attrRemoved {
+		slog.Info("GC: removed stale eBPF vpc_attribution_table entry", "block", e.Block, "argument", e.Argument)
+	}
+	result.EBPFVPCAttributionEntriesRemoved = len(attrRemoved)
+	if attrErr != nil {
+		slog.Error("GC: errors while reconciling eBPF vpc_attribution_table", "err", attrErr)
 		result.Errors++
 	}
 

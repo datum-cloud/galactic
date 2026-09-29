@@ -13,22 +13,28 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
 
-// Registry bundles the read/write API for all three of the uSID datapath's
+// Registry bundles the read/write API for all four of the uSID datapath's
 // control-plane maps against one loaded object set. A convenience constructor
 // for callers that would otherwise wrap each map individually.
 type Registry struct {
 	VRF      *VRFTable
 	Locator  *LocatorTable
 	Function *FunctionTable
+
+	// VPCAttribution is vpc_attribution_table's read/write API -- a
+	// counter-schema-independent companion to VRF, keyed identically. See
+	// VPCAttributionTable's doc comment.
+	VPCAttribution *VPCAttributionTable
 }
 
 // NewRegistryFromObjects builds a Registry backed by objs's kernel-loaded
 // maps.
 func NewRegistryFromObjects(objs *prog.UsidObjects) *Registry {
 	return &Registry{
-		VRF:      NewVRFTable(KernelTable{Map: objs.VrfTable}),
-		Locator:  NewLocatorTable(KernelTable{Map: objs.LocatorTable}),
-		Function: NewFunctionTable(KernelTable{Map: objs.FunctionTable}),
+		VRF:            NewVRFTable(KernelTable{Map: objs.VrfTable}),
+		Locator:        NewLocatorTable(KernelTable{Map: objs.LocatorTable}),
+		Function:       NewFunctionTable(KernelTable{Map: objs.FunctionTable}),
+		VPCAttribution: NewVPCAttributionTable(KernelTable{Map: objs.VpcAttributionTable}),
 	}
 }
 
@@ -45,7 +51,7 @@ func (p pinnedMaps) Close() error {
 	return nil
 }
 
-// OpenPinnedRegistry opens the three control-plane maps from their pinned paths
+// OpenPinnedRegistry opens the four control-plane maps from their pinned paths
 // under pinDir and returns a Registry wrapping them, for a short-lived process
 // that did not itself load the datapath but needs to read and write its maps.
 // The returned closer must be closed when the caller is done; the maps stay
@@ -74,11 +80,19 @@ func OpenPinnedRegistry(pinDir string) (*Registry, pinnedMaps, error) {
 		locatorMap.Close() //nolint:errcheck // best-effort close on partial-open failure
 		return nil, nil, err
 	}
+	vpcAttributionMap, err := open(prog.UsidMapVpcAttributionTable)
+	if err != nil {
+		vrfMap.Close()      //nolint:errcheck // best-effort close on partial-open failure
+		locatorMap.Close()  //nolint:errcheck // best-effort close on partial-open failure
+		functionMap.Close() //nolint:errcheck // best-effort close on partial-open failure
+		return nil, nil, err
+	}
 
-	closer := pinnedMaps{vrfMap, locatorMap, functionMap}
+	closer := pinnedMaps{vrfMap, locatorMap, functionMap, vpcAttributionMap}
 	return &Registry{
-		VRF:      NewVRFTable(KernelTable{Map: vrfMap}),
-		Locator:  NewLocatorTable(KernelTable{Map: locatorMap}),
-		Function: NewFunctionTable(KernelTable{Map: functionMap}),
+		VRF:            NewVRFTable(KernelTable{Map: vrfMap}),
+		Locator:        NewLocatorTable(KernelTable{Map: locatorMap}),
+		Function:       NewFunctionTable(KernelTable{Map: functionMap}),
+		VPCAttribution: NewVPCAttributionTable(KernelTable{Map: vpcAttributionMap}),
 	}, closer, nil
 }
