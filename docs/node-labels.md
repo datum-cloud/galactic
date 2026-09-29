@@ -12,16 +12,24 @@ for everything else about a given binary.
 
 ---
 
-## The four labels
+## The labels
 
 | Label                                            | Deploys                                               | Kind              |
 |--------------------------------------------------|-------------------------------------------------------|-------------------|
 | `galactic.datumapis.com/node=compute`            | nothing exclusively (see below)                       | primary role enum |
-| `galactic.datumapis.com/node=edge`               | `galactic-gateway` (standalone), `galactic-nat`       | primary role enum |
+| `galactic.datumapis.com/node=edge`               | `galactic-vrf` (ingress sidecar pods)                 | primary role enum |
+| `galactic.datumapis.com/gateway=enabled`         | `galactic-gateway`                                    | independent flag  |
+| `galactic.datumapis.com/nat=enabled`             | `galactic-nat`                                        | independent flag  |
 | `galactic.datumapis.com/galactic=router`         | `galactic-cni`, `galactic-router` (plain/tenant mode) | mode enum         |
 | `galactic.datumapis.com/galactic=control`        | `galactic-router-rr`                                  | mode enum         |
 | `galactic.datumapis.com/fabric=router`           | `fabric-router` (plain mode)                          | mode enum         |
 | `galactic.datumapis.com/fabric=control`          | `fabric-router` (reflector mode, same image)          | mode enum         |
+
+`galactic-gateway` and `galactic-nat` are **never deployed automatically**: a
+node runs one only after an operator labels it, and their manifests live in
+`base/` directories no default kustomization applies. Each requires its own
+label *and* `galactic.datumapis.com/node` to be absent (`DoesNotExist`). They
+are independent of each other, so a node can carry either label or both.
 
 Every affinity also excludes Kubernetes control-plane nodes
 (`node-role.kubernetes.io/control-plane: DoesNotExist`), independently of
@@ -106,27 +114,30 @@ bug, not a hypothetical:
 
 ---
 
-## Naming collision, read this before anything else
+## What `edge` means, and why gateway and NAT sit outside `node`
 
-**`galactic.datumapis.com/node=edge` deploys `galactic-gateway` and
-`galactic-nat` — it does *not* mean "the per-node tenant/compute role."**
-That's `node=compute`.
+**`galactic.datumapis.com/node=edge` marks the nodes that host
+`galactic-vrf`** — the ingress sidecar that runs next to Envoy and wires a
+tenant VRF into the pod. Like `compute`, an `edge` node also runs
+`galactic-cni`, `galactic-router` and `fabric-router`, through their own
+labels (`galactic=router`, `fabric=router`). It does **not** run
+`galactic-gateway` or `galactic-nat`.
 
-This is a deliberate rename, not an inconsistency to double-check: "edge"
-now means the actual network edge — the ingress/egress boundary
-`galactic-gateway`'s XDP NAT+LB datapath sits on — which is also why
-`galactic-gateway` has always been described elsewhere in this repo as "the
-edge XDP NAT+LB gateway," independently of and predating this label scheme.
-Before this rename, the *tenant-serving* role was called `edge` and the
-*gateway* role was called `gateway`, which collided with that existing
-"edge XDP" terminology. Calling the tenant role `compute` and reserving
-`edge` for the actual network-edge role resolves that collision instead of
-perpetuating it.
+Earlier versions of this scheme used `node=edge` to select both of those, so
+they could never be placed independently (one label, one value) and both
+landed wherever `galactic-vrf`'s nodes were. They now have their own labels
+and refuse any node that carries a `node` value at all. Because a node has at
+most one `node` value, that makes them exclude `galactic-vrf` by
+construction rather than by convention.
 
-If you're reading an older comment, commit, or diagram that says
-`galactic.datumapis.com/node: edge` and shows `galactic-router`/
-`galactic-cni` attached to it, it predates this rename and means what
-`compute` means today.
+Note the historical wording elsewhere in this repo: "edge XDP" describes
+`galactic-gateway`'s datapath and predates this scheme; it is unrelated to
+`node=edge`.
+
+**Placement of `galactic-vrf` itself** is not defined in this repo yet (no
+`config/galactic-vrf/`; see the note above `publish-galactic-vrf-image` in
+`.github/workflows/publish.yaml`). Whatever defines its pods must require
+`galactic.datumapis.com/node=edge`.
 
 ---
 
@@ -139,30 +150,42 @@ The ordinary tenant-serving node. Runs (via
 `galactic-router`, and nothing keyed on this label itself.
 
 `galactic-nat` used to run here, one egress shard per compute node. It now
-runs on `edge` (below): a compute node's tenant egress is encapsulated toward
-its own site's edge shards instead (`GALACTIC_CNI_EGRESS_SHARD_SIDS`, set per
-site, with no other site's shard as a fallback).
+runs on `nat=enabled` nodes (below): a compute node's tenant egress is
+encapsulated toward its own site's shards instead
+(`GALACTIC_CNI_EGRESS_SHARD_SIDS`, set per site, with no other site's shard as
+a fallback).
 
 ### `galactic.datumapis.com/node=edge`
 
-Runs `galactic-gateway`'s standalone, single-container pod and
-`galactic-nat`, the egress shard — the two components that differ between
-`compute` and `edge` — plus (via `galactic.datumapis.com/galactic=router`)
-`galactic-cni` and `galactic-router`. Dedicated, opt-in, tainted to keep
-ordinary tenant pods off — see `config/galactic-gateway/base/daemonset.yaml`
-and `config/galactic-nat/base/daemonset.yaml`.
+The nodes that host `galactic-vrf`. Runs (via
+`galactic.datumapis.com/galactic=router` and
+`galactic.datumapis.com/fabric=router`) `galactic-cni`, `galactic-router` and
+`fabric-router`, and nothing keyed on this label by a manifest in this repo.
+Never runs `galactic-gateway` or `galactic-nat`.
 
-The two share the edge node's native XDP hook, which an interface allows
-only one program on: `galactic-gateway` attaches, and `galactic-nat` runs in
-`GALACTIC_NAT_XDP_ATTACH=chain` mode, installed in the gateway's pinned
-`xdp_chain` program array so it receives every packet the gateway does not
-claim. `galactic-nat` therefore requires `galactic-gateway` on the same node.
+### `galactic.datumapis.com/gateway=enabled`
 
-`galactic-router` used to run as a second container inside this same pod
-(`galactic-router` + `galactic-gateway`, sharing one ServiceAccount). It's
-now a fully independent DaemonSet, deployed the same way on `edge` as on
-`compute` — a crash in one no longer risks the other's pod, not just the
-other's binary.
+Runs `galactic-gateway`'s standalone, single-container pod
+(`config/galactic-gateway/base/daemonset.yaml`). Opt-in, never automatic, and
+independent of `nat`. The node must carry no `galactic.datumapis.com/node`
+label. `galactic-router` and `galactic-cni` run here too if the node also has
+`galactic=router`, as their own independent DaemonSets.
+
+### `galactic.datumapis.com/nat=enabled`
+
+Runs `galactic-nat`, the egress shard
+(`config/galactic-nat/base/daemonset.yaml`). Opt-in, never automatic, and
+independent of `gateway`. The node must carry no `galactic.datumapis.com/node`
+label.
+
+A node with no gateway uses the base, whose `GALACTIC_NAT_XDP_ATTACH` defaults
+to `direct`: the shard attaches its own XDP program to its uplinks. A node
+that also carries `gateway=enabled` must apply
+`config/galactic-nat/overlays/chained/` instead. The gateway already holds the
+node's native XDP hook, an interface takes one program, and the shard installs
+itself in the gateway's pinned `xdp_chain` array, so the gateway has to be
+running on that node too. Compute nodes reach their site's shards over SRv6
+(`GALACTIC_CNI_EGRESS_SHARD_SIDS`).
 
 ### `galactic.datumapis.com/galactic=router`
 
@@ -209,8 +232,12 @@ Mutually exclusive with `fabric=router` on the same node, the same way
 | Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                                   |
 |------------------------------------------------------------|-----------|------------|----------|----------------------------------------------------------------------------------------|
 | `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-cni`, `galactic-router`, `fabric-router`                                     |
-| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | `edge`    | `router`   | `router` | `galactic-gateway`, `galactic-nat`, `galactic-cni`, `galactic-router`, `fabric-router` |
+| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | —         | `router`   | `router` | `galactic-gateway`, `galactic-nat` (`gateway`/`nat` = `enabled`), `galactic-cni`, `galactic-router`, `fabric-router` |
 | `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                                  |
+
+The lab has no `galactic-vrf` nodes, so no worker carries `node=edge`; its
+gateway/NAT workers carry `gateway=enabled` and `nat=enabled` and no `node`
+value, which is what keeps them apart from any future `node=edge` host.
 
 The reflector row is the one that shows why `galactic` is a mode enum rather
 than a boolean: `iad-worker3` carries no `node` value at all. Both `node`
@@ -225,6 +252,26 @@ particular lab's topology, not a rule the label scheme enforces — a real
 deployment is free to have nodes with no galactic role at all (GPU,
 monitoring, etc.), which correctly get none of these labels and none of
 these DaemonSets.
+
+---
+
+## Migrating gateway and NAT nodes off `node=edge`
+
+Existing pods keep running when a node's labels change
+(`IgnoredDuringExecution`), but a restarted pod reschedules only onto a node
+that matches its affinity. Order matters, or a restart leaves no pod at all:
+
+1. On each gateway or NAT node, add `galactic.datumapis.com/gateway=enabled`
+   and/or `galactic.datumapis.com/nat=enabled`. Nothing changes yet.
+2. Apply the new manifests. Running pods stay put.
+3. On each of those nodes, remove `galactic.datumapis.com/node=edge`, then
+   restart its `galactic-gateway` / `galactic-nat` pods.
+4. On a node running both, use `config/galactic-nat/overlays/chained/` for
+   the shard, or it will try to attach over the gateway's XDP program.
+
+Skipping step 1 and removing `node=edge` first leaves the DaemonSets with no
+matching node the next time the pod restarts, which blackholes ingress or
+egress for that node.
 
 ---
 

@@ -9,3 +9,9 @@ spec:
         - name: galactic-nat
           image: galactic-nat:latest
           imagePullPolicy: Never
+          env:
+            # Every lab NAT node also runs galactic-gateway, which holds the
+            # native XDP hook, so the shard chains behind it. This is what
+            # config/galactic-nat/overlays/chained/ sets.
+            - name: GALACTIC_NAT_XDP_ATTACH
+              value: chain

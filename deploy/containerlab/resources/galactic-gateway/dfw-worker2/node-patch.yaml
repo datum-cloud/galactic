@@ -13,10 +13,12 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
+                  - key: galactic.datumapis.com/gateway
                     operator: In
                     values:
-                      - edge
+                      - enabled
+                  - key: galactic.datumapis.com/node
+                    operator: DoesNotExist
                   - key: kubernetes.io/hostname
                     operator: In
                     values:

@@ -13,7 +13,8 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/gateway: enabled
+      galactic.datumapis.com/nat: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
@@ -21,8 +22,8 @@ nodes:
         kind: JoinConfiguration
         nodeRegistration:
           taints:
-            - key: galactic.datumapis.com/node
-              value: edge
+            - key: galactic.datumapis.com/gateway
+              value: enabled
               effect: NoSchedule
   # The EVPN route reflector for the whole lab -- every galactic-router in
   # every cluster peers with this one node (fc00:0:8::1 port 1790). It is

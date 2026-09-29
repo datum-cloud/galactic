@@ -32,21 +32,21 @@ copy_nat_config() {
   docker cp "${GALACTIC_NAT_BASE_DIR}" "${node}:/galactic/resources/galactic-nat/base/nat"
 }
 
-# delete_stale_shards NODE deletes every EgressShard not targeting an edge
-# node. Shards used to live on the compute workers, and a shard's identity is
+# delete_stale_shards NODE deletes every EgressShard not targeting a NAT
+# node (galactic.datumapis.com/nat=enabled). Shards used to live on the compute workers, and a shard's identity is
 # write-once, so a lab brought up before the move cannot be edited into the
 # new layout: the old objects have to go. Deleting one clears that node's
 # datapath and withdraws its advertisement. A fresh lab has none to delete.
 delete_stale_shards() {
   local node="$1" edge shard target
-  edge=$(docker exec "${node}" kubectl get nodes -l galactic.datumapis.com/node=edge \
+  edge=$(docker exec "${node}" kubectl get nodes -l galactic.datumapis.com/nat=enabled \
     -o jsonpath='{.items[*].metadata.name}')
   docker exec "${node}" kubectl -n galactic-system get egressshards \
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.targetRef.name}{"\n"}{end}' |
     while read -r shard target; do
       [ -n "${shard}" ] || continue
       if ! grep -qw -- "${target}" <<<"${edge}"; then
-        echo "Deleting EgressShard ${shard}: it targets ${target}, not an edge node"
+        echo "Deleting EgressShard ${shard}: it targets ${target}, not a NAT node"
         docker exec "${node}" kubectl -n galactic-system delete egressshard "${shard}" --wait
       fi
     done

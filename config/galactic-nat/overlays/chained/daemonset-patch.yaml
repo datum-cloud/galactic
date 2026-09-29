@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-nat
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-nat
+          env:
+            - name: GALACTIC_NAT_XDP_ATTACH
+              value: chain

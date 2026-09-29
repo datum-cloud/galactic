@@ -18,16 +18,23 @@ spec:
       labels:
         app.kubernetes.io/name: galactic-nat
     spec:
-      # galactic-nat is an edge component: every edge node runs it
-      # unconditionally, alongside galactic-gateway, with no separate opt-in
-      # label. The gateway handles ingress and the shard handles egress, and
-      # both belong where the node meets the transit: a shard's masquerade
-      # address is originated there and each reply lands there, so an edge
-      # shard is one hop from the internet instead of behind the edge node.
-      # Compute nodes reach their site's edge shards over SRv6
-      # (GALACTIC_CNI_EGRESS_SHARD_SIDS). galactic-cni and galactic-router run
-      # here too, but via the separate galactic.datumapis.com/galactic=router
-      # flag every compute *and* edge node carries
+      # Opt-in only: runs on a node an operator has explicitly labeled
+      # galactic.datumapis.com/nat=enabled, and nowhere else. Nothing
+      # deploys it automatically. It is independent of galactic-gateway: a
+      # node can carry either label or both. With no gateway on the node
+      # the shard attaches its own XDP program (the default,
+      # GALACTIC_NAT_XDP_ATTACH=direct); alongside a gateway, apply
+      # ../overlays/chained/ instead, which chains the shard behind the
+      # gateway's programs because an interface takes only one.
+      #
+      # It never shares a node with galactic-vrf. That sidecar's pods are
+      # placed on galactic.datumapis.com/node=edge nodes, and the affinity
+      # below requires this node to carry no galactic.datumapis.com/node
+      # value at all, so the two exclude each other by construction (a
+      # node's `node` label is single-valued). Compute nodes reach their
+      # site's shards over SRv6 (GALACTIC_CNI_EGRESS_SHARD_SIDS).
+      # galactic-cni and galactic-router may run here too, via the separate
+      # galactic.datumapis.com/galactic=router label
       # (config/galactic-cni/daemonset.yaml,
       # config/galactic-router/overlays/router/daemonset-patch.yaml). A
       # shard's own SID and public addresses must be unique per node, but they
@@ -47,10 +54,12 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
+                  - key: galactic.datumapis.com/nat
                     operator: In
                     values:
-                      - edge
+                      - enabled
+                  - key: galactic.datumapis.com/node
+                    operator: DoesNotExist
       serviceAccountName: galactic-nat
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -86,17 +95,11 @@ spec:
             # Set explicitly here anyway so it can't silently drift.
             - name: GALACTIC_NAT_GRPC_HEALTH_PORT
               value: "5182"
-            # Chained behind galactic-gateway rather than attached: the
-            # gateway already holds the native XDP hook on every edge node's
-            # uplinks, and an interface takes one native program. The shard
-            # installs itself in the gateway's pinned xdp_chain slot and
-            # receives every packet the gateway does not claim -- the two
-            # claim disjoint traffic. It waits for that map at startup, so
-            # the gateway must run on this node too. See internal/config/
-            # nat.go's EnvNATXDPAttach; "direct" is for a node with no
-            # gateway.
-            - name: GALACTIC_NAT_XDP_ATTACH
-              value: chain
+            # GALACTIC_NAT_XDP_ATTACH is left at its default, "direct": the
+            # shard attaches its own program to the uplinks. On a node that
+            # also runs galactic-gateway, which already holds the native XDP
+            # hook, apply ../overlays/chained/ to set it to "chain". See
+            # internal/config/nat.go's EnvNATXDPAttach.
             # Nothing about this shard's identity is set here. Its SID,
             # masquerade addresses and NAT64 prefix come from the
             # EgressShard whose spec.targetRef names this node, which the
