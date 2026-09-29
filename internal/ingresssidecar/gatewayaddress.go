@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 
@@ -126,11 +127,37 @@ func ensureGatewayAddress(vpc, inner string) error {
 	// A host route, matching what GatewayPublisher.PublishGateway advertises,
 	// rather than a claim on the whole prefix.
 	nladdr := &netlink.Addr{IPNet: &net.IPNet{IP: addr, Mask: net.CIDRMask(net.IPv6len*8, net.IPv6len*8)}}
-	if err := netlink.AddrReplace(link, nladdr); err != nil {
-		return fmt.Errorf("assign gateway address %s to %q: %w", addr, inner, err)
+	present, err := hasAddress(link, addr)
+	if err != nil {
+		return err
+	}
+	if !present {
+		if err := netlink.AddrAdd(link, nladdr); err != nil && !errors.Is(err, syscall.EEXIST) {
+			return fmt.Errorf("assign gateway address %s to %q: %w", addr, inner, err)
+		}
 	}
 
 	return ensureGatewayVRFRoute(vpc, addr)
+}
+
+// hasAddress reports whether link already carries addr.
+//
+// ensureGatewayAddress checks rather than replacing because the kernel drops an
+// address's local route when an address that has finished duplicate address
+// detection is replaced. Ensure runs again after a partial failure and after
+// every datapath reload, so a replace leaves the address assigned but no
+// longer local, and the gateway then forwards its own traffic.
+func hasAddress(link netlink.Link, addr net.IP) (bool, error) {
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+	if err != nil {
+		return false, fmt.Errorf("list addresses on %q: %w", link.Attrs().Name, err)
+	}
+	for _, a := range addrs {
+		if a.IP.Equal(addr) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ensureGatewayVRFRoute pulls traffic for vpc's gateway address into that
