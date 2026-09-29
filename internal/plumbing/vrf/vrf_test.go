@@ -5,8 +5,13 @@
 package vrf_test
 
 import (
+	"fmt"
 	"os"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -143,5 +148,58 @@ func TestDelete_ThenAddRecreates(t *testing.T) {
 	}
 	if err := vrf.Exists(vpc); err != nil {
 		t.Errorf("Exists after re-Add: %v", err)
+	}
+}
+
+// TestListVRFLinks_SurvivesLinkChurn lists VRFs while other goroutines add and
+// remove unrelated links. A single-attempt dump fails this with
+// ErrDumpInterrupted; the retrying dump must not.
+//
+// A few hundred stable links keep each dump long enough for a change to land
+// inside it.
+func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
+	requireRoot(t)
+
+	const stable, churners = 300, 2
+	for i := range stable {
+		link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("vrfstab%d", i)}}
+		if err := netlink.LinkAdd(link); err != nil {
+			t.Fatalf("add stable link %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = netlink.LinkDel(link) })
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for c := range churners {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("vrfchurn%d_%d", c, i%4)}}
+				if err := netlink.LinkAdd(dummy); err == nil {
+					_ = netlink.LinkDel(dummy)
+				}
+				// Bursts of changes, not a saturated loop: a node sees link
+				// churn in bursts, and a loop that never pauses can outlast
+				// any bounded retry.
+				time.Sleep(2 * time.Millisecond)
+			}
+		}()
+	}
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+	})
+
+	for i := range 100 {
+		if _, err := vrf.ListVRFLinks(); err != nil {
+			t.Fatalf("ListVRFLinks failed on iteration %d while links were changing: %v", i, err)
+		}
 	}
 }
