@@ -175,8 +175,21 @@ func FlushTable(vrfID uint32) error {
 }
 
 // ListVRFLinks returns all VRF interfaces currently present on the host.
+//
+// The link dump retries when the kernel flags it interrupted, which happens
+// whenever another process adds or removes a link while the dump is running.
+// The package-level netlink.LinkList makes a single attempt and returns
+// ErrDumpInterrupted, which failed a caller on a node with unrelated link
+// churn. TableID, Add and the sidecar's startup inventory all list through
+// here.
 func ListVRFLinks() ([]*netlink.Vrf, error) {
-	links, err := netlink.LinkList()
+	handle, err := netlink.NewHandleWithOptions(netlink.HandleOptions{RetryInterrupted: true})
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close() //nolint:errcheck // best-effort close of our own sockets
+
+	links, err := handle.LinkList()
 	if err != nil {
 		return nil, err
 	}
