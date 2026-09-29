@@ -13,8 +13,9 @@ Every edge node runs a shard — `dfw-worker2` and `dfw-worker3` in dfw,
   `eth0`, which carries every node's IPv6 default route.
 - `dfw/`, `sjc/`, `iad/` — one per-site overlay each, applying one
   `galactic-nat` DaemonSet to that site's edge nodes. There is no per-node
-  pin: the base's `galactic.datumapis.com/node: edge` affinity already
-  selects them, and nothing about a shard's identity lives in the
+  pin: the base's `galactic.datumapis.com/nat: enabled` affinity already
+  selects them (the lab labels every edge node so, and the lab base sets
+  `GALACTIC_NAT_XDP_ATTACH=chain`, as `config/galactic-nat/overlays/chained/` does), and nothing about a shard's identity lives in the
   DaemonSet. Each site's `node-patch.yaml` sets only
   `GALACTIC_NAT_UPLINK_INTERFACES=bond0,bond1` — an edge node's transit
   bond (replies arrive there) and its compute-facing bond (tenant egress

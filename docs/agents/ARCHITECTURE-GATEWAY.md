@@ -40,13 +40,13 @@ document to start from for a given task.
 load-balances into a tenant VPC's backend Pods, without a VRF or tunnel
 dependency and without a per-tenant Geneve device. It is a **separate
 binary from `galactic-router`**, deployed as its own single-container,
-`hostNetwork: true` DaemonSet on dedicated gateway-role nodes only
-(`galactic.datumapis.com/node: edge`), so a crash on either side — tenant
+`hostNetwork: true` DaemonSet on nodes an operator has labeled
+`galactic.datumapis.com/gateway: enabled` (opt-in, never automatic), so a crash on either side — tenant
 BGP vs. the XDP-holding gateway engine — no longer takes the other down
 with it. `galactic-router` used to run as a second container in this same
 pod; it's now a fully independent DaemonSet instead, opted in via
-`galactic.datumapis.com/galactic: router` on the same `edge` nodes (the
-identical flag `compute` nodes use), not co-located here at all. Tenant BGP
+`galactic.datumapis.com/galactic: router` (the identical flag `compute`
+nodes use), which a gateway node may carry too, not co-located here at all. Tenant BGP
 itself (the embedded GoBGP server, the
 `BGPRouter`/`BGPPeer`/`BGPAdvertisement`/`BGPPolicy`/`BGPVRFInstance`
 reconcilers) still runs unmodified in that separate `galactic-router`

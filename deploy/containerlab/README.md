@@ -124,7 +124,7 @@ hanging off `tr4`, the transit router with no site attached.
 | `tr1`–`tr4`         | linux (FRR)   | iBGP full mesh, AS 65100                                                       |
 | `remote-host`       | linux (nginx) | off-fabric host on `tr4`; runs no Galactic component, no BGP                   |
 
-Every edge node is tainted (`galactic.datumapis.com/node=edge:NoSchedule`) and so is the
+Every edge node is tainted (`galactic.datumapis.com/gateway=enabled:NoSchedule`) and so is the
 route reflector (`galactic.datumapis.com/galactic=control:NoSchedule`): no tenant pods land
 on either, only DaemonSets with a blanket toleration. Edge nodes run `galactic-cni` and
 plain-mode `galactic-router` as their own independent DaemonSets, exactly like compute

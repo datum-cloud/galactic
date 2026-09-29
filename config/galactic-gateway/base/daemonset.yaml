@@ -18,24 +18,30 @@ spec:
       labels:
         app.kubernetes.io/name: galactic-gateway
     spec:
-      # Dedicated gateway-role nodes only, opt-in, matching every other
-      # role's pattern (config/galactic-router/overlays/router,
-      # config/galactic-router/overlays/control). "edge" here means the actual
-      # network edge -- the ingress/egress boundary this gateway sits on --
-      # not a per-node compute role (see docs/node-labels.md). Excludes
-      # control-plane outright for the same reason those do. See
-      # ../kustomization.yaml for why this base is meant to be
-      # instantiated once per gateway node rather than applied as-is.
+      # Opt-in only: runs on a node an operator has explicitly labeled
+      # galactic.datumapis.com/gateway=enabled, and nowhere else. Nothing
+      # deploys it automatically -- see ../kustomization.yaml for why this
+      # base is meant to be instantiated once per gateway node rather than
+      # applied as-is. It is independent of galactic-nat: a node can carry
+      # either label or both (galactic-nat's chained overlay needs both).
+      #
+      # It never shares a node with galactic-vrf. That sidecar's pods are
+      # placed on galactic.datumapis.com/node=edge nodes, and the affinity
+      # below requires this node to carry no galactic.datumapis.com/node
+      # value at all, so the two exclude each other by construction (a
+      # node's `node` label is single-valued). Excludes control-plane
+      # outright for the same reason the other roles do. See
+      # docs/node-labels.md.
       #
       # Single-container pod: galactic-router used to run here as a
       # second container (see git history prior to this file), so a crash
       # in either binary could take the other's pod down with it despite
-      # them already being separate binaries. galactic-router now runs on
-      # edge nodes as its own standalone DaemonSet instead, opted in via
-      # galactic.datumapis.com/galactic=router alongside this node's
-      # galactic.datumapis.com/node=edge (see config/galactic-router/
-      # overlays/router/daemonset-patch.yaml) -- fully decoupled at the
-      # pod level, not just the binary level.
+      # them already being separate binaries. galactic-router now runs as
+      # its own standalone DaemonSet instead, opted in via
+      # galactic.datumapis.com/galactic=router, which a gateway node may
+      # carry too (see config/galactic-router/overlays/router/
+      # daemonset-patch.yaml) -- fully decoupled at the pod level, not just
+      # the binary level.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -43,10 +49,12 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
+                  - key: galactic.datumapis.com/gateway
                     operator: In
                     values:
-                      - edge
+                      - enabled
+                  - key: galactic.datumapis.com/node
+                    operator: DoesNotExist
       serviceAccountName: galactic-gateway
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

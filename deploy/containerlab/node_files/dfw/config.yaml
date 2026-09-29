@@ -22,7 +22,8 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw
-      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/gateway: enabled
+      galactic.datumapis.com/nat: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
@@ -30,13 +31,14 @@ nodes:
         kind: JoinConfiguration
         nodeRegistration:
           taints:
-            - key: galactic.datumapis.com/node
-              value: edge
+            - key: galactic.datumapis.com/gateway
+              value: enabled
               effect: NoSchedule
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw
-      galactic.datumapis.com/node: edge
+      galactic.datumapis.com/gateway: enabled
+      galactic.datumapis.com/nat: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
@@ -44,8 +46,8 @@ nodes:
         kind: JoinConfiguration
         nodeRegistration:
           taints:
-            - key: galactic.datumapis.com/node
-              value: edge
+            - key: galactic.datumapis.com/gateway
+              value: enabled
               effect: NoSchedule
 networking:
   ipFamily: ipv6
