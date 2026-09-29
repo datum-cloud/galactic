@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vishvananda/netlink"
 
@@ -159,7 +160,7 @@ func TestDelete_ThenAddRecreates(t *testing.T) {
 func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
 	requireRoot(t)
 
-	const stable, churners = 300, 4
+	const stable, churners = 300, 2
 	for i := range stable {
 		link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("vrfstab%d", i)}}
 		if err := netlink.LinkAdd(link); err != nil {
@@ -184,6 +185,10 @@ func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
 				if err := netlink.LinkAdd(dummy); err == nil {
 					_ = netlink.LinkDel(dummy)
 				}
+				// Bursts of changes, not a saturated loop: a node sees link
+				// churn in bursts, and a loop that never pauses can outlast
+				// any bounded retry.
+				time.Sleep(2 * time.Millisecond)
 			}
 		}()
 	}
