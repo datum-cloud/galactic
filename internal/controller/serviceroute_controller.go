@@ -43,6 +43,7 @@ type ServiceRoutePolicyReconciler struct {
 	NodeName     string
 	BGPNamespace string
 	Programmer   serviceroute.RouteProgrammer
+	Metrics      *serviceroute.Metrics
 
 	mu      sync.Mutex
 	Applied map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent
@@ -83,29 +84,50 @@ func startupSyncNeedsRetry(err error) bool {
 // Reconcile resolves one policy and replaces the local routes previously
 // programmed for that policy.
 func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	start := time.Now()
+	resultLabel := "success"
+	defer func() { r.Metrics.ObserveReconcile(resultLabel, time.Since(start)) }()
+	logger := log.FromContext(ctx).WithValues("policy", req.NamespacedName.String(), "node", r.NodeName)
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	policy := &networkv1alpha1.ServiceRoutePolicy{}
 	if err := r.Get(ctx, req.NamespacedName, policy); err != nil {
 		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, r.removePolicyLocked(req.NamespacedName)
+			err := r.removePolicyLocked(req.NamespacedName)
+			if err != nil {
+				resultLabel = "error"
+				logger.Error(err, "remove eBPF policy for deleted ServiceRoutePolicy")
+			}
+			return ctrl.Result{}, err
 		}
+		resultLabel = "error"
+		logger.Error(err, "get ServiceRoutePolicy")
 		return ctrl.Result{}, err
 	}
 	endpoint := &networkv1alpha1.ServiceEndpoint{}
 	endpointKey := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Spec.ServiceRef.Name}
 	if err := r.Get(ctx, endpointKey, endpoint); err != nil {
 		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, errors.Join(
+			joined := errors.Join(
 				r.replacePolicyLocked(req.NamespacedName, nil),
 				r.setAccepted(ctx, policy, metav1.ConditionFalse, "EndpointNotFound", "referenced ServiceEndpoint does not exist"),
 			)
+			if joined != nil {
+				resultLabel = "error"
+				logger.Error(joined, "revoke eBPF policy for missing ServiceEndpoint")
+			}
+			return ctrl.Result{}, joined
 		}
+		resultLabel = "error"
+		logger.Error(err, "get ServiceEndpoint", "endpoint", policy.Spec.ServiceRef.Name)
 		return ctrl.Result{}, fmt.Errorf("get ServiceEndpoint %s/%s: %w", policy.Namespace, policy.Spec.ServiceRef.Name, err)
 	}
 	attachments := &cloudv1alpha1.VPCAttachmentList{}
 	if err := r.List(ctx, attachments); err != nil {
+		resultLabel = "error"
+		logger.Error(err, "list VPCAttachments")
 		return ctrl.Result{}, fmt.Errorf("list VPCAttachments: %w", err)
 	}
 	all := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments.Items))
@@ -121,17 +143,23 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			// uninvolved nodes that correctly compile no local intents. Revoke
 			// this node's stale state and return the error for controller-runtime
 			// to retry while leaving the policy accepted cluster-wide.
-			return ctrl.Result{}, errors.Join(
+			joined := errors.Join(
 				err,
 				r.removePolicyLocked(req.NamespacedName),
 				r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"),
 			)
+			resultLabel = "error"
+			logger.Error(joined, "resolve service routing dependency", "endpoint", endpoint.Name)
+			return ctrl.Result{}, joined
 		}
-		return ctrl.Result{}, errors.Join(
+		joined := errors.Join(
 			err,
 			r.removePolicyLocked(req.NamespacedName),
 			r.setAccepted(ctx, policy, metav1.ConditionFalse, "Invalid", err.Error()),
 		)
+		resultLabel = "error"
+		logger.Error(joined, "compile service eBPF policy", "endpoint", endpoint.Name)
+		return ctrl.Result{}, joined
 	}
 	if len(intents) != 0 {
 		// The datapath loader may replace an incompatible pinned map while this
@@ -139,17 +167,27 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// change and reconstructs all desired state before an unchanged intent
 		// is otherwise skipped by replacePolicy.
 		if err := r.Programmer.Initialize(); err != nil {
+			resultLabel = "error"
+			logger.Error(err, "refresh service route maps", "endpoint", endpoint.Name)
 			return ctrl.Result{}, fmt.Errorf("refresh service route maps: %w", err)
 		}
 	}
+	logger.Info("compiled service eBPF policy", "endpoint", endpoint.Name, "attachments", len(intents))
 	if err := r.replacePolicyLocked(req.NamespacedName, intents); err != nil {
+		resultLabel = "error"
+		logger.Error(err, "program service eBPF policy", "endpoint", endpoint.Name)
 		return ctrl.Result{}, err
 	}
-	result := ctrl.Result{}
-	if len(intents) != 0 {
-		result.RequeueAfter = serviceRouteMapResyncInterval
+	if err := r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"); err != nil {
+		resultLabel = "error"
+		logger.Error(err, "update ServiceRoutePolicy acceptance status")
+		return ctrl.Result{}, err
 	}
-	return result, r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid")
+	requeue := ctrl.Result{}
+	if len(intents) != 0 {
+		requeue.RequeueAfter = serviceRouteMapResyncInterval
+	}
+	return requeue, nil
 }
 
 func (r *ServiceRoutePolicyReconciler) setAccepted(
@@ -427,6 +465,7 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 	key types.NamespacedName,
 	intents []serviceroute.RouteIntent,
 ) error {
+	defer r.updateProgrammedGauge()
 	if r.Applied == nil {
 		r.Applied = make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent)
 	}
@@ -449,8 +488,10 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 			continue
 		}
 		if err := r.Programmer.Remove(existing); err != nil {
+			r.Metrics.ObserveOperation("remove", err)
 			return &serviceRoutePolicyCleanupError{err: err}
 		}
+		r.Metrics.ObserveOperation("remove", nil)
 		delete(current, attachment)
 	}
 	for attachment, intent := range desired {
@@ -458,11 +499,13 @@ func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
 			continue
 		}
 		if err := r.Programmer.Apply(intent); err != nil {
+			r.Metrics.ObserveOperation("apply", err)
 			if cleanupErr := r.Programmer.Cleanup(intent); cleanupErr != nil {
 				return errors.Join(err, &serviceRoutePolicyCleanupError{err: cleanupErr})
 			}
 			return err
 		}
+		r.Metrics.ObserveOperation("apply", nil)
 		current[attachment] = intent
 	}
 	if len(current) == 0 {
@@ -478,13 +521,24 @@ func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) er
 }
 
 func (r *ServiceRoutePolicyReconciler) removePolicyLocked(key types.NamespacedName) error {
+	defer r.updateProgrammedGauge()
 	current := r.Applied[key]
 	for attachment, intent := range current {
 		if err := r.Programmer.Remove(intent); err != nil {
+			r.Metrics.ObserveOperation("remove", err)
 			return &serviceRoutePolicyCleanupError{err: err}
 		}
+		r.Metrics.ObserveOperation("remove", nil)
 		delete(current, attachment)
 	}
 	delete(r.Applied, key)
 	return nil
+}
+
+func (r *ServiceRoutePolicyReconciler) updateProgrammedGauge() {
+	count := 0
+	for _, intents := range r.Applied {
+		count += len(intents)
+	}
+	r.Metrics.SetProgrammedRoutes(count)
 }
