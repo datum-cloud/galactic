@@ -35,6 +35,11 @@ rules:
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
+      - serviceendpoints
+      - serviceroutepolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["network.datumapis.com"]
+    resources:
       - bgprouters/status
       - bgppeers/status
       - bgpadvertisements/status
@@ -42,6 +47,10 @@ rules:
       - bgpvrfinstances/status
       - servicevipbindings/status
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["cloud.datumapis.com"]
+    resources:
+      - vpcattachments
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources:
       - secrets

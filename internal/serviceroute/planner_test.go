@@ -22,9 +22,11 @@ func TestCompileUsesObservedNodeAndSelector(t *testing.T) {
 	}
 	endpoint := &networkv1alpha1.ServiceEndpoint{Spec: networkv1alpha1.ServiceEndpointSpec{
 		Address: "fd20:0:21::1:0:0", Port: 53, Protocol: networkv1alpha1.NetworkRuleProtocolUDP,
+		AttachmentRef: &networkv1alpha1.ServiceEndpointAttachmentReference{Namespace: "platform", Name: "dns64"},
 	}}
 	attachments := []*cloudv1alpha1.VPCAttachment{
-		{ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "selected", Labels: map[string]string{"egress": "enabled"}}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", PodSubnet: "fd20:0:19::2:0:0/96"}},
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "dns64"}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", VPC: "service-vpc", HostInterface: "Gdns"}},
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "selected", Labels: map[string]string{"egress": "enabled"}}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", VPC: "consumer-vpc", HostInterface: "Gconsumer", PodSubnet: "fd20:0:19::2:0:0/96"}},
 		{ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "other-node", Labels: map[string]string{"egress": "enabled"}}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-b", PodSubnet: "fd20:0:20::2:0:0/96"}},
 		{ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "not-selected", Labels: map[string]string{"egress": "disabled"}}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", PodSubnet: "fd20:0:21::2:0:0/96"}},
 	}
@@ -45,10 +47,11 @@ func TestCompileUsesEndpointPortByDefault(t *testing.T) {
 	policy := &networkv1alpha1.ServiceRoutePolicy{Spec: networkv1alpha1.ServiceRoutePolicySpec{
 		AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{"egress": "enabled"}},
 	}}
-	endpoint := &networkv1alpha1.ServiceEndpoint{Spec: networkv1alpha1.ServiceEndpointSpec{Address: "192.0.2.10", Port: 53, Protocol: networkv1alpha1.NetworkRuleProtocolTCP}}
-	attachment := &cloudv1alpha1.VPCAttachment{ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "selected", Labels: map[string]string{"egress": "enabled"}}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", PodSubnet: "fd20::/96"}}
+	endpoint := &networkv1alpha1.ServiceEndpoint{Spec: networkv1alpha1.ServiceEndpointSpec{Address: "192.0.2.10", Port: 53, Protocol: networkv1alpha1.NetworkRuleProtocolTCP, AttachmentRef: &networkv1alpha1.ServiceEndpointAttachmentReference{Namespace: "platform", Name: "dns64"}}}
+	attachment := &cloudv1alpha1.VPCAttachment{ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "selected", Labels: map[string]string{"egress": "enabled"}}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", VPC: "consumer-vpc", HostInterface: "Gconsumer", PodSubnet: "fd20::/96"}}
+	service := &cloudv1alpha1.VPCAttachment{ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "dns64"}, Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", VPC: "service-vpc", HostInterface: "Gdns"}}
 
-	got, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{attachment}, "node-a")
+	got, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{attachment, service}, "node-a")
 	if err != nil {
 		t.Fatal(err)
 	}
