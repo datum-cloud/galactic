@@ -7,12 +7,12 @@ skinparam sequenceMessageAlign center
 skinparam maxMessageSize 190
 hide footbox
 
-title DNS64 and Galactic NAT64: proposed end-to-end flow
+title Shared DNS64 and Galactic NAT64: proposed end-to-end flow
 
 participant "Compute platform\nand instance" as compute
 participant "Galactic\nCNI and routing" as galactic
 participant "DNS\ncontroller" as controller
-participant "DNS64 service\ndnsdist + BIND" as dns
+participant "DNS64 service\nPowerDNS Recursor" as dns
 participant "Network API\nEgressShard" as api
 participant "NAT64 gateway\ngalactic-nat" as nat
 participant "IPv4\nservice" as ipv4
@@ -27,15 +27,15 @@ group Provisioning: proposed DNS integration with existing Galactic routing
     end note
     compute -> galactic: Platform attaches instance to tenant network
     galactic -> galactic: Install shared-prefix route in tenant VRF
-    controller -> dns: Publish context, private zones, and synthesis policy
-    controller --> compute: Supply authorized context DNS endpoint
+    controller -> dns: Publish prefix, policy, and readiness configuration
+    controller --> compute: Supply managed resolver endpoint
     note over compute: Platform configures the instance resolver.
 end
 
 group DNS resolution: instance uses its network-specific endpoint
     compute -> galactic: AAAA query to context DNS VIP
-    galactic -> dns: Deliver query with trusted network identity
-    dns -> dns: Select isolated view\nResolve private zone or approved upstream
+    galactic -> dns: Deliver query to a ready replica
+    dns -> dns: Resolve public name and apply DNS64 policy
     alt Native AAAA exists
         dns --> compute: Return native IPv6 answer through Galactic
     else Eligible A-only result; synthesis permitted
