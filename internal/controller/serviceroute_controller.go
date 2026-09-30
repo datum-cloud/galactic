@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -17,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.datum.net/galactic/internal/serviceroute"
 )
@@ -29,6 +31,7 @@ type ServiceRoutePolicyReconciler struct {
 	Scheme     *runtime.Scheme
 	NodeName   string
 	Programmer serviceroute.RouteProgrammer
+	Metrics    *serviceroute.Metrics
 
 	mu      sync.Mutex
 	Applied map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent
@@ -37,19 +40,34 @@ type ServiceRoutePolicyReconciler struct {
 // Reconcile resolves one policy and replaces the local routes previously
 // programmed for that policy.
 func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	start := time.Now()
+	result := "success"
+	defer func() { r.Metrics.ObserveReconcile(result, time.Since(start)) }()
+	logger := log.FromContext(ctx).WithValues("policy", req.NamespacedName.String(), "node", r.NodeName)
 	policy := &networkv1alpha1.ServiceRoutePolicy{}
 	if err := r.Get(ctx, req.NamespacedName, policy); err != nil {
 		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, r.removePolicy(req.NamespacedName)
+			err := r.removePolicy(req.NamespacedName)
+			if err != nil {
+				result = "error"
+				logger.Error(err, "remove routes for deleted policy")
+			}
+			return ctrl.Result{}, err
 		}
+		result = "error"
+		logger.Error(err, "get ServiceRoutePolicy")
 		return ctrl.Result{}, err
 	}
 	endpoint := &networkv1alpha1.ServiceEndpoint{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: policy.Namespace, Name: policy.Spec.ServiceRef.Name}, endpoint); err != nil {
+		result = "error"
+		logger.Error(err, "get ServiceEndpoint", "endpoint", policy.Spec.ServiceRef.Name)
 		return ctrl.Result{}, fmt.Errorf("get ServiceEndpoint %s/%s: %w", policy.Namespace, policy.Spec.ServiceRef.Name, err)
 	}
 	attachments := &cloudv1alpha1.VPCAttachmentList{}
 	if err := r.List(ctx, attachments); err != nil {
+		result = "error"
+		logger.Error(err, "list VPCAttachments")
 		return ctrl.Result{}, fmt.Errorf("list VPCAttachments: %w", err)
 	}
 	local := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments.Items))
@@ -60,9 +78,17 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	intents, err := serviceroute.Compile(policy, endpoint, local, r.NodeName)
 	if err != nil {
+		result = "error"
+		logger.Error(err, "compile service route intents", "endpoint", endpoint.Name)
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.replacePolicy(req.NamespacedName, intents)
+	logger.Info("compiled service route intents", "endpoint", endpoint.Name, "intents", len(intents))
+	if err := r.replacePolicy(req.NamespacedName, intents); err != nil {
+		result = "error"
+		logger.Error(err, "program service route intents", "endpoint", endpoint.Name)
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager watches policies, endpoints, and attachments. Events from
@@ -115,13 +141,17 @@ func (r *ServiceRoutePolicyReconciler) replacePolicy(key types.NamespacedName, i
 	defer r.mu.Unlock()
 	for _, intent := range r.Applied[key] {
 		if err := r.Programmer.Remove(intent); err != nil {
+			r.Metrics.ObserveOperation("remove", err)
 			return err
 		}
+		r.Metrics.ObserveOperation("remove", nil)
 	}
 	for _, intent := range intents {
 		if err := r.Programmer.Apply(intent); err != nil {
+			r.Metrics.ObserveOperation("apply", err)
 			return err
 		}
+		r.Metrics.ObserveOperation("apply", nil)
 	}
 	if r.Applied == nil {
 		r.Applied = make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent)
@@ -130,6 +160,11 @@ func (r *ServiceRoutePolicyReconciler) replacePolicy(key types.NamespacedName, i
 	for _, intent := range intents {
 		r.Applied[key][intent.Attachment] = intent
 	}
+	var count int
+	for _, intents := range r.Applied {
+		count += len(intents)
+	}
+	r.Metrics.SetProgrammedRoutes(count)
 	return nil
 }
 
@@ -138,9 +173,16 @@ func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) er
 	defer r.mu.Unlock()
 	for _, intent := range r.Applied[key] {
 		if err := r.Programmer.Remove(intent); err != nil {
+			r.Metrics.ObserveOperation("remove", err)
 			return err
 		}
+		r.Metrics.ObserveOperation("remove", nil)
 	}
 	delete(r.Applied, key)
+	var count int
+	for _, intents := range r.Applied {
+		count += len(intents)
+	}
+	r.Metrics.SetProgrammedRoutes(count)
 	return nil
 }

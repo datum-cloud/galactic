@@ -23,6 +23,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -106,6 +107,8 @@ func runCmd(cfg *config.RouterConfig) error {
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
+	serviceRouteMetrics := serviceroute.NewMetrics()
+	serviceRouteMetrics.MustRegister(ctrlmetrics.Registry)
 
 	// ctx carries a cause so an ordinary signal-triggered shutdown can be told
 	// apart from the health server's own Serve failure below. See the cause
@@ -276,6 +279,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		Scheme:     mgr.GetScheme(),
 		NodeName:   nodeName,
 		Programmer: serviceroute.LinuxRouteProgrammer{},
+		Metrics:    serviceRouteMetrics,
 		Applied:    make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
