@@ -18,6 +18,7 @@ import (
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -25,6 +26,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/hash"
@@ -35,6 +37,7 @@ import (
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/gobgp"
+	"go.datum.net/galactic/internal/serviceroute"
 	networkwebhook "go.datum.net/galactic/internal/webhook"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -80,6 +83,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
 
 	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
@@ -262,6 +266,19 @@ func runCmd(cfg *config.RouterConfig) error {
 		VIPTranslationTable: vipTranslationTable,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
+	}
+
+	// Register the node-local platform service route controller. It resolves
+	// ServiceRoutePolicy against Cloud VPCAttachment.status.node and programs
+	// only this node's local routes.
+	if err := (&controller.ServiceRoutePolicyReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		NodeName:   nodeName,
+		Programmer: serviceroute.LinuxRouteProgrammer{},
+		Applied:    make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
 	}
 
 	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
