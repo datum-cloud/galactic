@@ -11,6 +11,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 // requireRoot skips the test when not running as root.
@@ -200,6 +202,83 @@ func TestInstallPodSubnetRouteReplacesStaleRoute(t *testing.T) {
 	for _, kernel := range []*net.IPNet{kernelLinkLocal, kernelMulticast} {
 		if !have[kernel.String()] {
 			t.Errorf("kernel route %s on this device was removed, want left alone", kernel)
+		}
+	}
+}
+
+// TestIsPodSubnetRouteCandidate_SparesUnreachableDefault covers the route
+// vrf.Add puts in every VRF table to stop tenant traffic falling through to
+// the main table. The stale-route sweep must never treat it as a pod-subnet
+// route, or the next ADD on an adopted device would reopen that leak.
+func TestIsPodSubnetRouteCandidate_SparesUnreachableDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		route netlink.Route
+		want  bool
+	}{
+		{"a pod-subnet route", netlink.Route{Type: unix.RTN_UNICAST, Protocol: unix.RTPROT_BOOT}, true},
+		{"an unreachable default", netlink.Route{Type: unix.RTN_UNREACHABLE, Protocol: unix.RTPROT_BOOT}, false},
+		{"a blackhole", netlink.Route{Type: unix.RTN_BLACKHOLE, Protocol: unix.RTPROT_BOOT}, false},
+		{"a kernel unicast route", netlink.Route{Type: unix.RTN_UNICAST, Protocol: unix.RTPROT_KERNEL}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPodSubnetRouteCandidate(&tc.route); got != tc.want {
+				t.Errorf("isPodSubnetRouteCandidate(type %d, proto %d) = %v, want %v",
+					tc.route.Type, tc.route.Protocol, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstallPodSubnetRouteKeepsUnreachableDefault runs the real sweep against
+// a table holding vrf.Add's unreachable defaults and checks both survive.
+func TestInstallPodSubnetRouteKeepsUnreachableDefault(t *testing.T) {
+	requireRoot(t)
+
+	const tableID = 251
+	const metric = vrf.UnreachableDefaultMetric
+
+	ownLink := addDummyLink(t, "hgwtestunr0")
+	defaults := []struct {
+		family int
+		dst    *net.IPNet
+	}{
+		{netlink.FAMILY_V4, mustParseCIDR(t, "0.0.0.0/0")},
+		{netlink.FAMILY_V6, mustParseCIDR(t, "::/0")},
+	}
+	for _, d := range defaults {
+		r := &netlink.Route{Dst: d.dst, Table: tableID, Type: unix.RTN_UNREACHABLE, Priority: metric}
+		if err := netlink.RouteAdd(r); err != nil {
+			t.Fatalf("seed unreachable default %s: %v", d.dst, err)
+		}
+		t.Cleanup(func() { _ = netlink.RouteDel(r) })
+	}
+
+	for _, sub := range []struct {
+		cidr   string
+		family int
+	}{
+		{"fd00:aa:ee::1/96", netlink.FAMILY_V6},
+		{"10.250.0.0/24", netlink.FAMILY_V4},
+	} {
+		if err := installPodSubnetRoute(ownLink, mustParseCIDR(t, sub.cidr), sub.family, tableID); err != nil {
+			t.Fatalf("installPodSubnetRoute %s: %v", sub.cidr, err)
+		}
+	}
+
+	for _, d := range defaults {
+		routes, err := netlink.RouteListFiltered(d.family, &netlink.Route{Table: tableID}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			t.Fatalf("list routes: %v", err)
+		}
+		found := false
+		for _, r := range routes {
+			if r.Type == unix.RTN_UNREACHABLE && r.Priority == metric {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("unreachable default %s was removed by the pod-subnet sweep, want left alone", d.dst)
 		}
 	}
 }
