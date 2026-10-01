@@ -614,6 +614,14 @@ func TestAutoDetect_FabricPeerRoutes(t *testing.T) {
 		}, Protocol: unix.RTPROT_BGP}
 	}
 
+	bgpECMP := func(idxs ...int) netlink.Route {
+		r := bgp(0)
+		for _, i := range idxs {
+			r.MultiPath = append(r.MultiPath, &netlink.NexthopInfo{LinkIndex: i})
+		}
+		return r
+	}
+
 	for _, tt := range []struct {
 		name   string
 		routes []netlink.Route
@@ -665,6 +673,24 @@ func TestAutoDetect_FabricPeerRoutes(t *testing.T) {
 				IP: net.ParseIP("2607:ed40:8002:6::"), Mask: net.CIDRMask(64, 128),
 			}, Protocol: unix.RTPROT_BGP}},
 			want: []string{testIfaceEth0},
+		},
+		{
+			// An ECMP route has no LinkIndex of its own; netlink reports
+			// each nexthop in MultiPath. An uplink reachable only that way
+			// must still be attached (issue #629).
+			name:   "every nexthop of a multipath BGP route is a fabric interface",
+			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, bgpECMP(2, 3)},
+			want:   []string{testIfaceEth0, testIfaceEth1},
+		},
+		{
+			name:   "a multipath default route yields all its uplinks in order",
+			routes: []netlink.Route{{Dst: nil, MultiPath: []*netlink.NexthopInfo{{LinkIndex: 3}, {LinkIndex: 2}}}},
+			want:   []string{testIfaceEth1, testIfaceEth0},
+		},
+		{
+			name:   "multipath nexthops on loopback are excluded",
+			routes: []netlink.Route{{LinkIndex: 2, Dst: nil}, bgpECMP(3, 4)},
+			want:   []string{testIfaceEth0, testIfaceEth1},
 		},
 		{
 			// Every EVPN route for a tenant prefix is BGP-learned and points

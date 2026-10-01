@@ -51,7 +51,8 @@ var (
 // auto-detection is ambiguous.
 //
 // Otherwise interfaces are auto-detected: those carrying the default IPv6
-// route first, then those carrying a BGP-learned route, which is where a fabric
+// route first, then those carrying a BGP-learned route (every nexthop of a
+// multipath route counts), which is where a fabric
 // peer's SRv6 traffic arrives when locators travel over a segment the default
 // route does not use. Attaching to too few interfaces shows up as silently
 // blackholed overlay traffic, so a caller that gets an error here must not
@@ -134,33 +135,38 @@ func autoDetectInterfaces() ([]string, error) {
 
 	var names []string
 	seen := make(map[string]bool)
+	add := func(index int) {
+		link, err := linkByIndexFn(index)
+		if err != nil {
+			// A route pointing at an interface that will not resolve
+			// is not actionable; skip it rather than fail the whole
+			// detection over one stale route.
+			return
+		}
+		if link.Type() == excludedLinkType {
+			return
+		}
+		if isVRFSlave(link) {
+			return
+		}
+		if link.Attrs().Flags&net.FlagLoopback != 0 {
+			return
+		}
+		name := link.Attrs().Name
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
 	collect := func(match func(netlink.Route) bool) {
 		for _, r := range routes {
-			if !match(r) || r.LinkIndex <= 0 {
+			if !match(r) {
 				continue
 			}
-			link, err := linkByIndexFn(r.LinkIndex)
-			if err != nil {
-				// A route pointing at an interface that will not resolve
-				// is not actionable; skip it rather than fail the whole
-				// detection over one stale route.
-				continue
+			for _, index := range routeLinkIndexes(r) {
+				add(index)
 			}
-			if link.Type() == excludedLinkType {
-				continue
-			}
-			if isVRFSlave(link) {
-				continue
-			}
-			if link.Attrs().Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			name := link.Attrs().Name
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			names = append(names, name)
 		}
 	}
 
@@ -179,6 +185,27 @@ func autoDetectInterfaces() ([]string, error) {
 				"SRv6/underlay-facing interface")
 	}
 	return names, nil
+}
+
+// routeLinkIndexes returns the interface indexes r leaves through. A route with
+// several nexthops (ECMP) reports no LinkIndex of its own; netlink puts each
+// nexthop's interface in MultiPath instead. Reading LinkIndex alone drops every
+// uplink that is reachable only through such a route, and the ingress hook is
+// then never attached there.
+func routeLinkIndexes(r netlink.Route) []int {
+	if len(r.MultiPath) == 0 {
+		if r.LinkIndex <= 0 {
+			return nil
+		}
+		return []int{r.LinkIndex}
+	}
+	out := make([]int, 0, len(r.MultiPath))
+	for _, nh := range r.MultiPath {
+		if nh != nil && nh.LinkIndex > 0 {
+			out = append(out, nh.LinkIndex)
+		}
+	}
+	return out
 }
 
 // isFabricPeerRoute reports whether r was learned over BGP, making r's
