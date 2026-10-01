@@ -1,4 +1,4 @@
-# One shard per edge node: dfw has two, an active-active pair. Compute
+# One shard per edge node: dfw has two. Compute
 # lists dfw-worker2's first (resources/galactic-cni/dfw/).
 apiVersion: network.datumapis.com/v1alpha1
 kind: EgressShard
@@ -11,7 +11,7 @@ spec:
     name: dfw-worker2
   # uFMT uSID over dfw's locator (2001:db8:ff01::/48), nodeID=0x2002
   # (service 2 = NAT shard, node index 002, the edge node's own index --
-  # its router is 0x1002 and its gateway 0x3002). Write-once, like every
+  # its router is 0x1002). Write-once, like every
   # identity field below.
   shardSID: "2001:db8:ff01:2002:e001::"
   # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block
@@ -32,7 +32,7 @@ spec:
     name: dfw-worker3
   # uFMT uSID over dfw's locator (2001:db8:ff01::/48), nodeID=0x2003
   # (service 2 = NAT shard, node index 003, the edge node's own index --
-  # its router is 0x1003 and its gateway 0x3003). Write-once, like every
+  # its router is 0x1003). Write-once, like every
   # identity field below.
   shardSID: "2001:db8:ff01:2003:e001::"
   # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block

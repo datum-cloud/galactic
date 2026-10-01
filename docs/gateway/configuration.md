@@ -10,6 +10,8 @@ that doc wherever the mechanics matter.
 > Last verified: 2026-09-09 against the current working tree of
 > `cmd/galactic-gateway/`, `internal/config/gateway.go`, `config/galactic-gateway/`,
 > `config/galactic-router/`, and `deploy/containerlab/resources/galactic-gateway/`.
+> The containerlab lab no longer deploys the gateway; the worked example below
+> is that directory as of commit `abdd665b`.
 
 ## What `galactic-gateway` is, and when you need it
 
@@ -223,9 +225,12 @@ to the gateway datapath — see
 
 ## Step 3: Worked example, a per-node overlay
 
-`deploy/containerlab/resources/galactic-gateway/` is a real, working
-instantiation pattern to copy for production — four edge nodes across three
-lab clusters, each with its own overlay directory named for the node:
+`deploy/containerlab/resources/galactic-gateway/`, as of commit `abdd665b`,
+is a real, working instantiation pattern to copy for production — four edge
+nodes across three lab clusters, each with its own overlay directory named
+for the node. The lab has since stopped deploying the gateway and the
+directory is gone from the tree; recover it with
+`git archive abdd665b deploy/containerlab/resources/galactic-gateway | tar -x`:
 
 ```
 deploy/containerlab/resources/galactic-gateway/
@@ -400,7 +405,7 @@ gateway node, named after that node (see the worked example above).
 | `spec.backends`         | Yes      | `[]{address, port}` (1–64) | Backend `address:port` targets traffic is load-balanced to.                                                                                      |
 | `status.conditions`     | —        | —                          | `Accepted` condition — currently set `True` unconditionally once gateway nodes exist for the namespace (see the admission-webhook caveat below). |
 
-Example, from `deploy/containerlab/resources/galactic-gateway/iad/networkrule-ns60.yaml`:
+Example, from `deploy/containerlab/resources/galactic-gateway/iad/networkrule-ns60.yaml` at `abdd665b`:
 
 ```yaml
 apiVersion: network.datumapis.com/v1alpha1
@@ -449,7 +454,7 @@ naming that `(node, VIP, backend)` triple — this is reconciled by
 `galactic-gateway`), so it's out of this document's direct scope, but
 worth knowing about since it's required for the datapath to work
 end-to-end. Example, from
-`deploy/containerlab/resources/galactic-gateway/iad/servicevipbinding-ns60.yaml`:
+`deploy/containerlab/resources/galactic-gateway/iad/servicevipbinding-ns60.yaml` at `abdd665b`:
 
 ```yaml
 apiVersion: network.datumapis.com/v1alpha1

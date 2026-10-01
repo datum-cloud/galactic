@@ -106,8 +106,9 @@ spec:
             # config.GatewayConfig.Validate requires both —
             # applying this base as-is produces a crash-looping container.
             # The deployer's per-node overlay must set both; see
-            # deploy/containerlab/resources/galactic-gateway/ for a
-            # worked example (four instances, one per edge node).
+            # deploy/containerlab/resources/galactic-gateway/ as of
+            # commit abdd665b for a worked example (four instances, one
+            # per edge node; the lab no longer deploys the gateway).
           ports:
             - name: metrics
               containerPort: 8081

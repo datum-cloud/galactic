@@ -1,4 +1,0 @@
-namespace: ns60
-resources:
-  - namespace.yaml
-  - pod.yaml

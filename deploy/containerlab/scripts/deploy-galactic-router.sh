@@ -20,16 +20,6 @@ source "${SCRIPT_DIR}/lib.sh"
 GALACTIC_ROUTER_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/base" && pwd)
 GALACTIC_ROUTER_DEFAULT_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/router" && pwd)
 GALACTIC_ROUTER_RR_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-router/overlays/control" && pwd)
-# config/galactic-gateway/base is the edge XDP NAT+LB gateway's own
-# single-container pod base -- self-contained, unlike
-# config/galactic-router/{base,overlays/router,overlays/control}, so no matching
-# config/galactic-router/base copy is needed alongside it the way copy_router_config/
-# copy_router_control_config need one. galactic-router itself reaches every
-# edge node via copy_router_config's own DaemonSet below, whose affinity
-# (galactic.datumapis.com/galactic=router) already matches those nodes'
-# labels (node_files/*/config.yaml) -- no separate copy or apply step is
-# needed for it here.
-GALACTIC_GATEWAY_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-gateway/base" && pwd)
 
 # copy_router_config NODE copies config/galactic-router/base and
 # config/galactic-router/overlays/router onto NODE, nested under
@@ -66,20 +56,11 @@ copy_router_control_config() {
   docker cp "${GALACTIC_ROUTER_RR_DIR}" "${node}:/galactic/resources/galactic-control/iad/overlays/control"
 }
 
-# copy_router_gateway_config NODE copies config/galactic-gateway/base onto NODE,
-# nested under resources/galactic-gateway/base/ so that overlay's
-# "gateway" resource reference resolves. Each per-node overlay
-# (dfw-worker2/, sjc-worker2/, ...) references ../base, so this is only
-# copied once per cluster regardless of how many edge nodes it has. rm -rf
-# first -- see copy_router_config's comment.
-copy_router_gateway_config() {
-  local node="$1"
-  docker exec "${node}" rm -rf /galactic/resources/galactic-gateway/base/gateway
-  docker cp "${GALACTIC_GATEWAY_BASE_DIR}" "${node}:/galactic/resources/galactic-gateway/base/gateway"
-}
-
 # apply_galactic_router applies the site's galactic-router overlay (DaemonSet
-# + BGP CRDs). Shared by all three sites; iad layers its route-reflector on
+# + BGP CRDs). The DaemonSet's affinity
+# (galactic.datumapis.com/galactic=router) matches the site's compute node
+# and its edge nodes alike, and the overlay carries a BGPRouter and
+# route-reflector BGPPeer for each of them. Shared by all three sites; iad layers its route-reflector on
 # top after calling this. NADs and test workloads live under
 # resources/tenants/ns10/ and are applied by deploy-ns.sh.
 apply_galactic_router() {
@@ -99,36 +80,12 @@ done
 # iad-control-plane: galactic-router resources were copied by deploy-fabric.sh —
 # apply galactic-router and the route-reflector overlay. iad-worker3 is the
 # lab's single EVPN reflector; every other site's galactic-router peers with
-# it, so this must be applied before the per-site edge tiers below settle.
+# it.
 node=$(control_plane iad)
 echo "Applying galactic-router/iad to ${node}..."
 copy_router_config "${node}"
 copy_router_control_config "${node}"
 apply_galactic_router "${node}" iad
 apply_k "${node}" /galactic/resources/galactic-control/iad/
-
-# The edge tier, now in all three sites: dfw runs an active-active pair
-# (dfw-worker2/dfw-worker3), sjc and iad one edge node each. Every edge node
-# gets its own single-container galactic-gateway pod instance, since
-# GALACTIC_GATEWAY_SRV6_ADDRESS must be unique per node (see
-# config/galactic-gateway/base/kustomization.yaml's doc comment).
-# galactic-router already reached these nodes above, as its own independent
-# DaemonSet. galactic-gateway's own ServiceAccount/ClusterRole
-# (config/galactic-gateway/{serviceaccount,rbac}.yaml, copied onto each node
-# by deploy-system.sh's copy_config) must be applied once per cluster before
-# the per-node overlays, same as galactic-cni/galactic-router's RBAC is
-# applied by deploy-system.sh itself rather than by this script.
-for site in dfw sjc iad; do
-  node=$(control_plane "${site}")
-  echo "Applying galactic-gateway RBAC to ${node}..."
-  apply_f "${node}" /galactic/config/galactic-gateway/serviceaccount.yaml
-  apply_f "${node}" /galactic/config/galactic-gateway/rbac.yaml
-
-  echo "Applying galactic-gateway/${site} to ${node}..."
-  docker exec "${node}" rm -rf /galactic/resources/galactic-gateway
-  copy_to "${node}" galactic-gateway
-  copy_router_gateway_config "${node}"
-  apply_k "${node}" "/galactic/resources/galactic-gateway/${site}/"
-done
 
 echo "Done."

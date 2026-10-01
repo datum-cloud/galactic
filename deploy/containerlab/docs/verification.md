@@ -22,7 +22,7 @@ docker exec dfw-worker2 cat /proc/net/bonding/bond0
 docker exec clab-gvpc-tr1 cat /proc/net/bonding/bond1
 
 # A member's LACP actor state: 63 (0x3f) is fully up; bits 0x30 are
-# collecting+distributing, which is what galactic-gateway's attach gate waits on
+# collecting+distributing
 docker exec dfw-worker2 ip -d link show dev eth1 | grep -o 'ad_actor_oper_port_state [0-9]*'
 
 # The datapaths attach to the members, never the master: expect an xdp
@@ -167,27 +167,23 @@ docker exec dfw-control-plane kubectl exec -n galactic-system ds/fabric-router \
 
 # Reachable from an edge node (an egress shard's own vantage point)
 docker exec dfw-worker2 curl -sS --max-time 5 http://[2001:db8:1:40::2]/
-
-# And the reverse direction: the off-fabric client curling an anycast
-# ingress VIP, which is what the edge gateways exist to answer
-docker exec clab-gvpc-remote-host curl -sS --max-time 5 http://[2001:db8:6060::1]/
 ```
 
-## Edge gateways
+## Egress shards
 
 Four edge nodes across three sites (`dfw-worker2`, `dfw-worker3`, `sjc-worker2`,
-`iad-worker2`), all originating the same anycast VIP.
+`iad-worker2`), each running its own shard. No node runs `galactic-gateway`, so
+each shard attaches its XDP program directly to its uplinks.
 
 ```bash
-task verify:gateway
+task verify:nat-sharding
 
-# Every edge node's own gateway DaemonSet should be Ready on its pinned node
+# One galactic-nat pod per edge node
 docker exec dfw-control-plane kubectl get pods -n galactic-system -o wide \
-  -l app.kubernetes.io/name=galactic-gateway
+  -l app.kubernetes.io/name=galactic-nat
 
-# The VIP aggregate each edge node's FRR originates -- dfw should show two
-# equal-cost paths (one per edge node), sjc and iad one each
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:6060::/48"
+# The shard's own program, on every member of both bonds (eth1-eth4)
+docker exec dfw-worker2 ip -d link show dev eth1 | grep -o 'prog/xdp id [0-9]*'
 ```
 
 ## EVPN route reflector
@@ -280,7 +276,7 @@ XDP program could not do.
 ## Automated checks
 
 ```bash
-task verify           # run all verification (bgp-transit, bgp-fabric, bgp-peers, underlay, srv6, evpn, gateway, nat66, scenarios)
+task verify           # run all verification (bgp-transit, bgp-fabric, bgp-peers, underlay, srv6, evpn, nat, scenarios)
 task verify:bgp-transit
 task verify:bgp-fabric
 task verify:bgp-peers

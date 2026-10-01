@@ -43,7 +43,7 @@ which of the above a node carries.
 one value — `compute` or `edge` — because a Kubernetes label key is
 single-valued, and these two are genuinely mutually exclusive by design:
 `edge` nodes are tainted specifically to keep tenant workloads off them (see
-`deploy/containerlab/node_files/iad/config.yaml`'s gateway-node taints), so a
+`deploy/containerlab/node_files/iad/config.yaml`'s NAT-node taints), so a
 node is never both at once. Each value deploys only what actually differs
 between the two roles, not everything that role runs (see the worked example
 below for the full per-node picture). Today that is all on the `edge` side:
@@ -229,15 +229,17 @@ Mutually exclusive with `fabric=router` on the same node, the same way
 
 ## Worked example: the containerlab lab
 
-| Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                                   |
-|------------------------------------------------------------|-----------|------------|----------|----------------------------------------------------------------------------------------|
-| `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-cni`, `galactic-router`, `fabric-router`                                     |
-| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | —         | `router`   | `router` | `galactic-gateway`, `galactic-nat` (`gateway`/`nat` = `enabled`), `galactic-cni`, `galactic-router`, `fabric-router` |
-| `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                                  |
+| Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                               |
+|------------------------------------------------------------|-----------|------------|----------|------------------------------------------------------------------------------------|
+| `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-cni`, `galactic-router`, `fabric-router`                                 |
+| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | —         | `router`   | `router` | `galactic-nat` (`nat=enabled`), `galactic-cni`, `galactic-router`, `fabric-router` |
+| `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                              |
 
 The lab has no `galactic-vrf` nodes, so no worker carries `node=edge`; its
-gateway/NAT workers carry `gateway=enabled` and `nat=enabled` and no `node`
-value, which is what keeps them apart from any future `node=edge` host.
+NAT workers carry `nat=enabled` and no `node` value, which is what keeps
+them apart from any future `node=edge` host. No worker carries
+`gateway=enabled`: the lab deploys no `galactic-gateway`, so each shard
+attaches its own XDP program rather than chaining behind one.
 
 The reflector row is the one that shows why `galactic` is a mode enum rather
 than a boolean: `iad-worker3` carries no `node` value at all. Both `node`

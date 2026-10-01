@@ -166,8 +166,6 @@ galactic/
 │   └── fabric-router/        # (not gateway-specific, but fabric-router must also
 │                              #   run on gateway-role nodes — see ARCHITECTURE-CNI.md
 │                              #   and root CLAUDE.md's config/fabric-router/ note)
-├── deploy/containerlab/resources/
-│   └── galactic-gateway/   # Worked two-node example — see below
 └── containers/
     └── galactic-gateway/    # galactic-gateway production image
 ```
@@ -184,8 +182,10 @@ public-interface/SRv6-address values.
 
 ### Worked ContainerLab example
 
-`deploy/containerlab/resources/galactic-gateway/` runs this role on four
-edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3` (an
+The containerlab lab no longer deploys `galactic-gateway`; its edge nodes
+run only the egress shards, attached directly to their uplinks. Until commit
+`abdd665b`, `deploy/containerlab/resources/galactic-gateway/` ran this role
+on four edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3` (an
 active-active pair), `sjc-worker2`, and `iad-worker2`. Each node's overlay
 directory, named for the node itself, carries:
 
@@ -718,7 +718,7 @@ pod on that node is not a supported configuration.
 | --------------- | -------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Unit            | `task test:unit`                      | `go test -race`                 | `internal/config` (`gateway_test.go`), `internal/controller` (`networkgateway_controller_test.go`, `networkrule_controller_test.go`, `usidresolver_test.go`), `internal/gateway` (`engine_test.go`, `diff_test.go`, `kerneldatapath_test.go`, `quota_test.go`, `recovery_test.go`, `telemetry_test.go`), `internal/maglev` (`table_test.go`), `internal/plumbing/bond` (`bond_test.go`, faked `netlink.Link`s, no kernel required — shared bond-master/slave detection used by both this package's `edgeattach.ResolveTargets` and `internal/plumbing/ebpf/attach`'s CNI TC-BPF path), `internal/plumbing/ebpf/edgemap` (`viptable_test.go`, in-memory fake `Table`, no kernel required), `internal/plumbing/ebpf/edgemetrics` (`collector_test.go`), `internal/plumbing/ebpf/edgepreflight` (`preflight_test.go`, `kernel_prober_test.go`); `edgeattach.ResolveTargets` also has its own faked-netlink `TestResolveTargets` (non-bond passthrough, bond-expands-to-slaves-only, no-slaves error) |
 | Kernel-required | `task test:unit` (root/CAP_BPF gated) | `go test` + `BPF_PROG_TEST_RUN` | `internal/plumbing/ebpf/edgeprog/edgedsr_test.go` — exercises the compiled program directly, including the version-nibble/payload_len regression tests; `internal/plumbing/ebpf/edgeattach/attach_test.go`                                                                                                                                |
-| E2E             | —                                     | —                                | **Not yet covered.** `deploy/containerlab/`'s four edge nodes are a manifests-and-live-pod canary, not a scripted e2e test — see Known Constraints. No bonded-uplink scenario exists there either, deliberately: those nodes' uplinks are veth pairs, and (confirmed while adding `TestResolveTargetsAndAttach_RealBondDevice` above) veth slaves accept a native XDP attach on a real bond master directly on at least some kernels, since veth itself supports native XDP and some kernels' bonding driver forwards the attach through to slaves that do — the opposite of the real igb/tg3 failure this whole feature exists for. A containerlab veth-bond scenario would not exercise the bug it would be built to guard against; the root-gated real-bond-device unit test does, without that false sense of coverage. |
+| E2E             | —                                     | —                                | **Not covered.** `deploy/containerlab/` no longer deploys the gateway (until `abdd665b` its four edge nodes were a manifests-and-live-pod canary, not a scripted e2e test) — see Known Constraints. No bonded-uplink scenario exists there either, deliberately: those nodes' uplinks are veth pairs, and (confirmed while adding `TestResolveTargetsAndAttach_RealBondDevice` above) veth slaves accept a native XDP attach on a real bond master directly on at least some kernels, since veth itself supports native XDP and some kernels' bonding driver forwards the attach through to slaves that do — the opposite of the real igb/tg3 failure this whole feature exists for. A containerlab veth-bond scenario would not exercise the bug it would be built to guard against; the root-gated real-bond-device unit test does, without that false sense of coverage. |
 
 ---
 
@@ -754,7 +754,7 @@ single-container and references no `galactic-router` image at all — see
 
 ## Known Constraints
 
-- **No e2e coverage yet.** The gateway canary in `deploy/containerlab/` validates manifests and a live pod/eBPF attach, but predates any live underlay BGP peering that would deliver real traffic through it — see the `gatewayDatapathKeepAlive` incident described in [Entry Points](#cmd-galactic-gatewaygateway-go--datapath-setup) above, which was only discovered because ingress traffic silently stopped being intercepted, not caught by any test.
+- **No e2e coverage yet.** `deploy/containerlab/` no longer deploys the gateway at all. Its former canary (removed after `abdd665b`) validated manifests and a live pod/eBPF attach, but predated any live underlay BGP peering that would deliver real traffic through it — see the `gatewayDatapathKeepAlive` incident described in [Entry Points](#cmd-galactic-gatewaygateway-go--datapath-setup) above, which was only discovered because ingress traffic silently stopped being intercepted, not caught by any test.
 - **No `NetworkRule` admission webhook is deployed in this repo.** The CRD's own doc comment and `NetworkRuleReconciler`'s doc comment both describe an admission webhook that verifies VPC/VPCAttachment ownership before setting the `Accepted` condition — no `ValidatingWebhookConfiguration` exists in `config/` yet (`config/webhook/` doesn't exist). `updateAcceptedCondition` currently sets `Accepted=True` unconditionally once gateway nodes exist for the namespace, not gated on any ownership check.
 - **The uSID backend resolver's tenant-ownership check depends on `BGPVRFInstance` naming staying deterministic.** `verifyTenantOwnership` closes the ambiguous-match gap an earlier version of this resolver had, but it is only as strong as `crdnames.BGPVRFInstanceName(vpc, nodeName)` staying the exact name `galactic-bgp` writes — a divergence between the two would fail closed (a real backend never resolving) rather than open (a wrong-tenant resolve), which is the safer failure direction but still worth knowing about when either side of that naming contract changes.
 - **`GALACTIC_GATEWAY_SRV6_ADDRESS` has no in-cluster derivation mechanism.** It is operator-supplied per gateway node today; nothing in this repo yet computes it automatically from a node's own `BGPRouter` locator/node-ID. See [SRv6 encap-source address](#srv6-encap-source-address) above.

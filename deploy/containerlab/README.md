@@ -43,8 +43,8 @@ two bonds are equal paths — see the BGP design below.
 
 Every link that carries a datapath is an 802.3ad (LACP) bond of two veths: each
 edge node's transit uplink, and each compute node's uplink to its edge node.
-Production gateway uplinks are bonds, and each datapath resolves a bond to its
-members before attaching — `galactic-gateway` and `galactic-nat` attach XDP to
+Production edge uplinks are bonds, and each datapath resolves a bond to its
+members before attaching — `galactic-nat` attaches XDP to
 the members only, `galactic-cni` attaches TC to the master and its members —
 so the lab presents bonds to exercise those code paths rather than leaving them
 to be found out in production. The route reflector's link, the `remote-host`
@@ -96,9 +96,8 @@ of `task verify`, since it deliberately takes links down.
 
 The veth members make this a test of the attach *plumbing*, not of the hardware
 behaviour it guards against. A veth never drops carrier when a native XDP
-program attaches, and always reports native XDP support, so `galactic-gateway`'s
-wait-for-rejoin gate is satisfied at once and its XDP-support preflight never
-refuses. A NIC whose driver bounces the link, or lacks native XDP entirely, can
+program attaches, and always reports native XDP support, so the shard's
+per-member attach never has to wait for a member to rejoin its aggregate. A NIC whose driver bounces the link, or lacks native XDP entirely, can
 only be tested on real hardware.
 
 Every worker's role comes from its labels alone — Kind's sequential names
@@ -112,50 +111,44 @@ hanging off `tr4`, the transit router with no site attached.
 |---------------------|---------------|--------------------------------------------------------------------------------|
 | `dfw-control-plane` | ext-container | Kind control-plane; runs Cilium, Multus                                        |
 | `dfw-worker`        | ext-container | compute: FRR PE, galactic-router PE, galactic-cni                              |
-| `dfw-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, galactic-gateway, egress shard |
-| `dfw-worker3`       | ext-container | edge: second gateway and egress shard of dfw's active-active pair              |
+| `dfw-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, egress shard                   |
+| `dfw-worker3`       | ext-container | edge: dfw's second edge node, same components as `dfw-worker2`                 |
 | `sjc-control-plane` | ext-container | Kind control-plane; runs Cilium, Multus                                        |
 | `sjc-worker`        | ext-container | compute: FRR PE, galactic-router PE, galactic-cni                              |
-| `sjc-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, galactic-gateway, egress shard |
+| `sjc-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, egress shard                   |
 | `iad-control-plane` | ext-container | Kind control-plane; runs Cilium, Multus                                        |
 | `iad-worker`        | ext-container | compute: FRR PE, galactic-router PE, galactic-cni                              |
-| `iad-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, galactic-gateway, egress shard |
+| `iad-worker2`       | ext-container | edge: FRR PE, galactic-router PE, galactic-cni, egress shard                   |
 | `iad-worker3`       | ext-container | EVPN route reflector for all three clusters; FRR PE only                       |
 | `tr1`–`tr4`         | linux (FRR)   | iBGP full mesh, AS 65100                                                       |
 | `remote-host`       | linux (nginx) | off-fabric host on `tr4`; runs no Galactic component, no BGP                   |
 
-Every edge node is tainted (`galactic.datumapis.com/gateway=enabled:NoSchedule`) and so is the
+Every edge node is tainted (`galactic.datumapis.com/nat=enabled:NoSchedule`) and so is the
 route reflector (`galactic.datumapis.com/galactic=control:NoSchedule`): no tenant pods land
 on either, only DaemonSets with a blanket toleration. Edge nodes run `galactic-cni` and
 plain-mode `galactic-router` as their own independent DaemonSets, exactly like compute
-nodes, plus their own single-container `galactic-gateway` and `galactic-nat`, the
-egress shard, chained behind the gateway's XDP programs (`GALACTIC_NAT_XDP_ATTACH=chain`).
+nodes, plus `galactic-nat`, the egress shard, which attaches its own XDP program to the
+node's uplinks (`GALACTIC_NAT_XDP_ATTACH=direct`, the default). No node in the lab runs
+`galactic-gateway`, so nothing else holds those hooks and the shard never chains.
 Compute nodes run no shard: each egresses through its own site's edge shards only. The
-reflector runs neither `galactic-cni` nor the gateway — its
+reflector runs neither `galactic-cni` nor a shard — its
 `galactic=control` label is mutually exclusive with the `galactic=router` value that pulls
 those in, which is why the reflector needs a worker of its own (see
 [docs/node-labels.md](../../docs/node-labels.md)).
 
-Real end-to-end ingress traffic through the edge datapath is **live-validated** — three
-stacked issues were found and fixed along the way, not one: (1) IPv6 forwarding sysctls
-weren't enabled (fixed, `sysctl.ConfigureFIBLookupUplinkSysctls`); (2) veth's native
-`XDP_TX` fast path does not deliver a frame to the peer interface's normal receive stack at
-all unless the peer *also* runs an XDP program — confirmed live via a real destination-side
-packet counter, not just `tcpdump` invisibility. Worked around for this lab specifically,
-not by converting `edgedsr.c`'s production datapath from XDP to TC (a real gateway's public
-uplink is a physical NIC, where this veth-specific behavior doesn't apply, and XDP's
-throughput advantage is exactly why that datapath uses it): `task deploy:lab-xdp-passthrough`
-loads a trivial pass-through XDP program on every transit port facing an edge node, and
-`task deploy:lab-xdp-passthrough-compute` on the compute-node bond members `edge_lb`
-redirects backend traffic onto (`node_files/common/xdp-passthrough.c`), both already wired
-into `task deploy`. The compute half runs after `deploy:cni`: loaded before Cilium, `ip`
-mounts a private bpffs on `/sys/fs/bpf` and Cilium then refuses to start on that node. (3)
-`vip_xlat_table`'s veth-kind delivery gap and its identical-VIP/backend-port key collision,
-both fixed in galactic. See the redesign plan's
-[§8](../../docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md#8-containerlab-validation) for
-the full account, and `resources/galactic-gateway/`.
+veth's native `XDP_TX`/`XDP_REDIRECT` fast path does not deliver a frame to the peer
+interface's normal receive stack at all unless the peer *also* runs an XDP program, and
+both legs of a shard leave from the driver via XDP. A real edge node's uplinks are
+physical NICs, where this veth-specific behavior doesn't apply, so the lab works around it
+rather than changing the datapath: `task deploy:lab-xdp-passthrough` loads a trivial
+pass-through XDP program on every transit port facing an edge node (where a translated
+packet leaves), and `task deploy:lab-xdp-passthrough-compute` on the compute-node bond
+members a shard redirects un-translated replies onto (`node_files/common/xdp-passthrough.c`),
+both already wired into `task deploy`. The compute half runs after `deploy:cni`: loaded
+before Cilium, `ip` mounts a private bpffs on `/sys/fs/bpf` and Cilium then refuses to
+start on that node.
 
-The NAT/default-egress gap that validation surfaced (no tenant VRF had any route out at
+The NAT/default-egress gap (no tenant VRF had any route out at
 all) is now closed: `task deploy:galactic-nat` stands up the sharded NAT egress tier with one
 shard per edge node — two in dfw, one each in sjc and iad (`resources/galactic-nat/`) — and
 every CNI ADD now installs a default route toward its own site's shards' advertised SIDs
@@ -195,7 +188,7 @@ overlay (galactic-router, l2vpn/evpn)
 - The IPv4 address family carries per-node `/32` loopbacks only. There is no IPv4 counterpart to the
   SRv6 locator block, and the numbered link subnets are never redistributed — so a ping between
   underlay nodes must be sourced from a loopback (`task verify:underlay` does this).
-- Each site's **compute** node originates that site's covering SRv6 locator `2001:db8:ff0X::/48` and its `fc00:0:X::/48` loopback pool; its edge nodes originate the shared anycast ingress VIP aggregate (`2001:db8:6060::/48`) and their own `/128` peering loopback. No node originates a locator prefix longer than that `/48`, so every per-node `/64` in [Node-ID allocation](#node-id-allocation) is reachable only via the one site aggregate.
+- Each site's **compute** node originates that site's covering SRv6 locator `2001:db8:ff0X::/48` and its `fc00:0:X::/48` loopback pool; its edge nodes originate their own `/128` peering loopback. No node originates a locator prefix longer than that `/48`, so every per-node `/64` in [Node-ID allocation](#node-id-allocation) is reachable only via the one site aggregate.
 - **Known gap:** the addressing plan's `fabric.md` calls for per-node `/64` origination instead of one site-wide `/48`. Originating the covering aggregate from a single compute node means a second compute node joining a site would create an anycast ambiguity — the `/48` would attract its `/64` too, to a node that cannot deliver it. The lab has not hit this (one compute node per site) and the renumber onto service-classed Node-IDs deliberately did not change origination.
 - `allowas-in 1` is configured on all cluster FRR instances so each site accepts prefixes that carry AS 65000 in the path — necessary because the transit reflects routes from one AS 65000 site to another.
 - **Only edge nodes are transit-facing.** They alone hold eBGP sessions to AS 65100; a compute node or the route reflector has no link to a transit router and no eBGP session anywhere. Each site's edge node is its border router.
@@ -299,12 +292,12 @@ node running both tenant delivery and an egress shard needs two Node-IDs, not
 one. Sharing one would let `galactic-nat`'s XDP program claim that node's own
 tenant ingress before the TC decap hook ever ran, silently.
 
-| Service     | Node-ID range     | Identity                                       |
-|-------------|-------------------|------------------------------------------------|
-| `0x1`       | `0x1000`–`0x1FFF` | Tenant delivery — every node's `BGPRouter`     |
-| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`EgressShard.spec.shardSID`) |
-| `0x3`       | `0x3000`–`0x3FFF` | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`) |
-| `0x4`–`0xD` | —                 | Unallocated                                    |
+| Service     | Node-ID range     | Identity                                                           |
+|-------------|-------------------|--------------------------------------------------------------------|
+| `0x1`       | `0x1000`–`0x1FFF` | Tenant delivery — every node's `BGPRouter`                         |
+| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`EgressShard.spec.shardSID`)                     |
+| `0x3`       | `0x3000`–`0x3FFF` | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`); unused in this lab |
+| `0x4`–`0xD` | —                 | Unallocated                                                        |
 
 `0x0` is left reserved (it is the one short range, since Node-ID `0x0000` is
 invalid), and `0xE`–`0xF` are the LIB — Function space, not Node-ID space. See
@@ -313,19 +306,19 @@ invalid), and `0xE`–`0xF` are the LIB — Function space, not Node-ID space. S
 The node index is per site and stable across services: `*-worker` is `001`,
 `*-worker2` is `002`, `*-worker3` is `003`.
 
-| Node        | BGPRouter nodeID | Shard SID                   | Gateway SRv6 address        |
-|-------------|------------------|-----------------------------|-----------------------------|
-| dfw-worker  | 4097 (`0x1001`)  | —                           | —                           |
-| dfw-worker2 | 4098 (`0x1002`)  | `2001:db8:ff01:2002:e001::` | `2001:db8:ff01:3002:e000::` |
-| dfw-worker3 | 4099 (`0x1003`)  | `2001:db8:ff01:2003:e001::` | `2001:db8:ff01:3003:e000::` |
-| sjc-worker  | 4097 (`0x1001`)  | —                           | —                           |
-| sjc-worker2 | 4098 (`0x1002`)  | `2001:db8:ff02:2002:e001::` | `2001:db8:ff02:3002:e000::` |
-| iad-worker  | 4097 (`0x1001`)  | —                           | —                           |
-| iad-worker2 | 4098 (`0x1002`)  | `2001:db8:ff03:2002:e001::` | `2001:db8:ff03:3002:e000::` |
-| iad-worker3 | 4099 (`0x1003`)  | — (route reflector)         | —                           |
+| Node        | BGPRouter nodeID | Shard SID                   |
+|-------------|------------------|-----------------------------|
+| dfw-worker  | 4097 (`0x1001`)  | —                           |
+| dfw-worker2 | 4098 (`0x1002`)  | `2001:db8:ff01:2002:e001::` |
+| dfw-worker3 | 4099 (`0x1003`)  | `2001:db8:ff01:2003:e001::` |
+| sjc-worker  | 4097 (`0x1001`)  | —                           |
+| sjc-worker2 | 4098 (`0x1002`)  | `2001:db8:ff02:2002:e001::` |
+| iad-worker  | 4097 (`0x1001`)  | —                           |
+| iad-worker2 | 4098 (`0x1002`)  | `2001:db8:ff03:2002:e001::` |
+| iad-worker3 | 4099 (`0x1003`)  | — (route reflector)         |
 
-Each edge node therefore holds three identities in its site locator: delivery
-(`0x1NNN`), egress shard (`0x2NNN`) and gateway (`0x3NNN`). Its `frr.conf`
+Each edge node therefore holds two identities in its site locator: delivery
+(`0x1NNN`) and egress shard (`0x2NNN`). Its `frr.conf`
 originates the shard's `/64` into the underlay, along with the shard's two
 masquerade addresses (`2001:db8:9966:N::/64`, `192.0.2.N/32`), since only the
 compute node originates the site's `/48`.
@@ -347,33 +340,6 @@ The `galactic-router address` column is no longer set explicitly in the
 per-cluster Kustomize patches — `galactic-router` auto-detects it from `lo`
 at startup (see `docs/router/configuration.md`), since it always matches the
 FRR loopback address on the same host.
-
-### Edge node self-addressing
-
-Each edge node gets a uFMT 48+16 uSID over its own site's locator, at the reserved
-Argument 0 (never registered into any tenant VRF — see
-`internal/plumbing/ebpf/uformat.go`'s `ArgumentMin`). Unlike a tenant's per-VPC uSID,
-`srv6.ComputeSID` can't derive this value (it rejects `argument==0` by design), so these
-were computed directly via `internal/plumbing/ebpf/uformat.Encode` and are supplied
-statically through `GALACTIC_GATEWAY_SRV6_ADDRESS` — see
-`resources/galactic-gateway/<node>/node-patch.yaml`.
-
-An edge node's gateway address takes a service-`0x3` Node-ID, distinct from the
-service-`0x1` Node-ID its own `BGPRouter` uses — see
-[Node-ID allocation](#node-id-allocation) above. The two are independent:
-`GALACTIC_GATEWAY_SRV6_ADDRESS` is validated only as a native IPv6 address
-(`internal/config/gateway.go`), never cross-checked against the `BGPRouter`.
-
-| Node        | Site locator       | Gateway Node-ID  | SRv6 self-address (Argument 0) |
-|-------------|--------------------|------------------|--------------------------------|
-| dfw-worker2 | 2001:db8:ff01::/48 | 12290 (`0x3002`) | 2001:db8:ff01:3002:e000::      |
-| dfw-worker3 | 2001:db8:ff01::/48 | 12291 (`0x3003`) | 2001:db8:ff01:3003:e000::      |
-| sjc-worker2 | 2001:db8:ff02::/48 | 12290 (`0x3002`) | 2001:db8:ff02:3002:e000::      |
-| iad-worker2 | 2001:db8:ff03::/48 | 12290 (`0x3002`) | 2001:db8:ff03:3002:e000::      |
-
-All four originate the same anycast ingress VIP aggregate (`2001:db8:6060::/48`) into the
-underlay, and each site's `NetworkRule` binds the same VIP `2001:db8:6060::1` to its own
-site-local `ns60` backend — one anycast service, three sites, four gateways.
 
 ### Management network (fc00:10::/64)
 
@@ -410,17 +376,13 @@ site-local `ns60` backend — one anycast service, three sites, four gateways.
   driver, so conntrack sees the reply
   ([#565](https://github.com/datum-cloud/galactic/issues/565), fixed);
   `verify:nat-datapath` is deliberately kept out of the `verify` chain.
-- **A shard reaches its uplinks through the gateway, once.** Every shard here
-  runs on an edge node, chained behind `galactic-gateway`'s XDP programs
-  (`GALACTIC_NAT_XDP_ATTACH=chain`), so it attaches nothing itself: it sees
-  whatever the gateway's programs see, on exactly the interfaces the gateway
-  attaches to. `GALACTIC_NAT_UPLINK_INTERFACES` (`bond0,bond1`, set
+- **A shard attaches to its uplinks once.** Every shard here attaches its own
+  XDP program (`GALACTIC_NAT_XDP_ATTACH=direct`) to every member of the
+  interfaces in `GALACTIC_NAT_UPLINK_INTERFACES` (`bond0,bond1`, set
   explicitly: auto-detection would also claim Kind's `eth0`, which carries
-  each node's IPv6 default route) only drives the shard's forwarding sysctls
-  and a startup warning for an uplink with no XDP program. The gateway
-  attaches once, at its own startup; nothing watches for link changes
-  afterwards, so an interface that appears later gets no program until the
-  gateway restarts.
+  each node's IPv6 default route). It attaches once, at its own startup;
+  nothing watches for link changes afterwards, so an interface that appears
+  later gets no program until the shard restarts.
 - **The tenant egress route resolves its outgoing link once, at CNI ADD.**
   `srv6.EgressPrefixRouteAdd` stores the resolved `ifindex` in
   `egress_route_table`, and nothing re-resolves it when routing changes. A pod
@@ -445,10 +407,8 @@ deploy/containerlab/
 │   ├── galactic-cni/            # galactic-cni installer DaemonSet + ConfigMap
 │   ├── fabric-router/           # FRR DaemonSet per-site overlays (dfw, iad, sjc),
 │   │                            #   one fabric-router.<nodename> ConfigMap per worker
-│   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs, compute nodes
+│   ├── galactic-router/         # galactic-router DaemonSet + BGP CRs, compute and edge nodes
 │   ├── galactic-control/iad/    # the EVPN route reflector + one BGPPeer per client
-│   ├── galactic-gateway/        # per-edge-node overlays (dfw-worker2, dfw-worker3,
-│   │                            #   sjc-worker2, iad-worker2) + per-site VIP rules
 │   ├── galactic-nat/            # egress shards per site, one per edge node (dfw has two)
 │   └── tenants/                 # test VPCs — one shared base/ (Namespace + netshoot
 │       ├── base/                 # Deployment), each tenant patching its namespace and
@@ -537,7 +497,6 @@ task deploy
 | `verify:ns20`             | Verify ns20 ping (dual-stack, 3-site mesh)                                      |
 | `verify:ns30`             | Verify ns30 ping (dfw only, 2 pods)                                             |
 | `verify:ns40`             | Verify ns40 ping (iad only, 2 pods)                                             |
-| `verify:gateway`          | Verify every site's edge gateway CRDs and DaemonSets                            |
 | `destroy`                 | Destroy the lab and remove all Kind clusters                                    |
 | `restart`                 | Full rebuild — destroy then redeploy                                            |
 | `rebuild`                 | Full rebuild — clean (destroy + delete images/artifacts) then redeploy          |

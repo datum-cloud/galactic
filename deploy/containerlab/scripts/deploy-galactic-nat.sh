@@ -3,10 +3,10 @@
 # one EgressShard per edge node (resources/galactic-nat/README.md). Requires
 # deploy:system (galactic-nat RBAC/ServiceAccount, applied there alongside
 # galactic-cni/galactic-router's own), deploy:images (galactic-nat:latest
-# loaded onto every edge node), and deploy:galactic-router, which deploys
-# galactic-gateway: the shard runs chained behind the gateway's XDP programs
-# and waits for the gateway's chain map, and it advertises its SID through
-# the edge node's BGPRouter, which that step creates.
+# loaded onto every edge node), and deploy:galactic-router: the shard
+# advertises its SID through the edge node's BGPRouter, which that step
+# creates. No lab node runs galactic-gateway, so each shard attaches its own
+# XDP program to its uplinks (GALACTIC_NAT_XDP_ATTACH=direct).
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -14,18 +14,15 @@ source "${SCRIPT_DIR}/lib.sh"
 
 # config/galactic-nat/base is self-contained (its own full
 # single-container DaemonSet spec, not a patch onto some other config/
-# base) -- same shape config/galactic-gateway/base already has, copied by
-# deploy-galactic-router.sh's copy_router_gateway_config for the identical
-# reason. Nested under resources/galactic-nat/base/nat/ so that
+# base). Nested under resources/galactic-nat/base/nat/ so that
 # overlay's own "nat" resource reference (see its kustomization.yaml's
 # doc comment) resolves.
 GALACTIC_NAT_BASE_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-nat/base" && pwd)
 
 # copy_nat_config NODE copies config/galactic-nat/base onto NODE,
-# nested under resources/galactic-nat/base/nat/. Mirrors
-# copy_router_gateway_config in deploy-galactic-router.sh; rm -rf first
-# for the same reason that comment gives (docker cp nests SRC inside an
-# already-existing DEST dir instead of overwriting it).
+# nested under resources/galactic-nat/base/nat/. rm -rf first, as
+# deploy-galactic-router.sh's copy_router_config does: docker cp nests SRC
+# inside an already-existing DEST dir instead of overwriting it.
 copy_nat_config() {
   local node="$1"
   docker exec "${node}" rm -rf /galactic/resources/galactic-nat/base/nat
@@ -52,9 +49,27 @@ delete_stale_shards() {
     done
 }
 
+# delete_gateway NODE removes everything the lab used to deploy for
+# galactic-gateway: its per-node DaemonSets, the NetworkGateway/NetworkRule/
+# ServiceVIPBinding objects that drove them, and ns60, their backend tenant.
+# The shards used to run chained behind the gateway and now attach their own
+# XDP program, which fails while a gateway still holds an uplink's hook. Its
+# XDP links are not pinned, so deleting the pod releases them. --wait makes
+# sure that has happened before the shard DaemonSet below rolls out in direct
+# mode. A fresh lab has none to delete.
+delete_gateway() {
+  local node="$1"
+  docker exec "${node}" kubectl -n galactic-system delete daemonset \
+    -l app.kubernetes.io/name=galactic-gateway --ignore-not-found --wait
+  docker exec "${node}" kubectl -n galactic-system delete \
+    networkrules,servicevipbindings,networkgateways --all --ignore-not-found --wait
+  docker exec "${node}" kubectl delete namespace ns60 --ignore-not-found --wait
+}
+
 for site in dfw sjc iad; do
   node=$(control_plane "${site}")
   echo "Applying galactic-nat/${site} to ${node}..."
+  delete_gateway "${node}"
   delete_stale_shards "${node}"
   docker exec "${node}" rm -rf /galactic/resources/galactic-nat
   copy_to "${node}" galactic-nat

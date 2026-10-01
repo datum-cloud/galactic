@@ -20,24 +20,6 @@ interface bond1
  ipv6 address 2001:db8:1:10::1/64
 !
 
-# Aggregate covering this site's anycast ingress VIP (2001:db8:6060::1, see
-# resources/galactic-gateway/*/networkrule-ns60.yaml). The VIP's own
-# reachability is carried as an EVPN Type 5 path inside galactic-router's
-# iBGP mesh, which the plain-IPv6-unicast transit fabric never sees at all --
-# and a remote galactic-router that does learn it installs it as a plain
-# (non-SRv6) kernel route keeping the VIP as the packet's literal
-# destination the whole way out. Without a matching route on tr1-tr4 for that
-# literal destination, a client on another site (or the off-fabric
-# remote-host on tr4) has nowhere to forward it -- confirmed live as a BGP
-# RIB miss on the transit before this existed.
-#
-# Every edge node in every site originates this identically -- DSR's anycast
-# model, no primary/secondary -- so each transit router sees as many
-# equal-cost paths as there are edge nodes reachable through it. Maglev's
-# consistent-hash ring on the receiving node, not this route, decides which
-# gateway actually answers a given flow.
-ipv6 route 2001:db8:6060::/48 Null0
-
 # This node's egress shard (resources/galactic-nat/dfw/egressshard.yaml),
 # originated into the underlay: its SID's covering /64 and its two masquerade
 # addresses.
@@ -53,8 +35,8 @@ ipv6 route 2001:db8:6060::/48 Null0
 # be originated by the shard's own node, since that node's datapath holds
 # the flow's connection state, and each shard needs its own prefix rather
 # than one aggregate covering all of them, or every site's replies would go
-# to whichever originator won best-path. That now means this node: the shard
-# runs here, chained behind galactic-gateway's XDP programs.
+# to whichever originator won best-path. That means this node, the one the
+# shard runs on.
 #
 # The SID /64, because only the site's compute node originates the site's
 # /48 (resources/fabric-router/dfw/frr.conf.dfw-worker). A remote
@@ -69,10 +51,11 @@ ipv6 route 2001:db8:6060::/48 Null0
 #
 # Null0 because a `network` statement needs a matching route in the RIB and
 # nothing else on this node installs one. It cannot blackhole real shard
-# traffic: the shard's XDP program runs at ingress, behind the gateway's, and
-# claims it before any FIB lookup (internal/plumbing/ebpf/natprog). A packet
-# that reaches these statics is one no shard claimed -- galactic-nat down, or
-# not yet in the gateway's chain -- and dropping it is the point: forwarded
+# traffic: the shard's XDP program runs at ingress, attached directly to both
+# uplinks, and claims it before any FIB lookup
+# (internal/plumbing/ebpf/natprog). A packet that reaches these statics is
+# one no shard claimed -- galactic-nat down, or not yet attached -- and
+# dropping it is the point: forwarded
 # instead, it would leave the site still carrying a tenant's private source
 # address.
 ipv6 route 2001:db8:ff01:2002::/64 Null0
@@ -115,8 +98,6 @@ router bgp 65000
   # /128, not the site /48 -- a per-node peering loopback is the only
   # thing meant to cross the transit as a host route.
   network fc00:0:a::1/128
-  # Anycast ingress VIP aggregate -- see this file's own comment above.
-  network 2001:db8:6060::/48
   # This node's egress shard's SID /64 and IPv6 masquerade address -- see
   # this file's own comment above.
   network 2001:db8:ff01:2002::/64
@@ -125,9 +106,7 @@ router bgp 65000
  !
  # IPv4 underlay -- this node's /32 loopback, plus its egress shard's
  # NAT64 masquerade address. There is no IPv4 counterpart to the SRv6
- # locator block, and the ingress VIP aggregate stays IPv6-only: this lab's
- # NetworkRule VIPs are IPv6, matching the edge datapath's own scope (see
- # edgedsr.c).
+ # locator block.
  address-family ipv4 unicast
   neighbor 10.1.11.1 activate
   neighbor 10.1.11.1 allowas-in 1

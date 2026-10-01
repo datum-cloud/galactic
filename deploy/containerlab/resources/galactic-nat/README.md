@@ -3,8 +3,9 @@
 What's here: a per-site containerlab overlay for `galactic-nat`, the
 sharded egress translation datapath control plane (`config/galactic-nat/`).
 Every edge node runs a shard — `dfw-worker2` and `dfw-worker3` in dfw,
-`sjc-worker2` in sjc, `iad-worker2` in iad — chained behind that node's
-`galactic-gateway`. Compute nodes run none.
+`sjc-worker2` in sjc, `iad-worker2` in iad. No node in the lab runs
+`galactic-gateway`, so every shard attaches its own XDP program to its
+uplinks. Compute nodes run none.
 
 - `base/` — the lab's patch onto `config/galactic-nat/base` (image
   override for Kind's locally-built images; see `base/kustomization.yaml`
@@ -14,13 +15,12 @@ Every edge node runs a shard — `dfw-worker2` and `dfw-worker3` in dfw,
 - `dfw/`, `sjc/`, `iad/` — one per-site overlay each, applying one
   `galactic-nat` DaemonSet to that site's edge nodes. There is no per-node
   pin: the base's `galactic.datumapis.com/nat: enabled` affinity already
-  selects them (the lab labels every edge node so, and the lab base sets
-  `GALACTIC_NAT_XDP_ATTACH=chain`, as `config/galactic-nat/overlays/chained/` does), and nothing about a shard's identity lives in the
+  selects them (the lab labels every edge node so), and nothing about a
+  shard's identity lives in the
   DaemonSet. Each site's `node-patch.yaml` sets only
   `GALACTIC_NAT_UPLINK_INTERFACES=bond0,bond1` — an edge node's transit
   bond (replies arrive there) and its compute-facing bond (tenant egress
-  arrives there), the same two the gateway attaches `edge_lb` and
-  `edge_return` to. The shard's identity lives in that site's
+  arrives there), the two the shard attaches its XDP program to. The shard's identity lives in that site's
   `egressshard.yaml`, one `EgressShard` per edge node (dfw's holds two),
   whose spec assigns the SID, both masquerade addresses and the NAT64
   prefix; see its comments for the exact uFMT 48+16 encoding. The
@@ -36,75 +36,44 @@ Every edge node runs a shard — `dfw-worker2` and `dfw-worker3` in dfw,
 
 Every shard translates for the same `nat64Prefix`, `2001:db8:64::/96`. The
 Node-ID is service `0x2` over the edge node's own index, beside its router
-(`0x1NNN`) and gateway (`0x3NNN`) identities.
+(`0x1NNN`) identity.
 
-## Chained behind the gateway
+## Attached directly
 
-An interface takes one native XDP program, and the gateway already holds
-that hook on both bonds. The base therefore sets
-`GALACTIC_NAT_XDP_ATTACH=chain`: the shard attaches nothing, and installs
-its dispatcher in the gateway's pinned `xdp_chain` program array
-(`/sys/fs/bpf/galactic-edge/xdp_chain`) instead, receiving every packet
-the gateway does not claim. It waits for that map at startup and
-re-installs itself if the gateway ever recreates it. See
-[docs/nat/configuration.md](../../../../docs/nat/configuration.md) for the
-full mechanism.
-
-Moving the shards off the compute nodes left those nodes' bond members
-with no XDP program, which `edge_lb`'s redirects toward a backend need on
-the far end of a veth. `task deploy:lab-xdp-passthrough-compute` now loads
-the lab's pass-through program there too, after `deploy:cni` (see that
-task's comment for why the order matters).
+The lab base leaves `GALACTIC_NAT_XDP_ATTACH` at its default, `direct`:
+with no gateway on any node, nothing else holds the uplinks' native XDP
+hook, so the shard attaches its own program to every member of `bond0`
+and `bond1`. The lab therefore no longer exercises
+`config/galactic-nat/overlays/chained/`, the mode for a node that also
+runs `galactic-gateway`; see
+[docs/nat/configuration.md](../../../../docs/nat/configuration.md) for
+both modes.
 
 ## Wired up
 
 This is applied by `task deploy:galactic-nat`
 (`deploy/containerlab/Taskfile.yaml`'s `scripts/deploy-galactic-nat.sh`),
 part of the main `task deploy` chain, right after `deploy:galactic-router`
-and before `deploy:scenarios` — deliberately in that order. The gateway
-(deployed by `deploy:galactic-router`) must already be running, since the
-shard waits for its chain map and advertises its SID through the edge
-node's `BGPRouter` that step creates. And a tenant pod's own CNI ADD
+and before `deploy:scenarios` — deliberately in that order. The shard
+advertises its SID through the edge node's `BGPRouter`
+(`resources/galactic-router/<site>/bgprouter-<node>.yaml`), which
+`deploy:galactic-router` creates. And a tenant pod's own CNI ADD
 installs a default egress route toward its site's shard SIDs
 (`internal/plumbing/srv6.EgressDefaultRouteAdd`, called from
 `internal/cnibgp`), which fails outright if none of them is reachable
 yet. The script waits for every shard's `Programmed` condition, not just
-the rollout: a shard reports ready once installed in the chain, before
-its identity is programmed.
+the rollout: a shard reports ready once attached, before its identity is
+programmed.
 
-It also migrates a lab brought up while the shards still ran on the
-compute nodes. A shard's identity is write-once, so the old
-`<site>-worker-egress` objects cannot be edited into the new layout: the
-script deletes every `EgressShard` that does not target an edge node
-before applying, which clears that node's datapath and withdraws its
-advertisement. A fresh lab has none to delete.
-
-The script alone does not finish that migration. Verified in the lab, run
-in this order:
-
-1. `task build:galactic-gateway build:galactic-nat` and load both images
-   onto the edge nodes, then `kubectl rollout restart` each
-   `galactic-gateway-<node>` DaemonSet. The new gateway creates
-   `xdp_chain`, and an image under an unchanged tag restarts nothing.
-2. `scripts/deploy-fabric.sh`, which moves the masquerade and shard-SID
-   originations onto the edge nodes and applies live.
-3. The galactic-cni overlays (the tail of `scripts/deploy-cni.sh`), so
-   each compute node's conflist carries its site's shard list.
-4. `task deploy:galactic-nat`.
-5. `task deploy:lab-xdp-passthrough-compute`. The compute bond members lose their
-   XDP program when galactic-nat leaves them, and without one, gateway
-   ingress to every backend fails: confirmed live, three failures in a row
-   until it was reattached.
-6. Recreate every tenant pod. A pod's egress route is chosen at its CNI
-   ADD, so a pod attached before the move still encapsulates toward a
-   compute shard SID that no longer exists and has no egress at all. Delete
-   ns70 outright; it is no longer part of the lab.
-
-Recreating pods can shift their addresses: IPAM hands the replacement a new
-one while the old pod is still terminating. ns60's `ServiceVIPBinding`s pin
-each backend's first address (`resources/galactic-gateway/<site>/`), so if
-`verify:gateway-ingress` fails after step 6, delete the ns60 pods once more
-now that their old addresses are free.
+It also migrates a lab brought up while the shards ran chained behind
+`galactic-gateway`. It deletes every `galactic-gateway` DaemonSet, the
+`NetworkGateway`/`NetworkRule`/`ServiceVIPBinding` objects behind them, and
+the `ns60` backend tenant, waiting for the gateway pods to exit before the
+shard DaemonSet rolls out in direct mode: a direct attach fails while a
+gateway still holds an uplink's hook. The gateway's XDP links are not
+pinned, so its exit releases them. Re-run `scripts/deploy-fabric.sh` too,
+so the edge nodes stop originating the anycast VIP aggregate. A fresh lab
+has nothing to delete.
 
 `task build`/`task deploy:images` build and load `galactic-nat:latest`
 onto the edge nodes the same way the other lab images are; RBAC
@@ -115,12 +84,10 @@ that same script.
 
 Each shard's `status.shardSID` is advertised as a plain, RT-less
 BGPAdvertisement by `EgressShardReconciler`
-(`internal/controller/egressshard_controller.go`) — the same shape
-`NetworkGatewayReconciler` uses for its own ingress VIP — so every other
+(`internal/controller/egressshard_controller.go`), so every other
 node in the mesh learns a real kernel route to it via the existing
 RT-less-EVPN main-table import path
 (`internal/runtime/gobgp/monitor.go`'s `matchTableID`/`RouteMainAdd`).
-
 It is the SID's covering `/64` (Block + Node-ID, e.g.
 `2001:db8:ff01:2002::/64` for dfw-worker2's shard), not a `/128`. Each
 tenant VRF encapsulates toward this shard with its own 12-bit Argument
@@ -165,6 +132,6 @@ Unlike `shardAddressIPv6`, the IPv4 address is not advertised into the
 fabric by anything in this repo — a NAT64 reply arrives over the IPv4
 underlay, which carries no EVPN, so each shard's edge node originates its
 own `/32` in `resources/fabric-router/<site>/frr.conf.<node>`. The reply
-reaches the chained shard because the gateway hands it every non-IPv6
-frame. `task verify:nat-datapath` drives both families end to end to the
+reaches the shard because its XDP program sits directly on `bond0`.
+`task verify:nat-datapath` drives both families end to end to the
 off-fabric host.

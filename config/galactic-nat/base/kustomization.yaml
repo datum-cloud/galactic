@@ -5,7 +5,7 @@
 # never set here; it comes from each node's EgressShard spec. The overlay
 # shape mirrors config/galactic-gateway/base/kustomization.yaml's identical
 # per-node overlay pattern (see
-# deploy/containerlab/resources/galactic-gateway/ for a worked example of
-# that pattern applied to a sibling component).
+# deploy/containerlab/resources/galactic-nat/ for the lab's own overlays,
+# one per site).
 resources:
   - daemonset.yaml

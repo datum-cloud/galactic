@@ -9,7 +9,7 @@ spec:
     name: sjc-worker2
   # uFMT uSID over sjc's locator (2001:db8:ff02::/48), nodeID=0x2002
   # (service 2 = NAT shard, node index 002, the edge node's own index --
-  # its router is 0x1002 and its gateway 0x3002). Write-once, like every
+  # its router is 0x1002). Write-once, like every
   # identity field below.
   shardSID: "2001:db8:ff02:2002:e001::"
   # NAT66 masquerade source address, docs-range 2001:db8:9966::/32 block
