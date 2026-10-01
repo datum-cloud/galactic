@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package edgeattach
+package xdpattach
 
 import (
 	"errors"
@@ -194,7 +194,7 @@ func TestCheckNativeXDPSupport_UnknownSupportProceeds(t *testing.T) {
 	restoreGateVars(t)
 
 	// A kernel too old to answer, and a query that fails on its own terms,
-	// both leave support unknown. Neither is grounds to hold the gateway
+	// both leave support unknown. Neither is grounds to hold the datapath
 	// down, so both proceed with a warning.
 	for name, probeErr := range map[string]error{
 		"family unavailable": edgepreflight.ErrXDPFeaturesUnavailable,

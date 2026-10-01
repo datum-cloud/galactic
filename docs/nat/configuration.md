@@ -91,10 +91,14 @@ containerlab lab. Detection would attach there too.
 A bonding master can be named in place of its members. It is expanded to
 its slaves at startup and the program attached to each of them, never to
 the master itself, the same way `galactic-gateway` treats a bonded public
-interface. Unlike the gateway, the slaves are attached back to back
-without waiting for each to rejoin its LACP aggregate, so on a NIC whose
-driver drops carrier to attach a native XDP program, every member of the
-bond bounces at once when the shard starts.
+interface. As with the gateway, every resolved interface is checked for
+native XDP support before any is touched, and the slaves are attached one
+at a time, each waited back into its LACP aggregate before the next, so a
+NIC whose driver drops carrier to attach a native XDP program bounces one
+member of the bond at a time rather than all of them at once. A slave that
+does not rejoin within 45 seconds fails the shard's startup with the
+remaining slaves left untouched. Neither guard helps a bond with `miimon`
+at 0, which never notices a bounced slave coming back.
 
 Attachment is all-or-nothing: a shard that cannot attach to every
 resolved interface fails to start, rather than coming up with a hole in

@@ -13,6 +13,10 @@ on:
 
 env:
   GO_VERSION: '1.26'
+  # Pinned rather than 3.x: setup-task resolves a range from git tags, so a
+  # tag pushed before its release assets exist (v3.54.0) breaks every job
+  # with a 404 on download.
+  TASK_VERSION: '3.53.1'
   # Pins every job's regeneration of internal/plumbing/ebpf/prog's bpf2go
   # output (usid_bpfel/eb.go and their embedded .o's; not committed, see
   # that package's doc.go) to the same explicit clang version, rather than
@@ -41,7 +45,7 @@ jobs:
 
       - uses: arduino/setup-task@v3.0.0
         with:
-          version: 3.x
+          version: ${{ env.TASK_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install eBPF build dependencies
@@ -65,7 +69,7 @@ jobs:
 
       - uses: arduino/setup-task@v3.0.0
         with:
-          version: 3.x
+          version: ${{ env.TASK_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install eBPF build dependencies
@@ -113,7 +117,7 @@ jobs:
 
       - uses: arduino/setup-task@v3.0.0
         with:
-          version: 3.x
+          version: ${{ env.TASK_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Mark workspace as safe for root
@@ -174,7 +178,7 @@ jobs:
 
       - uses: arduino/setup-task@v3.0.0
         with:
-          version: 3.x
+          version: ${{ env.TASK_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install eBPF build dependencies
@@ -207,7 +211,7 @@ jobs:
 
       - uses: arduino/setup-task@v3.0.0
         with:
-          version: 3.x
+          version: ${{ env.TASK_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install eBPF build dependencies

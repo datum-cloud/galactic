@@ -39,10 +39,11 @@
 // one naming a bonding master is expanded to that bond's slaves by
 // ResolveTargets, native XDP against a bonding master being unreliable.
 //
-// Unlike the edge attach package, slaves are attached back to back, without
-// waiting for each to rejoin its aggregate first. On a NIC whose driver drops
-// carrier to reallocate its rings for a native program, that briefly takes
-// every member of the bond down together.
+// The attach step is shared with the edge attach package (xdpattach.Attach):
+// every target is checked for native XDP support before any is touched, and
+// each bond slave is waited back into its aggregate before the next is
+// attached, since a driver that drops carrier to reallocate its rings would
+// otherwise take every member of the bond down together.
 //
 // Attachment happens once, though, and nothing here watches for link changes
 // afterwards: an interface that appears after startup gets no program until
