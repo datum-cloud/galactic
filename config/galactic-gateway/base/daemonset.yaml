@@ -129,9 +129,14 @@ spec:
               port: 5181
             initialDelaySeconds: 15
             periodSeconds: 20
+          # Readiness is its own gRPC health service: it also requires the
+          # datapath on every interface it resolves, which can change after
+          # startup. Liveness stays on the overall service so a missing
+          # interface takes the pod out of ready without restarting it.
           readinessProbe:
             grpc:
               port: 5181
+              service: readiness
             initialDelaySeconds: 5
             periodSeconds: 10
           # This container needs CAP_BPF for the bpf() syscalls themselves

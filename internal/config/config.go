@@ -62,6 +62,16 @@ const (
 	KeyGRPCHealthPort = "grpc_health_port"
 )
 
+// --- Shared gRPC health services -------------------------------------------
+
+// GRPCReadinessService is the gRPC health service an XDP datapath binary
+// reports readiness on, separately from the overall service ("") its startup
+// and liveness probes check. It is SERVING only while the datapath covers every
+// interface it should: a missing one takes the pod out of ready without
+// failing liveness, since a restart re-attaches every interface and would
+// bounce each of them to fix one.
+const GRPCReadinessService = "readiness"
+
 // --- Shared helpers --------------------------------------------------------
 
 // NormalizeLogLevel maps common log level aliases to canonical values.

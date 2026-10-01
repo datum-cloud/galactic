@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -17,10 +18,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -47,6 +50,12 @@ type EgressDatapath interface {
 	// Attached reports whether the datapath is loaded and attached.
 	Attached() bool
 
+	// MissingUplinks reports the uplinks the datapath should be translating
+	// on but is not, empty when it covers every one. An uplink it misses is
+	// one whose traffic leaves untranslated and uncounted, so any keeps the
+	// shard from reporting Ready.
+	MissingUplinks() []string
+
 	// Program replaces the identity the datapath translates with. It rejects
 	// an identity the datapath cannot translate with, leaving the previous one
 	// in place.
@@ -69,6 +78,10 @@ const (
 	// the datapath is not yet (or no longer) attached.
 	reasonEgressDatapathNotAttached = "DatapathNotAttached"
 
+	// reasonEgressDatapathUplinksMissing is the Ready condition reason while
+	// the datapath is attached but not to every uplink it should cover.
+	reasonEgressDatapathUplinksMissing = "UplinksMissing"
+
 	// reasonEgressShardConflict is the Programmed condition reason on every
 	// EgressShard targeting a node that more than one targets. The datapath
 	// holds one identity, so none of them is programmed until the conflict is
@@ -79,7 +92,8 @@ const (
 // EgressShardReconciler programs this node's egress translation datapath from
 // the spec of the single EgressShard whose spec.targetRef.name is this node,
 // and publishes what the datapath is actually programmed with in its status.
-// Ready reports that the datapath is attached; Programmed reports that it is
+// Ready reports that the datapath is attached to every uplink it should cover;
+// Programmed reports that it is
 // translating with the identity the spec assigns.
 //
 // It also maintains one BGPAdvertisement per shard carrying the shard SID's
@@ -103,6 +117,11 @@ type EgressShardReconciler struct {
 	// Datapath is this node's egress translation datapath -- see
 	// EgressDatapath's doc comment.
 	Datapath EgressDatapath
+
+	// CoverageEvents, when non-nil, delivers an event whenever the datapath's
+	// uplink coverage changes, so Ready follows it without waiting for an
+	// unrelated EgressShard or BGPRouter event.
+	CoverageEvents <-chan event.GenericEvent
 
 	// syncMu serializes syncNode between the controller's reconciles and the
 	// startup sync SetupWithManager registers, which run concurrently.
@@ -481,6 +500,15 @@ func withdrawShardAdvertisement(ctx context.Context, c client.Client, namespace,
 // not attached rather than a panic.
 func (r *EgressShardReconciler) readyCondition() metav1.Condition {
 	if r.Datapath != nil && r.Datapath.Attached() {
+		if missing := r.Datapath.MissingUplinks(); len(missing) > 0 {
+			return metav1.Condition{
+				Type:   bgpv1alpha1.ConditionTypeReady,
+				Status: metav1.ConditionFalse,
+				Reason: reasonEgressDatapathUplinksMissing,
+				Message: fmt.Sprintf("Egress translation datapath does not cover uplinks %s; "+
+					"traffic arriving on them leaves untranslated", strings.Join(missing, ", ")),
+			}
+		}
 		return metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionTrue,
@@ -522,15 +550,41 @@ func (r *EgressShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("add initial EgressShard sync: %w", err)
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.EgressShard{}).
 		Watches(&bgpv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToShardRequests(ctx, r.Client, obj.GetNamespace())
 			}),
-		).
-		Named("egressshard").
-		Complete(r)
+		)
+	if r.CoverageEvents != nil {
+		b = b.WatchesRawSource(source.Channel(r.CoverageEvents, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, _ client.Object) []ctrlreconcile.Request {
+				return r.nodeShardRequests(ctx)
+			}),
+		))
+	}
+	return b.Named("egressshard").Complete(r)
+}
+
+// nodeShardRequests enqueues every EgressShard targeting this node. A change in
+// this node's datapath concerns only those, and syncNode re-derives them all
+// from any one request.
+func (r *EgressShardReconciler) nodeShardRequests(ctx context.Context) []ctrlreconcile.Request {
+	shardList := &bgpv1alpha1.EgressShardList{}
+	if err := r.List(ctx, shardList); err != nil {
+		log.FromContext(ctx).Error(err, "list EgressShards for datapath coverage change", "node", r.NodeName)
+		return nil
+	}
+	var reqs []ctrlreconcile.Request
+	for _, s := range shardList.Items {
+		if s.Spec.TargetRef.Name == r.NodeName {
+			reqs = append(reqs, ctrlreconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: s.Namespace, Name: s.Name},
+			})
+		}
+	}
+	return reqs
 }
 
 // broadcastToShardRequests enqueues every EgressShard in namespace. A BGPRouter

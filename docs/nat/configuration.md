@@ -83,8 +83,9 @@ containerlab lab. Detection would attach there too.
 > a packet only on an interface its program is attached to. An
 > SRv6-encapsulated tenant packet arriving on an uplink with no program
 > reaches no translation at all and is forwarded untranslated and
-> uncounted — nothing on either side reports a fault, and the shard's own
-> `Ready` condition and every counter it exports still read healthy. On a
+> uncounted. A shard covers only the uplinks it resolves, so an uplink the
+> override leaves out is one its `Ready` condition and every counter it
+> exports never see. On a
 > multi-homed shard node, naming one uplink therefore makes the shard role
 > last only as long as that uplink does.
 
@@ -100,15 +101,29 @@ does not rejoin within 45 seconds fails the shard's startup with the
 remaining slaves left untouched. Neither guard helps a bond with `miimon`
 at 0, which never notices a bounced slave coming back.
 
-Attachment is all-or-nothing: a shard that cannot attach to every
-resolved interface fails to start, rather than coming up with a hole in
-its coverage. It happens once, at process startup, so an interface that
-appears later is not picked up until the process restarts.
+The startup attach is all-or-nothing: a shard that cannot attach to every
+interface it resolves at startup fails to start, rather than coming up
+with a hole in its coverage. A shard that resolves no uplink at all, with
+auto-detection on a node that has not learned a fabric route yet, waits
+for one instead, within the startup probe's window.
 
-In chain mode nothing is attached, so the uplinks are used only for the
-forwarding sysctls and for a startup warning about any uplink that carries
-no XDP program — traffic the gateway never hooks is traffic the chained
-shard never sees.
+After startup the shard keeps its uplinks current. Every netlink link or
+route change, and every 30 seconds without one, resolves them again, and
+an uplink that appears — routing converging over a second link, a bond
+gaining or replacing a member — is attached through the same checks, one
+at a time. A bond member that is the only one carrying traffic is not
+attached until a sibling is, since the bounce would take the bond down. An
+uplink that stops resolving keeps its program for as long as the interface
+exists, because detaching bounces the link just as attaching does. While
+any resolved uplink lacks the program, the `EgressShard`'s `Ready`
+condition reads `False` with reason `UplinksMissing`, naming them, and the
+pod's `readiness` gRPC health service, which the readinessProbe checks,
+reports not serving. Liveness is unaffected, so the pod is not restarted.
+
+In chain mode nothing is attached, so the uplinks are used for the
+forwarding sysctls and to check coverage: an uplink that carries no XDP
+program is reported missing the same way, since traffic the gateway never
+hooks is traffic the chained shard never sees.
 
 **`--nat-xdp-attach` / `GALACTIC_NAT_XDP_ATTACH`**
 How the datapath reaches its uplinks' XDP hook: `direct` or `chain`. Any
@@ -175,7 +190,7 @@ with in status.
 | `status.shardAddressIPv6` | —        | `string` | The IPv6 masquerade source the datapath is programmed with. Empty means no NAT66.                      |
 | `status.shardAddressIPv4` | —        | `string` | The IPv4 masquerade source the datapath is programmed with. Empty means no NAT64.                      |
 | `status.nat64Prefix`      | —        | `string` | The `/96` the datapath is programmed to translate.                                                     |
-| `status.conditions`       | —        | —        | `Ready` (datapath attached) and `Programmed` (datapath translating with the spec's identity).          |
+| `status.conditions`       | —        | —        | `Ready` (datapath on every uplink) and `Programmed` (datapath translating with the spec's identity).   |
 
 Every identity field is optional and write-once. A shard can exist before
 its identity is assigned, and gains it later with a spec update; once
@@ -374,7 +389,8 @@ kubectl exec -n galactic-system <galactic-nat-pod> -- \
 Confirm the eBPF program is attached (in chain mode, installed in the
 gateway's `xdp_chain` slot) and translating — on the `EgressShard` object,
 `Ready` should read `DatapathAttached` and `Programmed` should read
-`AddressesProgrammed`:
+`AddressesProgrammed`. `Ready` reading `UplinksMissing` names the uplinks
+whose traffic the shard is not translating:
 
 ```sh
 kubectl get egressshard <name> -n galactic-system -o jsonpath='{.status.conditions}'

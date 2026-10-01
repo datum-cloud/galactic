@@ -180,12 +180,17 @@ func autoDetectInterfaces() ([]string, error) {
 	collect(isFabricPeerRoute)
 
 	if len(names) == 0 {
-		return nil, errors.New(
-			"attach: no default or BGP-learned IPv6 route found to auto-detect the " +
-				"SRv6/underlay-facing interface")
+		return nil, ErrNoUplinkRoute
 	}
 	return names, nil
 }
+
+// ErrNoUplinkRoute is auto-detection's error when no route it derives uplinks
+// from exists yet: the state of a node that has not learned its default or
+// fabric routes, which a caller that can wait for BGP to converge tells apart
+// from a real failure.
+var ErrNoUplinkRoute = errors.New(
+	"attach: no default or BGP-learned IPv6 route found to auto-detect the SRv6/underlay-facing interface")
 
 // routeLinkIndexes returns the interface indexes r leaves through. A route with
 // several nexthops (ECMP) reports no LinkIndex of its own; netlink puts each

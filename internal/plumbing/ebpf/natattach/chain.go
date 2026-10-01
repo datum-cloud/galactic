@@ -93,22 +93,25 @@ func ChainHolds(program *ebpf.Program, mapPath string) (bool, error) {
 	return ebpf.ProgramID(got) == want, nil
 }
 
-// WarnUnhookedUplinks logs every one of ifaceNames that carries no XDP
-// program. Chained, the shard sees only what the gateway's programs see, so an
-// uplink the gateway is not attached to is one whose traffic this shard never
-// translates -- the same silent gap an unattached uplink is in direct mode. It
-// only warns: which interfaces the gateway attaches to is its own
-// configuration, not this process's.
-func WarnUnhookedUplinks(ifaceNames []string) {
+// UnhookedUplinks returns every one of ifaceNames that carries no XDP program.
+// Chained, the shard sees only what the gateway's programs see, so an uplink
+// the gateway is not attached to is one whose traffic this shard never
+// translates -- the same silent gap an unattached uplink is in direct mode.
+// Which interfaces the gateway attaches to is its own configuration, so the
+// caller can only report the gap, not close it. An uplink that cannot be
+// inspected counts as unhooked.
+func UnhookedUplinks(ifaceNames []string) []string {
+	var unhooked []string
 	for _, name := range ifaceNames {
 		l, err := linkByNameFn(name)
 		if err != nil {
 			slog.Warn("natattach: cannot inspect uplink for an XDP program", "interface", name, "err", err)
+			unhooked = append(unhooked, name)
 			continue
 		}
 		if xdp := l.Attrs().Xdp; xdp == nil || !xdp.Attached {
-			slog.Warn("natattach: uplink carries no XDP program, so the chained shard sees none of its traffic; "+
-				"the edge gateway is not attached to it", "interface", name)
+			unhooked = append(unhooked, name)
 		}
 	}
+	return unhooked
 }
