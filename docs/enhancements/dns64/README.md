@@ -1,13 +1,15 @@
 # Shared DNS64 service
 
-Status: Proposed. This design has not passed end-to-end Galactic validation.
+Status: Prototype. Galactic implements same-node service routing. Production
+DNS64/NAT64 packet-path validation is not complete. The prototype is not
+production-ready.
 
 ## Summary
 
-Provide a managed DNS64 service for IPv6-only Compute instances. PowerDNS
-Recursor resolves public names and synthesizes AAAA records from A records
-when a name has no usable native AAAA record. Galactic's NAT64 gateway
-translates connections to IPv4.
+This design proposes a managed DNS64 service for IPv6-only Compute instances.
+PowerDNS Recursor resolves public names and synthesizes AAAA records from
+A records when a name has no usable native AAAA record. Galactic's NAT64
+gateway translates connections to IPv4.
 
 The initial service uses one shared `/96` NAT64 prefix per serving fabric and a
 shared regional resolver fleet. The planning range is 10,000–100,000 tenants;
@@ -44,7 +46,7 @@ Galactic routing and NAT64 path.
 - Make IPv4 literals work or create connectivity to unreachable destinations.
 - Preserve established connections when a NAT64 gateway loses session state.
 
-## High-level architectural proposal
+## Proposed architecture
 
 Use PowerDNS Recursor as the short-term recursive DNS64 engine. Its native
 `recursor.dns64_prefix` setting supplies the shared `/96` prefix and performs
@@ -63,16 +65,14 @@ may reach it.
 
 [Container diagram source](containers.puml).
 
-The container diagram is the component and relationship reference. The
-resolver service and PowerDNS Recursor are shared regionally; the NAT64 path is
-separate from the DNS query path.
+The diagrams describe the proposed product architecture.
 
 ### Endpoint access and resource controls
 
-The resolver VIP is a managed network service. Galactic authorizes the workload
-attachment and routes only eligible network traffic to the endpoint. The
-attachment and resolver service must reject spoofed sources and unauthorized
-queries.
+The proposed resolver VIP is a managed network service. Galactic selects
+eligible workload attachments for routing. The attachment and resolver service
+must reject spoofed sources and unauthorized queries. The current route
+programmer does not enforce the policy's protocol and port restrictions.
 
 The first milestone does not require a resolver process or cache per tenant.
 Bound shard memory, connections, outstanding queries, and query rates. Apply
@@ -96,10 +96,82 @@ DNS does not select a NAT64 gateway, the synthesized address uses the shared
 prefix, and application traffic returns through the same translation path.
 
 The [CNI route implementation][cni-routes] and [NAT64 gateway design][nat64-design]
-define the existing networking side of this flow. Resolver endpoint delivery
-remains a proposed integration.
+define the egress side of this flow. The service-route prototype supplies the
+local resolver route; end-to-end DNS64 integration remains planned.
 
-### Shared prefix and routing contract
+### Current service-route prototype
+
+The [Network API][service-route-api] defines two internal resources:
+
+- `ServiceEndpoint` publishes a stable service address, protocol, and port.
+  Its `attachmentRef` identifies the Cloud API `VPCAttachment` that hosts the
+  service. The current Galactic implementation requires this reference.
+- `ServiceRoutePolicy` references an endpoint in the same namespace and selects
+  consumer attachments by label. The network control plane must assign labels
+  that grant service access.
+
+These resources support shared services without a customer-facing DNS64 API
+or a Kubernetes route resource for every attachment or node. Policy status
+holds durable conditions, not attachment counts. The current reconciler does
+not publish those conditions.
+
+[Galactic's service-route controller][service-route-programming] runs inside
+`galactic-router`. It watches both resources and Cloud `VPCAttachment` changes,
+including `VPCAttachment.status.node`, the authoritative placement field.
+Router RBAC grants read and watch access to these APIs. Each router reconciles
+only attachments assigned to its node. The service attachment must also be on
+that node.
+
+For each selected consumer, Galactic uses attachment status to resolve the
+consumer subnet, both VPCs, and their host interfaces. On Linux, it programs
+bidirectional routes in the VPC virtual routing and forwarding (VRF) tables:
+
+- The consumer VPC table routes the endpoint address to the service interface.
+- The service VPC table routes the consumer subnet to the consumer interface.
+
+Galactic also programs matching eBPF pass-through route-map entries in both
+VRFs. These entries keep service traffic on the local Linux routing path
+instead of sending it through an egress gateway. NAT64 translation, NAT64
+routes, and default-route programming remain outside this controller.
+
+### Route cleanup and rollback
+
+After it successfully computes the desired routes, the controller removes the
+policy's previously tracked routes and pass-through entries before applying
+the replacement. This removes stale routes when selection or attachment
+placement changes. Policy deletion also triggers cleanup of tracked routes.
+
+Updates are not atomic. If the return route fails to install, the programmer
+attempts to remove the forward route. If the service-side pass-through entry
+fails, it attempts to remove the consumer-side entry, but leaves the Linux
+routes installed. Rollback does not restore the previous policy state.
+
+Cleanup relies on in-memory tracking. Restarting the controller loses that
+tracking, and failed updates can leave partial state. Endpoint lookup or route
+planning errors leave existing routes in place; deleting an endpoint alone
+does not withdraw them. Recovery from these cases remains a prototype limit.
+
+### Current routing observability
+
+[Service-route metrics][service-route-observability] use the existing
+`galactic-router` Prometheus endpoint. They report reconciliation outcomes and
+duration, route apply and remove outcomes, and the number of locally tracked
+route intents. Labels use only bounded result and operation values. Resource
+identities stay out of metric labels to keep cardinality bounded.
+
+Structured logs include policy and node context, endpoint context where
+available, compiled intent counts, and errors from lookup, planning,
+programming, or cleanup. The route count reflects controller tracking; it does
+not prove resolver health or packet delivery.
+
+### Planned DNS64 readiness and prefix contract
+
+DNS64 readiness requires agreement between the resolver VIP, the Galactic
+route to that VIP, and the shared NAT64 prefix. The VIP supplied to the instance
+must match the routed endpoint. The resolver's synthesis prefix must match
+the prefix routed to the assigned NAT64 gateway. A reachable resolver alone
+does not establish DNS64 readiness. The service-route controller does not
+implement this readiness check.
 
 Use one Datum-managed `/96` prefix shared across the fabric. Read it from
 [`EgressShard.status.nat64Prefix`][egress-status]; do not allocate prefixes in
@@ -116,7 +188,7 @@ reason. Native IPv6 resolution can continue. Coordinate prefix changes with
 route retention for cached synthesized answers; clients can retain earlier
 answers until their TTL expires.
 
-### Synthesis and DNS security
+### Planned synthesis and DNS security
 
 Follow [RFC 6147][dns64-rfc]. Synthesize only for an AAAA query when eligible
 A records exist and no usable native AAAA record exists. Preserve NXDOMAIN,
@@ -134,20 +206,20 @@ resolution. Apply ACLs, response-rate limiting, maximum response sizes, and
 resource limits to reduce cache-poisoning, amplification, and denial-of-
 service risk.
 
-### Configuration and rollout
+### Planned configuration and rollout
 
-The DNS service controller distributes versioned fleet configuration to the
-assigned resolver shards. The initial configuration contains the shared
+The proposed DNS service controller distributes versioned fleet configuration
+to the assigned resolver shards. The initial configuration contains the shared
 prefix, public upstream policy, ACLs, synthesis exclusions, resource limits,
 and observability settings. It does not manage tenant zones or tenant DNS
 records.
 
 Validate each revision before activation and retain the previous revision for
 rollback. Drain a replica before upgrade, verify health and synthesis, then
-return it to service. Admit a shard only after its configuration, resolver
-health, and NAT64 prefix agree with the active revision.
+return it to service. Admit a shard only after its configuration and resolver
+health pass the DNS64 readiness checks.
 
-### Availability, capacity, and operations
+### Planned availability and capacity
 
 Place resolver replicas across failure domains within each region. Keep enough
 spare capacity to lose a replica. Use a stable IPv6 VIP with health-aware
@@ -161,16 +233,21 @@ synthesis rate, cache hit rate, resolver resource use, and NAT64 connection
 success. Bound metric cardinality and query-log retention. Add tenant-level
 accounting only when quotas or billing require it.
 
-## Implementation boundary
+## Limitations and validation
+
+The current implementation supports same-node consumer and service attachments
+only. Cross-node service routing is future work. Health-based endpoint
+withdrawal is not implemented. Route programming requires Linux.
 
 The existing prototype exercised dnsdist, BIND, and Jool in a controlled lab.
-That implementation is not the short-term production design. The new prototype
+That implementation is not the proposed production design. The DNS64 prototype
 must exercise PowerDNS Recursor with the shared prefix and the intended
 Galactic/NAT64 path. Jool remains a test fixture only.
 
-The Galactic compatibility profile validates saved configuration offline; it
-does not prove the Galactic packet path. Controlled upstreams and same-host
-replicas do not establish internet-resolution performance or failure-domain
+Production DNS64/NAT64 packet-path validation is not complete. The Galactic
+compatibility profile validates saved configuration offline; it does not prove
+the Galactic packet path. Controlled upstreams and same-host replicas do not
+establish internet-resolution performance or failure-domain
 availability.
 
 Galactic source reviewed on September 16, 2026, supports TCP and UDP. It lacks
@@ -213,3 +290,6 @@ plantuml -tsvg docs/enhancements/dns64/containers.puml docs/enhancements/dns64/r
 [nat64-constraints]: https://github.com/datum-cloud/enhancements/blob/a778a6c3104b60b0e7634af4f3e5d2e3ae303549/enhancements/networking/nat64-gateway-for-vpc-networks.md#L184-L198
 [dns64-rfc]: https://www.rfc-editor.org/rfc/rfc6147.html
 [nat64-rfc]: https://www.rfc-editor.org/rfc/rfc6146.html
+[service-route-api]: https://github.com/datum-cloud/network/pull/27
+[service-route-programming]: https://github.com/datum-cloud/galactic/pull/634
+[service-route-observability]: https://github.com/datum-cloud/galactic/pull/635
