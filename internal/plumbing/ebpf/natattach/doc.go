@@ -30,14 +30,14 @@
 // now. Loading already surfaces "this kernel cannot load this program" clearly,
 // just later than a dedicated check would.
 //
-// # No re-attachment
+// # Re-attachment
 //
 // Every uplink ResolveUplinks returns -- the operator's override, or the
 // auto-detected set -- is attached at process startup, so a multi-homed shard
 // node translates on all of them and losing one uplink does not stop
-// translation on the rest. A single uplink is simply a one-element list, and
-// one naming a bonding master is expanded to that bond's slaves by
-// ResolveTargets, native XDP against a bonding master being unreliable.
+// translation on the rest. A single uplink is a one-element list, and one
+// naming a bonding master is expanded to that bond's slaves by ResolveTargets,
+// native XDP against a bonding master being unreliable.
 //
 // The attach step is shared with the edge attach package (xdpattach.Attach):
 // every target is checked for native XDP support before any is touched, and
@@ -45,10 +45,11 @@
 // attached, since a driver that drops carrier to reallocate its rings would
 // otherwise take every member of the bond down together.
 //
-// Attachment happens once, though, and nothing here watches for link changes
-// afterwards: an interface that appears after startup gets no program until
-// the process restarts. That is the remaining gap, and it is a narrower one
-// than attaching to a single named uplink was -- a node's fabric uplinks are
-// present at boot, where which one carries traffic is decided by routing and
-// changes at any time.
+// Startup is not the end of it. Auto-detection reads routes, and a shard that
+// starts before BGP converges sees only some of its uplinks, so the caller
+// keeps the attachment set current with xdpattach.Watch: every link or route
+// change resolves the uplinks again, and any not yet attached is attached
+// through the same gate, one at a time. An uplink is never detached because it
+// stopped resolving, only once it is gone, since detaching bounces the link
+// exactly as attaching does.
 package natattach

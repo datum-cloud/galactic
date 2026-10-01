@@ -12,6 +12,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/bond"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 )
 
 const (
@@ -86,5 +87,44 @@ func TestResolveUplinks(t *testing.T) {
 				t.Errorf("ResolveUplinks(%v) = %v, want %v", tt.override, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestResolveUplinks_NoRouteYetIsErrNoUplinks covers the state a shard that
+// starts before BGP converges sees: it must be told apart from a real failure,
+// so startup can wait for the first route instead of failing.
+func TestResolveUplinks_NoRouteYetIsErrNoUplinks(t *testing.T) {
+	for name, detectErr := range map[string]error{
+		"no route to detect from":     attach.ErrNoUplinkRoute,
+		"routes resolving to nothing": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeUplinkHost(t, nil, detectErr)
+			if _, err := ResolveUplinks(nil); !errors.Is(err, ErrNoUplinks) {
+				t.Errorf("ResolveUplinks() error = %v, want ErrNoUplinks", err)
+			}
+		})
+	}
+
+	fakeUplinkHost(t, nil, errors.New("netlink: permission denied"))
+	if _, err := ResolveUplinks(nil); errors.Is(err, ErrNoUplinks) {
+		t.Errorf("ResolveUplinks() error = %v; a real detection failure must not read as ErrNoUplinks", err)
+	}
+}
+
+func TestUnhookedUplinks(t *testing.T) {
+	fakeUplinkHost(t, nil, nil)
+	hooked := &fakeLink{attrs: netlink.LinkAttrs{Name: "hooked0", Xdp: &netlink.LinkXdp{Attached: true}}}
+	byName := linkByNameFn
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		if name == hooked.attrs.Name {
+			return hooked, nil
+		}
+		return byName(name)
+	}
+
+	got := UnhookedUplinks([]string{"hooked0", testUplink, "gone0"})
+	if want := []string{testUplink, "gone0"}; !slices.Equal(got, want) {
+		t.Errorf("UnhookedUplinks() = %v, want %v", got, want)
 	}
 }

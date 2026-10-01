@@ -5,8 +5,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/netip"
+	"slices"
+	"sync"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,6 +19,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgemetrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -34,8 +39,9 @@ import (
 // a registered rule is never intercepted at all and routes past the node
 // ordinarily.
 var gatewayDatapathKeepAlive struct {
-	objs  *edgeprog.EdgedsrObjects
-	links []link.Link
+	objs      *edgeprog.EdgedsrObjects
+	publicSet *xdpattach.Set
+	returnSet *xdpattach.Set
 }
 
 // setupGatewayDatapath loads and attaches the edge Maglev datapath to
@@ -50,9 +56,13 @@ var gatewayDatapathKeepAlive struct {
 // being unable to attach to a bonding master. Every sysctl and every attachment
 // then targets the resolved set rather than the named interface.
 //
-// The loaded objects and every returned link are stashed in
+// The loaded objects and both attachment sets are stashed in
 // gatewayDatapathKeepAlive rather than closed here: they, and the attachment
 // itself, must survive for the life of this process.
+//
+// The resolution is redone for the life of ctx (watchTargets), so a bond
+// member enslaved or replaced after startup gets the datapath too. coverage
+// records which resolved targets are still without it.
 //
 // internalInterfaces name this node's compute-facing links, if any. Each is
 // resolved and attached the same way as publicInterface, but with the
@@ -69,7 +79,8 @@ var gatewayDatapathKeepAlive struct {
 // metricsReg additionally gets a collector registered against it once the
 // objects are loaded, reading the maps live at every scrape.
 func setupGatewayDatapath(
-	publicInterface string, internalInterfaces []string, srv6Address string, metricsReg prometheus.Registerer,
+	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address string,
+	metricsReg prometheus.Registerer, coverage *datapathCoverage,
 ) (gateway.Datapath, error) {
 	encapSrc, err := netip.ParseAddr(srv6Address)
 	if err != nil {
@@ -144,10 +155,140 @@ func setupGatewayDatapath(
 		return nil, fmt.Errorf("register edge gateway metrics collector: %w", err)
 	}
 
+	publicSet, err := xdpattach.NewSet(objs.EdgeLb, targets, xdpLinks[:len(targets)])
+	if err != nil {
+		closeAll(xdpLinks)
+		_ = objs.Close()
+		return nil, err
+	}
+	var returnSet *xdpattach.Set
+	if len(returnTargets) > 0 {
+		if returnSet, err = xdpattach.NewSet(objs.EdgeReturn, returnTargets, xdpLinks[len(targets):]); err != nil {
+			closeAll(xdpLinks)
+			_ = objs.Close()
+			return nil, err
+		}
+	}
+
 	gatewayDatapathKeepAlive.objs = objs
-	gatewayDatapathKeepAlive.links = xdpLinks
+	gatewayDatapathKeepAlive.publicSet = publicSet
+	gatewayDatapathKeepAlive.returnSet = returnSet
+
+	for _, target := range append(slices.Clone(targets), returnTargets...) {
+		coverage.configured[target] = true
+	}
+	go watchTargets(ctx, publicInterface, internalInterfaces, publicSet, returnSet, coverage)
 
 	return datapath, nil
+}
+
+// datapathCoverage is which of the datapath's resolved targets it is not
+// attached to, kept by watchTargets and read by the readiness reporter. Its
+// onChange, when set, is called whenever that changes, from watchTargets'
+// goroutine.
+type datapathCoverage struct {
+	onChange func()
+
+	mu      sync.Mutex
+	missing []string
+	// configured is the targets whose forwarding sysctls have been applied.
+	// Only watchTargets touches it once setup returns.
+	configured map[string]bool
+}
+
+func newDatapathCoverage(onChange func()) *datapathCoverage {
+	return &datapathCoverage{onChange: onChange, configured: map[string]bool{}}
+}
+
+// Missing reports the resolved targets the datapath is not attached to.
+func (c *datapathCoverage) Missing() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.missing)
+}
+
+func (c *datapathCoverage) set(missing []string) {
+	c.mu.Lock()
+	changed := !slices.Equal(c.missing, missing)
+	c.missing = slices.Clone(missing)
+	c.mu.Unlock()
+	if !changed {
+		return
+	}
+	if len(missing) > 0 {
+		slog.Warn("Edge gateway datapath is not attached to every resolved interface; traffic arriving on these "+
+			"bypasses it", "missing", missing)
+	} else {
+		slog.Info("Edge gateway datapath is attached to every resolved interface")
+	}
+	if c.onChange != nil {
+		c.onChange()
+	}
+}
+
+// configure applies the forwarding sysctls the datapath's FIB lookup needs to
+// every target not configured yet, returning the targets that have them. One
+// that fails is left out, so the datapath is never attached where its lookup
+// would refuse every packet, and retried on the next pass.
+func (c *datapathCoverage) configure(targets []string) []string {
+	ready := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if !c.configured[target] {
+			if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
+				slog.Error("Cannot configure forwarding on interface; leaving it without the datapath",
+					"interface", target, "err", err)
+				continue
+			}
+			c.configured[target] = true
+		}
+		ready = append(ready, target)
+	}
+	return ready
+}
+
+// watchTargets re-resolves the public and internal interfaces on every netlink
+// link or route change, until ctx is done, and attaches each set's program to
+// any resolved target it does not hold yet. A resolution failure, such as a
+// bond in the moment between losing a member and enslaving its replacement,
+// keeps every attachment and skips that pass.
+func watchTargets(ctx context.Context, publicInterface string, internalInterfaces []string,
+	publicSet, returnSet *xdpattach.Set, coverage *datapathCoverage,
+) {
+	xdpattach.OnNetlinkChange(ctx, func() {
+		targets, err := edgeattach.ResolveTargets(publicInterface)
+		if err != nil {
+			slog.Warn("Re-resolve edge gateway public interface failed; keeping current attachments",
+				"interface", publicInterface, "err", err)
+			return
+		}
+		var returnTargets []string
+		if returnSet != nil {
+			if returnTargets, err = resolveReturnTargets(internalInterfaces); err != nil {
+				slog.Warn("Re-resolve edge gateway internal interfaces failed; keeping current attachments",
+					"err", err)
+				return
+			}
+		}
+
+		publicSet.Reconcile(coverage.configure(targets))
+		missing := uncovered(targets, publicSet.Attached())
+		if returnSet != nil {
+			returnSet.Reconcile(coverage.configure(returnTargets))
+			missing = append(missing, uncovered(returnTargets, returnSet.Attached())...)
+		}
+		coverage.set(missing)
+	})
+}
+
+// uncovered returns every one of targets not in covered, in targets' order.
+func uncovered(targets, covered []string) []string {
+	var out []string
+	for _, t := range targets {
+		if !slices.Contains(covered, t) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // resolveReturnTargets expands every configured internal interface the way the

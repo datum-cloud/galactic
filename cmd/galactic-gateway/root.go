@@ -83,6 +83,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 	healthSrv := grpchealth.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	healthSrv.SetServingStatus(config.GRPCReadinessService, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	go func() {
 		// A Serve failure is fatal rather than merely logged: with no health
 		// server left and nothing to notice, the process would carry on
@@ -118,14 +119,28 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// Load and attach the edge eBPF datapath. Always a real datapath, never a
 	// no-op: configuration validation rejects an empty public interface or SRv6
 	// address before this is reached.
-	gwDatapath, err := setupGatewayDatapath(
-		cfg.PublicInterface, cfg.InternalInterfaces, cfg.SRv6Address, ctrlmetrics.Registry)
+	//
+	// Readiness, on its own gRPC health service, additionally needs the
+	// datapath on every interface it resolves, which can change after startup
+	// as bond members come and go. The coverage callback runs on the
+	// datapath's watch goroutine, possibly before setup returns, so it only
+	// nudges and followCoverage does the work.
+	coverageChanged := make(chan struct{}, 1)
+	coverage := newDatapathCoverage(func() {
+		select {
+		case coverageChanged <- struct{}{}:
+		default:
+		}
+	})
+	gwDatapath, err := setupGatewayDatapath(ctx,
+		cfg.PublicInterface, cfg.InternalInterfaces, cfg.SRv6Address, ctrlmetrics.Registry, coverage)
 	if err != nil {
 		return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
 	}
 	// Only now is the datapath attached and its rule table reachable. Report
 	// serving from here on, not from process start.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	go followCoverage(ctx, coverage, healthSrv, coverageChanged)
 
 	// Real quota and telemetry implementations, not stubs. See their own doc
 	// comments for what each does and does not cover.
@@ -167,6 +182,27 @@ func runCmd(cfg *config.GatewayConfig) error {
 	}
 
 	return nil
+}
+
+// followCoverage keeps the readiness service SERVING only while coverage
+// reports no missing interface, until ctx is done: once at the start, then on
+// every nudge from changed.
+func followCoverage(ctx context.Context, coverage *datapathCoverage, healthSrv *grpchealth.Server,
+	changed <-chan struct{},
+) {
+	for {
+		status := grpc_health_v1.HealthCheckResponse_SERVING
+		if len(coverage.Missing()) > 0 {
+			status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
+		}
+		healthSrv.SetServingStatus(config.GRPCReadinessService, status)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		}
+	}
 }
 
 // newRootCommand builds the root cobra command with all flags and the

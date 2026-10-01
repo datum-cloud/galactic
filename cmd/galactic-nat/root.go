@@ -19,6 +19,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -80,6 +81,7 @@ func runCmd(cfg *config.NATConfig) error {
 	healthSrv := grpchealth.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	healthSrv.SetServingStatus(config.GRPCReadinessService, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	go func() {
 		// A Serve failure is fatal rather than merely logged: with no health
 		// server left and nothing to notice, the process would carry on
@@ -115,24 +117,39 @@ func runCmd(cfg *config.NATConfig) error {
 	// Load and attach the egress translation datapath. It needs no identity to
 	// attach: that comes from this node's EgressShard spec, which the
 	// reconciler below programs on its first reconcile.
-	datapath, err := setupNatDatapath(ctx, cfg, ctrlmetrics.Registry)
+	//
+	// The datapath reports a change in which uplinks it covers through
+	// coverageChanged, possibly before setupNatDatapath has even returned, so
+	// the callback only nudges and followCoverage below does the work.
+	coverageChanged := make(chan struct{}, 1)
+	datapath, err := setupNatDatapath(ctx, cfg, ctrlmetrics.Registry, func() {
+		select {
+		case coverageChanged <- struct{}{}:
+		default:
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
+	coverageEvents := make(chan event.GenericEvent, 1)
+	go followCoverage(ctx, datapath, healthSrv, coverageChanged, coverageEvents)
+
 	// Only now is the datapath attached, or in chain mode installed in the
 	// edge gateway's XDP chain. Report serving from here on, not from
-	// process start. Serving does not wait for an identity to be programmed:
-	// a node whose shard has not been assigned one yet would otherwise never
-	// turn ready and would block the DaemonSet's rollout. The EgressShard's
-	// Programmed condition reports that instead.
+	// process start; readiness, on its own service, additionally needs every
+	// uplink covered (followCoverage). Neither waits for an identity to be
+	// programmed: a node whose shard has not been assigned one yet would
+	// otherwise never turn ready and would block the DaemonSet's rollout. The
+	// EgressShard's Programmed condition reports that instead.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	// Register EgressShard controller.
 	if err := (&controller.EgressShardReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		NodeName: nodeName,
-		Datapath: datapath,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		NodeName:       nodeName,
+		Datapath:       datapath,
+		CoverageEvents: coverageEvents,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EgressShard controller: %w", err)
 	}
@@ -148,6 +165,33 @@ func runCmd(cfg *config.NATConfig) error {
 	}
 
 	return nil
+}
+
+// followCoverage publishes datapath's uplink coverage until ctx is done: once
+// at the start, then on every nudge from changed. Readiness is SERVING only
+// while no uplink is missing, and each change also sends on events, which
+// re-publishes the EgressShard's Ready condition. Both sends coalesce, since
+// either consumer reads the current state rather than the event.
+func followCoverage(ctx context.Context, datapath controller.EgressDatapath, healthSrv *grpchealth.Server,
+	changed <-chan struct{}, events chan<- event.GenericEvent,
+) {
+	for {
+		status := grpc_health_v1.HealthCheckResponse_SERVING
+		if len(datapath.MissingUplinks()) > 0 {
+			status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
+		}
+		healthSrv.SetServingStatus(config.GRPCReadinessService, status)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		}
+		select {
+		case events <- event.GenericEvent{Object: &bgpv1alpha1.EgressShard{}}:
+		default:
+		}
+	}
 }
 
 // newRootCommand builds the root cobra command with all flags and the

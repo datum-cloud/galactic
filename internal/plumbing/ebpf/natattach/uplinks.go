@@ -17,6 +17,11 @@ import (
 // attach.go.
 var detectUplinksFn = attach.DetectUplinks
 
+// ErrNoUplinks is ResolveUplinks' error when nothing resolves at all. On an
+// auto-detected node it is what a shard sees when it starts before any fabric
+// route has been learned, which waiting fixes.
+var ErrNoUplinks = errors.New("natattach: no uplink interfaces resolved")
+
 // ResolveUplinks returns the interfaces Attach should attach the egress
 // translation program to.
 //
@@ -30,13 +35,20 @@ var detectUplinksFn = attach.DetectUplinks
 // resolves to its slaves and never to itself, native XDP on a master being
 // unreliable.
 //
-// An empty result is an error. The datapath claims a packet only on an
+// An empty result is ErrNoUplinks. The datapath claims a packet only on an
 // interface it is attached to, so too few uplinks is a silent blackhole rather
 // than a degraded mode.
+//
+// The result is only as current as the routes it was derived from. A caller
+// keeps it current by calling again as routes change, which
+// xdpattach.Watch does.
 func ResolveUplinks(override []string) ([]string, error) {
 	names := override
 	if len(names) == 0 {
 		detected, err := detectUplinksFn()
+		if errors.Is(err, attach.ErrNoUplinkRoute) {
+			return nil, fmt.Errorf("%w: %w", ErrNoUplinks, err)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("natattach: auto-detect uplinks: %w", err)
 		}
@@ -48,7 +60,7 @@ func ResolveUplinks(override []string) ([]string, error) {
 		return nil, err
 	}
 	if len(targets) == 0 {
-		return nil, errors.New("natattach: no uplink interfaces resolved")
+		return nil, ErrNoUplinks
 	}
 	return targets, nil
 }

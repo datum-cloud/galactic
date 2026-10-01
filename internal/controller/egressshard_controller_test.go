@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -44,6 +45,7 @@ const (
 // identity in memory, with settable attachment and Program failure.
 type fakeEgressDatapath struct {
 	attached   bool
+	missing    []string
 	programErr error
 
 	identity *EgressShardIdentity
@@ -52,6 +54,8 @@ type fakeEgressDatapath struct {
 }
 
 func (f *fakeEgressDatapath) Attached() bool { return f.attached }
+
+func (f *fakeEgressDatapath) MissingUplinks() []string { return f.missing }
 
 func (f *fakeEgressDatapath) Program(identity EgressShardIdentity) error {
 	f.programs++
@@ -225,6 +229,47 @@ func TestEgressShardReconciler_ReadyFalseWhenNotAttached(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	assertCondition(t, got, bgpv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonEgressDatapathNotAttached)
+}
+
+// TestEgressShardReconciler_ReadyFalseWhileUplinksMissing covers issue #647: a
+// shard attached to some of its uplinks but not all is not Ready, and turns
+// Ready once the missing one is covered.
+func TestEgressShardReconciler_ReadyFalseWhileUplinksMissing(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true, missing: []string{"eth1"}}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonEgressDatapathUplinksMissing)
+	ready := meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeReady)
+	if !strings.Contains(ready.Message, "eth1") {
+		t.Errorf("Ready message = %q, want it to name eth1", ready.Message)
+	}
+
+	datapath.missing = nil
+	if got, err = reconcileShard(t, r, c); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeReady, metav1.ConditionTrue, reasonEgressDatapathAttached)
+}
+
+func TestEgressShardReconciler_NodeShardRequestsOnlyThisNode(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	mine := newEgressShard(testNAT66NodeA)
+	other := newEgressShard("some-other-node")
+	other.Name = "other-shard"
+	c := newIndexedClientBuilder(scheme).WithObjects(mine, other).Build()
+	r := newNAT66Reconciler(c, scheme, &fakeEgressDatapath{attached: true})
+
+	reqs := r.nodeShardRequests(context.Background())
+	if len(reqs) != 1 || reqs[0].Name != mine.Name {
+		t.Errorf("nodeShardRequests() = %v, want only %s", reqs, mine.Name)
+	}
 }
 
 func TestEgressShardReconciler_NilDatapathIsAnError(t *testing.T) {
