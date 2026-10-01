@@ -78,6 +78,14 @@
 // this file includes no headers beyond <linux/bpf.h>.
 #define USID_OFFSETOF(type, member) ((__u32) (unsigned long) &((type *) 0)->member)
 
+// USID_BARRIER_VAR makes var opaque to the optimizer at this point, so clang
+// cannot fold a later choice between two loaded values back into a choice
+// between two pointers. Without CAP_PERFMON the verifier rejects arithmetic
+// on a map value pointer whose offset depends on a branch ("tried to add from
+// different maps, paths or scalars"). natprog's nat.c carries the same macro
+// under its own name.
+#define USID_BARRIER_VAR(var) asm volatile("" : "=r"(var) : "0"(var))
+
 // ---------------------------------------------------------------------
 // BPF helper function declarations. Only the helpers this program calls
 // are declared, using the enum bpf_func_id constants from the system's
@@ -208,6 +216,37 @@ static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const vo
 #define USID_TCP_DOFF_OFFSET 12
 #define USID_TCP_MIN_HDR_LEN 20
 #define USID_UDP_HDR_LEN 8
+
+// TCP header and option facts clamp_tcp_mss needs. Options occupy at most 40
+// bytes, the space a 4-bit data offset leaves after the 20-byte fixed header.
+#define USID_TCP_FLAGS_OFFSET 13
+#define USID_TCP_FLAG_SYN 0x02
+#define USID_TCP_MAX_OPTIONS_LEN 40
+// How many options clamp_tcp_mss walks before giving up, NOPs included. The
+// verifier's cost for the walk grows linearly up to about 20 steps and then
+// explodes past its 1M-instruction budget, since it can no longer prune the
+// paths through the end-of-options comparison. Sixteen covers every SYN a
+// real stack sends: Linux, Windows, macOS and FreeBSD all put MSS first, and
+// a full Linux SYN (MSS, SACK permitted, timestamps, NOP, window scale) is five
+// steps. A SYN whose MSS sits beyond it goes out unclamped and is counted.
+#define USID_TCP_MSS_WALK_LIMIT 16
+#define USID_TCPOPT_EOL 0
+#define USID_TCPOPT_NOP 1
+#define USID_TCPOPT_MSS 2
+#define USID_TCPOLEN_MSS 4
+
+// The IPv4 fragment offset, the low 13 bits of frag_off. Nonzero means a
+// non-first fragment, which carries no TCP header to read.
+#define USID_IPV4_FRAG_OFFSET_MASK 0x1FFF
+#define USID_IPV4_MIN_HDR_LEN 20
+
+// IPv6 next-header values that are extension headers, which clamp_tcp_mss
+// does not walk. Counted rather than silently skipped, so a tenant whose SYNs
+// carry one shows up as unclamped instead of as mysteriously slow transfers.
+#define USID_IPPROTO_HOPOPTS 0
+#define USID_IPPROTO_ROUTING 43
+#define USID_IPPROTO_FRAGMENT 44
+#define USID_IPPROTO_DSTOPTS 60
 
 // GSO_BY_FRAGS, a segment size that means "each fragment is one segment". Such
 // a packet has no single segment length to check.
@@ -809,6 +848,90 @@ struct {
 	__type(value, struct public_uplink_value);
 } public_uplink_table SEC(".maps");
 
+// struct mss_clamp_value is mss_clamp_table's value: the largest TCP MSS a SYN
+// crossing the fabric may advertise, per tenant address family, in host byte
+// order. Zero turns clamping off for that family.
+//
+// The fabric carries a tenant packet inside a 40-byte outer IPv6 header with no
+// SRH, so a tenant packet can be at most the uplink MTU minus 40. A tenant
+// interface at the uplink's own MTU advertises an MSS sized for the full MTU,
+// and every full-size segment sent to it is then 40 bytes too big once
+// encapsulated. Nothing on the path fragments or reports it: the egress shard
+// drops it at its FIB lookup, and a packet usid_egress encapsulates past the
+// uplink MTU is dropped by the link, neither with an ICMP error. So
+// clamp_tcp_mss lowers the MSS in the SYN instead, which makes both ends size
+// their segments to fit.
+//
+// The two families differ because their inner headers do: an IPv6 tenant's
+// packet spends 40 bytes on its own header and an IPv4 tenant's 20. NAT64 needs
+// no third value. An IPv6 tenant's 1400 is exactly a 1440-byte IPv4 packet,
+// which grows back to 1460 bytes when the shard translates it, and 1500 when
+// re-encapsulated.
+//
+// Written by galactic-cni from the uplink MTU it resolves, not compiled in. See
+// internal/plumbing/ebpf/mssclamp.
+struct mss_clamp_value {
+	__u16 mss_ipv4;
+	__u16 mss_ipv6;
+};
+
+// mss_clamp_table: see struct mss_clamp_value. A single-entry array, matching
+// node_src_addr_table's per-node lifecycle. An array lookup never misses, so a
+// node whose control plane has not written it yet reads zero for both
+// families, which is clamping off: the datapath behaves exactly as it did
+// before this map existed until galactic-cni sets a value.
+//
+// Its own map rather than a field on any existing one, so adding it does not
+// change an existing pinned map's layout. That would make the loader recreate
+// every pinned map empty (see attach.Load).
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct mss_clamp_value);
+} mss_clamp_table SEC(".maps");
+
+// enum mss_clamp_stat indexes mss_clamp_stats, which is observability only.
+// Not drop_reasons slots, for the same reason mss_clamp_table is its own map:
+// growing drop_reasons' entry count would recreate every pinned map.
+enum mss_clamp_stat {
+	// A SYN's MSS was above the limit and was rewritten to it.
+	MSS_CLAMP_STAT_CLAMPED_IPV4 = 0,
+	MSS_CLAMP_STAT_CLAMPED_IPV6 = 1,
+	// A SYN's MSS was already at or below the limit and was left alone.
+	MSS_CLAMP_STAT_WITHIN_LIMIT = 2,
+	// A SYN carried no MSS option. The peer then assumes the protocol default
+	// (536 for IPv4, 1220 for IPv6), which already fits.
+	MSS_CLAMP_STAT_NO_MSS_OPTION = 3,
+	// An IPv6 packet whose first next header is an extension header. Its TCP
+	// header, if any, is not walked to, so the SYN goes out unclamped.
+	MSS_CLAMP_STAT_SKIPPED_EXT_HDR = 4,
+	// A SYN whose TCP options could not be parsed: a data offset below the
+	// fixed header, an option running past the header, a zero or one byte
+	// option length, or an MSS option of the wrong length. Left unclamped.
+	MSS_CLAMP_STAT_MALFORMED_OPTIONS = 5,
+	// A rewrite helper failed. Before the checksum was touched the packet goes
+	// on unclamped; after it, the packet is dropped, since its checksum no
+	// longer matches its bytes.
+	MSS_CLAMP_STAT_REWRITE_FAILED = 6,
+	// A SYN whose options were not exhausted within USID_TCP_MSS_WALK_LIMIT
+	// steps and had shown no MSS yet. Left unclamped.
+	MSS_CLAMP_STAT_WALK_LIMIT = 7,
+	__MSS_CLAMP_STAT_COUNT,
+};
+
+// mss_clamp_stats is sized above __MSS_CLAMP_STAT_COUNT on purpose. A new stat
+// then fits in the existing map, rather than changing the pinned map's entry
+// count and recreating every map with it.
+#define USID_MSS_CLAMP_STATS_SLOTS 16
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, USID_MSS_CLAMP_STATS_SLOTS);
+	__type(key, __u32);
+	__type(value, __u64);
+} mss_clamp_stats SEC(".maps");
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
@@ -942,6 +1065,204 @@ static USID_ALWAYS_INLINE long apply_vip_xlat(struct __sk_buff *skb, __u32 addr_
 		return -1;
 	if (bpf_skb_store_bytes(skb, port_off, &new_port, 2, 0))
 		return -1;
+	return 0;
+}
+
+static USID_ALWAYS_INLINE void count_mss_clamp_stat(__u32 stat)
+{
+	__u64 *count = bpf_map_lookup_elem(&mss_clamp_stats, &stat);
+
+	if (count)
+		__sync_fetch_and_add(count, 1);
+}
+
+// clamp_tcp_mss lowers the MSS option of a TCP SYN to mss_clamp_table's limit
+// for its family, if it advertises more. ip_version is the family of the IP
+// header at USID_L3_OFFSET, which callers already know. Every other packet,
+// and every SYN it cannot parse, is left untouched: a SYN that goes out
+// unclamped costs that one connection its full-size segments, while a SYN
+// rewritten wrongly costs it the connection.
+//
+// Bytes are read and written through helpers at scalar offsets, never through
+// packet pointers. The TCP header's position depends on IPv4's IHL and the
+// option walk's position on each option's length, and the verifier rejects a
+// variable offset added to a packet pointer unless the loader holds
+// CAP_PERFMON, which galactic-cni does not (see usid_fib_tot_len). The helpers
+// also handle a non-linear skb with no pull.
+//
+// The checksum is updated before the MSS bytes are stored. If that update
+// fails, nothing has changed and the SYN goes on unclamped. If the store fails
+// after it, the checksum no longer matches the packet, so this returns -1 and
+// the caller drops it. Both are counted as MSS_CLAMP_STAT_REWRITE_FAILED.
+//
+// The update is a plain, not pseudo-header, replace, since the MSS is TCP
+// payload of the checksum, not part of the pseudo-header. On a packet whose
+// checksum is still to be completed by offload (CHECKSUM_PARTIAL, the norm for
+// traffic a pod sends), the helper correctly leaves the field alone: the final
+// checksum is computed from these bytes later. On one whose checksum the NIC
+// already summed (CHECKSUM_COMPLETE), the MSS and checksum fields change by
+// equal and opposite amounts, so the packet's total sum stays valid.
+//
+// Every caller invalidates its packet pointers across this call, since the
+// helpers do, and re-derives any it still needs.
+//
+// A global function, not inlined like this file's other helpers, so the
+// verifier checks it once on its own instead of again inside every path that
+// reaches each of its three call sites. Global functions taking the program
+// context need nothing newer than the kernel preflight already requires.
+__attribute__((noinline)) int clamp_tcp_mss(struct __sk_buff *skb, __u32 ip_version)
+{
+	__u32 cfg_key = 0;
+	struct mss_clamp_value *cfg = bpf_map_lookup_elem(&mss_clamp_table, &cfg_key);
+
+	if (!cfg)
+		return 0;
+
+	// Both fields are read before choosing between them. See USID_BARRIER_VAR.
+	__u16 limit_v4 = cfg->mss_ipv4;
+	__u16 limit_v6 = cfg->mss_ipv6;
+
+	USID_BARRIER_VAR(limit_v4);
+	USID_BARRIER_VAR(limit_v6);
+
+	__u16 limit = ip_version == 4 ? limit_v4 : limit_v6;
+
+	if (limit == 0)
+		return 0; // clamping off for this family, or not configured yet
+
+	__u32 l4_off;
+	__u8 proto;
+
+	if (ip_version == 6) {
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, nexthdr), &proto, 1))
+			return 0;
+		if (proto == USID_IPPROTO_HOPOPTS || proto == USID_IPPROTO_ROUTING ||
+		    proto == USID_IPPROTO_FRAGMENT || proto == USID_IPPROTO_DSTOPTS) {
+			count_mss_clamp_stat(MSS_CLAMP_STAT_SKIPPED_EXT_HDR);
+			return 0;
+		}
+		l4_off = USID_L3_OFFSET + (__u32) sizeof(struct usid_ip6hdr);
+	} else {
+		__u8 ver_ihl;
+		__be16 frag_off;
+
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ver_ihl, 1))
+			return 0;
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_iphdr, frag_off), &frag_off, 2))
+			return 0;
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_iphdr, protocol), &proto, 1))
+			return 0;
+
+		__u32 ihl_len = (__u32) (ver_ihl & 0x0F) * 4;
+
+		if (ihl_len < USID_IPV4_MIN_HDR_LEN)
+			return 0;
+		if (__builtin_bswap16(frag_off) & USID_IPV4_FRAG_OFFSET_MASK)
+			return 0; // a non-first fragment carries no TCP header
+		l4_off = USID_L3_OFFSET + ihl_len;
+	}
+
+	if (proto != USID_IPPROTO_TCP)
+		return 0;
+
+	// Data offset (high nibble of byte 12) and flags (byte 13), together.
+	__u8 doff_flags[2];
+
+	if (bpf_skb_load_bytes(skb, l4_off + USID_TCP_DOFF_OFFSET, doff_flags, sizeof(doff_flags)))
+		return 0;
+	if (!(doff_flags[1] & USID_TCP_FLAG_SYN))
+		return 0;
+
+	__u32 tcp_hdr_len = (__u32) (doff_flags[0] >> 4) * 4;
+
+	if (tcp_hdr_len < USID_TCP_MIN_HDR_LEN) {
+		count_mss_clamp_stat(MSS_CLAMP_STAT_MALFORMED_OPTIONS);
+		return 0;
+	}
+
+	__u32 opt_end = l4_off + tcp_hdr_len;
+
+	// A header claiming more bytes than the packet holds is not a SYN to
+	// trust, even when the bytes the walk would read happen to be present.
+	if (opt_end > skb->len) {
+		count_mss_clamp_stat(MSS_CLAMP_STAT_MALFORMED_OPTIONS);
+		return 0;
+	}
+
+	__u32 off = l4_off + USID_TCP_MIN_HDR_LEN;
+	int reached_eol = 0;
+
+	// Bounded, not by the 40 option bytes, but by USID_TCP_MSS_WALK_LIMIT
+	// steps. See that constant for why.
+	for (int i = 0; i < USID_TCP_MSS_WALK_LIMIT; i++) {
+		if (off >= opt_end)
+			break;
+
+		__u8 kind;
+
+		if (bpf_skb_load_bytes(skb, off, &kind, 1)) {
+			count_mss_clamp_stat(MSS_CLAMP_STAT_MALFORMED_OPTIONS);
+			return 0;
+		}
+		if (kind == USID_TCPOPT_EOL) {
+			reached_eol = 1;
+			break;
+		}
+		if (kind == USID_TCPOPT_NOP) {
+			off++;
+			continue;
+		}
+
+		__u8 len;
+
+		if (off + 1 >= opt_end || bpf_skb_load_bytes(skb, off + 1, &len, 1)) {
+			count_mss_clamp_stat(MSS_CLAMP_STAT_MALFORMED_OPTIONS);
+			return 0;
+		}
+		if (len < 2 || off + len > opt_end) {
+			count_mss_clamp_stat(MSS_CLAMP_STAT_MALFORMED_OPTIONS);
+			return 0;
+		}
+
+		if (kind == USID_TCPOPT_MSS) {
+			__be16 old_mss;
+
+			if (len != USID_TCPOLEN_MSS || bpf_skb_load_bytes(skb, off + 2, &old_mss, sizeof(old_mss))) {
+				count_mss_clamp_stat(MSS_CLAMP_STAT_MALFORMED_OPTIONS);
+				return 0;
+			}
+			if (__builtin_bswap16(old_mss) <= limit) {
+				count_mss_clamp_stat(MSS_CLAMP_STAT_WITHIN_LIMIT);
+				return 0;
+			}
+
+			__be16 new_mss = __builtin_bswap16(limit);
+
+			if (bpf_l4_csum_replace(skb, l4_off + USID_TCP_CSUM_OFFSET, (__u64) old_mss, (__u64) new_mss,
+						sizeof(new_mss))) {
+				count_mss_clamp_stat(MSS_CLAMP_STAT_REWRITE_FAILED);
+				return 0;
+			}
+			if (bpf_skb_store_bytes(skb, off + 2, &new_mss, sizeof(new_mss), 0)) {
+				count_mss_clamp_stat(MSS_CLAMP_STAT_REWRITE_FAILED);
+				return -1;
+			}
+			count_mss_clamp_stat(ip_version == 4 ? MSS_CLAMP_STAT_CLAMPED_IPV4 : MSS_CLAMP_STAT_CLAMPED_IPV6);
+			return 0;
+		}
+
+		off += len;
+	}
+
+	// The loop exits early, by break, only on the end of the options or an EOL
+	// option. Falling out of it with options left means the step limit ran
+	// out first.
+	if (off < opt_end && !reached_eol) {
+		count_mss_clamp_stat(MSS_CLAMP_STAT_WALK_LIMIT);
+		return 0;
+	}
+
+	count_mss_clamp_stat(MSS_CLAMP_STAT_NO_MSS_OPTION);
 	return 0;
 }
 
@@ -1227,7 +1548,23 @@ int usid_ingress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	// All three of the helpers above can change the underlying packet buffer, so
+	// Clamp the decapsulated packet's MSS if it is a SYN, so the tenant it is
+	// delivered to sizes its own segments to fit the fabric. This is what fixes
+	// a connection the tenant opened through an egress shard: the peer's
+	// SYN-ACK only ever crosses an encapsulation point at the shard, which does
+	// not clamp, so this is its one chance. A SYN from another tenant node was
+	// already clamped by that node's usid_egress, and clamping it again is a
+	// no-op.
+	//
+	// Placed before the pointer re-read below, which covers the rewrite
+	// helpers' invalidation too, and before the NPTv6 and VIP rewrites, whose
+	// checksum updates are incremental and so independent of this one.
+	if (clamp_tcp_mss(skb, inner_version)) {
+		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	// All of the helpers above can change the underlying packet buffer, so
 	// every previously derived pointer is invalid and must be re-read.
 	data = (void *) (long) skb->data;
 	data_end = (void *) (long) skb->data_end;
@@ -1549,6 +1886,27 @@ int usid_egress(struct __sk_buff *skb)
 					// egress route redirect path below: vrf_table's value is
 					// not resolved yet at this point, and this path is
 					// expected essentially never to fire.
+					// A DSR backend's SYN-ACK leaves here, and the
+					// client's segments then reach the backend
+					// encapsulated by the gateway. Clamping it is what
+					// keeps those segments small enough for that
+					// encapsulation. The reply itself leaves
+					// unencapsulated.
+					//
+					// The fall-through below, for a node whose uplink
+					// is not configured yet, reads ip6 again, so both
+					// pointers are re-derived.
+					if (clamp_tcp_mss(skb, 6))
+						return TC_ACT_SHOT;
+					data = (void *) (long) skb->data;
+					data_end = (void *) (long) skb->data_end;
+					eth = data;
+					if ((void *) (eth + 1) > data_end)
+						return TC_ACT_SHOT;
+					ip6 = (void *) (eth + 1);
+					if ((void *) (ip6 + 1) > data_end)
+						return TC_ACT_SHOT;
+
 					__u32 pu_key = 0;
 					struct public_uplink_value *pu = bpf_map_lookup_elem(&public_uplink_table, &pu_key);
 
@@ -1689,6 +2047,20 @@ int usid_egress(struct __sk_buff *skb)
 
 	if (src_or == 0)
 		return TC_ACT_UNSPEC; // this node's own source SID isn't registered yet -- fail open rather than encapsulate with an all-zero source
+
+	// Clamp the MSS of a SYN about to be encapsulated: past the last fail-open
+	// check above, so only traffic that really crosses the fabric is clamped,
+	// and before the header push below, which re-derives every packet pointer
+	// it uses. A connection between two pods on this node never reaches here
+	// and keeps its full MSS.
+	//
+	// A failed rewrite after the checksum update leaves a packet whose checksum
+	// is wrong, so it is dropped rather than sent, and counted with the encap
+	// failure it is part of. mss_clamp_stats records which it was.
+	if (clamp_tcp_mss(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4)) {
+		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
 
 	// Complete the stored base into this tenant's SID by writing the Argument
 	// into bits 69-80, the same field usid_ingress reads back out of an

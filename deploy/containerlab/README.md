@@ -492,6 +492,7 @@ task deploy
 | `verify:nat-return-route` | Prove a reply from outside the fabric reaches each shard's masquerade addresses |
 | `verify:nat-local`        | Prove each site's tenants egress through that site's own edge shard             |
 | `verify:nat-collision`    | Prove two tenants sharing a ULA on one node do not share a translation          |
+| `verify:mss-clamp`        | Prove full-size TCP segments cross the fabric, out through NAT and across sites |
 | `verify:scenarios`        | Verify ping across all VPC test scenarios                                       |
 | `verify:ns10`             | Verify ns10 ping (IPv6-only, 3-site mesh)                                       |
 | `verify:ns20`             | Verify ns20 ping (dual-stack, 3-site mesh)                                      |

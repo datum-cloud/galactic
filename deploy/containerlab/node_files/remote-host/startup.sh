@@ -39,5 +39,11 @@ ip -4 route replace default via 10.1.40.1 dev eth1
 wait_for_addr 2001:db8:1:40::2 || log "link address did not settle"
 
 mkdir -p /run/nginx
+
+# A 1 MiB file for verify:mss-clamp. A small page fits in one packet and
+# passes even when full-size segments are being dropped; only a transfer
+# long enough to fill the path proves they are not.
+head -c 1048576 /dev/urandom > /var/www/localhost/htdocs/large.bin
+
 log "serving on [2001:db8:1:40::2]:80 and 10.1.40.2:80"
 exec nginx -g 'daemon off;'

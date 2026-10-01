@@ -27,14 +27,14 @@ func NewEventCounters() *EventCounters {
 			Subsystem: "datapath",
 			Name:      "load_events_total",
 			Help:      "BPF program load attempts (internal/plumbing/ebpf/attach.Load), by result.",
-		}, []string{"result"}),
+		}, []string{labelResult}),
 		attach: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "datapath",
 			Name:      "attach_events_total",
 			Help: "TC-BPF ingress filter attach/detach attempts -- both the initial Start and every " +
 				"subsequent netlink-driven re-attachment ('reload') Watch performs -- by interface, action, and result.",
-		}, []string{"interface", "action", "result"}),
+		}, []string{"interface", "action", labelResult}),
 	}
 }
 

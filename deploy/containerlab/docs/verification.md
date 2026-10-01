@@ -246,6 +246,32 @@ never the SYN-ACK; the entry stays `SYN_SENT [UNREPLIED]`, the tenant's ACK is
 marked INVALID, and kube-proxy's `KUBE-FORWARD` INVALID rule drops it. See
 the README's Known limitations.
 
+### Full-size segments
+
+Every lab link is 1500 bytes and the fabric adds a 40-byte outer IPv6
+header, so a pod with a 1500-byte interface advertises an MSS the path
+cannot carry. Small requests work and every full-size segment is dropped,
+at the shard as `fib_frag_needed`. The uSID datapath clamps the MSS in each
+SYN to 1400 for IPv6 tenants and 1420 for IPv4.
+
+`task verify:mss-clamp` checks every galactic-cni node reports those
+limits, then moves 1 MiB from the off-fabric host to each site's ns10 pod
+over NAT64 and NAT66, and 3 MB between sites for ns10 and ns20. It refuses
+a pod whose default route has a cached `mtu`: such a pod advertises a
+smaller MSS on its own and would pass with no clamp at all. Delete the pod
+and re-run.
+
+To see the clamp on the wire, capture SYNs at the off-fabric host while a
+tenant opens a connection:
+
+```bash
+docker exec clab-gvpc-remote-host tcpdump -i eth1 -nn -v -c 1 \
+  'tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0'
+```
+
+It shows `mss 1400`. Each node's counters are in
+`galactic_usid_tcp_mss_clamp_syns_total{result}` on port 9180.
+
 ### The reply's underlay path
 
 A reply is addressed to the shard's masquerade address, and only the IPv6 one

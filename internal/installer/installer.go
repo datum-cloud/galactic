@@ -444,6 +444,10 @@ type ebpfDatapathState struct {
 	namespace string
 	nodeName  string
 
+	// mssClamp keeps the datapath's TCP MSS clamp sized to the uplink MTU.
+	// Nil when the datapath is a test fake.
+	mssClamp *mssClampState
+
 	// egressShardSIDs is the configured egress shard list, in preference
 	// order, from the same host conflist CNI ADD reads it from. The egress
 	// route sweep uses it to keep each VRF on the first reachable shard.
@@ -473,6 +477,8 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	// wiring below inert.
 	if objs, ok := datapath.(*prog.UsidObjects); ok {
 		state.objs = objs
+		state.mssClamp = newMSSClampState(objs.MssClampTable)
+		state.mssClamp.reconcile()
 		if err := m.RegisterDatapathCollector(objs); err != nil {
 			slog.Warn("Failed to register eBPF datapath metrics collector", "err", err)
 		}
@@ -1052,6 +1058,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 
 		case <-ebpfHealthTicker.C:
 			reportEBPFHealth(ebpfState, healthSrv, &ebpfLastHealthy)
+			ebpfState.mssClamp.reconcile()
 
 		case <-ebpfGCSweepTicker.C:
 			if ebpfState.k8sClient == nil {

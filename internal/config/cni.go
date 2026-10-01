@@ -37,6 +37,14 @@ const (
 	// where a deployment needs this filter ordered differently.
 	EnvCNIEBPFFilterPriority = "GALACTIC_CNI_EBPF_FILTER_PRIORITY"
 
+	// EnvCNITCPMSSClamp sets the TCP MSS clamp the uSID datapath applies to
+	// SYNs crossing the fabric: "auto" (the default) sizes it from the
+	// smallest uplink MTU, "off" disables it, and a number is the fabric MTU
+	// to size it against, for a path whose real MTU is below what the
+	// interfaces report. Read only by galactic-cni run, which writes the
+	// datapath's mss_clamp_table. See internal/plumbing/ebpf/mssclamp.
+	EnvCNITCPMSSClamp = "GALACTIC_CNI_TCP_MSS_CLAMP"
+
 	// EnvCNIEgressShardSIDs is a comma-separated list of every live egress
 	// shard's SID: the fabric-wide membership a tenant VRF's egress routes need.
 	// One SID per shard covers both address families -- a shard decides which
