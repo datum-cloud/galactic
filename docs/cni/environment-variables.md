@@ -103,7 +103,8 @@ field; as of this writing it is still env-only.
   names (whitespace trimmed, duplicates/empties removed) to attach the
   ingress hook to. When set, `attach.ResolveInterfaces` uses this list
   directly and skips auto-detection entirely. When unset, the
-  interface(s) carrying the default IPv6 route are auto-detected. Either
+  interface(s) carrying the default IPv6 route or a BGP-learned route are
+  auto-detected, counting every nexthop of a multipath (ECMP) route. Either
   way, any resolved interface that is itself a Linux bonding master is
   expanded to include its slave interfaces, since ingress classification
   happens on the slaves, not the master. This is the explicit override
