@@ -129,7 +129,9 @@ func TestRouteConflicts(t *testing.T) {
 // installPodSubnetRoute used to check for a matching destination and never
 // for a matching interface. It must remove that route and install the new
 // container's, and must leave alone a route in the same table that belongs
-// to a different interface entirely.
+// to a different interface entirely, as well as the kernel's own routes on
+// this device -- removing its multicast ff00::/8 left containers unable to
+// resolve their gateway at all.
 func TestInstallPodSubnetRouteReplacesStaleRoute(t *testing.T) {
 	requireRoot(t)
 
@@ -156,6 +158,22 @@ func TestInstallPodSubnetRouteReplacesStaleRoute(t *testing.T) {
 		t.Fatalf("seed sibling route: %v", err)
 	}
 
+	// The kernel's own routes on this device, as it installs them for a VRF
+	// slave: a link-local unicast route and the multicast route NDP needs.
+	kernelLinkLocal := mustParseCIDR(t, "fe80::/64")
+	kernelMulticast := mustParseCIDR(t, "ff00::/8")
+	for _, r := range []*netlink.Route{
+		{Dst: kernelLinkLocal, LinkIndex: ownLink.Attrs().Index, Table: tableID, Protocol: unix.RTPROT_KERNEL},
+		{
+			Dst: kernelMulticast, LinkIndex: ownLink.Attrs().Index, Table: tableID,
+			Protocol: unix.RTPROT_KERNEL, Type: unix.RTN_MULTICAST,
+		},
+	} {
+		if err := netlink.RouteAdd(r); err != nil {
+			t.Fatalf("seed kernel route %s: %v", r.Dst, err)
+		}
+	}
+
 	if err := installPodSubnetRoute(ownLink, desiredSubnet, netlink.FAMILY_V6, tableID); err != nil {
 		t.Fatalf("installPodSubnetRoute: %v", err)
 	}
@@ -178,6 +196,11 @@ func TestInstallPodSubnetRouteReplacesStaleRoute(t *testing.T) {
 	}
 	if !have[otherSubnet.String()] {
 		t.Errorf("sibling route %s on another interface was removed, want left alone", otherSubnet)
+	}
+	for _, kernel := range []*net.IPNet{kernelLinkLocal, kernelMulticast} {
+		if !have[kernel.String()] {
+			t.Errorf("kernel route %s on this device was removed, want left alone", kernel)
+		}
 	}
 }
 
