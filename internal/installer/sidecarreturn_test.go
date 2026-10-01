@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,6 +19,7 @@ import (
 
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -212,6 +214,14 @@ func TestStaleSidecarReturnRoute(t *testing.T) {
 		{"a tenant VRF table", returnRoute(testSidecarAddr+"/128", 1), false},
 		{"just below the range", returnRoute(testSidecarAddr+"/128", sidecarReturnTableBase-1), false},
 		{"just above the range", returnRoute(testSidecarAddr+"/128", sidecarReturnTableMax+1), false},
+		// vrf.Add's catch-all, which stops tenant traffic falling through to
+		// the main table. Deleting it would reopen that leak.
+		{"a tenant VRF's unreachable default", netlink.Route{
+			Dst:      &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
+			Table:    1,
+			Type:     unix.RTN_UNREACHABLE,
+			Priority: vrf.UnreachableDefaultMetric,
+		}, false},
 
 		{"no destination", netlink.Route{Table: int(table)}, false},
 	} {

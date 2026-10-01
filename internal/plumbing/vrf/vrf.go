@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"sync"
 	"time"
 
@@ -24,6 +25,13 @@ import (
 
 const minVRFID = uint32(1)
 const maxVRFID = uint32(math.MaxUint32 - 1)
+
+// UnreachableDefaultMetric is the metric of the unreachable default route Add
+// installs in every VRF table, for each family. It is the value the kernel's
+// own VRF documentation (Documentation/networking/vrf.rst) recommends: high
+// enough that any real default route installed in the table, such as the
+// ingress sidecar's, always wins over it.
+const UnreachableDefaultMetric = 4278198272
 
 // ErrNotFound is wrapped by TableID when no VRF interface for that VPC exists
 // in this process's own network namespace.
@@ -48,6 +56,11 @@ var vrfMu sync.Mutex
 // different pods, are serialized. It is idempotent by name: a VRF that already
 // exists, whether created by a sibling attachment or left behind by a failed
 // ADD, returns nil.
+//
+// Every call, including one that finds the VRF already present, ensures the
+// table's unreachable defaults (see ensureUnreachableDefaults). A VRF created
+// before those existed therefore gains them on its next attachment's ADD,
+// with no migration step.
 func Add(vpc string) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
@@ -60,8 +73,12 @@ func Add(vpc string) error {
 
 	name := intf.GenerateInterfaceNameVRF(vpc)
 
-	if _, err := netlink.LinkByName(name); err == nil {
-		return nil
+	if link, err := netlink.LinkByName(name); err == nil {
+		existing, ok := link.(*netlink.Vrf)
+		if !ok {
+			return fmt.Errorf("interface %q exists but is a %s, not a VRF", name, link.Type())
+		}
+		return ensureUnreachableDefaults(existing.Table)
 	}
 
 	vrfID, err := findNextAvailableVRFID()
@@ -88,7 +105,45 @@ func Add(vpc string) error {
 		return err
 	}
 
+	// Installed before the VRF comes up, so no packet is ever routed in it
+	// without the catch-all in place.
+	if err := ensureUnreachableDefaults(vrfID); err != nil {
+		return err
+	}
+
 	return netlink.LinkSetUp(vrf)
+}
+
+// ensureUnreachableDefaults installs an unreachable default route for IPv4
+// and IPv6 in VRF table tableID, at UnreachableDefaultMetric.
+//
+// Without it, a lookup that misses in the VRF's table does not stop there.
+// The l3mdev rule only selects the table, and a miss falls through to the
+// rules after it, ending in the main table. A tenant packet the eBPF datapath
+// does not claim would then be routed by the host's own routes, out the
+// node's default interface with the tenant's source address. The kernel's
+// VRF documentation calls for exactly this route to prevent that. A packet
+// with no route in its VRF now fails there, and the sender gets an ICMP
+// unreachable.
+//
+// Idempotent: the route is replaced rather than added.
+func ensureUnreachableDefaults(tableID uint32) error {
+	defaults := []*net.IPNet{
+		{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
+		{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
+	}
+	for _, dst := range defaults {
+		route := &netlink.Route{
+			Dst:      dst,
+			Table:    int(tableID),
+			Type:     unix.RTN_UNREACHABLE,
+			Priority: UnreachableDefaultMetric,
+		}
+		if err := netlink.RouteReplace(route); err != nil {
+			return fmt.Errorf("install unreachable default %s in VRF table %d: %w", dst, tableID, err)
+		}
+	}
+	return nil
 }
 
 // Delete flushes every route from the VRF's routing table and removes the
