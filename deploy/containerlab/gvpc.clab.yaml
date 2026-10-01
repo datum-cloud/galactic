@@ -74,7 +74,6 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff01:1002::/64 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff01:3002::/64 metric 2048
         - /galactic/scripts/mkbond.sh bond0 eth1 eth3
         - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
@@ -97,7 +96,6 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff01:1003::/64 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff01:3003::/64 metric 2048
         - /galactic/scripts/mkbond.sh bond0 eth1 eth3
         - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
@@ -157,7 +155,6 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff02:1002::/64 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff02:3002::/64 metric 2048
         - /galactic/scripts/mkbond.sh bond0 eth1 eth3
         - /galactic/scripts/mkbond.sh bond1 eth2 eth4
         - /galactic/scripts/install.sh
@@ -217,7 +214,6 @@ topology:
         net.ipv6.conf.all.forwarding: "1"
       exec:
         - ip -6 route add blackhole 2001:db8:ff03:1002::/64 metric 2048
-        - ip -6 route add blackhole 2001:db8:ff03:3002::/64 metric 2048
         - /galactic/scripts/mkbond.sh bond0 eth1 eth4
         - /galactic/scripts/mkbond.sh bond1 eth2 eth5
         - /galactic/scripts/install.sh
@@ -296,8 +292,7 @@ topology:
     # cluster and running no Galactic component at all: it exists to be the
     # far end of traffic that leaves the fabric. nginx serves on its transit
     # addresses (both families), so a tenant pod's egress path through the
-    # NAT66 shard tier has a real destination to reach, and the host itself
-    # is a real off-fabric client for curling an edge gateway's ingress VIP.
+    # NAT66 shard tier has a real destination to reach.
     # It hangs off tr4, the one transit router with no site attached to it.
     # No BGP: a host doesn't speak it -- tr4 originates the link subnets
     # (node_files/tr4/frr.conf) and the host just keeps a default route
@@ -320,8 +315,8 @@ topology:
     # pair of veths, not one, and both ends aggregate the pair into an 802.3ad
     # (LACP) bond: each Kind node's exec above runs mkbond.sh (baked into
     # the node image from group_files/common/), and node_files/tr*/startup.sh
-    # runs the same script on the transit routers. Production gateway uplinks are bonds, and
-    # galactic-gateway, galactic-nat and galactic-cni each resolve a bond to
+    # runs the same script on the transit routers. Production edge uplinks are bonds, and
+    # galactic-nat and galactic-cni each resolve a bond to
     # its members before attaching (XDP to the members only, TC to the master
     # and its members), so the lab has to present them one to exercise that.
     #
@@ -350,15 +345,15 @@ topology:
     # them. dfw has two, an active-active pair; sjc and iad one each.
     #
     # mtu: 1500 on both ends, unlike containerlab's jumbo-frame veth default
-    # (~9500) -- required, not cosmetic: galactic-gateway attaches its XDP
-    # program to every member of bond0 in native/driver mode (edgeattach.go,
-    # XDPDriverMode; generic/SKB mode is deliberately not attempted, see that
-    # package's doc comment), and the kernel's veth_xdp_set() rejects native
+    # (~9500) -- required, not cosmetic: the egress shard (galactic-nat)
+    # attaches its XDP program to every member of bond0 in native/driver mode
+    # (natattach, XDPDriverMode), and the kernel's veth_xdp_set() rejects native
     # XDP with -ERANGE whenever the *peer's* MTU exceeds what fits in one
     # page-sized buffer (SKB_WITH_OVERHEAD(PAGE_SIZE - VETH_XDP_HEADROOM),
     # ~3.5-3.8KB on a 4K-page host) -- 9500 blows well past that regardless
-    # of which end asks. Confirmed live: the gateway crash-looped with
-    # exactly this ERANGE until both ends were dropped to 1500.
+    # of which end asks. Confirmed live: galactic-gateway, which held these
+    # hooks before the shards did, crash-looped with exactly this ERANGE
+    # until both ends were dropped to 1500.
     - endpoints: ["dfw-worker2:eth1", "tr1:eth1"]    # dfw-worker2 bond0 / tr1 bond1
       mtu: 1500
     - endpoints: ["dfw-worker2:eth3", "tr1:eth6"]
@@ -383,12 +378,12 @@ topology:
     # resources/fabric-router/*/frr.conf.*).
     #
     # mtu: 1500 for the same -ERANGE reason as the edge uplinks above. The
-    # edge end runs galactic-gateway's return program (edge_return), with
-    # the egress shard chained behind it, on every member of these bonds,
-    # and the compute end runs the lab's pass-through XDP program on its
-    # members (Taskfile.yaml's deploy:lab-xdp-passthrough-compute) so that
-    # edge_lb's redirects toward a backend are received at all. Both native
-    # XDP, both subject to the peer-MTU limit. (galactic-nat used to attach
+    # edge end runs the egress shard's XDP program on every member of these
+    # bonds, and the compute end runs the lab's pass-through XDP program on
+    # its members (Taskfile.yaml's deploy:lab-xdp-passthrough-compute) so
+    # that the shard's redirects of a reply toward the tenant's node are
+    # received at all. Both native XDP, both subject to the peer-MTU limit.
+    # (galactic-nat used to attach
     # here from the compute end, while its shards ran on the compute nodes;
     # it crash-looped with this ERANGE until these links were dropped to
     # 1500.)
@@ -427,8 +422,8 @@ topology:
 
     # The route reflector sits behind iad's edge node exactly the way a
     # compute node does -- one iBGP session to it, no transit uplink of its
-    # own. It keeps the jumbo default: it runs neither galactic-nat nor
-    # galactic-gateway, so no XDP program ever attaches to its eth1. Nor is
+    # own. It keeps the jumbo default: it does not run galactic-nat, so no
+    # XDP program ever attaches to its eth1. Nor is
     # it bonded -- with no datapath on it, a bond would exercise nothing.
     - endpoints: ["iad-worker3:eth1", "iad-worker2:eth3"]
 

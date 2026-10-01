@@ -1,7 +1,0 @@
-resources:
-  - gateway
-patches:
-  - path: gateway-lab-patch.yaml
-    target:
-      kind: DaemonSet
-      name: galactic-gateway

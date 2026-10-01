@@ -1,5 +1,12 @@
+# The site's compute node (bgprouter.yaml/bgppeer.yaml) plus one BGPRouter and
+# route-reflector BGPPeer per edge node. An edge node's egress shard
+# advertises its SID through that node's BGPRouter.
 namespace: galactic-system
 resources:
   - ../base
   - bgprouter.yaml
   - bgppeer.yaml
+  - bgprouter-dfw-worker2.yaml
+  - bgppeer-dfw-worker2.yaml
+  - bgprouter-dfw-worker3.yaml
+  - bgppeer-dfw-worker3.yaml

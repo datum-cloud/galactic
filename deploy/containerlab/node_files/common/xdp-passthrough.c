@@ -13,23 +13,20 @@
 // affected traffic stay at exactly zero; attaching this program is what
 // makes them move).
 //
-// edgedsr.c (the edge DSR/Maglev gateway datapath) uses XDP_TX -- back out
-// the same interface a client's packet arrived on -- deliberately: on a
-// real gateway node's public uplink, a genuine physical NIC, this is
-// exactly the same high-throughput pattern real production XDP-based DSR
-// load balancers use (this design intentionally does not use TC for that
-// datapath -- see docs/plans/dsr-maglev-nptv6-nat66-gateway-redesign.md's
-// §8 for why converting production code to TC was rejected in favor of
-// this lab-only workaround instead). This program's only job is making
-// this lab's veth-pair simulation of that uplink behave the way a real NIC
-// already does, on whichever node sits on the *other* end of a link facing
-// a gateway-role node: the transit ports facing each edge node's public
-// bond, and the compute-node ports facing each edge node's compute-facing
-// bond, where edge_lb's XDP_REDIRECT toward a backend lands. See
-// deploy:lab-xdp-passthrough and deploy:lab-xdp-passthrough-compute for the
-// exact lists. Not applied anywhere else
-// in this topology: usid_ingress/usid_egress (usid.c) are TC-BPF, not XDP,
-// so ordinary tenant traffic never needed this.
+// The egress shard's datapath (internal/plumbing/ebpf/natprog) leaves every
+// translated packet from the driver: XDP_TX back out the interface it
+// arrived on, XDP_REDIRECT out another. On a real edge node's uplinks,
+// genuine physical NICs, that is the ordinary high-throughput XDP pattern.
+// This program's only job is making this lab's veth-pair simulation of
+// those uplinks behave the way a real NIC already does, on whichever node
+// sits on the *other* end of a link facing an edge node: the transit ports
+// facing each edge node's transit bond, where a translated packet leaves
+// toward the off-fabric host, and the compute-node ports facing each edge
+// node's compute-facing bond, where a shard redirects an un-translated reply
+// back toward the tenant's node. See deploy:lab-xdp-passthrough and
+// deploy:lab-xdp-passthrough-compute for the exact lists. Not applied
+// anywhere else in this topology: usid_ingress/usid_egress (usid.c) are
+// TC-BPF, not XDP, so ordinary tenant traffic never needed this.
 //
 // Built by deploy/containerlab/Taskfile.yaml's build:lab-xdp-passthrough
 // task (clang -target bpf); not go:generate'd or wrapped in bpf2go

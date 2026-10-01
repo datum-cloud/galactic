@@ -13,7 +13,6 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: iad
-      galactic.datumapis.com/gateway: enabled
       galactic.datumapis.com/nat: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
@@ -22,7 +21,7 @@ nodes:
         kind: JoinConfiguration
         nodeRegistration:
           taints:
-            - key: galactic.datumapis.com/gateway
+            - key: galactic.datumapis.com/nat
               value: enabled
               effect: NoSchedule
   # The EVPN route reflector for the whole lab -- every galactic-router in

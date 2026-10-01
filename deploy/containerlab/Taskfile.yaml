@@ -20,7 +20,6 @@ tasks:
       - "build:node"
       - "build:fabric-router"
       - "build:galactic-router"
-      - "build:galactic-gateway"
       - "build:galactic-cni"
       - "build:galactic-nat"
       - "build:remote-host"
@@ -38,7 +37,7 @@ tasks:
   # --build-context network=../../../network satisfies go.mod's local
   # `replace go.datum.net/network => ../network` (see that line's own
   # comment) inside each Dockerfile's "network" build stage -- see
-  # containers/galactic-{router,gateway,cni}/Dockerfile's own comment on
+  # containers/galactic-{router,cni,nat}/Dockerfile's own comment on
   # that stage for the full mechanism. ../../../network is this Taskfile's
   # own cwd (deploy/containerlab) relative to the network repo checked out
   # as galactic's sibling; harmless to pass even once that replace
@@ -49,11 +48,6 @@ tasks:
     desc: Build the galactic-router container image
     cmds:
       - docker build --network=host --build-context network=../../../network -t galactic-router:latest -f ../../containers/galactic-router/Dockerfile ../..
-
-  "build:galactic-gateway":
-    desc: Build the galactic-gateway container image
-    cmds:
-      - docker build --network=host --build-context network=../../../network -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
 
   "build:galactic-cni":
     desc: Build the galactic-cni installer image
@@ -127,21 +121,21 @@ tasks:
       - clang -O2 -g -target bpf -c node_files/common/xdp-passthrough.c -o node_files/common/xdp-passthrough.o
 
   # Loads the pass-through XDP program on every transit port facing an edge
-  # node -- makes those veth links behave like a real gateway's physical NIC
-  # uplink for edgedsr.c's XDP_TX redirect (see xdp-passthrough.c's own doc
-  # comment). Idempotent: `ip link set ... xdp obj` replaces whatever
-  # program (if any) is already attached. The compute side is
-  # deploy:lab-xdp-passthrough-compute, which has to run later.
+  # node -- makes those veth links behave like a real edge node's physical NIC
+  # uplink for the egress shard's XDP_TX/XDP_REDIRECT toward the transit (see
+  # xdp-passthrough.c's own doc comment). Idempotent: `ip link set ... xdp
+  # obj` replaces whatever program (if any) is already attached. The compute
+  # side is deploy:lab-xdp-passthrough-compute, which has to run later.
   "deploy:lab-xdp-passthrough":
     desc: Load the pass-through XDP program on edge-facing transit ports
     deps: [build:lab-xdp-passthrough]
     cmds:
       # Every transit port facing an edge node, and only those: edge nodes
       # are the lab's only transit-facing nodes, so these are exactly the
-      # links an edge XDP_TX redirect ever lands on. Each is a *member* of
-      # a transit-side LACP bond, never the bond itself: the edge program
-      # runs on the far end's members and transmits back out whichever
-      # member a packet arrived on, so the veth peer that has to be ready
+      # links a shard's XDP transmit toward the transit ever lands on. Each is
+      # a *member* of a transit-side LACP bond, never the bond itself: the
+      # shard's program runs on the far end's members and transmits back out
+      # whichever member a packet arrived on, so the veth peer that has to be ready
       # for an XDP frame is always a member. tr1:eth1/eth6 (bond1) face
       # dfw-worker2, tr1:eth5/eth7 (bond2) dfw-worker3, tr2:eth1/eth5
       # (bond1) sjc-worker2, tr3:eth4/eth5 (bond1) iad-worker2 -- keep this
@@ -165,11 +159,11 @@ tasks:
         done
 
   # The compute half of deploy:lab-xdp-passthrough: every compute-node port
-  # facing an edge node, where edge_lb's XDP_REDIRECT toward a backend lands
-  # (see xdp-passthrough.c). Without it gateway ingress to every backend
-  # fails. galactic-nat used to hold these hooks while its shards ran on the
-  # compute nodes; nothing else attaches XDP here now that they run on the
-  # edge.
+  # facing an edge node, where a shard's XDP_REDIRECT of an un-translated
+  # reply toward the tenant's node lands (see xdp-passthrough.c). Without it
+  # those replies are never received. galactic-nat used to hold these hooks
+  # while its shards ran on the compute nodes; nothing else attaches XDP here
+  # now that they run on the edge.
   #
   # Separate from, and later than, the transit half because these are Kind
   # nodes, and it must run after deploy:cni. Loading an object with `ip`
@@ -225,9 +219,7 @@ tasks:
         dfw-worker dfw-worker2 dfw-worker3
         sjc-worker sjc-worker2
         iad-worker iad-worker2
-      # The edge XDP DSR/Maglev datapath: one instance per edge node.
-      GATEWAY_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
-      # Egress shards: one per edge node, chained behind that node's gateway.
+      # Egress shards: one per edge node.
       NAT_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
     cmds:
       - |
@@ -243,7 +235,6 @@ tasks:
         load {{.FABRIC_ROUTER_IMAGE}} {{.FABRIC_NODES}}
         load galactic-router:latest {{.FABRIC_NODES}}
         load galactic-cni:latest {{.CNI_NODES}}
-        load galactic-gateway:latest {{.GATEWAY_NODES}}
         load galactic-nat:latest {{.NAT_NODES}}
 
   "deploy:system":
@@ -301,7 +292,6 @@ tasks:
       - task: "deploy:ns20"
       - task: "deploy:ns30"
       - task: "deploy:ns40"
-      - task: "deploy:ns60"
       - task: "deploy:ns71"
 
   "deploy:ns10":
@@ -329,11 +319,6 @@ tasks:
     cmds:
       - ./scripts/deploy-ns.sh ns71 sjc
 
-  "deploy:ns60":
-    desc: Deploy ns60 test VPC (gateway backend, one per site)
-    cmds:
-      - ./scripts/deploy-ns.sh ns60 dfw sjc iad
-
   verify:
     desc: Run all verification checks
     cmds:
@@ -344,8 +329,6 @@ tasks:
       - task: "verify:underlay"
       - task: "verify:srv6"
       - task: "verify:evpn"
-      - task: "verify:gateway"
-      - task: "verify:gateway-ingress"
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
       - task: "verify:nat-return-route"
@@ -441,162 +424,14 @@ tasks:
       - docker exec sjc-control-plane kubectl get bgprouters -A
       - docker exec dfw-control-plane kubectl get bgprouters -A
 
-  "verify:gateway":
-    desc: Verify every site's edge gateway CRDs and DaemonSets
-    cmds:
-      - |
-        for site in dfw sjc iad; do
-          echo "--- ${site} ---"
-          docker exec ${site}-control-plane \
-            kubectl get networkgateways,networkrules,servicevipbindings -n galactic-system
-          docker exec ${site}-control-plane \
-            kubectl get daemonset -n galactic-system -l app.kubernetes.io/name=galactic-gateway
-        done
-
-  # verify:gateway above reads CRDs and DaemonSets, so it passes on a datapath
-  # where no connection can complete -- the same shape as #551. This drives a
-  # real request from the one host outside every cluster (remote-host on tr4)
-  # to the anycast ingress VIP and reads what came back, on the wire and in the
-  # counters.
-  #
-  # Four assertions, because a 200 alone would not tell them apart:
-  #
-  #   - The VIP answers. Both halves of the connection worked at all.
-  #   - A backend logged the request, with the off-fabric client's own address
-  #     as its peer. That is DSR's defining property -- the client's packet
-  #     reaches the backend unmodified -- and it is what separates a real
-  #     round trip from some other nginx in the lab answering.
-  #   - The gateway counted the request and the reply. Traffic that took the
-  #     kernel's own forwarding path instead of the datapath would still
-  #     return 200 while both counters sat still.
-  #   - No edge node dropped a packet as ctstate INVALID. The reply crossing
-  #     the kernel forwarding path rather than edge_return is exactly what
-  #     that counter catches, and nothing else in this lab moves it.
-  #
-  # Which site answers is transit best-path's choice, not this task's, so
-  # everything here discovers the serving site rather than assuming one. Note
-  # that only that site is exercised: a second site's gateways stay untested
-  # until best-path moves.
-  #
-  # Needs deploy:ns60's backends (the `deploy` task installs them).
-  "verify:gateway-ingress":
-    desc: Full round trip from the off-fabric client to an anycast ingress VIP
-    # silent: the script is long enough that echoing it buries the result.
-    silent: true
-    vars:
-      VIP: "2001:db8:6060::1"
-      # remote-host on tr4, the one host outside every cluster.
-      CLIENT: "2001:db8:1:40::2"
-      EDGE_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
-      SITES: "dfw sjc iad"
-      METRICS_PORT: "8081"
-    cmds:
-      - |
-        set -e
-        marker="galactic-verify-$(date +%s)"
-
-        # One sample per edge node: the kernel's invalid-drop counter plus the
-        # three datapath counters, as "<invalid> <forward> <return> <drops>".
-        # The KUBE-FORWARD rule is matched on its text rather than its
-        # position -- kube-proxy owns that chain and its ordering is not ours
-        # to assume.
-        sample() {
-          inv=$(docker exec "$1" ip6tables -t filter -L KUBE-FORWARD -n -v -x 2>/dev/null \
-            | awk '/ctstate INVALID/ {print $1; exit}')
-          m=$(docker exec "$1" curl -s --max-time 5 http://localhost:{{.METRICS_PORT}}/metrics 2>/dev/null || true)
-          fwd=$(printf '%s\n' "${m}" | awk '/^galactic_edge_rule_packets_total/ {s+=$2} END {print s+0}')
-          ret=$(printf '%s\n' "${m}" | awk '/^galactic_edge_return_packets_total/ {s+=$2} END {print s+0}')
-          drp=$(printf '%s\n' "${m}" | awk '/^galactic_edge_drops_total/ {s+=$2} END {print s+0}')
-          echo "${inv:-0} ${fwd} ${ret} ${drp}"
-        }
-
-        # Counter values are Prometheus floats, so compare in awk rather than
-        # with shell integer tests.
-        rose() { awk -v a="$1" -v b="$2" 'BEGIN {exit !(b > a)}'; }
-
-        snap=$(mktemp -d)
-        for node in {{.EDGE_NODES}}; do sample ${node} > ${snap}/${node}; done
-
-        echo "--- GET http://[{{.VIP}}]/ from the off-fabric client ---"
-        code=$(docker exec clab-gvpc-remote-host curl -sS --max-time 12 -A "${marker}" \
-          -o /dev/null -w '%{http_code}' "http://[{{.VIP}}]/") && rc=0 || rc=$?
-        if [ "${rc}" -ne 0 ]; then
-          echo "FAIL: no response from the VIP (curl exit ${rc}) -- the request never reached a backend," \
-               "or its reply never came back" >&2
-          exit 1
-        fi
-        if [ "${code}" != "200" ]; then
-          echo "FAIL: VIP answered HTTP ${code}, want 200" >&2
-          exit 1
-        fi
-
-        # Which backend served it, and what it saw as the client.
-        served=""
-        for site in {{.SITES}}; do
-          cp=${site}-control-plane
-          pods=$(docker exec ${cp} kubectl -n ns60 get pods \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
-          for pod in ${pods}; do
-            line=$(docker exec ${cp} kubectl -n ns60 logs ${pod} --tail=200 2>/dev/null \
-              | grep "${marker}" | tail -1 || true)
-            if [ -n "${line}" ]; then served="${site}/${pod}"; served_line="${line}"; fi
-          done
-        done
-        if [ -z "${served}" ]; then
-          echo "FAIL: the VIP answered 200 but no ns60 backend logged the request -- something other than a" \
-               "tenant backend answered (or ns60 is not deployed: run deploy:ns60)" >&2
-          exit 1
-        fi
-        peer=$(echo "${served_line}" | awk '{print $1}')
-        if [ "${peer}" != "{{.CLIENT}}" ]; then
-          echo "FAIL: ${served} saw the client as ${peer}, want {{.CLIENT}} -- DSR must carry the client's" \
-               "own address to the backend unmodified" >&2
-          exit 1
-        fi
-        echo "served by ${served}, which saw the client as ${peer}"
-
-        # The datapath's own account of the same request.
-        fwd_moved=0
-        ret_moved=0
-        for node in {{.EDGE_NODES}}; do
-          set -- $(cat ${snap}/${node}); was_inv=$1; was_fwd=$2; was_ret=$3; was_drp=$4
-          set -- $(sample ${node});      now_inv=$1; now_fwd=$2; now_ret=$3; now_drp=$4
-
-          if [ "${now_inv:-0}" -gt "${was_inv:-0}" ]; then
-            echo "FAIL: ${node} dropped $((now_inv - was_inv)) packet(s) as ctstate INVALID -- a reply crossed" \
-                 "the kernel forwarding path instead of the return datapath (#554)" >&2
-            exit 1
-          fi
-          if rose "${was_drp}" "${now_drp}"; then
-            echo "FAIL: ${node}'s datapath counted a drop during this request (galactic_edge_drops_total" \
-                 "${was_drp} -> ${now_drp}); see its drops_total reason labels" >&2
-            exit 1
-          fi
-          if rose "${was_fwd}" "${now_fwd}"; then fwd_moved=1; echo "forward half claimed by ${node}"; fi
-          if rose "${was_ret}" "${now_ret}"; then ret_moved=1; echo "reply forwarded by ${node}"; fi
-        done
-
-        if [ "${fwd_moved}" -eq 0 ]; then
-          echo "FAIL: no gateway counted the request (galactic_edge_rule_packets_total did not move) -- the VIP" \
-               "answered without the XDP datapath intercepting anything" >&2
-          exit 1
-        fi
-        if [ "${ret_moved}" -eq 0 ]; then
-          echo "FAIL: no gateway counted the reply (galactic_edge_return_packets_total did not move) -- the" \
-               "reply took the kernel forwarding path, which survives only while conntrack happens to allow it" >&2
-          exit 1
-        fi
-        rm -rf ${snap}
-
-        echo "PASS: VIP answered 200, backend saw the real client, both halves counted, no invalid drops"
-
   "verify:nat-sharding":
     desc: Verify every edge node's EgressShard is programmed and advertised
     cmds:
       # One shard per edge node: two in dfw, one each in sjc and iad. Each
       # must report Programmed=True -- attached is not enough, since a shard
-      # with no programmed identity claims no packet -- and must target an
-      # edge node, the only role the shard runs on.
+      # with no programmed identity claims no packet -- and must target a
+      # node labeled galactic.datumapis.com/nat=enabled, the only nodes the
+      # shard DaemonSet runs on.
       - |
         set -e
         rc=0
@@ -605,13 +440,13 @@ tasks:
           cp=${site}-control-plane
           programmed=$(docker exec ${cp} kubectl -n galactic-system get egressshard ${node}-egress \
             -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || true)
-          role=$(docker exec ${cp} kubectl get node ${node} \
-            -o jsonpath='{.metadata.labels.galactic\.datumapis\.com/node}')
-          if [ "${programmed}" != "True" ] || [ "${role}" != "edge" ]; then
-            echo "FAIL ${site}/${node}-egress: Programmed=${programmed:-missing}, node role=${role:-none}" >&2
+          nat=$(docker exec ${cp} kubectl get node ${node} \
+            -o jsonpath='{.metadata.labels.galactic\.datumapis\.com/nat}')
+          if [ "${programmed}" != "True" ] || [ "${nat}" != "enabled" ]; then
+            echo "FAIL ${site}/${node}-egress: Programmed=${programmed:-missing}, nat label=${nat:-none}" >&2
             rc=1
           else
-            echo "ok   ${site}/${node}-egress programmed on an edge node"
+            echo "ok   ${site}/${node}-egress programmed on a NAT node"
           fi
         done
         for site in dfw sjc iad; do
@@ -1113,7 +948,7 @@ tasks:
       - task: destroy
       - docker rmi kindest/node:galactic || true
       - docker rmi galactic-router:latest || true
-      - docker rmi galactic-gateway:latest || true
+      - docker rmi galactic-nat:latest || true
       - docker rmi galactic-cni:latest || true
       - docker rmi {{.FABRIC_ROUTER_IMAGE}} || true
       - docker rmi remote-host:latest || true

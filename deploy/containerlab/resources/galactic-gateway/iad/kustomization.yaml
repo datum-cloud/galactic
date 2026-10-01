@@ -1,7 +1,0 @@
-# Single entry point for iad's edge tier: per-edge-node DaemonSet+BGP+
-# NetworkGateway, plus this site's ns60 NetworkRule and ServiceVIPBinding.
-namespace: galactic-system
-resources:
-  - ../iad-worker2
-  - networkrule-ns60.yaml
-  - servicevipbinding-ns60.yaml

@@ -10,9 +10,9 @@ spec:
           env:
             # Both of an edge node's uplinks, each an LACP bond: bond0 to the
             # transit (NAT replies arrive here) and bond1 to the site's
-            # compute node (encapsulated tenant egress arrives here). The same
-            # two the gateway attaches edge_lb and edge_return to, which is
-            # what the chained shard actually runs on. Named explicitly rather
+            # compute node (encapsulated tenant egress arrives here). The shard
+            # attaches its XDP program directly to every member of both. Named
+            # explicitly rather
             # than auto-detected: Kind's eth0 carries this node's IPv6 default
             # route, so detection would also claim the management bridge.
             - name: GALACTIC_NAT_UPLINK_INTERFACES
