@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package edgeattach
+package xdpattach
 
 import (
 	"errors"
@@ -60,7 +60,7 @@ const (
 	lacpStateDistributing = 1 << 5
 )
 
-// linkByIndexFn is an override point, matching linkByNameFn and linkListFn, so
+// linkByIndexFn is an override point, matching linkByNameFn, so
 // the bond-mode lookup can be faked in tests.
 var linkByIndexFn = netlink.LinkByIndex
 
@@ -73,23 +73,23 @@ var sleepFn = time.Sleep
 //
 // It refuses only on a definite answer. A kernel too old to serve the netdev
 // generic netlink family, or a query that fails for its own reasons, leaves
-// support unknown, and an unknown is not grounds to keep a gateway down: those
+// support unknown, and an unknown is not grounds to keep a datapath down: those
 // log and proceed, which is the behavior every release before this one had.
 func checkNativeXDPSupport(ifaceNames []string) error {
 	for _, ifaceName := range ifaceNames {
 		supported, err := edgepreflight.InterfaceXDPFn(ifaceName)
 		switch {
 		case errors.Is(err, edgepreflight.ErrXDPFeaturesUnavailable):
-			slog.Warn("edgeattach: kernel cannot report per-interface XDP support, attaching without checking first "+
+			slog.Warn("xdpattach: kernel cannot report per-interface XDP support, attaching without checking first "+
 				"(a driver that cannot take the program will be found out by attaching, which bounces the link)",
 				"interface", ifaceName)
 		case err != nil:
-			slog.Warn("edgeattach: could not read XDP support for interface, attaching without checking first",
+			slog.Warn("xdpattach: could not read XDP support for interface, attaching without checking first",
 				"interface", ifaceName, "err", err)
 		case !supported:
 			return fmt.Errorf(
-				"edgeattach: interface %q (driver %q) does not support native XDP, refusing to attach the edge "+
-					"gateway datapath to any interface: attaching to the rest would leave traffic arriving on %q "+
+				"xdpattach: interface %q (driver %q) does not support native XDP, refusing to attach the XDP "+
+					"datapath to any interface: attaching to the rest would leave traffic arriving on %q "+
 					"bypassing the datapath entirely, and on a bonded uplink it would take the link down",
 				ifaceName, driverName(ifaceName), ifaceName)
 		}
@@ -113,7 +113,7 @@ func driverName(ifaceName string) string {
 //
 // An interface that is not enslaved to a bond returns immediately: there is no
 // aggregate to rejoin and no sibling link to protect. Note that the interface
-// named in the gateway's configuration can itself be a slave rather than a
+// named in a datapath's configuration can itself be a slave rather than a
 // master -- a deployment that points at one member of a bond directly still
 // gets the wait, because the bounce still costs its siblings.
 func waitBondSlaveReady(ifaceName string, timeout time.Duration) error {
@@ -137,7 +137,7 @@ func waitBondSlaveReady(ifaceName string, timeout time.Duration) error {
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf(
-				"edgeattach: bond slave %q did not rejoin its aggregate within %s of the XDP attach "+
+				"xdpattach: bond slave %q did not rejoin its aggregate within %s of the XDP attach "+
 					"(mii status %d, LACP actor state %d); refusing to attach to any remaining slave, "+
 					"because doing so would take the rest of the bond down with it",
 				ifaceName, timeout, slave.MiiStatus, slave.AdActorOperPortState)
@@ -161,7 +161,7 @@ func waitBondSlaveReady(ifaceName string, timeout time.Duration) error {
 func bondSlaveOf(ifaceName string) (slave *netlink.BondSlave, masterIndex int, ok bool, err error) {
 	l, err := linkByNameFn(ifaceName)
 	if err != nil {
-		return nil, 0, false, fmt.Errorf("edgeattach: find link %q: %w", ifaceName, err)
+		return nil, 0, false, fmt.Errorf("xdpattach: find link %q: %w", ifaceName, err)
 	}
 	s, ok := l.Attrs().Slave.(*netlink.BondSlave)
 	if !ok {
@@ -176,7 +176,7 @@ func bondSlaveOf(ifaceName string) (slave *netlink.BondSlave, masterIndex int, o
 func bondUsesLACP(masterIndex int) (bool, error) {
 	master, err := linkByIndexFn(masterIndex)
 	if err != nil {
-		return false, fmt.Errorf("edgeattach: find bonding master at index %d: %w", masterIndex, err)
+		return false, fmt.Errorf("xdpattach: find bonding master at index %d: %w", masterIndex, err)
 	}
 	b, ok := master.(*netlink.Bond)
 	if !ok {

@@ -19,6 +19,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgepreflight"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 )
 
 // linkByNameFn and linkListFn are override points, as elsewhere in this
@@ -154,13 +155,11 @@ func ResolveTargets(ifaceName string) ([]string, error) {
 // through ResolveTargets first, so this is usually a single interface and never
 // a bond master.
 //
-// Every interface is checked for native XDP support before any of them is
-// touched, and a bond slave is waited back into its aggregate before the next
-// interface is attached, so a bonded uplink never loses every member at once.
-//
-// If attaching one interface fails partway through, every link already attached
-// in this call is closed before returning, so a caller that gets an error holds
-// no partial attachment to clean up.
+// The attach itself is xdpattach.Attach, which checks every interface for
+// native XDP support before touching any of them and waits each bond slave back
+// into its aggregate before attaching the next, so a bonded uplink never loses
+// every member at once. A failure partway through closes every link already
+// attached in this call.
 func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	if program == nil {
 		return nil, errors.New("edgeattach: program is nil")
@@ -168,70 +167,9 @@ func Attach(program *ebpf.Program, ifaceNames []string) ([]link.Link, error) {
 	if len(ifaceNames) == 0 {
 		return nil, errors.New("edgeattach: no interfaces to attach to")
 	}
-
-	return attachSequentially(ifaceNames, func(ifaceName string) (link.Link, error) {
-		return attachOne(program, ifaceName)
-	})
-}
-
-// attachSequentially is Attach's ordering, with the attach step itself passed
-// in so tests can drive the sequence without a real program or a real NIC.
-//
-// Nothing is attached until every interface has been checked, and each bond
-// slave is waited back into its aggregate before the next interface is
-// touched. Both orderings are load-bearing on a bonded uplink.
-func attachSequentially(ifaceNames []string, attach func(string) (link.Link, error)) ([]link.Link, error) {
-	if err := checkNativeXDPSupport(ifaceNames); err != nil {
-		return nil, err
-	}
-
-	links := make([]link.Link, 0, len(ifaceNames))
-	for _, ifaceName := range ifaceNames {
-		xdpLink, err := attach(ifaceName)
-		if err != nil {
-			closeAttached(links)
-			return nil, err
-		}
-		links = append(links, xdpLink)
-
-		if err := waitBondSlaveReady(ifaceName, BondReadyTimeout); err != nil {
-			closeAttached(links)
-			return nil, err
-		}
+	links, err := xdpattach.Attach(program, ifaceNames)
+	if err != nil {
+		return nil, fmt.Errorf("edgeattach: %w", err)
 	}
 	return links, nil
-}
-
-// closeAttached unwinds the links attached so far in one Attach call.
-func closeAttached(links []link.Link) {
-	for _, already := range links {
-		if already == nil {
-			continue
-		}
-		_ = already.Close()
-	}
-}
-
-// attachOne attaches program to ifaceName's XDP hook in native driver mode, the
-// single-interface mechanism Attach applies across its list.
-func attachOne(program *ebpf.Program, ifaceName string) (link.Link, error) {
-	iface, err := netlink.LinkByName(ifaceName)
-	if err != nil {
-		return nil, fmt.Errorf("edgeattach: find link %q: %w", ifaceName, err)
-	}
-
-	xdpLink, err := link.AttachXDP(link.XDPOptions{
-		Program:   program,
-		Interface: iface.Attrs().Index,
-		Flags:     link.XDPDriverMode,
-	})
-	if err != nil {
-		return nil, fmt.Errorf(
-			"edgeattach: attach XDP program to %q in native/driver mode: %w "+
-				"(this program requires native XDP support -- generic/SKB mode is not attempted, "+
-				"see this package's doc comment)",
-			ifaceName, err,
-		)
-	}
-	return xdpLink, nil
 }
