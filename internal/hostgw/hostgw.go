@@ -199,7 +199,7 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 			continue
 		}
 
-		if r.LinkIndex != desiredRoute.LinkIndex {
+		if r.LinkIndex != desiredRoute.LinkIndex || !isPodSubnetRouteCandidate(&r) {
 			continue
 		}
 		stale := r
@@ -220,6 +220,18 @@ func installPodSubnetRoute(hostLink netlink.Link, subnet *net.IPNet, family, tab
 		return fmt.Errorf("add pod subnet route to VRF table: %w", err)
 	}
 	return nil
+}
+
+// isPodSubnetRouteCandidate reports whether r could be a pod-subnet route this
+// package installed, and so is eligible for stale-route removal. The kernel
+// puts its own routes for hostLink in the same VRF table -- fe80::/64, the
+// multicast ff00::/8, local and anycast entries for its addresses -- and
+// removing them breaks the device outright: without ff00::/8 the VRF has no
+// input route for the solicited-node multicast a container's Neighbor
+// Solicitation for its gateway is sent to, so the solicitation is discarded
+// and the container never resolves its gateway at all.
+func isPodSubnetRouteCandidate(r *netlink.Route) bool {
+	return r.Type == unix.RTN_UNICAST && r.Protocol != unix.RTPROT_KERNEL
 }
 
 // routeConflicts reports whether existing conflicts with the desired
