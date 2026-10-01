@@ -334,6 +334,7 @@ tasks:
       - task: "verify:nat-return-route"
       - task: "verify:nat-local"
       - task: "verify:nat-collision"
+      - task: "verify:mss-clamp"
       - task: "verify:scenarios"
 
   # First, because every check after it rides these bonds: a member that
@@ -913,6 +914,15 @@ tasks:
           exit 1
         fi
         echo "PASS: each tenant received its own translation"
+
+  # Full-size TCP segments across the fabric, which a 1500-byte link only
+  # carries because the uSID datapath clamps each SYN's MSS: 1 MiB through
+  # each site's egress shard over NAT64 and NAT66, and 3 MB between sites
+  # for both tenant families. See the script's header for each check.
+  "verify:mss-clamp":
+    desc: Prove full-size TCP segments cross the fabric (TCP MSS clamp)
+    cmds:
+      - ./scripts/verify-mss-clamp.sh
 
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios

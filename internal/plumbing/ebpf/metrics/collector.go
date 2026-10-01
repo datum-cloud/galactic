@@ -31,6 +31,11 @@ type Collector struct {
 	vrf         *usidmap.VRFTable
 	locator     *usidmap.LocatorTable
 	dropReasons DropReasonsReader
+
+	// mssClampStats and mssClampTable are nil unless set by WithMSSClamp, in
+	// which case the TCP MSS clamp's outcomes and limits are collected too.
+	mssClampStats DropReasonsReader
+	mssClampTable DropReasonsReader
 }
 
 // NewCollector builds a Collector from already-constructed tables and reader.
@@ -47,12 +52,24 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 		usidmap.NewVRFTable(usidmap.KernelTable{Map: objs.VrfTable}),
 		usidmap.NewLocatorTable(usidmap.KernelTable{Map: objs.LocatorTable}),
 		objs.DropReasons,
-	)
+	).WithMSSClamp(objs.MssClampStats, objs.MssClampTable)
+}
+
+// WithMSSClamp adds the TCP MSS clamp's maps to c: stats, the per-CPU
+// mss_clamp_stats counters, and table, the single-entry mss_clamp_table. It
+// returns c.
+func (c *Collector) WithMSSClamp(stats, table DropReasonsReader) *Collector {
+	c.mssClampStats, c.mssClampTable = stats, table
+	return c
 }
 
 // labelBlock is the Prometheus label name for a uSID Block, shared by every
 // metric below that carries one.
 const labelBlock = "block"
+
+// labelResult is the Prometheus label name for an outcome, shared by the MSS
+// clamp series here and the datapath event counters in events.go.
+const labelResult = "result"
 
 var (
 	vrfPacketsDesc = prometheus.NewDesc(
@@ -75,6 +92,17 @@ var (
 		"Number of vrf_table entries (registered Arguments) currently active for this uSID Block.",
 		[]string{labelBlock}, nil,
 	)
+	mssClampDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "tcp_mss_clamp", "syns_total"),
+		"TCP SYNs the MSS clamp examined, by outcome (mss_clamp_stats map). Anything but clamped_* or "+
+			"within_limit is a SYN that crossed the fabric unclamped.",
+		[]string{labelResult}, nil,
+	)
+	mssClampLimitDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "tcp_mss_clamp", "limit_bytes"),
+		"The MSS the clamp lowers SYNs to, per tenant address family. Zero means clamping is off for that family.",
+		[]string{"family"}, nil,
+	)
 	blockArgumentUtilizationDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "block", "argument_utilization_ratio"),
 		"galactic_usid_block_arguments_used divided by 4095, the per-Block usable Argument capacity under "+
@@ -90,12 +118,45 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dropsDesc
 	ch <- blockArgumentsUsedDesc
 	ch <- blockArgumentUtilizationDesc
+	ch <- mssClampDesc
+	ch <- mssClampLimitDesc
 }
 
 // Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectVRF(ch)
 	c.collectDrops(ch)
+	c.collectMSSClamp(ch)
+}
+
+func (c *Collector) collectMSSClamp(ch chan<- prometheus.Metric) {
+	if c.mssClampStats != nil {
+		for i := range prog.MSSClampStatCount {
+			var perCPU []uint64
+			if err := c.mssClampStats.Lookup(i, &perCPU); err != nil {
+				ch <- prometheus.NewInvalidMetric(mssClampDesc, fmt.Errorf("lookup mss_clamp_stats[%d]: %w", i, err))
+				continue
+			}
+			var total uint64
+			for _, v := range perCPU {
+				total += v
+			}
+			name := prog.MSSClampStatNames[i]
+			if name == "" {
+				name = fmt.Sprintf("unknown_%d", i)
+			}
+			ch <- prometheus.MustNewConstMetric(mssClampDesc, prometheus.CounterValue, float64(total), name)
+		}
+	}
+	if c.mssClampTable != nil {
+		var v prog.UsidMssClampValue
+		if err := c.mssClampTable.Lookup(uint32(0), &v); err != nil {
+			ch <- prometheus.NewInvalidMetric(mssClampLimitDesc, fmt.Errorf("lookup mss_clamp_table: %w", err))
+			return
+		}
+		ch <- prometheus.MustNewConstMetric(mssClampLimitDesc, prometheus.GaugeValue, float64(v.MssIpv4), "ipv4")
+		ch <- prometheus.MustNewConstMetric(mssClampLimitDesc, prometheus.GaugeValue, float64(v.MssIpv6), "ipv6")
+	}
 }
 
 // formatBlock renders a Block as a metric label, in hex, matching how Block

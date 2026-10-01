@@ -6,6 +6,7 @@ package metrics
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -282,5 +283,83 @@ func TestCollector_VRFListErrorReportsInvalidMetric(t *testing.T) {
 	}
 	if !sawInvalid {
 		t.Error("expected at least one metric to fail Write() (an InvalidMetric) when vrf_table listing fails")
+	}
+}
+
+// fakeMSSClampTable is mss_clamp_table's single entry.
+type fakeMSSClampTable struct {
+	value prog.UsidMssClampValue
+	err   error
+}
+
+func (f fakeMSSClampTable) Lookup(key, valueOut any) error {
+	if f.err != nil {
+		return f.err
+	}
+	if k, ok := key.(uint32); !ok || k != 0 {
+		return fmt.Errorf("fakeMSSClampTable: key %v, want uint32(0)", key)
+	}
+	*valueOut.(*prog.UsidMssClampValue) = f.value
+	return nil
+}
+
+func TestCollector_MSSClamp(t *testing.T) {
+	stats := fakeDropReasons{prog.MSSClampStatClampedIPv6: 9, prog.MSSClampStatWalkLimit: 2}
+	table := fakeMSSClampTable{value: prog.UsidMssClampValue{MssIpv4: 1420, MssIpv6: 1400}}
+	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}).
+		WithMSSClamp(stats, table)
+
+	results := map[string]float64{}
+	limits := map[string]float64{}
+	for _, m := range collect(t, c) {
+		if r := labelValue(m, "result"); r != "" {
+			results[r] = metricValue(m)
+		}
+		if f := labelValue(m, "family"); f != "" {
+			limits[f] = metricValue(m)
+		}
+	}
+
+	// Every outcome is always emitted, even at zero, so a rate() over one
+	// never starts from a missing series.
+	if len(results) != int(prog.MSSClampStatCount) {
+		t.Errorf("emitted %d MSS clamp outcomes, want all %d", len(results), prog.MSSClampStatCount)
+	}
+	for name, want := range map[string]float64{"clamped_ipv6": 9, "walk_limit": 2, "clamped_ipv4": 0} {
+		if results[name] != want {
+			t.Errorf("result %q = %v, want %v", name, results[name], want)
+		}
+	}
+	if limits["ipv4"] != 1420 || limits["ipv6"] != 1400 {
+		t.Errorf("limits = %v, want ipv4 1420 and ipv6 1400", limits)
+	}
+}
+
+// TestCollector_MSSClampOptional checks a collector built without the clamp's
+// maps emits none of its series, the state of every existing caller.
+func TestCollector_MSSClampOptional(t *testing.T) {
+	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{})
+	for _, m := range collect(t, c) {
+		if labelValue(m, "result") != "" || labelValue(m, "family") != "" {
+			t.Errorf("collector without WithMSSClamp emitted an MSS clamp series: %v", m)
+		}
+	}
+}
+
+func TestCollector_MSSClampTableErrorReportsInvalidMetric(t *testing.T) {
+	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}).
+		WithMSSClamp(nil, fakeMSSClampTable{err: errors.New("map closed")})
+	ch := make(chan prometheus.Metric, 64)
+	c.Collect(ch)
+	close(ch)
+	invalid := 0
+	for m := range ch {
+		var out dto.Metric
+		if err := m.Write(&out); err != nil {
+			invalid++
+		}
+	}
+	if invalid != 1 {
+		t.Errorf("got %d invalid metrics, want 1 for the failed mss_clamp_table read", invalid)
 	}
 }
