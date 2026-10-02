@@ -4,6 +4,18 @@
 # these rules are the Prometheus-side signal for the same events, so an alert
 # does not depend on the collector or the log pipeline behind it.
 #
+# This file is the tested source for these rules, not necessarily where they
+# run. On Datum's infra the edge clusters' vmalert records but never notifies,
+# so the rules are evaluated centrally against the metrics the edge vmagent
+# remote-writes, and infra carries a copy of them. Change them here first,
+# with their tests, then update infra's copy to match.
+#
+# Every alert carries the labels and annotations infra's alerting standard
+# (infra docs/enhancements/alerting-standards) checks for: severity, service
+# and team, summary, description and runbook_url. service is galactic, the
+# Backstage System that owns galactic-router and the fabric router underlay,
+# and team is connect, that System's owner in infra's catalog-info.yaml.
+#
 # Unit tests: tests/rules-test.yaml, run with task test:alerts.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -23,8 +35,11 @@ spec:
           for: 5m
           labels:
             severity: critical
+            service: galactic
+            team: connect
           annotations:
             summary: "Underlay BGP session {{ $labels.node }} -> {{ $labels.peer }} ({{ $labels.afi }}) is down"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpsessiondown"
             description: >-
               fabric-router on {{ $labels.node }} has not had its {{ $labels.afi }} {{ $labels.safi }} session to
               {{ $labels.peer }} (AS {{ $labels.peer_as }}) Established for 5 minutes. The BMP collector's Peer Down
@@ -34,8 +49,11 @@ spec:
           for: 1h
           labels:
             severity: warning
+            service: galactic
+            team: connect
           annotations:
             summary: "Underlay BGP session {{ $labels.node }} -> {{ $labels.peer }} ({{ $labels.afi }}) has been shut down for an hour"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpsessionadmindown"
             description: >-
               The neighbor is administratively shut down in fabric-router's running config on {{ $labels.node }}.
               Re-enable it, or remove it from that node's fabric-router.<nodename> ConfigMap if the shutdown is
@@ -47,8 +65,11 @@ spec:
           expr: resets(frr_bgp_peer_uptime_seconds{job="fabric-router"}[30m]) >= 3
           labels:
             severity: warning
+            service: galactic
+            team: connect
           annotations:
             summary: "Underlay BGP session {{ $labels.node }} -> {{ $labels.peer }} ({{ $labels.afi }}) is flapping"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpsessionflapping"
             description: >-
               The session re-established {{ $value }} times in the last 30 minutes. The BMP collector's Peer Down
               messages for it carry the reason for each drop.
@@ -66,8 +87,11 @@ spec:
           for: 15m
           labels:
             severity: warning
+            service: galactic
+            team: connect
           annotations:
             summary: "{{ $labels.node }} receives under half its usual prefixes from {{ $labels.peer }} ({{ $labels.afi }})"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpprefixesdropped"
             description: >-
               {{ $labels.node }} now receives {{ $value }} {{ $labels.afi }} prefixes from {{ $labels.peer }}, under
               half what it received an hour ago, while the session stays up. Check the peer's export policy and
@@ -77,8 +101,11 @@ spec:
           for: 10m
           labels:
             severity: warning
+            service: galactic
+            team: connect
           annotations:
             summary: "frr-exporter's {{ $labels.collector }} collector is failing on {{ $labels.node }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricrouterexportercollectorfailing"
             description: >-
               frr-exporter on {{ $labels.node }} cannot read the {{ $labels.collector }} data from FRR, usually
               because a daemon's vty socket in /run/frr is missing or unreadable. The other fabric-router alerts on
@@ -88,8 +115,11 @@ spec:
           for: 5m
           labels:
             severity: warning
+            service: galactic
+            team: connect
           annotations:
             summary: "fabric-router metrics on {{ $labels.node }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricroutermetricsdown"
             description: >-
               Prometheus cannot reach frr-exporter on {{ $labels.node }} (port 9342). Every other fabric-router
               alert on this node is blind until it recovers.
@@ -100,8 +130,11 @@ spec:
           for: 10m
           labels:
             severity: warning
+            service: galactic
+            team: connect
           annotations:
             summary: "{{ $labels.router }} on {{ $labels.node }} is not streaming to BMP collector {{ $labels.station }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterbmpstationdown"
             description: >-
               galactic-router's BMP session to {{ $labels.station }} has been down for 10 minutes, or the station's
               name does not resolve. Route history and Peer Down events for this router are not being recorded.
@@ -110,8 +143,11 @@ spec:
           for: 5m
           labels:
             severity: warning
+            service: galactic
+            team: connect
           annotations:
             summary: "{{ $labels.job }} metrics on {{ $labels.node }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticroutermetricsdown"
             description: >-
               Prometheus cannot reach galactic-router's metrics port on {{ $labels.node }} (9179), so
               GalacticRouterBMPStationDown cannot fire for it.
