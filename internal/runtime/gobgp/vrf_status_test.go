@@ -52,7 +52,7 @@ func stubVRFKernel(t *testing.T, resolve []error, probe []error) {
 
 func newTestVRFRuntime(t *testing.T) *GoBGPRuntime {
 	t.Helper()
-	rt, err := NewRuntimeFactory(-1, false, "", nil)(testVRFRuntimeKey)
+	rt, err := NewRuntimeFactory(-1, false, "", nil, BMPConfig{})(testVRFRuntimeKey)
 	if err != nil {
 		t.Fatalf("factory() error = %v", err)
 	}

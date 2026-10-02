@@ -102,7 +102,8 @@ func testVRF(name string, id int32, rts ...string) model.DesiredVRFInstance {
 // outbound-only listener.
 func newTestRuntime(ctx context.Context, t *testing.T) *GoBGPRuntime {
 	t.Helper()
-	rt, err := NewRuntimeFactory(-1, false, "", nil)(types.NamespacedName{Namespace: "issue-599", Name: testRouterName})
+	rt, err := NewRuntimeFactory(-1, false, "", nil, BMPConfig{})(
+		types.NamespacedName{Namespace: "issue-599", Name: testRouterName})
 	if err != nil {
 		t.Fatalf("factory() error = %v", err)
 	}

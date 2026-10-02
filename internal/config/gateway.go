@@ -136,14 +136,14 @@ func (c *GatewayConfig) readFields() {
 	c.MetricsPort = c.v.GetInt(KeyMetricsPort)
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.PublicInterface = c.v.GetString("public_interface")
-	c.InternalInterfaces = splitInterfaceList(c.v.GetString("internal_interfaces"))
+	c.InternalInterfaces = splitCommaList(c.v.GetString("internal_interfaces"))
 	c.SRv6Address = c.v.GetString("srv6_address")
 }
 
-// splitInterfaceList parses a comma-separated interface list, dropping blank
-// entries so a trailing comma or a stray space does not produce an interface
-// name no attach could ever resolve.
-func splitInterfaceList(raw string) []string {
+// splitCommaList parses a comma-separated list, such as interface names or BMP
+// stations, dropping blank entries so a trailing comma or a stray space does
+// not produce an entry nothing could ever resolve.
+func splitCommaList(raw string) []string {
 	var names []string
 	for _, part := range strings.Split(raw, ",") {
 		if part = strings.TrimSpace(part); part != "" {

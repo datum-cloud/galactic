@@ -45,7 +45,7 @@ func TestApplyGlobal_ListenPortOverride(t *testing.T) {
 	ctx := context.Background()
 
 	// Factory default is -1 (outbound-only) -- e.g. the default per-node role.
-	factory := NewRuntimeFactory(-1, false, "", nil)
+	factory := NewRuntimeFactory(-1, false, "", nil, BMPConfig{})
 	rt, err := factory(types.NamespacedName{Namespace: "default", Name: "r1"})
 	if err != nil {
 		t.Fatalf("factory() error = %v", err)
@@ -79,7 +79,7 @@ func TestApplyGlobal_ListenPortOverride(t *testing.T) {
 func TestApplyGlobal_ListenPortUnsetFallsBackToFactoryDefault(t *testing.T) {
 	ctx := context.Background()
 
-	factory := NewRuntimeFactory(17901, false, "", nil)
+	factory := NewRuntimeFactory(17901, false, "", nil, BMPConfig{})
 	rt, err := factory(types.NamespacedName{Namespace: "default", Name: "r1"})
 	if err != nil {
 		t.Fatalf("factory() error = %v", err)
@@ -290,5 +290,32 @@ func TestEqualRTSets(t *testing.T) {
 				t.Errorf("equalRTSets(%v, %v) = %v, want %v (symmetry)", tt.b, tt.a, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestApply_ASNChangeSucceedsFirstTime verifies an Apply that changes the ASN,
+// which replaces the GoBGP server, converges on the replacement in the same
+// Apply rather than failing against the server it just stopped.
+func TestApply_ASNChangeSucceedsFirstTime(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntimeFactory(-1, false, "", nil, BMPConfig{})(types.NamespacedName{Name: "asn-change"})
+	if err != nil {
+		t.Fatalf("factory() error = %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Stop(ctx) })
+
+	if err := rt.Apply(ctx, model.DesiredRouter{LocalASN: 65000, RouterID: testRouterID1}); err != nil {
+		t.Fatalf("first Apply() error = %v", err)
+	}
+	if err := rt.Apply(ctx, model.DesiredRouter{LocalASN: 65001, RouterID: testRouterID1}); err != nil {
+		t.Fatalf("Apply() with a new ASN error = %v", err)
+	}
+
+	resp, err := rt.(*GoBGPRuntime).server.bgp.Load().GetBgp(ctx, &api.GetBgpRequest{})
+	if err != nil {
+		t.Fatalf("GetBgp() error = %v", err)
+	}
+	if resp.Global.Asn != 65001 {
+		t.Errorf("ASN = %d, want 65001", resp.Global.Asn)
 	}
 }

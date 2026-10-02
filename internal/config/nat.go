@@ -146,7 +146,7 @@ func (c *NATConfig) readFields() {
 	c.NodeName = c.v.GetString(KeyNodeName)
 	c.MetricsPort = c.v.GetInt(KeyMetricsPort)
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
-	c.UplinkInterfaces = splitInterfaceList(c.v.GetString("uplink_interfaces"))
+	c.UplinkInterfaces = splitCommaList(c.v.GetString("uplink_interfaces"))
 	c.XDPAttach = c.v.GetString("xdp_attach")
 }
 
