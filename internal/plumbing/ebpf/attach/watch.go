@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,6 +42,11 @@ var (
 // its own.
 var resolveInterfacesFn = ResolveInterfaces
 
+// reconcileFn is an override point so tests can drive Watch's publication of
+// the attached set without root or a loaded program. Production always leaves
+// it at reconcile.
+var reconcileFn = reconcile
+
 // onReconcileDone is a test-only hook invoked after every debounced
 // re-evaluation, whether or not anything changed and whether or not resolution
 // failed, so tests can wait deterministically instead of sleeping. Production
@@ -53,6 +60,12 @@ var onReconcileDone = func() {}
 type Watcher struct {
 	alive atomic.Bool
 	nudge chan struct{}
+
+	// mu guards attached and onChange, and is held across every onChange call
+	// so two calls never run at once or land out of order.
+	mu       sync.Mutex
+	attached []string
+	onChange func([]string)
 }
 
 // newWatcher creates a Watcher in its not-yet-started state. It is marked alive
@@ -88,6 +101,64 @@ func (w *Watcher) Reconcile() {
 	case w.nudge <- struct{}{}:
 	default:
 	}
+}
+
+// OnChange registers fn to receive the attached interface set, in resolution
+// order, every time it changes. If the loop has already published a set, fn
+// receives it before OnChange returns, so a caller registering after the loop
+// started misses nothing. Registering again replaces the previous fn.
+//
+// The CNI plugin reads its uplink list from a file the installer writes once,
+// before BGP has converged. A link the fabric routes over only later is
+// attached here but invisible to the plugin, which then rejects every route
+// leaving through it. fn is how the daemon keeps that file in step.
+//
+// fn runs on the watch loop's goroutine and blocks the next re-evaluation
+// until it returns, so it must not block for long.
+func (w *Watcher) OnChange(fn func([]string)) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onChange = fn
+	if fn != nil && w.attached != nil {
+		fn(slices.Clone(w.attached))
+	}
+}
+
+// publish records names as the attached set and passes it to the registered
+// OnChange fn, if it differs from the set last recorded.
+//
+// An empty set is never published. It means every attach just failed, and
+// those are retried on the next re-evaluation; publishing it would tell the
+// plugin to fall back to its own detection for no gain.
+func (w *Watcher) publish(names []string) {
+	if w == nil || len(names) == 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.attached != nil && slices.Equal(w.attached, names) {
+		return
+	}
+	w.attached = slices.Clone(names)
+	if w.onChange != nil {
+		w.onChange(slices.Clone(names))
+	}
+}
+
+// attachedInOrder returns the names in resolved that are also in attached, in
+// resolved's order. A set loses the order ResolveInterfaces returns, and the
+// first entry matters: it is the uplink a DSR reply is redirected toward.
+func attachedInOrder(resolved []string, attached map[string]struct{}) []string {
+	out := make([]string, 0, len(resolved))
+	for _, name := range resolved {
+		if _, ok := attached[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // logDegradedSubscription logs a netlink subscription channel closing, which
@@ -130,8 +201,10 @@ func logDegradedSubscription(kind string, otherKindAlreadyNil bool) {
 // likewise logged and skipped, leaving the previous attachment set in place
 // rather than tearing anything down on a transient error.
 //
-// w, when non-nil, is marked alive while this loop runs and supplies the
-// out-of-band re-evaluation trigger. Passing nil disables both.
+// w, when non-nil, is marked alive while this loop runs, supplies the
+// out-of-band re-evaluation trigger, and receives the attached set, initial
+// first and then after every re-evaluation that changes it (see
+// Watcher.OnChange). Passing nil disables all three.
 //
 // Returns nil when ctx is canceled, and a non-nil error only if establishing
 // the initial netlink subscriptions fails.
@@ -178,6 +251,7 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 	}
 
 	current := toSet(initial)
+	w.publish(initial)
 
 	var debounceTimer *time.Timer
 	var debounceC <-chan time.Time
@@ -235,7 +309,8 @@ func Watch(ctx context.Context, program *ebpf.Program, initial []string, w *Watc
 				onReconcileDone()
 				continue
 			}
-			current = reconcile(program, current, toSet(next))
+			current = reconcileFn(program, current, toSet(next))
+			w.publish(attachedInOrder(next, current))
 			// The uplink set just moved, or a link/route event says it may
 			// have. Drop the cached ifindexes so an egress route resolved
 			// right after an interface appears is judged against the new set

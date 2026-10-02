@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -961,5 +962,91 @@ func TestReconcileRadvActors_FailedRemovalIsRetried(t *testing.T) {
 	reconcileRadvActors(ctx, actors)
 	if radvRecordExists(t) {
 		t.Fatalf("record for %q kept once the directory became writable", radvTestIface)
+	}
+}
+
+// The bond masters the conflist rewrite tests below name.
+const (
+	uplinkBond0 = "bond0"
+	uplinkBond1 = "bond1"
+)
+
+// TestRewriteEBPFInterfaces covers the daemon keeping the conflist's uplink
+// list in step with the attached datapath (issue #644). The install step wrote
+// the list before BGP converged, so it is missing bond1 and its slaves; after
+// the rewrite the plugin, which reads the same file, must see them, and every
+// other field must be unchanged.
+func TestRewriteEBPFInterfaces(t *testing.T) {
+	orig := HostConflist
+	t.Cleanup(func() { HostConflist = orig })
+	HostConflist = filepath.Join(t.TempDir(), "10-galactic.conflist")
+
+	written := hostconf.HostConf{
+		NodeName:        "eris-giune",
+		Kubeconfig:      config.DefaultKubeconfig,
+		Namespace:       config.DefaultNamespace,
+		LogFile:         config.DefaultLogFile,
+		LogLevel:        "debug",
+		EgressShardSIDs: "2607:ed40:8002:2002:e00f::",
+		NAT64Prefix:     "64:ff9b::/96",
+		EBPFInterfaces:  "bond0,ens2f1np1,ens1f1np1",
+		DANDir:          "/var/lib/galactic/dan",
+	}
+	if err := os.WriteFile(HostConflist, []byte(renderConflist(&written)), 0644); err != nil {
+		t.Fatalf("write conflist: %v", err)
+	}
+
+	attached := []string{uplinkBond0, "ens2f1np1", "ens1f1np1", uplinkBond1, "ens1f0np0", "ens2f0np0"}
+	rewriteEBPFInterfaces(attached)
+
+	got, err := hostconf.Load(HostConflist, hostconf.PluginType)
+	if err != nil {
+		t.Fatalf("load rewritten conflist: %v", err)
+	}
+	want := written
+	want.EBPFInterfaces = strings.Join(attached, ",")
+	if *got != want {
+		t.Errorf("rewritten conflist = %+v, want %+v", *got, want)
+	}
+}
+
+// TestRewriteEBPFInterfaces_UnchangedSkipsWrite covers a re-evaluation that
+// resolves the list already on disk: the file must not be rewritten, so a
+// steady node never touches the CNI config directory.
+func TestRewriteEBPFInterfaces_UnchangedSkipsWrite(t *testing.T) {
+	orig := HostConflist
+	t.Cleanup(func() { HostConflist = orig })
+	HostConflist = filepath.Join(t.TempDir(), "10-galactic.conflist")
+
+	// Not renderConflist's layout, so any rewrite changes the bytes.
+	const content = `{"cniVersion":"1.0.0","name":"galactic","plugins":[` +
+		`{"type":"galactic-cni","node_name":"n","ebpf_interfaces":"` + uplinkBond0 + "," + uplinkBond1 + `"}]}`
+	if err := os.WriteFile(HostConflist, []byte(content), 0644); err != nil {
+		t.Fatalf("write conflist: %v", err)
+	}
+
+	rewriteEBPFInterfaces([]string{uplinkBond0, uplinkBond1})
+
+	got, err := os.ReadFile(HostConflist)
+	if err != nil {
+		t.Fatalf("read conflist: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("conflist rewritten although its list was unchanged:\n%s", got)
+	}
+}
+
+// TestRewriteEBPFInterfaces_MissingConflistIsHarmless covers the daemon
+// running before any conflist exists: the rewrite logs and returns, and does
+// not create a partial file.
+func TestRewriteEBPFInterfaces_MissingConflistIsHarmless(t *testing.T) {
+	orig := HostConflist
+	t.Cleanup(func() { HostConflist = orig })
+	HostConflist = filepath.Join(t.TempDir(), "10-galactic.conflist")
+
+	rewriteEBPFInterfaces([]string{uplinkBond0})
+
+	if _, err := os.Stat(HostConflist); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat conflist = %v, want not-exist", err)
 	}
 }

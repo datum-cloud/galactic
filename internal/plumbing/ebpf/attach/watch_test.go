@@ -99,11 +99,13 @@ func withWatchTestDefaults(t *testing.T) {
 	origResolve := resolveInterfacesFn
 	origDebounce := debounceInterval
 	origHook := onReconcileDone
+	origReconcile := reconcileFn
 	t.Cleanup(func() {
 		linkSubscribeFn, routeSubscribeFn = origLink, origRoute
 		resolveInterfacesFn = origResolve
 		debounceInterval = origDebounce
 		onReconcileDone = origHook
+		reconcileFn = origReconcile
 	})
 
 	linkSubscribeFn = stubLinkSubscribe(nil)
@@ -695,5 +697,96 @@ func TestWatch_HealsExternallyClearedFilterViaWatcherReconcile(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("post-watch verification: %v", err)
+	}
+}
+
+// The uplinks the publication tests below resolve: one present at start, one
+// BGP brings up later, and one whose attach fails.
+const (
+	primaryUplink = "bond0"
+	lateUplink    = "bond1"
+	failedUplink  = "ens1f0np0"
+)
+
+// TestWatch_PublishesAttachedSetWhenBGPConvergesAfterStart reproduces issue
+// #644 at the watch loop: the datapath starts on bond0 alone because bond1
+// carries no BGP-learned route yet, then a route event adds bond1. OnChange
+// must receive the initial set and then the grown one, in resolution order,
+// so the daemon can rewrite the conflist the plugin enforces. An interface
+// whose attach failed must be left out, and an unchanged re-evaluation must
+// not publish again.
+func TestWatch_PublishesAttachedSetWhenBGPConvergesAfterStart(t *testing.T) {
+	withWatchTestDefaults(t)
+
+	trigger := make(chan struct{}, 1)
+	routeSubscribeFn = stubRouteSubscribe(trigger)
+
+	resolved := make(chan []string, 3)
+	resolved <- []string{primaryUplink, lateUplink, failedUplink} // BGP converged on bond1
+	resolved <- []string{primaryUplink, lateUplink, failedUplink} // unchanged: no publish
+	resolveInterfacesFn = func() ([]string, error) { return <-resolved, nil }
+
+	// ens1f0np0 fails to attach, so the plugin must not be told to use it.
+	reconcileFn = func(_ *ebpf.Program, _, next map[string]struct{}) map[string]struct{} {
+		out := make(map[string]struct{}, len(next))
+		for name := range next {
+			if name != failedUplink {
+				out[name] = struct{}{}
+			}
+		}
+		return out
+	}
+
+	reconciled := make(chan struct{}, 4)
+	onReconcileDone = func() { reconciled <- struct{}{} }
+
+	var published [][]string
+	w := newWatcher()
+	w.OnChange(func(names []string) { published = append(published, names) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, &ebpf.Program{}, []string{primaryUplink}, w) }()
+
+	for range 2 {
+		trigger <- struct{}{}
+		select {
+		case <-reconciled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("watch loop never re-evaluated after a route event")
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	want := [][]string{{primaryUplink}, {primaryUplink, lateUplink}}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !reflect.DeepEqual(published, want) {
+		t.Errorf("published sets = %v, want %v", published, want)
+	}
+}
+
+// TestWatcher_OnChangeReplaysLastPublishedSet covers the daemon registering
+// its callback after the loop has already published: it must still receive
+// the current set, or a change made between start and registration is lost.
+func TestWatcher_OnChangeReplaysLastPublishedSet(t *testing.T) {
+	w := newWatcher()
+	w.publish(nil) // empty sets are never published
+	w.publish([]string{primaryUplink, lateUplink})
+
+	var got []string
+	w.OnChange(func(names []string) { got = names })
+	if want := []string{primaryUplink, lateUplink}; !reflect.DeepEqual(got, want) {
+		t.Errorf("replayed set = %v, want %v", got, want)
+	}
+
+	got = nil
+	w.publish([]string{primaryUplink, lateUplink})
+	if got != nil {
+		t.Errorf("unchanged set published again: %v", got)
 	}
 }

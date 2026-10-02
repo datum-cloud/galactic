@@ -73,7 +73,9 @@ type HostConf struct {
 	// EBPFInterfaces is the comma-separated interface list, written by the
 	// installer from its own environment or auto-detection. The installer runs
 	// as an init container sharing its pod's environment with the long-running
-	// one, so its detection is correct there.
+	// one, so its detection is correct there. The long-running container then
+	// rewrites it whenever the datapath's attached set changes, since the init
+	// container often runs before BGP has brought up every fabric link.
 	//
 	// The BGP plugin, invoked per pod by the CNI runtime rather than being a
 	// long-lived process with configurable environment, would otherwise never
