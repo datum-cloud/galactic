@@ -79,6 +79,7 @@ tasks:
       - task: "deploy:cni"
       - task: "deploy:lab-xdp-passthrough-compute"
       - task: "deploy:fabric"
+      - task: "deploy:bmp-collector"
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
       - task: "deploy:scenarios"
@@ -275,6 +276,11 @@ tasks:
     cmds:
       - ./scripts/deploy-fabric.sh
 
+  "deploy:bmp-collector":
+    desc: Install the lab's BMP collector on iad-worker3
+    cmds:
+      - ./scripts/deploy-bmp-collector.sh
+
   "deploy:galactic-router":
     desc: Install galactic-router and BGP resources
     cmds:
@@ -327,6 +333,7 @@ tasks:
       - task: "verify:bgp-fabric"
       - task: "verify:fabric-metrics"
       - task: "verify:bgp-peers"
+      - task: "verify:bmp"
       - task: "verify:underlay"
       - task: "verify:srv6"
       - task: "verify:evpn"
@@ -381,6 +388,11 @@ tasks:
     desc: Verify every fabric-router's frr-exporter reports all underlay sessions Established
     cmds:
       - ./scripts/verify-fabric-metrics.sh
+
+  "verify:bmp":
+    desc: Verify the route reflector streams every EVPN peer to the BMP collector
+    cmds:
+      - ./scripts/verify-bmp.sh
 
   "verify:bgp-peers":
     desc: Verify galactic-router BGP peer sessions
