@@ -226,6 +226,51 @@ spec:
             # sockets in /run/frr.
             - name: frr-run
               mountPath: /run/frr
+        # Prometheus exporter for BGP peer state, message counters, and
+        # prefix counts. It reads the daemons' JSON output directly over
+        # their vty sockets in /run/frr, which is why it runs in this pod
+        # rather than as its own workload: frr-run is a pod-scoped emptyDir.
+        # The sockets are mode 0770, group frrvty (GID 102 in the FRR
+        # image), so the exporter runs with that group and needs no
+        # capabilities. hostNetwork puts the listener on the node itself,
+        # the same as galactic-router's own metrics port.
+        - name: frr-exporter
+          image: ghcr.io/tynany/frr_exporter:v1.12.0@sha256:33ff64b0c07192ea62fb403df434c22229c141ce3a22f846341a4ca6e81a24bf
+          args:
+            - --frr.socket.dir-path=/run/frr
+            - --web.listen-address=:9342
+            # The underlay is dual-stack, so both unicast families are
+            # collected. OSPF and BFD are off because no node runs ospfd or
+            # bfdd (see containers/fabric-router/daemons); collecting them
+            # would only log a socket error on every scrape.
+            - --collector.bgp
+            - --collector.bgp6
+            - --collector.bgp.advertised-prefixes
+            - --no-collector.ospf
+            - --no-collector.bfd
+          ports:
+            - name: frr-metrics
+              containerPort: 9342
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 102
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: frr-run
+              mountPath: /run/frr
+              readOnly: true
       volumes:
         # No ConfigMap volume: each node's config lives in its own
         # fabric-router.<nodename> ConfigMap, which this kustomization does
