@@ -1,0 +1,25 @@
+# Scrapes galactic-router's metrics port (metrics, 9179) in both roles: the
+# plain per-node DaemonSet and the route reflector's galactic-router-rr.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: galactic-router
+  labels:
+    app.kubernetes.io/name: galactic-router
+spec:
+  # job="galactic-router" or "galactic-router-rr", which the alert rules
+  # match on.
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - galactic-router
+          - galactic-router-rr
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
