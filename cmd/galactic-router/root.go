@@ -186,7 +186,11 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("register peer state event emitter: %w", err)
 	}
 
-	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr, peerEventEmitter)
+	bmpCfg, err := bmpConfigFromRouter(cfg, nodeName)
+	if err != nil {
+		return err
+	}
+	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr, peerEventEmitter, bmpCfg)
 
 	// Create runtime manager.
 	runtimeMgr := galacticruntime.NewRuntimeManager(factory)
@@ -380,6 +384,12 @@ func newRootCommand() *cobra.Command {
 		"Webhook server listen port")
 	cmd.Flags().StringP("webhook-cert-dir", "", "",
 		"Directory containing the webhook server's TLS cert/key; defaults to controller-runtime's own default")
+	cmd.Flags().String("bmp-stations", "",
+		"Comma-separated BMP collectors to stream to, each host:port; empty disables BMP")
+	cmd.Flags().String("bmp-policy", config.DefaultRouterBMPPolicy,
+		"BMP route monitoring policy: "+strings.Join(config.RouterBMPPolicies, ", "))
+	cmd.Flags().Duration("bmp-statistics-interval", config.DefaultRouterBMPStatisticsInterval,
+		"Interval between BMP statistics reports per peer; 0 disables them")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 

@@ -7,6 +7,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -28,7 +31,22 @@ const (
 	// DefaultRouterWebhookPort matches controller-runtime's own default, named
 	// here so callers need not import that package to read it.
 	DefaultRouterWebhookPort = 9443
+
+	// DefaultRouterBMPPolicy streams each peer's Adj-RIB-In before import
+	// policy, the full record of what every peer sent. On a route reflector
+	// that is every node's advertisements.
+	DefaultRouterBMPPolicy = "pre-policy"
+	// DefaultRouterBMPStatisticsInterval is how often a BMP statistics report
+	// is sent per established peer.
+	DefaultRouterBMPStatisticsInterval = 60 * time.Second
+
+	// maxBMPStatisticsInterval is the largest interval GoBGP can carry: it
+	// holds the interval as a 16-bit count of seconds.
+	maxBMPStatisticsInterval = 65535 * time.Second
 )
+
+// RouterBMPPolicies lists the accepted GALACTIC_ROUTER_BMP_POLICY values.
+var RouterBMPPolicies = []string{"pre-policy", "post-policy", "local-rib", "all"}
 
 // --- Router environment variable keys --------------------------------------
 
@@ -50,6 +68,12 @@ const (
 	EnvRouterWebhookEnabled = "GALACTIC_ROUTER_WEBHOOK_ENABLED"
 	EnvRouterWebhookPort    = "GALACTIC_ROUTER_WEBHOOK_PORT"
 	EnvRouterWebhookCertDir = "GALACTIC_ROUTER_WEBHOOK_CERT_DIR"
+
+	// EnvRouterBMPStations lists the BMP collectors to stream to, as a
+	// comma-separated list of host:port. Empty, the default, disables BMP.
+	EnvRouterBMPStations           = "GALACTIC_ROUTER_BMP_STATIONS"
+	EnvRouterBMPPolicy             = "GALACTIC_ROUTER_BMP_POLICY"
+	EnvRouterBMPStatisticsInterval = "GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL"
 )
 
 // --- RouterConfig ----------------------------------------------------------
@@ -82,6 +106,13 @@ type RouterConfig struct {
 	WebhookEnabled bool
 	WebhookPort    int
 	WebhookCertDir string
+
+	// BMPStations, BMPPolicy, and BMPStatisticsInterval configure BMP export to
+	// collectors. BMPStations holds each collector as host:port; empty
+	// disables BMP.
+	BMPStations           []string
+	BMPPolicy             string
+	BMPStatisticsInterval time.Duration
 }
 
 // NewRouterConfig creates a config resolver reading the GALACTIC_ROUTER
@@ -103,6 +134,9 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("webhook_enabled", false)
 	v.SetDefault("webhook_port", DefaultRouterWebhookPort)
 	v.SetDefault("webhook_cert_dir", "")
+	v.SetDefault("bmp_stations", "")
+	v.SetDefault("bmp_policy", DefaultRouterBMPPolicy)
+	v.SetDefault("bmp_statistics_interval", DefaultRouterBMPStatisticsInterval.String())
 
 	cfg := &RouterConfig{
 		v:      v,
@@ -130,6 +164,9 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"webhook-enabled", "webhook_enabled"},
 		{"webhook-port", "webhook_port"},
 		{"webhook-cert-dir", "webhook_cert_dir"},
+		{"bmp-stations", "bmp_stations"},
+		{"bmp-policy", "bmp_policy"},
+		{"bmp-statistics-interval", "bmp_statistics_interval"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -155,6 +192,9 @@ func (c *RouterConfig) readFields() {
 	c.WebhookEnabled = c.v.GetBool("webhook_enabled")
 	c.WebhookPort = c.v.GetInt("webhook_port")
 	c.WebhookCertDir = c.v.GetString("webhook_cert_dir")
+	c.BMPStations = splitCommaList(c.v.GetString("bmp_stations"))
+	c.BMPPolicy = c.v.GetString("bmp_policy")
+	c.BMPStatisticsInterval = c.v.GetDuration("bmp_statistics_interval")
 }
 
 // Validate checks that the required configuration fields are set and within
@@ -175,5 +215,48 @@ func (c *RouterConfig) Validate() error {
 	if c.WebhookPort < 1 || c.WebhookPort > 65535 {
 		return errors.New("webhook port must be between 1 and 65535")
 	}
+	return c.validateBMP()
+}
+
+// validateBMP checks every BMP station is a host:port with a port in range,
+// that the policy is one of RouterBMPPolicies, and that the statistics
+// interval is a whole number of seconds GoBGP can carry.
+func (c *RouterConfig) validateBMP() error {
+	for _, st := range c.BMPStations {
+		if _, _, err := ParseBMPStation(st); err != nil {
+			return fmt.Errorf("%s: %w", EnvRouterBMPStations, err)
+		}
+	}
+	valid := false
+	for _, p := range RouterBMPPolicies {
+		valid = valid || c.BMPPolicy == p
+	}
+	if !valid {
+		return fmt.Errorf("%s must be one of %s, got %q",
+			EnvRouterBMPPolicy, strings.Join(RouterBMPPolicies, ", "), c.BMPPolicy)
+	}
+	if c.BMPStatisticsInterval < 0 || c.BMPStatisticsInterval > maxBMPStatisticsInterval ||
+		c.BMPStatisticsInterval%time.Second != 0 {
+		return fmt.Errorf("%s must be a whole number of seconds from 0s to %s, got %s",
+			EnvRouterBMPStatisticsInterval, maxBMPStatisticsInterval, c.BMPStatisticsInterval)
+	}
 	return nil
+}
+
+// ParseBMPStation splits a BMP station given as host:port, where host is an IP
+// address or a DNS name and an IPv6 host is bracketed. It returns an error
+// when the host is empty or the port is not between 1 and 65535.
+func ParseBMPStation(s string) (string, uint16, error) {
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return "", 0, fmt.Errorf("BMP station %q: %w", s, err)
+	}
+	if host == "" {
+		return "", 0, fmt.Errorf("BMP station %q has no host", s)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil || port == 0 {
+		return "", 0, fmt.Errorf("BMP station %q: port must be between 1 and 65535", s)
+	}
+	return host, uint16(port), nil
 }

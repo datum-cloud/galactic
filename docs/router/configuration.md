@@ -14,19 +14,22 @@ flag name — the mapping is defined in `internal/config` (see `RouterConfig`
 and the `EnvRouter*` constants). Always use the exact name from the table
 below.
 
-| Option | Environment Variable | CLI Flag | Default |
-|---|---|---|---|
-| Node name | `GALACTIC_ROUTER_NODE_NAME` | `--node-name` | _(required)_ |
-| Route reflector | `GALACTIC_ROUTER_REFLECTOR` | `--reflector` | `false` |
-| BGP listen port | `GALACTIC_ROUTER_BGP_LISTEN_PORT` | `--bgp-listen-port` | `179` |
-| BGP local address | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS` | `--bgp-local-address` | _(auto-detected from `lo`)_ |
-| Metrics port | `GALACTIC_ROUTER_METRICS_PORT` | `--metrics-port` | `9179` |
-| gRPC health port | `GALACTIC_ROUTER_GRPC_HEALTH_PORT` | `--grpc-health-port` | `5179` |
-| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE` | `--gc-namespace` | `galactic-system` |
-| Orphan-cleanup interval | `GALACTIC_ROUTER_GC_INTERVAL` | `--gc-interval` | `5m` |
-| Webhook enabled | `GALACTIC_ROUTER_WEBHOOK_ENABLED` | `--webhook-enabled` | `false` |
-| Webhook port | `GALACTIC_ROUTER_WEBHOOK_PORT` | `--webhook-port` | `9443` |
-| Webhook cert dir | `GALACTIC_ROUTER_WEBHOOK_CERT_DIR` | `--webhook-cert-dir` | _(controller-runtime default)_ |
+| Option                   | Environment Variable                      | CLI Flag                    | Default                        |
+|--------------------------|-------------------------------------------|-----------------------------|--------------------------------|
+| Node name                | `GALACTIC_ROUTER_NODE_NAME`               | `--node-name`               | _(required)_                   |
+| Route reflector          | `GALACTIC_ROUTER_REFLECTOR`               | `--reflector`               | `false`                        |
+| BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`         | `--bgp-listen-port`         | `179`                          |
+| BGP local address        | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`       | `--bgp-local-address`       | _(auto-detected from `lo`)_    |
+| Metrics port             | `GALACTIC_ROUTER_METRICS_PORT`            | `--metrics-port`            | `9179`                         |
+| gRPC health port         | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`        | `--grpc-health-port`        | `5179`                         |
+| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE`            | `--gc-namespace`            | `galactic-system`              |
+| Orphan-cleanup interval  | `GALACTIC_ROUTER_GC_INTERVAL`             | `--gc-interval`             | `5m`                           |
+| Webhook enabled          | `GALACTIC_ROUTER_WEBHOOK_ENABLED`         | `--webhook-enabled`         | `false`                        |
+| Webhook port             | `GALACTIC_ROUTER_WEBHOOK_PORT`            | `--webhook-port`            | `9443`                         |
+| Webhook cert dir         | `GALACTIC_ROUTER_WEBHOOK_CERT_DIR`        | `--webhook-cert-dir`        | _(controller-runtime default)_ |
+| BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`            | `--bmp-stations`            | _(empty; BMP disabled)_        |
+| BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`              | `--bmp-policy`              | `pre-policy`                   |
+| BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL` | `--bmp-statistics-interval` | `60s`                          |
 
 ## Required Options
 
@@ -173,6 +176,60 @@ Directory containing the webhook server's TLS certificate and key, when
 
 **Type:** string
 **Default:** _(empty; controller-runtime default)_
+
+### `--bmp-stations` / `GALACTIC_ROUTER_BMP_STATIONS`
+
+BMP (RFC 7854) collectors to stream to, as a comma-separated list of
+`host:port`. A host is an IP address or a DNS name; bracket an IPv6 address
+(`[fc00:0:7::1]:5000`). Empty disables BMP.
+
+Each BGPRouter's GoBGP server opens one session per station once BGP has
+started, sending the node name as the BMP `sysName`, then a Peer Up for each
+established peer and the routes selected by `--bmp-policy`. A session that
+drops reaches the collector as a Peer Down carrying the reason, plus the
+NOTIFICATION when one was sent or received.
+
+`galactic-router` resolves a DNS name itself, since GoBGP accepts only an IP
+address, and resolves it again every 30 seconds: a station whose name starts
+resolving elsewhere is moved to the new address. A station that does not
+resolve is retried on the same interval. Replacing the GoBGP server, as an
+ASN, router ID or listen-port change does, closes each session with a BMP
+Termination and opens a new one from the replacement.
+
+Each station's state is exported as the `galactic_router_bmp_station_up`
+gauge on the metrics port, labeled `router` (the BGPRouter's
+`namespace/name`) and `station` (as configured): `1` while the session is
+established, `0` while it is down or its host does not resolve.
+
+**Type:** comma-separated list of `host:port`
+**Default:** _(empty)_
+
+### `--bmp-policy` / `GALACTIC_ROUTER_BMP_POLICY`
+
+Which routes are streamed to each BMP station:
+
+| Value         | Streams                                                         |
+| ------------- | --------------------------------------------------------------- |
+| `pre-policy`  | Each peer's Adj-RIB-In before import policy: what the peer sent |
+| `post-policy` | Each peer's Adj-RIB-In after import policy                      |
+| `local-rib`   | The Loc-RIB (RFC 9069): the best path selected for each prefix  |
+| `all`         | All three                                                       |
+
+On the route reflector, `pre-policy` records every EVPN route every node
+advertises, which is why it is the default. GoBGP does not stream
+Adj-RIB-Out (RFC 8671).
+
+**Type:** string
+**Default:** `pre-policy`
+
+### `--bmp-statistics-interval` / `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL`
+
+How often a BMP Statistics Report is sent for each established peer. `0s`
+disables them.
+
+**Type:** duration, in whole seconds
+**Default:** `60s`
+**Valid values:** `0s`–`65535s`
 
 ## Configuration Precedence
 

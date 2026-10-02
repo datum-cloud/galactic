@@ -50,6 +50,15 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if cfg.WebhookCertDir != "" {
 		t.Errorf("WebhookCertDir = %q, want empty", cfg.WebhookCertDir)
 	}
+	if len(cfg.BMPStations) != 0 {
+		t.Errorf("BMPStations = %v, want none (BMP disabled by default)", cfg.BMPStations)
+	}
+	if cfg.BMPPolicy != DefaultRouterBMPPolicy {
+		t.Errorf("BMPPolicy = %q, want %q", cfg.BMPPolicy, DefaultRouterBMPPolicy)
+	}
+	if cfg.BMPStatisticsInterval != DefaultRouterBMPStatisticsInterval {
+		t.Errorf("BMPStatisticsInterval = %v, want %v", cfg.BMPStatisticsInterval, DefaultRouterBMPStatisticsInterval)
+	}
 }
 
 func TestRouterConfigEnvOverride(t *testing.T) {
@@ -64,6 +73,9 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterWebhookEnabled, testBoolTrue)
 	t.Setenv(EnvRouterWebhookPort, "9444")
 	t.Setenv(EnvRouterWebhookCertDir, "/tmp/certs")
+	t.Setenv(EnvRouterBMPStations, "gobmp.galactic-system.svc:5000, [2001:db8::5]:5000,")
+	t.Setenv(EnvRouterBMPPolicy, "local-rib")
+	t.Setenv(EnvRouterBMPStatisticsInterval, "0s")
 
 	cfg := NewRouterConfig()
 
@@ -99,6 +111,16 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	}
 	if cfg.WebhookCertDir != "/tmp/certs" {
 		t.Errorf("WebhookCertDir = %q, want %q", cfg.WebhookCertDir, "/tmp/certs")
+	}
+	wantStations := []string{"gobmp.galactic-system.svc:5000", "[2001:db8::5]:5000"}
+	if strings.Join(cfg.BMPStations, ",") != strings.Join(wantStations, ",") {
+		t.Errorf("BMPStations = %q, want %q", cfg.BMPStations, wantStations)
+	}
+	if cfg.BMPPolicy != "local-rib" {
+		t.Errorf("BMPPolicy = %q, want local-rib", cfg.BMPPolicy)
+	}
+	if cfg.BMPStatisticsInterval != 0 {
+		t.Errorf("BMPStatisticsInterval = %v, want 0", cfg.BMPStatisticsInterval)
 	}
 }
 
@@ -168,6 +190,70 @@ func TestRouterConfigValidate(t *testing.T) {
 			},
 			wantErr: "webhook port must be between",
 		},
+		{
+			name: "valid bmp stations",
+			envVars: map[string]string{
+				EnvRouterNodeName:    testRouterNodeName,
+				EnvRouterBMPStations: "gobmp:5000,[fc00:0:7::1]:5000,10.0.0.1:11019",
+			},
+			wantErr: "",
+		},
+		{
+			name: "bmp station without port",
+			envVars: map[string]string{
+				EnvRouterNodeName:    testRouterNodeName,
+				EnvRouterBMPStations: "gobmp",
+			},
+			wantErr: EnvRouterBMPStations,
+		},
+		{
+			name: "bmp station with port 0",
+			envVars: map[string]string{
+				EnvRouterNodeName:    testRouterNodeName,
+				EnvRouterBMPStations: "gobmp:0",
+			},
+			wantErr: "port must be between 1 and 65535",
+		},
+		{
+			name: "bmp station without host",
+			envVars: map[string]string{
+				EnvRouterNodeName:    testRouterNodeName,
+				EnvRouterBMPStations: ":5000",
+			},
+			wantErr: "has no host",
+		},
+		{
+			name: "unbracketed ipv6 bmp station",
+			envVars: map[string]string{
+				EnvRouterNodeName:    testRouterNodeName,
+				EnvRouterBMPStations: "fc00:0:7::1:5000",
+			},
+			wantErr: EnvRouterBMPStations,
+		},
+		{
+			name: "unknown bmp policy",
+			envVars: map[string]string{
+				EnvRouterNodeName:  testRouterNodeName,
+				EnvRouterBMPPolicy: "both",
+			},
+			wantErr: EnvRouterBMPPolicy,
+		},
+		{
+			name: "fractional bmp statistics interval",
+			envVars: map[string]string{
+				EnvRouterNodeName:              testRouterNodeName,
+				EnvRouterBMPStatisticsInterval: "1500ms",
+			},
+			wantErr: EnvRouterBMPStatisticsInterval,
+		},
+		{
+			name: "bmp statistics interval too long",
+			envVars: map[string]string{
+				EnvRouterNodeName:              testRouterNodeName,
+				EnvRouterBMPStatisticsInterval: "24h",
+			},
+			wantErr: EnvRouterBMPStatisticsInterval,
+		},
 	}
 
 	for _, tc := range tests {
@@ -189,6 +275,34 @@ func TestRouterConfigValidate(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("Validate() = %q, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseBMPStation(t *testing.T) {
+	tests := []struct {
+		in       string
+		wantHost string
+		wantPort uint16
+		wantErr  bool
+	}{
+		{in: "gobmp.galactic-system.svc:5000", wantHost: "gobmp.galactic-system.svc", wantPort: 5000},
+		{in: "[fc00:0:7::1]:5000", wantHost: "fc00:0:7::1", wantPort: 5000},
+		{in: "10.0.0.1:65535", wantHost: "10.0.0.1", wantPort: 65535},
+		{in: "gobmp", wantErr: true},
+		{in: "gobmp:65536", wantErr: true},
+		{in: "gobmp:abc", wantErr: true},
+		{in: "[]:5000", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			host, port, err := ParseBMPStation(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && (host != tt.wantHost || port != tt.wantPort) {
+				t.Errorf("= %q, %d, want %q, %d", host, port, tt.wantHost, tt.wantPort)
 			}
 		})
 	}

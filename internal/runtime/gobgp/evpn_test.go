@@ -142,7 +142,7 @@ func TestApplyEVPNWithdrawsOnlyUnclaimedRoutes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := newTestBgpServer(t)
-			rr, err := NewRuntimeFactory(-1, false, "", nil)(types.NamespacedName{Name: "test"})
+			rr, err := NewRuntimeFactory(-1, false, "", nil, BMPConfig{})(types.NamespacedName{Name: "test"})
 			if err != nil {
 				t.Fatalf("new runtime: %v", err)
 			}

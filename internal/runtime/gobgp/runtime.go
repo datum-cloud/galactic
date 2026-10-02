@@ -109,6 +109,9 @@ type GoBGPRuntime struct {
 	// observer, when non-nil, is notified of every peer FSM transition
 	// detected. It may be nil in tests that construct a runtime directly.
 	observer model.PeerStateObserver
+	// bmp keeps this runtime's BMP stations registered on its GoBGP server. It
+	// is nil when BMP export is not configured.
+	bmp *bmpKeeper
 	// wg tracks the server and RIB watcher goroutines so Stop blocks until both
 	// have exited rather than merely being asked to. GoBGP keeps some
 	// path-selection state in package-level globals rather than per-server
@@ -127,9 +130,10 @@ type GoBGPRuntime struct {
 // whether it is the fabric's route reflector, even where the two coincide today.
 // localAddress, when non-empty, is bound as the source address for outgoing BGP
 // connections. observer, when non-nil, is notified of every peer FSM transition
-// each created runtime detects.
+// each created runtime detects. bmp configures BMP export from each created
+// runtime; its zero value disables it.
 func NewRuntimeFactory(
-	listenPort int32, reflector bool, localAddress string, observer model.PeerStateObserver,
+	listenPort int32, reflector bool, localAddress string, observer model.PeerStateObserver, bmp BMPConfig,
 ) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		return &GoBGPRuntime{
@@ -149,6 +153,7 @@ func NewRuntimeFactory(
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 			appliedRoutes:         make(map[evpnRouteKey]evpnRoute),
 			observer:              observer,
+			bmp:                   newBMPKeeper(bmp, key.String()),
 		}, nil
 	}
 }
@@ -163,7 +168,10 @@ func (r *GoBGPRuntime) Apply(ctx context.Context, desired model.DesiredRouter) e
 		return err
 	}
 
-	if err := r.applyGlobal(ctx, b, desired); err != nil {
+	// applyGlobal can replace the server, so everything after it must use the
+	// server it returns.
+	b, err = r.applyGlobal(ctx, b, desired)
+	if err != nil {
 		return err
 	}
 
@@ -201,6 +209,13 @@ func (r *GoBGPRuntime) startGoBGP(ctx context.Context) (*gobgpserver.BgpServer, 
 			defer r.wg.Done()
 			_ = r.server.Start(srvCtx)
 		}()
+		if r.bmp != nil {
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				r.bmp.run(srvCtx)
+			}()
+		}
 
 		waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
 		defer waitCancel()
@@ -214,8 +229,13 @@ func (r *GoBGPRuntime) startGoBGP(ctx context.Context) (*gobgpserver.BgpServer, 
 }
 
 // applyGlobal starts or reconfigures the BGP global instance and persists
-// the last-seen ASN/RouterID/ListenPort so future changes can be detected.
-func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer, desired model.DesiredRouter) error {
+// the last-seen ASN/RouterID/ListenPort so future changes can be detected. A
+// change to any of the three replaces the server, since GoBGP cannot change
+// them on a started one; it returns the server now running, which is b unless
+// it was replaced.
+func (r *GoBGPRuntime) applyGlobal(
+	ctx context.Context, b *gobgpserver.BgpServer, desired model.DesiredRouter,
+) (*gobgpserver.BgpServer, error) {
 	listenPort := r.listenPort
 	if desired.ListenPort != nil {
 		listenPort = *desired.ListenPort
@@ -225,10 +245,13 @@ func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer
 	idChanged := r.lastRouterID != "" && r.lastRouterID != desired.RouterID
 	listenPortChanged := r.lastListenPort != 0 && r.lastListenPort != listenPort
 	if asnChanged || idChanged || listenPortChanged {
+		// Before the old server stops: GoBGP leaves a stopped server's BMP
+		// clients running.
+		r.bmp.detach(ctx)
 		var recErr error
 		b, recErr = r.server.Reconfigure()
 		if recErr != nil {
-			return fmt.Errorf("reconfigure gobgp: %w", recErr)
+			return nil, fmt.Errorf("reconfigure gobgp: %w", recErr)
 		}
 	}
 
@@ -242,13 +265,14 @@ func (r *GoBGPRuntime) applyGlobal(ctx context.Context, b *gobgpserver.BgpServer
 			Families:   globalFamilies(desired.AddressFamilies),
 		}
 		if err := b.StartBgp(ctx, &api.StartBgpRequest{Global: global}); err != nil {
-			return fmt.Errorf("start bgp: %w", err)
+			return nil, fmt.Errorf("start bgp: %w", err)
 		}
 	}
 	r.lastASN = desired.LocalASN
 	r.lastRouterID = desired.RouterID
 	r.lastListenPort = listenPort
-	return nil
+	r.bmp.attach(b)
+	return b, nil
 }
 
 // applyPeers adds, updates, and removes BGP peers to match desired state.
@@ -646,10 +670,13 @@ func (r *GoBGPRuntime) Status(ctx context.Context) (model.RuntimeStatus, error) 
 // EVPN RIB watcher have both exited rather than merely been asked to. A caller
 // that creates another runtime immediately after would otherwise race the
 // outgoing server's package-level path-selection state; see the wg field.
-func (r *GoBGPRuntime) Stop(_ context.Context) error {
+func (r *GoBGPRuntime) Stop(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Before the server stops, for the same reason as in applyGlobal, and so
+	// each collector receives a Termination rather than a reset.
+	r.bmp.detach(ctx)
 	if r.serverCtxCancel != nil {
 		r.serverCtxCancel()
 		r.serverCtxCancel = nil
