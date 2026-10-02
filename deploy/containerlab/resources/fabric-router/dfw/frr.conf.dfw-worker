@@ -70,6 +70,22 @@ router bgp 65000
   neighbor 10.1.13.1 allowas-in 1
   network 10.255.255.2/32
  exit-address-family
+ # Streams this node's underlay BGP to the lab's BMP collector on
+ # iad-worker3 (resources/bmp-collector/iad/): each peer's Adj-RIB-In before
+ # import policy (what it sent) and the Loc-RIB (what was selected), for
+ # both families, plus Peer Up/Down with the reason and any NOTIFICATION.
+ # FRR has no Adj-RIB-Out monitoring. source-interface lo is required: the
+ # collector is reached over the underlay, which carries loopbacks but not
+ # link subnets, so a session sourced from the outgoing link's address
+ # never gets a reply.
+ bmp targets collector
+  bmp connect fc00:0:8::1 port 5000 min-retry 1000 max-retry 30000 source-interface lo
+  bmp monitor ipv4 unicast pre-policy
+  bmp monitor ipv4 unicast loc-rib
+  bmp monitor ipv6 unicast pre-policy
+  bmp monitor ipv6 unicast loc-rib
+  bmp stats interval 60000
+ exit
 
 ip forwarding
 ipv6 forwarding

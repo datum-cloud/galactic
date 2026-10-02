@@ -19,4 +19,8 @@ pathd=no
 
 vtysh_enable=yes
 zebra_options="  -A 127.0.0.1 -s 90000000"
-bgpd_options="  -A 127.0.0.1"
+# -M bmp loads the BMP module (bgpd_bmp.so, shipped in the FRR image), so a
+# node's frr.conf can stream to a BMP collector with "bmp targets". Loading it
+# alone streams nothing. A module can only be loaded at startup, so changing
+# this needs a pod restart, not a config reload.
+bgpd_options="  -A 127.0.0.1 -M bmp"
