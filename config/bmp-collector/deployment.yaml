@@ -42,14 +42,14 @@ spec:
             - --source-port=5000
             - --dump=console
             - --logtostderr
+          # No probe: a TCP probe opens and drops a BMP connection each period,
+          # which GoBMP logs as a session starting and stopping, filling the
+          # very log stream that holds its output, and the image has no shell
+          # for an exec probe.
           ports:
             - name: bmp
               containerPort: 5000
               protocol: TCP
-          readinessProbe:
-            tcpSocket:
-              port: bmp
-            periodSeconds: 10
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
