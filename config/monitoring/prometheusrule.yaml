@@ -1,0 +1,117 @@
+# Alerts on the underlay (fabric-router's FRR, via frr-exporter) and on
+# galactic-router's BMP export. A BGP session that drops is also streamed to
+# the BMP collector as a Peer Down carrying the reason and any NOTIFICATION;
+# these rules are the Prometheus-side signal for the same events, so an alert
+# does not depend on the collector or the log pipeline behind it.
+#
+# Unit tests: tests/rules-test.yaml, run with task test:alerts.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: galactic-bgp
+  labels:
+    app.kubernetes.io/name: galactic-bgp
+spec:
+  groups:
+    - name: fabric-router
+      rules:
+        # frr_bgp_peer_state is 1 for Established, 0 for any other FSM state,
+        # 2 for a neighbor that is administratively shut down. Only 0 is an
+        # outage; a deliberate shutdown is covered by the next rule.
+        - alert: FabricBGPSessionDown
+          expr: frr_bgp_peer_state{job="fabric-router"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Underlay BGP session {{ $labels.node }} -> {{ $labels.peer }} ({{ $labels.afi }}) is down"
+            description: >-
+              fabric-router on {{ $labels.node }} has not had its {{ $labels.afi }} {{ $labels.safi }} session to
+              {{ $labels.peer }} (AS {{ $labels.peer_as }}) Established for 5 minutes. The BMP collector's Peer Down
+              for this session carries the reason and any NOTIFICATION.
+        - alert: FabricBGPSessionAdminDown
+          expr: frr_bgp_peer_state{job="fabric-router"} == 2
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Underlay BGP session {{ $labels.node }} -> {{ $labels.peer }} ({{ $labels.afi }}) has been shut down for an hour"
+            description: >-
+              The neighbor is administratively shut down in fabric-router's running config on {{ $labels.node }}.
+              Re-enable it, or remove it from that node's fabric-router.<nodename> ConfigMap if the shutdown is
+              meant to last.
+        # A session's uptime falls back toward zero each time it re-establishes,
+        # so resets() counts re-establishments, including flaps that come and
+        # go between two scrapes and never show in frr_bgp_peer_state.
+        - alert: FabricBGPSessionFlapping
+          expr: resets(frr_bgp_peer_uptime_seconds{job="fabric-router"}[30m]) >= 3
+          labels:
+            severity: warning
+          annotations:
+            summary: "Underlay BGP session {{ $labels.node }} -> {{ $labels.peer }} ({{ $labels.afi }}) is flapping"
+            description: >-
+              The session re-established {{ $value }} times in the last 30 minutes. The BMP collector's Peer Down
+              messages for it carry the reason for each drop.
+        # Compared against the same session an hour ago, so a session new
+        # within the hour has nothing to compare against and does not alert,
+        # and only while the session is Established, since a session that is
+        # down already has FabricBGPSessionDown.
+        - alert: FabricBGPPrefixesDropped
+          expr: |
+            (
+              frr_bgp_peer_prefixes_received_count_total{job="fabric-router"}
+                < 0.5 * (frr_bgp_peer_prefixes_received_count_total{job="fabric-router"} offset 1h)
+            )
+            and frr_bgp_peer_state{job="fabric-router"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.node }} receives under half its usual prefixes from {{ $labels.peer }} ({{ $labels.afi }})"
+            description: >-
+              {{ $labels.node }} now receives {{ $value }} {{ $labels.afi }} prefixes from {{ $labels.peer }}, under
+              half what it received an hour ago, while the session stays up. Check the peer's export policy and
+              this node's import filters; the BMP collector's pre-policy routes show what the peer actually sent.
+        - alert: FabricRouterExporterCollectorFailing
+          expr: frr_collector_up{job="fabric-router"} == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "frr-exporter's {{ $labels.collector }} collector is failing on {{ $labels.node }}"
+            description: >-
+              frr-exporter on {{ $labels.node }} cannot read the {{ $labels.collector }} data from FRR, usually
+              because a daemon's vty socket in /run/frr is missing or unreadable. The other fabric-router alerts on
+              this node are blind until it recovers.
+        - alert: FabricRouterMetricsDown
+          expr: up{job="fabric-router"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "fabric-router metrics on {{ $labels.node }} cannot be scraped"
+            description: >-
+              Prometheus cannot reach frr-exporter on {{ $labels.node }} (port 9342). Every other fabric-router
+              alert on this node is blind until it recovers.
+    - name: galactic-router
+      rules:
+        - alert: GalacticRouterBMPStationDown
+          expr: galactic_router_bmp_station_up{job=~"galactic-router|galactic-router-rr"} == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.router }} on {{ $labels.node }} is not streaming to BMP collector {{ $labels.station }}"
+            description: >-
+              galactic-router's BMP session to {{ $labels.station }} has been down for 10 minutes, or the station's
+              name does not resolve. Route history and Peer Down events for this router are not being recorded.
+        - alert: GalacticRouterMetricsDown
+          expr: up{job=~"galactic-router|galactic-router-rr"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }} metrics on {{ $labels.node }} cannot be scraped"
+            description: >-
+              Prometheus cannot reach galactic-router's metrics port on {{ $labels.node }} (9179), so
+              GalacticRouterBMPStationDown cannot fire for it.

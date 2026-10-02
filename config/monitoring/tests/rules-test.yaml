@@ -1,0 +1,199 @@
+# promtool unit tests for ../prometheusrule.yaml. task test:alerts extracts the
+# PrometheusRule's spec into rules.yaml beside this file and runs
+# `promtool test rules` on it. Series are sampled every 30s, the PodMonitors'
+# scrape interval.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30s
+tests:
+  # Down for 5m fires; administratively shut down does not.
+  - interval: 30s
+    input_series:
+      - series: 'frr_bgp_peer_state{job="fabric-router",node="dfw-worker",peer="10.1.10.1",peer_as="65000",afi="ipv4",safi="unicast"}'
+        values: "1x10 0x20"
+      - series: 'frr_bgp_peer_state{job="fabric-router",node="dfw-worker",peer="2001:db8:1:10::1",peer_as="65000",afi="ipv6",safi="unicast"}'
+        values: "1x10 2x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FabricBGPSessionDown
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: FabricBGPSessionDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: fabric-router
+              node: dfw-worker
+              peer: 10.1.10.1
+              peer_as: "65000"
+              afi: ipv4
+              safi: unicast
+            exp_annotations:
+              summary: "Underlay BGP session dfw-worker -> 10.1.10.1 (ipv4) is down"
+              description: >-
+                fabric-router on dfw-worker has not had its ipv4 unicast session to 10.1.10.1 (AS 65000)
+                Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
+                any NOTIFICATION.
+      - eval_time: 11m
+        alertname: FabricBGPSessionAdminDown
+        exp_alerts: []
+
+  # Shut down for an hour fires.
+  - interval: 30s
+    input_series:
+      - series: 'frr_bgp_peer_state{job="fabric-router",node="dfw-worker",peer="10.1.10.1",peer_as="65000",afi="ipv4",safi="unicast"}'
+        values: "2x130"
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: FabricBGPSessionAdminDown
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: FabricBGPSessionAdminDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: fabric-router
+              node: dfw-worker
+              peer: 10.1.10.1
+              peer_as: "65000"
+              afi: ipv4
+              safi: unicast
+            exp_annotations:
+              summary: "Underlay BGP session dfw-worker -> 10.1.10.1 (ipv4) has been shut down for an hour"
+              description: >-
+                The neighbor is administratively shut down in fabric-router's running config on dfw-worker.
+                Re-enable it, or remove it from that node's fabric-router.<nodename> ConfigMap if the shutdown is
+                meant to last.
+
+  # Three re-establishments within 30 minutes fire, even though every one
+  # came back before the next scrape; a single one does not.
+  - interval: 30s
+    input_series:
+      - series: 'frr_bgp_peer_uptime_seconds{job="fabric-router",node="sjc-worker",peer="10.1.20.1",afi="ipv4",safi="unicast"}'
+        values: "600+30x4 10+30x4 10+30x4 10+30x4"
+      - series: 'frr_bgp_peer_uptime_seconds{job="fabric-router",node="sjc-worker",peer="2001:db8:1:20::1",afi="ipv6",safi="unicast"}'
+        values: "600+30x4 10+30x14"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FabricBGPSessionFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: fabric-router
+              node: sjc-worker
+              peer: 10.1.20.1
+              afi: ipv4
+              safi: unicast
+            exp_annotations:
+              summary: "Underlay BGP session sjc-worker -> 10.1.20.1 (ipv4) is flapping"
+              description: >-
+                The session re-established 3 times in the last 30 minutes. The BMP collector's Peer Down messages
+                for it carry the reason for each drop.
+
+  # Falling below half of an hour ago fires after 15m while Established; not
+  # while the session is down, and not for a session too new to compare.
+  - interval: 30s
+    input_series:
+      - series: 'frr_bgp_peer_prefixes_received_count_total{job="fabric-router",node="iad-worker2",peer="10.1.30.2",afi="ipv4",safi="unicast"}'
+        values: "20x120 5x60"
+      - series: 'frr_bgp_peer_state{job="fabric-router",node="iad-worker2",peer="10.1.30.2",afi="ipv4",safi="unicast"}'
+        values: "1x180"
+      - series: 'frr_bgp_peer_prefixes_received_count_total{job="fabric-router",node="iad-worker2",peer="10.1.31.2",afi="ipv4",safi="unicast"}'
+        values: "20x120 5x60"
+      - series: 'frr_bgp_peer_state{job="fabric-router",node="iad-worker2",peer="10.1.31.2",afi="ipv4",safi="unicast"}'
+        values: "1x120 0x60"
+      - series: 'frr_bgp_peer_prefixes_received_count_total{job="fabric-router",node="iad-worker2",peer="10.1.32.2",afi="ipv4",safi="unicast"}'
+        values: "_x120 5x60"
+      - series: 'frr_bgp_peer_state{job="fabric-router",node="iad-worker2",peer="10.1.32.2",afi="ipv4",safi="unicast"}'
+        values: "_x120 1x60"
+    alert_rule_test:
+      - eval_time: 74m
+        alertname: FabricBGPPrefixesDropped
+        exp_alerts: []
+      - eval_time: 76m
+        alertname: FabricBGPPrefixesDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: fabric-router
+              node: iad-worker2
+              peer: 10.1.30.2
+              afi: ipv4
+              safi: unicast
+            exp_annotations:
+              summary: "iad-worker2 receives under half its usual prefixes from 10.1.30.2 (ipv4)"
+              description: >-
+                iad-worker2 now receives 5 ipv4 prefixes from 10.1.30.2, under half what it received an hour ago,
+                while the session stays up. Check the peer's export policy and this node's import filters; the BMP
+                collector's pre-policy routes show what the peer actually sent.
+
+  - interval: 30s
+    input_series:
+      - series: 'frr_collector_up{job="fabric-router",node="iad-worker",collector="bgp6"}'
+        values: "1x5 0x30"
+      - series: 'up{job="fabric-router",node="iad-worker"}'
+        values: "1x5 0x30"
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: FabricRouterExporterCollectorFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: fabric-router
+              node: iad-worker
+              collector: bgp6
+            exp_annotations:
+              summary: "frr-exporter's bgp6 collector is failing on iad-worker"
+              description: >-
+                frr-exporter on iad-worker cannot read the bgp6 data from FRR, usually because a daemon's vty
+                socket in /run/frr is missing or unreadable. The other fabric-router alerts on this node are blind
+                until it recovers.
+      - eval_time: 13m
+        alertname: FabricRouterMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: fabric-router
+              node: iad-worker
+            exp_annotations:
+              summary: "fabric-router metrics on iad-worker cannot be scraped"
+              description: >-
+                Prometheus cannot reach frr-exporter on iad-worker (port 9342). Every other fabric-router alert on
+                this node is blind until it recovers.
+
+  # A station down for 10m fires; one that recovers inside that does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_router_bmp_station_up{job="galactic-router-rr",node="iad-worker3",router="galactic-system/galactic-control",station="[fc00:0:8::1]:5000"}'
+        values: "1x5 0x30"
+      - series: 'galactic_router_bmp_station_up{job="galactic-router",node="dfw-worker",router="galactic-system/galactic-router",station="[fc00:0:8::1]:5000"}'
+        values: "1x5 0x10 1x20"
+      - series: 'up{job="galactic-router-rr",node="iad-worker3"}'
+        values: "1x5 0x30"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: GalacticRouterBMPStationDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: galactic-router-rr
+              node: iad-worker3
+              router: galactic-system/galactic-control
+              station: "[fc00:0:8::1]:5000"
+            exp_annotations:
+              summary: "galactic-system/galactic-control on iad-worker3 is not streaming to BMP collector [fc00:0:8::1]:5000"
+              description: >-
+                galactic-router's BMP session to [fc00:0:8::1]:5000 has been down for 10 minutes, or the station's
+                name does not resolve. Route history and Peer Down events for this router are not being recorded.
+      - eval_time: 14m
+        alertname: GalacticRouterMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: galactic-router-rr
+              node: iad-worker3
+            exp_annotations:
+              summary: "galactic-router-rr metrics on iad-worker3 cannot be scraped"
+              description: >-
+                Prometheus cannot reach galactic-router's metrics port on iad-worker3 (9179), so
+                GalacticRouterBMPStationDown cannot fire for it.

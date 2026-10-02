@@ -1,0 +1,21 @@
+# Scrapes each fabric-router pod's frr-exporter sidecar (port frr-metrics,
+# 9342), which serves underlay BGP peer state, message counters and prefix
+# counts. The pod uses hostNetwork, so its pod IP is the node's own.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: fabric-router
+  labels:
+    app.kubernetes.io/name: fabric-router
+spec:
+  # job="fabric-router", which the alert rules match on.
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabric-router
+  podMetricsEndpoints:
+    - port: frr-metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

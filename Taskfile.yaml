@@ -13,6 +13,7 @@ vars:
   GOLANGCI_LINT_VERSION: v2.12.2
   YAMLFMT_VERSION: v0.21.0
   GO_LICENSES_VERSION: v1.6.0
+  PROMETHEUS_VERSION: v3.15.0
 
 tasks:
   default:
@@ -163,6 +164,20 @@ tasks:
     deps: [build:ebpf]
     cmds:
       - bash scripts/ci.sh unittest-root
+
+  test:alerts:
+    desc: Unit-test the alert rules in config/monitoring/ with promtool
+    # promtool reads plain rule files, so the PrometheusRule's spec is
+    # extracted first. Both tools run from their images, so nothing needs
+    # installing; not part of ci, which has no Docker-image dependency of its own.
+    vars:
+      ALERTS_DIR: '{{.LOCALBIN}}/alerts-test'
+    cmds:
+      - mkdir -p {{.ALERTS_DIR}}
+      - docker run --rm -i mikefarah/yq:4 '.spec' < config/monitoring/prometheusrule.yaml > {{.ALERTS_DIR}}/rules.yaml
+      - cp config/monitoring/tests/rules-test.yaml {{.ALERTS_DIR}}/
+      - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} check rules rules.yaml
+      - docker run --rm -v {{.ALERTS_DIR}}:/t -w /t --entrypoint promtool prom/prometheus:{{.PROMETHEUS_VERSION}} test rules rules-test.yaml
 
   test:e2e:
     desc: E2E tests (Kind cluster, build+load image, lifecycle)
