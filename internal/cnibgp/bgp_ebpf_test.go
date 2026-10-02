@@ -16,6 +16,7 @@ import (
 
 	"go.datum.net/galactic/internal/cni/tap"
 	"go.datum.net/galactic/internal/cni/veth"
+	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
@@ -240,8 +241,9 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 		firstAttachment  = testAttachment
 		secondAttachment = "def2"
 
-		firstPrefix  = "fd20:30:ff01::/96"
-		secondPrefix = "fd20:30:ff02::/96"
+		firstPrefix   = "fd20:30:ff01::/96"
+		secondPrefix  = "fd20:30:ff02::/96"
+		gatewayPrefix = "fd20:30::1/128"
 	)
 
 	if err := vrf.Add(vpc); err != nil {
@@ -267,15 +269,21 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
+	firstLocal := localEgressPrefixes(&cniipam.IPAMResult{
+		IPv6Subnet: mustParseCIDR(t, firstPrefix), IPv6Gateway: net.ParseIP("fd20:30::1"),
+	})
+	secondLocal := localEgressPrefixes(&cniipam.IPAMResult{
+		IPv6Subnet: mustParseCIDR(t, secondPrefix), IPv6Gateway: net.ParseIP("fd20:30::1"),
+	})
 	if _, err := registerEBPFDatapath(
-		cfg, vpc, firstAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, []string{firstPrefix},
+		cfg, vpc, firstAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, firstLocal,
 	); err != nil {
 		t.Fatalf("first attachment's registerEBPFDatapath: %v", err)
 	}
 	// A second attachment on the same VPC/node resolves the same Argument
 	// (allocateArgument's idempotent lookup) and re-registers the same key.
 	registered, err := registerEBPFDatapath(
-		cfg, vpc, secondAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, []string{secondPrefix},
+		cfg, vpc, secondAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, secondLocal,
 	)
 	if err != nil {
 		t.Fatalf("second attachment's registerEBPFDatapath: %v", err)
@@ -314,7 +322,7 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 		t.Fatalf("OpenPinnedEgressRouteTable: %v", err)
 	}
 	defer func() { _ = egressCloser.Close() }()
-	for _, prefixStr := range []string{firstPrefix, secondPrefix} {
+	for _, prefixStr := range []string{firstPrefix, secondPrefix, gatewayPrefix} {
 		_, prefix, err := net.ParseCIDR(prefixStr)
 		if err != nil {
 			t.Fatalf("ParseCIDR(%q): %v", prefixStr, err)
