@@ -325,6 +325,7 @@ tasks:
       - task: "verify:bonds"
       - task: "verify:bgp-transit"
       - task: "verify:bgp-fabric"
+      - task: "verify:fabric-metrics"
       - task: "verify:bgp-peers"
       - task: "verify:underlay"
       - task: "verify:srv6"
@@ -375,6 +376,11 @@ tasks:
               -- vtysh -c "show bgp ${af} unicast summary"
           done
         done
+
+  "verify:fabric-metrics":
+    desc: Verify every fabric-router's frr-exporter reports all underlay sessions Established
+    cmds:
+      - ./scripts/verify-fabric-metrics.sh
 
   "verify:bgp-peers":
     desc: Verify galactic-router BGP peer sessions
