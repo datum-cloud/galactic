@@ -1,6 +1,8 @@
-# BMP (RFC 7854) collector for galactic-router: a single GoBMP instance behind
-# the bmp-collector Service. Point a router at it with
-# GALACTIC_ROUTER_BMP_STATIONS=bmp-collector.galactic-system.svc:5000.
+# BMP (RFC 7854) collector for galactic-router and fabric-router: a single
+# GoBMP instance behind the bmp-collector Service. Point galactic-router at it
+# with GALACTIC_ROUTER_BMP_STATIONS=bmp-collector.galactic-system.svc:5000, and
+# a fabric-router node with a "bmp targets" block in its frr.conf (see
+# deploy/containerlab/resources/fabric-router/ for one).
 #
 # Not part of config/kustomization.yaml's default resources: nothing streams to
 # it until a router is configured to, and where its output goes (stdout by

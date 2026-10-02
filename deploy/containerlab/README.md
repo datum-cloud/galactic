@@ -490,7 +490,7 @@ task deploy
 | `deploy:ns30`             | Deploy ns30 test VPC (dfw only, 2 pods)                                                                     |
 | `deploy:ns40`             | Deploy ns40 test VPC (iad only, 2 pods)                                                                     |
 | `verify:fabric-metrics`   | Scrape every fabric-router's frr-exporter; fail on a failed collector or a session not Established          |
-| `verify:bmp`              | Check the route reflector's BMP session is up and the collector last saw a Peer Up for every reflector peer |
+| `verify:bmp`              | Check the route reflector and every fabric-router stream to the BMP collector, and that it agrees with each on every session's state |
 | `verify:underlay`         | Ping every underlay loopback from tr1 over both IPv4 and IPv6                                               |
 | `verify:nat-datapath`     | Full egress round trip to the off-fabric host, IPv6 (NAT66) and IPv4 (NAT64)                                |
 | `verify:nat-return-route` | Prove a reply from outside the fabric reaches each shard's masquerade addresses                             |
