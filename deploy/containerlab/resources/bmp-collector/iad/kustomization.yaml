@@ -1,0 +1,10 @@
+namespace: galactic-system
+# collector is config/bmp-collector/, copied here by deploy-bmp-collector.sh
+# (kustomize requires resources in or below the overlay root).
+resources:
+  - collector
+patches:
+  - path: collector-lab-patch.yaml
+    target:
+      kind: Deployment
+      name: bmp-collector

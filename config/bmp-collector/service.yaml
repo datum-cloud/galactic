@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bmp-collector
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: bmp-collector
+spec:
+  selector:
+    app.kubernetes.io/name: bmp-collector
+  ports:
+    - name: bmp
+      port: 5000
+      targetPort: bmp
+      protocol: TCP

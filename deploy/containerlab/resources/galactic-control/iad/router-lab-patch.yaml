@@ -9,3 +9,10 @@ spec:
         - name: galactic-router
           image: galactic-router:latest
           imagePullPolicy: Never
+          # Streams the reflector's Adj-RIB-In, every node's EVPN
+          # advertisements, to the lab's BMP collector on this same node
+          # (resources/bmp-collector/iad/). The plain-mode routers leave BMP
+          # off: the reflector already sees everything they advertise.
+          env:
+            - name: GALACTIC_ROUTER_BMP_STATIONS
+              value: "[fc00:0:8::1]:5000"

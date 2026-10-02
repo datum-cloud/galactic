@@ -1,0 +1,18 @@
+# One collector for the whole lab, on the EVPN route reflector's node. The lab
+# is three separate clusters, so the bmp-collector Service in iad is not
+# reachable from dfw or sjc; the collector instead listens on iad-worker3's
+# own host network, where every node reaches it over the underlay at
+# iad-worker3's loopback, [fc00:0:8::1]:5000.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bmp-collector
+spec:
+  template:
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: iad-worker3
+      tolerations:
+        - operator: Exists

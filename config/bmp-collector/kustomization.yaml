@@ -1,0 +1,10 @@
+# BMP (RFC 7854) collector for galactic-router: a single GoBMP instance behind
+# the bmp-collector Service. Point a router at it with
+# GALACTIC_ROUTER_BMP_STATIONS=bmp-collector.galactic-system.svc:5000.
+#
+# Not part of config/kustomization.yaml's default resources: nothing streams to
+# it until a router is configured to, and where its output goes (stdout by
+# default, or Kafka) is a per-deployment choice.
+resources:
+  - deployment.yaml
+  - service.yaml

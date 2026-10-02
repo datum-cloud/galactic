@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bmp-collector
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: bmp-collector
+spec:
+  # One replica: each router holds one BMP session per station, and a second
+  # replica behind the Service would only split routers between two
+  # collectors' outputs.
+  replicas: 1
+  # Routers reconnect on their own, so a rollout gains nothing from overlap,
+  # and an overlay that pins the collector to one node's host network cannot
+  # run two pods there at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bmp-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bmp-collector
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gobmp
+          # Upstream publishes only :latest, so the digest is what pins it.
+          image: docker.io/sbezverk/gobmp:latest@sha256:34a661bb40ea78ab760b313174373dc469b3b943e3d756fc189ee1bcf481b2d0
+          # Parses every BMP message (Peer Up/Down with the reason and any
+          # NOTIFICATION, route monitoring, statistics) into JSON and writes
+          # it to stdout, one message per line, so the cluster's log
+          # pipeline is its store. To publish to Kafka instead, replace
+          # --dump with --kafka-server=<broker:port> in an overlay.
+          args:
+            - --source-port=5000
+            - --dump=console
+            - --logtostderr
+          # No probe: a TCP probe opens and drops a BMP connection each period,
+          # which GoBMP logs as a session starting and stopping, filling the
+          # very log stream that holds its output, and the image has no shell
+          # for an exec probe.
+          ports:
+            - name: bmp
+              containerPort: 5000
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
