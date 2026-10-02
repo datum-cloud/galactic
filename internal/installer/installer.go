@@ -368,7 +368,31 @@ func Bootstrap(ctx context.Context, nodeName string) error {
 	nat64Prefix := resolveNAT64Prefix()
 	ebpfInterfaces := resolveEBPFInterfaces()
 	danDir := os.Getenv(config.EnvCNIDANDir)
-	conflistContent := fmt.Sprintf(`{
+	conflistContent := renderConflist(&hostconf.HostConf{
+		NodeName:        nodeName,
+		Kubeconfig:      config.DefaultKubeconfig,
+		Namespace:       config.DefaultNamespace,
+		LogFile:         config.DefaultLogFile,
+		LogLevel:        logLevel,
+		EgressShardSIDs: egressShardSIDs,
+		NAT64Prefix:     nat64Prefix,
+		EBPFInterfaces:  ebpfInterfaces,
+		DANDir:          danDir,
+	})
+
+	if err := atomicWriteFile(HostConflist, []byte(conflistContent), 0644); err != nil {
+		return fmt.Errorf("write conflist file: %w", err)
+	}
+	slog.Info("Static CNI conflist written successfully")
+
+	return nil
+}
+
+// renderConflist renders the static host conflist from hc. Bootstrap writes it
+// first, and rewriteEBPFInterfaces rewrites it whenever the datapath's attached
+// set changes, so both go through this one template.
+func renderConflist(hc *hostconf.HostConf) string {
+	return fmt.Sprintf(`{
   "cniVersion": "1.0.0",
   "name": "galactic",
   "plugins": [
@@ -386,15 +410,42 @@ func Bootstrap(ctx context.Context, nodeName string) error {
     }
   ]
 }
-`, nodeName, config.DefaultKubeconfig, config.DefaultNamespace, config.DefaultLogFile, logLevel,
-		egressShardSIDs, nat64Prefix, ebpfInterfaces, danDir)
+`, hc.NodeName, hc.Kubeconfig, hc.Namespace, hc.LogFile, hc.LogLevel,
+		hc.EgressShardSIDs, hc.NAT64Prefix, hc.EBPFInterfaces, hc.DANDir)
+}
 
-	if err := atomicWriteFile(HostConflist, []byte(conflistContent), 0644); err != nil {
-		return fmt.Errorf("write conflist file: %w", err)
+// rewriteEBPFInterfaces rewrites the host conflist's ebpf_interfaces field to
+// names, leaving every other field as it is on disk. The datapath's watch loop
+// calls it each time its attached set changes.
+//
+// Bootstrap resolves the list once, in an init container that often runs
+// before BGP has converged. A link that only carries fabric routes later is
+// then attached by the daemon but missing from the conflist, and since the
+// plugin enforces the conflist's list, every egress route leaving through that
+// link is rejected and every ADD on the node fails until the pod restarts.
+//
+// A failure is logged, not returned: the watch loop has nothing better to do
+// with it, and the next change retries the write.
+func rewriteEBPFInterfaces(names []string) {
+	hc, err := hostconf.Load(HostConflist, hostconf.PluginType)
+	if err != nil {
+		slog.Warn("Could not update the conflist's eBPF interface list; CNI ADD keeps enforcing the old one",
+			"interfaces", names, "err", err)
+		return
 	}
-	slog.Info("Static CNI conflist written successfully")
-
-	return nil
+	joined := strings.Join(names, ",")
+	if hc.EBPFInterfaces == joined {
+		return
+	}
+	previous := hc.EBPFInterfaces
+	hc.EBPFInterfaces = joined
+	if err := atomicWriteFile(HostConflist, []byte(renderConflist(hc)), 0644); err != nil {
+		slog.Warn("Could not update the conflist's eBPF interface list; CNI ADD keeps enforcing the old one",
+			"interfaces", names, "err", err)
+		return
+	}
+	slog.Info("Updated the conflist's eBPF interface list to match the attached datapath",
+		"previous", previous, "interfaces", joined)
 }
 
 // writeKubeconfig writes the kubeconfig file using the ServiceAccount token.
@@ -471,6 +522,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	slog.Info("eBPF uSID datapath loaded, pinned, and attached", "interfaces", ifaces, "pinDir", attach.PinDir)
 
 	state := ebpfDatapathState{ifaces: ifaces, watcher: watcher}
+	watcher.OnChange(rewriteEBPFInterfaces)
 
 	// The closer is the loaded objects in production. A test fake stands in a
 	// plain mock closer, which correctly leaves the metrics, health, and GC
