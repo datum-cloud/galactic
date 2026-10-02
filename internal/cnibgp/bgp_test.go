@@ -313,7 +313,10 @@ func TestIPAMAdvertisementPrefixesIPv4Only(t *testing.T) {
 
 func TestIPAMAdvertisementPrefixesDualStack(t *testing.T) {
 	ipv6Subnet := mustParseCIDR(t, "fd00:10:ff01::1234/96")
-	res := &cniipam.IPAMResult{IPv6Subnet: ipv6Subnet, IPv4Address: net.ParseIP("10.128.0.5")}
+	res := &cniipam.IPAMResult{
+		IPv6Subnet: ipv6Subnet, IPv4Address: net.ParseIP("10.128.0.5"),
+		IPv6Gateway: net.ParseIP("fd00:10:ff01::1"), IPv4Gateway: net.ParseIP("10.128.0.1"),
+	}
 
 	prefixes, gotIPv6Subnet, gotIPv4Addr := ipamAdvertisementPrefixes(res)
 
@@ -325,6 +328,51 @@ func TestIPAMAdvertisementPrefixesDualStack(t *testing.T) {
 	}
 	if len(prefixes) != 2 || prefixes[0] != ipv6Subnet.String() || prefixes[1] != "10.128.0.5/32" {
 		t.Errorf("prefixes = %v, want [%q, \"10.128.0.5/32\"]", prefixes, ipv6Subnet.String())
+	}
+}
+
+func TestLocalEgressPrefixes(t *testing.T) {
+	const ipv4Prefix = "10.128.0.5/32"
+	subnet := mustParseCIDR(t, "fd20:0:9::1:0:0/96")
+	gateway := net.ParseIP("fd20:0:9::1")
+	if subnet.Contains(gateway) {
+		t.Fatal("regression fixture must have a gateway outside the guest subnet")
+	}
+	tests := []struct {
+		name string
+		res  *cniipam.IPAMResult
+		want []string
+	}{
+		{name: "nil allocation"},
+		{name: "empty allocation", res: &cniipam.IPAMResult{}},
+		{
+			name: "no gateways", res: &cniipam.IPAMResult{IPv6Subnet: subnet, IPv4Address: net.ParseIP("10.128.0.5")},
+			want: []string{subnet.String(), ipv4Prefix},
+		},
+		{
+			name: "IPv6 gateway outside subnet", res: &cniipam.IPAMResult{IPv6Subnet: subnet, IPv6Gateway: gateway},
+			want: []string{subnet.String(), "fd20:0:9::1/128"},
+		},
+		{
+			name: "IPv4 gateway", res: &cniipam.IPAMResult{
+				IPv4Address: net.ParseIP("10.128.0.5"), IPv4Gateway: net.ParseIP("10.128.0.1"),
+			},
+			want: []string{ipv4Prefix, "10.128.0.1/32"},
+		},
+		{
+			name: "dual stack", res: &cniipam.IPAMResult{
+				IPv6Subnet: subnet, IPv6Gateway: gateway,
+				IPv4Address: net.ParseIP("10.128.0.5"), IPv4Gateway: net.ParseIP("10.128.0.1"),
+			},
+			want: []string{subnet.String(), ipv4Prefix, "fd20:0:9::1/128", "10.128.0.1/32"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := localEgressPrefixes(tt.res); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("localEgressPrefixes() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

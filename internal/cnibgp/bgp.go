@@ -310,6 +310,22 @@ func ipamAdvertisementPrefixes(ipamResult *cniipam.IPAMResult) (prefixes []strin
 	return prefixes, ipv6Subnet, ipv4Addr
 }
 
+// localEgressPrefixes returns the guest prefixes and gateway host addresses
+// that must pass through eBPF routing to the local kernel.
+func localEgressPrefixes(ipamResult *cniipam.IPAMResult) []string {
+	prefixes, _, _ := ipamAdvertisementPrefixes(ipamResult)
+	if ipamResult == nil {
+		return prefixes
+	}
+	if ipamResult.IPv6Gateway != nil {
+		prefixes = append(prefixes, ipamResult.IPv6Gateway.String()+"/128")
+	}
+	if ipamResult.IPv4Gateway != nil {
+		prefixes = append(prefixes, ipamResult.IPv4Gateway.String()+"/32")
+	}
+	return prefixes
+}
+
 // allAdvertisedPrefixes derives the full prefix set for a BGPAdvertisement
 // from every subnet annotation on it, not just from the container being
 // processed, because one BGPAdvertisement can be shared by several containers.
@@ -429,8 +445,8 @@ func publishBGPState(
 			return err
 		}
 
-		// Computed ahead of registerEBPFDatapath so this attachment's own
-		// prefixes can be registered as local pass-through egress routes.
+		// Advertise guest prefixes only. Gateway addresses stay host-local
+		// and are included separately in the eBPF pass-through routes.
 		prefixes, ipv6Subnet, ipv4Addr := ipamAdvertisementPrefixes(ipamResult)
 
 		// Nothing to publish when this node's router has no SRv6 locator or
@@ -447,7 +463,7 @@ func publishBGPState(
 		// Not tracked for rollback: the vrf_table entry is shared by every
 		// attachment on this VPC and node, like the BGPVRFInstance above.
 		if _, err := registerEBPFDatapath(
-			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, prefixes,
+			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, localEgressPrefixes(ipamResult),
 		); err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
 		}
@@ -512,14 +528,10 @@ func publishBGPState(
 // router has no SRv6 locator or node ID configured, meaning SRv6 is
 // deliberately not set up for it. Any other failure returns an error.
 //
-// prefixes are this attachment's IPAM-derived CIDRs, computed by the caller.
+// prefixes are this attachment's guest CIDRs and gateway host addresses.
 // Each is registered as a local pass-through egress_route_table entry in this
-// VPC's VRF, so the attachment's own prefix wins the longest-prefix lookup
-// over the VRF's ::/0 NAT66 default. Without them, a sibling attachment in the
-// same VRF on the same node, reachable over an ordinary connected route, has
-// its traffic hijacked by that default and redirected toward a NAT66 shard
-// instead of delivered locally. An empty slice is valid and registers
-// nothing.
+// VPC's VRF, so local destinations outrank the VRF's ::/0 NAT66 default.
+// An empty slice is valid and registers nothing.
 func registerEBPFDatapath(
 	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string, prefixes []string,
 ) (registered bool, err error) {
@@ -705,16 +717,16 @@ func attachUsidEgress(pinDir, ifaceName string) error {
 }
 
 // registerLocalEgressRoutes registers each of prefixes as a local pass-through
-// egress_route_table entry in Linux VRF table vrfTableID, so an attachment's
-// own prefix outranks the VRF's NAT66 default. pinDir is the bpffs directory
-// holding the pinned map. Idempotent, so a repeat ADD, or a sibling
+// egress_route_table entry in Linux VRF table vrfTableID, so guest prefixes
+// and gateway host addresses outrank the VRF's NAT66 default. pinDir is the
+// bpffs directory holding the pinned map. Idempotent, so a repeat ADD, or a sibling
 // re-registering an unrelated prefix in the same VRF, is safe.
 //
 // It opens the map through egressroutemap rather than the srv6 wrappers, which
 // resolve their pin directory from a package var instead of a parameter:
 // registerEBPFDatapath is designed to run against an arbitrary pinDir.
 //
-// prefixes are the CIDR strings ipamAdvertisementPrefixes already produced, so
+// prefixes are the CIDR strings localEgressPrefixes already produced, so
 // a parse failure means that function emitted something unparseable. It is a
 // hard error here rather than a silent skip.
 func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []string) error {
