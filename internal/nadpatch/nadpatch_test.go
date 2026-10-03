@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -280,12 +281,18 @@ func TestAnnotateNAD(t *testing.T) {
 	})
 }
 
-func TestVerifyChainComplete(t *testing.T) {
+func TestVerifyDefinition(t *testing.T) {
 	const (
 		nadName      = "test-net"
 		nadNamespace = "default"
 		bgpType      = "galactic-bgp"
 	)
+	want := Expected{ChainType: bgpType, VPC: "vpc1", VPCAttachment: "att1"}
+	completeChain := func(vpc, vpcAttachment string) string {
+		return `{"cniVersion":"1.0.0","name":"private","plugins":[` +
+			`{"type":"galactic-veth","vpc":"` + vpc + `","vpcattachment":"` + vpcAttachment + `"},` +
+			`{"type":"galactic-bgp","vpc":"` + vpc + `","vpcattachment":"` + vpcAttachment + `"}]}`
+	}
 
 	nadWithConfig := func(config string) *unstructured.Unstructured {
 		nad := &unstructured.Unstructured{}
@@ -295,38 +302,57 @@ func TestVerifyChainComplete(t *testing.T) {
 		_ = unstructured.SetNestedField(nad.Object, config, "spec", "config")
 		return nad
 	}
+	wantCode := func(t *testing.T, err error, code uint) {
+		t.Helper()
+		var cniErr *cnitypes.Error
+		if !errors.As(err, &cniErr) {
+			t.Fatalf("error %v is not a CNI error", err)
+		}
+		if cniErr.Code != code {
+			t.Errorf("CNI error code = %d, want %d (%s)", cniErr.Code, code, cniErr.Msg)
+		}
+	}
 
 	t.Run("NAD does not exist is a hard failure", func(t *testing.T) {
 		k8s := fakeClient()
 
-		err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType)
+		err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want)
 		if err == nil {
 			t.Fatal("expected error when NAD does not exist, got nil")
 		}
 	})
 
-	t.Run("complete chain passes", func(t *testing.T) {
-		nad := nadWithConfig(
-			`{"cniVersion":"1.0.0","name":"private","plugins":[{"type":"galactic-veth"},{"type":"galactic-bgp"}]}`,
-		)
-		k8s := fakeClient(nad)
+	t.Run("complete chain with matching identifiers passes", func(t *testing.T) {
+		k8s := fakeClient(nadWithConfig(completeChain("vpc1", "att1")))
 
-		if err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType); err != nil {
-			t.Fatalf("VerifyChainComplete() = %v, want nil", err)
+		if err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want); err != nil {
+			t.Fatalf("VerifyDefinition() = %v, want nil", err)
+		}
+	})
+
+	t.Run("plugin stanza without identifiers is not compared", func(t *testing.T) {
+		k8s := fakeClient(nadWithConfig(`{"cniVersion":"1.0.0","name":"private","plugins":[` +
+			`{"type":"galactic-veth","vpc":"vpc1","vpcattachment":"att1"},` +
+			`{"type":"tuning"},` +
+			`{"type":"galactic-bgp","vpc":"vpc1","vpcattachment":"att1"}]}`))
+
+		if err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want); err != nil {
+			t.Fatalf("VerifyDefinition() = %v, want nil", err)
 		}
 	})
 
 	t.Run("galactic-bgp missing from spec.config fails", func(t *testing.T) {
-		nad := nadWithConfig(`{"cniVersion":"1.0.0","name":"private","plugins":[{"type":"galactic-veth"}]}`)
-		k8s := fakeClient(nad)
+		k8s := fakeClient(nadWithConfig(
+			`{"cniVersion":"1.0.0","name":"private","plugins":[{"type":"galactic-veth","vpc":"vpc1","vpcattachment":"att1"}]}`))
 
-		err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType)
+		err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want)
 		if err == nil {
 			t.Fatal("expected error when galactic-bgp is missing, got nil")
 		}
 		if !strings.Contains(err.Error(), bgpType) {
 			t.Errorf("error %q does not name the missing plugin type %q", err, bgpType)
 		}
+		wantCode(t, err, cnitypes.ErrInvalidNetworkConfig)
 	})
 
 	t.Run("NAD with no spec.config fails", func(t *testing.T) {
@@ -336,22 +362,79 @@ func TestVerifyChainComplete(t *testing.T) {
 		nad.SetNamespace(nadNamespace)
 		k8s := fakeClient(nad)
 
-		if err := VerifyChainComplete(context.Background(), k8s, nadName, nadNamespace, bgpType); err == nil {
+		err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want)
+		if err == nil {
 			t.Fatal("expected error when spec.config is absent, got nil")
 		}
+		wantCode(t, err, cnitypes.ErrInvalidNetworkConfig)
+	})
+
+	// A workload recreated under the same names: the runtime still holds the
+	// previous incarnation's attachment identifier, the operator has since
+	// written a new one.
+	t.Run("stale attachment identifier asks the runtime to retry", func(t *testing.T) {
+		k8s := fakeClient(nadWithConfig(completeChain("vpc1", "att2")))
+
+		err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want)
+		if err == nil {
+			t.Fatal("expected error when the live definition names another attachment, got nil")
+		}
+		for _, id := range []string{"att1", "att2"} {
+			if !strings.Contains(err.Error(), id) {
+				t.Errorf("error %q does not name attachment identifier %q", err, id)
+			}
+		}
+		wantCode(t, err, cnitypes.ErrTryAgainLater)
+	})
+
+	t.Run("stale VPC identifier asks the runtime to retry", func(t *testing.T) {
+		k8s := fakeClient(nadWithConfig(completeChain("vpc2", "att1")))
+
+		err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want)
+		if err == nil {
+			t.Fatal("expected error when the live definition names another VPC, got nil")
+		}
+		wantCode(t, err, cnitypes.ErrTryAgainLater)
+	})
+
+	t.Run("mismatch in the BGP stanza alone is caught", func(t *testing.T) {
+		k8s := fakeClient(nadWithConfig(`{"cniVersion":"1.0.0","name":"private","plugins":[` +
+			`{"type":"galactic-veth","vpc":"vpc1","vpcattachment":"att1"},` +
+			`{"type":"galactic-bgp","vpc":"vpc1","vpcattachment":"att2"}]}`))
+
+		err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want)
+		if err == nil {
+			t.Fatal("expected error when the BGP stanza names another attachment, got nil")
+		}
+		wantCode(t, err, cnitypes.ErrTryAgainLater)
+	})
+
+	t.Run("definition being deleted asks the runtime to retry", func(t *testing.T) {
+		nad := nadWithConfig(completeChain("vpc1", "att1"))
+		nad.SetFinalizers([]string{"example.com/hold"})
+		k8s := fakeClient(nad)
+		if err := k8s.Delete(context.Background(), nad); err != nil {
+			t.Fatalf("mark NAD deleting: %v", err)
+		}
+
+		err := VerifyDefinition(context.Background(), k8s, nadName, nadNamespace, want)
+		if err == nil {
+			t.Fatal("expected error when the definition is being deleted, got nil")
+		}
+		wantCode(t, err, cnitypes.ErrTryAgainLater)
 	})
 
 	t.Run("empty pod namespace is a no-op, no Get issued", func(t *testing.T) {
 		k8s := failingClient{t: t}
 
-		if err := VerifyChainComplete(context.Background(), k8s, nadName, "", bgpType); err != nil {
-			t.Fatalf("VerifyChainComplete() with empty namespace = %v, want nil", err)
+		if err := VerifyDefinition(context.Background(), k8s, nadName, "", want); err != nil {
+			t.Fatalf("VerifyDefinition() with empty namespace = %v, want nil", err)
 		}
 	})
 }
 
 // failingClient is a client.Client that fails the test if any method is
-// called — used to prove VerifyChainComplete's empty-namespace short
+// called — used to prove VerifyDefinition's empty-namespace short
 // circuit never touches the k8s client at all.
 type failingClient struct {
 	client.Client

@@ -52,11 +52,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		"vpc", pluginConf.VPC, "vpcAttachment", pluginConf.VPCAttachment,
 		"namespace", namespace, "nodeName", nodeName)
 
-	// Chain-completeness check, before any kernel state is created: a conflist
-	// missing the BGP plugin would otherwise attach successfully with no path
-	// to its VPC. The client and namespace are resolved here rather than at the
-	// annotation site below, so a stale conflist fails ADD with nothing to roll
-	// back yet.
+	// Definition check, before any kernel state is created: a conflist missing
+	// the BGP plugin would otherwise attach successfully with no path to its
+	// VPC, and identifiers the live definition no longer names would attach a
+	// recreated pod under its predecessor's attachment (#651). The client and
+	// namespace are resolved here rather than at the annotation site below, so
+	// a stale conflist fails ADD with nothing to roll back yet.
 	k8sClient, err := cnimaster.NewK8sClient()
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
@@ -64,10 +65,12 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	podNamespace := nadpatch.ParsePodNamespace(args.Args)
 	chainCtx, chainCancel := context.WithTimeout(context.Background(), cnimaster.NADPatchTimeout)
 	defer chainCancel()
-	if err := nadpatch.VerifyChainComplete(
-		chainCtx, k8sClient, pluginConf.Name, podNamespace, hostconf.BGPPluginType,
-	); err != nil {
-		return &types.Error{Code: 7, Msg: fmt.Sprintf("chain completeness check: %v", err)}
+	if err := nadpatch.VerifyDefinition(chainCtx, k8sClient, pluginConf.Name, podNamespace, nadpatch.Expected{
+		ChainType:     hostconf.BGPPluginType,
+		VPC:           pluginConf.VPC,
+		VPCAttachment: pluginConf.VPCAttachment,
+	}); err != nil {
+		return err
 	}
 
 	// Track resources for selective rollback on failure.

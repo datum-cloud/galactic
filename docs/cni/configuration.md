@@ -53,8 +53,15 @@ inside the master plugin. A real-world attachment's conflist has this shape:
   `galactic-tap`) fetches its own attachment's `NetworkAttachmentDefinition`
   and fails ADD before creating any kernel state if `galactic-bgp` is
   missing from its `plugins` list — see `internal/hostconf.VerifyChainIncludes`
-  and `internal/nadpatch.VerifyChainComplete`
-  ([#331](https://github.com/datum-cloud/galactic/issues/331)).
+  and `internal/nadpatch.VerifyDefinition`
+  ([#331](https://github.com/datum-cloud/galactic/issues/331)). The same
+  fetch fails ADD with CNI code 11 ("try again later") when the definition
+  is being deleted, or when any stanza in it names a `vpc`/`vpcattachment`
+  other than the ones the runtime passed. A workload recreated under the
+  same names can otherwise start from its predecessor's copy of the
+  definition and attach with an identifier its `VPCAttachment` record no
+  longer names; the retry rereads the definition
+  ([#651](https://github.com/datum-cloud/galactic/issues/651)).
 
 Every binary's own JSON stanza carries only the fields that binary itself
 reads (`vpc`/`vpcattachment` are duplicated across every stanza; nothing
