@@ -65,7 +65,7 @@ func loadObjects(t *testing.T) *NatObjects {
 	return &objs
 }
 
-// populateProgArray fills nat_progs with the four translation leaves, which is
+// populateProgArray fills nat_progs with every translation leaf, which is
 // what makes nat_ingress's tail calls resolve. natattach does the same thing
 // before attaching in production; a test that skipped it would exercise only
 // the dispatcher's fall-through-to-XDP_PASS path and silently prove nothing.
@@ -76,6 +76,9 @@ func populateProgArray(t *testing.T, objs *NatObjects) {
 		ProgNAT66Return:  objs.Nat66Return,
 		ProgNAT64Forward: objs.Nat64Forward,
 		ProgNAT64Return:  objs.Nat64Return,
+
+		ProgNAT66ICMPForward: objs.Nat66IcmpForward,
+		ProgNAT66ICMPReturn:  objs.Nat66IcmpReturn,
 	}
 	for slot, prog := range slots {
 		if err := objs.NatProgs.Put(slot, prog); err != nil {

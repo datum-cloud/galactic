@@ -343,6 +343,7 @@ tasks:
       - task: "verify:nat-local"
       - task: "verify:nat-collision"
       - task: "verify:mss-clamp"
+      - task: "verify:nat-icmp"
       - task: "verify:scenarios"
 
   # First, because every check after it rides these bonds: a member that
@@ -532,9 +533,9 @@ tasks:
         #
         # TCP, against a port the off-fabric host actually serves. The old
         # probe was UDP at a closed port on an address nothing answered to; the
-        # same UDP against a real host draws an ICMPv6 port-unreachable back to
-        # the shard, which a TCP/UDP-only datapath drops as malformed_return
-        # by design -- and the drop check below, rightly, fails on it.
+        # same UDP against a real host draws an ICMPv6 port-unreachable back
+        # through the shard's ICMP path, which verify:nat-icmp covers and this
+        # check is not about.
         docker exec clab-gvpc-remote-host timeout 16 tcpdump -i eth1 -nn -e -c 2 \
           "ip6 and src ${shard}" >/tmp/nat-egress.txt 2>&1 &
         sleep 2
@@ -941,6 +942,13 @@ tasks:
     desc: Prove full-size TCP segments cross the fabric (TCP MSS clamp)
     cmds:
       - ./scripts/verify-mss-clamp.sh
+
+  # Ping, Time Exceeded, and Packet Too Big through each site's egress shard.
+  # See the script's header for each check.
+  "verify:nat-icmp":
+    desc: Prove ICMP crosses each site's egress shard (ping, traceroute, PMTUD)
+    cmds:
+      - ./scripts/verify-nat-icmp.sh
 
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios

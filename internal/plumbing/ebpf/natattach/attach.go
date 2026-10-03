@@ -102,8 +102,8 @@ func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	return errors.Join(errs...)
 }
 
-// PopulateProgArray fills the nat_progs tail-call array with the four
-// translation leaves the dispatcher hands packets to.
+// PopulateProgArray fills the nat_progs tail-call array with every
+// translation leaf the dispatcher hands packets to.
 //
 // It must run before Attach. The dispatcher never modifies a packet, so a tail
 // call into an empty slot falls through to XDP_PASS and the packet leaves
@@ -116,6 +116,9 @@ func PopulateProgArray(objs *natprog.NatObjects) error {
 		natprog.ProgNAT66Return:  objs.Nat66Return,
 		natprog.ProgNAT64Forward: objs.Nat64Forward,
 		natprog.ProgNAT64Return:  objs.Nat64Return,
+
+		natprog.ProgNAT66ICMPForward: objs.Nat66IcmpForward,
+		natprog.ProgNAT66ICMPReturn:  objs.Nat66IcmpReturn,
 	}
 	for slot, prog := range slots {
 		if prog == nil {

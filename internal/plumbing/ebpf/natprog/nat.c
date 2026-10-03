@@ -50,17 +50,24 @@
 // lookup on the return path.
 //
 // ---------------------------------------------------------------------
-// Program structure: one dispatcher, four tail-called leaves.
+// Program structure: one dispatcher, tail-called leaves.
 // ---------------------------------------------------------------------
 //
 // nat_ingress is the only program attached to the wire. It parses just far
-// enough to decide which of four translation paths a packet belongs to, then
-// tail-calls into it:
+// enough to decide which translation path a packet belongs to, then tail-calls
+// into it:
 //
-//   nat66_forward  tenant -> IPv6 internet    (PAT, no header-family change)
-//   nat66_return   IPv6 internet -> tenant
-//   nat64_forward  tenant -> IPv4 internet    (RFC 6146/7915 translation)
-//   nat64_return   IPv4 internet -> tenant
+//   nat66_forward       tenant -> IPv6 internet    (PAT, no header-family change)
+//   nat66_return        IPv6 internet -> tenant
+//   nat64_forward       tenant -> IPv4 internet    (RFC 6146/7915 translation)
+//   nat64_return        IPv4 internet -> tenant
+//   nat66_icmp_forward  tenant's ICMPv6 -> IPv6 internet
+//   nat66_icmp_return   IPv6 internet's ICMPv6 -> tenant
+//
+// The ICMP leaves are their own programs rather than branches in the TCP/UDP
+// ones for the same budget reason the families are split: an ICMP error carries
+// a second, quoted packet to parse and rewrite, and none of that belongs in the
+// instruction count of a leaf that never sees one.
 //
 // Each leaf ends in leave_via: XDP_TX where the route egresses the interface
 // the packet arrived on, XDP_REDIRECT where it does not. No leaf ends in
@@ -80,33 +87,42 @@
 //     identity.
 //  2. IPv6 destination equal to shard_pub_addr6 is a reply from the IPv6
 //     internet addressed to a masquerade source this shard allocated ->
-//     nat66_return.
+//     nat66_return, or nat66_icmp_return for an ICMPv6 next header.
 //  3. IPv6 destination whose top 64 bits match shard_sid, with an
 //     IPv6-in-IPv6 next header, is a tenant's outbound packet encapsulated the
 //     way any cross-node SRv6 destination is. The *inner* destination decides
 //     the family: inside nat64_prefix -> nat64_forward, otherwise
-//     nat66_forward.
+//     nat66_forward, or nat66_icmp_forward for an inner ICMPv6 packet.
 //  4. IPv4 destination equal to shard_pub_addr4 is a reply from the IPv4
 //     internet -> nat64_return.
 //  5. Anything else: XDP_PASS.
 //
-// A shard with no IPv4 fields configured (serves_v4 == 0) never reaches step 3's
-// prefix test or step 4 at all, so its packet path is the one this file had
-// before NAT64 existed, instruction for instruction.
+// Step 3 always reads the inner header, which the IPv6-only dispatch did not
+// need to before ICMP: the inner next header picks the leaf.
 //
 // ---------------------------------------------------------------------
 // Scope.
 // ---------------------------------------------------------------------
 //
-// TCP and UDP only, both families. ICMP/ICMPv6 translation (RFC 6146 section
-// 3.5) and fragment handling (section 3.4) are deliberately absent, not
-// overlooked: each is a subsystem rather than a branch, and each is tracked as
-// its own follow-on. Their absence is counted, not silent -- an IPv4 fragment
-// or a packet carrying IPv4 options on the return path increments a named drop
-// reason, so "NAT64 works except for X" is a readable counter rather than a
-// support ticket. Until they land, this is stateful NAT64 for TCP and UDP, not
-// a complete RFC 6146 implementation, and PMTUD across the translator does not
-// work.
+// TCP, UDP, and ICMPv6 for NAT66; TCP and UDP for NAT64. ICMPv4 translation
+// (RFC 6146 section 3.5) and fragment handling (section 3.4) are deliberately
+// absent, not overlooked: each is a subsystem rather than a branch, and each is
+// tracked as its own follow-on. Their absence is counted, not silent -- an IPv4
+// fragment or a packet carrying IPv4 options on the return path increments a
+// named drop reason, so "NAT64 works except for X" is a readable counter rather
+// than a support ticket. Until they land, this is stateful NAT64 for TCP and
+// UDP, not a complete RFC 6146 implementation, and PMTUD across the NAT64
+// translator does not work.
+//
+// NAT66 ICMPv6 covers what a tenant behind a translator needs: its own ping,
+// and the errors the internet sends back about its flows. A tenant's Echo
+// Request is translated like a UDP datagram, the Echo Identifier standing in
+// for the port. Destination Unreachable, Packet Too Big, Time Exceeded, and
+// Parameter Problem are matched by the packet they quote -- which is the packet
+// this shard sent -- and rewritten so the tenant sees an error about the packet
+// it sent. Neighbor Discovery is passed to the kernel untouched; every other
+// ICMPv6 message addressed to a masquerade address is dropped against a named
+// reason. This shard generates no ICMP error of its own.
 //
 // There is no tenant-identity check beyond the Argument itself. A forged
 // Argument misdirects only the forger's own isolation bucket, never a
@@ -152,6 +168,19 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 #define NAT_IPPROTO_TCP 6
 #define NAT_IPPROTO_UDP 17
 #define NAT_IPPROTO_IPV6 41 // both this shard's own pushed header, and the tenant's inbound one
+#define NAT_IPPROTO_ICMPV6 58
+
+// ICMPv6 message types (RFC 4443, RFC 4861). The four error types share one
+// layout -- an 8-byte header followed by as much of the offending packet as
+// fits -- and are contiguous, which the return leaf's range test relies on.
+#define NAT_ICMPV6_DEST_UNREACH 1
+#define NAT_ICMPV6_PACKET_TOO_BIG 2
+#define NAT_ICMPV6_TIME_EXCEEDED 3
+#define NAT_ICMPV6_PARAM_PROBLEM 4
+#define NAT_ICMPV6_ECHO_REQUEST 128
+#define NAT_ICMPV6_ECHO_REPLY 129
+#define NAT_ICMPV6_ND_FIRST 133 // Router Solicitation
+#define NAT_ICMPV6_ND_LAST 137  // Redirect
 
 #define NAT_PAT_PROBE_LIMIT 8
 #define NAT_PAT_PORT_BASE 32768
@@ -172,7 +201,9 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 #define NAT_PROG_NAT66_RETURN 1
 #define NAT_PROG_NAT64_FORWARD 2
 #define NAT_PROG_NAT64_RETURN 3
-#define NAT_PROG_COUNT 4
+#define NAT_PROG_NAT66_ICMP_FORWARD 4
+#define NAT_PROG_NAT66_ICMP_RETURN 5
+#define NAT_PROG_COUNT 6
 
 // The IPv6 and IPv4 fixed header sizes, and the difference a NAT64 translation
 // adds to or removes from the front of a packet.
@@ -231,6 +262,18 @@ struct nat_udphdr {
 	__be16 check;
 } __attribute__((packed));
 
+// struct nat_icmphdr is the fixed 8-byte header every ICMP message this program
+// reads starts with. id and seq are an Echo message's Identifier and Sequence
+// Number; on an error message the same four bytes are the type-specific word
+// (unused, an MTU, or a pointer), which this program does not rewrite.
+struct nat_icmphdr {
+	__u8 type;
+	__u8 code;
+	__be16 check;
+	__be16 id;
+	__be16 seq;
+} __attribute__((packed));
+
 // ---------------------------------------------------------------------
 // Map key/value types.
 // ---------------------------------------------------------------------
@@ -263,6 +306,13 @@ struct nat_udphdr {
 // fully per-tenant once the Argument is threaded through.
 //
 // family separates the two address families' rows; see NAT_FAMILY_V4.
+//
+// An ICMP Echo flow has no ports, so its Echo Identifier takes the port's
+// place on the side this shard rewrites and the other side is zero: the
+// forward row holds the tenant's Identifier in sport, the reverse row the
+// masquerade Identifier in dport. proto keeps those rows apart from TCP and UDP
+// rows over the same addresses, so the masquerade Identifiers are allocated
+// from the same probe and range as ports without ever colliding with one.
 struct conn_key {
 	__u8 family;
 	__u8 proto;
@@ -336,13 +386,37 @@ enum nat_drop_reason {
 	DROP_REASON_NAT_HOP_LIMIT_EXCEEDED   = 16,
 	DROP_REASON_NAT_NO_EGRESS_IFINDEX    = 17,
 	DROP_REASON_NAT_REDIRECT_FAILED      = 18,
-	DROP_REASON_NAT_COUNT                = 19,
+	// 19 onward arrived with ICMP, appended for the same reason.
+	//
+	// malformed and no_conn mirror the TCP/UDP pair. untranslatable is a
+	// well-formed message this shard has no translation for -- an ICMP type it
+	// does not handle, or an error quoting a packet it could not have sent --
+	// and is a policy outcome, not a parse failure; unsolicited is an Echo
+	// Request addressed to the masquerade address itself rather than a reply
+	// to anything a tenant sent.
+	DROP_REASON_NAT66_ICMP_MALFORMED     = 19,
+	DROP_REASON_NAT66_ICMP_NO_CONN       = 20,
+	DROP_REASON_NAT_ICMP_UNTRANSLATABLE  = 21,
+	DROP_REASON_NAT_ICMP_UNSOLICITED     = 22,
+	DROP_REASON_NAT_COUNT                = 23,
 };
 
 // ---------------------------------------------------------------------
 // Maps.
 // ---------------------------------------------------------------------
 
+// nat_conn_table holds every session this shard translates, ICMP included.
+//
+// ICMP Echo rows share the table, and its 65536-entry LRU, with TCP and UDP
+// rather than living in a map of their own. That is a deliberate trade: a burst
+// of tenant pings to many destinations can evict live TCP and UDP sessions,
+// whose next reply then counts as no_return_conn. It is accepted because a
+// tenant pinging at a rate that churns the table would churn it just as hard
+// with UDP, and a second map would split one capacity budget into two that
+// have to be sized separately. RFC 6146's shorter ICMP query timeout has no
+// counterpart here: no row in this table carries a timer, and LRU eviction is
+// the only expiry any row gets. If the trade ever stops holding, ICMP rows move
+// to a separate, smaller LRU, and only the ICMP leaves change.
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 65536);
@@ -506,6 +580,71 @@ static NAT_ALWAYS_INLINE int parse_l4(__u8 proto, void *l4, void *data_end, stru
 		return 0;
 	}
 	return -1;
+}
+
+// parse_echo resolves an ICMP Echo message into the same view parse_l4 gives a
+// TCP or UDP header, so the translation legs need not know which they hold. The
+// Echo Identifier is the port on the side this shard rewrites -- the source on
+// the way out, where the tenant's Identifier is replaced by a masquerade one,
+// and the destination on the way back, where it is restored -- and the other
+// side reads as zero, which is what the session rows store for it.
+static NAT_ALWAYS_INLINE int parse_echo(void *l4, void *data_end, int outbound, struct l4_view *out)
+{
+	struct nat_icmphdr *icmp = l4;
+	if ((void *) (icmp + 1) > data_end)
+		return -1;
+	out->sport = outbound ? icmp->id : 0;
+	out->dport = outbound ? 0 : icmp->id;
+	out->sport_ptr = &icmp->id;
+	out->dport_ptr = &icmp->id;
+	out->check_ptr = &icmp->check;
+	return 0;
+}
+
+// struct quoted_view holds the transport fields of the packet an ICMP error
+// quotes. That packet is one this shard sent toward the internet, so its source
+// side carries the masquerade port or Identifier and its destination side the
+// peer's port.
+struct quoted_view {
+	__be16 masq;
+	__be16 peer_port;
+	__be16 *masq_ptr;
+};
+
+// parse_quoted reads the quoted packet's transport fields. It returns -1 when
+// the quote is too short to hold them and 1 when it is a packet this shard
+// could not have sent: neither TCP, UDP, nor an Echo Request of the given ICMP
+// protocol and type.
+//
+// Only the first four bytes of a quoted TCP or UDP header are read, not
+// parse_l4's whole header. RFC 4443 guarantees an error quotes as much of the
+// offending packet as fits, which in practice is all of it, but RFC 792 for
+// ICMPv4 guarantees only the first eight bytes of the transport header, and a
+// full-header bounds check would reject a legitimate minimal quote.
+static NAT_ALWAYS_INLINE int parse_quoted(__u8 proto, void *l4, void *data_end, __u8 icmp_proto,
+					  __u8 echo_request_type, struct quoted_view *out)
+{
+	if (proto == NAT_IPPROTO_TCP || proto == NAT_IPPROTO_UDP) {
+		__be16 *ports = l4;
+		if ((void *) (ports + 2) > data_end)
+			return -1;
+		out->masq = ports[0];
+		out->peer_port = ports[1];
+		out->masq_ptr = &ports[0];
+		return 0;
+	}
+	if (proto == icmp_proto) {
+		struct nat_icmphdr *echo = l4;
+		if ((void *) (echo + 1) > data_end)
+			return -1;
+		if (echo->type != echo_request_type)
+			return 1;
+		out->masq = echo->id;
+		out->peer_port = 0;
+		out->masq_ptr = &echo->id;
+		return 0;
+	}
+	return 1;
 }
 
 // fix_l4_checksum applies the combined address and port checksum delta for a
@@ -833,8 +972,11 @@ static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct conn_key *rev_key,
 // tenant's own ACK arrive against a half-seen flow, be marked INVALID, and be
 // dropped by any invalid-state rule on the node -- kube-proxy installs one --
 // with every drop counter here flat, because nothing here had dropped it.
-SEC("xdp")
-int nat66_forward(struct xdp_md *ctx)
+//
+// nat66_forward and nat66_icmp_forward are this one leg, specialized at compile
+// time on icmp: the two differ only in how the transport header is read, and
+// in which counters a packet that cannot be translated lands on.
+static NAT_ALWAYS_INLINE int nat66_forward_leg(struct xdp_md *ctx, const int icmp)
 {
 	void *data = (void *) (long) ctx->data;
 	void *data_end = (void *) (long) ctx->data_end;
@@ -860,34 +1002,52 @@ int nat66_forward(struct xdp_md *ctx)
 	__u8 tenant_usid[16];
 	__builtin_memcpy(tenant_usid, outer->saddr, 16);
 
+	const __u32 malformed = icmp ? DROP_REASON_NAT66_ICMP_MALFORMED : DROP_REASON_NAT66_MALFORMED_FORWARD;
+
 	if (strip_outer_header(ctx, &eth) != 0) {
-		count_drop(DROP_REASON_NAT66_MALFORMED_FORWARD);
+		count_drop(malformed);
 		return XDP_DROP;
 	}
 
 	data_end = (void *) (long) ctx->data_end;
 	struct nat_ip6hdr *inner = (void *) (eth + 1);
 	if ((void *) (inner + 1) > data_end) {
-		count_drop(DROP_REASON_NAT66_MALFORMED_FORWARD);
-		return XDP_DROP;
-	}
-	if (inner->nexthdr != NAT_IPPROTO_TCP && inner->nexthdr != NAT_IPPROTO_UDP) {
-		count_drop(DROP_REASON_NAT66_MALFORMED_FORWARD);
+		count_drop(malformed);
 		return XDP_DROP;
 	}
 
 	struct l4_view l4v;
-	if (parse_l4(inner->nexthdr, (void *) (inner + 1), data_end, &l4v) != 0) {
-		count_drop(DROP_REASON_NAT66_MALFORMED_FORWARD);
-		return XDP_DROP;
+	if (icmp) {
+		if (inner->nexthdr != NAT_IPPROTO_ICMPV6 ||
+		    parse_echo((void *) (inner + 1), data_end, 1, &l4v) != 0) {
+			count_drop(malformed);
+			return XDP_DROP;
+		}
+		// An Echo Request is the only ICMPv6 message a tenant can open a flow
+		// with. Anything else it sends outward -- an Echo Reply, an error about
+		// a packet it received -- answers a flow this shard has no row for.
+		struct nat_icmphdr *echo = (void *) (inner + 1);
+		if (echo->type != NAT_ICMPV6_ECHO_REQUEST) {
+			count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
+			return XDP_DROP;
+		}
+	} else {
+		if (inner->nexthdr != NAT_IPPROTO_TCP && inner->nexthdr != NAT_IPPROTO_UDP) {
+			count_drop(malformed);
+			return XDP_DROP;
+		}
+		if (parse_l4(inner->nexthdr, (void *) (inner + 1), data_end, &l4v) != 0) {
+			count_drop(malformed);
+			return XDP_DROP;
+		}
 	}
 
 	// The hop decrement is this program's job now that the packet leaves from
 	// the driver: the kernel's forwarding path used to do it, and without it a
 	// routing loop through this shard never expires. Checked before the session
 	// lookup so an expiring packet costs no port allocation. A router owes the
-	// sender an ICMPv6 Time Exceeded here, which this program cannot build --
-	// counted instead, for the same reason ICMP translation is (see Scope).
+	// sender an ICMPv6 Time Exceeded here, which this program does not generate
+	// (see Scope) -- the drop is counted instead.
 	if (inner->hop_limit <= 1) {
 		count_drop(DROP_REASON_NAT_HOP_LIMIT_EXCEEDED);
 		return XDP_DROP;
@@ -959,6 +1119,79 @@ int nat66_forward(struct xdp_md *ctx)
 	return leave_via(ctx, egress_ifindex);
 }
 
+SEC("xdp")
+int nat66_forward(struct xdp_md *ctx)
+{
+	return nat66_forward_leg(ctx, 0);
+}
+
+// nat66_icmp_forward: a tenant's outbound ICMPv6 Echo Request, translated like
+// a UDP datagram with the Echo Identifier masqueraded in the source port's
+// place.
+SEC("xdp")
+int nat66_icmp_forward(struct xdp_md *ctx)
+{
+	return nat66_forward_leg(ctx, 1);
+}
+
+// reencap_to_tenant is the last step every NAT66 return leg shares: push the
+// SRv6 outer header toward the tenant's worker node and transmit. ip6 is the
+// already-rewritten packet, read here only for its length before the head moves.
+static NAT_ALWAYS_INLINE int reencap_to_tenant(struct xdp_md *ctx, struct shard_config *cfg,
+						struct nat_ip6hdr *ip6, const __u8 usid[16])
+{
+	// Must include the inner IPv6 header's own 40 bytes, not just its payload.
+	// Passing the inner payload length alone undercounts the outer header's
+	// declared length on every packet, which a validating receiver rejects.
+	__be16 inner_payload_len_plus_ip6hdr =
+		__builtin_bswap16((__u16) sizeof(struct nat_ip6hdr) + __builtin_bswap16(ip6->payload_len));
+
+	__u8 backend_usid[16];
+	__builtin_memcpy(backend_usid, usid, 16);
+
+	// The outer source is this shard's own SRv6-reachable identity, not any
+	// field of the connection row. The tenant's worker node decapsulates this
+	// like any cross-node SRv6 packet and does not validate the encapsulation
+	// source, but it must still be a real address on this node rather than the
+	// internet peer's.
+	__u32 egress_ifindex = 0;
+	if (push_outer_header(ctx, cfg->shard_sid, backend_usid, inner_payload_len_plus_ip6hdr,
+			       &egress_ifindex) != 0)
+		return XDP_DROP;
+
+	return leave_via(ctx, egress_ifindex);
+}
+
+// nat66_return_leg un-SNATs a reply whose transport view the caller has already
+// resolved -- a TCP or UDP header, or an Echo Reply's Identifier -- back to the
+// tenant backend's own view and re-encapsulates it. no_conn is the counter a
+// reply matching no session lands on, which differs by protocol so an operator
+// can tell a stale TCP flow from an unanswered ping.
+static NAT_ALWAYS_INLINE int nat66_return_leg(struct xdp_md *ctx, struct shard_config *cfg,
+					       struct nat_ip6hdr *ip6, struct l4_view *l4v, __u32 no_conn)
+{
+	struct conn_key rev_key;
+	__builtin_memset(&rev_key, 0, sizeof(rev_key));
+	rev_key.family = NAT_FAMILY_V6;
+	rev_key.proto = ip6->nexthdr;
+	__builtin_memcpy(rev_key.saddr, ip6->saddr, 16);
+	rev_key.sport = l4v->sport;
+	__builtin_memcpy(rev_key.daddr, ip6->daddr, 16);
+	rev_key.dport = l4v->dport;
+
+	struct conn_value *cv = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
+	if (!cv) {
+		count_drop(no_conn);
+		return XDP_DROP;
+	}
+
+	fix_l4_checksum(l4v->check_ptr, ip6->daddr, l4v->dport, cv->backend_addr, cv->backend_port);
+	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
+	*l4v->dport_ptr = cv->backend_port;
+
+	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid);
+}
+
 // nat66_return: a reply from the IPv6 internet, addressed to this shard's own
 // masquerade source. Un-SNATs back to the tenant backend's own view and
 // re-encapsulates toward that backend's worker node via SRv6.
@@ -991,45 +1224,129 @@ int nat66_return(struct xdp_md *ctx)
 		return XDP_DROP;
 	}
 
-	struct conn_key rev_key;
-	__builtin_memset(&rev_key, 0, sizeof(rev_key));
-	rev_key.family = NAT_FAMILY_V6;
-	rev_key.proto = ip6->nexthdr;
-	__builtin_memcpy(rev_key.saddr, ip6->saddr, 16);
-	rev_key.sport = l4v.sport;
-	__builtin_memcpy(rev_key.daddr, ip6->daddr, 16);
-	rev_key.dport = l4v.dport;
+	return nat66_return_leg(ctx, cfg, ip6, &l4v, DROP_REASON_NAT66_NO_RETURN_CONN);
+}
 
-	struct conn_value *cv = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
-	if (!cv) {
-		count_drop(DROP_REASON_NAT66_NO_RETURN_CONN);
+// nat66_icmp_error translates an ICMPv6 error about a packet this shard sent.
+//
+// The quoted packet is that packet as it left: shard_pub_addr6 and a masquerade
+// port or Identifier toward the peer. Read with its two sides swapped, it is
+// exactly the reverse row a direct reply would be looked up by, one header
+// deeper. Because every reverse row's destination is shard_pub_addr6, an error
+// quoting any other source matches nothing -- the check that this shard really
+// sent the packet costs no instruction of its own.
+//
+// Three fields change, all under the one ICMPv6 checksum: the outer destination
+// (in the pseudo-header), so the error reaches the tenant, and the quoted source
+// address and port or Identifier, so the tenant's stack matches it to the socket
+// that sent the packet. The quoted packet's own transport checksum is left
+// stale: it covers bytes the quote may have truncated, and no receiver checks
+// it. The error's type-specific word is untouched, so a Packet Too Big reaches
+// the tenant with the MTU the path reported -- right as it stands, since the
+// tenant's packet crossed the internet path decapsulated, at the size it sent.
+static NAT_ALWAYS_INLINE int nat66_icmp_error(struct xdp_md *ctx, struct shard_config *cfg,
+					       struct nat_ip6hdr *ip6, struct nat_icmphdr *icmp,
+					       void *data_end)
+{
+	struct nat_ip6hdr *quoted = (void *) (icmp + 1);
+	if ((void *) (quoted + 1) > data_end) {
+		count_drop(DROP_REASON_NAT66_ICMP_MALFORMED);
 		return XDP_DROP;
 	}
 
-	fix_l4_checksum(l4v.check_ptr, ip6->daddr, l4v.dport, cv->backend_addr, cv->backend_port);
-	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
-	*l4v.dport_ptr = cv->backend_port;
-
-	// Must include the inner IPv6 header's own 40 bytes, not just its payload.
-	// Passing the inner payload length alone undercounts the outer header's
-	// declared length on every packet, which a validating receiver rejects.
-	__be16 inner_payload_len_plus_ip6hdr =
-		__builtin_bswap16((__u16) sizeof(struct nat_ip6hdr) + __builtin_bswap16(ip6->payload_len));
-
-	__u8 backend_usid[16];
-	__builtin_memcpy(backend_usid, cv->backend_usid, 16);
-
-	// The outer source is this shard's own SRv6-reachable identity, not any
-	// field of the connection row. The tenant's worker node decapsulates this
-	// like any cross-node SRv6 packet and does not validate the encapsulation
-	// source, but it must still be a real address on this node rather than the
-	// internet peer's.
-	__u32 egress_ifindex = 0;
-	if (push_outer_header(ctx, cfg->shard_sid, backend_usid, inner_payload_len_plus_ip6hdr,
-			       &egress_ifindex) != 0)
+	struct quoted_view q;
+	int rc = parse_quoted(quoted->nexthdr, (void *) (quoted + 1), data_end, NAT_IPPROTO_ICMPV6,
+			      NAT_ICMPV6_ECHO_REQUEST, &q);
+	if (rc < 0) {
+		count_drop(DROP_REASON_NAT66_ICMP_MALFORMED);
 		return XDP_DROP;
+	}
+	if (rc > 0) {
+		count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
+		return XDP_DROP;
+	}
 
-	return leave_via(ctx, egress_ifindex);
+	struct conn_key rev_key;
+	__builtin_memset(&rev_key, 0, sizeof(rev_key));
+	rev_key.family = NAT_FAMILY_V6;
+	rev_key.proto = quoted->nexthdr;
+	__builtin_memcpy(rev_key.saddr, quoted->daddr, 16);
+	rev_key.sport = q.peer_port;
+	__builtin_memcpy(rev_key.daddr, quoted->saddr, 16);
+	rev_key.dport = q.masq;
+
+	struct conn_value *cv = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
+	if (!cv) {
+		count_drop(DROP_REASON_NAT66_ICMP_NO_CONN);
+		return XDP_DROP;
+	}
+
+	// Two diffs rather than one: fix_l4_checksum pairs one address with one
+	// port, and the outer destination has no port of its own. Passing zero for
+	// both ports makes the first diff an address change alone.
+	fix_l4_checksum(&icmp->check, ip6->daddr, 0, cv->backend_addr, 0);
+	fix_l4_checksum(&icmp->check, quoted->saddr, q.masq, cv->backend_addr, cv->backend_port);
+	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
+	__builtin_memcpy(quoted->saddr, cv->backend_addr, 16);
+	*q.masq_ptr = cv->backend_port;
+
+	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid);
+}
+
+// nat66_icmp_return handles every ICMPv6 message addressed to shard_pub_addr6:
+// an Echo Reply to a tenant's ping, an error about one of its flows, or
+// something that is neither.
+SEC("xdp")
+int nat66_icmp_return(struct xdp_md *ctx)
+{
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+
+	struct nat_ethhdr *eth = data;
+	if ((void *) (eth + 1) > data_end)
+		return XDP_PASS;
+	struct nat_ip6hdr *ip6 = (void *) (eth + 1);
+	if ((void *) (ip6 + 1) > data_end)
+		return XDP_PASS;
+
+	__u32 cfg_key = 0;
+	struct shard_config *cfg = bpf_map_lookup_elem(&shard_config_table, &cfg_key);
+	if (!cfg)
+		return XDP_PASS;
+
+	struct nat_icmphdr *icmp = (void *) (ip6 + 1);
+	if (ip6->nexthdr != NAT_IPPROTO_ICMPV6 || (void *) (icmp + 1) > data_end) {
+		count_drop(DROP_REASON_NAT66_ICMP_MALFORMED);
+		return XDP_DROP;
+	}
+
+	__u8 type = icmp->type;
+	if (type == NAT_ICMPV6_ECHO_REPLY) {
+		struct l4_view l4v;
+		if (parse_echo(icmp, data_end, 0, &l4v) != 0) {
+			count_drop(DROP_REASON_NAT66_ICMP_MALFORMED);
+			return XDP_DROP;
+		}
+		return nat66_return_leg(ctx, cfg, ip6, &l4v, DROP_REASON_NAT66_ICMP_NO_CONN);
+	}
+	if (type >= NAT_ICMPV6_DEST_UNREACH && type <= NAT_ICMPV6_PARAM_PROBLEM)
+		return nat66_icmp_error(ctx, cfg, ip6, icmp, data_end);
+
+	// Neighbor Discovery is the kernel's. A masquerade address is normally a
+	// routed /128 that no neighbour solicits, but where an operator has made one
+	// on-link, dropping its Neighbor Solicitations would make the address
+	// unreachable. The packet is untouched, so passing it keeps this program's
+	// rule that nothing it has modified goes up.
+	if (type >= NAT_ICMPV6_ND_FIRST && type <= NAT_ICMPV6_ND_LAST)
+		return XDP_PASS;
+
+	if (type == NAT_ICMPV6_ECHO_REQUEST) {
+		count_drop(DROP_REASON_NAT_ICMP_UNSOLICITED);
+		return XDP_DROP;
+	}
+
+	count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
+	return XDP_DROP;
 }
 
 // ---------------------------------------------------------------------
@@ -1422,26 +1739,25 @@ int nat_ingress(struct xdp_md *ctx)
 			return XDP_PASS;
 
 		if (cfg->serves_v6 && addr6_eq(ip6->daddr, cfg->shard_pub_addr6)) {
-			bpf_tail_call(ctx, &nat_progs, NAT_PROG_NAT66_RETURN);
+			bpf_tail_call(ctx, &nat_progs, ip6->nexthdr == NAT_IPPROTO_ICMPV6 ?
+						       NAT_PROG_NAT66_ICMP_RETURN : NAT_PROG_NAT66_RETURN);
 			return XDP_PASS;
 		}
 
 		if (locator_matches(ip6->daddr, cfg->shard_sid) && ip6->nexthdr == NAT_IPPROTO_IPV6) {
-			// The inner destination, not the outer one, decides the family.
-			// A shard not serving IPv4 skips the test entirely, which is what
-			// keeps its dispatch identical to the NAT66-only program's.
-			if (cfg->serves_v4) {
-				struct nat_ip6hdr *inner = (void *) (ip6 + 1);
-				if ((void *) (inner + 1) > data_end) {
-					count_drop(DROP_REASON_NAT66_MALFORMED_FORWARD);
-					return XDP_DROP;
-				}
-				if (nat64_prefix_matches(inner->daddr, cfg->nat64_prefix)) {
-					bpf_tail_call(ctx, &nat_progs, NAT_PROG_NAT64_FORWARD);
-					return XDP_PASS;
-				}
+			struct nat_ip6hdr *inner = (void *) (ip6 + 1);
+			if ((void *) (inner + 1) > data_end) {
+				count_drop(DROP_REASON_NAT66_MALFORMED_FORWARD);
+				return XDP_DROP;
 			}
-			bpf_tail_call(ctx, &nat_progs, NAT_PROG_NAT66_FORWARD);
+			// The inner destination, not the outer one, decides the family.
+			// A shard not serving IPv4 skips the prefix test entirely.
+			if (cfg->serves_v4 && nat64_prefix_matches(inner->daddr, cfg->nat64_prefix)) {
+				bpf_tail_call(ctx, &nat_progs, NAT_PROG_NAT64_FORWARD);
+				return XDP_PASS;
+			}
+			bpf_tail_call(ctx, &nat_progs, inner->nexthdr == NAT_IPPROTO_ICMPV6 ?
+						       NAT_PROG_NAT66_ICMP_FORWARD : NAT_PROG_NAT66_FORWARD);
 			return XDP_PASS;
 		}
 

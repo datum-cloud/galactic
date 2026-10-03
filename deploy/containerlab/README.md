@@ -497,6 +497,7 @@ task deploy
 | `verify:nat-local`        | Prove each site's tenants egress through that site's own edge shard                                         |
 | `verify:nat-collision`    | Prove two tenants sharing a ULA on one node do not share a translation                                      |
 | `verify:mss-clamp`        | Prove full-size TCP segments cross the fabric, out through NAT and across sites                             |
+| `verify:nat-icmp`         | Prove ping, traceroute and path MTU discovery work through each site's egress shard                         |
 | `verify:scenarios`        | Verify ping across all VPC test scenarios                                                                   |
 | `verify:ns10`             | Verify ns10 ping (IPv6-only, 3-site mesh)                                                                   |
 | `verify:ns20`             | Verify ns20 ping (dual-stack, 3-site mesh)                                                                  |

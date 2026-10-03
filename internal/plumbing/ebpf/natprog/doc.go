@@ -34,7 +34,11 @@ const (
 	ProgNAT66Return  uint32 = 1
 	ProgNAT64Forward uint32 = 2
 	ProgNAT64Return  uint32 = 3
-	ProgCount        uint32 = 4
+
+	ProgNAT66ICMPForward uint32 = 4
+	ProgNAT66ICMPReturn  uint32 = 5
+
+	ProgCount uint32 = 6
 )
 
 // Address families as the datapath writes them into conn_key.family. They
