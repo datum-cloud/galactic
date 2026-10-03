@@ -191,11 +191,24 @@ spec:
         # running config is kept; an applied one raises an Applied event
         # carrying its hash. A change to `daemons` can't be applied live and
         # raises RestartRequired instead.
+        #
+        # It also checks FRR's BGP sessions every 30s. FRR can come up
+        # after a restart announcing ::ffff:<router-id> as an IPv6 session's
+        # next hop, which no receiving router can install (#665); the agent
+        # hard-resets such a session, at most once per 10 minutes, and raises
+        # a MappedNextHopReset event on this pod. Add --detect-only to keep
+        # the metrics and alerts without the resets. The metrics, also
+        # counting BGP routes zebra failed to install, are served on the
+        # node's port 9343 (hostNetwork).
         - name: config-agent
           image: ghcr.io/datum-cloud/fabric-router:latest
           command:
             - fabric-config-agent
             - watch
+          ports:
+            - name: agent-metrics
+              containerPort: 9343
+              protocol: TCP
           env:
             - name: NODE_NAME
               valueFrom:
@@ -222,8 +235,8 @@ spec:
           volumeMounts:
             - name: frr-etc
               mountPath: /etc/frr
-            # vtysh (used by frr-reload.py) reaches the daemons over the
-            # sockets in /run/frr.
+            # vtysh (used by frr-reload.py and the session check) reaches
+            # the daemons over the sockets in /run/frr.
             - name: frr-run
               mountPath: /run/frr
         # Prometheus exporter for BGP peer state, message counters, and

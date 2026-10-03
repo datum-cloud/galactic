@@ -44,6 +44,22 @@ func (e ExecFRR) Reload(ctx context.Context, path string) error {
 	return run(ctx, e.Reloader, "--reload", "--stdout", "--confdir", e.ConfigDir, path)
 }
 
+// Neighbors runs `show bgp neighbors json` through vtysh.
+func (e ExecFRR) Neighbors(ctx context.Context) ([]byte, error) {
+	return output(ctx, e.Vtysh, "-c", "show bgp neighbors json")
+}
+
+// Routes runs `show <afi> route json` through vtysh.
+func (e ExecFRR) Routes(ctx context.Context, afi string) ([]byte, error) {
+	return output(ctx, e.Vtysh, "-c", "show "+afi+" route json")
+}
+
+// ResetNeighbor runs `clear bgp ipv6 <neighbor>` through vtysh, a hard reset
+// that tears the session down and recomputes its next hop when it comes back.
+func (e ExecFRR) ResetNeighbor(ctx context.Context, neighbor string) error {
+	return run(ctx, e.Vtysh, "-c", "clear bgp ipv6 "+neighbor)
+}
+
 // run executes name with args and returns an error including its combined
 // output when it exits non-zero.
 func run(ctx context.Context, name string, args ...string) error {
@@ -55,4 +71,17 @@ func run(ctx context.Context, name string, args ...string) error {
 		return fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(out.String()))
 	}
 	return nil
+}
+
+// output executes name with args and returns its standard output. It returns
+// an error including standard error when it exits non-zero.
+func output(ctx context.Context, name string, args ...string) ([]byte, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
 }

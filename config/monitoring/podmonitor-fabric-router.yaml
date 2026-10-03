@@ -1,6 +1,8 @@
 # Scrapes each fabric-router pod's frr-exporter sidecar (port frr-metrics,
 # 9342), which serves underlay BGP peer state, message counters and prefix
-# counts. The pod uses hostNetwork, so its pod IP is the node's own.
+# counts, and its config-agent container (port agent-metrics, 9343), which
+# serves IPv4-mapped next hops and uninstalled BGP routes. The pod uses
+# hostNetwork, so its pod IP is the node's own.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -8,7 +10,10 @@ metadata:
   labels:
     app.kubernetes.io/name: fabric-router
 spec:
-  # job="fabric-router", which the alert rules match on.
+  # job="fabric-router" for frr-exporter, which the alert rules match on.
+  # The agent-metrics endpoint overrides it to job="fabric-config-agent", so
+  # FabricRouterMetricsDown and FabricConfigAgentMetricsDown each cover one
+  # target.
   jobLabel: app.kubernetes.io/name
   selector:
     matchLabels:
@@ -19,3 +24,10 @@ spec:
       relabelings:
         - sourceLabels: [__meta_kubernetes_pod_node_name]
           targetLabel: node
+    - port: agent-metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - targetLabel: job
+          replacement: fabric-config-agent
