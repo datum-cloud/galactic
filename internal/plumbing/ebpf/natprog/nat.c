@@ -107,15 +107,12 @@
 // Scope.
 // ---------------------------------------------------------------------
 //
-// TCP, UDP, and ICMPv6 for NAT66; TCP, UDP, and ICMP Echo for NAT64. ICMPv4
-// error translation (RFC 6146 section 3.5) and fragment handling (section 3.4)
-// are deliberately absent, not overlooked: each is a subsystem rather than a
-// branch, and each is tracked as its own follow-on. Their absence is counted,
-// not silent -- an IPv4 fragment, a packet carrying IPv4 options, or an ICMPv4
-// error on the return path increments a named drop reason, so "NAT64 works
-// except for X" is a readable counter rather than a support ticket. Until they
-// land, this is not a complete RFC 6146 implementation, and PMTUD across the
-// NAT64 translator does not work.
+// TCP, UDP, and ICMP, both families. Fragment handling (RFC 6146 section 3.4)
+// is deliberately absent, not overlooked: it is a subsystem rather than a
+// branch, tracked as its own follow-on. Its absence is counted, not silent --
+// an IPv4 fragment or a packet carrying IPv4 options on the return path
+// increments a named drop reason, so "NAT64 works except for X" is a readable
+// counter rather than a support ticket.
 //
 // NAT66 ICMPv6 covers what a tenant behind a translator needs: its own ping,
 // and the errors the internet sends back about its flows. A tenant's Echo
@@ -126,7 +123,9 @@
 // it sent. Neighbor Discovery is passed to the kernel untouched; every other
 // ICMPv6 message addressed to a masquerade address is dropped against a named
 // reason. NAT64 translates a tenant's ping the same way, ICMPv6 Echo to ICMPv4
-// Echo and back. This shard generates no ICMP error of its own.
+// Echo and back, and translates the ICMPv4 errors the IPv4 internet sends
+// about a tenant's flows into the ICMPv6 errors RFC 7915 section 4.2 maps them
+// to, quoted packet included. This shard generates no ICMP error of its own.
 //
 // An Echo Request addressed to a masquerade address itself is answered only
 // when the operator turns on the echo responder (NAT_SHARD_FLAG_ECHO_RESPONDER),
@@ -165,6 +164,7 @@ static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 pl
 static long (*bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *) BPF_FUNC_tail_call;
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
+static long (*bpf_xdp_adjust_tail)(void *ctx, int delta) = (void *) BPF_FUNC_xdp_adjust_tail;
 
 // ---------------------------------------------------------------------
 // Constants.
@@ -182,7 +182,20 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 
 // ICMPv4 message types (RFC 792).
 #define NAT_ICMP_ECHO_REPLY 0
+#define NAT_ICMP_DEST_UNREACH 3
 #define NAT_ICMP_ECHO_REQUEST 8
+#define NAT_ICMP_TIME_EXCEEDED 11
+#define NAT_ICMP_PARAM_PROBLEM 12
+
+// A translated ICMPv4 error has its front rebuilt: its own 8-byte header, the
+// quoted packet's IPv6 header, and the first 8 bytes of the quoted transport
+// header. Whatever the quote carries past those stays where it lies. See
+// nat64_icmp_error.
+#define NAT_QUOTED_L4_LEN 8
+#define NAT_ICMP6_ERR_FRONT (8 + NAT_IP6HDR_LEN + NAT_QUOTED_L4_LEN)
+// RFC 4443 section 2.4(c): an ICMPv6 error never makes its packet larger than
+// the IPv6 minimum MTU. Beyond that, the quote is cut to the rebuilt front.
+#define NAT_ICMP6_ERR_MAX (1280 - NAT_IP6HDR_LEN)
 
 // ICMPv6 message types (RFC 4443, RFC 4861). The four error types share one
 // layout -- an 8-byte header followed by as much of the offending packet as
@@ -1968,6 +1981,331 @@ int nat64_return(struct xdp_md *ctx)
 	return nat64_return_leg(ctx, cfg, ip4, &l4v, DROP_REASON_NAT64_NO_RETURN_CONN, 0);
 }
 
+// rfc1191_plateau is the greatest RFC 1191 plateau MTU below tot_len, the path
+// MTU estimate RFC 7915 section 4.2 has a translator report when an IPv4 router
+// sent Fragmentation Needed without an MTU.
+static NAT_ALWAYS_INLINE __u32 rfc1191_plateau(__u16 tot_len)
+{
+	if (tot_len > 32000)
+		return 32000;
+	if (tot_len > 17914)
+		return 17914;
+	if (tot_len > 8166)
+		return 8166;
+	if (tot_len > 4352)
+		return 4352;
+	if (tot_len > 2002)
+		return 2002;
+	if (tot_len > 1492)
+		return 1492;
+	if (tot_len > 1006)
+		return 1006;
+	if (tot_len > 508)
+		return 508;
+	if (tot_len > 296)
+		return 296;
+	return 68;
+}
+
+// struct icmp6_err is the ICMPv6 message an ICMPv4 error translates to: its
+// type, code and type-specific word, in host order.
+struct icmp6_err {
+	__u8 type;
+	__u8 code;
+	__u32 word;
+};
+
+// icmp4_err_to_icmp6 maps an ICMPv4 error to its ICMPv6 counterpart, as RFC
+// 7915 section 4.2 specifies, returning 0 when there is one and 1 for every
+// type and code that section says to drop. quoted_tot_len is the quoted
+// packet's own Total Length, which a Fragmentation Needed without an MTU is
+// estimated from.
+//
+// A Fragmentation Needed MTU grows by 20 because the tenant's packet was 20
+// bytes bigger before it was translated. RFC 7915 also bounds it by the
+// translator's own next-hop MTUs, which this does not: the IPv6 side of this
+// shard is the fabric, whose MTU a tenant's packet meets encapsulated and which
+// the fabric's own MSS clamp covers (galactic#641 for the rest), not something
+// an internet router's report can say anything about.
+static NAT_ALWAYS_INLINE int icmp4_err_to_icmp6(const struct nat_icmphdr *icmp4, __u16 quoted_tot_len,
+						struct icmp6_err *out)
+{
+	__u8 code = icmp4->code;
+	out->word = 0;
+
+	if (icmp4->type == NAT_ICMP_TIME_EXCEEDED) {
+		out->type = NAT_ICMPV6_TIME_EXCEEDED;
+		out->code = code;
+		return 0;
+	}
+
+	if (icmp4->type == NAT_ICMP_DEST_UNREACH) {
+		out->type = NAT_ICMPV6_DEST_UNREACH;
+		switch (code) {
+		case 0: case 1: case 5: case 6: case 7: case 8: case 11: case 12:
+			out->code = 0; // no route to destination
+			return 0;
+		case 9: case 10: case 13: case 15:
+			out->code = 1; // administratively prohibited
+			return 0;
+		case 3:
+			out->code = 4; // port unreachable
+			return 0;
+		case 2:
+			// Protocol Unreachable becomes a Parameter Problem pointing at
+			// the IPv6 header's Next Header field.
+			out->type = NAT_ICMPV6_PARAM_PROBLEM;
+			out->code = 1;
+			out->word = 6;
+			return 0;
+		case 4: {
+			// Fragmentation Needed: the MTU is the low half of the
+			// type-specific word, which this header names seq.
+			__u32 mtu = __builtin_bswap16(icmp4->seq);
+			if (mtu == 0)
+				mtu = rfc1191_plateau(quoted_tot_len);
+			out->type = NAT_ICMPV6_PACKET_TOO_BIG;
+			out->code = 0;
+			out->word = mtu + NAT_V6_V4_DELTA;
+			return 0;
+		}
+		}
+		return 1;
+	}
+
+	if (icmp4->type == NAT_ICMP_PARAM_PROBLEM && (code == 0 || code == 2)) {
+		// The pointer is the word's first byte. Each IPv4 header field that
+		// has an IPv6 counterpart points at it; the rest have none, and the
+		// message is dropped.
+		__u8 ptr = ((const __u8 *) &icmp4->id)[0];
+		out->type = NAT_ICMPV6_PARAM_PROBLEM;
+		out->code = 0;
+		if (ptr == 0 || ptr == 1)
+			out->word = ptr; // Version/IHL, Type of Service
+		else if (ptr == 2 || ptr == 3)
+			out->word = 4; // Total Length -> Payload Length
+		else if (ptr == 8)
+			out->word = 7; // Time to Live -> Hop Limit
+		else if (ptr == 9)
+			out->word = 6; // Protocol -> Next Header
+		else if (ptr >= 12 && ptr <= 15)
+			out->word = 8; // Source Address
+		else if (ptr >= 16 && ptr <= 19)
+			out->word = 24; // Destination Address
+		else
+			return 1;
+		return 0;
+	}
+
+	return 1;
+}
+
+// nat64_icmp_error translates an ICMPv4 error about a packet this shard sent
+// into the ICMPv6 error the tenant would have received had the path been IPv6
+// end to end (RFC 7915 section 4.2), and re-encapsulates it toward the tenant.
+//
+// The quoted packet is matched exactly as nat66_icmp_error matches its own:
+// read with its two sides swapped, it is the reverse session key. Its source
+// is shard_pub_addr4 on every row, so an error quoting anything else matches
+// nothing.
+//
+// Unlike NAT66, the quoted packet has to be translated too, and both its
+// header and the outer one grow by 20 bytes. Together that is exactly the 40
+// bytes the head moves back by, so every quoted byte past the first 8 of the
+// transport header is already where the translated message needs it. Only the
+// front is rebuilt -- outer IPv6 header, ICMPv6 header, quoted IPv6 header, and
+// the first 8 transport bytes, the ones holding the ports or the Echo
+// Identifier -- from fields read onto the stack before the move. The rest of
+// the quote is carried untouched, and so is its quoted transport checksum, as
+// in NAT66.
+//
+// The ICMPv6 checksum is then the ICMPv4 one adjusted for the front: the
+// carried bytes sum the same in both, at the same parity. That holds while the
+// whole quote is kept. Two cases cut it to the rebuilt front instead, with the
+// checksum computed outright over that fixed size: a quote that would make the
+// ICMPv6 packet larger than 1280 bytes, and an RFC 4884 multi-part message,
+// whose length field sits at a different offset in each family. The 8 bytes
+// kept are all RFC 792 guarantees an ICMPv4 error quotes, and all the kernel
+// matches an error to a socket on.
+//
+// The outer source is the reporting router's IPv4 address synthesized into the
+// NAT64 prefix, so the tenant sees which hop reported, as traceroute needs.
+static NAT_ALWAYS_INLINE int nat64_icmp_error(struct xdp_md *ctx, struct shard_config *cfg,
+					       struct nat_ethhdr *old_eth, struct nat_iphdr *ip4,
+					       struct nat_icmphdr *icmp, void *data_end)
+{
+	struct nat_iphdr *quoted = (void *) (icmp + 1);
+	__u8 *quoted_l4 = (void *) (quoted + 1);
+	if ((void *) (quoted_l4 + NAT_QUOTED_L4_LEN) > data_end) {
+		count_drop(DROP_REASON_NAT64_ICMP_MALFORMED);
+		return XDP_DROP;
+	}
+	// This shard sends no IPv4 options and never fragments, so a quote with
+	// either is not of a packet it sent.
+	if ((quoted->version_ihl & 0x0F) != NAT_IP4HDR_LEN / 4 ||
+	    (quoted->frag_off & __builtin_bswap16(0x1FFF)) != 0) {
+		count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
+		return XDP_DROP;
+	}
+
+	struct icmp6_err err6;
+	if (icmp4_err_to_icmp6(icmp, __builtin_bswap16(quoted->tot_len), &err6) != 0) {
+		count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
+		return XDP_DROP;
+	}
+
+	struct quoted_view q;
+	int rc = parse_quoted(quoted->protocol, quoted_l4, data_end, NAT_IPPROTO_ICMP,
+			      NAT_ICMP_ECHO_REQUEST, &q);
+	if (rc < 0) {
+		count_drop(DROP_REASON_NAT64_ICMP_MALFORMED);
+		return XDP_DROP;
+	}
+	if (rc > 0) {
+		count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
+		return XDP_DROP;
+	}
+
+	struct conn_key rev_key;
+	__builtin_memset(&rev_key, 0, sizeof(rev_key));
+	rev_key.family = NAT_FAMILY_V4;
+	rev_key.proto = quoted->protocol;
+	v4_mapped(rev_key.saddr, quoted->daddr);
+	rev_key.sport = q.peer_port;
+	v4_mapped(rev_key.daddr, quoted->saddr);
+	rev_key.dport = q.masq;
+
+	struct conn_value *cv = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
+	if (!cv) {
+		count_drop(DROP_REASON_NAT64_ICMP_NO_CONN);
+		return XDP_DROP;
+	}
+
+	// The ICMPv6 message's rebuilt front, on the stack as 14 words: header,
+	// quoted IPv6 header, first 8 quoted transport bytes.
+	__be32 msg[NAT_ICMP6_ERR_FRONT / 4];
+	__u8 *m = (__u8 *) msg;
+	__builtin_memset(msg, 0, sizeof(msg));
+	m[0] = err6.type;
+	m[1] = err6.code;
+	msg[1] = __builtin_bswap32(err6.word);
+
+	struct nat_ip6hdr *q6 = (struct nat_ip6hdr *) &m[8];
+	q6->vtc_flow[0] = (__u8) (0x60 | (quoted->tos >> 4));
+	q6->vtc_flow[1] = (__u8) ((quoted->tos & 0x0F) << 4);
+	// The quoted packet's own length, as it was sent, not as truncated here.
+	q6->payload_len = __builtin_bswap16((__u16) (__builtin_bswap16(quoted->tot_len) - NAT_IP4HDR_LEN));
+	q6->nexthdr = quoted->protocol == NAT_IPPROTO_ICMP ? NAT_IPPROTO_ICMPV6 : quoted->protocol;
+	q6->hop_limit = quoted->ttl;
+	__builtin_memcpy(q6->saddr, cv->backend_addr, 16);
+	__builtin_memcpy(q6->daddr, cv->dest_addr, 16);
+
+	__u8 *ql4 = &m[8 + NAT_IP6HDR_LEN];
+	__builtin_memcpy(ql4, quoted_l4, NAT_QUOTED_L4_LEN);
+	// The masquerade port or Identifier goes back to the tenant's own, at the
+	// same offset parse_quoted found it: bytes 0-1 of TCP or UDP, 4-5 of an
+	// Echo. A quoted Echo Request also goes back to its ICMPv6 type.
+	if (quoted->protocol == NAT_IPPROTO_ICMP) {
+		ql4[0] = NAT_ICMPV6_ECHO_REQUEST;
+		__builtin_memcpy(&ql4[4], &cv->backend_port, 2);
+	} else {
+		__builtin_memcpy(&ql4[0], &cv->backend_port, 2);
+	}
+
+	__u8 src6[16];
+	__builtin_memcpy(src6, cfg->nat64_prefix, 12);
+	__builtin_memcpy(&src6[12], &ip4->saddr, 4);
+	__u8 dst6[16];
+	__builtin_memcpy(dst6, cv->backend_addr, 16);
+	__u8 usid[16];
+	__builtin_memcpy(usid, cv->backend_usid, 16);
+	__u8 tos = ip4->tos;
+	__u8 ttl = ip4->ttl;
+
+	// Keep the whole quote unless it would outgrow 1280 bytes as ICMPv6, or
+	// carries an RFC 4884 length (the second byte of the word). Kept whole,
+	// the ICMPv6 message is exactly as long as the IPv4 packet was: it loses
+	// the outer IPv4 header's 20 bytes and its quoted header gains 20. The
+	// IPv4 Total Length, not the frame, says how long that is: a frame can
+	// carry link padding past it.
+	__u16 tot4 = __builtin_bswap16(ip4->tot_len);
+	int cur = (int) ((long) data_end - (long) old_eth);
+	int keep_all = ((const __u8 *) &icmp->id)[1] == 0 &&
+		       tot4 >= NAT_IP4HDR_LEN + 8 + NAT_IP4HDR_LEN + NAT_QUOTED_L4_LEN &&
+		       tot4 <= NAT_ICMP6_ERR_MAX &&
+		       (int) sizeof(struct nat_ethhdr) + tot4 <= cur;
+	__u32 kept = keep_all ? tot4 : NAT_ICMP6_ERR_FRONT;
+	// Bounded for the verifier; keep_all already guarantees it.
+	if (kept > NAT_ICMP6_ERR_MAX)
+		kept = NAT_ICMP6_ERR_FRONT;
+
+	{
+		__be32 now6[10 + NAT_ICMP6_ERR_FRONT / 4];
+		__builtin_memcpy(&now6[0], src6, 16);
+		__builtin_memcpy(&now6[4], dst6, 16);
+		now6[8] = __builtin_bswap32(kept);
+		now6[9] = __builtin_bswap32(NAT_IPPROTO_ICMPV6);
+		__builtin_memcpy(&now6[10], msg, sizeof(msg));
+		__be16 check;
+		if (keep_all) {
+			// The ICMPv4 message's front as it arrived, checksum zeroed:
+			// its header, the quoted IPv4 header, the first 8 transport
+			// bytes.
+			__be32 was4[(8 + NAT_IP4HDR_LEN + NAT_QUOTED_L4_LEN) / 4];
+			__builtin_memcpy(was4, icmp, sizeof(was4));
+			((__u8 *) was4)[2] = 0;
+			((__u8 *) was4)[3] = 0;
+			__s64 diff = bpf_csum_diff(was4, sizeof(was4), now6, sizeof(now6), 0);
+			check = csum_fold_add(icmp->check, diff);
+		} else {
+			// csum_fold_add folds a diff into an existing checksum;
+			// starting from 0xFFFF, the checksum of nothing, it folds a
+			// whole sum.
+			__s64 sum = bpf_csum_diff(0, 0, now6, sizeof(now6), 0);
+			check = csum_fold_add(0xFFFF, sum);
+		}
+		__builtin_memcpy(&m[2], &check, 2);
+	}
+
+	__u8 saved_eth[sizeof(struct nat_ethhdr)];
+	__builtin_memcpy(saved_eth, old_eth, sizeof(saved_eth));
+
+	// Cut the frame to the Ethernet header plus the message's kept length --
+	// which drops link padding, or the quote past the rebuilt front -- then
+	// grow the front by both headers' 20 bytes. What is left is exactly the
+	// result, the carried tail already where it belongs.
+	int want = (int) (sizeof(struct nat_ethhdr) + kept);
+	if (bpf_xdp_adjust_tail(ctx, want - cur) != 0 ||
+	    bpf_xdp_adjust_head(ctx, -2 * NAT_V6_V4_DELTA) != 0) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+
+	void *data = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+	if (data + sizeof(struct nat_ethhdr) + NAT_IP6HDR_LEN + NAT_ICMP6_ERR_FRONT > data_end) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+
+	struct nat_ethhdr *eth = data;
+	__builtin_memcpy(eth, saved_eth, sizeof(saved_eth));
+	eth->h_proto = __builtin_bswap16(NAT_ETH_P_IPV6);
+
+	struct nat_ip6hdr *ip6 = (void *) (eth + 1);
+	__builtin_memset(ip6->vtc_flow, 0, sizeof(ip6->vtc_flow));
+	ip6->vtc_flow[0] = (__u8) (0x60 | (tos >> 4));
+	ip6->vtc_flow[1] = (__u8) ((tos & 0x0F) << 4);
+	ip6->payload_len = __builtin_bswap16((__u16) kept);
+	ip6->nexthdr = NAT_IPPROTO_ICMPV6;
+	ip6->hop_limit = ttl;
+	__builtin_memcpy(ip6->saddr, src6, 16);
+	__builtin_memcpy(ip6->daddr, dst6, 16);
+	__builtin_memcpy((void *) (ip6 + 1), msg, sizeof(msg));
+
+	return reencap_to_tenant(ctx, cfg, ip6, usid);
+}
+
 // echo_respond4 answers an Echo Request addressed to shard_pub_addr4, when the
 // operator has enabled the echo responder and this CPU's bucket can pay for it.
 // The reply is built in place and leaves the way a forward leg does: this
@@ -2044,6 +2382,8 @@ int nat64_icmp_return(struct xdp_md *ctx)
 	}
 	if (type == NAT_ICMP_ECHO_REQUEST)
 		return echo_respond4(ctx, cfg, eth, ip4, icmp);
+	if (type == NAT_ICMP_DEST_UNREACH || type == NAT_ICMP_TIME_EXCEEDED || type == NAT_ICMP_PARAM_PROBLEM)
+		return nat64_icmp_error(ctx, cfg, eth, ip4, icmp, data_end);
 
 	count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
 	return XDP_DROP;
