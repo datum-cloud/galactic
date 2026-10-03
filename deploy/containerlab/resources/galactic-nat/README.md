@@ -85,9 +85,10 @@ that same script.
 Each shard's `status.shardSID` is advertised as a plain, RT-less
 BGPAdvertisement by `EgressShardReconciler`
 (`internal/controller/egressshard_controller.go`), so every other
-node in the mesh learns a real kernel route to it via the existing
-RT-less-EVPN main-table import path
-(`internal/runtime/gobgp/monitor.go`'s `matchTableID`/`RouteMainAdd`).
+node in the mesh learns a kernel route to it as a plain route
+(`internal/runtime/gobgp/plainroutes.go`), in a table consulted only
+when the main table has nothing more specific than its default route,
+so the underlay route below wins wherever it exists.
 It is the SID's covering `/64` (Block + Node-ID, e.g.
 `2001:db8:ff01:2002::/64` for dfw-worker2's shard), not a `/128`. Each
 tenant VRF encapsulates toward this shard with its own 12-bit Argument

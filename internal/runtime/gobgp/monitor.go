@@ -52,6 +52,9 @@ var (
 // withdrawn, dispatching each path to its VRF through the route-target index.
 // One goroutine and subscription for all VRFs, because a node can host
 // thousands and one per VRF would not scale.
+//
+// It also starts the plain-route reconciler, which owns the kernel routes for
+// paths carrying no route target.
 func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer) {
 	if r.srvCtx == nil {
 		slog.Info("startRIBMonitor: skipping — srvCtx is nil")
@@ -64,6 +67,13 @@ func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer) {
 			defer r.wg.Done()
 			r.watchEVPNRIB(r.srvCtx, b)
 		}()
+		if r.plain != nil {
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				r.plain.run(r.srvCtx)
+			}()
+		}
 	})
 }
 
@@ -135,16 +145,15 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	tableID := install.tableID
 
 	prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
+	plainPrefix := netip.PrefixFrom(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength)).Masked()
 
 	if path.Withdrawal {
 		slog.Info(logPrefix+": withdrawing route", "prefix", prefix, "table", tableID, "plain", install.plain)
-		var delErr error
 		if install.plain {
-			delErr = srv6.RouteMainDel(prefix, tableID)
-		} else {
-			delErr = srv6.RouteEgressDel(prefix, tableID)
+			r.plain.withdraw(plainPrefix)
+			return
 		}
-		if delErr != nil {
+		if delErr := srv6.RouteEgressDel(prefix, tableID); delErr != nil {
 			slog.Error(logPrefix+": route delete failed", "prefix", prefix, "table", tableID, "err", delErr)
 		}
 		return
@@ -166,21 +175,21 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	}
 
 	slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID, "plain", install.plain)
-	var addErr error
 	if install.plain {
-		addErr = srv6.RouteMainAdd(prefix, gw, tableID)
-	} else {
-		addErr = srv6.RouteEgressAdd(prefix, gw, tableID)
+		// The reconciler installs it, and keeps its next hop current.
+		r.plain.set(plainPrefix, gw)
+		return
 	}
-	if addErr != nil {
+	if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
 		slog.Error(logPrefix+": route install failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
 	}
 }
 
 // routeInstall is matchTableID's result: which kernel table the route belongs
 // in, and which installer to use. plain selects an ordinary next-hop route for
-// a path with no route target; otherwise the route is encapsulated toward a
-// uSID decap SID.
+// a path with no route target, owned by the plain-route reconciler, which
+// ignores tableID; otherwise the route is encapsulated toward a uSID decap SID
+// in VRF table tableID.
 type routeInstall struct {
 	tableID uint32
 	plain   bool
@@ -197,12 +206,13 @@ type routeInstall struct {
 // A path carrying no route target is not VRF-scoped by construction, since the
 // extended communities attribute is attached only when there is at least one.
 // The anycast ingress-VIP advertisements are the case today, and they leave
-// VRFID and Function unset for exactly this reason. Such a path goes into the
-// main routing table as a plain route rather than an encapsulated one.
+// VRFID and Function unset for exactly this reason, as do the egress shards'
+// SID and masquerade-address advertisements. Such a path becomes a plain route
+// rather than an encapsulated one; see srv6.PlainRouteTable.
 //
 // The distinction is on the absence of any route target, not on a lookup miss,
 // so a path naming a VRF this node does not have still returns false rather
-// than landing in the main table by accident.
+// than becoming a plain route by accident.
 func (r *GoBGPRuntime) matchTableID(attrs []bgp.PathAttributeInterface) (routeInstall, bool) {
 	r.rtIndexMu.RLock()
 	defer r.rtIndexMu.RUnlock()
