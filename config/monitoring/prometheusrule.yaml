@@ -1,6 +1,7 @@
-# Alerts on the underlay (fabric-router's FRR, via frr-exporter) and on
-# galactic-router's BMP export. A BGP session that drops is also streamed to
-# the BMP collector as a Peer Down carrying the reason and any NOTIFICATION;
+# Alerts on the underlay (fabric-router's FRR, via frr-exporter and
+# fabric-config-agent) and on galactic-router's BMP export. A BGP session
+# that drops is also streamed to the BMP collector as a Peer Down carrying
+# the reason and any NOTIFICATION;
 # these rules are the Prometheus-side signal for the same events, so an alert
 # does not depend on the collector or the log pipeline behind it.
 #
@@ -123,6 +124,58 @@ spec:
             description: >-
               Prometheus cannot reach frr-exporter on {{ $labels.node }} (port 9342). Every other fabric-router
               alert on this node is blind until it recovers.
+    # From fabric-config-agent's session check (job fabric-config-agent, port
+    # 9343).
+    - name: fabric-config-agent
+      rules:
+        # The agent hard-resets a session with a mapped next hop at most once
+        # per 10 minutes, so 15 minutes means at least one reset did not fix
+        # it, or the agent runs with --detect-only.
+        - alert: FabricBGPMappedNextHop
+          expr: fabric_router_bgp_mapped_nexthop{job="fabric-config-agent"} == 1
+          for: 15m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $labels.node }} announces an IPv4-mapped next hop to {{ $labels.peer }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpmappednexthop"
+            description: >-
+              fabric-router on {{ $labels.node }} has announced ::ffff:<router-id> as the IPv6 next hop to
+              {{ $labels.peer }} for 15 minutes, despite the agent's resets. Receiving routers cannot install these
+              routes, so other sites lose their routes to this node's locators and NAT shards. The agent's
+              MappedNextHopReset events on the pod show each reset.
+        # A BGP route that loses to an installed connected or static route is
+        # not counted, so this fires only for prefixes nothing routes.
+        - alert: FabricBGPRoutesNotInstalled
+          expr: fabric_router_bgp_uninstalled_routes{job="fabric-config-agent"} > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $value }} {{ $labels.afi }} BGP routes on {{ $labels.node }} are not installed"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgproutesnotinstalled"
+            description: >-
+              zebra on {{ $labels.node }} holds {{ $value }} {{ $labels.afi }} prefixes learned over BGP with no
+              route installed in the kernel for 10 minutes, usually because the next hop does not resolve.
+              `show {{ $labels.afi }} route` in the frr container shows which. An IPv4-mapped next hop from the
+              announcing node (FabricBGPMappedNextHop) is one cause.
+        - alert: FabricConfigAgentMetricsDown
+          expr: up{job="fabric-config-agent"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-config-agent metrics on {{ $labels.node }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricconfigagentmetricsdown"
+            description: >-
+              Prometheus cannot reach fabric-config-agent on {{ $labels.node }} (port 9343), so
+              FabricBGPMappedNextHop and FabricBGPRoutesNotInstalled cannot fire for it.
     - name: galactic-router
       rules:
         - alert: GalacticRouterBMPStationDown

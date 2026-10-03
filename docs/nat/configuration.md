@@ -59,8 +59,8 @@ node without an `EgressShard` runs attached but claims no packet rather than
 crash-looping.
 
 `9182`/`5182` are chosen to avoid every other `hostNetwork: true` galactic
-process already running on an edge node (`fabric-router`'s `179`,
-`galactic-router`'s `9179`/`5179`, `galactic-cni`'s `9180`/`5180`,
+process already running on an edge node (`fabric-router`'s `179`, `9342` and
+`9343`, `galactic-router`'s `9179`/`5179`, `galactic-cni`'s `9180`/`5180`,
 `galactic-gateway`'s `8081`/`5181`).
 
 ### Option details

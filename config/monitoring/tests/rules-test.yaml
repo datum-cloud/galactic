@@ -179,6 +179,86 @@ tests:
                 Prometheus cannot reach frr-exporter on iad-worker (port 9342). Every other fabric-router alert on
                 this node is blind until it recovers.
 
+  # A mapped next hop that lasts 15m fires; one a reset clears inside that
+  # does not.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_router_bgp_mapped_nexthop{job="fabric-config-agent",node="edge-1",peer="2607:f740:0:3f::39b"}'
+        values: "1x40"
+      - series: 'fabric_router_bgp_mapped_nexthop{job="fabric-config-agent",node="edge-1",peer="fd00::ffff:1"}'
+        values: "1x2 0x38"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FabricBGPMappedNextHop
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: FabricBGPMappedNextHop
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: fabric-config-agent
+              node: edge-1
+              peer: "2607:f740:0:3f::39b"
+            exp_annotations:
+              summary: "edge-1 announces an IPv4-mapped next hop to 2607:f740:0:3f::39b"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpmappednexthop"
+              description: >-
+                fabric-router on edge-1 has announced ::ffff:<router-id> as the IPv6 next hop to
+                2607:f740:0:3f::39b for 15 minutes, despite the agent's resets. Receiving routers cannot install
+                these routes, so other sites lose their routes to this node's locators and NAT shards. The agent's
+                MappedNextHopReset events on the pod show each reset.
+
+  # Uninstalled routes for 10m fire; zero does not; an unreachable agent does.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_router_bgp_uninstalled_routes{job="fabric-config-agent",node="edge-2",afi="ipv6"}'
+        values: "2x30"
+      - series: 'fabric_router_bgp_uninstalled_routes{job="fabric-config-agent",node="edge-2",afi="ipv4"}'
+        values: "0x30"
+      - series: 'up{job="fabric-config-agent",node="edge-3"}'
+        values: "1x5 0x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FabricBGPRoutesNotInstalled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: FabricBGPRoutesNotInstalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-config-agent
+              node: edge-2
+              afi: ipv6
+            exp_annotations:
+              summary: "2 ipv6 BGP routes on edge-2 are not installed"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgproutesnotinstalled"
+              description: >-
+                zebra on edge-2 holds 2 ipv6 prefixes learned over BGP with no route installed in the kernel for
+                10 minutes, usually because the next hop does not resolve. `show ipv6 route` in the frr container
+                shows which. An IPv4-mapped next hop from the announcing node (FabricBGPMappedNextHop) is one cause.
+      - eval_time: 11m
+        alertname: FabricConfigAgentMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-config-agent
+              node: edge-3
+            exp_annotations:
+              summary: "fabric-config-agent metrics on edge-3 cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricconfigagentmetricsdown"
+              description: >-
+                Prometheus cannot reach fabric-config-agent on edge-3 (port 9343), so FabricBGPMappedNextHop and
+                FabricBGPRoutesNotInstalled cannot fire for it.
+      - eval_time: 11m
+        alertname: FabricRouterMetricsDown
+        exp_alerts: []
+
   # A station down for 10m fires; one that recovers inside that does not.
   - interval: 30s
     input_series:

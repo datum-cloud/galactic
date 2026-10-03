@@ -191,11 +191,21 @@ spec:
         # running config is kept; an applied one raises an Applied event
         # carrying its hash. A change to `daemons` can't be applied live and
         # raises RestartRequired instead.
+        #
+        # Every 30s it also hard-resets any IPv6 session announcing an
+        # IPv4-mapped next hop, at most once per session per 10 minutes, and
+        # raises a MappedNextHopReset event on this pod. --detect-only keeps
+        # the check's metrics without the resets. The metrics are served on
+        # the node's port 9343 (hostNetwork).
         - name: config-agent
           image: ghcr.io/datum-cloud/fabric-router:latest
           command:
             - fabric-config-agent
             - watch
+          ports:
+            - name: agent-metrics
+              containerPort: 9343
+              protocol: TCP
           env:
             - name: NODE_NAME
               valueFrom:
@@ -222,8 +232,8 @@ spec:
           volumeMounts:
             - name: frr-etc
               mountPath: /etc/frr
-            # vtysh (used by frr-reload.py) reaches the daemons over the
-            # sockets in /run/frr.
+            # vtysh (used by frr-reload.py and the session check) reaches
+            # the daemons over the sockets in /run/frr.
             - name: frr-run
               mountPath: /run/frr
         # Prometheus exporter for BGP peer state, message counters, and
