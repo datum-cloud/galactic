@@ -65,6 +65,7 @@ const (
 	NatMapNatProgs          = "nat_progs"
 	NatMapShardConfigTable  = "shard_config_table"
 	NatProgNat64Forward     = "nat64_forward"
+	NatProgNat64IcmpError   = "nat64_icmp_error"
 	NatProgNat64IcmpForward = "nat64_icmp_forward"
 	NatProgNat64IcmpReturn  = "nat64_icmp_return"
 	NatProgNat64Return      = "nat64_return"
@@ -118,6 +119,7 @@ type NatSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type NatProgramSpecs struct {
 	Nat64Forward     *ebpf.ProgramSpec `ebpf:"nat64_forward"`
+	Nat64IcmpError   *ebpf.ProgramSpec `ebpf:"nat64_icmp_error"`
 	Nat64IcmpForward *ebpf.ProgramSpec `ebpf:"nat64_icmp_forward"`
 	Nat64IcmpReturn  *ebpf.ProgramSpec `ebpf:"nat64_icmp_return"`
 	Nat64Return      *ebpf.ProgramSpec `ebpf:"nat64_return"`
@@ -193,6 +195,7 @@ type NatVariables struct {
 // It can be passed to LoadNatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type NatPrograms struct {
 	Nat64Forward     *ebpf.Program `ebpf:"nat64_forward"`
+	Nat64IcmpError   *ebpf.Program `ebpf:"nat64_icmp_error"`
 	Nat64IcmpForward *ebpf.Program `ebpf:"nat64_icmp_forward"`
 	Nat64IcmpReturn  *ebpf.Program `ebpf:"nat64_icmp_return"`
 	Nat64Return      *ebpf.Program `ebpf:"nat64_return"`
@@ -206,6 +209,7 @@ type NatPrograms struct {
 func (p *NatPrograms) Close() error {
 	return _NatClose(
 		p.Nat64Forward,
+		p.Nat64IcmpError,
 		p.Nat64IcmpForward,
 		p.Nat64IcmpReturn,
 		p.Nat64Return,

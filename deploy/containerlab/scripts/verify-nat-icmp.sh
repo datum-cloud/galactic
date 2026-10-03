@@ -31,6 +31,14 @@
 #      on (resources/galactic-nat/iad/) and must answer both; the others run
 #      with it off and must drop each request as icmp_unsolicited. This runs
 #      after the drop check, since it moves icmp_unsolicited on purpose.
+#   8. Shard-sent Packet Too Big: the tenant opens a UDP flow to the host,
+#      and the host answers the flow's masquerade port with a 1450-byte
+#      datagram. That fits every lab link, and not the fabric once the shard
+#      re-encapsulates it, so the shard must answer the host itself: a Packet
+#      Too Big for 1460 over NAT66, a Fragmentation Needed for 1440 over
+#      NAT64. The host's route to the masquerade address learning that MTU is
+#      the proof. Runs after the drop check too, since the shard counts each
+#      reply it refuses as fib_frag_needed.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -225,6 +233,48 @@ for site in "${SITES[@]}"; do
       fail "${site}: ${shard} has the responder off but answered ${answered} of ${addrs} (icmp_unsolicited +${refused}, want +2)"
     fi
   fi
+done
+
+# too_big_mtu SITE TARGET PUB SPORT opens a UDP flow from SITE's tenant to
+# TARGET:7777 from SPORT, answers its masquerade port on PUB from the host
+# with a datagram too big to re-encapsulate, and prints the MTU the host's
+# route to PUB learned, or nothing.
+too_big_mtu() {
+  local site="$1" target="$2" pub="$3" sport="$4" capture port family=-6 flush=-6
+  case "${pub}" in *.*) family=-4 flush=-4 ;; esac
+  capture=$(mktemp)
+  docker exec "${REMOTE}" ip "${flush}" route flush cache
+  docker exec "${REMOTE}" timeout 8 tcpdump -i eth1 -nn -c 1 "udp and dst port 7777 and src host ${pub}" \
+    >"${capture}" 2>/dev/null &
+  local dumper=$!
+  sleep 1
+  # The host answers the probe with a port unreachable, which the tenant
+  # receives and socat reports; that is expected.
+  echo probe | docker exec -i "$(control_plane "${site}")" kubectl -n ns10 exec -i "${POD[${site}]}" -- \
+    socat -u - "UDP6:[${target}]:7777,sourceport=${sport}" >/dev/null 2>&1 || true
+  wait "${dumper}" || true
+  port=$(grep -oE "${pub}\.[0-9]+ >" "${capture}" | head -1 | sed 's/.*\.//; s/ >//')
+  rm -f "${capture}"
+  [ -n "${port}" ] || return 0
+  head -c 1450 /dev/zero | docker exec -i "${REMOTE}" nc -u -w2 -p 7777 "${pub}" "${port}" >/dev/null 2>&1 || true
+  docker exec "${REMOTE}" ip "${family}" route get "${pub}" | grep -oE 'mtu [0-9]+' | awk '{print $2}'
+  docker exec "${REMOTE}" ip "${flush}" route flush cache
+}
+
+echo "--- 8. shard-sent Packet Too Big ---"
+for site in "${SITES[@]}"; do
+  shard=${FIRST_SHARD[${site}]}
+  read -r pub6 pub4 <<<"$(docker exec "$(control_plane "${site}")" kubectl -n galactic-system get egressshard \
+    "${shard}-egress" -o jsonpath='{.status.shardAddressIPv6} {.status.shardAddressIPv4}')"
+  for check in "NAT66 ${HOST6} ${pub6} 1460 40001" "NAT64 ${HOST4_SYNTH} ${pub4} 1440 40002"; do
+    read -r label target pub want sport <<<"${check}"
+    learned=$(too_big_mtu "${site}" "${target}" "${pub}" "${sport}")
+    if [ "${learned}" = "${want}" ]; then
+      echo "  ok   ${site} ${label}: the host learned MTU ${learned} for ${pub} from ${shard}"
+    else
+      fail "${site} ${label}: the host's route to ${pub} has MTU '${learned:-none}', want ${want} from ${shard}"
+    fi
+  done
 done
 
 if [ "${rc}" -eq 0 ]; then

@@ -39,8 +39,9 @@ const (
 	ProgNAT66ICMPReturn  uint32 = 5
 	ProgNAT64ICMPForward uint32 = 6
 	ProgNAT64ICMPReturn  uint32 = 7
+	ProgNAT64ICMPError   uint32 = 8
 
-	ProgCount uint32 = 8
+	ProgCount uint32 = 9
 )
 
 // ShardFlagEchoResponder is shard_config.flags' NAT_SHARD_FLAG_ECHO_RESPONDER:
