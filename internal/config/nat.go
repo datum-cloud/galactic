@@ -63,6 +63,18 @@ const (
 	// Direct mode there fails at attach; chain mode on a node with no gateway
 	// waits for a map that never appears.
 	EnvNATXDPAttach = "GALACTIC_NAT_XDP_ATTACH"
+
+	// EnvNATEchoResponder makes the shard answer an ICMP or ICMPv6 Echo
+	// Request addressed to one of its own masquerade addresses. Optional,
+	// defaulting to false, under which the datapath drops such a request and
+	// counts it as icmp_unsolicited.
+	//
+	// It exists so an operator can check from the internet that a masquerade
+	// address reaches its shard. It is off by default because an
+	// internet-facing address that answers pings is a policy decision. Replies
+	// are rate-limited in the datapath by a token bucket per CPU, shared with
+	// any other ICMP the shard emits on its own behalf.
+	EnvNATEchoResponder = "GALACTIC_NAT_ECHO_RESPONDER"
 )
 
 // NATXDPAttachDirect and NATXDPAttachChain are EnvNATXDPAttach's values.
@@ -93,6 +105,9 @@ type NATConfig struct {
 	// XDPAttach is NATXDPAttachDirect or NATXDPAttachChain, from
 	// EnvNATXDPAttach.
 	XDPAttach string
+
+	// EchoResponder is EnvNATEchoResponder.
+	EchoResponder bool
 }
 
 // NewNATConfig creates a config resolver reading the GALACTIC_NAT
@@ -108,6 +123,7 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault(KeyGRPCHealthPort, DefaultNATGRPCHealthPort)
 	v.SetDefault("uplink_interfaces", "")
 	v.SetDefault("xdp_attach", NATXDPAttachDirect)
+	v.SetDefault("echo_responder", false)
 
 	cfg := &NATConfig{
 		v:      v,
@@ -129,6 +145,7 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"nat-uplink-interfaces", "uplink_interfaces"},
 		{"nat-xdp-attach", "xdp_attach"},
+		{"nat-echo-responder", "echo_responder"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -148,6 +165,7 @@ func (c *NATConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.UplinkInterfaces = splitCommaList(c.v.GetString("uplink_interfaces"))
 	c.XDPAttach = c.v.GetString("xdp_attach")
+	c.EchoResponder = c.v.GetBool("echo_responder")
 }
 
 // Validate checks that the required configuration fields are set.

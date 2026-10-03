@@ -37,6 +37,12 @@ type NatConnValue struct {
 	Family      uint8
 }
 
+type NatIcmpBucket struct {
+	_        structs.HostLayout
+	LastNs   uint64
+	CreditNs uint64
+}
+
 type NatShardConfig struct {
 	_             structs.HostLayout
 	ShardSid      [16]uint8
@@ -45,7 +51,8 @@ type NatShardConfig struct {
 	ShardPubAddr4 uint32
 	ServesV6      uint8
 	ServesV4      uint8
-	Pad           [2]uint8
+	Flags         uint8
+	Pad           uint8
 }
 
 // Names of all BPF objects in the ELF.
@@ -53,10 +60,13 @@ type NatShardConfig struct {
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	NatMapDropReasons       = "drop_reasons"
+	NatMapIcmpRateBucket    = "icmp_rate_bucket"
 	NatMapNatConnTable      = "nat_conn_table"
 	NatMapNatProgs          = "nat_progs"
 	NatMapShardConfigTable  = "shard_config_table"
 	NatProgNat64Forward     = "nat64_forward"
+	NatProgNat64IcmpForward = "nat64_icmp_forward"
+	NatProgNat64IcmpReturn  = "nat64_icmp_return"
 	NatProgNat64Return      = "nat64_return"
 	NatProgNat66Forward     = "nat66_forward"
 	NatProgNat66IcmpForward = "nat66_icmp_forward"
@@ -108,6 +118,8 @@ type NatSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type NatProgramSpecs struct {
 	Nat64Forward     *ebpf.ProgramSpec `ebpf:"nat64_forward"`
+	Nat64IcmpForward *ebpf.ProgramSpec `ebpf:"nat64_icmp_forward"`
+	Nat64IcmpReturn  *ebpf.ProgramSpec `ebpf:"nat64_icmp_return"`
 	Nat64Return      *ebpf.ProgramSpec `ebpf:"nat64_return"`
 	Nat66Forward     *ebpf.ProgramSpec `ebpf:"nat66_forward"`
 	Nat66IcmpForward *ebpf.ProgramSpec `ebpf:"nat66_icmp_forward"`
@@ -121,6 +133,7 @@ type NatProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type NatMapSpecs struct {
 	DropReasons      *ebpf.MapSpec `ebpf:"drop_reasons"`
+	IcmpRateBucket   *ebpf.MapSpec `ebpf:"icmp_rate_bucket"`
 	NatConnTable     *ebpf.MapSpec `ebpf:"nat_conn_table"`
 	NatProgs         *ebpf.MapSpec `ebpf:"nat_progs"`
 	ShardConfigTable *ebpf.MapSpec `ebpf:"shard_config_table"`
@@ -153,6 +166,7 @@ func (o *NatObjects) Close() error {
 // It can be passed to LoadNatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type NatMaps struct {
 	DropReasons      *ebpf.Map `ebpf:"drop_reasons"`
+	IcmpRateBucket   *ebpf.Map `ebpf:"icmp_rate_bucket"`
 	NatConnTable     *ebpf.Map `ebpf:"nat_conn_table"`
 	NatProgs         *ebpf.Map `ebpf:"nat_progs"`
 	ShardConfigTable *ebpf.Map `ebpf:"shard_config_table"`
@@ -161,6 +175,7 @@ type NatMaps struct {
 func (m *NatMaps) Close() error {
 	return _NatClose(
 		m.DropReasons,
+		m.IcmpRateBucket,
 		m.NatConnTable,
 		m.NatProgs,
 		m.ShardConfigTable,
@@ -178,6 +193,8 @@ type NatVariables struct {
 // It can be passed to LoadNatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type NatPrograms struct {
 	Nat64Forward     *ebpf.Program `ebpf:"nat64_forward"`
+	Nat64IcmpForward *ebpf.Program `ebpf:"nat64_icmp_forward"`
+	Nat64IcmpReturn  *ebpf.Program `ebpf:"nat64_icmp_return"`
 	Nat64Return      *ebpf.Program `ebpf:"nat64_return"`
 	Nat66Forward     *ebpf.Program `ebpf:"nat66_forward"`
 	Nat66IcmpForward *ebpf.Program `ebpf:"nat66_icmp_forward"`
@@ -189,6 +206,8 @@ type NatPrograms struct {
 func (p *NatPrograms) Close() error {
 	return _NatClose(
 		p.Nat64Forward,
+		p.Nat64IcmpForward,
+		p.Nat64IcmpReturn,
 		p.Nat64Return,
 		p.Nat66Forward,
 		p.Nat66IcmpForward,

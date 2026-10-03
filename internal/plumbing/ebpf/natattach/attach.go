@@ -119,6 +119,8 @@ func PopulateProgArray(objs *natprog.NatObjects) error {
 
 		natprog.ProgNAT66ICMPForward: objs.Nat66IcmpForward,
 		natprog.ProgNAT66ICMPReturn:  objs.Nat66IcmpReturn,
+		natprog.ProgNAT64ICMPForward: objs.Nat64IcmpForward,
+		natprog.ProgNAT64ICMPReturn:  objs.Nat64IcmpReturn,
 	}
 	for slot, prog := range slots {
 		if prog == nil {

@@ -9,9 +9,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 )
 
 const (
+	testBoolFalse   = "false"
 	testNATNodeName = "test-nat-node"
 	testNATIface    = "eth1"
 	testNATIface2   = "eth2"
@@ -218,6 +221,51 @@ func TestNATConfigXDPAttach(t *testing.T) {
 			}
 			if !tt.wantErr && cfg.XDPAttach != tt.want {
 				t.Errorf("XDPAttach = %q, want %q", cfg.XDPAttach, tt.want)
+			}
+		})
+	}
+}
+
+// TestNATConfigEchoResponder covers the echo responder's three tiers: off
+// unless asked for, on from the environment, and the CLI flag winning over the
+// environment in either direction. Off is the default that matters: a shard
+// that answered pings without being told to would change what an
+// internet-facing address does on upgrade.
+func TestNATConfigEchoResponder(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		flag string
+		want bool
+	}{
+		{name: "default", want: false},
+		{name: "env on", env: testBoolTrue, want: true},
+		{name: "env off", env: testBoolFalse, want: false},
+		{name: "flag over env", env: testBoolFalse, flag: testBoolTrue, want: true},
+		{name: "flag off over env on", env: testBoolTrue, flag: testBoolFalse, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv(EnvNATEchoResponder, tt.env)
+			}
+			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			flags.String(FlagNodeName, "", "")
+			flags.Int(FlagMetricsPort, DefaultNATMetricsPort, "")
+			flags.Int(FlagGRPCHealthPort, DefaultNATGRPCHealthPort, "")
+			flags.String("nat-uplink-interfaces", "", "")
+			flags.String("nat-xdp-attach", NATXDPAttachDirect, "")
+			flags.Bool("nat-echo-responder", false, "")
+			if tt.flag != "" {
+				if err := flags.Set("nat-echo-responder", tt.flag); err != nil {
+					t.Fatalf("set flag: %v", err)
+				}
+			}
+
+			cfg := NewNATConfig()
+			cfg.BindFlags(flags)
+			if cfg.EchoResponder != tt.want {
+				t.Errorf("EchoResponder = %v, want %v", cfg.EchoResponder, tt.want)
 			}
 		})
 	}

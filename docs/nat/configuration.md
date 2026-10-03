@@ -43,6 +43,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | Node name         | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |
 | Uplink interfaces | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected | No       |
 | XDP attach mode   | `GALACTIC_NAT_XDP_ATTACH`        | `--nat-xdp-attach`        | `direct`      | No       |
+| Echo responder    | `GALACTIC_NAT_ECHO_RESPONDER`    | `--nat-echo-responder`    | `false`       | No       |
 | Metrics port      | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`        | No       |
 | gRPC health port  | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`        | No       |
 
@@ -154,6 +155,19 @@ other value fails validation at startup.
   that had to recreate the map empties the slot. The slot keeps the program
   alive across a `galactic-nat` restart, and the next process replaces it in
   place, so a shard restart leaves no gap in translation.
+
+**`--nat-echo-responder` / `GALACTIC_NAT_ECHO_RESPONDER`**
+Whether the shard answers an ICMP or ICMPv6 Echo Request addressed to one of
+its own masquerade addresses. Off by default, and set explicitly to `false` in
+`config/galactic-nat/base/daemonset.yaml`: the datapath drops such a request
+and counts it as `icmp_unsolicited`. Turn it on to check from the internet that
+a masquerade address reaches its shard — the reply comes from the datapath on
+that shard, so an answer proves the underlay delivers the address there.
+
+Replies come out of a token bucket per CPU (see Known constraints); a refused
+reply counts as `icmp_rate_limited`. The setting is written into the datapath
+whenever the shard programs its identity, so changing it takes a pod restart
+and nothing else.
 
 ### Capabilities and host requirements
 
@@ -370,7 +384,7 @@ Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 | Reason                                                                             | Meaning                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `nat66_no_return_conn`, `nat64_no_return_conn`                                     | A TCP or UDP reply matched no session.                                                                                                                                                                   |
-| `nat66_malformed_return`, `nat64_malformed_return`                                 | A reply too short to parse, or not TCP or UDP. For NAT64 this still includes every ICMPv4 message.                                                                                                       |
+| `nat66_malformed_return`, `nat64_malformed_return`                                 | A reply too short to parse, or not TCP or UDP.                                                                                                                                                           |
 | `nat66_malformed_forward`, `nat64_malformed_forward`                               | A tenant packet too short to parse, or of a protocol the family does not translate.                                                                                                                      |
 | `nat66_pat_exhausted`, `nat64_pat_exhausted`                                       | No free masquerade port or Echo Identifier within the probe limit.                                                                                                                                       |
 | `nat64_v4_fragment`, `nat64_v4_options`                                            | An IPv4 reply that was fragmented or carried options.                                                                                                                                                    |
@@ -378,7 +392,10 @@ Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 | `nat66_icmp_malformed`                                                             | An ICMPv6 message, or the packet an ICMPv6 error quotes, too short to parse.                                                                                                                             |
 | `nat66_icmp_no_conn`                                                               | An Echo Reply, or an ICMPv6 error, that matched no session.                                                                                                                                              |
 | `icmp_untranslatable`                                                              | A well-formed ICMP message the shard has no translation for: an ICMP type it does not handle, a tenant sending anything but an Echo Request, or an error quoting a packet the shard could not have sent. |
-| `icmp_unsolicited`                                                                 | An Echo Request addressed to a masquerade address itself.                                                                                                                                                |
+| `icmp_unsolicited`                                                                 | An Echo Request addressed to a masquerade address itself, with the echo responder off.                                                                                                                   |
+| `nat64_icmp_malformed`                                                             | An ICMPv4 message too short to parse, or a tenant's ICMPv6 bound for a NAT64 address that is.                                                                                                            |
+| `nat64_icmp_no_conn`                                                               | An ICMPv4 Echo Reply that matched no session.                                                                                                                                                            |
+| `icmp_rate_limited`                                                                | A reply the echo responder would have sent, refused by the per-CPU token bucket.                                                                                                                         |
 | `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`, `fib_lookup_failed`          | The shard translated a packet and could not resolve where to send it.                                                                                                                                    |
 | `adjust_head_failed`, `hop_limit_exceeded`, `no_egress_ifindex`, `redirect_failed` | The shard translated a packet and could not transmit it.                                                                                                                                                 |
 
@@ -386,9 +403,9 @@ A tenant can ping through NAT66: its Echo Request is translated like a UDP
 datagram, the Echo Identifier masqueraded in the port's place, and the
 ICMPv6 errors the internet sends back about its flows — Destination
 Unreachable, Packet Too Big, Time Exceeded, Parameter Problem — reach it
-rewritten to describe the packet it sent. NAT64 still translates TCP and UDP
-only, so a ping to a NAT64-synthesized address surfaces as
-`nat64_malformed_forward`.
+rewritten to describe the packet it sent. A ping to a NAT64-synthesized
+address works too: the shard translates ICMPv6 Echo to ICMPv4 Echo and back.
+ICMPv4 errors are not translated yet, and count as `icmp_untranslatable`.
 
 The `fib_*` reasons and the three after them all mean the same class of
 thing: the shard translated a packet and then could not get rid of it.
@@ -461,6 +478,15 @@ knowing before you rely on this component in production:
   ICMP query timeout has no counterpart here: LRU eviction is the only expiry
   a session gets. The table is shared deliberately, not by omission; the
   datapath's `nat_conn_table` comment gives the reasoning.
+- **The ICMP rate limit is per CPU, not per shard or per peer.** Every
+  reply the echo responder sends comes out of a token bucket of 1000
+  messages a second with a burst of 100, one bucket per CPU, compile-time
+  constants in `nat.c`. The limit for a whole shard is that rate times the
+  number of CPUs receiving traffic, so it grows with the uplinks' RSS
+  queue count rather than being one number. One peer that drains a CPU's
+  bucket also suppresses replies to every other peer hashed to that CPU
+  until it refills. `icmp_rate_limited` counts each refusal; a per-peer or
+  global limiter is the follow-up if that counter shows either problem.
 - **A shard's identity is entirely operator-chosen.** Nothing in this repo
   allocates `spec.shardSID` or the masquerade addresses, and nothing checks
   that a chosen SID's Node-ID doesn't collide with a real node's own — see

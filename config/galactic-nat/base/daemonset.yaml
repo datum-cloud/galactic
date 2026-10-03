@@ -95,6 +95,13 @@ spec:
             # Set explicitly here anyway so it can't silently drift.
             - name: GALACTIC_NAT_GRPC_HEALTH_PORT
               value: "5182"
+            # Off, which is also the default: the shard drops an Echo
+            # Request addressed to its own masquerade address as
+            # icmp_unsolicited. Set "true" to have it answer, rate-limited,
+            # so the address can be checked from the internet. See
+            # internal/config/nat.go's EnvNATEchoResponder.
+            - name: GALACTIC_NAT_ECHO_RESPONDER
+              value: "false"
             # GALACTIC_NAT_XDP_ATTACH is left at its default, "direct": the
             # shard attaches its own program to the uplinks. On a node that
             # also runs galactic-gateway, which already holds the native XDP

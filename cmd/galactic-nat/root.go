@@ -233,6 +233,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringP("nat-xdp-attach", "", config.NATXDPAttachDirect,
 		"How the datapath reaches its uplinks' XDP hook: \"direct\" attaches it, \"chain\" installs it "+
 			"behind the edge gateway's programs on a node where the gateway holds the hook")
+	cmd.Flags().Bool("nat-echo-responder", false,
+		"Answer ICMP and ICMPv6 Echo Requests addressed to this shard's own masquerade addresses, "+
+			"rate-limited, instead of dropping them")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

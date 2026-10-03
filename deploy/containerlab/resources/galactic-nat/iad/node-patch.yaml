@@ -17,3 +17,8 @@ spec:
             # route, so detection would also claim the management bridge.
             - name: GALACTIC_NAT_UPLINK_INTERFACES
               value: bond0,bond1
+            # On in iad only, so verify:nat-icmp sees the shard answer a ping
+            # to its own masquerade address here and drop one at every other
+            # site, where the base leaves it off.
+            - name: GALACTIC_NAT_ECHO_RESPONDER
+              value: "true"
