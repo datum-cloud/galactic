@@ -48,26 +48,6 @@ func RouteEgressAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
 	return table.Register(tableID, prefix, gateway)
 }
 
-// resolveNextHop flattens gateway into the link index plus the concrete
-// next-hop address the kernel would forward through right now, via
-// netlink.RouteGet. nextHop is nil when gateway is itself on-link.
-//
-// IPv6 route installation does not recurse through an indirect gateway:
-// passing gateway as a route's Gw with no LinkIndex set fails with "no route
-// to host" whenever gateway is reachable only via a separate route, such as
-// through a link-local next-hop. BGP next-hops are usually exactly that
-// shape.
-func resolveNextHop(gateway net.IP) (linkIndex int, nextHop net.IP, err error) {
-	routes, err := netlink.RouteGet(gateway)
-	if err != nil {
-		return 0, nil, fmt.Errorf("no route to gateway %s: %w", gateway, err)
-	}
-	if len(routes) == 0 {
-		return 0, nil, fmt.Errorf("no route to gateway %s", gateway)
-	}
-	return routes[0].LinkIndex, routes[0].Gw, nil
-}
-
 // RouteEgressDel removes the egress_route_table entry for prefix from Linux
 // VRF table tableID. The counterpart to RouteEgressAdd.
 func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
@@ -77,55 +57,6 @@ func RouteEgressDel(prefix *net.IPNet, tableID uint32) error {
 	}
 	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
 	return table.Unregister(tableID, prefix)
-}
-
-// RouteMainAdd installs a plain kernel route for prefix in routing table
-// tableID, forwarding to gateway through ordinary recursive next-hop
-// resolution and no encapsulation at all.
-//
-// It exists for EVPN Type 5 paths carrying no Route Target extended community,
-// which today means the anycast ingress-VIP advertisements that name no tenant
-// VRF. Such a path carries no Prefix-SID either, so gateway is the path's
-// plain BGP next-hop: a node address already reachable over the fabric, not a
-// uSID decap SID. Wrapping it in an outer IPv6 header the way RouteEgressAdd
-// does would make the packet undeliverable, because nothing at that address
-// listens for that encapsulation.
-//
-// gateway must be a real address; an unspecified one would blackhole prefix.
-func RouteMainAdd(prefix *net.IPNet, gateway net.IP, tableID uint32) error {
-	if gateway == nil || gateway.IsUnspecified() {
-		return fmt.Errorf("refusing to install route for %s: gateway %s is not a usable next-hop", prefix, gateway)
-	}
-	linkIndex, nextHop, err := resolveNextHop(gateway)
-	if err != nil {
-		return err
-	}
-	route := &netlink.Route{
-		Dst:       prefix,
-		Table:     int(tableID),
-		LinkIndex: linkIndex,
-	}
-	if len(nextHop) > 0 {
-		if prefix.IP.To4() != nil {
-			route.Via = &netlink.Via{AddrFamily: netlink.FAMILY_V6, Addr: nextHop}
-		} else {
-			route.Gw = nextHop
-		}
-	} else {
-		// gateway is on-link. A plain route still needs it stated explicitly,
-		// or the kernel treats prefix itself as directly reachable here.
-		route.Gw = gateway
-	}
-	return netlink.RouteReplace(route)
-}
-
-// RouteMainDel removes the plain route for prefix from routing table tableID.
-// The counterpart to RouteMainAdd.
-func RouteMainDel(prefix *net.IPNet, tableID uint32) error {
-	return netlink.RouteDel(&netlink.Route{
-		Dst:   prefix,
-		Table: int(tableID),
-	})
 }
 
 // EgressDefaultRouteAdd installs egress_route_table's default (::/0) entry for

@@ -91,6 +91,9 @@ type GoBGPRuntime struct {
 	// peerMonitorOnce starts the shared peer FSM watcher at most once per
 	// runtime lifetime, as monitorOnce does for best-path events.
 	peerMonitorOnce sync.Once
+	// plain owns the kernel routes for EVPN paths carrying no route target.
+	// Its reconciler starts with the RIB watcher, under monitorOnce.
+	plain *plainRoutes
 	// peerStateMu guards lastPeerState, kept separate from mu so the peer-event
 	// watcher never contends with the lock Apply and Status hold for
 	// potentially long VRF and policy convergence work.
@@ -112,11 +115,11 @@ type GoBGPRuntime struct {
 	// bmp keeps this runtime's BMP stations registered on its GoBGP server. It
 	// is nil when BMP export is not configured.
 	bmp *bmpKeeper
-	// wg tracks the server and RIB watcher goroutines so Stop blocks until both
-	// have exited rather than merely being asked to. GoBGP keeps some
-	// path-selection state in package-level globals rather than per-server
-	// fields, so a server that outlives Stop races the next runtime's start in
-	// any process that creates more than one.
+	// wg tracks the server, RIB watcher and plain-route goroutines so Stop
+	// blocks until all have exited rather than merely being asked to. GoBGP
+	// keeps some path-selection state in package-level globals rather than
+	// per-server fields, so a server that outlives Stop races the next
+	// runtime's start in any process that creates more than one.
 	wg sync.WaitGroup
 }
 
@@ -152,6 +155,7 @@ func NewRuntimeFactory(
 			rtIndex:               make(map[string]uint32),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 			appliedRoutes:         make(map[evpnRouteKey]evpnRoute),
+			plain:                 newPlainRoutes(),
 			observer:              observer,
 			bmp:                   newBMPKeeper(bmp, key.String()),
 		}, nil

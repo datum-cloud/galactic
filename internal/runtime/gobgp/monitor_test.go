@@ -58,31 +58,28 @@ func TestMatchTableID_UnknownVRFSkipped(t *testing.T) {
 	}
 }
 
-// TestMatchTableID_RTLessPathUsesMainTable covers the fix: a path with no
+// TestMatchTableID_RTLessPathIsPlain covers the fix: a path with no
 // Route Target extended community at all -- e.g. NetworkGatewayReconciler's
 // anycast ingress-VIP advertisements (buildEVPNPaths never attaches the
-// attribute when adv.Communities is empty) -- must resolve to the main
-// table (0) via RouteMainAdd's plain routing (plain=true), not be silently
-// dropped. This is the exact bug found live in containerlab: an ns60
-// NetworkRule's VIP BGPAdvertisement reported Advertised/Ready, but no
-// receiving node anywhere in the mesh ever installed a route for it.
-func TestMatchTableID_RTLessPathUsesMainTable(t *testing.T) {
+// attribute when adv.Communities is empty) -- must resolve to a plain
+// route (plain=true), not be silently dropped. This is the exact bug found
+// live in containerlab: an ns60 NetworkRule's VIP BGPAdvertisement reported
+// Advertised/Ready, but no receiving node anywhere in the mesh ever
+// installed a route for it.
+func TestMatchTableID_RTLessPathIsPlain(t *testing.T) {
 	r := &GoBGPRuntime{rtIndex: map[string]uint32{testRT100: 42}}
 
 	got, ok := r.matchTableID(nil)
 	if !ok {
-		t.Fatalf("matchTableID(nil attrs) ok = false, want true (no RT at all must resolve to main table)")
+		t.Fatalf("matchTableID(nil attrs) ok = false, want true (no RT at all must resolve to a plain route)")
 	}
 	if !got.plain {
-		t.Errorf("plain = false, want true (RT-less path must use RouteMainAdd, not SEG6 encap)")
-	}
-	if got.tableID != 0 {
-		t.Errorf("tableID = %d, want 0 (main table)", got.tableID)
+		t.Errorf("plain = false, want true (RT-less path must be a plain route, not SEG6 encap)")
 	}
 }
 
 // TestMatchTableID_NoExtendedCommunitiesAttributeAtAll covers the same
-// RT-less case as TestMatchTableID_RTLessPathUsesMainTable, but via attrs
+// RT-less case as TestMatchTableID_RTLessPathIsPlain, but via attrs
 // containing other, unrelated path attributes rather than none at all --
 // the realistic shape of an actual EVPN path (which always carries Origin
 // and MpReachNLRI, see buildEVPNPaths).
@@ -96,8 +93,8 @@ func TestMatchTableID_NoExtendedCommunitiesAttributeAtAll(t *testing.T) {
 	if !ok {
 		t.Fatalf("matchTableID() ok = false, want true")
 	}
-	if !got.plain || got.tableID != 0 {
-		t.Errorf("routeInstall = %+v, want {tableID:0 plain:true}", got)
+	if !got.plain {
+		t.Errorf("routeInstall = %+v, want plain:true", got)
 	}
 }
 
