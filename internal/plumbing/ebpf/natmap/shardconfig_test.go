@@ -33,6 +33,31 @@ func TestShardConfigTable_SetAndGet(t *testing.T) {
 	}
 }
 
+// TestShardConfigTable_EchoResponderRoundTrips covers the one field that is
+// process configuration rather than identity: it rides in shard_config's flags
+// byte, and has to come back out of Get as it went in, in both states, or the
+// reconciler's compare-before-write never converges.
+func TestShardConfigTable_EchoResponderRoundTrips(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		table := NewShardConfigTable(newFakeTable())
+		cfg := ShardConfig{
+			ShardSID:      netip.MustParseAddr("fc00:1:2::1"),
+			ShardPubAddr6: netip.MustParseAddr("2001:db8:9999::1"),
+			EchoResponder: on,
+		}
+		if err := table.Set(cfg); err != nil {
+			t.Fatalf("Set(EchoResponder=%v) error = %v", on, err)
+		}
+		got, ok, err := table.Get()
+		if err != nil || !ok {
+			t.Fatalf("Get() = _, %v, %v; want a configuration", ok, err)
+		}
+		if got != cfg {
+			t.Errorf("Get() = %+v, want %+v", got, cfg)
+		}
+	}
+}
+
 func TestShardConfigTable_GetBeforeSet(t *testing.T) {
 	table := NewShardConfigTable(newFakeTable())
 

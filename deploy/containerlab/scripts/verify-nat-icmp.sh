@@ -11,10 +11,18 @@
 #   3. NAT66 Packet Too Big: with the transit link to the host narrowed to
 #      1300 bytes, a 1398-byte packet sent with DF draws a Packet Too Big from
 #      the transit router, and the tenant's route learns MTU 1300 from it.
+#   4. NAT64 ping: Echo Requests to the host's synthesized address leave as
+#      ICMPv4 and their replies come back as ICMPv6.
 #
 # Throughout, a site's shard must count no ICMP drop reason and no malformed
 # packet. hop_limit_exceeded is expected to move: mtr's first probe expires at
 # the shard itself, which drops it without an error of its own.
+#
+#   5. Echo responder: the off-fabric host pings every first shard's two
+#      masquerade addresses. iad's shard runs with GALACTIC_NAT_ECHO_RESPONDER
+#      on (resources/galactic-nat/iad/) and must answer both; the others run
+#      with it off and must drop each request as icmp_unsolicited. This runs
+#      after the drop check, since it moves icmp_unsolicited on purpose.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -25,6 +33,10 @@ SITES=(dfw sjc iad)
 declare -A FIRST_SHARD=([dfw]=dfw-worker2 [sjc]=sjc-worker2 [iad]=iad-worker2)
 
 HOST6="2001:db8:1:40::2"
+# 10.1.40.2 synthesized into the fabric's NAT64 prefix.
+HOST4_SYNTH="2001:db8:64::a01:2802"
+REMOTE=clab-gvpc-remote-host
+RESPONDER_SITE=iad
 # The transit router and interface the off-fabric host hangs off
 # (gvpc.clab.yaml: remote-host:eth1 <-> tr4:eth4).
 NARROW_ROUTER=clab-gvpc-tr4
@@ -35,7 +47,7 @@ NARROW_MTU=1300
 BIG_PAYLOAD=1350
 
 # Drop reasons none of these probes may move.
-WATCHED_DROPS="nat66_icmp_malformed nat66_icmp_no_conn icmp_untranslatable icmp_unsolicited nat66_malformed_forward nat66_malformed_return"
+WATCHED_DROPS="nat66_icmp_malformed nat66_icmp_no_conn nat64_icmp_malformed nat64_icmp_no_conn icmp_untranslatable icmp_unsolicited icmp_rate_limited nat66_malformed_forward nat66_malformed_return nat64_malformed_forward nat64_malformed_return"
 
 rc=0
 fail() { echo "  FAIL $*" >&2; rc=1; }
@@ -131,9 +143,52 @@ for site in "${SITES[@]}"; do
 done
 docker exec "${NARROW_ROUTER}" ip link set "${NARROW_IFACE}" mtu 1500
 
+echo "--- 4. NAT64 ping ---"
+for site in "${SITES[@]}"; do
+  if in_pod "${site}" ns10 "${POD[${site}]}" ping -6 -c 3 -W 2 "${HOST4_SYNTH}" >/dev/null 2>&1; then
+    echo "  ok   ${site}: ${HOST4_SYNTH} answered"
+  else
+    fail "${site}: no Echo Reply from ${HOST4_SYNTH}"
+  fi
+done
+
 echo "--- drop counters ---"
 for site in "${SITES[@]}"; do
   check_drops "${site}" "${FIRST_SHARD[${site}]}" "${snap}/${site}"
+done
+
+# unsolicited SHARD reads SHARD's icmp_unsolicited counter.
+unsolicited() {
+  drops "$1" | awk '$1 == "icmp_unsolicited" {print $2; found=1} END {if (!found) print 0}'
+}
+
+echo "--- 5. echo responder ---"
+for site in "${SITES[@]}"; do
+  shard=${FIRST_SHARD[${site}]}
+  addrs=$(docker exec "$(control_plane "${site}")" kubectl -n galactic-system get egressshard "${shard}-egress" \
+    -o jsonpath='{.status.shardAddressIPv6} {.status.shardAddressIPv4}')
+  before=$(unsolicited "${shard}")
+  answered=0
+  for addr in ${addrs}; do
+    if docker exec "${REMOTE}" ping -c 1 -W 2 "${addr}" >/dev/null 2>&1; then
+      answered=$((answered + 1))
+    fi
+  done
+  after=$(unsolicited "${shard}")
+  refused=$(awk -v a="${after}" -v b="${before}" 'BEGIN {print a - b}')
+  if [ "${site}" = "${RESPONDER_SITE}" ]; then
+    if [ "${answered}" -eq 2 ] && [ "${refused}" = 0 ]; then
+      echo "  ok   ${site}: ${shard} answered ${addrs}"
+    else
+      fail "${site}: ${shard} has the responder on but answered ${answered} of ${addrs} (icmp_unsolicited +${refused})"
+    fi
+  else
+    if [ "${answered}" -eq 0 ] && [ "${refused}" = 2 ]; then
+      echo "  ok   ${site}: ${shard} refused ${addrs} as unsolicited"
+    else
+      fail "${site}: ${shard} has the responder off but answered ${answered} of ${addrs} (icmp_unsolicited +${refused}, want +2)"
+    fi
+  fi
 done
 
 if [ "${rc}" -eq 0 ]; then

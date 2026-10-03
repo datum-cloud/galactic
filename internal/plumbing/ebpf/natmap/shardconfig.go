@@ -42,6 +42,13 @@ type ShardConfig struct {
 	// translates to IPv4 -- one Datum-operated Network-Specific Prefix, shared
 	// fabric-wide, never per-tenant. Required whenever ShardPubAddr4 is set.
 	NAT64Prefix netip.Prefix
+
+	// EchoResponder makes the shard answer Echo Requests addressed to its own
+	// masquerade addresses, rate-limited by the datapath, instead of dropping
+	// them as unsolicited. Unlike the fields above it is process
+	// configuration, not shard identity: it comes from the shard's own
+	// GALACTIC_NAT_ECHO_RESPONDER, not from its EgressShard.
+	EchoResponder bool
 }
 
 // nat64PrefixLen is the only NAT64 prefix length this datapath supports. RFC
@@ -112,6 +119,9 @@ func (c ShardConfig) toWire() (natprog.NatShardConfig, error) {
 
 	value := natprog.NatShardConfig{
 		ShardSid: c.ShardSID.As16(),
+	}
+	if c.EchoResponder {
+		value.Flags |= natprog.ShardFlagEchoResponder
 	}
 
 	if c.ShardPubAddr6.IsValid() {
@@ -184,7 +194,8 @@ func (t *ShardConfigTable) Get() (ShardConfig, bool, error) {
 		return ShardConfig{}, false, nil
 	}
 	cfg := ShardConfig{
-		ShardSID: netip.AddrFrom16(value.ShardSid),
+		ShardSID:      netip.AddrFrom16(value.ShardSid),
+		EchoResponder: value.Flags&natprog.ShardFlagEchoResponder != 0,
 	}
 	if value.ServesV6 != 0 {
 		cfg.ShardPubAddr6 = netip.AddrFrom16(value.ShardPubAddr6)

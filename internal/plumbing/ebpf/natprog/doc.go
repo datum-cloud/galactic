@@ -37,9 +37,16 @@ const (
 
 	ProgNAT66ICMPForward uint32 = 4
 	ProgNAT66ICMPReturn  uint32 = 5
+	ProgNAT64ICMPForward uint32 = 6
+	ProgNAT64ICMPReturn  uint32 = 7
 
-	ProgCount uint32 = 6
+	ProgCount uint32 = 8
 )
+
+// ShardFlagEchoResponder is shard_config.flags' NAT_SHARD_FLAG_ECHO_RESPONDER:
+// set, the shard answers an Echo Request addressed to its own masquerade
+// address instead of dropping it as unsolicited.
+const ShardFlagEchoResponder uint8 = 0x1
 
 // Address families as the datapath writes them into conn_key.family. They
 // discriminate a NAT64 row, whose IPv4 addresses are stored IPv4-mapped, from a

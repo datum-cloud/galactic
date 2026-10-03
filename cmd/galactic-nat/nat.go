@@ -52,6 +52,9 @@ var natDatapathKeepAlive struct {
 // change under the reconciler's feet, hence the mutex.
 type natDatapath struct {
 	shardConfig *natmap.ShardConfigTable
+	// echoResponder is process configuration written alongside every identity
+	// Program writes, not part of the identity itself.
+	echoResponder bool
 
 	mu       sync.Mutex
 	attached bool
@@ -158,6 +161,7 @@ func (d *natDatapath) Program(identity controller.EgressShardIdentity) error {
 		ShardPubAddr6: identity.ShardAddressIPv6,
 		ShardPubAddr4: identity.ShardAddressIPv4,
 		NAT64Prefix:   identity.NAT64Prefix,
+		EchoResponder: d.echoResponder,
 	}
 	if current, ok, err := d.shardConfig.Get(); err == nil && ok && current == cfg {
 		return nil
@@ -169,6 +173,7 @@ func (d *natDatapath) Program(identity controller.EgressShardIdentity) error {
 		"shardSID", identity.ShardSID,
 		"nat66", identity.ShardAddressIPv6.IsValid(),
 		"nat64", identity.ShardAddressIPv4.IsValid(),
+		"echoResponder", d.echoResponder,
 	)
 	return nil
 }
@@ -249,7 +254,7 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 	// this must be applied to every one of them rather than to a primary:
 	// once an uplink is a bond, its slaves rather than the master are what the
 	// kernel reports as ingress, and uplinks already holds the slaves.
-	d := &natDatapath{configured: map[string]bool{}}
+	d := &natDatapath{configured: map[string]bool{}, echoResponder: cfg.EchoResponder}
 	for _, iface := range uplinks {
 		if err := configureUplinkSysctls(iface, false); err != nil {
 			return nil, err
