@@ -93,7 +93,7 @@ func (m *NextHopMetrics) Handler() http.Handler {
 // of the session's own IPv6 address. Once its stored next hop is mapped, every
 // later update reuses it, and only a hard reset recomputes it from the
 // socket. Receiving routers resolve the mapped next hop over IPv4 only and
-// never install the route. See datum-cloud/galactic#665.
+// never install the route.
 type NextHopGuard struct {
 	// BGP reads and resets BGP state.
 	BGP BGP

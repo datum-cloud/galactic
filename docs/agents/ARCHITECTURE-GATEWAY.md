@@ -498,10 +498,11 @@ health port `5180`, metrics port `9180`) because every `edge` node runs
 namespace regardless of pod boundaries — every port any of them binds must
 not collide with any of the others':
 
-| Component           | Metrics | gRPC health |
-| -------------------- | ------- | ----------- |
-| `galactic-router`   | `9179`  | `5179`      |
-| `galactic-gateway`  | `8081`  | `5181`      |
+| Component          | Metrics                                             | gRPC health |
+| ------------------ | --------------------------------------------------- | ----------- |
+| `galactic-router`  | `9179`                                              | `5179`      |
+| `galactic-gateway` | `8081`                                              | `5181`      |
+| `fabric-router`    | `9342` (frr-exporter), `9343` (fabric-config-agent) | none        |
 
 ### SRv6 encap-source address
 

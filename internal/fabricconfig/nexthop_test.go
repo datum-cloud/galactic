@@ -17,10 +17,9 @@ import (
 	"k8s.io/client-go/tools/events"
 )
 
-// Neighbors as `show bgp neighbors json` reports them: one session with the
-// mapped next hop from datum-cloud/galactic#665, one healthy IPv6 session, an
-// IPv4 session, one not yet established, and one sourced from a link-local
-// address.
+// Neighbors as `show bgp neighbors json` reports them: one session announcing
+// an IPv4-mapped next hop, one healthy IPv6 session, an IPv4 session, one not
+// yet established, and one sourced from a link-local address.
 const neighborsJSON = `{
   "2607:f740:0:3f::39b": {
     "bgpState": "Established",
@@ -61,9 +60,9 @@ const neighborsJSON = `{
 
 const mappedPeer = "2607:f740:0:3f::39b"
 
-// Routes as `show ipv6 route json` reports them: the uninstalled route from
-// datum-cloud/galactic#665, an installed BGP route, a BGP route that loses to
-// an installed static route, and a connected route.
+// Routes as `show ipv6 route json` reports them: a BGP route with no installed
+// route, an installed BGP route, a BGP route that loses to an installed static
+// route, and a connected route.
 const routesJSON = `{
   "2607:ed40:10d::1:0:1/128": [
     {"protocol": "bgp", "selected": true, "distance": 200}

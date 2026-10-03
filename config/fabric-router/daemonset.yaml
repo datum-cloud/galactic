@@ -192,14 +192,11 @@ spec:
         # carrying its hash. A change to `daemons` can't be applied live and
         # raises RestartRequired instead.
         #
-        # It also checks FRR's BGP sessions every 30s. FRR can come up
-        # after a restart announcing ::ffff:<router-id> as an IPv6 session's
-        # next hop, which no receiving router can install (#665); the agent
-        # hard-resets such a session, at most once per 10 minutes, and raises
-        # a MappedNextHopReset event on this pod. Add --detect-only to keep
-        # the metrics and alerts without the resets. The metrics, also
-        # counting BGP routes zebra failed to install, are served on the
-        # node's port 9343 (hostNetwork).
+        # Every 30s it also hard-resets any IPv6 session announcing an
+        # IPv4-mapped next hop, at most once per session per 10 minutes, and
+        # raises a MappedNextHopReset event on this pod. --detect-only keeps
+        # the check's metrics without the resets. The metrics are served on
+        # the node's port 9343 (hostNetwork).
         - name: config-agent
           image: ghcr.io/datum-cloud/fabric-router:latest
           command:

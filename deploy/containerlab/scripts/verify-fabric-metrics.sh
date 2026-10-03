@@ -1,7 +1,9 @@
 #!/bin/bash
 # verify-fabric-metrics.sh — confirm every fabric-router pod's frr-exporter
 # sidecar is serving metrics, that each of its collectors succeeded, and that
-# every underlay session it reports is Established.
+# every underlay session it reports is Established. Also confirm its
+# config-agent serves the next-hop check's metrics, that no session announces
+# an IPv4-mapped next hop, and that every BGP route is installed.
 #
 # The exporter listens on the node itself (the pod uses hostNetwork), so each
 # node is scraped from inside its own Kind container rather than through the
@@ -14,6 +16,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 PORT=9342
+AGENT_PORT=9343
 fail=0
 
 for site in dfw iad sjc; do
@@ -41,6 +44,25 @@ for site in dfw iad sjc; do
       fail=1
     else
       echo "ok   ${node}: ${peers} sessions Established, all collectors up"
+    fi
+
+    if ! agent=$(docker exec "${node}" curl -sf "localhost:${AGENT_PORT}/metrics"); then
+      echo "FAIL ${node}: no response on :${AGENT_PORT}/metrics"
+      fail=1
+      continue
+    fi
+    # The agent sets fabric_router_bgp_uninstalled_routes for both families on
+    # every check, so its absence means no check has completed.
+    afis=$(grep -c '^fabric_router_bgp_uninstalled_routes' <<<"${agent}" || true)
+    mapped=$(awk '/^fabric_router_bgp_mapped_nexthop\{/ && $NF != 0' <<<"${agent}")
+    uninstalled=$(awk '/^fabric_router_bgp_uninstalled_routes/ && $NF != 0' <<<"${agent}")
+    if [[ "${afis}" -ne 2 || -n "${mapped}" || -n "${uninstalled}" ]]; then
+      echo "FAIL ${node}: next-hop check families=${afis}"
+      [[ -n "${mapped}" ]] && echo "${mapped}"
+      [[ -n "${uninstalled}" ]] && echo "${uninstalled}"
+      fail=1
+    else
+      echo "ok   ${node}: no IPv4-mapped next hops, every BGP route installed"
     fi
   done
 done
