@@ -562,6 +562,65 @@ func TestUsidIngress_VRFTableMatchReachesFIBLookup(t *testing.T) {
 	}
 }
 
+// TestUsidIngress_NeverTouchesVPCAttributionTable proves
+// vpc_attribution_table (datum-cloud/enhancements#878's byte-accounting
+// attribution, populated only by userspace at CNI ADD time -- see
+// internal/plumbing/ebpf/usidmap.VPCAttributionTable) is genuinely inert
+// from usid_ingress's own perspective: a claimed, successfully-matched
+// packet must leave a pre-seeded entry byte-for-byte unread and unwritten.
+// This is the property that lets the map's schema change independently of
+// vrf_table's own ErrMapIncompatible reload path -- see the map's doc
+// comment in usid.c.
+func TestUsidIngress_NeverTouchesVPCAttributionTable(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x123}
+	if err := objs.LocatorTable.Put(usid.locatorKey(t), UsidLocatorValue{Generation: 1}); err != nil {
+		t.Fatalf("populate locator_table: %v", err)
+	}
+	if err := objs.FunctionTable.Put(usid.functionKey(t), UsidFunctionValue{Behavior: 1}); err != nil {
+		t.Fatalf("populate function_table: %v", err)
+	}
+	if err := objs.VrfTable.Put(usid.vrfKey(), UsidVrfValue{VrfTableId: 0x2A2A2A}); err != nil {
+		t.Fatalf("populate vrf_table: %v", err)
+	}
+	seeded := UsidVpcAttributionValue{Vpc: 0xC0FFEE, VpcAttachment: 0x42, Generation: 1}
+	if err := objs.VpcAttributionTable.Put(usid.vrfKey(), seeded); err != nil {
+		t.Fatalf("populate vpc_attribution_table: %v", err)
+	}
+
+	pkt := buildPacket(t, usid.addr(t), netip.MustParseAddr("2001:db8::1"), true /* inner IPv6 header present */)
+
+	if _, _, err := objs.UsidIngress.Test(pkt); err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+
+	var got UsidVpcAttributionValue
+	if err := objs.VpcAttributionTable.Lookup(usid.vrfKey(), &got); err != nil {
+		t.Fatalf("lookup vpc_attribution_table entry: %v", err)
+	}
+	if got != seeded {
+		t.Errorf("vpc_attribution_table entry = %+v after usid_ingress ran, want unchanged %+v "+
+			"(usid_ingress must never read or write this map)", got, seeded)
+	}
+
+	var count int
+	var rawKey uint64
+	var val UsidVpcAttributionValue
+	it := objs.VpcAttributionTable.Iterate()
+	for it.Next(&rawKey, &val) {
+		count++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterate vpc_attribution_table: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("vpc_attribution_table has %d entries after usid_ingress ran, want exactly 1 "+
+			"(the pre-seeded one -- usid_ingress must never write a new entry)", count)
+	}
+}
+
 // TestUsidIngress_InnerIPv4ReachesFIBLookup covers step 7's inner-IPv4
 // branch (usid.c's `inner_version == 4` case), which
 // TestUsidIngress_VRFTableMatchReachesFIBLookup above never exercises
