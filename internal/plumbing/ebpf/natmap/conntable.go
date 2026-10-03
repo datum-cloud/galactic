@@ -56,6 +56,14 @@ type ConnKey struct {
 
 // ConnEntry is one fully decoded nat_conn_table row, decoupled from
 // natprog.NatConnValue's cilium/ebpf/BTF-generated field layout.
+//
+// A row whose Proto is ICMPv6 (58) is an Echo session, and its port fields hold
+// Echo Identifiers instead: BackendPort is the tenant's own Identifier,
+// ShardPort the masquerade Identifier the shard replaced it with, and DestPort
+// is zero. The key follows the same convention -- a forward row's Sport is the
+// tenant's Identifier and its Dport zero, a reverse row's Sport zero and its
+// Dport the masquerade Identifier. Echo sessions share the table, and its LRU
+// capacity, with TCP and UDP; see the datapath's nat_conn_table comment.
 type ConnEntry struct {
 	ConnKey
 

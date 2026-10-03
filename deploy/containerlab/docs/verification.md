@@ -272,6 +272,31 @@ docker exec clab-gvpc-remote-host tcpdump -i eth1 -nn -v -c 1 \
 It shows `mss 1400`. Each node's counters are in
 `galactic_usid_tcp_mss_clamp_syns_total{result}` on port 9180.
 
+### ICMP through a shard
+
+`task verify:nat-icmp` runs from each site's ns10 pod toward the off-fabric
+host:
+
+- **Ping.** The shard translates the tenant's Echo Request with its Echo
+  Identifier masqueraded in the port's place, and the reply comes back to
+  the tenant's own Identifier.
+- **Time Exceeded.** `mtr` has to name at least one transit router. Each
+  router's Time Exceeded quotes an Echo Request the shard sent, so each hop
+  that appears was matched and translated back. The first hop always shows
+  `???`: the probe expires at the shard, which counts `hop_limit_exceeded`
+  and sends no error of its own. netshoot's BusyBox `traceroute -I` shows
+  no hops at all even when translation works, because BusyBox matches only
+  errors that quote a UDP probe. Use `mtr` or UDP `traceroute`.
+- **Packet Too Big.** The task narrows `tr4`'s link to the off-fabric host
+  to 1300 bytes, sends a 1398-byte packet with DF set, and expects the
+  tenant's route to learn MTU 1300 from the translated Packet Too Big. It
+  restores the link and flushes the pod's learned MTU afterwards, from the
+  pod's node, because the pod has no `NET_ADMIN` to do it itself. A
+  leftover MTU of 1300 lowers the MSS the pod advertises and fails
+  `verify:mss-clamp` for ten minutes.
+
+The site's shard must count no ICMP drop reason while all of this runs.
+
 ### The reply's underlay path
 
 A reply is addressed to the shard's masquerade address, and only the IPv6 one

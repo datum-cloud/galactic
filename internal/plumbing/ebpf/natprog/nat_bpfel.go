@@ -52,15 +52,17 @@ type NatShardConfig struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	NatMapDropReasons      = "drop_reasons"
-	NatMapNatConnTable     = "nat_conn_table"
-	NatMapNatProgs         = "nat_progs"
-	NatMapShardConfigTable = "shard_config_table"
-	NatProgNat64Forward    = "nat64_forward"
-	NatProgNat64Return     = "nat64_return"
-	NatProgNat66Forward    = "nat66_forward"
-	NatProgNat66Return     = "nat66_return"
-	NatProgNatIngress      = "nat_ingress"
+	NatMapDropReasons       = "drop_reasons"
+	NatMapNatConnTable      = "nat_conn_table"
+	NatMapNatProgs          = "nat_progs"
+	NatMapShardConfigTable  = "shard_config_table"
+	NatProgNat64Forward     = "nat64_forward"
+	NatProgNat64Return      = "nat64_return"
+	NatProgNat66Forward     = "nat66_forward"
+	NatProgNat66IcmpForward = "nat66_icmp_forward"
+	NatProgNat66IcmpReturn  = "nat66_icmp_return"
+	NatProgNat66Return      = "nat66_return"
+	NatProgNatIngress       = "nat_ingress"
 )
 
 // LoadNat returns the embedded CollectionSpec for Nat.
@@ -105,11 +107,13 @@ type NatSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type NatProgramSpecs struct {
-	Nat64Forward *ebpf.ProgramSpec `ebpf:"nat64_forward"`
-	Nat64Return  *ebpf.ProgramSpec `ebpf:"nat64_return"`
-	Nat66Forward *ebpf.ProgramSpec `ebpf:"nat66_forward"`
-	Nat66Return  *ebpf.ProgramSpec `ebpf:"nat66_return"`
-	NatIngress   *ebpf.ProgramSpec `ebpf:"nat_ingress"`
+	Nat64Forward     *ebpf.ProgramSpec `ebpf:"nat64_forward"`
+	Nat64Return      *ebpf.ProgramSpec `ebpf:"nat64_return"`
+	Nat66Forward     *ebpf.ProgramSpec `ebpf:"nat66_forward"`
+	Nat66IcmpForward *ebpf.ProgramSpec `ebpf:"nat66_icmp_forward"`
+	Nat66IcmpReturn  *ebpf.ProgramSpec `ebpf:"nat66_icmp_return"`
+	Nat66Return      *ebpf.ProgramSpec `ebpf:"nat66_return"`
+	NatIngress       *ebpf.ProgramSpec `ebpf:"nat_ingress"`
 }
 
 // NatMapSpecs contains maps before they are loaded into the kernel.
@@ -173,11 +177,13 @@ type NatVariables struct {
 //
 // It can be passed to LoadNatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type NatPrograms struct {
-	Nat64Forward *ebpf.Program `ebpf:"nat64_forward"`
-	Nat64Return  *ebpf.Program `ebpf:"nat64_return"`
-	Nat66Forward *ebpf.Program `ebpf:"nat66_forward"`
-	Nat66Return  *ebpf.Program `ebpf:"nat66_return"`
-	NatIngress   *ebpf.Program `ebpf:"nat_ingress"`
+	Nat64Forward     *ebpf.Program `ebpf:"nat64_forward"`
+	Nat64Return      *ebpf.Program `ebpf:"nat64_return"`
+	Nat66Forward     *ebpf.Program `ebpf:"nat66_forward"`
+	Nat66IcmpForward *ebpf.Program `ebpf:"nat66_icmp_forward"`
+	Nat66IcmpReturn  *ebpf.Program `ebpf:"nat66_icmp_return"`
+	Nat66Return      *ebpf.Program `ebpf:"nat66_return"`
+	NatIngress       *ebpf.Program `ebpf:"nat_ingress"`
 }
 
 func (p *NatPrograms) Close() error {
@@ -185,6 +191,8 @@ func (p *NatPrograms) Close() error {
 		p.Nat64Forward,
 		p.Nat64Return,
 		p.Nat66Forward,
+		p.Nat66IcmpForward,
+		p.Nat66IcmpReturn,
 		p.Nat66Return,
 		p.NatIngress,
 	)
