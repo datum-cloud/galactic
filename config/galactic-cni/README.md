@@ -101,6 +101,16 @@ interface has been missing for 30 seconds, since nothing else would ever
 remove it once that tap's DEL has been missed. On a read-only mount every
 removal fails.
 
+## The `cni-net-dir` mount
+
+`credential-refresh` mounts the host's `/etc/cni/net.d` writable, as the
+`install-cni` init container does. Each time the datapath's attached uplink set
+changes, the run daemon rewrites the conflist's `ebpf_interfaces` through an
+atomic temp-file rename in that directory. Bootstrap resolves the list before
+BGP has converged, and the plugin rejects any egress route leaving through an
+uplink the list omits. On a read-only mount every rewrite fails and new pods on
+the node cannot attach until the pod restarts.
+
 ## Further reading
 
 - `docs/cni/README.md` — the CNI docs entry point (env vars, conflist
