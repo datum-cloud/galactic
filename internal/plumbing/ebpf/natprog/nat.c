@@ -27,8 +27,8 @@
 // The cost is that a shard node's netfilter rules do not see tenant egress at
 // all, and that routing this program performs is a bpf_fib_lookup rather than
 // the kernel's full output path -- no policy routing, no neighbour resolution
-// it can wait on, no ICMP error generated on its behalf. Each of those surfaces
-// as a named drop counter instead.
+// it can wait on, and only the ICMP errors this program builds itself (see
+// Scope). Each of the rest surfaces as a named drop counter instead.
 //
 // The whole tier is deliberately separate from the gateway's ingress datapath:
 // tenant egress toward an arbitrary internet destination is a different traffic
@@ -64,7 +64,8 @@
 //   nat66_icmp_forward  tenant's ICMPv6 -> IPv6 internet
 //   nat66_icmp_return   IPv6 internet's ICMPv6 -> tenant
 //   nat64_icmp_forward  tenant's ICMPv6 -> IPv4 internet as ICMPv4
-//   nat64_icmp_return   IPv4 internet's ICMPv4 -> tenant as ICMPv6
+//   nat64_icmp_return   IPv4 internet's ICMPv4 Echo -> tenant as ICMPv6
+//   nat64_icmp_error    IPv4 internet's ICMPv4 errors -> tenant as ICMPv6
 //
 // The ICMP leaves are their own programs rather than branches in the TCP/UDP
 // ones for the same budget reason the families are split: an ICMP error carries
@@ -97,7 +98,8 @@
 //     nat66_forward; or the _icmp_ leaf of the same family for an inner
 //     ICMPv6 packet.
 //  4. IPv4 destination equal to shard_pub_addr4 is a reply from the IPv4
-//     internet -> nat64_return, or nat64_icmp_return for ICMPv4.
+//     internet -> nat64_return; for ICMPv4, nat64_icmp_error for an error
+//     type and nat64_icmp_return for anything else.
 //  5. Anything else: XDP_PASS.
 //
 // Step 3 always reads the inner header, which the IPv6-only dispatch did not
@@ -125,7 +127,13 @@
 // reason. NAT64 translates a tenant's ping the same way, ICMPv6 Echo to ICMPv4
 // Echo and back, and translates the ICMPv4 errors the IPv4 internet sends
 // about a tenant's flows into the ICMPv6 errors RFC 7915 section 4.2 maps them
-// to, quoted packet included. This shard generates no ICMP error of its own.
+// to, quoted packet included.
+//
+// The one error this shard sends on its own behalf is the one only it can: a
+// reply that fits the internet path but not the fabric once re-encapsulated
+// gets its sender a Packet Too Big, or a Fragmentation Needed over NAT64 (see
+// send_too_big6). A tenant packet whose hop limit expires here is still
+// dropped without a Time Exceeded, counted as hop_limit_exceeded.
 //
 // An Echo Request addressed to a masquerade address itself is answered only
 // when the operator turns on the echo responder (NAT_SHARD_FLAG_ECHO_RESPONDER),
@@ -232,7 +240,8 @@ static long (*bpf_xdp_adjust_tail)(void *ctx, int delta) = (void *) BPF_FUNC_xdp
 #define NAT_PROG_NAT66_ICMP_RETURN 5
 #define NAT_PROG_NAT64_ICMP_FORWARD 6
 #define NAT_PROG_NAT64_ICMP_RETURN 7
-#define NAT_PROG_COUNT 8
+#define NAT_PROG_NAT64_ICMP_ERROR 8
+#define NAT_PROG_COUNT 9
 
 // shard_config.flags bits.
 //
@@ -242,8 +251,9 @@ static long (*bpf_xdp_adjust_tail)(void *ctx, int delta) = (void *) BPF_FUNC_xdp
 // address that answers pings is a policy choice, not a default.
 #define NAT_SHARD_FLAG_ECHO_RESPONDER 0x1
 
-// The ICMP this shard emits on its own behalf -- echo-responder replies -- is
-// limited by one token bucket per CPU: NAT_ICMP_RATE messages a second with a
+// The ICMP this shard emits on its own behalf -- echo-responder replies, and
+// the Packet Too Big and Fragmentation Needed it sends a sender whose reply
+// the fabric cannot carry -- is limited by one token bucket per CPU: NAT_ICMP_RATE messages a second with a
 // burst of NAT_ICMP_BURST, per CPU. See icmp_rate_bucket.
 #define NAT_ICMP_RATE 1000
 #define NAT_ICMP_BURST 100
@@ -900,9 +910,14 @@ static NAT_ALWAYS_INLINE void fix_echo_checksum_xlat(__be16 *check_ptr, const in
 // overwrites fib_params.ifindex with it on success. leave_via below needs that
 // value; discarding it is what put every encapsulated packet on the wrong wire
 // in the sibling edge datapath, which resolved it the same way.
+//
+// A lookup refused for size reports the route's MTU through frag_mtu, when the
+// caller passes one: the return legs answer that refusal rather than only
+// counting it.
 static NAT_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifindex, const __u8 src[16],
 							 const __u8 dst[16], __u16 tot_len,
-							 struct nat_ethhdr *eth, __u32 *egress_ifindex)
+							 struct nat_ethhdr *eth, __u32 *egress_ifindex,
+							 __u16 *frag_mtu)
 {
 	struct bpf_fib_lookup fib_params;
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -913,6 +928,8 @@ static NAT_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifindex
 	fib_params.tot_len = tot_len;
 
 	long fib_rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), BPF_FIB_LOOKUP_DIRECT);
+	if (fib_rc == BPF_FIB_LKUP_RET_FRAG_NEEDED && frag_mtu)
+		*frag_mtu = fib_params.mtu_result;
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS)
 		return fib_rc;
 
@@ -997,9 +1014,13 @@ static NAT_ALWAYS_INLINE int leave_via(struct xdp_md *ctx, __u32 egress_ifindex)
 // push_outer_header uses the same mechanism as the other datapath programs'
 // function of the same name. Copied rather than shared, since each program
 // defines its own surrounding header structs.
+//
+// A packet the encapsulated route is too small for still counts as
+// fib_frag_needed here, and also reports that route's MTU through frag_mtu so
+// the caller can tell the sender.
 static NAT_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16], const __u8 dst[16],
 						__be16 inner_payload_len_plus_ip6hdr,
-						__u32 *egress_ifindex)
+						__u32 *egress_ifindex, __u16 *frag_mtu)
 {
 	if (bpf_xdp_adjust_head(ctx, -NAT_IP6HDR_LEN) != 0) {
 		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
@@ -1029,7 +1050,7 @@ static NAT_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 sr
 
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, src, dst,
 						 (__u16) (sizeof(*outer) + __builtin_bswap16(inner_payload_len_plus_ip6hdr)),
-						 eth, egress_ifindex);
+						 eth, egress_ifindex, frag_mtu);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc);
 		return -1;
@@ -1264,7 +1285,7 @@ static NAT_ALWAYS_INLINE int nat66_forward_leg(struct xdp_md *ctx, const int icm
 
 	__u32 egress_ifindex = 0;
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, cfg->shard_pub_addr6,
-						 dst_addr, tot_len, eth, &egress_ifindex);
+						 dst_addr, tot_len, eth, &egress_ifindex, 0);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc);
 		return XDP_DROP;
@@ -1288,11 +1309,176 @@ int nat66_icmp_forward(struct xdp_md *ctx)
 	return nat66_forward_leg(ctx, 1);
 }
 
+// ---------------------------------------------------------------------
+// Errors this shard sends on its own behalf.
+// ---------------------------------------------------------------------
+//
+// A reply from the internet that fits the internet path can still be too big
+// for the fabric once the shard re-encapsulates it: 40 bytes bigger, or 60 for
+// NAT64, whose translation adds 20 more. The fabric's MSS clamp keeps TCP below
+// that; anything else used to be dropped at the shard with its sender never
+// told. These two answer it the way a router would, with the error a path MTU
+// discovery implementation reads: a Packet Too Big to an IPv6 sender, a
+// Fragmentation Needed to an IPv4 one.
+//
+// The MTU reported is the encapsulated route's, less what the shard adds, so
+// the sender's next packet fits once wrapped. The quote is the offending packet
+// as the sender sent it -- captured before translation, since by the time the
+// route refuses it, it no longer is -- cut to its IP header and first 8
+// transport bytes: all RFC 792 guarantees and all a sender's stack matches an
+// error on. Each message draws on icmp_rate_bucket, and none is sent about an
+// ICMP error; the callers translating errors pass no quote.
+
+// NAT_FRAG_QUOTE6/4 are the quoted bytes each error carries: an IP header and
+// the first 8 transport bytes.
+#define NAT_FRAG_QUOTE6 (NAT_IP6HDR_LEN + 8)
+#define NAT_FRAG_QUOTE4 (NAT_IP4HDR_LEN + 8)
+
+// send_too_big6 rewrites the frame, whatever it holds, into an ICMPv6 Packet
+// Too Big from shard_pub_addr6 to the sender of quote, and transmits it.
+static NAT_ALWAYS_INLINE int send_too_big6(struct xdp_md *ctx, struct shard_config *cfg,
+					    const __be32 quote[NAT_FRAG_QUOTE6 / 4], __u32 mtu)
+{
+	if (!take_icmp_token()) {
+		count_drop(DROP_REASON_NAT_ICMP_RATE_LIMITED);
+		return XDP_DROP;
+	}
+
+	__be32 msg[(8 + NAT_FRAG_QUOTE6) / 4];
+	__builtin_memset(msg, 0, 8);
+	((__u8 *) msg)[0] = NAT_ICMPV6_PACKET_TOO_BIG;
+	msg[1] = __builtin_bswap32(mtu);
+	__builtin_memcpy(&msg[2], quote, NAT_FRAG_QUOTE6);
+
+	// The sender is the quoted packet's source.
+	__u8 peer[16];
+	__builtin_memcpy(peer, &((const __u8 *) quote)[8], 16);
+	__u8 self[16];
+	__builtin_memcpy(self, cfg->shard_pub_addr6, 16);
+
+	{
+		__be32 pseudo[10];
+		__builtin_memcpy(&pseudo[0], self, 16);
+		__builtin_memcpy(&pseudo[4], peer, 16);
+		pseudo[8] = __builtin_bswap32(sizeof(msg));
+		pseudo[9] = __builtin_bswap32(NAT_IPPROTO_ICMPV6);
+		__s64 sum = bpf_csum_diff(0, 0, pseudo, sizeof(pseudo), 0);
+		sum = bpf_csum_diff(0, 0, msg, sizeof(msg), (__wsum) sum);
+		__be16 check = csum_fold_add(0xFFFF, sum);
+		__builtin_memcpy(&((__u8 *) msg)[2], &check, 2);
+	}
+
+	int cur = (int) ((long) ctx->data_end - (long) ctx->data);
+	int want = (int) (sizeof(struct nat_ethhdr) + NAT_IP6HDR_LEN + sizeof(msg));
+	if (bpf_xdp_adjust_tail(ctx, want - cur) != 0) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	if (data + sizeof(struct nat_ethhdr) + NAT_IP6HDR_LEN + sizeof(msg) > data_end) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+
+	struct nat_ethhdr *eth = data;
+	eth->h_proto = __builtin_bswap16(NAT_ETH_P_IPV6);
+	struct nat_ip6hdr *ip6 = (void *) (eth + 1);
+	__builtin_memset(ip6->vtc_flow, 0, sizeof(ip6->vtc_flow));
+	ip6->vtc_flow[0] = 0x60;
+	ip6->payload_len = __builtin_bswap16(sizeof(msg));
+	ip6->nexthdr = NAT_IPPROTO_ICMPV6;
+	ip6->hop_limit = 64;
+	__builtin_memcpy(ip6->saddr, self, 16);
+	__builtin_memcpy(ip6->daddr, peer, 16);
+	__builtin_memcpy((void *) (ip6 + 1), msg, sizeof(msg));
+
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, self, peer,
+						 (__u16) (NAT_IP6HDR_LEN + sizeof(msg)), eth, &egress_ifindex, 0);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc);
+		return XDP_DROP;
+	}
+	return leave_via(ctx, egress_ifindex);
+}
+
+// send_frag_needed4 is send_too_big6 for an IPv4 sender: an ICMPv4
+// Fragmentation Needed from shard_pub_addr4, the next-hop MTU in the low half
+// of its word (RFC 1191).
+static NAT_ALWAYS_INLINE int send_frag_needed4(struct xdp_md *ctx, struct shard_config *cfg,
+						const __be32 quote[NAT_FRAG_QUOTE4 / 4], __u32 mtu)
+{
+	if (!take_icmp_token()) {
+		count_drop(DROP_REASON_NAT_ICMP_RATE_LIMITED);
+		return XDP_DROP;
+	}
+
+	__be32 msg[(8 + NAT_FRAG_QUOTE4) / 4];
+	__builtin_memset(msg, 0, 8);
+	((__u8 *) msg)[0] = NAT_ICMP_DEST_UNREACH;
+	((__u8 *) msg)[1] = 4; // fragmentation needed and DF set
+	msg[1] = __builtin_bswap32(mtu & 0xFFFF);
+	__builtin_memcpy(&msg[2], quote, NAT_FRAG_QUOTE4);
+	{
+		__s64 sum = bpf_csum_diff(0, 0, msg, sizeof(msg), 0);
+		__be16 check = csum_fold_add(0xFFFF, sum);
+		__builtin_memcpy(&((__u8 *) msg)[2], &check, 2);
+	}
+
+	// The sender is the quoted packet's source.
+	__be32 peer = quote[3];
+	__be32 self = cfg->shard_pub_addr4;
+
+	int cur = (int) ((long) ctx->data_end - (long) ctx->data);
+	int want = (int) (sizeof(struct nat_ethhdr) + NAT_IP4HDR_LEN + sizeof(msg));
+	if (bpf_xdp_adjust_tail(ctx, want - cur) != 0) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	if (data + sizeof(struct nat_ethhdr) + NAT_IP4HDR_LEN + sizeof(msg) > data_end) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+
+	struct nat_ethhdr *eth = data;
+	eth->h_proto = __builtin_bswap16(NAT_ETH_P_IP);
+	struct nat_iphdr *ip4 = (void *) (eth + 1);
+	ip4->version_ihl = 0x45;
+	ip4->tos = 0;
+	ip4->tot_len = __builtin_bswap16(NAT_IP4HDR_LEN + sizeof(msg));
+	ip4->id = 0;
+	ip4->frag_off = 0;
+	ip4->ttl = 64;
+	ip4->protocol = NAT_IPPROTO_ICMP;
+	ip4->check = 0;
+	ip4->saddr = self;
+	ip4->daddr = peer;
+	ip4->check = ipv4_header_csum(ip4);
+	__builtin_memcpy((void *) (ip4 + 1), msg, sizeof(msg));
+
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib_and_write_eth4(ctx, ctx->ingress_ifindex, self, peer,
+						  (__u16) (NAT_IP4HDR_LEN + sizeof(msg)), eth, &egress_ifindex);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc);
+		return XDP_DROP;
+	}
+	return leave_via(ctx, egress_ifindex);
+}
+
 // reencap_to_tenant is the last step every NAT66 return leg shares: push the
 // SRv6 outer header toward the tenant's worker node and transmit. ip6 is the
 // already-rewritten packet, read here only for its length before the head moves.
+//
+// quote is the packet as its sender sent it, for a Packet Too Big should the
+// fabric be too small for it once encapsulated, or null where none may be sent:
+// a translated ICMP error is never answered with another.
 static NAT_ALWAYS_INLINE int reencap_to_tenant(struct xdp_md *ctx, struct shard_config *cfg,
-						struct nat_ip6hdr *ip6, const __u8 usid[16])
+						struct nat_ip6hdr *ip6, const __u8 usid[16],
+						const __be32 *quote)
 {
 	// Must include the inner IPv6 header's own 40 bytes, not just its payload.
 	// Passing the inner payload length alone undercounts the outer header's
@@ -1309,9 +1495,13 @@ static NAT_ALWAYS_INLINE int reencap_to_tenant(struct xdp_md *ctx, struct shard_
 	// source, but it must still be a real address on this node rather than the
 	// internet peer's.
 	__u32 egress_ifindex = 0;
+	__u16 frag_mtu = 0;
 	if (push_outer_header(ctx, cfg->shard_sid, backend_usid, inner_payload_len_plus_ip6hdr,
-			       &egress_ifindex) != 0)
+			       &egress_ifindex, &frag_mtu) != 0) {
+		if (quote && frag_mtu > NAT_IP6HDR_LEN)
+			return send_too_big6(ctx, cfg, quote, frag_mtu - NAT_IP6HDR_LEN);
 		return XDP_DROP;
+	}
 
 	return leave_via(ctx, egress_ifindex);
 }
@@ -1339,11 +1529,17 @@ static NAT_ALWAYS_INLINE int nat66_return_leg(struct xdp_md *ctx, struct shard_c
 		return XDP_DROP;
 	}
 
+	// The packet as the sender sent it, in case it has to be told it was too
+	// big; see send_too_big6. Every caller has proven at least 8 transport
+	// bytes present.
+	__be32 quote[NAT_FRAG_QUOTE6 / 4];
+	__builtin_memcpy(quote, ip6, NAT_FRAG_QUOTE6);
+
 	fix_l4_checksum(l4v->check_ptr, ip6->daddr, l4v->dport, cv->backend_addr, cv->backend_port);
 	__builtin_memcpy(ip6->daddr, cv->backend_addr, 16);
 	*l4v->dport_ptr = cv->backend_port;
 
-	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid);
+	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid, quote);
 }
 
 // nat66_return: a reply from the IPv6 internet, addressed to this shard's own
@@ -1444,7 +1640,7 @@ static NAT_ALWAYS_INLINE int nat66_icmp_error(struct xdp_md *ctx, struct shard_c
 	__builtin_memcpy(quoted->saddr, cv->backend_addr, 16);
 	*q.masq_ptr = cv->backend_port;
 
-	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid);
+	return reencap_to_tenant(ctx, cfg, ip6, cv->backend_usid, 0);
 }
 
 // echo_respond6 is echo_respond4 for shard_pub_addr6. Swapping the addresses
@@ -1475,7 +1671,7 @@ static NAT_ALWAYS_INLINE int echo_respond6(struct xdp_md *ctx, struct shard_conf
 	__u16 tot_len = (__u16) (NAT_IP6HDR_LEN + __builtin_bswap16(ip6->payload_len));
 	__u32 egress_ifindex = 0;
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, self, peer, tot_len, eth,
-						 &egress_ifindex);
+						 &egress_ifindex, 0);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc);
 		return XDP_DROP;
@@ -1854,6 +2050,12 @@ static NAT_ALWAYS_INLINE int nat64_return_leg(struct xdp_md *ctx, struct shard_c
 	struct conn_value cv;
 	__builtin_memcpy(&cv, found, sizeof(cv));
 
+	// The packet as the sender sent it, in case it has to be told it was too
+	// big; see send_frag_needed4. Every caller has proven at least 8 transport
+	// bytes present.
+	__be32 quote[NAT_FRAG_QUOTE4 / 4];
+	__builtin_memcpy(quote, ip4, NAT_FRAG_QUOTE4);
+
 	// The caller proved the header in bounds, but through its own pointer; the
 	// verifier needs this one proven too before it is read.
 	struct nat_ethhdr *eth = (void *) (long) ctx->data;
@@ -1938,9 +2140,15 @@ static NAT_ALWAYS_INLINE int nat64_return_leg(struct xdp_md *ctx, struct shard_c
 		__builtin_bswap16((__u16) (sizeof(struct nat_ip6hdr) + l4_len));
 
 	__u32 egress_ifindex = 0;
+	__u16 frag_mtu = 0;
 	if (push_outer_header(ctx, cfg->shard_sid, cv.backend_usid, inner_payload_len_plus_ip6hdr,
-			       &egress_ifindex) != 0)
+			       &egress_ifindex, &frag_mtu) != 0) {
+		// The sender's packet grows by the translation's 20 bytes as well as
+		// the encapsulation's 40.
+		if (frag_mtu > NAT_IP6HDR_LEN + NAT_V6_V4_DELTA)
+			return send_frag_needed4(ctx, cfg, quote, frag_mtu - NAT_IP6HDR_LEN - NAT_V6_V4_DELTA);
 		return XDP_DROP;
+	}
 
 	return leave_via(ctx, egress_ifindex);
 }
@@ -2130,10 +2338,37 @@ static NAT_ALWAYS_INLINE int icmp4_err_to_icmp6(const struct nat_icmphdr *icmp4,
 //
 // The outer source is the reporting router's IPv4 address synthesized into the
 // NAT64 prefix, so the tenant sees which hop reported, as traceroute needs.
-static NAT_ALWAYS_INLINE int nat64_icmp_error(struct xdp_md *ctx, struct shard_config *cfg,
-					       struct nat_ethhdr *old_eth, struct nat_iphdr *ip4,
-					       struct nat_icmphdr *icmp, void *data_end)
+//
+// It is its own tail-called program, not a branch of nat64_icmp_return: its
+// rebuild holds more on the stack than fits in one program alongside that
+// one's Echo Reply translation and echo responder.
+SEC("xdp")
+int nat64_icmp_error(struct xdp_md *ctx)
 {
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+
+	struct nat_ethhdr *old_eth = data;
+	if ((void *) (old_eth + 1) > data_end)
+		return XDP_PASS;
+	struct nat_iphdr *ip4 = (void *) (old_eth + 1);
+	if ((void *) (ip4 + 1) > data_end)
+		return XDP_PASS;
+
+	__u32 cfg_key = 0;
+	struct shard_config *cfg = bpf_map_lookup_elem(&shard_config_table, &cfg_key);
+	if (!cfg)
+		return XDP_PASS;
+
+	if (!nat64_v4_header_ok(ip4))
+		return XDP_DROP;
+
+	struct nat_icmphdr *icmp = (void *) (ip4 + 1);
+	if (ip4->protocol != NAT_IPPROTO_ICMP || (void *) (icmp + 1) > data_end) {
+		count_drop(DROP_REASON_NAT64_ICMP_MALFORMED);
+		return XDP_DROP;
+	}
+
 	struct nat_iphdr *quoted = (void *) (icmp + 1);
 	__u8 *quoted_l4 = (void *) (quoted + 1);
 	if ((void *) (quoted_l4 + NAT_QUOTED_L4_LEN) > data_end) {
@@ -2281,7 +2516,7 @@ static NAT_ALWAYS_INLINE int nat64_icmp_error(struct xdp_md *ctx, struct shard_c
 		return XDP_DROP;
 	}
 
-	void *data = (void *) (long) ctx->data;
+	data = (void *) (long) ctx->data;
 	data_end = (void *) (long) ctx->data_end;
 	if (data + sizeof(struct nat_ethhdr) + NAT_IP6HDR_LEN + NAT_ICMP6_ERR_FRONT > data_end) {
 		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
@@ -2303,7 +2538,7 @@ static NAT_ALWAYS_INLINE int nat64_icmp_error(struct xdp_md *ctx, struct shard_c
 	__builtin_memcpy(ip6->daddr, dst6, 16);
 	__builtin_memcpy((void *) (ip6 + 1), msg, sizeof(msg));
 
-	return reencap_to_tenant(ctx, cfg, ip6, usid);
+	return reencap_to_tenant(ctx, cfg, ip6, usid, 0);
 }
 
 // echo_respond4 answers an Echo Request addressed to shard_pub_addr4, when the
@@ -2341,9 +2576,10 @@ static NAT_ALWAYS_INLINE int echo_respond4(struct xdp_md *ctx, struct shard_conf
 	return leave_via(ctx, egress_ifindex);
 }
 
-// nat64_icmp_return handles every ICMPv4 message addressed to shard_pub_addr4:
-// an Echo Reply to a tenant's ping, an Echo Request to the shard itself, or
-// something this shard does not translate.
+// nat64_icmp_return handles every ICMPv4 message addressed to shard_pub_addr4
+// that the dispatcher did not send to nat64_icmp_error: an Echo Reply to a
+// tenant's ping, an Echo Request to the shard itself, or something this shard
+// does not translate.
 SEC("xdp")
 int nat64_icmp_return(struct xdp_md *ctx)
 {
@@ -2382,8 +2618,6 @@ int nat64_icmp_return(struct xdp_md *ctx)
 	}
 	if (type == NAT_ICMP_ECHO_REQUEST)
 		return echo_respond4(ctx, cfg, eth, ip4, icmp);
-	if (type == NAT_ICMP_DEST_UNREACH || type == NAT_ICMP_TIME_EXCEEDED || type == NAT_ICMP_PARAM_PROBLEM)
-		return nat64_icmp_error(ctx, cfg, eth, ip4, icmp, data_end);
 
 	count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
 	return XDP_DROP;
@@ -2456,8 +2690,17 @@ int nat_ingress(struct xdp_md *ctx)
 		if ((void *) (ip4 + 1) > data_end)
 			return XDP_PASS;
 		if (cfg->shard_pub_addr4 != 0 && ip4->daddr == cfg->shard_pub_addr4) {
-			bpf_tail_call(ctx, &nat_progs, ip4->protocol == NAT_IPPROTO_ICMP ?
-						       NAT_PROG_NAT64_ICMP_RETURN : NAT_PROG_NAT64_RETURN);
+			__u32 slot = NAT_PROG_NAT64_RETURN;
+			if (ip4->protocol == NAT_IPPROTO_ICMP) {
+				// A short header goes to the Echo leaf, which counts it.
+				struct nat_icmphdr *icmp = (void *) (ip4 + 1);
+				slot = NAT_PROG_NAT64_ICMP_RETURN;
+				if ((void *) (icmp + 1) <= data_end &&
+				    (icmp->type == NAT_ICMP_DEST_UNREACH || icmp->type == NAT_ICMP_TIME_EXCEEDED ||
+				     icmp->type == NAT_ICMP_PARAM_PROBLEM))
+					slot = NAT_PROG_NAT64_ICMP_ERROR;
+			}
+			bpf_tail_call(ctx, &nat_progs, slot);
 			return XDP_PASS;
 		}
 	}

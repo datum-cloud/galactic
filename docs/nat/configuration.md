@@ -405,6 +405,14 @@ ICMPv6 errors the internet sends back about its flows — Destination
 Unreachable, Packet Too Big, Time Exceeded, Parameter Problem — reach it
 rewritten to describe the packet it sent. A ping to a NAT64-synthesized
 address works too: the shard translates ICMPv6 Echo to ICMPv4 Echo and back.
+A reply that fits the internet path but not the fabric once the shard
+re-encapsulates it — 40 bytes bigger over NAT66, 60 over NAT64 — is still
+dropped and counted as `fib_frag_needed`, but its sender now hears why: the
+shard sends it a Packet Too Big, or a Fragmentation Needed over NAT64, from
+the masquerade address, carrying the fabric route's MTU less those bytes.
+TCP rarely needs this, since the fabric's MSS clamp keeps its segments small
+enough; UDP and ICMP do.
+
 ICMPv4 errors about a tenant's NAT64 flows reach it as the ICMPv6 errors RFC
 7915 section 4.2 maps them to, quoted packet translated too, from the
 reporting router's address synthesized into the NAT64 prefix — so
@@ -473,8 +481,12 @@ knowing before you rely on this component in production:
   are real: no host firewall or accounting applies to this traffic, the
   routing is a `bpf_fib_lookup` against the main table rather than the
   kernel's full output path — so `ip rule` policy routing is not consulted
-  — and no ICMP error is generated on the shard's behalf. Each of those
-  surfaces as a named drop counter instead.
+  — and the only ICMP error generated on the shard's behalf is the one the
+  datapath builds itself, for a reply too big for the fabric (see below).
+  Each of the rest surfaces as a named drop counter instead; a tenant
+  packet whose hop limit expires at the shard, for one, is dropped as
+  `hop_limit_exceeded` with no Time Exceeded, so traceroute shows the
+  shard's hop as `*`.
 - **ICMP sessions share the session table with TCP and UDP.** Echo
   sessions take rows from the same 65536-entry LRU `nat_conn_table`, so a
   burst of tenant pings to many destinations can evict live TCP and UDP
@@ -486,7 +498,8 @@ knowing before you rely on this component in production:
   a session gets. The table is shared deliberately, not by omission; the
   datapath's `nat_conn_table` comment gives the reasoning.
 - **The ICMP rate limit is per CPU, not per shard or per peer.** Every
-  reply the echo responder sends comes out of a token bucket of 1000
+  reply the echo responder sends, and every Packet Too Big or Fragmentation
+  Needed the shard sends a sender, comes out of a token bucket of 1000
   messages a second with a burst of 100, one bucket per CPU, compile-time
   constants in `nat.c`. The limit for a whole shard is that rate times the
   number of CPUs receiving traffic, so it grows with the uplinks' RSS

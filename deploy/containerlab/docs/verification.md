@@ -307,6 +307,14 @@ host:
   and must answer both. The others must refuse both and count them as
   `icmp_unsolicited`.
 
+- **Shard-sent Packet Too Big.** The tenant opens a UDP flow to the
+  off-fabric host, and the host answers the flow's masquerade port with a
+  1450-byte datagram. That fits every lab link but not the fabric once the
+  shard re-encapsulates it, so the shard must tell the host itself. The
+  host's route to the masquerade address has to learn MTU 1460 over NAT66,
+  or 1440 over NAT64, which has 20 more bytes of translation. The task
+  flushes the host's learned MTUs before and after.
+
 The site's shard must count no ICMP drop reason while the first six checks
 run.
 

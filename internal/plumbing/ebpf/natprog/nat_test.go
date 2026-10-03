@@ -81,6 +81,7 @@ func populateProgArray(t *testing.T, objs *NatObjects) {
 		ProgNAT66ICMPReturn:  objs.Nat66IcmpReturn,
 		ProgNAT64ICMPForward: objs.Nat64IcmpForward,
 		ProgNAT64ICMPReturn:  objs.Nat64IcmpReturn,
+		ProgNAT64ICMPError:   objs.Nat64IcmpError,
 	}
 	for slot, prog := range slots {
 		if err := objs.NatProgs.Put(slot, prog); err != nil {
