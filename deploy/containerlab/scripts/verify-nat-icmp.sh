@@ -13,12 +13,20 @@
 #      the transit router, and the tenant's route learns MTU 1300 from it.
 #   4. NAT64 ping: Echo Requests to the host's synthesized address leave as
 #      ICMPv4 and their replies come back as ICMPv6.
+#   5. NAT64 Time Exceeded: UDP traceroute to the synthesized address names
+#      at least one transit router, as an address synthesized from its IPv4
+#      one. netshoot's BusyBox traceroute matches an error on the probe's
+#      payload, past the transport header, so this also proves the shard
+#      carries the whole quote rather than its first 8 bytes.
+#   6. NAT64 Packet Too Big: through the same narrowed link, an ICMPv4
+#      Fragmentation Needed for MTU 1300 reaches the tenant as a Packet Too
+#      Big for 1320, the 20 bytes the translation strips added back.
 #
 # Throughout, a site's shard must count no ICMP drop reason and no malformed
 # packet. hop_limit_exceeded is expected to move: mtr's first probe expires at
 # the shard itself, which drops it without an error of its own.
 #
-#   5. Echo responder: the off-fabric host pings every first shard's two
+#   7. Echo responder: the off-fabric host pings every first shard's two
 #      masquerade addresses. iad's shard runs with GALACTIC_NAT_ECHO_RESPONDER
 #      on (resources/galactic-nat/iad/) and must answer both; the others run
 #      with it off and must drop each request as icmp_unsolicited. This runs
@@ -42,9 +50,11 @@ RESPONDER_SITE=iad
 NARROW_ROUTER=clab-gvpc-tr4
 NARROW_IFACE=eth4
 NARROW_MTU=1300
-# 1350 bytes of ICMP payload makes a 1398-byte IPv6 packet: past the narrowed
-# link, inside the fabric's own limit once encapsulated.
+# 1350 bytes of ICMP payload makes a 1398-byte IPv6 packet, or a 1378-byte
+# IPv4 one after NAT64: past the narrowed link either way, inside the fabric's
+# own limit once encapsulated.
 BIG_PAYLOAD=1350
+NARROW_MTU64=$((NARROW_MTU + 20))
 
 # Drop reasons none of these probes may move.
 WATCHED_DROPS="nat66_icmp_malformed nat66_icmp_no_conn nat64_icmp_malformed nat64_icmp_no_conn icmp_untranslatable icmp_unsolicited icmp_rate_limited nat66_malformed_forward nat66_malformed_return nat64_malformed_forward nat64_malformed_return"
@@ -152,6 +162,32 @@ for site in "${SITES[@]}"; do
   fi
 done
 
+echo "--- 5. NAT64 Time Exceeded ---"
+for site in "${SITES[@]}"; do
+  hops=$(in_pod "${site}" ns10 "${POD[${site}]}" traceroute -6 -n -q 1 -w 1 -m 6 "${HOST4_SYNTH}" 2>/dev/null |
+    awk -v dst="${HOST4_SYNTH}" 'NR > 1 && $2 != "*" && $2 != dst {print $2}' | tr '\n' ' ')
+  if [ -n "${hops}" ]; then
+    echo "  ok   ${site}: transit hops ${hops}"
+  else
+    fail "${site}: traceroute named no transit hop, so no translated Time Exceeded matched its probe"
+  fi
+done
+
+echo "--- 6. NAT64 Packet Too Big ---"
+docker exec "${NARROW_ROUTER}" ip link set "${NARROW_IFACE}" mtu "${NARROW_MTU}"
+for site in "${SITES[@]}"; do
+  pod=${POD[${site}]}
+  in_pod "${site}" ns10 "${pod}" ping -6 -c 2 -W 1 -M do -s "${BIG_PAYLOAD}" "${HOST4_SYNTH}" >/dev/null 2>&1 || true
+  learned=$(in_pod "${site}" ns10 "${pod}" ip -6 route get "${HOST4_SYNTH}" | grep -oE 'mtu [0-9]+' | awk '{print $2}')
+  if [ "${learned}" = "${NARROW_MTU64}" ]; then
+    echo "  ok   ${site}: route to ${HOST4_SYNTH} learned MTU ${learned}"
+  else
+    fail "${site}: route to ${HOST4_SYNTH} has MTU '${learned:-none}', want ${NARROW_MTU64} from a translated Fragmentation Needed"
+  fi
+  flush_pmtu "${site}" ns10 "${pod}"
+done
+docker exec "${NARROW_ROUTER}" ip link set "${NARROW_IFACE}" mtu 1500
+
 echo "--- drop counters ---"
 for site in "${SITES[@]}"; do
   check_drops "${site}" "${FIRST_SHARD[${site}]}" "${snap}/${site}"
@@ -162,7 +198,7 @@ unsolicited() {
   drops "$1" | awk '$1 == "icmp_unsolicited" {print $2; found=1} END {if (!found) print 0}'
 }
 
-echo "--- 5. echo responder ---"
+echo "--- 7. echo responder ---"
 for site in "${SITES[@]}"; do
   shard=${FIRST_SHARD[${site}]}
   addrs=$(docker exec "$(control_plane "${site}")" kubectl -n galactic-system get egressshard "${shard}-egress" \

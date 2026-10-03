@@ -294,8 +294,21 @@ host:
   pod's node, because the pod has no `NET_ADMIN` to do it itself. A
   leftover MTU of 1300 lowers the MSS the pod advertises and fails
   `verify:mss-clamp` for ten minutes.
+- **NAT64.** The same three checks against the host's synthesized address,
+  `2001:db8:64::a01:2802`. Each transit hop appears as its IPv4 address
+  synthesized into the NAT64 prefix (`2001:db8:64::a01:b01` is
+  `10.1.11.1`), and the Packet Too Big carries MTU 1320: the narrowed
+  link's 1300 plus the 20 bytes the translation strips. NAT64 traceroute
+  uses BusyBox's UDP mode on purpose. BusyBox matches an error on the
+  probe's payload, so a hop only appears if the shard carried the whole
+  quoted packet, not just its first 8 transport bytes.
+- **Echo responder.** The off-fabric host pings each site's first shard's
+  masquerade addresses. iad's shard has `GALACTIC_NAT_ECHO_RESPONDER` on
+  and must answer both. The others must refuse both and count them as
+  `icmp_unsolicited`.
 
-The site's shard must count no ICMP drop reason while all of this runs.
+The site's shard must count no ICMP drop reason while the first six checks
+run.
 
 ### The reply's underlay path
 
