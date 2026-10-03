@@ -57,6 +57,25 @@ func TestDaemonsetManifest_RunContainerMountsHostConflistDir(t *testing.T) {
 	}
 }
 
+// The run container rewrites the host conflist through atomicWriteFile, which
+// needs a writable mount.
+func TestDaemonsetManifest_RunContainerMountsHostConflistDirWritable(t *testing.T) {
+	c := findRunContainer(t)
+
+	hostConflistDir := filepath.Dir(hostConflistDefault)
+	for _, vm := range c.VolumeMounts {
+		if vm.MountPath != hostConflistDir {
+			continue
+		}
+		if vm.ReadOnly {
+			t.Errorf("container %q in %s mounts %s read-only; rewriteEBPFInterfaces must be able to "+
+				"rewrite %s there", c.Name, manifestPath, hostConflistDir, hostConflistDefault)
+		}
+		return
+	}
+	t.Errorf("container %q in %s does not mount %s", c.Name, manifestPath, hostConflistDir)
+}
+
 // TestDaemonsetManifest_RunContainerMountsRadvStateDir is a regression test
 // for the same class of manifest/code mismatch as
 // TestDaemonsetManifest_RunContainerMountsHostConflistDir above, this time
