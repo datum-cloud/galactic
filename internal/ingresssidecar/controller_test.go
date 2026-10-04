@@ -8,6 +8,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -106,5 +107,60 @@ func TestReconcilerMalformedSliceDoesNotError(t *testing.T) {
 	}
 	if got := backend.vrfCount(); got != 0 {
 		t.Errorf("vrfCount = %d, want 0", got)
+	}
+}
+
+// TestRunStartupSweepsAfterFailedSeed verifies a slice failing to apply at
+// startup, as it does when the sidecar starts before the CNI has loaded the
+// datapath, neither stops the periodic sweep nor stays failed: an orphaned VRF
+// left by an earlier instance is still torn down, and the failed slice is
+// installed once the datapath is ready.
+func TestRunStartupSweepsAfterFailedSeed(t *testing.T) {
+	slice := readySlice("vpc1-att1", "fd00:99::1", "fd00::1")
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(slice).Build()
+
+	backend := newFakeBackend()
+	backend.seedRoute("orphan", 9, mustPrefix(t, "fd00::9"), net.ParseIP("fd00:99::9"))
+	backend.failEnsureVRF = errTest
+	store := NewStore(backend, 20*time.Millisecond, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunStartup(ctx, c, store, 5*time.Millisecond)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitFor(t, "orphaned VRF torn down", func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		_, ok := backend.vrfs["orphan"]
+		return !ok
+	})
+
+	backend.mu.Lock()
+	backend.failEnsureVRF = nil
+	backend.mu.Unlock()
+
+	waitFor(t, "failed slice installed", func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		_, vrf := backend.vrfs[testVPC1]
+		return vrf && len(backend.routes) == 1
+	})
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

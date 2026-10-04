@@ -7,6 +7,7 @@ package ingresssidecar
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -70,6 +71,41 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func hasTenantLabel(obj client.Object) bool {
 	_, ok := obj.GetLabels()[crdnames.LabelTenantID]
 	return ok
+}
+
+// seedRetryInitial and seedRetryMax bound the backoff between failed attempts
+// to list EndpointSlices at startup. Variables so tests can shorten them.
+var (
+	seedRetryInitial = time.Second
+	seedRetryMax     = 30 * time.Second
+)
+
+// RunStartup blocks, seeding store from reader, taking its inventory of host
+// state, then sweeping it every interval until ctx is done.
+//
+// Only a failed EndpointSlice list holds the sweep back, retried with backoff:
+// running Inventory without the seed would reopen the race SeedFromAPI closes.
+// A slice that fails to apply does not, since the store still records it as
+// desired and the sweep both retries it and keeps cleaning up everything else.
+func RunStartup(ctx context.Context, reader client.Reader, store *Store, interval time.Duration) {
+	delay := seedRetryInitial
+	for {
+		err := SeedFromAPI(ctx, reader, store)
+		if err == nil {
+			break
+		}
+		slog.Error("ingresssidecar: startup seed; retrying", "retryIn", delay, "error", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, seedRetryMax)
+	}
+	if err := store.Inventory(ctx, time.Now()); err != nil {
+		slog.Error("ingresssidecar: startup inventory", "error", err)
+	}
+	RunSweeper(ctx, store, interval)
 }
 
 // RunSweeper blocks, sweeping the store on a fixed interval until ctx is done.

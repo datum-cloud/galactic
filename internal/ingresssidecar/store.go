@@ -21,6 +21,11 @@ type routeState struct {
 	prefix    *net.IPNet
 	sid       net.IP
 	installed bool
+	// pending is true while the latest desired value has not been fully
+	// applied, typically because the shared eBPF datapath was not loaded yet.
+	// The route still counts as desired, so Inventory does not mistake its
+	// host state for an orphan, and every Sweep retries applying it.
+	pending bool
 	// absentSince is the zero Time while this route is desired. It is set the
 	// moment a nil desired value is first observed, and cleared again if the
 	// route is reactivated before Sweep tears it down.
@@ -154,6 +159,9 @@ func (s *Store) withdrawGateway(ctx context.Context, vpc string, v *vrfState) {
 // exist immediately: no delay on the way up, only on the way down. A route
 // reappearing before its grace period elapses, or a VPC gaining a new route
 // before its VRF's does, cancels the pending teardown outright.
+//
+// A non-nil desired is recorded before it is applied, so a failed apply still
+// leaves the route desired. Sweep retries it until it succeeds.
 func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRoute) (err error) {
 	if s.metrics != nil {
 		timer := prometheusTimer(s.metrics)
@@ -179,30 +187,6 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 		}
 	}
 
-	v, ok := s.vrfs[desired.VPC]
-	if !ok {
-		v = &vrfState{}
-		s.vrfs[desired.VPC] = v
-	}
-	v.absentSince = time.Time{} // this VPC has a live pod again
-
-	if !v.installed {
-		tableID, verr := s.backend.EnsureVRF(desired.VPC)
-		if verr != nil {
-			s.countError("ensure_vrf")
-			return fmt.Errorf("ensure VRF for vpc %s: %w", desired.VPC, verr)
-		}
-		v.installed = true
-		v.tableID = tableID
-		s.vrfActiveDelta(1)
-	}
-	s.publishGateway(ctx, desired.VPC, v)
-
-	if rerr := s.backend.EnsureRoute(desired.Prefix, desired.SID, v.tableID); rerr != nil {
-		s.countError("ensure_route")
-		return fmt.Errorf("ensure route for %s: %w", desired.Prefix, rerr)
-	}
-
 	r, ok := s.routes[key]
 	if !ok {
 		r = &routeState{}
@@ -212,11 +196,58 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 	r.prefix = desired.Prefix
 	r.sid = desired.SID
 	r.absentSince = time.Time{} // (re)activated -- cancel any pending teardown
+	r.pending = true
+	return s.applyLocked(ctx, r)
+}
+
+// applyLocked ensures r's VRF and r itself exist on the host, clearing
+// r.pending once both do. Callers must hold s.mu.
+func (s *Store) applyLocked(ctx context.Context, r *routeState) error {
+	v, ok := s.vrfs[r.vpc]
+	if !ok {
+		v = &vrfState{}
+		s.vrfs[r.vpc] = v
+	}
+	v.absentSince = time.Time{} // this VPC has a live pod again
+
+	if !v.installed {
+		tableID, verr := s.backend.EnsureVRF(r.vpc)
+		if verr != nil {
+			s.countError("ensure_vrf")
+			return fmt.Errorf("ensure VRF for vpc %s: %w", r.vpc, verr)
+		}
+		v.installed = true
+		v.tableID = tableID
+		s.vrfActiveDelta(1)
+	}
+	s.publishGateway(ctx, r.vpc, v)
+
+	if rerr := s.backend.EnsureRoute(r.prefix, r.sid, v.tableID); rerr != nil {
+		s.countError("ensure_route")
+		return fmt.Errorf("ensure route for %s: %w", r.prefix, rerr)
+	}
+
+	r.pending = false
 	if !r.installed {
 		r.installed = true
 		s.routeActiveDelta(1)
 	}
 	return nil
+}
+
+// retryPendingLocked applies every desired route an earlier SetDesired failed
+// to apply. Without it, a route that failed because the datapath was not
+// loaded yet waits on the reconciler's own backoff, which grows to minutes.
+// Callers must hold s.mu.
+func (s *Store) retryPendingLocked(ctx context.Context) {
+	for key, r := range s.routes {
+		if !r.pending || !r.absentSince.IsZero() {
+			continue
+		}
+		if err := s.applyLocked(ctx, r); err != nil {
+			slog.Debug("ingresssidecar: retry pending route", "key", key, "vpc", r.vpc, "error", err)
+		}
+	}
 }
 
 // Sweep advances every pending teardown whose grace period has elapsed as of
@@ -228,7 +259,8 @@ func (s *Store) SetDesired(ctx context.Context, key string, desired *DesiredRout
 // one of its routes might still come back.
 //
 // Sweep first reapplies every live VRF and route if the shared eBPF datapath
-// has been reloaded since they were written; see checkDatapathLocked.
+// has been reloaded since they were written; see checkDatapathLocked. It then
+// retries every desired route an earlier SetDesired failed to apply.
 //
 // Call this periodically, never reactively: VRF teardown is an aggregate
 // condition over many routes, not one watched object's transition.
@@ -237,6 +269,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) {
 	defer s.mu.Unlock()
 
 	s.checkDatapathLocked()
+	s.retryPendingLocked(ctx)
 
 	pendingRoutes, pendingVRFs := 0, 0
 
@@ -336,6 +369,11 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 			v = &vrfState{tableID: info.TableID, installed: true, absentSince: now}
 			s.vrfs[info.VPC] = v
 			s.vrfActiveDelta(1)
+		} else if !v.installed {
+			// A failed SetDesired tracked this VPC without learning its
+			// table ID. Use the host's, or its routes are listed from, and
+			// later removed from, table 0.
+			v.tableID = info.TableID
 		}
 
 		routes, err := s.backend.ListRoutes(v.tableID)

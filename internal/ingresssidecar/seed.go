@@ -37,6 +37,10 @@ import (
 //
 // Seeding first closes that race. Applying desired state is idempotent, so the
 // reconciler's later, now-redundant pass over the same objects is harmless.
+//
+// It returns an error only when the list itself fails. A slice that fails to
+// apply is logged and skipped: the store still records it as desired, which is
+// all Inventory needs, and retries applying it.
 func SeedFromAPI(ctx context.Context, reader client.Reader, store *Store) error {
 	req, err := labels.NewRequirement(crdnames.LabelTenantID, selection.Exists, nil)
 	if err != nil {
@@ -64,7 +68,11 @@ func SeedFromAPI(ctx context.Context, reader client.Reader, store *Store) error 
 		}
 		key := fmt.Sprintf("%s/%s", slice.Namespace, slice.Name)
 		if err := store.SetDesired(ctx, key, desired); err != nil {
-			return fmt.Errorf("seed EndpointSlice %s: %w", key, err)
+			// The store keeps the route desired and retries it on every
+			// sweep, so one VPC whose datapath is not ready yet must not
+			// stop the rest from loading.
+			ctrl.LoggerFrom(ctx).Error(err, "seed EndpointSlice; retrying on the next sweep",
+				"endpointslice", key)
 		}
 	}
 	return nil
