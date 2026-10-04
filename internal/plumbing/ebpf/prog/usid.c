@@ -136,6 +136,11 @@ static long (*bpf_skb_load_bytes)(const struct __sk_buff *skb, __u32 offset, voi
 static long (*bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const void *from, __u32 len,
 				    __u64 flags) = (void *) BPF_FUNC_skb_store_bytes;
 
+// send_too_big resizes a packet too big for the fabric into the ICMP error it
+// sends back: change_tail cuts it, change_head pushes room at the front.
+static long (*bpf_skb_change_tail)(struct __sk_buff *skb, __u32 len, __u64 flags) = (void *) BPF_FUNC_skb_change_tail;
+static long (*bpf_skb_change_head)(struct __sk_buff *skb, __u32 len, __u64 flags) = (void *) BPF_FUNC_skb_change_head;
+
 // Two checksum flags reproduced as plain constants, for the same reason as the
 // TC verdict and address-family constants below: avoiding a second header
 // dependency.
@@ -893,11 +898,11 @@ struct {
 // SRH, so a tenant packet can be at most the uplink MTU minus 40. A tenant
 // interface at the uplink's own MTU advertises an MSS sized for the full MTU,
 // and every full-size segment sent to it is then 40 bytes too big once
-// encapsulated. Nothing on the path fragments or reports it: the egress shard
-// drops it at its FIB lookup, and a packet usid_egress encapsulates past the
-// uplink MTU is dropped by the link, neither with an ICMP error. So
-// clamp_tcp_mss lowers the MSS in the SYN instead, which makes both ends size
-// their segments to fit.
+// encapsulated. Nothing on the path fragments it. send_too_big and the egress
+// shard both answer an oversized packet with a Packet Too Big, but that costs
+// a TCP connection a lost segment and a retransmission at the start of every
+// flow. So clamp_tcp_mss lowers the MSS in the SYN instead, which makes both
+// ends size their segments to fit from the first one.
 //
 // The two families differ because their inner headers do: an IPv6 tenant's
 // packet spends 40 bytes on its own header and an IPv4 tenant's 20. NAT64 needs
@@ -968,6 +973,104 @@ struct {
 	__type(key, __u32);
 	__type(value, __u64);
 } mss_clamp_stats SEC(".maps");
+
+// encap_mtu_table holds the largest tenant packet, in bytes from its IP header
+// on, that usid_egress may encapsulate: the fabric uplink MTU less the 40-byte
+// outer header. A packet above it would be dropped by the uplink on transmit,
+// with no error sent and nothing counted, so send_too_big answers it instead.
+// Zero turns the check off.
+//
+// Written by galactic-cni from the same MTU and the same setting as
+// mss_clamp_table, so the two cannot disagree. A single-entry array that reads
+// zero until then, for the same reason as mss_clamp_table. Its own map so
+// adding it changes no existing pinned map's layout.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} encap_mtu_table SEC(".maps");
+
+// struct tenant_gw_value is tenant_gw_table's value: the gateway addresses
+// IPAM gave one attachment, which send_too_big uses as the source of the
+// errors it sends that attachment. The tenant then sees its own first hop
+// report the smaller MTU. An all-zero address means the attachment has no
+// gateway in that family.
+struct tenant_gw_value {
+	__u8 gw6[16];
+	__u8 gw4[4];
+};
+
+// tenant_gw_table: see struct tenant_gw_value. Keyed by the host-side ifindex
+// like ifindex_vrf_table, and sized and written alongside it, at CNI ADD, and
+// removed at DEL.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32); // ifindex
+	__type(value, struct tenant_gw_value);
+} tenant_gw_table SEC(".maps");
+
+// enum pmtu_stat indexes pmtu_stats: what usid_egress did with each packet too
+// big for the fabric. Every outcome other than the first two drops the packet
+// with no error sent.
+enum pmtu_stat {
+	// An ICMPv6 Packet Too Big was sent to an IPv6 tenant.
+	PMTU_STAT_TOO_BIG_SENT_IPV6 = 0,
+	// An ICMPv4 Fragmentation Needed was sent to an IPv4 tenant.
+	PMTU_STAT_FRAG_NEEDED_SENT_IPV4 = 1,
+	// An IPv4 packet without DF. The datapath does not fragment, and RFC 1191
+	// sends Fragmentation Needed only for a packet with DF set.
+	PMTU_STAT_DROPPED_NO_DF = 2,
+	// The packet was itself an ICMP error, which is never answered with
+	// another (RFC 4443 section 2.4, RFC 1122 section 3.2.2).
+	PMTU_STAT_DROPPED_ICMP_ERROR = 3,
+	// pmtu_icmp_bucket had no token left on this CPU.
+	PMTU_STAT_RATE_LIMITED = 4,
+	// tenant_gw_table has no gateway for this attachment in this family, so
+	// there is no address to send the error from.
+	PMTU_STAT_NO_GATEWAY = 5,
+	// A helper failed while rewriting the packet into the error.
+	PMTU_STAT_BUILD_FAILED = 6,
+	__PMTU_STAT_COUNT,
+};
+
+// pmtu_stats is sized above __PMTU_STAT_COUNT for the same reason as
+// mss_clamp_stats.
+#define USID_PMTU_STATS_SLOTS 16
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, USID_PMTU_STATS_SLOTS);
+	__type(key, __u32);
+	__type(value, __u64);
+} pmtu_stats SEC(".maps");
+
+// USID_PMTU_ICMP_RATE errors a second, with bursts of USID_PMTU_ICMP_BURST,
+// per CPU. The same limits as the egress shard's NAT_ICMP_RATE and
+// NAT_ICMP_BURST.
+#define USID_PMTU_ICMP_RATE 1000
+#define USID_PMTU_ICMP_BURST 100
+#define USID_PMTU_ICMP_COST_NS (1000000000ULL / USID_PMTU_ICMP_RATE)
+
+// struct pmtu_icmp_bucket is one CPU's token bucket, held as nanoseconds of
+// credit, the same scheme as natprog's struct icmp_bucket.
+struct pmtu_icmp_bucket {
+	__u64 last_ns;
+	__u64 credit_ns;
+};
+
+// pmtu_icmp_bucket limits the errors send_too_big sends, one bucket per CPU
+// with no locking. Like the shard's, the limit is per CPU, not per tenant: one
+// tenant that drains a CPU's bucket suppresses errors to every other tenant
+// sending on that CPU until it refills. Each refusal is counted as
+// PMTU_STAT_RATE_LIMITED.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct pmtu_icmp_bucket);
+} pmtu_icmp_bucket SEC(".maps");
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -1352,6 +1455,383 @@ static USID_ALWAYS_INLINE __u16 usid_fib_tot_len(struct __sk_buff *skb, __u16 l3
 	__u32 seg_len = l3_hdr_len + l4_hdr_len + gso_size;
 
 	return seg_len < l3_len ? (__u16) seg_len : l3_len;
+}
+
+// ---------------------------------------------------------------------
+// Path MTU errors
+// ---------------------------------------------------------------------
+
+#define USID_IPPROTO_ICMP 1
+#define USID_ICMPV6_PACKET_TOO_BIG 2
+#define USID_ICMP_DEST_UNREACH 3
+#define USID_ICMP_FRAG_NEEDED 4
+#define USID_IPV4_DF 0x4000
+#define USID_PMTU_HOP_LIMIT 64
+
+// The ICMP message send_too_big builds, in bytes:
+//
+//   [0, 8)    type, code, checksum, and the MTU
+//   [8, 76)   the start of the offending packet, as the tenant sent it
+//   [76, 78)  USID_PMTU_SLOT_VALUE
+//   [78, 80)  a pad word, chosen so the slot is a checksum fixed point
+//
+// The quote is 68 bytes, an IPv4 header with every option plus 8 transport
+// bytes, and at least the 48 an IPv6 sender needs to match the error to a
+// socket. The same length serves both families.
+#define USID_PMTU_QUOTE_LEN 68
+#define USID_PMTU_MSG_LEN 80
+#define USID_PMTU_MSG_WORDS (USID_PMTU_MSG_LEN / 2)
+#define USID_PMTU_SLOT_OFF 76
+#define USID_PMTU_SLOT_WORD (USID_PMTU_SLOT_OFF / 2)
+#define USID_PMTU_PAD_WORD (USID_PMTU_SLOT_WORD + 1)
+// Any value other than 0x0000 and 0xFFFF works. Zero would be written back as
+// 0xFFFF by a finalizer that treats a zero result as "no checksum".
+#define USID_PMTU_SLOT_VALUE 0x0001
+
+// Where a TCP and a UDP checksum sit in their headers, which is where the
+// kernel finishes an offloaded checksum. See send_too_big.
+#define USID_PMTU_TCP_CSUM_OFF 16
+#define USID_PMTU_UDP_CSUM_OFF 6
+
+// What send_too_big did. PMTU_FITS means the packet is not too big, and
+// usid_egress goes on to encapsulate it.
+enum pmtu_verdict {
+	PMTU_FITS = 0,
+	PMTU_SENT = 1,
+	PMTU_DROPPED = 2,
+};
+
+static USID_ALWAYS_INLINE void count_pmtu_stat(__u32 stat)
+{
+	__u64 *count = bpf_map_lookup_elem(&pmtu_stats, &stat);
+
+	if (count)
+		__sync_fetch_and_add(count, 1);
+}
+
+// take_pmtu_token reports whether this CPU's bucket can pay for one more
+// error, and spends it if so. A clock reading behind last_ns earns nothing,
+// which can never over-admit. natprog's take_icmp_token is the same.
+static USID_ALWAYS_INLINE int take_pmtu_token(void)
+{
+	__u32 key = 0;
+	struct pmtu_icmp_bucket *b = bpf_map_lookup_elem(&pmtu_icmp_bucket, &key);
+
+	if (!b)
+		return 0;
+
+	__u64 now = bpf_ktime_get_ns();
+	__u64 credit = b->credit_ns + (now > b->last_ns ? now - b->last_ns : 0);
+
+	if (credit > USID_PMTU_ICMP_BURST * USID_PMTU_ICMP_COST_NS)
+		credit = USID_PMTU_ICMP_BURST * USID_PMTU_ICMP_COST_NS;
+	if (now > b->last_ns)
+		b->last_ns = now;
+
+	if (credit < USID_PMTU_ICMP_COST_NS) {
+		b->credit_ns = credit;
+		return 0;
+	}
+	b->credit_ns = credit - USID_PMTU_ICMP_COST_NS;
+	return 1;
+}
+
+// csum_fold16 folds a 32-bit sum of 16-bit words into 16 bits. Two rounds are
+// enough for any sum of fewer than 65536 words.
+static USID_ALWAYS_INLINE __u16 csum_fold16(__u32 sum)
+{
+	sum = (sum & 0xFFFF) + (sum >> 16);
+	sum = (sum & 0xFFFF) + (sum >> 16);
+	return (__u16) sum;
+}
+
+// Every checksum below is summed over 16-bit words as they sit in memory and
+// stored the same way. The Internet checksum is byte-order independent (RFC
+// 1071), so this needs no swapping on either endianness.
+static USID_ALWAYS_INLINE __u32 sum_words(const __u16 *w, int n)
+{
+	__u32 sum = 0;
+
+	// Unrolled so every index is a constant. Without CAP_PERFMON the verifier
+	// rejects a stack pointer offset by a loop counter.
+#pragma unroll
+	for (int i = 0; i < n; i++)
+		sum += w[i];
+	return sum;
+}
+
+// send_too_big checks whether a tenant packet about to be encapsulated still
+// fits the fabric, and when it does not, rewrites it into an ICMPv6 Packet Too
+// Big or an ICMPv4 Fragmentation Needed and sends that back to the tenant. The
+// error carries encap_mtu_table's limit, the largest packet that fits once
+// encapsulated, so the tenant's path MTU discovery adapts and its next packets
+// get through. Without it, the uplink drops the packet on transmit and nobody
+// learns why. ip_version is the tenant packet's family. vrf_key names the
+// tenant VRF, for undoing NPTv6 in the quote.
+//
+// A packet the NIC merged with GSO is checked by its segment length, the same
+// rule usid_ingress's FIB lookup uses (usid_fib_tot_len). A merged TCP packet
+// whose segments fit goes on; one whose segments do not gets the error, which
+// makes the tenant's stack resegment.
+//
+// The error's source is the tenant's own gateway, from tenant_gw_table, and
+// its destination is the packet's source. NPTv6 has already rewritten that
+// source to the public prefix by the time this runs, so the quote and the
+// destination are translated back to the tenant's own address first. RFC 6296
+// translation is checksum-neutral, so the quoted checksum stays consistent.
+//
+// The packet is rewritten in place, so it keeps the checksum offload state the
+// tenant's stack gave it. A TCP or UDP packet from a pod or a guest usually
+// arrives as CHECKSUM_PARTIAL, a checksum still to be finished at csum_start +
+// csum_offset, and a helper cannot clear that. A device without checksum
+// offload, such as a tap whose guest did not negotiate it, finishes it on
+// transmit and would write a sum into the middle of the error. So the error is
+// laid out for that: room is pushed at the front until the spot the kernel
+// would write lands on the slot word, and the pad word beside it is chosen so
+// the sum the kernel writes there is exactly the value already there. The
+// error is then correct whether or not anything finishes the checksum. The
+// spot is the transport header's offset plus 16 for TCP and 6 for UDP, which
+// is where the kernel puts csum_start and csum_offset for either. A packet of
+// another protocol is never left with a partial checksum by Linux, and the
+// layout costs nothing there.
+//
+// Never sent: an error about an ICMP error, an error past the rate limit, and
+// an error for an attachment with no gateway in the packet's family. IPv4
+// without DF is dropped too, since this datapath does not fragment. Each is
+// counted in pmtu_stats.
+//
+// A global function, for the same reason as clamp_tcp_mss.
+__attribute__((noinline)) int send_too_big(struct __sk_buff *skb, __u32 ip_version, __u64 vrf_key)
+{
+	__u32 cfg_key = 0;
+	__u32 *limit_p = bpf_map_lookup_elem(&encap_mtu_table, &cfg_key);
+
+	if (!limit_p)
+		return PMTU_FITS;
+
+	__u32 limit = *limit_p;
+
+	if (limit == 0)
+		return PMTU_FITS; // check off, or not configured yet
+	if (skb->len <= USID_L3_OFFSET)
+		return PMTU_FITS;
+
+	__u32 l3_len = skb->len - USID_L3_OFFSET;
+
+	if (l3_len <= limit)
+		return PMTU_FITS;
+
+	__u32 l4_off;
+	__u8 proto;
+	__be16 frag_off = 0;
+
+	if (ip_version == 6) {
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, nexthdr), &proto, 1))
+			return PMTU_FITS;
+		l4_off = sizeof(struct usid_ip6hdr);
+	} else {
+		__u8 ver_ihl;
+
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ver_ihl, 1) ||
+		    bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_iphdr, frag_off), &frag_off, 2) ||
+		    bpf_skb_load_bytes(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_iphdr, protocol), &proto, 1))
+			return PMTU_FITS;
+		l4_off = (__u32) (ver_ihl & 0x0F) * 4;
+		if (l4_off < USID_IPV4_MIN_HDR_LEN)
+			return PMTU_FITS;
+	}
+
+	if (usid_fib_tot_len(skb, l3_len > 0xFFFF ? 0xFFFF : (__u16) l3_len, l4_off, proto) <= limit)
+		return PMTU_FITS;
+
+	if (ip_version == 4 && !(__builtin_bswap16(frag_off) & USID_IPV4_DF)) {
+		count_pmtu_stat(PMTU_STAT_DROPPED_NO_DF);
+		return PMTU_DROPPED;
+	}
+
+	// An ICMPv6 type below 128 is an error. ICMPv4's errors are Destination
+	// Unreachable, Source Quench, Redirect, Time Exceeded and Parameter
+	// Problem. A non-first IPv4 fragment carries no ICMP header to read.
+	if ((ip_version == 6 && proto == USID_IPPROTO_ICMPV6) ||
+	    (ip_version == 4 && proto == USID_IPPROTO_ICMP &&
+	     !(__builtin_bswap16(frag_off) & USID_IPV4_FRAG_OFFSET_MASK))) {
+		__u8 icmp_type;
+
+		if (bpf_skb_load_bytes(skb, USID_L3_OFFSET + l4_off, &icmp_type, 1)) {
+			count_pmtu_stat(PMTU_STAT_BUILD_FAILED);
+			return PMTU_DROPPED;
+		}
+		if ((ip_version == 6 && icmp_type < 128) ||
+		    (ip_version == 4 && (icmp_type == 3 || icmp_type == 4 || icmp_type == 5 || icmp_type == 11 ||
+					 icmp_type == 12))) {
+			count_pmtu_stat(PMTU_STAT_DROPPED_ICMP_ERROR);
+			return PMTU_DROPPED;
+		}
+	}
+
+	__u32 ifindex = skb->ifindex;
+	struct tenant_gw_value *gw = bpf_map_lookup_elem(&tenant_gw_table, &ifindex);
+
+	if (!gw) {
+		count_pmtu_stat(PMTU_STAT_NO_GATEWAY);
+		return PMTU_DROPPED;
+	}
+
+	// Copied to the stack as whole words: gw6 in src[0..3], gw4 in src[4].
+	__u32 src[5];
+
+	__builtin_memcpy(src, gw, sizeof(src));
+	if ((ip_version == 6 ? (src[0] | src[1] | src[2] | src[3]) : src[4]) == 0) {
+		count_pmtu_stat(PMTU_STAT_NO_GATEWAY);
+		return PMTU_DROPPED;
+	}
+
+	if (!take_pmtu_token()) {
+		count_pmtu_stat(PMTU_STAT_RATE_LIMITED);
+		return PMTU_DROPPED;
+	}
+
+	// Everything needed from the original packet is read before it is resized:
+	// its two MAC addresses, and the quote.
+	__u8 macs[12];
+	__u16 msg[USID_PMTU_MSG_WORDS] __attribute__((aligned(4)));
+
+	__builtin_memset(msg, 0, sizeof(msg));
+	if (bpf_skb_load_bytes(skb, 0, macs, sizeof(macs)) ||
+	    bpf_skb_load_bytes(skb, USID_L3_OFFSET, &msg[4], USID_PMTU_QUOTE_LEN)) {
+		count_pmtu_stat(PMTU_STAT_BUILD_FAILED);
+		return PMTU_DROPPED;
+	}
+
+	__u8 *quote = (__u8 *) &msg[4];
+
+	if (ip_version == 6) {
+		struct nptv6_value *npt = bpf_map_lookup_elem(&nptv6_table, &vrf_key);
+
+		if (npt)
+			apply_nptv6(&quote[USID_OFFSETOF(struct usid_ip6hdr, saddr)], npt, 0 /* inbound: public -> ULA */);
+	}
+
+	// Lay the error out so the kernel's checksum spot, if it has one, lands on
+	// the slot word. The spot is l4_off + csum_off past the original IP
+	// header. The slot is ip_hdr_len + USID_PMTU_SLOT_OFF past the error's IP
+	// header. So the error's IP header starts push bytes before the original
+	// one, and the packet is first cut to end 4 bytes past the spot, which
+	// after the push is exactly the end of the error.
+	__u32 csum_off = proto == USID_IPPROTO_TCP ? USID_PMTU_TCP_CSUM_OFF : USID_PMTU_UDP_CSUM_OFF;
+	__u32 ip_hdr_len = ip_version == 6 ? sizeof(struct usid_ip6hdr) : sizeof(struct usid_iphdr);
+	__u32 push = ip_hdr_len + USID_PMTU_SLOT_OFF - l4_off - csum_off;
+	__u32 cut_len = USID_L3_OFFSET + l4_off + csum_off + 4;
+
+	// The words the kernel would sum: from the spot's transport header start,
+	// csum_off bytes before the slot, through the end.
+	__u32 region_start = (USID_PMTU_SLOT_OFF - csum_off) / 2;
+	__u32 region = 0;
+
+#pragma unroll
+	for (int i = (USID_PMTU_SLOT_OFF - USID_PMTU_TCP_CSUM_OFF) / 2; i < USID_PMTU_SLOT_WORD; i++)
+		if (i >= region_start)
+			region += msg[i];
+
+	// The kernel writes ~fold(sum) over the region. Choosing pad so the region
+	// sums to ~slot makes that write put back the slot's own value.
+	__u16 slot = USID_PMTU_SLOT_VALUE;
+
+	msg[USID_PMTU_SLOT_WORD] = slot;
+	msg[USID_PMTU_PAD_WORD] = csum_fold16((__u32) (__u16) ~slot + (__u16) ~csum_fold16(region + slot));
+
+	__u8 *hdr = (__u8 *) msg;
+	__u32 pseudo_sum = 0;
+
+	if (ip_version == 6) {
+		hdr[0] = USID_ICMPV6_PACKET_TOO_BIG;
+		__u32 mtu = __builtin_bswap32(limit);
+		__builtin_memcpy(&hdr[4], &mtu, 4);
+
+		// The pseudo-header: source, destination, upper-layer length, next
+		// header, the last two as 32-bit words.
+		pseudo_sum = sum_words((const __u16 *) src, 8) +
+			     sum_words((const __u16 *) &quote[USID_OFFSETOF(struct usid_ip6hdr, saddr)], 8);
+		__u32 tail[2] = {__builtin_bswap32(USID_PMTU_MSG_LEN), __builtin_bswap32(USID_IPPROTO_ICMPV6)};
+		pseudo_sum += sum_words((const __u16 *) tail, 4);
+	} else {
+		hdr[0] = USID_ICMP_DEST_UNREACH;
+		hdr[1] = USID_ICMP_FRAG_NEEDED;
+		__u16 mtu = __builtin_bswap16((__u16) limit);
+		__builtin_memcpy(&hdr[6], &mtu, 2);
+	}
+	msg[1] = (__u16) ~csum_fold16(pseudo_sum + sum_words(msg, USID_PMTU_MSG_WORDS));
+
+	if (bpf_skb_change_tail(skb, cut_len, 0) || bpf_skb_change_head(skb, push, 0)) {
+		count_pmtu_stat(PMTU_STAT_BUILD_FAILED);
+		return PMTU_DROPPED;
+	}
+
+	// The headers are written straight into the packet, which is now exactly
+	// as long as the error.
+	void *data = (void *) (long) skb->data;
+	void *data_end = (void *) (long) skb->data_end;
+	struct usid_ethhdr *eth = data;
+
+	if ((void *) (eth + 1) > data_end) {
+		count_pmtu_stat(PMTU_STAT_BUILD_FAILED);
+		return PMTU_DROPPED;
+	}
+	__builtin_memcpy(eth->h_dest, &macs[6], 6);
+	__builtin_memcpy(eth->h_source, &macs[0], 6);
+	eth->h_proto = __builtin_bswap16(ip_version == 6 ? USID_ETH_P_IPV6 : USID_ETH_P_IP);
+
+	if (ip_version == 6) {
+		struct usid_ip6hdr *ip6 = (void *) (eth + 1);
+		__u8 *icmp = (void *) (ip6 + 1);
+
+		if ((void *) (icmp + USID_PMTU_MSG_LEN) > data_end) {
+			count_pmtu_stat(PMTU_STAT_BUILD_FAILED);
+			return PMTU_DROPPED;
+		}
+		__builtin_memset(ip6->vtc_flow, 0, sizeof(ip6->vtc_flow));
+		ip6->vtc_flow[0] = 0x60;
+		ip6->payload_len = __builtin_bswap16(USID_PMTU_MSG_LEN);
+		ip6->nexthdr = USID_IPPROTO_ICMPV6;
+		ip6->hop_limit = USID_PMTU_HOP_LIMIT;
+		__builtin_memcpy(ip6->saddr, src, 16);
+		__builtin_memcpy(ip6->daddr, &quote[USID_OFFSETOF(struct usid_ip6hdr, saddr)], 16);
+		__builtin_memcpy(icmp, msg, USID_PMTU_MSG_LEN);
+	} else {
+		struct usid_iphdr *ip4 = (void *) (eth + 1);
+		__u8 *icmp = (void *) (ip4 + 1);
+
+		if ((void *) (icmp + USID_PMTU_MSG_LEN) > data_end) {
+			count_pmtu_stat(PMTU_STAT_BUILD_FAILED);
+			return PMTU_DROPPED;
+		}
+		ip4->ver_ihl = 0x45;
+		ip4->tos = 0;
+		ip4->tot_len = __builtin_bswap16(sizeof(struct usid_iphdr) + USID_PMTU_MSG_LEN);
+		ip4->id = 0;
+		ip4->frag_off = 0;
+		ip4->ttl = USID_PMTU_HOP_LIMIT;
+		ip4->protocol = USID_IPPROTO_ICMP;
+		ip4->check = 0;
+		__builtin_memcpy(ip4->saddr, &src[4], 4);
+		__builtin_memcpy(ip4->daddr, &quote[USID_OFFSETOF(struct usid_iphdr, saddr)], 4);
+
+		// Summed from a stack copy, since the header in the packet is only
+		// 2-byte aligned.
+		__u16 words[10] __attribute__((aligned(4)));
+
+		__builtin_memcpy(words, ip4, sizeof(words));
+		ip4->check = (__u16) ~csum_fold16(sum_words(words, 10));
+		__builtin_memcpy(icmp, msg, USID_PMTU_MSG_LEN);
+	}
+
+	// Back out the interface it came in on, toward the tenant.
+	if (bpf_redirect(ifindex, 0) != TC_ACT_REDIRECT) {
+		count_pmtu_stat(PMTU_STAT_BUILD_FAILED);
+		return PMTU_DROPPED;
+	}
+	count_pmtu_stat(ip_version == 6 ? PMTU_STAT_TOO_BIG_SENT_IPV6 : PMTU_STAT_FRAG_NEEDED_SENT_IPV4);
+	return PMTU_SENT;
 }
 
 SEC("tc")
@@ -2096,6 +2576,20 @@ int usid_egress(struct __sk_buff *skb)
 	// failure it is part of. mss_clamp_stats records which it was.
 	if (clamp_tcp_mss(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4)) {
 		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
+		return TC_ACT_SHOT;
+	}
+
+	// A packet too big to cross the fabric once encapsulated is answered with
+	// a Packet Too Big or Fragmentation Needed rather than sent to be dropped
+	// by the uplink. One that gets no error is counted as fib_frag_needed, the
+	// drop the same packet would meet at a FIB lookup. pmtu_stats records
+	// which outcome it was.
+	int pmtu = send_too_big(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4, vrf_key);
+
+	if (pmtu == PMTU_SENT)
+		return TC_ACT_REDIRECT;
+	if (pmtu == PMTU_DROPPED) {
+		count_claimed_drop(DROP_REASON_FIB_FRAG_NEEDED, vrf);
 		return TC_ACT_SHOT;
 	}
 

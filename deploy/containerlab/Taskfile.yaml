@@ -343,6 +343,7 @@ tasks:
       - task: "verify:nat-local"
       - task: "verify:nat-collision"
       - task: "verify:mss-clamp"
+      - task: "verify:pmtu"
       - task: "verify:nat-icmp"
       - task: "verify:nat64-non-global"
       - task: "verify:scenarios"
@@ -943,6 +944,13 @@ tasks:
     desc: Prove full-size TCP segments cross the fabric (TCP MSS clamp)
     cmds:
       - ./scripts/verify-mss-clamp.sh
+
+  # A packet too big for the fabric draws a Packet Too Big or Fragmentation
+  # Needed from the sender's own node. See the script's header for each check.
+  "verify:pmtu":
+    desc: Prove a packet too big for the fabric draws an ICMP error from its node
+    cmds:
+      - ./scripts/verify-pmtu.sh
 
   # Ping, Time Exceeded, and Packet Too Big through each site's egress shard.
   # See the script's header for each check.

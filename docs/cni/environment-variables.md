@@ -58,7 +58,7 @@ they resolve only `LogFile`/`LogLevel` from `HostConf` — never `NodeName` or
 | eBPF interfaces      | `GALACTIC_CNI_EBPF_INTERFACES` env → `HostConf.EBPFInterfaces` (bridged back into the env var for `galactic-bgp`'s own process, see below) → auto-detect (interface(s) carrying the default IPv6 route)                          | _(auto-detected)_                    | `galactic-cni init`/`run`, `galactic-bgp`       |
 | DAN directory        | `GALACTIC_CNI_DAN_DIR` env → `HostConf.DANDir`                                                                                                                                                                                  | `/run/kata-containers/dans-rs`       | `galactic-cni init`, `galactic-tap`             |
 | eBPF filter priority | `GALACTIC_CNI_EBPF_FILTER_PRIORITY` env (plain `os.Getenv`, no `HostConf`/conflist tier)                                                                                                                                         | `1`                                  | `galactic-cni init`/`run`                       |
-| TCP MSS clamp        | `GALACTIC_CNI_TCP_MSS_CLAMP` env (plain `os.Getenv`, no `HostConf`/conflist tier)                                                                                                                                                | `auto`                               | `galactic-cni run`                              |
+| Fabric MTU limits    | `GALACTIC_CNI_TCP_MSS_CLAMP` env (plain `os.Getenv`, no `HostConf`/conflist tier)                                                                                                                                                | `auto`                               | `galactic-cni run`                              |
 
 `GALACTIC_CNI_*` env var names are shared as-is across every binary that
 resolves node-level settings — there's no per-binary prefix for these, since
@@ -141,38 +141,54 @@ field; as of this writing it is still env-only.
 
 ## `GALACTIC_CNI_TCP_MSS_CLAMP`
 
-Sets the TCP MSS clamp the uSID datapath applies to every SYN that crosses
-the fabric. A tenant packet travels inside a 40-byte outer IPv6 header with
-no SRH, so it can be at most the uplink MTU minus 40. A tenant interface at
-the uplink's own MTU advertises an MSS sized for the full MTU, and nothing
-on the path fragments an oversized segment or reports it, so every
-full-size segment is dropped. The clamp lowers the MSS in each SYN and
-SYN-ACK so both ends size their segments to fit.
+Sets the fabric MTU the uSID datapath sizes tenant traffic to. A tenant
+packet travels inside a 40-byte outer IPv6 header with no SRH, so it can be
+at most the uplink MTU minus 40, and nothing on the path fragments a bigger
+one. The setting drives two limits:
+
+- **TCP MSS clamp.** A tenant interface at the uplink's own MTU advertises
+  an MSS sized for the full MTU. The clamp lowers the MSS in each SYN and
+  SYN-ACK so both ends size their segments to fit.
+- **Largest packet.** Any other packet over the uplink MTU minus 40 gets an
+  ICMPv6 Packet Too Big, or an ICMPv4 Fragmentation Needed for an IPv4
+  tenant with DF set, from the tenant's own gateway. The sender's path MTU
+  discovery then lowers its packets to fit. An IPv4 packet without DF is
+  dropped, since the datapath does not fragment.
 
 At a 1500-byte fabric the limits are 1400 for IPv6 tenants and 1420 for
-IPv4 tenants. The IPv6 value also covers NAT64: a 1400-byte segment is a
-1440-byte IPv4 packet, which is 1500 bytes again once the egress shard
-translates it to IPv6 and re-encapsulates it.
+IPv4 tenants, and the largest packet is 1460 for both. The IPv6 MSS also
+covers NAT64: a 1400-byte segment is a 1440-byte IPv4 packet, which is 1500
+bytes again once the egress shard translates it to IPv6 and re-encapsulates
+it.
 
 | Value             | Effect                                                                                                                                                                             |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auto` (or unset) | Size the clamp from the smallest MTU of the interfaces the datapath attaches to (`GALACTIC_CNI_EBPF_INTERFACES`, or auto-detected).                                                |
-| `off`             | No clamping.                                                                                                                                                                       |
+| `auto` (or unset) | Size both limits from the smallest MTU of the interfaces the datapath attaches to (`GALACTIC_CNI_EBPF_INTERFACES`, or auto-detected).                                              |
+| `off`             | No clamping, and no Packet Too Big: an oversized packet is dropped by the uplink, uncounted.                                                                                       |
 | a number          | The fabric MTU to size against, for a path whose real MTU is below what the interfaces report, such as a VLAN tag carried inside a 1500-byte link. Must be between 1280 and 65535. |
 
-`galactic-cni run` writes the clamp when the datapath loads and re-checks it
-every 10 seconds, so an uplink MTU change is followed without a restart. An
-invalid value, or an MTU that cannot be read, is logged and leaves the
-clamp as it was. On a node that never resolved one, that is no clamping.
-Each node publishes the limits in effect as
-`galactic_usid_tcp_mss_clamp_limit_bytes{family}` and what the clamp did to
-each SYN as `galactic_usid_tcp_mss_clamp_syns_total{result}`.
+`galactic-cni run` writes both limits when the datapath loads and
+re-checks them every 10 seconds, so an uplink MTU change is followed
+without a restart. An invalid value, or an MTU that cannot be read, is
+logged and leaves the limits as they were. On a node that never resolved
+one, both are off. Each node publishes:
 
-The clamp applies only to traffic that is encapsulated, plus a DSR
-backend's SYN-ACK leaving through the public uplink. Connections between
-two pods on the same node keep their full MSS. It covers TCP only: large
-UDP replies still need ICMP Packet Too Big, which the datapath does not
-generate.
+| Metric                                            | Meaning                                                                                                                          |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_usid_tcp_mss_clamp_limit_bytes{family}` | The MSS limit per tenant family.                                                                                                 |
+| `galactic_usid_tcp_mss_clamp_syns_total{result}`  | What the clamp did to each SYN.                                                                                                  |
+| `galactic_usid_pmtu_limit_bytes`                  | The largest packet encapsulated.                                                                                                 |
+| `galactic_usid_pmtu_packets_total{result}`        | What happened to each packet over it: `too_big_sent_ipv6` and `frag_needed_sent_ipv4` sent an error, every other result did not. |
+
+Both limits apply only to traffic that is encapsulated. The clamp also
+covers a DSR backend's SYN-ACK leaving through the public uplink.
+Traffic between two pods on the same node keeps its full size.
+
+The error comes from the gateway IPAM gave the attachment. An attachment
+with no gateway in a family, such as a tap guest that manages its own
+addressing, has its oversized packets in that family dropped and counted
+as `no_gateway`. Errors are limited to 1,000 a second per CPU, with bursts
+of 100; refusals are counted as `rate_limited`.
 
   **Type:** `auto`, `off`, or an MTU · **Default:** `auto`
 

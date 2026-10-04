@@ -25,19 +25,36 @@ func (f *fakeMSSClampTable) Put(_, value any) error {
 	return nil
 }
 
-// TestMSSClampState_ReadsSetting checks the environment setting reaches the
-// map: a fixed MTU writes that MTU's values, and "off" writes zero.
+type fakeEncapMTUTable struct {
+	puts []uint32
+}
+
+func (f *fakeEncapMTUTable) Put(_, value any) error {
+	f.puts = append(f.puts, value.(uint32))
+	return nil
+}
+
+// TestMSSClampState_ReadsSetting checks the environment setting reaches both
+// maps: a fixed MTU writes that MTU's values, and "off" writes zero.
 func TestMSSClampState_ReadsSetting(t *testing.T) {
-	for setting, want := range map[string]prog.UsidMssClampValue{
-		"1496": {MssIpv4: 1416, MssIpv6: 1396},
+	for setting, want := range map[string]struct {
+		mss       prog.UsidMssClampValue
+		maxPacket uint32
+	}{
+		"1496": {prog.UsidMssClampValue{MssIpv4: 1416, MssIpv6: 1396}, 1456},
 		"off":  {},
 	} {
 		t.Run(setting, func(t *testing.T) {
 			t.Setenv(config.EnvCNITCPMSSClamp, setting)
 			var table fakeMSSClampTable
-			newMSSClampState(&table).reconcile()
-			if len(table.puts) != 1 || table.puts[0] != want {
-				t.Errorf("%s=%q wrote %v, want exactly [%+v]", config.EnvCNITCPMSSClamp, setting, table.puts, want)
+			var encap fakeEncapMTUTable
+			newMSSClampState(&table, &encap).reconcile()
+			if len(table.puts) != 1 || table.puts[0] != want.mss {
+				t.Errorf("%s=%q wrote %v, want exactly [%+v]", config.EnvCNITCPMSSClamp, setting, table.puts, want.mss)
+			}
+			if len(encap.puts) != 1 || encap.puts[0] != want.maxPacket {
+				t.Errorf("%s=%q wrote encap_mtu_table %v, want exactly [%d]",
+					config.EnvCNITCPMSSClamp, setting, encap.puts, want.maxPacket)
 			}
 		})
 	}
@@ -49,7 +66,7 @@ func TestMSSClampState_ReadsSetting(t *testing.T) {
 func TestMSSClampState_InvalidSettingWritesNothing(t *testing.T) {
 	t.Setenv(config.EnvCNITCPMSSClamp, "1500b")
 	var table fakeMSSClampTable
-	s := newMSSClampState(&table)
+	s := newMSSClampState(&table, &fakeEncapMTUTable{})
 	s.reconcile()
 	s.reconcile()
 	if len(table.puts) != 0 {
@@ -65,7 +82,7 @@ func TestMSSClampState_InvalidSettingWritesNothing(t *testing.T) {
 func TestMSSClampState_RecoversAfterWriteFailure(t *testing.T) {
 	t.Setenv(config.EnvCNITCPMSSClamp, "1500")
 	table := fakeMSSClampTable{err: errors.New("map closed")}
-	s := newMSSClampState(&table)
+	s := newMSSClampState(&table, &fakeEncapMTUTable{})
 	s.reconcile()
 	table.err = nil
 	s.reconcile()

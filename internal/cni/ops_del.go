@@ -110,8 +110,9 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table and
-// ifindex_egress_kind_table entries if they exist. The interface's ifindex is resolved by its deterministic name,
+// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table,
+// ifindex_egress_kind_table and tenant_gw_table entries if they exist. The
+// interface's ifindex is resolved by its deterministic name,
 // the same name the ADD path resolved it by, and before the interface is torn
 // down, since there is nothing to resolve from afterward.
 //
@@ -163,6 +164,20 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 
 	if err := kinds.Unregister(uint32(link.Attrs().Index)); err != nil {
 		slog.Warn("DEL: failed to unregister eBPF ifindex_egress_kind_table entry", "err", err,
+			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
+	}
+
+	// The gateway entry shares this row's lifecycle too. Left behind, the next
+	// attachment on this ifindex would be sent errors from this one's gateway
+	// until its own ADD overwrites it.
+	gateways, gatewaysCloser, err := ifindexvrfmap.OpenPinnedGateway(attach.PinDir)
+	if err != nil {
+		return
+	}
+	defer func() { _ = gatewaysCloser.Close() }()
+
+	if err := gateways.Unregister(uint32(link.Attrs().Index)); err != nil {
+		slog.Warn("DEL: failed to unregister eBPF tenant_gw_table entry", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
 	}
 }

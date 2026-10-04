@@ -462,10 +462,14 @@ func publishBGPState(
 
 		// Not tracked for rollback: the vrf_table entry is shared by every
 		// attachment on this VPC and node, like the BGPVRFInstance above.
-		if _, err := registerEBPFDatapath(
+		registered, err := registerEBPFDatapath(
 			bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, localEgressPrefixes(ipamResult),
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("register eBPF uSID datapath: %w", err)
+		}
+		if registered {
+			registerTenantGateway(ebpfPinDir, cfg.vpc, cfg.vpcAttachment, ipamResult)
 		}
 
 		adv := &bgpv1alpha1.BGPAdvertisement{
@@ -949,6 +953,49 @@ func registerEgressKind(pinDir string, hostIfindex, egressKind uint32) error {
 		return fmt.Errorf("register eBPF ifindex_egress_kind_table entry: %w", err)
 	}
 	return nil
+}
+
+// registerTenantGateway records this attachment's IPAM gateways in
+// tenant_gw_table, the addresses usid_egress sends an ICMP Packet Too Big or
+// Fragmentation Needed from when the tenant sends a packet too big for the
+// fabric. An attachment with no IPAM result, such as a tap workload managing
+// its own addressing, has its entry removed instead, so a reused ifindex never
+// keeps another attachment's gateway.
+//
+// Every failure is logged, not returned. Without an entry the datapath drops
+// an oversized packet with no error and counts it, which is how it behaved
+// before this map existed, and not worth failing the attach over. That covers
+// the window where this binary is newer than the datapath that pins the map,
+// as for registerEgressKind.
+func registerTenantGateway(pinDir, vpc, vpcAttachment string, ipamResult *cniipam.IPAMResult) {
+	hostIfindex, err := hostInterfaceIndex(vpc, vpcAttachment)
+	if err != nil {
+		slog.Warn("ADD: could not resolve host interface for eBPF tenant_gw_table; "+
+			"packets too big for the fabric get no ICMP error until the next ADD", "err", err)
+		return
+	}
+	table, closer, err := ifindexvrfmap.OpenPinnedGateway(pinDir)
+	if err != nil {
+		slog.Warn("ADD: could not open eBPF tenant_gw_table; "+
+			"packets too big for the fabric get no ICMP error until the next ADD",
+			"hostIfindex", hostIfindex, "err", err)
+		return
+	}
+	defer func() { _ = closer.Close() }()
+
+	if ipamResult == nil {
+		if err := table.Unregister(hostIfindex); err != nil {
+			slog.Warn("ADD: could not clear eBPF tenant_gw_table entry", "hostIfindex", hostIfindex, "err", err)
+		}
+		return
+	}
+	gw6, _ := netip.AddrFromSlice(ipamResult.IPv6Gateway)
+	gw4, _ := netip.AddrFromSlice(ipamResult.IPv4Gateway)
+	if err := table.Register(hostIfindex, gw6, gw4.Unmap()); err != nil {
+		slog.Warn("ADD: could not register eBPF tenant_gw_table entry; "+
+			"packets too big for the fabric get no ICMP error until the next ADD",
+			"hostIfindex", hostIfindex, "err", err)
+	}
 }
 
 // egressKindForInterfaceType maps a "veth" or "tap" interface type to the
