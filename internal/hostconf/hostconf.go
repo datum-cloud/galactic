@@ -65,9 +65,10 @@ type HostConf struct {
 	// entry here -- only NAT64Prefix below.
 	EgressShardSIDs string `json:"egress_shard_sids,omitempty"`
 
-	// NAT64Prefix is the fabric-wide NAT64 prefix, written by the installer
-	// from the same environment. Empty means this fabric has no NAT64 and a VRF
-	// gets no route toward it.
+	// NAT64Prefix is the comma-separated fabric-wide NAT64 prefix list, written
+	// by the installer from the same environment. A single prefix is a one-entry
+	// list, so a conflist written before the list form reads unchanged. Empty
+	// means this fabric has no NAT64 and a VRF gets no route toward it.
 	NAT64Prefix string `json:"nat64_prefix,omitempty"`
 
 	// EBPFInterfaces is the comma-separated interface list, written by the

@@ -318,16 +318,20 @@ on the shard nodes themselves.
 | Option               | Environment Variable              | Set on                                            | Default                         | Required |
 | -------------------- | --------------------------------- | ------------------------------------------------- | ------------------------------- | -------- |
 | Live shard SID list  | `GALACTIC_CNI_EGRESS_SHARD_SIDS`  | `galactic-cni`'s `install-cni` **init** container | _(empty — no shard configured)_ | No       |
-| NAT64 prefix         | `GALACTIC_CNI_NAT64_PREFIX`       | `galactic-cni`'s `install-cni` **init** container | _(empty — no NAT64)_            | No       |
+| NAT64 prefixes       | `GALACTIC_CNI_NAT64_PREFIX`       | `galactic-cni`'s `install-cni` **init** container | _(empty — no NAT64)_            | No       |
 
 One SID per shard covers both address families, so enabling NAT64 adds no
-entry to the SID list — only the prefix.
+entry to the SID list — only the prefixes.
 
-`GALACTIC_CNI_NAT64_PREFIX` must be the same `/96` the shards are
-configured with and the same one DNS64 synthesizes into. All three have to
-agree; any disagreement is a blackhole rather than an error. Setting it
-gives each tenant VRF a more-specific route for that prefix alongside the
-`::/0` default. Both point at the same shard SID, so the second route
+`GALACTIC_CNI_NAT64_PREFIX` is a comma-separated list of IPv6 `/96`
+prefixes, for example `2001:db8:64::/96,64:ff9b::/96` to serve a
+Network-Specific Prefix alongside the RFC 6052 Well-Known Prefix that public
+DNS64 resolvers synthesize into. A single prefix is a one-entry list. An
+entry that does not parse, is not IPv6, is not a `/96`, or repeats another
+fails every attachment ADD. Each prefix must be one the shards translate and
+one DNS64 synthesizes into; any disagreement is a blackhole rather than an
+error. Setting it gives each tenant VRF a more-specific route per prefix
+alongside the `::/0` default. Both point at the same shard SID, so the second route
 exists to make the prefix reachable where no default route covers it — a
 fabric may offer NAT64 without NAT66, and then there is no default for that
 traffic to fall into.

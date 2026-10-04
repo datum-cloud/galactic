@@ -234,3 +234,57 @@ func TestParseEgressShardSIDs_InvalidEntryFailsLoudly(t *testing.T) {
 		t.Error("ParseEgressShardSIDs() error = nil, want an error for the invalid entry")
 	}
 }
+
+const (
+	testNSP = "2001:db8:64::/96"
+	testWKP = "64:ff9b::/96"
+)
+
+func TestParseNAT64Prefixes(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    []string
+		wantErr bool
+	}{
+		{name: "empty", raw: "", want: nil},
+		{name: "blank entries only", raw: " , ,", want: nil},
+		{name: "single", raw: testNSP, want: []string{testNSP}},
+		{name: "multiple", raw: testNSP + "," + testWKP, want: []string{testNSP, testWKP}},
+		{
+			name: "whitespace and trailing comma",
+			raw:  " " + testNSP + " ,\t" + testWKP + " , ",
+			want: []string{testNSP, testWKP},
+		},
+		{name: "host bits masked", raw: "64:ff9b::1/96", want: []string{testWKP}},
+		{name: "unparseable", raw: "2001:db8:64::/96,not-a-prefix", wantErr: true},
+		{name: "bare address", raw: "64:ff9b::", wantErr: true},
+		{name: "not /96", raw: "64:ff9b::/64", wantErr: true},
+		{name: "IPv4", raw: "192.0.2.0/24", wantErr: true},
+		{name: "IPv4-mapped", raw: "::ffff:0.0.0.0/96", wantErr: true},
+		{name: "duplicate", raw: "64:ff9b::/96, 64:ff9b::/96", wantErr: true},
+		{name: "duplicate after masking", raw: "64:ff9b::/96,64:ff9b::1/96", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseNAT64Prefixes(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseNAT64Prefixes(%q) = %v, want an error", tt.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseNAT64Prefixes(%q) error = %v, want nil", tt.raw, err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("ParseNAT64Prefixes(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+			for i, w := range tt.want {
+				if got[i].String() != w {
+					t.Errorf("ParseNAT64Prefixes(%q)[%d] = %s, want %s", tt.raw, i, got[i], w)
+				}
+			}
+		})
+	}
+}

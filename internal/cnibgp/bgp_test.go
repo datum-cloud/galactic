@@ -1288,3 +1288,48 @@ func TestShardSIDsForTenant_RejectsAMalformedSID(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallNAT64EgressRoute_OneRoutePerPrefixToSameShards(t *testing.T) {
+	originalConfig, originalAdd := cniConfig, egressPrefixRouteAddFn
+	t.Cleanup(func() { cniConfig, egressPrefixRouteAddFn = originalConfig, originalAdd })
+
+	type call struct {
+		table  uint32
+		prefix string
+		sids   []net.IP
+	}
+	var calls []call
+	egressPrefixRouteAddFn = func(table uint32, prefix *net.IPNet, sids []net.IP) error {
+		calls = append(calls, call{table, prefix.String(), sids})
+		return nil
+	}
+	sids := []net.IP{net.ParseIP("2001:db8:ff01:9:e2a5::")}
+
+	cniConfig = &config.CNIConfig{NAT64Prefix: "2001:db8:64::/96, 64:ff9b::/96"}
+	if err := installNAT64EgressRoute(7, sids); err != nil {
+		t.Fatalf("installNAT64EgressRoute() = %v, want nil", err)
+	}
+	want := []string{"2001:db8:64::/96", "64:ff9b::/96"}
+	if len(calls) != len(want) {
+		t.Fatalf("installed %d routes, want %d: %+v", len(calls), len(want), calls)
+	}
+	for i, w := range want {
+		if calls[i].table != 7 || calls[i].prefix != w || !reflect.DeepEqual(calls[i].sids, sids) {
+			t.Errorf("route %d = %+v, want table 7, prefix %s, SIDs %v", i, calls[i], w, sids)
+		}
+	}
+
+	calls = nil
+	cniConfig = &config.CNIConfig{}
+	if err := installNAT64EgressRoute(7, sids); err != nil || len(calls) != 0 {
+		t.Errorf("unset list: err = %v, routes = %+v, want nil and none", err, calls)
+	}
+
+	cniConfig = &config.CNIConfig{NAT64Prefix: "64:ff9b::/96,64:ff9b::/64"}
+	if err := installNAT64EgressRoute(7, sids); err == nil {
+		t.Error("installNAT64EgressRoute() = nil with a non-/96 entry, want an error")
+	}
+	if len(calls) != 0 {
+		t.Errorf("invalid list installed %+v, want nothing", calls)
+	}
+}

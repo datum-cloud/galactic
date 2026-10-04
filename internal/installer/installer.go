@@ -230,7 +230,8 @@ func resolveEgressShardSIDs() string {
 	return os.Getenv(config.EnvCNIEgressShardSIDs)
 }
 
-// resolveNAT64Prefix reads the fabric-wide NAT64 prefix from the environment.
+// resolveNAT64Prefix reads the fabric-wide NAT64 prefix list from the
+// environment.
 // Empty means this fabric has no NAT64, and is written through verbatim for the
 // same reason the shard list is.
 func resolveNAT64Prefix() string {

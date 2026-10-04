@@ -839,20 +839,26 @@ func shardSIDsForTenant(sids []net.IP, argument uint16) ([]net.IP, error) {
 	return out, nil
 }
 
-// installNAT64EgressRoute installs vrfTableID's route for the fabric's NAT64
-// prefix. An unset prefix means this fabric has no NAT64 and is not an error; a
-// set but unparseable one is a misconfiguration and fails the ADD, since
-// silently skipping it would leave the VRF with no IPv4 reachability and
-// nothing to say why.
+// egressPrefixRouteAddFn is a variable so tests can observe route installs
+// without a pinned egress_route_table.
+var egressPrefixRouteAddFn = srv6.EgressPrefixRouteAdd
+
+// installNAT64EgressRoute installs vrfTableID's route for each of the fabric's
+// NAT64 prefixes, all toward the same shards. An unset list means this fabric
+// has no NAT64 and is not an error; a set but invalid one is a misconfiguration
+// and fails the ADD, since silently skipping it would leave the VRF with no
+// IPv4 reachability and nothing to say why.
 func installNAT64EgressRoute(vrfTableID uint32, shardSIDs []net.IP) error {
-	if cniConfig.NAT64Prefix == "" {
-		return nil
-	}
-	_, prefix, err := net.ParseCIDR(cniConfig.NAT64Prefix)
+	prefixes, err := config.ParseNAT64Prefixes(cniConfig.NAT64Prefix)
 	if err != nil {
-		return fmt.Errorf("parse %s %q: %w", config.EnvCNINAT64Prefix, cniConfig.NAT64Prefix, err)
+		return fmt.Errorf("parse %s: %w", config.EnvCNINAT64Prefix, err)
 	}
-	return srv6.EgressPrefixRouteAdd(vrfTableID, prefix, shardSIDs)
+	for _, prefix := range prefixes {
+		if err := egressPrefixRouteAddFn(vrfTableID, prefix, shardSIDs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // hostInterfaceIndex resolves this attachment's host-side veth or tap
