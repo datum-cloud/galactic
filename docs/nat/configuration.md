@@ -281,6 +281,14 @@ correctly and never sees a single reply.
 different prefix than the resolver hands out is a blackhole with no symptom
 on either side.
 
+A shard translates only to globally reachable IPv4 destinations, whatever
+the prefix. An address under `nat64Prefix` that embeds a special-purpose
+IPv4 address the IANA registry marks not globally reachable (RFC 6890:
+private, shared, loopback, link-local, documentation, benchmarking and
+the like), or a multicast or reserved one, is dropped and counted as
+`nat64_non_global_dest`, the rule RFC 6052 section 3.1 sets for the
+Well-Known Prefix.
+
 Example:
 
 ```yaml
@@ -389,6 +397,7 @@ Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 | `nat66_pat_exhausted`, `nat64_pat_exhausted`                                       | No free masquerade port or Echo Identifier within the probe limit.                                                                                                                                                                              |
 | `nat64_v4_fragment`, `nat64_v4_options`                                            | An IPv4 reply that was fragmented or carried options.                                                                                                                                                                                           |
 | `nat64_shard_unavailable`                                                          | A NAT64 packet reached a shard with no IPv4 masquerade address.                                                                                                                                                                                 |
+| `nat64_non_global_dest`                                                            | A tenant packet, Echo included, to a NAT64 address whose embedded IPv4 address is not globally reachable (RFC 6890 special-purpose, multicast or reserved).                                                                                     |
 | `nat66_icmp_malformed`                                                             | An ICMPv6 message, or the packet an ICMPv6 error quotes, too short to parse.                                                                                                                                                                    |
 | `nat66_icmp_no_conn`                                                               | An Echo Reply, or an ICMPv6 error, that matched no session.                                                                                                                                                                                     |
 | `icmp_untranslatable`                                                              | A well-formed ICMP message the shard has no translation for: an ICMP type it does not handle, an ICMPv4 error RFC 7915 says to drop, a tenant sending anything but an Echo Request, or an error quoting a packet the shard could not have sent. |

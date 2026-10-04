@@ -94,7 +94,7 @@ func newNAT64Fixture(t *testing.T, flags uint8) nat64Fixture {
 	f := nat64Fixture{
 		nat66Fixture: newNAT66Fixture(t),
 		shardPub4:    netip.MustParseAddr("192.0.2.10"),
-		peer4:        netip.MustParseAddr("198.51.100.7"),
+		peer4:        netip.MustParseAddr("1.1.1.1"),
 	}
 	f.synth = synthesize(nat64Prefix, f.peer4)
 	cfg := nat64ShardConfig(f.shardSID, f.shardPub, f.shardPub4)
@@ -326,5 +326,30 @@ func TestEchoResponder_RateLimited(t *testing.T) {
 	}
 	if got := sumPerCPU(t, f.objs.DropReasons, DropReasonNatICMPRateLimited); got != 1 {
 		t.Errorf("drop_reasons[icmp_rate_limited] = %d, want 1", got)
+	}
+}
+
+// TestNat64ICMPForward_RefusesNonGlobalDestination covers the Echo leaf's half
+// of the forward leg's destination check: a ping toward a non-global IPv4
+// address is refused and counted, and opens no session.
+func TestNat64ICMPForward_RefusesNonGlobalDestination(t *testing.T) {
+	for _, s := range []string{"10.1.2.3", "192.168.1.1", "127.0.0.1", "169.254.169.254", "100.64.0.1"} {
+		t.Run(s, func(t *testing.T) {
+			f := newNAT64Fixture(t, 0)
+			f.synth = synthesize(nat64Prefix, netip.MustParseAddr(s))
+
+			msg := icmpMessage(icmpv6EchoRequest, 0, echoWord(fixtureEchoID), []byte("ping"))
+			req := buildICMPv6Packet(f.backend, f.synth, msg)
+			ret, _ := f.run(t, encapsulate(sidWithArgument(f.shardSID, 0x123), f.backendUSID, req))
+			if ret != xdpDrop {
+				t.Errorf("verdict = %d, want XDP_DROP (%d)", ret, xdpDrop)
+			}
+			if got := sumPerCPU(t, f.objs.DropReasons, DropReasonNat64NonGlobalDest); got != 1 {
+				t.Errorf("drop_reasons[nat64_non_global_dest] = %d, want 1", got)
+			}
+			if n := countConnRows(t, f.objs); n != 0 {
+				t.Errorf("nat_conn_table holds %d rows, want 0", n)
+			}
+		})
 	}
 }

@@ -149,7 +149,7 @@ func TestNat64Forward_TranslatesIPv6ToIPv4(t *testing.T) {
 
 	backendAddr := netip.MustParseAddr("fd20:60::5")
 	backendUSID := netip.MustParseAddr("fc00:3:4::a1b2")
-	peer4 := netip.MustParseAddr("198.51.100.7")
+	peer4 := netip.MustParseAddr("1.1.1.1")
 	destAddr := synthesize(nat64Prefix, peer4)
 
 	payload := []byte("nat64 egress payload")
@@ -247,7 +247,7 @@ func TestNat64Return_TranslatesIPv4BackAndReencapsulates(t *testing.T) {
 
 	backendAddr := netip.MustParseAddr("fd20:60::5")
 	backendUSID := netip.MustParseAddr("fc00:3:4::a1b2")
-	peer4 := netip.MustParseAddr("198.51.100.7")
+	peer4 := netip.MustParseAddr("1.1.1.1")
 	destAddr := synthesize(nat64Prefix, peer4)
 
 	// Forward first, to populate both connection rows and learn the port.
@@ -343,7 +343,7 @@ func TestNat64_TenantIsolationAcrossFamilies(t *testing.T) {
 	// exists for.
 	backendAddr := netip.MustParseAddr("fd20:60::5")
 	backendUSID := netip.MustParseAddr("fc00:3:4::a1b2")
-	peer4 := netip.MustParseAddr("198.51.100.7")
+	peer4 := netip.MustParseAddr("1.1.1.1")
 	nat64Dest := synthesize(nat64Prefix, peer4)
 	nat66Dest := netip.MustParseAddr("2001:db8:9998::1")
 
@@ -388,7 +388,7 @@ func TestNat64Return_DropsFragmentsAndOptions(t *testing.T) {
 	shardSID := netip.MustParseAddr("fc00:1:2::1")
 	shardPub := netip.MustParseAddr("2001:db8:9999::1")
 	shardPub4 := netip.MustParseAddr("192.0.2.10")
-	peer4 := netip.MustParseAddr("198.51.100.7")
+	peer4 := netip.MustParseAddr("1.1.1.1")
 
 	tests := []struct {
 		name    string
@@ -457,7 +457,7 @@ func TestNat64Forward_ShardWithoutIPv4AddressIsUnavailable(t *testing.T) {
 	}
 
 	const vrfID = 0x123
-	dest := synthesize(nat64Prefix, netip.MustParseAddr("198.51.100.7"))
+	dest := synthesize(nat64Prefix, netip.MustParseAddr("1.1.1.1"))
 	pkt := buildEncappedUDPPacket(t, sidWithArgument(shardSID, vrfID),
 		netip.MustParseAddr("fc00:3:4::a1b2"), netip.MustParseAddr("fd20:60::5"), dest, []byte("x"))
 
@@ -490,7 +490,7 @@ func TestNat64_DisabledShardIsUnchanged(t *testing.T) {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
 
-	dest := synthesize(nat64Prefix, netip.MustParseAddr("198.51.100.7"))
+	dest := synthesize(nat64Prefix, netip.MustParseAddr("1.1.1.1"))
 	pkt := buildEncappedUDPPacket(t, sidWithArgument(shardSID, 0x123),
 		netip.MustParseAddr("fc00:3:4::a1b2"), netip.MustParseAddr("fd20:60::5"), dest, []byte("x"))
 
@@ -605,7 +605,7 @@ func TestNat64Forward_DropsExpiringHopLimit(t *testing.T) {
 		t.Fatalf("populate shard_config_table: %v", err)
 	}
 
-	destAddr := synthesize(nat64Prefix, netip.MustParseAddr("198.51.100.7"))
+	destAddr := synthesize(nat64Prefix, netip.MustParseAddr("1.1.1.1"))
 	pkt := setInnerHopLimit(buildEncappedUDPPacket(t, sidWithArgument(shardSID, 0x123),
 		netip.MustParseAddr("fc00:3:4::a1b2"), netip.MustParseAddr("fd20:60::5"),
 		destAddr, []byte("expiring")), 1)
@@ -624,4 +624,116 @@ func TestNat64Forward_DropsExpiringHopLimit(t *testing.T) {
 		t.Errorf("drop_reasons[nat64_pat_exhausted] = %d, want 0 -- the expiry check runs before the "+
 			"port allocation, so an expiring packet must not have reached it", got)
 	}
+}
+
+// TestNat64Forward_RefusesNonGlobalDestinations covers the forward leg's
+// destination check at both edges of every refused block, and at the
+// addresses just outside them, which must still translate. The check runs
+// whatever the prefix, so it is exercised under the Well-Known Prefix too.
+func TestNat64Forward_RefusesNonGlobalDestinations(t *testing.T) {
+	refused := []string{
+		"0.0.0.0", "0.255.255.255",
+		"10.0.0.1", "10.255.255.255",
+		"100.64.0.1", "100.127.255.255",
+		"127.0.0.1", "127.255.255.255",
+		"169.254.0.1", "169.254.255.255",
+		"172.16.0.1", "172.31.255.255",
+		"192.0.0.1", "192.0.0.255",
+		"192.0.2.1", "192.0.2.255",
+		"192.88.99.1",
+		"192.168.0.1", "192.168.255.255",
+		"198.18.0.1", "198.19.255.255",
+		"198.51.100.1",
+		"203.0.113.1",
+		"224.0.0.1", "239.255.255.255",
+		"240.0.0.1", "255.255.255.255",
+	}
+	allowed := []string{
+		"1.1.1.1", "9.255.255.255", "11.0.0.0",
+		"100.63.255.255", "100.128.0.0",
+		"126.255.255.255", "128.0.0.0",
+		"169.253.255.255", "169.255.0.0",
+		"172.15.255.255", "172.32.0.0",
+		"192.0.1.1", "192.0.3.0", "192.88.98.1", "192.88.100.1",
+		"192.167.255.255", "192.169.0.0",
+		"198.17.255.255", "198.20.0.0", "198.51.99.1", "198.51.101.1",
+		"203.0.112.1", "203.0.114.1",
+		"223.255.255.255",
+	}
+	prefixes := []netip.Addr{nat64Prefix, netip.MustParseAddr("64:ff9b::")}
+
+	shardSID := netip.MustParseAddr("fc00:1:2::1")
+	shardPub := netip.MustParseAddr("2001:db8:9999::1")
+	shardPub4 := netip.MustParseAddr("192.0.2.10")
+
+	for _, prefix := range prefixes {
+		t.Run(prefix.String(), func(t *testing.T) {
+			requireRoot(t)
+			objs := loadObjects(t)
+			cfg := nat64ShardConfig(shardSID, shardPub, shardPub4)
+			cfg.Nat64Prefix = prefix.As16()
+			if err := objs.ShardConfigTable.Put(uint32(0), cfg); err != nil {
+				t.Fatalf("populate shard_config_table: %v", err)
+			}
+
+			send := func(t *testing.T, v4 netip.Addr) (uint32, []byte) {
+				t.Helper()
+				pkt := buildEncappedUDPPacket(t, sidWithArgument(shardSID, 0x123),
+					netip.MustParseAddr("fc00:3:4::a1b2"), netip.MustParseAddr("fd20:60::5"),
+					synthesize(prefix, v4), []byte("non-global"))
+				ret, out, err := objs.NatIngress.Test(pkt)
+				if err != nil {
+					t.Fatalf("program test-run: %v", err)
+				}
+				return ret, out
+			}
+
+			for _, s := range refused {
+				v4 := netip.MustParseAddr(s)
+				before := sumPerCPU(t, objs.DropReasons, DropReasonNat64NonGlobalDest)
+				ret, _ := send(t, v4)
+				if ret != xdpDrop {
+					t.Errorf("%v: verdict = %d, want XDP_DROP (%d)", v4, ret, xdpDrop)
+				}
+				if got := sumPerCPU(t, objs.DropReasons, DropReasonNat64NonGlobalDest) - before; got != 1 {
+					t.Errorf("%v: drop_reasons[nat64_non_global_dest] rose by %d, want 1", v4, got)
+				}
+			}
+			if n := countConnRows(t, objs); n != 0 {
+				t.Errorf("nat_conn_table holds %d rows after refused packets only, want 0", n)
+			}
+
+			for _, s := range allowed {
+				v4 := netip.MustParseAddr(s)
+				ret, out := send(t, v4)
+				assertLeftFromDatapath(t, ret)
+				if got := sumPerCPU(t, objs.DropReasons, DropReasonNat64NonGlobalDest); got != uint64(len(refused)) {
+					t.Fatalf("%v: drop_reasons[nat64_non_global_dest] = %d, want %d -- a global "+
+						"destination was refused", v4, got, len(refused))
+				}
+				var dst4 [4]byte
+				copy(dst4[:], out[ethLen+16:ethLen+20])
+				if binary.BigEndian.Uint16(out[12:14]) != 0x0800 || dst4 != v4.As4() {
+					t.Errorf("%v: not translated to IPv4 toward the embedded address", v4)
+				}
+			}
+		})
+	}
+}
+
+func countConnRows(t *testing.T, objs *NatObjects) int {
+	t.Helper()
+	var (
+		k    NatConnKey
+		v    NatConnValue
+		rows int
+	)
+	it := objs.NatConnTable.Iterate()
+	for it.Next(&k, &v) {
+		rows++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterate nat_conn_table: %v", err)
+	}
+	return rows
 }
