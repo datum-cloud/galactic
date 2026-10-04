@@ -45,10 +45,10 @@ internal/plumbing/ebpf/edgeprog/edgedsr_bpfel.go
 internal/plumbing/ebpf/edgeprog/edgedsr_bpfel.o
 internal/plumbing/ebpf/edgeprog/edgedsr_bpfeb.go
 internal/plumbing/ebpf/edgeprog/edgedsr_bpfeb.o
-internal/plumbing/ebpf/nat66prog/nat66_bpfel.go
-internal/plumbing/ebpf/nat66prog/nat66_bpfel.o
-internal/plumbing/ebpf/nat66prog/nat66_bpfeb.go
-internal/plumbing/ebpf/nat66prog/nat66_bpfeb.o
+internal/plumbing/ebpf/natprog/nat_bpfel.go
+internal/plumbing/ebpf/natprog/nat_bpfel.o
+internal/plumbing/ebpf/natprog/nat_bpfeb.go
+internal/plumbing/ebpf/natprog/nat_bpfeb.o
 
 # Same convention as above, for the containerlab-only pass-through XDP
 # program (deploy/containerlab/Taskfile.yaml's build:lab-xdp-passthrough,
