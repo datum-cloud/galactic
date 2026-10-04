@@ -49,8 +49,8 @@ SITES=(dfw sjc iad)
 declare -A FIRST_SHARD=([dfw]=dfw-worker2 [sjc]=sjc-worker2 [iad]=iad-worker2)
 
 HOST6="2001:db8:1:40::2"
-# 10.1.40.2 synthesized into the fabric's NAT64 prefix.
-HOST4_SYNTH="2001:db8:64::a01:2802"
+# 11.1.40.2 synthesized into the fabric's NAT64 prefix.
+HOST4_SYNTH="2001:db8:64::b01:2802"
 REMOTE=clab-gvpc-remote-host
 RESPONDER_SITE=iad
 # The transit router and interface the off-fabric host hangs off
@@ -65,7 +65,7 @@ BIG_PAYLOAD=1350
 NARROW_MTU64=$((NARROW_MTU + 20))
 
 # Drop reasons none of these probes may move.
-WATCHED_DROPS="nat66_icmp_malformed nat66_icmp_no_conn nat64_icmp_malformed nat64_icmp_no_conn icmp_untranslatable icmp_unsolicited icmp_rate_limited nat66_malformed_forward nat66_malformed_return nat64_malformed_forward nat64_malformed_return"
+WATCHED_DROPS="nat64_non_global_dest nat66_icmp_malformed nat66_icmp_no_conn nat64_icmp_malformed nat64_icmp_no_conn icmp_untranslatable icmp_unsolicited icmp_rate_limited nat66_malformed_forward nat66_malformed_return nat64_malformed_forward nat64_malformed_return"
 
 rc=0
 fail() { echo "  FAIL $*" >&2; rc=1; }

@@ -21,17 +21,17 @@ sysctl -w net.ipv6.conf.eth1.autoconf=0
 
 ip link set eth1 up
 
-# Match tr4's eth4 (2001:db8:1:40::1/64, 10.1.40.1/24). The host takes ::2/.2
+# Match tr4's eth4 (2001:db8:1:40::1/64, 11.1.40.1/24). The host takes ::2/.2
 # on the link, the same TR-.1/node-.2 convention every worker uplink uses.
 ip -6 addr add 2001:db8:1:40::2/64 dev eth1 || true
-ip -4 addr add 10.1.40.2/24 dev eth1 || true
+ip -4 addr add 11.1.40.2/24 dev eth1 || true
 
 # Everything this host talks to is somewhere behind tr4: the whole fabric,
 # every site's nodes, and every tenant's egress source address. A default
 # route per family is all it needs -- no per-prefix state, exactly like a
 # host sitting on someone else's network.
 ip -6 route replace default via 2001:db8:1:40::1 dev eth1
-ip -4 route replace default via 10.1.40.1 dev eth1
+ip -4 route replace default via 11.1.40.1 dev eth1
 
 # The link-local address takes a moment to leave tentative state; nginx
 # binding [::]:80 doesn't depend on it, but a curl issued from this host
@@ -45,5 +45,5 @@ mkdir -p /run/nginx
 # long enough to fill the path proves they are not.
 head -c 1048576 /dev/urandom > /var/www/localhost/htdocs/large.bin
 
-log "serving on [2001:db8:1:40::2]:80 and 10.1.40.2:80"
+log "serving on [2001:db8:1:40::2]:80 and 11.1.40.2:80"
 exec nginx -g 'daemon off;'
