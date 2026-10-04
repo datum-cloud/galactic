@@ -133,7 +133,7 @@ var (
 // newTestPlainRoutes returns a reconciler whose clock starts at start and
 // whose GC grace has not yet elapsed.
 func newTestPlainRoutes(start time.Time) (*plainRoutes, *time.Time) {
-	p := newPlainRoutes()
+	p := newPlainRoutes(nil)
 	clock := start
 	p.now = func() time.Time { return clock }
 	p.startedAt = start
@@ -279,7 +279,7 @@ func TestPlainRoutes_RunResyncsOnRouteChange(t *testing.T) {
 	changes := make(chan struct{}, 1)
 	watchMainRouteChanges = func(context.Context) (<-chan struct{}, error) { return changes, nil }
 
-	p := newPlainRoutes()
+	p := newPlainRoutes(nil)
 	p.resync = time.Hour
 	p.debounce = time.Millisecond
 	k.setResolve(shardGateway.String(), nhDefaultRoute)
@@ -317,5 +317,26 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatalf("condition not met within 5s")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestPlainRoutes_ReportsFailingRoutes checks the reported count follows the
+// routes whose install is failing.
+func TestPlainRoutes_ReportsFailingRoutes(t *testing.T) {
+	k := newFakePlainKernel(t)
+	p, _ := newTestPlainRoutes(time.Now())
+	failing := -1
+	p.report = func(n int) { failing = n }
+
+	p.set(shardSIDPrefix, shardGateway)
+	p.sync()
+	if failing != 1 {
+		t.Fatalf("failing = %d with an unresolvable gateway, want 1", failing)
+	}
+
+	k.setResolve(shardGateway.String(), nhUnderlay)
+	p.sync()
+	if failing != 0 {
+		t.Errorf("failing = %d once the gateway resolves, want 0", failing)
 	}
 }

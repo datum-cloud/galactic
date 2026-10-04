@@ -85,7 +85,7 @@ func (r *GoBGPRuntime) onPeerUpdate(ev *apiutil.WatchEventMessage_PeerEvent, ts 
 	}
 
 	fields := []any{
-		"router", r.key.String(),
+		labelRouter, r.key.String(),
 		"peer", addr,
 		"asn", ev.Peer.Conf.PeerASN,
 		"from", prev,

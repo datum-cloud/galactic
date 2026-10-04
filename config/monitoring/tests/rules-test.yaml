@@ -300,4 +300,35 @@ tests:
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticroutermetricsdown"
               description: >-
                 Prometheus cannot reach galactic-router's metrics port on iad-worker3 (9179), so
-                GalacticRouterBMPStationDown cannot fire for it.
+                GalacticRouterBMPStationDown and GalacticRouterRoutesNotInstalled cannot fire for it.
+
+  # Routes failing for 10m fire; a burst during convergence that clears inside
+  # that does not.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_router_route_install_failing{job="galactic-router",node="dfw-worker",router="galactic-system/galactic-router",kind="vrf"}'
+        values: "0x5 26x30"
+      - series: 'galactic_router_route_install_failing{job="galactic-router",node="sjc-worker",router="galactic-system/galactic-router",kind="vrf"}'
+        values: "0x5 26x10 0x20"
+      - series: 'galactic_router_route_install_failing{job="galactic-router",node="dfw-worker",router="galactic-system/galactic-router",kind="plain"}'
+        values: "0x35"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: GalacticRouterRoutesNotInstalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-router
+              node: dfw-worker
+              router: galactic-system/galactic-router
+              kind: vrf
+            exp_annotations:
+              summary: "26 vrf routes on dfw-worker are not installed"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterroutesnotinstalled"
+              description: >-
+                galactic-router on dfw-worker has failed for 10 minutes to install 26 vrf routes it holds a best
+                path for, so this node cannot reach those prefixes. The router's "route install failed" log lines
+                name each prefix and the error, usually a SID with no route over an SRv6 uplink or an unresolved
+                neighbor.
