@@ -40,7 +40,8 @@ const (
 	DropReasonNat64ICMPMalformed    uint32 = 23
 	DropReasonNat64ICMPNoConn       uint32 = 24
 	DropReasonNatICMPRateLimited    uint32 = 25
-	DropReasonNatCount              uint32 = 26
+	DropReasonNat64NonGlobalDest    uint32 = 26
+	DropReasonNatCount              uint32 = 27
 )
 
 // DropReasonNames maps each DropReason* index to a short, stable,
@@ -72,4 +73,5 @@ var DropReasonNames = map[uint32]string{
 	DropReasonNat64ICMPMalformed:    "nat64_icmp_malformed",
 	DropReasonNat64ICMPNoConn:       "nat64_icmp_no_conn",
 	DropReasonNatICMPRateLimited:    "icmp_rate_limited",
+	DropReasonNat64NonGlobalDest:    "nat64_non_global_dest",
 }

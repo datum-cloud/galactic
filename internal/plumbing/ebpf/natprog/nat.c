@@ -458,7 +458,10 @@ enum nat_drop_reason {
 	// A message this shard would have emitted on its own behalf, refused by
 	// icmp_rate_bucket.
 	DROP_REASON_NAT_ICMP_RATE_LIMITED    = 25,
-	DROP_REASON_NAT_COUNT                = 26,
+	// A tenant packet, Echo included, whose NAT64 destination embeds a
+	// non-global IPv4 address (see v4_non_global).
+	DROP_REASON_NAT64_NON_GLOBAL_DEST    = 26,
+	DROP_REASON_NAT_COUNT                = 27,
 };
 
 // ---------------------------------------------------------------------
@@ -613,6 +616,33 @@ static NAT_ALWAYS_INLINE int nat64_prefix_matches(const __u8 daddr[16], const __
 			return 0;
 	}
 	return 1;
+}
+
+// v4_non_global reports whether an IPv4 address, as its four wire-order bytes,
+// falls in a block the IANA IPv4 Special-Purpose Address Registry marks not
+// globally reachable, or in multicast or reserved space. RFC 6052 section 3.1
+// forbids the Well-Known Prefix from carrying such an address; a NAT64 shard
+// refuses them under any prefix. 192.0.0.0/24 is refused whole, including the
+// two anycast /32s inside it the registry lists as global.
+static NAT_ALWAYS_INLINE int v4_non_global(const __u8 a[4])
+{
+	__u8 o0 = a[0], o1 = a[1], o2 = a[2];
+
+	if (o0 == 0 || o0 == 10 || o0 == 127 || o0 >= 224)
+		return 1;
+	if (o0 == 100)
+		return (o1 & 0xC0) == 64;
+	if (o0 == 169)
+		return o1 == 254;
+	if (o0 == 172)
+		return (o1 & 0xF0) == 16;
+	if (o0 == 192)
+		return (o1 == 0 && (o2 == 0 || o2 == 2)) || (o1 == 88 && o2 == 99) || o1 == 168;
+	if (o0 == 198)
+		return (o1 & 0xFE) == 18 || (o1 == 51 && o2 == 100);
+	if (o0 == 203)
+		return o1 == 0 && o2 == 113;
+	return 0;
 }
 
 // read_argument extracts the 12-bit Argument from a uFMT 48+16 address at bits
@@ -1817,6 +1847,11 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 			count_drop(malformed);
 			return XDP_DROP;
 		}
+	}
+
+	if (v4_non_global(inner->daddr + 12)) {
+		count_drop(DROP_REASON_NAT64_NON_GLOBAL_DEST);
+		return XDP_DROP;
 	}
 
 	// Everything the rewritten IPv4 header needs, captured before the head
