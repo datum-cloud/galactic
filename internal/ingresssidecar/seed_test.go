@@ -6,6 +6,9 @@ package ingresssidecar
 
 import (
 	"context"
+	"net"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,5 +151,69 @@ func TestSeedFromAPIThenInventoryDoesNotOrphanLiveRoute(t *testing.T) {
 	}
 	if got := backend.vrfCount(); got != 1 {
 		t.Errorf("vrfCount = %d, want 1", got)
+	}
+}
+
+// TestSeedFromAPIContinuesPastFailedSlice verifies one slice failing to apply
+// does not stop the slices after it from loading, and is not returned as an
+// error that would hold back the sweep.
+func TestSeedFromAPIContinuesPastFailedSlice(t *testing.T) {
+	a := readySlice("vpc1-att1", "fd00:99::1", "fd00::1")
+	a.Name = "a"
+	b := readySlice("vpc2-att1", "fd00:99::2", "fd00::2")
+	b.Name = "b"
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(a, b).Build()
+
+	backend := newFakeBackend()
+	backend.failEnsureVRF = errTest
+	store := NewStore(backend, testGrace, nil)
+
+	if err := SeedFromAPI(context.Background(), c, store); err != nil {
+		t.Fatalf("SeedFromAPI: %v, want nil", err)
+	}
+	for _, want := range []string{"EnsureVRF:vpc1", "EnsureVRF:vpc2"} {
+		if !slices.Contains(backend.calls, want) {
+			t.Errorf("calls = %v, want %q", backend.calls, want)
+		}
+	}
+}
+
+// TestSeedFromAPIFailedSliceKeepsHostRoute verifies a slice that fails to
+// apply at startup, while its route from an earlier instance is still on the
+// host, still claims that route: Inventory must not seed it as an orphan, and
+// once the datapath is ready a sweep reinstalls it rather than removing it.
+func TestSeedFromAPIFailedSliceKeepsHostRoute(t *testing.T) {
+	slice := readySlice("vpc1-att1", "fd00:99::1", "fd00::1")
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(slice).Build()
+
+	backend := newFakeBackend()
+	backend.seedRoute(testVPC1, 7, mustPrefix(t, "fd00::1"), net.ParseIP("fd00:99::1"))
+	backend.failEnsureVRF = errTest
+	store := NewStore(backend, testGrace, nil)
+
+	ctx := context.Background()
+	if err := SeedFromAPI(ctx, c, store); err != nil {
+		t.Fatalf("SeedFromAPI: %v", err)
+	}
+	if err := store.Inventory(ctx, time.Now()); err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	for key := range store.routes {
+		if strings.HasPrefix(key, "boot/") {
+			t.Errorf("Inventory seeded %q as an orphan; the failed slice should claim it", key)
+		}
+	}
+
+	backend.failEnsureVRF = nil
+	store.Sweep(ctx, time.Now().Add(100*testGrace))
+	store.Sweep(ctx, time.Now().Add(200*testGrace))
+	if got := backend.routeCount(); got != 1 {
+		t.Errorf("routeCount = %d, want 1", got)
+	}
+	if slices.ContainsFunc(backend.calls, func(c string) bool { return strings.HasPrefix(c, "Remove") }) {
+		t.Errorf("calls = %v, want no removals of the live slice's state", backend.calls)
+	}
+	if r := store.routes["ns/"+testPodName]; r == nil || !r.installed || r.pending {
+		t.Errorf("route state = %+v, want installed and not pending", r)
 	}
 }

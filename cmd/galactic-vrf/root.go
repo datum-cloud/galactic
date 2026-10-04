@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -130,16 +129,7 @@ func runCmd(cfg *config.VRFConfig) error {
 	// controller's own reconciles have drained the workqueue that list
 	// fed, so on a busy node at boot the two race. Seeding uses the
 	// manager's uncached reader, which depends on neither.
-	go func() {
-		if err := ingresssidecar.SeedFromAPI(ctx, mgr.GetAPIReader(), store); err != nil {
-			log.Printf("startup seed: %v", err)
-			return
-		}
-		if err := store.Inventory(ctx, time.Now()); err != nil {
-			log.Printf("startup inventory: %v", err)
-		}
-		ingresssidecar.RunSweeper(ctx, store, cfg.SweepInterval)
-	}()
+	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval)
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)

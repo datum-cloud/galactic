@@ -471,3 +471,68 @@ func TestStoreReapplyRetriesOnFailure(t *testing.T) {
 		t.Errorf("calls once the retry succeeded = %v, want none", got)
 	}
 }
+
+// TestStoreSweepRetriesFailedSetDesired verifies a route whose SetDesired
+// failed, as it does while the shared eBPF datapath is not loaded yet, is
+// installed by a later Sweep with no further SetDesired call.
+func TestStoreSweepRetriesFailedSetDesired(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.failEnsureVRF = errTest
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err == nil {
+		t.Fatal("SetDesired: want error, got nil")
+	}
+
+	store.Sweep(ctx, time.Now())
+	if got := backend.routeCount(); got != 0 {
+		t.Fatalf("routeCount while EnsureVRF still fails = %d, want 0", got)
+	}
+
+	backend.failEnsureVRF = nil
+	store.Sweep(ctx, time.Now())
+	if got := backend.vrfCount(); got != 1 {
+		t.Errorf("vrfCount after retry = %d, want 1", got)
+	}
+	if got := backend.routeCount(); got != 1 {
+		t.Errorf("routeCount after retry = %d, want 1", got)
+	}
+
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now())
+	if got := backend.callsSince(before); len(got) != 0 {
+		t.Errorf("calls once the retry succeeded = %v, want none", got)
+	}
+}
+
+// TestStoreSweepDropsNeverInstalledRoute verifies a route that never applied
+// and then left desired state is neither retried nor removed from the host:
+// nothing was written for it.
+func TestStoreSweepDropsNeverInstalledRoute(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.failEnsureRoute = errTest
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err == nil {
+		t.Fatal("SetDesired: want error, got nil")
+	}
+	if err := store.SetDesired(ctx, "ns/pod-a", nil); err != nil {
+		t.Fatalf("SetDesired(nil): %v", err)
+	}
+	backend.failEnsureRoute = nil
+
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now().Add(2*testGrace))
+	for _, call := range backend.callsSince(before) {
+		if call != "RemoveVRF:"+testVPC1 {
+			t.Errorf("unexpected call %q tearing down a never-installed route", call)
+		}
+	}
+	if _, ok := store.routes["ns/pod-a"]; ok {
+		t.Error("route still tracked after its grace period")
+	}
+}
