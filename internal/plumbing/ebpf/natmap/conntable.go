@@ -63,7 +63,8 @@ type ConnKey struct {
 // is zero. The key follows the same convention -- a forward row's Sport is the
 // tenant's Identifier and its Dport zero, a reverse row's Sport zero and its
 // Dport the masquerade Identifier. Echo sessions share the table, and its LRU
-// capacity, with TCP and UDP; see the datapath's nat_conn_table comment.
+// capacity, with TCP and UDP; see the datapath's nat_conn_table comment, which
+// also covers idle expiry.
 type ConnEntry struct {
 	ConnKey
 
@@ -88,6 +89,17 @@ type ConnEntry struct {
 	// by construction and exposed separately only because the kernel value
 	// carries its own field.
 	Proto uint8
+
+	// BackendTenantArg is the forward key's TenantArg, carried in both rows so
+	// a reverse row, whose key holds zero there, names its forward row.
+	BackendTenantArg uint16
+
+	// State holds natprog.SessionTCP* bits, and LastSeen the second of the
+	// monotonic clock the session last translated a packet. Both are kept
+	// current on the reverse row only; a forward row's are from when it was
+	// written.
+	State    uint8
+	LastSeen uint32
 }
 
 // ConnTable is the read-only accessor for nat_conn_table; see the package doc
@@ -180,6 +192,10 @@ func fromWireConnValue(key ConnKey, value natprog.NatConnValue) ConnEntry {
 		ShardPort:   beU16(value.ShardPort),
 		BackendUSID: netip.AddrFrom16(value.BackendUsid),
 		Proto:       value.Proto,
+
+		BackendTenantArg: value.TenantArg,
+		State:            value.State,
+		LastSeen:         value.LastSeen,
 	}
 }
 
@@ -219,4 +235,26 @@ func (t *ConnTable) List() ([]ConnEntry, error) {
 		return nil, fmt.Errorf("natmap: nat_conn_table: list: %w", err)
 	}
 	return entries, nil
+}
+
+// CountByFamily counts rows by their key's family. It reads no value field, so
+// it does not depend on the value layout.
+//
+// The datapath inserts and evicts rows during the walk, which can restart it
+// or cut it short. The counts gathered so far are returned alongside any error,
+// and are approximate either way.
+func (t *ConnTable) CountByFamily() (map[uint8]int, error) {
+	var (
+		counts = map[uint8]int{}
+		rawKey natprog.NatConnKey
+		value  natprog.NatConnValue
+	)
+	it := t.table.Iterate()
+	for it.Next(&rawKey, &value) {
+		counts[rawKey.Family]++
+	}
+	if err := it.Err(); err != nil {
+		return counts, fmt.Errorf("natmap: nat_conn_table: count: %w", err)
+	}
+	return counts, nil
 }

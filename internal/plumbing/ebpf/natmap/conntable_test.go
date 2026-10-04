@@ -5,9 +5,12 @@
 package natmap
 
 import (
+	"errors"
 	"net/netip"
 	"sort"
 	"testing"
+
+	"github.com/cilium/ebpf"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 )
@@ -33,6 +36,10 @@ func testConnEntry() ConnEntry {
 		ShardPort:   35000,
 		BackendUSID: netip.MustParseAddr("fc00:3:4::a1b2"),
 		Proto:       17,
+
+		BackendTenantArg: 0x123,
+		State:            natprog.SessionTCPEstablished,
+		LastSeen:         4242,
 	}
 }
 
@@ -48,6 +55,9 @@ func connValueFromEntry(e ConnEntry) natprog.NatConnValue {
 		ShardPort:   beU16(e.ShardPort),
 		BackendUsid: e.BackendUSID.As16(),
 		Proto:       e.Proto,
+		TenantArg:   e.BackendTenantArg,
+		State:       e.State,
+		LastSeen:    e.LastSeen,
 	}
 }
 
@@ -140,5 +150,43 @@ func TestConnTable_ListEmpty(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("List() = %d entries, want 0 on an empty table", len(entries))
+	}
+}
+
+// abortingTable is a table whose walk yields its rows and then fails, the way
+// a walk the datapath's evictions keep restarting ends.
+type abortingTable struct{ *fakeTable }
+
+func (a abortingTable) Iterate() Iterator {
+	return &abortingIterator{Iterator: a.fakeTable.Iterate()}
+}
+
+type abortingIterator struct{ Iterator }
+
+func (*abortingIterator) Err() error { return ebpf.ErrIterationAborted }
+
+func TestConnTable_CountByFamily(t *testing.T) {
+	fake := newFakeTable()
+	for i, family := range []uint8{natprog.FamilyIPv6, natprog.FamilyIPv6, natprog.FamilyIPv4} {
+		e := testConnEntry()
+		e.Family = family
+		e.Sport = uint16(1000 + i)
+		putEntry(t, fake, e)
+	}
+
+	counts, err := NewConnTable(fake).CountByFamily()
+	if err != nil {
+		t.Fatalf("CountByFamily: %v", err)
+	}
+	if counts[natprog.FamilyIPv6] != 2 || counts[natprog.FamilyIPv4] != 1 {
+		t.Errorf("counts = %v, want 2 IPv6 and 1 IPv4", counts)
+	}
+
+	counts, err = NewConnTable(abortingTable{fake}).CountByFamily()
+	if !errors.Is(err, ebpf.ErrIterationAborted) {
+		t.Fatalf("CountByFamily on an aborted walk: err = %v, want ErrIterationAborted", err)
+	}
+	if counts[natprog.FamilyIPv6] != 2 || counts[natprog.FamilyIPv4] != 1 {
+		t.Errorf("counts from an aborted walk = %v, want the rows seen before it ended", counts)
 	}
 }

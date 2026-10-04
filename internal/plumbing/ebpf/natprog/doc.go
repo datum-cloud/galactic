@@ -62,6 +62,22 @@ const (
 	FamilyIPv4 uint8 = 4
 )
 
+// Session idle timeouts in seconds, mirroring the datapath's NAT_TIMEOUT_*
+// constants; see nat.c for the RFC each follows.
+const (
+	TimeoutUDP            uint32 = 120
+	TimeoutUDPDNS         uint32 = 30
+	TimeoutTCPEstablished uint32 = 7440
+	TimeoutTCPTransitory  uint32 = 240
+	TimeoutICMP           uint32 = 60
+)
+
+// Session state bits in conn_value.state, mirroring NAT_SESS_*.
+const (
+	SessionTCPEstablished uint8 = 0x1
+	SessionTCPClosing     uint8 = 0x2
+)
+
 // See the uSID program package's doc.go for why the include flags list both
 // multiarch directories and why the compiler is not named explicitly.
 //

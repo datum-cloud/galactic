@@ -393,6 +393,36 @@ egress is scheduled — `internal/plumbing/srv6.EgressDefaultRouteAdd`
 (called from a pod's own CNI ADD) fails outright if none of the
 configured shard SIDs are yet resolvable.
 
+## Session table
+
+Every session is two rows in `nat_conn_table`, a 65536-entry LRU hash: a
+forward row keyed by the tenant's tuple and a reverse row keyed by the peer's
+tuple against the masquerade address and port. A session expires once it has
+gone idle for its protocol's timeout, compile-time constants in `nat.c`:
+
+| Session                          | Idle timeout | Basis                                                                 |
+| -------------------------------- | ------------ | --------------------------------------------------------------------- |
+| UDP                              | 2 min        | RFC 4787 REQ-5 floor (RFC 6146 `UDP_MIN`)                             |
+| UDP to port 53                   | 30 s         | RFC 4787 REQ-5a; one query and answer, retried within a few seconds   |
+| TCP, peer has answered           | 2 h 4 min    | RFC 5382 REQ-5 (RFC 6146 `TCP_EST`)                                   |
+| TCP, unanswered or after FIN/RST | 4 min        | RFC 5382 REQ-5 (RFC 6146 `TCP_TRANS`)                                 |
+| ICMP Echo                        | 60 s         | RFC 5508 REQ-2 (RFC 6146 `ICMP_TIMEOUT`)                              |
+
+- **Refresh.** A translated packet in either direction refreshes the session.
+  ICMP errors neither refresh it nor reach an expired one.
+- **Expiry without a sweeper.** Nothing walks the table. A reply to an expired
+  session drops as `no_return_conn`, the tenant's next packet claims a fresh
+  port, and a port claim that collides with an expired session releases both
+  its rows and takes the port. Expired rows hold table capacity until then,
+  so `galactic_nat_conns` counts them.
+- **Split sessions.** The LRU evicts rows one at a time. A forward row whose
+  reverse row is gone is replaced on its next packet; a reverse row whose
+  forward row is gone keeps translating replies, and the flow's next packet
+  adopts it.
+- **Upgrade.** A restart reuses the pinned table and keeps every session. A
+  release that changes the row layout recreates it instead, so that one
+  restart drops every session on the shard.
+
 ## Verifying
 
 ```sh
@@ -412,19 +442,19 @@ Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 
 | Reason                                                                             | Meaning                                                                                                                                                                                                                                         |
 | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `nat66_no_return_conn`, `nat64_no_return_conn`                                     | A TCP or UDP reply matched no session.                                                                                                                                                                                                          |
+| `nat66_no_return_conn`, `nat64_no_return_conn`                                     | A TCP or UDP reply matched no live session.                                                                                                                                                                                                     |
 | `nat66_malformed_return`, `nat64_malformed_return`                                 | A reply too short to parse, or not TCP or UDP.                                                                                                                                                                                                  |
 | `nat66_malformed_forward`, `nat64_malformed_forward`                               | A tenant packet too short to parse, or of a protocol the family does not translate.                                                                                                                                                             |
-| `nat66_pat_exhausted`, `nat64_pat_exhausted`                                       | No free masquerade port or Echo Identifier within the probe limit.                                                                                                                                                                              |
+| `nat66_pat_exhausted`, `nat64_pat_exhausted`                                       | Every port or Echo Identifier in the probe held by a live session.                                                                                                                                                                              |
 | `nat64_v4_fragment`, `nat64_v4_options`                                            | An IPv4 reply that was fragmented or carried options.                                                                                                                                                                                           |
 | `nat64_shard_unavailable`                                                          | A NAT64 packet reached a shard with no IPv4 masquerade address.                                                                                                                                                                                 |
 | `nat64_non_global_dest`                                                            | A tenant packet, Echo included, to a NAT64 address whose embedded IPv4 address is not globally reachable (RFC 6890 special-purpose, multicast or reserved).                                                                                     |
 | `nat66_icmp_malformed`                                                             | An ICMPv6 message, or the packet an ICMPv6 error quotes, too short to parse.                                                                                                                                                                    |
-| `nat66_icmp_no_conn`                                                               | An Echo Reply, or an ICMPv6 error, that matched no session.                                                                                                                                                                                     |
+| `nat66_icmp_no_conn`                                                               | An Echo Reply, or an ICMPv6 error, that matched no live session.                                                                                                                                                                                |
 | `icmp_untranslatable`                                                              | A well-formed ICMP message the shard has no translation for: an ICMP type it does not handle, an ICMPv4 error RFC 7915 says to drop, a tenant sending anything but an Echo Request, or an error quoting a packet the shard could not have sent. |
 | `icmp_unsolicited`                                                                 | An Echo Request addressed to a masquerade address itself, with the echo responder off.                                                                                                                                                          |
 | `nat64_icmp_malformed`                                                             | An ICMPv4 message, or the packet an ICMPv4 error quotes, too short to parse; or a tenant's ICMPv6 bound for a NAT64 address that is.                                                                                                            |
-| `nat64_icmp_no_conn`                                                               | An ICMPv4 Echo Reply, or an ICMPv4 error, that matched no session.                                                                                                                                                                              |
+| `nat64_icmp_no_conn`                                                               | An ICMPv4 Echo Reply, or an ICMPv4 error, that matched no live session.                                                                                                                                                                         |
 | `icmp_rate_limited`                                                                | A reply the echo responder would have sent, refused by the per-CPU token bucket.                                                                                                                                                                |
 | `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`, `fib_lookup_failed`          | The shard translated a packet and could not resolve where to send it.                                                                                                                                                                           |
 | `adjust_head_failed`, `hop_limit_exceeded`, `no_egress_ifindex`, `redirect_failed` | The shard translated a packet and could not transmit it.                                                                                                                                                                                        |
@@ -523,10 +553,8 @@ knowing before you rely on this component in production:
   sessions. Eviction looks like `nat66_no_return_conn` or
   `nat64_no_return_conn` rising in step with ICMP traffic rather than with
   any routing change — check `galactic_nat_conns` against the table's
-  capacity when that happens. No row carries a timer, so RFC 6146's shorter
-  ICMP query timeout has no counterpart here: LRU eviction is the only expiry
-  a session gets. The table is shared deliberately, not by omission; the
-  datapath's `nat_conn_table` comment gives the reasoning.
+  capacity when that happens. The table is shared deliberately, not by
+  omission; the datapath's `nat_conn_table` comment gives the reasoning.
 - **The ICMP rate limit is per CPU, not per shard or per peer.** Every
   reply the echo responder sends, and every Packet Too Big or Fragmentation
   Needed the shard sends a sender, comes out of a token bucket of 1000

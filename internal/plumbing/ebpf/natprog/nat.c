@@ -164,6 +164,7 @@
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *) BPF_FUNC_map_lookup_elem;
 static long (*bpf_map_update_elem)(void *map, const void *key, const void *value,
 				    __u64 flags) = (void *) BPF_FUNC_map_update_elem;
+static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *) BPF_FUNC_map_delete_elem;
 static long (*bpf_xdp_adjust_head)(void *ctx, int delta) = (void *) BPF_FUNC_xdp_adjust_head;
 static __s64 (*bpf_csum_diff)(__be32 *from, __u32 from_size, __be32 *to, __u32 to_size,
 			       __wsum seed) = (void *) BPF_FUNC_csum_diff;
@@ -220,6 +221,38 @@ static long (*bpf_xdp_adjust_tail)(void *ctx, int delta) = (void *) BPF_FUNC_xdp
 #define NAT_PAT_PROBE_LIMIT 8
 #define NAT_PAT_PORT_BASE 32768
 #define NAT_PAT_PORT_RANGE 28000
+
+// Session idle timeouts, in seconds. A session expires once its reverse row has
+// gone this long without a translated packet in either direction; see
+// session_expired.
+//
+//   UDP              120  RFC 4787 REQ-5's floor (RFC 6146 UDP_MIN). The
+//                         recommended 300 would hold a busy shard's table
+//                         full of finished flows.
+//   UDP, port 53      30  REQ-5a allows a shorter timer for a well-known
+//                         port. A DNS exchange is one query and one answer,
+//                         and a stub resolver gives up on it within a few
+//                         5-second retries, so a row older than that only
+//                         holds a port.
+//   TCP established 7440  RFC 5382 REQ-5, RFC 6146 TCP_EST: 2h04m.
+//   TCP transitory   240  RFC 5382 REQ-5, RFC 6146 TCP_TRANS: a session
+//                         the peer has not answered yet, or one either side
+//                         has sent FIN or RST on.
+//   ICMP Echo         60  RFC 5508 REQ-2, RFC 6146 ICMP_TIMEOUT.
+#define NAT_TIMEOUT_UDP 120
+#define NAT_TIMEOUT_UDP_DNS 30
+#define NAT_TIMEOUT_TCP_EST 7440
+#define NAT_TIMEOUT_TCP_TRANS 240
+#define NAT_TIMEOUT_ICMP 60
+#define NAT_DNS_PORT 53
+
+// conn_value.state bits, meaningful on a TCP session's reverse row.
+#define NAT_SESS_TCP_EST 0x1
+#define NAT_SESS_TCP_CLOSING 0x2
+
+#define NAT_TCP_FIN 0x01
+#define NAT_TCP_RST 0x04
+#define NAT_TCP_ACK 0x10
 
 // conn_key.family discriminates the two families' rows inside the one session
 // table. A NAT64 row stores its IPv4 addresses IPv4-mapped into the 16-byte
@@ -390,6 +423,14 @@ struct conn_key {
 // address), not the peer's IPv4 address alone. The return path needs it
 // verbatim as the IPv6 source it rebuilds toward the tenant: a reply whose
 // source is anything else does not match the socket the tenant opened.
+//
+// The value holds every field of the forward key -- tenant_arg is here for
+// that alone -- so a reverse row names its forward row. proto is the tenant's
+// protocol, ICMPv6 for a NAT64 Echo whose reverse key holds ICMP.
+//
+// last_seen (seconds of the monotonic clock) and state are the session's, and
+// only the reverse row's copy is kept current; a forward row's records when it
+// was written.
 struct conn_value {
 	__u8 backend_addr[16];
 	__be16 backend_port;
@@ -399,6 +440,10 @@ struct conn_value {
 	__u8 backend_usid[16];
 	__u8 proto;
 	__u8 family;
+	__u16 tenant_arg;
+	__u8 state; // NAT_SESS_*
+	__u8 pad;
+	__u32 last_seen;
 };
 
 // struct shard_config is shard_config_table's single-entry value.
@@ -471,7 +516,23 @@ enum nat_drop_reason {
 // Maps.
 // ---------------------------------------------------------------------
 
-// nat_conn_table holds every session this shard translates, ICMP included.
+// nat_conn_table holds every session this shard translates, ICMP included, as
+// a forward row and a reverse row.
+//
+// A session expires after its protocol's idle timeout (NAT_TIMEOUT_*), with no
+// sweeper: the reverse row carries the session's last_seen, which a translated
+// packet in either direction refreshes, and every path that finds a row asks
+// whether it has expired. An expired session translates nothing, its forward
+// row is replaced by a fresh claim on the tenant's next packet, and its port is
+// taken back by the first claim that collides with it (claim_masquerade_port).
+// Until then it holds its slots, and the LRU still evicts under pressure.
+//
+// The LRU evicts each row on its own, so a session can lose one half. A forward
+// row whose reverse row is gone, or names another session, is replaced by a
+// fresh claim on the next packet. A reverse row whose forward row is gone keeps
+// translating replies until it expires, and a claim for the same flow adopts
+// it rather than leave its port held. A forward row left behind by a session
+// that never sends again waits for the LRU; it holds no port.
 //
 // ICMP Echo rows share the table, and its 65536-entry LRU, with TCP and UDP
 // rather than living in a map of their own. That is a deliberate trade: a burst
@@ -479,9 +540,7 @@ enum nat_drop_reason {
 // whose next reply then counts as no_return_conn. It is accepted because a
 // tenant pinging at a rate that churns the table would churn it just as hard
 // with UDP, and a second map would split one capacity budget into two that
-// have to be sized separately. RFC 6146's shorter ICMP query timeout has no
-// counterpart here: no row in this table carries a timer, and LRU eviction is
-// the only expiry any row gets. If the trade ever stops holding, ICMP rows move
+// have to be sized separately. If the trade ever stops holding, ICMP rows move
 // to a separate, smaller LRU, and only the ICMP leaves change.
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -489,6 +548,26 @@ struct {
 	__type(key, struct conn_key);
 	__type(value, struct conn_value);
 } nat_conn_table SEC(".maps");
+
+// struct session_scratch is a forward leg's session working set: the flow's
+// two keys, the value a new session is written with, and the forward key
+// release_session rebuilds from a reverse row. The NAT64 forward legs'
+// translation already held 496 of their 512 stack bytes without it.
+struct session_scratch {
+	struct conn_key fwd;
+	struct conn_key rev;
+	struct conn_key victim;
+	struct conn_value cv;
+};
+
+// nat_scratch is one session_scratch per CPU. A leg runs to completion on its
+// CPU, so nothing else touches the entry while it is in use.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct session_scratch);
+} nat_scratch SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -711,6 +790,7 @@ static NAT_ALWAYS_INLINE __be16 csum_fold_add(__be16 check, __s64 diff)
 struct l4_view {
 	__be16 sport;
 	__be16 dport;
+	__u8 tcp_flags; // zero for anything but TCP
 	__be16 *sport_ptr;
 	__be16 *dport_ptr;
 	__be16 *check_ptr;
@@ -724,6 +804,7 @@ static NAT_ALWAYS_INLINE int parse_l4(__u8 proto, void *l4, void *data_end, stru
 			return -1;
 		out->sport = tcp->source;
 		out->dport = tcp->dest;
+		out->tcp_flags = tcp->flags;
 		out->sport_ptr = &tcp->source;
 		out->dport_ptr = &tcp->dest;
 		out->check_ptr = &tcp->check;
@@ -735,6 +816,7 @@ static NAT_ALWAYS_INLINE int parse_l4(__u8 proto, void *l4, void *data_end, stru
 			return -1;
 		out->sport = udp->source;
 		out->dport = udp->dest;
+		out->tcp_flags = 0;
 		out->sport_ptr = &udp->source;
 		out->dport_ptr = &udp->dest;
 		out->check_ptr = &udp->check;
@@ -756,6 +838,7 @@ static NAT_ALWAYS_INLINE int parse_echo(void *l4, void *data_end, int outbound, 
 		return -1;
 	out->sport = outbound ? icmp->id : 0;
 	out->dport = outbound ? 0 : icmp->id;
+	out->tcp_flags = 0;
 	out->sport_ptr = &icmp->id;
 	out->dport_ptr = &icmp->id;
 	out->check_ptr = &icmp->check;
@@ -1146,23 +1229,112 @@ static NAT_ALWAYS_INLINE int strip_outer_header(struct xdp_md *ctx, struct nat_e
 // Shared session-table logic.
 // ---------------------------------------------------------------------
 
+// now_sec reads the monotonic clock in whole seconds, the unit last_seen and
+// every idle timeout are kept in.
+static NAT_ALWAYS_INLINE __u32 now_sec(void)
+{
+	return (__u32) (bpf_ktime_get_ns() / 1000000000ULL);
+}
+
+static NAT_ALWAYS_INLINE __u32 session_timeout(const struct conn_value *v)
+{
+	if (v->proto == NAT_IPPROTO_TCP)
+		return (v->state & (NAT_SESS_TCP_EST | NAT_SESS_TCP_CLOSING)) == NAT_SESS_TCP_EST ?
+			       NAT_TIMEOUT_TCP_EST : NAT_TIMEOUT_TCP_TRANS;
+	if (v->proto == NAT_IPPROTO_UDP)
+		return v->dest_port == __builtin_bswap16(NAT_DNS_PORT) ? NAT_TIMEOUT_UDP_DNS : NAT_TIMEOUT_UDP;
+	return NAT_TIMEOUT_ICMP;
+}
+
+// session_expired asks the question of a reverse row. The subtraction wraps,
+// so a stamp from before the clock's last 32-bit wrap still reads as its true
+// age.
+static NAT_ALWAYS_INLINE int session_expired(const struct conn_value *v, __u32 now)
+{
+	return (__u32) (now - v->last_seen) > session_timeout(v);
+}
+
+// touch_session refreshes a reverse row for a packet translated through it,
+// and moves a TCP session between transitory and established: established
+// once the peer has answered, transitory again for good once either side sends
+// FIN or RST. Writes are skipped when nothing changes, so a busy session's row
+// is written about once a second rather than once a packet.
+static NAT_ALWAYS_INLINE void touch_session(struct conn_value *v, __u32 now, __u8 tcp_flags, const int inbound)
+{
+	if (v->last_seen != now)
+		v->last_seen = now;
+	if (v->proto != NAT_IPPROTO_TCP)
+		return;
+	__u8 state = v->state;
+	if (tcp_flags & (NAT_TCP_FIN | NAT_TCP_RST))
+		state |= NAT_SESS_TCP_CLOSING;
+	else if (inbound && (tcp_flags & NAT_TCP_ACK))
+		state |= NAT_SESS_TCP_EST;
+	if (state != v->state)
+		v->state = state;
+}
+
+// owns_session reports whether a reverse row belongs to the flow fwd_key names.
+// The reverse key pins the peer's port and protocol but not, for NAT64, which
+// prefix the tenant reached the peer through, so the destination is compared
+// along with the tenant side.
+static NAT_ALWAYS_INLINE int owns_session(const struct conn_value *v, const struct conn_key *fwd_key)
+{
+	if (v->backend_port != fwd_key->sport || v->tenant_arg != fwd_key->tenant_arg)
+		return 0;
+	return addr6_eq(v->backend_addr, fwd_key->saddr) && addr6_eq(v->backend_usid, fwd_key->encap_src) &&
+	       addr6_eq(v->dest_addr, fwd_key->daddr);
+}
+
+// release_session deletes an expired session: the reverse row at rev_key, and
+// the forward row its value names, if that forward row still points here. One
+// that has since moved to another port belongs to a newer session of the same
+// flow and is left alone.
+//
+// Two CPUs can release the same session at once, and the second's delete can
+// then remove the reverse row the first just claimed in its place. That first
+// session's forward row is left naming a port it no longer holds, which its
+// next packet notices and replaces with a fresh claim.
+static NAT_ALWAYS_INLINE void release_session(struct conn_key *rev_key, const struct conn_value *v,
+						struct conn_key *fwd)
+{
+	__builtin_memset(fwd, 0, sizeof(*fwd));
+	fwd->family = v->family;
+	fwd->proto = v->proto;
+	fwd->tenant_arg = v->tenant_arg;
+	__builtin_memcpy(fwd->saddr, v->backend_addr, 16);
+	fwd->sport = v->backend_port;
+	__builtin_memcpy(fwd->daddr, v->dest_addr, 16);
+	fwd->dport = v->dest_port;
+	__builtin_memcpy(fwd->encap_src, v->backend_usid, 16);
+	struct conn_value *f = bpf_map_lookup_elem(&nat_conn_table, fwd);
+	if (f && f->shard_port == rev_key->dport)
+		bpf_map_delete_elem(&nat_conn_table, fwd);
+	bpf_map_delete_elem(&nat_conn_table, rev_key);
+}
+
 // claim_masquerade_port probes for a free (shard address, port) pair for a new
 // flow and installs the reverse row under it, returning the claimed port in
-// network order or 0 when every probe collided.
+// network order or 0 when every probe collided with a live session.
 //
 // Installing the reverse row *is* the claim: BPF_NOEXIST makes the map itself
 // the allocator, so two CPUs racing for the same candidate cannot both win. The
 // forward row is written by the caller afterward.
 //
-// rev_key is mutated in place rather than copied per probe. A copy inside an
-// unrolled loop is a second whole key on the stack, and this program's 512-byte
-// BPF stack has no room for one; the caller owns the key and has no use for it
-// after this returns, so there is nothing to preserve by copying. Its dport is
-// left holding whichever candidate was tried last.
-static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct conn_key *rev_key,
-						       struct conn_value *cv, __u32 hash_base)
+// A candidate held by an expired session is released and claimed. One held by
+// a live session of this same flow, whose forward row was lost, is adopted:
+// its port is returned and the caller writes a forward row back for it.
+//
+// rev_key is mutated in place rather than copied per probe; the caller owns
+// the key and has no use for it after this returns. Its dport is left holding
+// whichever candidate was tried last. The loop is not unrolled: the release
+// path would be copied into every probe.
+static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct session_scratch *ss, __u32 hash_base, __u32 now)
 {
-	#pragma unroll
+	struct conn_key *rev_key = &ss->rev;
+	struct conn_value *cv = &ss->cv;
+
+	#pragma clang loop unroll(disable)
 	for (int i = 0; i < NAT_PAT_PROBE_LIMIT; i++) {
 		__u16 candidate = NAT_PAT_PORT_BASE + ((hash_base + (__u32) i) % NAT_PAT_PORT_RANGE);
 		__be16 port = __builtin_bswap16(candidate);
@@ -1172,8 +1344,73 @@ static NAT_ALWAYS_INLINE __be16 claim_masquerade_port(struct conn_key *rev_key,
 
 		if (bpf_map_update_elem(&nat_conn_table, rev_key, cv, BPF_NOEXIST) == 0)
 			return port;
+
+		struct conn_value *held = bpf_map_lookup_elem(&nat_conn_table, rev_key);
+		if (!held)
+			continue;
+		if (!session_expired(held, now)) {
+			if (!owns_session(held, &ss->fwd))
+				continue;
+			if (held->last_seen != now)
+				held->last_seen = now;
+			return port;
+		}
+		release_session(rev_key, held, &ss->victim);
+		if (bpf_map_update_elem(&nat_conn_table, rev_key, cv, BPF_NOEXIST) == 0)
+			return port;
 	}
 	return 0;
+}
+
+// session_port returns the masquerade port a tenant's outbound packet leaves
+// with, claiming one for a new session, or 0 when none is free. ss arrives with
+// fwd filled in, and rev with every field but dport.
+//
+// The reverse row decides whether a forward row is still live, which costs a
+// second lookup per packet: a forward row whose reverse row expired, was
+// evicted, or now names another flow is replaced by a fresh claim rather than
+// sending traffic whose replies have nowhere to go.
+static NAT_ALWAYS_INLINE __be16 session_port(struct session_scratch *ss, __u32 hash_base, __u8 tcp_flags)
+{
+	__u32 now = now_sec();
+	const struct conn_key *fwd_key = &ss->fwd;
+
+	struct conn_value *existing = bpf_map_lookup_elem(&nat_conn_table, fwd_key);
+	if (existing) {
+		ss->rev.dport = existing->shard_port;
+		struct conn_value *rv = bpf_map_lookup_elem(&nat_conn_table, &ss->rev);
+		if (rv && owns_session(rv, fwd_key) && !session_expired(rv, now)) {
+			touch_session(rv, now, tcp_flags, 0);
+			return ss->rev.dport;
+		}
+	}
+
+	struct conn_value *cv = &ss->cv;
+	__builtin_memset(cv, 0, sizeof(*cv));
+	__builtin_memcpy(cv->backend_addr, fwd_key->saddr, 16);
+	cv->backend_port = fwd_key->sport;
+	__builtin_memcpy(cv->dest_addr, fwd_key->daddr, 16);
+	cv->dest_port = fwd_key->dport;
+	__builtin_memcpy(cv->backend_usid, fwd_key->encap_src, 16); // the tenant's own worker-node uSID
+	cv->proto = fwd_key->proto;
+	cv->family = fwd_key->family;
+	cv->tenant_arg = fwd_key->tenant_arg;
+	cv->last_seen = now;
+	if (tcp_flags & (NAT_TCP_FIN | NAT_TCP_RST))
+		cv->state = NAT_SESS_TCP_CLOSING;
+
+	__be16 port = claim_masquerade_port(ss, hash_base, now);
+	if (port)
+		bpf_map_update_elem(&nat_conn_table, fwd_key, cv, BPF_ANY);
+	return port;
+}
+
+// session_scratch_get returns this CPU's session_scratch, which an array map
+// always has; the null check is for the verifier.
+static NAT_ALWAYS_INLINE struct session_scratch *session_scratch_get(void)
+{
+	__u32 zero = 0;
+	return bpf_map_lookup_elem(&nat_scratch, &zero);
 }
 
 // ---------------------------------------------------------------------
@@ -1275,52 +1512,41 @@ static NAT_ALWAYS_INLINE int nat66_forward_leg(struct xdp_md *ctx, const int icm
 	}
 	inner->hop_limit--;
 
-	struct conn_key fwd_key;
-	__builtin_memset(&fwd_key, 0, sizeof(fwd_key));
-	fwd_key.family = NAT_FAMILY_V6;
-	fwd_key.proto = inner->nexthdr;
-	fwd_key.tenant_arg = (__u16) tenant_arg;
-	__builtin_memcpy(fwd_key.saddr, inner->saddr, 16);
-	fwd_key.sport = l4v.sport;
-	__builtin_memcpy(fwd_key.daddr, inner->daddr, 16);
-	fwd_key.dport = l4v.dport;
-	__builtin_memcpy(fwd_key.encap_src, tenant_usid, 16);
+	// Unreachable for an array map, and counted as exhaustion if it ever is not.
+	struct session_scratch *ss = session_scratch_get();
+	if (!ss) {
+		count_drop(DROP_REASON_NAT66_PAT_EXHAUSTED);
+		return XDP_DROP;
+	}
+	struct conn_key *fwd_key = &ss->fwd;
+	__builtin_memset(fwd_key, 0, sizeof(*fwd_key));
+	fwd_key->family = NAT_FAMILY_V6;
+	fwd_key->proto = inner->nexthdr;
+	fwd_key->tenant_arg = (__u16) tenant_arg;
+	__builtin_memcpy(fwd_key->saddr, inner->saddr, 16);
+	fwd_key->sport = l4v.sport;
+	__builtin_memcpy(fwd_key->daddr, inner->daddr, 16);
+	fwd_key->dport = l4v.dport;
+	__builtin_memcpy(fwd_key->encap_src, tenant_usid, 16);
 
-	struct conn_value *existing = bpf_map_lookup_elem(&nat_conn_table, &fwd_key);
-	struct conn_value cv;
+	struct conn_key *rev_key = &ss->rev;
+	__builtin_memset(rev_key, 0, sizeof(*rev_key));
+	rev_key->family = NAT_FAMILY_V6;
+	rev_key->proto = inner->nexthdr;
+	__builtin_memcpy(rev_key->saddr, inner->daddr, 16);
+	rev_key->sport = l4v.dport;
+	__builtin_memcpy(rev_key->daddr, cfg->shard_pub_addr6, 16);
 
-	if (existing) {
-		__builtin_memcpy(&cv, existing, sizeof(cv));
-	} else {
-		__builtin_memset(&cv, 0, sizeof(cv));
-		__builtin_memcpy(cv.backend_addr, inner->saddr, 16);
-		cv.backend_port = l4v.sport;
-		__builtin_memcpy(cv.dest_addr, inner->daddr, 16);
-		cv.dest_port = l4v.dport;
-		__builtin_memcpy(cv.backend_usid, tenant_usid, 16); // the tenant's own worker-node uSID
-		cv.proto = inner->nexthdr;
-		cv.family = NAT_FAMILY_V6;
-
-		struct conn_key rev_key;
-		__builtin_memset(&rev_key, 0, sizeof(rev_key));
-		rev_key.family = NAT_FAMILY_V6;
-		rev_key.proto = inner->nexthdr;
-		__builtin_memcpy(rev_key.saddr, inner->daddr, 16);
-		rev_key.sport = l4v.dport;
-		__builtin_memcpy(rev_key.daddr, cfg->shard_pub_addr6, 16);
-
-		__u32 base = fnv1a_flow(inner->saddr, l4v.sport) ^ (__u32) l4v.dport ^ tenant_arg;
-		if (claim_masquerade_port(&rev_key, &cv, base) == 0) {
-			count_drop(DROP_REASON_NAT66_PAT_EXHAUSTED);
-			return XDP_DROP;
-		}
-
-		bpf_map_update_elem(&nat_conn_table, &fwd_key, &cv, BPF_ANY);
+	__u32 base = fnv1a_flow(inner->saddr, l4v.sport) ^ (__u32) l4v.dport ^ tenant_arg;
+	__be16 shard_port = session_port(ss, base, l4v.tcp_flags);
+	if (shard_port == 0) {
+		count_drop(DROP_REASON_NAT66_PAT_EXHAUSTED);
+		return XDP_DROP;
 	}
 
-	fix_l4_checksum(l4v.check_ptr, inner->saddr, l4v.sport, cfg->shard_pub_addr6, cv.shard_port);
+	fix_l4_checksum(l4v.check_ptr, inner->saddr, l4v.sport, cfg->shard_pub_addr6, shard_port);
 	__builtin_memcpy(inner->saddr, cfg->shard_pub_addr6, 16);
-	*l4v.sport_ptr = cv.shard_port;
+	*l4v.sport_ptr = shard_port;
 
 	// Resolved from the translated source, not the tenant's: the reply has to
 	// come back to this shard's own masquerade address, and a route selected
@@ -1569,11 +1795,16 @@ static NAT_ALWAYS_INLINE int nat66_return_leg(struct xdp_md *ctx, struct shard_c
 	__builtin_memcpy(rev_key.daddr, ip6->daddr, 16);
 	rev_key.dport = l4v->dport;
 
+	// An expired session translates nothing: its mapping is gone, and an
+	// inbound packet with no mapping is filtered (RFC 4787 section 5, RFC 6146
+	// section 3.5).
+	__u32 now = now_sec();
 	struct conn_value *cv = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
-	if (!cv) {
+	if (!cv || session_expired(cv, now)) {
 		count_drop(no_conn);
 		return XDP_DROP;
 	}
+	touch_session(cv, now, l4v->tcp_flags, 1);
 
 	// The packet as the sender sent it, in case it has to be told it was too
 	// big; see send_too_big6. Every caller has proven at least 8 transport
@@ -1671,8 +1902,10 @@ static NAT_ALWAYS_INLINE int nat66_icmp_error(struct xdp_md *ctx, struct shard_c
 	__builtin_memcpy(rev_key.daddr, quoted->saddr, 16);
 	rev_key.dport = q.masq;
 
+	// An error about an expired session has no session to reach, and an error
+	// never refreshes one (RFC 5508 section 3.2).
 	struct conn_value *cv = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
-	if (!cv) {
+	if (!cv || session_expired(cv, now_sec())) {
 		count_drop(DROP_REASON_NAT66_ICMP_NO_CONN);
 		return XDP_DROP;
 	}
@@ -1907,49 +2140,36 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 	__be16 sport = l4v.sport;
 	__be16 dport = l4v.dport;
 
-	struct conn_key fwd_key;
-	__builtin_memset(&fwd_key, 0, sizeof(fwd_key));
-	fwd_key.family = NAT_FAMILY_V4;
-	fwd_key.proto = proto;
-	fwd_key.tenant_arg = (__u16) tenant_arg;
-	__builtin_memcpy(fwd_key.saddr, src6, 16);
-	fwd_key.sport = sport;
-	__builtin_memcpy(fwd_key.daddr, dst6, 16);
-	fwd_key.dport = dport;
-	__builtin_memcpy(fwd_key.encap_src, tenant_usid, 16);
+	// Unreachable for an array map, and counted as exhaustion if it ever is not.
+	struct session_scratch *ss = session_scratch_get();
+	if (!ss) {
+		count_drop(DROP_REASON_NAT64_PAT_EXHAUSTED);
+		return XDP_DROP;
+	}
+	struct conn_key *fwd_key = &ss->fwd;
+	__builtin_memset(fwd_key, 0, sizeof(*fwd_key));
+	fwd_key->family = NAT_FAMILY_V4;
+	fwd_key->proto = proto;
+	fwd_key->tenant_arg = (__u16) tenant_arg;
+	__builtin_memcpy(fwd_key->saddr, src6, 16);
+	fwd_key->sport = sport;
+	__builtin_memcpy(fwd_key->daddr, dst6, 16);
+	fwd_key->dport = dport;
+	__builtin_memcpy(fwd_key->encap_src, tenant_usid, 16);
 
-	struct conn_value *existing = bpf_map_lookup_elem(&nat_conn_table, &fwd_key);
-	struct conn_value cv;
+	struct conn_key *rev_key = &ss->rev;
+	__builtin_memset(rev_key, 0, sizeof(*rev_key));
+	rev_key->family = NAT_FAMILY_V4;
+	rev_key->proto = proto4;
+	v4_mapped(rev_key->saddr, dst4);
+	rev_key->sport = dport;
+	v4_mapped(rev_key->daddr, cfg->shard_pub_addr4);
 
-	if (existing) {
-		__builtin_memcpy(&cv, existing, sizeof(cv));
-	} else {
-		__builtin_memset(&cv, 0, sizeof(cv));
-		__builtin_memcpy(cv.backend_addr, src6, 16);
-		cv.backend_port = sport;
-		// The synthesized IPv6 destination, not the embedded IPv4 address:
-		// the return path rebuilds it verbatim as the reply's IPv6 source.
-		__builtin_memcpy(cv.dest_addr, dst6, 16);
-		cv.dest_port = dport;
-		__builtin_memcpy(cv.backend_usid, tenant_usid, 16);
-		cv.proto = proto;
-		cv.family = NAT_FAMILY_V4;
-
-		struct conn_key rev_key;
-		__builtin_memset(&rev_key, 0, sizeof(rev_key));
-		rev_key.family = NAT_FAMILY_V4;
-		rev_key.proto = proto4;
-		v4_mapped(rev_key.saddr, dst4);
-		rev_key.sport = dport;
-		v4_mapped(rev_key.daddr, cfg->shard_pub_addr4);
-
-		__u32 base = fnv1a_flow(src6, sport) ^ (__u32) dport ^ tenant_arg;
-		if (claim_masquerade_port(&rev_key, &cv, base) == 0) {
-			count_drop(DROP_REASON_NAT64_PAT_EXHAUSTED);
-			return XDP_DROP;
-		}
-
-		bpf_map_update_elem(&nat_conn_table, &fwd_key, &cv, BPF_ANY);
+	__u32 base = fnv1a_flow(src6, sport) ^ (__u32) dport ^ tenant_arg;
+	__be16 shard_port = session_port(ss, base, l4v.tcp_flags);
+	if (shard_port == 0) {
+		count_drop(DROP_REASON_NAT64_PAT_EXHAUSTED);
+		return XDP_DROP;
 	}
 
 	// Shrink the front by the 20 bytes an IPv4 header saves over an IPv6 one.
@@ -2006,7 +2226,7 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 	// and overflowing.
 	if (icmp) {
 		fix_echo_checksum_xlat(out_l4v.check_ptr, 1, src6, dst6, __builtin_bswap16(payload_len),
-				       NAT_ICMPV6_ECHO_REQUEST, sport, NAT_ICMP_ECHO_REQUEST, cv.shard_port);
+				       NAT_ICMPV6_ECHO_REQUEST, sport, NAT_ICMP_ECHO_REQUEST, shard_port);
 		struct nat_icmphdr *echo = (void *) (ip4 + 1);
 		if ((void *) (echo + 1) > data_end) {
 			count_drop(malformed);
@@ -2017,12 +2237,12 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 		__be32 old_words[9];
 		__be32 new_words[9];
 		xlat_words6(old_words, src6, dst6, sport);
-		xlat_words4(new_words, cfg->shard_pub_addr4, dst4, cv.shard_port);
+		xlat_words4(new_words, cfg->shard_pub_addr4, dst4, shard_port);
 		fix_l4_checksum_xlat(out_l4v.check_ptr, old_words, new_words);
 	}
 	udp_zero_checksum_fixup(proto, out_l4v.check_ptr);
 
-	*out_l4v.sport_ptr = cv.shard_port;
+	*out_l4v.sport_ptr = shard_port;
 
 	__u32 egress_ifindex = 0;
 	long fib_rc = resolve_fib_and_write_eth4(ctx, ctx->ingress_ifindex, cfg->shard_pub_addr4, dst4,
@@ -2092,11 +2312,14 @@ static NAT_ALWAYS_INLINE int nat64_return_leg(struct xdp_md *ctx, struct shard_c
 	v4_mapped(rev_key.daddr, ip4->daddr);
 	rev_key.dport = l4v->dport;
 
+	// An expired session translates nothing; see nat66_return_leg.
+	__u32 now = now_sec();
 	struct conn_value *found = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
-	if (!found) {
+	if (!found || session_expired(found, now)) {
 		count_drop(no_conn);
 		return XDP_DROP;
 	}
+	touch_session(found, now, l4v->tcp_flags, 1);
 
 	struct conn_value cv;
 	__builtin_memcpy(&cv, found, sizeof(cv));
@@ -2461,8 +2684,9 @@ int nat64_icmp_error(struct xdp_md *ctx)
 	v4_mapped(rev_key.daddr, quoted->saddr);
 	rev_key.dport = q.masq;
 
+	// Expired or not refreshed, as in nat66_icmp_error.
 	struct conn_value *cv = bpf_map_lookup_elem(&nat_conn_table, &rev_key);
-	if (!cv) {
+	if (!cv || session_expired(cv, now_sec())) {
 		count_drop(DROP_REASON_NAT64_ICMP_NO_CONN);
 		return XDP_DROP;
 	}

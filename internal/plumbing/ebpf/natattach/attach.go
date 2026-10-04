@@ -62,7 +62,9 @@ func Load(pinDir string) (*natprog.NatObjects, error) {
 		// the shard config being rewritten at process startup, or
 		// datapath-owned and self-managing, the connection table being an
 		// LRU that self-evicts and the drop counters a pure array. A stale
-		// pin from an incompatible layout is safe to recreate.
+		// pin from an incompatible layout is safe to recreate. A compatible
+		// restart keeps every session; this one drops them, and each flow's
+		// next packet claims a new one.
 		slog.Warn("natattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate at next startup)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {

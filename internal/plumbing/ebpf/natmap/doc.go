@@ -10,8 +10,8 @@
 // # nat_conn_table is never written here
 //
 // The datapath alone writes that table: it allocates masquerade ports, claims
-// rows, and self-evicts under memory pressure, with no GC needed. ConnTable
-// exposes only Get and List, since there is no control-plane liveness set to
+// rows, expires idle sessions as it meets them, and self-evicts under memory
+// pressure, with no GC needed. ConnTable exposes only reads, since there is no control-plane liveness set to
 // reconcile it against.
 //
 // # shard_config_table is what the control plane does write
