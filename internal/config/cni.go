@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -76,8 +77,11 @@ const (
 	// is stated in its own CNI config, that being a property of the workload.
 	EnvCNIDANDir = "GALACTIC_CNI_DAN_DIR"
 
-	// EnvCNINAT64Prefix is the fabric-wide NAT64 prefix, and setting it is what
-	// gives a tenant VRF a route toward IPv4 reachability.
+	// EnvCNINAT64Prefix is the comma-separated list of fabric-wide NAT64 /96
+	// prefixes, and setting it is what gives a tenant VRF a route toward IPv4
+	// reachability: one route per prefix, all toward the same shard SID, so a
+	// Network-Specific Prefix and the RFC 6052 Well-Known Prefix can be served
+	// together.
 	//
 	// It has to be installed as its own more-specific route rather than relying
 	// on the ::/0 default, because the two are independent: a VRF may have NAT64
@@ -108,8 +112,8 @@ type CNIConfig struct {
 	// plugin splits and validates it.
 	EgressShardSIDs string
 
-	// NAT64Prefix is the raw fabric-wide NAT64 prefix, unparsed for the same
-	// reason. Empty means this fabric has no NAT64.
+	// NAT64Prefix is the raw comma-separated NAT64 prefix list, unparsed for
+	// the same reason. Empty means this fabric has no NAT64.
 	NAT64Prefix string
 
 	// DANDir is where Directly Attachable Network files are written.
@@ -219,4 +223,44 @@ func ParseEgressShardSIDs(raw string) ([]net.IP, error) {
 		sids = append(sids, sid)
 	}
 	return sids, nil
+}
+
+// nat64PrefixLen is the only NAT64 prefix length the shard datapath supports.
+const nat64PrefixLen = 96
+
+// ParseNAT64Prefixes splits a comma-separated NAT64 prefix list, trimming
+// whitespace and skipping blank entries as ParseEgressShardSIDs does. Every
+// entry must be an IPv6 /96, and no two may name the same prefix. Host bits are
+// masked off, as net.ParseCIDR always did for the single-prefix form.
+func ParseNAT64Prefixes(raw string) ([]*net.IPNet, error) {
+	var (
+		prefixes []*net.IPNet
+		seen     = map[netip.Prefix]struct{}{}
+	)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid NAT64 prefix %q: %w", part, err)
+		}
+		if !p.Addr().Is6() || p.Addr().Is4In6() {
+			return nil, fmt.Errorf("NAT64 prefix %q is not an IPv6 prefix", part)
+		}
+		if p.Bits() != nat64PrefixLen {
+			return nil, fmt.Errorf("NAT64 prefix %q must be a /%d", part, nat64PrefixLen)
+		}
+		p = p.Masked()
+		if _, dup := seen[p]; dup {
+			return nil, fmt.Errorf("duplicate NAT64 prefix %q", part)
+		}
+		seen[p] = struct{}{}
+		prefixes = append(prefixes, &net.IPNet{
+			IP:   net.IP(p.Addr().AsSlice()),
+			Mask: net.CIDRMask(nat64PrefixLen, 8*net.IPv6len),
+		})
+	}
+	return prefixes, nil
 }

@@ -75,8 +75,9 @@ func EgressDefaultRouteAdd(tableID uint32, shardSIDs []net.IP) error {
 // VRF table tableID, encapsulating toward the first usable address in
 // shardSIDs.
 //
-// Two prefixes are installed in practice: ::/0, reaching the IPv6 internet
-// through NAT66, and the fabric's NAT64 prefix, reaching the IPv4 internet.
+// Two kinds of prefix are installed in practice: ::/0, reaching the IPv6
+// internet through NAT66, and each of the fabric's NAT64 prefixes, reaching
+// the IPv4 internet.
 // Both point at the same shard SID -- a shard decides which translation a
 // packet gets from its inner destination, not from which route carried it --
 // so the NAT64 entry exists to make that prefix reachable where no default
