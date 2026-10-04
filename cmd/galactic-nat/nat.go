@@ -162,6 +162,8 @@ func (d *natDatapath) Program(identity controller.EgressShardIdentity) error {
 		ShardPubAddr4: identity.ShardAddressIPv4,
 		NAT64Prefix:   identity.NAT64Prefix,
 		EchoResponder: d.echoResponder,
+
+		TranslateWellKnownPrefix: identity.TranslateWellKnownPrefix,
 	}
 	if current, ok, err := d.shardConfig.Get(); err == nil && ok && current == cfg {
 		return nil
@@ -173,6 +175,7 @@ func (d *natDatapath) Program(identity controller.EgressShardIdentity) error {
 		"shardSID", identity.ShardSID,
 		"nat66", identity.ShardAddressIPv6.IsValid(),
 		"nat64", identity.ShardAddressIPv4.IsValid(),
+		"wellKnownPrefix", identity.TranslateWellKnownPrefix,
 		"echoResponder", d.echoResponder,
 	)
 	return nil
@@ -209,6 +212,8 @@ func (d *natDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 		ShardAddressIPv6: cfg.ShardPubAddr6,
 		ShardAddressIPv4: cfg.ShardPubAddr4,
 		NAT64Prefix:      cfg.NAT64Prefix,
+
+		TranslateWellKnownPrefix: cfg.TranslateWellKnownPrefix,
 	}, true
 }
 

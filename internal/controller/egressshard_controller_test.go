@@ -288,6 +288,86 @@ func TestEgressShardReconciler_NilDatapathIsAnError(t *testing.T) {
 // moment its node is labelled and gains an identity afterwards, so this is a
 // normal state rather than an error, and the datapath must not keep one the
 // spec does not assign.
+// TestEgressShardReconciler_WellKnownPrefixFollowsTheSpec covers the one
+// mutable identity field: toggling it reprograms the running datapath, and
+// status reports what the datapath holds.
+func TestEgressShardReconciler_WellKnownPrefixFollowsTheSpec(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	shard.Spec.ShardAddressIPv4 = testNAT64ShardAddr
+	shard.Spec.NAT64Prefix = testNAT64Prefix
+	shard.Spec.TranslateWellKnownPrefix = true
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	for _, on := range []bool{true, false, true} {
+		cur := &bgpv1alpha1.EgressShard{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(shard), cur); err != nil {
+			t.Fatalf("get shard: %v", err)
+		}
+		cur.Spec.TranslateWellKnownPrefix = on
+		if err := c.Update(context.Background(), cur); err != nil {
+			t.Fatalf("update shard: %v", err)
+		}
+
+		got, err := reconcileShard(t, r, c)
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if identity, ok := datapath.Programmed(); !ok || identity.TranslateWellKnownPrefix != on {
+			t.Errorf("datapath TranslateWellKnownPrefix = %v (programmed %v), want %v",
+				identity.TranslateWellKnownPrefix, ok, on)
+		}
+		if got.Status.TranslatesWellKnownPrefix != on {
+			t.Errorf("Status.TranslatesWellKnownPrefix = %v, want %v", got.Status.TranslatesWellKnownPrefix, on)
+		}
+	}
+}
+
+// TestEgressShardReconciler_WellKnownPrefixNeedsNAT64 covers a spec the CRD
+// rejects, should one reach the controller anyway: without a NAT64 prefix the
+// datapath is not asked to translate the Well-Known Prefix.
+func TestEgressShardReconciler_WellKnownPrefixNeedsNAT64(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	shard.Spec.TranslateWellKnownPrefix = true
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if identity, ok := datapath.Programmed(); !ok || identity.TranslateWellKnownPrefix {
+		t.Errorf("datapath identity = %+v (programmed %v), want NAT66 only", identity, ok)
+	}
+	if got.Status.TranslatesWellKnownPrefix {
+		t.Error("Status.TranslatesWellKnownPrefix = true for a shard with no NAT64")
+	}
+}
+
+// TestEgressShardReconciler_WellKnownPrefixClearedWithTheIdentity covers the
+// status of a shard whose datapath is cleared.
+func TestEgressShardReconciler_WellKnownPrefixClearedWithTheIdentity(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	shard.Spec.ShardSID = ""
+	shard.Status.TranslatesWellKnownPrefix = true
+	c := newIndexedClientBuilder(scheme).WithObjects(shard).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if got.Status.TranslatesWellKnownPrefix {
+		t.Error("Status.TranslatesWellKnownPrefix = true with the datapath cleared")
+	}
+}
+
 func TestEgressShardReconciler_UnassignedIdentityClearsTheDatapath(t *testing.T) {
 	tests := []struct {
 		name   string
