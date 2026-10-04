@@ -1591,9 +1591,14 @@ static USID_ALWAYS_INLINE __u32 sum_words(const __u16 *w, int n)
 // the sum the kernel writes there is exactly the value already there. The
 // error is then correct whether or not anything finishes the checksum. The
 // spot is the transport header's offset plus 16 for TCP and 6 for UDP, which
-// is where the kernel puts csum_start and csum_offset for either. A packet of
-// another protocol is never left with a partial checksum by Linux, and the
-// layout costs nothing there.
+// is where the kernel puts csum_start and csum_offset for either, and which
+// usid_pmtu_tap_test.go checks against the kernel. Every other packet gets the
+// UDP layout. That is right for UDP-Lite, whose checksum sits where UDP's does,
+// and costs nothing for a packet with no partial checksum. It is not proven
+// for SCTP, whose offloaded CRC32c is finished differently, or for an IPv6
+// packet whose transport header follows extension headers, since the spot is
+// then further in. Either could reach the tenant with a corrupted error through
+// a device without checksum offload.
 //
 // Never sent: an error about an ICMP error, an error past the rate limit, and
 // an error for an attachment with no gateway in the packet's family. IPv4

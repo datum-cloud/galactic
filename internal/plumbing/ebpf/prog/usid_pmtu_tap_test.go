@@ -38,15 +38,21 @@ const (
 	pmtuTapBlock           uint64 = 0x123456
 )
 
-// tunOffloadCsum is TUN_F_CSUM, which lets the tap hand checksums to the
-// reader to finish instead of finishing them in the kernel.
-const tunOffloadCsum = 0x01
+// The tap offload flags from the kernel UAPI. TUN_F_CSUM lets the tap hand
+// checksums to the reader to finish instead of finishing them in the kernel.
+// TUN_F_TSO4 and TUN_F_TSO6 let it hand over TCP packets still to be
+// segmented, so GSO state that survives to the tap shows in the header read.
+const (
+	tunOffloadCsum = 0x01
+	tunOffloadTSO4 = 0x02
+	tunOffloadTSO6 = 0x04
+)
 
 // newPMTUTap creates a tap with a virtio_net_hdr in a private network
 // namespace, attaches usid_egress to it the way CNI ADD does to a tenant's
 // host-side interface, and registers it as a tenant attachment whose default
-// routes encapsulate. offload sets whether the tap accepts partial checksums.
-func newPMTUTap(t *testing.T, offload bool) (*UsidObjects, int) {
+// routes encapsulate. offloads is the TUN_F_* set the tap accepts.
+func newPMTUTap(t *testing.T, offloads uint) (*UsidObjects, int) {
 	t.Helper()
 	requireRoot(t)
 	if _, err := os.Stat("/dev/net/tun"); err != nil {
@@ -82,12 +88,8 @@ func newPMTUTap(t *testing.T, offload bool) (*UsidObjects, int) {
 	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 		t.Fatalf("create tap: %v", err)
 	}
-	var flags uint
-	if offload {
-		flags = tunOffloadCsum
-	}
-	if err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, int(flags)); err != nil {
-		t.Fatalf("set tap offload to %#x: %v", flags, err)
+	if err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, int(offloads)); err != nil {
+		t.Fatalf("set tap offload to %#x: %v", offloads, err)
 	}
 	link := setLinkUp(t, pmtuTapName)
 	attachIngress(t, link, objs.UsidEgress)
@@ -135,8 +137,19 @@ func registerPMTUAttachment(t *testing.T, objs *UsidObjects, ifindex uint32, gw 
 // header, csum_offset at the checksum field.
 func writeGuestFrame(t *testing.T, fd int, frame []byte, l4Off, csumOff int) {
 	t.Helper()
+	writeGuestGSOFrame(t, fd, frame, l4Off, csumOff, virtioNetHdrGSONone, 0, 0)
+}
+
+// writeGuestGSOFrame is writeGuestFrame for a packet the host must still
+// segment: gsoType and gsoSize as the virtio_net_hdr carries them, and hdrLen
+// the length of the headers every segment repeats.
+func writeGuestGSOFrame(t *testing.T, fd int, frame []byte, l4Off, csumOff int, gsoType byte, hdrLen, gsoSize int) {
+	t.Helper()
 	hdr := make([]byte, virtioNetHdrLen)
 	hdr[0] = virtioNetHdrFNeedsCsum
+	hdr[1] = gsoType
+	binary.LittleEndian.PutUint16(hdr[2:4], uint16(hdrLen))
+	binary.LittleEndian.PutUint16(hdr[4:6], uint16(gsoSize))
 	binary.LittleEndian.PutUint16(hdr[6:8], uint16(l4Off))
 	binary.LittleEndian.PutUint16(hdr[8:10], uint16(csumOff))
 	if _, err := unix.Write(fd, append(hdr, frame...)); err != nil {
@@ -200,7 +213,7 @@ func TestPMTU_TapWithoutOffloadFinishesChecksumHarmlessly(t *testing.T) {
 		{"IPv4 TCP", true, ipProtoTCP},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			objs, fd := newPMTUTap(t, false)
+			objs, fd := newPMTUTap(t, 0)
 			pkt, l4Off := tapTestPacket(tt.v4, tt.proto)
 			writeGuestFrame(t, fd, pkt, l4Off, partialCsumOffset(tt.proto))
 
@@ -228,7 +241,7 @@ func TestPMTU_TapWithOffloadReportsPredictedChecksumSpot(t *testing.T) {
 		{"IPv4 TCP", true, ipProtoTCP},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, fd := newPMTUTap(t, true)
+			_, fd := newPMTUTap(t, tunOffloadCsum)
 			pkt, l4Off := tapTestPacket(tt.v4, tt.proto)
 			writeGuestFrame(t, fd, pkt, l4Off, partialCsumOffset(tt.proto))
 
@@ -251,6 +264,77 @@ func TestPMTU_TapWithOffloadReportsPredictedChecksumSpot(t *testing.T) {
 			// survive that too.
 			assertErrorFrame(t, finishPartialChecksum(frame, gotStart, gotOffset), pkt, tt.v4, tt.proto)
 		})
+	}
+}
+
+// TestPMTU_TapGSOErrorCarriesNoGSOState covers a guest handing over a TCP
+// packet still to be segmented, whose segments are each too big for the
+// fabric. The error is rewritten from that packet, and must reach the guest as
+// one plain ICMP packet: no GSO type or segment size left over from the TCP
+// packet it replaced, which would make the guest try to segment an ICMP
+// message as TCP.
+func TestPMTU_TapGSOErrorCarriesNoGSOState(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		v4      bool
+		gsoType byte
+	}{
+		{"IPv6", false, virtioNetHdrGSOTCPv6},
+		{"IPv4", true, virtioNetHdrGSOTCPv4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			objs, fd := newPMTUTap(t, tunOffloadCsum|tunOffloadTSO4|tunOffloadTSO6)
+
+			// Two 1440-byte segments. Each makes a 1500-byte packet over IPv6
+			// and a 1480-byte one over IPv4, both past the 1460 limit.
+			const segPayload = 1440
+			ipHdr := ip6HeaderLen
+			if tt.v4 {
+				ipHdr = 20
+			}
+			l3Len := ipHdr + 20 + 2*segPayload
+			var pkt []byte
+			if tt.v4 {
+				pkt = v4Packet(ipProtoTCP, nil, true, l3Len)
+			} else {
+				pkt = v6Packet(mssPodV6, mssRemoteV6, ipProtoTCP, l3Len)
+			}
+			l4Off := ethHeaderLen + ipHdr
+			writeGuestGSOFrame(t, fd, pkt, l4Off, 16, tt.gsoType, l4Off+20, segPayload)
+
+			hdr, frame := readHostFrame(t, fd, binary.BigEndian.Uint16(pkt[12:14]))
+			if hdr[1] != virtioNetHdrGSONone || binary.LittleEndian.Uint16(hdr[4:6]) != 0 {
+				t.Errorf("error reached the guest with GSO type %d, segment size %d; want none",
+					hdr[1], binary.LittleEndian.Uint16(hdr[4:6]))
+			}
+			if hdr[0]&virtioNetHdrFNeedsCsum != 0 {
+				frame = finishPartialChecksum(frame, int(binary.LittleEndian.Uint16(hdr[6:8])),
+					int(binary.LittleEndian.Uint16(hdr[8:10])))
+			}
+			assertErrorFrame(t, frame, pkt, tt.v4, ipProtoTCP)
+			assertPMTUStats(t, objs, map[uint32]uint64{sentStat(tt.v4): 1})
+		})
+	}
+}
+
+// TestPMTU_TapGSOSegmentsThatFitAreEncapsulated is the control for the test
+// above: the same merged packet with 1400-byte segments, each a 1460-byte
+// IPv6 packet, gets no error, although the merged packet is far over the
+// limit. It also proves the tap really hands the program a GSO packet.
+func TestPMTU_TapGSOSegmentsThatFitAreEncapsulated(t *testing.T) {
+	objs, fd := newPMTUTap(t, tunOffloadCsum|tunOffloadTSO4|tunOffloadTSO6)
+	const segPayload = 1400
+	pkt := v6Packet(mssPodV6, mssRemoteV6, ipProtoTCP, ip6HeaderLen+20+2*segPayload)
+	l4Off := ethHeaderLen + ip6HeaderLen
+	writeGuestGSOFrame(t, fd, pkt, l4Off, 16, virtioNetHdrGSOTCPv6, l4Off+20, segPayload)
+
+	time.Sleep(200 * time.Millisecond)
+	assertPMTUStats(t, objs, nil)
+	// DROP_REASON_TRACE_REDIRECT_OK, a trace slot with no Go constant:
+	// usid_egress reached its final redirect toward the fabric.
+	const traceRedirectOK = 22
+	if got := sumPerCPU(t, objs.DropReasons, traceRedirectOK); got != 1 {
+		t.Errorf("drop_reasons[trace_redirect_ok] = %d, want 1: the packet should have been encapsulated", got)
 	}
 }
 
