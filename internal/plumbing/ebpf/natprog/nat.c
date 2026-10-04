@@ -1275,13 +1275,15 @@ static NAT_ALWAYS_INLINE void touch_session(struct conn_value *v, __u32 now, __u
 }
 
 // owns_session reports whether a reverse row belongs to the flow fwd_key names.
-// The reverse key already pins the peer and the protocol, so the tenant side is
-// all that is left to compare.
+// The reverse key pins the peer's port and protocol but not, for NAT64, which
+// prefix the tenant reached the peer through, so the destination is compared
+// along with the tenant side.
 static NAT_ALWAYS_INLINE int owns_session(const struct conn_value *v, const struct conn_key *fwd_key)
 {
 	if (v->backend_port != fwd_key->sport || v->tenant_arg != fwd_key->tenant_arg)
 		return 0;
-	return addr6_eq(v->backend_addr, fwd_key->saddr) && addr6_eq(v->backend_usid, fwd_key->encap_src);
+	return addr6_eq(v->backend_addr, fwd_key->saddr) && addr6_eq(v->backend_usid, fwd_key->encap_src) &&
+	       addr6_eq(v->dest_addr, fwd_key->daddr);
 }
 
 // release_session deletes an expired session: the reverse row at rev_key, and
