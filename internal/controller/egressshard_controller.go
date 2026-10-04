@@ -32,7 +32,8 @@ import (
 // EgressShardIdentity is the identity an egress translation datapath is
 // programmed with: the shard SID tenant egress routes encapsulate toward, and
 // the masquerade address of each family it serves. ShardAddressIPv4 and
-// NAT64Prefix are valid together or not at all.
+// NAT64Prefix are valid together or not at all, and TranslateWellKnownPrefix
+// is set only alongside them.
 //
 // It is this package's own type rather than the datapath's map row so the
 // controller package, which every binary links, does not pull in the egress
@@ -42,6 +43,8 @@ type EgressShardIdentity struct {
 	ShardAddressIPv6 netip.Addr
 	ShardAddressIPv4 netip.Addr
 	NAT64Prefix      netip.Prefix
+
+	TranslateWellKnownPrefix bool
 }
 
 // EgressDatapath is this node's egress translation XDP datapath, as
@@ -297,6 +300,7 @@ func identityFromSpec(spec bgpv1alpha1.EgressShardSpec) (identity EgressShardIde
 		if identity.NAT64Prefix, err = netip.ParsePrefix(spec.NAT64Prefix); err != nil {
 			return identity, "", fmt.Errorf("spec.nat64Prefix: %w", err)
 		}
+		identity.TranslateWellKnownPrefix = spec.TranslateWellKnownPrefix
 	}
 
 	switch {
@@ -321,6 +325,7 @@ func (r *EgressShardReconciler) publish(ctx context.Context, shard *bgpv1alpha1.
 	shardCopy.Status.ShardAddressIPv6 = ""
 	shardCopy.Status.ShardAddressIPv4 = ""
 	shardCopy.Status.NAT64Prefix = ""
+	shardCopy.Status.TranslatesWellKnownPrefix = false
 	// A conflicting shard publishes no identity even while the datapath holds
 	// one, which it cannot here: syncNode clears it first. Checking the
 	// condition rather than relying on that keeps the two from drifting.
@@ -331,6 +336,7 @@ func (r *EgressShardReconciler) publish(ctx context.Context, shard *bgpv1alpha1.
 			shardCopy.Status.ShardAddressIPv4 = addrString(identity.ShardAddressIPv4)
 			if identity.NAT64Prefix.IsValid() {
 				shardCopy.Status.NAT64Prefix = identity.NAT64Prefix.String()
+				shardCopy.Status.TranslatesWellKnownPrefix = identity.TranslateWellKnownPrefix
 			}
 		}
 	}

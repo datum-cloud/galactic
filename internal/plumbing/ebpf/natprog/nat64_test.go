@@ -77,6 +77,8 @@ func ipv4HeaderChecksum(hdr []byte) uint16 {
 // buildIPv4UDPPacket constructs an Ethernet+IPv4+UDP frame with a correct IPv4
 // header checksum and a correct UDP checksum -- the shape a reply from the
 // IPv4 internet arrives in.
+//
+//nolint:unparam // every fixture so far replies from the tenant's destination port
 func buildIPv4UDPPacket(t *testing.T, dst, src netip.Addr, srcPort, dstPort uint16, payload []byte) []byte {
 	t.Helper()
 

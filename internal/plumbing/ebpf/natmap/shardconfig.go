@@ -43,6 +43,10 @@ type ShardConfig struct {
 	// fabric-wide, never per-tenant. Required whenever ShardPubAddr4 is set.
 	NAT64Prefix netip.Prefix
 
+	// TranslateWellKnownPrefix additionally translates the RFC 6052
+	// Well-Known Prefix 64:ff9b::/96 to IPv4. Requires ShardPubAddr4.
+	TranslateWellKnownPrefix bool
+
 	// EchoResponder makes the shard answer Echo Requests addressed to its own
 	// masquerade addresses, rate-limited by the datapath, instead of dropping
 	// them as unsolicited. Unlike the fields above it is process
@@ -155,9 +159,15 @@ func (c ShardConfig) toWire() (natprog.NatShardConfig, error) {
 		value.Nat64Prefix = c.NAT64Prefix.Addr().As16()
 		value.ShardPubAddr4 = v4ToWire(c.ShardPubAddr4)
 		value.ServesV4 = 1
+		if c.TranslateWellKnownPrefix {
+			value.Flags |= natprog.ShardFlagWKP
+		}
 	} else if c.NAT64Prefix.IsValid() {
 		return natprog.NatShardConfig{}, errors.New(
 			"a NAT64 prefix needs a shard public IPv4 address to translate into")
+	} else if c.TranslateWellKnownPrefix {
+		return natprog.NatShardConfig{}, errors.New(
+			"well-known prefix translation needs a shard public IPv4 address to translate into")
 	}
 
 	if value.ServesV6 == 0 && value.ServesV4 == 0 {
@@ -203,6 +213,7 @@ func (t *ShardConfigTable) Get() (ShardConfig, bool, error) {
 	if value.ServesV4 != 0 {
 		cfg.ShardPubAddr4 = v4FromWire(value.ShardPubAddr4)
 		cfg.NAT64Prefix = netip.PrefixFrom(netip.AddrFrom16(value.Nat64Prefix), nat64PrefixLen)
+		cfg.TranslateWellKnownPrefix = value.Flags&natprog.ShardFlagWKP != 0
 	}
 	return cfg, true, nil
 }

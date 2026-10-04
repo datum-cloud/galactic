@@ -168,3 +168,37 @@ func TestShardConfigTable_SetRejectsIPv4(t *testing.T) {
 		})
 	}
 }
+
+func TestShardConfigTable_WellKnownPrefixRoundTrips(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		table := NewShardConfigTable(newFakeTable())
+		cfg := ShardConfig{
+			ShardSID:                 netip.MustParseAddr("fc00:1:2::1"),
+			ShardPubAddr4:            netip.MustParseAddr("192.0.2.10"),
+			NAT64Prefix:              netip.MustParsePrefix("2001:db8:64::/96"),
+			TranslateWellKnownPrefix: on,
+		}
+		if err := table.Set(cfg); err != nil {
+			t.Fatalf("Set(TranslateWellKnownPrefix=%v) error = %v", on, err)
+		}
+		got, ok, err := table.Get()
+		if err != nil || !ok {
+			t.Fatalf("Get() = _, %v, %v; want a configuration", ok, err)
+		}
+		if got != cfg {
+			t.Errorf("Get() = %+v, want %+v", got, cfg)
+		}
+	}
+}
+
+func TestShardConfigTable_WellKnownPrefixNeedsNAT64(t *testing.T) {
+	table := NewShardConfigTable(newFakeTable())
+	err := table.Set(ShardConfig{
+		ShardSID:                 netip.MustParseAddr("fc00:1:2::1"),
+		ShardPubAddr6:            netip.MustParseAddr("2001:db8:9999::1"),
+		TranslateWellKnownPrefix: true,
+	})
+	if err == nil {
+		t.Fatal("Set() error = nil, want an error for well-known prefix translation without NAT64")
+	}
+}

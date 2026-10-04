@@ -193,24 +193,26 @@ assigns the shard's identity; the `galactic-nat` process on the target node
 programs its datapath from it and reports what it is actually programmed
 with in status.
 
-| Field                     | Required | Type     | Description                                                                                            |
-| ------------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------ |
-| `spec.targetRef.name`     | Yes      | `string` | Kubernetes node name this shard's `galactic-nat` process runs on.                                      |
-| `spec.shardSID`           | No       | `string` | This shard's SRv6 uSID. Write-once.                                                                    |
-| `spec.shardAddressIPv6`   | No       | `string` | IPv6 masquerade source. Setting it enables NAT66. Write-once.                                          |
-| `spec.shardAddressIPv4`   | No       | `string` | IPv4 masquerade source. Setting it, with `nat64Prefix`, enables NAT64. Write-once.                     |
-| `spec.nat64Prefix`        | No       | `string` | The fabric-wide `/96` this shard translates to IPv4. Set together with `shardAddressIPv4`. Write-once. |
-| `status.shardSID`         | —        | `string` | The SID the datapath is programmed with.                                                               |
-| `status.shardAddressIPv6` | —        | `string` | The IPv6 masquerade source the datapath is programmed with. Empty means no NAT66.                      |
-| `status.shardAddressIPv4` | —        | `string` | The IPv4 masquerade source the datapath is programmed with. Empty means no NAT64.                      |
-| `status.nat64Prefix`      | —        | `string` | The `/96` the datapath is programmed to translate.                                                     |
-| `status.conditions`       | —        | —        | `Ready` (datapath on every uplink) and `Programmed` (datapath translating with the spec's identity).   |
+| Field                              | Required | Type     | Description                                                                                            |
+| ---------------------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------ |
+| `spec.targetRef.name`              | Yes      | `string` | Kubernetes node name this shard's `galactic-nat` process runs on.                                      |
+| `spec.shardSID`                    | No       | `string` | This shard's SRv6 uSID. Write-once.                                                                    |
+| `spec.shardAddressIPv6`            | No       | `string` | IPv6 masquerade source. Setting it enables NAT66. Write-once.                                          |
+| `spec.shardAddressIPv4`            | No       | `string` | IPv4 masquerade source. Setting it, with `nat64Prefix`, enables NAT64. Write-once.                     |
+| `spec.nat64Prefix`                 | No       | `string` | The fabric-wide `/96` this shard translates to IPv4. Set together with `shardAddressIPv4`. Write-once. |
+| `spec.translateWellKnownPrefix`    | No       | `bool`   | Also translate the RFC 6052 Well-Known Prefix `64:ff9b::/96`. Requires `nat64Prefix`. Mutable.         |
+| `status.shardSID`                  | —        | `string` | The SID the datapath is programmed with.                                                               |
+| `status.shardAddressIPv6`          | —        | `string` | The IPv6 masquerade source the datapath is programmed with. Empty means no NAT66.                      |
+| `status.shardAddressIPv4`          | —        | `string` | The IPv4 masquerade source the datapath is programmed with. Empty means no NAT64.                      |
+| `status.nat64Prefix`               | —        | `string` | The `/96` the datapath is programmed to translate.                                                     |
+| `status.translatesWellKnownPrefix` | —        | `bool`   | Whether the datapath is programmed to translate `64:ff9b::/96` too.                                    |
+| `status.conditions`                | —        | —        | `Ready` (datapath on every uplink) and `Programmed` (datapath translating with the spec's identity).   |
 
-Every identity field is optional and write-once. A shard can exist before
-its identity is assigned, and gains it later with a spec update; once
-assigned, a value cannot change or be cleared, because the datapath claims
-return traffic by exact match on it and a change strands every established
-flow. A shard holding the wrong identity is deleted and recreated instead.
+Every identity field except `translateWellKnownPrefix` is optional and
+write-once. A shard can exist before its identity is assigned, and gains it
+later with a spec update; once assigned, a value cannot change or be
+cleared, because the datapath claims return traffic by exact match on it and
+a change strands every established flow. A shard holding the wrong identity is deleted and recreated instead.
 
 The datapath needs a SID and at least one family before it translates
 anything:
@@ -289,6 +291,19 @@ the like), or a multicast or reserved one, is dropped and counted as
 `nat64_non_global_dest`, the rule RFC 6052 section 3.1 sets for the
 Well-Known Prefix.
 
+`translateWellKnownPrefix: true` translates `64:ff9b::/96` alongside
+`nat64Prefix`, to the same `shardAddressIPv4`, so tenants whose resolver is
+a public DNS64 service reach IPv4-only destinations. A reply returns from
+the address the tenant sent to, under whichever prefix it used. An ICMPv4
+error about a Well-Known Prefix flow from a non-global router is dropped as
+`icmp_untranslatable`, since RFC 6052 forbids synthesizing that source.
+Toggling it reprograms the running shard. Turning it off sends every
+`64:ff9b::/96` packet, open flows included, down the NAT66 path, which
+blackholes destinations tenants already resolved until their DNS TTLs
+expire. Tenants reach the prefix only once
+`GALACTIC_CNI_NAT64_PREFIX` lists it alongside the NSP (see
+[below](#shard-membership-galactic-cni-side)).
+
 Example:
 
 ```yaml
@@ -305,6 +320,7 @@ spec:
   shardAddressIPv6: "2001:db8:9966:1::1"
   shardAddressIPv4: "192.0.2.1"
   nat64Prefix: "2001:db8:64::/96"
+  translateWellKnownPrefix: true
 ```
 
 ### RBAC
@@ -428,7 +444,7 @@ enough; UDP and ICMP do.
 
 ICMPv4 errors about a tenant's NAT64 flows reach it as the ICMPv6 errors RFC
 7915 section 4.2 maps them to, quoted packet translated too, from the
-reporting router's address synthesized into the NAT64 prefix — so
+reporting router's address synthesized into the prefix the flow used — so
 traceroute names each IPv4 hop, and a Fragmentation Needed arrives as a
 Packet Too Big for 20 bytes more than the IPv4 MTU. The quote is carried
 whole unless the ICMPv6 packet would exceed 1280 bytes or the message

@@ -94,9 +94,9 @@
 //  3. IPv6 destination whose top 64 bits match shard_sid, with an
 //     IPv6-in-IPv6 next header, is a tenant's outbound packet encapsulated the
 //     way any cross-node SRv6 destination is. The *inner* destination decides
-//     the family: inside nat64_prefix -> nat64_forward, otherwise
-//     nat66_forward; or the _icmp_ leaf of the same family for an inner
-//     ICMPv6 packet.
+//     the family: inside nat64_prefix, or inside 64:ff9b::/96 when
+//     NAT_SHARD_FLAG_WKP is set -> nat64_forward, otherwise nat66_forward;
+//     or the _icmp_ leaf of the same family for an inner ICMPv6 packet.
 //  4. IPv4 destination equal to shard_pub_addr4 is a reply from the IPv4
 //     internet -> nat64_return; for ICMPv4, nat64_icmp_error for an error
 //     type and nat64_icmp_return for anything else.
@@ -250,6 +250,9 @@ static long (*bpf_xdp_adjust_tail)(void *ctx, int delta) = (void *) BPF_FUNC_xdp
 // an operator turns it on (GALACTIC_NAT_ECHO_RESPONDER): an internet-facing
 // address that answers pings is a policy choice, not a default.
 #define NAT_SHARD_FLAG_ECHO_RESPONDER 0x1
+// WKP additionally translates the RFC 6052 Well-Known Prefix 64:ff9b::/96
+// alongside nat64_prefix. Meaningful only with serves_v4.
+#define NAT_SHARD_FLAG_WKP 0x2
 
 // The ICMP this shard emits on its own behalf -- echo-responder replies, and
 // the Packet Too Big and Fragmentation Needed it sends a sender whose reply
@@ -383,10 +386,10 @@ struct conn_key {
 // key found it.
 //
 // For a NAT64 flow, dest_addr holds the *synthesized* IPv6 destination the
-// tenant originally sent to (nat64_prefix plus the peer's IPv4 address), not
-// the peer's IPv4 address alone. The return path needs it verbatim as the IPv6
-// source it rebuilds toward the tenant: a reply whose source is anything else
-// does not match the socket the tenant opened.
+// tenant originally sent to (whichever prefix it used plus the peer's IPv4
+// address), not the peer's IPv4 address alone. The return path needs it
+// verbatim as the IPv6 source it rebuilds toward the tenant: a reply whose
+// source is anything else does not match the socket the tenant opened.
 struct conn_value {
 	__u8 backend_addr[16];
 	__be16 backend_port;
@@ -613,6 +616,19 @@ static NAT_ALWAYS_INLINE int nat64_prefix_matches(const __u8 daddr[16], const __
 {
 	for (int i = 0; i < 12; i++) {
 		if (daddr[i] != prefix[i])
+			return 0;
+	}
+	return 1;
+}
+
+// wkp_matches tests an address against the RFC 6052 Well-Known Prefix,
+// 64:ff9b::/96.
+static NAT_ALWAYS_INLINE int wkp_matches(const __u8 addr[16])
+{
+	if (addr[0] != 0x00 || addr[1] != 0x64 || addr[2] != 0xff || addr[3] != 0x9b)
+		return 0;
+	for (int i = 4; i < 12; i++) {
+		if (addr[i] != 0)
 			return 0;
 	}
 	return 1;
@@ -2450,6 +2466,13 @@ int nat64_icmp_error(struct xdp_md *ctx)
 		count_drop(DROP_REASON_NAT64_ICMP_NO_CONN);
 		return XDP_DROP;
 	}
+	// The reporting router's address is synthesized into the prefix the
+	// tenant's flow used, which RFC 6052 section 3.1 forbids for a non-global
+	// address under the Well-Known Prefix.
+	if (wkp_matches(cv->dest_addr) && v4_non_global((const __u8 *) &ip4->saddr)) {
+		count_drop(DROP_REASON_NAT_ICMP_UNTRANSLATABLE);
+		return XDP_DROP;
+	}
 
 	// The ICMPv6 message's rebuilt front, on the stack as 14 words: header,
 	// quoted IPv6 header, first 8 quoted transport bytes.
@@ -2483,7 +2506,7 @@ int nat64_icmp_error(struct xdp_md *ctx)
 	}
 
 	__u8 src6[16];
-	__builtin_memcpy(src6, cfg->nat64_prefix, 12);
+	__builtin_memcpy(src6, cv->dest_addr, 12);
 	__builtin_memcpy(&src6[12], &ip4->saddr, 4);
 	__u8 dst6[16];
 	__builtin_memcpy(dst6, cv->backend_addr, 16);
@@ -2707,7 +2730,8 @@ int nat_ingress(struct xdp_md *ctx)
 			}
 			// The inner destination, not the outer one, decides the family.
 			// A shard not serving IPv4 skips the prefix test entirely.
-			if (cfg->serves_v4 && nat64_prefix_matches(inner->daddr, cfg->nat64_prefix)) {
+			if (cfg->serves_v4 && (nat64_prefix_matches(inner->daddr, cfg->nat64_prefix) ||
+					       ((cfg->flags & NAT_SHARD_FLAG_WKP) && wkp_matches(inner->daddr)))) {
 				bpf_tail_call(ctx, &nat_progs, inner->nexthdr == NAT_IPPROTO_ICMPV6 ?
 							       NAT_PROG_NAT64_ICMP_FORWARD : NAT_PROG_NAT64_FORWARD);
 				return XDP_PASS;

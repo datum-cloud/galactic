@@ -49,6 +49,11 @@ const (
 // address instead of dropping it as unsolicited.
 const ShardFlagEchoResponder uint8 = 0x1
 
+// ShardFlagWKP is shard_config.flags' NAT_SHARD_FLAG_WKP: set, the shard also
+// translates the RFC 6052 Well-Known Prefix 64:ff9b::/96 alongside its NAT64
+// prefix.
+const ShardFlagWKP uint8 = 0x2
+
 // Address families as the datapath writes them into conn_key.family. They
 // discriminate a NAT64 row, whose IPv4 addresses are stored IPv4-mapped, from a
 // genuine IPv6 flow that happens to fall in ::ffff:0:0/96.
