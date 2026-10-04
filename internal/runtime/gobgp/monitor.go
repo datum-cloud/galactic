@@ -22,7 +22,6 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/intf"
-	"go.datum.net/galactic/internal/plumbing/srv6"
 	vrfpkg "go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -54,7 +53,8 @@ var (
 // thousands and one per VRF would not scale.
 //
 // It also starts the plain-route reconciler, which owns the kernel routes for
-// paths carrying no route target.
+// paths carrying no route target, and the loop retrying VRF routes whose
+// install failed.
 func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer) {
 	if r.srvCtx == nil {
 		slog.Info("startRIBMonitor: skipping — srvCtx is nil")
@@ -72,6 +72,13 @@ func (r *GoBGPRuntime) startRIBMonitor(b *gobgpserver.BgpServer) {
 			go func() {
 				defer r.wg.Done()
 				r.plain.run(r.srvCtx)
+			}()
+		}
+		if r.vrf != nil {
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				r.vrf.run(r.srvCtx)
 			}()
 		}
 	})
@@ -145,15 +152,15 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	tableID := install.tableID
 
 	prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
-	plainPrefix := netip.PrefixFrom(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength)).Masked()
+	routePrefix := netip.PrefixFrom(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength)).Masked()
 
 	if path.Withdrawal {
 		slog.Info(logPrefix+": withdrawing route", "prefix", prefix, "table", tableID, "plain", install.plain)
 		if install.plain {
-			r.plain.withdraw(plainPrefix)
+			r.plain.withdraw(routePrefix)
 			return
 		}
-		if delErr := srv6.RouteEgressDel(prefix, tableID); delErr != nil {
+		if delErr := r.vrf.withdraw(vrfRouteKey{tableID: tableID, prefix: routePrefix}); delErr != nil {
 			slog.Error(logPrefix+": route delete failed", "prefix", prefix, "table", tableID, "err", delErr)
 		}
 		return
@@ -177,12 +184,12 @@ func (r *GoBGPRuntime) processEVPNPath(path *apiutil.Path, logPrefix string) {
 	slog.Info(logPrefix+": installing route", "prefix", prefix, "gw", gw, "table", tableID, "plain", install.plain)
 	if install.plain {
 		// The reconciler installs it, and keeps its next hop current.
-		r.plain.set(plainPrefix, gw)
+		r.plain.set(routePrefix, gw)
 		return
 	}
-	if addErr := srv6.RouteEgressAdd(prefix, gw, tableID); addErr != nil {
-		slog.Error(logPrefix+": route install failed", "prefix", prefix, "gw", gw, "table", tableID, "err", addErr)
-	}
+	// Retried by r.vrf until it installs or is withdrawn, since BGP will not
+	// deliver this path again unless it changes.
+	r.vrf.install(vrfRouteKey{tableID: tableID, prefix: routePrefix}, gw)
 }
 
 // routeInstall is matchTableID's result: which kernel table the route belongs

@@ -80,6 +80,9 @@ type plainRoutes struct {
 	// startedAt is when run began, for gcGrace.
 	startedAt time.Time
 
+	// report, when non-nil, is given len(failing) after every sync.
+	report func(int)
+
 	// resync, debounce and gcGrace default to plainRouteResync,
 	// plainRouteDebounce and plainRouteGCGrace; now is time.Now. All are
 	// replaceable in tests.
@@ -89,8 +92,9 @@ type plainRoutes struct {
 	now      func() time.Time
 }
 
-func newPlainRoutes() *plainRoutes {
+func newPlainRoutes(report func(int)) *plainRoutes {
 	return &plainRoutes{
+		report:    report,
 		desired:   make(map[netip.Prefix]net.IP),
 		withdrawn: make(map[netip.Prefix]struct{}),
 		kick:      make(chan struct{}, 1),
@@ -216,6 +220,10 @@ func (p *plainRoutes) sync() {
 
 	if p.now().Sub(p.startedAt) >= p.gcGrace {
 		p.collect(desired)
+	}
+
+	if p.report != nil {
+		p.report(len(p.failing))
 	}
 }
 

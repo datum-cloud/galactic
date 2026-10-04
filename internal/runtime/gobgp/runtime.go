@@ -20,6 +20,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	gobgpserver "github.com/osrg/gobgp/v4/pkg/server"
+	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -94,6 +95,11 @@ type GoBGPRuntime struct {
 	// plain owns the kernel routes for EVPN paths carrying no route target.
 	// Its reconciler starts with the RIB watcher, under monitorOnce.
 	plain *plainRoutes
+	// vrf installs the tenant routes for EVPN paths matching a VRF's route
+	// target, and retries any that fail. Its retry loop starts with the RIB
+	// watcher, under monitorOnce. Nil in tests that construct a runtime
+	// directly and never install a route.
+	vrf *vrfRoutes
 	// peerStateMu guards lastPeerState, kept separate from mu so the peer-event
 	// watcher never contends with the lock Apply and Status hold for
 	// potentially long VRF and policy convergence work.
@@ -139,6 +145,7 @@ func NewRuntimeFactory(
 	listenPort int32, reflector bool, localAddress string, observer model.PeerStateObserver, bmp BMPConfig,
 ) runtime.RuntimeFactory {
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
+		router := key.String()
 		return &GoBGPRuntime{
 			key:                   key,
 			server:                newServer(Config{}),
@@ -155,7 +162,8 @@ func NewRuntimeFactory(
 			rtIndex:               make(map[string]uint32),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 			appliedRoutes:         make(map[evpnRouteKey]evpnRoute),
-			plain:                 newPlainRoutes(),
+			plain:                 newPlainRoutes(installFailingReporter(router, "plain")),
+			vrf:                   newVRFRoutes(installFailingReporter(router, "vrf")),
 			observer:              observer,
 			bmp:                   newBMPKeeper(bmp, key.String()),
 		}, nil
@@ -347,6 +355,9 @@ func (r *GoBGPRuntime) applyVRFs(
 	for name := range r.appliedVRFs {
 		if _, ok := desired[name]; !ok {
 			deleteVRF(ctx, b, name)
+			if r.vrf != nil {
+				r.vrf.forgetTable(r.appliedVRFs[name])
+			}
 			delete(r.appliedVRFs, name)
 			delete(r.appliedVRFImportRTs, name)
 		}
@@ -686,6 +697,7 @@ func (r *GoBGPRuntime) Stop(ctx context.Context) error {
 		r.serverCtxCancel = nil
 	}
 	r.wg.Wait()
+	routeInstallFailing.DeletePartialMatch(prometheus.Labels{labelRouter: r.key.String()})
 	return nil
 }
 

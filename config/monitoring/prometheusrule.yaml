@@ -191,6 +191,24 @@ spec:
             description: >-
               galactic-router's BMP session to {{ $labels.station }} has been down for 10 minutes, or the station's
               name does not resolve. Route history and Peer Down events for this router are not being recorded.
+        # vrf counts tenant VPC routes, plain counts egress shard and VIP routes.
+        # The router retries both as the underlay changes, so this fires only
+        # for routes still failing after 10 minutes of retries.
+        - alert: GalacticRouterRoutesNotInstalled
+          expr: galactic_router_route_install_failing{job=~"galactic-router|galactic-router-rr"} > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $value }} {{ $labels.kind }} routes on {{ $labels.node }} are not installed"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticrouterroutesnotinstalled"
+            description: >-
+              galactic-router on {{ $labels.node }} has failed for 10 minutes to install {{ $value }}
+              {{ $labels.kind }} routes it holds a best path for, so this node cannot reach those prefixes.
+              The router's "route install failed" log lines name each prefix and the error, usually a SID
+              with no route over an SRv6 uplink or an unresolved neighbor.
         - alert: GalacticRouterMetricsDown
           expr: up{job=~"galactic-router|galactic-router-rr"} == 0
           for: 5m
@@ -203,4 +221,4 @@ spec:
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticroutermetricsdown"
             description: >-
               Prometheus cannot reach galactic-router's metrics port on {{ $labels.node }} (9179), so
-              GalacticRouterBMPStationDown cannot fire for it.
+              GalacticRouterBMPStationDown and GalacticRouterRoutesNotInstalled cannot fire for it.

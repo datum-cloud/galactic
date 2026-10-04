@@ -111,6 +111,16 @@ peer's site.
 TCP port for the controller-runtime metrics HTTP server. Exposes Prometheus
 metrics for monitoring.
 
+Besides controller-runtime's own metrics, it exports
+`galactic_router_route_install_failing`, labeled `router` (the BGPRouter's
+`namespace/name`) and `kind`: the number of routes this node holds a best path
+for but failed to install on the last attempt. `vrf` counts tenant VPC routes
+in `egress_route_table`, `plain` counts routes for paths with no route target
+(egress shards and VIPs). Both are retried whenever the main routing table
+changes and every 30 seconds, so a value above `0` that persists means those
+prefixes stay unreachable from this node. The `route install failed` log line
+names each one.
+
 **Type:** integer
 **Default:** `9179`
 **Valid values:** `1`–`65535`
