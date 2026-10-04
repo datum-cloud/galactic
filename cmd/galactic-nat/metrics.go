@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -72,17 +73,19 @@ func familyLabel(family uint8) string {
 }
 
 func (c *natCollector) collectConns(ch chan<- prometheus.Metric) {
-	entries, err := c.connTable.List()
+	// A walk the datapath's own inserts and evictions disturbed still reports
+	// what it counted: an error metric here fails the whole scrape, drops
+	// included.
+	counts, err := c.connTable.CountByFamily()
 	if err != nil {
-		ch <- prometheus.NewInvalidMetric(connsDesc, fmt.Errorf("list nat_conn_table: %w", err))
-		return
+		slog.Debug("nat_conn_table walk incomplete; reporting an approximate count", "err", err)
 	}
 	// Both families are always reported, zero included: a family that
 	// disappears from the output entirely reads as "not scraped" rather than
 	// "no flows", which is the difference that matters at 3am.
 	byFamily := map[string]int{"nat66": 0, "nat64": 0}
-	for _, entry := range entries {
-		byFamily[familyLabel(entry.Family)]++
+	for family, count := range counts {
+		byFamily[familyLabel(family)] += count
 	}
 	for family, count := range byFamily {
 		ch <- prometheus.MustNewConstMetric(connsDesc, prometheus.GaugeValue, float64(count), family)
