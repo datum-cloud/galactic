@@ -387,6 +387,114 @@ tests:
                 idle sessions that have not expired, so tenants' long-lived connections through this shard break
                 when they next send. galactic_nat_sessions shows which family and protocol hold the table.
 
+  # A single stalled receive queue fires, and so do two of four; drops
+  # spread across every queue (a burst) do not, nor does a single-queue
+  # interface, nor a lossy queue receiving 2 packets a second. Counters grow every 30s: 3000 packets is 100 a second.
+  - interval: 30s
+    input_series:
+      # dfw-worker2 ens1f1np1: queue 2 discards 300 of every 3300 (9.1%),
+      # queue 0 none.
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker2",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker2",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0x40"
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker2",interface="ens1f1np1",driver="bnxt_en",queue="2"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker2",interface="ens1f1np1",driver="bnxt_en",queue="2"}'
+        values: "0+300x40"
+      # dfw-worker2 ens2f1np1: both queues discard alike, a burst.
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker2",interface="ens2f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker2",interface="ens2f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+300x40"
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker2",interface="ens2f1np1",driver="bnxt_en",queue="1"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker2",interface="ens2f1np1",driver="bnxt_en",queue="1"}'
+        values: "0+300x40"
+      # sjc-worker2 ens1f1np1: queue 0 loses half its packets, at 2 a second.
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="sjc-worker2",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+60x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="sjc-worker2",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+60x40"
+      # dfw-worker3 ens1f1np1: queues 1 and 3 of four both stall alike, queues
+      # 0 and 2 are clean.
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0x40"
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="1"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="1"}'
+        values: "0+300x40"
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="2"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="2"}'
+        values: "0x40"
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="3"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="dfw-worker3",interface="ens1f1np1",driver="bnxt_en",queue="3"}'
+        values: "0+300x40"
+      # sjc-worker3 ens1f1np1: a single queue drops; it is all of its own queues.
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="sjc-worker3",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="sjc-worker3",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+300x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GalacticNatUplinkRxQueueStalled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: GalacticNatUplinkRxQueueStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker2
+              interface: ens1f1np1
+              driver: bnxt_en
+              queue: "2"
+            exp_annotations:
+              summary: "Receive queue 2 of ens1f1np1 on dfw-worker2 is dropping packets"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+              description: >-
+                Queue 2 of uplink ens1f1np1 (bnxt_en) has discarded 9.091% of its packets for 10 minutes while no
+                more than half of the interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the
+                interface clears it, once its bond partner is confirmed up.
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker3
+              interface: ens1f1np1
+              driver: bnxt_en
+              queue: "1"
+            exp_annotations:
+              summary: "Receive queue 1 of ens1f1np1 on dfw-worker3 is dropping packets"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+              description: >-
+                Queue 1 of uplink ens1f1np1 (bnxt_en) has discarded 9.091% of its packets for 10 minutes while no
+                more than half of the interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the
+                interface clears it, once its bond partner is confirmed up.
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker3
+              interface: ens1f1np1
+              driver: bnxt_en
+              queue: "3"
+            exp_annotations:
+              summary: "Receive queue 3 of ens1f1np1 on dfw-worker3 is dropping packets"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+              description: >-
+                Queue 3 of uplink ens1f1np1 (bnxt_en) has discarded 9.091% of its packets for 10 minutes while no
+                more than half of the interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the
+                interface clears it, once its bond partner is confirmed up.
+
   # An unreachable shard for 5m fires; one that comes back inside that does
   # not.
   - interval: 30s
@@ -410,4 +518,4 @@ tests:
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatmetricsdown"
               description: >-
                 Prometheus cannot reach galactic-nat's metrics port on dfw-worker2 (9182), so
-                GalacticNatSessionTableEvictingLive cannot fire for it.
+                GalacticNatSessionTableEvictingLive and GalacticNatUplinkRxQueueStalled cannot fire for it.

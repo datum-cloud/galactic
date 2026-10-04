@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/safchain/ethtool"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
@@ -24,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/natmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
+	"go.datum.net/galactic/internal/plumbing/nicstats"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -83,6 +85,13 @@ func (d *natDatapath) MissingUplinks() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return slices.Clone(d.missing)
+}
+
+// Uplinks reports the most recently resolved uplink set.
+func (d *natDatapath) Uplinks() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.uplinks)
 }
 
 // setMissing records missing, reporting whether it changed.
@@ -316,6 +325,8 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 		return nil, fmt.Errorf("register egress shard metrics collector: %w", err)
 	}
 
+	registerUplinkQueueStats(metricsReg, d)
+
 	natDatapathKeepAlive.objs = objs
 	natDatapathKeepAlive.set = set
 
@@ -328,6 +339,23 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 	d.attached = true
 	go d.watchUplinks(ctx, cfg.UplinkInterfaces, set, onCoverage)
 	return d, nil
+}
+
+// registerUplinkQueueStats exports the per-queue receive counters of every
+// uplink d currently resolves. A single stalled NIC receive queue drops packets
+// before the datapath sees them, so drops_total stays flat through it (#673);
+// these counters are what show it. Failing to set them up costs only those
+// counters, so it is logged rather than failing the shard.
+func registerUplinkQueueStats(metricsReg prometheus.Registerer, d *natDatapath) {
+	et, err := ethtool.NewEthtool()
+	if err != nil {
+		slog.Warn("Cannot open ethtool; uplink receive queue metrics are disabled", "err", err)
+		return
+	}
+	if err := metricsReg.Register(nicstats.NewCollector(metricsNamespace, et, d.Uplinks)); err != nil {
+		et.Close()
+		slog.Warn("Cannot register uplink receive queue metrics", "err", err)
+	}
 }
 
 // uplinkRetryInterval is how often waitForUplinks resolves again while none

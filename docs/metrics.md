@@ -232,6 +232,8 @@ One `galactic-nat` pod per egress shard; every value is per shard.
 | `galactic_nat_conn_table_oldest_row_age_seconds` | gauge   | none                                     | Seconds since the least recently seen session, expired ones included, last translated a packet. Meaningful only on a near-full table |
 | `galactic_nat_conn_table_max_entries`            | gauge   | none                                     | Table capacity in rows, shared by both families                                                                                      |
 | `galactic_nat_drops_total`                       | counter | `reason`                                 | Packets dropped by the NAT datapath                                                                                                  |
+| `galactic_nat_uplink_rx_queue_packets_total`     | counter | `interface`, `driver`, `queue`           | Packets one NIC receive queue of an uplink received, from `ethtool -S`. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e`, `mlx5_core`  |
+| `galactic_nat_uplink_rx_queue_discards_total`    | counter | `interface`, `driver`, `queue`           | Packets one receive queue discarded before the datapath saw them. Reported only by drivers that count per queue: `bnxt_en` today     |
 
 Caveats for the session table:
 
@@ -268,13 +270,17 @@ sum by (node, reason) (rate(galactic_nat_drops_total{reason=~".*_pat_exhausted|n
 
 # Drop rate by reason
 sum by (node, reason) (rate(galactic_nat_drops_total[5m])) > 0
+
+# Discard share per uplink receive queue (#673)
+rate(galactic_nat_uplink_rx_queue_discards_total[5m])
+  / (rate(galactic_nat_uplink_rx_queue_discards_total[5m]) + rate(galactic_nat_uplink_rx_queue_packets_total[5m]))
 ```
 
 ## Shipped alerts
 
 `config/monitoring/prometheusrule.yaml` (the `galactic-bgp` PrometheusRule,
-unit-tested with `task test:alerts`) covers routing and the NAT session
-table. Every alert
+unit-tested with `task test:alerts`) covers routing, the NAT session table
+and the egress shards' uplinks. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                | Fires when                                              | For | Severity |
@@ -292,4 +298,5 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticRouterRoutesNotInstalled     | `galactic_router_route_install_failing > 0`             | 10m | warning  |
 | GalacticRouterMetricsDown            | `galactic-router` or `galactic-router-rr` scrape down   | 5m  | warning  |
 | GalacticNatSessionTableEvictingLive  | table over 90% full, oldest row under 7440 s            | 15m | warning  |
+| GalacticNatUplinkRxQueueStalled      | one uplink rx queue discards >1%, most siblings do not  | 10m | critical |
 | GalacticNatMetricsDown               | `galactic-nat` scrape down                              | 5m  | warning  |
