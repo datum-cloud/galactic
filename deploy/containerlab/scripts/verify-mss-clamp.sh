@@ -31,8 +31,8 @@ declare -A FIRST_SHARD=([dfw]=dfw-worker2 [sjc]=sjc-worker2 [iad]=iad-worker2)
 
 REMOTE=clab-gvpc-remote-host
 HOST6="2001:db8:1:40::2"
-# 10.1.40.2 synthesized into the fabric's NAT64 prefix.
-HOST4_SYNTH="2001:db8:64::a01:2802"
+# 11.1.40.2 synthesized into the fabric's NAT64 prefix.
+HOST4_SYNTH="2001:db8:64::b01:2802"
 LARGE=large.bin
 LARGE_BYTES=1048576
 XFER_BYTES=3000000

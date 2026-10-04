@@ -154,7 +154,7 @@ shard per edge node — two in dfw, one each in sjc and iad (`resources/galactic
 every CNI ADD now installs a default route toward its own site's shards' advertised SIDs
 (`internal/plumbing/srv6.EgressDefaultRouteAdd`, `internal/cnibgp`) — see
 `resources/galactic-nat/README.md` for the full mechanism. `remote-host` is what that
-egress path now has to reach: nginx on `2001:db8:1:40::2` and `10.1.40.2`, outside every
+egress path now has to reach: nginx on `2001:db8:1:40::2` and `11.1.40.2`, outside every
 cluster, advertised into the fabric by `tr4` on the host's behalf.
 
 `dfw`, `iad`, and `sjc` are the three Kind cluster names — not separate ContainerLab
@@ -251,7 +251,7 @@ its behalf.
 | dfw-worker3 – tr1:bond2 | 2001:db8:1:12::/64 | 2001:db8:1:12::1 | 2001:db8:1:12::2 | 10.1.12.0/24 | 10.1.12.1  | 10.1.12.2    |
 | sjc-worker2 – tr2:bond1 | 2001:db8:1:21::/64 | 2001:db8:1:21::1 | 2001:db8:1:21::2 | 10.1.21.0/24 | 10.1.21.1  | 10.1.21.2    |
 | iad-worker2 – tr3:bond1 | 2001:db8:1:32::/64 | 2001:db8:1:32::1 | 2001:db8:1:32::2 | 10.1.32.0/24 | 10.1.32.1  | 10.1.32.2    |
-| remote-host – tr4:eth4  | 2001:db8:1:40::/64 | 2001:db8:1:40::1 | 2001:db8:1:40::2 | 10.1.40.0/24 | 10.1.40.1  | 10.1.40.2    |
+| remote-host – tr4:eth4  | 2001:db8:1:40::/64 | 2001:db8:1:40::1 | 2001:db8:1:40::2 | 11.1.40.0/24 | 11.1.40.1  | 11.1.40.2    |
 
 ### Site-internal links (numbered, iBGP to the site's edge node)
 

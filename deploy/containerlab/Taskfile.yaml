@@ -344,6 +344,7 @@ tasks:
       - task: "verify:nat-collision"
       - task: "verify:mss-clamp"
       - task: "verify:nat-icmp"
+      - task: "verify:nat64-non-global"
       - task: "verify:scenarios"
 
   # First, because every check after it rides these bonds: a member that
@@ -740,10 +741,10 @@ tasks:
     silent: true
     vars:
       HOST6: "2001:db8:1:40::2"
-      HOST4: "10.1.40.2"
-      # {{.HOST4}} synthesized into the fabric NAT64 prefix: 10.1.40.2 is
-      # 0a01:2802, so the tenant addresses 2001:db8:64::a01:2802.
-      HOST4_SYNTH: "2001:db8:64::a01:2802"
+      HOST4: "11.1.40.2"
+      # {{.HOST4}} synthesized into the fabric NAT64 prefix: 11.1.40.2 is
+      # 0b01:2802, so the tenant addresses 2001:db8:64::b01:2802.
+      HOST4_SYNTH: "2001:db8:64::b01:2802"
       # dfw's tenant egresses through dfw's own first edge shard.
       SENDER_SITE: dfw
       SHARD_NODE: dfw-worker2
@@ -949,6 +950,13 @@ tasks:
     desc: Prove ICMP crosses each site's egress shard (ping, traceroute, PMTUD)
     cmds:
       - ./scripts/verify-nat-icmp.sh
+
+  # A shard refuses NAT64 to IPv4 that is not globally reachable. See the
+  # script's header.
+  "verify:nat64-non-global":
+    desc: Prove each site's egress shard refuses NAT64 to non-global IPv4
+    cmds:
+      - ./scripts/verify-nat64-non-global.sh
 
   "verify:scenarios":
     desc: Verify ping across all VPC test scenarios

@@ -148,9 +148,14 @@ docker exec sjc-control-plane kubectl get bgprouters -A
 ## Off-fabric host (remote-host)
 
 `remote-host` hangs off `tr4` and is in no cluster: nginx on `2001:db8:1:40::2`
-and `10.1.40.2`, reachable from anywhere the transit reaches. It speaks no BGP
+and `11.1.40.2`, reachable from anywhere the transit reaches. It speaks no BGP
 — `tr4` originates its subnets on its behalf, so a missing route here means
 `tr4`'s `network` statements, not the host.
+
+Its IPv4 address has to be globally reachable, because a shard refuses NAT64
+to anything else, and every IPv4 documentation block is on that list. So the
+lab uses `11.1.40.0/24`, one octet past the private `10.1.x.0/24` links, and
+never announces it.
 
 ```bash
 # The host itself, and what it serves
@@ -159,7 +164,7 @@ docker exec clab-gvpc-remote-host curl -sS http://[2001:db8:1:40::2]/
 
 # Its subnets should be in every transit router's RIB, both families
 docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:1:40::/64"
-docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv4 unicast 10.1.40.0/24"
+docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv4 unicast 11.1.40.0/24"
 
 # ...and in each site's fabric, which is what a tenant's egress path needs
 docker exec dfw-control-plane kubectl exec -n galactic-system ds/fabric-router \
@@ -231,7 +236,7 @@ docker exec clab-gvpc-remote-host tcpdump -i eth1 -nn 'tcp port 80'
 # The tenant side of the same request
 pod=$(docker exec dfw-control-plane kubectl -n ns10 get pods -o jsonpath='{.items[0].metadata.name}')
 docker exec dfw-control-plane kubectl -n ns10 exec "$pod" -- curl -sS --max-time 8 http://[2001:db8:1:40::2]/
-docker exec dfw-control-plane kubectl -n ns10 exec "$pod" -- curl -sS --max-time 8 http://[2001:db8:64::a01:2802]/
+docker exec dfw-control-plane kubectl -n ns10 exec "$pod" -- curl -sS --max-time 8 http://[2001:db8:64::b01:2802]/
 ```
 
 The forward half passes on both families, and so does the SRv6 return path:
@@ -295,7 +300,7 @@ host:
   leftover MTU of 1300 lowers the MSS the pod advertises and fails
   `verify:mss-clamp` for ten minutes.
 - **NAT64.** The same three checks against the host's synthesized address,
-  `2001:db8:64::a01:2802`. Each transit hop appears as its IPv4 address
+  `2001:db8:64::b01:2802`. Each transit hop appears as its IPv4 address
   synthesized into the NAT64 prefix (`2001:db8:64::a01:b01` is
   `10.1.11.1`), and the Packet Too Big carries MTU 1320: the narrowed
   link's 1300 plus the 20 bytes the translation strips. NAT64 traceroute
@@ -315,8 +320,16 @@ host:
   or 1440 over NAT64, which has 20 more bytes of translation. The task
   flushes the host's learned MTUs before and after.
 
-The site's shard must count no ICMP drop reason while the first six checks
-run.
+The site's shard must count no ICMP drop reason, and no
+`nat64_non_global_dest`, while the first six checks run.
+
+### Non-global NAT64 destinations
+
+`task verify:nat64-non-global` sends Echo Requests and a UDP datagram from
+each site's ns10 pod to the synthesized form of `10.255.255.103` (`tr4`'s
+loopback, which the lab can route to), `192.168.0.1` and `100.64.0.1`. The
+site's first shard must answer none of them and count each packet as
+`nat64_non_global_dest`.
 
 ### The reply's underlay path
 
