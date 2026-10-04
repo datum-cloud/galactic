@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/cilium/ebpf"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/natmap"
@@ -20,17 +21,27 @@ const metricsNamespace = "galactic_nat"
 // scoped to what the map layer exposes read access to, the connection table
 // being entirely datapath-owned and so observability-only.
 type natCollector struct {
-	connTable   *natmap.ConnTable
-	dropReasons natmap.DropReasonsReader
+	connTable      *natmap.ConnTable
+	connMaxEntries uint32
+	dropReasons    natmap.DropReasonsReader
 }
 
 // newNatCollector builds a collector reading directly from a loaded object
 // set's maps.
 func newNatCollector(objs *natprog.NatObjects) *natCollector {
 	return &natCollector{
-		connTable:   natmap.NewConnTable(natmap.KernelTable{Map: objs.NatConnTable}),
-		dropReasons: objs.DropReasons,
+		connTable:      natmap.NewConnTable(natmap.KernelTable{Map: objs.NatConnTable}),
+		connMaxEntries: mapMaxEntries(objs.NatConnTable),
+		dropReasons:    objs.DropReasons,
 	}
+}
+
+func mapMaxEntries(m *ebpf.Map) uint32 {
+	info, err := m.Info()
+	if err != nil {
+		return m.MaxEntries()
+	}
+	return info.MaxEntries
 }
 
 var (
@@ -40,6 +51,11 @@ var (
 			"snapshot; the table is a self-evicting LRU, so this can fluctuate independently of actual "+
 			"live traffic under memory pressure.",
 		[]string{"family"}, nil,
+	)
+	connTableMaxEntriesDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(metricsNamespace, "", "conn_table_max_entries"),
+		"Capacity of nat_conn_table in rows.",
+		nil, nil,
 	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "drops_total"),
@@ -51,12 +67,14 @@ var (
 // Describe implements prometheus.Collector.
 func (c *natCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- connsDesc
+	ch <- connTableMaxEntriesDesc
 	ch <- dropsDesc
 }
 
 // Collect implements prometheus.Collector.
 func (c *natCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectConns(ch)
+	c.collectConnTableMaxEntries(ch)
 	c.collectDrops(ch)
 }
 
@@ -87,6 +105,13 @@ func (c *natCollector) collectConns(ch chan<- prometheus.Metric) {
 	for family, count := range byFamily {
 		ch <- prometheus.MustNewConstMetric(connsDesc, prometheus.GaugeValue, float64(count), family)
 	}
+}
+
+func (c *natCollector) collectConnTableMaxEntries(ch chan<- prometheus.Metric) {
+	if c.connMaxEntries == 0 {
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(connTableMaxEntriesDesc, prometheus.GaugeValue, float64(c.connMaxEntries))
 }
 
 func (c *natCollector) collectDrops(ch chan<- prometheus.Metric) {
