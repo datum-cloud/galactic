@@ -95,9 +95,10 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table and
-// ifindex_egress_kind_table entries if they exist, mirroring the veth plugin's identical helper but resolving a
-// tap device's host-side interface rather than a veth pair's.
+// unregisterIfindexVRFEntry removes this attachment's ifindex_vrf_table,
+// ifindex_egress_kind_table and tenant_gw_table entries if they exist,
+// mirroring the veth plugin's identical helper but resolving a tap device's
+// host-side interface rather than a veth pair's.
 func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
 	link, err := netlink.LinkByName(hostName)
@@ -127,6 +128,20 @@ func unregisterIfindexVRFEntry(vpc, vpcAttachment, containerID string) {
 
 	if err := kinds.Unregister(uint32(link.Attrs().Index)); err != nil {
 		slog.Warn("DEL: failed to unregister eBPF ifindex_egress_kind_table entry", "err", err,
+			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
+	}
+
+	// The gateway entry shares this row's lifecycle too. Left behind, the next
+	// attachment on this ifindex would be sent errors from this one's gateway
+	// until its own ADD overwrites it.
+	gateways, gatewaysCloser, err := ifindexvrfmap.OpenPinnedGateway(attach.PinDir)
+	if err != nil {
+		return
+	}
+	defer func() { _ = gatewaysCloser.Close() }()
+
+	if err := gateways.Unregister(uint32(link.Attrs().Index)); err != nil {
+		slog.Warn("DEL: failed to unregister eBPF tenant_gw_table entry", "err", err,
 			"containerID", containerID, "vpc", vpc, "vpcAttachment", vpcAttachment, "hostInterface", hostName)
 	}
 }

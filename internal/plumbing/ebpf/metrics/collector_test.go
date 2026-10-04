@@ -453,3 +453,70 @@ func TestCollector_MSSClampTableErrorReportsInvalidMetric(t *testing.T) {
 		t.Errorf("got %d invalid metrics, want 1 for the failed mss_clamp_table read", invalid)
 	}
 }
+
+type fakeEncapMTUTable struct {
+	limit uint32
+	err   error
+}
+
+func (f fakeEncapMTUTable) Lookup(key, valueOut any) error {
+	if f.err != nil {
+		return f.err
+	}
+	if k, ok := key.(uint32); !ok || k != 0 {
+		return fmt.Errorf("fakeEncapMTUTable: key %v, want uint32(0)", key)
+	}
+	*valueOut.(*uint32) = f.limit
+	return nil
+}
+
+func TestCollector_PMTU(t *testing.T) {
+	stats := fakeDropReasons{prog.PMTUStatTooBigSentIPv6: 5, prog.PMTUStatRateLimited: 3}
+	c := NewCollector(
+		usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil,
+	).
+		WithPMTU(stats, fakeEncapMTUTable{limit: 1460})
+
+	results := map[string]float64{}
+	var limits []float64
+	for _, m := range collect(t, c) {
+		if r := labelValue(m, "result"); r != "" {
+			results[r] = metricValue(m)
+		}
+		if len(m.GetLabel()) == 0 {
+			limits = append(limits, metricValue(m))
+		}
+	}
+
+	if len(results) != int(prog.PMTUStatCount) {
+		t.Errorf("emitted %d path MTU outcomes, want all %d", len(results), prog.PMTUStatCount)
+	}
+	for name, want := range map[string]float64{"too_big_sent_ipv6": 5, "rate_limited": 3, "no_gateway": 0} {
+		if results[name] != want {
+			t.Errorf("result %q = %v, want %v", name, results[name], want)
+		}
+	}
+	if len(limits) != 1 || limits[0] != 1460 {
+		t.Errorf("limit series = %v, want one at 1460", limits)
+	}
+}
+
+func TestCollector_EncapMTUTableErrorReportsInvalidMetric(t *testing.T) {
+	c := NewCollector(
+		usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil,
+	).
+		WithPMTU(nil, fakeEncapMTUTable{err: errors.New("map closed")})
+	ch := make(chan prometheus.Metric, 64)
+	c.Collect(ch)
+	close(ch)
+	invalid := 0
+	for m := range ch {
+		var out dto.Metric
+		if err := m.Write(&out); err != nil {
+			invalid++
+		}
+	}
+	if invalid != 1 {
+		t.Errorf("got %d invalid metrics, want 1 for the failed encap_mtu_table read", invalid)
+	}
+}

@@ -277,6 +277,28 @@ docker exec clab-gvpc-remote-host tcpdump -i eth1 -nn -v -c 1 \
 It shows `mss 1400`. Each node's counters are in
 `galactic_usid_tcp_mss_clamp_syns_total{result}` on port 9180.
 
+### Packets too big for the fabric
+
+The largest tenant packet that crosses the fabric is 1460 bytes. A bigger
+one gets an ICMPv6 Packet Too Big, or an ICMPv4 Fragmentation Needed for
+an IPv4 tenant, from the tenant's own gateway on its own node, so its path
+MTU discovery adapts.
+
+`task verify:pmtu` checks every galactic-cni node reports
+`galactic_usid_pmtu_limit_bytes` 1460, then:
+
+- **Between sites.** A 1500-byte ping from dfw to sjc, for ns10 and ns20,
+  must leave the sender's route with MTU 1460, and a 1460-byte ping must
+  then get through.
+- **Over NAT66.** A 1500-byte UDP datagram from each site's ns10 pod to the
+  off-fabric host must leave the route with MTU 1460.
+- **Counters.** Each sending node's
+  `galactic_usid_pmtu_packets_total{result}` must show the errors sent and
+  no packet refused without one.
+
+The task flushes each pod's learned MTUs before and after, from the pod's
+node, for the same reason as `verify:nat-icmp`.
+
 ### ICMP through a shard
 
 `task verify:nat-icmp` runs from each site's ns10 pod toward the off-fabric

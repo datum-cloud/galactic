@@ -438,3 +438,62 @@ func TestRegisterEgressKind_UnpinnedMapIsNotFatal(t *testing.T) {
 		t.Errorf("registerEgressKind with no pinned map = %v, want nil", err)
 	}
 }
+
+// TestRegisterTenantGateway_WritesAndClearsEntry checks an attachment's IPAM
+// gateways reach tenant_gw_table under its host interface's ifindex, and that
+// an ADD with no IPAM result clears the entry rather than leaving a previous
+// attachment's gateway on a reused ifindex.
+func TestRegisterTenantGateway_WritesAndClearsEntry(t *testing.T) {
+	requireRoot(t)
+
+	const vpc = testVPC
+	if err := vrf.Add(vpc); err != nil {
+		t.Fatalf("vrf.Add: %v", err)
+	}
+	t.Cleanup(func() { _ = vrf.Delete(vpc) })
+	if _, err := veth.Add(vpc, testAttachment, testContainerID, 1500); err != nil {
+		t.Fatalf("veth.Add: %v", err)
+	}
+	t.Cleanup(func() { _ = veth.Delete(vpc, testAttachment, testContainerID) })
+	hostLinkObj, err := netlink.LinkByName(intf.GenerateInterfaceNameHost(vpc, testAttachment))
+	if err != nil {
+		t.Fatalf("look up host interface: %v", err)
+	}
+	hostLink := uint32(hostLinkObj.Attrs().Index)
+
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-gw-test-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	loaderObjs, err := attach.Load(pinDir)
+	if err != nil {
+		t.Fatalf("attach.Load: %v", err)
+	}
+	t.Cleanup(func() { _ = loaderObjs.Close() })
+
+	registerTenantGateway(pinDir, vpc, testAttachment, &cniipam.IPAMResult{
+		IPv6Gateway: net.ParseIP("fd20:70::1"),
+		IPv4Gateway: net.ParseIP("172.21.1.1"),
+	})
+
+	table, closer, err := ifindexvrfmap.OpenPinnedGateway(pinDir)
+	if err != nil {
+		t.Fatalf("OpenPinnedGateway: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	gw6, gw4, ok, err := table.Get(hostLink)
+	if err != nil || !ok {
+		t.Fatalf("tenant_gw_table[%d] = ok %v, err %v; want the entry", hostLink, ok, err)
+	}
+	if want := netip.MustParseAddr("fd20:70::1"); gw6 != want {
+		t.Errorf("IPv6 gateway = %v, want %v", gw6, want)
+	}
+	// net.ParseIP returns IPv4 in its 16-byte form; it must land as IPv4.
+	if want := netip.MustParseAddr("172.21.1.1"); gw4 != want {
+		t.Errorf("IPv4 gateway = %v, want %v", gw4, want)
+	}
+
+	registerTenantGateway(pinDir, vpc, testAttachment, nil)
+	if _, _, ok, err := table.Get(hostLink); ok || err != nil {
+		t.Errorf("after an ADD with no IPAM result: ok %v, err %v; want the entry removed", ok, err)
+	}
+}

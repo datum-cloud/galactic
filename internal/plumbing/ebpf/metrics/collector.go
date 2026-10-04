@@ -39,6 +39,12 @@ type Collector struct {
 	// which case the TCP MSS clamp's outcomes and limits are collected too.
 	mssClampStats DropReasonsReader
 	mssClampTable DropReasonsReader
+
+	// pmtuStats and encapMTUTable are nil unless set by WithPMTU, in which
+	// case what usid_egress did with packets too big for the fabric, and the
+	// limit it checks, are collected too.
+	pmtuStats     DropReasonsReader
+	encapMTUTable DropReasonsReader
 }
 
 // NewCollector builds a Collector from already-constructed tables and reader.
@@ -60,7 +66,8 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 		usidmap.NewLocatorTable(usidmap.KernelTable{Map: objs.LocatorTable}),
 		objs.DropReasons,
 		usidmap.NewVPCAttributionTable(usidmap.KernelTable{Map: objs.VpcAttributionTable}),
-	).WithMSSClamp(objs.MssClampStats, objs.MssClampTable)
+	).WithMSSClamp(objs.MssClampStats, objs.MssClampTable).
+		WithPMTU(objs.PmtuStats, objs.EncapMtuTable)
 }
 
 // WithMSSClamp adds the TCP MSS clamp's maps to c: stats, the per-CPU
@@ -68,6 +75,13 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 // returns c.
 func (c *Collector) WithMSSClamp(stats, table DropReasonsReader) *Collector {
 	c.mssClampStats, c.mssClampTable = stats, table
+	return c
+}
+
+// WithPMTU adds the path MTU check's maps to c: stats, the per-CPU pmtu_stats
+// counters, and table, the single-entry encap_mtu_table. It returns c.
+func (c *Collector) WithPMTU(stats, table DropReasonsReader) *Collector {
+	c.pmtuStats, c.encapMTUTable = stats, table
 	return c
 }
 
@@ -111,6 +125,19 @@ var (
 		"The MSS the clamp lowers SYNs to, per tenant address family. Zero means clamping is off for that family.",
 		[]string{"family"}, nil,
 	)
+	pmtuDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "pmtu", "packets_total"),
+		"Tenant packets too big to cross the fabric once encapsulated, by what usid_egress did with them "+
+			"(pmtu_stats map). too_big_sent_ipv6 and frag_needed_sent_ipv4 sent the tenant an ICMP error; "+
+			"every other result dropped the packet without one.",
+		[]string{labelResult}, nil,
+	)
+	encapMTUDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "pmtu", "limit_bytes"),
+		"The largest tenant packet usid_egress encapsulates, the fabric MTU less the outer header. "+
+			"Zero means the check is off.",
+		nil, nil,
+	)
 	blockArgumentUtilizationDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "block", "argument_utilization_ratio"),
 		"galactic_usid_block_arguments_used divided by 4095, the per-Block usable Argument capacity under "+
@@ -128,6 +155,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- blockArgumentUtilizationDesc
 	ch <- mssClampDesc
 	ch <- mssClampLimitDesc
+	ch <- pmtuDesc
+	ch <- encapMTUDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -135,6 +164,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectVRF(ch)
 	c.collectDrops(ch)
 	c.collectMSSClamp(ch)
+	c.collectPMTU(ch)
 }
 
 func (c *Collector) collectMSSClamp(ch chan<- prometheus.Metric) {
@@ -164,6 +194,35 @@ func (c *Collector) collectMSSClamp(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(mssClampLimitDesc, prometheus.GaugeValue, float64(v.MssIpv4), "ipv4")
 		ch <- prometheus.MustNewConstMetric(mssClampLimitDesc, prometheus.GaugeValue, float64(v.MssIpv6), "ipv6")
+	}
+}
+
+func (c *Collector) collectPMTU(ch chan<- prometheus.Metric) {
+	if c.pmtuStats != nil {
+		for i := range prog.PMTUStatCount {
+			var perCPU []uint64
+			if err := c.pmtuStats.Lookup(i, &perCPU); err != nil {
+				ch <- prometheus.NewInvalidMetric(pmtuDesc, fmt.Errorf("lookup pmtu_stats[%d]: %w", i, err))
+				continue
+			}
+			var total uint64
+			for _, v := range perCPU {
+				total += v
+			}
+			name := prog.PMTUStatNames[i]
+			if name == "" {
+				name = fmt.Sprintf("unknown_%d", i)
+			}
+			ch <- prometheus.MustNewConstMetric(pmtuDesc, prometheus.CounterValue, float64(total), name)
+		}
+	}
+	if c.encapMTUTable != nil {
+		var limit uint32
+		if err := c.encapMTUTable.Lookup(uint32(0), &limit); err != nil {
+			ch <- prometheus.NewInvalidMetric(encapMTUDesc, fmt.Errorf("lookup encap_mtu_table: %w", err))
+			return
+		}
+		ch <- prometheus.MustNewConstMetric(encapMTUDesc, prometheus.GaugeValue, float64(limit))
 	}
 }
 

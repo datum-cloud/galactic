@@ -18,8 +18,29 @@ func TestFromMTU_FabricAt1500(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FromMTU(1500): %v", err)
 	}
-	if want := (Values{IPv4: 1420, IPv6: 1400}); got != want {
+	if want := (Values{IPv4: 1420, IPv6: 1400, MaxPacket: 1460}); got != want {
 		t.Errorf("FromMTU(1500) = %+v, want %+v", got, want)
+	}
+}
+
+// TestFromMTU_MaxPacketFitsOnceEncapsulated checks the packet limit is the
+// largest packet that still fits the MTU with the outer header added, and that
+// it agrees with the MSS limits: a full-size TCP segment is exactly that size.
+func TestFromMTU_MaxPacketFitsOnceEncapsulated(t *testing.T) {
+	for _, mtu := range []int{MinMTU, 1500, 9000, MaxMTU} {
+		v, err := FromMTU(mtu)
+		if err != nil {
+			t.Fatalf("FromMTU(%d): %v", mtu, err)
+		}
+		if got := int(v.MaxPacket) + OuterHeaderLen; got != mtu {
+			t.Errorf("MTU %d: largest packet %d is %d bytes encapsulated, want exactly %d", mtu, v.MaxPacket, got, mtu)
+		}
+		if got := int(v.IPv6) + tcpHeaderLen + ipv6HeaderLen; got != int(v.MaxPacket) {
+			t.Errorf("MTU %d: full-size IPv6 segment is %d bytes, want the packet limit %d", mtu, got, v.MaxPacket)
+		}
+		if got := int(v.IPv4) + tcpHeaderLen + ipv4HeaderLen; got != int(v.MaxPacket) {
+			t.Errorf("MTU %d: full-size IPv4 segment is %d bytes, want the packet limit %d", mtu, got, v.MaxPacket)
+		}
 	}
 }
 
@@ -62,7 +83,7 @@ func TestFromMTU_RejectsOutOfRange(t *testing.T) {
 const testUplink = "bond0"
 
 func TestResolve(t *testing.T) {
-	at1500 := Values{IPv4: 1420, IPv6: 1400}
+	at1500 := Values{IPv4: 1420, IPv6: 1400, MaxPacket: 1460}
 	for _, tc := range []struct {
 		name     string
 		override string
@@ -79,7 +100,7 @@ func TestResolve(t *testing.T) {
 		{"auto with an uplink below the IPv6 minimum is an error", ModeAuto, []int{1500, 1200}, Off, true},
 		{"off", ModeOff, []int{1500}, Off, false},
 		{"off needs no uplink", ModeOff, nil, Off, false},
-		{"a number is the fabric MTU", "1496", []int{1500}, Values{IPv4: 1416, IPv6: 1396}, false},
+		{"a number is the fabric MTU", "1496", []int{1500}, Values{IPv4: 1416, IPv6: 1396, MaxPacket: 1456}, false},
 		{"a number overrides a larger uplink MTU", "1500", []int{9000}, at1500, false},
 		{"a number below the IPv6 minimum is an error", "1000", nil, Off, true},
 		{"a number above the maximum is an error", "70000", nil, Off, true},
@@ -117,7 +138,7 @@ func (f *fakeTable) Put(key, value any) error {
 
 func TestWrite_SingleEntryLayout(t *testing.T) {
 	var table fakeTable
-	if err := Write(&table, Values{IPv4: 1420, IPv6: 1400}); err != nil {
+	if err := Write(&table, Values{IPv4: 1420, IPv6: 1400, MaxPacket: 1460}); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if len(table.puts) != 1 || table.keys[0] != uint32(0) {
@@ -125,6 +146,49 @@ func TestWrite_SingleEntryLayout(t *testing.T) {
 	}
 	if want := (prog.UsidMssClampValue{MssIpv4: 1420, MssIpv6: 1400}); table.puts[0] != want {
 		t.Errorf("Write stored %+v, want %+v: each family's value in its own field", table.puts[0], want)
+	}
+}
+
+// encapTable records every Put to encap_mtu_table.
+type encapTable struct {
+	puts []uint32
+	keys []any
+	err  error
+}
+
+func (f *encapTable) Put(key, value any) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.keys = append(f.keys, key)
+	f.puts = append(f.puts, value.(uint32))
+	return nil
+}
+
+func TestWriteEncapMTU_SingleEntryLayout(t *testing.T) {
+	var table encapTable
+	if err := WriteEncapMTU(&table, Values{IPv4: 1420, IPv6: 1400, MaxPacket: 1460}); err != nil {
+		t.Fatalf("WriteEncapMTU: %v", err)
+	}
+	if len(table.puts) != 1 || table.keys[0] != uint32(0) || table.puts[0] != 1460 {
+		t.Errorf("WriteEncapMTU made puts %v with keys %v, want 1460 at key uint32(0)", table.puts, table.keys)
+	}
+}
+
+// TestReconciler_EncapWriteFailureIsRetried checks a failed encap_mtu_table
+// write is not remembered as written, so the next call writes both again.
+func TestReconciler_EncapWriteFailureIsRetried(t *testing.T) {
+	withLinkMTUs(t, map[string]int{testUplink: 1500})
+	var table fakeTable
+	encap := encapTable{err: errors.New("map closed")}
+	r := NewReconciler(&table, &encap, ModeAuto, uplinks(testUplink))
+	if _, _, err := r.Reconcile(); err == nil {
+		t.Fatal("Reconcile with a failing encap_mtu_table write = nil error, want the failure")
+	}
+	encap.err = nil
+	if _, changed, err := r.Reconcile(); err != nil || !changed || len(encap.puts) != 1 || encap.puts[0] != 1460 {
+		t.Errorf("Reconcile after the write recovers = changed %v, err %v, puts %v; want 1460 written",
+			changed, err, encap.puts)
 	}
 }
 
@@ -150,10 +214,11 @@ func TestReconciler_WritesOnlyOnChange(t *testing.T) {
 	mtus := map[string]int{testUplink: 1500}
 	withLinkMTUs(t, mtus)
 	var table fakeTable
-	r := NewReconciler(&table, ModeAuto, uplinks(testUplink))
+	var encap encapTable
+	r := NewReconciler(&table, &encap, ModeAuto, uplinks(testUplink))
 
 	v, changed, err := r.Reconcile()
-	if err != nil || !changed || v != (Values{IPv4: 1420, IPv6: 1400}) {
+	if err != nil || !changed || v != (Values{IPv4: 1420, IPv6: 1400, MaxPacket: 1460}) {
 		t.Fatalf("first Reconcile = %+v, %v, %v; want the 1500 values, changed, no error", v, changed, err)
 	}
 	if _, changed, _ := r.Reconcile(); changed || len(table.puts) != 1 {
@@ -163,9 +228,12 @@ func TestReconciler_WritesOnlyOnChange(t *testing.T) {
 	// The uplink's MTU drops, so the clamp has to follow it down.
 	mtus[testUplink] = 1496
 	v, changed, err = r.Reconcile()
-	if err != nil || !changed || v != (Values{IPv4: 1416, IPv6: 1396}) || len(table.puts) != 2 {
+	if err != nil || !changed || v != (Values{IPv4: 1416, IPv6: 1396, MaxPacket: 1456}) || len(table.puts) != 2 {
 		t.Errorf("Reconcile after an MTU change = %+v, %v, %v, %d puts; want the 1496 values written",
 			v, changed, err, len(table.puts))
+	}
+	if want := []uint32{1460, 1456}; len(encap.puts) != 2 || encap.puts[0] != want[0] || encap.puts[1] != want[1] {
+		t.Errorf("encap_mtu_table puts = %v, want %v: the packet limit follows the MTU with the clamp", encap.puts, want)
 	}
 }
 
@@ -184,7 +252,7 @@ func TestReconciler_ErrorLeavesTableAlone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withLinkMTUs(t, map[string]int{testUplink: 1500})
 			var table fakeTable
-			if _, changed, err := NewReconciler(&table, ModeAuto, tc.uplinks).Reconcile(); err == nil || changed {
+			if _, changed, err := NewReconciler(&table, &encapTable{}, ModeAuto, tc.uplinks).Reconcile(); err == nil || changed {
 				t.Errorf("Reconcile = changed %v, err %v; want an error and no change", changed, err)
 			}
 			if len(table.puts) != 0 {
@@ -198,14 +266,14 @@ func TestReconciler_KeepsLastGoodValuesOnError(t *testing.T) {
 	mtus := map[string]int{testUplink: 1500}
 	withLinkMTUs(t, mtus)
 	var table fakeTable
-	r := NewReconciler(&table, ModeAuto, uplinks(testUplink))
+	r := NewReconciler(&table, &encapTable{}, ModeAuto, uplinks(testUplink))
 	if _, _, err := r.Reconcile(); err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
 
 	delete(mtus, testUplink)
 	v, changed, err := r.Reconcile()
-	if err == nil || changed || v != (Values{IPv4: 1420, IPv6: 1400}) || len(table.puts) != 1 {
+	if err == nil || changed || v != (Values{IPv4: 1420, IPv6: 1400, MaxPacket: 1460}) || len(table.puts) != 1 {
 		t.Errorf("Reconcile with the uplink gone = %+v, %v, %v, %d puts; want an error and the last good values kept",
 			v, changed, err, len(table.puts))
 	}
@@ -215,9 +283,9 @@ func TestReconciler_KeepsLastGoodValuesOnError(t *testing.T) {
 // consult the uplinks, so they work on a node whose uplink resolution fails.
 func TestReconciler_NonAutoModesIgnoreUplinks(t *testing.T) {
 	broken := func() ([]string, error) { return nil, errors.New("must not be called") }
-	for override, want := range map[string]Values{ModeOff: Off, "1496": {IPv4: 1416, IPv6: 1396}} {
+	for override, want := range map[string]Values{ModeOff: Off, "1496": {IPv4: 1416, IPv6: 1396, MaxPacket: 1456}} {
 		var table fakeTable
-		v, changed, err := NewReconciler(&table, override, broken).Reconcile()
+		v, changed, err := NewReconciler(&table, &encapTable{}, override, broken).Reconcile()
 		if err != nil || !changed || v != want {
 			t.Errorf("Reconcile(%q) = %+v, %v, %v; want %+v written", override, v, changed, err, want)
 		}
@@ -227,7 +295,7 @@ func TestReconciler_NonAutoModesIgnoreUplinks(t *testing.T) {
 func TestReconciler_WriteFailureIsRetried(t *testing.T) {
 	withLinkMTUs(t, map[string]int{testUplink: 1500})
 	table := fakeTable{err: errors.New("map closed")}
-	r := NewReconciler(&table, ModeAuto, uplinks(testUplink))
+	r := NewReconciler(&table, &encapTable{}, ModeAuto, uplinks(testUplink))
 	if _, _, err := r.Reconcile(); err == nil {
 		t.Fatal("Reconcile with a failing write = nil error, want the failure")
 	}

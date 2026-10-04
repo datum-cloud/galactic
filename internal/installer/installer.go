@@ -530,7 +530,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	// wiring below inert.
 	if objs, ok := datapath.(*prog.UsidObjects); ok {
 		state.objs = objs
-		state.mssClamp = newMSSClampState(objs.MssClampTable)
+		state.mssClamp = newMSSClampState(objs.MssClampTable, objs.EncapMtuTable)
 		state.mssClamp.reconcile()
 		if err := m.RegisterDatapathCollector(objs); err != nil {
 			slog.Warn("Failed to register eBPF datapath metrics collector", "err", err)

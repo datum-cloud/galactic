@@ -2,16 +2,22 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package mssclamp computes and writes the TCP MSS limits the uSID datapath
-// clamps SYNs to, into its mss_clamp_table map.
+// Package mssclamp computes and writes the limits the uSID datapath sizes
+// tenant traffic to from the fabric MTU: the TCP MSS it clamps SYNs to, in its
+// mss_clamp_table map, and the largest packet it encapsulates, in its
+// encap_mtu_table map.
 //
 // The fabric carries a tenant packet inside a 40-byte outer IPv6 header with no
 // SRH, so a tenant packet can be at most the uplink MTU minus 40, while a tenant
-// interface at the uplink's own MTU sizes its TCP segments for the full MTU.
-// Nothing on the path fragments an oversized packet or reports it, so every
-// full-size segment of such a connection is dropped. Clamping the MSS each SYN
-// advertises makes both ends size their segments to fit. See usid.c's struct
-// mss_clamp_value for where the datapath applies it.
+// interface at the uplink's own MTU sizes its packets for the full MTU. Nothing
+// on the path fragments an oversized packet. Clamping the MSS each SYN
+// advertises makes both ends of a TCP connection size their segments to fit.
+// Any other packet above the limit gets an ICMP Packet Too Big or
+// Fragmentation Needed from the datapath, so the sender's path MTU discovery
+// adapts. See usid.c's struct mss_clamp_value and send_too_big for where the
+// datapath applies each.
+//
+// One setting sizes both, so the two can never disagree about the fabric MTU.
 package mssclamp
 
 import (
@@ -46,22 +52,26 @@ const (
 	MaxMTU = 65535
 )
 
-// Values is one mss_clamp_table entry: the MSS limit for each tenant address
-// family. Zero turns clamping off for that family.
+// Values holds the limits for one fabric MTU: IPv4 and IPv6 are the
+// mss_clamp_table entry, the MSS limit for each tenant address family, and
+// MaxPacket is the encap_mtu_table entry, the largest tenant packet
+// encapsulated. Zero turns that limit off.
 type Values struct {
-	IPv4 uint16
-	IPv6 uint16
+	IPv4      uint16
+	IPv6      uint16
+	MaxPacket uint32
 }
 
 // Off is the Values that turns clamping off for both families.
 var Off = Values{}
 
-// IsOff reports whether v clamps neither family.
+// IsOff reports whether v sets no limit at all.
 func (v Values) IsOff() bool { return v == Off }
 
 // FromMTU returns the limits for a fabric whose uplink MTU is mtu: the largest
-// TCP payload whose packet still fits once encapsulated. At an MTU of 1500 that
-// is 1420 for IPv4 tenants and 1400 for IPv6 ones.
+// TCP payload whose packet still fits once encapsulated, and the largest packet.
+// At an MTU of 1500 that is an MSS of 1420 for IPv4 tenants and 1400 for IPv6
+// ones, and a packet of 1460 for both.
 //
 // No third value is needed for NAT64. An IPv6 tenant's limit makes a
 // 1440-byte IPv4 packet at a 1500 MTU, which grows by 20 bytes when the egress
@@ -72,8 +82,9 @@ func FromMTU(mtu int) (Values, error) {
 		return Off, fmt.Errorf("fabric MTU %d is outside [%d, %d]", mtu, MinMTU, MaxMTU)
 	}
 	return Values{
-		IPv4: uint16(mtu - OuterHeaderLen - ipv4HeaderLen - tcpHeaderLen),
-		IPv6: uint16(mtu - OuterHeaderLen - ipv6HeaderLen - tcpHeaderLen),
+		IPv4:      uint16(mtu - OuterHeaderLen - ipv4HeaderLen - tcpHeaderLen),
+		IPv6:      uint16(mtu - OuterHeaderLen - ipv6HeaderLen - tcpHeaderLen),
+		MaxPacket: uint32(mtu - OuterHeaderLen),
 	}, nil
 }
 
@@ -118,16 +129,24 @@ func Resolve(override string, uplinkMTUs []int) (Values, error) {
 	}
 }
 
-// Putter is the one operation Write needs from mss_clamp_table, so tests can
-// substitute a fake. A loaded *ebpf.Map satisfies it.
+// Putter is the one operation Write and WriteEncapMTU need from their map, so
+// tests can substitute a fake. A loaded *ebpf.Map satisfies it.
 type Putter interface {
 	Put(key, value any) error
 }
 
-// Write stores v in table's single entry.
+// Write stores v's MSS limits in mss_clamp_table's single entry.
 func Write(table Putter, v Values) error {
 	if err := table.Put(uint32(0), prog.UsidMssClampValue{MssIpv4: v.IPv4, MssIpv6: v.IPv6}); err != nil {
 		return fmt.Errorf("write mss_clamp_table: %w", err)
+	}
+	return nil
+}
+
+// WriteEncapMTU stores v's packet limit in encap_mtu_table's single entry.
+func WriteEncapMTU(table Putter, v Values) error {
+	if err := table.Put(uint32(0), v.MaxPacket); err != nil {
+		return fmt.Errorf("write encap_mtu_table: %w", err)
 	}
 	return nil
 }
@@ -157,30 +176,34 @@ func UplinkMTUs(names []string) ([]int, error) {
 	return mtus, nil
 }
 
-// Reconciler keeps mss_clamp_table in step with the operator's setting and the
-// uplinks' MTUs. It writes the map only when the values change, so it is cheap
-// to call on every health tick.
+// Reconciler keeps mss_clamp_table and encap_mtu_table in step with the
+// operator's setting and the uplinks' MTUs. It writes the maps only when the
+// values change, so it is cheap to call on every health tick.
 type Reconciler struct {
-	table    Putter
-	override string
-	uplinks  func() ([]string, error)
+	table      Putter
+	encapTable Putter
+	override   string
+	uplinks    func() ([]string, error)
 
 	written bool
 	last    Values
 }
 
-// NewReconciler returns a Reconciler writing table, sized per override (see
-// Resolve) from the MTUs of the interfaces uplinks returns.
-func NewReconciler(table Putter, override string, uplinks func() ([]string, error)) *Reconciler {
-	return &Reconciler{table: table, override: override, uplinks: uplinks}
+// NewReconciler returns a Reconciler writing table (mss_clamp_table) and
+// encapTable (encap_mtu_table), sized per override (see Resolve) from the MTUs
+// of the interfaces uplinks returns.
+func NewReconciler(table, encapTable Putter, override string, uplinks func() ([]string, error)) *Reconciler {
+	return &Reconciler{table: table, encapTable: encapTable, override: override, uplinks: uplinks}
 }
 
 // Reconcile computes the current values and writes them if they differ from
 // the last write. It returns the values in effect and whether they changed.
 //
-// On any error the map is left as it was. A node that has never written it
-// reads zero, which is clamping off: an unresolved MTU leaves the datapath
-// exactly as it behaved before the clamp existed, rather than guessing.
+// On any error the maps are left as they were, though a failure writing the
+// second leaves the first already written, and the next call retries both. A
+// node that has never written them reads zero, which turns both limits off: an
+// unresolved MTU leaves the datapath exactly as it behaved before the limits
+// existed, rather than guessing.
 func (r *Reconciler) Reconcile() (Values, bool, error) {
 	v, err := r.resolve()
 	if err != nil {
@@ -190,6 +213,9 @@ func (r *Reconciler) Reconcile() (Values, bool, error) {
 		return v, false, nil
 	}
 	if err := Write(r.table, v); err != nil {
+		return r.last, false, err
+	}
+	if err := WriteEncapMTU(r.encapTable, v); err != nil {
 		return r.last, false, err
 	}
 	r.written, r.last = true, v
