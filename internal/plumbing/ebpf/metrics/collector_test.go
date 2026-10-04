@@ -16,6 +16,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 const (
@@ -98,7 +99,7 @@ func TestCollector_VRFPacketsAndBytes(t *testing.T) {
 	putVRFEntry(t, vrfFake, testBlock, 0x001, vrfTableID1, 10, 1000)
 	putVRFEntry(t, vrfFake, testBlock, 0x002, vrfTableID2, 20, 2000)
 
-	c := NewCollector(usidmap.NewVRFTable(vrfFake), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{})
+	c := NewCollector(usidmap.NewVRFTable(vrfFake), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil)
 	metrics := collect(t, c)
 
 	wantVRFTableID := map[string]string{
@@ -133,6 +134,90 @@ func TestCollector_VRFPacketsAndBytes(t *testing.T) {
 	}
 }
 
+// putVPCAttribution writes a raw vpc_attribution_table entry directly into
+// fake, matching putVRFEntry's own bypass-Register shape above.
+func putVPCAttribution(t *testing.T, fake *fakeTable, block uint64, argument uint16, vpc uint64, vpcAttachment uint32) {
+	t.Helper()
+	key, err := uformat.NewVRFKey(block, argument)
+	if err != nil {
+		t.Fatalf("uformat.NewVRFKey: %v", err)
+	}
+	if err := fake.Put(uint64(key), prog.UsidVpcAttributionValue{
+		Vpc:           vpc,
+		VpcAttachment: vpcAttachment,
+	}); err != nil {
+		t.Fatalf("fake.Put: %v", err)
+	}
+}
+
+func TestCollector_VPCAttribution(t *testing.T) {
+	// 0x2589 base62-round-trips to a short, easy-to-recognize string; the
+	// exact identifiers don't matter, only that they survive a decode ->
+	// store -> re-encode round trip unchanged.
+	const (
+		vpc1           uint64 = 0x2589
+		vpcAttachment1 uint32 = 0x07
+		vpc2           uint64 = 0xDEAD
+		vpcAttachment2 uint32 = 0x0B
+	)
+	wantVPC1, err := intf.HexToBase62(strconv.FormatUint(vpc1, 16))
+	if err != nil {
+		t.Fatalf("HexToBase62: %v", err)
+	}
+	wantVPCAttachment1, err := intf.HexToBase62(strconv.FormatUint(uint64(vpcAttachment1), 16))
+	if err != nil {
+		t.Fatalf("HexToBase62: %v", err)
+	}
+
+	vrfFake := newFakeTable()
+	putVRFEntry(t, vrfFake, testBlock, 0x001, 1, 10, 1000)  // has a matching attribution row below
+	putVRFEntry(t, vrfFake, testBlock2, 0x002, 2, 20, 2000) // no attribution row for THIS block -- must still report
+
+	attrFake := newFakeTable()
+	putVPCAttribution(t, attrFake, testBlock, 0x001, vpc1, vpcAttachment1)
+	// Same Argument as the testBlock2 vrf_table row above, but registered
+	// under testBlock instead -- must not satisfy that lookup, proving
+	// vpc_attribution_table is keyed on (Block, Argument) together, matching
+	// vrf_table's own key (uformat.NewVRFKey), not Argument alone.
+	putVPCAttribution(t, attrFake, testBlock, 0x002, vpc2, vpcAttachment2)
+
+	c := NewCollector(
+		usidmap.NewVRFTable(vrfFake), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{},
+		usidmap.NewVPCAttributionTable(attrFake),
+	)
+	metrics := collect(t, c)
+
+	var sawAttributed, sawUnattributed int
+	for _, m := range metrics {
+		switch {
+		case labelValue(m, labelBlock) == formatBlock(testBlock) && labelValue(m, "argument") == "1":
+			if got := labelValue(m, "vpc"); got != wantVPC1 {
+				t.Errorf("argument=1: vpc label = %q, want %q", got, wantVPC1)
+			}
+			if got := labelValue(m, "vpc_attachment"); got != wantVPCAttachment1 {
+				t.Errorf("argument=1: vpc_attachment label = %q, want %q", got, wantVPCAttachment1)
+			}
+			sawAttributed++
+		case labelValue(m, labelBlock) == formatBlock(testBlock2) && labelValue(m, "argument") == "2":
+			if got := labelValue(m, "vpc"); got != "" {
+				t.Errorf("argument=2: vpc label = %q, want empty (no attribution row for this block)", got)
+			}
+			if got := labelValue(m, "vpc_attachment"); got != "" {
+				t.Errorf("argument=2: vpc_attachment label = %q, want empty (no attribution row for this block)", got)
+			}
+			sawUnattributed++
+		}
+	}
+	// Each argument emits both a packets and a bytes sample.
+	if sawAttributed != 2 {
+		t.Errorf("saw %d attributed samples for argument=1, want 2", sawAttributed)
+	}
+	if sawUnattributed != 2 {
+		t.Errorf("saw %d unattributed samples for argument=2, want 2 -- a missing attribution row must "+
+			"not drop the vrf_table sample", sawUnattributed)
+	}
+}
+
 func TestCollector_BlockUtilization(t *testing.T) {
 	locFake := newFakeTable()
 	loc := usidmap.NewLocatorTable(locFake)
@@ -141,7 +226,7 @@ func TestCollector_BlockUtilization(t *testing.T) {
 	}
 
 	vrfFake := newFakeTable()
-	c := NewCollector(usidmap.NewVRFTable(vrfFake), loc, fakeDropReasons{})
+	c := NewCollector(usidmap.NewVRFTable(vrfFake), loc, fakeDropReasons{}, nil)
 
 	t.Run("zero entries reports zero, not absent", func(t *testing.T) {
 		metrics := collect(t, c)
@@ -204,7 +289,7 @@ func TestCollector_Drops(t *testing.T) {
 		prog.DropReasonUnknownArgument: 42,
 		prog.DropReasonFibLookupFailed: 7,
 	}
-	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), drops)
+	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), drops, nil)
 
 	metrics := collect(t, c)
 
@@ -258,7 +343,8 @@ func (erroringIterator) Next(any, any) bool { return false }
 func (erroringIterator) Err() error         { return errors.New("simulated map iteration failure") }
 
 func TestCollector_VRFListErrorReportsInvalidMetric(t *testing.T) {
-	c := NewCollector(usidmap.NewVRFTable(erroringTable{}), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{})
+	c := NewCollector(
+		usidmap.NewVRFTable(erroringTable{}), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil)
 
 	// 256, not a count sized to exactly this test's own metrics: Collect
 	// sends synchronously and this channel isn't drained concurrently
@@ -306,7 +392,9 @@ func (f fakeMSSClampTable) Lookup(key, valueOut any) error {
 func TestCollector_MSSClamp(t *testing.T) {
 	stats := fakeDropReasons{prog.MSSClampStatClampedIPv6: 9, prog.MSSClampStatWalkLimit: 2}
 	table := fakeMSSClampTable{value: prog.UsidMssClampValue{MssIpv4: 1420, MssIpv6: 1400}}
-	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}).
+	c := NewCollector(
+		usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil,
+	).
 		WithMSSClamp(stats, table)
 
 	results := map[string]float64{}
@@ -338,7 +426,7 @@ func TestCollector_MSSClamp(t *testing.T) {
 // TestCollector_MSSClampOptional checks a collector built without the clamp's
 // maps emits none of its series, the state of every existing caller.
 func TestCollector_MSSClampOptional(t *testing.T) {
-	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{})
+	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil)
 	for _, m := range collect(t, c) {
 		if labelValue(m, "result") != "" || labelValue(m, "family") != "" {
 			t.Errorf("collector without WithMSSClamp emitted an MSS clamp series: %v", m)
@@ -347,7 +435,9 @@ func TestCollector_MSSClampOptional(t *testing.T) {
 }
 
 func TestCollector_MSSClampTableErrorReportsInvalidMetric(t *testing.T) {
-	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}).
+	c := NewCollector(
+		usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), fakeDropReasons{}, nil,
+	).
 		WithMSSClamp(nil, fakeMSSClampTable{err: errors.New("map closed")})
 	ch := make(chan prometheus.Metric, 64)
 	c.Collect(ch)

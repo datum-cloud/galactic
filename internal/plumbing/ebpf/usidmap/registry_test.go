@@ -72,6 +72,21 @@ func TestOpenPinnedRegistry_RoundTrip(t *testing.T) {
 	if err := reg.Function.Register(testBlock, 0xE); err != nil {
 		t.Fatalf("Function.Register via opened handle: %v", err)
 	}
+
+	if err := reg.VPCAttribution.Register(testBlock, 0x001, 0xC0FFEE, 0x42); err != nil {
+		t.Fatalf("VPCAttribution.Register via opened handle: %v", err)
+	}
+	loaderSideVPCAttribution := NewVPCAttributionTable(KernelTable{Map: objs.VpcAttributionTable})
+	attrEntry, ok, err := loaderSideVPCAttribution.Get(testBlock, 0x001)
+	if err != nil {
+		t.Fatalf("Get via loader-side VPCAttribution handle: %v", err)
+	}
+	if !ok {
+		t.Fatal("entry registered via the opened VPCAttribution handle is not visible via the loader-side handle")
+	}
+	if attrEntry.VPC != 0xC0FFEE || attrEntry.VPCAttachment != 0x42 {
+		t.Errorf("VPCAttribution entry = %+v, want VPC=0xC0FFEE VPCAttachment=0x42", attrEntry)
+	}
 }
 
 // TestOpenPinnedRegistry_MissingPinDirIsActionableError covers the

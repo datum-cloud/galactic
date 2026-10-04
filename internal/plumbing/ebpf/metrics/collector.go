@@ -6,6 +6,7 @@ package metrics
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -13,6 +14,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 const namespace = "galactic_usid"
@@ -28,9 +30,10 @@ type DropReasonsReader interface {
 // per-Argument packet and byte counters, drops by reason, and Argument-space
 // utilization per Block.
 type Collector struct {
-	vrf         *usidmap.VRFTable
-	locator     *usidmap.LocatorTable
-	dropReasons DropReasonsReader
+	vrf            *usidmap.VRFTable
+	locator        *usidmap.LocatorTable
+	dropReasons    DropReasonsReader
+	vpcAttribution *usidmap.VPCAttributionTable
 
 	// mssClampStats and mssClampTable are nil unless set by WithMSSClamp, in
 	// which case the TCP MSS clamp's outcomes and limits are collected too.
@@ -40,9 +43,13 @@ type Collector struct {
 
 // NewCollector builds a Collector from already-constructed tables and reader.
 // Production callers normally use NewCollectorFromObjects; this exists so tests
-// can pass fakes without a kernel.
-func NewCollector(vrf *usidmap.VRFTable, locator *usidmap.LocatorTable, dropReasons DropReasonsReader) *Collector {
-	return &Collector{vrf: vrf, locator: locator, dropReasons: dropReasons}
+// can pass fakes without a kernel. vpcAttribution may be nil, in which case
+// vrf/bytes metrics carry no vpc/vpc_attachment labels.
+func NewCollector(
+	vrf *usidmap.VRFTable, locator *usidmap.LocatorTable, dropReasons DropReasonsReader,
+	vpcAttribution *usidmap.VPCAttributionTable,
+) *Collector {
+	return &Collector{vrf: vrf, locator: locator, dropReasons: dropReasons, vpcAttribution: vpcAttribution}
 }
 
 // NewCollectorFromObjects builds a Collector reading directly from a loaded
@@ -52,6 +59,7 @@ func NewCollectorFromObjects(objs *prog.UsidObjects) *Collector {
 		usidmap.NewVRFTable(usidmap.KernelTable{Map: objs.VrfTable}),
 		usidmap.NewLocatorTable(usidmap.KernelTable{Map: objs.LocatorTable}),
 		objs.DropReasons,
+		usidmap.NewVPCAttributionTable(usidmap.KernelTable{Map: objs.VpcAttributionTable}),
 	).WithMSSClamp(objs.MssClampStats, objs.MssClampTable)
 }
 
@@ -75,12 +83,12 @@ var (
 	vrfPacketsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "vrf", "packets_total"),
 		"Packets forwarded through vrf_table for this (uSID Block, Argument) entry since it was last (re-)registered.",
-		[]string{labelBlock, "argument", "vrf_table_id"}, nil,
+		[]string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment"}, nil,
 	)
 	vrfBytesDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "vrf", "bytes_total"),
 		"Bytes forwarded through vrf_table for this (uSID Block, Argument) entry since it was last (re-)registered.",
-		[]string{labelBlock, "argument", "vrf_table_id"}, nil,
+		[]string{labelBlock, "argument", "vrf_table_id", "vpc", "vpc_attachment"}, nil,
 	)
 	dropsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "drops_total"),
@@ -184,6 +192,22 @@ func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
 		}
 	}
 
+	// Keyed the same as vrf_table, so each entry below looks its own
+	// attribution up by VRFKey. A lookup miss (a registration race, or an
+	// entry predating this feature) must not drop the sample -- see
+	// vpcLabels's own doc comment.
+	attribution := make(map[usidmap.VRFKey]usidmap.VPCAttributionEntry)
+	if c.vpcAttribution != nil {
+		attributionEntries, err := c.vpcAttribution.List()
+		if err != nil {
+			ch <- prometheus.NewInvalidMetric(vrfPacketsDesc, fmt.Errorf("list vpc_attribution_table: %w", err))
+		} else {
+			for _, e := range attributionEntries {
+				attribution[e.VRFKey] = e
+			}
+		}
+	}
+
 	entries, err := c.vrf.List()
 	if err != nil {
 		ch <- prometheus.NewInvalidMetric(vrfPacketsDesc, fmt.Errorf("list vrf_table: %w", err))
@@ -193,10 +217,12 @@ func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
 		block := formatBlock(e.Block)
 		argument := strconv.Itoa(int(e.Argument))
 		vrfTableID := strconv.FormatUint(uint64(e.VRFTableID), 10)
+		attributionEntry, found := attribution[e.VRFKey]
+		vpc, vpcAttachment := vpcLabels(attributionEntry, found, e.VRFKey)
 		ch <- prometheus.MustNewConstMetric(
-			vrfPacketsDesc, prometheus.CounterValue, float64(e.Packets), block, argument, vrfTableID)
+			vrfPacketsDesc, prometheus.CounterValue, float64(e.Packets), block, argument, vrfTableID, vpc, vpcAttachment)
 		ch <- prometheus.MustNewConstMetric(
-			vrfBytesDesc, prometheus.CounterValue, float64(e.Bytes), block, argument, vrfTableID)
+			vrfBytesDesc, prometheus.CounterValue, float64(e.Bytes), block, argument, vrfTableID, vpc, vpcAttachment)
 		perBlockUsed[e.Block]++
 	}
 
@@ -206,6 +232,33 @@ func (c *Collector) collectVRF(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(blockArgumentUtilizationDesc, prometheus.GaugeValue,
 			float64(used)/float64(uformat.ArgumentMax), label)
 	}
+}
+
+// vpcLabels re-encodes entry's VPC/VPCAttachment identifiers back to the
+// base62 form used everywhere else in this codebase (CNI conflist,
+// interface names). found is false when this key had no vpc_attribution_table
+// row -- not an error, since vrf_table's own counters must never go
+// unreported for want of an attribution row (a registration race, or an
+// entry that predates this feature) -- and both labels come back empty in
+// that case.
+func vpcLabels(entry usidmap.VPCAttributionEntry, found bool, key usidmap.VRFKey) (vpc, vpcAttachment string) {
+	if !found {
+		return "", ""
+	}
+
+	vpc, err := intf.HexToBase62(strconv.FormatUint(entry.VPC, 16))
+	if err != nil {
+		slog.Warn("metrics: could not re-encode vpc_attribution_table VPC identifier as base62",
+			"block", key.Block, "argument", key.Argument, "vpc", entry.VPC, "err", err)
+		vpc = ""
+	}
+	vpcAttachment, err = intf.HexToBase62(strconv.FormatUint(uint64(entry.VPCAttachment), 16))
+	if err != nil {
+		slog.Warn("metrics: could not re-encode vpc_attribution_table VPCAttachment identifier as base62",
+			"block", key.Block, "argument", key.Argument, "vpcAttachment", entry.VPCAttachment, "err", err)
+		vpcAttachment = ""
+	}
+	return vpc, vpcAttachment
 }
 
 func (c *Collector) collectDrops(ch chan<- prometheus.Metric) {

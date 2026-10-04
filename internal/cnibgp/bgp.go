@@ -600,6 +600,26 @@ func registerEBPFDatapath(
 		return false, fmt.Errorf("register eBPF vrf_table entry: %w", err)
 	}
 
+	// Attribute this (block, argument) to its VPC/VPCAttachment for byte
+	// accounting (datum-cloud/enhancements#878), keyed identically to the
+	// vrf_table row just registered. vpc and vpcAttachment are already known
+	// here as this attachment's own CNI-config identifiers, so this needs no
+	// central uSID-to-VPC lookup for the receiving side. Non-fatal: a
+	// registration failure here must not fail the CNI ADD, since vrf_table's
+	// own registration above already succeeded and forwarding is unaffected;
+	// only attribution for this attachment is degraded until the next ADD/DEL
+	// or GC repair.
+	vpcNum, vpcAttachmentNum, err := decodeVPCIdentifiers(vpc, vpcAttachment)
+	if err != nil {
+		slog.Warn("ADD: could not decode VPC/VPCAttachment for byte-accounting attribution; "+
+			"vrf_table counters for this entry will report unattributed until the next ADD/DEL",
+			"vpc", vpc, "vpcAttachment", vpcAttachment, "err", err)
+	} else if err := registry.VPCAttribution.Register(block, argument, vpcNum, vpcAttachmentNum); err != nil {
+		slog.Warn("ADD: could not register eBPF vpc_attribution_table entry; "+
+			"vrf_table counters for this entry will report unattributed until the next ADD/DEL",
+			"vpc", vpc, "vpcAttachment", vpcAttachment, "err", err)
+	}
+
 	ifindexTable, ifindexCloser, err := ifindexvrfmap.OpenPinned(pinDir)
 	if err != nil {
 		return false, fmt.Errorf("open pinned eBPF ifindex_vrf_table: %w", err)
@@ -647,6 +667,35 @@ func registerEBPFDatapath(
 	}
 
 	return true, nil
+}
+
+// decodeVPCIdentifiers decodes vpc and vpcAttachment, the base62 identifiers
+// CNI configuration carries (see docs/cni/conflist-reference.md), into the
+// fixed-width numeric form vpc_attribution_table stores: 48-bit VPC, 16-bit
+// VPCAttachment. Both are validated as base62 elsewhere in this chain (see
+// isValidBase62 in config.go); a decode failure here means that validation
+// was bypassed or the format changed underneath it, not an ordinary runtime
+// condition.
+func decodeVPCIdentifiers(vpc, vpcAttachment string) (vpcNum uint64, vpcAttachmentNum uint32, err error) {
+	vpcHex, err := intf.Base62ToHex(vpc)
+	if err != nil {
+		return 0, 0, fmt.Errorf("decode vpc %q: %w", vpc, err)
+	}
+	vpcNum, err = strconv.ParseUint(vpcHex, 16, 48)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse decoded vpc %q (hex %q) as uint48: %w", vpc, vpcHex, err)
+	}
+
+	vpcAttachmentHex, err := intf.Base62ToHex(vpcAttachment)
+	if err != nil {
+		return 0, 0, fmt.Errorf("decode vpcAttachment %q: %w", vpcAttachment, err)
+	}
+	vpcAttachmentNum64, err := strconv.ParseUint(vpcAttachmentHex, 16, 16)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse decoded vpcAttachment %q (hex %q) as uint16: %w",
+			vpcAttachment, vpcAttachmentHex, err)
+	}
+	return vpcNum, uint32(vpcAttachmentNum64), nil
 }
 
 // registerNodeSourceAddress derives this node's own End.DT46 SID base from

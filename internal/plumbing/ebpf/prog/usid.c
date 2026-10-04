@@ -383,6 +383,29 @@ struct vrf_value {
 	__u64 dropped_packets;
 };
 
+// struct vpc_attribution_value is vpc_attribution_table's value: the
+// VPC/VPCAttachment identity for this (Block, Argument), stored purely for
+// userspace's byte-accounting attribution
+// (datum-cloud/enhancements#878). Wholly inert to the forwarding path:
+// usid_ingress and usid_egress never look this map up, so a schema change
+// here can never touch a live packet's verdict.
+//
+// vpc and vpc_attachment are the decoded numeric form of the base62
+// identifiers registerEBPFDatapath already carries at CNI ADD time (48-bit
+// VPC, 16-bit VPCAttachment; see docs/cni/conflist-reference.md), stored
+// fixed-width rather than as strings, since a BPF map value must be fixed
+// size.
+//
+// generation follows the same convention as vrf_value's own field: written
+// only by userspace at registration time, compared against a Reconcile
+// sweep's cutoff to tell "existed before this sweep" from "registered
+// after".
+struct vpc_attribution_value {
+	__u64 vpc;
+	__u32 vpc_attachment;
+	__u64 generation;
+};
+
 // ---------------------------------------------------------------------
 // Per-VRF stateless NPTv6 and the VIP-boundary substitution. Both are consulted
 // from two places: usid_ingress, inbound, after the strip and before the FIB
@@ -702,6 +725,20 @@ struct {
 	__type(key, __u64);
 	__type(value, struct vrf_value);
 } vrf_table SEC(".maps");
+
+// vpc_attribution_table: see struct vpc_attribution_value. Keyed identically
+// to vrf_table (Block<<12|Argument). A separate map rather than fields on
+// vrf_value, so a schema change here -- adding a billing attribute -- can
+// never trigger vrf_table's own ErrMapIncompatible reload path, and this
+// map's own reload never wipes vrf_table's live counters. Read only by
+// userspace (internal/plumbing/ebpf/metrics), never by usid_ingress or
+// usid_egress -- see the struct's own comment.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192); // sized identically to vrf_table: one row per VRF.
+	__type(key, __u64);
+	__type(value, struct vpc_attribution_value);
+} vpc_attribution_table SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
