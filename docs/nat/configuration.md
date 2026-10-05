@@ -446,13 +446,19 @@ Metrics, exposed on `GALACTIC_NAT_METRICS_PORT` (`9182` by default):
 | `galactic_nat_conn_table_max_entries`            | Gauge   | —                 | Capacity of `nat_conn_table` in rows, read from the loaded map.                                                                                                                                                                                                                                                                                                                        |
 | `galactic_nat_drops_total`                       | Counter | `reason`          | Packets dropped by the `nat_ingress` program, by reason. Cumulative for the life of the *node*, not the process: the counters live in a map pinned under `natattach.PinDir`, which a restarting shard reuses as-is. Always read it as a delta — an absolute value includes every transient the node has ever seen, and zeroing it takes `bpftool map update` against the pin directly. |
 
-A full table alone is not a problem. Alert when the table is full and its
-oldest row is younger than the longest session timeout, 7440 s: idle
-established TCP sessions are then evicted before they expire.
+`config/monitoring/podmonitor-galactic-nat.yaml` scrapes every shard as
+`job="galactic-nat"` with a `node` label.
+
+A full table alone is not a problem. The table is evicting live sessions
+when it is full and its oldest row is younger than the longest session
+timeout, 7440 s: idle established TCP sessions are then evicted before they
+expire. `GalacticNatSessionTableEvictingLive` in
+`config/monitoring/prometheusrule.yaml` fires on this query after 15
+minutes:
 
 ```promql
-sum by (node) (galactic_nat_conns) / on (node) galactic_nat_conn_table_max_entries > 0.9
-  and on (node) galactic_nat_conn_table_oldest_row_age_seconds < 7440
+sum by (node) (galactic_nat_conns) / on (node) max by (node) (galactic_nat_conn_table_max_entries) > 0.9
+  and on (node) max by (node) (galactic_nat_conn_table_oldest_row_age_seconds) < 7440
 ```
 
 Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):

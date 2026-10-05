@@ -332,3 +332,82 @@ tests:
                 path for, so this node cannot reach those prefixes. The router's "route install failed" log lines
                 name each prefix and the error, usually a SID with no route over an SRv6 uplink or an unresolved
                 neighbor.
+
+  # A table over 90% full whose oldest row is younger than the TCP timeout
+  # fires after 15m. A full table holding only expired rows does not, nor
+  # does a half-full one, nor a full one reporting no oldest-row age.
+  - interval: 30s
+    input_series:
+      - series: 'galactic_nat_conns{job="galactic-nat",node="dfw-worker2",family="nat66"}'
+        values: "900x40"
+      - series: 'galactic_nat_conns{job="galactic-nat",node="dfw-worker2",family="nat64"}'
+        values: "50x40"
+      - series: 'galactic_nat_conn_table_max_entries{job="galactic-nat",node="dfw-worker2"}'
+        values: "1000x40"
+      - series: 'galactic_nat_conn_table_oldest_row_age_seconds{job="galactic-nat",node="dfw-worker2"}'
+        values: "600x40"
+      - series: 'galactic_nat_conns{job="galactic-nat",node="sjc-worker2",family="nat66"}'
+        values: "950x40"
+      - series: 'galactic_nat_conns{job="galactic-nat",node="sjc-worker2",family="nat64"}'
+        values: "0x40"
+      - series: 'galactic_nat_conn_table_max_entries{job="galactic-nat",node="sjc-worker2"}'
+        values: "1000x40"
+      - series: 'galactic_nat_conn_table_oldest_row_age_seconds{job="galactic-nat",node="sjc-worker2"}'
+        values: "8000x40"
+      - series: 'galactic_nat_conns{job="galactic-nat",node="iad-worker2",family="nat66"}'
+        values: "500x40"
+      - series: 'galactic_nat_conns{job="galactic-nat",node="iad-worker2",family="nat64"}'
+        values: "0x40"
+      - series: 'galactic_nat_conn_table_max_entries{job="galactic-nat",node="iad-worker2"}'
+        values: "1000x40"
+      - series: 'galactic_nat_conn_table_oldest_row_age_seconds{job="galactic-nat",node="iad-worker2"}'
+        values: "600x40"
+      - series: 'galactic_nat_conns{job="galactic-nat",node="sjc-worker3",family="nat66"}'
+        values: "950x40"
+      - series: 'galactic_nat_conn_table_max_entries{job="galactic-nat",node="sjc-worker3"}'
+        values: "1000x40"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: GalacticNatSessionTableEvictingLive
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: GalacticNatSessionTableEvictingLive
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker2
+            exp_annotations:
+              summary: "The NAT session table on dfw-worker2 is over 90% full and evicting live sessions"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatsessiontableevictinglive"
+              description: >-
+                The egress shard on dfw-worker2 has had its session table over 90% full for 15 minutes, with
+                its least recently used row younger than the 7440s established-TCP timeout. The table is evicting
+                idle sessions that have not expired, so tenants' long-lived connections through this shard break
+                when they next send. galactic_nat_sessions shows which family and protocol hold the table.
+
+  # An unreachable shard for 5m fires; one that comes back inside that does
+  # not.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="galactic-nat",node="dfw-worker2"}'
+        values: "1x5 0x20"
+      - series: 'up{job="galactic-nat",node="sjc-worker2"}'
+        values: "1x5 0x5 1x15"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GalacticNatMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: dfw-worker2
+            exp_annotations:
+              summary: "galactic-nat metrics on dfw-worker2 cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatmetricsdown"
+              description: >-
+                Prometheus cannot reach galactic-nat's metrics port on dfw-worker2 (9182), so
+                GalacticNatSessionTableEvictingLive cannot fire for it.

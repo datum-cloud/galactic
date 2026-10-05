@@ -1,0 +1,22 @@
+# Scrapes each egress shard's galactic-nat metrics port (metrics, 9182), which
+# serves the session table and the NAT datapath's drop counters. The pod uses
+# hostNetwork, so its pod IP is the node's own. The chained overlay keeps the
+# same pod labels, so this covers shards in either XDP attach mode.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: galactic-nat
+  labels:
+    app.kubernetes.io/name: galactic-nat
+spec:
+  # job="galactic-nat", which the alert rules match on.
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-nat
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

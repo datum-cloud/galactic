@@ -1,5 +1,6 @@
 # Alerts on the underlay (fabric-router's FRR, via frr-exporter and
-# fabric-config-agent) and on galactic-router's BMP export. A BGP session
+# fabric-config-agent), on galactic-router's BMP export and route installs,
+# and on the galactic-nat egress shards' session tables. A BGP session
 # that drops is also streamed to the BMP collector as a Peer Down carrying
 # the reason and any NOTIFICATION;
 # these rules are the Prometheus-side signal for the same events, so an alert
@@ -14,8 +15,9 @@
 # Every alert carries the labels and annotations infra's alerting standard
 # (infra docs/enhancements/alerting-standards) checks for: severity, service
 # and team, summary, description and runbook_url. service is galactic, the
-# Backstage System that owns galactic-router and the fabric router underlay,
-# and team is connect, that System's owner in infra's catalog-info.yaml.
+# Backstage System that owns galactic-router, galactic-nat and the fabric
+# router underlay, and team is connect, that System's owner in infra's
+# catalog-info.yaml.
 #
 # Unit tests: tests/rules-test.yaml, run with task test:alerts.
 apiVersion: monitoring.coreos.com/v1
@@ -222,3 +224,43 @@ spec:
             description: >-
               Prometheus cannot reach galactic-router's metrics port on {{ $labels.node }} (9179), so
               GalacticRouterBMPStationDown and GalacticRouterRoutesNotInstalled cannot fire for it.
+    # From each egress shard's galactic-nat (job galactic-nat, port 9182).
+    - name: galactic-nat
+      rules:
+        # Expired sessions keep their rows until the LRU evicts them, so a
+        # busy shard's table sits near full by design. Live sessions are lost
+        # only once the table is full and its least recently seen row is
+        # younger than the longest session timeout, 7440s for established
+        # TCP: the LRU is then evicting sessions that were still live.
+        - alert: GalacticNatSessionTableEvictingLive
+          expr: >-
+            sum by (node) (galactic_nat_conns{job="galactic-nat"})
+              / on (node) max by (node) (galactic_nat_conn_table_max_entries{job="galactic-nat"}) > 0.9
+            and on (node)
+            max by (node) (galactic_nat_conn_table_oldest_row_age_seconds{job="galactic-nat"}) < 7440
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "The NAT session table on {{ $labels.node }} is over 90% full and evicting live sessions"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatsessiontableevictinglive"
+            description: >-
+              The egress shard on {{ $labels.node }} has had its session table over 90% full for 15 minutes, with
+              its least recently used row younger than the 7440s established-TCP timeout. The table is evicting
+              idle sessions that have not expired, so tenants' long-lived connections through this shard break
+              when they next send. galactic_nat_sessions shows which family and protocol hold the table.
+        - alert: GalacticNatMetricsDown
+          expr: up{job="galactic-nat"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "galactic-nat metrics on {{ $labels.node }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatmetricsdown"
+            description: >-
+              Prometheus cannot reach galactic-nat's metrics port on {{ $labels.node }} (9182), so
+              GalacticNatSessionTableEvictingLive cannot fire for it.
