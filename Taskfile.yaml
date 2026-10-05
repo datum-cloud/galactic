@@ -89,13 +89,14 @@ tasks:
       - task: build:binaries
 
   build:ebpf:
-    desc: Regenerate the eBPF uSID, edge gateway DSR, and NAT egress datapaths (requires clang)
+    desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, and XDP dispatcher datapaths (requires clang)
     run: once
     deps: [require-clang]
     cmds:
       - go generate ./internal/plumbing/ebpf/prog/...
       - go generate ./internal/plumbing/ebpf/edgeprog/...
       - go generate ./internal/plumbing/ebpf/natprog/...
+      - go generate ./internal/plumbing/ebpf/xdpdispatch/...
 
   require-clang:
     internal: true
