@@ -50,6 +50,12 @@ data flow, module reference, known constraints):
     [cni/gc-cmd-sequence.md](cni/gc-cmd-sequence.md) — Mermaid sequence
     diagrams for the attach/detach path and orphan garbage collection.
 
+## Observability
+
+- [metrics.md](metrics.md) — every Prometheus metric for the VPC dataplane,
+  VPC ingress, routing and NAT: labels, label values and the shipped alerts,
+  with PromQL for dashboards and monitors.
+
 ## Proposals and exploratory design
 
 Not descriptions of what's implemented today — read the architecture docs
