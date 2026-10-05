@@ -1,6 +1,7 @@
-# Prometheus Operator resources for the BGP control and data planes: scrape
-# config for fabric-router's frr-exporter and galactic-router's metrics port,
-# and the alert rules built on them. Requires the Prometheus Operator CRDs
+# Prometheus Operator resources for the BGP control and data planes and the
+# NAT egress shards: scrape config for fabric-router's frr-exporter,
+# galactic-router's metrics port and galactic-nat's metrics port, and the
+# alert rules built on them. Requires the Prometheus Operator CRDs
 # (monitoring.coreos.com), which this repo does not install, so it is not
 # part of config/kustomization.yaml's default resources.
 #
@@ -13,5 +14,6 @@
 namespace: galactic-system
 resources:
   - podmonitor-fabric-router.yaml
+  - podmonitor-galactic-nat.yaml
   - podmonitor-galactic-router.yaml
   - prometheusrule.yaml

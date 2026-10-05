@@ -19,11 +19,11 @@ without clashing, since the two never share a node.
 | Tenant routing (GoBGP) | `galactic-router`, `galactic-router-rr`                   | `galactic_router_*`, controller-runtime | 9179           | `galactic-router` / `galactic-router-rr` |
 | Underlay routing (FRR) | `fabric-router` `frr-exporter` sidecar                    | `frr_*`                                 | 9342           | `fabric-router`                          |
 | Underlay config        | `fabric-router` `fabric-config-agent`                     | `fabric_router_*`                       | 9343           | `fabric-config-agent`                    |
-| NAT66 / NAT64          | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                        | 9182           | none shipped                             |
+| NAT66 / NAT64          | `galactic-nat` (one per egress shard)                     | `galactic_nat_*`                        | 9182           | `galactic-nat`                           |
 
-`config/monitoring/` ships PodMonitors for `galactic-router` and
-`fabric-router` only. Scraping `galactic-cni`, `galactic-vrf` or
-`galactic-nat` needs a scrape object of your own. Copy the shipped
+`config/monitoring/` ships PodMonitors for `galactic-router`,
+`fabric-router` and `galactic-nat` only. Scraping `galactic-cni` or
+`galactic-vrf` needs a scrape object of your own. Copy the shipped
 PodMonitors' relabeling of `__meta_kubernetes_pod_node_name` into `node`:
 every galactic metric is per node, and `node` is the label you group and
 alert by.
@@ -259,8 +259,9 @@ Caveats for the session table:
 sum by (node, family) (galactic_nat_sessions)
 
 # Idle live sessions being evicted: table full, oldest row younger than the TCP timeout
-sum by (node) (galactic_nat_conns) / on (node) galactic_nat_conn_table_max_entries > 0.9
-  and on (node) galactic_nat_conn_table_oldest_row_age_seconds < 7440
+# (GalacticNatSessionTableEvictingLive)
+sum by (node) (galactic_nat_conns) / on (node) max by (node) (galactic_nat_conn_table_max_entries) > 0.9
+  and on (node) max by (node) (galactic_nat_conn_table_oldest_row_age_seconds) < 7440
 
 # Port exhaustion or no shard
 sum by (node, reason) (rate(galactic_nat_drops_total{reason=~".*_pat_exhausted|nat64_shard_unavailable"}[5m])) > 0
@@ -272,7 +273,8 @@ sum by (node, reason) (rate(galactic_nat_drops_total[5m])) > 0
 ## Shipped alerts
 
 `config/monitoring/prometheusrule.yaml` (the `galactic-bgp` PrometheusRule,
-unit-tested with `task test:alerts`) covers routing only. Every alert
+unit-tested with `task test:alerts`) covers routing and the NAT session
+table. Every alert
 carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                | Fires when                                              | For | Severity |
@@ -289,3 +291,5 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | GalacticRouterBMPStationDown         | `galactic_router_bmp_station_up == 0`                   | 10m | warning  |
 | GalacticRouterRoutesNotInstalled     | `galactic_router_route_install_failing > 0`             | 10m | warning  |
 | GalacticRouterMetricsDown            | `galactic-router` or `galactic-router-rr` scrape down   | 5m  | warning  |
+| GalacticNatSessionTableEvictingLive  | table over 90% full, oldest row under 7440 s            | 15m | warning  |
+| GalacticNatMetricsDown               | `galactic-nat` scrape down                              | 5m  | warning  |
