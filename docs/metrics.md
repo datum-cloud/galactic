@@ -7,8 +7,10 @@ themselves; when this page and the code disagree, the code wins.
 
 ## Where the metrics come from
 
-Every DaemonSet runs `hostNetwork: true`, so each port is bound on the node
-itself.
+Every DaemonSet under `config/` runs `hostNetwork: true`, so its port is
+bound on the node itself. `galactic-vrf` runs as a sidecar in the ingress
+proxy's pod instead, and shares the 9182 default with `galactic-nat`
+without clashing, since the two never share a node.
 
 | Area                   | Component                                                 | Metric prefix                           | Port           | `job` from `config/monitoring/`          |
 |------------------------|-----------------------------------------------------------|-----------------------------------------|----------------|------------------------------------------|
@@ -277,8 +279,8 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 | FabricRouterExporterCollectorFailing | `frr_collector_up == 0`                                 | 10m | warning  |
 | FabricRouterMetricsDown              | `fabric-router` scrape down                             | 5m  | warning  |
 | FabricBGPMappedNextHop               | `fabric_router_bgp_mapped_nexthop == 1`                 | 15m | critical |
-| FabricBGPRoutesNotInstalled          | `fabric_router_bgp_uninstalled_routes > 0`              | 10m | see rule |
-| FabricConfigAgentMetricsDown         | `fabric-config-agent` scrape down                       | 5m  | see rule |
-| GalacticRouterBMPStationDown         | `galactic_router_bmp_station_up == 0`                   | 10m | see rule |
-| GalacticRouterRoutesNotInstalled     | `galactic_router_route_install_failing > 0`             | 10m | see rule |
-| GalacticRouterMetricsDown            | `galactic-router` or `galactic-router-rr` scrape down   | 5m  | see rule |
+| FabricBGPRoutesNotInstalled          | `fabric_router_bgp_uninstalled_routes > 0`              | 10m | warning  |
+| FabricConfigAgentMetricsDown         | `fabric-config-agent` scrape down                       | 5m  | warning  |
+| GalacticRouterBMPStationDown         | `galactic_router_bmp_station_up == 0`                   | 10m | warning  |
+| GalacticRouterRoutesNotInstalled     | `galactic_router_route_install_failing > 0`             | 10m | warning  |
+| GalacticRouterMetricsDown            | `galactic-router` or `galactic-router-rr` scrape down   | 5m  | warning  |
