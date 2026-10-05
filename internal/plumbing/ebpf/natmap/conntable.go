@@ -307,18 +307,35 @@ func sessionTimeout(value *natprog.NatConnValue) uint32 {
 	}
 }
 
-// sessionExpired mirrors the datapath's session_expired. now is the datapath's
-// clock: CLOCK_MONOTONIC in whole seconds, truncated to 32 bits. The
-// subtraction wraps the same way, so a stamp from before the last wrap still
-// reads as its true age.
+// rowAge is how many seconds before now a row was last seen. now is the
+// datapath's clock: CLOCK_MONOTONIC in whole seconds, truncated to 32 bits. The
+// subtraction wraps as the datapath's does, so a stamp from before the last
+// wrap still reads as its true age.
+//
+// Unlike the datapath, a stamp after now reads as age zero. The walk reads now
+// once and then takes a while, and the datapath keeps refreshing rows on other
+// CPUs meanwhile; without the clamp, a session refreshed mid-walk would wrap to
+// an age of about 2^32 seconds and read as long expired.
+func rowAge(lastSeen, now uint32) uint32 {
+	age := now - lastSeen
+	if int32(age) < 0 { //nolint:gosec // reinterpreting the wrapped difference is the point
+		return 0
+	}
+	return age
+}
+
+// sessionExpired mirrors the datapath's session_expired, with rowAge's clamp.
 func sessionExpired(value *natprog.NatConnValue, now uint32) bool {
-	return now-value.LastSeen > sessionTimeout(value)
+	return rowAge(value.LastSeen, now) > sessionTimeout(value)
 }
 
 // CountSessions counts rows by family, and live sessions by family and
-// protocol, as of now (see sessionExpired for its clock). Only a reverse row,
-// whose key carries no encapsulation source, is checked for liveness: a forward
-// row's last_seen records when it was written and is never refreshed.
+// protocol, as of now (see rowAge for its clock). Only a reverse row, whose key
+// carries no encapsulation source, is checked for liveness: a forward row's
+// last_seen records when it was written and is never refreshed. The datapath
+// copies a forward row's encapsulation source from the packet's outer header,
+// so a packet sent from "::" would leave a forward row that is counted here as a
+// session; no legitimate fabric node sends from that address.
 //
 // The datapath inserts and evicts rows during the walk, which can restart it
 // or cut it short. The counts gathered so far are returned alongside any error,
@@ -335,7 +352,7 @@ func (t *ConnTable) CountSessions(now uint32) (SessionCounts, error) {
 		if rawKey.EncapSrc != ([16]byte{}) {
 			continue
 		}
-		if age := now - value.LastSeen; !counts.HasReverse || age > counts.OldestAge {
+		if age := rowAge(value.LastSeen, now); !counts.HasReverse || age > counts.OldestAge {
 			counts.OldestAge = age
 		}
 		counts.HasReverse = true

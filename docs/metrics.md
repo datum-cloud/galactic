@@ -225,13 +225,13 @@ sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~"galact
 
 One `galactic-nat` pod per egress shard; every value is per shard.
 
-| Metric                                           | Type    | Labels                                   | Meaning                                                                                        |
-|--------------------------------------------------|---------|------------------------------------------|------------------------------------------------------------------------------------------------|
-| `galactic_nat_conns`                             | gauge   | `family` (`nat66`, `nat64`)              | Rows in the connection table, expired sessions included. A session holds two rows              |
-| `galactic_nat_sessions`                          | gauge   | `family`, `proto` (`tcp`, `udp`, `icmp`) | Live sessions: one per session within its idle timeout                                         |
-| `galactic_nat_conn_table_oldest_row_age_seconds` | gauge   | none                                     | Seconds since the least recently seen session, expired ones included, last translated a packet |
-| `galactic_nat_conn_table_max_entries`            | gauge   | none                                     | Table capacity in rows, shared by both families                                                |
-| `galactic_nat_drops_total`                       | counter | `reason`                                 | Packets dropped by the NAT datapath                                                            |
+| Metric                                           | Type    | Labels                                   | Meaning                                                                                                                              |
+|--------------------------------------------------|---------|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `galactic_nat_conns`                             | gauge   | `family` (`nat66`, `nat64`)              | Rows in the connection table, expired sessions included. A session holds two rows                                                    |
+| `galactic_nat_sessions`                          | gauge   | `family`, `proto` (`tcp`, `udp`, `icmp`) | Live sessions: one per session within its idle timeout                                                                               |
+| `galactic_nat_conn_table_oldest_row_age_seconds` | gauge   | none                                     | Seconds since the least recently seen session, expired ones included, last translated a packet. Meaningful only on a near-full table |
+| `galactic_nat_conn_table_max_entries`            | gauge   | none                                     | Table capacity in rows, shared by both families                                                                                      |
+| `galactic_nat_drops_total`                       | counter | `reason`                                 | Packets dropped by the NAT datapath                                                                                                  |
 
 Caveats for the session table:
 
@@ -239,7 +239,8 @@ Caveats for the session table:
   reuses their port, so `galactic_nat_conns` sits near capacity on any busy
   shard. That is normal. Use `galactic_nat_sessions` for live sessions.
 - Live sessions are at risk only when the table is full and its oldest row is
-  younger than the longest session timeout, 7440 s for established TCP.
+  younger than the longest session timeout, 7440 s for established TCP. The
+  table's LRU evicts in approximate order, so the age is an estimate.
 - The table is a self-evicting LRU, so the counts can move without traffic
   changing.
 

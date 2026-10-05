@@ -30,18 +30,18 @@ type natCollector struct {
 
 	// now reads the clock the datapath stamps last_seen with. Nil means
 	// datapathNow.
-	now func() uint32
+	now func() (uint32, error)
 }
 
 // datapathNow reads the datapath's session clock: bpf_ktime_get_ns is
 // CLOCK_MONOTONIC, which the datapath keeps in whole seconds truncated to 32
 // bits (now_sec in nat.c).
-func datapathNow() uint32 {
+func datapathNow() (uint32, error) {
 	var ts unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
-		return 0
+		return 0, fmt.Errorf("read CLOCK_MONOTONIC: %w", err)
 	}
-	return uint32(ts.Sec)
+	return uint32(ts.Sec), nil //nolint:gosec // truncated to 32 bits, as the datapath's now_sec does
 }
 
 // newNatCollector builds a collector reading directly from a loaded object
@@ -79,9 +79,10 @@ var (
 	oldestRowAgeDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(metricsNamespace, "", "conn_table_oldest_row_age_seconds"),
 		"Seconds since the least recently seen session in nat_conn_table last translated a packet, "+
-			"expired sessions included. On a full table this approximates how long an idle session "+
-			"survives before the LRU evicts it; below the longest session timeout, idle live sessions "+
-			"are being evicted.",
+			"expired sessions included. Meaningful only while the table is near full: then it "+
+			"approximates how long an idle session survives before the LRU evicts it, and a value "+
+			"below the longest session timeout means idle live sessions are being evicted. On a "+
+			"table with room it only grows.",
 		nil, nil,
 	)
 	connTableMaxEntriesDesc = prometheus.NewDesc(
@@ -129,18 +130,29 @@ func familyLabel(family uint8) string {
 	}
 }
 
+// collectConns reports the session table's rows, live sessions and oldest row.
+// A collector with no table, like one with no capacity, reports none of them;
+// newNatCollector always sets one, so that happens only in tests.
 func (c *natCollector) collectConns(ch chan<- prometheus.Metric) {
 	if c.connTable == nil {
 		return
 	}
-	now := c.now
-	if now == nil {
-		now = datapathNow
+	clock := c.now
+	if clock == nil {
+		clock = datapathNow
+	}
+	// Without the datapath's clock every row's age is meaningless, so the
+	// scrape skips these series rather than report wrong ones; the drop
+	// counters are still reported.
+	now, err := clock()
+	if err != nil {
+		slog.Warn("cannot read the session clock; skipping session table metrics", "err", err)
+		return
 	}
 	// A walk the datapath's own inserts and evictions disturbed still reports
 	// what it counted: an error metric here fails the whole scrape, drops
 	// included.
-	counts, err := c.connTable.CountSessions(now())
+	counts, err := c.connTable.CountSessions(now)
 	if err != nil {
 		slog.Debug("nat_conn_table walk incomplete; reporting an approximate count", "err", err)
 	}

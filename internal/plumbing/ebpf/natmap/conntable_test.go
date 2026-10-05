@@ -172,6 +172,11 @@ func sessionRow(family, proto uint8, shardPort, destPort uint16, state uint8, la
 	e.Family = family
 	e.Proto = proto
 	e.ConnKey.Proto = proto
+	// A NAT64 Echo session's value holds the tenant's ICMPv6, its reverse key
+	// the peer's ICMP.
+	if family == natprog.FamilyIPv4 && proto == 58 {
+		e.ConnKey.Proto = 1
+	}
 	e.TenantArg = 0
 	e.Sport = 0
 	e.Dport = shardPort
@@ -310,6 +315,24 @@ func TestConnTable_CountSessionsClockWrap(t *testing.T) {
 	}
 	if got := counts.Live[SessionKey{Family: natprog.FamilyIPv6, Proto: SessionProtoUDP}]; got != 1 {
 		t.Errorf("a 30 s old DNS session across the wrap: live = %d, want 1", got)
+	}
+}
+
+func TestConnTable_CountSessionsRefreshedMidWalk(t *testing.T) {
+	// The datapath refreshed the session after the walk read now.
+	const now uint32 = 100_000
+	fake := newFakeTable()
+	putEntry(t, fake, sessionRow(natprog.FamilyIPv6, 6, 35000, 443, 0, now+1))
+
+	counts, err := NewConnTable(fake).CountSessions(now)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if got := counts.Live[SessionKey{Family: natprog.FamilyIPv6, Proto: SessionProtoTCP}]; got != 1 {
+		t.Errorf("session stamped after now: live = %d, want 1", got)
+	}
+	if counts.OldestAge != 0 {
+		t.Errorf("session stamped after now: OldestAge = %d, want 0", counts.OldestAge)
 	}
 }
 

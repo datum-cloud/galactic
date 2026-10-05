@@ -64,12 +64,22 @@ func (it *connRowsIterator) Next(keyOut, valueOut any) bool {
 func (*connRowsIterator) Err() error { return nil }
 
 // reverseRow is a reverse row's wire key and value: no encapsulation source.
-// destPort is in host order.
+// proto is the tenant's protocol, which the value carries; a NAT64 Echo
+// session's key holds ICMP instead, as the datapath writes it. destPort is in
+// host order.
 func reverseRow(
 	family, proto uint8, shardPort, destPort uint16, lastSeen uint32,
 ) (natprog.NatConnKey, natprog.NatConnValue) {
-	return natprog.NatConnKey{Family: family, Proto: proto, Dport: shardPort},
+	keyProto := proto
+	if family == natprog.FamilyIPv4 && proto == 58 {
+		keyProto = 1
+	}
+	return natprog.NatConnKey{Family: family, Proto: keyProto, Dport: shardPort},
 		natprog.NatConnValue{Proto: proto, DestPort: destPort<<8 | destPort>>8, LastSeen: lastSeen}
+}
+
+func fixedClock(now uint32) func() (uint32, error) {
+	return func() (uint32, error) { return now, nil }
 }
 
 // gatherGauges registers c and returns every gauge by metric name, each keyed
@@ -117,7 +127,7 @@ func TestNatCollectorCountsLiveSessions(t *testing.T) {
 	rows.add(natprog.NatConnKey{Family: natprog.FamilyIPv6, Proto: 17, EncapSrc: [16]byte{0xfc}},
 		natprog.NatConnValue{Proto: 17, LastSeen: 1})
 
-	c := &natCollector{connTable: natmap.NewConnTable(rows), now: func() uint32 { return now }}
+	c := &natCollector{connTable: natmap.NewConnTable(rows), now: fixedClock(now)}
 	gauges, help := gatherGauges(t, c)
 
 	wantConns := map[string]float64{familyNAT66: 4, familyNAT64: 1}
@@ -144,7 +154,7 @@ func TestNatCollectorCountsLiveSessions(t *testing.T) {
 }
 
 func TestNatCollectorEmptyConnTable(t *testing.T) {
-	c := &natCollector{connTable: natmap.NewConnTable(&connRows{}), now: func() uint32 { return 1 }}
+	c := &natCollector{connTable: natmap.NewConnTable(&connRows{}), now: fixedClock(1)}
 	gauges, _ := gatherGauges(t, c)
 
 	if len(gauges[connsName]) != 2 || len(gauges[sessionsName]) != 6 {
@@ -200,6 +210,48 @@ func TestNatCollectorReportsMaxEntriesAsGauge(t *testing.T) {
 	}
 	if out.GetGauge() == nil || out.GetGauge().GetValue() != 1024 {
 		t.Errorf("metric = %v, want gauge 1024", &out)
+	}
+}
+
+func TestNatCollectorSessionRefreshedMidWalk(t *testing.T) {
+	// The datapath refreshed this session after the scrape read its clock.
+	const now uint32 = 50_000
+	rows := &connRows{}
+	rows.add(reverseRow(natprog.FamilyIPv6, 6, 35000, 443, now+1))
+
+	c := &natCollector{connTable: natmap.NewConnTable(rows), now: fixedClock(now)}
+	gauges, _ := gatherGauges(t, c)
+
+	if got := gauges[sessionsName]["nat66/tcp"]; got != 1 {
+		t.Errorf("session refreshed mid-walk: %s{nat66,tcp} = %v, want 1", sessionsName, got)
+	}
+	if got := gauges[oldestRowAgeName][""]; got != 0 {
+		t.Errorf("session refreshed mid-walk: %s = %v, want 0", oldestRowAgeName, got)
+	}
+}
+
+func TestNatCollectorSkipsSessionsWithoutClock(t *testing.T) {
+	rows := &connRows{}
+	rows.add(reverseRow(natprog.FamilyIPv6, 17, 35000, 53, 1))
+	c := &natCollector{
+		connTable: natmap.NewConnTable(rows),
+		now:       func() (uint32, error) { return 0, errors.New("no clock") },
+	}
+	gauges, _ := gatherGauges(t, c)
+
+	for _, name := range []string{connsName, sessionsName, oldestRowAgeName} {
+		if _, ok := gauges[name]; ok {
+			t.Errorf("%s reported without the session clock", name)
+		}
+	}
+}
+
+func TestNatCollectorOmitsSessionsWithoutTable(t *testing.T) {
+	ch := make(chan prometheus.Metric, 16)
+	(&natCollector{}).collectConns(ch)
+	close(ch)
+	for m := range ch {
+		t.Errorf("unexpected metric without a session table: %s", m.Desc())
 	}
 }
 
