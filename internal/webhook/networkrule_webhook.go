@@ -60,6 +60,10 @@ func (v *NetworkRuleValidator) ValidateDelete(
 // object has passed admission and been persisted: a validating webhook cannot
 // write to the status of a request it has not yet admitted.
 func (v *NetworkRuleValidator) authorize(ctx context.Context, rule *networkv1alpha1.NetworkRule) error {
+	if err := validateBackendPorts(rule); err != nil {
+		return err
+	}
+
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve admission request: %w", err)
@@ -93,3 +97,19 @@ func (v *NetworkRuleValidator) SetupWebhookWithManager(mgr ctrl.Manager) error {
 
 // Production registration additionally requires a webhook configuration and
 // service manifest, plus TLS provisioning, neither of which is wired up here.
+
+// validateBackendPorts refuses a NetworkRule whose backends declare a port other
+// than spec.port. The gateway datapath never rewrites ports (Direct Server
+// Return); a mismatched backend port is accepted today and then ignored, so the
+// backend never sees traffic on the port it was configured with (#737).
+func validateBackendPorts(rule *networkv1alpha1.NetworkRule) error {
+	for i, b := range rule.Spec.Backends {
+		if b.Port != rule.Spec.Port {
+			return fmt.Errorf(
+				"backends[%d].port (%d) must match spec.port (%d): Direct Server Return cannot remap ports",
+				i, b.Port, rule.Spec.Port,
+			)
+		}
+	}
+	return nil
+}

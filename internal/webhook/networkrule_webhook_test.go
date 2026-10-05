@@ -103,3 +103,42 @@ func TestAllowAllAuthorizer_AlwaysAllows(t *testing.T) {
 		t.Fatal("AllowAllAuthorizer must always allow")
 	}
 }
+
+func TestNetworkRuleValidator_BackendPortMustMatchRulePort(t *testing.T) {
+	v := &NetworkRuleValidator{Authorizer: fakeAuthorizer{allow: true}}
+
+	mismatch := testRule()
+	mismatch.Spec.Port = 443
+	mismatch.Spec.Backends = []networkv1alpha1.NetworkRuleBackend{
+		{Address: "10.0.0.1", Port: 8443},
+	}
+	_, err := v.ValidateCreate(contextWithRequester("alice"), mismatch)
+	if err == nil {
+		t.Fatal("expected refusal when backend port differs from spec.port")
+	}
+	if want := "Direct Server Return cannot remap ports"; !containsStr(err.Error(), want) {
+		t.Errorf("error %q does not mention %q", err.Error(), want)
+	}
+
+	match := testRule()
+	match.Spec.Port = 443
+	match.Spec.Backends = []networkv1alpha1.NetworkRuleBackend{
+		{Address: "10.0.0.1", Port: 443},
+	}
+	if _, err := v.ValidateCreate(contextWithRequester("alice"), match); err != nil {
+		t.Fatalf("matching ports should be admitted: %v", err)
+	}
+}
+
+func containsStr(s, sub string) bool {
+	return len(sub) == 0 || (len(s) >= len(sub) && (s == sub || len(s) > 0 && containsAt(s, sub)))
+}
+
+func containsAt(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
