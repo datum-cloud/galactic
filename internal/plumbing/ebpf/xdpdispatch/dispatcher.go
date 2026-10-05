@@ -239,10 +239,23 @@ func (d *Dispatcher) updateLinks(root *ebpf.Program) error {
 	}
 	var errs []error
 	for _, e := range entries {
+		// Only links are pinned here, each named for its ifindex. Anything
+		// else is not ours to move.
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
 		l, err := link.LoadPinnedLink(filepath.Join(d.dir, linksDirName, e.Name()), nil)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("load pinned link %q: %w", e.Name(), err))
 			continue
+		}
+		// A link whose interface is gone cannot be updated. Skip it rather than
+		// fail every Open; PruneDefunct or EnsureLink removes the pin.
+		if info, err := l.Info(); err == nil {
+			if xdp := info.XDP(); xdp == nil || xdp.Ifindex == 0 {
+				_ = l.Close()
+				continue
+			}
 		}
 		if err := l.Update(root); err != nil {
 			errs = append(errs, fmt.Errorf("move link %q to the new root: %w", e.Name(), err))
@@ -538,9 +551,12 @@ func (d *Dispatcher) Roles(ifindex int) (Role, error) {
 // Fill puts program in slot, replacing whatever the slot held, and renews the
 // slot's lease, so the slot runs from the moment it is filled. The kernel swaps
 // the program atomically, so a restarted datapath takes over its slot with no
-// packet missing it. The program must be an XDP program with the default
-// attach type and no frags support, like the root.
-func (d *Dispatcher) Fill(slot Slot, program *ebpf.Program) error {
+// packet missing it. It runs under the lock so a predecessor's ClearIfHeld,
+// which checks then deletes, can never land between the two and empty the slot
+// this call filled. The program must be an XDP program with the default attach
+// type and no frags support, like the root.
+func (l *Locked) Fill(slot Slot, program *ebpf.Program) error {
+	d := l.d
 	if slot >= NumSlots {
 		return errInvalidSlot
 	}

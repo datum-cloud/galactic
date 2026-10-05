@@ -59,8 +59,9 @@
 // flock on PinDir. Holding it across a first attach and the bond-member wait
 // that follows keeps the gateway and the shard from bouncing two members of
 // one bond at once, and holding it across a role update keeps either
-// datapath's bit from being lost. A datapath fills and renews its own slot
-// without the lock.
+// datapath's bit from being lost. Filling a slot takes the lock too, so a
+// predecessor clearing the slot on shutdown never empties it. A datapath renews
+// its own lease without the lock.
 //
 // # Generated code
 //

@@ -139,6 +139,12 @@ func (a auto) PruneDefunct() ([]int, error) {
 	return l.PruneDefunct()
 }
 
+func (a auto) Fill(slot Slot, program *ebpf.Program) error {
+	l := a.lock()
+	defer l.Unlock()
+	return l.Fill(slot, program)
+}
+
 func (a auto) Clear(slot Slot) error {
 	l := a.lock()
 	defer l.Unlock()
@@ -191,7 +197,7 @@ func TestEnsureLink_SurvivesTheOwnerClosing(t *testing.T) {
 	if err := locked(t, nat).SetRole(ifindex, RoleEgress); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	if err := nat.Fill(SlotNAT, natProg); err != nil {
+	if err := locked(t, nat).Fill(SlotNAT, natProg); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 	if err := nat.Renew(SlotNAT); err != nil {
@@ -284,7 +290,7 @@ func TestEnsureLink_LeavesAForeignProgramAlone(t *testing.T) {
 	if err := locked(t, d).SetRole(ifindex, RoleEgress); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	if err := d.Fill(SlotNAT, nat); err != nil {
+	if err := locked(t, d).Fill(SlotNAT, nat); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 	if err := d.Renew(SlotNAT); err != nil {
@@ -399,7 +405,7 @@ func TestCoverage_FollowsTheSlotAndItsLease(t *testing.T) {
 		t.Errorf("empty slot: Coverage = %v, want ErrSlotNotHeld", err)
 	}
 	// Fill renews the lease, so the slot is covered at once.
-	if err := d.Fill(SlotNAT, prog); err != nil {
+	if err := locked(t, d).Fill(SlotNAT, prog); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 	if err := d.Coverage(ifindex, SlotNAT, prog); err != nil {
@@ -463,10 +469,10 @@ func TestOpen_RefusesAnotherABI(t *testing.T) {
 func TestFill_RejectsAnOutOfRangeSlot(t *testing.T) {
 	dir := testPinDir(t)
 	d := openDispatcher(t, dir)
-	if err := d.Fill(NumSlots, stubProgram(t, xdpPass)); !errors.Is(err, errInvalidSlot) {
+	if err := locked(t, d).Fill(NumSlots, stubProgram(t, xdpPass)); !errors.Is(err, errInvalidSlot) {
 		t.Errorf("Fill(NumSlots) = %v, want errInvalidSlot", err)
 	}
-	if err := d.Fill(SlotNAT, nil); !errors.Is(err, errNilProgram) {
+	if err := locked(t, d).Fill(SlotNAT, nil); !errors.Is(err, errNilProgram) {
 		t.Errorf("Fill(nil) = %v, want errNilProgram", err)
 	}
 }
@@ -483,7 +489,7 @@ func TestEnsureLink_FollowsANewerPinnedRoot(t *testing.T) {
 	if err := locked(t, older).SetRole(ifindex, RoleEgress); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	if err := older.Fill(SlotNAT, prog); err != nil {
+	if err := locked(t, older).Fill(SlotNAT, prog); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 
@@ -598,10 +604,10 @@ func TestClearIfHeld_LeavesASuccessorsSlot(t *testing.T) {
 	d := openDispatcher(t, dir)
 	oldProg, newProg := stubProgram(t, xdpDrop), stubProgram(t, xdpTx)
 
-	if err := d.Fill(SlotNAT, oldProg); err != nil {
+	if err := locked(t, d).Fill(SlotNAT, oldProg); err != nil {
 		t.Fatalf("Fill old: %v", err)
 	}
-	if err := d.Fill(SlotNAT, newProg); err != nil {
+	if err := locked(t, d).Fill(SlotNAT, newProg); err != nil {
 		t.Fatalf("Fill new: %v", err)
 	}
 	cleared, err := locked(t, d).ClearIfHeld(SlotNAT, oldProg)
@@ -617,5 +623,40 @@ func TestClearIfHeld_LeavesASuccessorsSlot(t *testing.T) {
 	}
 	if live, _ := d.LiveSlots(); len(live) != 0 {
 		t.Errorf("LiveSlots = %v after clearing, want none", live)
+	}
+}
+
+// TestOpen_UpgradeSkipsADefunctLink is a root upgrade on a node where an
+// interface went away and its link pin is still there. Open must move the live
+// links and succeed rather than fail on the dead one at every start.
+func TestOpen_UpgradeSkipsADefunctLink(t *testing.T) {
+	dir := testPinDir(t)
+	gone := testVeth(t, "xdph")
+	d := openDispatcher(t, dir)
+	ensureLink(t, d, gone)
+
+	l, err := netlink.LinkByIndex(gone)
+	if err != nil {
+		t.Fatalf("find veth: %v", err)
+	}
+	if err := netlink.LinkDel(l); err != nil {
+		t.Fatalf("delete veth: %v", err)
+	}
+	if err := d.maps.DispatchMeta.Put(metaKeyRevision, uint64(RootRevision-1)); err != nil {
+		t.Fatalf("lower pinned revision: %v", err)
+	}
+	// A stray entry that is not an ifindex is skipped too.
+	if err := os.Mkdir(filepath.Join(dir, linksDirName, "stray"), 0o755); err != nil {
+		t.Fatalf("create stray entry: %v", err)
+	}
+
+	upgraded, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open with a defunct link pinned: %v", err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+	var rev uint64
+	if err := upgraded.maps.DispatchMeta.Lookup(metaKeyRevision, &rev); err != nil || rev != RootRevision {
+		t.Errorf("recorded revision = %d, %v; want %d", rev, err, RootRevision)
 	}
 }
