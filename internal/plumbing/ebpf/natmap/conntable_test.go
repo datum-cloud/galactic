@@ -165,28 +165,160 @@ type abortingIterator struct{ Iterator }
 
 func (*abortingIterator) Err() error { return ebpf.ErrIterationAborted }
 
-func TestConnTable_CountByFamily(t *testing.T) {
+// sessionRow builds a reverse row: no encapsulation source, as the datapath
+// writes one. destPort, state and lastSeen are the fields liveness reads.
+func sessionRow(family, proto uint8, shardPort, destPort uint16, state uint8, lastSeen uint32) ConnEntry {
+	e := testConnEntry()
+	e.Family = family
+	e.Proto = proto
+	e.ConnKey.Proto = proto
+	e.TenantArg = 0
+	e.Sport = 0
+	e.Dport = shardPort
+	e.DestPort = destPort
+	e.State = state
+	e.LastSeen = lastSeen
+	return e
+}
+
+func TestConnTable_CountSessions(t *testing.T) {
+	const now uint32 = 100_000
+	est := natprog.SessionTCPEstablished
+	closing := natprog.SessionTCPEstablished | natprog.SessionTCPClosing
+
+	tests := []struct {
+		name     string
+		proto    uint8
+		destPort uint16
+		state    uint8
+		age      uint32
+		live     bool
+	}{
+		{"udp live", 17, 443, 0, natprog.TimeoutUDP, true},
+		{"udp expired", 17, 443, 0, natprog.TimeoutUDP + 1, false},
+		{"udp dns live", 17, 53, 0, natprog.TimeoutUDPDNS, true},
+		{"udp dns expired", 17, 53, 0, natprog.TimeoutUDPDNS + 1, false},
+		{"tcp established live", 6, 443, est, natprog.TimeoutTCPEstablished, true},
+		{"tcp established expired", 6, 443, est, natprog.TimeoutTCPEstablished + 1, false},
+		{"tcp transitory live", 6, 443, 0, natprog.TimeoutTCPTransitory, true},
+		{"tcp transitory expired", 6, 443, 0, natprog.TimeoutTCPTransitory + 1, false},
+		{"tcp closing expired", 6, 443, closing, natprog.TimeoutTCPTransitory + 1, false},
+		{"icmp live", 58, 0, 0, natprog.TimeoutICMP, true},
+		{"icmp expired", 58, 0, 0, natprog.TimeoutICMP + 1, false},
+	}
+
+	for _, family := range []uint8{natprog.FamilyIPv6, natprog.FamilyIPv4} {
+		for _, tt := range tests {
+			t.Run(familyName(family)+"/"+tt.name, func(t *testing.T) {
+				fake := newFakeTable()
+				putEntry(t, fake, sessionRow(family, tt.proto, 35000, tt.destPort, tt.state, now-tt.age))
+
+				counts, err := NewConnTable(fake).CountSessions(now)
+				if err != nil {
+					t.Fatalf("CountSessions: %v", err)
+				}
+				want := 0
+				if tt.live {
+					want = 1
+				}
+				key := SessionKey{Family: family, Proto: sessionProto(tt.proto)}
+				if got := counts.Live[key]; got != want {
+					t.Errorf("Live[%v] = %d, want %d", key, got, want)
+				}
+				if counts.Rows[family] != 1 {
+					t.Errorf("Rows[%d] = %d, want 1 whether or not the session expired", family, counts.Rows[family])
+				}
+				if !counts.HasReverse || counts.OldestAge != tt.age {
+					t.Errorf("OldestAge = %d (HasReverse %t), want %d", counts.OldestAge, counts.HasReverse, tt.age)
+				}
+			})
+		}
+	}
+}
+
+func familyName(family uint8) string {
+	if family == natprog.FamilyIPv4 {
+		return "nat64"
+	}
+	return "nat66"
+}
+
+func TestConnTable_CountSessionsMixedTable(t *testing.T) {
+	const now uint32 = 100_000
 	fake := newFakeTable()
-	for i, family := range []uint8{natprog.FamilyIPv6, natprog.FamilyIPv6, natprog.FamilyIPv4} {
-		e := testConnEntry()
-		e.Family = family
-		e.Sport = uint16(1000 + i)
-		putEntry(t, fake, e)
-	}
 
-	counts, err := NewConnTable(fake).CountByFamily()
+	// Two live sessions and three expired ones, as a busy DNS client leaves
+	// the table.
+	putEntry(t, fake, sessionRow(natprog.FamilyIPv6, 17, 35000, 53, 0, now-5))
+	putEntry(t, fake, sessionRow(natprog.FamilyIPv6, 17, 35001, 53, 0, now-3600))
+	putEntry(t, fake, sessionRow(natprog.FamilyIPv6, 17, 35002, 53, 0, now-600))
+	putEntry(t, fake, sessionRow(natprog.FamilyIPv4, 6, 35003, 443, natprog.SessionTCPEstablished, now-7000))
+	putEntry(t, fake, sessionRow(natprog.FamilyIPv4, 1, 35004, 0, 0, now-61))
+
+	// A forward row, keyed by its encapsulation source, whose last_seen is
+	// from when it was written: never live, never the oldest.
+	fwd := testConnEntry()
+	fwd.Family = natprog.FamilyIPv6
+	fwd.EncapSrc = netip.MustParseAddr("fc00:3:4::1")
+	fwd.LastSeen = 1
+	putEntry(t, fake, fwd)
+
+	counts, err := NewConnTable(fake).CountSessions(now)
 	if err != nil {
-		t.Fatalf("CountByFamily: %v", err)
+		t.Fatalf("CountSessions: %v", err)
 	}
-	if counts[natprog.FamilyIPv6] != 2 || counts[natprog.FamilyIPv4] != 1 {
-		t.Errorf("counts = %v, want 2 IPv6 and 1 IPv4", counts)
+	wantLive := map[SessionKey]int{
+		{Family: natprog.FamilyIPv6, Proto: SessionProtoUDP}: 1,
+		{Family: natprog.FamilyIPv4, Proto: SessionProtoTCP}: 1,
+	}
+	if len(counts.Live) != len(wantLive) {
+		t.Errorf("Live = %v, want %v", counts.Live, wantLive)
+	}
+	for k, v := range wantLive {
+		if counts.Live[k] != v {
+			t.Errorf("Live[%v] = %d, want %d", k, counts.Live[k], v)
+		}
+	}
+	if counts.Rows[natprog.FamilyIPv6] != 4 || counts.Rows[natprog.FamilyIPv4] != 2 {
+		t.Errorf("Rows = %v, want 4 IPv6 and 2 IPv4", counts.Rows)
+	}
+	if counts.OldestAge != 7000 {
+		t.Errorf("OldestAge = %d, want 7000 from the reverse rows alone", counts.OldestAge)
 	}
 
-	counts, err = NewConnTable(abortingTable{fake}).CountByFamily()
+	counts, err = NewConnTable(abortingTable{fake}).CountSessions(now)
 	if !errors.Is(err, ebpf.ErrIterationAborted) {
-		t.Fatalf("CountByFamily on an aborted walk: err = %v, want ErrIterationAborted", err)
+		t.Fatalf("CountSessions on an aborted walk: err = %v, want ErrIterationAborted", err)
 	}
-	if counts[natprog.FamilyIPv6] != 2 || counts[natprog.FamilyIPv4] != 1 {
-		t.Errorf("counts from an aborted walk = %v, want the rows seen before it ended", counts)
+	if counts.Rows[natprog.FamilyIPv6] != 4 || counts.Rows[natprog.FamilyIPv4] != 2 {
+		t.Errorf("rows from an aborted walk = %v, want the rows seen before it ended", counts.Rows)
+	}
+}
+
+func TestConnTable_CountSessionsClockWrap(t *testing.T) {
+	// The clock wrapped 10 s ago; the row was stamped 20 s before the wrap.
+	const now uint32 = 10
+	fake := newFakeTable()
+	putEntry(t, fake, sessionRow(natprog.FamilyIPv6, 17, 35000, 53, 0, ^uint32(0)-19))
+
+	counts, err := NewConnTable(fake).CountSessions(now)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if counts.OldestAge != 30 {
+		t.Errorf("OldestAge = %d, want 30 across the wrap", counts.OldestAge)
+	}
+	if got := counts.Live[SessionKey{Family: natprog.FamilyIPv6, Proto: SessionProtoUDP}]; got != 1 {
+		t.Errorf("a 30 s old DNS session across the wrap: live = %d, want 1", got)
+	}
+}
+
+func TestConnTable_CountSessionsEmpty(t *testing.T) {
+	counts, err := NewConnTable(newFakeTable()).CountSessions(1)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if counts.HasReverse || len(counts.Rows) != 0 || len(counts.Live) != 0 {
+		t.Errorf("counts on an empty table = %+v, want nothing", counts)
 	}
 }

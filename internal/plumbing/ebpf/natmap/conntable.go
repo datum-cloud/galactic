@@ -237,21 +237,111 @@ func (t *ConnTable) List() ([]ConnEntry, error) {
 	return entries, nil
 }
 
-// CountByFamily counts rows by their key's family. It reads no value field, so
-// it does not depend on the value layout.
+// Session protocols as CountSessions reports them. A row of any protocol other
+// than TCP or UDP is an ICMP Echo session, matching the datapath's
+// session_timeout, which gives every such row the ICMP timeout.
+const (
+	SessionProtoTCP  = "tcp"
+	SessionProtoUDP  = "udp"
+	SessionProtoICMP = "icmp"
+)
+
+const (
+	ipprotoTCP = 6
+	ipprotoUDP = 17
+	dnsPort    = 53
+)
+
+// SessionKey groups live sessions by their key's family and their protocol.
+type SessionKey struct {
+	Family uint8
+	Proto  string
+}
+
+// SessionCounts is one walk of nat_conn_table.
+type SessionCounts struct {
+	// Rows counts every row by its key's family, expired sessions included.
+	// A whole session holds two rows.
+	Rows map[uint8]int
+
+	// Live counts reverse rows whose session has not expired, one per live
+	// session.
+	Live map[SessionKey]int
+
+	// OldestAge is the largest age in seconds, now minus last_seen, of any
+	// reverse row, expired ones included. Expired rows stay until the LRU
+	// evicts them or a claim reuses their port, so on a full table this is
+	// roughly how long an idle row survives before eviction. HasReverse is
+	// false, and OldestAge zero, when the walk found no reverse row.
+	OldestAge  uint32
+	HasReverse bool
+}
+
+// sessionProto names a row's protocol as SessionKey reports it.
+func sessionProto(proto uint8) string {
+	switch proto {
+	case ipprotoTCP:
+		return SessionProtoTCP
+	case ipprotoUDP:
+		return SessionProtoUDP
+	default:
+		return SessionProtoICMP
+	}
+}
+
+// sessionTimeout mirrors the datapath's session_timeout, in seconds.
+func sessionTimeout(value *natprog.NatConnValue) uint32 {
+	switch value.Proto {
+	case ipprotoTCP:
+		if value.State&(natprog.SessionTCPEstablished|natprog.SessionTCPClosing) == natprog.SessionTCPEstablished {
+			return natprog.TimeoutTCPEstablished
+		}
+		return natprog.TimeoutTCPTransitory
+	case ipprotoUDP:
+		if beU16(value.DestPort) == dnsPort {
+			return natprog.TimeoutUDPDNS
+		}
+		return natprog.TimeoutUDP
+	default:
+		return natprog.TimeoutICMP
+	}
+}
+
+// sessionExpired mirrors the datapath's session_expired. now is the datapath's
+// clock: CLOCK_MONOTONIC in whole seconds, truncated to 32 bits. The
+// subtraction wraps the same way, so a stamp from before the last wrap still
+// reads as its true age.
+func sessionExpired(value *natprog.NatConnValue, now uint32) bool {
+	return now-value.LastSeen > sessionTimeout(value)
+}
+
+// CountSessions counts rows by family, and live sessions by family and
+// protocol, as of now (see sessionExpired for its clock). Only a reverse row,
+// whose key carries no encapsulation source, is checked for liveness: a forward
+// row's last_seen records when it was written and is never refreshed.
 //
 // The datapath inserts and evicts rows during the walk, which can restart it
 // or cut it short. The counts gathered so far are returned alongside any error,
 // and are approximate either way.
-func (t *ConnTable) CountByFamily() (map[uint8]int, error) {
+func (t *ConnTable) CountSessions(now uint32) (SessionCounts, error) {
 	var (
-		counts = map[uint8]int{}
+		counts = SessionCounts{Rows: map[uint8]int{}, Live: map[SessionKey]int{}}
 		rawKey natprog.NatConnKey
 		value  natprog.NatConnValue
 	)
 	it := t.table.Iterate()
 	for it.Next(&rawKey, &value) {
-		counts[rawKey.Family]++
+		counts.Rows[rawKey.Family]++
+		if rawKey.EncapSrc != ([16]byte{}) {
+			continue
+		}
+		if age := now - value.LastSeen; !counts.HasReverse || age > counts.OldestAge {
+			counts.OldestAge = age
+		}
+		counts.HasReverse = true
+		if !sessionExpired(&value, now) {
+			counts.Live[SessionKey{Family: rawKey.Family, Proto: sessionProto(value.Proto)}]++
+		}
 	}
 	if err := it.Err(); err != nil {
 		return counts, fmt.Errorf("natmap: nat_conn_table: count: %w", err)

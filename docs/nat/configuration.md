@@ -414,7 +414,13 @@ gone idle for its protocol's timeout, compile-time constants in `nat.c`:
   session drops as `no_return_conn`, the tenant's next packet claims a fresh
   port, and a port claim that collides with an expired session releases both
   its rows and takes the port. Expired rows hold table capacity until then,
-  so `galactic_nat_conns` counts them.
+  so `galactic_nat_conns` counts them and `galactic_nat_sessions` does not.
+- **A full table is normal.** On any steadily used shard, expired rows fill
+  `nat_conn_table` toward its capacity and stay there, because nothing
+  removes them early. Only evicting a live session is harmful, and the LRU
+  does that only once rows turn over faster than the longest timeout,
+  2 h 4 min. `galactic_nat_conn_table_oldest_row_age_seconds` shows how
+  fast rows turn over; see the alert under [Verifying](#verifying).
 - **Split sessions.** The LRU evicts rows one at a time. A forward row whose
   reverse row is gone is replaced on its next packet; a reverse row whose
   forward row is gone keeps translating replies, and the flow's next packet
@@ -432,11 +438,22 @@ kubectl get bgpadvertisement -n galactic-system | grep nat66
 
 Metrics, exposed on `GALACTIC_NAT_METRICS_PORT` (`9182` by default):
 
-| Metric                                | Type    | Labels   | Meaning                                                                                                                                                                                                                                                                                                                                                                                |
-| ------------------------------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic_nat_conns`                  | Gauge   | —        | Current row count in this shard's `nat_conn_table` — a point-in-time snapshot of an LRU, so it can fluctuate independently of actual live traffic under memory pressure.                                                                                                                                                                                                               |
-| `galactic_nat_conn_table_max_entries` | Gauge   | —        | Capacity of `nat_conn_table`, read from the loaded map. Alert when `sum(galactic_nat_conns) / galactic_nat_conn_table_max_entries` stays above about 0.9: past that, new sessions evict live ones.                                                                                                                                                                                     |
-| `galactic_nat_drops_total`            | Counter | `reason` | Packets dropped by the `nat_ingress` program, by reason. Cumulative for the life of the *node*, not the process: the counters live in a map pinned under `natattach.PinDir`, which a restarting shard reuses as-is. Always read it as a delta — an absolute value includes every transient the node has ever seen, and zeroing it takes `bpftool map update` against the pin directly. |
+| Metric                                           | Type    | Labels            | Meaning                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------ | ------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_nat_conns`                             | Gauge   | `family`          | Rows in this shard's `nat_conn_table`, expired sessions included. A session holds two rows. Expect it near capacity on a busy shard; see [Session table](#session-table).                                                                                                                                                                                                              |
+| `galactic_nat_sessions`                          | Gauge   | `family`, `proto` | Live sessions, one per session within its idle timeout. `proto` is `tcp`, `udp` or `icmp`. Every series is reported, at zero when empty.                                                                                                                                                                                                                                               |
+| `galactic_nat_conn_table_oldest_row_age_seconds` | Gauge   | —                 | Seconds since the least recently seen session in the table, expired ones included, last translated a packet. On a full table this is roughly how long an idle session lasts before the LRU evicts it. Absent while the table holds no sessions.                                                                                                                                        |
+| `galactic_nat_conn_table_max_entries`            | Gauge   | —                 | Capacity of `nat_conn_table` in rows, read from the loaded map.                                                                                                                                                                                                                                                                                                                        |
+| `galactic_nat_drops_total`                       | Counter | `reason`          | Packets dropped by the `nat_ingress` program, by reason. Cumulative for the life of the *node*, not the process: the counters live in a map pinned under `natattach.PinDir`, which a restarting shard reuses as-is. Always read it as a delta — an absolute value includes every transient the node has ever seen, and zeroing it takes `bpftool map update` against the pin directly. |
+
+A full table alone is not a problem. Alert when the table is full and its
+oldest row is younger than the longest session timeout, 7440 s: idle
+established TCP sessions are then evicted before they expire.
+
+```promql
+sum by (node) (galactic_nat_conns) / on (node) galactic_nat_conn_table_max_entries > 0.9
+  and on (node) galactic_nat_conn_table_oldest_row_age_seconds < 7440
+```
 
 Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 
@@ -552,8 +569,9 @@ knowing before you rely on this component in production:
   burst of tenant pings to many destinations can evict live TCP and UDP
   sessions. Eviction looks like `nat66_no_return_conn` or
   `nat64_no_return_conn` rising in step with ICMP traffic rather than with
-  any routing change — check `galactic_nat_conns` against the table's
-  capacity when that happens. The table is shared deliberately, not by
+  any routing change — check
+  `galactic_nat_conn_table_oldest_row_age_seconds` against the 7440 s TCP
+  timeout when that happens. The table is shared deliberately, not by
   omission; the datapath's `nat_conn_table` comment gives the reasoning.
 - **The ICMP rate limit is per CPU, not per shard or per peer.** Every
   reply the echo responder sends, and every Packet Too Big or Fragmentation

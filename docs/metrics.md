@@ -225,20 +225,23 @@ sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~"galact
 
 One `galactic-nat` pod per egress shard; every value is per shard.
 
-| Metric                                | Type    | Labels                      | Meaning                                                                             |
-|---------------------------------------|---------|-----------------------------|-------------------------------------------------------------------------------------|
-| `galactic_nat_conns`                  | gauge   | `family` (`nat66`, `nat64`) | Flows in the connection table. Both families are always emitted, at zero when empty |
-| `galactic_nat_conn_table_max_entries` | gauge   | none                        | Table capacity in rows, shared by both families                                     |
-| `galactic_nat_drops_total`            | counter | `reason`                    | Packets dropped by the NAT datapath                                                 |
+| Metric                                           | Type    | Labels                                   | Meaning                                                                                        |
+|--------------------------------------------------|---------|------------------------------------------|------------------------------------------------------------------------------------------------|
+| `galactic_nat_conns`                             | gauge   | `family` (`nat66`, `nat64`)              | Rows in the connection table, expired sessions included. A session holds two rows              |
+| `galactic_nat_sessions`                          | gauge   | `family`, `proto` (`tcp`, `udp`, `icmp`) | Live sessions: one per session within its idle timeout                                         |
+| `galactic_nat_conn_table_oldest_row_age_seconds` | gauge   | none                                     | Seconds since the least recently seen session, expired ones included, last translated a packet |
+| `galactic_nat_conn_table_max_entries`            | gauge   | none                                     | Table capacity in rows, shared by both families                                                |
+| `galactic_nat_drops_total`                       | counter | `reason`                                 | Packets dropped by the NAT datapath                                                            |
 
-Caveats for `galactic_nat_conns`:
+Caveats for the session table:
 
-- The table is a self-evicting LRU, so under memory pressure the count can
-  move without traffic changing.
-- It also counts expired sessions
-  ([#731](https://github.com/datum-cloud/galactic/issues/731)), so a healthy
-  shard can look nearly full. Until that is fixed, don't alert on occupancy
-  alone; pair it with a port-exhaustion drop rate.
+- Expired sessions keep their rows until the LRU evicts them or a new claim
+  reuses their port, so `galactic_nat_conns` sits near capacity on any busy
+  shard. That is normal. Use `galactic_nat_sessions` for live sessions.
+- Live sessions are at risk only when the table is full and its oldest row is
+  younger than the longest session timeout, 7440 s for established TCP.
+- The table is a self-evicting LRU, so the counts can move without traffic
+  changing.
 
 | Reason group        | Values                                                                                                                                                                          | Meaning                                                                                                       |
 |---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
@@ -251,11 +254,12 @@ Caveats for `galactic_nat_conns`:
 | Rate limit          | `icmp_rate_limited`                                                                                                                                                             | ICMP errors suppressed by the rate limiter                                                                    |
 
 ```promql
-# Occupancy (inflated by #731 until it is fixed)
-sum by (node) (galactic_nat_conns) / on (node) galactic_nat_conn_table_max_entries
+# Live sessions per family
+sum by (node, family) (galactic_nat_sessions)
 
-# Sessions per family
-sum by (node, family) (galactic_nat_conns)
+# Idle live sessions being evicted: table full, oldest row younger than the TCP timeout
+sum by (node) (galactic_nat_conns) / on (node) galactic_nat_conn_table_max_entries > 0.9
+  and on (node) galactic_nat_conn_table_oldest_row_age_seconds < 7440
 
 # Port exhaustion or no shard
 sum by (node, reason) (rate(galactic_nat_drops_total{reason=~".*_pat_exhausted|nat64_shard_unavailable"}[5m])) > 0
