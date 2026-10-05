@@ -22,7 +22,9 @@
 // still sees it. The last slot, the egress shard, returns XDP_PASS itself.
 //
 // Each datapath fills only its own slot (Fill), sets the role bits for its own
-// interfaces (SetRole), and renews its slot's lease while it runs (Lease).
+// interfaces (SetRole), and renews its slot's lease while it runs (Lease). On
+// shutdown it leaves the slot alone, or clears it with ClearIfHeld, which
+// never empties a slot its replacement has already filled.
 //
 // # Lifetime
 //
@@ -46,14 +48,19 @@
 // cannot be made by appending gets a new versioned directory. The root can
 // change without a new layout: a process carrying a newer RootRevision swaps
 // it on every link with a link update, which neither detaches the hook nor
-// leaves the interface without a program.
+// leaves the interface without a program. Only Open replaces the pinned root.
+// Every other call reads the root from its pin, so a process started before
+// the upgrade follows the newer root instead of moving links back.
 //
 // # Locking
 //
-// Two processes can attach to the same interfaces, so first attaches and the
-// bond-member waits that follow them run under Lock, an flock on PinDir.
-// Without it, the gateway and the shard could each bounce a different member
-// of one bond at the same time and take the bond down.
+// Two processes share the pinned state, so every call that changes the links
+// or the role bits is a method of Locked, which only Lock returns. Lock is an
+// flock on PinDir. Holding it across a first attach and the bond-member wait
+// that follows keeps the gateway and the shard from bouncing two members of
+// one bond at once, and holding it across a role update keeps either
+// datapath's bit from being lost. A datapath fills and renews its own slot
+// without the lock.
 //
 // # Generated code
 //

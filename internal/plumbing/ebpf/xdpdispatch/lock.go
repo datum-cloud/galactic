@@ -17,17 +17,6 @@ import (
 // the lock.
 const lockRetryInterval = 100 * time.Millisecond
 
-// Lock takes the node-wide dispatch lock, an flock on the pin directory, and
-// returns the function that releases it. It waits while another process holds
-// it, until ctx is done.
-//
-// Hold it across EnsureLink and, when EnsureLink bounced the interface, the
-// wait for a bond member to rejoin. A process may hold it once: a second
-// call from the same process blocks until the first is released.
-func (d *Dispatcher) Lock(ctx context.Context) (func(), error) {
-	return lockDir(ctx, d.dir)
-}
-
 // lockDir locks dir, waiting until ctx is done.
 func lockDir(ctx context.Context, dir string) (func(), error) {
 	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)

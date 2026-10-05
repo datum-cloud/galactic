@@ -119,19 +119,22 @@ var (
 
 // Dispatcher is an open handle on a node's pinned dispatch state. Closing it
 // closes this process's descriptors only; everything pinned stays.
+//
+// A Dispatcher holds no root program of its own. Every call that needs the
+// root reads it from its pin, so a process started before a newer root was
+// pinned follows that root instead of moving links back to the one it loaded.
 type Dispatcher struct {
 	dir  string
 	maps DispatchMaps
-	root *ebpf.Program
 }
 
 // Open loads the dispatch state pinned under dir, creating it on first use,
 // and makes sure the pinned root is at least this build's revision. When this
 // build's root is newer, Open pins it and moves every pinned link to it with a
-// link update.
+// link update. Only Open replaces the pinned root.
 //
-// Open takes Lock itself, waiting until ctx is done, so the caller must not
-// hold it.
+// Open takes the dispatch lock itself, waiting until ctx is done, so the
+// caller must not hold it.
 func Open(ctx context.Context, dir string) (*Dispatcher, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("xdpdispatch: remove memlock rlimit: %w", err)
@@ -168,50 +171,44 @@ func Open(ctx context.Context, dir string) (*Dispatcher, error) {
 		}
 		return nil, fmt.Errorf("xdpdispatch: load and pin dispatch objects: %w", err)
 	}
+	// The pin, when adoptRoot makes one, keeps the program alive.
+	defer objs.XdpDispatch.Close() //nolint:errcheck // our own descriptor
 
 	d := &Dispatcher{dir: dir, maps: objs.DispatchMaps}
-	root, err := d.adoptRoot(objs.XdpDispatch)
-	if err != nil {
-		_ = objs.Close()
+	if err := d.adoptRoot(objs.XdpDispatch); err != nil {
+		_ = d.maps.Close()
 		return nil, err
 	}
-	d.root = root
 	return d, nil
 }
 
-// adoptRoot settles which root program this node runs: the pinned one, unless
-// ours is a newer revision, in which case ours is pinned and every link moved
-// to it. It records the ABI on first use and refuses a mismatch. The program
-// not kept is closed.
-func (d *Dispatcher) adoptRoot(ours *ebpf.Program) (*ebpf.Program, error) {
+// adoptRoot pins ours as the node's root when the pinned root is older or
+// missing, and moves every link to it. It records the ABI on first use and
+// refuses a mismatch. The revision is recorded only once every link has moved,
+// so a failed move is retried by the next Open.
+func (d *Dispatcher) adoptRoot(ours *ebpf.Program) error {
 	var abi uint64
 	if err := d.maps.DispatchMeta.Lookup(metaKeyABI, &abi); err != nil {
-		return nil, fmt.Errorf("xdpdispatch: read dispatch ABI: %w", err)
+		return fmt.Errorf("xdpdispatch: read dispatch ABI: %w", err)
 	}
 	switch abi {
 	case 0:
 		if err := d.maps.DispatchMeta.Put(metaKeyABI, uint64(ABIVersion)); err != nil {
-			return nil, fmt.Errorf("xdpdispatch: record dispatch ABI: %w", err)
+			return fmt.Errorf("xdpdispatch: record dispatch ABI: %w", err)
 		}
 	case ABIVersion:
 	default:
-		return nil, fmt.Errorf("%w: pinned ABI %d, this build %d", ErrIncompatibleLayout, abi, ABIVersion)
+		return fmt.Errorf("%w: pinned ABI %d, this build %d", ErrIncompatibleLayout, abi, ABIVersion)
 	}
 
 	var pinnedRev uint64
 	if err := d.maps.DispatchMeta.Lookup(metaKeyRevision, &pinnedRev); err != nil {
-		return nil, fmt.Errorf("xdpdispatch: read root revision: %w", err)
+		return fmt.Errorf("xdpdispatch: read root revision: %w", err)
 	}
-	rootPath := filepath.Join(d.dir, abiDirName, rootPinName)
-	pinned, err := ebpf.LoadPinnedProgram(rootPath, nil)
-	switch {
-	case err == nil && pinnedRev >= RootRevision:
-		_ = ours.Close()
-		return pinned, nil
-	case err == nil:
-		_ = pinned.Close()
-	case !errors.Is(err, os.ErrNotExist):
-		return nil, fmt.Errorf("xdpdispatch: load pinned root %q: %w", rootPath, err)
+	if pinnedRev >= RootRevision {
+		if _, err := os.Stat(d.rootPath()); err == nil {
+			return nil
+		}
 	}
 
 	// Pin under a staging name and rename over the old pin, so the root path
@@ -219,19 +216,19 @@ func (d *Dispatcher) adoptRoot(ours *ebpf.Program) (*ebpf.Program, error) {
 	staged := filepath.Join(d.dir, abiDirName, rootStagedPinName)
 	_ = os.Remove(staged)
 	if err := ours.Pin(staged); err != nil {
-		return nil, fmt.Errorf("xdpdispatch: pin root: %w", err)
+		return fmt.Errorf("xdpdispatch: pin root: %w", err)
 	}
-	if err := os.Rename(staged, rootPath); err != nil {
+	if err := os.Rename(staged, d.rootPath()); err != nil {
 		_ = ours.Unpin()
-		return nil, fmt.Errorf("xdpdispatch: install pinned root: %w", err)
-	}
-	if err := d.maps.DispatchMeta.Put(metaKeyRevision, uint64(RootRevision)); err != nil {
-		return nil, fmt.Errorf("xdpdispatch: record root revision: %w", err)
+		return fmt.Errorf("xdpdispatch: install pinned root: %w", err)
 	}
 	if err := d.updateLinks(ours); err != nil {
-		return nil, err
+		return err
 	}
-	return ours, nil
+	if err := d.maps.DispatchMeta.Put(metaKeyRevision, uint64(RootRevision)); err != nil {
+		return fmt.Errorf("xdpdispatch: record root revision: %w", err)
+	}
+	return nil
 }
 
 // updateLinks moves every live pinned link to root.
@@ -260,7 +257,7 @@ func (d *Dispatcher) updateLinks(root *ebpf.Program) error {
 
 // Close closes this process's descriptors. Pinned state is untouched.
 func (d *Dispatcher) Close() error {
-	return errors.Join(d.root.Close(), d.maps.Close())
+	return d.maps.Close()
 }
 
 // Maps returns the pinned dispatch maps, for a datapath whose own programs
@@ -274,42 +271,104 @@ func (d *Dispatcher) Maps() map[string]*ebpf.Map {
 	}
 }
 
-// Root returns the root program this node runs.
-func (d *Dispatcher) Root() *ebpf.Program { return d.root }
+func (d *Dispatcher) rootPath() string {
+	return filepath.Join(d.dir, abiDirName, rootPinName)
+}
+
+// loadRoot opens the pinned root. The caller closes it.
+func (d *Dispatcher) loadRoot() (*ebpf.Program, error) {
+	root, err := ebpf.LoadPinnedProgram(d.rootPath(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("xdpdispatch: load pinned root: %w", err)
+	}
+	return root, nil
+}
+
+// RootID returns the ID of the root program currently pinned.
+func (d *Dispatcher) RootID() (ebpf.ProgramID, error) {
+	root, err := d.loadRoot()
+	if err != nil {
+		return 0, err
+	}
+	defer root.Close() //nolint:errcheck // our own descriptor
+	return programID(root)
+}
 
 func (d *Dispatcher) linkPath(ifindex int) string {
 	return filepath.Join(d.dir, linksDirName, strconv.Itoa(ifindex))
 }
 
-// EnsureLink makes sure the root is attached to ifindex through a pinned link.
-// bounced reports whether this call attached it, which on most drivers resets
-// the interface; the caller then waits for a bond member to rejoin. A pinned
+// Locked is the dispatch lock, held. Every call that changes shared state
+// other than a datapath's own slot program or lease is a method here, so it
+// cannot run without the lock. Release it with Unlock.
+type Locked struct {
+	d      *Dispatcher
+	unlock func()
+}
+
+// Lock takes the node-wide dispatch lock, an flock on the pin directory,
+// waiting while another holder has it, until ctx is done. Each call opens its
+// own descriptor, so it also excludes other goroutines of this process: a
+// goroutine that calls Lock again before Unlock blocks on itself.
+//
+// Hold it across EnsureLink and, when EnsureLink bounced the interface, the
+// wait for a bond member to rejoin, so two processes never bounce two members
+// of one bond at once.
+func (d *Dispatcher) Lock(ctx context.Context) (*Locked, error) {
+	unlock, err := lockDir(ctx, d.dir)
+	if err != nil {
+		return nil, err
+	}
+	return &Locked{d: d, unlock: unlock}, nil
+}
+
+// Unlock releases the lock. Calling it again does nothing.
+func (l *Locked) Unlock() {
+	if l.unlock != nil {
+		l.unlock()
+		l.unlock = nil
+	}
+}
+
+// EnsureLink makes sure the pinned root is attached to ifindex through a
+// pinned link. bounced reports whether this call attached it, which on most
+// drivers resets the interface; the caller then waits for a bond member to
+// rejoin. A link running an older root is moved to the pinned one. A pinned
 // link whose interface is gone is released and replaced. An interface held by
 // any other XDP program returns ErrForeignProgram and is left alone.
 //
-// The caller must hold Lock.
-func (d *Dispatcher) EnsureLink(ifindex int) (bounced bool, err error) {
+// A link is defunct when the kernel reports its interface index as 0, which it
+// does once the interface is unregistered. Interface indexes are not reused
+// until the counter wraps, so a pin named for one interface never matches a
+// different one.
+func (l *Locked) EnsureLink(ifindex int) (bounced bool, err error) {
+	d := l.d
+	root, err := d.loadRoot()
+	if err != nil {
+		return false, err
+	}
+	defer root.Close() //nolint:errcheck // our own descriptor
+	rootID, err := programID(root)
+	if err != nil {
+		return false, err
+	}
+
 	path := d.linkPath(ifindex)
-	if l, err := link.LoadPinnedLink(path, nil); err == nil {
-		defer l.Close() //nolint:errcheck // our own descriptor; the pin keeps the link
-		info, err := l.Info()
+	if pinned, err := link.LoadPinnedLink(path, nil); err == nil {
+		defer pinned.Close() //nolint:errcheck // our own descriptor; the pin keeps the link
+		info, err := pinned.Info()
 		if err != nil {
 			return false, fmt.Errorf("xdpdispatch: read link info for ifindex %d: %w", ifindex, err)
 		}
 		if xdp := info.XDP(); xdp != nil && int(xdp.Ifindex) == ifindex {
-			rootID, err := programID(d.root)
-			if err != nil {
-				return false, err
-			}
 			if info.Program != rootID {
-				if err := l.Update(d.root); err != nil {
+				if err := pinned.Update(root); err != nil {
 					return false, fmt.Errorf("xdpdispatch: move ifindex %d to the pinned root: %w", ifindex, err)
 				}
 			}
 			return false, nil
 		}
-		// Defunct: the interface this link was attached to is gone.
-		if err := l.Unpin(); err != nil {
+		if err := pinned.Unpin(); err != nil {
 			return false, fmt.Errorf("xdpdispatch: unpin defunct link for ifindex %d: %w", ifindex, err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -325,13 +384,13 @@ func (d *Dispatcher) EnsureLink(ifindex int) (bounced bool, err error) {
 			ErrForeignProgram, nl.Attrs().Name, ifindex, xdp.ProgId)
 	}
 
-	l, err := attachXDPFn(link.XDPOptions{Program: d.root, Interface: ifindex, Flags: link.XDPDriverMode})
+	attached, err := attachXDPFn(link.XDPOptions{Program: root, Interface: ifindex, Flags: link.XDPDriverMode})
 	if err != nil {
 		return false, fmt.Errorf("xdpdispatch: attach dispatcher to %s in native/driver mode: %w",
 			nl.Attrs().Name, err)
 	}
-	defer l.Close() //nolint:errcheck // our own descriptor; the pin keeps the link
-	if err := l.Pin(path); err != nil {
+	defer attached.Close() //nolint:errcheck // our own descriptor; the pin keeps the link
+	if err := attached.Pin(path); err != nil {
 		return true, fmt.Errorf("xdpdispatch: pin link for %s: %w", nl.Attrs().Name, err)
 	}
 	return true, nil
@@ -341,23 +400,23 @@ func (d *Dispatcher) EnsureLink(ifindex int) (bounced bool, err error) {
 // Every datapath on the interface stops seeing its traffic at once, so this is
 // for an interface no datapath uses any more, or for an operator returning the
 // hook to a non-dispatching program. It is a no-op when nothing is pinned.
-func (d *Dispatcher) Release(ifindex int) error {
-	l, err := link.LoadPinnedLink(d.linkPath(ifindex), nil)
+func (l *Locked) Release(ifindex int) error {
+	pinned, err := link.LoadPinnedLink(l.d.linkPath(ifindex), nil)
 	if errors.Is(err, os.ErrNotExist) {
-		return d.ClearRoles(ifindex)
+		return l.ClearRoles(ifindex)
 	}
 	if err != nil {
 		return fmt.Errorf("xdpdispatch: load pinned link for ifindex %d: %w", ifindex, err)
 	}
-	defer l.Close() //nolint:errcheck // our own descriptor
+	defer pinned.Close() //nolint:errcheck // our own descriptor
 	var errs []error
-	if err := l.Detach(); err != nil && !errors.Is(err, unix.ENOLINK) {
+	if err := pinned.Detach(); err != nil && !errors.Is(err, unix.ENOLINK) {
 		errs = append(errs, fmt.Errorf("detach: %w", err))
 	}
-	if err := l.Unpin(); err != nil {
+	if err := pinned.Unpin(); err != nil {
 		errs = append(errs, fmt.Errorf("unpin: %w", err))
 	}
-	if err := d.ClearRoles(ifindex); err != nil {
+	if err := l.ClearRoles(ifindex); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -368,7 +427,8 @@ func (d *Dispatcher) Release(ifindex int) error {
 
 // PruneDefunct releases every pinned link whose interface is gone and drops
 // its role row. It returns the ifindexes it pruned.
-func (d *Dispatcher) PruneDefunct() ([]int, error) {
+func (l *Locked) PruneDefunct() ([]int, error) {
+	d := l.d
 	entries, err := os.ReadDir(filepath.Join(d.dir, linksDirName))
 	if err != nil {
 		return nil, fmt.Errorf("xdpdispatch: list pinned links: %w", err)
@@ -382,15 +442,15 @@ func (d *Dispatcher) PruneDefunct() ([]int, error) {
 		if err != nil {
 			continue
 		}
-		l, err := link.LoadPinnedLink(filepath.Join(d.dir, linksDirName, e.Name()), nil)
+		pinned, err := link.LoadPinnedLink(filepath.Join(d.dir, linksDirName, e.Name()), nil)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		info, err := l.Info()
+		info, err := pinned.Info()
 		if err == nil {
 			if xdp := info.XDP(); xdp == nil || int(xdp.Ifindex) != ifindex {
-				err = errors.Join(l.Unpin(), d.ClearRoles(ifindex))
+				err = errors.Join(pinned.Unpin(), l.ClearRoles(ifindex))
 				if err == nil {
 					pruned = append(pruned, ifindex)
 				}
@@ -399,7 +459,7 @@ func (d *Dispatcher) PruneDefunct() ([]int, error) {
 		if err != nil {
 			errs = append(errs, err)
 		}
-		_ = l.Close()
+		_ = pinned.Close()
 	}
 	if len(errs) > 0 {
 		return pruned, fmt.Errorf("xdpdispatch: prune defunct links: %w", errors.Join(errs...))
@@ -407,23 +467,56 @@ func (d *Dispatcher) PruneDefunct() ([]int, error) {
 	return pruned, nil
 }
 
-// SetRole adds role to ifindex's role bits. Bits are only ever added here;
-// they go away with the interface (ClearRoles, PruneDefunct). A role that
-// would put the return program on a public interface returns ErrRoleConflict.
-func (d *Dispatcher) SetRole(ifindex int, role Role) error {
-	key := uint32(ifindex)
-	var cur uint32
-	if err := d.maps.IfaceRoles.Lookup(key, &cur); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("xdpdispatch: read roles for ifindex %d: %w", ifindex, err)
+// SetRole adds role to ifindex's role bits. A role that would put the return
+// program on a public interface returns ErrRoleConflict. The read and write
+// are one step under the lock, so two datapaths adding their bits to one
+// interface never lose either.
+func (l *Locked) SetRole(ifindex int, role Role) error {
+	cur, err := l.d.Roles(ifindex)
+	if err != nil {
+		return err
 	}
-	next := Role(cur) | role
+	next := cur | role
 	if next&RolePublicLB != 0 && next&RoleInternalReturn != 0 {
 		return fmt.Errorf("%w (ifindex %d)", ErrRoleConflict, ifindex)
 	}
-	if next == Role(cur) {
+	if next == cur {
 		return nil
 	}
-	if err := d.maps.IfaceRoles.Put(key, uint32(next)); err != nil {
+	return l.d.writeRoles(ifindex, next)
+}
+
+// RemoveRole drops role from ifindex's role bits and keeps the rest, so a
+// datapath can give up an interface without touching the other's bits. The
+// row goes when no bit is left.
+func (l *Locked) RemoveRole(ifindex int, role Role) error {
+	cur, err := l.d.Roles(ifindex)
+	if err != nil {
+		return err
+	}
+	next := cur &^ role
+	switch next {
+	case cur:
+		return nil
+	case 0:
+		return l.ClearRoles(ifindex)
+	default:
+		return l.d.writeRoles(ifindex, next)
+	}
+}
+
+// ClearRoles drops ifindex's whole role row, every datapath's bits. It is for
+// an interface that is gone.
+func (l *Locked) ClearRoles(ifindex int) error {
+	err := l.d.maps.IfaceRoles.Delete(uint32(ifindex))
+	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("xdpdispatch: clear roles for ifindex %d: %w", ifindex, err)
+	}
+	return nil
+}
+
+func (d *Dispatcher) writeRoles(ifindex int, roles Role) error {
+	if err := d.maps.IfaceRoles.Put(uint32(ifindex), uint32(roles)); err != nil {
 		return fmt.Errorf("xdpdispatch: write roles for ifindex %d: %w", ifindex, err)
 	}
 	return nil
@@ -442,17 +535,9 @@ func (d *Dispatcher) Roles(ifindex int) (Role, error) {
 	return Role(cur), nil
 }
 
-// ClearRoles drops ifindex's role row.
-func (d *Dispatcher) ClearRoles(ifindex int) error {
-	err := d.maps.IfaceRoles.Delete(uint32(ifindex))
-	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("xdpdispatch: clear roles for ifindex %d: %w", ifindex, err)
-	}
-	return nil
-}
-
-// Fill puts program in slot, replacing whatever the slot held. The kernel
-// swaps it atomically, so a restarted datapath takes over its slot with no
+// Fill puts program in slot, replacing whatever the slot held, and renews the
+// slot's lease, so the slot runs from the moment it is filled. The kernel swaps
+// the program atomically, so a restarted datapath takes over its slot with no
 // packet missing it. The program must be an XDP program with the default
 // attach type and no frags support, like the root.
 func (d *Dispatcher) Fill(slot Slot, program *ebpf.Program) error {
@@ -466,23 +551,55 @@ func (d *Dispatcher) Fill(slot Slot, program *ebpf.Program) error {
 		return fmt.Errorf("xdpdispatch: fill slot %d "+
 			"(EINVAL here means the program is incompatible with the root): %w", slot, err)
 	}
-	return nil
+	return d.Renew(slot)
 }
 
-// Clear empties slot and expires its lease, so its traffic passes straight
-// to the later slots.
-func (d *Dispatcher) Clear(slot Slot) error {
+// Clear empties slot whatever it holds and expires its lease, so its traffic
+// passes straight to the later slots. It is for turning a datapath off. A
+// process shutting down uses ClearIfHeld instead, so it never empties a slot
+// its replacement has already filled.
+func (l *Locked) Clear(slot Slot) error {
 	if slot >= NumSlots {
 		return errInvalidSlot
 	}
-	err := d.maps.DispatchProgs.Delete(uint32(slot))
+	err := l.d.maps.DispatchProgs.Delete(uint32(slot))
 	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("xdpdispatch: clear slot %d: %w", slot, err)
 	}
-	return d.setLease(slot, 0)
+	return l.d.setLease(slot, 0)
 }
 
-// Renew extends slot's lease to LeaseTTL from now.
+// ClearIfHeld clears slot only while it holds program. It reports whether it
+// cleared it.
+func (l *Locked) ClearIfHeld(slot Slot, program *ebpf.Program) (bool, error) {
+	if slot >= NumSlots {
+		return false, errInvalidSlot
+	}
+	held, err := l.d.holds(slot, program)
+	if err != nil || !held {
+		return false, err
+	}
+	return true, l.Clear(slot)
+}
+
+// holds reports whether slot holds program.
+func (d *Dispatcher) holds(slot Slot, program *ebpf.Program) (bool, error) {
+	want, err := programID(program)
+	if err != nil {
+		return false, err
+	}
+	var got uint32
+	if err := d.maps.DispatchProgs.Lookup(uint32(slot), &got); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("xdpdispatch: read slot %d: %w", slot, err)
+	}
+	return ebpf.ProgramID(got) == want, nil
+}
+
+// Renew extends slot's lease to LeaseTTL from now. A slot's owner calls it
+// without the lock: the lease is the owner's alone, written in one update.
 func (d *Dispatcher) Renew(slot Slot) error {
 	return d.setLease(slot, monotonicNowFn()+uint64(LeaseTTL))
 }
@@ -529,22 +646,22 @@ func (d *Dispatcher) Coverage(ifindex int, slot Slot, program *ebpf.Program) err
 	if slot >= NumSlots {
 		return errInvalidSlot
 	}
-	l, err := link.LoadPinnedLink(d.linkPath(ifindex), nil)
+	pinned, err := link.LoadPinnedLink(d.linkPath(ifindex), nil)
 	if errors.Is(err, os.ErrNotExist) {
 		return ErrNoLink
 	}
 	if err != nil {
 		return fmt.Errorf("xdpdispatch: load pinned link for ifindex %d: %w", ifindex, err)
 	}
-	defer l.Close() //nolint:errcheck // our own descriptor
-	info, err := l.Info()
+	defer pinned.Close() //nolint:errcheck // our own descriptor
+	info, err := pinned.Info()
 	if err != nil {
 		return fmt.Errorf("xdpdispatch: read link info for ifindex %d: %w", ifindex, err)
 	}
 	if xdp := info.XDP(); xdp == nil || int(xdp.Ifindex) != ifindex {
 		return ErrLinkDefunct
 	}
-	rootID, err := programID(d.root)
+	rootID, err := d.RootID()
 	if err != nil {
 		return err
 	}
@@ -560,18 +677,11 @@ func (d *Dispatcher) Coverage(ifindex int, slot Slot, program *ebpf.Program) err
 		return ErrRoleMissing
 	}
 
-	want, err := programID(program)
+	held, err := d.holds(slot, program)
 	if err != nil {
 		return err
 	}
-	var got uint32
-	if err := d.maps.DispatchProgs.Lookup(uint32(slot), &got); err != nil {
-		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return ErrSlotNotHeld
-		}
-		return fmt.Errorf("xdpdispatch: read slot %d: %w", slot, err)
-	}
-	if ebpf.ProgramID(got) != want {
+	if !held {
 		return ErrSlotNotHeld
 	}
 

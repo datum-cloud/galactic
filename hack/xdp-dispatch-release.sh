@@ -15,7 +15,11 @@
 # Usage:
 #   xdp-dispatch-release.sh                 run on this host, as root
 #   xdp-dispatch-release.sh --node NAME     run on NAME through kubectl debug
-#   add --all to also remove the pinned maps and root
+#   add --all to also remove the pinned maps, root and role rows
+#
+# kubectl debug leaves its pod behind. Delete it by the name it prints,
+# node-debugger-NAME-xxxxx. --node pulls busybox, so a node that cannot reach
+# a registry needs the script run locally instead.
 set -euo pipefail
 
 PIN_DIR=/sys/fs/bpf/galactic-xdp
@@ -33,7 +37,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h | --help)
-      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '/^# xdp-dispatch-release.sh/,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
