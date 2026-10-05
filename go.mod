@@ -12,13 +12,13 @@ require (
 	github.com/mdlayher/genetlink v1.4.0
 	github.com/mdlayher/ndp v1.1.0
 	github.com/mdlayher/netlink v1.11.2
-	github.com/osrg/gobgp/v4 v4.9.0
+	github.com/osrg/gobgp/v4 v4.10.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
-	github.com/vishvananda/netlink v1.3.2-0.20260831221819-dcee5577542a
+	github.com/vishvananda/netlink v1.3.2-0.20261002201547-1d1c62507e3c
 	go.datum.net/network v0.3.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
