@@ -6,13 +6,17 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -35,6 +39,42 @@ const networkRuleFinalizer = "galactic.datum.net/networkrule-teardown"
 // was created and since departed would not appear in that reconstruction,
 // leaving its advertisement never withdrawn.
 const networkRuleLabel = "galactic.datum.net/network-rule"
+
+// gatewayNodeLabel is set on every BGPAdvertisement applyBGPAdvertisements
+// creates. Its value is gatewayNodeLabelValue of the originating gateway node's
+// name, so withdrawNodeAdvertisements can select one node's routes by label.
+const gatewayNodeLabel = "galactic.datum.net/gateway-node"
+
+// gatewayNodeLabelHashLen is how many hex characters of the node name's
+// SHA-256 gatewayNodeLabelValue keeps when it has to shorten a name.
+const gatewayNodeLabelHashLen = 10
+
+// gatewayNodeLabelValue returns the gatewayNodeLabel value for nodeName.
+// A label value is capped at 63 characters, but a node name can be up to 253
+// (an FQDN, say), and a raw over-long value would fail every create and update
+// of that node's advertisements. A name that is already a valid label value is
+// returned unchanged. Any other is cut to a prefix, trimmed to end in an
+// alphanumeric, and suffixed with "-" and a short hash of the full name, so the
+// result is valid, deterministic, and distinct for two long names that share a
+// prefix.
+func gatewayNodeLabelValue(nodeName string) string {
+	if len(validation.IsValidLabelValue(nodeName)) == 0 {
+		return nodeName
+	}
+	sum := sha256.Sum256([]byte(nodeName))
+	suffix := hex.EncodeToString(sum[:])[:gatewayNodeLabelHashLen]
+	prefix := nodeName
+	if maxPrefix := validation.LabelValueMaxLength - 1 - len(suffix); len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
+	}
+	prefix = strings.TrimRightFunc(prefix, func(c rune) bool {
+		return (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9')
+	})
+	if prefix == "" {
+		return suffix
+	}
+	return prefix + "-" + suffix
+}
 
 // NetworkRuleReconciler owns the per-object NetworkRule lifecycle that
 // NetworkGatewayReconciler's aggregate, list-driven loop is the wrong place

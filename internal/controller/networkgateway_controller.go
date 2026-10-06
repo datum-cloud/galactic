@@ -766,11 +766,13 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 // keeps the advertisements alive as independent routes instead of BGP
 // collapsing them to a single best path.
 //
-// Every object created or touched here is labeled with networkRuleLabel,
-// backfilled on existing objects too. That label is what lets rule teardown
-// find every advertisement a rule ever caused on any gateway node, including
-// one that has since left the namespace, without depending on this naming
-// convention.
+// Every object created or touched here is labeled with networkRuleLabel and
+// gatewayNodeLabel, both backfilled on existing objects too. networkRuleLabel
+// is what lets rule teardown find every advertisement a rule ever caused on any
+// gateway node, including one that has since left the namespace, without
+// depending on this naming convention. gatewayNodeLabel lets
+// withdrawNodeAdvertisements find every advertisement one node made, whatever
+// rule caused it.
 //
 // Each also carries an owner reference to rule, again backfilled, so
 // Kubernetes garbage collection deletes it once the rule is gone. That covers
@@ -821,7 +823,10 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: rule.Namespace,
 					Name:      name,
-					Labels:    map[string]string{networkRuleLabel: rule.Name},
+					Labels: map[string]string{
+						networkRuleLabel: rule.Name,
+						gatewayNodeLabel: gatewayNodeLabelValue(r.NodeName),
+					},
 				},
 				Spec: bgpv1alpha1.BGPAdvertisementSpec{
 					RouterRef:     bgpv1alpha1.RouterRef{Name: routerName},
@@ -847,12 +852,14 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 		}
 
 		advCopy := adv.DeepCopy()
-		// Backfill networkRuleLabel on an advertisement created before the
-		// label existed, so teardown's label-selector list finds it too.
+		// Set networkRuleLabel and gatewayNodeLabel on every pass, so rule
+		// teardown's and node withdrawal's label-selector lists find the
+		// object.
 		if advCopy.Labels == nil {
 			advCopy.Labels = map[string]string{}
 		}
 		advCopy.Labels[networkRuleLabel] = rule.Name
+		advCopy.Labels[gatewayNodeLabel] = gatewayNodeLabelValue(r.NodeName)
 		// Backfill the owner reference the same way, so garbage collection
 		// covers an advertisement created before it was set.
 		if refErr := controllerutil.SetOwnerReference(rule, advCopy, r.Scheme); refErr != nil {
@@ -990,39 +997,37 @@ func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName str
 }
 
 // isNodeAdvertisement reports whether adv is one applyBGPAdvertisements created
-// on node nodeName. An advertisement carrying networkRuleLabel must be named
-// exactly "<rule>-<node>-v4" or "-v6" for its own rule, so a node named "edge1"
-// never claims "ruleX-pop-edge1-v4", which belongs to node "pop-edge1". One
-// without the label, created before the label existed, falls back to the
-// name suffix alone.
+// on node nodeName: it carries gatewayNodeLabel set to
+// gatewayNodeLabelValue(nodeName) and networkRuleLabel, and is named exactly
+// "<rule>-<node>-v4" or "<rule>-<node>-v6". An advertisement missing either
+// label is never claimed, whatever its name.
 func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) bool {
-	if rule, ok := adv.Labels[networkRuleLabel]; ok {
-		return adv.Name == rule+"-"+nodeName+"-v4" || adv.Name == rule+"-"+nodeName+"-v6"
+	if adv.Labels[gatewayNodeLabel] != gatewayNodeLabelValue(nodeName) {
+		return false
 	}
-	return strings.HasSuffix(adv.Name, "-"+nodeName+"-v4") || strings.HasSuffix(adv.Name, "-"+nodeName+"-v6")
+	rule, ok := adv.Labels[networkRuleLabel]
+	if !ok {
+		return false
+	}
+	return adv.Name == rule+"-"+nodeName+"-v4" || adv.Name == rule+"-"+nodeName+"-v6"
 }
 
 // withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway node
 // nodeName created in namespace: each per-rule, per-address-family route it
-// advertised, found by the "<rule>-<node>-v4"/"-v6" names applyBGPAdvertisements
-// gives them.
+// advertised. It lists by gatewayNodeLabel and deletes those that
+// isNodeAdvertisement accepts, so it needs no NetworkRule object, live or
+// deleted, and never matches by name suffix. An advertisement without
+// gatewayNodeLabel is not withdrawn and has to be deleted by hand.
 //
-// It selects by name rather than by label, the mirror image of how rule
-// teardown works. That path lists every advertisement a rule caused, whatever
-// node made it, because the namespace's current gateway membership no longer
-// includes a node that has left. Here the gap runs the other way: nothing
-// enumerates every rule a node ever advertised, least of all once the rule
-// itself is deleted. Selecting by name needs no rule object, live or deleted,
-// and no label backfill from a node that is already gone.
-//
-// nodeName is the departing node's identity, not the caller's. The caller may
-// be any surviving gateway node's process, most likely because the departing
-// node's process is already gone, which is why its NetworkGateway was deleted.
-// Surviving nodes racing this same sweep is expected and harmless, since every
-// delete is idempotent.
+// nodeName is the departing node's identity, not the caller's: the caller may
+// be any surviving gateway node's process. Concurrent sweeps are harmless
+// because every delete is idempotent.
 func withdrawNodeAdvertisements(ctx context.Context, c client.Client, namespace, nodeName string) error {
 	advList := &bgpv1alpha1.BGPAdvertisementList{}
-	if err := c.List(ctx, advList, client.InNamespace(namespace)); err != nil {
+	if err := c.List(ctx, advList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{gatewayNodeLabel: gatewayNodeLabelValue(nodeName)},
+	); err != nil {
 		return fmt.Errorf("list BGPAdvertisements for departed gateway node %s: %w", nodeName, err)
 	}
 

@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -532,15 +533,21 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 			networkRuleLabel, got, testRuleName)
 	}
 	assertRuleOwnerReference(t, adv)
+	if got := adv.Labels[gatewayNodeLabel]; got != testNodeGWA {
+		t.Errorf("Labels[%s] = %q, want %q (withdrawNodeAdvertisements selects on this)",
+			gatewayNodeLabel, got, testNodeGWA)
+	}
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
 }
 
 // TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement covers
 // applyBGPAdvertisements's update path self-healing an advertisement that
-// was created before networkRuleLabel existed (issue #367) — without this,
-// an advertisement from an older release would stay permanently invisible
-// to NetworkRuleReconciler's teardown List. The owner reference to the rule
-// (#715) is backfilled the same way, so garbage collection covers it too.
+// was created before networkRuleLabel (issue #367) or gatewayNodeLabel
+// (issue #714) existed — without this, an advertisement from an older
+// release would stay permanently invisible to NetworkRuleReconciler's
+// teardown List and to withdrawNodeAdvertisements's. The owner reference to
+// the rule (#715) is backfilled the same way, so garbage collection covers it
+// too.
 func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
@@ -581,6 +588,9 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 		t.Errorf("Labels[%s] = %q, want %q (backfill on update path)", networkRuleLabel, got, testRuleName)
 	}
 	assertRuleOwnerReference(t, adv)
+	if got := adv.Labels[gatewayNodeLabel]; got != testNodeGWA {
+		t.Errorf("Labels[%s] = %q, want %q (backfill on update path)", gatewayNodeLabel, got, testNodeGWA)
+	}
 }
 
 // TestNetworkGatewayReconciler_AdvertisementFailureSurfaces is the
@@ -834,12 +844,22 @@ func TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure(t *testing.T) {
 }
 
 // newAdvertisement returns a minimal BGPAdvertisement fixture, named and
-// namespaced only -- withdrawNodeAdvertisements matches purely on Name, so
-// nothing else about the object matters for these tests.
+// namespaced only, with no labels: an advertisement from before the labels
+// existed, or one the CNI wrote.
 func newAdvertisement(name string) *bgpv1alpha1.BGPAdvertisement {
 	return &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
 	}
+}
+
+// newNodeAdvertisement returns a BGPAdvertisement fixture shaped like one
+// applyBGPAdvertisements creates on node for rule: named
+// "<rule>-<node>-<family>" and carrying networkRuleLabel and
+// gatewayNodeLabel, which is all withdrawNodeAdvertisements looks at.
+func newNodeAdvertisement(rule, node, family string) *bgpv1alpha1.BGPAdvertisement {
+	adv := newAdvertisement(rule + "-" + node + "-" + family)
+	adv.Labels = map[string]string{networkRuleLabel: rule, gatewayNodeLabel: gatewayNodeLabelValue(node)}
+	return adv
 }
 
 // TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode
@@ -853,10 +873,10 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA) // gw-a's own gateway; still exists
 
-	ruleV4 := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v4")
-	ruleV6 := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v6")
-	otherRuleV4 := newAdvertisement("other-rule-" + testNodeGWB + "-v4")
-	survivorAdv := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v4")
+	ruleV4 := newNodeAdvertisement(testRuleName, testNodeGWB, "v4")
+	ruleV6 := newNodeAdvertisement(testRuleName, testNodeGWB, "v6")
+	otherRuleV4 := newNodeAdvertisement("other-rule", testNodeGWB, "v4")
+	survivorAdv := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
@@ -887,6 +907,124 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(
 	}
 }
 
+// TestNetworkGatewayReconciler_DepartedNodeLeavesSuffixSharingNodesAlone is
+// the regression test for #714: removing node "edge-1" used to withdraw node
+// "east-edge-1"'s advertisements, and a CNI-written one, because unlabelled
+// advertisements were matched on the "-edge-1-v4"/"-v6" name suffix alone.
+// Only advertisements labelled for edge-1 may go.
+func TestNetworkGatewayReconciler_DepartedNodeLeavesSuffixSharingNodesAlone(t *testing.T) {
+	const (
+		departed  = "edge-1"
+		surviving = "east-edge-1"
+	)
+	scheme := newRuleTestScheme(t)
+
+	departedV4 := newNodeAdvertisement(testRuleName, departed, "v4")
+	departedV6 := newNodeAdvertisement(testRuleName, departed, "v6")
+	survivorV4 := newNodeAdvertisement(testRuleName, surviving, "v4")
+	survivorV6 := newNodeAdvertisement(testRuleName, surviving, "v6")
+	unlabelledSurvivor := newAdvertisement("rulex-" + surviving + "-v4")
+	cniAdv := newAdvertisement("vpc0000001-att0000001-" + surviving + "-v4")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(surviving),
+			departedV4, departedV6, survivorV4, survivorV6, unlabelledSurvivor, cniAdv).
+		Build()
+
+	r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), surviving)
+	req := ctrl.Request{NamespacedName: testRuleKey(departed)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	ctx := context.Background()
+	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{departedV4, departedV6} {
+		err := fakeClient.Get(ctx, testRuleKey(gone.Name), &bgpv1alpha1.BGPAdvertisement{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("BGPAdvertisement %s still exists (err=%v), want withdrawn with %s", gone.Name, err, departed)
+		}
+	}
+	for _, kept := range []*bgpv1alpha1.BGPAdvertisement{survivorV4, survivorV6, unlabelledSurvivor, cniAdv} {
+		if err := fakeClient.Get(ctx, testRuleKey(kept.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+			t.Errorf("BGPAdvertisement %s was withdrawn with %s: %v", kept.Name, departed, err)
+		}
+	}
+}
+
+// TestNetworkGatewayReconciler_WithdrawsAdvertisementsForLongNamedNode covers
+// a node name longer than the 63 characters a label value allows, an FQDN
+// here. Its advertisements carry the shortened gatewayNodeLabelValue form, and
+// withdrawal must select on that same form, or they would never go.
+func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForLongNamedNode(t *testing.T) {
+	departed := testLongNodeName("a")
+	surviving := testLongNodeName("b")
+	scheme := newRuleTestScheme(t)
+
+	departedV4 := newNodeAdvertisement(testRuleName, departed, "v4")
+	survivorV4 := newNodeAdvertisement(testRuleName, surviving, "v4")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), departedV4, survivorV4).
+		Build()
+
+	r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(departed)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	ctx := context.Background()
+	err := fakeClient.Get(ctx, testRuleKey(departedV4.Name), &bgpv1alpha1.BGPAdvertisement{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("BGPAdvertisement %s still exists (err=%v), want withdrawn with its node", departedV4.Name, err)
+	}
+	if err := fakeClient.Get(ctx, testRuleKey(survivorV4.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("BGPAdvertisement %s of another long-named node was withdrawn: %v", survivorV4.Name, err)
+	}
+}
+
+// testLongNodeName returns a node name longer than a label value may be,
+// distinct from any other built with a different tail but sharing a long
+// common prefix with it.
+func testLongNodeName(tail string) string {
+	return strings.Repeat("edge.", 15) + tail + ".example.com"
+}
+
+// TestGatewayNodeLabelValue covers the node-name-to-label-value mapping
+// applyBGPAdvertisements writes and withdrawNodeAdvertisements selects on.
+func TestGatewayNodeLabelValue(t *testing.T) {
+	if got := gatewayNodeLabelValue("edge-1"); got != "edge-1" {
+		t.Errorf("gatewayNodeLabelValue(edge-1) = %q, want it unchanged", got)
+	}
+	exact := strings.Repeat("a", validation.LabelValueMaxLength)
+	if got := gatewayNodeLabelValue(exact); got != exact {
+		t.Errorf("gatewayNodeLabelValue(63 chars) = %q, want it unchanged", got)
+	}
+
+	a, b := testLongNodeName("a"), testLongNodeName("b")
+	gotA, gotB := gatewayNodeLabelValue(a), gatewayNodeLabelValue(b)
+	for name, got := range map[string]string{a: gotA, b: gotB} {
+		if errs := validation.IsValidLabelValue(got); len(errs) != 0 {
+			t.Errorf("gatewayNodeLabelValue(%s) = %q, not a valid label value: %v", name, got, errs)
+		}
+	}
+	if again := gatewayNodeLabelValue(a); again != gotA {
+		t.Errorf("gatewayNodeLabelValue is not deterministic: %q then %q", gotA, again)
+	}
+	if gotA == gotB {
+		t.Errorf("gatewayNodeLabelValue(%s) and (%s) both = %q, want distinct", a, b, gotA)
+	}
+
+	// A cut that lands right after a "." or "-" must not leave the value
+	// ending in it before the hash separator.
+	dotted := strings.Repeat("x", validation.LabelValueMaxLength-12) + ".yyyyyyyyyy"
+	if errs := validation.IsValidLabelValue(gatewayNodeLabelValue(dotted)); len(errs) != 0 {
+		t.Errorf("gatewayNodeLabelValue(%s) is not a valid label value: %v", dotted, errs)
+	}
+}
+
 // TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion covers
 // the DeletionTimestamp-set branch (Reconcile observes its own
 // NetworkGateway still present but terminating). Not known to be
@@ -902,7 +1040,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion(t *testin
 	now := metav1.Now()
 	gwA.DeletionTimestamp = &now
 
-	ruleV4 := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v4")
+	ruleV4 := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
@@ -1007,8 +1145,8 @@ func TestPrefixesByFamily(t *testing.T) {
 func TestNetworkGatewayReconciler_DisabledWithdrawsAndSkipsTheEngine(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
-	own := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v6")
-	other := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v6")
+	own := newNodeAdvertisement(testRuleName, testNodeGWA, "v6")
+	other := newNodeAdvertisement(testRuleName, testNodeGWB, "v6")
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
@@ -1038,30 +1176,37 @@ func TestNetworkGatewayReconciler_DisabledWithdrawsAndSkipsTheEngine(t *testing.
 	}
 }
 
-// TestIsNodeAdvertisement_LabelledNamesMatchExactly: a disabled node "edge1"
+// TestIsNodeAdvertisement_LabelledNamesMatchExactly: a disabled node "edge-1"
 // withdraws its own advertisements on every reconcile, so it must never match
-// a labelled advertisement of node "pop-edge1", or the two would fight.
+// another node's advertisement, labelled or not, or a CNI-written one that
+// shares its name suffix (#714).
 func TestIsNodeAdvertisement_LabelledNamesMatchExactly(t *testing.T) {
-	labelled := func(name, rule string) *bgpv1alpha1.BGPAdvertisement {
+	labelled := func(name, rule, node string) *bgpv1alpha1.BGPAdvertisement {
 		adv := newAdvertisement(name)
-		adv.Labels = map[string]string{networkRuleLabel: rule}
+		adv.Labels = map[string]string{networkRuleLabel: rule, gatewayNodeLabel: gatewayNodeLabelValue(node)}
 		return adv
 	}
+	ruleLabelOnly := newAdvertisement("rulex-edge-1-v4")
+	ruleLabelOnly.Labels = map[string]string{networkRuleLabel: "rulex"}
 	tests := []struct {
 		name string
 		adv  *bgpv1alpha1.BGPAdvertisement
 		want bool
 	}{
-		{"own labelled v4", labelled("rulex-edge1-v4", "rulex"), true},
-		{"own labelled v6", labelled("rulex-edge1-v6", "rulex"), true},
-		{"other node sharing the suffix", labelled("rulex-pop-edge1-v4", "rulex"), false},
-		{"unlabelled legacy name", newAdvertisement("rulex-edge1-v6"), true},
-		{"unrelated", labelled("rulex-edge2-v4", "rulex"), false},
+		{"own labelled v4", labelled("rulex-edge-1-v4", "rulex", "edge-1"), true},
+		{"own labelled v6", labelled("rulex-edge-1-v6", "rulex", "edge-1"), true},
+		{"other node sharing the suffix", labelled("rulex-pop-edge-1-v4", "rulex", "pop-edge-1"), false},
+		{"node label but name for another node", labelled("rulex-pop-edge-1-v4", "rulex", "edge-1"), false},
+		{"rule label without node label", ruleLabelOnly, false},
+		{"unlabelled legacy name", newAdvertisement("rulex-edge-1-v6"), false},
+		{"unlabelled other node sharing the suffix", newAdvertisement("rulex-east-edge-1-v4"), false},
+		{"CNI-named sharing the suffix", newAdvertisement("vpc0000001-att0000001-east-edge-1-v4"), false},
+		{"unrelated", labelled("rulex-edge-2-v4", "rulex", "edge-2"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isNodeAdvertisement(tt.adv, "edge1"); got != tt.want {
-				t.Errorf("isNodeAdvertisement(%s, edge1) = %v, want %v", tt.adv.Name, got, tt.want)
+			if got := isNodeAdvertisement(tt.adv, "edge-1"); got != tt.want {
+				t.Errorf("isNodeAdvertisement(%s, edge-1) = %v, want %v", tt.adv.Name, got, tt.want)
 			}
 		})
 	}
