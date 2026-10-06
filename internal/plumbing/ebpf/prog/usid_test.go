@@ -1290,15 +1290,12 @@ func buildPlainIPv4Packet(t *testing.T, src, dst netip.Addr) []byte {
 // to the L4 header's start, and fail (silently, by this function's own
 // design -- see usid_egress's own comment at its call site) if that
 // offset falls outside the packet's bounds, which a 4-byte packet would.
-// proto is currently always 6 (TCP) at this file's only two call sites,
-// but is still a parameter, matching buildPlainIPv4Packet's own shape,
-// rather than a hardcoded assumption baked into the function body.
-func buildPlainV6PacketWithL4Ports(t *testing.T, src, dst netip.Addr, proto uint8, srcPort, dstPort uint16) []byte {
+func buildPlainV6PacketWithL4Ports(t *testing.T, src, dst netip.Addr, srcPort, dstPort uint16) []byte {
 	t.Helper()
-	if proto != 6 {
-		t.Fatalf("buildPlainV6PacketWithL4Ports: proto %d unsupported, only TCP(6)'s 20-byte header is built", proto)
-	}
-	const tcpHeaderLen = 20
+	const (
+		tcpProtocol  = 6
+		tcpHeaderLen = 20
+	)
 
 	pkt := make([]byte, 0, ethHeaderLen+ip6HeaderLen+tcpHeaderLen)
 	pkt = append(pkt, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
@@ -1307,7 +1304,7 @@ func buildPlainV6PacketWithL4Ports(t *testing.T, src, dst netip.Addr, proto uint
 
 	pkt = append(pkt, 0x60, 0x00, 0x00, 0x00)
 	pkt = append(pkt, byte(tcpHeaderLen>>8), byte(tcpHeaderLen))
-	pkt = append(pkt, proto)
+	pkt = append(pkt, tcpProtocol)
 	pkt = append(pkt, 64)
 	srcBytes := src.As16()
 	pkt = append(pkt, srcBytes[:]...)
@@ -1490,7 +1487,7 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 	}
 
 	pkt := buildPlainV6PacketWithL4Ports(t,
-		netip.MustParseAddr("fd20:70::2"), service, 6, 49152, servicePort)
+		netip.MustParseAddr("fd20:70::2"), service, 49152, servicePort)
 	ret, out, err := objs.UsidServiceEgress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
@@ -1523,7 +1520,7 @@ func TestUsidEgress_ServiceRouteDropsUnauthorizedPort(t *testing.T) {
 	}
 
 	pkt := buildPlainV6PacketWithL4Ports(t,
-		netip.MustParseAddr("fd20:70::2"), service, 6, 49152, 8443)
+		netip.MustParseAddr("fd20:70::2"), service, 49152, 8443)
 	ret, out, err := objs.UsidServiceEgress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)
@@ -1562,12 +1559,12 @@ func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 		t.Fatalf("populate service_access_table: %v", err)
 	}
 
-	reply := buildPlainV6PacketWithL4Ports(t, service, consumer, 6, 8443, 49152)
+	reply := buildPlainV6PacketWithL4Ports(t, service, consumer, 8443, 49152)
 	if ret, _, err := objs.UsidServiceEgress.Test(reply); err != nil || ret != tcActUnspec {
 		t.Fatalf("unsolicited reply verdict = %d, err = %v; want TC_ACT_UNSPEC", ret, err)
 	}
 
-	request := buildPlainV6PacketWithL4Ports(t, consumer, service, 6, 49152, 8443)
+	request := buildPlainV6PacketWithL4Ports(t, consumer, service, 49152, 8443)
 	if ret, _, err := objs.UsidServiceEgress.Test(request); err != nil || ret != tcActRedirect {
 		t.Fatalf("authorized request verdict = %d, err = %v; want TC_ACT_REDIRECT", ret, err)
 	}
@@ -1995,7 +1992,7 @@ func TestUsidEgress_VIPSourcedReplyRedirectsToPublicUplinkNotNAT66(t *testing.T)
 		t.Fatalf("populate public_uplink_table: %v", err)
 	}
 
-	pkt := buildPlainV6PacketWithL4Ports(t, backendReal, client, 6 /* TCP */, backendPort, clientPort)
+	pkt := buildPlainV6PacketWithL4Ports(t, backendReal, client, backendPort, clientPort)
 
 	ret, out, err := objs.UsidEgress.Test(pkt)
 	if err != nil {

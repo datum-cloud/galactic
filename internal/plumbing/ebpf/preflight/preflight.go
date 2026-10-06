@@ -99,7 +99,8 @@ func capabilityChecks(p Prober) []capabilityCheck {
 		{
 			name: "bpf_redirect_neigh helper",
 			fn:   p.RedirectNeigh,
-			why:  "private-service forwarding redirects directly between attachment interfaces and requires kernel neighbor resolution",
+			why: "private-service forwarding redirects directly between attachment interfaces and requires " +
+				"kernel neighbor resolution",
 		},
 	}
 }

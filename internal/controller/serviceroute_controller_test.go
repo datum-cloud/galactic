@@ -13,6 +13,8 @@ import (
 	"go.datum.net/galactic/internal/serviceroute"
 )
 
+const testServiceRouteTenantNamespace = "tenant"
+
 type retryRouteProgrammer struct {
 	applyCalls  int
 	removeCalls int
@@ -41,8 +43,8 @@ func TestServiceRouteReplacePolicyResumesPartialApply(t *testing.T) {
 	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
 	policy := types.NamespacedName{Namespace: "platform", Name: "dns"}
 	intents := []serviceroute.RouteIntent{
-		{Attachment: types.NamespacedName{Namespace: "tenant", Name: "a"}},
-		{Attachment: types.NamespacedName{Namespace: "tenant", Name: "b"}},
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"}},
+		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"}},
 	}
 
 	if err := reconciler.replacePolicy(policy, intents); err == nil {
@@ -70,8 +72,12 @@ func TestServiceRouteRemovePolicyResumesPartialRemove(t *testing.T) {
 		Programmer: programmer,
 		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
 			policy: {
-				{Namespace: "tenant", Name: "a"}: {Attachment: types.NamespacedName{Namespace: "tenant", Name: "a"}},
-				{Namespace: "tenant", Name: "b"}: {Attachment: types.NamespacedName{Namespace: "tenant", Name: "b"}},
+				{Namespace: testServiceRouteTenantNamespace, Name: "a"}: {
+					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"},
+				},
+				{Namespace: testServiceRouteTenantNamespace, Name: "b"}: {
+					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"},
+				},
 			},
 		},
 	}
