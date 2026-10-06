@@ -89,7 +89,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	start := time.Now()
 	resultLabel := "success"
 	defer func() { r.Metrics.ObserveReconcile(resultLabel, time.Since(start)) }()
-	logger := log.FromContext(ctx).WithValues("policy", req.NamespacedName.String(), "node", r.NodeName)
+	logger := log.FromContext(ctx).WithValues("policy", req.String(), "node", r.NodeName)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
