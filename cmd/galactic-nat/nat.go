@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/safchain/ethtool"
+	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
@@ -25,6 +27,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/natmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	"go.datum.net/galactic/internal/plumbing/nicstats"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
@@ -41,8 +44,9 @@ import (
 // shard's XDP attachment live on the wire, would eventually be collected and
 // silently detached while the shard's Ready condition still reported healthy.
 var natDatapathKeepAlive struct {
-	objs *natprog.NatObjects
-	set  *xdpattach.Set
+	objs     *natprog.NatObjects
+	set      *xdpattach.Set
+	dispatch *xdpdispatch.Dispatcher
 }
 
 // natDatapath is this node's attached egress translation datapath, as
@@ -80,7 +84,8 @@ func (d *natDatapath) Attached() bool {
 }
 
 // MissingUplinks reports the resolved uplinks the datapath does not cover: not
-// attached in direct mode, not hooked by the edge gateway in chain mode.
+// attached in direct mode, not reaching this shard's dispatcher slot in
+// dispatch mode, not hooked by the edge gateway in chain mode.
 func (d *natDatapath) MissingUplinks() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -246,6 +251,17 @@ func (d *natDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 // the rest as routing reveals them. onCoverage is called whenever the set of
 // uplinks the datapath misses changes, which MissingUplinks then reports.
 //
+// In dispatch mode (config.NATXDPAttachDispatch) the program is not attached
+// either. It fills this shard's slot in the node's shared XDP dispatcher, whose
+// pinned root holds every uplink, and the slot's lease is renewed for the life
+// of the process. The root and the slot outlive the process, so a restart
+// never detaches anything; the next process swaps its program into the slot.
+// Nothing here is all-or-nothing: an uplink the dispatcher cannot hold yet is
+// reported missing and retried.
+//
+// In direct mode, an idle dispatcher on the resolved uplinks is released
+// first (releaseIdleDispatcher).
+//
 // In chain mode (config.NATXDPAttachChain) nothing is attached: the program is
 // installed in the edge gateway's xdp_chain slot instead, waiting for the
 // gateway to create it, and kept there for the life of the process by
@@ -296,16 +312,31 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 	d.shardConfig = natmap.NewShardConfigTable(natmap.KernelTable{Map: objs.ShardConfigTable})
 
 	var (
-		set      *xdpattach.Set
-		xdpLinks []link.Link
+		set         *xdpattach.Set
+		dispatchSet *xdpattach.DispatchSet
+		dispatcher  *xdpdispatch.Dispatcher
+		xdpLinks    []link.Link
 	)
-	if cfg.XDPAttach == config.NATXDPAttachChain {
+	switch cfg.XDPAttach {
+	case config.NATXDPAttachChain:
 		if err := waitForChain(ctx, objs.NatIngress, natattach.EdgeChainMapPath); err != nil {
 			_ = objs.Close()
 			return nil, err
 		}
 		go keepChain(ctx, objs.NatIngress, natattach.EdgeChainMapPath)
-	} else {
+	case config.NATXDPAttachDispatch:
+		// The lease runs for the life of the process, so its done channel
+		// is not needed here.
+		if dispatcher, dispatchSet, _, err = joinDispatcher(ctx, xdpdispatch.PinDir, objs.NatIngress); err != nil {
+			_ = objs.Close()
+			return nil, err
+		}
+		d.missing = dispatchSet.Reconcile(ctx, uplinks)
+	default:
+		if err := releaseIdleDispatcher(ctx, xdpdispatch.PinDir, uplinks); err != nil {
+			_ = objs.Close()
+			return nil, err
+		}
 		xdpLinks, err = natattach.Attach(objs.NatIngress, uplinks)
 		if err != nil {
 			_ = objs.Close()
@@ -329,6 +360,7 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 
 	natDatapathKeepAlive.objs = objs
 	natDatapathKeepAlive.set = set
+	natDatapathKeepAlive.dispatch = dispatcher
 
 	slog.Info("Egress translation datapath attached",
 		"interfaces", uplinks,
@@ -337,7 +369,8 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 	)
 
 	d.attached = true
-	go d.watchUplinks(ctx, cfg.UplinkInterfaces, set, onCoverage)
+	go d.watchUplinks(ctx, cfg.UplinkInterfaces, coverageFor(ctx, set, dispatchSet), dispatchSet == nil && set == nil,
+		onCoverage)
 	return d, nil
 }
 
@@ -355,6 +388,125 @@ func registerUplinkQueueStats(metricsReg prometheus.Registerer, d *natDatapath) 
 	if err := metricsReg.Register(nicstats.NewCollector(metricsNamespace, et, d.Uplinks)); err != nil {
 		et.Close()
 		slog.Warn("Cannot register uplink receive queue metrics", "err", err)
+	}
+}
+
+// joinDispatcher opens the node's XDP dispatcher, fills this shard's slot with
+// program, and starts renewing the slot's lease for the life of ctx. It
+// returns the set that keeps the dispatcher on the uplinks, and a channel
+// closed once the lease loop has stopped, which a caller waits on before
+// closing the dispatcher.
+func joinDispatcher(ctx context.Context, pinDir string, program *ebpf.Program) (
+	*xdpdispatch.Dispatcher, *xdpattach.DispatchSet, <-chan struct{}, error,
+) {
+	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("open the node's XDP dispatcher: %w", err)
+	}
+	lock, err := dispatcher.Lock(ctx)
+	if err != nil {
+		_ = dispatcher.Close()
+		return nil, nil, nil, err
+	}
+	err = lock.Fill(xdpdispatch.SlotNAT, program)
+	lock.Unlock()
+	if err != nil {
+		_ = dispatcher.Close()
+		return nil, nil, nil, fmt.Errorf("install egress translation datapath in the XDP dispatcher: %w", err)
+	}
+	set, err := xdpattach.NewDispatchSet(dispatcher, xdpdispatch.SlotNAT, xdpdispatch.RoleEgress, program)
+	if err != nil {
+		_ = dispatcher.Close()
+		return nil, nil, nil, err
+	}
+
+	// A lapsed lease shows as missing uplinks within one coverage resync,
+	// since every Reconcile reads the lease back.
+	leaseDone := make(chan struct{})
+	go func() {
+		defer close(leaseDone)
+		dispatcher.Lease(ctx, xdpdispatch.SlotNAT, func(err error) {
+			slog.Error("Cannot renew the egress translation slot's lease in the XDP dispatcher; "+
+				"the dispatcher skips the slot once it lapses", "err", err)
+		})
+	}()
+	slog.Info("Egress translation datapath installed in the XDP dispatcher", "pinDir", pinDir)
+	return dispatcher, set, leaseDone, nil
+}
+
+// releaseIdleDispatcher detaches the node's XDP dispatcher from uplinks, so a
+// shard switched back from dispatch to direct mode can attach its own program.
+// It does nothing on a node that never ran the dispatcher.
+//
+// It refuses, returning an error, while another datapath's slot is live: the
+// dispatcher is serving that datapath on these uplinks, and detaching it would
+// cut that datapath's traffic. Such a node needs dispatch mode.
+func releaseIdleDispatcher(ctx context.Context, pinDir string, uplinks []string) error {
+	if _, err := os.Stat(filepath.Join(pinDir, "links")); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
+	if err != nil {
+		return fmt.Errorf("open the node's XDP dispatcher to release it: %w", err)
+	}
+	defer dispatcher.Close() //nolint:errcheck // our own descriptors; the pins are what matter
+
+	// Under the lock, which every Fill takes too, so no other datapath can
+	// take its slot between this read and the releases below.
+	lock, err := dispatcher.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	live, err := dispatcher.LiveSlots()
+	if err != nil {
+		return err
+	}
+	others := slices.DeleteFunc(live, func(s xdpdispatch.Slot) bool { return s == xdpdispatch.SlotNAT })
+	for _, name := range uplinks {
+		l, err := netlink.LinkByName(name)
+		if err != nil {
+			return fmt.Errorf("find uplink %q: %w", name, err)
+		}
+		ifindex := l.Attrs().Index
+		linked, err := dispatcher.Linked(ifindex)
+		if err != nil {
+			return err
+		}
+		if !linked {
+			continue
+		}
+		if len(others) > 0 {
+			return fmt.Errorf("the XDP dispatcher on uplink %q is also running dispatcher slots %v for "+
+				"another datapath, so direct mode cannot take the uplink without cutting that datapath's "+
+				"traffic; set %s=%s", name, others, config.EnvNATXDPAttach, config.NATXDPAttachDispatch)
+		}
+		if err := lock.Release(ifindex); err != nil {
+			return err
+		}
+		slog.Info("Released the idle XDP dispatcher from uplink for a direct attach", "interface", name)
+	}
+	return lock.Clear(xdpdispatch.SlotNAT)
+}
+
+// coverageFor returns how watchUplinks brings the ready uplinks under the
+// datapath and reads back which it covers: through set in direct mode,
+// dispatchSet in dispatch mode, and the gateway's hooks in chain mode.
+func coverageFor(ctx context.Context, set *xdpattach.Set, dispatchSet *xdpattach.DispatchSet) func([]string) []string {
+	switch {
+	case set != nil:
+		return func(ready []string) []string {
+			set.Reconcile(ready)
+			return set.Attached()
+		}
+	case dispatchSet != nil:
+		return func(ready []string) []string {
+			return uncovered(ready, dispatchSet.Reconcile(ctx, ready))
+		}
+	default:
+		return func(ready []string) []string {
+			return uncovered(ready, natattach.UnhookedUplinks(ready))
+		}
 	}
 }
 
@@ -390,12 +542,14 @@ func waitForUplinks(ctx context.Context, override []string) ([]string, error) {
 }
 
 // watchUplinks keeps the datapath on every uplink ResolveUplinks returns, for
-// the life of ctx, re-resolving on every netlink link or route change. In
-// direct mode set holds the attachments and an uplink found later is attached
-// to it; in chain mode set is nil and the gateway owns the hook, so an uplink
-// it does not cover can only be reported. Either way, onCoverage is called
-// whenever the missing uplinks change.
-func (d *natDatapath) watchUplinks(ctx context.Context, override []string, set *xdpattach.Set, onCoverage func()) {
+// the life of ctx, re-resolving on every netlink link or route change. cover
+// brings the ready uplinks under the datapath and returns the ones it covers
+// (coverageFor). chained says the shard runs in the gateway's xdp_chain,
+// which changes what a missing uplink means. onCoverage is called whenever the
+// missing uplinks change.
+func (d *natDatapath) watchUplinks(ctx context.Context, override []string, cover func([]string) []string,
+	chained bool, onCoverage func(),
+) {
 	xdpattach.OnNetlinkChange(ctx, func() {
 		uplinks, err := natattach.ResolveUplinks(override)
 		if err != nil {
@@ -404,14 +558,7 @@ func (d *natDatapath) watchUplinks(ctx context.Context, override []string, set *
 		}
 		ready := d.adoptUplinks(uplinks)
 
-		var covered []string
-		if set != nil {
-			set.Reconcile(ready)
-			covered = set.Attached()
-		} else {
-			covered = uncovered(ready, natattach.UnhookedUplinks(ready))
-		}
-		missing := uncovered(uplinks, covered)
+		missing := uncovered(uplinks, cover(ready))
 
 		if !d.setMissing(missing) {
 			return
@@ -419,7 +566,7 @@ func (d *natDatapath) watchUplinks(ctx context.Context, override []string, set *
 		switch {
 		case len(missing) == 0:
 			slog.Info("Egress translation datapath covers every uplink", "uplinks", uplinks)
-		case set == nil:
+		case chained:
 			slog.Warn("Uplinks carry no XDP program, so the chained shard sees none of their traffic; "+
 				"the edge gateway is not attached to them", "missing", missing)
 		default:
@@ -516,4 +663,60 @@ func closeAll(links []link.Link) {
 	for _, l := range links {
 		_ = l.Close()
 	}
+}
+
+// disabledDatapath is the datapath of a shard turned off by configuration
+// (config.EnvNATDatapathEnabled). It holds nothing and translates nothing, and
+// reports no missing uplinks, so the pod stays ready while the EgressShard
+// reports the shard as disabled.
+type disabledDatapath struct{}
+
+func (disabledDatapath) Attached() bool           { return false }
+func (disabledDatapath) MissingUplinks() []string { return nil }
+func (disabledDatapath) Clear() error             { return nil }
+
+func (disabledDatapath) Program(controller.EgressShardIdentity) error {
+	return errors.New("the egress translation datapath is turned off")
+}
+
+func (disabledDatapath) Programmed() (controller.EgressShardIdentity, bool) {
+	return controller.EgressShardIdentity{}, false
+}
+
+// turnOffDatapath turns this node's shard off; the shard then runs with
+// disabledDatapath. A dispatch-mode
+// predecessor left the shard's program in the XDP dispatcher with a live
+// lease, so the slot is emptied here and the dispatcher passes the shard's
+// traffic on at once rather than once the lease lapses. Every other slot, and
+// the dispatcher itself, are left alone. A direct-mode predecessor's
+// attachment ended with its process, so there is nothing to undo for it.
+//
+// A failure to empty the slot is logged, not returned: the shard is meant to
+// be off, the lease lapses on its own within xdpdispatch.LeaseTTL, and a
+// shard that crash-looped instead would keep its advertisement up no longer
+// but would page for nothing.
+func turnOffDatapath(ctx context.Context, pinDir string) {
+	if _, err := os.Stat(filepath.Join(pinDir, "links")); err == nil {
+		if err := emptyDispatcherSlot(ctx, pinDir); err != nil {
+			slog.Error("Cannot empty the egress translation slot in the XDP dispatcher; "+
+				"it stops claiming packets once its lease lapses", "lease", xdpdispatch.LeaseTTL, "err", err)
+		}
+	}
+	slog.Info("Egress translation datapath is turned off; this shard attaches nothing and translates nothing",
+		"env", config.EnvNATDatapathEnabled)
+}
+
+// emptyDispatcherSlot clears this shard's slot in the dispatcher under pinDir.
+func emptyDispatcherSlot(ctx context.Context, pinDir string) error {
+	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
+	if err != nil {
+		return fmt.Errorf("open the node's XDP dispatcher: %w", err)
+	}
+	defer dispatcher.Close() //nolint:errcheck // our own descriptors
+	lock, err := dispatcher.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return lock.Clear(xdpdispatch.SlotNAT)
 }

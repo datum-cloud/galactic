@@ -38,11 +38,12 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# galactic-nat's build graph reaches all three of this module's eBPF
-# program packages, so all three must be generated here -- none of their
+# galactic-nat's build graph reaches all four of this module's eBPF
+# program packages, so all four must be generated here -- none of their
 # bpf2go output (*_bpfel.go/.o, *_bpfeb.go/.o) is committed to git (see each
-# package's doc.go). Only the first is loaded by this binary; the other two
-# arrive transitively and still have to compile:
+# package's doc.go). natprog, and in dispatch mode xdpdispatch, are loaded
+# by this binary; the other two arrive transitively and still have to
+# compile:
 #   - natprog  -- the sharded NAT66 egress XDP program, loaded directly
 #                   via internal/plumbing/ebpf/natattach.
 #   - prog       -- the SRv6 uSID TC-BPF program, via
@@ -51,6 +52,8 @@ COPY internal/ internal/
 #                   and internal/controller -> .../edgemap. galactic-nat
 #                   never loads it, but shares those packages with
 #                   galactic-gateway, so it links against the bindings.
+#   - xdpdispatch -- the node's shared XDP dispatcher, loaded in
+#                   GALACTIC_NAT_XDP_ATTACH=dispatch mode.
 # Dropping any one of these turns into an "undefined: <Prog><Type>" build
 # failure in the go build step below, not a missing-file error.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -59,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN go generate ./internal/plumbing/ebpf/prog/...
 RUN go generate ./internal/plumbing/ebpf/edgeprog/...
 RUN go generate ./internal/plumbing/ebpf/natprog/...
+RUN go generate ./internal/plumbing/ebpf/xdpdispatch/...
 
 # Build galactic-nat
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

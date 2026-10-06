@@ -204,6 +204,7 @@ func TestNATConfigXDPAttach(t *testing.T) {
 	}{
 		{want: NATXDPAttachDirect},
 		{value: NATXDPAttachDirect, set: true, want: NATXDPAttachDirect},
+		{value: NATXDPAttachDispatch, set: true, want: NATXDPAttachDispatch},
 		{value: NATXDPAttachChain, set: true, want: NATXDPAttachChain},
 		{value: "tc", set: true, wantErr: true},
 	}
@@ -266,6 +267,50 @@ func TestNATConfigEchoResponder(t *testing.T) {
 			cfg.BindFlags(flags)
 			if cfg.EchoResponder != tt.want {
 				t.Errorf("EchoResponder = %v, want %v", cfg.EchoResponder, tt.want)
+			}
+		})
+	}
+}
+
+// TestNATConfigDatapathEnabled covers the datapath switch's three tiers. On is
+// the default that matters: a shard that came up disabled after an upgrade
+// would withdraw its advertisement and stop translating.
+func TestNATConfigDatapathEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		flag string
+		want bool
+	}{
+		{name: "default", want: true},
+		{name: "env off", env: testBoolFalse, want: false},
+		{name: "env on", env: testBoolTrue, want: true},
+		{name: "flag off over env on", env: testBoolTrue, flag: testBoolFalse, want: false},
+		{name: "flag on over env off", env: testBoolFalse, flag: testBoolTrue, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv(EnvNATDatapathEnabled, tt.env)
+			}
+			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			flags.String(FlagNodeName, "", "")
+			flags.Int(FlagMetricsPort, DefaultNATMetricsPort, "")
+			flags.Int(FlagGRPCHealthPort, DefaultNATGRPCHealthPort, "")
+			flags.String("nat-uplink-interfaces", "", "")
+			flags.String("nat-xdp-attach", NATXDPAttachDirect, "")
+			flags.Bool("nat-datapath-enabled", true, "")
+			flags.Bool("nat-echo-responder", false, "")
+			if tt.flag != "" {
+				if err := flags.Set("nat-datapath-enabled", tt.flag); err != nil {
+					t.Fatalf("set flag: %v", err)
+				}
+			}
+
+			cfg := NewNATConfig()
+			cfg.BindFlags(flags)
+			if cfg.DatapathEnabled != tt.want {
+				t.Errorf("DatapathEnabled = %v, want %v", cfg.DatapathEnabled, tt.want)
 			}
 		})
 	}

@@ -374,8 +374,14 @@ func TestRelease_DetachesTheRoot(t *testing.T) {
 		t.Fatalf("SetRole: %v", err)
 	}
 
+	if linked, err := d.Linked(ifindex); err != nil || !linked {
+		t.Fatalf("Linked before Release = %v, %v; want true", linked, err)
+	}
 	if err := locked(t, d).Release(ifindex); err != nil {
 		t.Fatalf("Release: %v", err)
+	}
+	if linked, err := d.Linked(ifindex); err != nil || linked {
+		t.Errorf("Linked after Release = %v, %v; want false", linked, err)
 	}
 	if got := attachedProgID(t, ifindex); got != 0 {
 		t.Errorf("ifindex %d still runs program %d after Release", ifindex, got)

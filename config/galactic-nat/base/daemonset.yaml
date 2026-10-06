@@ -103,10 +103,15 @@ spec:
             - name: GALACTIC_NAT_ECHO_RESPONDER
               value: "false"
             # GALACTIC_NAT_XDP_ATTACH is left at its default, "direct": the
-            # shard attaches its own program to the uplinks. On a node that
-            # also runs galactic-gateway, which already holds the native XDP
-            # hook, apply ../overlays/chained/ to set it to "chain". See
+            # shard attaches its own program to the uplinks. "dispatch" runs
+            # it from the node's shared, pinned XDP dispatcher instead, so a
+            # restart bounces no uplink, and so the gateway can share the
+            # uplinks once it moves onto the dispatcher too. On a
+            # node where the gateway holds the hook directly, apply
+            # ../overlays/chained/ to set it to "chain". See
             # internal/config/nat.go's EnvNATXDPAttach.
+            # GALACTIC_NAT_DATAPATH_ENABLED, default "true", turns the shard
+            # off without removing the pod; see EnvNATDatapathEnabled.
             # Nothing about this shard's identity is set here. Its SID,
             # masquerade addresses and NAT64 prefix come from the
             # EgressShard whose spec.targetRef names this node, which the
@@ -205,7 +210,8 @@ spec:
             # would silently produce a regular filesystem path instead of a
             # real bpf filesystem, masking the failure instead of
             # surfacing it at load time). The galactic-nat/ subdirectory
-            # itself is created by this container on first pin.
+            # itself is created by this container on first pin, as is
+            # galactic-xdp/, the shared XDP dispatcher's, in dispatch mode.
             - name: bpf-fs
               mountPath: /sys/fs/bpf
       volumes:

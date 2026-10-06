@@ -54,15 +54,29 @@ const (
 	EnvNATUplinkInterfaces = "GALACTIC_NAT_UPLINK_INTERFACES"
 
 	// EnvNATXDPAttach selects how the datapath reaches its uplinks' XDP hook:
-	// NATXDPAttachDirect or NATXDPAttachChain. Optional, defaulting to direct.
+	// NATXDPAttachDirect, NATXDPAttachDispatch or NATXDPAttachChain. Optional,
+	// defaulting to direct.
 	//
-	// An interface takes one native XDP program. On an edge node the gateway
-	// already holds that hook on the interfaces this shard needs, so the shard
-	// runs chained -- installed in the gateway's xdp_chain slot, receiving
-	// every packet the gateway does not claim -- instead of attaching itself.
-	// Direct mode there fails at attach; chain mode on a node with no gateway
-	// waits for a map that never appears.
+	// An interface takes one native XDP program. Direct attaches the shard's
+	// own program, unpinned, so it detaches when the process exits and every
+	// restart bounces each uplink. Dispatch puts the node's shared XDP
+	// dispatcher (xdpdispatch) on the uplinks instead and runs the shard from
+	// its slot: the attachment is pinned, so a restart swaps the program in
+	// place, and the edge gateway can share the same uplinks. Chain installs
+	// the shard in the gateway's xdp_chain slot, on a node where the gateway
+	// holds the hook directly; it is superseded by dispatch.
+	//
+	// Switching a node back from dispatch to direct is safe while nothing else
+	// uses the dispatcher there: direct mode detaches an idle dispatcher before
+	// attaching. While another datapath's slot is live it refuses to start.
 	EnvNATXDPAttach = "GALACTIC_NAT_XDP_ATTACH"
+
+	// EnvNATDatapathEnabled turns the shard's datapath on or off. Optional,
+	// defaulting to true. Off, the process stays up and healthy but attaches
+	// nothing, empties its dispatcher slot, clears its identity and withdraws
+	// its BGPAdvertisement, so no traffic is drawn to a shard that does not
+	// translate. Every other datapath on the node keeps running.
+	EnvNATDatapathEnabled = "GALACTIC_NAT_DATAPATH_ENABLED"
 
 	// EnvNATEchoResponder makes the shard answer an ICMP or ICMPv6 Echo
 	// Request addressed to one of its own masquerade addresses. Optional,
@@ -77,10 +91,11 @@ const (
 	EnvNATEchoResponder = "GALACTIC_NAT_ECHO_RESPONDER"
 )
 
-// NATXDPAttachDirect and NATXDPAttachChain are EnvNATXDPAttach's values.
+// EnvNATXDPAttach's values.
 const (
-	NATXDPAttachDirect = "direct"
-	NATXDPAttachChain  = "chain"
+	NATXDPAttachDirect   = "direct"
+	NATXDPAttachDispatch = "dispatch"
+	NATXDPAttachChain    = "chain"
 )
 
 // --- NATConfig ---------------------------------------------------------
@@ -102,9 +117,11 @@ type NATConfig struct {
 	// comma-separated EnvNATUplinkInterfaces. Empty means auto-detect.
 	UplinkInterfaces []string
 
-	// XDPAttach is NATXDPAttachDirect or NATXDPAttachChain, from
-	// EnvNATXDPAttach.
+	// XDPAttach is one of the NATXDPAttach values, from EnvNATXDPAttach.
 	XDPAttach string
+
+	// DatapathEnabled is EnvNATDatapathEnabled.
+	DatapathEnabled bool
 
 	// EchoResponder is EnvNATEchoResponder.
 	EchoResponder bool
@@ -123,6 +140,7 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault(KeyGRPCHealthPort, DefaultNATGRPCHealthPort)
 	v.SetDefault("uplink_interfaces", "")
 	v.SetDefault("xdp_attach", NATXDPAttachDirect)
+	v.SetDefault("datapath_enabled", true)
 	v.SetDefault("echo_responder", false)
 
 	cfg := &NATConfig{
@@ -145,6 +163,7 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{FlagGRPCHealthPort, KeyGRPCHealthPort},
 		{"nat-uplink-interfaces", "uplink_interfaces"},
 		{"nat-xdp-attach", "xdp_attach"},
+		{"nat-datapath-enabled", "datapath_enabled"},
 		{"nat-echo-responder", "echo_responder"},
 	}
 	for _, b := range bindings {
@@ -165,6 +184,7 @@ func (c *NATConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.UplinkInterfaces = splitCommaList(c.v.GetString("uplink_interfaces"))
 	c.XDPAttach = c.v.GetString("xdp_attach")
+	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
 	c.EchoResponder = c.v.GetBool("echo_responder")
 }
 
@@ -179,9 +199,11 @@ func (c *NATConfig) Validate() error {
 	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
 		return errors.New("grpc health port must be between 1 and 65535")
 	}
-	if c.XDPAttach != NATXDPAttachDirect && c.XDPAttach != NATXDPAttachChain {
-		return fmt.Errorf("%s must be %q or %q, got %q",
-			EnvNATXDPAttach, NATXDPAttachDirect, NATXDPAttachChain, c.XDPAttach)
+	switch c.XDPAttach {
+	case NATXDPAttachDirect, NATXDPAttachDispatch, NATXDPAttachChain:
+	default:
+		return fmt.Errorf("%s must be %q, %q or %q, got %q", EnvNATXDPAttach,
+			NATXDPAttachDirect, NATXDPAttachDispatch, NATXDPAttachChain, c.XDPAttach)
 	}
 	return nil
 }
