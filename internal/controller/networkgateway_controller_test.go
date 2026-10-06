@@ -570,11 +570,11 @@ func newAdvertisement(name string) *bgpv1alpha1.BGPAdvertisement {
 
 // TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode
 // is the regression test for #406: gw-b's NetworkGateway is deleted while
-// gw-b's own per-rule BGPAdvertisement routes are still around. gw-a's process -- the only one
-// left to react, since gw-b's own process is presumably already gone --
-// must withdraw every one of them on the NotFound reconcile it receives
-// for gw-b's deletion, without touching gw-a's own advertisements for the
-// same rule.
+// gw-b's own per-rule BGPAdvertisement routes are still around. gw-a's
+// process -- the only one left to react, since gw-b's own process is
+// presumably already gone -- must withdraw every one of them on the NotFound
+// reconcile it receives for gw-b's deletion, without touching gw-a's own
+// advertisements for the same rule.
 func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA) // gw-a's own gateway; still exists

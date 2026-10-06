@@ -179,11 +179,12 @@ public-interface/SRv6-address values.
 
 ### Worked ContainerLab example
 
-The containerlab lab no longer deploys `galactic-gateway`; its edge nodes
-run only the egress shards, attached directly to their uplinks. Until commit
-`abdd665b`, `deploy/containerlab/resources/galactic-gateway/` ran this role
-on four edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3`, `sjc-worker2`, and `iad-worker2`. Each node's overlay
-directory, named for the node itself, carries:
+The containerlab lab no longer deploys `galactic-gateway`; its edge nodes run
+only the egress shards, attached directly to their uplinks. Until commit
+`abdd665b`, `deploy/containerlab/resources/galactic-gateway/` ran this role on
+four edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3`,
+`sjc-worker2`, and `iad-worker2`. Each node's overlay directory, named for the
+node itself, carries:
 
 - `node-patch.yaml` — pins the DaemonSet to one node via
   `kubernetes.io/hostname` and sets `GALACTIC_GATEWAY_PUBLIC_INTERFACE`
@@ -250,10 +251,10 @@ to every object in the namespace on change (`ruleToGatewayRequests`,
 ### Packet path (`internal/plumbing/ebpf/edgeprog/edgedsr.c`, program `edge_lb`)
 
 IPv6-only, phase 1 scope (plain TCP/UDP, no extension headers). Attached to
-the node's public/underlay-facing uplink. There is no "is this a reply to
-me" direction check: a reply never reaches this program, which sees only the forward half, so it has
-exactly one branch, not two. Replies are `edge_return`'s, on a different
-attach point — see below.
+the node's public/underlay-facing uplink. There is no "is this a reply to me"
+direction check: a reply never reaches this program, which sees only the
+forward half, so it has exactly one branch, not two. Replies are
+`edge_return`'s, on a different attach point — see below.
 
 1. **Parse** the outer Ethernet + IPv6 header, then the L4 header (TCP or
    UDP only). Not IPv6, unparseable, or not TCP/UDP — unclaimed: handed to
@@ -262,9 +263,9 @@ attach point — see below.
    [below](#sharing-the-xdp-hook-xdpdispatch)), otherwise `XDP_PASS` to the
    kernel stack, e.g. BGP/SSH to the node itself. Only the
    source/destination port are ever read; nothing is rewritten.
-2. **Match** `(proto, dst port, dst addr)` against `vip_table` (a VIP
-   is globally unique by construction, so the key has no tenant dimension). No match — unclaimed, as above (not
-   one of this gateway's VIPs).
+2. **Match** `(proto, dst port, dst addr)` against `vip_table` (a VIP is
+   globally unique by construction, so the key has no tenant dimension). No
+   match — unclaimed, as above (not one of this gateway's VIPs).
 3. **Claimed past this point** — every subsequent failure is a drop, not a
    pass-through (this gateway owns this VIP+port+protocol). Bump
    `vip_stats_table`'s hit counters (packets/bytes/last-seen), lazily
@@ -281,21 +282,20 @@ attach point — see below.
    same backend.
 5. **Push** a fresh 40-byte outer IPv6 header addressed to the chosen
    backend's own worker-node SRv6 uSID (`vip_table`'s per-backend field,
-   resolved by the Go control plane the same way any other cross-node
-   SRv6 destination is — see
-   [uSID resolution](#usid-resolution-for-backends) below), sourced from
-   this node's own `encap_config_table` entry (this node's plain
-   SRv6-reachable address — never compared against anything on a receive path, since no reply ever re-enters this
-   program). Resolve the L2 next-hop via
-   `bpf_fib_lookup`, then leave over the interface that lookup selected:
-   `XDP_TX` where the route egresses the interface the client's packet
-   arrived on, `bpf_redirect` + `XDP_REDIRECT` where it does not. Those
-   differ on every gateway that reaches its clients and its compute nodes
-   over separate links, which is this role's normal shape — see
-   [Known Constraints](#known-constraints) for the bug that came from
-   returning `XDP_TX` unconditionally. The inner packet travels completely
-   unmodified — this is DSR's entire premise: no address or port
-   rewriting and no checksum touch anywhere.
+   resolved by the Go control plane the same way any other cross-node SRv6
+   destination is — see [uSID resolution](#usid-resolution-for-backends)
+   below), sourced from this node's own `encap_config_table` entry (this
+   node's plain SRv6-reachable address — never compared against anything on a
+   receive path, since no reply ever re-enters this program). Resolve the L2
+   next-hop via `bpf_fib_lookup`, then leave over the interface that lookup
+   selected: `XDP_TX` where the route egresses the interface the client's
+   packet arrived on, `bpf_redirect` + `XDP_REDIRECT` where it does not. Those
+   differ on every gateway that reaches its clients and its compute nodes over
+   separate links, which is this role's normal shape — see [Known
+   Constraints](#known-constraints) for the bug that came from returning
+   `XDP_TX` unconditionally. The inner packet travels completely unmodified —
+   this is DSR's entire premise: no address or port rewriting and no checksum
+   touch anywhere.
 
 See `edgedsr.c`'s own header comment for the full byte-level walkthrough,
 including the `EDGE_BARRIER_VAR` eBPF-verifier bounds-narrowing workaround
@@ -701,10 +701,13 @@ pod on that node is not a supported configuration.
 
 ### History
 
-The gateway first shipped as a Full-NAT datapath with primary/secondary BGP
-local-preference placement. [#427](https://github.com/datum-cloud/galactic/pull/427) replaced it with the DSR/anycast design
-described here, with no migration path. Nothing from the Full-NAT design
-remains in the code.
+The gateway first shipped as a Full-NAT datapath (`edgenat.c`) with
+primary/secondary BGP local-preference placement (`AssignPrimaryNode`,
+`internal/gateway/placement.go`, `localpref.go`) and a per-node
+self-address route (`publishSelfAddress`).
+[#427](https://github.com/datum-cloud/galactic/pull/427) replaced it with
+the DSR/anycast design described here, with no migration path, and deleted
+that code.
 
 ---
 

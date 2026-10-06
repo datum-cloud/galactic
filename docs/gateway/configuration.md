@@ -112,19 +112,18 @@ node is not a supported configuration.
 
 `config/galactic-gateway/base/` is intentionally excluded from
 `config/galactic-gateway/`'s own kustomization and must never be applied
-directly — doing so produces a crash-looping `galactic-gateway` container.
-The reason is `GALACTIC_GATEWAY_SRV6_ADDRESS`: it is this node's own plain
-SRv6-reachable IPv6 address, used purely as the source address of every
-outer header the node's `edge_lb` XDP program pushes
-(`edgedsr.c`'s `encap_config_table`). It is not an address-translation
-source and has no return-path significance. Because DSR rewrites nothing, there is no
-reconcile step that derives or publishes this value automatically (no
-analogue of a "self-address" status field exists on `NetworkGateway` at
-all — see that CRD's own doc comment). It must be unique per gateway node
-and is operator-supplied today, with no in-cluster derivation mechanism.
-`GALACTIC_GATEWAY_PUBLIC_INTERFACE` is deployment-specific for the same
-reason — every node's public/underlay-facing uplink interface name can
-differ.
+directly — doing so produces a crash-looping `galactic-gateway` container. The
+reason is `GALACTIC_GATEWAY_SRV6_ADDRESS`: it is this node's own plain
+SRv6-reachable IPv6 address, used purely as the source address of every outer
+header the node's `edge_lb` XDP program pushes (`edgedsr.c`'s
+`encap_config_table`). It is not an address-translation source and has no
+return-path significance. Because DSR rewrites nothing, there is no reconcile
+step that derives or publishes this value automatically (no analogue of a
+"self-address" status field exists on `NetworkGateway` at all — see that CRD's
+own doc comment). It must be unique per gateway node and is operator-supplied
+today, with no in-cluster derivation mechanism.
+`GALACTIC_GATEWAY_PUBLIC_INTERFACE` is deployment-specific for the same reason
+— every node's public/underlay-facing uplink interface name can differ.
 
 > The authoritative explanation of this constraint is
 > `internal/config/gateway.go`'s `EnvGatewaySRv6Address` doc comment and

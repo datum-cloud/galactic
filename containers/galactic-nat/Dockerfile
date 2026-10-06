@@ -48,7 +48,7 @@ COPY internal/ internal/
 #                   via internal/plumbing/ebpf/natattach.
 #   - prog       -- the SRv6 uSID TC-BPF program, via
 #                   internal/plumbing/ebpf/attach and .../usidmap.
-#   - edgeprog   -- the edge NAT+LB DSR XDP program, via internal/gateway
+#   - edgeprog   -- the edge DSR load-balancer XDP program, via internal/gateway
 #                   and internal/controller -> .../edgemap. galactic-nat
 #                   never loads it, but shares those packages with
 #                   galactic-gateway, so it links against the bindings.

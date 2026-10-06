@@ -63,8 +63,7 @@ func TestBackendSIDIndex_NoMatchingPrefixIsError(t *testing.T) {
 
 // TestBackendSIDIndex_ExcludesAdvertisementsWithoutVRFIDOrFunction verifies
 // that an advertisement with no SRv6 VRFID/Function (e.g. a NetworkRule VIP
-// preference advertisement, or a rule's own self-address advertisement --
-// see NetworkGatewayReconciler.applyBGPAdvertisements/publishSelfAddress)
+// advertisement -- see NetworkGatewayReconciler.applyBGPAdvertisements)
 // is excluded from matching even if its prefix would otherwise contain the
 // address, since it carries no SRv6 decap behavior of its own.
 func TestBackendSIDIndex_ExcludesAdvertisementsWithoutVRFIDOrFunction(t *testing.T) {

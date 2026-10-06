@@ -24,9 +24,9 @@ import (
 // before RT match, and rtIndex being 1:1 not fan-out. Reading those two
 // functions directly (see monitor.go) shows both are scoped to advertisements
 // that carry a VRFID/Function (tenant-VRF SEG6 kernel-route installation) —
-// a gateway VIP/self-address advertisement carries neither (see
-// publishSelfAddress's doc comment), so it never reaches that code path at
-// all. Those two issues are real but irrelevant to this design.
+// a gateway VIP advertisement carries neither (see
+// NetworkGatewayReconciler.applyBGPAdvertisements), so it never reaches that
+// code path at all. Those two issues are real but irrelevant to this design.
 //
 // What actually determines whether two gateway nodes' identical-VIP-prefix
 // advertisements coexist is buildEVPNPaths' RD derivation (paths.go's
@@ -46,18 +46,17 @@ func TestAnycastSpike_TwoGatewayNodesSamePrefixSurviveIndependently(t *testing.T
 	const vipPrefix = "203.0.113.5/32"
 
 	gw1 := model.DesiredAdvertisement{
-		Name:          "gw1-selfaddr",
+		Name:          "gw1-vip",
 		AddressFamily: model.AddressFamily{AFI: afiL2VPN, SAFI: safiEVPN},
 		Prefixes:      []string{vipPrefix},
 		NextHop:       "2001:db8::1",
 		// VRFID intentionally nil: this is the exact shape
-		// NetworkGatewayReconciler.publishSelfAddress produces for a VIP/
-		// self-address advertisement — no VRFID/Function, per its own doc
-		// comment ("carries no VRFID/Function... not reached via a per-tenant
-		// VRF decap at all").
+		// NetworkGatewayReconciler.applyBGPAdvertisements produces for a VIP
+		// advertisement, which carries no VRFID/Function and is not reached
+		// via a per-tenant VRF decap at all.
 	}
 	gw2 := model.DesiredAdvertisement{
-		Name:          "gw2-selfaddr",
+		Name:          "gw2-vip",
 		AddressFamily: model.AddressFamily{AFI: afiL2VPN, SAFI: safiEVPN},
 		Prefixes:      []string{vipPrefix},
 		NextHop:       "2001:db8::2",
