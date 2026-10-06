@@ -226,13 +226,15 @@ that converges this node's whole gateway engine:
    Function, is what keeps every node's route alive as an independent,
    non-competing path). **No `LocalPreference` is set** — every gateway
    node's route is equally preferred by construction. A rule that fails to
-   build (a backend uSID that does not resolve) or that the engine refuses
-   (over quota, or a VIP the datapath rejects) is not advertised, and any
-   route an earlier pass published for it is withdrawn, so the fabric never
-   sends a VIP's traffic to a node with nothing loaded for it. Each node
-   records the result on the rule as its own `<node>/Programmed` condition
-   (`Programmed`, `LoadFailed`, or `InvalidRule`, with the error in the
-   message). The type is node-scoped because `NetworkRule` status is shared
+   build (no backend uSID resolves, or an address is malformed) or that the
+   engine refuses (over quota, or a VIP the datapath rejects) is not
+   advertised, and any route an earlier pass published for it is withdrawn,
+   so the fabric never sends a VIP's traffic to a node with nothing loaded
+   for it. A rule where only some backends resolve is loaded and advertised
+   with the rest (#713). Each node records the result on the rule as its
+   own `<node>/Programmed` condition (`Programmed`, `BackendsUnresolved`,
+   `LoadFailed`, or `InvalidRule`, with the error or the unresolved
+   backends in the message). The type is node-scoped because `NetworkRule` status is shared
    by every gateway node while loading is per node; a node writes it only
    when it changes, and a departing, deleted, or disabled node's condition
    is removed with its advertisements. The `NetworkGateway`'s
@@ -669,6 +671,15 @@ pod on that node is not a supported configuration.
   advertising overlapping (e.g. colliding ULA) address space would
   otherwise resolve ambiguously, silently routing a packet into the wrong
   tenant's VRF rather than merely picking an ambiguous-but-harmless match.
+  A backend that does not resolve is left out of the rule rather than
+  failing it (`buildDesiredRule`), since a backend pod being recreated
+  removes its `BGPAdvertisement` until the new pod attaches. Nodes stay
+  consistent because each resolves from the same API objects and the
+  Maglev table depends only on the backend set. A per-node cache of the
+  last resolved uSID was rejected: a restarted gateway starts with an
+  empty cache, so nodes would disagree for longer, and traffic would keep
+  going to a pod that no longer exists. Dropping a backend because it is
+  unhealthy is #704.
 - **SRv6 encap-source address has no in-cluster derivation mechanism.**
   `GALACTIC_GATEWAY_SRV6_ADDRESS` is operator-supplied per gateway node
   today; nothing in this repo yet computes it automatically from a node's

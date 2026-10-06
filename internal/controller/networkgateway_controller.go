@@ -116,9 +116,15 @@ const (
 	reasonLoadFailed = "LoadFailed"
 
 	// reasonInvalidRule is the per-node Programmed reason for a rule that
-	// could not be turned into engine state, for example because a backend's
-	// uSID does not resolve.
+	// could not be turned into engine state, for example because none of its
+	// backends' uSIDs resolve.
 	reasonInvalidRule = "InvalidRule"
+
+	// reasonBackendsUnresolved is the per-node Programmed reason for a rule
+	// this node's engine loaded without one or more backends whose uSID did
+	// not resolve, for example while a backend pod is being recreated. The
+	// rule keeps serving through the rest.
+	reasonBackendsUnresolved = "BackendsUnresolved"
 
 	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
 	// whether observed on a live object carrying a deletion timestamp or
@@ -278,14 +284,17 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			continue
 		}
 
-		dr, err := buildDesiredRule(rule, sidIndex)
+		dr, unresolved, err := buildDesiredRule(rule, sidIndex)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
 			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
 			continue
 		}
+		if len(unresolved) > 0 {
+			logger.Info("loading rule without unresolved backends", "networkRule", rule.Name, "unresolved", unresolved)
+		}
 		desired.Rules[dr.Key] = dr
-		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr})
+		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr, unresolved: unresolved})
 	}
 
 	status, err := r.Engine.Reconcile(ctx, desired)
@@ -329,10 +338,13 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // ruleOutcome is one accepted, non-deleting NetworkRule's result from a
 // reconcile pass: the engine state it built, or why it could not be built.
+// unresolved lists the backends left out of desired because their uSID did
+// not resolve.
 type ruleOutcome struct {
-	rule     *bgpv1alpha1.NetworkRule
-	desired  gateway.DesiredRule
-	buildErr error
+	rule       *bgpv1alpha1.NetworkRule
+	desired    gateway.DesiredRule
+	unresolved []string
+	buildErr   error
 }
 
 // publishRuleOutcomes advertises every rule the engine loaded, withdraws this
@@ -404,8 +416,24 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 		}
 		cond.Status, cond.Reason = metav1.ConditionFalse, reasonLoadFailed
 		cond.Message = fmt.Sprintf("not loaded on node %s: %s", node, loadErr)
+		return cond
+	}
+	if len(o.unresolved) > 0 {
+		cond.Reason = reasonBackendsUnresolved
+		cond.Message = fmt.Sprintf("loaded on node %s with %d of %d backends; unresolved: %s",
+			node, len(o.desired.Backends), len(o.desired.Backends)+len(o.unresolved),
+			cappedList(o.unresolved, maxReadyFailures))
 	}
 	return cond
+}
+
+// cappedList joins the first max items with ", ", followed by a count of the
+// rest, so a long list stays under the metav1.Condition message limit.
+func cappedList(items []string, max int) string {
+	if len(items) <= max {
+		return strings.Join(items, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(items[:max], ", "), len(items)-max)
 }
 
 // maxReadyFailures caps how many failed rules the Ready message names, so a
@@ -542,30 +570,49 @@ func withdrawRuleAdvertisements(
 // buildDesiredRule converts rule into a gateway.DesiredRule, resolving each
 // backend's SRv6 uSID through sidIndex. There is no kernel VRF or FIB
 // dependency.
+//
+// A backend whose uSID does not resolve is left out and returned in
+// unresolved as "address:port", so the rule keeps serving through the rest.
+// A backend pod being recreated is enough to cause this, since its
+// BGPAdvertisement is gone until the new pod is attached. Every gateway node
+// resolves from the same API objects and the Maglev table depends only on the
+// backend set, so nodes that see the same objects build the same table. Only
+// when no backend resolves does the rule fail, so it is withdrawn rather than
+// advertised with nothing behind it. A malformed address fails the rule
+// outright, since that is a spec error rather than a passing state.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
-) (gateway.DesiredRule, error) {
+) (dr gateway.DesiredRule, unresolved []string, err error) {
 	vips := make([]netip.Addr, 0, len(rule.Spec.VIPAddresses))
 	for _, v := range rule.Spec.VIPAddresses {
 		addr, err := netip.ParseAddr(v)
 		if err != nil {
-			return gateway.DesiredRule{}, fmt.Errorf("invalid VIP address %q: %w", v, err)
+			return gateway.DesiredRule{}, nil, fmt.Errorf("invalid VIP address %q: %w", v, err)
 		}
 		vips = append(vips, addr)
 	}
 
-	backends := make([]gateway.DesiredBackend, len(rule.Spec.Backends))
-	for i, b := range rule.Spec.Backends {
+	backends := make([]gateway.DesiredBackend, 0, len(rule.Spec.Backends))
+	var firstResolveErr error
+	for _, b := range rule.Spec.Backends {
 		addr, err := netip.ParseAddr(b.Address)
 		if err != nil {
-			return gateway.DesiredRule{}, fmt.Errorf("invalid backend address %q: %w", b.Address, err)
-		}
-		usid, err := sidIndex.resolveUSID(addr, rule.Spec.VPCRef)
-		if err != nil {
-			return gateway.DesiredRule{}, fmt.Errorf("resolve backend %s: %w", addr, err)
+			return gateway.DesiredRule{}, nil, fmt.Errorf("invalid backend address %q: %w", b.Address, err)
 		}
 		//nolint:gosec // b.Port is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleBackend.Port)
-		backends[i] = gateway.DesiredBackend{Address: addr, Port: uint16(b.Port), USID: usid}
+		port := uint16(b.Port)
+		usid, err := sidIndex.resolveUSID(addr, rule.Spec.VPCRef)
+		if err != nil {
+			if firstResolveErr == nil {
+				firstResolveErr = fmt.Errorf("resolve backend %s: %w", addr, err)
+			}
+			unresolved = append(unresolved, netip.AddrPortFrom(addr, port).String())
+			continue
+		}
+		backends = append(backends, gateway.DesiredBackend{Address: addr, Port: port, USID: usid})
+	}
+	if len(backends) == 0 && len(unresolved) > 0 {
+		return gateway.DesiredRule{}, nil, fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
 	}
 
 	return gateway.DesiredRule{
@@ -577,7 +624,7 @@ func buildDesiredRule(
 		//nolint:gosec // rule.Spec.Port is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleSpec.Port)
 		Port:     uint16(rule.Spec.Port),
 		Backends: backends,
-	}, nil
+	}, unresolved, nil
 }
 
 // routerNameForNode returns the name of the BGPRouter whose targetRef.name
