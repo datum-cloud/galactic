@@ -9,6 +9,9 @@ spec:
         - name: galactic-nat
           image: galactic-nat:latest
           imagePullPolicy: Never
-          # GALACTIC_NAT_XDP_ATTACH stays at the base's default, direct: no
-          # lab node runs galactic-gateway, so nothing else holds the uplinks'
-          # XDP hook and the shard attaches its own program.
+          # dispatch, not the base's default direct: the lab runs the shards
+          # from the node's shared XDP dispatcher, the mode production edges
+          # move to, so every lab deploy exercises it.
+          env:
+            - name: GALACTIC_NAT_XDP_ATTACH
+              value: dispatch

@@ -346,8 +346,8 @@ topology:
     #
     # mtu: 1500 on both ends, unlike containerlab's jumbo-frame veth default
     # (~9500) -- required, not cosmetic: the egress shard (galactic-nat)
-    # attaches its XDP program to every member of bond0 in native/driver mode
-    # (natattach, XDPDriverMode), and the kernel's veth_xdp_set() rejects native
+    # attaches the XDP dispatcher to every member of bond0 in native/driver
+    # mode (xdpattach, XDPDriverMode), and the kernel's veth_xdp_set() rejects native
     # XDP with -ERANGE whenever the *peer's* MTU exceeds what fits in one
     # page-sized buffer (SKB_WITH_OVERHEAD(PAGE_SIZE - VETH_XDP_HEADROOM),
     # ~3.5-3.8KB on a 4K-page host) -- 9500 blows well past that regardless

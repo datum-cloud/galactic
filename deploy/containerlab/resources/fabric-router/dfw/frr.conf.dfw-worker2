@@ -51,8 +51,8 @@ interface bond1
 #
 # Null0 because a `network` statement needs a matching route in the RIB and
 # nothing else on this node installs one. It cannot blackhole real shard
-# traffic: the shard's XDP program runs at ingress, attached directly to both
-# uplinks, and claims it before any FIB lookup
+# traffic: the shard's XDP program runs at ingress, from the XDP dispatcher on
+# both uplinks, and claims it before any FIB lookup
 # (internal/plumbing/ebpf/natprog). A packet that reaches these statics is
 # one no shard claimed -- galactic-nat down, or not yet attached -- and
 # dropping it is the point: forwarded

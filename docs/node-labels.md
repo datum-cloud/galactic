@@ -254,7 +254,8 @@ Mutually exclusive with `fabric=router` on the same node, the same way
 The lab's edge workers carry `node=edge` plus `nat=enabled`, which together
 place a `galactic-nat` shard on each; the lab deploys no `galactic-vrf`
 yet. No worker carries `gateway=enabled`: the lab deploys no
-`galactic-gateway`, so each shard attaches its own XDP program.
+`galactic-gateway`; each shard still runs from the node's XDP dispatcher
+(`GALACTIC_NAT_XDP_ATTACH=dispatch`).
 
 The reflector row is the one that shows why `galactic` is a mode enum rather
 than a boolean: `iad-worker3` carries no `node` value at all. Both `node`

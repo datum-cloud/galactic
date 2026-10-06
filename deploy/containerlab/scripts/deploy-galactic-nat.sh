@@ -5,8 +5,8 @@
 # galactic-cni/galactic-router's own), deploy:images (galactic-nat:latest
 # loaded onto every edge node), and deploy:galactic-router: the shard
 # advertises its SID through the edge node's BGPRouter, which that step
-# creates. No lab node runs galactic-gateway, so each shard attaches its own
-# XDP program to its uplinks (GALACTIC_NAT_XDP_ATTACH=direct).
+# creates. Each shard runs from the node's XDP dispatcher on its uplinks
+# (GALACTIC_NAT_XDP_ATTACH=dispatch, set in resources/galactic-nat/base).
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -52,11 +52,11 @@ delete_stale_shards() {
 # delete_gateway NODE removes everything the lab used to deploy for
 # galactic-gateway: its per-node DaemonSets, the NetworkGateway/NetworkRule/
 # ServiceVIPBinding objects that drove them, and ns60, their backend tenant.
-# The shards used to run chained behind the gateway and now attach their own
-# XDP program, which fails while a gateway still holds an uplink's hook. Its
-# XDP links are not pinned, so deleting the pod releases them. --wait makes
-# sure that has happened before the shard DaemonSet below rolls out in direct
-# mode. A fresh lab has none to delete.
+# The shards used to run chained behind the gateway and now run from the
+# node's XDP dispatcher, which cannot attach while an old gateway still holds
+# an uplink's hook. The gateway's XDP links are not pinned, so deleting the
+# pod releases them. --wait makes sure that has happened before the shard
+# DaemonSet below rolls out. A fresh lab has none to delete.
 delete_gateway() {
   local node="$1"
   docker exec "${node}" kubectl -n galactic-system delete daemonset \
