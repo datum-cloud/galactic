@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -59,8 +60,12 @@ type GatewayEngine interface {
 //     converges the engine toward it. Under the anycast model every gateway
 //     node in a PoP serves every accepted rule identically, so there is no
 //     primary or secondary node to gate on.
-//  2. Reconciles one BGPAdvertisement per rule per VIP address family, reusing
-//     the l2vpn/evpn Type-5 IP-Prefix path unmodified. VRFID and Function stay
+//  2. Reconciles one BGPAdvertisement per loaded rule per VIP address family,
+//     reusing the l2vpn/evpn Type-5 IP-Prefix path unmodified. A rule that
+//     failed to build or that the engine did not load has this node's
+//     advertisements withdrawn instead, so the fabric never sends a VIP's
+//     traffic to a node with nothing loaded for it. Each rule's
+//     "<node>/Programmed" condition records which happened. VRFID and Function stay
 //     unset, since these advertisements need no SRv6 decap behavior, which
 //     gives each originating node a distinct route distinguisher. That
 //     distinctness, not BGP preference, is what keeps every node's
@@ -87,6 +92,10 @@ const (
 	// converged and fully advertised node.
 	reasonEngineHealthy = "EngineHealthy"
 
+	// reasonEngineDegraded is the Ready reason for a node whose engine
+	// failed to load or remove one or more rules.
+	reasonEngineDegraded = "EngineDegraded"
+
 	// reasonAdvertisementFailed is the Ready reason for a node whose engine
 	// converged but which could not publish one or more of the
 	// BGPAdvertisements that make it reachable. Such a node serves nothing, so
@@ -96,6 +105,20 @@ const (
 	// reasonDatapathDisabled is the Ready reason while this node's datapath is
 	// turned off by configuration.
 	reasonDatapathDisabled = "DatapathDisabled"
+
+	// reasonProgrammed is the per-node Programmed reason for a rule this
+	// node's engine loaded.
+	reasonProgrammed = "Programmed"
+
+	// reasonLoadFailed is the per-node Programmed reason for a rule this
+	// node's engine refused, for example over quota or with an address the
+	// datapath does not accept.
+	reasonLoadFailed = "LoadFailed"
+
+	// reasonInvalidRule is the per-node Programmed reason for a rule that
+	// could not be turned into engine state, for example because a backend's
+	// uSID does not resolve.
+	reasonInvalidRule = "InvalidRule"
 
 	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
 	// whether observed on a live object carrying a deletion timestamp or
@@ -132,6 +155,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			if withdrawErr != nil {
 				logger.Error(withdrawErr, "withdraw BGPAdvertisements for departed gateway node", "node", req.Name)
 			}
+			if clearErr := clearNodeRuleConditions(ctx, r.Client, req.Namespace, req.Name); clearErr != nil {
+				logger.Error(clearErr, "clear Programmed conditions for departed gateway node", "node", req.Name)
+				withdrawErr = errors.Join(withdrawErr, clearErr)
+			}
 
 			stillOwned, checkErr := isGatewayNode(ctx, r.Client, req.Namespace, r.NodeName)
 			if checkErr != nil {
@@ -165,6 +192,11 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			logger.Error(withdrawErr, "withdraw BGPAdvertisements for terminating NetworkGateway",
 				"networkGateway", req.NamespacedName)
 		}
+		if clearErr := clearNodeRuleConditions(ctx, r.Client, gw.Namespace, gw.Name); clearErr != nil {
+			logger.Error(clearErr, "clear Programmed conditions for terminating NetworkGateway",
+				"networkGateway", req.NamespacedName)
+			withdrawErr = errors.Join(withdrawErr, clearErr)
+		}
 		if stopErr := r.Engine.Stop(ctx); stopErr != nil {
 			logger.Error(stopErr, "stop gateway engine for terminating NetworkGateway", "networkGateway", req.NamespacedName)
 		}
@@ -182,7 +214,10 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if r.Disabled {
-		withdrawErr := withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName)
+		withdrawErr := errors.Join(
+			withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName),
+			clearNodeRuleConditions(ctx, r.Client, gw.Namespace, r.NodeName),
+		)
 		gwCopy := gw.DeepCopy()
 		gwCopy.Status.ObservedGeneration = gw.Generation
 		setGatewayCondition(gwCopy, metav1.Condition{
@@ -196,12 +231,6 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, withdrawErr
 	}
-
-	// Advertisement failures are collected rather than returned on the spot, so
-	// one bad rule does not stop the others. They are then reported on the
-	// object and returned, so controller-runtime retries with backoff instead
-	// of leaving a node that advertised nothing claiming to be healthy.
-	var advErrs []error
 
 	// Crash-safety ordering contract (see GatewayEngine.ReconcileOrphans):
 	// cutoff must be captured before desired's NetworkRule CRDs are listed.
@@ -223,11 +252,11 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
-	type advertisementWork struct {
-		rule    *bgpv1alpha1.NetworkRule
-		desired gateway.DesiredRule
-	}
-	var work []advertisementWork
+
+	// Every accepted, non-deleting rule gets an outcome, including one that
+	// failed to build: the engine drops it from the datapath, so the outcome
+	// is what withdraws its advertisement and records why it is not loaded.
+	var outcomes []ruleOutcome
 
 	for i := range ruleList.Items {
 		rule := &ruleList.Items[i]
@@ -235,21 +264,28 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			// Being torn down: excluded from desired state immediately, so
 			// this node's vip_table converges toward gone without waiting on
 			// NetworkRuleReconciler's finalizer to finish withdrawing BGP.
+			// That finalizer owns the rule's advertisements: reconcileDelete
+			// deletes every one carrying networkRuleLabel, whichever node
+			// made it, so this loop gives the rule no outcome.
 			continue
 		}
 		if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
-			continue // admission has not (yet) accepted this rule
+			// Admission has not accepted this rule yet. Once accepted, a rule
+			// loses Accepted only when no NetworkGateway is left in the
+			// namespace (updateAcceptedCondition), and each node's NotFound
+			// branch has then already withdrawn its advertisements and cleared
+			// its Programmed condition, so this loop gives the rule no outcome.
+			continue
 		}
 
 		dr, err := buildDesiredRule(rule, sidIndex)
 		if err != nil {
 			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
+			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
 			continue
 		}
 		desired.Rules[dr.Key] = dr
-		if routerName != "" {
-			work = append(work, advertisementWork{rule: rule, desired: dr})
-		}
+		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr})
 	}
 
 	status, err := r.Engine.Reconcile(ctx, desired)
@@ -270,13 +306,8 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if routerName == "" {
 		logger.Info("no BGPRouter targets this node; skipping BGPAdvertisement wiring", "node", r.NodeName)
 	}
-	for _, w := range work {
-		if err := r.applyBGPAdvertisements(ctx, w.rule, w.desired, routerName); err != nil {
-			logger.Error(err, "apply BGPAdvertisements for NetworkRule", "networkRule", w.rule.Name)
-			advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", w.rule.Name, err))
-		}
-	}
-	advErr := errors.Join(advErrs...)
+
+	advErr, ruleStatusErr := r.publishRuleOutcomes(ctx, outcomes, status, routerName)
 
 	gwCopy := gw.DeepCopy()
 	gwCopy.Status.ObservedGeneration = gw.Generation
@@ -290,22 +321,125 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// status write above so the failure stays visible on the object.
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		logger.Error(err, "reconcile orphaned vip_table state")
-		return ctrl.Result{}, errors.Join(advErr, fmt.Errorf("reconcile orphaned vip_table state: %w", err))
+		return ctrl.Result{}, errors.Join(advErr, ruleStatusErr, fmt.Errorf("reconcile orphaned vip_table state: %w", err))
 	}
 
-	return ctrl.Result{}, advErr
+	return ctrl.Result{}, errors.Join(advErr, ruleStatusErr)
 }
+
+// ruleOutcome is one accepted, non-deleting NetworkRule's result from a
+// reconcile pass: the engine state it built, or why it could not be built.
+type ruleOutcome struct {
+	rule     *bgpv1alpha1.NetworkRule
+	desired  gateway.DesiredRule
+	buildErr error
+}
+
+// publishRuleOutcomes advertises every rule the engine loaded, withdraws this
+// node's advertisements for every other rule, and records the result on each
+// rule's Programmed condition for this node.
+//
+// Failures are collected rather than returned on the spot, so one bad rule
+// does not stop the others. Advertisement failures come back as advErr, which
+// the caller reports on the NetworkGateway and returns, so controller-runtime
+// retries with backoff instead of leaving a node that advertised nothing
+// claiming to be healthy. Rule status failures come back separately as
+// statusErr: they are retried too, but say nothing about whether this node
+// serves traffic, so they stay out of the Ready condition.
+func (r *NetworkGatewayReconciler) publishRuleOutcomes(
+	ctx context.Context, outcomes []ruleOutcome, status gateway.EngineStatus, routerName string,
+) (advErr, statusErr error) {
+	logger := log.FromContext(ctx)
+
+	// The engine reports one status per desired rule. Only a rule it loaded
+	// is advertised: a route for anything else draws traffic this node drops.
+	loadErrs := make(map[string]string, len(status.Rules))
+	for _, s := range status.Rules {
+		if !s.Applied || s.Error != "" {
+			loadErrs[s.Key] = s.Error
+		}
+	}
+
+	var advErrs, statusErrs []error
+	for _, o := range outcomes {
+		cond := programmedCondition(r.NodeName, o, loadErrs)
+		switch {
+		case cond.Status != metav1.ConditionTrue:
+			if err := withdrawRuleAdvertisements(ctx, r.Client, o.rule, r.NodeName); err != nil {
+				logger.Error(err, "withdraw BGPAdvertisements for unloaded NetworkRule", "networkRule", o.rule.Name)
+				advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
+			}
+		case routerName != "":
+			if err := r.applyBGPAdvertisements(ctx, o.rule, o.desired, routerName); err != nil {
+				logger.Error(err, "apply BGPAdvertisements for NetworkRule", "networkRule", o.rule.Name)
+				advErrs = append(advErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, err))
+			}
+		}
+
+		if err := r.setRuleProgrammed(ctx, o.rule, cond); err != nil {
+			logger.Error(err, "update NetworkRule Programmed condition", "networkRule", o.rule.Name)
+			statusErrs = append(statusErrs, fmt.Errorf("networkRule %s status: %w", o.rule.Name, err))
+		}
+	}
+	return errors.Join(advErrs...), errors.Join(statusErrs...)
+}
+
+// programmedCondition returns node's Programmed condition for o. loadErrs maps
+// each rule key the engine did not load to its error.
+func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string) metav1.Condition {
+	cond := metav1.Condition{
+		Type:    programmedConditionType(node),
+		Status:  metav1.ConditionTrue,
+		Reason:  reasonProgrammed,
+		Message: "loaded on node " + node,
+	}
+	if o.buildErr != nil {
+		cond.Status, cond.Reason = metav1.ConditionFalse, reasonInvalidRule
+		cond.Message = fmt.Sprintf("not loaded on node %s: %v", node, o.buildErr)
+		return cond
+	}
+	if loadErr, failed := loadErrs[o.desired.Key]; failed {
+		if loadErr == "" {
+			loadErr = "the engine did not load it"
+		}
+		cond.Status, cond.Reason = metav1.ConditionFalse, reasonLoadFailed
+		cond.Message = fmt.Sprintf("not loaded on node %s: %s", node, loadErr)
+	}
+	return cond
+}
+
+// maxReadyFailures caps how many failed rules the Ready message names, so a
+// pass with many failures stays under the metav1.Condition message limit.
+const maxReadyFailures = 10
 
 // readyConditionFor computes the Ready condition for a completed pass: engine
 // health first, then advertisement failures. A node whose engine converged but
 // whose routes never reached BGP serves no traffic, so it must not report
-// reasonEngineHealthy.
+// reasonEngineHealthy. The engine failures named in the message are those the
+// engine failed to load; a rule that failed to build never reaches the engine
+// and is reported on the rule's own Programmed condition instead.
 func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Condition {
 	switch {
 	case !status.Healthy:
+		var failures []string
+		for _, s := range status.Rules {
+			if s.Error != "" {
+				failures = append(failures, s.Key+": "+s.Error)
+			}
+		}
+		more := 0
+		if len(failures) > maxReadyFailures {
+			more = len(failures) - maxReadyFailures
+			failures = failures[:maxReadyFailures]
+		}
+		msg := "NetworkRules failed to apply: " + strings.Join(failures, "; ")
+		if more > 0 {
+			msg += fmt.Sprintf(" and %d more", more)
+		}
 		return metav1.Condition{
 			Type: bgpv1alpha1.ConditionTypeReady, Status: metav1.ConditionFalse,
-			Reason: "EngineDegraded", Message: "one or more NetworkRules failed to apply",
+			Reason:  reasonEngineDegraded,
+			Message: msg,
 		}
 	case advErr != nil:
 		return metav1.Condition{
@@ -318,6 +452,91 @@ func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Conditi
 			Reason: reasonEngineHealthy, Message: "gateway engine converged",
 		}
 	}
+}
+
+// programmedConditionType returns the NetworkRule condition type that records
+// whether node's engine loaded the rule. NetworkRule status is shared by every
+// gateway node in the namespace while loading is per node, so each node owns
+// its own condition type and never overwrites another node's result.
+func programmedConditionType(node string) string {
+	return node + "/" + bgpv1alpha1.ConditionTypeProgrammed
+}
+
+// setRuleProgrammed writes cond to rule's status, skipping the write when
+// nothing changed. Every write fans out to every gateway node through the
+// NetworkRule watch, so an unconditional write would never settle.
+//
+// Every gateway node and NetworkRuleReconciler write the same status, so a
+// write retries on conflict against a fresh read. A rule deleted mid-pass
+// has nothing left to record and counts as success.
+func (r *NetworkGatewayReconciler) setRuleProgrammed(
+	ctx context.Context, rule *bgpv1alpha1.NetworkRule, cond metav1.Condition,
+) error {
+	key := client.ObjectKeyFromObject(rule)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &bgpv1alpha1.NetworkRule{}
+		if err := r.Get(ctx, key, current); err != nil {
+			return err
+		}
+		c := cond
+		c.ObservedGeneration = current.Generation
+		if !meta.SetStatusCondition(&current.Status.Conditions, c) {
+			return nil
+		}
+		return r.Status().Update(ctx, current)
+	})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// clearNodeRuleConditions removes node's Programmed condition from every
+// NetworkRule in namespace, for a node that no longer serves any of them. A
+// write retries on conflict against a fresh read, and a rule deleted
+// mid-pass counts as cleared.
+func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, node string) error {
+	list := &bgpv1alpha1.NetworkRuleList{}
+	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list NetworkRules to clear node %s conditions: %w", node, err)
+	}
+	var errs []error
+	for i := range list.Items {
+		key := client.ObjectKeyFromObject(&list.Items[i])
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &bgpv1alpha1.NetworkRule{}
+			if err := c.Get(ctx, key, current); err != nil {
+				return err
+			}
+			if !meta.RemoveStatusCondition(&current.Status.Conditions, programmedConditionType(node)) {
+				return nil
+			}
+			return c.Status().Update(ctx, current)
+		})
+		if err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("clear node %s condition on NetworkRule %s: %w", node, key.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// withdrawRuleAdvertisements deletes the BGPAdvertisements node created for
+// rule, one per address family, so the fabric stops sending the rule's VIP
+// traffic to a node that has not loaded it.
+func withdrawRuleAdvertisements(
+	ctx context.Context, c client.Client, rule *bgpv1alpha1.NetworkRule, node string,
+) error {
+	var errs []error
+	for _, suffix := range []string{"v4", "v6"} {
+		adv := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+			Namespace: rule.Namespace,
+			Name:      rule.Name + "-" + node + "-" + suffix,
+		}}
+		if err := c.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("withdraw BGPAdvertisement %s: %w", adv.Name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // buildDesiredRule converts rule into a gateway.DesiredRule, resolving each
