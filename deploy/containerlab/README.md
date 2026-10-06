@@ -129,7 +129,7 @@ on either, only DaemonSets with a blanket toleration. Edge nodes run `galactic-c
 plain-mode `galactic-router` as their own independent DaemonSets, exactly like compute
 nodes, plus `galactic-nat`, the egress shard, which attaches its own XDP program to the
 node's uplinks (`GALACTIC_NAT_XDP_ATTACH=direct`, the default). No node in the lab runs
-`galactic-gateway`, so nothing else holds those hooks and the shard never chains.
+`galactic-gateway`, so nothing else holds those hooks and the shard needs no dispatcher.
 Compute nodes run no shard: each egresses through its own site's edge shards only. The
 reflector runs neither `galactic-cni` nor a shard — its
 `galactic=control` label is mutually exclusive with the `galactic=router` value that pulls

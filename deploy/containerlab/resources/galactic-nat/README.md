@@ -45,9 +45,8 @@ Node-ID is service `0x2` over the edge node's own index, beside its router
 The lab base leaves `GALACTIC_NAT_XDP_ATTACH` at its default, `direct`:
 with no gateway on any node, nothing else holds the uplinks' native XDP
 hook, so the shard attaches its own program to every member of `bond0`
-and `bond1`. The lab therefore no longer exercises
-`config/galactic-nat/overlays/chained/`, the mode for a node that also
-runs `galactic-gateway`; see
+and `bond1`. A node that also runs `galactic-gateway` needs
+`GALACTIC_NAT_XDP_ATTACH=dispatch` instead; see
 [docs/nat/configuration.md](../../../../docs/nat/configuration.md) for
 both modes.
 

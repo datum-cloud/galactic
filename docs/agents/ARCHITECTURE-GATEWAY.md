@@ -24,10 +24,10 @@ VPC-attached workloads reaching the internet — see `cmd/galactic-nat`,
 (`internal/controller/egressshard_controller.go`, which registers with
 `galactic-nat`'s own manager (`cmd/galactic-nat/root.go`) — a separate
 binary from both this one and `galactic-router`) rather than this file for
-egress. It runs on the same edge nodes as this binary, chained behind its
-XDP programs through `xdp_chain` — see
-[Chaining the egress shard](#chaining-the-egress-shard-xdp_chain) below for
-the part of that contract this binary owns. This file,
+egress. It can run on the same edge nodes as this binary, each from its own
+slot of the node's shared XDP dispatcher; see
+[Sharing the XDP hook](#sharing-the-xdp-hook-xdpdispatch) below for the part
+of that contract this binary owns. This file,
 together with the other two architecture docs, supersedes the former
 monolithic `ARCHITECTURE.md` — see [AGENTS.md](../../AGENTS.md) for which
 document to start from for a given task.
@@ -266,9 +266,10 @@ attach point — see below.
 
 1. **Parse** the outer Ethernet + IPv6 header, then the L4 header (TCP or
    UDP only). Not IPv6, unparseable, or not TCP/UDP — unclaimed: handed to
-   the program in `xdp_chain`'s slot if one is installed (see
-   [below](#chaining-the-egress-shard-xdp_chain)), otherwise `XDP_PASS` to
-   the kernel stack, e.g. BGP/SSH to the node itself. Only the
+   the dispatcher's later slots, in practice the egress shard's, if the
+   interface carries their role (see
+   [below](#sharing-the-xdp-hook-xdpdispatch)), otherwise `XDP_PASS` to the
+   kernel stack, e.g. BGP/SSH to the node itself. Only the
    source/destination port are ever read; nothing is rewritten, so there is
    no pointer-to-field resolution the way a rewrite would need.
 2. **Match** `(proto, dst port, dst addr)` against `vip_table` (keyed
@@ -323,39 +324,47 @@ length-validating intermediate hop or receiver to reject every packet this
 datapath ever pushed — found via live-kernel investigation, not
 `BPF_PROG_TEST_RUN`, and covered by regression tests in `edgedsr_test.go`.
 
-### Chaining the egress shard (`xdp_chain`)
+### Sharing the XDP hook (`xdpdispatch`)
 
 An interface takes one native XDP program, and `galactic-nat`'s egress shard
-runs on the same edge nodes and needs the same interfaces: tenant egress
+can run on the same edge nodes, needing the same interfaces: tenant egress
 arrives on the compute-facing bond (`edge_return`'s) and its replies on the
-public uplink (`edge_lb`'s). Rather than attach, the shard runs as a tail
-call from this datapath.
+public uplink (`edge_lb`'s). Neither binary owns the hook. The node's shared
+XDP dispatcher (`internal/plumbing/ebpf/xdpdispatch`) holds it, and each
+datapath runs from its own slot.
 
-- `edgedsr.c` declares `xdp_chain`, a one-slot `BPF_MAP_TYPE_PROG_ARRAY`.
-  Every unclaimed exit in both `edge_lb` and `edge_return` —
-  including the non-IPv6 early returns, which is how NAT64's IPv4 replies
-  reach the shard — goes through `pass_unclaimed`:
-  `bpf_tail_call(ctx, &xdp_chain, 0)`, then `XDP_PASS` if the slot is
-  empty. A claimed packet never reaches the slot.
-- This binary owns and pins the map: `edgeattach.Load` pins every map by
-  name, so it lives at `/sys/fs/bpf/galactic-edge/xdp_chain` and survives a
-  gateway restart with its slot intact. An incompatible pin is recreated
-  like any other map here, which empties the slot; the shard notices and
-  re-installs itself.
-- `galactic-nat` fills the slot from its own process
-  (`GALACTIC_NAT_XDP_ATTACH=chain`, `natattach.AttachChain`), waiting for
-  the map at startup and re-checking it every 10s. The path is spelled out
-  in `natattach.EdgeChainMapPath` rather than imported;
-  `edgeattach`'s `TestChainMapPathMatchesTheShardsCopy` holds the two in
-  step.
-- The two datapaths claim disjoint traffic — a VIP destination or source
-  here, a shard SID or masquerade-address destination there — so running
-  the shard second changes no verdict.
+- `GALACTIC_GATEWAY_XDP_ATTACH=dispatch`, the default, opens the dispatcher,
+  loads `edgedsr.c` against its maps (`edgeattach.Load` with
+  `CollectionOptions.MapReplacements`), fills slot 0 with `edge_lb` and slot
+  1 with `edge_return`, and renews both slots' leases. `xdpattach.DispatchSet`
+  puts the dispatcher on the public targets with the public role and on the
+  internal targets with the return role. The links are pinned under
+  `/sys/fs/bpf/galactic-xdp`, so a gateway restart swaps its programs into
+  the slots without detaching anything.
+- Every unclaimed exit in `edge_lb` and `edge_return`, including the
+  non-IPv6 early returns that carry NAT64's IPv4 replies, goes through
+  `dispatch_next` (`dispatch.h`), which tail-calls the later slots the
+  interface's roles allow. A claimed packet never reaches them.
+- The return slot never runs on an interface that also carries the public
+  role: the dispatcher's root and `SetRole` both refuse it, and
+  `setupGatewayDatapath` refuses an internal interface that resolves to a
+  public one at startup.
+- `GALACTIC_GATEWAY_XDP_ATTACH=direct` attaches the programs themselves,
+  unpinned. It first detaches an idle dispatcher from the targets and
+  refuses to start while another datapath's slot is live there.
+  Attached directly, the programs hold their own empty copies of the
+  dispatcher maps, so every unclaimed packet passes to the kernel.
+- `GALACTIC_GATEWAY_DATAPATH_ENABLED=false` loads nothing, empties the
+  gateway's slots, and makes `NetworkGatewayReconciler` withdraw this
+  node's VIP advertisements and report `DatapathDisabled`.
+- The two datapaths claim disjoint traffic, a VIP destination or source here
+  and a shard SID or masquerade-address destination there, so the slot
+  order changes no verdict.
 - The kernel ties a program array to its first user's program type, JIT
   state, frags support and expected attach type, and rejects any other
-  program with a bare `EINVAL`. `edge_lb`/`edge_return` and the shard's
-  `nat_ingress` are all ELF `SEC("xdp")` programs (`AttachXDP`), so they
-  match; a hand-built program needs `AttachType: ebpf.AttachXDP` to be
+  program with a bare `EINVAL`. The root, `edge_lb`/`edge_return` and the
+  shard's `nat_ingress` are all ELF `SEC("xdp")` programs (`AttachXDP`), so
+  they match; a hand-built program needs `AttachType: ebpf.AttachXDP` to be
   accepted (see `edgedsr_chain_test.go`).
 
 ### Return path (`edgedsr.c`, program `edge_return`)
@@ -773,20 +782,20 @@ that tag into `config/galactic-gateway/base`.
 
 **Where to start for each concern:**
 
-| Concern                                                                                            | Start here                                                                                               |
-| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Node-scoped aggregate reconcile (desired-state assembly, BGP wiring, crash recovery)               | `internal/controller/networkgateway_controller.go:Reconcile`                                             |
-| Per-object lifecycle (finalizer teardown ordering, `Accepted`-condition maintenance)                 | `internal/controller/networkrule_controller.go:Reconcile`, `updateAcceptedCondition`, `reconcileDelete`  |
-| Backend address → SRv6 uSID resolution (with tenant-ownership verification)                        | `internal/controller/usidresolver.go:buildBackendSIDIndex`, `resolveUSID`, `verifyTenantOwnership`       |
-| Engine convergence loop                                                                             | `internal/gateway/engine.go:Reconcile`, `applyRuleLocked`, `removeRuleLocked`                            |
-| Real datapath implementation (vip_table read/write, Maglev table construction)                      | `internal/gateway/kerneldatapath.go:ApplyRule`, `RemoveRule`, `buildMaglevTable`                          |
-| Maglev consistent-hash ring                                                                          | `internal/maglev/table.go:New`, `Lookup`, `Backends`                                                      |
-| Crash recovery (orphaned vip_table state)                                                           | `internal/gateway/recovery.go`, `internal/plumbing/ebpf/edgemap/viptable.go`'s `Generation`/`Reconcile`  |
-| Quota enforcement                                                                                    | `internal/gateway/quota.go:NodeQuotaEnforcer.CheckAndReserve`                                             |
-| XDP packet path                                                                                      | `internal/plumbing/ebpf/edgeprog/edgedsr.c` (start with its own header comment)                          |
-| Datapath load/attach lifecycle                                                                       | `internal/plumbing/ebpf/edgeattach/attach.go`, `cmd/galactic-gateway/gateway.go:setupGatewayDatapath`    |
-| Egress shard chained behind this datapath                                                            | `edgedsr.c`'s `xdp_chain`/`pass_unclaimed`, `internal/plumbing/ebpf/natattach/chain.go`                   |
-| Startup sequencing / gRPC health ordering                                                            | `cmd/galactic-gateway/root.go:runCmd`                                                                    |
+| Concern                                                                              | Start here                                                                                              |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| Node-scoped aggregate reconcile (desired-state assembly, BGP wiring, crash recovery) | `internal/controller/networkgateway_controller.go:Reconcile`                                            |
+| Per-object lifecycle (finalizer teardown ordering, `Accepted`-condition maintenance) | `internal/controller/networkrule_controller.go:Reconcile`, `updateAcceptedCondition`, `reconcileDelete` |
+| Backend address → SRv6 uSID resolution (with tenant-ownership verification)          | `internal/controller/usidresolver.go:buildBackendSIDIndex`, `resolveUSID`, `verifyTenantOwnership`      |
+| Engine convergence loop                                                              | `internal/gateway/engine.go:Reconcile`, `applyRuleLocked`, `removeRuleLocked`                           |
+| Real datapath implementation (vip_table read/write, Maglev table construction)       | `internal/gateway/kerneldatapath.go:ApplyRule`, `RemoveRule`, `buildMaglevTable`                        |
+| Maglev consistent-hash ring                                                          | `internal/maglev/table.go:New`, `Lookup`, `Backends`                                                    |
+| Crash recovery (orphaned vip_table state)                                            | `internal/gateway/recovery.go`, `internal/plumbing/ebpf/edgemap/viptable.go`'s `Generation`/`Reconcile` |
+| Quota enforcement                                                                    | `internal/gateway/quota.go:NodeQuotaEnforcer.CheckAndReserve`                                           |
+| XDP packet path                                                                      | `internal/plumbing/ebpf/edgeprog/edgedsr.c` (start with its own header comment)                         |
+| Datapath load/attach lifecycle                                                       | `internal/plumbing/ebpf/edgeattach/attach.go`, `cmd/galactic-gateway/gateway.go:setupGatewayDatapath`   |
+| Sharing the XDP hook with the egress shard                                           | `edgedsr.c`'s `pass_unclaimed_*`, `internal/plumbing/ebpf/xdpdispatch`, `xdpattach/dispatchset.go`      |
+| Startup sequencing / gRPC health ordering                                            | `cmd/galactic-gateway/root.go:runCmd`                                                                   |
 
 **Stable vs. frequently changed:**
 - Stable: `internal/maglev/table.go` (a settled, well-tested algorithm — Google's published Maglev construction), `internal/plumbing/ebpf/edgemap` (mirrors `usidmap`'s already-settled crash-safety pattern)

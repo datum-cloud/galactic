@@ -23,7 +23,8 @@ spec:
       # deploys it automatically -- see ../kustomization.yaml for why this
       # base is meant to be instantiated once per gateway node rather than
       # applied as-is. It is independent of galactic-nat: a node can carry
-      # either label or both (galactic-nat's chained overlay needs both).
+      # either label or both; on a node with both, each runs from its own
+      # slot of the node's shared XDP dispatcher.
       #
       # It never shares a node with galactic-vrf. That sidecar's pods are
       # placed on galactic.datumapis.com/node=edge nodes, and the affinity
@@ -96,6 +97,14 @@ spec:
             # invalid. Unlike the two below it is optional — a node with
             # no compute tier behind it leaves it unset and attaches no
             # return program.
+            #
+            # GALACTIC_GATEWAY_XDP_ATTACH is left at its default,
+            # "dispatch": the programs run from the node's shared, pinned
+            # XDP dispatcher, so a restart detaches nothing and the egress
+            # shard can share the uplinks. "direct" attaches them
+            # unpinned instead. GALACTIC_GATEWAY_DATAPATH_ENABLED, default
+            # "true", turns the datapath off and withdraws this node's VIPs
+            # without removing the pod. See internal/config/gateway.go.
             #
             # GALACTIC_GATEWAY_PUBLIC_INTERFACE/_SRV6_ADDRESS are
             # intentionally left unset here: the interface name is

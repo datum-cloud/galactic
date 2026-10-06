@@ -39,10 +39,25 @@ const PinDir = "/sys/fs/bpf/galactic-edge"
 // failure path without touching the real kernel.
 var preflightCheckFn = edgepreflight.Check
 
+// dispatchMapNames are the maps edgedsr.c shares with the node's XDP
+// dispatcher (xdpdispatch's dispatch.h). They belong to the dispatcher, never
+// to this package: they are not pinned under pinDir, never recreated here, and
+// in dispatch mode are replaced with the dispatcher's own pinned maps.
+var dispatchMapNames = map[string]bool{
+	edgeprog.EdgedsrMapDispatchProgs: true,
+	edgeprog.EdgedsrMapIfaceRoles:    true,
+	edgeprog.EdgedsrMapSlotLease:     true,
+}
+
 // Load runs the kernel preflight check and, only if it passes, loads the edge
-// program with every map pinned under pinDir. A map already pinned there by a
-// previous process is reused as-is.
-func Load(pinDir string) (*edgeprog.EdgedsrObjects, error) {
+// program with every map of its own pinned under pinDir. A map already pinned
+// there by a previous process is reused as-is.
+//
+// dispatchMaps is the node's XDP dispatcher's maps (xdpdispatch.Dispatcher.Maps)
+// when the programs run from the dispatcher's slots, and nil when they are
+// attached directly. Nil leaves the programs their own empty, unpinned copies,
+// so every packet they do not claim passes to the kernel.
+func Load(pinDir string, dispatchMaps map[string]*ebpf.Map) (*edgeprog.EdgedsrObjects, error) {
 	if err := preflightCheckFn(); err != nil {
 		return nil, fmt.Errorf(
 			"edgeattach: kernel preflight check failed, refusing to load the edge gateway datapath: %w", err)
@@ -54,26 +69,40 @@ func Load(pinDir string) (*edgeprog.EdgedsrObjects, error) {
 		return nil, fmt.Errorf("edgeattach: create bpf map pin directory %q: %w", pinDir, err)
 	}
 
+	// Gateways before the shared dispatcher pinned a one-slot program array
+	// here, xdp_chain, that the egress shard filled. Nothing reads it now, so
+	// it only keeps a retired shard program loaded, and a shard not yet
+	// upgraded would install itself into a map no datapath runs and look
+	// healthy. Remove it.
+	legacyChain := filepath.Join(pinDir, "xdp_chain")
+	if err := os.Remove(legacyChain); err == nil {
+		slog.Info("edgeattach: removed the retired xdp_chain pin; the egress shard now runs from the XDP dispatcher",
+			"path", legacyChain)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("edgeattach: cannot remove the retired xdp_chain pin", "path", legacyChain, "err", err)
+	}
+
 	spec, err := edgeprog.LoadEdgedsr()
 	if err != nil {
 		return nil, fmt.Errorf("edgeattach: load compiled edgedsr collection spec: %w", err)
 	}
-	for _, m := range spec.Maps {
-		m.Pinning = ebpf.PinByName
+	for name, m := range spec.Maps {
+		if !dispatchMapNames[name] {
+			m.Pinning = ebpf.PinByName
+		}
 	}
 
 	var loaded edgeprog.EdgedsrObjects
-	opts := &ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: pinDir}}
+	opts := &ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: pinDir}, MapReplacements: dispatchMaps}
 	loadErr := spec.LoadAndAssign(&loaded, opts)
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
 		// Every map here is control-plane-owned and reconstructable: the VIP
 		// table is repopulated from live CRDs, the statistics map is a
 		// pure cache the datapath refills from traffic, and the
 		// encapsulation config is a single entry rewritten at process
-		// startup. xdp_chain is filled by another process, the egress
-		// shard, which re-asserts its slot periodically and so refills a
-		// recreated one on its own. A stale pin from an incompatible layout
-		// is safe to recreate rather than fatal.
+		// startup. A stale pin from an incompatible layout is safe to
+		// recreate rather than fatal. The dispatcher's maps are not ours and
+		// are never touched here.
 		slog.Warn("edgeattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
 			"(control-plane state will repopulate on the next NetworkRule reconcile)", "pinDir", pinDir, "err", loadErr)
 		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
@@ -96,6 +125,9 @@ func Load(pinDir string) (*edgeprog.EdgedsrObjects, error) {
 func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
 	var errs []error
 	for name := range spec.Maps {
+		if dispatchMapNames[name] {
+			continue
+		}
 		path := filepath.Join(pinDir, name)
 		m, err := ebpf.LoadPinnedMap(path, nil)
 		if err != nil {

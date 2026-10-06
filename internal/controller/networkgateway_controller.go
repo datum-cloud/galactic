@@ -73,6 +73,13 @@ type NetworkGatewayReconciler struct {
 	Engine GatewayEngine
 
 	NodeName string
+
+	// Disabled is set when this node's datapath is turned off by
+	// configuration. The reconciler then keeps every one of this node's VIP
+	// advertisements withdrawn and reports the node not ready, so the fabric
+	// stops sending VIP traffic to a node that will not load-balance it. The
+	// engine is never driven.
+	Disabled bool
 }
 
 const (
@@ -85,6 +92,10 @@ const (
 	// BGPAdvertisements that make it reachable. Such a node serves nothing, so
 	// it must not report reasonEngineHealthy.
 	reasonAdvertisementFailed = "AdvertisementFailed"
+
+	// reasonDatapathDisabled is the Ready reason while this node's datapath is
+	// turned off by configuration.
+	reasonDatapathDisabled = "DatapathDisabled"
 
 	// reasonTerminating is the Ready reason for a NetworkGateway being deleted,
 	// whether observed on a live object carrying a deletion timestamp or
@@ -166,6 +177,22 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		})
 		if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
 			logger.Error(updateErr, "update status for terminating NetworkGateway")
+		}
+		return ctrl.Result{}, withdrawErr
+	}
+
+	if r.Disabled {
+		withdrawErr := withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName)
+		gwCopy := gw.DeepCopy()
+		gwCopy.Status.ObservedGeneration = gw.Generation
+		setGatewayCondition(gwCopy, metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reasonDatapathDisabled,
+			Message: fmt.Sprintf("The edge gateway datapath on node %s is turned off", r.NodeName),
+		})
+		if updateErr := r.Status().Update(ctx, gwCopy); updateErr != nil {
+			logger.Error(updateErr, "update status for disabled NetworkGateway")
 		}
 		return ctrl.Result{}, withdrawErr
 	}
@@ -569,6 +596,19 @@ func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName str
 	return false, nil
 }
 
+// isNodeAdvertisement reports whether adv is one applyBGPAdvertisements created
+// on node nodeName. An advertisement carrying networkRuleLabel must be named
+// exactly "<rule>-<node>-v4" or "-v6" for its own rule, so a node named "edge1"
+// never claims "ruleX-pop-edge1-v4", which belongs to node "pop-edge1". One
+// without the label, created before the label existed, falls back to the
+// name suffix alone.
+func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) bool {
+	if rule, ok := adv.Labels[networkRuleLabel]; ok {
+		return adv.Name == rule+"-"+nodeName+"-v4" || adv.Name == rule+"-"+nodeName+"-v6"
+	}
+	return strings.HasSuffix(adv.Name, "-"+nodeName+"-v4") || strings.HasSuffix(adv.Name, "-"+nodeName+"-v6")
+}
+
 // withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway node
 // nodeName created in namespace: each per-rule, per-address-family route it
 // advertised, found by the "<rule>-<node>-v4"/"-v6" names applyBGPAdvertisements
@@ -593,13 +633,10 @@ func withdrawNodeAdvertisements(ctx context.Context, c client.Client, namespace,
 		return fmt.Errorf("list BGPAdvertisements for departed gateway node %s: %w", nodeName, err)
 	}
 
-	v4Suffix := "-" + nodeName + "-v4"
-	v6Suffix := "-" + nodeName + "-v6"
-
 	var errs []error
 	for i := range advList.Items {
 		adv := &advList.Items[i]
-		if !strings.HasSuffix(adv.Name, v4Suffix) && !strings.HasSuffix(adv.Name, v6Suffix) {
+		if !isNodeAdvertisement(adv, nodeName) {
 			continue
 		}
 		if err := c.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {

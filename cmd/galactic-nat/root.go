@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 
@@ -224,6 +225,10 @@ func newRootCommand() *cobra.Command {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
+			if cfg.XDPAttachDeprecated {
+				slog.Warn("GALACTIC_NAT_XDP_ATTACH=chain is retired and runs as dispatch; set it to dispatch",
+					"env", config.EnvNATXDPAttach)
+			}
 			return runCmd(cfg)
 		},
 	}
@@ -240,8 +245,7 @@ func newRootCommand() *cobra.Command {
 			"overriding auto-detection; name every fabric uplink, not just the primary")
 	cmd.Flags().StringP("nat-xdp-attach", "", config.NATXDPAttachDirect,
 		"How the datapath reaches its uplinks' XDP hook: \"direct\" attaches it, \"dispatch\" runs it "+
-			"from the node's shared, pinned XDP dispatcher, \"chain\" installs it behind the edge "+
-			"gateway's programs on a node where the gateway holds the hook")
+			"from the node's shared, pinned XDP dispatcher (\"chain\" is read as dispatch)")
 	cmd.Flags().Bool("nat-datapath-enabled", true,
 		"Run the egress translation datapath; false keeps the process up but attaches nothing, "+
 			"clears the shard's identity and withdraws its advertisement")

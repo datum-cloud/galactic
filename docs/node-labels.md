@@ -100,8 +100,8 @@ bug, not a hypothetical:
   the enum and folding shard duty into `node=compute` directly. It has since
   moved to `node=edge`, where a shard is one hop from the transit its
   masquerade addresses are originated into — every edge node now runs
-  `galactic-nat` unconditionally, chained behind `galactic-gateway`'s XDP
-  programs.
+  `galactic-nat` unconditionally, sharing each uplink's XDP hook with
+  `galactic-gateway` through the node's XDP dispatcher.
 - `galactic-router-rr` used to require a dedicated
   `galactic.datumapis.com/galactic-route-reflector=true` boolean flag,
   independent of everything else. Once `galactic-cni`/`galactic-router`
@@ -178,15 +178,13 @@ Runs `galactic-nat`, the egress shard
 independent of `gateway`. The node must carry no `galactic.datumapis.com/node`
 label.
 
-A node with no gateway uses the base, whose `GALACTIC_NAT_XDP_ATTACH` defaults
-to `direct`: the shard attaches its own XDP program to its uplinks. A node
-that also carries `gateway=enabled` must apply
-`config/galactic-nat/overlays/chained/` instead. The gateway already holds the
-node's native XDP hook, an interface takes one program, and the shard installs
-itself in the gateway's pinned `xdp_chain` array, so the gateway has to be
-running on that node too. `GALACTIC_NAT_XDP_ATTACH=dispatch` runs the shard
-from the node's shared, pinned XDP dispatcher instead, which survives a shard
-restart without bouncing an uplink (see
+A node with no gateway can use the base, whose `GALACTIC_NAT_XDP_ATTACH`
+defaults to `direct`: the shard attaches its own XDP program to its uplinks.
+A node that also carries `gateway=enabled` must set
+`GALACTIC_NAT_XDP_ATTACH=dispatch`. An interface takes one program, so the
+shard and the gateway, which runs in dispatch mode by default, each run from
+their own slot of the node's shared, pinned XDP dispatcher, and either can
+restart without detaching the other (see
 [docs/nat/configuration.md](nat/configuration.md)). Compute nodes reach their
 site's shards over SRv6 (`GALACTIC_CNI_EGRESS_SHARD_SIDS`).
 
@@ -271,8 +269,8 @@ that matches its affinity. Order matters, or a restart leaves no pod at all:
 2. Apply the new manifests. Running pods stay put.
 3. On each of those nodes, remove `galactic.datumapis.com/node=edge`, then
    restart its `galactic-gateway` / `galactic-nat` pods.
-4. On a node running both, use `config/galactic-nat/overlays/chained/` for
-   the shard, or it will try to attach over the gateway's XDP program.
+4. On a node running both, set `GALACTIC_NAT_XDP_ATTACH=dispatch` for the
+   shard, or it will refuse to attach over the gateway's dispatcher.
 
 Skipping step 1 and removing `node=edge` first leaves the DaemonSets with no
 matching node the next time the pod restarts, which blackholes ingress or

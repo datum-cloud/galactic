@@ -18,7 +18,7 @@ import (
 // binary's config.GatewayConfig.Validate rejects an empty
 // PublicInterface/SRv6Address before setupGatewayDatapath is ever called.
 func TestSetupGatewayDatapath_InvalidAddressIsError(t *testing.T) {
-	_, err := setupGatewayDatapath(context.Background(), "eth0", nil, "not-an-ip-address",
+	_, err := setupGatewayDatapath(context.Background(), "eth0", nil, "not-an-ip-address", "dispatch",
 		prometheus.NewRegistry(), newDatapathCoverage(nil))
 	if err == nil {
 		t.Error("setupGatewayDatapath with an invalid SRv6 address: want an error, got nil")

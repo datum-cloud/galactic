@@ -135,17 +135,12 @@ func natXDPAttach(ds appsv1.DaemonSet) (string, bool) {
 	return "", false
 }
 
-// TestNATChainedOverlay pins the base to the binary's default (attach its own
-// program) so it works with no gateway, and leaves chaining to the overlay for
-// nodes that also run galactic-gateway.
-func TestNATChainedOverlay(t *testing.T) {
+// TestNATBaseLeavesTheAttachModeDefault pins the base to the binary's
+// default (attach its own program), so it works on a node with no gateway.
+// A node that also runs the gateway sets dispatch in its own overlay.
+func TestNATBaseLeavesTheAttachModeDefault(t *testing.T) {
 	base := loadDaemonSet(t, "galactic-nat", "base", "daemonset.yaml")
 	if v, ok := natXDPAttach(base); ok {
 		t.Errorf("base sets GALACTIC_NAT_XDP_ATTACH=%q; it must be left to the default so a node with no gateway works", v)
-	}
-
-	patch := loadDaemonSet(t, "galactic-nat", "overlays", "chained", "daemonset-patch.yaml")
-	if v, ok := natXDPAttach(patch); !ok || v != "chain" {
-		t.Errorf("chained overlay GALACTIC_NAT_XDP_ATTACH = %q (set=%v), want chain", v, ok)
 	}
 }

@@ -7,25 +7,39 @@ package edgeprog
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"golang.org/x/sys/unix"
 )
 
-// chainStubVerdict is what the stub chained program returns. XDP_TX, because
-// neither test path below can produce it from the gateway's own programs: a
-// claimed packet there is a counted drop, so a TX verdict can only have come
-// from the stub.
+// chainStubVerdict is what the stub in the dispatcher's egress slot returns.
+// XDP_TX, because neither test path below can produce it from the gateway's
+// own programs: a claimed packet there is a counted drop, so a TX verdict can
+// only have come from the stub.
 const chainStubVerdict = xdpTx
 
-// installChainStub loads a one-instruction XDP program returning
-// chainStubVerdict and puts it in xdp_chain's slot, standing in for the egress
-// translation shard that fills it in production.
+// Dispatcher constants, mirroring dispatch.h. BPF_PROG_TEST_RUN with no
+// context reports the loopback device, ifindex 1, as the ingress interface.
+const (
+	testRunIfindex    = uint32(1)
+	slotNAT           = uint32(2)
+	roleGatewayLB     = uint32(1 << 0)
+	roleGatewayReturn = uint32(1 << 1)
+	roleEgress        = uint32(1 << 2)
+)
+
+// installChainStub stands in for the egress shard running from the node's XDP
+// dispatcher: a one-instruction program returning chainStubVerdict in the
+// egress slot with a live lease, and roles on the test-run interface. The
+// gateway's programs here hold their own copies of the dispatcher maps, as
+// they do when loaded without a dispatcher.
 //
 // AttachType must be AttachXDP, as an ELF SEC("xdp") program's is: the kernel
 // refuses a program into a prog array whose owner's expected attach type
 // differs, with a bare EINVAL.
-func installChainStub(t *testing.T, objs *EdgedsrObjects) {
+func installChainStub(t *testing.T, objs *EdgedsrObjects, roles uint32) {
 	t.Helper()
 	stub, err := ebpf.NewProgram(&ebpf.ProgramSpec{
 		Type:       ebpf.XDP,
@@ -40,9 +54,22 @@ func installChainStub(t *testing.T, objs *EdgedsrObjects) {
 		t.Fatalf("load chain stub program: %v", err)
 	}
 	t.Cleanup(func() { _ = stub.Close() })
-	if err := objs.XdpChain.Put(uint32(0), stub); err != nil {
-		t.Fatalf("install chain stub in xdp_chain: %v", err)
+	if err := objs.DispatchProgs.Put(slotNAT, stub); err != nil {
+		t.Fatalf("install chain stub in dispatch_progs: %v", err)
 	}
+	if err := objs.SlotLease.Put(slotNAT, monotonicNow()+uint64(time.Minute)); err != nil {
+		t.Fatalf("lease the egress slot: %v", err)
+	}
+	if err := objs.IfaceRoles.Put(testRunIfindex, roles); err != nil {
+		t.Fatalf("set test-run interface roles: %v", err)
+	}
+}
+
+// monotonicNow reads CLOCK_MONOTONIC, the clock the dispatcher's leases use.
+func monotonicNow() uint64 {
+	var ts unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
+	return uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 }
 
 // buildIPv4Frame is a minimal Ethernet+IPv4 frame. Neither gateway program
@@ -60,12 +87,12 @@ func buildIPv4Frame() []byte {
 }
 
 // TestEdgeLB_ChainsUnclaimedTraffic proves that every packet edge_lb does not
-// claim reaches the chained program -- a miss in vip_table and a frame that is
-// not IPv6 at all -- and that a claimed one never does.
+// claim reaches the dispatcher's egress slot, a miss in vip_table and a frame
+// that is not IPv6 at all, and that a claimed one never does.
 func TestEdgeLB_ChainsUnclaimedTraffic(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
-	installChainStub(t, objs)
+	installChainStub(t, objs, roleGatewayLB|roleEgress)
 
 	vip := netip.MustParseAddr("2001:db8::100")
 	client := netip.MustParseAddr("2001:db8:ffff::1")
@@ -104,7 +131,7 @@ func TestEdgeLB_ChainsUnclaimedTraffic(t *testing.T) {
 func TestEdgeReturn_ChainsUnclaimedTraffic(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
-	installChainStub(t, objs)
+	installChainStub(t, objs, roleGatewayReturn|roleEgress)
 
 	vip := netip.MustParseAddr("2001:db8:6060::1")
 	client := netip.MustParseAddr("2001:db8:1:40::2")
@@ -134,5 +161,24 @@ func TestEdgeReturn_ChainsUnclaimedTraffic(t *testing.T) {
 				t.Errorf("verdict = %d, want %d", ret, tt.want)
 			}
 		})
+	}
+}
+
+// TestEdgeLB_UnclaimedPassesWithoutTheEgressRole: an interface the egress
+// shard does not run on hands it nothing, and the packet passes to the kernel
+// as it does with no dispatcher at all.
+func TestEdgeLB_UnclaimedPassesWithoutTheEgressRole(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	installChainStub(t, objs, roleGatewayLB)
+
+	pkt := buildL4Packet(t, ipprotoUDP, netip.MustParseAddr("2001:db8::200"),
+		netip.MustParseAddr("2001:db8:ffff::1"), 5000, 443, nil)
+	ret, _, err := objs.EdgeLb.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != xdpPass {
+		t.Errorf("verdict = %d, want XDP_PASS (%d)", ret, xdpPass)
 	}
 }

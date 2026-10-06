@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -19,7 +17,6 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/safchain/ethtool"
-	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
@@ -262,12 +259,6 @@ func (d *natDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 // In direct mode, an idle dispatcher on the resolved uplinks is released
 // first (releaseIdleDispatcher).
 //
-// In chain mode (config.NATXDPAttachChain) nothing is attached: the program is
-// installed in the edge gateway's xdp_chain slot instead, waiting for the
-// gateway to create it, and kept there for the life of the process by
-// keepChain. The uplinks are still resolved, for the forwarding sysctls and to
-// report any the gateway does not hook as missing.
-//
 // The loaded objects and the attachment set are stashed in
 // natDatapathKeepAlive rather than closed here: they, and the attachment
 // itself, must survive for the life of this process.
@@ -318,12 +309,6 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 		xdpLinks    []link.Link
 	)
 	switch cfg.XDPAttach {
-	case config.NATXDPAttachChain:
-		if err := waitForChain(ctx, objs.NatIngress, natattach.EdgeChainMapPath); err != nil {
-			_ = objs.Close()
-			return nil, err
-		}
-		go keepChain(ctx, objs.NatIngress, natattach.EdgeChainMapPath)
 	case config.NATXDPAttachDispatch:
 		// The lease runs for the life of the process, so its done channel
 		// is not needed here.
@@ -369,8 +354,7 @@ func setupNatDatapath(ctx context.Context, cfg *config.NATConfig,
 	)
 
 	d.attached = true
-	go d.watchUplinks(ctx, cfg.UplinkInterfaces, coverageFor(ctx, set, dispatchSet), dispatchSet == nil && set == nil,
-		onCoverage)
+	go d.watchUplinks(ctx, cfg.UplinkInterfaces, coverageFor(ctx, set, dispatchSet), onCoverage)
 	return d, nil
 }
 
@@ -434,79 +418,28 @@ func joinDispatcher(ctx context.Context, pinDir string, program *ebpf.Program) (
 	return dispatcher, set, leaseDone, nil
 }
 
-// releaseIdleDispatcher detaches the node's XDP dispatcher from uplinks, so a
-// shard switched back from dispatch to direct mode can attach its own program.
-// It does nothing on a node that never ran the dispatcher.
-//
-// It refuses, returning an error, while another datapath's slot is live: the
-// dispatcher is serving that datapath on these uplinks, and detaching it would
-// cut that datapath's traffic. Such a node needs dispatch mode.
+// releaseIdleDispatcher detaches an idle XDP dispatcher from uplinks before a
+// direct attach (xdpattach.ReleaseIdleDispatcher), refusing while another
+// datapath's slot is live there.
 func releaseIdleDispatcher(ctx context.Context, pinDir string, uplinks []string) error {
-	if _, err := os.Stat(filepath.Join(pinDir, "links")); errors.Is(err, os.ErrNotExist) {
-		return nil
+	if err := xdpattach.ReleaseIdleDispatcher(ctx, pinDir, uplinks, xdpdispatch.SlotNAT); err != nil {
+		return fmt.Errorf("%w; set %s=%s", err, config.EnvNATXDPAttach, config.NATXDPAttachDispatch)
 	}
-	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
-	if err != nil {
-		return fmt.Errorf("open the node's XDP dispatcher to release it: %w", err)
-	}
-	defer dispatcher.Close() //nolint:errcheck // our own descriptors; the pins are what matter
-
-	// Under the lock, which every Fill takes too, so no other datapath can
-	// take its slot between this read and the releases below.
-	lock, err := dispatcher.Lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer lock.Unlock()
-	live, err := dispatcher.LiveSlots()
-	if err != nil {
-		return err
-	}
-	others := slices.DeleteFunc(live, func(s xdpdispatch.Slot) bool { return s == xdpdispatch.SlotNAT })
-	for _, name := range uplinks {
-		l, err := netlink.LinkByName(name)
-		if err != nil {
-			return fmt.Errorf("find uplink %q: %w", name, err)
-		}
-		ifindex := l.Attrs().Index
-		linked, err := dispatcher.Linked(ifindex)
-		if err != nil {
-			return err
-		}
-		if !linked {
-			continue
-		}
-		if len(others) > 0 {
-			return fmt.Errorf("the XDP dispatcher on uplink %q is also running dispatcher slots %v for "+
-				"another datapath, so direct mode cannot take the uplink without cutting that datapath's "+
-				"traffic; set %s=%s", name, others, config.EnvNATXDPAttach, config.NATXDPAttachDispatch)
-		}
-		if err := lock.Release(ifindex); err != nil {
-			return err
-		}
-		slog.Info("Released the idle XDP dispatcher from uplink for a direct attach", "interface", name)
-	}
-	return lock.Clear(xdpdispatch.SlotNAT)
+	return nil
 }
 
 // coverageFor returns how watchUplinks brings the ready uplinks under the
-// datapath and reads back which it covers: through set in direct mode,
-// dispatchSet in dispatch mode, and the gateway's hooks in chain mode.
+// datapath and reads back which it covers: through set in direct mode, and
+// dispatchSet in dispatch mode.
 func coverageFor(ctx context.Context, set *xdpattach.Set, dispatchSet *xdpattach.DispatchSet) func([]string) []string {
-	switch {
-	case set != nil:
+	if set != nil {
 		return func(ready []string) []string {
 			set.Reconcile(ready)
 			return set.Attached()
 		}
-	case dispatchSet != nil:
-		return func(ready []string) []string {
-			return uncovered(ready, dispatchSet.Reconcile(ctx, ready))
-		}
-	default:
-		return func(ready []string) []string {
-			return uncovered(ready, natattach.UnhookedUplinks(ready))
-		}
+	}
+	return func(ready []string) []string {
+		return uncovered(ready, dispatchSet.Reconcile(ctx, ready))
 	}
 }
 
@@ -544,11 +477,9 @@ func waitForUplinks(ctx context.Context, override []string) ([]string, error) {
 // watchUplinks keeps the datapath on every uplink ResolveUplinks returns, for
 // the life of ctx, re-resolving on every netlink link or route change. cover
 // brings the ready uplinks under the datapath and returns the ones it covers
-// (coverageFor). chained says the shard runs in the gateway's xdp_chain,
-// which changes what a missing uplink means. onCoverage is called whenever the
-// missing uplinks change.
+// (coverageFor). onCoverage is called whenever the missing uplinks change.
 func (d *natDatapath) watchUplinks(ctx context.Context, override []string, cover func([]string) []string,
-	chained bool, onCoverage func(),
+	onCoverage func(),
 ) {
 	xdpattach.OnNetlinkChange(ctx, func() {
 		uplinks, err := natattach.ResolveUplinks(override)
@@ -566,9 +497,6 @@ func (d *natDatapath) watchUplinks(ctx context.Context, override []string, cover
 		switch {
 		case len(missing) == 0:
 			slog.Info("Egress translation datapath covers every uplink", "uplinks", uplinks)
-		case chained:
-			slog.Warn("Uplinks carry no XDP program, so the chained shard sees none of their traffic; "+
-				"the edge gateway is not attached to them", "missing", missing)
 		default:
 			slog.Warn("Egress translation datapath does not cover every uplink; traffic arriving on these "+
 				"leaves untranslated", "missing", missing)
@@ -588,73 +516,6 @@ func uncovered(uplinks, covered []string) []string {
 		}
 	}
 	return out
-}
-
-// chainRetryInterval is how often waitForChain looks for the gateway's map,
-// and chainCheckInterval how often keepChain confirms the slot still holds
-// this process's program.
-const (
-	chainRetryInterval = 2 * time.Second
-	chainCheckInterval = 10 * time.Second
-)
-
-// waitForChain installs program in the gateway's xdp_chain at mapPath,
-// retrying while the map does not exist yet -- the gateway loading after this
-// process on a fresh node is ordinary, and the startup probe bounds the wait.
-// Any other failure, an incompatible program above all, is returned at once:
-// retrying cannot fix it.
-func waitForChain(ctx context.Context, program *ebpf.Program, mapPath string) error {
-	logged := false
-	for {
-		err := natattach.AttachChain(program, mapPath)
-		if err == nil {
-			slog.Info("Egress translation datapath installed in the edge gateway's XDP chain", "map", mapPath)
-			return nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("install egress translation datapath in the edge gateway's XDP chain: %w", err)
-		}
-		if !logged {
-			slog.Info("Waiting for the edge gateway to create its XDP chain map", "map", mapPath)
-			logged = true
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("waiting for the edge gateway's XDP chain map %q: %w", mapPath, ctx.Err())
-		case <-time.After(chainRetryInterval):
-		}
-	}
-}
-
-// keepChain re-installs program whenever the slot stops holding it, until ctx
-// is done. A gateway restart normally reuses its pinned map and leaves the
-// slot alone, but one that had to recreate the map (a layout change) leaves it
-// empty, and without this the shard would stop translating with nothing
-// reporting it.
-func keepChain(ctx context.Context, program *ebpf.Program, mapPath string) {
-	ticker := time.NewTicker(chainCheckInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		held, err := natattach.ChainHolds(program, mapPath)
-		if err != nil {
-			slog.Warn("Cannot read the edge gateway's XDP chain slot", "map", mapPath, "err", err)
-			continue
-		}
-		if held {
-			continue
-		}
-		if err := natattach.AttachChain(program, mapPath); err != nil {
-			slog.Error("Egress translation datapath is out of the edge gateway's XDP chain and cannot be "+
-				"re-installed; this shard translates nothing until it is", "map", mapPath, "err", err)
-			continue
-		}
-		slog.Warn("Re-installed the egress translation datapath in the edge gateway's XDP chain", "map", mapPath)
-	}
 }
 
 // closeAll best-effort closes every link, to unwind a partially set-up datapath
@@ -696,27 +557,10 @@ func (disabledDatapath) Programmed() (controller.EgressShardIdentity, bool) {
 // shard that crash-looped instead would keep its advertisement up no longer
 // but would page for nothing.
 func turnOffDatapath(ctx context.Context, pinDir string) {
-	if _, err := os.Stat(filepath.Join(pinDir, "links")); err == nil {
-		if err := emptyDispatcherSlot(ctx, pinDir); err != nil {
-			slog.Error("Cannot empty the egress translation slot in the XDP dispatcher; "+
-				"it stops claiming packets once its lease lapses", "lease", xdpdispatch.LeaseTTL, "err", err)
-		}
+	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpdispatch.SlotNAT); err != nil {
+		slog.Error("Cannot empty the egress translation slot in the XDP dispatcher; "+
+			"it stops claiming packets once its lease lapses", "lease", xdpdispatch.LeaseTTL, "err", err)
 	}
 	slog.Info("Egress translation datapath is turned off; this shard attaches nothing and translates nothing",
 		"env", config.EnvNATDatapathEnabled)
-}
-
-// emptyDispatcherSlot clears this shard's slot in the dispatcher under pinDir.
-func emptyDispatcherSlot(ctx context.Context, pinDir string) error {
-	dispatcher, err := xdpdispatch.Open(ctx, pinDir)
-	if err != nil {
-		return fmt.Errorf("open the node's XDP dispatcher: %w", err)
-	}
-	defer dispatcher.Close() //nolint:errcheck // our own descriptors
-	lock, err := dispatcher.Lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer lock.Unlock()
-	return lock.Clear(xdpdispatch.SlotNAT)
 }

@@ -156,3 +156,54 @@ func TestGatewayConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestGatewayConfigXDPAttach covers the attach mode: dispatch unless set,
+// direct when asked for, and anything else refused at startup.
+func TestGatewayConfigXDPAttach(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{want: GatewayXDPAttachDispatch},
+		{value: GatewayXDPAttachDirect, want: GatewayXDPAttachDirect},
+		{value: "chain", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Setenv(EnvGatewayNodeName, testEnvNode)
+			t.Setenv(EnvGatewayPublicInterface, testGatewayIface)
+			t.Setenv(EnvGatewaySRv6Address, testGatewaySRv6)
+			if tt.value != "" {
+				t.Setenv(EnvGatewayXDPAttach, tt.value)
+			}
+			cfg := NewGatewayConfig()
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && cfg.XDPAttach != tt.want {
+				t.Errorf("XDPAttach = %q, want %q", cfg.XDPAttach, tt.want)
+			}
+		})
+	}
+}
+
+// TestGatewayConfigDisabledNeedsNoInterface: a node with its datapath off has
+// nothing to attach, so it starts without a public interface or SRv6 address.
+func TestGatewayConfigDisabledNeedsNoInterface(t *testing.T) {
+	t.Setenv(EnvGatewayNodeName, testEnvNode)
+	t.Setenv(EnvGatewayDatapathEnabled, "false")
+	cfg := NewGatewayConfig()
+	if cfg.DatapathEnabled {
+		t.Fatal("DatapathEnabled = true with the env set to false")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() = %v for a disabled datapath with no interface", err)
+	}
+
+	t.Setenv(EnvGatewayDatapathEnabled, "true")
+	if err := NewGatewayConfig().Validate(); err == nil {
+		t.Error("Validate() = nil for an enabled datapath with no public interface")
+	}
+}

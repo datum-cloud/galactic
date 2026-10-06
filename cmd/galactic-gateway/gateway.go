@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -15,11 +16,13 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/gateway"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeattach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgemetrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
@@ -39,9 +42,10 @@ import (
 // a registered rule is never intercepted at all and routes past the node
 // ordinarily.
 var gatewayDatapathKeepAlive struct {
-	objs      *edgeprog.EdgedsrObjects
-	publicSet *xdpattach.Set
-	returnSet *xdpattach.Set
+	objs       *edgeprog.EdgedsrObjects
+	publicSet  targetSet
+	returnSet  targetSet
+	dispatcher *xdpdispatch.Dispatcher
 }
 
 // setupGatewayDatapath loads and attaches the edge Maglev datapath to
@@ -79,7 +83,7 @@ var gatewayDatapathKeepAlive struct {
 // metricsReg additionally gets a collector registered against it once the
 // objects are loaded, reading the maps live at every scrape.
 func setupGatewayDatapath(
-	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address string,
+	ctx context.Context, publicInterface string, internalInterfaces []string, srv6Address, attachMode string,
 	metricsReg prometheus.Registerer, coverage *datapathCoverage,
 ) (gateway.Datapath, error) {
 	encapSrc, err := netip.ParseAddr(srv6Address)
@@ -95,6 +99,14 @@ func setupGatewayDatapath(
 	returnTargets, err := resolveReturnTargets(internalInterfaces)
 	if err != nil {
 		return nil, err
+	}
+	// edge_return forwards anything sourced from a VIP. On a public uplink an
+	// external client could source a packet from a VIP and have it forwarded
+	// unexamined, so an internal interface may never resolve to a public one.
+	if overlap := publicReturnOverlap(targets, returnTargets); len(overlap) > 0 {
+		return nil, fmt.Errorf("edge gateway internal interfaces %v resolve to %v, which the public interface %q "+
+			"also resolves to; the return program must never run on a public uplink", internalInterfaces,
+			overlap, publicInterface)
 	}
 
 	// Required for the FIB lookup in the datapath's header push to succeed
@@ -120,66 +132,239 @@ func setupGatewayDatapath(
 		}
 	}
 
-	objs, err := edgeattach.Load(edgeattach.PinDir)
-	if err != nil {
-		return nil, fmt.Errorf("load edge gateway eBPF datapath: %w", err)
-	}
-
-	xdpLinks, err := edgeattach.Attach(objs.EdgeLb, targets)
-	if err != nil {
-		_ = objs.Close()
-		return nil, fmt.Errorf("attach edge gateway datapath to public interface %q: %w", publicInterface, err)
-	}
-
-	if len(returnTargets) > 0 {
-		returnLinks, err := edgeattach.Attach(objs.EdgeReturn, returnTargets)
+	var (
+		objs                 *edgeprog.EdgedsrObjects
+		publicSet, returnSet targetSet
+		dispatcher           *xdpdispatch.Dispatcher
+	)
+	// abandon undoes a dispatcher join when a later setup step fails: the
+	// leases stop and the slots are emptied, so a half-set-up gateway never
+	// claims packets while the process exits.
+	abandon := func() {}
+	if attachMode == config.GatewayXDPAttachDispatch {
+		leaseCtx, stopLeases := context.WithCancel(ctx)
+		var leaseDone <-chan struct{}
+		objs, dispatcher, publicSet, returnSet, leaseDone, err = joinDispatcher(leaseCtx, xdpdispatch.PinDir,
+			edgeattach.PinDir, len(returnTargets) > 0)
 		if err != nil {
-			closeAll(xdpLinks)
-			_ = objs.Close()
-			return nil, fmt.Errorf("attach edge gateway return datapath to internal interfaces %v: %w",
-				internalInterfaces, err)
+			stopLeases()
+			return nil, err
 		}
-		xdpLinks = append(xdpLinks, returnLinks...)
+		abandon = func() {
+			stopLeases()
+			<-leaseDone
+			if err := xdpattach.ClearDispatcherSlots(ctx, xdpdispatch.PinDir, xdpdispatch.SlotGatewayLB,
+				xdpdispatch.SlotGatewayReturn); err != nil {
+				slog.Warn("Cannot empty the edge gateway's dispatcher slots after a failed setup", "err", err)
+			}
+		}
+	} else {
+		objs, publicSet, returnSet, err = attachDirect(ctx, xdpdispatch.PinDir, edgeattach.PinDir, targets,
+			returnTargets)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	datapath, err := gateway.NewKernelDatapath(objs, encapSrc)
 	if err != nil {
-		closeAll(xdpLinks)
-		_ = objs.Close()
+		abandon()
 		return nil, fmt.Errorf("construct kernel datapath: %w", err)
 	}
-
 	if err := metricsReg.Register(edgemetrics.NewCollectorFromObjects(objs)); err != nil {
-		closeAll(xdpLinks)
-		_ = objs.Close()
+		abandon()
 		return nil, fmt.Errorf("register edge gateway metrics collector: %w", err)
-	}
-
-	publicSet, err := xdpattach.NewSet(objs.EdgeLb, targets, xdpLinks[:len(targets)])
-	if err != nil {
-		closeAll(xdpLinks)
-		_ = objs.Close()
-		return nil, err
-	}
-	var returnSet *xdpattach.Set
-	if len(returnTargets) > 0 {
-		if returnSet, err = xdpattach.NewSet(objs.EdgeReturn, returnTargets, xdpLinks[len(targets):]); err != nil {
-			closeAll(xdpLinks)
-			_ = objs.Close()
-			return nil, err
-		}
 	}
 
 	gatewayDatapathKeepAlive.objs = objs
 	gatewayDatapathKeepAlive.publicSet = publicSet
 	gatewayDatapathKeepAlive.returnSet = returnSet
+	gatewayDatapathKeepAlive.dispatcher = dispatcher
 
 	for _, target := range append(slices.Clone(targets), returnTargets...) {
 		coverage.configured[target] = true
 	}
+	missing := publicSet.reconcile(ctx, targets)
+	if returnSet != nil {
+		missing = append(missing, returnSet.reconcile(ctx, returnTargets)...)
+	}
+	coverage.set(missing)
 	go watchTargets(ctx, publicInterface, internalInterfaces, publicSet, returnSet, coverage)
 
 	return datapath, nil
+}
+
+// targetSet keeps one of the gateway's programs on a set of interfaces and
+// reports the ones it does not cover: xdpattach.Set in direct mode,
+// xdpattach.DispatchSet in dispatch mode.
+type targetSet interface {
+	reconcile(ctx context.Context, targets []string) (missing []string)
+}
+
+type directSet struct{ *xdpattach.Set }
+
+func (s directSet) reconcile(_ context.Context, targets []string) []string {
+	s.Reconcile(targets)
+	return uncovered(targets, s.Attached())
+}
+
+type dispatchSet struct{ *xdpattach.DispatchSet }
+
+func (s dispatchSet) reconcile(ctx context.Context, targets []string) []string {
+	return s.Reconcile(ctx, targets)
+}
+
+// attachDirect loads the programs with their own dispatcher maps and attaches
+// them to the targets themselves, unpinned, after releasing an idle
+// dispatcher from those targets. A dispatcher still serving the egress shard
+// there is refused rather than taken: detaching it would cut egress.
+// Attachment is all-or-nothing, as it has always been in this mode.
+func attachDirect(ctx context.Context, dispatchDir, edgeDir string, targets, returnTargets []string) (
+	*edgeprog.EdgedsrObjects, targetSet, targetSet, error,
+) {
+	if err := xdpattach.ReleaseIdleDispatcher(ctx, dispatchDir, append(slices.Clone(targets), returnTargets...),
+		xdpdispatch.SlotGatewayLB, xdpdispatch.SlotGatewayReturn); err != nil {
+		return nil, nil, nil, fmt.Errorf("%w; set %s=%s", err, config.EnvGatewayXDPAttach,
+			config.GatewayXDPAttachDispatch)
+	}
+
+	objs, err := edgeattach.Load(edgeDir, nil)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load edge gateway eBPF datapath: %w", err)
+	}
+
+	xdpLinks, err := edgeattach.Attach(objs.EdgeLb, targets)
+	if err != nil {
+		_ = objs.Close()
+		return nil, nil, nil, fmt.Errorf("attach edge gateway datapath to public interfaces %v: %w", targets, err)
+	}
+	publicSet, err := xdpattach.NewSet(objs.EdgeLb, targets, xdpLinks)
+	if err != nil {
+		closeAll(xdpLinks)
+		_ = objs.Close()
+		return nil, nil, nil, err
+	}
+	if len(returnTargets) == 0 {
+		return objs, directSet{publicSet}, nil, nil
+	}
+
+	returnLinks, err := edgeattach.Attach(objs.EdgeReturn, returnTargets)
+	if err != nil {
+		closeAll(xdpLinks)
+		_ = objs.Close()
+		return nil, nil, nil, fmt.Errorf("attach edge gateway return datapath to internal interfaces %v: %w",
+			returnTargets, err)
+	}
+	returnSet, err := xdpattach.NewSet(objs.EdgeReturn, returnTargets, returnLinks)
+	if err != nil {
+		closeAll(append(xdpLinks, returnLinks...))
+		_ = objs.Close()
+		return nil, nil, nil, err
+	}
+	return objs, directSet{publicSet}, directSet{returnSet}, nil
+}
+
+// joinDispatcher opens the node's XDP dispatcher under dispatchDir, loads the
+// programs against its maps, with their own maps pinned under edgeDir, fills
+// the gateway's slots, and renews both slots' leases for the life of ctx. The
+// return slot is filled whether or not this node has internal interfaces:
+// without the role on any interface it never runs. Nothing is attached here;
+// the returned sets put the dispatcher on the targets and read coverage back.
+// The returned channel closes once both lease loops have stopped, which a
+// caller waits on before closing the dispatcher.
+func joinDispatcher(ctx context.Context, dispatchDir, edgeDir string, withReturn bool) (
+	*edgeprog.EdgedsrObjects, *xdpdispatch.Dispatcher, targetSet, targetSet, <-chan struct{}, error,
+) {
+	dispatcher, err := xdpdispatch.Open(ctx, dispatchDir)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("open the node's XDP dispatcher: %w", err)
+	}
+	fail := func(err error) (*edgeprog.EdgedsrObjects, *xdpdispatch.Dispatcher, targetSet, targetSet,
+		<-chan struct{}, error,
+	) {
+		_ = dispatcher.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+
+	objs, err := edgeattach.Load(edgeDir, dispatcher.Maps())
+	if err != nil {
+		return fail(fmt.Errorf("load edge gateway eBPF datapath: %w", err))
+	}
+	lock, err := dispatcher.Lock(ctx)
+	if err != nil {
+		_ = objs.Close()
+		return fail(err)
+	}
+	err = errors.Join(lock.Fill(xdpdispatch.SlotGatewayLB, objs.EdgeLb),
+		lock.Fill(xdpdispatch.SlotGatewayReturn, objs.EdgeReturn))
+	lock.Unlock()
+	if err != nil {
+		_ = objs.Close()
+		return fail(fmt.Errorf("install edge gateway datapath in the XDP dispatcher: %w", err))
+	}
+
+	public, err := xdpattach.NewDispatchSet(dispatcher, xdpdispatch.SlotGatewayLB, xdpdispatch.RolePublicLB,
+		objs.EdgeLb)
+	if err != nil {
+		_ = objs.Close()
+		return fail(err)
+	}
+	var ret targetSet
+	if withReturn {
+		rs, err := xdpattach.NewDispatchSet(dispatcher, xdpdispatch.SlotGatewayReturn,
+			xdpdispatch.RoleInternalReturn, objs.EdgeReturn)
+		if err != nil {
+			_ = objs.Close()
+			return fail(err)
+		}
+		ret = dispatchSet{rs}
+	}
+
+	// A lapsed lease shows as missing interfaces within one coverage resync,
+	// since every Reconcile reads the lease back.
+	var leases sync.WaitGroup
+	for _, slot := range []xdpdispatch.Slot{xdpdispatch.SlotGatewayLB, xdpdispatch.SlotGatewayReturn} {
+		leases.Go(func() {
+			dispatcher.Lease(ctx, slot, func(err error) {
+				slog.Error("Cannot renew an edge gateway slot's lease in the XDP dispatcher; "+
+					"the dispatcher skips the slot once it lapses", "slot", slot, "err", err)
+			})
+		})
+	}
+	leaseDone := make(chan struct{})
+	go func() {
+		leases.Wait()
+		close(leaseDone)
+	}()
+	slog.Info("Edge gateway datapath installed in the XDP dispatcher", "pinDir", dispatchDir)
+	return objs, dispatcher, dispatchSet{public}, ret, leaseDone, nil
+}
+
+// publicReturnOverlap returns the return targets that are also public targets.
+func publicReturnOverlap(targets, returnTargets []string) []string {
+	var overlap []string
+	for _, t := range returnTargets {
+		if slices.Contains(targets, t) {
+			overlap = append(overlap, t)
+		}
+	}
+	return overlap
+}
+
+// turnOffDatapath turns this node's gateway off. A dispatch-mode predecessor
+// left the gateway's programs in the XDP dispatcher with live leases, so its
+// slots are emptied here and the dispatcher passes their traffic on at once.
+// Every other slot, and the dispatcher itself, are left alone. A failure is
+// logged, not returned: the leases lapse on their own within
+// xdpdispatch.LeaseTTL.
+func turnOffDatapath(ctx context.Context, pinDir string) {
+	if err := xdpattach.ClearDispatcherSlots(ctx, pinDir, xdpdispatch.SlotGatewayLB,
+		xdpdispatch.SlotGatewayReturn); err != nil {
+		slog.Error("Cannot empty the edge gateway's slots in the XDP dispatcher; "+
+			"they stop claiming packets once their leases lapse", "lease", xdpdispatch.LeaseTTL, "err", err)
+	}
+	slog.Info("Edge gateway datapath is turned off; this node attaches nothing and advertises no VIP",
+		"env", config.EnvGatewayDatapathEnabled)
 }
 
 // datapathCoverage is which of the datapath's resolved targets it is not
@@ -252,7 +437,7 @@ func (c *datapathCoverage) configure(targets []string) []string {
 // bond in the moment between losing a member and enslaving its replacement,
 // keeps every attachment and skips that pass.
 func watchTargets(ctx context.Context, publicInterface string, internalInterfaces []string,
-	publicSet, returnSet *xdpattach.Set, coverage *datapathCoverage,
+	publicSet, returnSet targetSet, coverage *datapathCoverage,
 ) {
 	xdpattach.OnNetlinkChange(ctx, func() {
 		targets, err := edgeattach.ResolveTargets(publicInterface)
@@ -268,16 +453,35 @@ func watchTargets(ctx context.Context, publicInterface string, internalInterface
 					"err", err)
 				return
 			}
+			if overlap := publicReturnOverlap(targets, returnTargets); len(overlap) > 0 {
+				slog.Warn("Internal interfaces now resolve to public ones; keeping the return program off them",
+					"interfaces", overlap)
+				returnTargets = slices.DeleteFunc(returnTargets, func(t string) bool { return slices.Contains(overlap, t) })
+			}
 		}
 
-		publicSet.Reconcile(coverage.configure(targets))
-		missing := uncovered(targets, publicSet.Attached())
+		// A target whose forwarding sysctls failed is left out of the set and
+		// counted missing; configure retries it on the next pass.
+		ready := coverage.configure(targets)
+		missing := append(publicSet.reconcile(ctx, ready), uncovered(targets, ready)...)
 		if returnSet != nil {
-			returnSet.Reconcile(coverage.configure(returnTargets))
-			missing = append(missing, uncovered(returnTargets, returnSet.Attached())...)
+			ready := coverage.configure(returnTargets)
+			missing = append(missing, returnSet.reconcile(ctx, ready)...)
+			missing = append(missing, uncovered(returnTargets, ready)...)
 		}
-		coverage.set(missing)
+		coverage.set(dedupe(missing))
 	})
+}
+
+// dedupe drops repeated names, keeping the first of each.
+func dedupe(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // uncovered returns every one of targets not in covered, in targets' order.

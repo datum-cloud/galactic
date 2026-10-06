@@ -54,17 +54,18 @@ const (
 	EnvNATUplinkInterfaces = "GALACTIC_NAT_UPLINK_INTERFACES"
 
 	// EnvNATXDPAttach selects how the datapath reaches its uplinks' XDP hook:
-	// NATXDPAttachDirect, NATXDPAttachDispatch or NATXDPAttachChain. Optional,
-	// defaulting to direct.
+	// NATXDPAttachDirect or NATXDPAttachDispatch. Optional, defaulting to
+	// direct. NATXDPAttachChain is still accepted and runs as dispatch.
 	//
 	// An interface takes one native XDP program. Direct attaches the shard's
 	// own program, unpinned, so it detaches when the process exits and every
 	// restart bounces each uplink. Dispatch puts the node's shared XDP
 	// dispatcher (xdpdispatch) on the uplinks instead and runs the shard from
 	// its slot: the attachment is pinned, so a restart swaps the program in
-	// place, and the edge gateway can share the same uplinks. Chain installs
-	// the shard in the gateway's xdp_chain slot, on a node where the gateway
-	// holds the hook directly; it is superseded by dispatch.
+	// place, and the edge gateway can share the same uplinks. Chain, which
+	// installed the shard in the gateway's own xdp_chain map, is gone: the
+	// gateway now runs from the same dispatcher, so the value is read as
+	// dispatch.
 	//
 	// Switching a node back from dispatch to direct is safe while nothing else
 	// uses the dispatcher there: direct mode detaches an idle dispatcher before
@@ -91,7 +92,8 @@ const (
 	EnvNATEchoResponder = "GALACTIC_NAT_ECHO_RESPONDER"
 )
 
-// EnvNATXDPAttach's values.
+// EnvNATXDPAttach's values. NATXDPAttachChain is deprecated and read as
+// NATXDPAttachDispatch.
 const (
 	NATXDPAttachDirect   = "direct"
 	NATXDPAttachDispatch = "dispatch"
@@ -117,8 +119,13 @@ type NATConfig struct {
 	// comma-separated EnvNATUplinkInterfaces. Empty means auto-detect.
 	UplinkInterfaces []string
 
-	// XDPAttach is one of the NATXDPAttach values, from EnvNATXDPAttach.
+	// XDPAttach is NATXDPAttachDirect or NATXDPAttachDispatch, from
+	// EnvNATXDPAttach.
 	XDPAttach string
+
+	// XDPAttachDeprecated is set when EnvNATXDPAttach named the retired chain
+	// mode, which XDPAttach reads as dispatch, so the caller can warn.
+	XDPAttachDeprecated bool
 
 	// DatapathEnabled is EnvNATDatapathEnabled.
 	DatapathEnabled bool
@@ -184,6 +191,10 @@ func (c *NATConfig) readFields() {
 	c.GRPCHealthPort = c.v.GetInt(KeyGRPCHealthPort)
 	c.UplinkInterfaces = splitCommaList(c.v.GetString("uplink_interfaces"))
 	c.XDPAttach = c.v.GetString("xdp_attach")
+	c.XDPAttachDeprecated = c.XDPAttach == NATXDPAttachChain
+	if c.XDPAttachDeprecated {
+		c.XDPAttach = NATXDPAttachDispatch
+	}
 	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
 	c.EchoResponder = c.v.GetBool("echo_responder")
 }
@@ -200,10 +211,10 @@ func (c *NATConfig) Validate() error {
 		return errors.New("grpc health port must be between 1 and 65535")
 	}
 	switch c.XDPAttach {
-	case NATXDPAttachDirect, NATXDPAttachDispatch, NATXDPAttachChain:
+	case NATXDPAttachDirect, NATXDPAttachDispatch:
 	default:
-		return fmt.Errorf("%s must be %q, %q or %q, got %q", EnvNATXDPAttach,
-			NATXDPAttachDirect, NATXDPAttachDispatch, NATXDPAttachChain, c.XDPAttach)
+		return fmt.Errorf("%s must be %q or %q, got %q", EnvNATXDPAttach,
+			NATXDPAttachDirect, NATXDPAttachDispatch, c.XDPAttach)
 	}
 	return nil
 }
