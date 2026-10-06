@@ -188,7 +188,7 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 			rule.Namespace, rule.Name, err)
 	}
 
-	logger.Info("NetworkRule BGP route withdrawn; rule_table teardown proceeds independently on each gateway node",
+	logger.Info("NetworkRule BGP route withdrawn; vip_table teardown proceeds independently on each gateway node",
 		"networkRule", rule.Name)
 
 	patchBase := rule.DeepCopy()

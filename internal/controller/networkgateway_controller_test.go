@@ -33,8 +33,7 @@ var (
 )
 
 // fakeGatewayEngine records the EngineState passed to Reconcile so tests can
-// assert on exactly which rules were included/excluded and at what
-// local-pref.
+// assert on exactly which rules were included or excluded.
 type fakeGatewayEngine struct {
 	mu             sync.Mutex
 	lastDesired    gateway.EngineState

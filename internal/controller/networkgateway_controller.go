@@ -38,7 +38,7 @@ type GatewayEngine interface {
 	// ReconcileOrphans.
 	DatapathGeneration() uint64
 
-	// ReconcileOrphans removes rule_table state left behind by a mid-reconcile
+	// ReconcileOrphans removes vip_table state left behind by a mid-reconcile
 	// crash. cutoff must come from DatapathGeneration, read before desired's
 	// NetworkRule CRDs were listed, so an entry written during the listing
 	// survives.
@@ -233,7 +233,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		rule := &ruleList.Items[i]
 		if !rule.DeletionTimestamp.IsZero() {
 			// Being torn down: excluded from desired state immediately, so
-			// this node's rule_table converges toward gone without waiting on
+			// this node's vip_table converges toward gone without waiting on
 			// NetworkRuleReconciler's finalizer to finish withdrawing BGP.
 			continue
 		}
@@ -285,12 +285,12 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(updateErr, "update NetworkGateway status")
 	}
 
-	// Crash recovery. A failed sweep leaves orphaned rule_table state behind
+	// Crash recovery. A failed sweep leaves orphaned vip_table state behind
 	// until a later pass succeeds, so it is returned for retry, after the
 	// status write above so the failure stays visible on the object.
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
-		logger.Error(err, "reconcile orphaned rule_table state")
-		return ctrl.Result{}, errors.Join(advErr, fmt.Errorf("reconcile orphaned rule_table state: %w", err))
+		logger.Error(err, "reconcile orphaned vip_table state")
+		return ctrl.Result{}, errors.Join(advErr, fmt.Errorf("reconcile orphaned vip_table state: %w", err))
 	}
 
 	return ctrl.Result{}, advErr
