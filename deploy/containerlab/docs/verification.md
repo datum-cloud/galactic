@@ -177,8 +177,8 @@ docker exec dfw-worker2 curl -sS --max-time 5 http://[2001:db8:1:40::2]/
 ## Egress shards
 
 Four edge nodes across three sites (`dfw-worker2`, `dfw-worker3`, `sjc-worker2`,
-`iad-worker2`), each running its own shard. No node runs `galactic-gateway`, so
-each shard attaches its XDP program directly to its uplinks.
+`iad-worker2`), each running its own shard from the node's XDP dispatcher on
+its uplinks.
 
 ```bash
 task verify:nat-sharding
@@ -187,7 +187,8 @@ task verify:nat-sharding
 docker exec dfw-control-plane kubectl get pods -n galactic-system -o wide \
   -l app.kubernetes.io/name=galactic-nat
 
-# The shard's own program, on every member of both bonds (eth1-eth4)
+# The XDP dispatcher, on every member of both bonds (eth1-eth4); the shard runs
+# from one of its slots
 docker exec dfw-worker2 ip -d link show dev eth1 | grep -o 'prog/xdp id [0-9]*'
 ```
 

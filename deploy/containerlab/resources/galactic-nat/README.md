@@ -20,7 +20,7 @@ node's shared XDP dispatcher on its uplinks. Compute nodes run none.
   DaemonSet. Each site's `node-patch.yaml` sets only
   `GALACTIC_NAT_UPLINK_INTERFACES=bond0,bond1` — an edge node's transit
   bond (replies arrive there) and its compute-facing bond (tenant egress
-  arrives there), the two the shard attaches its XDP program to. iad's
+  arrives there), the two the shard runs from the XDP dispatcher on. iad's
   also sets `GALACTIC_NAT_ECHO_RESPONDER=true`, so `verify:nat-icmp` can
   ping one shard's masquerade addresses and see the others refuse. The shard's identity lives in that site's
   `egressshard.yaml`, one `EgressShard` per edge node (dfw's holds two),
