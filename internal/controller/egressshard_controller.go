@@ -270,8 +270,8 @@ func (r *EgressShardReconciler) syncNode(ctx context.Context) error {
 // program writes shard's spec into the datapath and returns the resulting
 // Programmed condition. A spec that assigns no usable identity yet clears the
 // datapath rather than leaving a previous one in place, which is not an error:
-// the assignment arrives later as a spec update. Neither is a SID that shares
-// its Block and Node-ID with a BGPRouter: see routerLocatorConflict.
+// the assignment arrives later as a spec update. A SID that shares its Block
+// and Node-ID with a BGPRouter is refused too; see routerLocatorConflict.
 func (r *EgressShardReconciler) program(ctx context.Context, shard *bgpv1alpha1.EgressShard) (metav1.Condition, error) {
 	cond := metav1.Condition{Type: bgpv1alpha1.ConditionTypeProgrammed, Status: metav1.ConditionFalse}
 
