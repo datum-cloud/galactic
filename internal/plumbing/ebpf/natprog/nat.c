@@ -675,7 +675,10 @@ static NAT_ALWAYS_INLINE int addr6_eq(const __u8 a[16], const __u8 b[16])
 // silently hijacked here before reaching the ingress hook.
 //
 // That is an address-allocation conflict this function cannot detect, not a
-// flaw in the 64-bit match. Widening to a full 128-bit compare breaks the
+// flaw in the 64-bit match. The EgressShard controller refuses a shard whose
+// SID shares a BGPRouter's Block and Node-ID (routerLocatorConflict in
+// internal/controller/egressshard_controller.go), so such a shard_sid never
+// reaches this map. Widening to a full 128-bit compare breaks the
 // intended case of two tenants' egress packets sharing this shard_sid with
 // different Argument values.
 static NAT_ALWAYS_INLINE int locator_matches(const __u8 daddr[16], const __u8 shard_sid[16])
