@@ -234,11 +234,12 @@ that converges this node's whole gateway engine:
    with the rest (#713). Each node records the result on the rule as its
    own `<node>/Programmed` condition (`Programmed`, `BackendsUnresolved`,
    `LoadFailed`, or `InvalidRule`, with the error or the unresolved
-   backends in the message). The type is node-scoped because `NetworkRule` status is shared
-   by every gateway node while loading is per node; a node writes it only
-   when it changes, and a departing, deleted, or disabled node's condition
-   is removed with its advertisements. The `NetworkGateway`'s
-   `EngineDegraded` message lists every failed rule.
+   backends in the message). The type is node-scoped because
+   `NetworkRule` status is shared by every gateway node while loading
+   is per node; a node writes it only when it changes, and a
+   departing, deleted, or disabled node's condition is removed with its
+   advertisements. The `NetworkGateway`'s `EngineDegraded` message
+   lists every failed rule.
 3. **Crash recovery.** Runs `Engine.ReconcileOrphans` (see
    [Crash recovery](#crash-recovery) below).
 
