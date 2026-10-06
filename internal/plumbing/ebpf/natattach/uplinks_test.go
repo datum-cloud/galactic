@@ -111,20 +111,3 @@ func TestResolveUplinks_NoRouteYetIsErrNoUplinks(t *testing.T) {
 		t.Errorf("ResolveUplinks() error = %v; a real detection failure must not read as ErrNoUplinks", err)
 	}
 }
-
-func TestUnhookedUplinks(t *testing.T) {
-	fakeUplinkHost(t, nil, nil)
-	hooked := &fakeLink{attrs: netlink.LinkAttrs{Name: "hooked0", Xdp: &netlink.LinkXdp{Attached: true}}}
-	byName := linkByNameFn
-	linkByNameFn = func(name string) (netlink.Link, error) {
-		if name == hooked.attrs.Name {
-			return hooked, nil
-		}
-		return byName(name)
-	}
-
-	got := UnhookedUplinks([]string{"hooked0", testUplink, "gone0"})
-	if want := []string{testUplink, "gone0"}; !slices.Equal(got, want) {
-		t.Errorf("UnhookedUplinks() = %v, want %v", got, want)
-	}
-}

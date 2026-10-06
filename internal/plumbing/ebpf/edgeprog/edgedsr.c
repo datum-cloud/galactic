@@ -29,8 +29,9 @@
 // Packet path:
 //
 //  1. Parse the outer Ethernet and IPv6 header, bounds-checked. Not IPv6, or
-//     unparseable: unclaimed. Every unclaimed packet goes to xdp_chain's
-//     program if one is installed, and otherwise XDP_PASS to the kernel stack.
+//     unparseable: unclaimed. Every unclaimed packet goes on to the later
+//     slots of the node's XDP dispatcher (dispatch_next), and past the last
+//     one, or with no dispatcher, XDP_PASS to the kernel stack.
 //  2. Parse the L4 header, TCP or UDP only. Only the ports are read, and
 //     nothing is ever rewritten.
 //  3. Match (proto, destination port, destination address) against vip_table. A
@@ -85,7 +86,6 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 // bpf_redirect, not bpf_redirect_peer: the latter is TC-only, and every egress
 // interface here is in this node's own namespace anyway.
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
-static long (*bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *) BPF_FUNC_tail_call;
 
 // ---------------------------------------------------------------------
 // Constants.
@@ -278,36 +278,26 @@ struct {
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
 
-// EDGE_CHAIN_SLOT is xdp_chain's one slot.
-#define EDGE_CHAIN_SLOT 0
+// The node's XDP dispatcher (internal/plumbing/ebpf/xdpdispatch). edge_lb and
+// edge_return run from its gateway slots, and a packet either does not claim
+// goes on to the later slots, in practice the egress translation shard, which
+// shares these interfaces. The two claim disjoint traffic, a VIP destination
+// or source here and a shard SID or masquerade address there, so the order
+// they run in changes no verdict. Attached directly instead, with no
+// dispatcher on the node, these programs see an empty iface_roles and every
+// unclaimed packet passes to the kernel.
+#include "../xdpdispatch/dispatch.h"
 
-// xdp_chain hands every packet this node's gateway does not claim to one
-// further XDP program sharing the same interfaces -- in practice the egress
-// translation shard (internal/plumbing/ebpf/natprog), which runs on the same
-// edge nodes and needs both of the interfaces these programs hold. An
-// interface takes one native XDP program, so the second datapath runs as a
-// tail call from here rather than as an attachment of its own.
-//
-// This program owns the map and pins it (edgeattach.Load); the other datapath
-// only fills the slot, from its own process (natattach.AttachChain). The two
-// claim disjoint traffic -- a VIP destination or source here, a shard SID or
-// masquerade address there -- so the order they run in changes no verdict.
-//
-// An empty slot makes bpf_tail_call return, and the packet passes to the
-// kernel exactly as it did before this map existed.
-struct {
-	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, __u32);
-} xdp_chain SEC(".maps");
-
-// pass_unclaimed is every exit for a packet this gateway does not claim. It
-// never returns when the chained program runs, and otherwise yields XDP_PASS.
-static EDGE_ALWAYS_INLINE int pass_unclaimed(struct xdp_md *ctx)
+// pass_unclaimed_lb and pass_unclaimed_return are every exit for a packet the
+// gateway does not claim, from edge_lb and edge_return.
+static EDGE_ALWAYS_INLINE int pass_unclaimed_lb(struct xdp_md *ctx)
 {
-	bpf_tail_call(ctx, &xdp_chain, EDGE_CHAIN_SLOT);
-	return XDP_PASS;
+	return dispatch_next(ctx, XDPD_SLOT_GATEWAY_LB);
+}
+
+static EDGE_ALWAYS_INLINE int pass_unclaimed_return(struct xdp_md *ctx)
+{
+	return dispatch_next(ctx, XDPD_SLOT_GATEWAY_RETURN);
 }
 
 static EDGE_ALWAYS_INLINE void count_drop(__u32 reason)
@@ -505,20 +495,20 @@ int edge_lb(struct xdp_md *ctx)
 
 	struct edge_ethhdr *eth = data;
 	if ((void *) (eth + 1) > data_end)
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_lb(ctx);
 	if (eth->h_proto != __builtin_bswap16(EDGE_ETH_P_IPV6))
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_lb(ctx);
 
 	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
 	if ((void *) (ip6 + 1) > data_end)
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_lb(ctx);
 
 	if (ip6->nexthdr != EDGE_IPPROTO_TCP && ip6->nexthdr != EDGE_IPPROTO_UDP)
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_lb(ctx);
 
 	struct edge_l4ports *ports = (void *) (ip6 + 1);
 	if ((void *) (ports + 1) > data_end)
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_lb(ctx);
 
 	struct vip_key vk;
 	__builtin_memset(&vk, 0, sizeof(vk));
@@ -528,7 +518,7 @@ int edge_lb(struct xdp_md *ctx)
 
 	struct vip_value *rule = bpf_map_lookup_elem(&vip_table, &vk);
 	if (!rule)
-		return pass_unclaimed(ctx); // not one of this gateway's VIPs
+		return pass_unclaimed_lb(ctx); // not one of this gateway's VIPs
 
 	// Claimed past this point -- every subsequent failure is a drop, not
 	// a pass-through (this gateway owns this VIP+port+protocol).
@@ -625,20 +615,20 @@ int edge_return(struct xdp_md *ctx)
 
 	struct edge_ethhdr *eth = data;
 	if ((void *) (eth + 1) > data_end)
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_return(ctx);
 	if (eth->h_proto != __builtin_bswap16(EDGE_ETH_P_IPV6))
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_return(ctx);
 
 	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
 	if ((void *) (ip6 + 1) > data_end)
-		return pass_unclaimed(ctx);
+		return pass_unclaimed_return(ctx);
 
 	struct vip_addr_key ak;
 	__builtin_memset(&ak, 0, sizeof(ak));
 	__builtin_memcpy(ak.vip, ip6->saddr, 16);
 
 	if (!bpf_map_lookup_elem(&vip_addr_table, &ak))
-		return pass_unclaimed(ctx); // not sourced from one of this gateway's VIPs
+		return pass_unclaimed_return(ctx); // not sourced from one of this gateway's VIPs
 
 	// Claimed past this point: this node owns the source address, so every
 	// subsequent failure is a counted drop rather than a pass-through that

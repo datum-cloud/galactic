@@ -30,10 +30,11 @@ so a crash on either side no longer takes the other's *pod* down with it,
 not just the other's binary. You need `galactic-gateway` only on nodes that
 terminate external ingress traffic for tenant VPCs — every other node in the
 fleet (`galactic-router` default role, `galactic-cni`) has no dependency on
-it. `galactic-nat` is the exception: it runs on the same edge nodes, chained
-behind this binary's XDP programs through the pinned `xdp_chain` program
-array (`GALACTIC_NAT_XDP_ATTACH=chain`), and waits for that map at startup —
-see [docs/nat/configuration.md](../nat/configuration.md). See
+it. `galactic-nat` is the exception: it can run on the same edge nodes, and
+the two share each uplink's XDP hook through the node's shared dispatcher,
+each from its own slot (`GALACTIC_GATEWAY_XDP_ATTACH=dispatch` here,
+`GALACTIC_NAT_XDP_ATTACH=dispatch` there). See
+[docs/nat/configuration.md](../nat/configuration.md). See
 [ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) for the full
 design (DSR vs. the removed Full-NAT design, the anycast BGP model, the
 XDP packet path) and
@@ -152,14 +153,32 @@ flags, or a combination of both (CLI flags take precedence), with the
 `GALACTIC_GATEWAY` env prefix — the same three-tier precedence pattern
 `galactic-router` uses (see [docs/router/configuration.md](../router/configuration.md)).
 
-| Option              | Environment Variable                   | CLI Flag                        | Default | Required |
-| ------------------- | -------------------------------------- | ------------------------------- | ------- | -------- |
-| Node name           | `GALACTIC_GATEWAY_NODE_NAME`           | `--node-name`, `-n`             | —       | Yes      |
-| Public interface    | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`    | `--gateway-public-interface`    | —       | Yes      |
-| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | —       | Yes      |
-| Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —       | No       |
-| Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`  | No       |
-| gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`  | No       |
+| Option              | Environment Variable                   | CLI Flag                        | Default    | Required          |
+| ------------------- | -------------------------------------- | ------------------------------- | ---------- | ----------------- |
+| Node name           | `GALACTIC_GATEWAY_NODE_NAME`           | `--node-name`, `-n`             | —          | Yes               |
+| Public interface    | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`    | `--gateway-public-interface`    | —          | While enabled     |
+| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | —          | While enabled     |
+| Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —          | No                |
+| XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch` | No                |
+| Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`     | No                |
+| Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`     | No                |
+| gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`     | No                |
+
+`GALACTIC_GATEWAY_XDP_ATTACH` is `dispatch` or `direct`. `dispatch` runs
+`edge_lb` and `edge_return` from the gateway slots of the node's shared,
+pinned XDP dispatcher, so a restart swaps the programs in place without
+detaching anything, and the egress shard can share the uplinks. `direct`
+attaches the programs themselves, unpinned, so they detach when the process
+exits. It first detaches an idle dispatcher from its interfaces, and refuses
+to start while another datapath's slot is live there. See
+[Sharing the XDP hook](../agents/ARCHITECTURE-GATEWAY.md#sharing-the-xdp-hook-xdpdispatch).
+
+`GALACTIC_GATEWAY_DATAPATH_ENABLED=false` keeps the process up and its pod
+ready but loads nothing, empties the gateway's dispatcher slots, and
+withdraws every one of this node's VIP advertisements. The NetworkGateway's
+`Ready` reads `False` with reason `DatapathDisabled`. The public interface
+and SRv6 address are not required while it is off.
+
 
 `GALACTIC_GATEWAY_INTERNAL_INTERFACES` is a comma-separated list of this
 node's compute-facing interfaces, and it is what puts the return path in
@@ -371,7 +390,7 @@ spec:
     name: dfw-worker2
 ```
 
-`spec.targetRef.name` must equal the Kubernetes node name — by this repo's
+| `spec.targetRef.name` must equal the Kubernetes node name — by this repo's |
 own convention every `NetworkGateway` fixture and overlay names the object
 after the node it targets. `NetworkGatewayReconciler` matches this against
 `--node-name`/`GALACTIC_GATEWAY_NODE_NAME` to decide whether it owns this
@@ -387,7 +406,7 @@ object.
 | Field                 | Required | Type     | Description                                                                                                                                                                   |
 | --------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `spec.targetRef.name` | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                         |
-| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), or `Terminating`. |
+| `status.conditions`   | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, or `Terminating`. |
 
 There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per

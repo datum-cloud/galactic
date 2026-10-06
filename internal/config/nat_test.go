@@ -192,9 +192,9 @@ func TestNATConfigUplinkInterfacesOptional(t *testing.T) {
 	}
 }
 
-// TestNATConfigXDPAttach covers the attach mode: direct unless set, chain when
-// asked for, and anything else refused at startup rather than read as one of
-// the two -- a shard on the wrong mode either fails to attach or waits forever.
+// TestNATConfigXDPAttach covers the attach mode: direct unless set, dispatch
+// when asked for, the retired chain read as dispatch, and anything else
+// refused at startup rather than read as one of them.
 func TestNATConfigXDPAttach(t *testing.T) {
 	tests := []struct {
 		value   string
@@ -205,7 +205,7 @@ func TestNATConfigXDPAttach(t *testing.T) {
 		{want: NATXDPAttachDirect},
 		{value: NATXDPAttachDirect, set: true, want: NATXDPAttachDirect},
 		{value: NATXDPAttachDispatch, set: true, want: NATXDPAttachDispatch},
-		{value: NATXDPAttachChain, set: true, want: NATXDPAttachChain},
+		{value: NATXDPAttachChain, set: true, want: NATXDPAttachDispatch},
 		{value: "tc", set: true, wantErr: true},
 	}
 	for _, tt := range tests {

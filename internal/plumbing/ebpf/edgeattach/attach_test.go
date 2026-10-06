@@ -19,7 +19,6 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
-	"go.datum.net/galactic/internal/plumbing/ebpf/natattach"
 )
 
 func requireRoot(t *testing.T) {
@@ -41,7 +40,7 @@ func TestLoad_PreflightBlocksLoad(t *testing.T) {
 
 	pinDir := filepath.Join(t.TempDir(), "does-not-exist", "galactic-edge")
 
-	objs, err := Load(pinDir)
+	objs, err := Load(pinDir, nil)
 	if err == nil {
 		t.Fatal("Load() error = nil, want a preflight failure")
 	}
@@ -241,7 +240,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 	// --- pre-restart: first load, attach, and populate a map entry. ---
 	var firstLink interface{ Close() error }
 	err = nsObj.Do(func(_ ns.NetNS) error {
-		objs, err := Load(pinDir)
+		objs, err := Load(pinDir, nil)
 		if err != nil {
 			return fmt.Errorf("load: %w", err)
 		}
@@ -275,7 +274,7 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 	// --- simulate a container restart: fresh Load+Attach against the
 	// same pinDir/interface, as a brand new process would do. ---
 	err = nsObj.Do(func(_ ns.NetNS) error {
-		objs, err := Load(pinDir)
+		objs, err := Load(pinDir, nil)
 		if err != nil {
 			return fmt.Errorf("reload after restart: %w", err)
 		}
@@ -357,7 +356,7 @@ func TestAttach_MultipleInterfacesRollsBackOnPartialFailure(t *testing.T) {
 	}
 
 	err = nsObj.Do(func(_ ns.NetNS) error {
-		objs, err := Load(pinDir)
+		objs, err := Load(pinDir, nil)
 		if err != nil {
 			return fmt.Errorf("load: %w", err)
 		}
@@ -479,7 +478,7 @@ func TestResolveTargetsAndAttach_RealBondDevice(t *testing.T) {
 			return fmt.Errorf("ResolveTargets(%q) = %v, want %v", bondName, got, want)
 		}
 
-		objs, err := Load(pinDir)
+		objs, err := Load(pinDir, nil)
 		if err != nil {
 			return fmt.Errorf("load: %w", err)
 		}
@@ -501,12 +500,35 @@ func TestResolveTargetsAndAttach_RealBondDevice(t *testing.T) {
 	}
 }
 
-// TestChainMapPathMatchesTheShardsCopy holds natattach's spelled-out copy of
-// where this package pins xdp_chain in step with the real thing. The egress
-// shard opens that path to install itself; a drift here leaves it retrying
-// against a map that is never created.
-func TestChainMapPathMatchesTheShardsCopy(t *testing.T) {
-	if got := filepath.Join(PinDir, edgeprog.EdgedsrMapXdpChain); got != natattach.EdgeChainMapPath {
-		t.Errorf("xdp_chain pins at %q, natattach.EdgeChainMapPath = %q", got, natattach.EdgeChainMapPath)
+// TestLoad_RemovesTheRetiredChainPin: a gateway upgraded from the xdp_chain
+// era must not leave that map pinned, where a shard not yet upgraded would
+// install itself into a map no datapath runs.
+func TestLoad_RemovesTheRetiredChainPin(t *testing.T) {
+	requireRoot(t)
+	pinDir := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-edge-test-chain-%d", os.Getpid()))
+	if err := os.MkdirAll(pinDir, 0o755); err != nil {
+		t.Skipf("bpffs not writable at /sys/fs/bpf: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+
+	legacy, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type: ebpf.ProgramArray, KeySize: 4, ValueSize: 4, MaxEntries: 1,
+	})
+	if err != nil {
+		t.Fatalf("create legacy chain map: %v", err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+	chainPin := filepath.Join(pinDir, "xdp_chain")
+	if err := legacy.Pin(chainPin); err != nil {
+		t.Fatalf("pin legacy chain map: %v", err)
+	}
+
+	objs, err := Load(pinDir, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	if _, err := os.Stat(chainPin); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("retired xdp_chain pin still present after Load (stat err = %v)", err)
 	}
 }

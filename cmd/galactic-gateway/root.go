@@ -27,6 +27,7 @@ import (
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/gateway"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -132,10 +133,17 @@ func runCmd(cfg *config.GatewayConfig) error {
 		default:
 		}
 	})
-	gwDatapath, err := setupGatewayDatapath(ctx,
-		cfg.PublicInterface, cfg.InternalInterfaces, cfg.SRv6Address, ctrlmetrics.Registry, coverage)
-	if err != nil {
-		return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
+	var gwDatapath gateway.Datapath = gateway.NoopDatapath{}
+	if cfg.DatapathEnabled {
+		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, cfg.SRv6Address,
+			cfg.XDPAttach, ctrlmetrics.Registry, coverage)
+		if err != nil {
+			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
+		}
+	} else {
+		// Nothing to attach and nothing to load: the reconciler below keeps
+		// this node's VIPs withdrawn, so no rule reaches this datapath.
+		turnOffDatapath(ctx, xdpdispatch.PinDir)
 	}
 	// Only now is the datapath attached and its rule table reachable. Report
 	// serving from here on, not from process start.
@@ -157,6 +165,7 @@ func runCmd(cfg *config.GatewayConfig) error {
 		Scheme:   mgr.GetScheme(),
 		Engine:   gwEngine,
 		NodeName: nodeName,
+		Disabled: !cfg.DatapathEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -245,6 +254,12 @@ func newRootCommand() *cobra.Command {
 			"forwards before netfilter (optional; empty means this node carries no return traffic)")
 	cmd.Flags().StringP("gateway-srv6-address", "", "",
 		"This gateway node's own SRv6-reachable address, used as the Maglev/DSR encap source (required)")
+	cmd.Flags().StringP("gateway-xdp-attach", "", config.GatewayXDPAttachDispatch,
+		"How the datapath reaches its interfaces' XDP hook: \"dispatch\" runs it from the node's shared, "+
+			"pinned XDP dispatcher, \"direct\" attaches it")
+	cmd.Flags().Bool("gateway-datapath-enabled", true,
+		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
+			"this node's VIP advertisements")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

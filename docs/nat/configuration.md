@@ -50,9 +50,8 @@ flags, or a combination of both (CLI flags take precedence), with the
 
 `config/galactic-nat/base/daemonset.yaml` leaves `GALACTIC_NAT_XDP_ATTACH`
 at the binary's default, `direct`. `dispatch` is the mode to move to: it is
-what lets a shard restart without bouncing its uplinks, and what will let it
-share them with `galactic-gateway` once the gateway moves onto the dispatcher
-too.
+what lets a shard restart without bouncing its uplinks, and what lets it share
+them with `galactic-gateway`, which runs from the same dispatcher by default.
 
 That is the whole process configuration. The shard's identity — its SID,
 masquerade addresses and NAT64 prefix — is not process configuration: it
@@ -124,14 +123,18 @@ condition reads `False` with reason `UplinksMissing`, naming them, and the
 pod's `readiness` gRPC health service, which the readinessProbe checks,
 reports not serving. Liveness is unaffected, so the pod is not restarted.
 
-In dispatch and chain mode the shard attaches nothing of its own, so the
-uplinks are used for the forwarding sysctls and to check coverage. An uplink
+In dispatch mode the shard attaches nothing of its own, so the uplinks are
+used for the forwarding sysctls and to check coverage. An uplink
 whose traffic does not reach the shard's program is reported missing the
 same way.
 
 **`--nat-xdp-attach` / `GALACTIC_NAT_XDP_ATTACH`**
-How the datapath reaches its uplinks' XDP hook: `direct`, `dispatch` or
-`chain`. Any other value fails validation at startup.
+How the datapath reaches its uplinks' XDP hook: `direct` or `dispatch`. The
+retired `chain` is read as `dispatch`, with a warning. Any other value fails
+validation at startup. A node that ran `chain` upgrades the gateway and the
+shard together: a shard on this release cannot share an uplink with a gateway
+that still holds the hook directly, and reports those uplinks missing until
+the gateway joins the dispatcher.
 
 - **`direct`** (the binary's default) attaches `nat_ingress` to every
   resolved uplink in native driver mode, as described above. The attachment
@@ -148,9 +151,8 @@ How the datapath reaches its uplinks' XDP hook: `direct`, `dispatch` or
   uplink and runs `nat_ingress` from the dispatcher's egress slot. The
   dispatcher is one small root program, `xdp_dispatch`, that holds the hook
   for every datapath on the node and hands each packet to the slots its
-  interface's roles allow. Slots are reserved for the gateway's load balancer
-  and return program, ahead of the shard's, though the gateway does not use
-  the dispatcher yet. Its state is pinned under `/sys/fs/bpf/galactic-xdp`: the
+  interface's roles allow: the gateway's load balancer and return program,
+  then the shard. Its state is pinned under `/sys/fs/bpf/galactic-xdp`: the
   maps and root under `v1/`, one link per interface under `links/`.
 
   Because the links are pinned, the root stays attached when the shard's
@@ -173,29 +175,6 @@ How the datapath reaches its uplinks' XDP hook: `direct`, `dispatch` or
   `hack/xdp-dispatch-release.sh` detaches it. Run it before rolling back to
   an image that predates dispatch mode, which would otherwise fail to attach
   with `EBUSY`.
-- **`chain`** attaches nothing. An interface takes one native XDP program,
-  and on an edge node `galactic-gateway` already holds that hook on the
-  interfaces the shard needs (a direct attach there fails outright). The
-  gateway pins a one-slot program array, `xdp_chain`, at
-  `/sys/fs/bpf/galactic-edge/xdp_chain`, and both of its programs
-  (`edge_lb`, `edge_return`) tail-call into it with every packet they do not
-  claim — non-IPv6 frames included, so NAT64 replies reach the shard. The
-  shard installs `nat_ingress` in that slot (`natattach.AttachChain`). The
-  two datapaths claim disjoint traffic — a VIP destination or source for the
-  gateway, a shard SID or masquerade address for the shard — so the order
-  they run in changes no verdict.
-
-  At startup the shard waits for the map, retrying every 2s while it does
-  not exist (the startup probe bounds the wait), and reports healthy once its
-  program is in the slot. Any other install failure is fatal: the kernel
-  refuses a program whose type, JIT state, frags support or expected attach
-  type differ from the array owner's, with a bare `EINVAL`. After that it
-  re-checks the slot every 10s and re-installs its program if the slot no
-  longer holds it — a gateway restart normally reuses its pinned map, but one
-  that had to recreate the map empties the slot. The slot keeps the program
-  alive across a `galactic-nat` restart, and the next process replaces it in
-  place, so a shard restart leaves no gap in translation.
-
 **`--nat-datapath-enabled` / `GALACTIC_NAT_DATAPATH_ENABLED`**
 Whether the shard runs its datapath. On by default. Off, the process stays
 up and its pod ready, but it attaches nothing, empties its dispatcher slot if
@@ -233,9 +212,8 @@ It also needs a real bpffs already mounted at `/sys/fs/bpf` on the host
 (`type: Directory`, not `DirectoryOrCreate` — a missing mount must fail
 loudly, not silently pin maps to a plain directory). Every map is pinned
 under `/sys/fs/bpf/galactic-nat`. In dispatch mode it also pins the node's
-XDP dispatcher under `/sys/fs/bpf/galactic-xdp`, and in chain mode it opens
-the gateway's `/sys/fs/bpf/galactic-edge/xdp_chain`. The same `/sys/fs/bpf`
-mount covers both.
+XDP dispatcher under `/sys/fs/bpf/galactic-xdp`, which the same `/sys/fs/bpf`
+mount covers.
 
 ## `EgressShard` CRD (`network.datumapis.com/v1alpha1`)
 
@@ -571,7 +549,7 @@ kubectl exec -n galactic-system <galactic-nat-pod> -- \
 ```
 
 Confirm the eBPF program is attached (in dispatch mode, in the dispatcher's
-egress slot; in chain mode, in the gateway's `xdp_chain` slot) and
+egress slot) and
 translating. On the `EgressShard` object, `Ready` should read
 `DatapathAttached` and `Programmed` should read `AddressesProgrammed`. `Ready` reading `UplinksMissing` names the uplinks
 whose traffic the shard is not translating:
@@ -646,11 +624,6 @@ knowing before you rely on this component in production:
   allocates `spec.shardSID` or the masquerade addresses, and nothing checks
   that a chosen SID's Node-ID doesn't collide with a real node's own — see
   the "Node-ID collision hazard" callout above.
-- **A chained shard depends on the gateway on its node.** In chain mode
-  the shard sees only what `galactic-gateway`'s programs see, on exactly the
-  interfaces the gateway attaches to, and waits at startup for a map only
-  the gateway creates. With the gateway gone, the slot keeps the shard's
-  program alive but nothing calls it.
 - **One NIC receive queue on a `bnxt_en` uplink can stall.** The queue
   drops a steady share of its packets while the CPU sits idle, and every
   flow hashed to it fails on each retry: tenant egress times out per flow,
@@ -683,7 +656,7 @@ knowing before you rely on this component in production:
   `GALACTIC_ROUTER_*` environment variables a NAT66 shard node's
   co-located `galactic-router` process also needs.
 - [docs/agents/ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) —
-  the edge XDP programs the shard is chained behind.
+  the edge XDP programs that share the dispatcher with the shard.
 - [docs/cni/configuration.md](../cni/configuration.md) — the full
   `galactic-cni` conflist/runtime configuration surface
   `GALACTIC_CNI_EGRESS_SHARD_SIDS` is one part of.

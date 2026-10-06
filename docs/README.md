@@ -36,7 +36,7 @@ data flow, module reference, known constraints):
   deployment (node labeling, RBAC, per-node overlay), its config reference,
   and the `NetworkGateway`/`NetworkRule`/`ServiceVIPBinding` CRD fields.
 - [nat/configuration.md](nat/configuration.md) — `galactic-nat` placement
-  (edge nodes, chained behind the gateway's XDP programs), config
+  (edge nodes, sharing the uplinks' XDP hook with the gateway), config
   reference, the `EgressShard` CRD, and the `galactic-cni`-side shard
   membership settings that point tenant nodes at it.
 - [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs

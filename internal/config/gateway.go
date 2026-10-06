@@ -55,6 +55,32 @@ const (
 	// never a translation source and is never compared against anything on a
 	// receive path. Required.
 	EnvGatewaySRv6Address = "GALACTIC_GATEWAY_SRV6_ADDRESS"
+
+	// EnvGatewayXDPAttach selects how the datapath reaches its interfaces' XDP
+	// hook: GatewayXDPAttachDispatch, the default, or GatewayXDPAttachDirect.
+	//
+	// Dispatch runs edge_lb and edge_return from the gateway slots of the
+	// node's shared XDP dispatcher (xdpdispatch), whose attachments are pinned:
+	// a restart swaps the programs in place without detaching anything, and the
+	// egress shard can share the same uplinks. Direct attaches the programs
+	// themselves, unpinned, so they detach when the process exits; it releases
+	// an idle dispatcher first and refuses to start while another datapath's
+	// slot is live, since taking the hook would cut that datapath's traffic.
+	EnvGatewayXDPAttach = "GALACTIC_GATEWAY_XDP_ATTACH"
+
+	// EnvGatewayDatapathEnabled turns the gateway's datapath on or off.
+	// Optional, defaulting to true. Off, the process stays up and healthy but
+	// attaches nothing, empties its dispatcher slots, and withdraws this
+	// node's VIP advertisements, so no traffic is drawn to a node that will not
+	// load-balance it. Every other datapath on the node keeps running. The
+	// public interface and SRv6 address are not required while it is off.
+	EnvGatewayDatapathEnabled = "GALACTIC_GATEWAY_DATAPATH_ENABLED"
+)
+
+// EnvGatewayXDPAttach's values.
+const (
+	GatewayXDPAttachDispatch = "dispatch"
+	GatewayXDPAttachDirect   = "direct"
 )
 
 // --- GatewayConfig -----------------------------------------------------
@@ -81,6 +107,12 @@ type GatewayConfig struct {
 	// the comma-separated environment value. Empty is valid and means this node
 	// carries no return traffic -- see EnvGatewayInternalInterfaces.
 	InternalInterfaces []string
+
+	// XDPAttach is one of the GatewayXDPAttach values, from EnvGatewayXDPAttach.
+	XDPAttach string
+
+	// DatapathEnabled is EnvGatewayDatapathEnabled.
+	DatapathEnabled bool
 }
 
 // NewGatewayConfig creates a config resolver reading the GALACTIC_GATEWAY
@@ -96,6 +128,8 @@ func NewGatewayConfig() *GatewayConfig {
 	v.SetDefault(KeyGRPCHealthPort, DefaultGatewayGRPCHealthPort)
 	v.SetDefault("public_interface", "")
 	v.SetDefault("srv6_address", "")
+	v.SetDefault("xdp_attach", GatewayXDPAttachDispatch)
+	v.SetDefault("datapath_enabled", true)
 
 	cfg := &GatewayConfig{
 		v:      v,
@@ -118,13 +152,15 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gateway-public-interface", "public_interface"},
 		{"gateway-internal-interfaces", "internal_interfaces"},
 		{"gateway-srv6-address", "srv6_address"},
+		{"gateway-xdp-attach", "xdp_attach"},
+		{"gateway-datapath-enabled", "datapath_enabled"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
 			c.v.Set(b.key, flags.Lookup(b.flag).Value.String())
-		} else {
+		} else if f := flags.Lookup(b.flag); f != nil {
 			//nolint:errcheck // controlled keys, BindPFlag cannot fail here
-			c.v.BindPFlag(b.key, flags.Lookup(b.flag))
+			c.v.BindPFlag(b.key, f)
 		}
 	}
 	c.readFields()
@@ -138,6 +174,8 @@ func (c *GatewayConfig) readFields() {
 	c.PublicInterface = c.v.GetString("public_interface")
 	c.InternalInterfaces = splitCommaList(c.v.GetString("internal_interfaces"))
 	c.SRv6Address = c.v.GetString("srv6_address")
+	c.XDPAttach = c.v.GetString("xdp_attach")
+	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
 }
 
 // splitCommaList parses a comma-separated list, such as interface names or BMP
@@ -158,6 +196,21 @@ func (c *GatewayConfig) Validate() error {
 	if c.NodeName == "" {
 		return fmt.Errorf("node name is required (use --node-name flag or %s env var)", EnvGatewayNodeName)
 	}
+	switch c.XDPAttach {
+	case GatewayXDPAttachDispatch, GatewayXDPAttachDirect:
+	default:
+		return fmt.Errorf("%s must be %q or %q, got %q", EnvGatewayXDPAttach,
+			GatewayXDPAttachDispatch, GatewayXDPAttachDirect, c.XDPAttach)
+	}
+	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
+		return errors.New(errMetricsPortRange)
+	}
+	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
+		return errors.New("grpc health port must be between 1 and 65535")
+	}
+	if !c.DatapathEnabled {
+		return nil
+	}
 	if c.PublicInterface == "" {
 		return fmt.Errorf(
 			"public interface is required (use --gateway-public-interface flag or %s env var)",
@@ -176,12 +229,6 @@ func (c *GatewayConfig) Validate() error {
 	// problem instead of surfacing as a deeper kernel-datapath error.
 	if !addr.Is6() || addr.Is4In6() {
 		return fmt.Errorf("SRv6 address %q must be a native IPv6 address, not IPv4", c.SRv6Address)
-	}
-	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
-		return errors.New(errMetricsPortRange)
-	}
-	if c.GRPCHealthPort < 1 || c.GRPCHealthPort > 65535 {
-		return errors.New("grpc health port must be between 1 and 65535")
 	}
 	return nil
 }

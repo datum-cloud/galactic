@@ -735,3 +735,69 @@ func TestPrefixesByFamily(t *testing.T) {
 		t.Errorf("v6 = %v", v6)
 	}
 }
+
+// TestNetworkGatewayReconciler_DisabledWithdrawsAndSkipsTheEngine: a node with
+// its datapath turned off withdraws its own VIP advertisements, leaves another
+// node's alone, never drives the engine, and says why on Ready.
+func TestNetworkGatewayReconciler_DisabledWithdrawsAndSkipsTheEngine(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	gwA := newTestGateway(testNodeGWA)
+	own := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v6")
+	other := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v6")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithObjects(gwA, own, other).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	r.Disabled = true
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	if engine.reconciled != 0 {
+		t.Errorf("engine reconciled %d times while disabled, want 0", engine.reconciled)
+	}
+	ctx := context.Background()
+	if err := fakeClient.Get(ctx, testRuleKey(own.Name), &bgpv1alpha1.BGPAdvertisement{}); !apierrors.IsNotFound(err) {
+		t.Errorf("own advertisement %s still exists (err=%v), want withdrawn", own.Name, err)
+	}
+	if err := fakeClient.Get(ctx, testRuleKey(other.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("another node's advertisement %s was touched: %v", other.Name, err)
+	}
+	cond := gatewayReadyCondition(t, fakeClient)
+	if cond.Status != metav1.ConditionFalse || cond.Reason != reasonDatapathDisabled {
+		t.Errorf("Ready = %v/%q, want False/%q", cond.Status, cond.Reason, reasonDatapathDisabled)
+	}
+}
+
+// TestIsNodeAdvertisement_LabelledNamesMatchExactly: a disabled node "edge1"
+// withdraws its own advertisements on every reconcile, so it must never match
+// a labelled advertisement of node "pop-edge1", or the two would fight.
+func TestIsNodeAdvertisement_LabelledNamesMatchExactly(t *testing.T) {
+	labelled := func(name, rule string) *bgpv1alpha1.BGPAdvertisement {
+		adv := newAdvertisement(name)
+		adv.Labels = map[string]string{networkRuleLabel: rule}
+		return adv
+	}
+	tests := []struct {
+		name string
+		adv  *bgpv1alpha1.BGPAdvertisement
+		want bool
+	}{
+		{"own labelled v4", labelled("rulex-edge1-v4", "rulex"), true},
+		{"own labelled v6", labelled("rulex-edge1-v6", "rulex"), true},
+		{"other node sharing the suffix", labelled("rulex-pop-edge1-v4", "rulex"), false},
+		{"unlabelled legacy name", newAdvertisement("rulex-edge1-v6"), true},
+		{"unrelated", labelled("rulex-edge2-v4", "rulex"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNodeAdvertisement(tt.adv, "edge1"); got != tt.want {
+				t.Errorf("isNodeAdvertisement(%s, edge1) = %v, want %v", tt.adv.Name, got, tt.want)
+			}
+		})
+	}
+}

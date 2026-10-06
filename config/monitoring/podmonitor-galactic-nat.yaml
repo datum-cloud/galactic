@@ -1,8 +1,8 @@
 # Scrapes each egress shard's galactic-nat metrics port (metrics, 9182), which
 # serves the session table, the NAT datapath's drop counters and the uplinks'
 # per-queue NIC receive counters. The pod uses hostNetwork, so its pod IP is
-# the node's own. The chained overlay keeps the same pod labels, so this
-# covers shards in either XDP attach mode.
+# the node's own. The pod labels do not depend on the XDP attach mode, so
+# this covers shards in either.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
