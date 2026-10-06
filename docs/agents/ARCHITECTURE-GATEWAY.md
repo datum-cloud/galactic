@@ -462,7 +462,13 @@ pre-existing containerlab veth/XDP_TX blocker — the sysctl gap, not
 [Known Constraints](#known-constraints) below for the related, lab-only
 `XDP_TX` observability quirk this investigation also turned up, and for
 why the sysctl targets the resolved bond slave rather than
-`PublicInterface` itself when the two differ). It then loads
+`PublicInterface` itself when the two differ). The helper reads each sysctl
+back and returns an error unless it reads `1`, which fails startup: before
+#586 it logged the write failure and returned `nil`, so a pod with a
+read-only `/proc/sys` ran a datapath that dropped every packet. The DaemonSet
+mounts the host's `/proc/sys/net` at `/host/proc/sys/net` and points
+`GALACTIC_GATEWAY_PROC_SYS_PATH` at `/host/proc/sys` so the write can succeed
+without `privileged`. It then loads
 `edgeprog.EdgedsrObjects` (`edgeattach.Load`), attaches it to every
 resolved target (`edgeattach.Attach` — native XDP driver mode only, no
 generic/SKB-mode fallback, one `link.Link` per target), and constructs a

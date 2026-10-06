@@ -42,6 +42,27 @@ func ConfigureInterfaceSysctls(iface string) error {
 	return nil
 }
 
+// procSysPath is the procfs root the FIB-lookup helpers read and write their
+// sysctls under. See SetProcSysPath.
+var procSysPath = gosysctl.DefaultPath
+
+// SetProcSysPath points ConfigureFIBLookupUplinkSysctls and
+// ConfigureFIBLookupUplinkSysctlsIPv4 at a procfs root other than /proc/sys.
+//
+// An unprivileged container gets /proc/sys read-only, so a host-network pod
+// that must change the host's forwarding sysctls mounts the host's
+// /proc/sys/net somewhere writable, such as /host/proc/sys/net, and passes the
+// parent here. A net sysctl acts on the network namespace of the process that
+// opens it, not the mount, so a host-network pod reaches the host's settings.
+// The other helpers here are unaffected.
+func SetProcSysPath(path string) error {
+	if _, err := gosysctl.NewClient(path); err != nil {
+		return fmt.Errorf("use %s as the procfs sysctl root: %w", path, err)
+	}
+	procSysPath = path
+	return nil
+}
+
 // ConfigureFIBLookupUplinkSysctls enables IPv6 forwarding on iface, a gateway
 // or egress shard node's fabric-facing uplink, and alongside it the
 // all-interfaces forwarding sysctl.
@@ -58,18 +79,15 @@ func ConfigureInterfaceSysctls(iface string) error {
 // all-interfaces one would affect every interface on the node rather than the
 // uplink.
 //
-// A sysctl that does not exist is skipped silently, as elsewhere here.
+// It returns an error when either sysctl does not read 1 afterwards, since a
+// datapath attached there would drop every packet. A write that fails is not
+// an error on its own: a node whose forwarding something else already enabled
+// passes even where /proc/sys is read-only.
 func ConfigureFIBLookupUplinkSysctls(iface string) error {
-	settings := []struct{ key, value string }{
+	return setForwarding([]struct{ key, value string }{
 		{fmt.Sprintf("net.ipv6.conf.%s.forwarding", iface), "1"},
 		{"net.ipv6.conf.all.forwarding", "1"},
-	}
-	for _, s := range settings {
-		if err := gosysctl.Set(s.key, s.value); err != nil {
-			logger.Warn("failed to set sysctl (non-fatal)", "sysctl", s.key, "err", err)
-		}
-	}
-	return nil
+	})
 }
 
 // ConfigureFIBLookupUplinkSysctlsIPv4 enables IPv4 forwarding on iface, the
@@ -81,16 +99,36 @@ func ConfigureFIBLookupUplinkSysctls(iface string) error {
 // packet dies at its last instruction, counted under a fib_* reason, so the
 // shard reads as healthy while no IPv4 traffic ever leaves it.
 //
-// A sysctl that does not exist is skipped silently, as elsewhere here.
+// It returns an error on the same terms as ConfigureFIBLookupUplinkSysctls.
 func ConfigureFIBLookupUplinkSysctlsIPv4(iface string) error {
-	settings := []struct{ key, value string }{
+	return setForwarding([]struct{ key, value string }{
 		{fmt.Sprintf("net.ipv4.conf.%s.forwarding", iface), "1"},
 		{"net.ipv4.conf.all.forwarding", "1"},
 		{"net.ipv4.ip_forward", "1"},
+	})
+}
+
+// setForwarding writes each setting under procSysPath and reads it back,
+// returning an error for the first one that does not hold its value.
+func setForwarding(settings []struct{ key, value string }) error {
+	client, err := gosysctl.NewClient(procSysPath)
+	if err != nil {
+		return fmt.Errorf("open procfs sysctl root %s: %w", procSysPath, err)
 	}
 	for _, s := range settings {
-		if err := gosysctl.Set(s.key, s.value); err != nil {
-			logger.Warn("failed to set sysctl (non-fatal)", "sysctl", s.key, "err", err)
+		setErr := client.Set(s.key, s.value)
+		got, getErr := client.Get(s.key)
+		switch {
+		case getErr == nil && got == s.value:
+			if setErr != nil {
+				logger.Debug("sysctl already set; write failed", "sysctl", s.key, "err", setErr)
+			}
+		case setErr != nil:
+			return fmt.Errorf("set sysctl %s to %s: %w", s.key, s.value, setErr)
+		case getErr != nil:
+			return fmt.Errorf("read back sysctl %s: %w", s.key, getErr)
+		default:
+			return fmt.Errorf("sysctl %s reads %s after setting it to %s", s.key, got, s.value)
 		}
 	}
 	return nil

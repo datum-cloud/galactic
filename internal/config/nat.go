@@ -90,6 +90,13 @@ const (
 	// are rate-limited in the datapath by a token bucket per CPU, shared with
 	// any other ICMP the shard emits on its own behalf.
 	EnvNATEchoResponder = "GALACTIC_NAT_ECHO_RESPONDER"
+
+	// EnvNATProcSysPath is the procfs sysctl root the datapath writes its
+	// uplinks' forwarding sysctls under. Optional, defaulting to
+	// DefaultProcSysPath. An unprivileged pod gets /proc/sys read-only, so the
+	// DaemonSet mounts the host's /proc/sys/net at /host/proc/sys/net and sets
+	// this to /host/proc/sys.
+	EnvNATProcSysPath = "GALACTIC_NAT_PROC_SYS_PATH"
 )
 
 // EnvNATXDPAttach's values. NATXDPAttachChain is deprecated and read as
@@ -132,6 +139,9 @@ type NATConfig struct {
 
 	// EchoResponder is EnvNATEchoResponder.
 	EchoResponder bool
+
+	// ProcSysPath is EnvNATProcSysPath.
+	ProcSysPath string
 }
 
 // NewNATConfig creates a config resolver reading the GALACTIC_NAT
@@ -149,6 +159,7 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault("xdp_attach", NATXDPAttachDirect)
 	v.SetDefault("datapath_enabled", true)
 	v.SetDefault("echo_responder", false)
+	v.SetDefault("proc_sys_path", DefaultProcSysPath)
 
 	cfg := &NATConfig{
 		v:      v,
@@ -172,6 +183,7 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{"nat-xdp-attach", "xdp_attach"},
 		{"nat-datapath-enabled", "datapath_enabled"},
 		{"nat-echo-responder", "echo_responder"},
+		{"nat-proc-sys-path", "proc_sys_path"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -197,6 +209,7 @@ func (c *NATConfig) readFields() {
 	}
 	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
 	c.EchoResponder = c.v.GetBool("echo_responder")
+	c.ProcSysPath = c.v.GetString("proc_sys_path")
 }
 
 // Validate checks that the required configuration fields are set.

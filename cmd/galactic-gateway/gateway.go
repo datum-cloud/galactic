@@ -114,8 +114,9 @@ func setupGatewayDatapath(
 	// ingress interface, meaning whichever resolved target the packet
 	// arrived on, so this must be applied to every one of them: once the
 	// named interface is a bond, its slaves rather than the master are
-	// what the kernel reports as ingress. Best-effort and non-fatal,
-	// matching how sysctls are configured elsewhere here.
+	// what the kernel reports as ingress. A target left without forwarding
+	// fails startup: the datapath would drop every packet arriving there
+	// while the process reported healthy.
 	for _, target := range targets {
 		if err := sysctl.ConfigureFIBLookupUplinkSysctls(target); err != nil {
 			return nil, fmt.Errorf("configure IPv6 forwarding on public interface %q: %w", target, err)

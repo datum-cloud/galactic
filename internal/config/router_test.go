@@ -18,6 +18,8 @@ const (
 	// from RouterConfig by the galactic-gateway split.
 	testGatewayIface = "eth0"
 	testGatewaySRv6  = "2001:db8:3::1"
+	// testHostProcSys is the procfs root the gateway and NAT DaemonSets set.
+	testHostProcSys = "/host/proc/sys"
 )
 
 func TestRouterConfigDefaults(t *testing.T) {

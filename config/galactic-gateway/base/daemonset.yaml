@@ -86,6 +86,14 @@ spec:
                   fieldPath: spec.nodeName
             - name: GALACTIC_GATEWAY_GRPC_HEALTH_PORT
               value: "5181"
+            # An unprivileged container gets /proc/sys read-only, so the
+            # forwarding sysctls the datapath's FIB lookup needs are written
+            # through the host's /proc/sys/net, mounted below. hostNetwork
+            # makes those writes land in the node's own network namespace.
+            # A sysctl that still does not read 1 fails startup rather than
+            # leaving a datapath that drops every packet (#586).
+            - name: GALACTIC_GATEWAY_PROC_SYS_PATH
+              value: /host/proc/sys
             # GALACTIC_GATEWAY_INTERNAL_INTERFACES is also left unset,
             # for the same deployment-specific reason. It names the
             # compute-facing interfaces, comma-separated, whose
@@ -187,8 +195,17 @@ spec:
             # container on first pin.
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+            # The host's net sysctls, writable, for the forwarding settings
+            # galactic-gateway sets. Only net.*: the rest of /proc/sys stays
+            # read-only.
+            - name: host-proc-sys-net
+              mountPath: /host/proc/sys/net
       volumes:
         - name: bpf-fs
           hostPath:
             path: /sys/fs/bpf
+            type: Directory
+        - name: host-proc-sys-net
+          hostPath:
+            path: /proc/sys/net
             type: Directory
