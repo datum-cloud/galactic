@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	serviceRouteMapName   = "service_route_table"
-	serviceAccessMapName  = "service_access_table"
-	serviceReverseMapName = "service_reverse_table"
+	serviceRouteMapName       = "service_route_table"
+	serviceAccessMapName      = "service_access_table"
+	serviceReverseMapName     = "service_reverse_table"
+	serviceRemoteGrantMapName = "service_remote_grant_table"
 
 	familyIPv6 = uint8(0)
 	familyIPv4 = uint8(1)
@@ -35,12 +36,22 @@ const (
 
 type serviceRouteValue struct {
 	TargetIfindex uint32
+	Mode          uint8
+	Pad           [3]uint8
+	GrantID       [16]uint8
+	TargetSID     [16]uint8
 }
+
+const (
+	routeModeLocal  = uint8(1)
+	routeModeRemote = uint8(2)
+)
 
 type serviceRouteKey struct {
 	IngressIfindex uint32
 	Family         uint8
-	Pad            [3]uint8
+	Protocol       uint8
+	Port           uint16
 	Address        [16]uint8
 }
 
@@ -65,15 +76,32 @@ type serviceReverseKey struct {
 
 type serviceReverseValue struct {
 	ConsumerIfindex uint32
-	Pad             uint32
+	Mode            uint8
+	Pad             [3]uint8
+	GrantID         [16]uint8
+	ReturnSID       [16]uint8
 	LastSeenNS      uint64
+}
+
+type serviceRemoteGrantKey struct {
+	ProducerIfindex uint32
+	Family          uint8
+	Protocol        uint8
+	Port            uint16
+	GrantID         [16]uint8
+	Address         [16]uint8
+}
+
+type serviceRemoteGrantValue struct {
+	ConsumerSID [16]uint8
 }
 
 // Tables owns the route and access maps used by the service datapath.
 type Tables struct {
-	routes  usidmap.Table
-	access  usidmap.Table
-	reverse usidmap.Table
+	routes       usidmap.Table
+	access       usidmap.Table
+	reverse      usidmap.Table
+	remoteGrants usidmap.Table
 }
 
 // OpenPinned opens both service maps under pinDir. The caller owns the
@@ -94,13 +122,24 @@ func OpenPinned(pinDir string) (*Tables, []*ebpf.Map, error) {
 		_ = access.Close()
 		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", serviceReverseMapName, err)
 	}
-	return New(usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access}, usidmap.KernelTable{Map: reverse}),
-		[]*ebpf.Map{routes, access, reverse}, nil
+	remoteGrants, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, serviceRemoteGrantMapName), nil)
+	if err != nil {
+		_ = routes.Close()
+		_ = access.Close()
+		_ = reverse.Close()
+		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", serviceRemoteGrantMapName, err)
+	}
+	return New(usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access}, usidmap.KernelTable{Map: reverse}, usidmap.KernelTable{Map: remoteGrants}),
+		[]*ebpf.Map{routes, access, reverse, remoteGrants}, nil
 }
 
 // New wraps map implementations. Production uses OpenPinned; tests use fakes.
-func New(routes, access, reverse usidmap.Table) *Tables {
-	return &Tables{routes: routes, access: access, reverse: reverse}
+func New(routes, access, reverse usidmap.Table, remoteGrants ...usidmap.Table) *Tables {
+	t := &Tables{routes: routes, access: access, reverse: reverse}
+	if len(remoteGrants) != 0 {
+		t.remoteGrants = remoteGrants[0]
+	}
+	return t
 }
 
 // Clear removes all service-owned state. Galactic calls this once when it
@@ -141,6 +180,19 @@ func (t *Tables) Clear() error {
 		return fmt.Errorf("serviceroutemap: iterate reverse flows: %w", err)
 	}
 
+	var remoteGrantKeys []serviceRemoteGrantKey
+	if t.remoteGrants != nil {
+		iterator := t.remoteGrants.Iterate()
+		var key serviceRemoteGrantKey
+		var value serviceRemoteGrantValue
+		for iterator.Next(&key, &value) {
+			remoteGrantKeys = append(remoteGrantKeys, key)
+		}
+		if err := iterator.Err(); err != nil {
+			return fmt.Errorf("serviceroutemap: iterate remote grants: %w", err)
+		}
+	}
+
 	for _, key := range routeKeys {
 		if err := t.routes.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return fmt.Errorf("serviceroutemap: clear route: %w", err)
@@ -156,6 +208,11 @@ func (t *Tables) Clear() error {
 			return fmt.Errorf("serviceroutemap: clear reverse flow: %w", err)
 		}
 	}
+	for _, key := range remoteGrantKeys {
+		if err := t.remoteGrants.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("serviceroutemap: clear remote grant: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -163,14 +220,17 @@ func (t *Tables) Clear() error {
 func (t *Tables) RegisterRoute(
 	ingressIfindex uint32,
 	address net.IP,
+	protocol uint8,
+	port uint16,
 	targetIfindex uint32,
 ) error {
-	key, err := routeKey(ingressIfindex, address)
+	key, err := routeKey(ingressIfindex, address, protocol, port)
 	if err != nil {
 		return err
 	}
 	value := serviceRouteValue{
 		TargetIfindex: targetIfindex,
+		Mode:          routeModeLocal,
 	}
 	if err := t.routes.Put(key, value); err != nil {
 		return fmt.Errorf("serviceroutemap: register route ifindex=%d address=%s: %w", ingressIfindex, address, err)
@@ -178,9 +238,61 @@ func (t *Tables) RegisterRoute(
 	return nil
 }
 
+// RegisterRemoteRoute installs an authenticated service tunnel target while
+// keeping the original inner source address intact.
+func (t *Tables) RegisterRemoteRoute(ingressIfindex uint32, address net.IP, grantID [16]byte,
+	protocol uint8, port uint16, targetSID net.IP) error {
+	key, err := routeKey(ingressIfindex, address, protocol, port)
+	if err != nil {
+		return err
+	}
+	sid := targetSID.To16()
+	if sid == nil || targetSID.To4() != nil {
+		return fmt.Errorf("serviceroutemap: target SID %q is not IPv6", targetSID)
+	}
+	value := serviceRouteValue{Mode: routeModeRemote, GrantID: grantID}
+	copy(value.TargetSID[:], sid)
+	if err := t.routes.Put(key, value); err != nil {
+		return fmt.Errorf("serviceroutemap: register remote route: %w", err)
+	}
+	return nil
+}
+
+func (t *Tables) RegisterRemoteGrant(producerIfindex uint32, address net.IP, protocol uint8, port uint16,
+	grantID [16]byte, consumerSID net.IP) error {
+	if t.remoteGrants == nil {
+		return errors.New("serviceroutemap: remote grant table unavailable")
+	}
+	key, err := remoteGrantKey(producerIfindex, address, protocol, port, grantID)
+	if err != nil {
+		return err
+	}
+	sid := consumerSID.To16()
+	if sid == nil || consumerSID.To4() != nil {
+		return fmt.Errorf("serviceroutemap: consumer SID %q is not IPv6", consumerSID)
+	}
+	value := serviceRemoteGrantValue{}
+	copy(value.ConsumerSID[:], sid)
+	if err := t.remoteGrants.Put(key, value); err != nil {
+		return fmt.Errorf("serviceroutemap: register remote grant: %w", err)
+	}
+	return nil
+}
+
+func (t *Tables) UnregisterRemoteGrant(producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte) error {
+	key, err := remoteGrantKey(producerIfindex, address, protocol, port, grantID)
+	if err != nil {
+		return err
+	}
+	if err := t.remoteGrants.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("serviceroutemap: unregister remote grant: %w", err)
+	}
+	return nil
+}
+
 // UnregisterRoute removes a service forwarding entry if it exists.
-func (t *Tables) UnregisterRoute(ingressIfindex uint32, address net.IP) error {
-	key, err := routeKey(ingressIfindex, address)
+func (t *Tables) UnregisterRoute(ingressIfindex uint32, address net.IP, protocol uint8, port uint16) error {
+	key, err := routeKey(ingressIfindex, address, protocol, port)
 	if err != nil {
 		return err
 	}
@@ -216,8 +328,8 @@ func (t *Tables) UnregisterAccess(ingressIfindex uint32, address net.IP, protoco
 	return nil
 }
 
-func routeKey(ingressIfindex uint32, address net.IP) (serviceRouteKey, error) {
-	key := serviceRouteKey{IngressIfindex: ingressIfindex}
+func routeKey(ingressIfindex uint32, address net.IP, protocol uint8, port uint16) (serviceRouteKey, error) {
+	key := serviceRouteKey{IngressIfindex: ingressIfindex, Protocol: protocol, Port: bits.ReverseBytes16(port)}
 	if ipv4 := address.To4(); ipv4 != nil {
 		key.Family = familyIPv4
 		copy(key.Address[:4], ipv4)
@@ -242,6 +354,22 @@ func accessKey(ingressIfindex uint32, address net.IP, protocol uint8, port uint1
 	ipv6 := address.To16()
 	if ipv6 == nil {
 		return serviceAccessKey{}, fmt.Errorf("serviceroutemap: address %q is not an IP address", address)
+	}
+	key.Family = familyIPv6
+	copy(key.Address[:], ipv6)
+	return key, nil
+}
+
+func remoteGrantKey(producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte) (serviceRemoteGrantKey, error) {
+	key := serviceRemoteGrantKey{ProducerIfindex: producerIfindex, Protocol: protocol, Port: bits.ReverseBytes16(port), GrantID: grantID}
+	if ipv4 := address.To4(); ipv4 != nil {
+		key.Family = familyIPv4
+		copy(key.Address[:4], ipv4)
+		return key, nil
+	}
+	ipv6 := address.To16()
+	if ipv6 == nil {
+		return serviceRemoteGrantKey{}, fmt.Errorf("serviceroutemap: address %q is not an IP address", address)
 	}
 	key.Family = familyIPv6
 	copy(key.Address[:], ipv6)

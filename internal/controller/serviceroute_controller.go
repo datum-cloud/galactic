@@ -8,8 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"sync"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -21,6 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/serviceroute"
 	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -31,13 +36,16 @@ import (
 // resources or Linux routes.
 type ServiceRoutePolicyReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	NodeName   string
-	Programmer serviceroute.RouteProgrammer
+	Scheme       *runtime.Scheme
+	NodeName     string
+	BGPNamespace string
+	Programmer   serviceroute.RouteProgrammer
 
 	mu      sync.Mutex
 	Applied map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent
 }
+
+const serviceRouteMapResyncInterval = 30 * time.Second
 
 // Reconcile resolves one policy and replaces the local routes previously
 // programmed for that policy.
@@ -64,24 +72,48 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.List(ctx, attachments); err != nil {
 		return ctrl.Result{}, fmt.Errorf("list VPCAttachments: %w", err)
 	}
-	local := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments.Items))
+	all := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments.Items))
 	for i := range attachments.Items {
-		if attachments.Items[i].Status.Node == r.NodeName {
-			local = append(local, &attachments.Items[i])
-		}
+		all = append(all, &attachments.Items[i])
 	}
-	intents, err := serviceroute.Compile(policy, endpoint, local, r.NodeName)
+	intents, err := serviceroute.Compile(policy, endpoint, all, r.NodeName, r.sidResolver(ctx))
 	if err != nil {
+		var dependencyErr *serviceroute.DependencyNotReadyError
+		if errors.As(err, &dependencyErr) {
+			// Accepted describes the shared policy contract. SID readiness is a
+			// node-local dependency, so publishing Invalid here would race with
+			// uninvolved nodes that correctly compile no local intents. Revoke
+			// this node's stale state and return the error for controller-runtime
+			// to retry while leaving the policy accepted cluster-wide.
+			return ctrl.Result{}, errors.Join(
+				err,
+				r.removePolicy(req.NamespacedName),
+				r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"),
+			)
+		}
 		return ctrl.Result{}, errors.Join(
 			err,
 			r.removePolicy(req.NamespacedName),
 			r.setAccepted(ctx, policy, metav1.ConditionFalse, "Invalid", err.Error()),
 		)
 	}
+	if len(intents) != 0 {
+		// The datapath loader may replace an incompatible pinned map while this
+		// controller process stays alive. Initialize detects the map identity
+		// change and reconstructs all desired state before an unchanged intent
+		// is otherwise skipped by replacePolicy.
+		if err := r.Programmer.Initialize(); err != nil {
+			return ctrl.Result{}, fmt.Errorf("refresh service route maps: %w", err)
+		}
+	}
 	if err := r.replacePolicy(req.NamespacedName, intents); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid")
+	result := ctrl.Result{}
+	if len(intents) != 0 {
+		result.RequeueAfter = serviceRouteMapResyncInterval
+	}
+	return result, r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid")
 }
 
 func (r *ServiceRoutePolicyReconciler) setAccepted(
@@ -116,6 +148,8 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&networkv1alpha1.ServiceRoutePolicy{}).
 		Watches(&networkv1alpha1.ServiceEndpoint{}, handler.EnqueueRequestsFromMapFunc(r.endpointPolicies)).
 		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(r.attachmentPolicies)).
+		Watches(&networkv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
+		Watches(&networkv1alpha1.BGPVRFInstance{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
 		Complete(r)
 }
 
@@ -125,6 +159,57 @@ func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj
 
 func (r *ServiceRoutePolicyReconciler) attachmentPolicies(ctx context.Context, _ client.Object) []ctrl.Request {
 	return r.allPolicies(ctx)
+}
+
+func (r *ServiceRoutePolicyReconciler) routingDependencyPolicies(ctx context.Context, _ client.Object) []ctrl.Request {
+	return r.allPolicies(ctx)
+}
+
+// sidResolver derives an attachment's End.DT46 SID from the same BGPRouter and
+// BGPVRFInstance identities the CNI publish path used. It deliberately does not
+// resolve by address containment: a guest-managed attachment may advertise no
+// prefix, and tenant address spaces may overlap.
+func (r *ServiceRoutePolicyReconciler) sidResolver(ctx context.Context) serviceroute.SIDResolver {
+	cache := make(map[string]net.IP)
+	return func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
+		identity := attachment.Status.VPC + "|" + attachment.Status.Node
+		if sid, ok := cache[identity]; ok {
+			return append(net.IP(nil), sid...), nil
+		}
+		namespace := r.BGPNamespace
+		if namespace == "" {
+			namespace = config.DefaultNamespace
+		}
+		vrf := &networkv1alpha1.BGPVRFInstance{}
+		vrfKey := types.NamespacedName{
+			Namespace: namespace,
+			Name:      crdnames.BGPVRFInstanceName(attachment.Status.VPC, attachment.Status.Node),
+		}
+		if err := r.Get(ctx, vrfKey, vrf); err != nil {
+			return nil, fmt.Errorf("get BGPVRFInstance %s: %w", vrfKey, err)
+		}
+		if vrf.Spec.RouterRef == nil || vrf.Spec.RouterRef.Name == "" {
+			return nil, fmt.Errorf("BGPVRFInstance %s does not have an explicit routerRef", vrfKey)
+		}
+		routerKey := types.NamespacedName{Namespace: namespace, Name: vrf.Spec.RouterRef.Name}
+		router := &networkv1alpha1.BGPRouter{}
+		if err := r.Get(ctx, routerKey, router); err != nil {
+			return nil, fmt.Errorf("get BGPRouter %s: %w", routerKey, err)
+		}
+		if router.Spec.TargetRef.Name != attachment.Status.Node {
+			return nil, fmt.Errorf("BGPRouter %s targets node %q, not attachment node %q",
+				routerKey, router.Spec.TargetRef.Name, attachment.Status.Node)
+		}
+		sid, err := srv6.ComputeSID(router.Spec.SRv6Locator, router.Spec.NodeID, vrf.Spec.VRFID,
+			networkv1alpha1.SRv6FunctionEndDT46)
+		if err != nil {
+			return nil, fmt.Errorf("compute attachment SID from BGPRouter %s and BGPVRFInstance %s: %w",
+				routerKey, vrfKey, err)
+		}
+		resolved := net.IP(sid.AsSlice())
+		cache[identity] = append(net.IP(nil), resolved...)
+		return resolved, nil
+	}
 }
 
 func (r *ServiceRoutePolicyReconciler) policiesForEndpoint(ctx context.Context, namespace, name string) []ctrl.Request {

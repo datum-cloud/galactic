@@ -26,6 +26,11 @@ type routeRef struct {
 	ingressIfindex uint32
 	address        string
 	targetIfindex  uint32
+	mode           RouteIntentKind
+	protocol       uint8
+	port           uint16
+	grantID        ServiceGrantID
+	targetSID      [16]byte
 }
 
 type accessRef struct {
@@ -38,6 +43,16 @@ type accessRef struct {
 type appliedEntry struct {
 	route  *routeRef
 	access *accessRef
+	grant  *grantRef
+}
+
+type grantRef struct {
+	producerIfindex uint32
+	address         string
+	protocol        uint8
+	port            uint16
+	grantID         ServiceGrantID
+	consumerSID     [16]byte
 }
 
 type routeState struct {
@@ -57,6 +72,7 @@ type EBPFRouteProgrammer struct {
 	routeMapID       ebpf.MapID
 	routeRefs        map[string]routeState
 	accessRefs       map[accessRef]int
+	grantRefs        map[grantRef]int
 	appliedRefs      map[string][][]appliedEntry
 	desiredRefs      map[string][][]appliedEntry
 	pendingRollbacks map[string][]appliedEntry
@@ -178,6 +194,7 @@ func (p *EBPFRouteProgrammer) ensureOpen() error {
 	}
 	p.routeRefs = make(map[string]routeState)
 	p.accessRefs = make(map[accessRef]int)
+	p.grantRefs = make(map[grantRef]int)
 	p.appliedRefs = make(map[string][][]appliedEntry)
 	p.pendingRollbacks = make(map[string][]appliedEntry)
 	if desired == nil {
@@ -257,17 +274,50 @@ func (p *EBPFRouteProgrammer) retryRollback(key string) error {
 }
 
 func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error) {
+	serviceIP := intent.Service.IP
+	entries := make([]appliedEntry, 0, len(intent.Ports)+2)
+	if intent.Kind == RouteIntentRemoteProducer {
+		serviceIfindex, err := p.target(intent.ServiceDevice)
+		if err != nil {
+			return nil, fmt.Errorf("resolve service interface %q: %w", intent.ServiceDevice, err)
+		}
+		consumerSID, err := ipv6Bytes(intent.ConsumerSID)
+		if err != nil {
+			return nil, err
+		}
+		for _, port := range intent.Ports {
+			protocol, err := protocolNumber(port.Protocol)
+			if err != nil {
+				return nil, err
+			}
+			ref := grantRef{producerIfindex: serviceIfindex, address: serviceIP.String(), protocol: protocol,
+				port: uint16(port.Port), grantID: intent.GrantID, consumerSID: consumerSID}
+			entries = append(entries, appliedEntry{grant: &ref})
+		}
+		return entries, nil
+	}
 	consumerIfindex, err := p.target(intent.ConsumerDevice)
 	if err != nil {
 		return nil, fmt.Errorf("resolve consumer interface %q: %w", intent.ConsumerDevice, err)
 	}
-	serviceIfindex, err := p.target(intent.ServiceDevice)
-	if err != nil {
-		return nil, fmt.Errorf("resolve service interface %q: %w", intent.ServiceDevice, err)
+	// A protocol/port-zero marker makes malformed or non-TCP/UDP traffic to a
+	// configured service fail closed without conflating distinct real tuples.
+	entries = append(entries, appliedEntry{access: &accessRef{
+		ingressIfindex: consumerIfindex, address: serviceIP.String(),
+	}})
+	var targetIfindex uint32
+	var targetSID [16]byte
+	if intent.Kind == RouteIntentRemoteConsumer {
+		targetSID, err = ipv6Bytes(intent.ServiceSID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		targetIfindex, err = p.target(intent.ServiceDevice)
+		if err != nil {
+			return nil, fmt.Errorf("resolve service interface %q: %w", intent.ServiceDevice, err)
+		}
 	}
-
-	serviceIP := intent.Service.IP
-	entries := make([]appliedEntry, 0, len(intent.Ports)+2)
 	for _, port := range intent.Ports {
 		protocol, err := protocolNumber(port.Protocol)
 		if err != nil {
@@ -276,11 +326,21 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 		entries = append(entries, appliedEntry{access: &accessRef{
 			ingressIfindex: consumerIfindex, address: serviceIP.String(), protocol: protocol, port: uint16(port.Port),
 		}})
+		ref := routeRef{ingressIfindex: consumerIfindex, address: serviceIP.String(), mode: intent.Kind,
+			protocol: protocol, port: uint16(port.Port), grantID: intent.GrantID,
+			targetIfindex: targetIfindex, targetSID: targetSID}
+		entries = append(entries, appliedEntry{route: &ref})
 	}
-	entries = append(entries, appliedEntry{route: &routeRef{
-		ingressIfindex: consumerIfindex, address: serviceIP.String(), targetIfindex: serviceIfindex,
-	}})
 	return entries, nil
+}
+
+func ipv6Bytes(ip net.IP) ([16]byte, error) {
+	var out [16]byte
+	if ip == nil || ip.To4() != nil || ip.To16() == nil {
+		return out, fmt.Errorf("service route SID %q is not IPv6", ip)
+	}
+	copy(out[:], ip.To16())
+	return out, nil
 }
 
 func (p *EBPFRouteProgrammer) target(name string) (uint32, error) {
@@ -292,6 +352,17 @@ func (p *EBPFRouteProgrammer) target(name string) (uint32, error) {
 }
 
 func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
+	if entry.grant != nil {
+		if p.grantRefs[*entry.grant] == 0 {
+			g := entry.grant
+			if err := p.tables.RegisterRemoteGrant(g.producerIfindex, net.ParseIP(g.address), g.protocol, g.port,
+				[16]byte(g.grantID), net.IP(g.consumerSID[:])); err != nil {
+				return err
+			}
+		}
+		p.grantRefs[*entry.grant]++
+		return nil
+	}
 	if entry.access != nil {
 		if p.accessRefs[*entry.access] == 0 {
 			address := net.ParseIP(entry.access.address)
@@ -315,11 +386,15 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 		p.routeRefs[key] = state
 		return nil
 	}
-	if err := p.tables.RegisterRoute(
-		entry.route.ingressIfindex,
-		net.ParseIP(entry.route.address),
-		entry.route.targetIfindex,
-	); err != nil {
+	var err error
+	if entry.route.mode == RouteIntentRemoteConsumer {
+		err = p.tables.RegisterRemoteRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
+			[16]byte(entry.route.grantID), entry.route.protocol, entry.route.port, net.IP(entry.route.targetSID[:]))
+	} else {
+		err = p.tables.RegisterRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
+			entry.route.protocol, entry.route.port, entry.route.targetIfindex)
+	}
+	if err != nil {
 		return err
 	}
 	p.routeRefs[key] = routeState{count: 1, ref: *entry.route}
@@ -327,6 +402,19 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 }
 
 func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
+	if entry.grant != nil {
+		count := p.grantRefs[*entry.grant]
+		if count > 1 {
+			p.grantRefs[*entry.grant] = count - 1
+			return nil
+		}
+		g := entry.grant
+		if err := p.tables.UnregisterRemoteGrant(g.producerIfindex, net.ParseIP(g.address), g.protocol, g.port, [16]byte(g.grantID)); err != nil {
+			return err
+		}
+		delete(p.grantRefs, *entry.grant)
+		return nil
+	}
 	if entry.access != nil {
 		count := p.accessRefs[*entry.access]
 		if count > 1 {
@@ -355,7 +443,8 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 		p.routeRefs[key] = state
 		return nil
 	}
-	if err := p.tables.UnregisterRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address)); err != nil {
+	if err := p.tables.UnregisterRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address),
+		entry.route.protocol, entry.route.port); err != nil {
 		return err
 	}
 	delete(p.routeRefs, key)
@@ -374,13 +463,14 @@ func protocolNumber(protocol api.NetworkRuleProtocol) (uint8, error) {
 }
 
 func routeRefKey(ref routeRef) string {
-	return fmt.Sprintf("%d|%s", ref.ingressIfindex, ref.address)
+	return fmt.Sprintf("%d|%s|%d|%d", ref.ingressIfindex, ref.address, ref.protocol, ref.port)
 }
 
 func intentKey(intent RouteIntent) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "%s|%s|%s|%s",
-		intent.Attachment, intent.Service, intent.ConsumerDevice, intent.ServiceDevice)
+	fmt.Fprintf(&builder, "%s|%s|%s|%s|%s|%s|%s|%x",
+		intent.Attachment, intent.ProducerAttachment, intent.Kind, intent.Service, intent.ConsumerDevice,
+		intent.ServiceDevice, intent.ServiceSID, intent.GrantID)
 	for _, port := range intent.Ports {
 		fmt.Fprintf(&builder, "|%s:%d", port.Protocol, port.Port)
 	}

@@ -5,6 +5,7 @@
 package prog
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"math/bits"
@@ -1362,7 +1363,7 @@ func egressRouteKey(tableID uint32, family uint8, addr netip.Addr, prefixBits in
 	}
 }
 
-func serviceRouteKey(ifindex uint32, family uint8, addr netip.Addr) UsidServiceRouteKey {
+func serviceRouteKey(ifindex uint32, family, protocol uint8, port uint16, addr netip.Addr) UsidServiceRouteKey {
 	var value [16]byte
 	if family == egressRouteFamilyINET4 {
 		v4 := addr.As4()
@@ -1370,7 +1371,8 @@ func serviceRouteKey(ifindex uint32, family uint8, addr netip.Addr) UsidServiceR
 	} else {
 		value = addr.As16()
 	}
-	return UsidServiceRouteKey{IngressIfindex: ifindex, Family: family, Addr: value}
+	return UsidServiceRouteKey{IngressIfindex: ifindex, Family: family, Protocol: protocol,
+		Port: bits.ReverseBytes16(port), Addr: value}
 }
 
 // setUpEgressRouteAttachment registers the two per-attachment lookups
@@ -1469,7 +1471,7 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 
 	service := netip.MustParseAddr("fd20:70::100")
 	if err := objs.ServiceRouteTable.Put(
-		serviceRouteKey(loopback, egressRouteFamilyINET6, service),
+		serviceRouteKey(loopback, egressRouteFamilyINET6, 6, servicePort, service),
 		UsidServiceRouteValue{
 			TargetIfindex: loopback,
 		},
@@ -1513,7 +1515,7 @@ func TestUsidEgress_ServiceRouteDropsUnauthorizedPort(t *testing.T) {
 
 	service := netip.MustParseAddr("fd20:70::100")
 	if err := objs.ServiceRouteTable.Put(
-		serviceRouteKey(1, egressRouteFamilyINET6, service),
+		serviceRouteKey(1, egressRouteFamilyINET6, 6, 8443, service),
 		UsidServiceRouteValue{TargetIfindex: 1},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)
@@ -1536,6 +1538,49 @@ func TestUsidEgress_ServiceRouteDropsUnauthorizedPort(t *testing.T) {
 	}
 }
 
+func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	const servicePort = uint16(8443)
+	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, 7)
+	wantOuterSource := setUpNodeSIDBase(t, objs, netip.MustParseAddr("fd00:1:2:3::"), 0x100)
+	service := netip.MustParseAddr("fd20:70::100")
+	consumer := netip.MustParseAddr("fd20:70::2")
+	targetSID := netip.MustParseAddr("fd00:9:8:7:e000::")
+	grantID := [16]byte{1, 2, 3, 4}
+	if err := objs.PublicUplinkTable.Put(uint32(0), UsidPublicUplinkValue{LinkIfindex: 1}); err != nil {
+		t.Fatalf("populate public uplink: %v", err)
+	}
+	if err := objs.ServiceRouteTable.Put(serviceRouteKey(1, egressRouteFamilyINET6, 6, servicePort, service),
+		UsidServiceRouteValue{Mode: 2, GrantId: grantID, TargetSid: targetSID.As16()}); err != nil {
+		t.Fatalf("populate remote service route: %v", err)
+	}
+	if err := objs.ServiceAccessTable.Put(UsidServiceAccessKey{IngressIfindex: 1, Family: egressRouteFamilyINET6,
+		Protocol: 6, Port: bits.ReverseBytes16(servicePort), Addr: service.As16()}, uint8(1)); err != nil {
+		t.Fatalf("populate service access: %v", err)
+	}
+	pkt := buildPlainV6PacketWithL4Ports(t, consumer, service, 49152, servicePort)
+	ret, out, err := objs.UsidServiceEgress.Test(pkt)
+	if err != nil || ret != tcActRedirect {
+		t.Fatalf("remote request verdict = %d, err = %v; want TC_ACT_REDIRECT", ret, err)
+	}
+	if len(out) != len(pkt)+60 {
+		t.Fatalf("encapsulated length = %d, want %d", len(out), len(pkt)+60)
+	}
+	if got := netip.AddrFrom16([16]byte(out[22:38])); got != wantOuterSource {
+		t.Errorf("outer source = %s, want %s", got, wantOuterSource)
+	}
+	if got := netip.AddrFrom16([16]byte(out[38:54])); got != targetSID {
+		t.Errorf("outer destination = %s, want %s", got, targetSID)
+	}
+	if out[54] != 1 || out[55] != 41 || out[56] != 1 || !bytes.Equal(out[58:74], grantID[:]) {
+		t.Errorf("service shim = % x, want version=1 inner=41 request=1 grant=%x", out[54:74], grantID)
+	}
+	if got := netip.AddrFrom16([16]byte(out[82:98])); got != consumer {
+		t.Errorf("inner source = %s, want original consumer %s", got, consumer)
+	}
+}
+
 func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
@@ -1550,7 +1595,7 @@ func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 		Addr:           service.As16(),
 	}
 	if err := objs.ServiceRouteTable.Put(
-		serviceRouteKey(1, egressRouteFamilyINET6, service),
+		serviceRouteKey(1, egressRouteFamilyINET6, 6, 8443, service),
 		UsidServiceRouteValue{TargetIfindex: 1},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)

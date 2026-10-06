@@ -278,7 +278,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	// controller process before informer reconciliation starts. A missing map is
 	// tolerated because the datapath loader may start after galactic-router;
 	// the first Apply retries initialization.
-	if err := setupServiceRouteController(mgr, nodeName); err != nil {
+	if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace); err != nil {
 		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
 	}
 
@@ -346,18 +346,19 @@ func runCmd(cfg *config.RouterConfig) error {
 	return nil
 }
 
-func setupServiceRouteController(mgr ctrl.Manager, nodeName string) error {
+func setupServiceRouteController(mgr ctrl.Manager, nodeName, bgpNamespace string) error {
 	programmer := &serviceroute.EBPFRouteProgrammer{}
 	if err := programmer.Initialize(); err != nil {
 		ctrl.Log.Error(err, "service route eBPF maps are not available yet; initialization will retry on reconcile")
 	}
 
 	return (&controller.ServiceRoutePolicyReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		NodeName:   nodeName,
-		Programmer: programmer,
-		Applied:    make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		NodeName:     nodeName,
+		BGPNamespace: bgpNamespace,
+		Programmer:   programmer,
+		Applied:      make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
 	}).SetupWithManager(mgr)
 }
 

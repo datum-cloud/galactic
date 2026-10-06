@@ -21,7 +21,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.2-0.20261002201547-1d1c62507e3c
 	go.datum.net/cloud v0.1.1-0.20260918213150-260f797bbc5c
-	go.datum.net/network v0.3.1-0.20261006181206-248c62692a8f
+	go.datum.net/network v0.3.1-0.20261006185716-0f099eb3b0ea
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
 	google.golang.org/grpc v1.84.0

@@ -187,6 +187,7 @@ static long (*bpf_skb_change_head)(struct __sk_buff *skb, __u32 len, __u64 flags
 // packet. Fixed kernel ABI.
 #define USID_IPPROTO_IPIP 4
 #define USID_IPPROTO_IPV6 41
+#define USID_IPPROTO_SERVICE 253
 
 // Transport protocol numbers, needed for the vip_xlat_table lookup. TCP and UDP
 // place source and destination port at the same offset, so one struct covers
@@ -595,13 +596,32 @@ struct egress_route_value {
 struct service_route_key {
 	__u32 ingress_ifindex;
 	__u8 family;
-	__u8 pad[3];
+	__u8 protocol;
+	__be16 port;
 	__u8 addr[16];
-};
+} __attribute__((packed));
 
 struct service_route_value {
 	__u32 target_ifindex;
+	__u8 mode;
+	__u8 pad[3];
+	__u8 grant_id[16];
+	__u8 target_sid[16];
 };
+
+#define SERVICE_ROUTE_MODE_LOCAL 1
+#define SERVICE_ROUTE_MODE_REMOTE 2
+#define SERVICE_TUNNEL_VERSION 1
+#define SERVICE_TUNNEL_REQUEST 1
+#define SERVICE_TUNNEL_REPLY 2
+
+struct service_tunnel_header {
+	__u8 version;
+	__u8 inner_nexthdr;
+	__u8 direction;
+	__u8 reserved;
+	__u8 grant_id[16];
+} __attribute__((packed));
 
 // service_access_key authorizes one transport endpoint on one consumer
 // attachment.
@@ -631,8 +651,24 @@ struct service_reverse_key {
 
 struct service_reverse_value {
 	__u32 consumer_ifindex;
-	__u32 pad;
+	__u8 mode;
+	__u8 pad[3];
+	__u8 grant_id[16];
+	__u8 return_sid[16];
 	__u64 last_seen_ns;
+};
+
+struct service_remote_grant_key {
+	__u32 producer_ifindex;
+	__u8 family;
+	__u8 protocol;
+	__be16 port;
+	__u8 grant_id[16];
+	__u8 addr[16];
+} __attribute__((packed));
+
+struct service_remote_grant_value {
+	__u8 consumer_sid[16];
 };
 
 // Flat byte-for-byte form of bpf_fib_lookup. The kernel UAPI type contains
@@ -664,6 +700,11 @@ struct service_fib_scratch_value {
 	struct service_access_key access;
 	struct service_reverse_key reverse;
 	struct service_reverse_value reverse_value;
+	struct service_remote_grant_key remote_grant;
+	__u8 tunnel_grant_id[16];
+	__u8 tunnel_return_sid[16];
+	__u8 tunnel_target_sid[16];
+	__u8 tunnel_direction;
 	struct bpf_redir_neigh neigh;
 };
 
@@ -967,6 +1008,16 @@ struct {
 	__type(key, struct service_reverse_key);
 	__type(value, struct service_reverse_value);
 } service_reverse_table SEC(".maps");
+
+// Producer-side authorization. Reverse flow state is only a routing cache;
+// this table is rechecked for every reply so deleting policy revokes traffic
+// immediately even while an LRU row remains.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct service_remote_grant_key);
+	__type(value, struct service_remote_grant_value);
+} service_remote_grant_table SEC(".maps");
 
 // service_fib_scratch keeps the comparatively large bpf_fib_lookup parameter
 // block out of usid_egress's stack. One value per CPU is safe because BPF
@@ -1434,7 +1485,7 @@ static USID_ALWAYS_INLINE void count_mss_clamp_stat(__u32 stat)
 // verifier checks it once on its own instead of again inside every path that
 // reaches each of its three call sites. Global functions taking the program
 // context need nothing newer than the kernel preflight already requires.
-__attribute__((noinline)) int clamp_tcp_mss(struct __sk_buff *skb, __u32 ip_version)
+__attribute__((noinline)) int clamp_tcp_mss(struct __sk_buff *skb, __u32 ip_version, __u32 extra_overhead)
 {
 	__u32 cfg_key = 0;
 	struct mss_clamp_value *cfg = bpf_map_lookup_elem(&mss_clamp_table, &cfg_key);
@@ -1450,6 +1501,7 @@ __attribute__((noinline)) int clamp_tcp_mss(struct __sk_buff *skb, __u32 ip_vers
 	USID_BARRIER_VAR(limit_v6);
 
 	__u16 limit = ip_version == 4 ? limit_v4 : limit_v6;
+	limit = limit > extra_overhead ? limit - (__u16) extra_overhead : 0;
 
 	if (limit == 0)
 		return 0; // clamping off for this family, or not configured yet
@@ -1790,7 +1842,8 @@ static USID_ALWAYS_INLINE __u32 sum_words(const __u16 *w, int n)
 // counted in pmtu_stats.
 //
 // A global function, for the same reason as clamp_tcp_mss.
-__attribute__((noinline)) int send_too_big(struct __sk_buff *skb, __u32 ip_version, __u64 vrf_key)
+__attribute__((noinline)) int send_too_big(struct __sk_buff *skb, __u32 ip_version, __u64 vrf_key,
+					   __u32 extra_overhead)
 {
 	__u32 cfg_key = 0;
 	__u32 *limit_p = bpf_map_lookup_elem(&encap_mtu_table, &cfg_key);
@@ -1799,6 +1852,7 @@ __attribute__((noinline)) int send_too_big(struct __sk_buff *skb, __u32 ip_versi
 		return PMTU_FITS;
 
 	__u32 limit = *limit_p;
+	limit = limit > extra_overhead ? limit - extra_overhead : 0;
 
 	if (limit == 0)
 		return PMTU_FITS; // check off, or not configured yet
@@ -2023,6 +2077,18 @@ __attribute__((noinline)) int send_too_big(struct __sk_buff *skb, __u32 ip_versi
 	return PMTU_SENT;
 }
 
+static USID_ALWAYS_INLINE int parse_service_packet(struct __sk_buff *skb, __be16 h_proto,
+						    struct service_fib_scratch_value *scratch);
+static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_value *s);
+static USID_ALWAYS_INLINE int service_id_equal(const __u8 a[16], const __u8 b[16])
+{
+	__u8 diff = 0;
+#pragma unroll
+	for (int i = 0; i < 16; i++)
+		diff |= a[i] ^ b[i];
+	return diff == 0;
+}
+
 SEC("tc")
 int usid_ingress(struct __sk_buff *skb)
 {
@@ -2153,7 +2219,25 @@ int usid_ingress(struct __sk_buff *skb)
 	// UNKNOWN_INNER_VERSION and mask a distinct, actionable failure, so it is
 	// checked and counted apart before that peek. The field is already covered
 	// by the bounds check above.
-	if (ip6->nexthdr != USID_IPPROTO_IPIP && ip6->nexthdr != USID_IPPROTO_IPV6) {
+	__u8 service_tunnel = ip6->nexthdr == USID_IPPROTO_SERVICE;
+	__u8 service_reverse_installed = 0;
+	__u32 service_scratch_key = 0;
+	struct service_fib_scratch_value *service_scratch = 0;
+	if (service_tunnel) {
+		service_scratch = bpf_map_lookup_elem(&service_fib_scratch, &service_scratch_key);
+		struct service_tunnel_header *tunnel = (void *) (ip6 + 1);
+		if (!service_scratch || (void *) (tunnel + 1) > data_end ||
+		    tunnel->version != SERVICE_TUNNEL_VERSION || tunnel->reserved != 0 ||
+		    (tunnel->direction != SERVICE_TUNNEL_REQUEST && tunnel->direction != SERVICE_TUNNEL_REPLY) ||
+		    (tunnel->inner_nexthdr != USID_IPPROTO_IPIP && tunnel->inner_nexthdr != USID_IPPROTO_IPV6)) {
+			count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf);
+			return TC_ACT_SHOT;
+		}
+		__builtin_memcpy(service_scratch->tunnel_grant_id, tunnel->grant_id, 16);
+		__builtin_memcpy(service_scratch->tunnel_return_sid, ip6->saddr, 16);
+		service_scratch->tunnel_direction = tunnel->direction;
+	}
+	if (!service_tunnel && ip6->nexthdr != USID_IPPROTO_IPIP && ip6->nexthdr != USID_IPPROTO_IPV6) {
 		count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf);
 		return TC_ACT_SHOT;
 	}
@@ -2161,12 +2245,12 @@ int usid_ingress(struct __sk_buff *skb)
 	// Peek the inner version nibble now, on the still-unmutated outer header:
 	// step 7 needs to know the family before it decides how to strip, not
 	// after.
-	if ((void *) (ip6 + 1) + 1 > data_end) {
+	__u8 *inner_peek = (__u8 *) (ip6 + 1) + (service_tunnel ? sizeof(struct service_tunnel_header) : 0);
+	if ((void *) inner_peek + 1 > data_end) {
 		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
 		return TC_ACT_SHOT;
 	}
 
-	__u8 *inner_peek = (__u8 *) (ip6 + 1);
 	__u8 inner_version = (*inner_peek) >> 4;
 
 	if (inner_version != 4 && inner_version != 6) {
@@ -2205,7 +2289,7 @@ int usid_ingress(struct __sk_buff *skb)
 	// A packet the NIC merged with GRO keeps its sender's segment size, and
 	// the DECAP flag names the inner header it is left with. A kernel that
 	// predates the DECAP flags rejects them, so the strip retries without.
-	__s32 strip_len = (__s32) sizeof(struct usid_ip6hdr);
+	__s32 strip_len = (__s32) sizeof(struct usid_ip6hdr) + (service_tunnel ? (__s32) sizeof(struct service_tunnel_header) : 0);
 	__u64 strip_flags = USID_BPF_F_ADJ_ROOM_FIXED_GSO;
 	__u64 decap_flag = USID_BPF_F_ADJ_ROOM_DECAP_L3_IPV6;
 
@@ -2214,7 +2298,7 @@ int usid_ingress(struct __sk_buff *skb)
 			count_claimed_drop(DROP_REASON_STRIP_FAILED, vrf);
 			return TC_ACT_SHOT;
 		}
-		strip_len = (__s32) sizeof(struct usid_iphdr);
+		strip_len = (__s32) sizeof(struct usid_iphdr) + (service_tunnel ? (__s32) sizeof(struct service_tunnel_header) : 0);
 		decap_flag = USID_BPF_F_ADJ_ROOM_DECAP_L3_IPV4;
 	}
 
@@ -2265,7 +2349,7 @@ int usid_ingress(struct __sk_buff *skb)
 	// Placed before the pointer re-read below, which covers the rewrite
 	// helpers' invalidation too, and before the NPTv6 and VIP rewrites, whose
 	// checksum updates are incremental and so independent of this one.
-	if (clamp_tcp_mss(skb, inner_version)) {
+	if (clamp_tcp_mss(skb, inner_version, 0)) {
 		count_claimed_drop(DROP_REASON_MALFORMED_INNER, vrf);
 		return TC_ACT_SHOT;
 	}
@@ -2316,7 +2400,7 @@ int usid_ingress(struct __sk_buff *skb)
 		// the outer one checked above, which only ever names the encap format.
 		// The outer pointer is invalid here regardless, since the strip can
 		// relocate the buffer.
-		if (inner6->nexthdr == USID_IPPROTO_TCP || inner6->nexthdr == USID_IPPROTO_UDP) {
+		if (!service_tunnel && (inner6->nexthdr == USID_IPPROTO_TCP || inner6->nexthdr == USID_IPPROTO_UDP)) {
 			struct usid_l4ports *ports = (void *) (inner6 + 1);
 
 			if ((void *) (ports + 1) <= data_end) {
@@ -2356,7 +2440,7 @@ int usid_ingress(struct __sk_buff *skb)
 			}
 		}
 
-		if (npt && !vip_hit)
+		if (!service_tunnel && npt && !vip_hit)
 			apply_nptv6(inner6->daddr, npt, 0 /* inbound: public -> ULA */);
 
 		fib_params.family = USID_AF_INET6;
@@ -2462,6 +2546,65 @@ int usid_ingress(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	if (service_tunnel) {
+		if (!service_scratch || parse_service_packet(skb, new_eth->h_proto, service_scratch)) {
+			count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
+			return TC_ACT_SHOT;
+		}
+		if (service_scratch->tunnel_direction == SERVICE_TUNNEL_REQUEST) {
+			__builtin_memset(&service_scratch->remote_grant, 0, sizeof(service_scratch->remote_grant));
+			service_scratch->remote_grant.producer_ifindex = fib_params.ifindex;
+			service_scratch->remote_grant.family = service_scratch->meta_family;
+			service_scratch->remote_grant.protocol = service_scratch->protocol;
+			service_scratch->remote_grant.port = service_scratch->dest_port;
+			__builtin_memcpy(service_scratch->remote_grant.grant_id, service_scratch->tunnel_grant_id, 16);
+			__builtin_memcpy(service_scratch->remote_grant.addr, service_scratch->dest_addr, 16);
+			struct service_remote_grant_value *grant = bpf_map_lookup_elem(&service_remote_grant_table, &service_scratch->remote_grant);
+			if (!grant || !service_id_equal(grant->consumer_sid, service_scratch->tunnel_return_sid)) {
+				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
+				return TC_ACT_SHOT;
+			}
+			__builtin_memset(&service_scratch->reverse, 0, sizeof(service_scratch->reverse));
+			service_scratch->reverse.ingress_ifindex = fib_params.ifindex;
+			service_scratch->reverse.family = service_scratch->meta_family;
+			service_scratch->reverse.protocol = service_scratch->protocol;
+			service_scratch->reverse.source_port = service_scratch->dest_port;
+			service_scratch->reverse.dest_port = service_scratch->source_port;
+			__builtin_memcpy(service_scratch->reverse.source_addr, service_scratch->dest_addr, 16);
+			__builtin_memcpy(service_scratch->reverse.dest_addr, service_scratch->source_addr, 16);
+			__builtin_memset(&service_scratch->reverse_value, 0, sizeof(service_scratch->reverse_value));
+			service_scratch->reverse_value.mode = SERVICE_ROUTE_MODE_REMOTE;
+			__builtin_memcpy(service_scratch->reverse_value.grant_id, service_scratch->tunnel_grant_id, 16);
+			__builtin_memcpy(service_scratch->reverse_value.return_sid, service_scratch->tunnel_return_sid, 16);
+			if (service_install_reverse(service_scratch)) {
+				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
+				return TC_ACT_SHOT;
+			}
+			service_reverse_installed = 1;
+		} else {
+			__builtin_memset(&service_scratch->route, 0, sizeof(service_scratch->route));
+			service_scratch->route.ingress_ifindex = fib_params.ifindex;
+			service_scratch->route.family = service_scratch->meta_family;
+			service_scratch->route.protocol = service_scratch->protocol;
+			service_scratch->route.port = service_scratch->source_port;
+			__builtin_memcpy(service_scratch->route.addr, service_scratch->source_addr, 16);
+			struct service_route_value *route = bpf_map_lookup_elem(&service_route_table, &service_scratch->route);
+			__builtin_memset(&service_scratch->access, 0, sizeof(service_scratch->access));
+			service_scratch->access.ingress_ifindex = fib_params.ifindex;
+			service_scratch->access.family = service_scratch->meta_family;
+			service_scratch->access.protocol = service_scratch->protocol;
+			service_scratch->access.port = service_scratch->source_port;
+			__builtin_memcpy(service_scratch->access.addr, service_scratch->source_addr, 16);
+			if (!route || route->mode != SERVICE_ROUTE_MODE_REMOTE ||
+			    !service_id_equal(route->grant_id, service_scratch->tunnel_grant_id) ||
+			    !service_id_equal(route->target_sid, service_scratch->tunnel_return_sid) ||
+			    !bpf_map_lookup_elem(&service_access_table, &service_scratch->access)) {
+				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
+				return TC_ACT_SHOT;
+			}
+		}
+	}
+
 	__builtin_memcpy(new_eth->h_dest, fib_params.dmac, sizeof(new_eth->h_dest));
 	__builtin_memcpy(new_eth->h_source, fib_params.smac, sizeof(new_eth->h_source));
 
@@ -2489,6 +2632,8 @@ int usid_ingress(struct __sk_buff *skb)
 		redirect_rc = bpf_redirect(egress_ifindex, 0);
 
 	if (redirect_rc != TC_ACT_REDIRECT) {
+		if (service_reverse_installed && service_scratch)
+			bpf_map_delete_elem(&service_reverse_table, &service_scratch->reverse);
 		count_claimed_drop(DROP_REASON_REDIRECT_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
@@ -2651,6 +2796,99 @@ static USID_ALWAYS_INLINE long service_redirect(struct __sk_buff *skb,
 	return bpf_redirect_neigh(target_ifindex, &scratch->neigh, sizeof(scratch->neigh), 0);
 }
 
+static USID_NOINLINE long service_remote_encap(struct __sk_buff *skb,
+						struct service_fib_scratch_value *scratch)
+{
+	__u32 ifindex = skb->ifindex;
+	struct ifindex_vrf_value *iv = bpf_map_lookup_elem(&ifindex_vrf_table, &ifindex);
+	__u32 zero = 0;
+	__u8 *base = bpf_map_lookup_elem(&node_src_addr_table, &zero);
+	struct public_uplink_value *uplink = bpf_map_lookup_elem(&public_uplink_table, &zero);
+	if (!iv || !base || !uplink || !uplink->link_ifindex)
+		return TC_ACT_SHOT;
+	__u8 source_or = 0;
+#pragma unroll
+	for (int i = 0; i < 16; i++)
+		source_or |= base[i];
+	if (!source_or)
+		return TC_ACT_SHOT;
+	__u32 ip_version = scratch->meta_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4;
+	if (clamp_tcp_mss(skb, ip_version, sizeof(struct service_tunnel_header)))
+		return TC_ACT_SHOT;
+	__u64 vrf_key = (iv->block << 12) | iv->argument;
+	int pmtu = send_too_big(skb, ip_version, vrf_key, sizeof(struct service_tunnel_header));
+	if (pmtu == PMTU_SENT)
+		return TC_ACT_REDIRECT;
+	if (pmtu == PMTU_DROPPED || service_decrement_hop(skb, scratch))
+		return TC_ACT_SHOT;
+	__builtin_memcpy(scratch->source_addr, base, 16);
+	scratch->source_addr[8] = (__u8) ((scratch->source_addr[8] & 0xF0) | ((iv->argument >> 8) & 0x0F));
+	scratch->source_addr[9] = (__u8) iv->argument;
+
+	__s32 grow = sizeof(struct usid_ip6hdr) + sizeof(struct service_tunnel_header);
+	if (bpf_skb_adjust_room(skb, grow, BPF_ADJ_ROOM_MAC, USID_BPF_F_ADJ_ROOM_ENCAP_L3_IPV6) &&
+	    bpf_skb_adjust_room(skb, grow, BPF_ADJ_ROOM_MAC, 0))
+		return TC_ACT_SHOT;
+	void *data = (void *) (long) skb->data;
+	void *data_end = (void *) (long) skb->data_end;
+	struct usid_ethhdr *eth = data;
+	struct usid_ip6hdr *outer = (void *) (eth + 1);
+	struct service_tunnel_header *tunnel = (void *) (outer + 1);
+	if ((void *) (tunnel + 1) > data_end)
+		return TC_ACT_SHOT;
+	__builtin_memset(outer, 0, sizeof(*outer));
+	outer->vtc_flow[0] = 0x60;
+	outer->payload_len = __builtin_bswap16((__u16) (skb->len - sizeof(*eth) - sizeof(*outer)));
+	outer->nexthdr = USID_IPPROTO_SERVICE;
+	outer->hop_limit = USID_EGRESS_HOP_LIMIT;
+	__builtin_memcpy(outer->saddr, scratch->source_addr, 16);
+	__builtin_memcpy(outer->daddr, scratch->tunnel_target_sid, 16);
+	__builtin_memset(tunnel, 0, sizeof(*tunnel));
+	tunnel->version = SERVICE_TUNNEL_VERSION;
+	tunnel->inner_nexthdr = scratch->meta_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? USID_IPPROTO_IPV6 : USID_IPPROTO_IPIP;
+	tunnel->direction = scratch->tunnel_direction;
+	__builtin_memcpy(tunnel->grant_id, scratch->tunnel_grant_id, 16);
+	eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
+	__builtin_memcpy(eth->h_dest, uplink->dmac, 6);
+	__builtin_memcpy(eth->h_source, uplink->smac, 6);
+	return bpf_redirect(uplink->link_ifindex, 0);
+}
+
+static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_value *s)
+{
+	__u64 now = bpf_ktime_get_ns();
+	s->reverse_value.last_seen_ns = now;
+	if (!bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_NOEXIST))
+		return 0;
+	struct service_reverse_value *old = bpf_map_lookup_elem(&service_reverse_table, &s->reverse);
+	if (!old)
+		return -1;
+	if (now - old->last_seen_ns > SERVICE_FLOW_TIMEOUT_NS) {
+		bpf_map_delete_elem(&service_reverse_table, &s->reverse);
+		return bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_NOEXIST);
+	}
+	int same_owner = old->mode == s->reverse_value.mode &&
+		old->consumer_ifindex == s->reverse_value.consumer_ifindex &&
+		service_id_equal(old->grant_id, s->reverse_value.grant_id) &&
+		service_id_equal(old->return_sid, s->reverse_value.return_sid);
+	if (!same_owner && old->mode == SERVICE_ROUTE_MODE_REMOTE) {
+		__builtin_memset(&s->remote_grant, 0, sizeof(s->remote_grant));
+		s->remote_grant.producer_ifindex = s->reverse.ingress_ifindex;
+		s->remote_grant.family = s->reverse.family;
+		s->remote_grant.protocol = s->reverse.protocol;
+		s->remote_grant.port = s->reverse.source_port;
+		__builtin_memcpy(s->remote_grant.grant_id, old->grant_id, 16);
+		__builtin_memcpy(s->remote_grant.addr, s->reverse.source_addr, 16);
+		if (!bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant)) {
+			bpf_map_delete_elem(&service_reverse_table, &s->reverse);
+			return bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_NOEXIST);
+		}
+	}
+	if (!same_owner)
+		return -1;
+	return bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_EXIST);
+}
+
 // service_path is noinline so its transient tuple-building scalars do not
 // inflate usid_egress's already tight stack on the unrelated encapsulation and
 // Packet-Too-Big call chain.
@@ -2665,11 +2903,11 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		if (s->meta_family != USID_EGRESS_ROUTE_FAMILY_INET6 &&
 		    s->meta_family != USID_EGRESS_ROUTE_FAMILY_INET4)
 			return TC_ACT_UNSPEC;
-		__builtin_memset(&s->route, 0, sizeof(s->route));
-		s->route.ingress_ifindex = ifindex;
-		s->route.family = s->meta_family;
-		__builtin_memcpy(s->route.addr, s->dest_addr, 16);
-		if (bpf_map_lookup_elem(&service_route_table, &s->route)) {
+		__builtin_memset(&s->access, 0, sizeof(s->access));
+		s->access.ingress_ifindex = ifindex;
+		s->access.family = s->meta_family;
+		__builtin_memcpy(s->access.addr, s->dest_addr, 16);
+		if (bpf_map_lookup_elem(&service_access_table, &s->access)) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
 		}
@@ -2691,6 +2929,27 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 			bpf_map_delete_elem(&service_reverse_table, &s->reverse);
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
+		}
+		if (reverse->mode == SERVICE_ROUTE_MODE_REMOTE) {
+			__builtin_memset(&s->remote_grant, 0, sizeof(s->remote_grant));
+			s->remote_grant.producer_ifindex = ifindex;
+			s->remote_grant.family = s->meta_family;
+			s->remote_grant.protocol = s->protocol;
+			s->remote_grant.port = s->source_port;
+			__builtin_memcpy(s->remote_grant.grant_id, reverse->grant_id, 16);
+			__builtin_memcpy(s->remote_grant.addr, s->source_addr, 16);
+			struct service_remote_grant_value *grant = bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant);
+			if (!grant || !service_id_equal(grant->consumer_sid, reverse->return_sid)) {
+				count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+				return TC_ACT_SHOT;
+			}
+			__builtin_memcpy(s->tunnel_target_sid, reverse->return_sid, 16);
+			__builtin_memcpy(s->tunnel_grant_id, reverse->grant_id, 16);
+			s->tunnel_direction = SERVICE_TUNNEL_REPLY;
+			reverse->last_seen_ns = now;
+			long rc = service_remote_encap(skb, s);
+			if (rc != TC_ACT_REDIRECT) count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+			return rc == TC_ACT_REDIRECT ? rc : TC_ACT_SHOT;
 		}
 		__u32 consumer_ifindex = reverse->consumer_ifindex;
 		USID_BARRIER_VAR(consumer_ifindex);
@@ -2716,6 +2975,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	__builtin_memset(&s->route, 0, sizeof(s->route));
 	s->route.ingress_ifindex = ifindex;
 	s->route.family = s->meta_family;
+	s->route.protocol = s->protocol;
+	s->route.port = s->dest_port;
 	__builtin_memcpy(s->route.addr, s->dest_addr, 16);
 	struct service_route_value *route = bpf_map_lookup_elem(&service_route_table, &s->route);
 	if (!route)
@@ -2732,6 +2993,14 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		return TC_ACT_SHOT;
 	}
 
+	if (route->mode == SERVICE_ROUTE_MODE_REMOTE) {
+		__builtin_memcpy(s->tunnel_target_sid, route->target_sid, 16);
+		__builtin_memcpy(s->tunnel_grant_id, route->grant_id, 16);
+		s->tunnel_direction = SERVICE_TUNNEL_REQUEST;
+		long rc = service_remote_encap(skb, s);
+		if (rc != TC_ACT_REDIRECT) count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+		return rc == TC_ACT_REDIRECT ? rc : TC_ACT_SHOT;
+	}
 	__u32 target_ifindex = route->target_ifindex;
 	USID_BARRIER_VAR(target_ifindex);
 	__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
@@ -2742,16 +3011,10 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	s->reverse.dest_port = s->source_port;
 	__builtin_memcpy(s->reverse.source_addr, s->dest_addr, 16);
 	__builtin_memcpy(s->reverse.dest_addr, s->source_addr, 16);
-	struct service_reverse_value *existing = bpf_map_lookup_elem(&service_reverse_table, &s->reverse);
-	if (existing && existing->consumer_ifindex != ifindex &&
-	    bpf_ktime_get_ns() - existing->last_seen_ns <= SERVICE_FLOW_TIMEOUT_NS) {
-		count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
-		return TC_ACT_SHOT;
-	}
+	__builtin_memset(&s->reverse_value, 0, sizeof(s->reverse_value));
 	s->reverse_value.consumer_ifindex = ifindex;
-	s->reverse_value.pad = 0;
-	s->reverse_value.last_seen_ns = bpf_ktime_get_ns();
-	if (bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_ANY)) {
+	s->reverse_value.mode = SERVICE_ROUTE_MODE_LOCAL;
+	if (service_install_reverse(s)) {
 		count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 		return TC_ACT_SHOT;
 	}
@@ -2891,7 +3154,7 @@ int usid_egress(struct __sk_buff *skb)
 					// The fall-through below, for a node whose uplink
 					// is not configured yet, reads ip6 again, so both
 					// pointers are re-derived.
-					if (clamp_tcp_mss(skb, 6))
+					if (clamp_tcp_mss(skb, 6, 0))
 						return TC_ACT_SHOT;
 					data = (void *) (long) skb->data;
 					data_end = (void *) (long) skb->data_end;
@@ -3046,7 +3309,7 @@ int usid_egress(struct __sk_buff *skb)
 	// A failed rewrite after the checksum update leaves a packet whose checksum
 	// is wrong, so it is dropped rather than sent, and counted with the encap
 	// failure it is part of. mss_clamp_stats records which it was.
-	if (clamp_tcp_mss(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4)) {
+	if (clamp_tcp_mss(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4, 0)) {
 		count_claimed_drop(DROP_REASON_EGRESS_ROUTE_ENCAP_FAILED, vrf);
 		return TC_ACT_SHOT;
 	}
@@ -3056,7 +3319,7 @@ int usid_egress(struct __sk_buff *skb)
 	// by the uplink. One that gets no error is counted as fib_frag_needed, the
 	// drop the same packet would meet at a FIB lookup. pmtu_stats records
 	// which outcome it was.
-	int pmtu = send_too_big(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4, vrf_key);
+	int pmtu = send_too_big(skb, route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 6 : 4, vrf_key, 0);
 
 	if (pmtu == PMTU_SENT)
 		return TC_ACT_REDIRECT;
