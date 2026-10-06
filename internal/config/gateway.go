@@ -75,6 +75,13 @@ const (
 	// load-balance it. Every other datapath on the node keeps running. The
 	// public interface and SRv6 address are not required while it is off.
 	EnvGatewayDatapathEnabled = "GALACTIC_GATEWAY_DATAPATH_ENABLED"
+
+	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its
+	// interfaces' forwarding sysctls under. Optional, defaulting to
+	// DefaultProcSysPath. An unprivileged pod gets /proc/sys read-only, so the
+	// DaemonSet mounts the host's /proc/sys/net at /host/proc/sys/net and sets
+	// this to /host/proc/sys.
+	EnvGatewayProcSysPath = "GALACTIC_GATEWAY_PROC_SYS_PATH"
 )
 
 // EnvGatewayXDPAttach's values.
@@ -113,6 +120,9 @@ type GatewayConfig struct {
 
 	// DatapathEnabled is EnvGatewayDatapathEnabled.
 	DatapathEnabled bool
+
+	// ProcSysPath is EnvGatewayProcSysPath.
+	ProcSysPath string
 }
 
 // NewGatewayConfig creates a config resolver reading the GALACTIC_GATEWAY
@@ -130,6 +140,7 @@ func NewGatewayConfig() *GatewayConfig {
 	v.SetDefault("srv6_address", "")
 	v.SetDefault("xdp_attach", GatewayXDPAttachDispatch)
 	v.SetDefault("datapath_enabled", true)
+	v.SetDefault("proc_sys_path", DefaultProcSysPath)
 
 	cfg := &GatewayConfig{
 		v:      v,
@@ -154,6 +165,7 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gateway-srv6-address", "srv6_address"},
 		{"gateway-xdp-attach", "xdp_attach"},
 		{"gateway-datapath-enabled", "datapath_enabled"},
+		{"gateway-proc-sys-path", "proc_sys_path"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -176,6 +188,7 @@ func (c *GatewayConfig) readFields() {
 	c.SRv6Address = c.v.GetString("srv6_address")
 	c.XDPAttach = c.v.GetString("xdp_attach")
 	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
+	c.ProcSysPath = c.v.GetString("proc_sys_path")
 }
 
 // splitCommaList parses a comma-separated list, such as interface names or BMP

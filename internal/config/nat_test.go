@@ -315,3 +315,40 @@ func TestNATConfigDatapathEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestNATConfigProcSysPath covers the procfs root's three tiers. /proc/sys is
+// the default that matters: a shard run outside the DaemonSet, with no host
+// mount, still writes where the kernel expects.
+func TestNATConfigProcSysPath(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		flag string
+		want string
+	}{
+		{name: "unset", want: DefaultProcSysPath},
+		{name: "env", env: testHostProcSys, want: testHostProcSys},
+		{name: "flag over env", env: testHostProcSys, flag: "/elsewhere", want: "/elsewhere"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv(EnvNATProcSysPath, tt.env)
+			}
+			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			flags.String(FlagNodeName, "", "")
+			flags.String("nat-proc-sys-path", DefaultProcSysPath, "")
+			if tt.flag != "" {
+				if err := flags.Set("nat-proc-sys-path", tt.flag); err != nil {
+					t.Fatalf("set flag: %v", err)
+				}
+			}
+
+			cfg := NewNATConfig()
+			cfg.BindFlags(flags)
+			if cfg.ProcSysPath != tt.want {
+				t.Errorf("ProcSysPath = %q, want %q", cfg.ProcSysPath, tt.want)
+			}
+		})
+	}
+}

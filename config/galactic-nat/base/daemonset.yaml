@@ -102,6 +102,14 @@ spec:
             # internal/config/nat.go's EnvNATEchoResponder.
             - name: GALACTIC_NAT_ECHO_RESPONDER
               value: "false"
+            # An unprivileged container gets /proc/sys read-only, so the
+            # forwarding sysctls the datapath's FIB lookup needs are written
+            # through the host's /proc/sys/net, mounted below. hostNetwork
+            # makes those writes land in the node's own network namespace.
+            # A sysctl that still does not read 1 fails startup rather than
+            # leaving a datapath that drops every packet (#586).
+            - name: GALACTIC_NAT_PROC_SYS_PATH
+              value: /host/proc/sys
             # GALACTIC_NAT_XDP_ATTACH is left at its default, "direct": the
             # shard attaches its own program to the uplinks. "dispatch" runs
             # it from the node's shared, pinned XDP dispatcher instead, so a
@@ -213,8 +221,17 @@ spec:
             # galactic-xdp/, the shared XDP dispatcher's, in dispatch mode.
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+            # The host's net sysctls, writable, for the forwarding settings
+            # galactic-nat sets. Only net.*: the rest of /proc/sys stays
+            # read-only.
+            - name: host-proc-sys-net
+              mountPath: /host/proc/sys/net
       volumes:
         - name: bpf-fs
           hostPath:
             path: /sys/fs/bpf
+            type: Directory
+        - name: host-proc-sys-net
+          hostPath:
+            path: /proc/sys/net
             type: Directory

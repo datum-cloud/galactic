@@ -207,3 +207,13 @@ func TestGatewayConfigDisabledNeedsNoInterface(t *testing.T) {
 		t.Error("Validate() = nil for an enabled datapath with no public interface")
 	}
 }
+
+func TestGatewayConfigProcSysPath(t *testing.T) {
+	if got := NewGatewayConfig().ProcSysPath; got != DefaultProcSysPath {
+		t.Errorf("default ProcSysPath = %q, want %q", got, DefaultProcSysPath)
+	}
+	t.Setenv(EnvGatewayProcSysPath, testHostProcSys)
+	if got := NewGatewayConfig().ProcSysPath; got != testHostProcSys {
+		t.Errorf("ProcSysPath = %q with %s set, want %s", got, EnvGatewayProcSysPath, testHostProcSys)
+	}
+}

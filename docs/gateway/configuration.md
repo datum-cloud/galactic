@@ -143,16 +143,17 @@ flags, or a combination of both (CLI flags take precedence), with the
 `GALACTIC_GATEWAY` env prefix — the same three-tier precedence pattern
 `galactic-router` uses (see [docs/router/configuration.md](../router/configuration.md)).
 
-| Option              | Environment Variable                   | CLI Flag                        | Default    | Required          |
-| ------------------- | -------------------------------------- | ------------------------------- | ---------- | ----------------- |
-| Node name           | `GALACTIC_GATEWAY_NODE_NAME`           | `--node-name`, `-n`             | —          | Yes               |
-| Public interface    | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`    | `--gateway-public-interface`    | —          | While enabled     |
-| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | —          | While enabled     |
-| Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —          | No                |
-| XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch` | No                |
-| Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`     | No                |
-| Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`     | No                |
-| gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`     | No                |
+| Option              | Environment Variable                   | CLI Flag                        | Default     | Required      |
+| ------------------- | -------------------------------------- | ------------------------------- | ----------- | ------------- |
+| Node name           | `GALACTIC_GATEWAY_NODE_NAME`           | `--node-name`, `-n`             | —           | Yes           |
+| Public interface    | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`    | `--gateway-public-interface`    | —           | While enabled |
+| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | —           | While enabled |
+| Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —           | No            |
+| XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch`  | No            |
+| Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`      | No            |
+| Procfs sysctl root  | `GALACTIC_GATEWAY_PROC_SYS_PATH`       | `--gateway-proc-sys-path`       | `/proc/sys` | No            |
+| Metrics port        | `GALACTIC_GATEWAY_METRICS_PORT`        | `--metrics-port`                | `8081`      | No            |
+| gRPC health port    | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`    | `--grpc-health-port`            | `5181`      | No            |
 
 `GALACTIC_GATEWAY_XDP_ATTACH` is `dispatch` or `direct`. `dispatch` runs
 `edge_lb` and `edge_return` from the gateway slots of the node's shared,
@@ -169,6 +170,17 @@ withdraws every one of this node's VIP advertisements. The NetworkGateway's
 `Ready` reads `False` with reason `DatapathDisabled`. The public interface
 and SRv6 address are not required while it is off.
 
+`GALACTIC_GATEWAY_PROC_SYS_PATH` is the procfs root the datapath writes its
+forwarding sysctls under (`net.ipv6.conf.<iface>.forwarding` and
+`net.ipv6.conf.all.forwarding`). `bpf_fib_lookup` refuses every lookup on an
+interface with forwarding off, so a sysctl that does not read `1` after the
+write stops the gateway at startup, and leaves an interface found later
+without the datapath until it does. A pod that is not privileged gets
+`/proc/sys` read-only, so `config/galactic-gateway/base/daemonset.yaml`
+mounts the host's `/proc/sys/net` at `/host/proc/sys/net` and sets this to
+`/host/proc/sys`. A node where something else already turned forwarding on
+passes with the default too. SELinux policy on an enforcing node can still
+refuse the write, and the gateway then says so at startup.
 
 `GALACTIC_GATEWAY_INTERNAL_INTERFACES` is a comma-separated list of this
 node's compute-facing interfaces, and it is what puts the return path in

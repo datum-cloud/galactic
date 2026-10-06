@@ -29,6 +29,7 @@ import (
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
+	"go.datum.net/galactic/internal/plumbing/sysctl"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -126,6 +127,9 @@ func runCmd(cfg *config.NATConfig) error {
 	coverageChanged := make(chan struct{}, 1)
 	var datapath controller.EgressDatapath
 	if cfg.DatapathEnabled {
+		if err := sysctl.SetProcSysPath(cfg.ProcSysPath); err != nil {
+			return err
+		}
 		datapath, err = setupNatDatapath(ctx, cfg, ctrlmetrics.Registry, func() {
 			select {
 			case coverageChanged <- struct{}{}:
@@ -252,6 +256,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("nat-echo-responder", false,
 		"Answer ICMP and ICMPv6 Echo Requests addressed to this shard's own masquerade addresses, "+
 			"rate-limited, instead of dropping them")
+	cmd.Flags().String("nat-proc-sys-path", config.DefaultProcSysPath,
+		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
+			"of the host's /proc/sys/net at <path>/net")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd

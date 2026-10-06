@@ -22,6 +22,10 @@ const (
 	DefaultLogFile    = "/var/log/galactic/galactic-cni.log"
 	DefaultLogLevel   = "info"
 
+	// DefaultProcSysPath is the procfs sysctl root galactic-gateway and
+	// galactic-nat write forwarding sysctls under unless configured otherwise.
+	DefaultProcSysPath = "/proc/sys"
+
 	LogLevelDebug   = "debug"
 	LogLevelWarn    = "warn"
 	LogLevelWarning = "warning"

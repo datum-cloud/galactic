@@ -41,15 +41,16 @@ flags, or a combination of both (CLI flags take precedence), with the
 `galactic-router` and `galactic-gateway` use (see
 [docs/router/configuration.md](../router/configuration.md)).
 
-| Option            | Environment Variable             | CLI Flag                  | Default       | Required |
-| ----------------- | -------------------------------- | ------------------------- | ------------- | -------- |
-| Node name         | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |
-| Uplink interfaces | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected | No       |
-| XDP attach mode   | `GALACTIC_NAT_XDP_ATTACH`        | `--nat-xdp-attach`        | `direct`      | No       |
-| Datapath enabled  | `GALACTIC_NAT_DATAPATH_ENABLED`  | `--nat-datapath-enabled`  | `true`        | No       |
-| Echo responder    | `GALACTIC_NAT_ECHO_RESPONDER`    | `--nat-echo-responder`    | `false`       | No       |
-| Metrics port      | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`        | No       |
-| gRPC health port  | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`        | No       |
+| Option             | Environment Variable             | CLI Flag                  | Default       | Required |
+| ------------------ | -------------------------------- | ------------------------- | ------------- | -------- |
+| Node name          | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |
+| Uplink interfaces  | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected | No       |
+| XDP attach mode    | `GALACTIC_NAT_XDP_ATTACH`        | `--nat-xdp-attach`        | `direct`      | No       |
+| Datapath enabled   | `GALACTIC_NAT_DATAPATH_ENABLED`  | `--nat-datapath-enabled`  | `true`        | No       |
+| Echo responder     | `GALACTIC_NAT_ECHO_RESPONDER`    | `--nat-echo-responder`    | `false`       | No       |
+| Procfs sysctl root | `GALACTIC_NAT_PROC_SYS_PATH`     | `--nat-proc-sys-path`     | `/proc/sys`   | No       |
+| Metrics port       | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`        | No       |
+| gRPC health port   | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`        | No       |
 
 `config/galactic-nat/base/daemonset.yaml` leaves `GALACTIC_NAT_XDP_ATTACH`
 at the binary's default, `direct`. `dispatch` is the mode to move to: it is
@@ -200,6 +201,19 @@ Replies come out of a token bucket per CPU (see Known constraints); a refused
 reply counts as `icmp_rate_limited`. The setting is written into the datapath
 whenever the shard programs its identity, so changing it takes a pod restart
 and nothing else.
+
+**`--nat-proc-sys-path` / `GALACTIC_NAT_PROC_SYS_PATH`**
+The procfs root the datapath writes its forwarding sysctls under:
+`net.ipv6.conf.<iface>.forwarding` and `net.ipv6.conf.all.forwarding`, plus
+the IPv4 ones once the shard serves NAT64. `bpf_fib_lookup` refuses every
+lookup on an interface with forwarding off, so a sysctl that does not read
+`1` after the write stops the shard at startup, and leaves an uplink found
+later uncovered until it does. A pod that is not privileged gets `/proc/sys`
+read-only, so `config/galactic-nat/base/daemonset.yaml` mounts the host's
+`/proc/sys/net` at `/host/proc/sys/net` and sets this to `/host/proc/sys`. A
+node where something else already turned forwarding on passes with the
+default too. SELinux policy on an enforcing node can still refuse the write,
+and the shard then says so at startup.
 
 ### Capabilities and host requirements
 

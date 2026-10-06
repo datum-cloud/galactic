@@ -28,6 +28,7 @@ import (
 	"go.datum.net/galactic/internal/gateway"
 	"go.datum.net/galactic/internal/metadata"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
+	"go.datum.net/galactic/internal/plumbing/sysctl"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -135,6 +136,9 @@ func runCmd(cfg *config.GatewayConfig) error {
 	})
 	var gwDatapath gateway.Datapath = gateway.NoopDatapath{}
 	if cfg.DatapathEnabled {
+		if err := sysctl.SetProcSysPath(cfg.ProcSysPath); err != nil {
+			return err
+		}
 		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, cfg.SRv6Address,
 			cfg.XDPAttach, ctrlmetrics.Registry, coverage)
 		if err != nil {
@@ -260,6 +264,9 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().Bool("gateway-datapath-enabled", true,
 		"Run the edge gateway datapath; false keeps the process up but attaches nothing and withdraws "+
 			"this node's VIP advertisements")
+	cmd.Flags().String("gateway-proc-sys-path", config.DefaultProcSysPath,
+		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
+			"of the host's /proc/sys/net at <path>/net")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	return cmd
