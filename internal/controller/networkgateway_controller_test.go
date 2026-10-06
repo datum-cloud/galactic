@@ -33,8 +33,7 @@ var (
 )
 
 // fakeGatewayEngine records the EngineState passed to Reconcile so tests can
-// assert on exactly which rules were included/excluded and at what
-// local-pref.
+// assert on exactly which rules were included or excluded.
 type fakeGatewayEngine struct {
 	mu             sync.Mutex
 	lastDesired    gateway.EngineState
@@ -214,11 +213,8 @@ func TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway(t *testing.
 // TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules covers
 // DSR's anycast model directly: every accepted, non-deleting NetworkRule in
 // the namespace goes into desired state, with no primary/secondary
-// distinction to gate on (an earlier, Full-NAT-era version of this test,
-// "...ForAcceptedAssignedRules", also required status.primaryNode to be
-// set -- that field and the active-passive model it implemented no longer
-// exist; every gateway node in a PoP now serves every accepted rule
-// identically).
+// distinction to gate on: every gateway node in a PoP serves every accepted
+// rule identically.
 func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
@@ -344,11 +340,8 @@ func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *te
 }
 
 // TestNetworkGatewayReconciler_CreatesBGPAdvertisement covers the anycast
-// BGPAdvertisement shape directly: no LocalPreference is set at all (an
-// earlier, Full-NAT-era version of this test,
-// "...WithComputedLocalPref", asserted a computed primary/secondary
-// preference value here — that model no longer exists; every gateway
-// node's route is equally preferred by construction, see
+// BGPAdvertisement shape directly: no LocalPreference is set at all, since
+// every gateway node's route is equally preferred by construction (see
 // networkgateway_controller.go's applyBGPAdvertisements doc comment).
 func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 	scheme := newRuleTestScheme(t)
@@ -576,14 +569,11 @@ func newAdvertisement(name string) *bgpv1alpha1.BGPAdvertisement {
 
 // TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode
 // is the regression test for #406: gw-b's NetworkGateway is deleted while
-// gw-b's own per-rule BGPAdvertisement routes are still around (an
-// earlier, Full-NAT-era version of this test also seeded a self-address
-// route -- DSR's anycast model has no self-address to advertise at all, so
-// that fixture no longer applies here). gw-a's process -- the only one
-// left to react, since gw-b's own process is presumably already gone --
-// must withdraw every one of them on the NotFound reconcile it receives
-// for gw-b's deletion, without touching gw-a's own advertisements for the
-// same rule.
+// gw-b's own per-rule BGPAdvertisement routes are still around. gw-a's
+// process -- the only one left to react, since gw-b's own process is
+// presumably already gone -- must withdraw every one of them on the NotFound
+// reconcile it receives for gw-b's deletion, without touching gw-a's own
+// advertisements for the same rule.
 func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA) // gw-a's own gateway; still exists

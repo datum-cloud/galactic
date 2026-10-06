@@ -16,7 +16,7 @@ data flow, module reference, known constraints):
 - [agents/ARCHITECTURE-ROUTER.md](agents/ARCHITECTURE-ROUTER.md) — the
   BGP/EVPN control plane (`galactic-router`, embedded GoBGP, GC).
 - [agents/ARCHITECTURE-GATEWAY.md](agents/ARCHITECTURE-GATEWAY.md) — the edge
-  XDP DSR NAT+LB gateway (`galactic-gateway`, `NetworkGateway`/`NetworkRule`).
+  XDP DSR load balancer (`galactic-gateway`, `NetworkGateway`/`NetworkRule`).
 - [agents/ARCHITECTURE.md](agents/ARCHITECTURE.md) — superseded by the three
   documents above; kept only as a redirect for old links.
 - [agents/CONVENTIONS.md](agents/CONVENTIONS.md) — Go naming, error

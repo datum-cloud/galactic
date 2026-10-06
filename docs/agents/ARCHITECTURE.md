@@ -10,11 +10,11 @@ Galactic now ships four binaries per node (the third and fourth only on
 dedicated gateway-role `edge` nodes); three of them have
 their own architecture document:
 
-| Document                                           | Covers                                                                                                                                             |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Document                                           | Covers                                                                                                                                |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | [ARCHITECTURE-CNI.md](ARCHITECTURE-CNI.md)         | The CNI attach chain — `galactic-cni` (installer), `galactic-veth`, `galactic-tap`, `galactic-ipam`, `galactic-bgp`, `galactic-route` |
-| [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)   | The BGP/EVPN control plane — `galactic-router`                                                                                                     |
-| [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) | The edge XDP NAT+LB gateway — `galactic-gateway`, `NetworkGateway`/`NetworkRule`                                                                   |
+| [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md)   | The BGP/EVPN control plane — `galactic-router`                                                                                        |
+| [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md) | The edge XDP DSR load balancer — `galactic-gateway`, `NetworkGateway`/`NetworkRule`                                                   |
 
 The fourth, `galactic-nat` (sharded stateful egress translation, `EgressShard`),
 has no architecture document of its own yet — see

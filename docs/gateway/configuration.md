@@ -1,7 +1,7 @@
 # Gateway Deployment & Configuration
 
 This is a how-to/reference guide for deploying and configuring
-`galactic-gateway`, the edge XDP Maglev/DSR NAT+LB gateway control plane. For
+`galactic-gateway`, the edge XDP Maglev/DSR L4 load-balancer control plane. For
 the design rationale (why DSR, why anycast, why no VRF dependency) see
 [docs/agents/ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) —
 this document only covers the "how", not the "why", and cross-links back to
@@ -36,11 +36,7 @@ each from its own slot (`GALACTIC_GATEWAY_XDP_ATTACH=dispatch` here,
 `GALACTIC_NAT_XDP_ATTACH=dispatch` there). See
 [docs/nat/configuration.md](../nat/configuration.md). See
 [ARCHITECTURE-GATEWAY.md](../agents/ARCHITECTURE-GATEWAY.md) for the full
-design (DSR vs. the removed Full-NAT design, the anycast BGP model, the
-XDP packet path) and
-[gateway-ingress-packet-trace.md](gateway-ingress-packet-trace.md) for a
-packet-level sequence diagram (currently describing the earlier Full-NAT
-datapath — see that file's own header for the caveat).
+design (why DSR, the anycast BGP model, the XDP packet path).
 
 ## Prerequisite: node labeling
 
@@ -116,29 +112,20 @@ node is not a supported configuration.
 
 `config/galactic-gateway/base/` is intentionally excluded from
 `config/galactic-gateway/`'s own kustomization and must never be applied
-directly — doing so produces a crash-looping `galactic-gateway` container.
-The reason is `GALACTIC_GATEWAY_SRV6_ADDRESS`: it is this node's own plain
-SRv6-reachable IPv6 address, used purely as the source address of every
-outer header the node's `edge_lb` XDP program pushes
-(`edgedsr.c`'s `encap_config_table`) — it is **never** a NAT/SNAT source and
-has no return-path significance, unlike the identically-named field in the
-now-removed Full-NAT design. Because DSR rewrites nothing, there is no
-reconcile step that derives or publishes this value automatically (no
-analogue of a "self-address" status field exists on `NetworkGateway` at
-all — see that CRD's own doc comment). It must be unique per gateway node
-and is operator-supplied today, with no in-cluster derivation mechanism.
-`GALACTIC_GATEWAY_PUBLIC_INTERFACE` is deployment-specific for the same
-reason — every node's public/underlay-facing uplink interface name can
-differ.
+directly — doing so produces a crash-looping `galactic-gateway` container. The
+reason is `GALACTIC_GATEWAY_SRV6_ADDRESS`: it is this node's own plain
+SRv6-reachable IPv6 address, used purely as the source address of every outer
+header the node's `edge_lb` XDP program pushes (`edgedsr.c`'s
+`encap_config_table`). It is not an address-translation source and has no
+return-path significance. Because DSR rewrites nothing, there is no reconcile
+step that derives or publishes this value automatically (no analogue of a
+"self-address" status field exists on `NetworkGateway` at all — see that CRD's
+own doc comment). It must be unique per gateway node and is operator-supplied
+today, with no in-cluster derivation mechanism.
+`GALACTIC_GATEWAY_PUBLIC_INTERFACE` is deployment-specific for the same reason
+— every node's public/underlay-facing uplink interface name can differ.
 
-> A few older comments in this repo (`config/galactic-gateway/base/daemonset.yaml`,
-> `AGENTS.md`, `README.md`) attribute this constraint to a `publishSelfAddress`
-> doc comment on `internal/controller/networkgateway_controller.go`. That
-> function was removed as part of the DSR/anycast rewrite — it belonged to
-> the earlier Full-NAT design, which *did* publish a per-node self-address
-> route. The underlying constraint (unique per-node SRv6 address, no
-> in-cluster derivation) still holds; it's just no longer explained by a
-> function of that name. The authoritative explanation today is
+> The authoritative explanation of this constraint is
 > `internal/config/gateway.go`'s `EnvGatewaySRv6Address` doc comment and
 > ARCHITECTURE-GATEWAY.md's ["SRv6 encap-source address"](../agents/ARCHITECTURE-GATEWAY.md#srv6-encap-source-address)
 > section.
@@ -582,9 +569,6 @@ access.
   constraints.
 - [docs/node-labels.md](../node-labels.md) — the full node-labeling
   strategy shared across every Galactic component.
-- [docs/gateway/gateway-ingress-packet-trace.md](gateway-ingress-packet-trace.md) —
-  packet-level sequence diagrams (currently describing the earlier
-  Full-NAT datapath).
 - [docs/router/configuration.md](../router/configuration.md) — the
   `GALACTIC_ROUTER_*` environment variables the co-located `galactic-router`
   pod on the same gateway node also reads.

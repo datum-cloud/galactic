@@ -1,4 +1,4 @@
-# The edge XDP NAT+LB gateway control plane. Unlike config/galactic-router/'s
+# The edge XDP DSR load-balancer control plane. Unlike config/galactic-router/'s
 # equivalent kustomization.yaml, this deliberately does NOT include base/:
 # base/daemonset.yaml's galactic-gateway container has no generic default
 # for GALACTIC_GATEWAY_PUBLIC_INTERFACE/_SRV6_ADDRESS (both required —

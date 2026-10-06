@@ -26,11 +26,11 @@ Rel(client, galactic, "Connects to a NetworkGateway VIP:port", "IPv6")
 
 Rel(compute, galactic, "Relies on for pod/VM VPC-attached networking", "SRv6, EVPN")
 Rel(connectors, galactic, "Relies on for EVPN route distribution between sites", "SRv6, EVPN")
-Rel(gateways, galactic, "Relies on for edge NAT+LB and Active-Active BGP placement", "XDP, EVPN")
+Rel(gateways, galactic, "Relies on for edge DSR load balancing and anycast VIP advertisement", "XDP, EVPN")
 
 Rel(galactic, k8s, "Watches / writes BGP and Gateway CRDs", "controller-runtime, bare client")
 Rel(vpcop, galactic, "Pre-populates VPC/VPCAttachment identifiers", "CNI config / NAD annotation")
 Rel(galactic, fabric, "Peers over eBGP underlay", "eBGP, port 179")
-Rel(galactic, rr, "Distributes tenant EVPN + Active-Active gateway routes", "iBGP, port 1790")
+Rel(galactic, rr, "Distributes tenant EVPN + anycast gateway VIP routes", "iBGP, port 1790")
 
 @enduml

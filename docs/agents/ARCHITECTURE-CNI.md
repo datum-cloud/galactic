@@ -10,7 +10,7 @@ _Last updated: 2026-09-09_
 This document covers the CNI side of Galactic only. See
 [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) for the BGP/EVPN control
 plane (`galactic-router`) and [ARCHITECTURE-GATEWAY.md](ARCHITECTURE-GATEWAY.md)
-for the edge XDP NAT+LB gateway (`galactic-gateway`). This file, together
+for the edge XDP DSR load balancer (`galactic-gateway`). This file, together
 with those two, supersedes the former monolithic `ARCHITECTURE.md` — see
 [AGENTS.md](../../AGENTS.md) for which document to start from for a given
 task.

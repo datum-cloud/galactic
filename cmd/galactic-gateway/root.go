@@ -34,7 +34,7 @@ import (
 const (
 	appName = "galactic-gateway"
 
-	appDesc = `Galactic edge XDP NAT+LB gateway
+	appDesc = `Galactic edge XDP DSR load balancer
 
  Find more information at: https://www.datum.net/docs`
 )
@@ -248,7 +248,7 @@ func newRootCommand() *cobra.Command {
 		config.DefaultGatewayGRPCHealthPort,
 		"gRPC health check port")
 	cmd.Flags().StringP("gateway-public-interface", "", "",
-		"Public/underlay-facing uplink interface for the edge NAT+LB gateway datapath (required)")
+		"Public/underlay-facing uplink interface for the edge DSR load-balancer datapath (required)")
 	cmd.Flags().StringP("gateway-internal-interfaces", "", "",
 		"Comma-separated compute-facing interfaces whose VIP-sourced return traffic this node "+
 			"forwards before netfilter (optional; empty means this node carries no return traffic)")

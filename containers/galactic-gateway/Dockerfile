@@ -39,7 +39,7 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 
 # galactic-gateway transitively imports both internal/plumbing/ebpf/edgeprog
-# (the edge NAT+LB XDP program it loads directly) and, via
+# (the edge DSR load-balancer XDP program it loads directly) and, via
 # internal/plumbing/ebpf/edgepreflight, internal/plumbing/ebpf/prog (the
 # SRv6 uSID TC-BPF program) -- neither package's bpf2go output
 # (*_bpfel.go/.o, *_bpfeb.go/.o) is committed to git (see each package's

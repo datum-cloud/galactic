@@ -18,10 +18,8 @@
 // inside unmodified. The backend answers the client directly, so reply traffic
 // never re-enters this program. That has three consequences:
 //
-//   - No connection table. A full-NAT datapath needs one to remember which
-//     backend and translated port a flow was assigned, because that state must
-//     persist for the life of the connection. Here the same hash table produces
-//     the same backend for the same flow on every packet, with no state.
+//   - No connection table. The same hash table produces the same backend for
+//     the same flow on every packet, with no state.
 //   - No return or decap branch, since this node never sees replies.
 //   - No port allocation and no checksum touch anywhere in this file, the
 //     packet's own checksum already being correct for its unmodified content.
@@ -152,9 +150,8 @@ struct backend {
 	__u8 usid[16];
 };
 
-// struct vip_key is vip_table's key -- identical composition to edgenat.c's
-// former rule_key (proto, dst port, VIP address). No tenant dimension: a
-// VIP is globally unique by construction.
+// struct vip_key is vip_table's key: proto, dst port, VIP address. No tenant
+// dimension: a VIP is globally unique by construction.
 struct vip_key {
 	__u8 proto;
 	__u8 pad[1];
@@ -211,9 +208,9 @@ struct encap_config {
 	__u8 encap_src[16];
 };
 
-// Drop reason indices into the drop_reasons map -- a much smaller set than
-// edgenat.c's former enum edge_drop_reason, since DSR has no conn_table,
-// no PAT allocation, and no return/decap branch to fail in.
+// Drop reason indices into the drop_reasons map -- a small set, since DSR has
+// no connection table, no port allocation, and no return/decap branch to fail
+// in.
 enum edge_drop_reason {
 	DROP_REASON_EMPTY_BACKEND_LIST = 0,
 	DROP_REASON_NO_ENCAP_CONFIG    = 1,
