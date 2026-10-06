@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/features"
 	"github.com/cilium/ebpf/rlimit"
@@ -62,6 +63,18 @@ func (k *KernelProber) HashMap() error {
 	}
 	if err := features.HaveMapType(ebpf.Hash); err != nil {
 		return fmt.Errorf("kernel rejects BPF_MAP_TYPE_HASH: %w", err)
+	}
+	return nil
+}
+
+// RedirectNeigh reports whether SCHED_CLS programs may call
+// bpf_redirect_neigh on this kernel.
+func (k *KernelProber) RedirectNeigh() error {
+	if err := ensureMemlockRemoved(); err != nil {
+		return err
+	}
+	if err := features.HaveProgramHelper(ebpf.SchedCLS, asm.FnRedirectNeigh); err != nil {
+		return fmt.Errorf("kernel rejects bpf_redirect_neigh for BPF_PROG_TYPE_SCHED_CLS: %w", err)
 	}
 	return nil
 }

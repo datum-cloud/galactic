@@ -46,6 +46,7 @@ rules:
       - bgppolicies/status
       - bgpvrfinstances/status
       - servicevipbindings/status
+      - serviceroutepolicies/status
     verbs: ["get", "update", "patch"]
   - apiGroups: ["cloud.datumapis.com"]
     resources:

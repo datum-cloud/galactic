@@ -20,18 +20,23 @@ import (
 	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-// RouteIntent describes one local bidirectional service route. The consumer
-// prefix is taken from VPCAttachment.status.podSubnet; the service prefix is
-// the endpoint address as a host route.
+// RouteIntent describes one local, attachment-scoped service path. Consumer
+// addresses are learned from authorized packets, so guest-managed attachments
+// do not need to publish a podSubnet.
 type RouteIntent struct {
 	Attachment     types.NamespacedName
-	Consumer       *net.IPNet
 	Service        *net.IPNet
-	ConsumerVPC    string
 	ConsumerDevice string
-	ServiceVPC     string
 	ServiceDevice  string
 	Ports          []networkv1alpha1.ServiceRouteProtocolPort
+}
+
+// RouteProgrammer applies a local service path. Implementations must make
+// repeated Apply and Remove calls safe so reconciliation can resume after a
+// partial failure.
+type RouteProgrammer interface {
+	Apply(RouteIntent) error
+	Remove(RouteIntent) error
 }
 
 // Compile evaluates policy against attachments assigned to localNode and
@@ -48,6 +53,10 @@ func Compile(
 	}
 	if policy.Spec.Region != "" && endpoint.Spec.Region != "" && policy.Spec.Region != endpoint.Spec.Region {
 		return nil, fmt.Errorf("policy region %q does not match endpoint region %q", policy.Spec.Region, endpoint.Spec.Region)
+	}
+	if endpoint.Spec.DeliveryMode != networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal {
+		return nil, fmt.Errorf("service endpoint %s has unsupported deliveryMode %q",
+			endpoint.Name, endpoint.Spec.DeliveryMode)
 	}
 	selector, err := metav1.LabelSelectorAsSelector(&policy.Spec.AttachmentSelector)
 	if err != nil {
@@ -78,14 +87,21 @@ func Compile(
 	if serviceAttachment == nil || serviceAttachment.Status.Node != localNode {
 		return nil, nil
 	}
-	if serviceAttachment.Status.VPC == "" || serviceAttachment.Status.HostInterface == "" {
-		return nil, fmt.Errorf("service attachment %s/%s is missing VPC or host interface status",
+	if serviceAttachment.Status.HostInterface == "" {
+		return nil, fmt.Errorf("service attachment %s/%s is missing host interface status",
 			serviceKey.Namespace, serviceKey.Name)
 	}
 
 	ports := append([]networkv1alpha1.ServiceRouteProtocolPort(nil), policy.Spec.ProtocolPorts...)
 	if len(ports) == 0 {
 		ports = []networkv1alpha1.ServiceRouteProtocolPort{{Protocol: endpoint.Spec.Protocol, Port: endpoint.Spec.Port}}
+	} else {
+		for _, port := range ports {
+			if port.Protocol != endpoint.Spec.Protocol || port.Port != endpoint.Spec.Port {
+				return nil, fmt.Errorf("policy protocolPorts must be a subset of endpoint %s/%d",
+					endpoint.Spec.Protocol, endpoint.Spec.Port)
+			}
+		}
 	}
 
 	intents := make([]RouteIntent, 0, len(attachments))
@@ -93,18 +109,13 @@ func Compile(
 		if attachment == nil || attachment.Status.Node != localNode || !selector.Matches(labels.Set(attachment.Labels)) {
 			continue
 		}
-		_, consumer, err := net.ParseCIDR(attachment.Status.PodSubnet)
-		if err != nil {
-			return nil, fmt.Errorf("attachment %s/%s has invalid podSubnet %q: %w",
-				attachment.Namespace, attachment.Name, attachment.Status.PodSubnet, err)
+		if attachment.Status.HostInterface == "" {
+			continue
 		}
 		intents = append(intents, RouteIntent{
 			Attachment:     types.NamespacedName{Namespace: attachment.Namespace, Name: attachment.Name},
-			Consumer:       consumer,
 			Service:        cloneIPNet(service),
-			ConsumerVPC:    attachment.Status.VPC,
 			ConsumerDevice: attachment.Status.HostInterface,
-			ServiceVPC:     serviceAttachment.Status.VPC,
 			ServiceDevice:  serviceAttachment.Status.HostInterface,
 			Ports:          append([]networkv1alpha1.ServiceRouteProtocolPort(nil), ports...),
 		})

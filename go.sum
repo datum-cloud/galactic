@@ -209,6 +209,10 @@ go.datum.net/network v0.1.1-0.20260930210653-3a8d02541780 h1:RPC/5vwvalvHlVzCRL5
 go.datum.net/network v0.1.1-0.20260930210653-3a8d02541780/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
 go.datum.net/network v0.3.1-0.20261006163011-bf0955ada028 h1:+y/NPSFPLuC1spzQPmg4d30MuB9bggZgmJ/Uttw/QvM=
 go.datum.net/network v0.3.1-0.20261006163011-bf0955ada028/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
+go.datum.net/network v0.3.1-0.20261006181027-ce5fa0d7dd95 h1:+dbgzYC0pCoJTVBJW+BUQX59w/Vicu8PC14spJkK/nY=
+go.datum.net/network v0.3.1-0.20261006181027-ce5fa0d7dd95/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
+go.datum.net/network v0.3.1-0.20261006181206-248c62692a8f h1:DTXKelzYW0LWGRhMzGIEoOl+HKw8qaSEG8oHySCDfnU=
+go.datum.net/network v0.3.1-0.20261006181206-248c62692a8f/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/otel v1.44.0 h1:JjwHmHpA4iZ3wBxluu2fbbE7j4kqlE8jXyAyPXH7HqU=

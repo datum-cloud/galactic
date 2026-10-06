@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -17,33 +18,21 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
-	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/serviceroutemap"
-	"go.datum.net/galactic/internal/plumbing/vrf"
 	api "go.datum.net/network/api/v1alpha1"
 )
 
-// RouteProgrammer applies the local bidirectional service path for a route
-// intent. Implementations must make repeated Apply calls safe.
-type RouteProgrammer interface {
-	Apply(RouteIntent) error
-	Remove(RouteIntent) error
-}
-
 type routeRef struct {
-	tableID       uint32
-	prefix        string
-	targetIfindex uint32
-	targetTableID uint32
-	targetKind    uint32
-	requirePolicy bool
+	ingressIfindex uint32
+	address        string
+	targetIfindex  uint32
 }
 
 type accessRef struct {
-	tableID  uint32
-	address  string
-	protocol uint8
-	port     uint16
+	ingressIfindex uint32
+	address        string
+	protocol       uint8
+	port           uint16
 }
 
 type appliedEntry struct {
@@ -62,13 +51,15 @@ type routeState struct {
 type EBPFRouteProgrammer struct {
 	PinDir string
 
-	mu          sync.Mutex
-	tables      *serviceroutemap.Tables
-	kinds       *ifindexvrfmap.EgressKindTable
-	mapHandles  []*ebpf.Map
-	routeRefs   map[string]routeState
-	accessRefs  map[accessRef]int
-	appliedRefs map[string][][]appliedEntry
+	mu               sync.Mutex
+	tables           *serviceroutemap.Tables
+	mapHandles       []*ebpf.Map
+	routeMapID       ebpf.MapID
+	routeRefs        map[string]routeState
+	accessRefs       map[accessRef]int
+	appliedRefs      map[string][][]appliedEntry
+	desiredRefs      map[string][][]appliedEntry
+	pendingRollbacks map[string][]appliedEntry
 }
 
 // Initialize opens the pinned maps and removes service state left by an older
@@ -93,18 +84,26 @@ func (p *EBPFRouteProgrammer) Apply(intent RouteIntent) error {
 		return err
 	}
 
+	key := intentKey(intent)
+	if err := p.retryRollback(key); err != nil {
+		return fmt.Errorf("retry prior service route rollback: %w", err)
+	}
 	applied := make([]appliedEntry, 0, len(entries))
 	for _, entry := range entries {
 		if err := p.acquire(entry); err != nil {
+			var rollbackErrs []error
 			for index := len(applied) - 1; index >= 0; index-- {
-				_ = p.release(applied[index])
+				if rollbackErr := p.release(applied[index]); rollbackErr != nil {
+					p.pendingRollbacks[key] = append(p.pendingRollbacks[key], applied[index])
+					rollbackErrs = append(rollbackErrs, rollbackErr)
+				}
 			}
-			return err
+			return errors.Join(err, errors.Join(rollbackErrs...))
 		}
 		applied = append(applied, entry)
 	}
-	key := intentKey(intent)
 	p.appliedRefs[key] = append(p.appliedRefs[key], applied)
+	p.desiredRefs[key] = append(p.desiredRefs[key], applied)
 	return nil
 }
 
@@ -116,70 +115,153 @@ func (p *EBPFRouteProgrammer) Remove(intent RouteIntent) error {
 		return err
 	}
 	key := intentKey(intent)
+	if err := p.retryRollback(key); err != nil {
+		return fmt.Errorf("retry prior service route rollback: %w", err)
+	}
 	sets := p.appliedRefs[key]
 	if len(sets) == 0 {
 		return nil
 	}
 	entries := sets[len(sets)-1]
+	remaining := make([]appliedEntry, 0, len(entries))
 	var errs []error
 	for index := len(entries) - 1; index >= 0; index-- {
 		if err := p.release(entries[index]); err != nil {
 			errs = append(errs, err)
+			remaining = append(remaining, entries[index])
 		}
+	}
+	if len(remaining) != 0 {
+		sets[len(sets)-1] = remaining
+		p.appliedRefs[key] = sets
+		return errors.Join(errs...)
 	}
 	if len(sets) == 1 {
 		delete(p.appliedRefs, key)
+		delete(p.desiredRefs, key)
 	} else {
 		p.appliedRefs[key] = sets[:len(sets)-1]
+		desired := p.desiredRefs[key]
+		p.desiredRefs[key] = desired[:len(desired)-1]
 	}
 	return errors.Join(errs...)
 }
 
 func (p *EBPFRouteProgrammer) ensureOpen() error {
 	if p.tables != nil {
-		return nil
+		changed, err := p.routeMapChanged()
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		p.closeHandles()
 	}
+	desired := p.desiredRefs
 	tables, handles, err := serviceroutemap.OpenPinned(p.pinDir())
 	if err != nil {
-		return err
-	}
-	kinds, kindHandle, err := ifindexvrfmap.OpenPinnedEgressKind(p.pinDir())
-	if err != nil {
-		for _, handle := range handles {
-			_ = handle.Close()
-		}
 		return err
 	}
 	if err := tables.Clear(); err != nil {
 		for _, handle := range handles {
 			_ = handle.Close()
 		}
-		_ = kindHandle.Close()
 		return err
 	}
 	p.tables = tables
-	p.kinds = kinds
-	p.mapHandles = append(handles, kindHandle)
+	p.mapHandles = handles
+	p.routeMapID, err = kernelMapID(handles[0])
+	if err != nil {
+		p.closeHandles()
+		return err
+	}
 	p.routeRefs = make(map[string]routeState)
 	p.accessRefs = make(map[accessRef]int)
 	p.appliedRefs = make(map[string][][]appliedEntry)
+	p.pendingRollbacks = make(map[string][]appliedEntry)
+	if desired == nil {
+		p.desiredRefs = make(map[string][][]appliedEntry)
+		return nil
+	}
+	p.desiredRefs = desired
+	for key, sets := range desired {
+		for _, entries := range sets {
+			applied := make([]appliedEntry, 0, len(entries))
+			for _, entry := range entries {
+				if err := p.acquire(entry); err != nil {
+					p.closeHandles()
+					return fmt.Errorf("rebuild service route state %s: %w", key, err)
+				}
+				applied = append(applied, entry)
+			}
+			p.appliedRefs[key] = append(p.appliedRefs[key], applied)
+		}
+	}
 	return nil
 }
 
+func (p *EBPFRouteProgrammer) routeMapChanged() (bool, error) {
+	current, err := ebpf.LoadPinnedMap(filepath.Join(p.pinDir(), "service_route_table"), nil)
+	if err != nil {
+		return false, fmt.Errorf("open current service route map: %w", err)
+	}
+	defer current.Close() //nolint:errcheck // read-only identity check
+	id, err := kernelMapID(current)
+	if err != nil {
+		return false, err
+	}
+	return id != p.routeMapID, nil
+}
+
+func kernelMapID(m *ebpf.Map) (ebpf.MapID, error) {
+	info, err := m.Info()
+	if err != nil {
+		return 0, fmt.Errorf("read service route map info: %w", err)
+	}
+	id, ok := info.ID()
+	if !ok {
+		return 0, errors.New("kernel did not report service route map ID")
+	}
+	return id, nil
+}
+
+func (p *EBPFRouteProgrammer) closeHandles() {
+	for _, handle := range p.mapHandles {
+		_ = handle.Close()
+	}
+	p.mapHandles = nil
+	p.tables = nil
+	p.routeMapID = 0
+}
+
+func (p *EBPFRouteProgrammer) retryRollback(key string) error {
+	entries := p.pendingRollbacks[key]
+	if len(entries) == 0 {
+		return nil
+	}
+	remaining := make([]appliedEntry, 0, len(entries))
+	var errs []error
+	for _, entry := range entries {
+		if err := p.release(entry); err != nil {
+			remaining = append(remaining, entry)
+			errs = append(errs, err)
+		}
+	}
+	if len(remaining) == 0 {
+		delete(p.pendingRollbacks, key)
+	} else {
+		p.pendingRollbacks[key] = remaining
+	}
+	return errors.Join(errs...)
+}
+
 func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error) {
-	consumerTable, err := vrf.TableID(intent.ConsumerVPC)
-	if err != nil {
-		return nil, fmt.Errorf("resolve consumer VRF %q: %w", intent.ConsumerVPC, err)
-	}
-	serviceTable, err := vrf.TableID(intent.ServiceVPC)
-	if err != nil {
-		return nil, fmt.Errorf("resolve service VRF %q: %w", intent.ServiceVPC, err)
-	}
-	consumerIfindex, consumerKind, err := p.target(intent.ConsumerDevice)
+	consumerIfindex, err := p.target(intent.ConsumerDevice)
 	if err != nil {
 		return nil, fmt.Errorf("resolve consumer interface %q: %w", intent.ConsumerDevice, err)
 	}
-	serviceIfindex, serviceKind, err := p.target(intent.ServiceDevice)
+	serviceIfindex, err := p.target(intent.ServiceDevice)
 	if err != nil {
 		return nil, fmt.Errorf("resolve service interface %q: %w", intent.ServiceDevice, err)
 	}
@@ -192,36 +274,21 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 			return nil, err
 		}
 		entries = append(entries, appliedEntry{access: &accessRef{
-			tableID: consumerTable, address: serviceIP.String(), protocol: protocol, port: uint16(port.Port),
+			ingressIfindex: consumerIfindex, address: serviceIP.String(), protocol: protocol, port: uint16(port.Port),
 		}})
 	}
-	entries = append(entries,
-		appliedEntry{route: &routeRef{
-			tableID: serviceTable, prefix: intent.Consumer.String(), targetIfindex: consumerIfindex,
-			targetTableID: consumerTable, targetKind: consumerKind,
-		}},
-		appliedEntry{route: &routeRef{
-			tableID: consumerTable, prefix: intent.Service.String(), targetIfindex: serviceIfindex,
-			targetTableID: serviceTable, targetKind: serviceKind, requirePolicy: true,
-		}},
-	)
+	entries = append(entries, appliedEntry{route: &routeRef{
+		ingressIfindex: consumerIfindex, address: serviceIP.String(), targetIfindex: serviceIfindex,
+	}})
 	return entries, nil
 }
 
-func (p *EBPFRouteProgrammer) target(name string) (uint32, uint32, error) {
+func (p *EBPFRouteProgrammer) target(name string) (uint32, error) {
 	link, err := netlink.LinkByName(name)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	ifindex := uint32(link.Attrs().Index)
-	kind, ok, err := p.kinds.Get(ifindex)
-	if err != nil {
-		return 0, 0, err
-	}
-	if !ok {
-		return 0, 0, fmt.Errorf("interface %d has no registered egress kind", ifindex)
-	}
-	return ifindex, kind, nil
+	return uint32(link.Attrs().Index), nil
 }
 
 func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
@@ -229,7 +296,7 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 		if p.accessRefs[*entry.access] == 0 {
 			address := net.ParseIP(entry.access.address)
 			if err := p.tables.RegisterAccess(
-				entry.access.tableID, address, entry.access.protocol, entry.access.port,
+				entry.access.ingressIfindex, address, entry.access.protocol, entry.access.port,
 			); err != nil {
 				return err
 			}
@@ -248,17 +315,10 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 		p.routeRefs[key] = state
 		return nil
 	}
-	prefix, err := parsePrefix(entry.route.prefix)
-	if err != nil {
-		return err
-	}
 	if err := p.tables.RegisterRoute(
-		entry.route.tableID,
-		prefix,
+		entry.route.ingressIfindex,
+		net.ParseIP(entry.route.address),
 		entry.route.targetIfindex,
-		entry.route.targetTableID,
-		entry.route.targetKind,
-		entry.route.requirePolicy,
 	); err != nil {
 		return err
 	}
@@ -273,13 +333,16 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 			p.accessRefs[*entry.access] = count - 1
 			return nil
 		}
-		delete(p.accessRefs, *entry.access)
-		return p.tables.UnregisterAccess(
-			entry.access.tableID,
+		if err := p.tables.UnregisterAccess(
+			entry.access.ingressIfindex,
 			net.ParseIP(entry.access.address),
 			entry.access.protocol,
 			entry.access.port,
-		)
+		); err != nil {
+			return err
+		}
+		delete(p.accessRefs, *entry.access)
+		return nil
 	}
 
 	key := routeRefKey(*entry.route)
@@ -292,12 +355,11 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 		p.routeRefs[key] = state
 		return nil
 	}
-	delete(p.routeRefs, key)
-	prefix, err := parsePrefix(entry.route.prefix)
-	if err != nil {
+	if err := p.tables.UnregisterRoute(entry.route.ingressIfindex, net.ParseIP(entry.route.address)); err != nil {
 		return err
 	}
-	return p.tables.UnregisterRoute(entry.route.tableID, prefix)
+	delete(p.routeRefs, key)
+	return nil
 }
 
 func protocolNumber(protocol api.NetworkRuleProtocol) (uint8, error) {
@@ -311,23 +373,14 @@ func protocolNumber(protocol api.NetworkRuleProtocol) (uint8, error) {
 	}
 }
 
-func parsePrefix(value string) (*net.IPNet, error) {
-	_, prefix, err := net.ParseCIDR(value)
-	if err != nil {
-		return nil, fmt.Errorf("parse service route prefix %q: %w", value, err)
-	}
-	return prefix, nil
-}
-
 func routeRefKey(ref routeRef) string {
-	return fmt.Sprintf("%d|%s", ref.tableID, ref.prefix)
+	return fmt.Sprintf("%d|%s", ref.ingressIfindex, ref.address)
 }
 
 func intentKey(intent RouteIntent) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "%s|%s|%s|%s|%s|%s|%s",
-		intent.Attachment, intent.Consumer, intent.Service, intent.ConsumerVPC,
-		intent.ConsumerDevice, intent.ServiceVPC, intent.ServiceDevice)
+	fmt.Fprintf(&builder, "%s|%s|%s|%s",
+		intent.Attachment, intent.Service, intent.ConsumerDevice, intent.ServiceDevice)
 	for _, port := range intent.Ports {
 		fmt.Fprintf(&builder, "|%s:%d", port.Protocol, port.Port)
 	}

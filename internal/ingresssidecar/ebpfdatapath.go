@@ -338,13 +338,19 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 		return fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}
 
+	serviceProgram, err := ebpf.LoadPinnedProgram(filepath.Join(ebpfPinDir, attach.UsidServiceEgressPinName), nil)
+	if err != nil {
+		return fmt.Errorf("load pinned usid_service_egress program: %w", err)
+	}
+	defer func() { _ = serviceProgram.Close() }()
+
 	program, err := ebpf.LoadPinnedProgram(filepath.Join(ebpfPinDir, attach.UsidEgressPinName), nil)
 	if err != nil {
 		return fmt.Errorf("load pinned usid_egress program: %w", err)
 	}
 	defer func() { _ = program.Close() }()
 
-	if err := attach.AttachEgress(program, peerLink.Attrs().Name); err != nil {
+	if err := attach.AttachEgress(serviceProgram, program, peerLink.Attrs().Name); err != nil {
 		return fmt.Errorf("attach usid_egress to VRF %d's veth peer %q: %w", tableID, peerLink.Attrs().Name, err)
 	}
 	return nil

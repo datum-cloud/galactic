@@ -35,6 +35,7 @@ func TestCompileUsesObservedNodeAndSelector(t *testing.T) {
 	}
 	endpoint := &networkv1alpha1.ServiceEndpoint{Spec: networkv1alpha1.ServiceEndpointSpec{
 		Address: "fd20:0:21::1:0:0", Port: 53, Protocol: networkv1alpha1.NetworkRuleProtocolUDP,
+		DeliveryMode: networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
 		AttachmentRef: &networkv1alpha1.ServiceEndpointAttachmentReference{
 			Namespace: testServiceNamespace,
 			Name:      testServiceName,
@@ -55,7 +56,6 @@ func TestCompileUsesObservedNodeAndSelector(t *testing.T) {
 			},
 			Status: cloudv1alpha1.VPCAttachmentStatus{
 				Node: testNodeName, VPC: "consumer-vpc", HostInterface: "Gconsumer",
-				PodSubnet: "fd20:0:19::2:0:0/96",
 			},
 		},
 		{
@@ -97,6 +97,7 @@ func TestCompileUsesEndpointPortByDefault(t *testing.T) {
 	}}
 	endpoint := &networkv1alpha1.ServiceEndpoint{Spec: networkv1alpha1.ServiceEndpointSpec{
 		Address: "192.0.2.10", Port: 53, Protocol: networkv1alpha1.NetworkRuleProtocolTCP,
+		DeliveryMode: networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
 		AttachmentRef: &networkv1alpha1.ServiceEndpointAttachmentReference{
 			Namespace: testServiceNamespace, Name: testServiceName,
 		},

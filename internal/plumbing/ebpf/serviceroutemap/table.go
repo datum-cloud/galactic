@@ -15,13 +15,13 @@ import (
 
 	"github.com/cilium/ebpf"
 
-	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
 const (
-	serviceRouteMapName  = "service_route_table"
-	serviceAccessMapName = "service_access_table"
+	serviceRouteMapName   = "service_route_table"
+	serviceAccessMapName  = "service_access_table"
+	serviceReverseMapName = "service_reverse_table"
 
 	familyIPv6 = uint8(0)
 	familyIPv4 = uint8(1)
@@ -35,24 +35,45 @@ const (
 
 type serviceRouteValue struct {
 	TargetIfindex uint32
-	TargetTableID uint32
-	TargetKind    uint32
-	RequirePolicy uint8
-	Pad           [3]uint8
+}
+
+type serviceRouteKey struct {
+	IngressIfindex uint32
+	Family         uint8
+	Pad            [3]uint8
+	Address        [16]uint8
 }
 
 type serviceAccessKey struct {
-	TableID  uint32
-	Family   uint8
-	Protocol uint8
-	Port     uint16
-	Address  [16]uint8
+	IngressIfindex uint32
+	Family         uint8
+	Protocol       uint8
+	Port           uint16
+	Address        [16]uint8
+}
+
+type serviceReverseKey struct {
+	IngressIfindex uint32
+	Family         uint8
+	Protocol       uint8
+	SourcePort     uint16
+	DestPort       uint16
+	Pad            [2]uint8
+	SourceAddress  [16]uint8
+	DestAddress    [16]uint8
+}
+
+type serviceReverseValue struct {
+	ConsumerIfindex uint32
+	Pad             uint32
+	LastSeenNS      uint64
 }
 
 // Tables owns the route and access maps used by the service datapath.
 type Tables struct {
-	routes usidmap.Table
-	access usidmap.Table
+	routes  usidmap.Table
+	access  usidmap.Table
+	reverse usidmap.Table
 }
 
 // OpenPinned opens both service maps under pinDir. The caller owns the
@@ -67,13 +88,19 @@ func OpenPinned(pinDir string) (*Tables, []*ebpf.Map, error) {
 		_ = routes.Close()
 		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", serviceAccessMapName, err)
 	}
-	return New(usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access}),
-		[]*ebpf.Map{routes, access}, nil
+	reverse, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, serviceReverseMapName), nil)
+	if err != nil {
+		_ = routes.Close()
+		_ = access.Close()
+		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", serviceReverseMapName, err)
+	}
+	return New(usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access}, usidmap.KernelTable{Map: reverse}),
+		[]*ebpf.Map{routes, access, reverse}, nil
 }
 
 // New wraps map implementations. Production uses OpenPinned; tests use fakes.
-func New(routes, access usidmap.Table) *Tables {
-	return &Tables{routes: routes, access: access}
+func New(routes, access, reverse usidmap.Table) *Tables {
+	return &Tables{routes: routes, access: access, reverse: reverse}
 }
 
 // Clear removes all service-owned state. Galactic calls this once when it
@@ -81,9 +108,9 @@ func New(routes, access usidmap.Table) *Tables {
 // set from informer events. Clearing fails closed and prevents an object that
 // was deleted while the controller was down from leaving permanent access.
 func (t *Tables) Clear() error {
-	var routeKeys []prog.UsidEgressRouteKey
+	var routeKeys []serviceRouteKey
 	routeIterator := t.routes.Iterate()
-	var routeKey prog.UsidEgressRouteKey
+	var routeKey serviceRouteKey
 	var routeValue serviceRouteValue
 	for routeIterator.Next(&routeKey, &routeValue) {
 		routeKeys = append(routeKeys, routeKey)
@@ -103,6 +130,17 @@ func (t *Tables) Clear() error {
 		return fmt.Errorf("serviceroutemap: iterate access grants: %w", err)
 	}
 
+	var reverseKeys []serviceReverseKey
+	reverseIterator := t.reverse.Iterate()
+	var reverseKey serviceReverseKey
+	var reverseValue serviceReverseValue
+	for reverseIterator.Next(&reverseKey, &reverseValue) {
+		reverseKeys = append(reverseKeys, reverseKey)
+	}
+	if err := reverseIterator.Err(); err != nil {
+		return fmt.Errorf("serviceroutemap: iterate reverse flows: %w", err)
+	}
+
 	for _, key := range routeKeys {
 		if err := t.routes.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return fmt.Errorf("serviceroutemap: clear route: %w", err)
@@ -113,99 +151,89 @@ func (t *Tables) Clear() error {
 			return fmt.Errorf("serviceroutemap: clear access grant: %w", err)
 		}
 	}
+	for _, key := range reverseKeys {
+		if err := t.reverse.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("serviceroutemap: clear reverse flow: %w", err)
+		}
+	}
 	return nil
 }
 
 // RegisterRoute installs or replaces a service forwarding entry.
 func (t *Tables) RegisterRoute(
-	tableID uint32,
-	prefix *net.IPNet,
+	ingressIfindex uint32,
+	address net.IP,
 	targetIfindex uint32,
-	targetTableID uint32,
-	targetKind uint32,
-	requirePolicy bool,
 ) error {
-	key, err := routeKey(tableID, prefix)
+	key, err := routeKey(ingressIfindex, address)
 	if err != nil {
 		return err
 	}
 	value := serviceRouteValue{
 		TargetIfindex: targetIfindex,
-		TargetTableID: targetTableID,
-		TargetKind:    targetKind,
-	}
-	if requirePolicy {
-		value.RequirePolicy = 1
 	}
 	if err := t.routes.Put(key, value); err != nil {
-		return fmt.Errorf("serviceroutemap: register route table=%d prefix=%s: %w", tableID, prefix, err)
+		return fmt.Errorf("serviceroutemap: register route ifindex=%d address=%s: %w", ingressIfindex, address, err)
 	}
 	return nil
 }
 
 // UnregisterRoute removes a service forwarding entry if it exists.
-func (t *Tables) UnregisterRoute(tableID uint32, prefix *net.IPNet) error {
-	key, err := routeKey(tableID, prefix)
+func (t *Tables) UnregisterRoute(ingressIfindex uint32, address net.IP) error {
+	key, err := routeKey(ingressIfindex, address)
 	if err != nil {
 		return err
 	}
 	if err := t.routes.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("serviceroutemap: unregister route table=%d prefix=%s: %w", tableID, prefix, err)
+		return fmt.Errorf("serviceroutemap: unregister route ifindex=%d address=%s: %w", ingressIfindex, address, err)
 	}
 	return nil
 }
 
 // RegisterAccess allows protocol and port traffic to one service address.
-func (t *Tables) RegisterAccess(tableID uint32, address net.IP, protocol uint8, port uint16) error {
-	key, err := accessKey(tableID, address, protocol, port)
+func (t *Tables) RegisterAccess(ingressIfindex uint32, address net.IP, protocol uint8, port uint16) error {
+	key, err := accessKey(ingressIfindex, address, protocol, port)
 	if err != nil {
 		return err
 	}
 	if err := t.access.Put(key, uint8(1)); err != nil {
-		return fmt.Errorf("serviceroutemap: register access table=%d address=%s protocol=%d port=%d: %w",
-			tableID, address, protocol, port, err)
+		return fmt.Errorf("serviceroutemap: register access ifindex=%d address=%s protocol=%d port=%d: %w",
+			ingressIfindex, address, protocol, port, err)
 	}
 	return nil
 }
 
 // UnregisterAccess removes a service access grant if it exists.
-func (t *Tables) UnregisterAccess(tableID uint32, address net.IP, protocol uint8, port uint16) error {
-	key, err := accessKey(tableID, address, protocol, port)
+func (t *Tables) UnregisterAccess(ingressIfindex uint32, address net.IP, protocol uint8, port uint16) error {
+	key, err := accessKey(ingressIfindex, address, protocol, port)
 	if err != nil {
 		return err
 	}
 	if err := t.access.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("serviceroutemap: unregister access table=%d address=%s protocol=%d port=%d: %w",
-			tableID, address, protocol, port, err)
+		return fmt.Errorf("serviceroutemap: unregister access ifindex=%d address=%s protocol=%d port=%d: %w",
+			ingressIfindex, address, protocol, port, err)
 	}
 	return nil
 }
 
-func routeKey(tableID uint32, prefix *net.IPNet) (prog.UsidEgressRouteKey, error) {
-	if prefix == nil {
-		return prog.UsidEgressRouteKey{}, errors.New("serviceroutemap: prefix is nil")
-	}
-	ones, width := prefix.Mask.Size()
-	if width == 0 {
-		return prog.UsidEgressRouteKey{}, fmt.Errorf("serviceroutemap: prefix %s has an invalid mask", prefix)
-	}
-	key := prog.UsidEgressRouteKey{TableId: tableID, Prefixlen: uint32(40 + ones)}
-	if address := prefix.IP.To4(); address != nil {
+func routeKey(ingressIfindex uint32, address net.IP) (serviceRouteKey, error) {
+	key := serviceRouteKey{IngressIfindex: ingressIfindex}
+	if ipv4 := address.To4(); ipv4 != nil {
 		key.Family = familyIPv4
-		copy(key.Addr[:4], address)
+		copy(key.Address[:4], ipv4)
 		return key, nil
 	}
-	address := prefix.IP.To16()
-	if address == nil {
-		return prog.UsidEgressRouteKey{}, fmt.Errorf("serviceroutemap: prefix %s is not an IP prefix", prefix)
+	ipv6 := address.To16()
+	if ipv6 == nil {
+		return serviceRouteKey{}, fmt.Errorf("serviceroutemap: address %q is not an IP address", address)
 	}
 	key.Family = familyIPv6
-	copy(key.Addr[:], address)
+	copy(key.Address[:], ipv6)
 	return key, nil
 }
 
-func accessKey(tableID uint32, address net.IP, protocol uint8, port uint16) (serviceAccessKey, error) {
-	key := serviceAccessKey{TableID: tableID, Protocol: protocol, Port: bits.ReverseBytes16(port)}
+func accessKey(ingressIfindex uint32, address net.IP, protocol uint8, port uint16) (serviceAccessKey, error) {
+	key := serviceAccessKey{IngressIfindex: ingressIfindex, Protocol: protocol, Port: bits.ReverseBytes16(port)}
 	if ipv4 := address.To4(); ipv4 != nil {
 		key.Family = familyIPv4
 		copy(key.Address[:4], ipv4)

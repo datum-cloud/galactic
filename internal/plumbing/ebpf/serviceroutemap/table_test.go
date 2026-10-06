@@ -11,7 +11,6 @@ import (
 
 	"github.com/cilium/ebpf"
 
-	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
@@ -43,31 +42,28 @@ func (emptyIterator) Err() error         { return nil }
 
 func TestTables_RegisterIPv6Route(t *testing.T) {
 	routes, access := &fakeTable{}, &fakeTable{}
-	tables := New(routes, access)
-	_, prefix, err := net.ParseCIDR("fd20:0:19::/96")
-	if err != nil {
+	reverse := &fakeTable{}
+	tables := New(routes, access, reverse)
+	address := net.ParseIP("fd20:0:19::53")
+	if err := tables.RegisterRoute(42, address, 101); err != nil {
 		t.Fatal(err)
 	}
-	if err := tables.RegisterRoute(42, prefix, 101, 43, 1, true); err != nil {
-		t.Fatal(err)
-	}
-	key, ok := routes.putKey.(prog.UsidEgressRouteKey)
+	key, ok := routes.putKey.(serviceRouteKey)
 	if !ok {
 		t.Fatalf("route key type = %T", routes.putKey)
 	}
-	if key.TableId != 42 || key.Family != familyIPv6 || key.Prefixlen != 136 {
+	if key.IngressIfindex != 42 || key.Family != familyIPv6 || !bytes.Equal(key.Address[:], address.To16()) {
 		t.Fatalf("route key = %+v", key)
 	}
 	value, ok := routes.putValue.(serviceRouteValue)
-	if !ok || value.TargetIfindex != 101 || value.TargetTableID != 43 ||
-		value.TargetKind != 1 || value.RequirePolicy != 1 {
+	if !ok || value.TargetIfindex != 101 {
 		t.Fatalf("route value = %+v", routes.putValue)
 	}
 }
 
 func TestTables_RegisterAccessUsesNetworkPortOrder(t *testing.T) {
 	routes, access := &fakeTable{}, &fakeTable{}
-	tables := New(routes, access)
+	tables := New(routes, access, &fakeTable{})
 	address := net.ParseIP("fd20::53")
 	if err := tables.RegisterAccess(42, address, ProtocolUDP, 53); err != nil {
 		t.Fatal(err)
@@ -76,7 +72,7 @@ func TestTables_RegisterAccessUsesNetworkPortOrder(t *testing.T) {
 	if !ok {
 		t.Fatalf("access key type = %T", access.putKey)
 	}
-	if key.TableID != 42 || key.Family != familyIPv6 || key.Protocol != ProtocolUDP || key.Port != 0x3500 {
+	if key.IngressIfindex != 42 || key.Family != familyIPv6 || key.Protocol != ProtocolUDP || key.Port != 0x3500 {
 		t.Fatalf("access key = %+v", key)
 	}
 	if !bytes.Equal(key.Address[:], address.To16()) {
@@ -86,12 +82,9 @@ func TestTables_RegisterAccessUsesNetworkPortOrder(t *testing.T) {
 
 func TestTables_UnregisterAbsentIsIdempotent(t *testing.T) {
 	routes, access := &fakeTable{}, &fakeTable{}
-	tables := New(routes, access)
-	_, prefix, err := net.ParseCIDR("192.0.2.0/24")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := tables.UnregisterRoute(7, prefix); err != nil {
+	reverse := &fakeTable{}
+	tables := New(routes, access, reverse)
+	if err := tables.UnregisterRoute(7, net.ParseIP("192.0.2.53")); err != nil {
 		t.Fatal(err)
 	}
 	if err := tables.UnregisterAccess(7, net.ParseIP("192.0.2.53"), ProtocolTCP, 853); err != nil {
@@ -102,7 +95,7 @@ func TestTables_UnregisterAbsentIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestRouteKeyRejectsNilPrefix(t *testing.T) {
+func TestRouteKeyRejectsInvalidAddress(t *testing.T) {
 	_, err := routeKey(1, nil)
 	if err == nil {
 		t.Fatal("routeKey(nil) did not return an error")

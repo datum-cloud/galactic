@@ -26,6 +26,9 @@ const (
 	resourceBGPPolicies        = "bgppolicies"
 	resourceBGPVRFInstances    = "bgpvrfinstances"
 	resourceServiceVIPBindings = "servicevipbindings"
+	resourceServiceEndpoints   = "serviceendpoints"
+	resourceServiceRoutePolicy = "serviceroutepolicies"
+	resourceVPCAttachments     = "vpcattachments"
 	resourceSecrets            = "secrets"
 	resourceNodes              = "nodes"
 )
@@ -65,6 +68,9 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPPolicies},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceBGPVRFInstances},
 		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceVIPBindings},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceEndpoints},
+		{group: bgpAPIGroup, version: bgpAPIVersion, resource: resourceServiceRoutePolicy},
+		{group: "cloud.datumapis.com", version: "v1alpha1", resource: resourceVPCAttachments},
 		{version: "v1", resource: resourceSecrets},
 		{version: "v1", resource: resourceNodes},
 	}
