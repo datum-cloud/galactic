@@ -1,7 +1,7 @@
 # Alerts on the underlay (fabric-router's FRR, via frr-exporter and
 # fabric-config-agent), on galactic-router's BMP export and route installs,
-# and on the galactic-nat egress shards' session tables. A BGP session
-# that drops is also streamed to the BMP collector as a Peer Down carrying
+# and on the galactic-nat egress shards' session tables and uplink NICs. A BGP
+# session that drops is also streamed to the BMP collector as a Peer Down carrying
 # the reason and any NOTIFICATION;
 # these rules are the Prometheus-side signal for the same events, so an alert
 # does not depend on the collector or the log pipeline behind it.
@@ -251,6 +251,58 @@ spec:
               its least recently used row younger than the 7440s established-TCP timeout. The table is evicting
               idle sessions that have not expired, so tenants' long-lived connections through this shard break
               when they next send. galactic_nat_sessions shows which family and protocol hold the table.
+        # One NIC receive queue dropping a steady share of its traffic while
+        # most of the interface's queues do not (#673). The NIC drops these
+        # before the XDP datapath sees them, so galactic_nat_drops_total stays
+        # flat. Every flow hashed to the queue keeps failing on retry, and a
+        # BGP session on it expires its hold timer. Three conditions, all for
+        # 10 minutes: the queue drops over 1% of its packets while no more than
+        # half of the interface's queues drop that much (a burst spreads across
+        # queues, and a single-queue uplink is all of its own queues so it
+        # cannot fire), and the queue receives over 10 packets a second (so a
+        # handful of drops on an idle queue does not count). Idle queues count
+        # as queues of the interface. Only drivers that count discards per
+        # queue report them, bnxt_en among them.
+        - alert: GalacticNatUplinkRxQueueStalled
+          expr: |
+            (
+              rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m])
+                /
+              (rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) + rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]))
+            ) > 0.01
+            and on (node, interface)
+            (
+              count by (node, interface) (
+                (
+                  rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m])
+                    /
+                  (rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) + rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]))
+                ) > 0.01
+              )
+                <=
+              0.5 * count by (node, interface) (
+                (
+                  rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m])
+                    /
+                  (rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) + rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]))
+                )
+              )
+            )
+            and
+            rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) > 10
+          for: 10m
+          labels:
+            severity: critical
+            service: galactic
+            team: connect
+          annotations:
+            summary: "Receive queue {{ $labels.queue }} of {{ $labels.interface }} on {{ $labels.node }} is dropping packets"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+            description: >-
+              Queue {{ $labels.queue }} of uplink {{ $labels.interface }} ({{ $labels.driver }}) has discarded
+              {{ $value | humanizePercentage }} of its packets for 10 minutes while no more than half of the
+              interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the interface clears it,
+              once its bond partner is confirmed up.
         - alert: GalacticNatMetricsDown
           expr: up{job="galactic-nat"} == 0
           for: 5m
@@ -263,4 +315,4 @@ spec:
             runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatmetricsdown"
             description: >-
               Prometheus cannot reach galactic-nat's metrics port on {{ $labels.node }} (9182), so
-              GalacticNatSessionTableEvictingLive cannot fire for it.
+              GalacticNatSessionTableEvictingLive and GalacticNatUplinkRxQueueStalled cannot fire for it.
