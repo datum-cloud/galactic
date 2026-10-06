@@ -7,15 +7,17 @@
 package serviceroute
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sort"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
-	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
+	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // RouteIntent describes one local bidirectional service route. The consumer
@@ -42,7 +44,7 @@ func Compile(
 	localNode string,
 ) ([]RouteIntent, error) {
 	if policy == nil || endpoint == nil {
-		return nil, fmt.Errorf("service route policy and endpoint are required")
+		return nil, errors.New("service route policy and endpoint are required")
 	}
 	if policy.Spec.Region != "" && endpoint.Spec.Region != "" && policy.Spec.Region != endpoint.Spec.Region {
 		return nil, fmt.Errorf("policy region %q does not match endpoint region %q", policy.Spec.Region, endpoint.Spec.Region)
@@ -58,7 +60,10 @@ func Compile(
 	if endpoint.Spec.AttachmentRef == nil {
 		return nil, fmt.Errorf("service endpoint %s requires attachmentRef for local service routing", endpoint.Name)
 	}
-	serviceKey := types.NamespacedName{Namespace: endpoint.Spec.AttachmentRef.Namespace, Name: endpoint.Spec.AttachmentRef.Name}
+	serviceKey := types.NamespacedName{
+		Namespace: endpoint.Spec.AttachmentRef.Namespace,
+		Name:      endpoint.Spec.AttachmentRef.Name,
+	}
 	var serviceAttachment *cloudv1alpha1.VPCAttachment
 	for _, attachment := range attachments {
 		if attachment == nil {
@@ -74,7 +79,8 @@ func Compile(
 		return nil, nil
 	}
 	if serviceAttachment.Status.VPC == "" || serviceAttachment.Status.HostInterface == "" {
-		return nil, fmt.Errorf("service attachment %s/%s is missing VPC or host interface status", serviceKey.Namespace, serviceKey.Name)
+		return nil, fmt.Errorf("service attachment %s/%s is missing VPC or host interface status",
+			serviceKey.Namespace, serviceKey.Name)
 	}
 
 	ports := append([]networkv1alpha1.ServiceRouteProtocolPort(nil), policy.Spec.ProtocolPorts...)
@@ -89,7 +95,8 @@ func Compile(
 		}
 		_, consumer, err := net.ParseCIDR(attachment.Status.PodSubnet)
 		if err != nil {
-			return nil, fmt.Errorf("attachment %s/%s has invalid podSubnet %q: %w", attachment.Namespace, attachment.Name, attachment.Status.PodSubnet, err)
+			return nil, fmt.Errorf("attachment %s/%s has invalid podSubnet %q: %w",
+				attachment.Namespace, attachment.Name, attachment.Status.PodSubnet, err)
 		}
 		intents = append(intents, RouteIntent{
 			Attachment:     types.NamespacedName{Namespace: attachment.Namespace, Name: attachment.Name},

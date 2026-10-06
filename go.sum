@@ -102,6 +102,7 @@ github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
+github.com/josharian/intern v1.0.0/go.mod h1:5DoeVV0s6jJacbCEi61lwdGj/aVlrQvzHFFd8Hwg//Y=
 github.com/jsimonetti/rtnetlink/v2 v2.0.1 h1:xda7qaHDSVOsADNouv7ukSuicKZO7GgVUCXxpaIEIlM=
 github.com/jsimonetti/rtnetlink/v2 v2.0.1/go.mod h1:7MoNYNbb3UaDHtF8udiJo/RH6VsTKP1pqKLUTVCvToE=
 github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnrnM=
@@ -122,6 +123,7 @@ github.com/lithammer/dedent v1.1.0 h1:VNzHMVCBNG1j0fh3OrsFRkVUwStdDArbgBWoPAffkt
 github.com/lithammer/dedent v1.1.0/go.mod h1:jrXYCQtgg0nJiN+StA2KgR7w6CiQNv9Fd/Z9BP0jIOc=
 github.com/lorenzosaino/go-sysctl v0.3.1 h1:3phX80tdITw2fJjZlwbXQnDWs4S30beNcMbw0cn0HtY=
 github.com/lorenzosaino/go-sysctl v0.3.1/go.mod h1:5grcsBRpspKknNS1qzt1eIeRDLrhpKZAtz8Fcuvs1Rc=
+github.com/mailru/easyjson v0.7.7/go.mod h1:xzfreul335JAWq5oZzymOObrkdz5UnU4kGfJJLY9Nlc=
 github.com/mdlayher/genetlink v1.4.0 h1:f/Xs7Y2T+GyX9b3dbiUhnLE9InGs5F9RxJ2JwBMl71o=
 github.com/mdlayher/genetlink v1.4.0/go.mod h1:d1hrKr8fwZU2JkcAtQUAzeTrI7nbgQSl+5k1cC0biSA=
 github.com/mdlayher/ndp v1.1.0 h1:QylGKGVtH60sKZUE88+IW5ila1Z/M9/OXhWdsVKuscs=
@@ -205,6 +207,8 @@ go.datum.net/cloud v0.1.1-0.20260918213150-260f797bbc5c h1:k0P5980+kS90zCa0M4Moh
 go.datum.net/cloud v0.1.1-0.20260918213150-260f797bbc5c/go.mod h1:HTeaepXL0EqiqNsQ13K4/kGEwv+VLJ//BGrUfVIFfEA=
 go.datum.net/network v0.1.1-0.20260930210653-3a8d02541780 h1:RPC/5vwvalvHlVzCRL55XH6Wyvgi7GwQ4m4mYLvz39A=
 go.datum.net/network v0.1.1-0.20260930210653-3a8d02541780/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
+go.datum.net/network v0.3.1-0.20261006163011-bf0955ada028 h1:+y/NPSFPLuC1spzQPmg4d30MuB9bggZgmJ/Uttw/QvM=
+go.datum.net/network v0.3.1-0.20261006163011-bf0955ada028/go.mod h1:dqzM8WZczbiZ9bCvsxjkoI10GJqQ24NVWnc9boXgOkE=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/otel v1.44.0 h1:JjwHmHpA4iZ3wBxluu2fbbE7j4kqlE8jXyAyPXH7HqU=

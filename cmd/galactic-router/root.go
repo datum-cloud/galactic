@@ -274,14 +274,11 @@ func runCmd(cfg *config.RouterConfig) error {
 
 	// Register the node-local platform service route controller. It resolves
 	// ServiceRoutePolicy against Cloud VPCAttachment.status.node and programs
-	// only this node's local routes.
-	if err := (&controller.ServiceRoutePolicyReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		NodeName:   nodeName,
-		Programmer: serviceroute.LinuxRouteProgrammer{},
-		Applied:    make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
-	}).SetupWithManager(mgr); err != nil {
+	// only this node's local eBPF state. Clear any pinned state left by a prior
+	// controller process before informer reconciliation starts. A missing map is
+	// tolerated because the datapath loader may start after galactic-router;
+	// the first Apply retries initialization.
+	if err := setupServiceRouteController(mgr, nodeName); err != nil {
 		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
 	}
 
@@ -347,6 +344,21 @@ func runCmd(cfg *config.RouterConfig) error {
 	}
 
 	return nil
+}
+
+func setupServiceRouteController(mgr ctrl.Manager, nodeName string) error {
+	programmer := &serviceroute.EBPFRouteProgrammer{}
+	if err := programmer.Initialize(); err != nil {
+		ctrl.Log.Error(err, "service route eBPF maps are not available yet; initialization will retry on reconcile")
+	}
+
+	return (&controller.ServiceRoutePolicyReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		NodeName:   nodeName,
+		Programmer: programmer,
+		Applied:    make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
+	}).SetupWithManager(mgr)
 }
 
 // newRootCommand builds the root cobra command with all flags and the

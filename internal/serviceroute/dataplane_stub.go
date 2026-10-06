@@ -6,17 +6,23 @@
 
 package serviceroute
 
-import "fmt"
+import "errors"
 
-// LinuxRouteProgrammer is unavailable outside Linux. The stub keeps API and
+// EBPFRouteProgrammer is unavailable outside Linux. The stub keeps API and
 // planner packages testable on developer workstations; CI and production use
 // the Linux implementation.
-type LinuxRouteProgrammer struct{}
-
-func (LinuxRouteProgrammer) Apply(RouteIntent) error {
-	return fmt.Errorf("service route dataplane programming requires linux")
+type EBPFRouteProgrammer struct {
+	PinDir string
 }
 
-func (LinuxRouteProgrammer) Remove(RouteIntent) error {
-	return fmt.Errorf("service route dataplane programming requires linux")
+func (*EBPFRouteProgrammer) Initialize() error {
+	return errors.New("service route dataplane programming requires linux")
+}
+
+func (*EBPFRouteProgrammer) Apply(RouteIntent) error {
+	return errors.New("service route dataplane programming requires linux")
+}
+
+func (*EBPFRouteProgrammer) Remove(RouteIntent) error {
+	return errors.New("service route dataplane programming requires linux")
 }

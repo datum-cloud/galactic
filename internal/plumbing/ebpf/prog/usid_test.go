@@ -7,6 +7,7 @@ package prog
 import (
 	"encoding/binary"
 	"errors"
+	"math/bits"
 	"net/netip"
 	"os"
 	"testing"
@@ -1444,6 +1445,85 @@ func TestUsidEgress_RouteMissPassesThroughUnmodified(t *testing.T) {
 	}
 	if string(out) != string(pkt) {
 		t.Errorf("packet mutated on an egress_route_table miss:\n in: % x\nout: % x", pkt, out)
+	}
+}
+
+func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const (
+		tableID       = uint32(7)
+		loopback      = uint32(1)
+		egressKindTap = uint32(1)
+		servicePort   = uint16(8443)
+	)
+	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, tableID)
+
+	service := netip.MustParseAddr("fd20:70::100")
+	if err := objs.ServiceRouteTable.Put(
+		egressRouteKey(tableID, egressRouteFamilyINET6, service, 128),
+		UsidServiceRouteValue{
+			TargetIfindex: loopback,
+			TargetKind:    egressKindTap,
+			RequirePolicy: 1,
+		},
+	); err != nil {
+		t.Fatalf("populate service_route_table: %v", err)
+	}
+	if err := objs.ServiceAccessTable.Put(UsidServiceAccessKey{
+		TableId:  tableID,
+		Family:   egressRouteFamilyINET6,
+		Protocol: 6,
+		Port:     bits.ReverseBytes16(servicePort),
+		Addr:     service.As16(),
+	}, uint8(1)); err != nil {
+		t.Fatalf("populate service_access_table: %v", err)
+	}
+
+	pkt := buildPlainV6PacketWithL4Ports(t,
+		netip.MustParseAddr("fd20:70::2"), service, 6, 49152, servicePort)
+	ret, _, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActRedirect {
+		t.Errorf("verdict = %d, want TC_ACT_REDIRECT (%d)", ret, tcActRedirect)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, 40); got != 0 {
+		t.Errorf("drop_reasons[service_route_denied] = %d, want 0", got)
+	}
+}
+
+func TestUsidEgress_ServiceRouteDropsUnauthorizedPort(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+
+	const tableID = uint32(7)
+	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, tableID)
+
+	service := netip.MustParseAddr("fd20:70::100")
+	if err := objs.ServiceRouteTable.Put(
+		egressRouteKey(tableID, egressRouteFamilyINET6, service, 128),
+		UsidServiceRouteValue{TargetIfindex: 1, TargetKind: 1, RequirePolicy: 1},
+	); err != nil {
+		t.Fatalf("populate service_route_table: %v", err)
+	}
+
+	pkt := buildPlainV6PacketWithL4Ports(t,
+		netip.MustParseAddr("fd20:70::2"), service, 6, 49152, 8443)
+	ret, out, err := objs.UsidEgress.Test(pkt)
+	if err != nil {
+		t.Fatalf("program test-run: %v", err)
+	}
+	if ret != tcActShot {
+		t.Errorf("verdict = %d, want TC_ACT_SHOT (%d)", ret, tcActShot)
+	}
+	if string(out) != string(pkt) {
+		t.Errorf("packet mutated on denied service route:\n in: % x\nout: % x", pkt, out)
+	}
+	if got := sumPerCPU(t, objs.DropReasons, 40); got != 1 {
+		t.Errorf("drop_reasons[service_route_denied] = %d, want 1", got)
 	}
 }
 

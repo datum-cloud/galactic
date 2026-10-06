@@ -578,6 +578,34 @@ struct egress_route_value {
 	__u8 smac[6];
 } __attribute__((packed));
 
+// service_route_table carries the node-local private-service forwarding path.
+// It shares egress_route_key's (VRF table, address prefix) key layout, but its
+// value names another attachment directly instead of a fabric SID. Consumer
+// entries require a matching service_access_table row; return entries do not,
+// because the destination prefix already identifies the selected consumer.
+struct service_route_value {
+	__u32 target_ifindex;
+	__u32 target_kind;
+	__u8 require_policy;
+	__u8 pad[3];
+} __attribute__((packed));
+
+// service_access_key authorizes one transport endpoint in one consumer VRF.
+// Address is always the ServiceEndpoint's exact IP, not a prefix. Port is in
+// network byte order, matching the packet header read in usid_egress.
+struct service_access_key {
+	__u32 table_id;
+	__u8 family;
+	__u8 protocol;
+	__be16 port;
+	__u8 addr[16];
+} __attribute__((packed));
+
+union egress_lookup_key {
+	struct egress_route_key route;
+	struct service_access_key access;
+};
+
 // ---------------------------------------------------------------------
 
 // enum drop_reason indexes drop_reasons, which is observability only.
@@ -698,6 +726,8 @@ enum drop_reason {
 	// the host-side NDP handling that must answer it, and the container's
 	// gateway neighbor entry went to FAILED. Remove once resolved.
 	DROP_REASON_TRACE_NDP_BAIL = 39,
+	DROP_REASON_SERVICE_ROUTE_DENIED = 40,
+	DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED = 41,
 	__DROP_REASON_MAX,
 };
 
@@ -844,6 +874,24 @@ struct {
 	__type(key, struct egress_route_key);
 	__type(value, struct egress_route_value);
 } egress_route_table SEC(".maps");
+
+// Node-local private-service routes are separate from fabric egress routes so
+// service policy never has to create a Linux route or overload the egress
+// route table's pass-through sentinel.
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 32768);
+	__type(key, struct egress_route_key);
+	__type(value, struct service_route_value);
+} service_route_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct service_access_key);
+	__type(value, __u8);
+} service_access_table SEC(".maps");
 
 // node_src_addr_table: this node's own End.DT46 SID with the Argument field
 // left zero, the base usid_egress completes per packet and writes into the
@@ -2619,16 +2667,82 @@ int usid_egress(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC; // attachment registered but its vrf_table entry isn't -- shouldn't happen; fail open
 	}
 
-	struct egress_route_key rkey;
+	// A service route is a complete forwarding decision. Consumer-facing rows
+	// additionally require an exact protocol/port grant; return rows match only
+	// the selected consumer prefix. Neither path returns to Linux routing.
+	union egress_lookup_key lookup_key;
 
-	__builtin_memset(&rkey, 0, sizeof(rkey));
-	rkey.table_id = vrf->vrf_table_id;
-	rkey.family = route_family;
-	__builtin_memcpy(rkey.addr, dst_addr, sizeof(rkey.addr));
-	rkey.prefixlen = 8 * (sizeof(rkey.table_id) + sizeof(rkey.family)) +
-			 (route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 128 : 32);
+	__builtin_memset(&lookup_key, 0, sizeof(lookup_key));
+	lookup_key.route.table_id = vrf->vrf_table_id;
+	lookup_key.route.family = route_family;
+	__builtin_memcpy(lookup_key.route.addr, dst_addr, sizeof(lookup_key.route.addr));
+	lookup_key.route.prefixlen =
+		8 * (sizeof(lookup_key.route.table_id) + sizeof(lookup_key.route.family)) +
+		(route_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? 128 : 32);
 
-	struct egress_route_value *rv = bpf_map_lookup_elem(&egress_route_table, &rkey);
+	struct service_route_value *service_route = bpf_map_lookup_elem(&service_route_table, &lookup_key.route);
+	if (service_route) {
+		if (service_route->require_policy) {
+			__u8 protocol;
+			__u32 port_offset;
+
+			if (route_family == USID_EGRESS_ROUTE_FAMILY_INET6) {
+				if (bpf_skb_load_bytes(skb,
+						       USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, nexthdr),
+						       &protocol, sizeof(protocol))) {
+					count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+					return TC_ACT_SHOT;
+				}
+				port_offset = USID_L3_OFFSET + sizeof(struct usid_ip6hdr) + sizeof(__be16);
+			} else {
+				__u8 ver_ihl;
+
+				if (bpf_skb_load_bytes(skb, USID_L3_OFFSET, &ver_ihl, sizeof(ver_ihl)) ||
+				    (ver_ihl & 0x0F) != 5 ||
+				    bpf_skb_load_bytes(skb,
+						       USID_L3_OFFSET + USID_OFFSETOF(struct usid_iphdr, protocol),
+						       &protocol, sizeof(protocol))) {
+					count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+					return TC_ACT_SHOT;
+				}
+				port_offset = USID_L3_OFFSET + sizeof(struct usid_iphdr) + sizeof(__be16);
+			}
+			if (protocol != USID_IPPROTO_TCP && protocol != USID_IPPROTO_UDP) {
+				count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+				return TC_ACT_SHOT;
+			}
+			__be16 port;
+			if (bpf_skb_load_bytes(skb, port_offset, &port, sizeof(port))) {
+				count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+				return TC_ACT_SHOT;
+			}
+			__builtin_memset(&lookup_key, 0, sizeof(lookup_key));
+			lookup_key.access.table_id = vrf->vrf_table_id;
+			lookup_key.access.family = route_family;
+			lookup_key.access.protocol = protocol;
+			lookup_key.access.port = port;
+			__builtin_memcpy(lookup_key.access.addr, dst_addr, sizeof(lookup_key.access.addr));
+
+			if (!bpf_map_lookup_elem(&service_access_table, &lookup_key.access)) {
+				count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+				return TC_ACT_SHOT;
+			}
+		}
+
+		long redirect_rc;
+		if (service_route->target_kind == EGRESS_KIND_VETH)
+			redirect_rc = bpf_redirect_peer(service_route->target_ifindex, 0);
+		else
+			redirect_rc = bpf_redirect(service_route->target_ifindex, 0);
+
+		if (redirect_rc != TC_ACT_REDIRECT) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+			return TC_ACT_SHOT;
+		}
+		return redirect_rc;
+	}
+
+	struct egress_route_value *rv = bpf_map_lookup_elem(&egress_route_table, &lookup_key.route);
 
 	if (!rv) {
 		count_drop(DROP_REASON_TRACE_MISS_ROUTE);
