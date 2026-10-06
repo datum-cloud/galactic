@@ -48,7 +48,7 @@ func TestTables_RegisterIPv6Route(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tables.RegisterRoute(42, prefix, 101, 1, true); err != nil {
+	if err := tables.RegisterRoute(42, prefix, 101, 43, 1, true); err != nil {
 		t.Fatal(err)
 	}
 	key, ok := routes.putKey.(prog.UsidEgressRouteKey)
@@ -59,7 +59,8 @@ func TestTables_RegisterIPv6Route(t *testing.T) {
 		t.Fatalf("route key = %+v", key)
 	}
 	value, ok := routes.putValue.(serviceRouteValue)
-	if !ok || value.TargetIfindex != 101 || value.TargetKind != 1 || value.RequirePolicy != 1 {
+	if !ok || value.TargetIfindex != 101 || value.TargetTableID != 43 ||
+		value.TargetKind != 1 || value.RequirePolicy != 1 {
 		t.Fatalf("route value = %+v", routes.putValue)
 	}
 }

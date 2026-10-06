@@ -585,6 +585,7 @@ struct egress_route_value {
 // because the destination prefix already identifies the selected consumer.
 struct service_route_value {
 	__u32 target_ifindex;
+	__u32 target_table_id;
 	__u32 target_kind;
 	__u8 require_policy;
 	__u8 pad[3];
@@ -600,6 +601,28 @@ struct service_access_key {
 	__be16 port;
 	__u8 addr[16];
 } __attribute__((packed));
+
+// Flat byte-for-byte form of bpf_fib_lookup. The kernel UAPI type contains
+// anonymous unions that bpf2go cannot emit when it discovers the type through
+// a map definition. Keep this named shape as the map value and cast it back to
+// the UAPI type at the helper call.
+struct service_fib_scratch_value {
+	__u8 family;
+	__u8 l4_protocol;
+	__be16 sport;
+	__be16 dport;
+	__u16 tot_len;
+	__u32 ifindex;
+	__u32 flowinfo;
+	__u32 src[4];
+	__u32 dst[4];
+	__u32 tbid;
+	__u8 smac[6];
+	__u8 dmac[6];
+};
+
+_Static_assert(sizeof(struct service_fib_scratch_value) == sizeof(struct bpf_fib_lookup),
+	       "service FIB scratch layout must match the kernel UAPI");
 
 union egress_lookup_key {
 	struct egress_route_key route;
@@ -892,6 +915,16 @@ struct {
 	__type(key, struct service_access_key);
 	__type(value, __u8);
 } service_access_table SEC(".maps");
+
+// service_fib_scratch keeps the comparatively large bpf_fib_lookup parameter
+// block out of usid_egress's stack. One value per CPU is safe because BPF
+// programs do not migrate between CPUs while running.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct service_fib_scratch_value);
+} service_fib_scratch SEC(".maps");
 
 // node_src_addr_table: this node's own End.DT46 SID with the Argument field
 // left zero, the base usid_egress completes per packet and writes into the
@@ -2729,11 +2762,77 @@ int usid_egress(struct __sk_buff *skb)
 			}
 		}
 
+		// Resolve the directly attached destination in its target VRF before
+		// redirecting. The incoming frame is addressed to this node's gateway;
+		// preserving that Ethernet header would make a tap-backed guest discard
+		// it. A target-table FIB lookup supplies the attachment's current neighbor
+		// MACs without installing a service route in either VRF.
+		__u32 target_ifindex = service_route->target_ifindex;
+		__u32 target_table_id = service_route->target_table_id;
+		__u32 target_kind = service_route->target_kind;
+		USID_BARRIER_VAR(target_ifindex);
+		USID_BARRIER_VAR(target_table_id);
+		USID_BARRIER_VAR(target_kind);
+
+		// A zero table ID is reserved for program-test fixtures that exercise
+		// policy and redirect verdicts without a live network namespace. The
+		// production programmer always supplies the target VRF's nonzero table.
+		if (target_table_id != 0) {
+			__u32 scratch_key = 0;
+			struct service_fib_scratch_value *service_fib_scratch_value =
+				bpf_map_lookup_elem(&service_fib_scratch, &scratch_key);
+			if (!service_fib_scratch_value) {
+				count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+				return TC_ACT_SHOT;
+			}
+			struct bpf_fib_lookup *service_fib = (void *) service_fib_scratch_value;
+			__builtin_memset(service_fib, 0, sizeof(*service_fib));
+			service_fib->ifindex = skb->ingress_ifindex;
+			service_fib->tbid = target_table_id;
+			if (route_family == USID_EGRESS_ROUTE_FAMILY_INET6) {
+				struct usid_ip6hdr *service_ip6 = (void *) (eth + 1);
+
+				if ((void *) (service_ip6 + 1) > data_end) {
+					count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+					return TC_ACT_SHOT;
+				}
+				service_fib->family = USID_AF_INET6;
+				__builtin_memcpy(service_fib->ipv6_src, service_ip6->saddr,
+						 sizeof(service_fib->ipv6_src));
+				__builtin_memcpy(service_fib->ipv6_dst, service_ip6->daddr,
+						 sizeof(service_fib->ipv6_dst));
+				service_fib->tot_len =
+					(__u16) sizeof(struct usid_ip6hdr) + __builtin_bswap16(service_ip6->payload_len);
+			} else {
+				struct usid_iphdr *service_ip4 = (void *) (eth + 1);
+
+				if ((void *) (service_ip4 + 1) > data_end) {
+					count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+					return TC_ACT_SHOT;
+				}
+				service_fib->family = USID_AF_INET;
+				__builtin_memcpy(&service_fib->ipv4_src, service_ip4->saddr,
+						 sizeof(service_fib->ipv4_src));
+				__builtin_memcpy(&service_fib->ipv4_dst, service_ip4->daddr,
+						 sizeof(service_fib->ipv4_dst));
+				service_fib->tot_len = __builtin_bswap16(service_ip4->tot_len);
+			}
+
+			long fib_rc = bpf_fib_lookup(skb, service_fib, sizeof(*service_fib),
+						      BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID);
+			if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS || service_fib->ifindex != target_ifindex) {
+				count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+				return TC_ACT_SHOT;
+			}
+			__builtin_memcpy(eth->h_dest, service_fib->dmac, sizeof(eth->h_dest));
+			__builtin_memcpy(eth->h_source, service_fib->smac, sizeof(eth->h_source));
+		}
+
 		long redirect_rc;
-		if (service_route->target_kind == EGRESS_KIND_VETH)
-			redirect_rc = bpf_redirect_peer(service_route->target_ifindex, 0);
+		if (target_kind == EGRESS_KIND_VETH)
+			redirect_rc = bpf_redirect_peer(target_ifindex, 0);
 		else
-			redirect_rc = bpf_redirect(service_route->target_ifindex, 0);
+			redirect_rc = bpf_redirect(target_ifindex, 0);
 
 		if (redirect_rc != TC_ACT_REDIRECT) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);

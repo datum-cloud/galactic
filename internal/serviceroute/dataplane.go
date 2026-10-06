@@ -34,6 +34,7 @@ type routeRef struct {
 	tableID       uint32
 	prefix        string
 	targetIfindex uint32
+	targetTableID uint32
 	targetKind    uint32
 	requirePolicy bool
 }
@@ -197,11 +198,11 @@ func (p *EBPFRouteProgrammer) entries(intent RouteIntent) ([]appliedEntry, error
 	entries = append(entries,
 		appliedEntry{route: &routeRef{
 			tableID: serviceTable, prefix: intent.Consumer.String(), targetIfindex: consumerIfindex,
-			targetKind: consumerKind,
+			targetTableID: consumerTable, targetKind: consumerKind,
 		}},
 		appliedEntry{route: &routeRef{
 			tableID: consumerTable, prefix: intent.Service.String(), targetIfindex: serviceIfindex,
-			targetKind: serviceKind, requirePolicy: true,
+			targetTableID: serviceTable, targetKind: serviceKind, requirePolicy: true,
 		}},
 	)
 	return entries, nil
@@ -255,6 +256,7 @@ func (p *EBPFRouteProgrammer) acquire(entry appliedEntry) error {
 		entry.route.tableID,
 		prefix,
 		entry.route.targetIfindex,
+		entry.route.targetTableID,
 		entry.route.targetKind,
 		entry.route.requirePolicy,
 	); err != nil {

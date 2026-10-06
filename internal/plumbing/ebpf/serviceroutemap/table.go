@@ -35,6 +35,7 @@ const (
 
 type serviceRouteValue struct {
 	TargetIfindex uint32
+	TargetTableID uint32
 	TargetKind    uint32
 	RequirePolicy uint8
 	Pad           [3]uint8
@@ -120,6 +121,7 @@ func (t *Tables) RegisterRoute(
 	tableID uint32,
 	prefix *net.IPNet,
 	targetIfindex uint32,
+	targetTableID uint32,
 	targetKind uint32,
 	requirePolicy bool,
 ) error {
@@ -127,7 +129,11 @@ func (t *Tables) RegisterRoute(
 	if err != nil {
 		return err
 	}
-	value := serviceRouteValue{TargetIfindex: targetIfindex, TargetKind: targetKind}
+	value := serviceRouteValue{
+		TargetIfindex: targetIfindex,
+		TargetTableID: targetTableID,
+		TargetKind:    targetKind,
+	}
 	if requirePolicy {
 		value.RequirePolicy = 1
 	}
