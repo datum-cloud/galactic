@@ -23,6 +23,8 @@ type recordingTable struct {
 	deleteErr     error
 }
 
+const testRemoteServiceAddress = "10.0.0.53"
+
 func (t *recordingTable) Put(any, any) error {
 	t.puts++
 	return t.putErr
@@ -63,10 +65,10 @@ func TestRemoteConsumerEntriesAcquireAndRevokeRouteAndAccess(t *testing.T) {
 	routes, access, grants := &recordingTable{}, &recordingTable{}, &recordingTable{}
 	programmer := testRouteProgrammer(routes, access, grants)
 	accessEntry := appliedEntry{access: &accessRef{
-		ingressIfindex: 42, address: "10.0.0.53", protocol: serviceroutemap.ProtocolTCP, port: 443,
+		ingressIfindex: 42, address: testRemoteServiceAddress, protocol: serviceroutemap.ProtocolTCP, port: 443,
 	}}
 	routeEntry := appliedEntry{route: &routeRef{
-		ingressIfindex: 42, address: "10.0.0.53", mode: RouteIntentRemoteConsumer,
+		ingressIfindex: 42, address: testRemoteServiceAddress, mode: RouteIntentRemoteConsumer,
 		protocol: serviceroutemap.ProtocolTCP, port: 443, grantID: ServiceGrantID{1},
 		targetSID: [16]byte{0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
 	}}
@@ -98,10 +100,10 @@ func TestRemoteConsumerRollbackRevokesAcquiredAccess(t *testing.T) {
 	routes, access := &recordingTable{putErr: routeFailure}, &recordingTable{}
 	programmer := testRouteProgrammer(routes, access, &recordingTable{})
 	accessEntry := appliedEntry{access: &accessRef{
-		ingressIfindex: 42, address: "10.0.0.53", protocol: serviceroutemap.ProtocolUDP, port: 53,
+		ingressIfindex: 42, address: testRemoteServiceAddress, protocol: serviceroutemap.ProtocolUDP, port: 53,
 	}}
 	routeEntry := appliedEntry{route: &routeRef{
-		ingressIfindex: 42, address: "10.0.0.53", mode: RouteIntentRemoteConsumer,
+		ingressIfindex: 42, address: testRemoteServiceAddress, mode: RouteIntentRemoteConsumer,
 		protocol: serviceroutemap.ProtocolUDP, port: 53,
 		targetSID: [16]byte{0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
 	}}

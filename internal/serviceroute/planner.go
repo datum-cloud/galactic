@@ -157,7 +157,9 @@ func producerCandidates(endpoint *networkv1alpha1.ServiceEndpoint,
 	attachments []*cloudv1alpha1.VPCAttachment,
 ) ([]*cloudv1alpha1.VPCAttachment, error) {
 	if (endpoint.Spec.AttachmentRef == nil) == (endpoint.Spec.AttachmentSelector == nil) {
-		return nil, fmt.Errorf("service endpoint %s must set exactly one of attachmentRef or attachmentSelector", endpoint.Name)
+		return nil, fmt.Errorf(
+			"service endpoint %s must set exactly one of attachmentRef or attachmentSelector", endpoint.Name,
+		)
 	}
 	ready := readyAttachments(attachments)
 	if endpoint.Spec.AttachmentRef != nil {

@@ -114,7 +114,7 @@ func TestServiceRouteRemovePolicyResumesPartialRemove(t *testing.T) {
 func TestServiceRouteSIDResolverUsesConfiguredBGPNamespace(t *testing.T) {
 	const (
 		bgpNamespace = "routing-system"
-		node         = "node-b"
+		node         = testNAT66NodeB
 		vpc          = "vpc-b"
 		locator      = "fd00:1234::/48"
 		vrfID        = int32(42)
@@ -167,7 +167,9 @@ func TestServiceRouteSIDResolverRejectsWrongRouterNode(t *testing.T) {
 		},
 	}
 	vrf := &networkv1alpha1.BGPVRFInstance{
-		ObjectMeta: metav1.ObjectMeta{Namespace: bgpNamespace, Name: crdnames.BGPVRFInstanceName("vpc-b", "node-b")},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: bgpNamespace, Name: crdnames.BGPVRFInstanceName("vpc-b", testNAT66NodeB),
+		},
 		Spec: networkv1alpha1.BGPVRFInstanceSpec{
 			RouterTarget: networkv1alpha1.RouterTarget{RouterRef: &networkv1alpha1.RouterRef{Name: router.Name}},
 			VRFID:        42,
@@ -177,7 +179,9 @@ func TestServiceRouteSIDResolverRejectsWrongRouterNode(t *testing.T) {
 		Client:       fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, vrf).Build(),
 		BGPNamespace: bgpNamespace,
 	}
-	attachment := &cloudv1alpha1.VPCAttachment{Status: cloudv1alpha1.VPCAttachmentStatus{Node: "node-b", VPC: "vpc-b"}}
+	attachment := &cloudv1alpha1.VPCAttachment{
+		Status: cloudv1alpha1.VPCAttachmentStatus{Node: testNAT66NodeB, VPC: "vpc-b"},
+	}
 	if _, err := reconciler.sidResolver(context.Background())(attachment); err == nil {
 		t.Fatal("resolve SID succeeded for a router targeting the wrong node")
 	}

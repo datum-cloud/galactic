@@ -15,7 +15,14 @@ import (
 	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-const testNodeName = "node-a"
+const (
+	testNodeName       = "node-a"
+	testRemoteNodeName = "node-b"
+	testAccessLabel    = "access"
+	testProducerLabel  = "producer"
+)
+
+func testLabels(key, value string) map[string]string { return map[string]string{key: value} }
 
 func readyAttachment(namespace, name, uid, node, host string, labels map[string]string) *cloudv1alpha1.VPCAttachment {
 	return &cloudv1alpha1.VPCAttachment{
@@ -38,14 +45,14 @@ func testPolicyAndEndpoint(mode networkv1alpha1.ServiceEndpointDeliveryMode) (
 		ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "platform", UID: "policy-uid"},
 		Spec: networkv1alpha1.ServiceRoutePolicySpec{
 			ServiceRef:         networkv1alpha1.ServiceEndpointReference{Name: "dns"},
-			AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{"access": "yes"}},
+			AttachmentSelector: metav1.LabelSelector{MatchLabels: testLabels(testAccessLabel, "yes")},
 		},
 	}
 	endpoint := &networkv1alpha1.ServiceEndpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: "dns", Namespace: "platform", UID: "endpoint-uid"},
 		Spec: networkv1alpha1.ServiceEndpointSpec{
 			Address: "fd00::53", Protocol: networkv1alpha1.NetworkRuleProtocolUDP, Port: 53, DeliveryMode: mode,
-			AttachmentSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"producer": "yes"}},
+			AttachmentSelector: &metav1.LabelSelector{MatchLabels: testLabels(testProducerLabel, "yes")},
 		},
 	}
 	return policy, endpoint
@@ -53,9 +60,15 @@ func testPolicyAndEndpoint(mode networkv1alpha1.ServiceEndpointDeliveryMode) (
 
 func TestCompilePreferNodeLocalIgnoresInputOrder(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
-	consumer := readyAttachment("tenant", "consumer", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
-	remote := readyAttachment("service", "a-remote", "remote-uid", "node-b", "remote0", map[string]string{"producer": "yes"})
-	local := readyAttachment("service", "z-local", "local-uid", testNodeName, "local0", map[string]string{"producer": "yes"})
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	remote := readyAttachment(
+		"service", "a-remote", "remote-uid", testRemoteNodeName, "remote0", testLabels(testProducerLabel, "yes"),
+	)
+	local := readyAttachment(
+		"service", "z-local", "local-uid", testNodeName, "local0", testLabels(testProducerLabel, "yes"),
+	)
 
 	got, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{remote, consumer, local}, testNodeName, nil)
 	if err != nil {
@@ -72,10 +85,16 @@ func TestCompileUsesObservedNodeAndSelector(t *testing.T) {
 	endpoint.Spec.AttachmentRef = &networkv1alpha1.ServiceEndpointAttachmentReference{
 		Namespace: "service", Name: "producer",
 	}
-	consumer := readyAttachment("tenant", "selected", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
+	consumer := readyAttachment(
+		"tenant", "selected", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
 	producer := readyAttachment("service", "producer", "producer-uid", testNodeName, "producer0", nil)
-	otherNode := readyAttachment("tenant", "other-node", "other-uid", "node-b", "other0", map[string]string{"access": "yes"})
-	notSelected := readyAttachment("tenant", "not-selected", "not-selected-uid", testNodeName, "disabled0", map[string]string{"access": "no"})
+	otherNode := readyAttachment(
+		"tenant", "other-node", "other-uid", testRemoteNodeName, "other0", testLabels(testAccessLabel, "yes"),
+	)
+	notSelected := readyAttachment(
+		"tenant", "not-selected", "not-selected-uid", testNodeName, "disabled0", testLabels(testAccessLabel, "no"),
+	)
 
 	got, err := Compile(policy, endpoint,
 		[]*cloudv1alpha1.VPCAttachment{otherNode, notSelected, producer, consumer}, testNodeName, nil)
@@ -95,8 +114,12 @@ func TestCompileUsesEndpointPortByDefault(t *testing.T) {
 	policy.Spec.ProtocolPorts = nil
 	endpoint.Spec.Address = "192.0.2.10"
 	endpoint.Spec.Protocol = networkv1alpha1.NetworkRuleProtocolTCP
-	consumer := readyAttachment("tenant", "consumer", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
-	producer := readyAttachment("service", "producer", "producer-uid", testNodeName, "producer0", map[string]string{"producer": "yes"})
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	producer := readyAttachment(
+		"service", "producer", "producer-uid", testNodeName, "producer0", testLabels(testProducerLabel, "yes"),
+	)
 
 	got, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{consumer, producer}, testNodeName, nil)
 	if err != nil {
@@ -110,8 +133,12 @@ func TestCompileUsesEndpointPortByDefault(t *testing.T) {
 
 func TestCompilePreferNodeLocalBuildsMatchingRemoteHalves(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
-	consumer := readyAttachment("tenant", "consumer", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
-	producer := readyAttachment("service", "producer", "producer-uid", "node-b", "producer0", map[string]string{"producer": "yes"})
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	producer := readyAttachment(
+		"service", "producer", "producer-uid", testRemoteNodeName, "producer0", testLabels(testProducerLabel, "yes"),
+	)
 	resolver := func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
 		if attachment.Status.Node == testNodeName {
 			return net.ParseIP("fd00::a"), nil
@@ -119,11 +146,15 @@ func TestCompilePreferNodeLocalBuildsMatchingRemoteHalves(t *testing.T) {
 		return net.ParseIP("fd00::b"), nil
 	}
 
-	consumerIntents, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{producer, consumer}, testNodeName, resolver)
+	consumerIntents, err := Compile(
+		policy, endpoint, []*cloudv1alpha1.VPCAttachment{producer, consumer}, testNodeName, resolver,
+	)
 	if err != nil {
 		t.Fatalf("Compile consumer node: %v", err)
 	}
-	producerIntents, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{consumer, producer}, "node-b", resolver)
+	producerIntents, err := Compile(
+		policy, endpoint, []*cloudv1alpha1.VPCAttachment{consumer, producer}, testRemoteNodeName, resolver,
+	)
 	if err != nil {
 		t.Fatalf("Compile producer node: %v", err)
 	}
@@ -142,8 +173,12 @@ func TestCompilePreferNodeLocalBuildsMatchingRemoteHalves(t *testing.T) {
 
 func TestCompileNodeLocalDoesNotUseRemoteProducer(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal)
-	consumer := readyAttachment("tenant", "consumer", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
-	producer := readyAttachment("service", "producer", "producer-uid", "node-b", "producer0", map[string]string{"producer": "yes"})
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	producer := readyAttachment(
+		"service", "producer", "producer-uid", testRemoteNodeName, "producer0", testLabels(testProducerLabel, "yes"),
+	)
 	got, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{consumer, producer}, testNodeName,
 		func(*cloudv1alpha1.VPCAttachment) (net.IP, error) { return net.ParseIP("fd00::b"), nil })
 	if err != nil {
@@ -156,10 +191,16 @@ func TestCompileNodeLocalDoesNotUseRemoteProducer(t *testing.T) {
 
 func TestCompileSkipsUnreadyLocalProducerAndFallsBackRemote(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
-	consumer := readyAttachment("tenant", "consumer", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
-	local := readyAttachment("service", "local", "local-uid", testNodeName, "local0", map[string]string{"producer": "yes"})
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	local := readyAttachment(
+		"service", "local", "local-uid", testNodeName, "local0", testLabels(testProducerLabel, "yes"),
+	)
 	local.Status.Conditions[1].Status = metav1.ConditionFalse
-	remote := readyAttachment("service", "remote", "remote-uid", "node-b", "remote0", map[string]string{"producer": "yes"})
+	remote := readyAttachment(
+		"service", "remote", "remote-uid", testRemoteNodeName, "remote0", testLabels(testProducerLabel, "yes"),
+	)
 	got, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{local, remote, consumer}, testNodeName,
 		func(*cloudv1alpha1.VPCAttachment) (net.IP, error) { return net.ParseIP("fd00::b"), nil })
 	if err != nil {
@@ -172,8 +213,12 @@ func TestCompileSkipsUnreadyLocalProducerAndFallsBackRemote(t *testing.T) {
 
 func TestCompileClassifiesUnavailableRemoteSIDAsDependencyNotReady(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
-	consumer := readyAttachment("tenant", "consumer", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
-	producer := readyAttachment("service", "producer", "producer-uid", "node-b", "producer0", map[string]string{"producer": "yes"})
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	producer := readyAttachment(
+		"service", "producer", "producer-uid", testRemoteNodeName, "producer0", testLabels(testProducerLabel, "yes"),
+	)
 	want := errors.New("routing dependency unavailable")
 	_, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{consumer, producer}, testNodeName,
 		func(*cloudv1alpha1.VPCAttachment) (net.IP, error) { return nil, want })
@@ -185,9 +230,15 @@ func TestCompileClassifiesUnavailableRemoteSIDAsDependencyNotReady(t *testing.T)
 
 func TestCompilePreferNodeLocalSelectsStableRemoteFallback(t *testing.T) {
 	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
-	consumer := readyAttachment("tenant", "consumer", "consumer-uid", testNodeName, "consumer0", map[string]string{"access": "yes"})
-	first := readyAttachment("service", "a-remote", "first-uid", "node-b", "first0", map[string]string{"producer": "yes"})
-	last := readyAttachment("service", "z-remote", "last-uid", "node-c", "last0", map[string]string{"producer": "yes"})
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	first := readyAttachment(
+		"service", "a-remote", "first-uid", testRemoteNodeName, "first0", testLabels(testProducerLabel, "yes"),
+	)
+	last := readyAttachment(
+		"service", "z-remote", "last-uid", "node-c", "last0", testLabels(testProducerLabel, "yes"),
+	)
 	resolver := func(attachment *cloudv1alpha1.VPCAttachment) (net.IP, error) {
 		if attachment.Name == first.Name {
 			return net.ParseIP("fd00::b"), nil
@@ -195,11 +246,15 @@ func TestCompilePreferNodeLocalSelectsStableRemoteFallback(t *testing.T) {
 		return net.ParseIP("fd00::c"), nil
 	}
 
-	one, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{last, consumer, first}, testNodeName, resolver)
+	one, err := Compile(
+		policy, endpoint, []*cloudv1alpha1.VPCAttachment{last, consumer, first}, testNodeName, resolver,
+	)
 	if err != nil {
 		t.Fatalf("Compile first order: %v", err)
 	}
-	two, err := Compile(policy, endpoint, []*cloudv1alpha1.VPCAttachment{first, last, consumer}, testNodeName, resolver)
+	two, err := Compile(
+		policy, endpoint, []*cloudv1alpha1.VPCAttachment{first, last, consumer}, testNodeName, resolver,
+	)
 	if err != nil {
 		t.Fatalf("Compile second order: %v", err)
 	}

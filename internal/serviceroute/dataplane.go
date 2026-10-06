@@ -409,7 +409,9 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 			return nil
 		}
 		g := entry.grant
-		if err := p.tables.UnregisterRemoteGrant(g.producerIfindex, net.ParseIP(g.address), g.protocol, g.port, [16]byte(g.grantID)); err != nil {
+		if err := p.tables.UnregisterRemoteGrant(
+			g.producerIfindex, net.ParseIP(g.address), g.protocol, g.port, [16]byte(g.grantID),
+		); err != nil {
 			return err
 		}
 		delete(p.grantRefs, *entry.grant)

@@ -129,7 +129,10 @@ func OpenPinned(pinDir string) (*Tables, []*ebpf.Map, error) {
 		_ = reverse.Close()
 		return nil, nil, fmt.Errorf("serviceroutemap: open %s: %w", serviceRemoteGrantMapName, err)
 	}
-	return New(usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access}, usidmap.KernelTable{Map: reverse}, usidmap.KernelTable{Map: remoteGrants}),
+	return New(
+			usidmap.KernelTable{Map: routes}, usidmap.KernelTable{Map: access},
+			usidmap.KernelTable{Map: reverse}, usidmap.KernelTable{Map: remoteGrants},
+		),
 		[]*ebpf.Map{routes, access, reverse, remoteGrants}, nil
 }
 
@@ -279,7 +282,9 @@ func (t *Tables) RegisterRemoteGrant(producerIfindex uint32, address net.IP, pro
 	return nil
 }
 
-func (t *Tables) UnregisterRemoteGrant(producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte) error {
+func (t *Tables) UnregisterRemoteGrant(
+	producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte,
+) error {
 	key, err := remoteGrantKey(producerIfindex, address, protocol, port, grantID)
 	if err != nil {
 		return err
@@ -360,8 +365,13 @@ func accessKey(ingressIfindex uint32, address net.IP, protocol uint8, port uint1
 	return key, nil
 }
 
-func remoteGrantKey(producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte) (serviceRemoteGrantKey, error) {
-	key := serviceRemoteGrantKey{ProducerIfindex: producerIfindex, Protocol: protocol, Port: bits.ReverseBytes16(port), GrantID: grantID}
+func remoteGrantKey(
+	producerIfindex uint32, address net.IP, protocol uint8, port uint16, grantID [16]byte,
+) (serviceRemoteGrantKey, error) {
+	key := serviceRemoteGrantKey{
+		ProducerIfindex: producerIfindex, Protocol: protocol,
+		Port: bits.ReverseBytes16(port), GrantID: grantID,
+	}
 	if ipv4 := address.To4(); ipv4 != nil {
 		key.Family = familyIPv4
 		copy(key.Address[:4], ipv4)
