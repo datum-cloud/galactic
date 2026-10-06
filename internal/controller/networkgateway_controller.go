@@ -90,7 +90,10 @@ type NetworkGatewayReconciler struct {
 const (
 	// reasonEngineHealthy is the Ready condition reason for a fully
 	// converged and fully advertised node.
-	reasonEngineHealthy  = "EngineHealthy"
+	reasonEngineHealthy = "EngineHealthy"
+
+	// reasonEngineDegraded is the Ready reason for a node whose engine
+	// failed to load or remove one or more rules.
 	reasonEngineDegraded = "EngineDegraded"
 
 	// reasonAdvertisementFailed is the Ready reason for a node whose engine
@@ -261,10 +264,18 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			// Being torn down: excluded from desired state immediately, so
 			// this node's vip_table converges toward gone without waiting on
 			// NetworkRuleReconciler's finalizer to finish withdrawing BGP.
+			// That finalizer owns the rule's advertisements: reconcileDelete
+			// deletes every one carrying networkRuleLabel, whichever node
+			// made it, so this loop gives the rule no outcome.
 			continue
 		}
 		if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
-			continue // admission has not (yet) accepted this rule
+			// Admission has not accepted this rule yet. Once accepted, a rule
+			// loses Accepted only when no NetworkGateway is left in the
+			// namespace (updateAcceptedCondition), and each node's NotFound
+			// branch has then already withdrawn its advertisements and cleared
+			// its Programmed condition, so this loop gives the rule no outcome.
+			continue
 		}
 
 		dr, err := buildDesiredRule(rule, sidIndex)
