@@ -9,6 +9,9 @@ package sysctl
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 
 	gosysctl "github.com/lorenzosaino/go-sysctl"
 )
@@ -43,8 +46,9 @@ func ConfigureInterfaceSysctls(iface string) error {
 }
 
 // procSysPath is the procfs root the FIB-lookup helpers read and write their
-// sysctls under. See SetProcSysPath.
-var procSysPath = gosysctl.DefaultPath
+// sysctls under. See SetProcSysPath. Set once at startup, before any helper
+// runs; it is not guarded for concurrent use.
+var procSysPath = "/proc/sys"
 
 // SetProcSysPath points ConfigureFIBLookupUplinkSysctls and
 // ConfigureFIBLookupUplinkSysctlsIPv4 at a procfs root other than /proc/sys.
@@ -56,8 +60,12 @@ var procSysPath = gosysctl.DefaultPath
 // opens it, not the mount, so a host-network pod reaches the host's settings.
 // The other helpers here are unaffected.
 func SetProcSysPath(path string) error {
-	if _, err := gosysctl.NewClient(path); err != nil {
+	info, err := os.Stat(path)
+	if err != nil {
 		return fmt.Errorf("use %s as the procfs sysctl root: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("use %s as the procfs sysctl root: not a directory", path)
 	}
 	procSysPath = path
 	return nil
@@ -84,10 +92,7 @@ func SetProcSysPath(path string) error {
 // an error on its own: a node whose forwarding something else already enabled
 // passes even where /proc/sys is read-only.
 func ConfigureFIBLookupUplinkSysctls(iface string) error {
-	return setForwarding([]struct{ key, value string }{
-		{fmt.Sprintf("net.ipv6.conf.%s.forwarding", iface), "1"},
-		{"net.ipv6.conf.all.forwarding", "1"},
-	})
+	return setForwarding(ipv6ForwardingSysctls(iface))
 }
 
 // ConfigureFIBLookupUplinkSysctlsIPv4 enables IPv4 forwarding on iface, the
@@ -101,37 +106,61 @@ func ConfigureFIBLookupUplinkSysctls(iface string) error {
 //
 // It returns an error on the same terms as ConfigureFIBLookupUplinkSysctls.
 func ConfigureFIBLookupUplinkSysctlsIPv4(iface string) error {
-	return setForwarding([]struct{ key, value string }{
-		{fmt.Sprintf("net.ipv4.conf.%s.forwarding", iface), "1"},
-		{"net.ipv4.conf.all.forwarding", "1"},
-		{"net.ipv4.ip_forward", "1"},
-	})
+	return setForwarding(ipv4ForwardingSysctls(iface))
 }
 
-// setForwarding writes each setting under procSysPath and reads it back,
-// returning an error for the first one that does not hold its value.
-func setForwarding(settings []struct{ key, value string }) error {
-	client, err := gosysctl.NewClient(procSysPath)
-	if err != nil {
-		return fmt.Errorf("open procfs sysctl root %s: %w", procSysPath, err)
-	}
-	for _, s := range settings {
-		setErr := client.Set(s.key, s.value)
-		got, getErr := client.Get(s.key)
+// ipv6ForwardingSysctls and ipv4ForwardingSysctls are the sysctls, as path
+// segments, the two FIB-lookup helpers set for iface.
+func ipv6ForwardingSysctls(iface string) [][]string {
+	return [][]string{forwardingSysctl("ipv6", iface), forwardingSysctl("ipv6", "all")}
+}
+
+func ipv4ForwardingSysctls(iface string) [][]string {
+	return [][]string{forwardingSysctl("ipv4", iface), forwardingSysctl("ipv4", "all"), {"net", "ipv4", "ip_forward"}}
+}
+
+// forwardingSysctl is the path of family's forwarding sysctl for dev.
+func forwardingSysctl(family, dev string) []string {
+	return []string{"net", family, "conf", dev, "forwarding"}
+}
+
+// setForwarding writes 1 to each sysctl under procSysPath and reads it back,
+// returning an error for the first one that does not read 1.
+//
+// Each sysctl is given as its path segments rather than as a dotted key: an
+// interface name may itself contain a dot, as a VLAN such as bond0.100 does,
+// and a dotted key cannot tell that dot from a separator.
+func setForwarding(sysctls [][]string) error {
+	for _, segments := range sysctls {
+		path := filepath.Join(append([]string{procSysPath}, segments...)...)
+		name := sysctlName(segments)
+		writeErr := os.WriteFile(path, []byte("1"), 0o644)
+		raw, readErr := os.ReadFile(path)
+		got := strings.TrimSpace(string(raw))
 		switch {
-		case getErr == nil && got == s.value:
-			if setErr != nil {
-				logger.Debug("sysctl already set; write failed", "sysctl", s.key, "err", setErr)
+		case readErr == nil && got == "1":
+			if writeErr != nil {
+				logger.Debug("sysctl already set; write failed", "sysctl", name, "err", writeErr)
 			}
-		case setErr != nil:
-			return fmt.Errorf("set sysctl %s to %s: %w", s.key, s.value, setErr)
-		case getErr != nil:
-			return fmt.Errorf("read back sysctl %s: %w", s.key, getErr)
+		case writeErr != nil:
+			return fmt.Errorf("set sysctl %s to 1: %w", name, writeErr)
+		case readErr != nil:
+			return fmt.Errorf("read back sysctl %s: %w", name, readErr)
 		default:
-			return fmt.Errorf("sysctl %s reads %s after setting it to %s", s.key, got, s.value)
+			return fmt.Errorf("sysctl %s reads %s after setting it to 1", name, got)
 		}
 	}
 	return nil
+}
+
+// sysctlName renders path segments as sysctl(8) names them, with a dot inside
+// a segment written as a slash, so net.ipv6.conf.bond0/100.forwarding.
+func sysctlName(segments []string) string {
+	parts := make([]string, len(segments))
+	for i, seg := range segments {
+		parts[i] = strings.ReplaceAll(seg, ".", "/")
+	}
+	return strings.Join(parts, ".")
 }
 
 // ConfigureTapSysctls applies the sysctls appropriate for a tap connected to a

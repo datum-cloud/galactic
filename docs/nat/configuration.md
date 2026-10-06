@@ -203,15 +203,17 @@ whenever the shard programs its identity, so changing it takes a pod restart
 and nothing else.
 
 **`--nat-proc-sys-path` / `GALACTIC_NAT_PROC_SYS_PATH`**
-`GALACTIC_NAT_PROC_SYS_PATH` is the procfs root the datapath writes its
-forwarding sysctls under (`net.ipv6.conf.<iface>.forwarding` and
-`net.ipv6.conf.all.forwarding`, plus the IPv4 ones once the shard serves NAT64). `bpf_fib_lookup` refuses every lookup on
-an interface with forwarding off, so a sysctl that does not read `1` after
-the write stops the shard at startup, and leaves an uplink found later
-uncovered until it does. A pod that is not privileged gets `/proc/sys` read-only, so
-`config/galactic-nat/base/daemonset.yaml` mounts the host's `/proc/sys/net` at
-`/host/proc/sys/net` and sets this to `/host/proc/sys`. A node where
-something else already turned forwarding on passes with the default too.
+The procfs root the datapath writes its forwarding sysctls under:
+`net.ipv6.conf.<iface>.forwarding` and `net.ipv6.conf.all.forwarding`, plus
+the IPv4 ones once the shard serves NAT64. `bpf_fib_lookup` refuses every
+lookup on an interface with forwarding off, so a sysctl that does not read
+`1` after the write stops the shard at startup, and leaves an uplink found
+later uncovered until it does. A pod that is not privileged gets `/proc/sys`
+read-only, so `config/galactic-nat/base/daemonset.yaml` mounts the host's
+`/proc/sys/net` at `/host/proc/sys/net` and sets this to `/host/proc/sys`. A
+node where something else already turned forwarding on passes with the
+default too. SELinux policy on an enforcing node can still refuse the write,
+and the shard then says so at startup.
 
 ### Capabilities and host requirements
 

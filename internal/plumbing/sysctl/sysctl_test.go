@@ -76,17 +76,16 @@ func TestInterfaceSettings_hasAllEntries(t *testing.T) {
 }
 
 // fakeProcSys builds a procfs sysctl root under a temporary directory holding
-// the IPv6 forwarding sysctls for iface and all, each set to value, and points
-// the FIB-lookup helpers at it for the rest of the test.
-func fakeProcSys(t *testing.T, iface, value string, mode os.FileMode) {
+// each of the given sysctls, by path segment, set to value with file mode
+// mode, and points the FIB-lookup helpers at it for the rest of the test.
+func fakeProcSys(t *testing.T, sysctls [][]string, value string, mode os.FileMode) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, dev := range []string{iface, "all"} {
-		dir := filepath.Join(root, "net", "ipv6", "conf", dev)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	for _, segments := range sysctls {
+		path := filepath.Join(append([]string{root}, segments...)...)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(dir, "forwarding")
 		if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -99,47 +98,77 @@ func fakeProcSys(t *testing.T, iface, value string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { procSysPath = orig })
+	return root
 }
 
+const (
+	testUplink = "uplink0"
+	// testVLAN is a VLAN's name, whose dot a dotted sysctl key would read as a
+	// separator.
+	testVLAN = "bond0.100"
+)
+
 func TestConfigureFIBLookupUplinkSysctls(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the read-only file modes these cases depend on")
-	}
-	const iface = "uplink0"
-	tests := []struct {
+	helpers := []struct {
 		name    string
-		value   string
-		mode    os.FileMode
-		iface   string
-		wantErr bool
+		fn      func(string) error
+		sysctls func(string) [][]string
 	}{
-		{name: "writable, off", value: "0", mode: 0o644, iface: iface},
-		{name: "read-only, already on", value: "1", mode: 0o444, iface: iface},
+		{"IPv6", ConfigureFIBLookupUplinkSysctls, ipv6ForwardingSysctls},
+		{"IPv4", ConfigureFIBLookupUplinkSysctlsIPv4, ipv4ForwardingSysctls},
+	}
+	tests := []struct {
+		name     string
+		present  string // interface the fake root holds sysctls for
+		iface    string // interface the helper is asked to configure
+		value    string
+		readOnly bool
+		wantErr  bool
+	}{
+		{name: "writable, off", present: testUplink, iface: testUplink, value: "0"},
+		{name: "dotted interface name", present: testVLAN, iface: testVLAN, value: "0"},
+		{name: "read-only, already on", present: testUplink, iface: testUplink, value: "1", readOnly: true},
 		// The defect in #586: the write fails, forwarding stays off, and the
 		// helper used to report success anyway.
-		{name: "read-only, off", value: "0", mode: 0o444, iface: iface, wantErr: true},
-		{name: "interface missing", value: "1", mode: 0o644, iface: "missing0", wantErr: true},
+		{name: "read-only, off", present: testUplink, iface: testUplink, value: "0", readOnly: true, wantErr: true},
+		{name: "interface missing", present: testUplink, iface: "missing0", value: "1", wantErr: true},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fakeProcSys(t, iface, tt.value, tt.mode)
-			err := ConfigureFIBLookupUplinkSysctls(tt.iface)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ConfigureFIBLookupUplinkSysctls(%q) error = %v, wantErr %v", tt.iface, err, tt.wantErr)
-			}
-			if err != nil {
-				return
-			}
-			for _, dev := range []string{tt.iface, "all"} {
-				got, readErr := os.ReadFile(filepath.Join(procSysPath, "net", "ipv6", "conf", dev, "forwarding"))
-				if readErr != nil {
-					t.Fatal(readErr)
+	for _, h := range helpers {
+		for _, tt := range tests {
+			t.Run(h.name+"/"+tt.name, func(t *testing.T) {
+				mode := os.FileMode(0o644)
+				if tt.readOnly {
+					if os.Geteuid() == 0 {
+						t.Skip("root ignores the read-only file mode this case depends on")
+					}
+					mode = 0o444
 				}
-				if strings.TrimSpace(string(got)) != "1" {
-					t.Errorf("net.ipv6.conf.%s.forwarding = %q, want 1", dev, got)
+				root := fakeProcSys(t, h.sysctls(tt.present), tt.value, mode)
+				err := h.fn(tt.iface)
+				if (err != nil) != tt.wantErr {
+					t.Fatalf("configure %q: error = %v, wantErr %v", tt.iface, err, tt.wantErr)
 				}
-			}
-		})
+				if err != nil {
+					return
+				}
+				for _, segments := range h.sysctls(tt.iface) {
+					got, readErr := os.ReadFile(filepath.Join(append([]string{root}, segments...)...))
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if strings.TrimSpace(string(got)) != "1" {
+						t.Errorf("%s = %q, want 1", sysctlName(segments), got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSysctlName(t *testing.T) {
+	got := sysctlName(forwardingSysctl("ipv6", testVLAN))
+	if want := "net.ipv6.conf.bond0/100.forwarding"; got != want {
+		t.Errorf("sysctlName = %q, want %q", got, want)
 	}
 }
 

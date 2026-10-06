@@ -185,14 +185,15 @@ and SRv6 address are not required while it is off.
 
 `GALACTIC_GATEWAY_PROC_SYS_PATH` is the procfs root the datapath writes its
 forwarding sysctls under (`net.ipv6.conf.<iface>.forwarding` and
-`net.ipv6.conf.all.forwarding`). `bpf_fib_lookup` refuses every lookup on
-an interface with forwarding off, so a sysctl that does not read `1` after
-the write stops the gateway at startup, and leaves an interface found later
-without the datapath until it does. A pod that is not privileged gets `/proc/sys` read-only, so
-`config/galactic-gateway/base/daemonset.yaml` mounts the host's `/proc/sys/net` at
-`/host/proc/sys/net` and sets this to `/host/proc/sys`. A node where
-something else already turned forwarding on passes with the default too.
-
+`net.ipv6.conf.all.forwarding`). `bpf_fib_lookup` refuses every lookup on an
+interface with forwarding off, so a sysctl that does not read `1` after the
+write stops the gateway at startup, and leaves an interface found later
+without the datapath until it does. A pod that is not privileged gets
+`/proc/sys` read-only, so `config/galactic-gateway/base/daemonset.yaml`
+mounts the host's `/proc/sys/net` at `/host/proc/sys/net` and sets this to
+`/host/proc/sys`. A node where something else already turned forwarding on
+passes with the default too. SELinux policy on an enforcing node can still
+refuse the write, and the gateway then says so at startup.
 
 `GALACTIC_GATEWAY_INTERNAL_INTERFACES` is a comma-separated list of this
 node's compute-facing interfaces, and it is what puts the return path in
