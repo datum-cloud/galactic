@@ -21,6 +21,7 @@ const (
 	labelNAT     = "galactic.datumapis.com/nat"
 	enabled      = "enabled"
 	roleEdge     = "edge"
+	roleCompute  = "compute"
 	controlPlane = "node-role.kubernetes.io/control-plane"
 )
 
@@ -85,32 +86,41 @@ func TestGatewayAndNATPlacement(t *testing.T) {
 		wantNAT     bool
 	}{
 		{name: "unlabeled node runs neither (never automatic)", labels: map[string]string{}},
-		{name: "compute node runs neither", labels: map[string]string{labelNode: "compute"}},
-		{name: "edge node (galactic-vrf host) runs neither", labels: map[string]string{labelNode: roleEdge}},
-		{name: "gateway only", labels: map[string]string{labelGateway: enabled}, wantGateway: true},
-		{name: "nat only", labels: map[string]string{labelNAT: enabled}, wantNAT: true},
+		{name: "compute node runs neither", labels: map[string]string{labelNode: roleCompute}},
+		{name: "edge node without an opt-in label runs neither", labels: map[string]string{labelNode: roleEdge}},
 		{
-			name:        "both labels run both",
-			labels:      map[string]string{labelGateway: enabled, labelNAT: enabled},
+			name:        "gateway label on an edge node runs the gateway",
+			labels:      map[string]string{labelNode: roleEdge, labelGateway: enabled},
+			wantGateway: true,
+		},
+		{
+			name:    "nat label on an edge node runs a shard",
+			labels:  map[string]string{labelNode: roleEdge, labelNAT: enabled},
+			wantNAT: true,
+		},
+		{
+			name:        "both labels on an edge node run both",
+			labels:      map[string]string{labelNode: roleEdge, labelGateway: enabled, labelNAT: enabled},
 			wantGateway: true, wantNAT: true,
 		},
 		{
-			name:   "gateway label on an edge node is refused",
-			labels: map[string]string{labelGateway: enabled, labelNode: roleEdge},
-		},
-		{
-			name:   "nat label on an edge node is refused",
-			labels: map[string]string{labelNAT: enabled, labelNode: roleEdge},
+			name:   "opt-in labels without a node role are refused",
+			labels: map[string]string{labelGateway: enabled, labelNAT: enabled},
 		},
 		{
 			name:   "both labels on a compute node are refused",
-			labels: map[string]string{labelGateway: enabled, labelNAT: enabled, labelNode: "compute"},
+			labels: map[string]string{labelNode: roleCompute, labelGateway: enabled, labelNAT: enabled},
 		},
 		{
-			name:   "control-plane node is refused",
-			labels: map[string]string{labelGateway: enabled, labelNAT: enabled, controlPlane: ""},
+			name: "control-plane edge node is refused",
+			labels: map[string]string{
+				labelNode: roleEdge, labelGateway: enabled, labelNAT: enabled, controlPlane: "",
+			},
 		},
-		{name: "wrong label value is refused", labels: map[string]string{labelGateway: "true", labelNAT: "true"}},
+		{
+			name:   "wrong label value is refused",
+			labels: map[string]string{labelNode: roleEdge, labelGateway: "true", labelNAT: "true"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

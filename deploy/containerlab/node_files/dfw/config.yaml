@@ -22,6 +22,7 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw
+      galactic.datumapis.com/node: edge
       galactic.datumapis.com/nat: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
@@ -36,6 +37,7 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw
+      galactic.datumapis.com/node: edge
       galactic.datumapis.com/nat: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
