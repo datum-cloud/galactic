@@ -20,6 +20,11 @@ coverage.html
 /galactic-ipam
 /galactic-bgp
 /galactic-route
+/galactic-gateway
+/galactic-nat
+/galactic-usid
+/galactic-vrf
+/fabric-config-agent
 
 # Go workspace
 go.work
