@@ -43,6 +43,10 @@ type fakeGatewayEngine struct {
 	stopped        bool
 	generation     uint64
 	orphansCutoffs []uint64
+
+	// loadErrs fails the named rule keys with the given error, the way the
+	// real engine reports a quota rejection or a datapath refusal.
+	loadErrs map[string]string
 }
 
 func newFakeGatewayEngine() *fakeGatewayEngine {
@@ -57,7 +61,16 @@ func (f *fakeGatewayEngine) Reconcile(_ context.Context, desired gateway.EngineS
 	if f.reconcileErr != nil {
 		return gateway.EngineStatus{}, f.reconcileErr
 	}
-	return gateway.EngineStatus{Healthy: true}, nil
+	status := gateway.EngineStatus{Healthy: true}
+	for key := range desired.Rules {
+		if msg, ok := f.loadErrs[key]; ok {
+			status.Healthy = false
+			status.Rules = append(status.Rules, gateway.RuleStatus{Key: key, Applied: false, Error: msg})
+			continue
+		}
+		status.Rules = append(status.Rules, gateway.RuleStatus{Key: key, Applied: true})
+	}
+	return status, nil
 }
 
 func (f *fakeGatewayEngine) DatapathGeneration() uint64 {
@@ -145,12 +158,38 @@ func gatewayReadyCondition(t *testing.T, c client.Client) *metav1.Condition {
 	return cond
 }
 
+// ruleProgrammedCondition returns testNodeGWA's Programmed condition on the
+// named NetworkRule, or nil when the rule carries none.
+func ruleProgrammedCondition(t *testing.T, c client.Client, name string) *metav1.Condition {
+	t.Helper()
+	rule := &bgpv1alpha1.NetworkRule{}
+	if err := c.Get(context.Background(), testRuleKey(name), rule); err != nil {
+		t.Fatalf("get NetworkRule %s: %v", name, err)
+	}
+	return meta.FindStatusCondition(rule.Status.Conditions, programmedConditionType(testNodeGWA))
+}
+
+// assertRuleProgrammed fails the test unless testNodeGWA's Programmed
+// condition on testRuleName has the given status and reason.
+func assertRuleProgrammed(t *testing.T, c client.Client, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+	name := testRuleName
+	cond := ruleProgrammedCondition(t, c, name)
+	if cond == nil {
+		t.Fatalf("NetworkRule %s has no %s condition", name, programmedConditionType(testNodeGWA))
+	}
+	if cond.Status != status || cond.Reason != reason {
+		t.Errorf("NetworkRule %s %s = %s/%s, want %s/%s",
+			name, cond.Type, cond.Status, cond.Reason, status, reason)
+	}
+}
+
 func TestNetworkGatewayReconciler_SkipsNonMatchingNode(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gw := newTestGateway(testNodeGWA)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gw).
 		Build()
 
@@ -190,7 +229,7 @@ func TestNetworkGatewayReconciler_IgnoresDeletionOfOtherNodesGateway(t *testing.
 	gwA := newTestGateway(testNodeGWA) // this node's own gateway; still exists
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA).
 		Build()
 
@@ -242,7 +281,7 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules(t *testing.
 	deleting.DeletionTimestamp = &now
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, gwB, backendRouter, backendAdv, backendVRF, backendAdv2, backendVRF2,
 			ruleA, ruleB, notAccepted, deleting).
 		Build()
@@ -290,7 +329,7 @@ func TestNetworkGatewayReconciler_ExcludesRuleWithUnresolvableBackend(t *testing
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, rule).
 		Build()
 
@@ -305,6 +344,7 @@ func TestNetworkGatewayReconciler_ExcludesRuleWithUnresolvableBackend(t *testing
 		t.Fatalf("desired rules = %d, want 0 (backend unresolvable); got %+v",
 			len(engine.lastDesired.Rules), engine.lastDesired.Rules)
 	}
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonInvalidRule)
 }
 
 func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *testing.T) {
@@ -316,7 +356,7 @@ func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *te
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, backendRouter, backendAdv, backendVRF, rule).
 		Build()
 
@@ -353,7 +393,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, gwB, router, backendRouter, backendAdv, backendVRF, rule).
 		Build()
 
@@ -386,6 +426,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 		t.Errorf("Labels[%s] = %q, want %q (networkrule_controller.go's teardown depends on this)",
 			networkRuleLabel, got, testRuleName)
 	}
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
 }
 
 // TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement covers
@@ -412,7 +453,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	}
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule, preexisting).
 		Build()
 
@@ -448,7 +489,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(
@@ -499,7 +540,7 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 	acceptRule(rule)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule).
 		Build()
 
@@ -523,6 +564,128 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 	if cond.Reason != reasonEngineHealthy {
 		t.Errorf("Ready reason = %q, want %q", cond.Reason, reasonEngineHealthy)
 	}
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
+}
+
+// errLoadQuota is the load failure the #712 regression tests make the fake
+// engine report.
+const errLoadQuota = "rule exceeds its per-tenant quota"
+
+// TestNetworkGatewayReconciler_DoesNotAdvertiseUnloadedRule is the
+// regression test for #712: a rule the engine refused to load must not be
+// advertised from this node, and its status must name the failure.
+func TestNetworkGatewayReconciler_DoesNotAdvertiseUnloadedRule(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	engine.loadErrs = map[string]string{testNamespace + "/" + testRuleName: errLoadQuota}
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
+		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule never loaded); prefixes %v",
+			testRuleAdvV4, err, adv.Spec.Prefixes)
+	}
+
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonLoadFailed)
+	if cond := ruleProgrammedCondition(t, fakeClient, testRuleName); !strings.Contains(cond.Message, errLoadQuota) {
+		t.Errorf("Programmed message = %q, want it to name the failure %q", cond.Message, errLoadQuota)
+	}
+
+	ready := gatewayReadyCondition(t, fakeClient)
+	if ready.Reason != "EngineDegraded" || !strings.Contains(ready.Message, testRuleName) {
+		t.Errorf("Ready = %s/%q, want EngineDegraded naming %s", ready.Reason, ready.Message, testRuleName)
+	}
+}
+
+// TestNetworkGatewayReconciler_WithdrawsRuleThatStopsLoading covers a rule
+// that was advertised and then fails to load: its route must be withdrawn,
+// and its Programmed condition must flip to False.
+func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsLoading(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first Reconcile: unexpected error: %v", err)
+	}
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s after a clean pass: %v", testRuleAdvV4, err)
+	}
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
+
+	engine.loadErrs = map[string]string{testNamespace + "/" + testRuleName: errLoadQuota}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second Reconcile: unexpected error: %v", err)
+	}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
+		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule stopped loading)", testRuleAdvV4, err)
+	}
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonLoadFailed)
+}
+
+// TestNetworkGatewayReconciler_WithdrawsRuleThatStopsBuilding covers a rule
+// that was advertised and then can no longer be built, here because its
+// backend's uSID stops resolving. The engine drops it from the datapath, so
+// its route must go too.
+func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsBuilding(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+	stale := &bgpv1alpha1.BGPAdvertisement{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testRuleAdvV4,
+			Labels:    map[string]string{networkRuleLabel: testRuleName},
+		},
+		Spec: bgpv1alpha1.BGPAdvertisementSpec{
+			RouterRef:     bgpv1alpha1.RouterRef{Name: testRouterName},
+			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
+			Prefixes:      []bgpv1alpha1.Prefix{testVIPPrefix},
+		},
+	}
+
+	// No backend fixtures: the backend no longer resolves.
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), rule, stale).
+		Build()
+
+	r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); !apierrors.IsNotFound(err) {
+		t.Fatalf("get BGPAdvertisement %s: err = %v, want NotFound (the rule no longer builds)", testRuleAdvV4, err)
+	}
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonInvalidRule)
 }
 
 // TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure covers the third
@@ -534,7 +697,7 @@ func TestNetworkGatewayReconciler_ReturnsOrphanSweepFailure(t *testing.T) {
 	gwA := newTestGateway(testNodeGWA)
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA).
 		Build()
 
@@ -584,7 +747,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsForDepartedGatewayNode(
 	survivorAdv := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, ruleV4, ruleV6, otherRuleV4, survivorAdv).
 		Build()
 
@@ -630,7 +793,7 @@ func TestNetworkGatewayReconciler_WithdrawsAdvertisementsOnOwnDeletion(t *testin
 	ruleV4 := newAdvertisement(testRuleName + "-" + testNodeGWA + "-v4")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, ruleV4).
 		Build()
 
@@ -736,7 +899,7 @@ func TestNetworkGatewayReconciler_DisabledWithdrawsAndSkipsTheEngine(t *testing.
 	other := newAdvertisement(testRuleName + "-" + testNodeGWB + "-v6")
 
 	fakeClient := newIndexedClientBuilder(scheme).
-		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, own, other).
 		Build()
 
@@ -789,5 +952,41 @@ func TestIsNodeAdvertisement_LabelledNamesMatchExactly(t *testing.T) {
 				t.Errorf("isNodeAdvertisement(%s, edge1) = %v, want %v", tt.adv.Name, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNetworkGatewayReconciler_ClearsDepartedNodeProgrammedCondition covers
+// a gateway node leaving: its Programmed condition on every rule goes with
+// its advertisements, and every other node's condition stays.
+func TestNetworkGatewayReconciler_ClearsDepartedNodeProgrammedCondition(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+	for _, node := range []string{testNodeGWA, testNodeGWB} {
+		meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
+			Type: programmedConditionType(node), Status: metav1.ConditionTrue, Reason: reasonProgrammed,
+		})
+	}
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), rule).
+		Build()
+
+	r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWB)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	got := &bgpv1alpha1.NetworkRule{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleName), got); err != nil {
+		t.Fatalf("get NetworkRule %s: %v", testRuleName, err)
+	}
+	if meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWB)) != nil {
+		t.Errorf("departed node %s's condition is still on NetworkRule %s", testNodeGWB, testRuleName)
+	}
+	if meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWA)) == nil {
+		t.Errorf("surviving node %s's condition was removed from NetworkRule %s", testNodeGWA, testRuleName)
 	}
 }

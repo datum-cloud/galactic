@@ -216,8 +216,8 @@ that converges this node's whole gateway engine:
    is no primary/secondary subset to filter on — resolves each backend's
    SRv6 uSID via `usidresolver.go`'s `buildBackendSIDIndex`, and converges
    `gateway.Engine` toward the result.
-2. **Wire BGP.** Reconciles one `BGPAdvertisement` per rule per non-empty
-   VIP address family, name-qualified by node (`<rule>-<node>-v4`/`-v6` —
+2. **Wire BGP.** Reconciles one `BGPAdvertisement` per loaded rule per
+   non-empty VIP address family, name-qualified by node (`<rule>-<node>-v4`/`-v6` —
    required, not cosmetic, since every gateway node computes the same rule
    independently). This reuses the existing `l2vpn/evpn` Type-5 IP-Prefix
    advertisement path end-to-end unmodified. `VRFID`/`Function` are left
@@ -225,7 +225,18 @@ that converges this node's whole gateway engine:
    different Route Distinguisher per originating node, not a decap
    Function, is what keeps every node's route alive as an independent,
    non-competing path). **No `LocalPreference` is set** — every gateway
-   node's route is equally preferred by construction.
+   node's route is equally preferred by construction. A rule that fails to
+   build (a backend uSID that does not resolve) or that the engine refuses
+   (over quota, or a VIP the datapath rejects) is not advertised, and any
+   route an earlier pass published for it is withdrawn, so the fabric never
+   sends a VIP's traffic to a node with nothing loaded for it. Each node
+   records the result on the rule as its own `<node>/Programmed` condition
+   (`Programmed`, `LoadFailed`, or `InvalidRule`, with the error in the
+   message). The type is node-scoped because `NetworkRule` status is shared
+   by every gateway node while loading is per node; a node writes it only
+   when it changes, and a departing, deleted, or disabled node's condition
+   is removed with its advertisements. The `NetworkGateway`'s
+   `EngineDegraded` message lists every failed rule.
 3. **Crash recovery.** Runs `Engine.ReconcileOrphans` (see
    [Crash recovery](#crash-recovery) below).
 
