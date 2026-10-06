@@ -246,12 +246,13 @@ a change strands every established flow. A shard holding the wrong identity is d
 The datapath needs a SID and at least one family before it translates
 anything:
 
-| `Programmed` reason   | Meaning                                                                                                          |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `AddressesProgrammed` | The datapath translates with the identity the spec assigns.                                                      |
-| `AddressUnassigned`   | The spec assigns no SID, or no masquerade address for either family. The datapath is cleared and claims nothing. |
-| `ProgrammingFailed`   | The datapath rejected the identity, for example a NAT64 prefix that is not a `/96`. The message says why.        |
-| `ShardConflict`       | More than one `EgressShard` targets this node. None is programmed until only one does.                           |
+| `Programmed` reason   | Meaning                                                                                                                      |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `AddressesProgrammed` | The datapath translates with the identity the spec assigns.                                                                  |
+| `AddressUnassigned`   | The spec assigns no SID, or no masquerade address for either family. The datapath is cleared and claims nothing.             |
+| `LocatorConflict`     | The SID's Block and Node-ID equal a `BGPRouter`'s. The datapath is cleared and claims nothing. The message names the router. |
+| `ProgrammingFailed`   | The datapath rejected the identity, for example a NAT64 prefix that is not a `/96`. The message says why.                    |
+| `ShardConflict`       | More than one `EgressShard` targets this node. None is programmed until only one does.                                       |
 
 `EgressShardReconciler` (running inside that node's own `galactic-nat` pod)
 publishes one `BGPAdvertisement` per shard, built from status rather than
@@ -265,11 +266,12 @@ identity, clears the datapath and withdraws the advertisement.
 > **Node-ID collision hazard.** The datapath's `locator_matches` check
 > (`internal/plumbing/ebpf/natprog/nat.c`) only compares the top 64
 > bits (Block + Node-ID) of a packet's outer destination against
-> `shardSID` — it does **not** check that the Node-ID is actually reserved
-> for the shard. Reusing the physical node's own real `BGPRouter.Spec.NodeID`
-> here means the shard's XDP program hijacks that node's own ordinary
-> tenant ingress traffic before `usid_ingress` ever gets to it. Reserve a
-> distinct Node-ID on the shard's locator for this purpose alone — see
+> `shardSID`. A shard reusing a `BGPRouter`'s `srv6Locator` and `nodeID`
+> would capture that router's tenant ingress before `usid_ingress` ever
+> gets to it, so `EgressShardReconciler` checks the SID against every
+> `BGPRouter` in the cluster and refuses one that matches, with
+> `Programmed=False` reason `LocatorConflict`. Reserve a distinct Node-ID
+> on the shard's locator for this purpose alone — see
 > `deploy/containerlab/resources/galactic-nat/dfw/egressshard.yaml` for
 > the exact encoding the lab uses.
 
@@ -621,9 +623,10 @@ knowing before you rely on this component in production:
   until it refills. `icmp_rate_limited` counts each refusal; a per-peer or
   global limiter is the follow-up if that counter shows either problem.
 - **A shard's identity is entirely operator-chosen.** Nothing in this repo
-  allocates `spec.shardSID` or the masquerade addresses, and nothing checks
-  that a chosen SID's Node-ID doesn't collide with a real node's own — see
-  the "Node-ID collision hazard" callout above.
+  allocates `spec.shardSID` or the masquerade addresses. A SID colliding
+  with a `BGPRouter`'s Block and Node-ID is refused (see the "Node-ID
+  collision hazard" callout above), but a collision with any other uSID
+  identity, one no `BGPRouter` carries, is not detected.
 - **One NIC receive queue on a `bnxt_en` uplink can stall.** The queue
   drops a steady share of its packets while the CPU sits idle, and every
   flow hashed to it fails on each retry: tenant egress times out per flow,

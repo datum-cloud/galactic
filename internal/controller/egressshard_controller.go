@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -94,6 +95,12 @@ const (
 	// holds one identity, so none of them is programmed until the conflict is
 	// resolved.
 	reasonEgressShardConflict = "ShardConflict"
+
+	// reasonEgressShardLocatorConflict is the Programmed condition reason on
+	// an EgressShard whose SID shares its Block and Node-ID with a BGPRouter.
+	// The datapath claims every packet matching those 64 bits, so programming
+	// the shard would capture that router's tenant ingress.
+	reasonEgressShardLocatorConflict = "LocatorConflict"
 )
 
 // EgressShardReconciler programs this node's egress translation datapath from
@@ -234,7 +241,7 @@ func (r *EgressShardReconciler) syncNode(ctx context.Context) error {
 		return nil
 	case len(mine) == 1:
 		var err error
-		if programmed, err = r.program(mine[0]); err != nil {
+		if programmed, err = r.program(ctx, mine[0]); err != nil {
 			// Publish why before returning the error for a retry.
 			if pubErr := r.publish(ctx, mine[0], programmed); pubErr != nil {
 				return errors.Join(err, pubErr)
@@ -263,8 +270,9 @@ func (r *EgressShardReconciler) syncNode(ctx context.Context) error {
 // program writes shard's spec into the datapath and returns the resulting
 // Programmed condition. A spec that assigns no usable identity yet clears the
 // datapath rather than leaving a previous one in place, which is not an error:
-// the assignment arrives later as a spec update.
-func (r *EgressShardReconciler) program(shard *bgpv1alpha1.EgressShard) (metav1.Condition, error) {
+// the assignment arrives later as a spec update. Neither is a SID that shares
+// its Block and Node-ID with a BGPRouter: see routerLocatorConflict.
+func (r *EgressShardReconciler) program(ctx context.Context, shard *bgpv1alpha1.EgressShard) (metav1.Condition, error) {
 	cond := metav1.Condition{Type: bgpv1alpha1.ConditionTypeProgrammed, Status: metav1.ConditionFalse}
 
 	identity, missing, err := identityFromSpec(shard.Spec)
@@ -281,6 +289,22 @@ func (r *EgressShardReconciler) program(shard *bgpv1alpha1.EgressShard) (metav1.
 		cond.Message = missing
 		return cond, nil
 	}
+	conflict, err := r.routerLocatorConflict(ctx, identity.ShardSID)
+	if err != nil {
+		cond.Reason = bgpv1alpha1.ProgrammedReasonProgrammingFailed
+		cond.Message = err.Error()
+		return cond, err
+	}
+	if conflict != "" {
+		if err := r.Datapath.Clear(); err != nil {
+			cond.Reason = bgpv1alpha1.ProgrammedReasonProgrammingFailed
+			cond.Message = err.Error()
+			return cond, fmt.Errorf("clear egress translation datapath: %w", err)
+		}
+		cond.Reason = reasonEgressShardLocatorConflict
+		cond.Message = conflict
+		return cond, nil
+	}
 	if err := r.Datapath.Program(identity); err != nil {
 		cond.Reason = bgpv1alpha1.ProgrammedReasonProgrammingFailed
 		cond.Message = err.Error()
@@ -292,6 +316,46 @@ func (r *EgressShardReconciler) program(shard *bgpv1alpha1.EgressShard) (metav1.
 	cond.Reason = bgpv1alpha1.ProgrammedReasonAddressesProgrammed
 	cond.Message = "Egress translation datapath is translating with the assigned identity"
 	return cond, nil
+}
+
+// routerLocatorConflict reports, as a condition message, the first BGPRouter
+// whose Block and Node-ID equal sid's top 64 bits, or "" if none does.
+//
+// locator_matches in internal/plumbing/ebpf/natprog/nat.c claims every
+// encapsulated packet matching those 64 bits, so a shard reusing a router's
+// Block and Node-ID captures the tenant ingress addressed to it and drops what
+// it cannot translate. Every BGPRouter in the cluster is checked, not only this
+// node's: the shard's SID is advertised across the fabric, so a clash with any
+// router misroutes that router's traffic. A router whose locator or Node-ID is
+// unset or invalid owns no uSID identity and is skipped.
+func (r *EgressShardReconciler) routerLocatorConflict(ctx context.Context, sid netip.Addr) (string, error) {
+	if !sid.Is6() {
+		return "", nil
+	}
+	routers := &bgpv1alpha1.BGPRouterList{}
+	if err := r.List(ctx, routers); err != nil {
+		return "", fmt.Errorf("list BGPRouters: %w", err)
+	}
+	shardLocator := netip.PrefixFrom(sid, uformat.LocatorBits).Masked()
+	for i := range routers.Items {
+		router := &routers.Items[i]
+		if router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {
+			continue
+		}
+		base, err := srv6.NodeSIDBase(router.Spec.SRv6Locator, router.Spec.NodeID)
+		if err != nil {
+			log.FromContext(ctx).V(1).Info("skip BGPRouter with no valid uSID identity",
+				"bgpRouter", client.ObjectKeyFromObject(router), "error", err.Error())
+			continue
+		}
+		if netip.PrefixFrom(base, uformat.LocatorBits).Masked() == shardLocator {
+			return fmt.Sprintf(
+				"Shard SID %s shares Block and Node-ID %s with BGPRouter %s/%s (srv6Locator %s, nodeID %d); "+
+					"a shard needs a Node-ID no BGPRouter uses",
+				sid, shardLocator, router.Namespace, router.Name, router.Spec.SRv6Locator, router.Spec.NodeID), nil
+		}
+	}
+	return "", nil
 }
 
 // identityFromSpec parses spec's identity fields. missing is non-empty, with
@@ -412,7 +476,8 @@ func shardAdvertisementName(shardName string) string {
 // advertised and carries no meaning; installEgressRoutes overwrites it per
 // tenant. Reserving the Block and Node-ID for this shard alone is what the /64
 // requires, which was already true -- locator_matches' doc comment spells out
-// what reusing a co-located BGPRouter's Node-ID silently breaks.
+// what reusing a co-located BGPRouter's Node-ID silently breaks, and program
+// refuses a shard that does.
 //
 // The shard address stays a /128. It is an ordinary masquerade source address,
 // not a uSID, and nothing varies below it.
@@ -566,7 +631,10 @@ func (r *EgressShardReconciler) readyCondition() metav1.Condition {
 // The BGPRouter watch closes a startup race: without it, a EgressShard whose
 // node's BGPRouter does not exist yet at first reconcile fails its router
 // lookup once and gets no second chance until an unrelated event triggers a
-// fresh reconcile.
+// fresh reconcile. It also re-checks this node's shard against every
+// BGPRouter's uSID identity whenever any of them changes, in any namespace,
+// so a router created over the shard's Block and Node-ID unprograms it and
+// one moved off them programs it again.
 //
 // The startup runnable closes another. The datapath's maps are pinned, so a
 // restarted process inherits whatever identity its predecessor programmed. If
@@ -590,8 +658,8 @@ func (r *EgressShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.EgressShard{}).
 		Watches(&bgpv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(
-			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
-				return broadcastToShardRequests(ctx, r.Client, obj.GetNamespace())
+			func(ctx context.Context, _ client.Object) []ctrlreconcile.Request {
+				return r.nodeShardRequests(ctx)
 			}),
 		)
 	if r.CoverageEvents != nil {
@@ -620,25 +688,6 @@ func (r *EgressShardReconciler) nodeShardRequests(ctx context.Context) []ctrlrec
 				NamespacedName: types.NamespacedName{Namespace: s.Namespace, Name: s.Name},
 			})
 		}
-	}
-	return reqs
-}
-
-// broadcastToShardRequests enqueues every EgressShard in namespace. A BGPRouter
-// change may be the one this node's shard was waiting on, and there is normally
-// at most one shard per node, so listing the namespace is cheap.
-func broadcastToShardRequests(ctx context.Context, c client.Client, namespace string) []ctrlreconcile.Request {
-	logger := log.FromContext(ctx)
-	shardList := &bgpv1alpha1.EgressShardList{}
-	if err := c.List(ctx, shardList, client.InNamespace(namespace)); err != nil {
-		logger.Error(err, "list EgressShards for BGPRouter change", "namespace", namespace)
-		return nil
-	}
-	reqs := make([]ctrlreconcile.Request, 0, len(shardList.Items))
-	for _, s := range shardList.Items {
-		reqs = append(reqs, ctrlreconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: s.Namespace, Name: s.Name},
-		})
 	}
 	return reqs
 }

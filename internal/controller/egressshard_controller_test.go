@@ -791,3 +791,136 @@ func TestEgressShardReconciler_DisabledWithdrawsAndProgramsNothing(t *testing.T)
 		t.Errorf("advertisement still present while disabled: err = %v", err)
 	}
 }
+
+// testNAT66RouterLocator is the Block of testNAT66ShardSIDVal, so a BGPRouter
+// with this locator and Node-ID 9 owns the shard SID's whole /64.
+const testNAT66RouterLocator = "fc00:1:2::/48"
+
+// withUSIDIdentity gives router locator testNAT66RouterLocator and nodeID.
+func withUSIDIdentity(router *bgpv1alpha1.BGPRouter, nodeID int32) *bgpv1alpha1.BGPRouter {
+	router.Spec.SRv6Locator = testNAT66RouterLocator
+	router.Spec.NodeID = nodeID
+	return router
+}
+
+// TestEgressShardReconciler_RefusesSIDOverlappingItsNodesRouter is #711: a
+// shard SID sharing its Block and Node-ID with this node's own BGPRouter would
+// capture that router's tenant ingress, so the shard is never programmed and
+// never advertised.
+func TestEgressShardReconciler_RefusesSIDOverlappingItsNodesRouter(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	router := withUSIDIdentity(newTestNAT66Router(), 9)
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if datapath.programs != 0 {
+		t.Errorf("datapath programmed %d times, want 0", datapath.programs)
+	}
+	if _, ok := datapath.Programmed(); ok {
+		t.Errorf("datapath holds an identity for a refused shard")
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionFalse, reasonEgressShardLocatorConflict)
+	cond := meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeProgrammed)
+	if !strings.Contains(cond.Message, testNAT66RouterName) {
+		t.Errorf("Programmed message %q does not name BGPRouter %s", cond.Message, testNAT66RouterName)
+	}
+	if got.Status.ShardSID != "" {
+		t.Errorf("Status.ShardSID = %q, want empty", got.Status.ShardSID)
+	}
+	advKey := client.ObjectKey{Namespace: testNAT66Namespace, Name: shardAdvertisementName(testNAT66ShardName)}
+	if err := c.Get(context.Background(), advKey, &bgpv1alpha1.BGPAdvertisement{}); !apierrors.IsNotFound(err) {
+		t.Errorf("advertisement exists for a refused shard: err = %v", err)
+	}
+}
+
+// TestEgressShardReconciler_RefusesSIDOverlappingAnotherNodesRouter covers a
+// clash with a BGPRouter on another node, in another namespace: the shard SID
+// is advertised fabric-wide, so it misroutes that router's traffic too.
+func TestEgressShardReconciler_RefusesSIDOverlappingAnotherNodesRouter(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	other := withUSIDIdentity(&bgpv1alpha1.BGPRouter{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "node-b-router"},
+		Spec: bgpv1alpha1.BGPRouterSpec{
+			TargetRef: bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testNAT66NodeB},
+		},
+	}, 9)
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, other, newTestNAT66Router()).
+		WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if _, ok := datapath.Programmed(); ok {
+		t.Errorf("datapath holds an identity for a refused shard")
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionFalse, reasonEgressShardLocatorConflict)
+}
+
+// TestEgressShardReconciler_ProgramsSIDBesideItsRoutersNodeID is the address
+// plan the lab uses: shard and router share a Block, but the shard's Node-ID
+// is its own.
+func TestEgressShardReconciler_ProgramsSIDBesideItsRoutersNodeID(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	router := withUSIDIdentity(newTestNAT66Router(), 8)
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if _, ok := datapath.Programmed(); !ok {
+		t.Errorf("datapath not programmed for a shard with its own Node-ID")
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionTrue,
+		bgpv1alpha1.ProgrammedReasonAddressesProgrammed)
+}
+
+// TestEgressShardReconciler_ProgramsOnceTheLocatorConflictIsResolved checks a
+// refusal is not sticky: moving the router to another Node-ID programs the
+// shard on the next reconcile, which the BGPRouter watch delivers.
+func TestEgressShardReconciler_ProgramsOnceTheLocatorConflictIsResolved(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	router := withUSIDIdentity(newTestNAT66Router(), 9)
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("conflicting Reconcile() error = %v", err)
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionFalse, reasonEgressShardLocatorConflict)
+
+	stored := &bgpv1alpha1.BGPRouter{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(router), stored); err != nil {
+		t.Fatalf("get BGPRouter: %v", err)
+	}
+	stored.Spec.NodeID = 8
+	if err := c.Update(context.Background(), stored); err != nil {
+		t.Fatalf("update BGPRouter: %v", err)
+	}
+
+	got, err = reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("resolved Reconcile() error = %v", err)
+	}
+	if _, ok := datapath.Programmed(); !ok {
+		t.Errorf("datapath not programmed after the conflict was resolved")
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionTrue,
+		bgpv1alpha1.ProgrammedReasonAddressesProgrammed)
+}
