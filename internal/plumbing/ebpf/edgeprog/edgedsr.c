@@ -51,6 +51,9 @@
 //     ingress interface, bpf_redirect and XDP_REDIRECT where it is not. The
 //     two differ on every gateway that reaches its clients and its compute
 //     nodes over different links, which is this role's normal shape.
+//  7. A packet the route refuses for size, too big once the outer header is
+//     on, is answered with an ICMPv6 Packet Too Big to the client instead of
+//     vanishing; see send_too_big6.
 //
 // The verifier's bounds-narrowing behavior described at EDGE_BARRIER_VAR
 // applies to the backend-index lookup below, a plain byte read from a map
@@ -81,6 +84,9 @@ static long (*bpf_xdp_adjust_head)(void *ctx, int delta) = (void *) BPF_FUNC_xdp
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 plen,
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
+static long (*bpf_xdp_adjust_tail)(void *ctx, int delta) = (void *) BPF_FUNC_xdp_adjust_tail;
+static __s64 (*bpf_csum_diff)(__be32 *from, __u32 from_size, __be32 *to, __u32 to_size,
+			       __wsum seed) = (void *) BPF_FUNC_csum_diff;
 // bpf_redirect, not bpf_redirect_peer: the latter is TC-only, and every egress
 // interface here is in this node's own namespace anyway.
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
@@ -94,6 +100,24 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 #define EDGE_IPPROTO_TCP 6
 #define EDGE_IPPROTO_UDP 17
 #define EDGE_IPPROTO_IPV6 41 // this program's own pushed outer header's Next Header, always
+#define EDGE_IPPROTO_ICMPV6 58
+#define EDGE_ICMPV6_PACKET_TOO_BIG 2
+
+// EDGE_IP6HDR_LEN is the IPv6 fixed header size, and also exactly what
+// push_outer_header adds to every packet.
+#define EDGE_IP6HDR_LEN 40
+
+// EDGE_FRAG_QUOTE6 is how much of the offending packet a Packet Too Big quotes:
+// its IPv6 header and first 8 transport bytes, all a sender's stack matches an
+// error on.
+#define EDGE_FRAG_QUOTE6 (EDGE_IP6HDR_LEN + 8)
+
+// The Packet Too Big this program sends is limited by one token bucket per CPU:
+// EDGE_ICMP_RATE messages a second with a burst of EDGE_ICMP_BURST, the same
+// limits the egress shard uses. See icmp_rate_bucket.
+#define EDGE_ICMP_RATE 1000
+#define EDGE_ICMP_BURST 100
+#define EDGE_ICMP_COST_NS (1000000000ULL / EDGE_ICMP_RATE)
 
 // EDGE_MAX_BACKENDS matches the CRD's own maximum backend count. It must stay a
 // power of two for the masking below to be equivalent to a range check.
@@ -222,7 +246,8 @@ enum edge_drop_reason {
 	DROP_REASON_NO_EGRESS_IFINDEX  = 7,
 	DROP_REASON_REDIRECT_FAILED    = 8,
 	DROP_REASON_RETURN_HOP_LIMIT   = 9,
-	DROP_REASON_COUNT              = 10,
+	DROP_REASON_ICMP_RATE_LIMITED  = 10,
+	DROP_REASON_COUNT              = 11,
 };
 
 // ---------------------------------------------------------------------
@@ -275,6 +300,28 @@ struct {
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
 
+// struct icmp_bucket is one CPU's token bucket, held as nanoseconds of credit
+// rather than whole tokens so a refill is an addition, with no division on the
+// packet path: each message costs EDGE_ICMP_COST_NS, and credit accrues one
+// nanosecond per nanosecond up to EDGE_ICMP_BURST messages' worth.
+struct icmp_bucket {
+	__u64 last_ns;
+	__u64 credit_ns;
+};
+
+// icmp_rate_bucket limits the ICMP this program emits, with one independent
+// bucket per CPU and no locking. The effective limit for the node is the
+// per-CPU rate times the number of CPUs receiving VIP traffic, and it is not
+// per client: one client draining a CPU's bucket suppresses the errors every
+// other client hashed to that CPU would get until it refills. Every refusal is
+// counted as icmp_rate_limited.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct icmp_bucket);
+} icmp_rate_bucket SEC(".maps");
+
 // The node's XDP dispatcher (internal/plumbing/ebpf/xdpdispatch). edge_lb and
 // edge_return run from its gateway slots, and a packet either does not claim
 // goes on to the later slots, in practice the egress translation shard, which
@@ -309,6 +356,41 @@ static EDGE_ALWAYS_INLINE void count_claimed_drop(__u32 reason, struct vip_stats
 	count_drop(reason);
 	if (stats)
 		__sync_fetch_and_add(&stats->dropped_packets, 1);
+}
+
+// take_icmp_token reports whether this CPU's bucket can pay for one more
+// message, and spends it if so. A clock reading behind last_ns earns nothing
+// rather than underflowing into a full bucket.
+static EDGE_ALWAYS_INLINE int take_icmp_token(void)
+{
+	__u32 key = 0;
+	struct icmp_bucket *b = bpf_map_lookup_elem(&icmp_rate_bucket, &key);
+	if (!b)
+		return 0;
+
+	__u64 now = bpf_ktime_get_ns();
+	__u64 credit = b->credit_ns + (now > b->last_ns ? now - b->last_ns : 0);
+	if (credit > EDGE_ICMP_BURST * EDGE_ICMP_COST_NS)
+		credit = EDGE_ICMP_BURST * EDGE_ICMP_COST_NS;
+	if (now > b->last_ns)
+		b->last_ns = now;
+
+	if (credit < EDGE_ICMP_COST_NS) {
+		b->credit_ns = credit;
+		return 0;
+	}
+	b->credit_ns = credit - EDGE_ICMP_COST_NS;
+	return 1;
+}
+
+// csum_fold_add folds a bpf_csum_diff result into a ones'-complement checksum.
+static EDGE_ALWAYS_INLINE __be16 csum_fold_add(__be16 check, __s64 diff)
+{
+	__s64 sum = (__u16) ~check;
+	sum += diff;
+	sum = (sum & 0xffff) + (sum >> 16);
+	sum = (sum & 0xffff) + (sum >> 16);
+	return (__be16) ~((__u16) sum);
 }
 
 // stats_row returns key's row in a statistics map, creating a zeroed one on
@@ -368,10 +450,13 @@ static EDGE_ALWAYS_INLINE __u32 fnv1a_flow(const __u8 addr[16], __be16 port)
 // overwrites fib_params.ifindex with it on success. Discarding that value is
 // what made every encapsulated packet leave on the wrong wire before, since the
 // MACs written below belong to the egress link and nothing else.
+//
+// A lookup refused for size reports the route's MTU through frag_mtu, when the
+// caller passes one.
 static EDGE_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifindex,
 							  const __u8 src[16], const __u8 dst[16],
 							  __u16 tot_len, struct edge_ethhdr *eth,
-							  __u32 *egress_ifindex)
+							  __u32 *egress_ifindex, __u16 *frag_mtu)
 {
 	struct bpf_fib_lookup fib_params;
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -382,6 +467,8 @@ static EDGE_ALWAYS_INLINE long resolve_fib_and_write_eth(void *ctx, __u32 ifinde
 	fib_params.tot_len = tot_len;
 
 	long fib_rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), BPF_FIB_LOOKUP_DIRECT);
+	if (fib_rc == BPF_FIB_LKUP_RET_FRAG_NEEDED && frag_mtu)
+		*frag_mtu = fib_params.mtu_result;
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS)
 		return fib_rc;
 
@@ -408,9 +495,13 @@ static EDGE_ALWAYS_INLINE void count_fib_drop(long fib_rc, struct vip_stats_valu
 // Every failure here is a claimed packet this gateway then failed to deliver,
 // so each one counts against the VIP's own dropped_packets as well as its
 // reason bucket -- a gateway that cannot deliver must not read as one that did.
+//
+// A packet the route refuses for size also reports the route's MTU through
+// frag_mtu, so the caller can tell the client; see send_too_big6.
 static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 src[16],
 						 const __u8 dst[16], __be16 inner_payload_len_plus_ip6hdr,
-						 struct vip_stats_value *stats, __u32 *egress_ifindex)
+						 struct vip_stats_value *stats, __u32 *egress_ifindex,
+						 __u16 *frag_mtu)
 {
 	if (bpf_xdp_adjust_head(ctx, -40) != 0) {
 		count_claimed_drop(DROP_REASON_ADJUST_HEAD_FAILED, stats);
@@ -443,7 +534,7 @@ static EDGE_ALWAYS_INLINE int push_outer_header(struct xdp_md *ctx, const __u8 s
 
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, src, dst,
 						 (__u16) (sizeof(*outer) + __builtin_bswap16(inner_payload_len_plus_ip6hdr)),
-						 eth, egress_ifindex);
+						 eth, egress_ifindex, frag_mtu);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		count_fib_drop(fib_rc, stats);
 		return -1;
@@ -478,6 +569,93 @@ static EDGE_ALWAYS_INLINE int leave_via(struct xdp_md *ctx, __u32 egress_ifindex
 		return XDP_DROP;
 	}
 	return XDP_REDIRECT;
+}
+
+// send_too_big6 answers a client whose packet is too big for the fabric once
+// push_outer_header has added its 40 bytes, the way a router would: with an
+// ICMPv6 Packet Too Big, so its path MTU discovery adapts instead of every
+// large packet to the VIP vanishing.
+//
+// It runs after push_outer_header has failed, so the frame holds the 54 bytes
+// it wrote and then the client's packet, untouched, which is what gets quoted.
+// The message comes from the VIP, the address the client was talking to and
+// the one announced publicly, rather than this node's SRv6 source, which
+// upstream source filtering may drop. mtu is the route's, less the
+// encapsulation, so the client's next packet fits once wrapped.
+//
+// The packet itself is already counted as a fib_frag_needed drop against the
+// VIP, so nothing here counts against the VIP's dropped_packets again; a
+// failure only moves its reason bucket. edge_lb claims only TCP and UDP, so
+// this never answers an ICMP error with another.
+static EDGE_ALWAYS_INLINE int send_too_big6(struct xdp_md *ctx, __u32 mtu)
+{
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	const __u8 *inner = data + sizeof(struct edge_ethhdr) + EDGE_IP6HDR_LEN;
+	if ((void *) (inner + EDGE_FRAG_QUOTE6) > data_end)
+		return XDP_DROP;
+
+	if (!take_icmp_token()) {
+		count_drop(DROP_REASON_ICMP_RATE_LIMITED);
+		return XDP_DROP;
+	}
+
+	__be32 msg[(8 + EDGE_FRAG_QUOTE6) / 4];
+	__builtin_memset(msg, 0, 8);
+	((__u8 *) msg)[0] = EDGE_ICMPV6_PACKET_TOO_BIG;
+	msg[1] = __builtin_bswap32(mtu);
+	__builtin_memcpy(&msg[2], inner, EDGE_FRAG_QUOTE6);
+
+	// The client is the quoted packet's source, and the VIP its destination.
+	__u8 client[16];
+	__builtin_memcpy(client, &inner[8], 16);
+	__u8 vip[16];
+	__builtin_memcpy(vip, &inner[24], 16);
+
+	{
+		__be32 pseudo[10];
+		__builtin_memcpy(&pseudo[0], vip, 16);
+		__builtin_memcpy(&pseudo[4], client, 16);
+		pseudo[8] = __builtin_bswap32(sizeof(msg));
+		pseudo[9] = __builtin_bswap32(EDGE_IPPROTO_ICMPV6);
+		__s64 sum = bpf_csum_diff(0, 0, pseudo, sizeof(pseudo), 0);
+		sum = bpf_csum_diff(0, 0, msg, sizeof(msg), (__wsum) sum);
+		__be16 check = csum_fold_add(0xFFFF, sum);
+		__builtin_memcpy(&((__u8 *) msg)[2], &check, 2);
+	}
+
+	int cur = (int) ((long) data_end - (long) data);
+	int want = (int) (sizeof(struct edge_ethhdr) + EDGE_IP6HDR_LEN + sizeof(msg));
+	if (bpf_xdp_adjust_tail(ctx, want - cur) != 0) {
+		count_drop(DROP_REASON_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+	data = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+	if (data + sizeof(struct edge_ethhdr) + EDGE_IP6HDR_LEN + sizeof(msg) > data_end) {
+		count_drop(DROP_REASON_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+
+	struct edge_ethhdr *eth = data;
+	struct edge_ip6hdr *ip6 = (void *) (eth + 1);
+	__builtin_memset(ip6->vtc_flow, 0, sizeof(ip6->vtc_flow));
+	ip6->vtc_flow[0] = 0x60;
+	ip6->payload_len = __builtin_bswap16(sizeof(msg));
+	ip6->nexthdr = EDGE_IPPROTO_ICMPV6;
+	ip6->hop_limit = 64;
+	__builtin_memcpy(ip6->saddr, vip, 16);
+	__builtin_memcpy(ip6->daddr, client, 16);
+	__builtin_memcpy((void *) (ip6 + 1), msg, sizeof(msg));
+
+	__u32 egress_ifindex = 0;
+	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, vip, client,
+						 (__u16) (EDGE_IP6HDR_LEN + sizeof(msg)), eth, &egress_ifindex, 0);
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+		count_fib_drop(fib_rc, 0);
+		return XDP_DROP;
+	}
+	return leave_via(ctx, egress_ifindex, 0);
 }
 
 // ---------------------------------------------------------------------
@@ -571,9 +749,13 @@ int edge_lb(struct xdp_md *ctx)
 		__builtin_bswap16((__u16) sizeof(struct edge_ip6hdr) + __builtin_bswap16(ip6->payload_len));
 
 	__u32 egress_ifindex = 0;
+	__u16 frag_mtu = 0;
 	if (push_outer_header(ctx, cfg->encap_src, b->usid, inner_payload_len_plus_ip6hdr, stats,
-			      &egress_ifindex) != 0)
+			      &egress_ifindex, &frag_mtu) != 0) {
+		if (frag_mtu > EDGE_IP6HDR_LEN)
+			return send_too_big6(ctx, frag_mtu - EDGE_IP6HDR_LEN);
 		return XDP_DROP;
+	}
 
 	return leave_via(ctx, egress_ifindex, stats);
 }
@@ -636,8 +818,8 @@ int edge_return(struct xdp_md *ctx)
 	// Forwarding in XDP means the kernel never sees this packet, so nothing
 	// else decrements the hop limit. Omitting it would forward a looping
 	// packet forever and make this node invisible to traceroute. No ICMPv6
-	// Time Exceeded is emitted, the same accepted gap this datapath already
-	// has for Packet Too Big.
+	// Time Exceeded is emitted, and a reply too big for its route is dropped
+	// as fib_frag_needed without a Packet Too Big; only edge_lb sends one.
 	if (ip6->hop_limit <= 1) {
 		count_claimed_drop(DROP_REASON_RETURN_HOP_LIMIT, stats);
 		return XDP_DROP;
@@ -646,7 +828,7 @@ int edge_return(struct xdp_md *ctx)
 	__u32 egress_ifindex = 0;
 	long fib_rc = resolve_fib_and_write_eth(ctx, ctx->ingress_ifindex, ip6->saddr, ip6->daddr,
 						 (__u16) (sizeof(*ip6) + __builtin_bswap16(ip6->payload_len)),
-						 eth, &egress_ifindex);
+						 eth, &egress_ifindex, 0);
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		// Including BPF_FIB_LKUP_RET_NOT_FWDED, which covers both a
 		// locally destined reply and forwarding being disabled on this
