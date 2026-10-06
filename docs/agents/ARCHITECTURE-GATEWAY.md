@@ -735,11 +735,7 @@ tier structure.
 **Publish pipeline:** `.github/workflows/publish.yaml`'s
 `publish-galactic-gateway-image` job builds and pushes
 `ghcr.io/datum-cloud/galactic-gateway`; `publish-kustomize-bundles` stamps
-that tag into `config/galactic-gateway/base`. That same step also stamps
-the `galactic-router` tag into the same path — a carryover from when this
-DaemonSet ran both images in one pod, now stale (`daemonset.yaml` is
-single-container and references no `galactic-router` image at all — see
-[Known Constraints](#known-constraints)).
+that tag into `config/galactic-gateway/base`.
 
 **Container image:**
 - `containers/galactic-gateway/Dockerfile` — golang builder →
@@ -769,7 +765,6 @@ single-container and references no `galactic-router` image at all — see
 - **The return path is opt-in per node and fails closed at startup, not silently.** `edge_return` attaches only where `GALACTIC_GATEWAY_INTERNAL_INTERFACES` names an interface; a node that needs it and does not set it drops every reply in `KUBE-FORWARD` with nothing to say why, exactly as before this program existed. Where it *is* set, an attach failure is fatal to `setupGatewayDatapath` and the pod crash-loops rather than running with the forward half working and replies dying — the same all-or-nothing choice `edgeattach.Attach` already makes across a bond's slaves.
 - **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkRule` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkRule` existing on both sides, which nothing in this repo enforces.
 - **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place, unlike the removed Full-NAT predecessor's `conn_table`, which relied on `BPF_MAP_TYPE_LRU_HASH` self-eviction for the same purpose.
-- **`publish.yaml` still stamps a `galactic-router` tag into `config/galactic-gateway/base`.** A leftover from when this DaemonSet ran both images in one pod (see [CI/CD](#cicd)) — harmless today only because the string it replaces no longer appears in this single-container manifest, not because the step was updated to reflect the split. Worth removing in `.github/workflows/publish.yaml` rather than relying on that.
 - **Egress is out of this binary's scope, not unimplemented.** An earlier plan (`docs/plans/865-edge-gateway-nat66-egress.md`) proposed adding a second, egress-masquerading XDP personality to this same program and process; that approach was superseded by a separate, sharded stateful egress translation tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`) rather than built here. `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.
 
 ---
