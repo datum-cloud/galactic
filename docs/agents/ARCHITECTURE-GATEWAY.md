@@ -217,9 +217,9 @@ that converges this node's whole gateway engine:
    SRv6 uSID via `usidresolver.go`'s `buildBackendSIDIndex`, and converges
    `gateway.Engine` toward the result.
 2. **Wire BGP.** Reconciles one `BGPAdvertisement` per loaded rule per
-   non-empty VIP address family, name-qualified by node (`<rule>-<node>-v4`/`-v6` —
-   required, not cosmetic, since every gateway node computes the same rule
-   independently). This reuses the existing `l2vpn/evpn` Type-5 IP-Prefix
+   non-empty VIP address family, name-qualified by node (`<rule>-<node>-v4`/
+   `-v6` — required, not cosmetic, since every gateway node computes the same
+   rule independently). This reuses the existing `l2vpn/evpn` Type-5 IP-Prefix
    advertisement path end-to-end unmodified. `VRFID`/`Function` are left
    unset (these routes need no SRv6 decap behavior of their own — a
    different Route Distinguisher per originating node, not a decap
