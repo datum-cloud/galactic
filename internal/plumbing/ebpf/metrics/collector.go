@@ -324,7 +324,7 @@ func (c *Collector) collectDrops(ch chan<- prometheus.Metric) {
 	if c.dropReasons == nil {
 		return
 	}
-	for i := range prog.DropReasonCount {
+	for _, i := range prog.DropReasonMetricIndices {
 		var perCPU []uint64
 		if err := c.dropReasons.Lookup(i, &perCPU); err != nil {
 			ch <- prometheus.NewInvalidMetric(dropsDesc, fmt.Errorf("lookup drop_reasons[%d]: %w", i, err))

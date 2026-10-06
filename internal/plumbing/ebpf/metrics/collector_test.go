@@ -286,8 +286,9 @@ func findBlockGauges(metrics []*dto.Metric, block uint64) (used, ratio float64, 
 
 func TestCollector_Drops(t *testing.T) {
 	drops := fakeDropReasons{
-		prog.DropReasonUnknownArgument: 42,
-		prog.DropReasonFibLookupFailed: 7,
+		prog.DropReasonUnknownArgument:    42,
+		prog.DropReasonFibLookupFailed:    7,
+		prog.DropReasonServiceRouteDenied: 3,
 	}
 	c := NewCollector(usidmap.NewVRFTable(newFakeTable()), usidmap.NewLocatorTable(newFakeTable()), drops, nil)
 
@@ -308,20 +309,21 @@ func TestCollector_Drops(t *testing.T) {
 		"strip_failed":          0,
 		"fib_lookup_failed":     7,
 		"redirect_failed":       0,
+		"service_route_denied":  3,
 	}
 	for reason, wantVal := range want {
 		got, ok := seen[reason]
 		if !ok {
-			t.Errorf("reason %q not emitted at all (all %d drop reasons must always be emitted, even at zero)",
-				reason, prog.DropReasonCount)
+			t.Errorf("reason %q not emitted at all (all %d metric reasons must always be emitted, even at zero)",
+				reason, len(prog.DropReasonMetricIndices))
 			continue
 		}
 		if got != wantVal {
 			t.Errorf("reason %q = %v, want %v", reason, got, wantVal)
 		}
 	}
-	if len(seen) != int(prog.DropReasonCount) {
-		t.Errorf("emitted %d distinct drop reasons, want %d", len(seen), prog.DropReasonCount)
+	if len(seen) != len(prog.DropReasonMetricIndices) {
+		t.Errorf("emitted %d distinct drop reasons, want %d", len(seen), len(prog.DropReasonMetricIndices))
 	}
 }
 

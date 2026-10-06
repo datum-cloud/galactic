@@ -33,6 +33,8 @@ import (
 	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
+const reconcileResultError = "error"
+
 // ServiceRoutePolicyReconciler resolves service policies against local Cloud
 // API attachments and programs the resulting stateful eBPF forwarding policy
 // directly on this node. It intentionally does not create child Kubernetes
@@ -97,12 +99,12 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if apierrors.IsNotFound(err) {
 			err := r.removePolicyLocked(req.NamespacedName)
 			if err != nil {
-				resultLabel = "error"
+				resultLabel = reconcileResultError
 				logger.Error(err, "remove eBPF policy for deleted ServiceRoutePolicy")
 			}
 			return ctrl.Result{}, err
 		}
-		resultLabel = "error"
+		resultLabel = reconcileResultError
 		logger.Error(err, "get ServiceRoutePolicy")
 		return ctrl.Result{}, err
 	}
@@ -115,18 +117,18 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 				r.setAccepted(ctx, policy, metav1.ConditionFalse, "EndpointNotFound", "referenced ServiceEndpoint does not exist"),
 			)
 			if joined != nil {
-				resultLabel = "error"
+				resultLabel = reconcileResultError
 				logger.Error(joined, "revoke eBPF policy for missing ServiceEndpoint")
 			}
 			return ctrl.Result{}, joined
 		}
-		resultLabel = "error"
+		resultLabel = reconcileResultError
 		logger.Error(err, "get ServiceEndpoint", "endpoint", policy.Spec.ServiceRef.Name)
 		return ctrl.Result{}, fmt.Errorf("get ServiceEndpoint %s/%s: %w", policy.Namespace, policy.Spec.ServiceRef.Name, err)
 	}
 	attachments := &cloudv1alpha1.VPCAttachmentList{}
 	if err := r.List(ctx, attachments); err != nil {
-		resultLabel = "error"
+		resultLabel = reconcileResultError
 		logger.Error(err, "list VPCAttachments")
 		return ctrl.Result{}, fmt.Errorf("list VPCAttachments: %w", err)
 	}
@@ -148,7 +150,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 				r.removePolicyLocked(req.NamespacedName),
 				r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"),
 			)
-			resultLabel = "error"
+			resultLabel = reconcileResultError
 			logger.Error(joined, "resolve service routing dependency", "endpoint", endpoint.Name)
 			return ctrl.Result{}, joined
 		}
@@ -157,7 +159,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			r.removePolicyLocked(req.NamespacedName),
 			r.setAccepted(ctx, policy, metav1.ConditionFalse, "Invalid", err.Error()),
 		)
-		resultLabel = "error"
+		resultLabel = reconcileResultError
 		logger.Error(joined, "compile service eBPF policy", "endpoint", endpoint.Name)
 		return ctrl.Result{}, joined
 	}
@@ -167,19 +169,19 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// change and reconstructs all desired state before an unchanged intent
 		// is otherwise skipped by replacePolicy.
 		if err := r.Programmer.Initialize(); err != nil {
-			resultLabel = "error"
+			resultLabel = reconcileResultError
 			logger.Error(err, "refresh service route maps", "endpoint", endpoint.Name)
 			return ctrl.Result{}, fmt.Errorf("refresh service route maps: %w", err)
 		}
 	}
 	logger.Info("compiled service eBPF policy", "endpoint", endpoint.Name, "attachments", len(intents))
 	if err := r.replacePolicyLocked(req.NamespacedName, intents); err != nil {
-		resultLabel = "error"
+		resultLabel = reconcileResultError
 		logger.Error(err, "program service eBPF policy", "endpoint", endpoint.Name)
 		return ctrl.Result{}, err
 	}
 	if err := r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"); err != nil {
-		resultLabel = "error"
+		resultLabel = reconcileResultError
 		logger.Error(err, "update ServiceRoutePolicy acceptance status")
 		return ctrl.Result{}, err
 	}
