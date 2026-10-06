@@ -7,9 +7,11 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -606,8 +608,11 @@ func TestNetworkGatewayReconciler_DoesNotAdvertiseUnloadedRule(t *testing.T) {
 	}
 
 	ready := gatewayReadyCondition(t, fakeClient)
-	if ready.Reason != "EngineDegraded" || !strings.Contains(ready.Message, testRuleName) {
+	if ready.Reason != reasonEngineDegraded || !strings.Contains(ready.Message, testRuleName) {
 		t.Errorf("Ready = %s/%q, want EngineDegraded naming %s", ready.Reason, ready.Message, testRuleName)
+	}
+	if key := testNamespace + "/" + testRuleName; !strings.Contains(ready.Message, key) {
+		t.Errorf("Ready message = %q, want it to name the failed rule key %q", ready.Message, key)
 	}
 }
 
@@ -988,5 +993,106 @@ func TestNetworkGatewayReconciler_ClearsDepartedNodeProgrammedCondition(t *testi
 	}
 	if meta.FindStatusCondition(got.Status.Conditions, programmedConditionType(testNodeGWA)) == nil {
 		t.Errorf("surviving node %s's condition was removed from NetworkRule %s", testNodeGWA, testRuleName)
+	}
+}
+
+// TestReadyConditionFor_CapsListedFailures asserts the Ready message names
+// at most maxReadyFailures rules and counts the rest.
+func TestReadyConditionFor_CapsListedFailures(t *testing.T) {
+	total := maxReadyFailures + 5
+	status := gateway.EngineStatus{Healthy: false}
+	for i := range total {
+		status.Rules = append(status.Rules, gateway.RuleStatus{Key: fmt.Sprintf("ns/rule-%02d", i), Error: "quota"})
+	}
+
+	cond := readyConditionFor(status, nil)
+	if cond.Reason != reasonEngineDegraded {
+		t.Fatalf("Reason = %q, want EngineDegraded", cond.Reason)
+	}
+	if got := strings.Count(cond.Message, ": quota"); got != maxReadyFailures {
+		t.Errorf("message names %d failures, want %d: %q", got, maxReadyFailures, cond.Message)
+	}
+	if !strings.HasSuffix(cond.Message, " and 5 more") {
+		t.Errorf("message = %q, want suffix %q", cond.Message, " and 5 more")
+	}
+	if strings.Contains(cond.Message, fmt.Sprintf("rule-%02d", maxReadyFailures)) {
+		t.Errorf("message names a failure past the cap: %q", cond.Message)
+	}
+
+	status.Rules = status.Rules[:maxReadyFailures]
+	if cond := readyConditionFor(status, nil); strings.Contains(cond.Message, " more") {
+		t.Errorf("message = %q, want no count at the cap", cond.Message)
+	}
+}
+
+// TestNetworkGatewayReconciler_RuleDeletedMidPassIsNotAnError covers a rule
+// that is listed and then deleted before its status is written.
+func TestNetworkGatewayReconciler_RuleDeletedMidPassIsNotAnError(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(
+				ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption,
+			) error {
+				if _, ok := obj.(*bgpv1alpha1.NetworkRule); ok {
+					return apierrors.NewNotFound(bgpv1alpha1.GroupVersion.WithResource("networkrules").GroupResource(), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error for a rule deleted mid-pass: %v", err)
+	}
+}
+
+// TestNetworkGatewayReconciler_UnchangedProgrammedConditionWritesNothing
+// asserts a second pass over an unchanged rule makes no status write, since
+// each write wakes every gateway node.
+func TestNetworkGatewayReconciler_UnchangedProgrammedConditionWritesNothing(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+
+	var ruleWrites atomic.Int32
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(
+				ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption,
+			) error {
+				if _, ok := obj.(*bgpv1alpha1.NetworkRule); ok {
+					ruleWrites.Add(1)
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	if got := ruleWrites.Load(); got != 1 {
+		t.Fatalf("first pass wrote NetworkRule status %d times, want 1", got)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if got := ruleWrites.Load(); got != 1 {
+		t.Errorf("unchanged second pass wrote NetworkRule status %d times in total, want 1", got)
 	}
 }

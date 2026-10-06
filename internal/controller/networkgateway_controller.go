@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -89,7 +90,8 @@ type NetworkGatewayReconciler struct {
 const (
 	// reasonEngineHealthy is the Ready condition reason for a fully
 	// converged and fully advertised node.
-	reasonEngineHealthy = "EngineHealthy"
+	reasonEngineHealthy  = "EngineHealthy"
+	reasonEngineDegraded = "EngineDegraded"
 
 	// reasonAdvertisementFailed is the Ready reason for a node whose engine
 	// converged but which could not publish one or more of the
@@ -249,9 +251,8 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
 
 	// Every accepted, non-deleting rule gets an outcome, including one that
-	// failed to build: such a rule may have been advertised by an earlier
-	// pass, and the engine is about to drop it from the datapath, so its
-	// advertisement has to be withdrawn too.
+	// failed to build: the engine drops it from the datapath, so the outcome
+	// is what withdraws its advertisement and records why it is not loaded.
 	var outcomes []ruleOutcome
 
 	for i := range ruleList.Items {
@@ -396,10 +397,16 @@ func programmedCondition(node string, o ruleOutcome, loadErrs map[string]string)
 	return cond
 }
 
+// maxReadyFailures caps how many failed rules the Ready message names, so a
+// pass with many failures stays under the metav1.Condition message limit.
+const maxReadyFailures = 10
+
 // readyConditionFor computes the Ready condition for a completed pass: engine
 // health first, then advertisement failures. A node whose engine converged but
 // whose routes never reached BGP serves no traffic, so it must not report
-// reasonEngineHealthy.
+// reasonEngineHealthy. The engine failures named in the message are those the
+// engine failed to load; a rule that failed to build never reaches the engine
+// and is reported on the rule's own Programmed condition instead.
 func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Condition {
 	switch {
 	case !status.Healthy:
@@ -409,10 +416,19 @@ func readyConditionFor(status gateway.EngineStatus, advErr error) metav1.Conditi
 				failures = append(failures, s.Key+": "+s.Error)
 			}
 		}
+		more := 0
+		if len(failures) > maxReadyFailures {
+			more = len(failures) - maxReadyFailures
+			failures = failures[:maxReadyFailures]
+		}
+		msg := "NetworkRules failed to apply: " + strings.Join(failures, "; ")
+		if more > 0 {
+			msg += fmt.Sprintf(" and %d more", more)
+		}
 		return metav1.Condition{
 			Type: bgpv1alpha1.ConditionTypeReady, Status: metav1.ConditionFalse,
-			Reason:  "EngineDegraded",
-			Message: "NetworkRules failed to apply: " + strings.Join(failures, "; "),
+			Reason:  reasonEngineDegraded,
+			Message: msg,
 		}
 	case advErr != nil:
 		return metav1.Condition{
@@ -438,19 +454,36 @@ func programmedConditionType(node string) string {
 // setRuleProgrammed writes cond to rule's status, skipping the write when
 // nothing changed. Every write fans out to every gateway node through the
 // NetworkRule watch, so an unconditional write would never settle.
+//
+// Every gateway node and NetworkRuleReconciler write the same status, so a
+// write retries on conflict against a fresh read. A rule deleted mid-pass
+// has nothing left to record and counts as success.
 func (r *NetworkGatewayReconciler) setRuleProgrammed(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule, cond metav1.Condition,
 ) error {
-	ruleCopy := rule.DeepCopy()
-	cond.ObservedGeneration = rule.Generation
-	if !meta.SetStatusCondition(&ruleCopy.Status.Conditions, cond) {
+	key := client.ObjectKeyFromObject(rule)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &bgpv1alpha1.NetworkRule{}
+		if err := r.Get(ctx, key, current); err != nil {
+			return err
+		}
+		c := cond
+		c.ObservedGeneration = current.Generation
+		if !meta.SetStatusCondition(&current.Status.Conditions, c) {
+			return nil
+		}
+		return r.Status().Update(ctx, current)
+	})
+	if apierrors.IsNotFound(err) {
 		return nil
 	}
-	return r.Status().Update(ctx, ruleCopy)
+	return err
 }
 
 // clearNodeRuleConditions removes node's Programmed condition from every
-// NetworkRule in namespace, for a node that no longer serves any of them.
+// NetworkRule in namespace, for a node that no longer serves any of them. A
+// write retries on conflict against a fresh read, and a rule deleted
+// mid-pass counts as cleared.
 func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, node string) error {
 	list := &bgpv1alpha1.NetworkRuleList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -458,12 +491,19 @@ func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, no
 	}
 	var errs []error
 	for i := range list.Items {
-		ruleCopy := list.Items[i].DeepCopy()
-		if !meta.RemoveStatusCondition(&ruleCopy.Status.Conditions, programmedConditionType(node)) {
-			continue
-		}
-		if err := c.Status().Update(ctx, ruleCopy); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, fmt.Errorf("clear node %s condition on NetworkRule %s: %w", node, ruleCopy.Name, err))
+		key := client.ObjectKeyFromObject(&list.Items[i])
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &bgpv1alpha1.NetworkRule{}
+			if err := c.Get(ctx, key, current); err != nil {
+				return err
+			}
+			if !meta.RemoveStatusCondition(&current.Status.Conditions, programmedConditionType(node)) {
+				return nil
+			}
+			return c.Status().Update(ctx, current)
+		})
+		if err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("clear node %s condition on NetworkRule %s: %w", node, key.Name, err))
 		}
 	}
 	return errors.Join(errs...)
