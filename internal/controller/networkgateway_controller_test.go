@@ -276,6 +276,10 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules(t *testing.
 	notAccepted := newTestRule("not-accepted", "vpc-4", "203.0.113.8")
 	// No Accepted condition set -- must be excluded.
 
+	// No BGPAdvertisement carries its label, so nothing is left to withdraw
+	// and this node never loaded it: it is excluded straight away. A deleting
+	// rule whose route is still advertised drains instead; see
+	// TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn.
 	deleting := newTestRule("deleting", "vpc-5", "203.0.113.9")
 	acceptRule(deleting)
 	deleting.Finalizers = []string{networkRuleFinalizer}
@@ -393,6 +397,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 	router := newTestRouter()
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 	acceptRule(rule)
+	rule.UID = testRuleUID
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
@@ -428,6 +433,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 		t.Errorf("Labels[%s] = %q, want %q (networkrule_controller.go's teardown depends on this)",
 			networkRuleLabel, got, testRuleName)
 	}
+	assertRuleOwnerReference(t, adv)
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonProgrammed)
 }
 
@@ -435,7 +441,8 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 // applyBGPAdvertisements's update path self-healing an advertisement that
 // was created before networkRuleLabel existed (issue #367) — without this,
 // an advertisement from an older release would stay permanently invisible
-// to NetworkRuleReconciler's teardown List.
+// to NetworkRuleReconciler's teardown List. The owner reference to the rule
+// (#715) is backfilled the same way, so garbage collection covers it too.
 func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	gwA := newTestGateway(testNodeGWA)
@@ -444,6 +451,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
 	acceptRule(rule)
+	rule.UID = testRuleUID
 
 	preexisting := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRuleAdvV4}, // no label
@@ -474,6 +482,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 	if got := adv.Labels[networkRuleLabel]; got != testRuleName {
 		t.Errorf("Labels[%s] = %q, want %q (backfill on update path)", networkRuleLabel, got, testRuleName)
 	}
+	assertRuleOwnerReference(t, adv)
 }
 
 // TestNetworkGatewayReconciler_AdvertisementFailureSurfaces is the

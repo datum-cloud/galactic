@@ -215,7 +215,18 @@ that converges this node's whole gateway engine:
    gateway node in a PoP serves every accepted rule identically, so there
    is no primary/secondary subset to filter on — resolves each backend's
    SRv6 uSID via `usidresolver.go`'s `buildBackendSIDIndex`, and converges
-   `gateway.Engine` toward the result.
+   `gateway.Engine` toward the result. A deleting rule stays in that state,
+   as *draining*, while it still carries the teardown finalizer and any
+   `BGPAdvertisement` labelled with its name exists: it is not advertised
+   and its `<node>/Programmed` condition is left alone, but the datapath
+   keeps serving it. Once the last labelled advertisement is gone, the node
+   keeps it loaded for a further `ruleDrainDelay` (5s, tracked in memory by
+   `networkgateway_drain.go`'s `ruleDrainTracker`, even after the object
+   itself is gone) so the BGP withdrawal can reach every peer, then drops it
+   (issue #715). The `BGPAdvertisement` watch wakes the pass when the
+   advertisements are deleted, and a `RequeueAfter` wakes the one that ends
+   the delay. A restarted process remembers nothing, so it drops a rule
+   whose advertisements are already gone on its first pass.
 2. **Wire BGP.** Reconciles one `BGPAdvertisement` per loaded rule per
    non-empty VIP address family, name-qualified by node (`<rule>-<node>-v4`/
    `-v6` — required, not cosmetic, since every gateway node computes the same
@@ -236,7 +247,13 @@ that converges this node's whole gateway engine:
    by every gateway node while loading is per node; a node writes it only
    when it changes, and a departing, deleted, or disabled node's condition
    is removed with its advertisements. The `NetworkGateway`'s
-   `EngineDegraded` message lists every failed rule.
+   `EngineDegraded` message lists every failed rule. Every rule
+   advertisement carries a `networkRuleLabel` label and a plain (not
+   controller, no `blockOwnerDeletion`) owner reference to its
+   `NetworkRule`, both backfilled on existing objects, and nothing is
+   created or updated for a rule that is being deleted. The owner reference
+   lets Kubernetes garbage collection delete an advertisement a stale-cache
+   pass created after teardown listed the rule's advertisements.
 3. **Crash recovery.** Runs `Engine.ReconcileOrphans` (see
    [Crash recovery](#crash-recovery) below).
 
@@ -244,10 +261,15 @@ that converges this node's whole gateway engine:
 lifecycle pieces the aggregate pass above is the wrong place for:
 `status.conditions`'s `Accepted` condition (`updateAcceptedCondition` — set
 once gateway nodes exist for the namespace) and the
-finalizer-guarded teardown ordering on deletion (withdraw the rule's
-`BGPAdvertisement`s *before* releasing quota/reservation state, so an
-in-flight flow is never blackholed through a route that has already
-disappeared while the datapath still thinks it owns it).
+finalizer-guarded teardown ordering on deletion (`reconcileDelete`: delete
+every `BGPAdvertisement` labelled with the rule's name, on any node,
+*before* releasing quota/reservation state, then remove the finalizer).
+Each gateway node removes the rule's `vip_table` rows only after those
+deletes and its drain delay (step 1 above), which is what the
+`Datapath.RemoveRule` contract requires: withdraw the route first, or
+traffic the fabric still sends to the VIP is dropped. The finalizer does
+not wait for every node to finish draining; that would need a cross-node
+protocol that does not exist.
 
 Every gateway node's own process runs both reconcilers, unconditionally, on
 every `NetworkGateway`/`NetworkRule` in the namespace, with no leader
@@ -586,7 +608,7 @@ pod on that node is not a supported configuration.
 | Package                                                 | Binary           | Responsibility                                                                                                                                                                                                                              | Owns state                           |
 | ------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
 | `internal/config` (`gateway.go`)                        | galactic-gateway | `GatewayConfig`: node name, ports, public interface, SRv6 encap-source address; three-tier CLI/env/default precedence via viper                                                                                                             | No                                   |
-| `internal/controller` (`networkgateway_controller.go`)  | galactic-gateway | `NetworkGatewayReconciler`: desired-state assembly, BGP wiring, orphan-crash recovery                                                                                                                                                       | No                                   |
+| `internal/controller` (`networkgateway_controller.go`)  | galactic-gateway | `NetworkGatewayReconciler`: desired-state assembly (with the deleted-rule drain in `networkgateway_drain.go`), BGP wiring, orphan-crash recovery                                                                                            | No                                   |
 | `internal/controller` (`networkrule_controller.go`)     | galactic-gateway | `NetworkRuleReconciler`: finalizer-guarded teardown ordering, `Accepted`-condition maintenance (`updateAcceptedCondition`)                                                                                                                  | No                                   |
 | `internal/controller` (`usidresolver.go`)               | galactic-gateway | `backendSIDIndex`: resolves a `NetworkRule` backend address to the worker node's SRv6 uSID by matching against `BGPAdvertisement`/`BGPRouter`/`BGPVRFInstance` CRDs, verifying tenant ownership                                             | No                                   |
 | `internal/gateway` (`engine.go`)                        | galactic-gateway | `Engine`: mutex-guarded convergence loop ("apply everything in desired, remove everything not in desired"), mirroring `GoBGPRuntime`'s shape                                                                                                | Yes (active-rule map)                |
@@ -812,3 +834,4 @@ that tag into `config/galactic-gateway/base`.
 - A deleted `NetworkGateway` reconcile can't just call `Engine.Stop()` unconditionally — every gateway node's process reconciles every `NetworkGateway` in the namespace, so a *sibling* node's deletion reaches this reconciler too. `isGatewayNode` re-checks whether *this* node still has its own `NetworkGateway` before stopping the engine (issue #364).
 - Advertisement failures during `Reconcile` are collected, not returned immediately — one bad rule's BGP-wiring failure must not stop the rest of the pass, but a node that converged its engine while failing to publish any route must still report `AdvertisementFailed`, not `EngineHealthy` (issue #365) — see `readyConditionFor`.
 - `withdrawNodeAdvertisements` matches only the `-v4`/`-v6` rule-advertisement name suffixes; the anycast model publishes no other per-node route (see the package doc comment in `networkgateway_controller.go`).
+- A deleting `NetworkRule` is not dropped from the engine on the pass that first sees its deletion timestamp. Doing so ran `Datapath.RemoveRule` before `reconcileDelete` had withdrawn the route, breaking the withdraw-first contract on `Datapath.RemoveRule` (issue #715). It drains instead: kept loaded while any labelled advertisement exists, then for `ruleDrainDelay` more.

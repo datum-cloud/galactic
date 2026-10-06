@@ -147,11 +147,18 @@ func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rul
 //     implementation behind it is a no-op.
 //
 // Removing the datapath's own rule rows is node-local and done independently by
-// each gateway node, which drops a deleting rule from its desired state
-// immediately rather than waiting on this finalizer. Coordinating "every
-// gateway node has finished" before releasing the finalizer would need a
-// cross-node protocol that does not exist, so this only orders step 1 before
-// step 2 on this reconciler's own timeline.
+// each gateway node, after this step 1 rather than before it: while this
+// finalizer is present and any advertisement carrying networkRuleLabel exists,
+// NetworkGatewayReconciler keeps the rule loaded as draining, and once the last
+// one is gone it waits ruleDrainDelay for the withdrawal to reach every peer
+// before dropping it. The BGPAdvertisement watch is what wakes each node when
+// the deletes below land. Coordinating "every gateway node has finished" before
+// releasing the finalizer would need a cross-node protocol that does not
+// exist, so the finalizer does not wait on the nodes.
+//
+// An advertisement created from a stale cache after the list below runs is not
+// seen here. Its owner reference to the rule lets Kubernetes garbage collection
+// delete it once the rule is gone.
 func (r *NetworkRuleReconciler) reconcileDelete(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule,
 ) (ctrl.Result, error) {
@@ -188,7 +195,7 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 			rule.Namespace, rule.Name, err)
 	}
 
-	logger.Info("NetworkRule BGP route withdrawn; vip_table teardown proceeds independently on each gateway node",
+	logger.Info("NetworkRule BGP route withdrawn; each gateway node drops it from vip_table after its drain delay",
 		"networkRule", rule.Name)
 
 	patchBase := rule.DeepCopy()

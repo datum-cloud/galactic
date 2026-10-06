@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -59,7 +61,10 @@ type GatewayEngine interface {
 //     NetworkRule in the namespace, resolving each backend's SRv6 uSID, and
 //     converges the engine toward it. Under the anycast model every gateway
 //     node in a PoP serves every accepted rule identically, so there is no
-//     primary or secondary node to gate on.
+//     primary or secondary node to gate on. A deleting rule stays in that
+//     state, unadvertised, until its BGPAdvertisements are gone and
+//     ruleDrainDelay has passed, so its route is withdrawn before the
+//     datapath drops it.
 //  2. Reconciles one BGPAdvertisement per loaded rule per VIP address family,
 //     reusing the l2vpn/evpn Type-5 IP-Prefix path unmodified. A rule that
 //     failed to build or that the engine did not load has this node's
@@ -85,6 +90,14 @@ type NetworkGatewayReconciler struct {
 	// stops sending VIP traffic to a node that will not load-balance it. The
 	// engine is never driven.
 	Disabled bool
+
+	// drain keeps a deleted rule loaded until its route is withdrawn. See
+	// ruleDrainTracker.
+	drain ruleDrainTracker
+
+	// now returns the current time. Nil means time.Now; tests set it to step
+	// past ruleDrainDelay.
+	now func() time.Time
 }
 
 const (
@@ -170,6 +183,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			if stopErr := r.Engine.Stop(ctx); stopErr != nil {
 				logger.Error(stopErr, "stop gateway engine for deleted NetworkGateway", "networkGateway", req.NamespacedName)
 			}
+			r.drain.reset()
 			return ctrl.Result{}, withdrawErr
 		}
 		return ctrl.Result{}, fmt.Errorf("get NetworkGateway %s: %w", req.NamespacedName, err)
@@ -200,6 +214,7 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if stopErr := r.Engine.Stop(ctx); stopErr != nil {
 			logger.Error(stopErr, "stop gateway engine for terminating NetworkGateway", "networkGateway", req.NamespacedName)
 		}
+		r.drain.reset()
 		gwCopy := gw.DeepCopy()
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
@@ -251,41 +266,9 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("build backend uSID index: %w", err)
 	}
 
-	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
-
-	// Every accepted, non-deleting rule gets an outcome, including one that
-	// failed to build: the engine drops it from the datapath, so the outcome
-	// is what withdraws its advertisement and records why it is not loaded.
-	var outcomes []ruleOutcome
-
-	for i := range ruleList.Items {
-		rule := &ruleList.Items[i]
-		if !rule.DeletionTimestamp.IsZero() {
-			// Being torn down: excluded from desired state immediately, so
-			// this node's vip_table converges toward gone without waiting on
-			// NetworkRuleReconciler's finalizer to finish withdrawing BGP.
-			// That finalizer owns the rule's advertisements: reconcileDelete
-			// deletes every one carrying networkRuleLabel, whichever node
-			// made it, so this loop gives the rule no outcome.
-			continue
-		}
-		if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
-			// Admission has not accepted this rule yet. Once accepted, a rule
-			// loses Accepted only when no NetworkGateway is left in the
-			// namespace (updateAcceptedCondition), and each node's NotFound
-			// branch has then already withdrawn its advertisements and cleared
-			// its Programmed condition, so this loop gives the rule no outcome.
-			continue
-		}
-
-		dr, err := buildDesiredRule(rule, sidIndex)
-		if err != nil {
-			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
-			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
-			continue
-		}
-		desired.Rules[dr.Key] = dr
-		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr})
+	desired, outcomes, requeueAfter, err := r.gatherRules(ctx, gw.Namespace, ruleList.Items, sidIndex)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	status, err := r.Engine.Reconcile(ctx, desired)
@@ -324,15 +307,131 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, errors.Join(advErr, ruleStatusErr, fmt.Errorf("reconcile orphaned vip_table state: %w", err))
 	}
 
-	return ctrl.Result{}, errors.Join(advErr, ruleStatusErr)
+	if err := errors.Join(advErr, ruleStatusErr); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Nothing else is sure to trigger the pass that drops a held rule once
+	// its drain delay ends, so ask for it.
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// ruleOutcome is one accepted, non-deleting NetworkRule's result from a
-// reconcile pass: the engine state it built, or why it could not be built.
+// gatherRules builds this pass's engine state and rule outcomes from rules,
+// every NetworkRule in namespace, and settles the drain tracker against it. It
+// returns how long until a held rule's drain delay ends, or zero.
+func (r *NetworkGatewayReconciler) gatherRules(
+	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
+) (gateway.EngineState, []ruleOutcome, time.Duration, error) {
+	logger := log.FromContext(ctx)
+	desired := gateway.EngineState{Rules: make(map[string]gateway.DesiredRule)}
+
+	// Every accepted, non-deleting rule gets an outcome, including one that
+	// failed to build: the engine drops it from the datapath, so the outcome
+	// is what withdraws its advertisement and records why it is not loaded.
+	// A draining rule gets one too, marked so nothing is published for it.
+	var outcomes []ruleOutcome
+
+	// live holds every listed rule that is not being deleted, so the drain
+	// tracker can tell a deleted rule from one that merely stopped building.
+	live := make(map[string]bool, len(rules))
+
+	for i := range rules {
+		rule := &rules[i]
+		if !rule.DeletionTimestamp.IsZero() {
+			// Being torn down. NetworkRuleReconciler's finalizer owns the
+			// rule's advertisements: reconcileDelete deletes every one
+			// carrying networkRuleLabel, whichever node made it. Until they
+			// are all gone the route may still draw traffic here, so the rule
+			// stays loaded as draining, which advertises nothing and leaves
+			// the Programmed condition alone. Once they are gone, the drain
+			// tracker keeps it for ruleDrainDelay so the withdrawal can reach
+			// every peer before the datapath drops it.
+			o, draining, err := r.drainingOutcome(ctx, rule, sidIndex)
+			if err != nil {
+				return desired, nil, 0, err
+			}
+			if draining {
+				desired.Rules[o.desired.Key] = o.desired
+				outcomes = append(outcomes, o)
+			}
+			continue
+		}
+		live[rule.Namespace+"/"+rule.Name] = true
+		if !meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
+			// Admission has not accepted this rule yet. Once accepted, a rule
+			// loses Accepted only when no NetworkGateway is left in the
+			// namespace (updateAcceptedCondition), and each node's NotFound
+			// branch has then already withdrawn its advertisements and cleared
+			// its Programmed condition, so this loop gives the rule no outcome.
+			continue
+		}
+
+		dr, err := buildDesiredRule(rule, sidIndex)
+		if err != nil {
+			logger.Error(err, "build desired rule; skipping", "networkRule", rule.Name)
+			outcomes = append(outcomes, ruleOutcome{rule: rule, buildErr: err})
+			continue
+		}
+		desired.Rules[dr.Key] = dr
+		outcomes = append(outcomes, ruleOutcome{rule: rule, desired: dr})
+	}
+
+	return desired, outcomes, r.drain.settle(r.clock(), namespace, desired.Rules, live), nil
+}
+
+// clock returns the current time from r.now, or time.Now when unset.
+func (r *NetworkGatewayReconciler) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// drainingOutcome reports whether the deleting rule must stay loaded because
+// some BGPAdvertisement carrying its networkRuleLabel still exists, on any
+// node, and returns its draining outcome if so. A rule whose finalizer is
+// already gone has finished teardown and never drains.
+//
+// The rule is rebuilt as usual. If it no longer builds, for example because
+// its backends were deleted with it, the rule as this node last loaded it is
+// kept instead. If this node never loaded it, there is nothing to keep.
+func (r *NetworkGatewayReconciler) drainingOutcome(
+	ctx context.Context, rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
+) (ruleOutcome, bool, error) {
+	if !controllerutil.ContainsFinalizer(rule, networkRuleFinalizer) {
+		return ruleOutcome{}, false, nil
+	}
+	advList := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := r.List(ctx, advList,
+		client.InNamespace(rule.Namespace),
+		client.MatchingLabels{networkRuleLabel: rule.Name},
+	); err != nil {
+		return ruleOutcome{}, false, fmt.Errorf("list BGPAdvertisements for deleting NetworkRule %s/%s: %w",
+			rule.Namespace, rule.Name, err)
+	}
+	if len(advList.Items) == 0 {
+		return ruleOutcome{}, false, nil
+	}
+
+	dr, err := buildDesiredRule(rule, sidIndex)
+	if err != nil {
+		var ok bool
+		if dr, ok = r.drain.lastLoaded(rule.Namespace + "/" + rule.Name); !ok {
+			return ruleOutcome{}, false, nil
+		}
+	}
+	return ruleOutcome{rule: rule, desired: dr, draining: true}, true, nil
+}
+
+// ruleOutcome is one accepted NetworkRule's result from a reconcile pass: the
+// engine state it built, or why it could not be built.
 type ruleOutcome struct {
 	rule     *bgpv1alpha1.NetworkRule
 	desired  gateway.DesiredRule
 	buildErr error
+
+	// draining marks a deleting rule kept loaded until its route is
+	// withdrawn. Nothing is advertised or written to its status.
+	draining bool
 }
 
 // publishRuleOutcomes advertises every rule the engine loaded, withdraws this
@@ -362,6 +461,9 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 
 	var advErrs, statusErrs []error
 	for _, o := range outcomes {
+		if o.draining {
+			continue
+		}
 		cond := programmedCondition(r.NodeName, o, loadErrs)
 		switch {
 		case cond.Status != metav1.ConditionTrue:
@@ -623,9 +725,21 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 // find every advertisement a rule ever caused on any gateway node, including
 // one that has since left the namespace, without depending on this naming
 // convention.
+//
+// Each also carries an owner reference to rule, again backfilled, so
+// Kubernetes garbage collection deletes it once the rule is gone. That covers
+// an advertisement created from a stale cache after reconcileDelete listed the
+// rule's advertisements: teardown never sees it, and without the reference
+// nothing would ever withdraw it. The reference is not a controller reference
+// and leaves blockOwnerDeletion unset, so it neither blocks the rule's deletion
+// nor needs extra RBAC. A rule that is already being deleted gets nothing
+// created or updated at all.
 func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired gateway.DesiredRule, routerName string,
 ) error {
+	if !rule.DeletionTimestamp.IsZero() {
+		return nil
+	}
 	v4Prefixes, v6Prefixes := prefixesByFamily(desired.VIPAddresses)
 
 	groups := []struct {
@@ -669,6 +783,12 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 					Prefixes:      prefixes,
 				},
 			}
+			if refErr := controllerutil.SetOwnerReference(rule, adv, r.Scheme); refErr != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("set owner reference on BGPAdvertisement %s: %w", name, refErr)
+				}
+				continue
+			}
 			if createErr := r.Create(ctx, adv); createErr != nil && firstErr == nil {
 				firstErr = fmt.Errorf("create BGPAdvertisement %s: %w", name, createErr)
 			}
@@ -687,6 +807,14 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 			advCopy.Labels = map[string]string{}
 		}
 		advCopy.Labels[networkRuleLabel] = rule.Name
+		// Backfill the owner reference the same way, so garbage collection
+		// covers an advertisement created before it was set.
+		if refErr := controllerutil.SetOwnerReference(rule, advCopy, r.Scheme); refErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("set owner reference on BGPAdvertisement %s: %w", name, refErr)
+			}
+			continue
+		}
 		advCopy.Spec.RouterRef = bgpv1alpha1.RouterRef{Name: routerName}
 		advCopy.Spec.AddressFamily = bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN}
 		advCopy.Spec.Prefixes = prefixes
