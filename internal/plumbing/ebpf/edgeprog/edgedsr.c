@@ -112,6 +112,11 @@ static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redi
 // error on.
 #define EDGE_FRAG_QUOTE6 (EDGE_IP6HDR_LEN + 8)
 
+// EDGE_IPV6_MIN_MTU is the smallest MTU an IPv6 sender ever uses (RFC 8200
+// section 5). A Packet Too Big reporting less cannot help: the sender keeps
+// sending 1280-byte packets, still too big once encapsulated.
+#define EDGE_IPV6_MIN_MTU 1280
+
 // The Packet Too Big this program sends is limited by one token bucket per CPU:
 // EDGE_ICMP_RATE messages a second with a burst of EDGE_ICMP_BURST, the same
 // limits the egress shard uses. See icmp_rate_bucket.
@@ -752,7 +757,10 @@ int edge_lb(struct xdp_md *ctx)
 	__u16 frag_mtu = 0;
 	if (push_outer_header(ctx, cfg->encap_src, b->usid, inner_payload_len_plus_ip6hdr, stats,
 			      &egress_ifindex, &frag_mtu) != 0) {
-		if (frag_mtu > EDGE_IP6HDR_LEN)
+		// A fabric route under 1320 bytes cannot carry even a minimum-MTU
+		// packet once encapsulated, so no Packet Too Big would help; the drop
+		// is already counted as fib_frag_needed.
+		if (frag_mtu >= EDGE_IPV6_MIN_MTU + EDGE_IP6HDR_LEN)
 			return send_too_big6(ctx, frag_mtu - EDGE_IP6HDR_LEN);
 		return XDP_DROP;
 	}

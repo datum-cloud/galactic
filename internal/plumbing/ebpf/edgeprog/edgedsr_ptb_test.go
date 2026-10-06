@@ -44,7 +44,7 @@ type icmpBucket struct {
 }
 
 // narrowFabric moves the calling test's thread into a fresh network namespace
-// whose routes reach each of dsts over a link of fabricMTU bytes. Every FIB
+// whose routes reach each of dsts over a link of mtu bytes. Every FIB
 // lookup a test run makes resolves there: an encapsulated packet bigger than
 // the link is refused for size with the route's MTU, and the Packet Too Big the
 // gateway answers with is routed to the client.
@@ -52,7 +52,7 @@ type icmpBucket struct {
 // The thread stays locked for the test, since a namespace belongs to a thread,
 // and is moved back afterwards. A thread that cannot be is left locked, which
 // makes the runtime discard it rather than reuse it.
-func narrowFabric(t *testing.T, dsts ...netip.Addr) {
+func narrowFabric(t *testing.T, mtu int, dsts ...netip.Addr) {
 	t.Helper()
 	runtime.LockOSThread()
 	orig, err := unix.Open("/proc/thread-self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -84,7 +84,7 @@ func narrowFabric(t *testing.T, dsts ...netip.Addr) {
 		t.Fatalf("enable IPv6 forwarding: %v", err)
 	}
 
-	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "fab0", MTU: fabricMTU}}); err != nil {
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "fab0", MTU: mtu}}); err != nil {
 		t.Fatalf("add fabric link: %v", err)
 	}
 	link, err := netlink.LinkByName("fab0")
@@ -129,6 +129,11 @@ type ptbFixture struct {
 
 func newPTBFixture(t *testing.T) *ptbFixture {
 	t.Helper()
+	return newPTBFixtureMTU(t, fabricMTU)
+}
+
+func newPTBFixtureMTU(t *testing.T, mtu int) *ptbFixture {
+	t.Helper()
 	requireRoot(t)
 
 	f := &ptbFixture{
@@ -136,7 +141,7 @@ func newPTBFixture(t *testing.T) *ptbFixture {
 		client: netip.MustParseAddr("2001:db8:ffff::1"),
 	}
 	usid := netip.MustParseAddr("fc00:1:2::a1b2")
-	narrowFabric(t, usid, f.client)
+	narrowFabric(t, mtu, usid, f.client)
 
 	f.objs = loadObjects(t)
 	f.key = vipKey(ipprotoTCP, 8080, f.vip)
@@ -267,6 +272,26 @@ func TestEdgeLB_PacketTooBigRateLimited(t *testing.T) {
 	}
 	if got := sumPerCPU(t, f.objs.DropReasons, DropReasonICMPRateLimited); got != 1 {
 		t.Errorf("drop_reasons[icmp_rate_limited] = %d, want 1", got)
+	}
+}
+
+// TestEdgeLB_NoPacketTooBigBelowTheIPv6Minimum covers a fabric route too small
+// to carry even a 1280-byte packet once encapsulated. A Packet Too Big would
+// report less than 1280, which an IPv6 sender never goes below, so its next
+// packet would fail the same way. The packet is dropped and counted, and no
+// message is sent or charged to the rate limit.
+func TestEdgeLB_NoPacketTooBigBelowTheIPv6Minimum(t *testing.T) {
+	const mtu = 1300
+	f := newPTBFixtureMTU(t, mtu)
+
+	if ret, _ := f.run(t, make([]byte, mtu-ip6Len-tcpLen)); ret != xdpDrop {
+		t.Errorf("verdict = %d, want XDP_DROP (%d)", ret, xdpDrop)
+	}
+	if got := sumPerCPU(t, f.objs.DropReasons, DropReasonFibFragNeeded); got != 1 {
+		t.Errorf("drop_reasons[fib_frag_needed] = %d, want 1", got)
+	}
+	if got := sumPerCPU(t, f.objs.DropReasons, DropReasonICMPRateLimited); got != 0 {
+		t.Errorf("drop_reasons[icmp_rate_limited] = %d, want 0 (no message attempted)", got)
 	}
 }
 
