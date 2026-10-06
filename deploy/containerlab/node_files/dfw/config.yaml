@@ -17,8 +17,8 @@ nodes:
   # Two edge nodes, each running its own egress shard: dfw's compute node
   # lists both in its shard list, so this is the only site where a tenant's
   # egress has a second shard to fall back to. sjc and iad each run a single
-  # edge node. No node in this lab runs galactic-gateway, so every shard
-  # attaches its own XDP program (GALACTIC_NAT_XDP_ATTACH=direct).
+  # edge node. Every shard runs from the node's XDP dispatcher
+  # (GALACTIC_NAT_XDP_ATTACH=dispatch).
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw

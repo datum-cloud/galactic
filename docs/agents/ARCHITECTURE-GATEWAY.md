@@ -180,7 +180,7 @@ public-interface/SRv6-address values.
 ### Worked ContainerLab example
 
 The containerlab lab no longer deploys `galactic-gateway`; its edge nodes run
-only the egress shards, attached directly to their uplinks. Until commit
+only the egress shards, run from each node's XDP dispatcher. Until commit
 `abdd665b`, `deploy/containerlab/resources/galactic-gateway/` ran this role on
 four edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3`,
 `sjc-worker2`, and `iad-worker2`. Each node's overlay directory, named for the

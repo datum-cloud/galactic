@@ -3,9 +3,8 @@
 What's here: a per-site containerlab overlay for `galactic-nat`, the
 sharded egress translation datapath control plane (`config/galactic-nat/`).
 Every edge node runs a shard — `dfw-worker2` and `dfw-worker3` in dfw,
-`sjc-worker2` in sjc, `iad-worker2` in iad. No node in the lab runs
-`galactic-gateway`, so every shard attaches its own XDP program to its
-uplinks. Compute nodes run none.
+`sjc-worker2` in sjc, `iad-worker2` in iad. Every shard runs from the
+node's shared XDP dispatcher on its uplinks. Compute nodes run none.
 
 - `base/` — the lab's patch onto `config/galactic-nat/base` (image
   override for Kind's locally-built images; see `base/kustomization.yaml`
@@ -41,13 +40,16 @@ Every shard translates for the same `nat64Prefix`, `2001:db8:64::/96`. The
 Node-ID is service `0x2` over the edge node's own index, beside its router
 (`0x1NNN`) identity.
 
-## Attached directly
+## Run from the dispatcher
 
-The lab base leaves `GALACTIC_NAT_XDP_ATTACH` at its default, `direct`:
-with no gateway on any node, nothing else holds the uplinks' native XDP
-hook, so the shard attaches its own program to every member of `bond0`
-and `bond1`. A node that also runs `galactic-gateway` needs
-`GALACTIC_NAT_XDP_ATTACH=dispatch` instead; see
+The lab base sets `GALACTIC_NAT_XDP_ATTACH=dispatch`, overriding the
+binary's default, `direct`: the shard runs from the node's shared, pinned
+XDP dispatcher on every member of `bond0` and `bond1`. No lab node runs
+`galactic-gateway`, so nothing else needs the hook, but dispatch is the
+mode production edges are moving to. The first deploy onto a lab that ran
+`direct` bounces each uplink: the old shard's unpinned program detaches when
+its pod exits, and the dispatcher's first attach bounces it again. After
+that, a shard restart bounces no uplink. See
 [docs/nat/configuration.md](../../../../docs/nat/configuration.md) for
 both modes.
 
@@ -71,7 +73,7 @@ It also migrates a lab brought up while the shards ran chained behind
 `galactic-gateway`. It deletes every `galactic-gateway` DaemonSet, the
 `NetworkGateway`/`NetworkRule`/`ServiceVIPBinding` objects behind them, and
 the `ns60` backend tenant, waiting for the gateway pods to exit before the
-shard DaemonSet rolls out in direct mode: a direct attach fails while a
+shard DaemonSet rolls out: the shard cannot attach while a
 gateway still holds an uplink's hook. The gateway's XDP links are not
 pinned, so its exit releases them. Re-run `scripts/deploy-fabric.sh` too,
 so the edge nodes stop originating the anycast VIP aggregate. A fresh lab

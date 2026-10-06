@@ -127,9 +127,11 @@ Every edge node is tainted (`galactic.datumapis.com/nat=enabled:NoSchedule`) and
 route reflector (`galactic.datumapis.com/galactic=control:NoSchedule`): no tenant pods land
 on either, only DaemonSets with a blanket toleration. Edge nodes run `galactic-cni` and
 plain-mode `galactic-router` as their own independent DaemonSets, exactly like compute
-nodes, plus `galactic-nat`, the egress shard, which attaches its own XDP program to the
-node's uplinks (`GALACTIC_NAT_XDP_ATTACH=direct`, the default). No node in the lab runs
-`galactic-gateway`, so nothing else holds those hooks and the shard needs no dispatcher.
+nodes, plus `galactic-nat`, the egress shard, which runs from the node's shared XDP
+dispatcher on its uplinks (`GALACTIC_NAT_XDP_ATTACH=dispatch`). No node in the lab runs
+`galactic-gateway`, so nothing needs the dispatcher to share the hook, but the lab uses it
+anyway: it is the mode production edges are moving to, and a shard restart then bounces no
+uplink.
 Compute nodes run no shard: each egresses through its own site's edge shards only. The
 reflector runs neither `galactic-cni` nor a shard — its
 `galactic=control` label is mutually exclusive with the `galactic=router` value that pulls
@@ -376,13 +378,13 @@ FRR loopback address on the same host.
   driver, so conntrack sees the reply
   ([#565](https://github.com/datum-cloud/galactic/issues/565), fixed);
   `verify:nat-datapath` is deliberately kept out of the `verify` chain.
-- **A shard attaches to its uplinks once.** Every shard here attaches its own
-  XDP program (`GALACTIC_NAT_XDP_ATTACH=direct`) to every member of the
+- **A shard follows its uplinks.** Every shard here runs from the node's XDP
+  dispatcher (`GALACTIC_NAT_XDP_ATTACH=dispatch`) on every member of the
   interfaces in `GALACTIC_NAT_UPLINK_INTERFACES` (`bond0,bond1`, set
   explicitly: auto-detection would also claim Kind's `eth0`, which carries
-  each node's IPv6 default route). It attaches once, at its own startup;
-  nothing watches for link changes afterwards, so an interface that appears
-  later gets no program until the shard restarts.
+  each node's IPv6 default route). It resolves them again on every netlink
+  link or route change and every 30 seconds; an uplink it cannot cover yet
+  shows as `Ready=False` with reason `UplinksMissing` until it is.
 - **The tenant egress route resolves its outgoing link once, at CNI ADD.**
   `srv6.EgressPrefixRouteAdd` stores the resolved `ifindex` in
   `egress_route_table`, and nothing re-resolves it when routing changes. A pod
