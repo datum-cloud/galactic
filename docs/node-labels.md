@@ -184,8 +184,11 @@ that also carries `gateway=enabled` must apply
 `config/galactic-nat/overlays/chained/` instead. The gateway already holds the
 node's native XDP hook, an interface takes one program, and the shard installs
 itself in the gateway's pinned `xdp_chain` array, so the gateway has to be
-running on that node too. Compute nodes reach their site's shards over SRv6
-(`GALACTIC_CNI_EGRESS_SHARD_SIDS`).
+running on that node too. `GALACTIC_NAT_XDP_ATTACH=dispatch` runs the shard
+from the node's shared, pinned XDP dispatcher instead, which survives a shard
+restart without bouncing an uplink (see
+[docs/nat/configuration.md](nat/configuration.md)). Compute nodes reach their
+site's shards over SRv6 (`GALACTIC_CNI_EGRESS_SHARD_SIDS`).
 
 ### `galactic.datumapis.com/galactic=router`
 

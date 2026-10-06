@@ -50,6 +50,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN go generate ./internal/plumbing/ebpf/prog/...
 RUN go generate ./internal/plumbing/ebpf/edgeprog/...
+# internal/plumbing/ebpf/xdpattach, which this binary attaches through,
+# links the shared XDP dispatcher's bindings too.
+RUN go generate ./internal/plumbing/ebpf/xdpdispatch/...
 
 # Build galactic-gateway
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \

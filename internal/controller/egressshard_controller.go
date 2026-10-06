@@ -85,6 +85,10 @@ const (
 	// the datapath is attached but not to every uplink it should cover.
 	reasonEgressDatapathUplinksMissing = "UplinksMissing"
 
+	// reasonEgressDatapathDisabled is the Ready and Programmed condition reason
+	// while this node's datapath is turned off by configuration.
+	reasonEgressDatapathDisabled = "DatapathDisabled"
+
 	// reasonEgressShardConflict is the Programmed condition reason on every
 	// EgressShard targeting a node that more than one targets. The datapath
 	// holds one identity, so none of them is programmed until the conflict is
@@ -120,6 +124,13 @@ type EgressShardReconciler struct {
 	// Datapath is this node's egress translation datapath -- see
 	// EgressDatapath's doc comment.
 	Datapath EgressDatapath
+
+	// Disabled is set when this node's datapath is turned off by
+	// configuration. The reconciler then keeps the datapath cleared and every
+	// shard targeting the node unprogrammed, which withdraws its
+	// advertisement, so the fabric stops sending egress traffic to a node that
+	// will not translate it.
+	Disabled bool
 
 	// CoverageEvents, when non-nil, delivers an event whenever the datapath's
 	// uplink coverage changes, so Ready follows it without waiting for an
@@ -177,6 +188,8 @@ func (r *EgressShardReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // syncNode drives the datapath from every live EgressShard targeting this node
 // and publishes the result on each of them:
 //
+//   - the datapath turned off (Disabled): it is cleared and every one of them
+//     reports it, so each withdraws its advertisement.
 //   - none: the datapath is cleared. Nothing assigns this node an identity, so
 //     it must not keep translating with one a deleted shard left behind.
 //   - one: the datapath is programmed from its spec.
@@ -203,13 +216,23 @@ func (r *EgressShardReconciler) syncNode(ctx context.Context) error {
 	}
 
 	var programmed metav1.Condition
-	switch len(mine) {
-	case 0:
+	switch {
+	case r.Disabled:
+		if err := r.Datapath.Clear(); err != nil {
+			return fmt.Errorf("clear egress translation datapath: %w", err)
+		}
+		programmed = metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeProgrammed,
+			Status:  metav1.ConditionFalse,
+			Reason:  reasonEgressDatapathDisabled,
+			Message: fmt.Sprintf("The egress translation datapath on node %s is turned off", r.NodeName),
+		}
+	case len(mine) == 0:
 		if err := r.Datapath.Clear(); err != nil {
 			return fmt.Errorf("clear egress translation datapath: %w", err)
 		}
 		return nil
-	case 1:
+	case len(mine) == 1:
 		var err error
 		if programmed, err = r.program(mine[0]); err != nil {
 			// Publish why before returning the error for a retry.
@@ -329,7 +352,7 @@ func (r *EgressShardReconciler) publish(ctx context.Context, shard *bgpv1alpha1.
 	// A conflicting shard publishes no identity even while the datapath holds
 	// one, which it cannot here: syncNode clears it first. Checking the
 	// condition rather than relying on that keeps the two from drifting.
-	if programmed.Reason != reasonEgressShardConflict {
+	if programmed.Reason != reasonEgressShardConflict && programmed.Reason != reasonEgressDatapathDisabled {
 		if identity, ok := r.Datapath.Programmed(); ok {
 			shardCopy.Status.ShardSID = addrString(identity.ShardSID)
 			shardCopy.Status.ShardAddressIPv6 = addrString(identity.ShardAddressIPv6)
@@ -505,6 +528,14 @@ func withdrawShardAdvertisement(ctx context.Context, c client.Client, namespace,
 // attachment state. A nil datapath, not expected in production, is treated as
 // not attached rather than a panic.
 func (r *EgressShardReconciler) readyCondition() metav1.Condition {
+	if r.Disabled {
+		return metav1.Condition{
+			Type:    bgpv1alpha1.ConditionTypeReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reasonEgressDatapathDisabled,
+			Message: "Egress translation datapath is turned off on this node",
+		}
+	}
 	if r.Datapath != nil && r.Datapath.Attached() {
 		if missing := r.Datapath.MissingUplinks(); len(missing) > 0 {
 			return metav1.Condition{

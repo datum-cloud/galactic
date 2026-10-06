@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -746,5 +747,47 @@ func TestEgressShardReconciler_WithdrawsAdvertisementWhenShardObjectAlreadyGone(
 	assertNoAdvertisement(t, c)
 	if _, ok := datapath.Programmed(); ok {
 		t.Error("datapath still programmed after its EgressShard object disappeared")
+	}
+}
+
+// TestEgressShardReconciler_DisabledWithdrawsAndProgramsNothing: a node whose
+// datapath is turned off must stop drawing egress traffic, so the identity it
+// held is cleared, its advertisement withdrawn, and both conditions say why.
+func TestEgressShardReconciler_DisabledWithdrawsAndProgramsNothing(t *testing.T) {
+	scheme := nat66TestScheme(t)
+	shard := newEgressShard(testNAT66NodeA)
+	router := newTestNAT66Router()
+	c := newIndexedClientBuilder(scheme).WithObjects(shard, router).WithStatusSubresource(shard).Build()
+	datapath := &fakeEgressDatapath{attached: true}
+	r := newNAT66Reconciler(c, scheme, datapath)
+
+	// Enabled first, so there is an identity and an advertisement to lose.
+	if _, err := reconcileShard(t, r, c); err != nil {
+		t.Fatalf("enabled Reconcile() error = %v", err)
+	}
+	advKey := client.ObjectKey{Namespace: testNAT66Namespace, Name: shardAdvertisementName(testNAT66ShardName)}
+	if err := c.Get(context.Background(), advKey, &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Fatalf("advertisement not created while enabled: %v", err)
+	}
+
+	r.Disabled = true
+	programsBefore := datapath.programs
+	got, err := reconcileShard(t, r, c)
+	if err != nil {
+		t.Fatalf("disabled Reconcile() error = %v", err)
+	}
+	if datapath.programs != programsBefore {
+		t.Errorf("disabled reconciler programmed the datapath")
+	}
+	if _, ok := datapath.Programmed(); ok {
+		t.Errorf("datapath still holds an identity while disabled")
+	}
+	if got.Status.ShardSID != "" || got.Status.ShardAddressIPv6 != "" {
+		t.Errorf("status publishes identity %q/%q while disabled", got.Status.ShardSID, got.Status.ShardAddressIPv6)
+	}
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeProgrammed, metav1.ConditionFalse, reasonEgressDatapathDisabled)
+	assertCondition(t, got, bgpv1alpha1.ConditionTypeReady, metav1.ConditionFalse, reasonEgressDatapathDisabled)
+	if err := c.Get(context.Background(), advKey, &bgpv1alpha1.BGPAdvertisement{}); !apierrors.IsNotFound(err) {
+		t.Errorf("advertisement still present while disabled: err = %v", err)
 	}
 }

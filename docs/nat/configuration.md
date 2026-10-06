@@ -43,13 +43,16 @@ flags, or a combination of both (CLI flags take precedence), with the
 | Node name         | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |
 | Uplink interfaces | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected | No       |
 | XDP attach mode   | `GALACTIC_NAT_XDP_ATTACH`        | `--nat-xdp-attach`        | `direct`      | No       |
+| Datapath enabled  | `GALACTIC_NAT_DATAPATH_ENABLED`  | `--nat-datapath-enabled`  | `true`        | No       |
 | Echo responder    | `GALACTIC_NAT_ECHO_RESPONDER`    | `--nat-echo-responder`    | `false`       | No       |
 | Metrics port      | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`        | No       |
 | gRPC health port  | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`        | No       |
 
-`config/galactic-nat/base/daemonset.yaml` sets `GALACTIC_NAT_XDP_ATTACH=chain`,
-since every edge node runs `galactic-gateway`; the binary's own default is
-`direct`.
+`config/galactic-nat/base/daemonset.yaml` leaves `GALACTIC_NAT_XDP_ATTACH`
+at the binary's default, `direct`. `dispatch` is the mode to move to: it is
+what lets a shard restart without bouncing its uplinks, and what will let it
+share them with `galactic-gateway` once the gateway moves onto the dispatcher
+too.
 
 That is the whole process configuration. The shard's identity — its SID,
 masquerade addresses and NAT64 prefix — is not process configuration: it
@@ -121,18 +124,55 @@ condition reads `False` with reason `UplinksMissing`, naming them, and the
 pod's `readiness` gRPC health service, which the readinessProbe checks,
 reports not serving. Liveness is unaffected, so the pod is not restarted.
 
-In chain mode nothing is attached, so the uplinks are used for the
-forwarding sysctls and to check coverage: an uplink that carries no XDP
-program is reported missing the same way, since traffic the gateway never
-hooks is traffic the chained shard never sees.
+In dispatch and chain mode the shard attaches nothing of its own, so the
+uplinks are used for the forwarding sysctls and to check coverage. An uplink
+whose traffic does not reach the shard's program is reported missing the
+same way.
 
 **`--nat-xdp-attach` / `GALACTIC_NAT_XDP_ATTACH`**
-How the datapath reaches its uplinks' XDP hook: `direct` or `chain`. Any
-other value fails validation at startup.
+How the datapath reaches its uplinks' XDP hook: `direct`, `dispatch` or
+`chain`. Any other value fails validation at startup.
 
 - **`direct`** (the binary's default) attaches `nat_ingress` to every
-  resolved uplink in native driver mode, as described above. Use it on a
-  node with no `galactic-gateway`.
+  resolved uplink in native driver mode, as described above. The attachment
+  is not pinned, so it detaches when the process exits, and every restart
+  bounces each uplink, once on the detach and again on the attach. On a
+  node where an earlier `dispatch`-mode shard left the node's XDP
+  dispatcher on the uplinks, direct mode detaches it
+  first, if no other datapath's slot is live there. If one is, direct mode
+  fails to start and names the uplink, since detaching the dispatcher would
+  cut that datapath's traffic. Only the uplinks resolved at startup are
+  released: an uplink found later that still carries the dispatcher is
+  reported missing until `hack/xdp-dispatch-release.sh` frees it.
+- **`dispatch`** puts the node's shared XDP dispatcher on every resolved
+  uplink and runs `nat_ingress` from the dispatcher's egress slot. The
+  dispatcher is one small root program, `xdp_dispatch`, that holds the hook
+  for every datapath on the node and hands each packet to the slots its
+  interface's roles allow. Slots are reserved for the gateway's load balancer
+  and return program, ahead of the shard's, though the gateway does not use
+  the dispatcher yet. Its state is pinned under `/sys/fs/bpf/galactic-xdp`: the
+  maps and root under `v1/`, one link per interface under `links/`.
+
+  Because the links are pinned, the root stays attached when the shard's
+  process exits. The next process swaps its program into the slot, which the
+  kernel does atomically, so a restart neither bounces an uplink nor misses a
+  packet. The shard renews its slot's lease every 10s; a slot whose lease is
+  more than 120s old is skipped, so a shard that was removed, or that has been
+  down that long, stops claiming packets instead of translating with state
+  nothing maintains.
+
+  Nothing in dispatch mode is all-or-nothing. An uplink the dispatcher cannot
+  hold yet, because another XDP program is attached there, the driver has no
+  native XDP, or attaching would take a bond down, is reported missing and
+  retried on the next link or route change. The first attach to each bond
+  member, and the wait for it to rejoin its bond, run under a node-wide lock,
+  so two datapaths sharing the dispatcher never bounce two members of one bond
+  at once.
+
+  The dispatcher stays attached after the shard is removed from a node.
+  `hack/xdp-dispatch-release.sh` detaches it. Run it before rolling back to
+  an image that predates dispatch mode, which would otherwise fail to attach
+  with `EBUSY`.
 - **`chain`** attaches nothing. An interface takes one native XDP program,
   and on an edge node `galactic-gateway` already holds that hook on the
   interfaces the shard needs (a direct attach there fails outright). The
@@ -155,6 +195,16 @@ other value fails validation at startup.
   that had to recreate the map empties the slot. The slot keeps the program
   alive across a `galactic-nat` restart, and the next process replaces it in
   place, so a shard restart leaves no gap in translation.
+
+**`--nat-datapath-enabled` / `GALACTIC_NAT_DATAPATH_ENABLED`**
+Whether the shard runs its datapath. On by default. Off, the process stays
+up and its pod ready, but it attaches nothing, empties its dispatcher slot if
+an earlier process filled one, and keeps the node's `EgressShard`
+unprogrammed: `Ready` and `Programmed` both read `False` with reason
+`DatapathDisabled`, no identity is published, and its `BGPAdvertisement` is
+withdrawn, so the fabric stops sending egress traffic to the node. Any other
+datapath on the node, and the dispatcher itself, are left alone. Turning it
+back on takes a pod restart, which in dispatch mode bounces nothing.
 
 **`--nat-echo-responder` / `GALACTIC_NAT_ECHO_RESPONDER`**
 Whether the shard answers an ICMP or ICMPv6 Echo Request addressed to one of
@@ -182,9 +232,10 @@ and nothing else.
 It also needs a real bpffs already mounted at `/sys/fs/bpf` on the host
 (`type: Directory`, not `DirectoryOrCreate` — a missing mount must fail
 loudly, not silently pin maps to a plain directory). Every map is pinned
-under `/sys/fs/bpf/galactic-nat`. In chain mode it also opens the gateway's
-`/sys/fs/bpf/galactic-edge/xdp_chain`, which the same `/sys/fs/bpf` mount
-covers.
+under `/sys/fs/bpf/galactic-nat`. In dispatch mode it also pins the node's
+XDP dispatcher under `/sys/fs/bpf/galactic-xdp`, and in chain mode it opens
+the gateway's `/sys/fs/bpf/galactic-edge/xdp_chain`. The same `/sys/fs/bpf`
+mount covers both.
 
 ## `EgressShard` CRD (`network.datumapis.com/v1alpha1`)
 
@@ -519,10 +570,10 @@ kubectl exec -n galactic-system <galactic-nat-pod> -- \
   wget -qO- http://localhost:9182/metrics | grep galactic_nat_
 ```
 
-Confirm the eBPF program is attached (in chain mode, installed in the
-gateway's `xdp_chain` slot) and translating — on the `EgressShard` object,
-`Ready` should read `DatapathAttached` and `Programmed` should read
-`AddressesProgrammed`. `Ready` reading `UplinksMissing` names the uplinks
+Confirm the eBPF program is attached (in dispatch mode, in the dispatcher's
+egress slot; in chain mode, in the gateway's `xdp_chain` slot) and
+translating. On the `EgressShard` object, `Ready` should read
+`DatapathAttached` and `Programmed` should read `AddressesProgrammed`. `Ready` reading `UplinksMissing` names the uplinks
 whose traffic the shard is not translating:
 
 ```sh
@@ -615,6 +666,9 @@ knowing before you rely on this component in production:
   bounce the affected member (`ip link set <member> down; ip link set
   <member> up`). The bond partner carries traffic meanwhile, and the queue's
   discards stop at once. Nothing bounces it automatically.
+- **The dispatcher outlives the shard.** In dispatch mode the root stays on
+  the uplinks after the shard is removed, passing every packet once the
+  slot's lease lapses. `hack/xdp-dispatch-release.sh` detaches it.
 - **The CNI's shard list is a second copy of every shard SID.**
   `GALACTIC_CNI_EGRESS_SHARD_SIDS` is set by hand and is not derived from
   `EgressShard` status, so the two can disagree.

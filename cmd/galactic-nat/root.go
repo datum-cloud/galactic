@@ -27,6 +27,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -122,20 +123,26 @@ func runCmd(cfg *config.NATConfig) error {
 	// coverageChanged, possibly before setupNatDatapath has even returned, so
 	// the callback only nudges and followCoverage below does the work.
 	coverageChanged := make(chan struct{}, 1)
-	datapath, err := setupNatDatapath(ctx, cfg, ctrlmetrics.Registry, func() {
-		select {
-		case coverageChanged <- struct{}{}:
-		default:
-		}
-	})
+	var datapath controller.EgressDatapath
+	if cfg.DatapathEnabled {
+		datapath, err = setupNatDatapath(ctx, cfg, ctrlmetrics.Registry, func() {
+			select {
+			case coverageChanged <- struct{}{}:
+			default:
+			}
+		})
+	} else {
+		turnOffDatapath(ctx, xdpdispatch.PinDir)
+		datapath = disabledDatapath{}
+	}
 	if err != nil {
 		return fmt.Errorf("setup egress translation eBPF datapath: %w", err)
 	}
 	coverageEvents := make(chan event.GenericEvent, 1)
 	go followCoverage(ctx, datapath, healthSrv, coverageChanged, coverageEvents)
 
-	// Only now is the datapath attached, or in chain mode installed in the
-	// edge gateway's XDP chain. Report serving from here on, not from
+	// Only now is the datapath attached, installed in the XDP dispatcher or,
+	// in chain mode, in the edge gateway's XDP chain, or turned off. Report serving from here on, not from
 	// process start; readiness, on its own service, additionally needs every
 	// uplink covered (followCoverage). Neither waits for an identity to be
 	// programmed: a node whose shard has not been assigned one yet would
@@ -149,6 +156,7 @@ func runCmd(cfg *config.NATConfig) error {
 		Scheme:         mgr.GetScheme(),
 		NodeName:       nodeName,
 		Datapath:       datapath,
+		Disabled:       !cfg.DatapathEnabled,
 		CoverageEvents: coverageEvents,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup EgressShard controller: %w", err)
@@ -231,8 +239,12 @@ func newRootCommand() *cobra.Command {
 		"Comma-separated fabric-facing uplink interfaces this shard's XDP datapath attaches to, "+
 			"overriding auto-detection; name every fabric uplink, not just the primary")
 	cmd.Flags().StringP("nat-xdp-attach", "", config.NATXDPAttachDirect,
-		"How the datapath reaches its uplinks' XDP hook: \"direct\" attaches it, \"chain\" installs it "+
-			"behind the edge gateway's programs on a node where the gateway holds the hook")
+		"How the datapath reaches its uplinks' XDP hook: \"direct\" attaches it, \"dispatch\" runs it "+
+			"from the node's shared, pinned XDP dispatcher, \"chain\" installs it behind the edge "+
+			"gateway's programs on a node where the gateway holds the hook")
+	cmd.Flags().Bool("nat-datapath-enabled", true,
+		"Run the egress translation datapath; false keeps the process up but attaches nothing, "+
+			"clears the shard's identity and withdraws its advertisement")
 	cmd.Flags().Bool("nat-echo-responder", false,
 		"Answer ICMP and ICMPv6 Echo Requests addressed to this shard's own masquerade addresses, "+
 			"rate-limited, instead of dropping them")

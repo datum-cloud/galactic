@@ -311,6 +311,25 @@ func (d *Dispatcher) linkPath(ifindex int) string {
 	return filepath.Join(d.dir, linksDirName, strconv.Itoa(ifindex))
 }
 
+// Linked reports whether a live pinned dispatcher link holds ifindex, which
+// is when EnsureLink would neither attach nor bounce it.
+func (d *Dispatcher) Linked(ifindex int) (bool, error) {
+	pinned, err := link.LoadPinnedLink(d.linkPath(ifindex), nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("xdpdispatch: load pinned link for ifindex %d: %w", ifindex, err)
+	}
+	defer pinned.Close() //nolint:errcheck // our own descriptor
+	info, err := pinned.Info()
+	if err != nil {
+		return false, fmt.Errorf("xdpdispatch: read link info for ifindex %d: %w", ifindex, err)
+	}
+	xdp := info.XDP()
+	return xdp != nil && int(xdp.Ifindex) == ifindex, nil
+}
+
 // Locked is the dispatch lock, held. Every call that changes shared state
 // other than a datapath's own slot program or lease is a method here, so it
 // cannot run without the lock. Release it with Unlock.
