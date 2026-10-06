@@ -7,19 +7,20 @@ package controller
 import (
 	"testing"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 )
 
 func TestVPCAttachmentIndexTracksObservedNode(t *testing.T) {
 	index := NewVPCAttachmentIndex()
 	attachment := &cloudv1alpha1.VPCAttachment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "attachment-a"},
-		Status:     cloudv1alpha1.VPCAttachmentStatus{Node: "node-a", PodSubnet: "fd20:0:19::2:0:0/96"},
+		Status:     cloudv1alpha1.VPCAttachmentStatus{Node: testNAT66NodeA, PodSubnet: "fd20:0:19::2:0:0/96"},
 	}
 
 	index.Upsert(attachment)
-	got := index.ForNode("node-a")
+	got := index.ForNode(testNAT66NodeA)
 	if len(got) != 1 || got[0].Status.PodSubnet != attachment.Status.PodSubnet {
 		t.Fatalf("ForNode(node-a) = %+v, want attachment", got)
 	}
@@ -32,13 +33,13 @@ func TestVPCAttachmentIndexMovesAndDeletes(t *testing.T) {
 	index := NewVPCAttachmentIndex()
 	attachment := &cloudv1alpha1.VPCAttachment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "attachment-a"},
-		Status:     cloudv1alpha1.VPCAttachmentStatus{Node: "node-a"},
+		Status:     cloudv1alpha1.VPCAttachmentStatus{Node: testNAT66NodeA},
 	}
 	index.Upsert(attachment)
 
 	attachment.Status.Node = "node-b"
 	index.Upsert(attachment)
-	if len(index.ForNode("node-a")) != 0 || len(index.ForNode("node-b")) != 1 {
+	if len(index.ForNode(testNAT66NodeA)) != 0 || len(index.ForNode("node-b")) != 1 {
 		t.Fatal("attachment was not moved between node indexes")
 	}
 
@@ -54,7 +55,7 @@ func TestVPCAttachmentIndexIgnoresUnassignedAttachment(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pending"},
 		Status:     cloudv1alpha1.VPCAttachmentStatus{},
 	})
-	if got := index.ForNode("node-a"); len(got) != 0 {
+	if got := index.ForNode(testNAT66NodeA); len(got) != 0 {
 		t.Fatalf("unassigned attachment indexed: %+v", got)
 	}
 }

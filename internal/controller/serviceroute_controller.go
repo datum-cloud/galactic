@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"sync"
 
-	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
-	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,7 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/serviceroute"
+	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
 // ServiceRoutePolicyReconciler resolves service policies against local Cloud
@@ -45,7 +45,8 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	endpoint := &networkv1alpha1.ServiceEndpoint{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: policy.Namespace, Name: policy.Spec.ServiceRef.Name}, endpoint); err != nil {
+	endpointKey := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Spec.ServiceRef.Name}
+	if err := r.Get(ctx, endpointKey, endpoint); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get ServiceEndpoint %s/%s: %w", policy.Namespace, policy.Spec.ServiceRef.Name, err)
 	}
 	attachments := &cloudv1alpha1.VPCAttachmentList{}
@@ -92,7 +93,10 @@ func (r *ServiceRoutePolicyReconciler) policiesForEndpoint(ctx context.Context, 
 	requests := make([]ctrl.Request, 0)
 	for _, policy := range list.Items {
 		if policy.Spec.ServiceRef.Name == name {
-			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}})
+			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+				Namespace: policy.Namespace,
+				Name:      policy.Name,
+			}})
 		}
 	}
 	return requests
@@ -105,12 +109,18 @@ func (r *ServiceRoutePolicyReconciler) allPolicies(ctx context.Context) []ctrl.R
 	}
 	requests := make([]ctrl.Request, 0, len(list.Items))
 	for _, policy := range list.Items {
-		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}})
+		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+			Namespace: policy.Namespace,
+			Name:      policy.Name,
+		}})
 	}
 	return requests
 }
 
-func (r *ServiceRoutePolicyReconciler) replacePolicy(key types.NamespacedName, intents []serviceroute.RouteIntent) error {
+func (r *ServiceRoutePolicyReconciler) replacePolicy(
+	key types.NamespacedName,
+	intents []serviceroute.RouteIntent,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, intent := range r.Applied[key] {
