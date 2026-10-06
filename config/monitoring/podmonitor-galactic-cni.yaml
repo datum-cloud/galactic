@@ -1,0 +1,19 @@
+# Scrapes galactic-cni's per-node metrics port (metrics, 9180), including the
+# TC-eBPF service policy and drop counters.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: galactic-cni
+  labels:
+    app.kubernetes.io/name: galactic-cni
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-cni
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
