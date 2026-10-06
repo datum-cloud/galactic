@@ -452,8 +452,8 @@ tasks:
       # One shard per edge node: two in dfw, one each in sjc and iad. Each
       # must report Programmed=True -- attached is not enough, since a shard
       # with no programmed identity claims no packet -- and must target a
-      # node labeled galactic.datumapis.com/nat=enabled, the only nodes the
-      # shard DaemonSet runs on.
+      # node labeled galactic.datumapis.com/nat=enabled. The shard
+      # DaemonSet runs only on node=edge nodes carrying that label.
       - |
         set -e
         rc=0

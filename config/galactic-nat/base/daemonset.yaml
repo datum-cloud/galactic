@@ -18,20 +18,19 @@ spec:
       labels:
         app.kubernetes.io/name: galactic-nat
     spec:
-      # Opt-in only: runs on a node an operator has explicitly labeled
-      # galactic.datumapis.com/nat=enabled, and nowhere else. Nothing
+      # Opt-in only: runs on a galactic.datumapis.com/node=edge node an
+      # operator has explicitly labeled galactic.datumapis.com/nat=enabled,
+      # and nowhere else. Nothing
       # deploys it automatically. It is independent of galactic-gateway: a
       # node can carry either label or both. The shard attaches its own XDP
       # program by default (GALACTIC_NAT_XDP_ATTACH=direct); alongside a
       # gateway, set dispatch, so both run from the node's shared XDP
       # dispatcher, since an interface takes only one program.
       #
-      # It never shares a node with galactic-vrf. That sidecar's pods are
-      # placed on galactic.datumapis.com/node=edge nodes, and the affinity
-      # below requires this node to carry no galactic.datumapis.com/node
-      # value at all, so the two exclude each other by construction (a
-      # node's `node` label is single-valued). Compute nodes reach their
-      # site's shards over SRv6 (GALACTIC_CNI_EGRESS_SHARD_SIDS).
+      # It shares the edge node with galactic-vrf, whose sidecar pods are
+      # placed on galactic.datumapis.com/node=edge nodes too. Compute nodes
+      # (node=compute) never run a shard; they reach their site's shards
+      # over SRv6 (GALACTIC_CNI_EGRESS_SHARD_SIDS).
       # galactic-cni and galactic-router may run here too, via the separate
       # galactic.datumapis.com/galactic=router label
       # (config/galactic-cni/daemonset.yaml,
@@ -53,12 +52,14 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - edge
                   - key: galactic.datumapis.com/nat
                     operator: In
                     values:
                       - enabled
-                  - key: galactic.datumapis.com/node
-                    operator: DoesNotExist
       serviceAccountName: galactic-nat
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

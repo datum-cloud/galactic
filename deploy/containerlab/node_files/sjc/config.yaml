@@ -13,6 +13,7 @@ nodes:
   - role: worker
     labels:
       topology.kubernetes.io/region: sjc
+      galactic.datumapis.com/node: edge
       galactic.datumapis.com/nat: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router

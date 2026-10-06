@@ -14,8 +14,9 @@ uplinks. Compute nodes run none.
   `eth0`, which carries every node's IPv6 default route.
 - `dfw/`, `sjc/`, `iad/` — one per-site overlay each, applying one
   `galactic-nat` DaemonSet to that site's edge nodes. There is no per-node
-  pin: the base's `galactic.datumapis.com/nat: enabled` affinity already
-  selects them (the lab labels every edge node so), and nothing about a
+  pin: the base's affinity (`galactic.datumapis.com/node: edge` plus
+  `galactic.datumapis.com/nat: enabled`) already selects them (the lab
+  labels every edge node with both), and nothing about a
   shard's identity lives in the
   DaemonSet. Each site's `node-patch.yaml` sets only
   `GALACTIC_NAT_UPLINK_INTERFACES=bond0,bond1` — an edge node's transit

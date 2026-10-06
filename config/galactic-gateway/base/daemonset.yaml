@@ -18,7 +18,8 @@ spec:
       labels:
         app.kubernetes.io/name: galactic-gateway
     spec:
-      # Opt-in only: runs on a node an operator has explicitly labeled
+      # Opt-in only: runs on a galactic.datumapis.com/node=edge node an
+      # operator has explicitly labeled
       # galactic.datumapis.com/gateway=enabled, and nowhere else. Nothing
       # deploys it automatically -- see ../kustomization.yaml for why this
       # base is meant to be instantiated once per gateway node rather than
@@ -26,13 +27,10 @@ spec:
       # either label or both; on a node with both, each runs from its own
       # slot of the node's shared XDP dispatcher.
       #
-      # It never shares a node with galactic-vrf. That sidecar's pods are
-      # placed on galactic.datumapis.com/node=edge nodes, and the affinity
-      # below requires this node to carry no galactic.datumapis.com/node
-      # value at all, so the two exclude each other by construction (a
-      # node's `node` label is single-valued). Excludes control-plane
-      # outright for the same reason the other roles do. See
-      # docs/node-labels.md.
+      # It shares the edge node with galactic-vrf, whose sidecar pods are
+      # placed on galactic.datumapis.com/node=edge nodes too. Compute nodes
+      # (node=compute), unlabeled nodes and control-plane nodes never run
+      # it. See docs/node-labels.md.
       #
       # Single-container pod: galactic-router used to run here as a
       # second container (see git history prior to this file), so a crash
@@ -50,12 +48,14 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - edge
                   - key: galactic.datumapis.com/gateway
                     operator: In
                     values:
                       - enabled
-                  - key: galactic.datumapis.com/node
-                    operator: DoesNotExist
       serviceAccountName: galactic-gateway
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

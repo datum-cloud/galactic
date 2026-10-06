@@ -44,16 +44,19 @@ datapath — see that file's own header for the caveat).
 
 ## Prerequisite: node labeling
 
-`galactic-gateway`'s DaemonSet only schedules onto nodes labeled
-`galactic.datumapis.com/node: edge` (see
-`config/galactic-gateway/base/daemonset.yaml`'s node affinity, which also
-excludes `node-role.kubernetes.io/control-plane` nodes outright). Read
+`galactic-gateway`'s DaemonSet only schedules onto nodes labeled both
+`galactic.datumapis.com/node: edge` and `galactic.datumapis.com/gateway:
+enabled` (see `config/galactic-gateway/base/daemonset.yaml`'s node affinity,
+which also excludes `node-role.kubernetes.io/control-plane` nodes outright).
+It runs there alongside `galactic-vrf`, which `node=edge` also places, so
+label an edge node `gateway=enabled` to opt it in. Read
 [docs/node-labels.md](../node-labels.md) for the full node-labeling
 strategy before doing anything else here.
 
 **Do not confuse this label with the gateway's own "edge XDP" terminology.**
-`galactic.datumapis.com/node=edge` is the *node role* label — it identifies a
-dedicated gateway node (which also runs `galactic-nat`), distinct from the
+`galactic.datumapis.com/node=edge` is the *node role* label — it identifies an
+edge node (which hosts `galactic-vrf`, and `galactic-gateway` or
+`galactic-nat` where it carries their opt-in label), distinct from the
 ordinary tenant-serving `galactic.datumapis.com/node=compute` role that runs
 `galactic-router` (default role)/`galactic-cni`. "Edge XDP" is a separate,
 pre-existing description of *what the datapath is* (an XDP program attached
