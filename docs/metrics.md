@@ -9,8 +9,9 @@ themselves; when this page and the code disagree, the code wins.
 
 Every DaemonSet under `config/` runs `hostNetwork: true`, so its port is
 bound on the node itself. `galactic-vrf` runs as a sidecar in the ingress
-proxy's pod instead, and shares the 9182 default with `galactic-nat`
-without clashing, since the two never share a node.
+proxy's pod instead, which has its own network namespace, so it shares
+the 9182 default with `galactic-nat` without clashing, even on the edge
+nodes that run both.
 
 | Area                   | Component                                                 | Metric prefix                           | Port           | `job` from `config/monitoring/`          |
 |------------------------|-----------------------------------------------------------|-----------------------------------------|----------------|------------------------------------------|
