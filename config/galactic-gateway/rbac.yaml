@@ -1,4 +1,4 @@
-# The edge XDP NAT+LB gateway control plane's own RBAC. This ClusterRole
+# The edge XDP DSR load-balancer control plane's own RBAC. This ClusterRole
 # covers only what NetworkGatewayReconciler/NetworkRuleReconciler
 # (internal/controller/networkgateway_controller.go,
 # internal/controller/networkrule_controller.go) actually touch.

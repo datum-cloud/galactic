@@ -153,9 +153,9 @@ spec:
           # attach — the same pair config/galactic-cni/daemonset.yaml's eBPF-loading
           # container already uses for its own (TC-BPF) program. PERFMON is
           # additionally required: the verifier only allows pointer+scalar
-          # arithmetic on packet data/data_end (edgenat.c's DNAT/SNAT
-          # header rewrites) when the loading process is perfmon_capable()
-          # — without it the verifier falls back to its unprivileged-BPF
+          # arithmetic on packet data/data_end (edgedsr.c's header parsing
+          # and its data_end - data byte count) when the loading process is
+          # perfmon_capable(). Without it the verifier falls back to its unprivileged-BPF
           # ruleset and rejects the program with "pointer arithmetic ...
           # prohibited for !root" even though the container runs as root.
           securityContext:
@@ -175,7 +175,7 @@ spec:
             limits:
               memory: 256Mi
           volumeMounts:
-            # edgeattach.PinDir pins every edgenat map under
+            # edgeattach.PinDir pins every edge map under
             # /sys/fs/bpf/galactic-edge, same convention config/galactic-cni/
             # daemonset.yaml's bpf-fs mount documents: bpffs must already be
             # mounted at this host path by the node itself (type: Directory,

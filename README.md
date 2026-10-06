@@ -10,7 +10,7 @@ Modern organizations run workloads everywhere: AWS, Azure, GCP, on-premises, and
 
 ## Our Approach
 
-Galactic provides the SRv6 data plane that makes multi-cloud VPC connectivity work at the kernel level. It runs as a DaemonSet agent on every node, managing SRv6 routes and VRF isolation, and as a CNI plugin that attaches pods to the correct virtual network. On nodes dedicated to the gateway role, a third component loads an edge XDP NAT+LB datapath to handle ingress load balancing at the VPC boundary. VPC and VPCAttachment definitions are managed by a companion operator; Galactic acts on the identifiers that operator assigns.
+Galactic provides the SRv6 data plane that makes multi-cloud VPC connectivity work at the kernel level. It runs as a DaemonSet agent on every node, managing SRv6 routes and VRF isolation, and as a CNI plugin that attaches pods to the correct virtual network. On nodes dedicated to the gateway role, a third component loads an edge XDP DSR (Direct Server Return) load balancer to handle L4 ingress at the VPC boundary. VPC and VPCAttachment definitions are managed by a companion operator; Galactic acts on the identifiers that operator assigns.
 
 Under the hood, Galactic uses Segment Routing over IPv6 (SRv6) for efficient, deterministic routing and Virtual Routing and Forwarding (VRF) for true network isolation at the kernel level. BGP is used to distribute SRv6 routes between agents across nodes and clusters.
 
@@ -43,7 +43,7 @@ Each component can also be applied on its own, e.g. `kubectl apply -k config/gal
 Two components are **not** part of `kubectl apply -k config/` and must be applied separately, each with its own per-node prerequisite:
 
 - **`config/fabric-router/`** — the FRR underlay eBGP DaemonSet `galactic-router` depends on.
-- **`config/galactic-gateway/`** — the edge XDP NAT+LB gateway control plane, a single-container `galactic-gateway` DaemonSet on dedicated `galactic.datumapis.com/node: edge` nodes (`galactic-router` runs there too, but as its own independent DaemonSet via `galactic.datumapis.com/galactic: router` — see `config/galactic-router/` above, not bundled into this pod). `kubectl apply -k config/galactic-gateway/` only installs the shared, cluster-safe ServiceAccount/RBAC; `config/galactic-gateway/base/` itself is a template meant to be instantiated once per gateway node by a further overlay (see `deploy/containerlab/resources/galactic-gateway/` as of commit `abdd665b`, the last before the containerlab lab stopped deploying the gateway, for a worked example) — apply that overlay per node instead of `base/` directly.
+- **`config/galactic-gateway/`** — the edge XDP DSR load-balancer control plane, a single-container `galactic-gateway` DaemonSet on nodes labeled `galactic.datumapis.com/gateway: enabled` that carry no `galactic.datumapis.com/node` label (`galactic-router` runs there too, but as its own independent DaemonSet via `galactic.datumapis.com/galactic: router` — see `config/galactic-router/` above, not bundled into this pod). `kubectl apply -k config/galactic-gateway/` only installs the shared, cluster-safe ServiceAccount/RBAC; `config/galactic-gateway/base/` itself is a template meant to be instantiated once per gateway node by a further overlay (see `deploy/containerlab/resources/galactic-gateway/` as of commit `abdd665b`, the last before the containerlab lab stopped deploying the gateway, for a worked example) — apply that overlay per node instead of `base/` directly.
 
 ```bash
 kubectl apply -k config/fabric-router/

@@ -11,8 +11,7 @@ package edgeprog
 // as a literal constant.
 //
 // A small set: direct server return has no connection table and no port
-// allocation, so there is nothing analogous to a full-NAT datapath's
-// state-related reasons. Both programs share these buckets -- a FIB or redirect
+// allocation, so there are no state-related reasons. Both programs share these buckets -- a FIB or redirect
 // failure means the same thing whichever direction hit it.
 const (
 	DropReasonEmptyBackendList uint32 = 0

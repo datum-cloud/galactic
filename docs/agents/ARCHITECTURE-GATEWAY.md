@@ -8,7 +8,7 @@
 > existing tenant EVPN mesh — there is no primary/secondary node, no BGP
 > local-preference split, and no address rewriting anywhere in the datapath.
 
-_Last updated: 2026-09-09_
+_Last updated: 2026-10-06_
 
 This document covers `galactic-gateway` and the `NetworkGateway`/
 `NetworkRule` reconcilers only. See
@@ -54,9 +54,7 @@ reconcilers) still runs unmodified in that separate `galactic-router`
 pod — see [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md).
 
 The load-balancing design itself is **DSR (Direct Server Return) over a
-Maglev consistent-hash ring**, replacing an earlier Full-NAT (DNAT+SNAT)
-design entirely — a breaking change with no migration path, not a second
-mode alongside the old one. The defining simplification: this datapath does
+Maglev consistent-hash ring**. The defining simplification: this datapath does
 **no address or port rewriting at all**. A client's packet travels inside
 the SRv6 encapsulation byte-for-byte unmodified all the way to the backend;
 the backend replies to the client *directly*, never re-entering the
@@ -77,16 +75,14 @@ Consequences that follow directly from dropping rewriting:
 
 - No `conn_table`/flow state of any kind, and nothing to garbage-collect
   beyond the eBPF verifier's own bookkeeping — DSR is fully stateless.
-  Full-NAT needed a flow table to remember which backend/SNAT port a flow
-  was assigned; Maglev/DSR re-derives the same answer from the same input
-  on every packet.
-- No un-DNAT/un-SNAT branch — a reply carries the client's own addressing
+  Maglev re-derives the same backend from the same input on every packet.
+- No reply-translation branch — a reply carries the client's own addressing
   already, so the return program forwards it rather than translating it,
   and needs no flow state to do so.
 - No L3/L4 checksum touch anywhere in the datapath — the packet's own
   checksum is already correct for its own, completely unmodified content.
-- No Active-Active BGP local-preference model, no primary/secondary node
-  election, and no per-node self-address to publish — every gateway node's
+- No BGP local preference, no primary/secondary node election, and no
+  per-node self-address to publish — every gateway node's
   route is equally preferred by construction (a distinct Route
   Distinguisher per originating node keeps every node's identical-prefix
   advertisement alive as an independent, non-competing route rather than
@@ -107,16 +103,15 @@ per-VPC gateway design to colocate with the workload's own VRF.
 
 ### The two CRDs
 
-| CRD              | Scope                                                                | Written by                                                                                                                                     | Purpose                                                                                                                                                                                                                                        |
-| ---------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                     | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no SNAT source to publish. |
-| `NetworkRule`    | Namespaced, tenant-writable                                          | Tenant, via an admission webhook that verifies VPC/VPCAttachment ownership (**webhook not yet deployed in this repo** — see Known Constraints) | Ingress load-balancing spec: `vpcRef`/`vpcAttachmentRef` (opaque tenant identifiers), `vipAddresses` (1–8, IPv4/IPv6), `protocol` (`tcp`/`udp`), `port`, `backends` (1–64 `address:port` pairs). Served by every `NetworkGateway` in the namespace identically — there is **no** `status.primaryNode` field. |
+| CRD              | Scope                                                                | Written by                                                                                                                                     | Purpose                                                                                                                                                                                                                                                                                  |
+| ---------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NetworkGateway` | Namespaced, one per gateway node (`spec.targetRef.name` = node name) | Operator, once per gateway node (see [worked example](#worked-containerlab-example) below)                                                     | Node-scoped root object, mirroring `BGPRouter`'s pattern. Identifies which nodes participate in the anycast mesh and surfaces each node's engine health via `status.conditions`. Carries **no** self-address field — DSR rewrites nothing, so there is no translation source to publish. |
+| `NetworkRule`    | Namespaced, tenant-writable                                          | Tenant, via an admission webhook that verifies VPC/VPCAttachment ownership (**webhook not yet deployed in this repo** — see Known Constraints) | Ingress load-balancing spec: `vpcRef`/`vpcAttachmentRef` (opaque tenant identifiers), `vipAddresses` (1–8, IPv4/IPv6), `protocol` (`tcp`/`udp`), `port`, `backends` (1–64 `address:port` pairs). Served by every `NetworkGateway` in the namespace identically.                          |
 
 Both are defined in `go.datum.net/network`'s `api/v1alpha1` package
 (`gateway_types.go`, `rule_types.go`) — the same external CRD module the
 BGP-family types live in. Both types' own doc comments describe this
-DSR/anycast model directly (they were rewritten alongside this redesign,
-not left describing the old Full-NAT behavior).
+DSR/anycast model directly.
 
 ---
 
@@ -138,8 +133,7 @@ galactic/
 │   │                        #   encap-source address
 │   ├── gateway/              # Engine, Datapath/QuotaEnforcer/TelemetryEmitter
 │   │                        #   interfaces + real implementations, crash
-│   │                        #   recovery — no VRF/Geneve state, no
-│   │                        #   primary/secondary placement
+│   │                        #   recovery — no VRF/Geneve state
 │   ├── maglev/               # Pure-Go Maglev consistent-hash lookup table
 │   │                        #   (internal/maglev/table.go) — this binary's
 │   │                        #   only importer; galactic-nat has no
@@ -188,8 +182,7 @@ public-interface/SRv6-address values.
 The containerlab lab no longer deploys `galactic-gateway`; its edge nodes
 run only the egress shards, attached directly to their uplinks. Until commit
 `abdd665b`, `deploy/containerlab/resources/galactic-gateway/` ran this role
-on four edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3` (an
-active-active pair), `sjc-worker2`, and `iad-worker2`. Each node's overlay
+on four edge nodes across all three lab clusters — `dfw-worker2`/`dfw-worker3`, `sjc-worker2`, and `iad-worker2`. Each node's overlay
 directory, named for the node itself, carries:
 
 - `node-patch.yaml` — pins the DaemonSet to one node via
@@ -231,16 +224,14 @@ that converges this node's whole gateway engine:
    different Route Distinguisher per originating node, not a decap
    Function, is what keeps every node's route alive as an independent,
    non-competing path). **No `LocalPreference` is set** — every gateway
-   node's route is equally preferred by construction, unlike the removed
-   Full-NAT design's primary/secondary local-pref split.
+   node's route is equally preferred by construction.
 3. **Crash recovery.** Runs `Engine.ReconcileOrphans` (see
    [Crash recovery](#crash-recovery) below).
 
 `NetworkRuleReconciler.Reconcile` separately owns two **per-object**
 lifecycle pieces the aggregate pass above is the wrong place for:
 `status.conditions`'s `Accepted` condition (`updateAcceptedCondition` — set
-once gateway nodes exist for the namespace; no `primary_node`-style
-assignment exists anymore, since DSR has no primary node to assign) and the
+once gateway nodes exist for the namespace) and the
 finalizer-guarded teardown ordering on deletion (withdraw the rule's
 `BGPAdvertisement`s *before* releasing quota/reservation state, so an
 in-flight flow is never blackholed through a route that has already
@@ -259,9 +250,8 @@ to every object in the namespace on change (`ruleToGatewayRequests`,
 ### Packet path (`internal/plumbing/ebpf/edgeprog/edgedsr.c`, program `edge_lb`)
 
 IPv6-only, phase 1 scope (plain TCP/UDP, no extension headers). Attached to
-the node's public/underlay-facing uplink. Unlike the removed Full-NAT
-`edgenat.c`, there is no "is this a reply to me" direction check: a reply
-never reaches this program, which sees only the forward half, so it has
+the node's public/underlay-facing uplink. There is no "is this a reply to
+me" direction check: a reply never reaches this program, which sees only the forward half, so it has
 exactly one branch, not two. Replies are `edge_return`'s, on a different
 attach point — see below.
 
@@ -271,11 +261,9 @@ attach point — see below.
    interface carries their role (see
    [below](#sharing-the-xdp-hook-xdpdispatch)), otherwise `XDP_PASS` to the
    kernel stack, e.g. BGP/SSH to the node itself. Only the
-   source/destination port are ever read; nothing is rewritten, so there is
-   no pointer-to-field resolution the way a rewrite would need.
-2. **Match** `(proto, dst port, dst addr)` against `vip_table` (keyed
-   identically to the removed `rule_table` — a VIP is globally unique by
-   construction, no tenant dimension). No match — unclaimed, as above (not
+   source/destination port are ever read; nothing is rewritten.
+2. **Match** `(proto, dst port, dst addr)` against `vip_table` (a VIP
+   is globally unique by construction, so the key has no tenant dimension). No match — unclaimed, as above (not
    one of this gateway's VIPs).
 3. **Claimed past this point** — every subsequent failure is a drop, not a
    pass-through (this gateway owns this VIP+port+protocol). Bump
@@ -297,8 +285,7 @@ attach point — see below.
    SRv6 destination is — see
    [uSID resolution](#usid-resolution-for-backends) below), sourced from
    this node's own `encap_config_table` entry (this node's plain
-   SRv6-reachable address — never a NAT/SNAT source and never compared
-   against anything on a receive path, since no reply ever re-enters this
+   SRv6-reachable address — never compared against anything on a receive path, since no reply ever re-enters this
    program). Resolve the L2 next-hop via
    `bpf_fib_lookup`, then leave over the interface that lookup selected:
    `XDP_TX` where the route egresses the interface the client's packet
@@ -307,14 +294,12 @@ attach point — see below.
    over separate links, which is this role's normal shape — see
    [Known Constraints](#known-constraints) for the bug that came from
    returning `XDP_TX` unconditionally. The inner packet travels completely
-   unmodified — this is DSR's entire premise: no DNAT, no SNAT, no
-   checksum touch anywhere.
+   unmodified — this is DSR's entire premise: no address or port
+   rewriting and no checksum touch anywhere.
 
 See `edgedsr.c`'s own header comment for the full byte-level walkthrough,
-including the `EDGE_BARRIER_VAR` eBPF-verifier bounds-narrowing gotcha
-carried over unchanged from the removed `edgenat.c`, and two real
-wire-format bugs found and fixed in `push_outer_header` (inherited
-unchanged from `edgenat.c`, not introduced by this rewrite): the pushed
+including the `EDGE_BARRIER_VAR` eBPF-verifier bounds-narrowing workaround
+and two wire-format bugs found and fixed in `push_outer_header`: the pushed
 outer IPv6 header's version nibble was left zeroed instead of set to `6`,
 and the outer header's `payload_len` undercounted the inner IPv6 header's
 own 40 bytes (a call site passed `ip6->payload_len` directly instead of
@@ -486,13 +471,13 @@ normal while ingress traffic quietly stopped being intercepted at all.
 
 ### GatewayConfig environment variables (`internal/config/gateway.go`)
 
-| Variable                            | Required | Default | Description                                                                                                                                        |
-| ----------------------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GALACTIC_GATEWAY_NODE_NAME`        | Yes      | —       | Kubernetes node name                                                                                                                                |
-| `GALACTIC_GATEWAY_PUBLIC_INTERFACE` | Yes      | —       | Public/underlay-facing uplink interface the XDP program attaches to. May name a Linux bonding master (`edgeattach.ResolveTargets` expands it to that bond's slaves — see [Known Constraints](#known-constraints)) |
-| `GALACTIC_GATEWAY_SRV6_ADDRESS`     | Yes      | —       | This node's own plain SRv6-reachable IPv6 address, used as the DSR outer-header encap source (`encap_config_table`) — never a NAT/SNAT source and never compared against anything on a receive path; must be a native IPv6 address (rejected if IPv4 or 4-in-6) |
-| `GALACTIC_GATEWAY_METRICS_PORT`     | No       | `8081`  | Prometheus metrics port                                                                                                                             |
-| `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | No       | `5181`  | gRPC health check port                                                                                                                              |
+| Variable                            | Required | Default | Description                                                                                                                                                                                                                         |
+| ----------------------------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GALACTIC_GATEWAY_NODE_NAME`        | Yes      | —       | Kubernetes node name                                                                                                                                                                                                                |
+| `GALACTIC_GATEWAY_PUBLIC_INTERFACE` | Yes      | —       | Public/underlay-facing uplink interface the XDP program attaches to. May name a Linux bonding master (`edgeattach.ResolveTargets` expands it to that bond's slaves — see [Known Constraints](#known-constraints))                   |
+| `GALACTIC_GATEWAY_SRV6_ADDRESS`     | Yes      | —       | This node's own plain SRv6-reachable IPv6 address, used as the DSR outer-header encap source (`encap_config_table`) — never compared against anything on a receive path; must be a native IPv6 address (rejected if IPv4 or 4-in-6) |
+| `GALACTIC_GATEWAY_METRICS_PORT`     | No       | `8081`  | Prometheus metrics port                                                                                                                                                                                                             |
+| `GALACTIC_GATEWAY_GRPC_HEALTH_PORT` | No       | `5181`  | gRPC health check port                                                                                                                                                                                                              |
 
 All three required fields are enforced by `GatewayConfig.Validate` at
 startup, not deferred to a later, less obvious kernel-datapath error — a
@@ -519,9 +504,8 @@ not collide with any of the others':
 `GALACTIC_GATEWAY_SRV6_ADDRESS` is this gateway node's own plain
 SRv6-reachable address, used purely as the source of every outer header
 this node's `edge_lb` program pushes (`edge_return` pushes no header at
-all, so it never reads this) — unlike the removed Full-NAT design's
-identically-named field, it is never a NAT/SNAT source, never has
-return-path significance (DSR has no return path through this node at
+all, so it never reads this). It is never an address-translation source,
+never has return-path significance (DSR has no return path through this node at
 all), and is never published to any CRD status (`NetworkGatewayStatus`
 carries no self-address field — see [The two CRDs](#the-two-crds) above).
 It is operator-supplied per gateway node today, with no in-cluster
@@ -582,25 +566,25 @@ pod on that node is not a supported configuration.
 
 ## Module / Package Reference
 
-| Package                                                 | Binary           | Responsibility                                                                                                                                                                                  | Owns state                           |
-| ------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `internal/config` (`gateway.go`)                        | galactic-gateway | `GatewayConfig`: node name, ports, public interface, SRv6 encap-source address; three-tier CLI/env/default precedence via viper                                                                 | No                                   |
-| `internal/controller` (`networkgateway_controller.go`)  | galactic-gateway | `NetworkGatewayReconciler`: desired-state assembly, BGP wiring, orphan-crash recovery                                                                                                            | No                                   |
-| `internal/controller` (`networkrule_controller.go`)     | galactic-gateway | `NetworkRuleReconciler`: finalizer-guarded teardown ordering, `Accepted`-condition maintenance (`updateAcceptedCondition`)                                                                       | No                                   |
-| `internal/controller` (`usidresolver.go`)               | galactic-gateway | `backendSIDIndex`: resolves a `NetworkRule` backend address to the worker node's SRv6 uSID by matching against `BGPAdvertisement`/`BGPRouter`/`BGPVRFInstance` CRDs, verifying tenant ownership  | No                                   |
-| `internal/gateway` (`engine.go`)                        | galactic-gateway | `Engine`: mutex-guarded convergence loop ("apply everything in desired, remove everything not in desired"), mirroring `GoBGPRuntime`'s shape                                                    | Yes (active-rule map)                |
-| `internal/gateway` (`types.go`)                         | galactic-gateway | `DesiredRule`/`DesiredBackend`/`EngineState`/`EngineStatus`/`RuleStatus` — the engine's own representation, assembled by the controllers above; `DesiredBackend` implements `internal/maglev.Backend` | No                              |
-| `internal/gateway` (`datapath.go`, `kerneldatapath.go`) | galactic-gateway | `Datapath`/`QuotaEnforcer`/`TelemetryEmitter` interfaces; `KernelDatapath`, the real `Datapath` backed by `edgemap.VIPTable` over a loaded `edgeprog.EdgedsrObjects`, building a `internal/maglev.Table` per rule; `NoopDatapath` for tests | Yes (`vipKeysByName` bookkeeping) |
-| `internal/gateway` (`quota.go`)                         | galactic-gateway | `NodeQuotaEnforcer` — real, coarse node-level admission caps (max rules/tenant, max total `vip_table` entries); `NoopQuotaEnforcer` for tests                                                    | Yes (in-memory reservation counters) |
-| `internal/gateway` (`telemetry.go`)                     | galactic-gateway | `PrometheusTelemetryEmitter` — control-plane-drop counter only (no primary/secondary placement gauge — see Key Design Decisions); `NoopTelemetryEmitter` for tests                               | Yes (Prometheus metric state)        |
-| `internal/gateway` (`recovery.go`, `diff.go`)           | galactic-gateway | `Engine.ReconcileOrphans` (crash recovery) and `diffRuleKeys` (the pure key-set diff both `Reconcile`/`ReconcileOrphans` build on)                                                               | No                                   |
-| `internal/maglev` (`table.go`)                          | galactic-gateway | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; this binary's only importer today (`galactic-nat` has no analogous shard-placement ring — see Known Constraints) | No                        |
-| `internal/plumbing/ebpf/edgeprog`                       | galactic-gateway | Compiled XDP program (`edgedsr.c`, program `edge_lb`) + bpf2go-generated Go bindings (`EdgedsrObjects`)                                                                                          | No                                   |
-| `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table`/`vip_addr_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                       | Yes (via `KernelTable`)              |
-| `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + native-XDP-only attach of the compiled program to one interface                                                                                                                          | Yes (pinned maps, held link)         |
-| `internal/plumbing/ebpf/edgemetrics`                    | galactic-gateway | Pull-based `prometheus.Collector` reading `vip_table`/`vip_stats_table`/`drop_reasons` live at every scrape                                                                                      | No                                   |
-| `internal/plumbing/ebpf/edgepreflight`                  | galactic-gateway | Startup kernel-capability check (`BPF_PROG_TYPE_XDP`, `BPF_MAP_TYPE_HASH`, kernel BTF, `bpf_xdp_adjust_head`) — no partial pass, no degraded fallback                                            | No                                   |
-| `internal/plumbing/ebpf/xdpattach`                      | gateway, nat     | Native-XDP attach across a target list, shared with `natattach`: per-NIC support check before any attach, each bond slave waited back into its aggregate before the next                         | No                                   |
+| Package                                                 | Binary           | Responsibility                                                                                                                                                                                                                              | Owns state                           |
+| ------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `internal/config` (`gateway.go`)                        | galactic-gateway | `GatewayConfig`: node name, ports, public interface, SRv6 encap-source address; three-tier CLI/env/default precedence via viper                                                                                                             | No                                   |
+| `internal/controller` (`networkgateway_controller.go`)  | galactic-gateway | `NetworkGatewayReconciler`: desired-state assembly, BGP wiring, orphan-crash recovery                                                                                                                                                       | No                                   |
+| `internal/controller` (`networkrule_controller.go`)     | galactic-gateway | `NetworkRuleReconciler`: finalizer-guarded teardown ordering, `Accepted`-condition maintenance (`updateAcceptedCondition`)                                                                                                                  | No                                   |
+| `internal/controller` (`usidresolver.go`)               | galactic-gateway | `backendSIDIndex`: resolves a `NetworkRule` backend address to the worker node's SRv6 uSID by matching against `BGPAdvertisement`/`BGPRouter`/`BGPVRFInstance` CRDs, verifying tenant ownership                                             | No                                   |
+| `internal/gateway` (`engine.go`)                        | galactic-gateway | `Engine`: mutex-guarded convergence loop ("apply everything in desired, remove everything not in desired"), mirroring `GoBGPRuntime`'s shape                                                                                                | Yes (active-rule map)                |
+| `internal/gateway` (`types.go`)                         | galactic-gateway | `DesiredRule`/`DesiredBackend`/`EngineState`/`EngineStatus`/`RuleStatus` — the engine's own representation, assembled by the controllers above; `DesiredBackend` implements `internal/maglev.Backend`                                       | No                                   |
+| `internal/gateway` (`datapath.go`, `kerneldatapath.go`) | galactic-gateway | `Datapath`/`QuotaEnforcer`/`TelemetryEmitter` interfaces; `KernelDatapath`, the real `Datapath` backed by `edgemap.VIPTable` over a loaded `edgeprog.EdgedsrObjects`, building a `internal/maglev.Table` per rule; `NoopDatapath` for tests | Yes (`vipKeysByName` bookkeeping)    |
+| `internal/gateway` (`quota.go`)                         | galactic-gateway | `NodeQuotaEnforcer` — real, coarse node-level admission caps (max rules/tenant, max total `vip_table` entries); `NoopQuotaEnforcer` for tests                                                                                               | Yes (in-memory reservation counters) |
+| `internal/gateway` (`telemetry.go`)                     | galactic-gateway | `PrometheusTelemetryEmitter` — control-plane-drop counter only; `NoopTelemetryEmitter` for tests                                                                                                                                            | Yes (Prometheus metric state)        |
+| `internal/gateway` (`recovery.go`, `diff.go`)           | galactic-gateway | `Engine.ReconcileOrphans` (crash recovery) and `diffRuleKeys` (the pure key-set diff both `Reconcile`/`ReconcileOrphans` build on)                                                                                                          | No                                   |
+| `internal/maglev` (`table.go`)                          | galactic-gateway | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; this binary's only importer today (`galactic-nat` has no analogous shard-placement ring — see Known Constraints)                     | No                                   |
+| `internal/plumbing/ebpf/edgeprog`                       | galactic-gateway | Compiled XDP program (`edgedsr.c`, program `edge_lb`) + bpf2go-generated Go bindings (`EdgedsrObjects`)                                                                                                                                     | No                                   |
+| `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table`/`vip_addr_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                                                                  | Yes (via `KernelTable`)              |
+| `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + native-XDP-only attach of the compiled program to one interface                                                                                                                                                                      | Yes (pinned maps, held link)         |
+| `internal/plumbing/ebpf/edgemetrics`                    | galactic-gateway | Pull-based `prometheus.Collector` reading `vip_table`/`vip_stats_table`/`drop_reasons` live at every scrape                                                                                                                                 | No                                   |
+| `internal/plumbing/ebpf/edgepreflight`                  | galactic-gateway | Startup kernel-capability check (`BPF_PROG_TYPE_XDP`, `BPF_MAP_TYPE_HASH`, kernel BTF, `bpf_xdp_adjust_head`) — no partial pass, no degraded fallback                                                                                       | No                                   |
+| `internal/plumbing/ebpf/xdpattach`                      | gateway, nat     | Native-XDP attach across a target list, shared with `natattach`: per-NIC support check before any attach, each bond slave waited back into its aggregate before the next                                                                    | No                                   |
 
 ---
 
@@ -620,21 +604,16 @@ pod on that node is not a supported configuration.
 
 ## Key Design Decisions
 
-- **DSR (Direct Server Return), not Full-NAT.** The datapath does no
-  address/port rewriting at all: a client's packet is pushed inside an SRv6
-  outer header toward the chosen backend's worker node completely
-  unmodified, and the backend replies to the client directly. This is a
-  breaking replacement of the earlier Full-NAT (DNAT+SNAT) design, not a
-  second mode alongside it — no migration path, per the redesign's
-  explicit decision to drop Full-NAT rather than grow a second personality.
-  Everything else in this section follows from that one choice.
-- **Anycast, not Active-Active BGP local-preference.** Every gateway node
-  in a PoP advertises every accepted rule's VIPs at equal BGP preference —
-  there is no `AssignPrimaryNode`/`LocalPreference` primitive anywhere in
-  this codebase anymore (`internal/gateway/placement.go` and
-  `localpref.go`, and their tests, were deleted outright as part of this
-  rewrite). A distinct Route Distinguisher per originating node (RFC 4364
-  §4.3.2, `internal/runtime/gobgp/paths.go`'s `deriveRD`) is what keeps
+- **DSR (Direct Server Return).** The datapath does no address/port
+  rewriting at all: a client's packet is pushed inside an SRv6 outer header
+  toward the chosen backend's worker node completely unmodified, and the
+  backend replies to the client directly. Everything else in this section
+  follows from that one choice.
+- **Anycast VIP advertisement.** Every gateway node in a PoP advertises
+  every accepted rule's VIPs at equal BGP preference; nothing in this
+  codebase sets a local preference or picks a primary node. A distinct
+  Route Distinguisher per originating node (RFC 4364 §4.3.2,
+  `internal/runtime/gobgp/paths.go`'s `deriveRD`) is what keeps
   every node's identical-prefix advertisement alive as an independent,
   non-competing route instead of BGP collapsing them to one best path — see
   the go/no-go anycast spike, `internal/runtime/gobgp/anycast_spike_test.go`.
@@ -676,11 +655,9 @@ pod on that node is not a supported configuration.
 - **SRv6 encap-source address has no in-cluster derivation mechanism.**
   `GALACTIC_GATEWAY_SRV6_ADDRESS` is operator-supplied per gateway node
   today; nothing in this repo yet computes it automatically from a node's
-  own `BGPRouter` locator/node-ID. Unlike the removed Full-NAT design, this
-  value is never published to any CRD status — there is no reconcile step
-  analogous to the old `publishSelfAddress` at all, since DSR rewrites
-  nothing and so has no SNAT source that needs advertising as a
-  node-reachability route.
+  own `BGPRouter` locator/node-ID. The value is never published to any CRD
+  status: DSR rewrites nothing, so there is no translation source that
+  needs advertising as a node-reachability route.
 - **Quota/telemetry are real but deliberately coarse.** `NodeQuotaEnforcer`
   enforces two node-level admission caps entirely from control-plane state
   already held by `Engine` (no eBPF map read required): max `NetworkRule`s
@@ -695,11 +672,9 @@ pod on that node is not a supported configuration.
   own per-packet counters are exposed separately by `edgemetrics`'s
   pull-based collector.
 - **Per-VIP hit counters live in their own map (`vip_stats_table`), not
-  `vip_table`.** The removed Full-NAT predecessor's `rule_table`/
-  `rule_stats_table` split already established this convention (issue
-  #361: a control-plane `Register` read-modify-write racing the datapath's
-  own per-packet increments silently discarded whichever landed second).
-  `vip_table`/`vip_stats_table` keep the same split: `Register` is a blind
+  `vip_table`.** A control-plane `Register` read-modify-write racing the
+  datapath's own per-packet increments would silently discard whichever
+  landed second (issue #361). So `Register` is a blind
   overwrite of `vip_table` alone and never touches `vip_stats_table`, which
   `edgedsr.c` alone populates, lazily, on a VIP's first matching packet —
   so re-registering a VIP (e.g. every controller reconcile pass) can never
@@ -723,6 +698,13 @@ pod on that node is not a supported configuration.
   tenant BGP session on the same node, and vice versa. See
   [ARCHITECTURE-ROUTER.md](ARCHITECTURE-ROUTER.md) for what's left in that
   binary.
+
+### History
+
+The gateway first shipped as a Full-NAT datapath with primary/secondary BGP
+local-preference placement. [#427](https://github.com/datum-cloud/galactic/pull/427) replaced it with the DSR/anycast design
+described here, with no migration path. Nothing from the Full-NAT design
+remains in the code.
 
 ---
 
@@ -774,8 +756,8 @@ that tag into `config/galactic-gateway/base`.
 - **`XDP_REDIRECT` into a veth needs NAPI enabled on the *peer*, which is a lab-only concern.** `edgedsr.c` returns `XDP_REDIRECT` whenever the route to the backend egresses an interface other than the ingress one. In native mode that calls the egress device's `ndo_xdp_xmit`, and veth's implementation silently discards the frame unless the peer end has NAPI enabled — which for a veth means the peer runs its own XDP program or has GRO turned on. A containerlab peer inside an FRR/transit container has neither by default, so a redirect there can fail exactly the way this datapath's original bug did: no drop counter moves, because `bpf_redirect()` itself succeeded and the discard happens later in `xdp_do_redirect`. Both programs are affected, and `edge_return` more so: it attaches to compute-facing links, which are veth pairs in the lab and may be veth or a plain NIC in production. `bpftool prog tracelog` and the `xdp:xdp_redirect_err` tracepoint are the diagnostics; `ethtool -K <peer> gro on` is the lab fix. A production uplink (physical NIC, or a bond slave per the bullet above) implements `ndo_xdp_xmit` natively and has no peer to ask about. This is the redirect-side analogue of the `XDP_TX`-on-veth observability quirk noted above.
 - **The return path is opt-in per node and fails closed at startup, not silently.** `edge_return` attaches only where `GALACTIC_GATEWAY_INTERNAL_INTERFACES` names an interface; a node that needs it and does not set it drops every reply in `KUBE-FORWARD` with nothing to say why, exactly as before this program existed. Where it *is* set, an attach failure is fatal to `setupGatewayDatapath` and the pod crash-loops rather than running with the forward half working and replies dying — the same all-or-nothing choice `edgeattach.Attach` already makes across a bond's slaves.
 - **A backend in another site replies through that site's edge node.** The gateway can pick a backend anywhere its `NetworkRule` reaches, and the reply then leaves through the edge node in front of *that* backend, whose own `vip_addr_table` must hold the same anycast VIP or the reply meets the unmodified kernel path and dies. Within one cluster the reconciler guarantees this; across clusters it depends on the same `NetworkRule` existing on both sides, which nothing in this repo enforces.
-- **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place, unlike the removed Full-NAT predecessor's `conn_table`, which relied on `BPF_MAP_TYPE_LRU_HASH` self-eviction for the same purpose.
-- **Egress is out of this binary's scope, not unimplemented.** An earlier plan (`docs/plans/865-edge-gateway-nat66-egress.md`) proposed adding a second, egress-masquerading XDP personality to this same program and process; that approach was superseded by a separate, sharded stateful egress translation tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`) rather than built here. `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.
+- **`vip_table` has no active GC beyond crash-recovery reconcile.** By design (see Key Design Decisions above) — DSR keeps no flow state to leak in the first place.
+- **Egress is out of this binary's scope, not unimplemented.** Egress translation is a separate, sharded tier (`galactic-nat`, its own binary — see `cmd/galactic-nat` and `internal/controller/egressshard_controller.go`). `NetworkRule`/this datapath remain ingress-only: external client → VIP → tenant backend.
 
 ---
 
@@ -806,7 +788,7 @@ that tag into `config/galactic-gateway/base`.
 **Non-obvious patterns:**
 - `gatewayDatapathKeepAlive` (`cmd/galactic-gateway/gateway.go`) intentionally never calls `Close` on the loaded eBPF objects or the XDP `link.Link` — see that var's doc comment for the live incident this guards against (silent GC-triggered detach with every control-plane signal still looking healthy).
 - Every gateway node reconciles every `NetworkGateway`/`NetworkRule` in the namespace — there is no leader election and no per-node filtering predicate on the watch itself; filtering happens inside `Reconcile` (`gw.Spec.TargetRef.Name != r.NodeName` early-return) and via `isGatewayNode`/broadcast watch mappers, not via `SetupWithManager` predicates.
-- `BGPAdvertisement` names for gateway-originated routes are node-qualified (`<rule>-<node>-v4`/`-v6`) specifically because the anycast model means every gateway node computes the same rule independently — omitting the node qualifier caused two nodes to race to create/update one shared object, confirmed live (`AlreadyExists` forever on the second node, only the first node's route ever advertised) under the earlier Full-NAT design and never reintroduced here.
+- `BGPAdvertisement` names for gateway-originated routes are node-qualified (`<rule>-<node>-v4`/`-v6`) specifically because the anycast model means every gateway node computes the same rule independently — omitting the node qualifier caused two nodes to race to create/update one shared object, which would leave the second node failing with `AlreadyExists` forever and only the first node's route ever advertised.
 - A deleted `NetworkGateway` reconcile can't just call `Engine.Stop()` unconditionally — every gateway node's process reconciles every `NetworkGateway` in the namespace, so a *sibling* node's deletion reaches this reconciler too. `isGatewayNode` re-checks whether *this* node still has its own `NetworkGateway` before stopping the engine (issue #364).
 - Advertisement failures during `Reconcile` are collected, not returned immediately — one bad rule's BGP-wiring failure must not stop the rest of the pass, but a node that converged its engine while failing to publish any route must still report `AdvertisementFailed`, not `EngineHealthy` (issue #365) — see `readyConditionFor`.
-- `withdrawNodeAdvertisements` matches only the `-v4`/`-v6` rule-advertisement name suffixes now — an earlier, Full-NAT-era version of this function also withdrew a `-selfaddr` self-address route; DSR's anycast model has no self-address to publish at all, so that name pattern no longer applies (see this file's package doc comment in `networkgateway_controller.go`).
+- `withdrawNodeAdvertisements` matches only the `-v4`/`-v6` rule-advertisement name suffixes; the anycast model publishes no other per-node route (see the package doc comment in `networkgateway_controller.go`).

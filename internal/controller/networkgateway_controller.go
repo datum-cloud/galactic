@@ -530,10 +530,10 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // ruleToGatewayRequests maps a NetworkRule change to every NetworkGateway in
-// its namespace. A NetworkRule carries no gatewayRef, and under the
-// Active-Active model every gateway node in the rule's PoP must re-evaluate its
-// own engine state whenever any rule changes, so the broadcast is intentional
-// rather than a missing index.
+// its namespace. A NetworkRule carries no gatewayRef, and every gateway node
+// advertises every VIP identically (anycast), so every gateway node in the
+// rule's PoP must re-evaluate its own engine state whenever any rule changes.
+// The broadcast is intentional rather than a missing index.
 func ruleToGatewayRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
 	rule, ok := obj.(*bgpv1alpha1.NetworkRule)
 	if !ok {
