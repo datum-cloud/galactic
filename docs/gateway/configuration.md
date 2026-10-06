@@ -459,6 +459,11 @@ not a control-plane assignment step you configure here. See
 [ARCHITECTURE-GATEWAY.md's Data Flow section](../agents/ARCHITECTURE-GATEWAY.md#data-flow)
 for the full mechanics.
 
+Deleting a `NetworkRule` withdraws its VIP routes before any gateway node
+stops serving it. The rule's finalizer deletes its `BGPAdvertisement`s,
+and each node keeps the rule loaded until they are gone plus a 5-second
+drain delay, so traffic already on its way to the VIP is not dropped.
+
 > **Known constraint:** no `NetworkRule` admission webhook is deployed in
 > this repo today. `Accepted` is set `True` unconditionally once gateway
 > nodes exist for the namespace — anyone who can create a `NetworkRule` in
