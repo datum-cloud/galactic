@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -347,6 +348,103 @@ func TestNetworkGatewayReconciler_ExcludesRuleWithUnresolvableBackend(t *testing
 			len(engine.lastDesired.Rules), engine.lastDesired.Rules)
 	}
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionFalse, reasonInvalidRule)
+}
+
+// TestNetworkGatewayReconciler_ServesThroughResolvedBackends covers #713: a
+// rule with one backend whose uSID does not resolve, as while a backend pod is
+// recreated, keeps serving and stays advertised through the backends that do
+// resolve, and its Programmed condition names the one left out.
+func TestNetworkGatewayReconciler_ServesThroughResolvedBackends(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	// Outside testBackendPrefix, so it resolves against nothing.
+	rule.Spec.Backends = append(rule.Spec.Backends, bgpv1alpha1.NetworkRuleBackend{Address: "192.0.2.99", Port: 8443})
+	acceptRule(rule)
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		Build()
+
+	engine := newFakeGatewayEngine()
+	r := newGatewayReconciler(fakeClient, scheme, engine, testNodeGWA)
+	req := ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	dr, ok := engine.lastDesired.Rules[testNamespace+"/"+testRuleName]
+	if !ok {
+		t.Fatalf("rule missing from desired state although backend %s resolves", testBackendAddr)
+	}
+	if len(dr.Backends) != 1 || dr.Backends[0].Address != netip.MustParseAddr(testBackendAddr) {
+		t.Fatalf("desired backends = %+v, want only %s", dr.Backends, testBackendAddr)
+	}
+
+	adv := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(context.Background(), testRuleKey(testRuleAdvV4), adv); err != nil {
+		t.Fatalf("get BGPAdvertisement %s: %v (the rule still serves, so it must stay advertised)", testRuleAdvV4, err)
+	}
+
+	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonBackendsUnresolved)
+	cond := ruleProgrammedCondition(t, fakeClient, testRuleName)
+	if !strings.Contains(cond.Message, "1 of 2 backends") || !strings.Contains(cond.Message, "192.0.2.99:8443") {
+		t.Errorf("Programmed message = %q, want it to count 1 of 2 backends and name 192.0.2.99:8443", cond.Message)
+	}
+}
+
+// TestBuildDesiredRule_BackendResolution covers which backend failures leave
+// a backend out and which fail the whole rule.
+func TestBuildDesiredRule_BackendResolution(t *testing.T) {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	idx := &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
+	}
+
+	tests := []struct {
+		name           string
+		backends       []string
+		wantErr        bool
+		wantBackends   int
+		wantUnresolved []string
+	}{
+		{name: "all resolve", backends: []string{testBackendAddr, "10.0.0.2"}, wantBackends: 2},
+		{
+			name: "some unresolved", backends: []string{testBackendAddr, "198.51.100.1", "2001:db8::1"},
+			wantBackends: 1, wantUnresolved: []string{"198.51.100.1:8443", "[2001:db8::1]:8443"},
+		},
+		{name: "none resolve", backends: []string{"198.51.100.1", "198.51.100.2"}, wantErr: true},
+		{name: "malformed address", backends: []string{testBackendAddr, "not-an-ip"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := newTestRule(testRuleName, "vpc-1", testVIP)
+			rule.Spec.Backends = nil
+			for _, b := range tt.backends {
+				rule.Spec.Backends = append(rule.Spec.Backends, bgpv1alpha1.NetworkRuleBackend{Address: b, Port: 8443})
+			}
+
+			dr, unresolved, err := buildDesiredRule(rule, idx)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("buildDesiredRule: err = nil, want an error; got %+v", dr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildDesiredRule: %v", err)
+			}
+			if len(dr.Backends) != tt.wantBackends {
+				t.Errorf("backends = %d, want %d", len(dr.Backends), tt.wantBackends)
+			}
+			if !slices.Equal(unresolved, tt.wantUnresolved) {
+				t.Errorf("unresolved = %v, want %v", unresolved, tt.wantUnresolved)
+			}
+		})
+	}
 }
 
 func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *testing.T) {
