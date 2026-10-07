@@ -80,6 +80,10 @@ type Key struct {
 type Entry struct {
 	Key
 
+	// Direction is the lookup this row serves, which the kernel key carries
+	// but Key does not.
+	Direction Direction
+
 	// Addr is the rewrite target's address (backend for an ingress-direction
 	// row, VIP for an egress-direction row).
 	Addr net.IP
@@ -171,6 +175,28 @@ const (
 	directionIngress = uint8(0)
 	directionEgress  = uint8(1)
 )
+
+// Direction reports which lookup a decoded row serves: DirectionIngress for the
+// row RegisterIngress writes, DirectionEgress for the row RegisterEgress writes.
+type Direction uint8
+
+// The two directions an Entry can report, matching the kernel key's byte.
+const (
+	DirectionIngress = Direction(directionIngress)
+	DirectionEgress  = Direction(directionEgress)
+)
+
+// String returns "ingress", "egress", or the raw byte for any other value.
+func (d Direction) String() string {
+	switch d {
+	case DirectionIngress:
+		return "ingress"
+	case DirectionEgress:
+		return "egress"
+	default:
+		return fmt.Sprintf("direction(%d)", uint8(d))
+	}
+}
 
 // register is the shared primitive RegisterIngress and RegisterEgress build
 // their key and value around. keyPort is the port the kernel key is composed
@@ -290,6 +316,76 @@ func (t *VipXlatTable) UnregisterEgress(block uint64, argument uint16, proto uin
 	return t.unregister(directionEgress, block, argument, proto, backendPort)
 }
 
+// UnregisterBinding removes the rows one binding wrote, wherever they sit,
+// without the caller supplying the block or argument. It returns the rows it
+// removed.
+//
+// It exists for teardown after the binding's VRF has left the node, when the
+// (block, argument) pair can no longer be derived from the node's BGP objects.
+// The egress row is the anchor: it is keyed on (proto, backendPort) and
+// rewrites to the VIP, and a VIP belongs to exactly one rule, so an egress row
+// with this binding's port, protocol, and VIP rewrite target is this binding's
+// row under whatever argument it was registered.
+//
+// For each anchor found, the ingress row at the same (block, argument, proto,
+// vipPort) is removed only if it still rewrites to backendAddr and backendPort.
+// The ingress key carries no VIP address, so a row at that key with a
+// different value belongs to another binding.
+//
+// An ingress row whose egress row is already gone is not found here. Callers
+// that can still resolve the binding's (block, argument) should also remove by
+// key.
+func (t *VipXlatTable) UnregisterBinding(
+	proto uint8, vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16,
+) ([]Entry, error) {
+	if err := validateProto(proto); err != nil {
+		return nil, err
+	}
+	rawVIP, err := addrTo16(vipAddr)
+	if err != nil {
+		return nil, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: vip address: %w", err)
+	}
+	rawBackend, err := addrTo16(backendAddr)
+	if err != nil {
+		return nil, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: backend address: %w", err)
+	}
+
+	entries, err := t.List()
+	if err != nil {
+		return nil, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: %w", err)
+	}
+
+	var (
+		removed []Entry
+		errs    []error
+	)
+	for _, e := range entries {
+		if e.Direction != DirectionEgress || e.Proto != proto || e.Port != backendPort ||
+			e.RewritePort != vipPort || [16]byte(e.Addr) != rawVIP {
+			continue
+		}
+
+		ingress, found, getErr := t.GetIngress(e.Block, e.Argument, proto, vipPort)
+		switch {
+		case getErr != nil:
+			errs = append(errs, getErr)
+		case found && ingress.RewritePort == backendPort && [16]byte(ingress.Addr) == rawBackend:
+			if delErr := t.UnregisterIngress(e.Block, e.Argument, proto, vipPort); delErr != nil {
+				errs = append(errs, delErr)
+			} else {
+				removed = append(removed, ingress)
+			}
+		}
+
+		if delErr := t.UnregisterEgress(e.Block, e.Argument, proto, backendPort); delErr != nil {
+			errs = append(errs, delErr)
+			continue
+		}
+		removed = append(removed, e)
+	}
+	return removed, errors.Join(errs...)
+}
+
 // decodeEntry converts a raw kernel key and value into an Entry, attaching this
 // table's in-memory generation for that key, or 0 when unknown.
 func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXlatValue) Entry {
@@ -307,6 +403,7 @@ func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXl
 			Proto:    key.Proto,
 			Port:     hostToNetwork16(key.Port), // self-inverse: wire -> host
 		},
+		Direction:   Direction(key.Direction),
 		Addr:        addr,
 		RewritePort: hostToNetwork16(value.Port), // self-inverse: wire -> host
 		Generation:  gen,

@@ -18,8 +18,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/vip"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -55,6 +57,8 @@ type VIPTranslationTable interface {
 		backendAddr net.IP, backendPort uint16, vipAddr net.IP, vipPort uint16) error
 	UnregisterIngress(block uint64, argument uint16, proto uint8, vipPort uint16) error
 	UnregisterEgress(block uint64, argument uint16, proto uint8, backendPort uint16) error
+	UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
 }
 
 // ServiceVIPBindingReconciler reconciles ServiceVIPBinding objects targeting
@@ -282,9 +286,22 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 }
 
 // unregisterVIPTranslation removes both vip_xlat_table rows for binding. Shared
-// by both egress kinds. Both directions are attempted even if resolving the VRF
-// context or the first removal fails, and the errors are joined, so a partial
-// failure never leaves the other row behind.
+// by both egress kinds.
+//
+// Teardown must not depend on the binding's VRF still being on the node: a VPC
+// can leave the node before its bindings are deleted, and a delete that needs
+// it would hold the finalizer forever and leave the rows in the map. Rows are
+// therefore removed in two passes, and failing to resolve the VRF context is
+// not an error:
+//
+//  1. UnregisterBinding finds the rows by value, under whatever block and
+//     argument they were written, with no lookup of BGP objects.
+//  2. If the VRF context still resolves, both rows are also removed by key, as
+//     a bind wrote them. This catches an ingress row whose egress row was never
+//     written, which the first pass cannot find.
+//
+// Every removal is attempted even if an earlier one fails, and the errors are
+// joined, so a partial failure never leaves another row behind.
 func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
@@ -297,21 +314,33 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	if err != nil {
 		return err
 	}
-
+	vipAddr := net.ParseIP(binding.Spec.VIPAddress)
+	if vipAddr == nil {
+		return fmt.Errorf("invalid vipAddress %q", binding.Spec.VIPAddress)
+	}
+	backendAddr := net.ParseIP(binding.Spec.BackendAddress)
+	if backendAddr == nil {
+		return fmt.Errorf("invalid backendAddress %q", binding.Spec.BackendAddress)
+	}
 	backendAddrIP, err := netip.ParseAddr(binding.Spec.BackendAddress)
 	if err != nil {
 		return fmt.Errorf("parse backendAddress %q: %w", binding.Spec.BackendAddress, err)
-	}
-
-	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
-	if err != nil {
-		return fmt.Errorf("resolve VRF context for VIP unbind: %w", err)
 	}
 
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
 	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
 
 	var errs []error
+	if _, err := r.VIPTranslationTable.UnregisterBinding(proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
+		errs = append(errs, fmt.Errorf("unregister vip_xlat_table rows by value: %w", err))
+	}
+
+	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
+	if err != nil {
+		log.FromContext(ctx).Info("VRF context no longer resolves; removed vip_xlat_table rows by value only",
+			"binding", client.ObjectKeyFromObject(binding), "reason", err.Error())
+		return errors.Join(errs...)
+	}
 	if err := r.VIPTranslationTable.UnregisterIngress(block, argument, proto, vipPort); err != nil {
 		errs = append(errs, fmt.Errorf("unregister vip_xlat_table ingress row: %w", err))
 	}

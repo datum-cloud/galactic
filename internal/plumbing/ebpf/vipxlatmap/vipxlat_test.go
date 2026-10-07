@@ -282,6 +282,119 @@ func TestVipXlatTable_List(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("List returned %d entries, want 2", len(entries))
 	}
+	directions := make(map[Direction]Entry)
+	for _, e := range entries {
+		directions[e.Direction] = e
+	}
+	if e, ok := directions[DirectionIngress]; !ok || !e.Addr.Equal(backend) {
+		t.Errorf("List: ingress row = %+v (found=%v), want one rewriting to %s", e, ok, backend)
+	}
+	if e, ok := directions[DirectionEgress]; !ok || !e.Addr.Equal(vip) {
+		t.Errorf("List: egress row = %+v (found=%v), want one rewriting to %s", e, ok, vip)
+	}
+}
+
+// registerBinding writes both rows of one binding on VIP port 8080 and backend
+// port 30080, failing the test on error.
+func registerBinding(t *testing.T, vt *VipXlatTable, argument uint16, vip, backend net.IP) {
+	t.Helper()
+	const vipPort, backendPort = 8080, 30080
+	if err := vt.RegisterIngress(testBlock, argument, ProtoTCP, vip, vipPort, backend, backendPort); err != nil {
+		t.Fatalf("RegisterIngress: unexpected error: %v", err)
+	}
+	if err := vt.RegisterEgress(testBlock, argument, ProtoTCP, backend, backendPort, vip, vipPort); err != nil {
+		t.Fatalf("RegisterEgress: unexpected error: %v", err)
+	}
+}
+
+func TestVipXlatTable_UnregisterBindingRemovesBothRows(t *testing.T) {
+	vt, ft := newTestTable(constClock(1))
+
+	vip := net.ParseIP("2001:db8::1")
+	backend := net.ParseIP("fd20:60::1")
+	registerBinding(t, vt, 0x46, vip, backend)
+
+	removed, err := vt.UnregisterBinding(ProtoTCP, vip, 8080, backend, 30080)
+	if err != nil {
+		t.Fatalf("UnregisterBinding: unexpected error: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Errorf("UnregisterBinding removed %d rows, want 2", len(removed))
+	}
+	if ft.len() != 0 {
+		t.Errorf("table has %d entries after UnregisterBinding, want 0", ft.len())
+	}
+
+	// Second call: nothing left to find, still not an error.
+	removed, err = vt.UnregisterBinding(ProtoTCP, vip, 8080, backend, 30080)
+	if err != nil || len(removed) != 0 {
+		t.Errorf("second UnregisterBinding = (%d removed, %v), want (0, nil)", len(removed), err)
+	}
+}
+
+func TestVipXlatTable_UnregisterBindingKeepsOtherVIPs(t *testing.T) {
+	vt, ft := newTestTable(constClock(1))
+
+	vip := net.ParseIP("2001:db8::1")
+	otherVIP := net.ParseIP("2001:db8::2")
+	backend := net.ParseIP("fd20:60::1")
+	registerBinding(t, vt, 0x46, vip, backend)
+	// Same backend address and ports in another tenant's VRF, behind another VIP.
+	registerBinding(t, vt, 0x47, otherVIP, backend)
+
+	if _, err := vt.UnregisterBinding(ProtoTCP, vip, 8080, backend, 30080); err != nil {
+		t.Fatalf("UnregisterBinding: unexpected error: %v", err)
+	}
+	if ft.len() != 2 {
+		t.Fatalf("table has %d entries, want 2 (the other VIP's rows)", ft.len())
+	}
+	if _, ok, _ := vt.GetIngress(testBlock, 0x47, ProtoTCP, 8080); !ok {
+		t.Error("other VIP's ingress row was removed")
+	}
+	if _, ok, _ := vt.GetEgress(testBlock, 0x47, ProtoTCP, 30080); !ok {
+		t.Error("other VIP's egress row was removed")
+	}
+}
+
+func TestVipXlatTable_UnregisterBindingKeepsForeignIngressRow(t *testing.T) {
+	vt, _ := newTestTable(constClock(1))
+
+	vip := net.ParseIP("2001:db8::1")
+	backend := net.ParseIP("fd20:60::1")
+	otherBackend := net.ParseIP("fd20:60::2")
+	registerBinding(t, vt, 0x46, vip, backend)
+	// Another binding in the same VRF on the same VIP port overwrote the
+	// ingress row, which carries no VIP address in its key.
+	if err := vt.RegisterIngress(testBlock, 0x46, ProtoTCP, vip, 8080, otherBackend, 30080); err != nil {
+		t.Fatalf("RegisterIngress: unexpected error: %v", err)
+	}
+
+	removed, err := vt.UnregisterBinding(ProtoTCP, vip, 8080, backend, 30080)
+	if err != nil {
+		t.Fatalf("UnregisterBinding: unexpected error: %v", err)
+	}
+	if len(removed) != 1 || removed[0].Direction != DirectionEgress {
+		t.Errorf("UnregisterBinding removed %+v, want only the egress row", removed)
+	}
+	if e, ok, _ := vt.GetIngress(testBlock, 0x46, ProtoTCP, 8080); !ok || !e.Addr.Equal(otherBackend) {
+		t.Errorf("ingress row = %+v (found=%v), want the other binding's row kept", e, ok)
+	}
+}
+
+func TestVipXlatTable_UnregisterBindingRejectsInvalidInput(t *testing.T) {
+	vt, _ := newTestTable(constClock(1))
+
+	vip := net.ParseIP("2001:db8::1")
+	backend := net.ParseIP("fd20:60::1")
+	if _, err := vt.UnregisterBinding(1, vip, 8080, backend, 30080); err == nil {
+		t.Error("UnregisterBinding with proto 1: expected an error")
+	}
+	if _, err := vt.UnregisterBinding(ProtoTCP, net.ParseIP("192.0.2.1"), 8080, backend, 30080); err == nil {
+		t.Error("UnregisterBinding with an IPv4 VIP: expected an error")
+	}
+	if _, err := vt.UnregisterBinding(ProtoTCP, vip, 8080, nil, 30080); err == nil {
+		t.Error("UnregisterBinding with a nil backend: expected an error")
+	}
 }
 
 func TestVipXlatTable_ReconcileRemovesStaleEntries(t *testing.T) {
