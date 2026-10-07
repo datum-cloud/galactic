@@ -66,12 +66,18 @@ func Load(pinDir string) (*natprog.NatObjects, error) {
 		// restart keeps every session; this one drops them, and each flow's
 		// next packet claims a new one.
 		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, nil)
-		slog.Warn("natattach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them "+
-			"(control-plane state will repopulate at next startup)", "pinDir", pinDir, "maps", unpinned, "err", loadErr)
 		if unpinErr != nil {
 			return nil, fmt.Errorf("natattach: recreate incompatible pinned maps: %w", unpinErr)
 		}
-		loadErr = spec.LoadAndAssign(&loaded, opts)
+		if len(unpinned) == 0 {
+			return nil, fmt.Errorf("natattach: load reported an incompatible map, but every pin under %s matches: %w",
+				pinDir, loadErr)
+		}
+		slog.Warn("natattach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them "+
+			"(control-plane state will repopulate at next startup)", "pinDir", pinDir, "maps", unpinned, "err", loadErr)
+		if loadErr = spec.LoadAndAssign(&loaded, opts); loadErr != nil {
+			loadErr = fmt.Errorf("after recreating %v: %w", unpinned, loadErr)
+		}
 	}
 	if loadErr != nil {
 		var ve *ebpf.VerifierError

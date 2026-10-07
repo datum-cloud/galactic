@@ -147,13 +147,20 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		// re-attaches, which blackholes every attachment on the node. An
 		// unchanged map keeps its rows.
 		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, nil)
-		slog.Warn("attach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them",
-			"pinDir", pinDir, "maps", unpinned, "err", loadErr)
 		if unpinErr != nil {
 			err = fmt.Errorf("attach: recreate incompatible pinned maps: %w", unpinErr)
 			return nil, err
 		}
-		loadErr = spec.LoadAndAssign(&loaded, opts)
+		if len(unpinned) == 0 {
+			err = fmt.Errorf("attach: load reported an incompatible map, but every pin under %s matches: %w",
+				pinDir, loadErr)
+			return nil, err
+		}
+		slog.Warn("attach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them",
+			"pinDir", pinDir, "maps", unpinned, "err", loadErr)
+		if loadErr = spec.LoadAndAssign(&loaded, opts); loadErr != nil {
+			loadErr = fmt.Errorf("after recreating %v: %w", unpinned, loadErr)
+		}
 	}
 	if loadErr != nil {
 		var ve *ebpf.VerifierError

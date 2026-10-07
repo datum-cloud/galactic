@@ -105,13 +105,19 @@ func Load(pinDir string, dispatchMaps map[string]*ebpf.Map) (*edgeprog.EdgedsrOb
 		// recreate rather than fatal. The dispatcher's maps are not ours and
 		// are never touched here.
 		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, func(name string) bool { return dispatchMapNames[name] })
-		slog.Warn("edgeattach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them "+
-			"(control-plane state will repopulate on the next NetworkRule reconcile)",
-			"pinDir", pinDir, "maps", unpinned, "err", loadErr)
 		if unpinErr != nil {
 			return nil, fmt.Errorf("edgeattach: recreate incompatible pinned maps: %w", unpinErr)
 		}
-		loadErr = spec.LoadAndAssign(&loaded, opts)
+		if len(unpinned) == 0 {
+			return nil, fmt.Errorf("edgeattach: load reported an incompatible map, but every pin under %s matches: %w",
+				pinDir, loadErr)
+		}
+		slog.Warn("edgeattach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them "+
+			"(control-plane state will repopulate on the next NetworkRule reconcile)",
+			"pinDir", pinDir, "maps", unpinned, "err", loadErr)
+		if loadErr = spec.LoadAndAssign(&loaded, opts); loadErr != nil {
+			loadErr = fmt.Errorf("after recreating %v: %w", unpinned, loadErr)
+		}
 	}
 	if loadErr != nil {
 		var ve *ebpf.VerifierError

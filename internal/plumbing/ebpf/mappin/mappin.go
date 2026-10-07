@@ -13,6 +13,11 @@
 // lose it. Some of that state, such as the uSID datapath's per-attachment rows,
 // is written once at CNI ADD and never again, so recreating a map that did not
 // need it blackholes traffic until every workload on the node re-attaches.
+//
+// Only a map's shape is compared: its type, key size, value size, entry count
+// and flags. A map that keeps its shape keeps its rows, so a change to what
+// those rows mean, such as a repurposed field of the same size, needs a new map
+// name rather than an edit to the existing one.
 package mappin
 
 import (
