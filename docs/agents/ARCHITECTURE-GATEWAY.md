@@ -255,9 +255,12 @@ that converges this node's whole gateway engine:
    advertisement carries a `networkRuleLabel` label and a plain (not
    controller, no `blockOwnerDeletion`) owner reference to its
    `NetworkRule`, both backfilled on existing objects, and nothing is
-   created or updated for a rule that is being deleted. The owner reference
-   lets Kubernetes garbage collection delete an advertisement a stale-cache
-   pass created after teardown listed the rule's advertisements.
+   created or updated for a rule that is being deleted. A pass whose cache
+   has not yet seen that deletion can still create one after teardown has
+   finished. Each pass therefore withdraws this node's advertisements for
+   rules missing from its list once an uncached read confirms the rule is
+   gone (`sweepOrphanedAdvertisements`, #763). The owner reference lets
+   Kubernetes garbage collection delete any that remain.
 3. **Crash recovery.** Runs `Engine.ReconcileOrphans` (see
    [Crash recovery](#crash-recovery) below).
 
@@ -267,7 +270,9 @@ lifecycle pieces the aggregate pass above is the wrong place for:
 once gateway nodes exist for the namespace) and the
 finalizer-guarded teardown ordering on deletion (`reconcileDelete`: delete
 every `BGPAdvertisement` labelled with the rule's name, on any node,
-*before* releasing quota/reservation state, then remove the finalizer).
+*before* releasing quota/reservation state, then list them again through
+the manager's uncached API reader and, if another node created one the
+cache missed, delete it and requeue instead of removing the finalizer).
 Each gateway node removes the rule's `vip_table` rows only after those
 deletes and its drain delay (step 1 above), which is what the
 `Datapath.RemoveRule` contract requires: withdraw the route first, or

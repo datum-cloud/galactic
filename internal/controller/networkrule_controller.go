@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -94,7 +95,16 @@ type NetworkRuleReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	NodeName string
+
+	// APIReader reads from the API server, bypassing the informer cache.
+	// Teardown uses it to find an advertisement another gateway node created
+	// after this node's cache was last updated. Required.
+	APIReader client.Reader
 }
+
+// staleAdvertisementRequeue is how long reconcileDelete waits before checking
+// again after it found an advertisement its cache had missed.
+const staleAdvertisementRequeue = time.Second
 
 // Reconcile reconciles one NetworkRule's finalizer and Accepted condition.
 // Engine convergence and advertisement wiring for accepted rules happen in
@@ -196,9 +206,14 @@ func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rul
 // releasing the finalizer would need a cross-node protocol that does not
 // exist, so the finalizer does not wait on the nodes.
 //
-// An advertisement created from a stale cache after the list below runs is not
-// seen here. Its owner reference to the rule lets Kubernetes garbage collection
-// delete it once the rule is gone.
+// The cached list can miss an advertisement another gateway node created
+// from a cache that had not yet seen the deletion timestamp. Before removing
+// the finalizer the rule's advertisements are listed again through APIReader;
+// any found there are deleted and the rule is requeued, keeping the finalizer
+// until a pass finds none. A node that creates one after the finalizer is gone
+// deletes it itself once its cache drops the rule (sweepOrphanedAdvertisements),
+// and the advertisement's owner reference to the rule lets Kubernetes garbage
+// collection delete it as a last resort.
 func (r *NetworkRuleReconciler) reconcileDelete(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule,
 ) (ctrl.Result, error) {
@@ -212,19 +227,17 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 	// gateway-node membership, which a name-based lookup would need. This finds
 	// every advertisement the rule ever caused, including one for a node that
 	// has since left.
-	advList := &bgpv1alpha1.BGPAdvertisementList{}
-	if err := r.List(ctx, advList,
-		client.InNamespace(rule.Namespace),
-		client.MatchingLabels{networkRuleLabel: rule.Name},
-	); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list BGPAdvertisements for NetworkRule %s/%s teardown: %w",
-			rule.Namespace, rule.Name, err)
+	if _, err := deleteRuleAdvertisements(ctx, r.Client, r.Client, rule); err != nil {
+		return ctrl.Result{}, err
 	}
-	for i := range advList.Items {
-		adv := &advList.Items[i]
-		if delErr := r.Delete(ctx, adv); delErr != nil && !apierrors.IsNotFound(delErr) {
-			return ctrl.Result{}, fmt.Errorf("withdraw BGPAdvertisement %s: %w", adv.Name, delErr)
-		}
+	missed, err := deleteRuleAdvertisements(ctx, r.APIReader, r.Client, rule)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if missed > 0 {
+		logger.Info("withdrew BGPAdvertisements the cache had missed; checking again before removing the finalizer",
+			"networkRule", rule.Name, "count", missed)
+		return ctrl.Result{RequeueAfter: staleAdvertisementRequeue}, nil
 	}
 
 	// TODO(edge-gateway): the QuotaEnforcer interface is real and wired, but
@@ -244,6 +257,37 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 		return ctrl.Result{}, fmt.Errorf("remove finalizer from NetworkRule %s/%s: %w", rule.Namespace, rule.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// deleteRuleAdvertisements lists rule's BGPAdvertisements through reader and
+// deletes each one through c that is not already being deleted. It returns how
+// many it deleted.
+func deleteRuleAdvertisements(
+	ctx context.Context, reader client.Reader, c client.Client, rule *bgpv1alpha1.NetworkRule,
+) (int, error) {
+	advList := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := reader.List(ctx, advList,
+		client.InNamespace(rule.Namespace),
+		client.MatchingLabels{networkRuleLabel: rule.Name},
+	); err != nil {
+		return 0, fmt.Errorf("list BGPAdvertisements for NetworkRule %s/%s teardown: %w",
+			rule.Namespace, rule.Name, err)
+	}
+	deleted := 0
+	for i := range advList.Items {
+		adv := &advList.Items[i]
+		if !adv.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if err := c.Delete(ctx, adv); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return deleted, fmt.Errorf("withdraw BGPAdvertisement %s: %w", adv.Name, err)
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 // SetupWithManager registers the reconciler with the manager.
