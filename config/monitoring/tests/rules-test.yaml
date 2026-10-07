@@ -387,9 +387,11 @@ tests:
                 idle sessions that have not expired, so tenants' long-lived connections through this shard break
                 when they next send. galactic_nat_sessions shows which family and protocol hold the table.
 
-  # A single stalled receive queue fires, and so do two of four; drops
+  # A single stalled receive queue fires, and so do two of four, and so does
+  # a queue that delivers nothing at all while discarding, at any rate; drops
   # spread across every queue (a burst) do not, nor does a single-queue
-  # interface, nor a lossy queue receiving 2 packets a second. Counters grow every 30s: 3000 packets is 100 a second.
+  # interface, nor a lossy queue receiving 2 packets a second, nor an idle
+  # queue. Counters grow every 30s: 3000 packets is 100 a second.
   - interval: 30s
     input_series:
       # dfw-worker2 ens1f1np1: queue 2 discards 300 of every 3300 (9.1%),
@@ -439,6 +441,21 @@ tests:
         values: "0+3000x40"
       - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="sjc-worker3",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
         values: "0+300x40"
+      # iad-worker2 ens1f1np1: queue 1 has stopped delivering and discards
+      # all it receives, 6 a second (#673 as seen on a staging edge), queue 0
+      # is clean and queue 2 is idle.
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="iad-worker2",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0+3000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="iad-worker2",interface="ens1f1np1",driver="bnxt_en",queue="0"}'
+        values: "0x40"
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="iad-worker2",interface="ens1f1np1",driver="bnxt_en",queue="1"}'
+        values: "893462x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="iad-worker2",interface="ens1f1np1",driver="bnxt_en",queue="1"}'
+        values: "154352+180x40"
+      - series: 'galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat",node="iad-worker2",interface="ens1f1np1",driver="bnxt_en",queue="2"}'
+        values: "1000x40"
+      - series: 'galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat",node="iad-worker2",interface="ens1f1np1",driver="bnxt_en",queue="2"}'
+        values: "0x40"
     alert_rule_test:
       - eval_time: 10m
         alertname: GalacticNatUplinkRxQueueStalled
@@ -492,6 +509,22 @@ tests:
               runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
               description: >-
                 Queue 3 of uplink ens1f1np1 (bnxt_en) has discarded 9.091% of its packets for 10 minutes while no
+                more than half of the interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the
+                interface clears it, once its bond partner is confirmed up.
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: galactic-nat
+              node: iad-worker2
+              interface: ens1f1np1
+              driver: bnxt_en
+              queue: "1"
+            exp_annotations:
+              summary: "Receive queue 1 of ens1f1np1 on iad-worker2 is dropping packets"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#galacticnatuplinkrxqueuestalled"
+              description: >-
+                Queue 1 of uplink ens1f1np1 (bnxt_en) has discarded 100% of its packets for 10 minutes while no
                 more than half of the interface's queues have. Flows hashed to that queue fail on every retry. Bouncing the
                 interface clears it, once its bond partner is confirmed up.
 
