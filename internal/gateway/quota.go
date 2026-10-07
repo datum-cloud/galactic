@@ -73,8 +73,8 @@ func NewNodeQuotaEnforcer(maxRulesPerTenant, maxRuleTableEntries int) *NodeQuota
 // CheckAndReserve reports whether rule fits within both limits and, if so,
 // reserves its map footprint. Idempotent for a key already reserved:
 // re-checking, or changing, an active rule's VIP count never double-counts it.
-// That is required because the engine calls this for every desired rule on
-// every pass, not only for new ones.
+// That is required because the engine calls this again whenever an active
+// rule changes or is retried after a failure, not only for new rules.
 func (e *NodeQuotaEnforcer) CheckAndReserve(_ context.Context, rule DesiredRule) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
