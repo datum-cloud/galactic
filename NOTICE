@@ -3101,7 +3101,7 @@ SOFTWARE.
 ## github.com/osrg/gobgp/v4
 
 * Name: github.com/osrg/gobgp/v4
-* Version: v4.9.0
+* Version: v4.10.0
 * License: Apache-2.0
 
 ```
@@ -5095,7 +5095,7 @@ THE SOFTWARE.
 ## github.com/vishvananda/netlink
 
 * Name: github.com/vishvananda/netlink
-* Version: v1.3.2-0.20260831221819-dcee5577542a
+* Version: v1.3.2-0.20261002201547-1d1c62507e3c
 * License: Apache-2.0
 
 ```
