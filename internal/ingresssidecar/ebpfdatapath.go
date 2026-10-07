@@ -471,6 +471,40 @@ func pruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
 	return result.Total(), err
 }
 
+// datapathRowsPresent reports whether vrf_table and ifindex_vrf_table still hold
+// the rows ensureEgressDatapath registered for each VRF in tableIDs.
+//
+// Those two are written together, before any egress_route_table entry, and
+// removed together by every path that removes a sidecar's rows: this
+// sidecar's own startup prune in a later pod, and the host installer's reaper
+// once it judges every sidecar on the node gone. Either can be wrong about a
+// live sidecar, in a pod overlapping its predecessor or one slow to publish
+// its advertisements, and reading the rows back is what lets this one notice.
+func datapathRowsPresent(tableIDs []uint32) (bool, error) {
+	if len(tableIDs) == 0 {
+		return true, nil
+	}
+	maps, closer, err := sidecarmap.OpenPinned(ebpfPinDir)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = closer.Close() }()
+
+	for _, tableID := range tableIDs {
+		argument, err := argumentForTableID(tableID)
+		if err != nil {
+			continue // not a table this sidecar registers rows for
+		}
+		if _, ok, err := maps.VRF.Get(ingressSidecarBlock, argument); err != nil || !ok {
+			return false, err
+		}
+		if _, ok, err := maps.Ifindex.Get(ifindexvrfmap.SidecarIfindex(argument)); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 // ensureRedirectRoute installs a plain host route for prefix into this pod's
 // main routing table, out the VRF interface for tableID as a bare nexthop
 // device. A VRF master device needs no gateway address: naming it as the link

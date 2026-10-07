@@ -112,7 +112,12 @@ sidecar advertisement on the node is in that state on two sweeps in a row, it
 first removes every sidecar row from the maps. The second sweep covers a
 replacement pod that has written its rows but not yet republished its
 advertisements. A node whose sidecar publishes no advertisements gives the
-installer no evidence, so it keeps that node's rows.
+installer no evidence, so it keeps that node's rows. Either path can still take
+a live sidecar's rows for a deleted pod's: the startup prune when two sidecar
+pods overlap on a node, and the installer when a replacement pod fails to
+publish for two sweeps. So every sidecar reads its own `vrf_table` and
+`ifindex_vrf_table` rows back on each sweep and reapplies its VRFs and routes
+when any are missing, the same reapply a datapath reload triggers.
 
 `galactic-router`'s own reconciler independently derives the *same* SID value
 from the same inputs (`srv6.ComputeSID`, `internal/plumbing/srv6/usid.go`,

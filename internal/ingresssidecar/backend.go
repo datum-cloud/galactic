@@ -50,6 +50,11 @@ type Backend interface {
 	// keepTableIDs, and reports how many it removed. Those rows belong to an
 	// earlier sidecar pod on this node, which never removes its own on exit.
 	PruneDatapath(keepTableIDs map[uint32]struct{}) (removed int, err error)
+	// DatapathRowsPresent reports whether the shared eBPF maps still hold the
+	// rows EnsureVRF registered for every VRF in tableIDs. Another writer can
+	// remove them without reloading the datapath, which DatapathGeneration
+	// does not see.
+	DatapathRowsPresent(tableIDs []uint32) (bool, error)
 }
 
 // VRFInfo describes one kernel VRF device discovered by Backend.ListVRFs.
@@ -134,6 +139,10 @@ func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
 
 func (kernelBackend) DatapathGeneration() (string, error) {
 	return datapathGeneration()
+}
+
+func (kernelBackend) DatapathRowsPresent(tableIDs []uint32) (bool, error) {
+	return datapathRowsPresent(tableIDs)
 }
 
 func (kernelBackend) PruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
