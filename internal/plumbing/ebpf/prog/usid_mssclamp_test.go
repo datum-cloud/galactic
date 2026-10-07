@@ -535,6 +535,7 @@ func TestMSSClamp_DSRReplyClamped(t *testing.T) {
 	client := netip.MustParseAddr("2001:db8:0:13::1")
 	if err := objs.VipXlatTable.Put(UsidVipXlatKey{
 		Block: block, Argument: argument, Proto: ipProtoTCP, Direction: usidVIPXlatDirEgress, Port: bswap16(80),
+		Addr: backendReal.As16(),
 	}, UsidVipXlatValue{Addr: vip.As16(), Port: bswap16(80)}); err != nil {
 		t.Fatalf("populate vip_xlat_table: %v", err)
 	}

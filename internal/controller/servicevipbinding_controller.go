@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,7 +19,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
@@ -55,6 +58,8 @@ type VIPTranslationTable interface {
 		vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) error
 	RegisterEgress(block uint64, argument uint16, proto uint8,
 		backendAddr net.IP, backendPort uint16, vipAddr net.IP, vipPort uint16) error
+	UnregisterIngress(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16) error
+	UnregisterEgress(block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16) error
 	UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
 		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
 	UnregisterBindingAt(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
@@ -86,6 +91,18 @@ type VIPTranslationTable interface {
 // plane was ever kind-gated. The bind is kept alongside it for veth rather than
 // replaced, because it still gives the node a locally verifiable answer on the
 // VIP.
+//
+// # One owner per row
+//
+// A vip_xlat_table row is keyed by VRF, protocol, address and port, so two
+// bindings on this node can claim the same row: the same VIP and port, or the
+// same backend address and port. The kernel row can only point one way. The
+// oldest live binding claiming a row owns it, by creation time and then name,
+// so the choice does not change from one reconcile to the next. A binding that
+// loses either of its rows writes neither, removes any row it alone held, and
+// reports Bound=False with reason Conflict. Deleting a binding removes only rows
+// that still hold its own values, and a change to any binding on this node
+// requeues the others, so the next owner writes the row.
 //
 // VIPTranslationTable may be nil for tests that never reconcile a live binding.
 // A nil table matters only once one is, at which point it fails with a clear
@@ -142,7 +159,15 @@ func (r *ServiceVIPBindingReconciler) reconcileBind(ctx context.Context, binding
 
 	bindingCopy := binding.DeepCopy()
 	cond := metav1.Condition{Type: bgpv1alpha1.ConditionTypeBound}
-	if bindErr != nil {
+	var conflict *vipRowConflictError
+	if errors.As(bindErr, &conflict) {
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "Conflict"
+		cond.Message = conflict.Error()
+		// Not retried on a timer: a change to the owning binding requeues
+		// this one through the peer watch in SetupWithManager.
+		bindErr = nil
+	} else if bindErr != nil {
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "BindFailed"
 		cond.Message = bindErr.Error()
@@ -191,6 +216,10 @@ func (r *ServiceVIPBindingReconciler) applyBind(ctx context.Context, binding *bg
 // registerVIPTranslation registers both vip_xlat_table rows for binding, after
 // resolving this node's uSID Block and the owning tenant VRF's Argument. Shared
 // by both egress kinds; see the type doc comment for why veth needs it too.
+//
+// It writes the rows only if binding owns both of them. Otherwise it removes
+// any row binding alone claims and returns a *vipRowConflictError naming the
+// owner of each row it lost. See the type doc comment's "One owner per row".
 func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
@@ -199,39 +228,49 @@ func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
 			"cannot bind a %s-kind ServiceVIPBinding", binding.Spec.EgressKind)
 	}
 
-	vipAddr := net.ParseIP(binding.Spec.VIPAddress)
-	if vipAddr == nil {
-		return fmt.Errorf("invalid vipAddress %q", binding.Spec.VIPAddress)
-	}
-	backendAddr := net.ParseIP(binding.Spec.BackendAddress)
-	if backendAddr == nil {
-		return fmt.Errorf("invalid backendAddress %q (required for both egressKind veth and tap)",
-			binding.Spec.BackendAddress)
-	}
-	backendAddrIP, err := netip.ParseAddr(binding.Spec.BackendAddress)
+	idx, err := buildBackendSIDIndex(ctx, r.Client, binding.Namespace)
 	if err != nil {
-		return fmt.Errorf("parse backendAddress %q: %w", binding.Spec.BackendAddress, err)
+		return fmt.Errorf("build backend SID index: %w", err)
 	}
-
-	proto, err := ipProtocolNumber(binding.Spec.Protocol)
+	self, err := resolveVIPBindingRows(idx, r.NodeName, binding)
+	if err != nil {
+		return err
+	}
+	peers, err := r.livePeers(ctx, idx, binding)
 	if err != nil {
 		return err
 	}
 
-	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
-	if err != nil {
-		return fmt.Errorf("resolve VRF context for VIP binding: %w", err)
+	conflict := &vipRowConflictError{}
+	var owned []vipRow
+	for _, row := range []vipRow{self.ingress, self.egress} {
+		if owner := rowOwner(row, binding, peers); owner != nil {
+			conflict.lost = append(conflict.lost, lostRow{row: row, owner: owner})
+		} else {
+			owned = append(owned, row)
+		}
+	}
+	if len(conflict.lost) > 0 {
+		// A binding serves traffic only with both rows. Drop the one it alone
+		// claims, in case an earlier reconcile wrote it.
+		var errs []error
+		for _, row := range owned {
+			errs = append(errs, r.unregisterRow(row))
+		}
+		if err := errors.Join(errs...); err != nil {
+			return err
+		}
+		return conflict
 	}
 
-	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
-	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
-
 	if err := r.VIPTranslationTable.RegisterIngress(
-		block, argument, proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
+		self.ingress.block, self.ingress.argument, self.ingress.proto,
+		self.vipAddr, self.vipPort, self.backendAddr, self.backendPort); err != nil {
 		return fmt.Errorf("register vip_xlat_table ingress row: %w", err)
 	}
 	if err := r.VIPTranslationTable.RegisterEgress(
-		block, argument, proto, backendAddr, backendPort, vipAddr, vipPort); err != nil {
+		self.egress.block, self.egress.argument, self.egress.proto,
+		self.backendAddr, self.backendPort, self.vipAddr, self.vipPort); err != nil {
 		return fmt.Errorf("register vip_xlat_table egress row: %w", err)
 	}
 	return nil
@@ -272,9 +311,17 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 		if err := r.unregisterVIPTranslation(ctx, binding); err != nil {
 			errs = append(errs, err)
 		}
+		// Bindings for other ports share the VIP's address on the dummy
+		// interface, so it stays while any of them is live.
 		if vipAddr := net.ParseIP(binding.Spec.VIPAddress); vipAddr != nil {
-			if err := vipUnbindFn(vipAddr); err != nil {
+			shared, err := r.vipAddressShared(ctx, binding, vipAddr)
+			switch {
+			case err != nil:
 				errs = append(errs, err)
+			case !shared:
+				if err := vipUnbindFn(vipAddr); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		} // else: already-invalid address; nothing meaningful for vip.Unbind to do
 		return errors.Join(errs...)
@@ -294,18 +341,20 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 // therefore removed in two passes, and failing to resolve the VRF context is
 // not an error:
 //
-//  1. UnregisterBinding finds the rows by value, under whatever block and
-//     argument they were written, with no lookup of BGP objects.
+//  1. UnregisterBinding finds the rows by key and value, under whatever block
+//     and argument they were written, with no lookup of BGP objects.
 //  2. If the VRF context still resolves, UnregisterBindingAt checks that
-//     location too. This catches an ingress row whose egress row was never
-//     written, which the first pass cannot find.
+//     location too.
 //
-// Both passes read each row before deleting it and leave rows another binding
-// owns, since two backends of one rule on a node can share them. Registration
-// writes rows only for an IPv6 VIP and backend, so an IPv4 or unparseable
-// address means there is nothing to remove, which must not block deletion.
-// Every removal is attempted even if an earlier one fails, and the errors are
-// joined.
+// Both passes read each row before deleting it and leave a row another binding
+// has since written its own values to. Neither can tell this binding's rows
+// from those of another live binding with the same values, so when one exists
+// on this node nothing is removed: that binding owns the rows now.
+//
+// Registration writes rows only for an IPv6 VIP and backend, so an IPv4 or
+// unparseable address means there is nothing to remove, which must not block
+// deletion. Every removal is attempted even if an earlier one fails, and the
+// errors are joined.
 func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
@@ -331,6 +380,15 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
 	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
 
+	twin, err := r.liveTwin(ctx, binding, proto, vipAddr, backendAddr)
+	if err != nil {
+		return err
+	}
+	if twin != nil {
+		logger.Info("another live binding has the same values and keeps the vip_xlat_table rows", "owner", twin.Name)
+		return nil
+	}
+
 	var errs []error
 	if _, err := r.VIPTranslationTable.UnregisterBinding(proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
 		errs = append(errs, fmt.Errorf("unregister vip_xlat_table rows by value: %w", err))
@@ -349,6 +407,31 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	return errors.Join(errs...)
 }
 
+// liveTwin returns another live binding on this node with binding's protocol,
+// VIP and port, and backend and port, or nil if there is none. Such a binding
+// writes exactly binding's rows.
+func (r *ServiceVIPBindingReconciler) liveTwin(
+	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding, proto uint8, vipAddr, backendAddr net.IP,
+) (*bgpv1alpha1.ServiceVIPBinding, error) {
+	bindings, err := r.nodeBindings(ctx, binding.Namespace, binding.Name)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range bindings {
+		bProto, err := ipProtocolNumber(b.Spec.Protocol)
+		if err != nil || bProto != proto ||
+			b.Spec.Port != binding.Spec.Port || b.Spec.BackendPort != binding.Spec.BackendPort {
+			continue
+		}
+		bVIP, vipOK := ipv6Address(b.Spec.VIPAddress)
+		bBackend, backendOK := ipv6Address(b.Spec.BackendAddress)
+		if vipOK && backendOK && bVIP.Equal(vipAddr) && bBackend.Equal(backendAddr) {
+			return b, nil
+		}
+	}
+	return nil, nil
+}
+
 // ipv6Address parses s and reports whether it is an IPv6 address, the only
 // family vip_xlat_table holds. An IPv4-mapped address counts as IPv4.
 func ipv6Address(s string) (net.IP, bool) {
@@ -357,6 +440,201 @@ func ipv6Address(s string) (net.IP, bool) {
 		return nil, false
 	}
 	return net.IP(addr.AsSlice()), true
+}
+
+// unregisterRow removes one vip_xlat_table row.
+func (r *ServiceVIPBindingReconciler) unregisterRow(row vipRow) error {
+	addr := net.IP(row.addr.AsSlice())
+	if row.egress {
+		if err := r.VIPTranslationTable.UnregisterEgress(row.block, row.argument, row.proto, addr, row.port); err != nil {
+			return fmt.Errorf("unregister vip_xlat_table egress row: %w", err)
+		}
+		return nil
+	}
+	if err := r.VIPTranslationTable.UnregisterIngress(row.block, row.argument, row.proto, addr, row.port); err != nil {
+		return fmt.Errorf("unregister vip_xlat_table ingress row: %w", err)
+	}
+	return nil
+}
+
+// vipRow identifies one vip_xlat_table row. addr and port are the VIP's for an
+// ingress row and the backend's for an egress row.
+type vipRow struct {
+	egress   bool
+	block    uint64
+	argument uint16
+	proto    uint8
+	addr     netip.Addr
+	port     uint16
+}
+
+func (r vipRow) String() string {
+	dir := "ingress"
+	if r.egress {
+		dir = "egress"
+	}
+	return fmt.Sprintf("%s row for VRF %d %s", dir, r.argument, netip.AddrPortFrom(r.addr, r.port))
+}
+
+// vipBindingRows is one binding's claim on vip_xlat_table, with the addresses
+// and ports its two rows are written from.
+type vipBindingRows struct {
+	ingress, egress      vipRow
+	vipAddr, backendAddr net.IP
+	vipPort, backendPort uint16
+}
+
+// resolveVIPBindingRows resolves the two vip_xlat_table rows binding claims on
+// nodeName.
+func resolveVIPBindingRows(
+	idx *backendSIDIndex, nodeName string, binding *bgpv1alpha1.ServiceVIPBinding,
+) (vipBindingRows, error) {
+	vipIP, err := netip.ParseAddr(binding.Spec.VIPAddress)
+	if err != nil {
+		return vipBindingRows{}, fmt.Errorf("invalid vipAddress %q: %w", binding.Spec.VIPAddress, err)
+	}
+	backendIP, err := netip.ParseAddr(binding.Spec.BackendAddress)
+	if err != nil {
+		return vipBindingRows{}, fmt.Errorf("invalid backendAddress %q (required for both egressKind veth and tap): %w",
+			binding.Spec.BackendAddress, err)
+	}
+	vipIP, backendIP = vipIP.Unmap(), backendIP.Unmap()
+
+	proto, err := ipProtocolNumber(binding.Spec.Protocol)
+	if err != nil {
+		return vipBindingRows{}, err
+	}
+
+	block, argument, err := resolveVIPBindingContextFromIndex(idx, nodeName, backendIP)
+	if err != nil {
+		return vipBindingRows{}, fmt.Errorf("resolve VRF context for VIP binding: %w", err)
+	}
+
+	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
+	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
+
+	return vipBindingRows{
+		ingress:     vipRow{block: block, argument: argument, proto: proto, addr: vipIP, port: vipPort},
+		egress:      vipRow{egress: true, block: block, argument: argument, proto: proto, addr: backendIP, port: backendPort},
+		vipAddr:     net.IP(vipIP.AsSlice()),
+		backendAddr: net.IP(backendIP.AsSlice()),
+		vipPort:     vipPort,
+		backendPort: backendPort,
+	}, nil
+}
+
+// vipPeer is another live binding on this node and the rows it claims.
+type vipPeer struct {
+	binding *bgpv1alpha1.ServiceVIPBinding
+	rows    vipBindingRows
+}
+
+// nodeBindings lists the live ServiceVIPBindings in namespace targeting this
+// node, other than exclude. A binding being deleted is not live: it gives up
+// its rows to whoever else claims them.
+func (r *ServiceVIPBindingReconciler) nodeBindings(
+	ctx context.Context, namespace, exclude string,
+) ([]*bgpv1alpha1.ServiceVIPBinding, error) {
+	list := &bgpv1alpha1.ServiceVIPBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list ServiceVIPBindings: %w", err)
+	}
+	var out []*bgpv1alpha1.ServiceVIPBinding
+	for i := range list.Items {
+		b := &list.Items[i]
+		if b.Name == exclude || b.Spec.TargetRef.Name != r.NodeName || !b.DeletionTimestamp.IsZero() {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// livePeers returns every other live binding on this node whose rows resolve.
+// One that does not resolve cannot be programmed, so it claims nothing.
+func (r *ServiceVIPBindingReconciler) livePeers(
+	ctx context.Context, idx *backendSIDIndex, binding *bgpv1alpha1.ServiceVIPBinding,
+) ([]vipPeer, error) {
+	bindings, err := r.nodeBindings(ctx, binding.Namespace, binding.Name)
+	if err != nil {
+		return nil, err
+	}
+	peers := make([]vipPeer, 0, len(bindings))
+	for _, b := range bindings {
+		rows, err := resolveVIPBindingRows(idx, r.NodeName, b)
+		if err != nil {
+			continue
+		}
+		peers = append(peers, vipPeer{binding: b, rows: rows})
+	}
+	return peers, nil
+}
+
+// vipAddressShared reports whether another live veth-kind binding on this node
+// binds the same VIP address as binding.
+func (r *ServiceVIPBindingReconciler) vipAddressShared(
+	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding, vipAddr net.IP,
+) (bool, error) {
+	bindings, err := r.nodeBindings(ctx, binding.Namespace, binding.Name)
+	if err != nil {
+		return false, err
+	}
+	for _, b := range bindings {
+		if b.Spec.EgressKind == bgpv1alpha1.ServiceVIPBindingEgressKindVeth &&
+			vipAddr.Equal(net.ParseIP(b.Spec.VIPAddress)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// claims reports whether rows includes row.
+func (rows vipBindingRows) claims(row vipRow) bool {
+	return rows.ingress == row || rows.egress == row
+}
+
+// rowOwner returns the peer that owns row ahead of self, or nil if self owns
+// it. The oldest claimant owns a row, by creation time and then name.
+func rowOwner(row vipRow, self *bgpv1alpha1.ServiceVIPBinding, peers []vipPeer) *bgpv1alpha1.ServiceVIPBinding {
+	var owner *bgpv1alpha1.ServiceVIPBinding
+	for _, p := range peers {
+		if !p.rows.claims(row) || !bindingOlder(p.binding, self) {
+			continue
+		}
+		if owner == nil || bindingOlder(p.binding, owner) {
+			owner = p.binding
+		}
+	}
+	return owner
+}
+
+// bindingOlder reports whether a was created before b, breaking a tie on
+// creation time, which has one-second resolution, by name.
+func bindingOlder(a, b *bgpv1alpha1.ServiceVIPBinding) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.Name < b.Name
+}
+
+// lostRow is one row a binding claims that an older binding owns.
+type lostRow struct {
+	row   vipRow
+	owner *bgpv1alpha1.ServiceVIPBinding
+}
+
+// vipRowConflictError reports that a binding cannot be programmed without
+// displacing an older binding's vip_xlat_table row.
+type vipRowConflictError struct {
+	lost []lostRow
+}
+
+func (e *vipRowConflictError) Error() string {
+	parts := make([]string, 0, len(e.lost))
+	for _, l := range e.lost {
+		parts = append(parts, fmt.Sprintf("%s is held by ServiceVIPBinding %s", l.row, l.owner.Name))
+	}
+	return "not programmed: " + strings.Join(parts, "; ")
 }
 
 // ipProtocolNumber maps a NetworkRuleProtocol to the IANA protocol number
@@ -405,7 +683,15 @@ func resolveVIPBindingContext(
 	if err != nil {
 		return 0, 0, fmt.Errorf("build backend SID index: %w", err)
 	}
+	return resolveVIPBindingContextFromIndex(idx, nodeName, backendAddr)
+}
 
+// resolveVIPBindingContextFromIndex is resolveVIPBindingContext over an index
+// the caller already built, so resolving every binding on a node lists each
+// resource once.
+func resolveVIPBindingContextFromIndex(
+	idx *backendSIDIndex, nodeName string, backendAddr netip.Addr,
+) (block uint64, argument uint16, err error) {
 	var router *bgpv1alpha1.BGPRouter
 	for _, rt := range idx.routers {
 		if rt.Spec.TargetRef.Name == nodeName {
@@ -414,7 +700,7 @@ func resolveVIPBindingContext(
 		}
 	}
 	if router == nil {
-		return 0, 0, fmt.Errorf("no BGPRouter targets node %q in namespace %q", nodeName, namespace)
+		return 0, 0, fmt.Errorf("no BGPRouter targets node %q", nodeName)
 	}
 	if router.Spec.SRv6Locator == "" {
 		return 0, 0, fmt.Errorf("BGPRouter %s has no SRv6Locator set", router.Name)
@@ -499,11 +785,37 @@ func vrfInstanceTargetsRouter(vrf *bgpv1alpha1.BGPVRFInstance, router *bgpv1alph
 }
 
 // SetupWithManager registers the reconciler with the manager. ServiceVIPBinding
-// is a leaf CRD written outside this repo and consumed only here, so no watch
-// beyond the object itself is needed.
+// is a leaf CRD written outside this repo and consumed only here. Besides the
+// object itself, a change to any binding on this node requeues the others, since
+// it can change which of them owns a shared vip_xlat_table row.
 func (r *ServiceVIPBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bgpv1alpha1.ServiceVIPBinding{}).
+		Watches(&bgpv1alpha1.ServiceVIPBinding{}, handler.EnqueueRequestsFromMapFunc(r.nodePeerRequests)).
 		Named("servicevipbinding").
 		Complete(r)
+}
+
+// nodePeerRequests maps a binding targeting this node to every other binding in
+// its namespace that targets this node, including ones being deleted, which
+// still need their finalizer handled.
+func (r *ServiceVIPBindingReconciler) nodePeerRequests(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+	binding, ok := obj.(*bgpv1alpha1.ServiceVIPBinding)
+	if !ok || binding.Spec.TargetRef.Name != r.NodeName {
+		return nil
+	}
+	list := &bgpv1alpha1.ServiceVIPBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(binding.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "list ServiceVIPBindings to requeue peers", "binding", binding.Name)
+		return nil
+	}
+	var reqs []ctrlreconcile.Request
+	for i := range list.Items {
+		peer := &list.Items[i]
+		if peer.Name == binding.Name || peer.Spec.TargetRef.Name != r.NodeName {
+			continue
+		}
+		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(peer)})
+	}
+	return reqs
 }

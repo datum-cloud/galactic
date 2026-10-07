@@ -510,6 +510,12 @@ deployment must currently do the same for each backend. See
 `internal/controller/servicevipbinding_controller.go`'s package doc
 comment for the full mechanics of what happens once this object exists.
 
+Bindings on one node may share a port. Two bindings conflict only when they
+claim the same VIP, port and protocol, or the same backend address, port and
+protocol, in the same VPC. The older binding keeps serving. The newer one is
+not programmed and reports `Bound=False` with reason `Conflict`, naming the
+binding that holds the row. It takes over once that binding is deleted.
+
 ## Verifying the deployment
 
 Confirm the DaemonSet and CRDs exist and are healthy:
