@@ -87,6 +87,18 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 		return nil, nil, fmt.Errorf("attach: %w", err)
 	}
 
+	// Not fatal: an attachment left on the previous usid_egress still forwards,
+	// only without what changed since. Failing startup would drop the ingress
+	// datapath for the whole node over it.
+	replaced, err := ReattachEgress(objs.UsidEgress)
+	if err != nil {
+		slog.Error("attach: could not move every attachment onto the new usid_egress; "+
+			"those keep running the previous program and maps until their next CNI ADD",
+			"replaced", replaced, "err", err)
+	} else if replaced > 0 {
+		slog.Info("attach: moved existing attachments onto the new usid_egress", "replaced", replaced)
+	}
+
 	return objs, ifaces, nil
 }
 
