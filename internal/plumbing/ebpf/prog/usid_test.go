@@ -1348,10 +1348,13 @@ func fragmentServicePacket(t *testing.T, family uint8, src, dst netip.Addr, srcP
 	}
 	pkt := buildPlainV6PacketWithL4Ports(t, src, dst, srcPort, dstPort)
 	const fragmentHeaderLen = 8
-	fragment := []byte{6, 0, 0, 1, 0, 0, 0, 1}
+	fragment := [fragmentHeaderLen]byte{6, 0, 0, 1, 0, 0, 0, 1}
 	pkt[ethHeaderLen+6] = 44
 	binary.BigEndian.PutUint16(pkt[ethHeaderLen+4:ethHeaderLen+6], 20+fragmentHeaderLen)
-	return append(pkt[:ethHeaderLen+ip6HeaderLen], append(fragment, pkt[ethHeaderLen+ip6HeaderLen:]...)...)
+	result := make([]byte, 0, len(pkt)+fragmentHeaderLen)
+	result = append(result, pkt[:ethHeaderLen+ip6HeaderLen]...)
+	result = append(result, fragment[:]...)
+	return append(result, pkt[ethHeaderLen+ip6HeaderLen:]...)
 }
 
 // egressRouteFamilyINET6/egressRouteFamilyINET4 mirror usid.c's
@@ -1416,12 +1419,12 @@ func serviceAddressMarker(ifindex uint32, addr netip.Addr) UsidServiceAccessKey 
 	return key
 }
 
-func setServiceIdentity(t *testing.T, objs *UsidObjects, ifindex uint32, token uint64) {
+func setServiceIdentity(t *testing.T, objs *UsidObjects, token uint64) {
 	t.Helper()
 	if err := objs.ServicePolicyStateTable.Put(uint32(0), UsidServicePolicyStateValue{Enabled: 1}); err != nil {
 		t.Fatalf("enable service policy: %v", err)
 	}
-	if err := objs.AttachmentIdentityTable.Put(ifindex, token); err != nil {
+	if err := objs.AttachmentIdentityTable.Put(uint32(1), token); err != nil {
 		t.Fatalf("populate attachment identity: %v", err)
 	}
 }
@@ -1519,7 +1522,7 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 		servicePort = uint16(8443)
 	)
 	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, tableID)
-	setServiceIdentity(t, objs, loopback, 1)
+	setServiceIdentity(t, objs, 1)
 
 	service := netip.MustParseAddr("fd20:70::100")
 	if err := objs.ServiceRouteTable.Put(
@@ -1565,7 +1568,7 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 	// Simulate deletion and immediate kernel ifindex reuse. The stale route and
 	// access keys still match ifindex 1, but their old incarnation token must
 	// not authorize the replacement interface.
-	setServiceIdentity(t, objs, loopback, 2)
+	setServiceIdentity(t, objs, 2)
 	if ret, _, err := objs.UsidServiceEgress.Test(pkt); err != nil || ret != tcActShot {
 		t.Fatalf("request after identity rotation verdict = %d, err = %v; want TC_ACT_SHOT", ret, err)
 	}
@@ -1577,7 +1580,7 @@ func TestUsidEgress_ServiceRouteDropsUnauthorizedPort(t *testing.T) {
 
 	const tableID = uint32(7)
 	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, tableID)
-	setServiceIdentity(t, objs, 1, 1)
+	setServiceIdentity(t, objs, 1)
 
 	service := netip.MustParseAddr("fd20:70::100")
 	if err := objs.ServiceRouteTable.Put(
@@ -1609,7 +1612,7 @@ func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
 	objs := loadObjects(t)
 	const servicePort = uint16(8443)
 	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, 7)
-	setServiceIdentity(t, objs, 1, 1)
+	setServiceIdentity(t, objs, 1)
 	wantOuterSource := setUpNodeSIDBase(t, objs, netip.MustParseAddr("fd00:1:2:3::"), 0x100)
 	service := netip.MustParseAddr("fd20:70::100")
 	consumer := netip.MustParseAddr("fd20:70::2")
@@ -1664,20 +1667,53 @@ func TestUsidServiceEgress_ServiceFragmentsFailClosed(t *testing.T) {
 		wrongDirection  bool
 		mismatchedToken bool
 	}{
-		{name: "IPv4 service request", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"), requestSource: true, configured: true},
-		{name: "IPv4 service reply", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"), configured: true},
-		{name: "IPv4 unrelated", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.200"), requestSource: true},
-		{name: "IPv4 request with reply-only marker", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"), requestSource: true, configured: true, wrongDirection: true},
-		{name: "IPv6 service request", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), requestSource: true, configured: true},
-		{name: "IPv6 service reply", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), configured: true},
-		{name: "IPv6 unrelated", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::200"), requestSource: true},
-		{name: "IPv6 reply with request-only marker", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), configured: true, wrongDirection: true},
-		{name: "IPv6 service request with stale token", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), requestSource: true, configured: true, mismatchedToken: true},
+		{
+			name: "IPv4 service request", family: egressRouteFamilyINET4,
+			consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"),
+			requestSource: true, configured: true,
+		},
+		{
+			name: "IPv4 service reply", family: egressRouteFamilyINET4,
+			consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"), configured: true,
+		},
+		{
+			name: "IPv4 unrelated", family: egressRouteFamilyINET4,
+			consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.200"), requestSource: true,
+		},
+		{
+			name: "IPv4 request with reply-only marker", family: egressRouteFamilyINET4,
+			consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"),
+			requestSource: true, configured: true, wrongDirection: true,
+		},
+		{
+			name: "IPv6 service request", family: egressRouteFamilyINET6,
+			consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"),
+			requestSource: true, configured: true,
+		},
+		{
+			name: "IPv6 service reply", family: egressRouteFamilyINET6,
+			consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), configured: true,
+		},
+		{
+			name: "IPv6 unrelated", family: egressRouteFamilyINET6,
+			consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::200"),
+			requestSource: true,
+		},
+		{
+			name: "IPv6 reply with request-only marker", family: egressRouteFamilyINET6,
+			consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"),
+			configured: true, wrongDirection: true,
+		},
+		{
+			name: "IPv6 service request with stale token", family: egressRouteFamilyINET6,
+			consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"),
+			requestSource: true, configured: true, mismatchedToken: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			objs := loadObjects(t)
-			setServiceIdentity(t, objs, 1, 1)
+			setServiceIdentity(t, objs, 1)
 			if tt.configured {
 				direction := uint8(2)
 				if tt.requestSource {
@@ -1767,7 +1803,7 @@ func TestUsidServiceEgress_DisabledGateDeniesKnownServiceRouteMiss(t *testing.T)
 func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
-	setServiceIdentity(t, objs, 1, 1)
+	setServiceIdentity(t, objs, 1)
 
 	service := netip.MustParseAddr("fd20:70::100")
 	consumer := netip.MustParseAddr("fd20:70::2")
@@ -1834,7 +1870,7 @@ func TestUsidServiceEgress_ReclaimsCollisionFromStaleRemoteGrant(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 	const currentToken = uint64(2)
-	setServiceIdentity(t, objs, 1, currentToken)
+	setServiceIdentity(t, objs, currentToken)
 	service := netip.MustParseAddr("fd20:70::100")
 	consumer := netip.MustParseAddr("fd20:70::2")
 	grantID := [16]byte{9}
@@ -1884,7 +1920,7 @@ func TestUsidServiceEgress_ReclaimsCollisionFromStaleLocalRoute(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
 	const currentToken = uint64(2)
-	setServiceIdentity(t, objs, 1, currentToken)
+	setServiceIdentity(t, objs, currentToken)
 	service := netip.MustParseAddr("fd20:70::100")
 	consumer := netip.MustParseAddr("fd20:70::2")
 	if err := objs.ServiceRouteTable.Put(serviceRouteKey(service), UsidServiceRouteValue{

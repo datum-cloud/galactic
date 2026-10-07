@@ -22,7 +22,13 @@ import (
 	networkv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
-const testServiceRouteTenantNamespace = "tenant"
+const (
+	testServiceRouteTenantNamespace = "tenant"
+	testServiceRouteName            = "dns"
+	testServiceRouteConsumerName    = "consumer"
+	testServiceRouteAccessLabel     = "access"
+	testServiceRoutePolicyNamespace = "platform"
+)
 
 type retryRouteProgrammer struct {
 	initializeCalls    int
@@ -73,7 +79,7 @@ func (p *retryRouteProgrammer) Finalize() error {
 func TestServiceRouteReplacePolicyResumesPartialApply(t *testing.T) {
 	programmer := &retryRouteProgrammer{failApply: 2}
 	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
-	policy := types.NamespacedName{Namespace: "platform", Name: "dns"}
+	policy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
 	intents := []serviceroute.RouteIntent{
 		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "a"}},
 		{Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "b"}},
@@ -101,9 +107,14 @@ func TestServiceRouteReplacePolicyReportsUnresolvedApplyRollback(t *testing.T) {
 	rollbackFailure := errors.New("rollback failed")
 	programmer := &retryRouteProgrammer{failApply: 1, cleanupErr: rollbackFailure}
 	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
-	err := reconciler.replacePolicy(types.NamespacedName{Namespace: "platform", Name: "dns"},
+	err := reconciler.replacePolicy(types.NamespacedName{
+		Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName,
+	},
 		[]serviceroute.RouteIntent{{
-			Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "consumer"},
+			Attachment: types.NamespacedName{
+				Namespace: testServiceRouteTenantNamespace,
+				Name:      testServiceRouteConsumerName,
+			},
 		}})
 	if err == nil || !errors.Is(err, rollbackFailure) || !isServiceRoutePolicyCleanupError(err) {
 		t.Fatalf("replacePolicy error = %v, want unresolved cleanup wrapping %v", err, rollbackFailure)
@@ -115,7 +126,7 @@ func TestServiceRouteReplacePolicyReportsUnresolvedApplyRollback(t *testing.T) {
 
 func TestServiceRouteRemovePolicyResumesPartialRemove(t *testing.T) {
 	programmer := &retryRouteProgrammer{failRemove: 2}
-	policy := types.NamespacedName{Namespace: "platform", Name: "dns"}
+	policy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName}
 	reconciler := &ServiceRoutePolicyReconciler{
 		Programmer: programmer,
 		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
@@ -157,14 +168,17 @@ func TestServiceRouteStartupSyncRemovesOfflineDeletedPolicyBeforeSweep(t *testin
 		t.Fatal(err)
 	}
 	programmer := &retryRouteProgrammer{}
-	deletedPolicy := types.NamespacedName{Namespace: "platform", Name: "deleted-while-offline"}
+	deletedPolicy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: "deleted-while-offline"}
 	reconciler := &ServiceRoutePolicyReconciler{
 		Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
 		Programmer: programmer,
 		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
 			deletedPolicy: {
-				{Namespace: testServiceRouteTenantNamespace, Name: "consumer"}: {
-					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "consumer"},
+				{Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName}: {
+					Attachment: types.NamespacedName{
+						Namespace: testServiceRouteTenantNamespace,
+						Name:      testServiceRouteConsumerName,
+					},
 				},
 			},
 		},
@@ -190,14 +204,17 @@ func TestServiceRouteStartupSyncRemovalFailureKeepsGateClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	programmer := &retryRouteProgrammer{failRemove: 1, staleAuthorization: true}
-	deletedPolicy := types.NamespacedName{Namespace: "platform", Name: "deleted-while-offline"}
+	deletedPolicy := types.NamespacedName{Namespace: testServiceRoutePolicyNamespace, Name: "deleted-while-offline"}
 	reconciler := &ServiceRoutePolicyReconciler{
 		Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
 		Programmer: programmer,
 		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
 			deletedPolicy: {
-				{Namespace: testServiceRouteTenantNamespace, Name: "consumer"}: {
-					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "consumer"},
+				{Namespace: testServiceRouteTenantNamespace, Name: testServiceRouteConsumerName}: {
+					Attachment: types.NamespacedName{
+						Namespace: testServiceRouteTenantNamespace,
+						Name:      testServiceRouteConsumerName,
+					},
 				},
 			},
 		},
@@ -226,18 +243,24 @@ func TestServiceRouteStartupPermanentApplyFailureDoesNotRetryFinalizedGlobalSync
 	}
 	const node = "node-a"
 	policy := &networkv1alpha1.ServiceRoutePolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "a-bad", UID: "bad-policy-uid"},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testServiceRoutePolicyNamespace, Name: "a-bad", UID: "bad-policy-uid",
+		},
 		Spec: networkv1alpha1.ServiceRoutePolicySpec{
-			ServiceRef:         networkv1alpha1.ServiceEndpointReference{Name: "dns"},
-			AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{"access": "bad"}},
+			ServiceRef: networkv1alpha1.ServiceEndpointReference{Name: testServiceRouteName},
+			AttachmentSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{testServiceRouteAccessLabel: "bad"},
+			},
 		},
 	}
 	goodPolicy := policy.DeepCopy()
 	goodPolicy.Name = "z-good"
 	goodPolicy.UID = "good-policy-uid"
-	goodPolicy.Spec.AttachmentSelector.MatchLabels["access"] = "good"
+	goodPolicy.Spec.AttachmentSelector.MatchLabels[testServiceRouteAccessLabel] = "good"
 	endpoint := &networkv1alpha1.ServiceEndpoint{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "dns", UID: "endpoint-uid"},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testServiceRoutePolicyNamespace, Name: testServiceRouteName, UID: "endpoint-uid",
+		},
 		Spec: networkv1alpha1.ServiceEndpointSpec{
 			Address: "10.0.0.53", Protocol: networkv1alpha1.NetworkRuleProtocolUDP, Port: 53,
 			DeliveryMode:       networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
@@ -246,7 +269,13 @@ func TestServiceRouteStartupPermanentApplyFailureDoesNotRetryFinalizedGlobalSync
 	}
 	readyAttachment := func(namespace, name, host string, labels map[string]string) *cloudv1alpha1.VPCAttachment {
 		return &cloudv1alpha1.VPCAttachment{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, UID: types.UID(name + "-uid"), Generation: 1, Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:  namespace,
+				Name:       name,
+				UID:        types.UID(name + "-uid"),
+				Generation: 1,
+				Labels:     labels,
+			},
 			Status: cloudv1alpha1.VPCAttachmentStatus{
 				ObservedGeneration: 1, Node: node, VPC: "vpc-a", VPCAttachment: "attachment-" + name,
 				HostInterface: host,
@@ -257,8 +286,18 @@ func TestServiceRouteStartupPermanentApplyFailureDoesNotRetryFinalizedGlobalSync
 			},
 		}
 	}
-	consumer := readyAttachment("tenant", "consumer", "consumer0", map[string]string{"access": "bad"})
-	goodConsumer := readyAttachment("tenant", "good-consumer", "consumer1", map[string]string{"access": "good"})
+	consumer := readyAttachment(
+		testServiceRouteTenantNamespace,
+		testServiceRouteConsumerName,
+		"consumer0",
+		map[string]string{testServiceRouteAccessLabel: "bad"},
+	)
+	goodConsumer := readyAttachment(
+		testServiceRouteTenantNamespace,
+		"good-consumer",
+		"consumer1",
+		map[string]string{testServiceRouteAccessLabel: "good"},
+	)
 	producer := readyAttachment("service", "producer", "producer0", map[string]string{"producer": "yes"})
 	programmer := &retryRouteProgrammer{failAttachment: consumer.Name, staleAuthorization: true}
 	reconciler := &ServiceRoutePolicyReconciler{
@@ -282,10 +321,12 @@ func TestServiceRouteStartupPermanentApplyFailureDoesNotRetryFinalizedGlobalSync
 	if programmer.initializeCalls != 1 {
 		t.Fatalf("Initialize calls = %d, want one global sync attempt", programmer.initializeCalls)
 	}
-	if _, retained := reconciler.Applied[types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}]; retained {
+	failedPolicyKey := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}
+	if _, retained := reconciler.Applied[failedPolicyKey]; retained {
 		t.Fatal("failed policy retained desired refs and would be exempt from sweep")
 	}
-	if _, retained := reconciler.Applied[types.NamespacedName{Namespace: goodPolicy.Namespace, Name: goodPolicy.Name}]; !retained {
+	goodPolicyKey := types.NamespacedName{Namespace: goodPolicy.Namespace, Name: goodPolicy.Name}
+	if _, retained := reconciler.Applied[goodPolicyKey]; !retained {
 		t.Fatal("independent valid policy was not retained after another policy failed")
 	}
 

@@ -6,6 +6,7 @@ package attach
 import (
 	"errors"
 	"fmt"
+
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 )

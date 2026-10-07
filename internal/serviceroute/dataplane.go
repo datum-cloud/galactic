@@ -550,23 +550,6 @@ func (p *EBPFRouteProgrammer) acquireSet(entries []appliedEntry) ([]appliedEntry
 	return applied, nil
 }
 
-func (p *EBPFRouteProgrammer) releaseSet(entries []appliedEntry) error {
-	released := make([]appliedEntry, 0, len(entries))
-	for index := len(entries) - 1; index >= 0; index-- {
-		if err := p.release(entries[index]); err != nil {
-			var restoreErrs []error
-			for restoreIndex := len(released) - 1; restoreIndex >= 0; restoreIndex-- {
-				if restoreErr := p.acquire(released[restoreIndex]); restoreErr != nil {
-					restoreErrs = append(restoreErrs, restoreErr)
-				}
-			}
-			return errors.Join(err, errors.Join(restoreErrs...))
-		}
-		released = append(released, entries[index])
-	}
-	return nil
-}
-
 func sortedIntentKeys(intents map[string][]RouteIntent) []string {
 	keys := make([]string, 0, len(intents))
 	for key := range intents {
@@ -814,7 +797,9 @@ func (p *EBPFRouteProgrammer) release(entry appliedEntry) error {
 		}
 		decrementAccessState(&state, entry.access.markerDirections)
 		if accessStateCount(state) == 0 {
-			if err := p.tables.UnregisterAccess(key.ingressIfindex, net.ParseIP(key.address), key.protocol, key.port); err != nil {
+			if err := p.tables.UnregisterAccess(
+				key.ingressIfindex, net.ParseIP(key.address), key.protocol, key.port,
+			); err != nil {
 				return err
 			}
 			delete(p.accessRefs, key)

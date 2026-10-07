@@ -388,6 +388,8 @@ func (t *Tables) Clear() error {
 // desired-key error therefore leaves the live maps unchanged. Deletion is
 // idempotent, so a partial deletion failure is safe to retry with the same
 // complete snapshot.
+//
+//nolint:gocyclo // Atomic multi-map sweep is intentionally linear.
 func (t *Tables) SweepPolicy(snapshot PolicySnapshot) error {
 	desiredRoutes := make(map[serviceRouteKey]struct{}, len(snapshot.Routes))
 	for _, route := range snapshot.Routes {

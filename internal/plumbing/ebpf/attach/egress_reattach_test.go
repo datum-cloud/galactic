@@ -20,7 +20,7 @@ import (
 // service egress chain. Without that, the attachment keeps running old
 // programs against old copies of maps, and rows written after the reload never
 // reach it. Unrelated filters are untouched, and a second pass changes nothing.
-func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
+func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) { //nolint:gocyclo // privileged end-to-end matrix
 	requireRoot(t)
 	const (
 		legacyLink      = "legacy0"

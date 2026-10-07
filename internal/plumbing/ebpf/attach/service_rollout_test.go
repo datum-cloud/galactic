@@ -64,9 +64,13 @@ func TestDrainLegacyServiceAuthorization(t *testing.T) {
 	}
 }
 
-func createPinnedTestMap(t *testing.T, dir, name string, typ ebpf.MapType, keySize, valueSize, maxEntries uint32) *ebpf.Map {
+func createPinnedTestMap(
+	t *testing.T, dir, name string, typ ebpf.MapType, keySize, valueSize, maxEntries uint32,
+) *ebpf.Map {
 	t.Helper()
-	m, err := ebpf.NewMap(&ebpf.MapSpec{Name: name, Type: typ, KeySize: keySize, ValueSize: valueSize, MaxEntries: maxEntries})
+	m, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name: name, Type: typ, KeySize: keySize, ValueSize: valueSize, MaxEntries: maxEntries,
+	})
 	if err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}

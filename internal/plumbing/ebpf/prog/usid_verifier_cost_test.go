@@ -17,7 +17,8 @@ import (
 // either program. The kernel's own limit is 1,000,000, but crossing it is a
 // cliff, not a slope: clamp_tcp_mss's option walk cost about 4,000 at 20 steps
 // and over 1,000,000 at 40, which failed every load on every node. This budget
-// sits about four times above today's cost (roughly 4,000 per program), so a
+// leaves modest headroom above today's largest program (usid_ingress at about
+// 13,600) while remaining more than 60 times below the kernel limit, so a
 // change that starts multiplying verifier states fails here, in a unit test,
 // long before it reaches the cliff.
 //

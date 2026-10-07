@@ -29,7 +29,11 @@ type recordingTable struct {
 	lastValue      any
 }
 
-const testRemoteServiceAddress = "10.0.0.53"
+const (
+	testRemoteServiceAddress = "10.0.0.53"
+	testConsumerDeviceName   = "consumer0"
+	testProducerDeviceName   = "producer0"
+)
 
 func (t *recordingTable) Put(_ any, value any) error {
 	t.puts++
@@ -114,7 +118,9 @@ func testRouteProgrammer(routes, access, grants *recordingTable) *EBPFRouteProgr
 	identities := &recordingTable{identityTokens: map[uint32]uint64{10: 100, 11: 110, 20: 200, 42: 420, 101: 1010}}
 	policyState := &recordingTable{}
 	return &EBPFRouteProgrammer{
-		tables:           serviceroutemap.New(routes, access, &recordingTable{}, grants, identities, policyState, &recordingTable{}),
+		tables: serviceroutemap.New(
+			routes, access, &recordingTable{}, grants, identities, policyState, &recordingTable{},
+		),
 		routeRefs:        make(map[string]routeState),
 		accessRefs:       make(map[accessKey]accessState),
 		denyRefs:         make(map[denyKey]denyState),
@@ -130,8 +136,8 @@ func localTestIntent() RouteIntent {
 	return RouteIntent{
 		Kind:           RouteIntentLocal,
 		Service:        service,
-		ConsumerDevice: "consumer0",
-		ServiceDevice:  "producer0",
+		ConsumerDevice: testConsumerDeviceName,
+		ServiceDevice:  testProducerDeviceName,
 		Ports: []api.ServiceRouteProtocolPort{{
 			Protocol: api.NetworkRuleProtocolTCP,
 			Port:     443,
@@ -313,9 +319,9 @@ func TestInitializeRepairsRecreatedInterface(t *testing.T) {
 	consumerIndex := uint32(10)
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
-		case "consumer0":
+		case testConsumerDeviceName:
 			return consumerIndex, nil
-		case "producer0":
+		case testProducerDeviceName:
 			return 20, nil
 		default:
 			return 0, fmt.Errorf("unknown interface %q", name)
@@ -351,9 +357,9 @@ func TestInitializeRepairsSharedRefsAsCompleteGeneration(t *testing.T) {
 	consumerIndex := uint32(10)
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
-		case "consumer0":
+		case testConsumerDeviceName:
 			return consumerIndex, nil
-		case "producer0":
+		case testProducerDeviceName:
 			return 20, nil
 		default:
 			return 0, fmt.Errorf("unknown interface %q", name)
@@ -402,7 +408,7 @@ func TestInitializeRetriesIncompleteGenerationRebuild(t *testing.T) {
 	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	consumerIndex := uint32(10)
 	programmer.targetIndexFn = func(name string) (uint32, error) {
-		if name == "consumer0" {
+		if name == testConsumerDeviceName {
 			return consumerIndex, nil
 		}
 		return 20, nil
@@ -438,7 +444,7 @@ func TestRemoveRetryClearsSyncFailure(t *testing.T) {
 	programmer.mapIDsValid = true
 	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
-		if name == "consumer0" {
+		if name == testConsumerDeviceName {
 			return 10, nil
 		}
 		return 20, nil
@@ -471,7 +477,7 @@ func TestMapReplacementClearsStaleMutationFailure(t *testing.T) {
 	programmer.mapIDsValid = true
 	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return currentIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
-		if name == "consumer0" {
+		if name == testConsumerDeviceName {
 			return 10, nil
 		}
 		return 20, nil
@@ -521,7 +527,7 @@ func TestInitializeReopensAllMapsWhenGrantMapChanges(t *testing.T) {
 	currentIDs := programmer.mapIDs
 	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return currentIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
-		if name == "consumer0" {
+		if name == testConsumerDeviceName {
 			return 10, nil
 		}
 		return 20, nil
@@ -536,8 +542,11 @@ func TestInitializeReopensAllMapsWhenGrantMapChanges(t *testing.T) {
 	currentIDs[3] = 99
 	programmer.openMapSetFn = func(string) (*serviceroutemap.Tables, []*ebpf.Map, [7]ebpf.MapID, error) {
 		openCalls++
-		return serviceroutemap.New(newRoutes, newAccess, &recordingTable{}, newGrants,
-			&recordingTable{identityTokens: map[uint32]uint64{10: 100, 20: 200}}, &recordingTable{}, &recordingTable{}), nil, currentIDs, nil
+		return serviceroutemap.New(
+			newRoutes, newAccess, &recordingTable{}, newGrants,
+			&recordingTable{identityTokens: map[uint32]uint64{10: 100, 20: 200}},
+			&recordingTable{}, &recordingTable{},
+		), nil, currentIDs, nil
 	}
 	if err := programmer.Initialize(); err != nil {
 		t.Fatalf("Initialize after grant map replacement: %v", err)
@@ -554,9 +563,9 @@ func TestEntriesIncludeConsumerAndProducerFragmentMarkers(t *testing.T) {
 	programmer := testRouteProgrammer(&recordingTable{}, &recordingTable{}, &recordingTable{})
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
-		case "consumer0":
+		case testConsumerDeviceName:
 			return 10, nil
-		case "producer0":
+		case testProducerDeviceName:
 			return 20, nil
 		default:
 			return 0, fmt.Errorf("unknown interface %q", name)

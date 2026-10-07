@@ -8,6 +8,7 @@ package attachmentidentity
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -41,7 +42,7 @@ func Rotate(table interface{ Put(key, value any) error }, ifindex uint32) (uint6
 // RotateMap rotates an identity in an already-open kernel map.
 func RotateMap(m *ebpf.Map, ifindex uint32) (uint64, error) {
 	if m == nil {
-		return 0, fmt.Errorf("attachmentidentity: map is nil")
+		return 0, errors.New("attachmentidentity: map is nil")
 	}
 	return Rotate(m, ifindex)
 }

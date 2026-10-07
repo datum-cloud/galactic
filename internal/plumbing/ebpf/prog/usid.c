@@ -2148,6 +2148,67 @@ static USID_ALWAYS_INLINE int service_id_equal(const __u8 a[16], const __u8 b[16
 	return diff == 0;
 }
 
+// Validate a decapsulated service tunnel at its resolved attachment. Keeping
+// this branch in a BPF subprogram prevents its request/reply states from being
+// multiplied through the legacy ingress redirect path. Return 1 when request
+// reverse state was installed, 0 for an authorized reply, and -1 on denial.
+static USID_NOINLINE int service_ingress_authorize(struct __sk_buff *skb, __be16 h_proto,
+						    __u32 ifindex, struct service_fib_scratch_value *s)
+{
+	if (!s || parse_service_packet(skb, h_proto, s))
+		return -1;
+	if (s->tunnel_direction == SERVICE_TUNNEL_REQUEST) {
+		__builtin_memset(&s->remote_grant, 0, sizeof(s->remote_grant));
+		s->remote_grant.producer_ifindex = ifindex;
+		s->remote_grant.family = s->meta_family;
+		s->remote_grant.protocol = s->protocol;
+		s->remote_grant.port = s->dest_port;
+		__builtin_memcpy(s->remote_grant.grant_id, s->tunnel_grant_id, 16);
+		__builtin_memcpy(s->remote_grant.addr, s->dest_addr, 16);
+		struct service_remote_grant_value *grant =
+			bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant);
+		if (!grant || !service_id_equal(grant->consumer_sid, s->tunnel_return_sid) ||
+		    !service_identity_matches(ifindex, grant->producer_token))
+			return -1;
+		__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
+		s->reverse.ingress_ifindex = ifindex;
+		s->reverse.family = s->meta_family;
+		s->reverse.protocol = s->protocol;
+		s->reverse.source_port = s->dest_port;
+		s->reverse.dest_port = s->source_port;
+		__builtin_memcpy(s->reverse.source_addr, s->dest_addr, 16);
+		__builtin_memcpy(s->reverse.dest_addr, s->source_addr, 16);
+		__builtin_memset(&s->reverse_value, 0, sizeof(s->reverse_value));
+		s->reverse_value.mode = SERVICE_ROUTE_MODE_REMOTE;
+		s->reverse_value.producer_token = grant->producer_token;
+		__builtin_memcpy(s->reverse_value.grant_id, s->tunnel_grant_id, 16);
+		__builtin_memcpy(s->reverse_value.return_sid, s->tunnel_return_sid, 16);
+		return service_install_reverse(s) ? -1 : 1;
+	}
+
+	__builtin_memset(&s->route, 0, sizeof(s->route));
+	s->route.ingress_ifindex = ifindex;
+	s->route.family = s->meta_family;
+	s->route.protocol = s->protocol;
+	s->route.port = s->source_port;
+	__builtin_memcpy(s->route.addr, s->source_addr, 16);
+	struct service_route_value *route = bpf_map_lookup_elem(&service_route_table, &s->route);
+	__builtin_memset(&s->access, 0, sizeof(s->access));
+	s->access.ingress_ifindex = ifindex;
+	s->access.family = s->meta_family;
+	s->access.protocol = s->protocol;
+	s->access.port = s->source_port;
+	__builtin_memcpy(s->access.addr, s->source_addr, 16);
+	struct service_access_value *access = bpf_map_lookup_elem(&service_access_table, &s->access);
+	if (!route || route->mode != SERVICE_ROUTE_MODE_REMOTE ||
+	    !service_id_equal(route->grant_id, s->tunnel_grant_id) ||
+	    !service_id_equal(route->target_sid, s->tunnel_return_sid) ||
+	    !access || access->attachment_token != route->consumer_token ||
+	    !service_identity_matches(ifindex, route->consumer_token))
+		return -1;
+	return 0;
+}
+
 SEC("tc")
 int usid_ingress(struct __sk_buff *skb)
 {
@@ -2590,66 +2651,13 @@ int usid_ingress(struct __sk_buff *skb)
 	}
 
 	if (service_tunnel) {
-		if (!service_scratch || parse_service_packet(skb, new_eth->h_proto, service_scratch)) {
+		int authorization = service_ingress_authorize(skb, new_eth->h_proto, fib_params.ifindex,
+							      service_scratch);
+		if (authorization < 0) {
 			count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
 			return TC_ACT_SHOT;
 		}
-		if (service_scratch->tunnel_direction == SERVICE_TUNNEL_REQUEST) {
-			__builtin_memset(&service_scratch->remote_grant, 0, sizeof(service_scratch->remote_grant));
-			service_scratch->remote_grant.producer_ifindex = fib_params.ifindex;
-			service_scratch->remote_grant.family = service_scratch->meta_family;
-			service_scratch->remote_grant.protocol = service_scratch->protocol;
-			service_scratch->remote_grant.port = service_scratch->dest_port;
-			__builtin_memcpy(service_scratch->remote_grant.grant_id, service_scratch->tunnel_grant_id, 16);
-			__builtin_memcpy(service_scratch->remote_grant.addr, service_scratch->dest_addr, 16);
-			struct service_remote_grant_value *grant = bpf_map_lookup_elem(&service_remote_grant_table, &service_scratch->remote_grant);
-			if (!grant || !service_id_equal(grant->consumer_sid, service_scratch->tunnel_return_sid) ||
-			    !service_identity_matches(fib_params.ifindex, grant->producer_token)) {
-				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
-				return TC_ACT_SHOT;
-			}
-			__builtin_memset(&service_scratch->reverse, 0, sizeof(service_scratch->reverse));
-			service_scratch->reverse.ingress_ifindex = fib_params.ifindex;
-			service_scratch->reverse.family = service_scratch->meta_family;
-			service_scratch->reverse.protocol = service_scratch->protocol;
-			service_scratch->reverse.source_port = service_scratch->dest_port;
-			service_scratch->reverse.dest_port = service_scratch->source_port;
-			__builtin_memcpy(service_scratch->reverse.source_addr, service_scratch->dest_addr, 16);
-			__builtin_memcpy(service_scratch->reverse.dest_addr, service_scratch->source_addr, 16);
-			__builtin_memset(&service_scratch->reverse_value, 0, sizeof(service_scratch->reverse_value));
-			service_scratch->reverse_value.mode = SERVICE_ROUTE_MODE_REMOTE;
-			service_scratch->reverse_value.producer_token = grant->producer_token;
-			__builtin_memcpy(service_scratch->reverse_value.grant_id, service_scratch->tunnel_grant_id, 16);
-			__builtin_memcpy(service_scratch->reverse_value.return_sid, service_scratch->tunnel_return_sid, 16);
-			if (service_install_reverse(service_scratch)) {
-				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
-				return TC_ACT_SHOT;
-			}
-			service_reverse_installed = 1;
-		} else {
-			__builtin_memset(&service_scratch->route, 0, sizeof(service_scratch->route));
-			service_scratch->route.ingress_ifindex = fib_params.ifindex;
-			service_scratch->route.family = service_scratch->meta_family;
-			service_scratch->route.protocol = service_scratch->protocol;
-			service_scratch->route.port = service_scratch->source_port;
-			__builtin_memcpy(service_scratch->route.addr, service_scratch->source_addr, 16);
-			struct service_route_value *route = bpf_map_lookup_elem(&service_route_table, &service_scratch->route);
-			__builtin_memset(&service_scratch->access, 0, sizeof(service_scratch->access));
-			service_scratch->access.ingress_ifindex = fib_params.ifindex;
-			service_scratch->access.family = service_scratch->meta_family;
-			service_scratch->access.protocol = service_scratch->protocol;
-			service_scratch->access.port = service_scratch->source_port;
-			__builtin_memcpy(service_scratch->access.addr, service_scratch->source_addr, 16);
-			struct service_access_value *access = bpf_map_lookup_elem(&service_access_table, &service_scratch->access);
-			if (!route || route->mode != SERVICE_ROUTE_MODE_REMOTE ||
-			    !service_id_equal(route->grant_id, service_scratch->tunnel_grant_id) ||
-			    !service_id_equal(route->target_sid, service_scratch->tunnel_return_sid) ||
-			    !access || access->attachment_token != route->consumer_token ||
-			    !service_identity_matches(fib_params.ifindex, route->consumer_token)) {
-				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
-				return TC_ACT_SHOT;
-			}
-		}
+		service_reverse_installed = authorization;
 	}
 
 	// Authorization above must run before cold-neighbor handling. Otherwise a

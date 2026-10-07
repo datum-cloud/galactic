@@ -24,9 +24,9 @@ func TestCleanupDrainsFailedApplyRollbackBeforeFinalize(t *testing.T) {
 	programmer.readMapIDsFn = func(string) ([7]ebpf.MapID, error) { return programmer.mapIDs, nil }
 	programmer.targetIndexFn = func(name string) (uint32, error) {
 		switch name {
-		case "consumer0":
+		case testConsumerDeviceName:
 			return 10, nil
-		case "producer0":
+		case testProducerDeviceName:
 			return 20, nil
 		default:
 			return 0, fmt.Errorf("unknown interface %q", name)
