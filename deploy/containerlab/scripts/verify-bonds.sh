@@ -8,9 +8,10 @@
 # disagree about who they are talking to, and the bond keeps forwarding over
 # whichever member is left. Every datapath attached to the missing member then
 # goes unexercised without anything failing. So for every member this checks
-# LACP actor state collecting and distributing (the same test
-# galactic-gateway's attach gate applies, internal/plumbing/ebpf/edgeattach/
-# gate.go, though the lab no longer deploys the gateway). It also checks that the member count matches the topology and
+# LACP actor state collecting and distributing (the same test the XDP attach
+# gate galactic-gateway and galactic-nat share applies,
+# internal/plumbing/ebpf/xdpattach/gate.go). It also checks that the member
+# count matches the topology and
 # that every member joined the bond's active aggregator with a real partner.
 #
 # Keep BONDS in step with gvpc.clab.yaml's mkbond.sh exec lines and

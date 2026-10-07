@@ -10,8 +10,8 @@ that doc wherever the mechanics matter.
 > Last verified: 2026-09-09 against the current working tree of
 > `cmd/galactic-gateway/`, `internal/config/gateway.go`, `config/galactic-gateway/`,
 > `config/galactic-router/`, and `deploy/containerlab/resources/galactic-gateway/`.
-> The containerlab lab no longer deploys the gateway; the worked example below
-> is that directory as of commit `abdd665b`.
+> The worked example below is the lab's own gateway deployment in that
+> directory.
 
 ## What `galactic-gateway` is, and when you need it
 
@@ -246,43 +246,75 @@ to the gateway datapath — see
 
 ## Step 3: Worked example, a per-node overlay
 
-`deploy/containerlab/resources/galactic-gateway/`, as of commit `abdd665b`,
-is a real, working instantiation pattern to copy for production — four edge
-nodes across three lab clusters, each with its own overlay directory named
-for the node. The lab has since stopped deploying the gateway and the
-directory is gone from the tree; recover it with
-`git archive abdd665b deploy/containerlab/resources/galactic-gateway | tar -x`:
+`deploy/containerlab/resources/galactic-gateway/` is a real, working
+instantiation pattern to copy for production: four edge nodes across three
+lab clusters, each with its own overlay directory named for the node.
 
 ```
 deploy/containerlab/resources/galactic-gateway/
 ├── base/                 # kustomize base pointing at config/galactic-gateway/base,
 │                         #   plus a lab-only image-tag patch (gateway-lab-patch.yaml)
 ├── dfw-worker2/
-│   ├── kustomization.yaml
-│   ├── node-patch.yaml      # pins to one node, sets PUBLIC_INTERFACE/SRV6_ADDRESS
-│   ├── bgprouter.yaml       # this node's tenant BGPRouter
-│   ├── bgppeer.yaml         # this node's iBGP session to the route reflector
+│   ├── kustomization.yaml   # pins to one node, renames the DaemonSet
+│   ├── node-patch.yaml      # sets PUBLIC_INTERFACE/INTERNAL_INTERFACES/SRV6_ADDRESS
 │   └── networkgateway.yaml  # the NetworkGateway object itself
 ├── dfw-worker3/             # same shape, this node's own values
 ├── sjc-worker2/             #   "
 ├── iad-worker2/             #   "
 ├── dfw/
-│   ├── kustomization.yaml       # composes this site's edge nodes + its rule
-│   ├── networkrule-ns60.yaml    # sample NetworkRule
-│   └── servicevipbinding-ns60.yaml  # sample ServiceVIPBinding for the backend
+│   ├── kustomization.yaml        # composes this site's edge nodes + its rules
+│   ├── networkrules.yaml         # ns60-tcp and ns60-udp, port 80
+│   └── servicevipbindings.yaml   # one ServiceVIPBinding per rule for the backend
 ├── sjc/                     # same shape, one edge node
 └── iad/                     #   "
 ```
 
-All three sites bind the same anycast VIP to their own site-local backend, so
-the per-site directories differ only in which backend they point at.
+Each site has its own VIP, in a `/64` only that site's edge nodes originate
+(`2001:db8:6060:1::/64` for dfw, `:2::` for sjc, `:3::` for iad), and one
+`ns60` backend of its own, so the per-site directories differ in both.
 
-### `node-patch.yaml` — pin to one node, set the per-node values
+### `kustomization.yaml` and `node-patch.yaml` — pin to one node, set the per-node values
 
-`dfw-worker2/node-patch.yaml` adds a `kubernetes.io/hostname` match to the
-DaemonSet's node affinity (so this overlay's copy of the DaemonSet only
-ever schedules onto exactly one node) and sets the two required
-gateway-container env vars:
+`dfw-worker2/kustomization.yaml` adds a `kubernetes.io/hostname` match to
+the DaemonSet's node affinity, on top of the base's own `node=edge` and
+`gateway=enabled` terms, so this overlay's copy of the DaemonSet only ever
+schedules onto exactly one node. It also renames the DaemonSet to
+`galactic-gateway-dfw-worker2` (a strategic-merge patch can't rename a
+resource), so two gateway nodes in the same cluster don't collide under one
+name in one namespace:
+
+```yaml
+# dfw-worker2's galactic-gateway: one DaemonSet pinned to this node, and the
+# NetworkGateway that tells the gateway controller to serve VIPs here.
+namespace: galactic-system
+resources:
+  - ../base
+  - networkgateway.yaml
+patches:
+  - path: node-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-gateway
+  # Pins this instance to dfw-worker2, on top of the base's own edge-node and
+  # opt-in terms.
+  - target:
+      kind: DaemonSet
+      name: galactic-gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions/-
+        value:
+          key: kubernetes.io/hostname
+          operator: In
+          values:
+            - dfw-worker2
+      - op: replace
+        path: /metadata/name
+        value: galactic-gateway-dfw-worker2
+```
+
+`dfw-worker2/node-patch.yaml` sets the gateway container's per-node env
+vars:
 
 ```yaml
 apiVersion: apps/v1
@@ -292,63 +324,56 @@ metadata:
 spec:
   template:
     spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
-                  - key: galactic.datumapis.com/node
-                    operator: In
-                    values: [edge]
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values: [dfw-worker2]
       containers:
         - name: galactic-gateway
           env:
+            # Transit-facing uplink, where VIP traffic arrives: an LACP bond,
+            # so edge_lb runs on each of its members.
             - name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
-              value: eth1
+              value: bond0
+            # Compute-facing bond, where backends' VIP-sourced replies cross
+            # this node; edge_return runs on its members.
+            - name: GALACTIC_GATEWAY_INTERNAL_INTERFACES
+              value: bond1
+            # The outer source of every packet edge_lb encapsulates toward a
+            # backend: this node's own uSID, from its BGPRouter's locator and
+            # nodeID (resources/galactic-router/dfw/). Infra sets it the
+            # same way.
             - name: GALACTIC_GATEWAY_SRV6_ADDRESS
-              value: "2001:db8:ff01:3002:e000::"
+              value: "2001:db8:ff01:1002::"
 ```
 
-`dfw-worker3`'s own `node-patch.yaml` repeats this shape with its own
-hostname and a distinct `GALACTIC_GATEWAY_SRV6_ADDRESS`
-(`2001:db8:ff01:3003:e000::`) — every gateway node needs its own unique value.
-`dfw-worker2/kustomization.yaml` additionally JSON6902-patches the
-DaemonSet's own `metadata.name` to `galactic-gateway-dfw-worker2` (a
-strategic-merge patch can't rename a resource), so two gateway nodes in the
-same cluster don't collide under one name in one namespace.
+`dfw-worker3`'s own overlay repeats this shape with its own hostname and its
+own uSID (`2001:db8:ff01:1003::`), since every gateway node needs its own
+unique `GALACTIC_GATEWAY_SRV6_ADDRESS`.
 
 **To generalize this to a real deployment:** create one overlay directory
-per gateway node, each with its own `node-patch.yaml` pinning
-`kubernetes.io/hostname` to that node and setting that node's own public
-uplink interface name and a unique SRv6-reachable IPv6 address (a uSID
-computed the same way `internal/plumbing/ebpf/uformat.Encode` derives one
-for this node's `BGPRouter`'s locator/nodeID — see the lab's own
-`node-patch.yaml` comment for the exact encoding used there). There is no
-generic default for either value and nothing in this repo computes them
-for you.
+per gateway node, each pinning `kubernetes.io/hostname` to that node and
+setting that node's own public uplink interface name and a unique
+SRv6-reachable IPv6 address. The lab uses the node's own uSID, the
+`<locator>:<nodeID hex>::` address of its `BGPRouter` (`nodeID: 4098` is
+`0x1002`). There is no generic default for either value and nothing in this
+repo computes them for you.
 
-### `bgprouter.yaml`/`bgppeer.yaml` — this node's tenant BGP
+### The node's tenant BGP
 
 The co-located `galactic-router` pod needs its own `BGPRouter`/
 `BGPPeer` CRDs, exactly like every other `galactic-router` node — a gateway
-node is not exempt from the normal tenant-BGP setup:
+node is not exempt from the normal tenant-BGP setup. The lab keeps them with
+the rest of the router config, in
+`deploy/containerlab/resources/galactic-router/dfw/bgprouter-dfw-worker2.yaml`
+and `bgppeer-dfw-worker2.yaml`:
 
 ```yaml
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPRouter
 metadata:
-  name: dfw-worker2-tenant
+  name: galactic-router-dfw-worker2
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
     name: dfw-worker2
-  roles: [tenant]
   localASN: 65000
   routerID: "10.0.1.2"
   srv6Locator: "2001:db8:ff01::/48"
@@ -360,11 +385,11 @@ spec:
 apiVersion: network.datumapis.com/v1alpha1
 kind: BGPPeer
 metadata:
-  name: dfw-worker2-tenant-to-rr
+  name: galactic-control-dfw-worker2
   namespace: galactic-system
 spec:
   routerRef:
-    name: dfw-worker2-tenant
+    name: galactic-router-dfw-worker2
   peerASN: 65000
   address: "fc00:0:8::1"
   remotePort: 1790
@@ -426,23 +451,23 @@ gateway node, named after that node (see the worked example above).
 | `spec.backends`         | Yes      | `[]{address, port}` (1–64) | Backend `address:port` targets traffic is load-balanced to.                                                                                      |
 | `status.conditions`     | —        | —                          | `Accepted` condition — currently set `True` unconditionally once gateway nodes exist for the namespace (see the admission-webhook caveat below). |
 
-Example, from `deploy/containerlab/resources/galactic-gateway/iad/networkrule-ns60.yaml` at `abdd665b`:
+Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkrules.yaml`:
 
 ```yaml
 apiVersion: network.datumapis.com/v1alpha1
 kind: NetworkRule
 metadata:
-  name: ns60-web
+  name: ns60-tcp
   namespace: galactic-system
 spec:
   vpcRef: "60"
   vpcAttachmentRef: "60"
   vipAddresses:
-    - 2001:db8:6060::1
+    - 2001:db8:6060:3::1
   protocol: tcp
   port: 80
   backends:
-    - address: fd20:60:ff03::100:0
+    - address: fd20:60:ff03:a::100
       port: 80
 ```
 
@@ -474,23 +499,23 @@ naming that `(node, VIP, backend)` triple — this is reconciled by
 `ServiceVIPBindingReconciler` running inside **`galactic-router`** (not
 `galactic-gateway`), so it's out of this document's direct scope, but
 worth knowing about since it's required for the datapath to work
-end-to-end. Example, from
-`deploy/containerlab/resources/galactic-gateway/iad/servicevipbinding-ns60.yaml` at `abdd665b`:
+end-to-end. Example, the TCP binding from
+`deploy/containerlab/resources/galactic-gateway/iad/servicevipbindings.yaml`:
 
 ```yaml
 apiVersion: network.datumapis.com/v1alpha1
 kind: ServiceVIPBinding
 metadata:
-  name: ns60-web-iad-worker
+  name: ns60-tcp-backend
   namespace: galactic-system
 spec:
   targetRef:
     kind: Node
     name: iad-worker
-  vipAddress: 2001:db8:6060::1
+  vipAddress: 2001:db8:6060:3::1
   port: 80
   protocol: tcp
-  backendAddress: fd20:60:ff03::100:0
+  backendAddress: fd20:60:ff03:a::100
   backendPort: 80
   egressKind: veth
 ```

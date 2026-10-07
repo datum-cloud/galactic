@@ -13,17 +13,20 @@
 // affected traffic stay at exactly zero; attaching this program is what
 // makes them move).
 //
-// The egress shard's datapath (internal/plumbing/ebpf/natprog) leaves every
-// translated packet from the driver: XDP_TX back out the interface it
-// arrived on, XDP_REDIRECT out another. On a real edge node's uplinks,
-// genuine physical NICs, that is the ordinary high-throughput XDP pattern.
-// This program's only job is making this lab's veth-pair simulation of
-// those uplinks behave the way a real NIC already does, on whichever node
-// sits on the *other* end of a link facing an edge node: the transit ports
-// facing each edge node's transit bond, where a translated packet leaves
-// toward the off-fabric host, and the compute-node ports facing each edge
-// node's compute-facing bond, where a shard redirects an un-translated reply
-// back toward the tenant's node. See deploy:lab-xdp-passthrough and
+// Both XDP datapaths on an edge node leave their packets from the driver:
+// the egress shard (internal/plumbing/ebpf/natprog) and galactic-gateway's
+// edge_lb/edge_return (internal/plumbing/ebpf/edgeprog/edgedsr.c), XDP_TX
+// back out the interface a packet arrived on, XDP_REDIRECT out another. On a
+// real edge node's uplinks, genuine physical NICs, that is the ordinary
+// high-throughput XDP pattern. This program's only job is making this lab's
+// veth-pair simulation of those uplinks behave the way a real NIC already
+// does, on whichever node sits on the *other* end of a link facing an edge
+// node: the transit ports facing each edge node's transit bond, where a
+// translated packet leaves toward the off-fabric host and edge_return sends
+// a backend's reply toward the client, and the compute-node ports facing
+// each edge node's compute-facing bond, where a shard redirects an
+// un-translated reply back toward the tenant's node and edge_lb redirects a
+// client's packet toward its backend. See deploy:lab-xdp-passthrough and
 // deploy:lab-xdp-passthrough-compute for the exact lists. Not applied
 // anywhere else in this topology: usid_ingress/usid_egress (usid.c) are
 // TC-BPF, not XDP, so ordinary tenant traffic never needed this.
