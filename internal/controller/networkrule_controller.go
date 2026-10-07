@@ -6,13 +6,17 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -35,6 +39,42 @@ const networkRuleFinalizer = "galactic.datum.net/networkrule-teardown"
 // was created and since departed would not appear in that reconstruction,
 // leaving its advertisement never withdrawn.
 const networkRuleLabel = "galactic.datum.net/network-rule"
+
+// gatewayNodeLabel is set on every BGPAdvertisement applyBGPAdvertisements
+// creates. Its value is gatewayNodeLabelValue of the originating gateway node's
+// name, so withdrawNodeAdvertisements can select one node's routes by label.
+const gatewayNodeLabel = "galactic.datum.net/gateway-node"
+
+// gatewayNodeLabelHashLen is how many hex characters of the node name's
+// SHA-256 gatewayNodeLabelValue keeps when it has to shorten a name.
+const gatewayNodeLabelHashLen = 10
+
+// gatewayNodeLabelValue returns the gatewayNodeLabel value for nodeName.
+// A label value is capped at 63 characters, but a node name can be up to 253
+// (an FQDN, say), and a raw over-long value would fail every create and update
+// of that node's advertisements. A name that is already a valid label value is
+// returned unchanged. Any other is cut to a prefix, trimmed to end in an
+// alphanumeric, and suffixed with "-" and a short hash of the full name, so the
+// result is valid, deterministic, and distinct for two long names that share a
+// prefix.
+func gatewayNodeLabelValue(nodeName string) string {
+	if len(validation.IsValidLabelValue(nodeName)) == 0 {
+		return nodeName
+	}
+	sum := sha256.Sum256([]byte(nodeName))
+	suffix := hex.EncodeToString(sum[:])[:gatewayNodeLabelHashLen]
+	prefix := nodeName
+	if maxPrefix := validation.LabelValueMaxLength - 1 - len(suffix); len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
+	}
+	prefix = strings.TrimRightFunc(prefix, func(c rune) bool {
+		return (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9')
+	})
+	if prefix == "" {
+		return suffix
+	}
+	return prefix + "-" + suffix
+}
 
 // NetworkRuleReconciler owns the per-object NetworkRule lifecycle that
 // NetworkGatewayReconciler's aggregate, list-driven loop is the wrong place
@@ -147,11 +187,18 @@ func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rul
 //     implementation behind it is a no-op.
 //
 // Removing the datapath's own rule rows is node-local and done independently by
-// each gateway node, which drops a deleting rule from its desired state
-// immediately rather than waiting on this finalizer. Coordinating "every
-// gateway node has finished" before releasing the finalizer would need a
-// cross-node protocol that does not exist, so this only orders step 1 before
-// step 2 on this reconciler's own timeline.
+// each gateway node, after this step 1 rather than before it: while this
+// finalizer is present and any advertisement carrying networkRuleLabel exists,
+// NetworkGatewayReconciler keeps the rule loaded as draining, and once the last
+// one is gone it waits ruleDrainDelay for the withdrawal to reach every peer
+// before dropping it. The BGPAdvertisement watch is what wakes each node when
+// the deletes below land. Coordinating "every gateway node has finished" before
+// releasing the finalizer would need a cross-node protocol that does not
+// exist, so the finalizer does not wait on the nodes.
+//
+// An advertisement created from a stale cache after the list below runs is not
+// seen here. Its owner reference to the rule lets Kubernetes garbage collection
+// delete it once the rule is gone.
 func (r *NetworkRuleReconciler) reconcileDelete(
 	ctx context.Context, rule *bgpv1alpha1.NetworkRule,
 ) (ctrl.Result, error) {
@@ -188,7 +235,7 @@ func (r *NetworkRuleReconciler) reconcileDelete(
 			rule.Namespace, rule.Name, err)
 	}
 
-	logger.Info("NetworkRule BGP route withdrawn; vip_table teardown proceeds independently on each gateway node",
+	logger.Info("NetworkRule BGP route withdrawn; each gateway node drops it from vip_table after its drain delay",
 		"networkRule", rule.Name)
 
 	patchBase := rule.DeepCopy()
