@@ -15,7 +15,7 @@ import (
 )
 
 // VPCAttributionEntry is one decoded vpc_attribution_table row: the
-// VPC/VPCAttachment identity registerEBPFDatapath already knows for a
+// VPC/VPCAttachment identity attachreg.RegisterDatapath already knows for a
 // (Block, Argument) at CNI ADD time, kept alongside vrf_table's own counters
 // so byte accounting (datum-cloud/enhancements#878) can attribute them to a
 // tenant without a central uSID-to-VPC lookup for the receiving side, which

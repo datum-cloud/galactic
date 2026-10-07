@@ -25,6 +25,7 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/nadpatch"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
@@ -209,11 +210,11 @@ func checkEBPFEntry(pluginConf *PluginConf, argument uint16, bgp bgpConfig, ifac
 // an error here: once the datapath has reloaded, a still-missing entry means
 // this attachment has lost its fast delivery path.
 func checkEgressKind(pinDir, vpc, vpcAttachment, ifaceType string) error {
-	want, err := egressKindForInterfaceType(ifaceType)
+	want, err := attachreg.EgressKindForInterfaceType(ifaceType)
 	if err != nil {
 		return fmt.Errorf("determine eBPF egress kind: %w", err)
 	}
-	hostIfindex, err := hostInterfaceIndex(vpc, vpcAttachment)
+	hostIfindex, err := attachreg.HostInterfaceIndex(vpc, vpcAttachment)
 	if err != nil {
 		return fmt.Errorf("resolve host interface ifindex for eBPF check: %w", err)
 	}

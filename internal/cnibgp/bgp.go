@@ -9,13 +9,14 @@
 // does not own; host-interface gateway configuration lives in internal/hostgw,
 // called directly by the master plugins.
 //
-// Two narrow exceptions touch kernel state here. registerEBPFDatapath resolves
-// the host-side interface's ifindex with a read-only netlink.LinkByName to key
-// its ifindex_vrf_table row, because the (Block, Argument) values that row
-// pairs with are known only at that call site, and the interface name is
-// deterministic. installEgressRoutes writes a real kernel route, because
-// the optional routing plugin in this chain may be absent from a conflist and
-// the route must exist wherever a NAT66 shard is configured. That route
+// The eBPF registration itself lives in internal/plumbing/ebpf/attachreg,
+// which the galactic-cni daemon also uses to rebuild rows a map recreation has
+// lost. Two narrow exceptions there touch kernel state on this plugin's
+// behalf. It resolves the host-side interface's ifindex with a read-only
+// netlink.LinkByName to key its ifindex_vrf_table row, because the interface
+// name is deterministic. It writes the VRF's shard egress routes, because the
+// optional routing plugin in this chain may be absent from a conflist and the
+// route must exist wherever a NAT66 shard is configured. That route
 // encapsulates toward the shard's SID with this attachment's VRFID written
 // into the Argument, which is what a shard reads back to tell one tenant on
 // this node from another.
@@ -26,35 +27,24 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/cilium/ebpf"
 	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/vishvananda/netlink"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"go.datum.net/galactic/internal/cniipam"
-	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/gc"
-	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
-	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
-	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
-	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/srv6"
-	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -65,8 +55,8 @@ const maxRetries = 2
 // ifaceTypeVeth and ifaceTypeTap are the values publishConfig.ifaceType
 // accepts. Inferred from prevResult, not from a config field.
 const (
-	ifaceTypeVeth = "veth"
-	ifaceTypeTap  = "tap"
+	ifaceTypeVeth = attachreg.InterfaceTypeVeth
+	ifaceTypeTap  = attachreg.InterfaceTypeTap
 )
 
 // publishConfig carries the subset of this plugin's own config that
@@ -318,10 +308,10 @@ func localEgressPrefixes(ipamResult *cniipam.IPAMResult) []string {
 		return prefixes
 	}
 	if ipamResult.IPv6Gateway != nil {
-		prefixes = append(prefixes, ipamResult.IPv6Gateway.String()+"/128")
+		prefixes = append(prefixes, attachreg.HostPrefix(ipamResult.IPv6Gateway))
 	}
 	if ipamResult.IPv4Gateway != nil {
-		prefixes = append(prefixes, ipamResult.IPv4Gateway.String()+"/32")
+		prefixes = append(prefixes, attachreg.HostPrefix(ipamResult.IPv4Gateway))
 	}
 	return prefixes
 }
@@ -527,487 +517,45 @@ func publishBGPState(
 	return result, err
 }
 
+// egressConfig returns the egress shard configuration CNI ADD installs a
+// VRF's shard routes from. cniConfig is nil until InitCNIConfig runs, which
+// unit tests calling registerEBPFDatapath directly never do; that reads as
+// no shard configured.
+func egressConfig() attachreg.EgressConfig {
+	if cniConfig == nil {
+		return attachreg.EgressConfig{}
+	}
+	return attachreg.EgressConfig{ShardSIDs: cniConfig.EgressShardSIDs, NAT64Prefix: cniConfig.NAT64Prefix}
+}
+
 // registerEBPFDatapath registers this attachment against the eBPF uSID
-// datapath's pinned maps. registered is false with a nil error only when this
-// router has no SRv6 locator or node ID configured, meaning SRv6 is
-// deliberately not set up for it. Any other failure returns an error.
+// datapath's pinned maps under pinDir through attachreg.RegisterDatapath, with
+// this ADD's egress configuration. registered is false with a nil error only
+// when this router has no SRv6 locator or node ID configured.
 //
-// prefixes are this attachment's guest CIDRs and gateway host addresses.
-// Each is registered as a local pass-through egress_route_table entry in this
-// VPC's VRF, so local destinations outrank the VRF's ::/0 NAT66 default.
-// An empty slice is valid and registers nothing.
+// prefixes are this attachment's guest CIDRs and gateway host addresses, as
+// localEgressPrefixes produces them.
 func registerEBPFDatapath(
 	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string, prefixes []string,
 ) (registered bool, err error) {
-	if bgp.srv6Locator == "" || bgp.nodeID == 0 {
-		return false, nil
-	}
-
-	if bgp.nodeID < uformat.NodeIDMin || bgp.nodeID > uformat.NodeIDMax {
-		return false, fmt.Errorf("eBPF registration: nodeID %d out of range [%#x,%#x]",
-			bgp.nodeID, uint16(uformat.NodeIDMin), uint16(uformat.NodeIDMax))
-	}
-
-	egressKind, err := egressKindForInterfaceType(ifaceType)
-	if err != nil {
-		return false, fmt.Errorf("determine eBPF egress kind: %w", err)
-	}
-
-	prefix, err := netip.ParsePrefix(bgp.srv6Locator)
-	if err != nil {
-		return false, fmt.Errorf("parse SRv6 locator %q for eBPF registration: %w", bgp.srv6Locator, err)
-	}
-	block, err := uformat.Block(prefix.Addr())
-	if err != nil {
-		return false, fmt.Errorf("derive eBPF uSID Block from locator %q: %w", bgp.srv6Locator, err)
-	}
-
-	vrfTableID, err := vrf.TableID(vpc)
-	if err != nil {
-		return false, fmt.Errorf("look up VRF table id for eBPF registration: %w", err)
-	}
-
-	// Installs or refreshes this VRF's NAT66 default egress route. The
-	// optional routing plugin in this chain may be absent from a given
-	// conflist, and this route must exist wherever a shard is configured, so
-	// it is written here.
-	if err := installEgressRoutes(vrfTableID, argument); err != nil {
-		return false, fmt.Errorf("install NAT66 default egress route: %w", err)
-	}
-
-	if err := registerLocalEgressRoutes(pinDir, vrfTableID, prefixes); err != nil {
-		return false, fmt.Errorf("register local pass-through egress route: %w", err)
-	}
-
-	// The host-side interface's ifindex keys this attachment's
-	// ifindex_vrf_table row. See the package doc comment for why this
-	// read-only netlink call is an accepted exception.
-	hostIfindex, err := hostInterfaceIndex(vpc, vpcAttachment)
-	if err != nil {
-		return false, fmt.Errorf("resolve host interface ifindex for eBPF registration: %w", err)
-	}
-
-	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
-	if err != nil {
-		return false, fmt.Errorf("open pinned eBPF uSID maps: %w", err)
-	}
-	defer func() { _ = closer.Close() }()
-
-	if err := registry.Locator.Register(block, uint16(bgp.nodeID)); err != nil {
-		return false, fmt.Errorf("register eBPF locator_table entry: %w", err)
-	}
-	if err := registry.Function.Register(block, uformat.FunctionEndDT46); err != nil {
-		return false, fmt.Errorf("register eBPF function_table entry: %w", err)
-	}
-
-	if err := registry.VRF.Register(block, argument, vrfTableID, egressKind); err != nil {
-		return false, fmt.Errorf("register eBPF vrf_table entry: %w", err)
-	}
-
-	// Attribute this (block, argument) to its VPC/VPCAttachment for byte
-	// accounting (datum-cloud/enhancements#878), keyed identically to the
-	// vrf_table row just registered. vpc and vpcAttachment are already known
-	// here as this attachment's own CNI-config identifiers, so this needs no
-	// central uSID-to-VPC lookup for the receiving side. Non-fatal: a
-	// registration failure here must not fail the CNI ADD, since vrf_table's
-	// own registration above already succeeded and forwarding is unaffected;
-	// only attribution for this attachment is degraded until the next ADD/DEL
-	// or GC repair.
-	vpcNum, vpcAttachmentNum, err := decodeVPCIdentifiers(vpc, vpcAttachment)
-	if err != nil {
-		slog.Warn("ADD: could not decode VPC/VPCAttachment for byte-accounting attribution; "+
-			"vrf_table counters for this entry will report unattributed until the next ADD/DEL",
-			"vpc", vpc, "vpcAttachment", vpcAttachment, "err", err)
-	} else if err := registry.VPCAttribution.Register(block, argument, vpcNum, vpcAttachmentNum); err != nil {
-		slog.Warn("ADD: could not register eBPF vpc_attribution_table entry; "+
-			"vrf_table counters for this entry will report unattributed until the next ADD/DEL",
-			"vpc", vpc, "vpcAttachment", vpcAttachment, "err", err)
-	}
-
-	ifindexTable, ifindexCloser, err := ifindexvrfmap.OpenPinned(pinDir)
-	if err != nil {
-		return false, fmt.Errorf("open pinned eBPF ifindex_vrf_table: %w", err)
-	}
-	defer func() { _ = ifindexCloser.Close() }()
-	if err := ifindexTable.Register(hostIfindex, block, argument); err != nil {
-		return false, fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
-	}
-	if err := registerEgressKind(pinDir, hostIfindex, egressKind); err != nil {
-		return false, err
-	}
-
-	// Attach usid_egress to this attachment's host-side interface. This is
-	// what translates a reply's source address on the way back out.
-	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
-	if err := attachUsidEgress(pinDir, hostName); err != nil {
-		return false, fmt.Errorf("attach eBPF usid_egress to host interface %q: %w", hostName, err)
-	}
-
-	// Register this node's own SRv6 SID base. A per-node constant rather than
-	// a per-attachment one, but idempotent and cheap enough to redo on every
-	// ADD instead of adding a once-per-node lifecycle hook.
-	//
-	// Non-fatal, unlike the registrations above. A node whose BGPRouter names
-	// no SRv6 locator or node ID has no SID to register and no SRv6 endpoint
-	// of its own -- the same condition that leaves this attachment's own
-	// advertised SID unset above. Failing every pod attach on such a node is
-	// worse than the alternative, where only traffic needing encapsulation
-	// fails. usid_egress fails open for exactly this gap, and a later ADD
-	// succeeds once the locator is configured.
-	if err := registerNodeSourceAddress(pinDir, bgp.srv6Locator, bgp.nodeID); err != nil {
-		slog.Warn("ADD: could not register this node's own SRv6 SID; "+
-			"egress routing will fail open until this succeeds", "err", err)
-	}
-
-	// Register this node's fabric-uplink next hop. Same per-node,
-	// redo-on-every-ADD, non-fatal shape as registerNodeSourceAddress above,
-	// for the same reason: resolving it needs a converged underlay neighbor.
-	// usid_egress falls through to egress_route_table while the entry is
-	// absent.
-	if err := registerPublicUplink(pinDir); err != nil {
-		slog.Warn("ADD: could not register this node's own public uplink; "+
-			"a DSR backend's VIP-sourced reply traffic will fail open to egress_route_table until this succeeds",
-			"err", err)
-	}
-
-	return true, nil
-}
-
-// decodeVPCIdentifiers decodes vpc and vpcAttachment, the base62 identifiers
-// CNI configuration carries (see docs/cni/conflist-reference.md), into the
-// fixed-width numeric form vpc_attribution_table stores: 48-bit VPC, 16-bit
-// VPCAttachment. Both are validated as base62 elsewhere in this chain (see
-// isValidBase62 in config.go); a decode failure here means that validation
-// was bypassed or the format changed underneath it, not an ordinary runtime
-// condition.
-func decodeVPCIdentifiers(vpc, vpcAttachment string) (vpcNum uint64, vpcAttachmentNum uint32, err error) {
-	vpcHex, err := intf.Base62ToHex(vpc)
-	if err != nil {
-		return 0, 0, fmt.Errorf("decode vpc %q: %w", vpc, err)
-	}
-	vpcNum, err = strconv.ParseUint(vpcHex, 16, 48)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse decoded vpc %q (hex %q) as uint48: %w", vpc, vpcHex, err)
-	}
-
-	vpcAttachmentHex, err := intf.Base62ToHex(vpcAttachment)
-	if err != nil {
-		return 0, 0, fmt.Errorf("decode vpcAttachment %q: %w", vpcAttachment, err)
-	}
-	vpcAttachmentNum64, err := strconv.ParseUint(vpcAttachmentHex, 16, 16)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse decoded vpcAttachment %q (hex %q) as uint16: %w",
-			vpcAttachment, vpcAttachmentHex, err)
-	}
-	return vpcNum, uint32(vpcAttachmentNum64), nil
-}
-
-// registerNodeSourceAddress derives this node's own End.DT46 SID base from
-// locator and nodeID and writes it into node_src_addr_table, the value
-// usid_egress completes with the packet's own Argument and stamps into every
-// outer header it pushes. While the entry is missing, every egress_route_table
-// hit fails open instead of encapsulating, so no installed egress route can
-// carry traffic. pinDir is the bpffs directory holding the pinned map. Failure
-// here does not fail the CNI ADD; see the call site.
-//
-// The value is this node's SID rather than its uplink interface address, which
-// is what it held until #550: the shard that translates a tenant's egress
-// traffic sends the reply back to whatever the outer source was, and only a
-// SID is both routable across the fabric and decapsulated on arrival. See
-// node_src_addr_table's own comment in internal/plumbing/ebpf/prog/usid.c.
-func registerNodeSourceAddress(pinDir, locator string, nodeID int32) error {
-	sid, err := srv6.NodeSIDBase(locator, nodeID)
-	if err != nil {
-		return fmt.Errorf("derive node SID base: %w", err)
-	}
-	addr := net.IP(sid.AsSlice())
-	nodeSrc, closer, err := egressroutemap.OpenPinnedNodeSourceAddress(pinDir)
-	if err != nil {
-		return fmt.Errorf("open pinned node_src_addr_table: %w", err)
-	}
-	defer func() { _ = closer.Close() }()
-	return nodeSrc.Set(addr)
-}
-
-// registerPublicUplink resolves this node's fabric-uplink next hop and writes
-// it into public_uplink_table, the value usid_egress redirects a DSR backend's
-// VIP-sourced reply toward once apply_vip_xlat has rewritten that reply's
-// source address, bypassing egress_route_table's NAT66 default. Without it,
-// such a reply is re-translated through a NAT66 shard instead of reaching the
-// real client. pinDir is the bpffs directory holding the pinned map. Failure
-// here does not fail the CNI ADD; see the call site.
-func registerPublicUplink(pinDir string) error {
-	linkIndex, dmac, smac, err := srv6.ResolvePublicUplink()
-	if err != nil {
-		return fmt.Errorf("resolve public uplink: %w", err)
-	}
-	uplink, closer, err := egressroutemap.OpenPinnedPublicUplink(pinDir)
-	if err != nil {
-		return fmt.Errorf("open pinned public_uplink_table: %w", err)
-	}
-	defer func() { _ = closer.Close() }()
-	return uplink.Set(linkIndex, dmac, smac)
-}
-
-// attachUsidEgress loads usid_egress from its pin and attaches it to
-// ifaceName's TC ingress hook. attach.Load pins the program there so a
-// short-lived process like this one can reach it without reloading.
-//
-// The forward path works without this, because nothing on it depends on a
-// reply leaving with its source address translated. Only a full round trip
-// needs it, and a missing attachment stalls the handshake, with the client
-// discarding replies that arrive from an address it never contacted.
-//
-// Idempotent, so it is safe to call on every attachment ADD.
-func attachUsidEgress(pinDir, ifaceName string) error {
-	program, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.UsidEgressPinName), nil)
-	if err != nil {
-		return fmt.Errorf("load pinned usid_egress program: %w", err)
-	}
-	defer func() { _ = program.Close() }()
-
-	return attach.AttachEgress(program, ifaceName)
-}
-
-// registerLocalEgressRoutes registers each of prefixes as a local pass-through
-// egress_route_table entry in Linux VRF table vrfTableID, so guest prefixes
-// and gateway host addresses outrank the VRF's NAT66 default. pinDir is the
-// bpffs directory holding the pinned map. Idempotent, so a repeat ADD, or a sibling
-// re-registering an unrelated prefix in the same VRF, is safe.
-//
-// It opens the map through egressroutemap rather than the srv6 wrappers, which
-// resolve their pin directory from a package var instead of a parameter:
-// registerEBPFDatapath is designed to run against an arbitrary pinDir.
-//
-// prefixes are the CIDR strings localEgressPrefixes already produced, so
-// a parse failure means that function emitted something unparseable. It is a
-// hard error here rather than a silent skip.
-func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []string) error {
-	if len(prefixes) == 0 {
-		return nil
-	}
-	table, closer, err := egressroutemap.OpenPinnedEgressRouteTable(pinDir)
-	if err != nil {
-		return fmt.Errorf("open pinned egress_route_table: %w", err)
-	}
-	defer func() { _ = closer.Close() }()
-
-	for _, p := range prefixes {
-		_, prefix, err := net.ParseCIDR(p)
-		if err != nil {
-			return fmt.Errorf("parse prefix %q: %w", p, err)
-		}
-		if err := table.RegisterPassThrough(vrfTableID, prefix); err != nil {
-			return fmt.Errorf("register local pass-through route for %s: %w", p, err)
-		}
-	}
-	return nil
-}
-
-// installEgressRoutes installs or refreshes vrfTableID's egress routes toward
-// the configured shards: the ::/0 default that reaches the IPv6 internet, and,
-// where this fabric has NAT64, a more-specific route for the NAT64 prefix.
-// Idempotent, so it is safe on every attachment ADD sharing this VRF.
-//
-// argument is this attachment's VRFID, written into every shard SID these
-// routes encapsulate toward. It is what makes a shard able to tell one tenant
-// on this node from another: the shard reads it back out of the outer
-// destination and composes it with the encapsulation source into its session
-// table key. Without it every VRF on this node encapsulates toward a byte-
-// identical destination, and two tenants whose inner tuples also match -- an
-// ordinary occurrence with overlapping RFC 4193 ULAs -- share one connection
-// row and one masquerade port, so the second tenant's replies are delivered to
-// the first. See struct conn_key in internal/plumbing/ebpf/natprog/nat.c.
-//
-// Both routes point at the same shard SID, argument included. A shard decides
-// which translation a packet gets from its inner destination, so the second
-// route exists to make the NAT64 prefix reachable at all rather than to steer
-// it somewhere else -- which matters because the two are independent: a fabric
-// may offer NAT64 without NAT66, and then no default route exists for this
-// traffic to fall into.
-//
-// No shard configured is not an error: the shard list parses to an empty slice
-// and srv6.EgressDefaultRouteAdd no-ops. A shard SID that is invalid, or that
-// has no reachable route yet, fails this attachment's ADD rather than leaving
-// the VRF with no egress at all.
-func installEgressRoutes(vrfTableID uint32, argument uint16) error {
-	// cniConfig is nil until InitCNIConfig runs, which several unit tests
-	// calling registerEBPFDatapath directly never do. Treated as "no shard
-	// configured" rather than a panic.
-	if cniConfig == nil {
-		return nil
-	}
-	shardSIDs, err := config.ParseEgressShardSIDs(cniConfig.EgressShardSIDs)
-	if err != nil {
-		return fmt.Errorf("parse %s: %w", config.EnvCNIEgressShardSIDs, err)
-	}
-	if len(shardSIDs) == 0 {
-		return nil
-	}
-	tenantSIDs, err := shardSIDsForTenant(shardSIDs, argument)
-	if err != nil {
-		return fmt.Errorf("apply tenant argument to %s: %w", config.EnvCNIEgressShardSIDs, err)
-	}
-	if err := srv6.EgressDefaultRouteAdd(vrfTableID, tenantSIDs); err != nil {
-		return err
-	}
-	return installNAT64EgressRoute(vrfTableID, tenantSIDs)
-}
-
-// shardSIDsForTenant returns sids with each SID's 12-bit Argument replaced by
-// argument, leaving Block, Node-ID and Function as the operator configured
-// them. Whatever Argument an operator baked into a configured SID is therefore
-// overwritten rather than honoured; it identifies no tenant and never could,
-// one configured value being shared by every VRF on every node.
-//
-// A SID that is not a well-formed uFMT 48+16 address fails here rather than
-// being passed through unchanged. uformat.Decode's padding check is what
-// catches it -- an address with anything in bits 81-128 is not a uSID, and
-// writing an Argument into it would produce a plausible-looking destination
-// that addresses nothing. An IPv4 entry is unmapped first so it fails as "not
-// an IPv6 address" rather than as stray padding, which is what it actually is.
-//
-// The shard must have a route covering its whole Block and Node-ID for these
-// destinations to be reachable, not just a host route for the one SID the
-// operator configured. EgressShardReconciler advertises that /64; see
-// shardAdvertisementPrefixes.
-func shardSIDsForTenant(sids []net.IP, argument uint16) ([]net.IP, error) {
-	out := make([]net.IP, 0, len(sids))
-	for _, sid := range sids {
-		addr, ok := netip.AddrFromSlice(sid.To16())
-		if !ok {
-			return nil, fmt.Errorf("egress shard SID %s is not a 16-byte address", sid)
-		}
-		fields, err := uformat.Decode(addr.Unmap())
-		if err != nil {
-			return nil, fmt.Errorf("decode egress shard SID %s: %w", sid, err)
-		}
-		fields.Argument = argument
-		tenant, err := uformat.Encode(fields)
-		if err != nil {
-			return nil, fmt.Errorf("encode egress shard SID %s with argument %#x: %w", sid, argument, err)
-		}
-		out = append(out, net.IP(tenant.AsSlice()))
-	}
-	return out, nil
-}
-
-// egressPrefixRouteAddFn is a variable so tests can observe route installs
-// without a pinned egress_route_table.
-var egressPrefixRouteAddFn = srv6.EgressPrefixRouteAdd
-
-// installNAT64EgressRoute installs vrfTableID's route for each of the fabric's
-// NAT64 prefixes, all toward the same shards. An unset list means this fabric
-// has no NAT64 and is not an error; a set but invalid one is a misconfiguration
-// and fails the ADD, since silently skipping it would leave the VRF with no
-// IPv4 reachability and nothing to say why.
-func installNAT64EgressRoute(vrfTableID uint32, shardSIDs []net.IP) error {
-	prefixes, err := config.ParseNAT64Prefixes(cniConfig.NAT64Prefix)
-	if err != nil {
-		return fmt.Errorf("parse %s: %w", config.EnvCNINAT64Prefix, err)
-	}
-	for _, prefix := range prefixes {
-		if err := egressPrefixRouteAddFn(vrfTableID, prefix, shardSIDs); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// hostInterfaceIndex resolves this attachment's host-side veth or tap
-// interface's kernel ifindex by name, using the same deterministic name the
-// master plugin used to create it, so no value needs threading through
-// prevResult to find it again.
-func hostInterfaceIndex(vpc, vpcAttachment string) (uint32, error) {
-	hostName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
-	link, err := netlink.LinkByName(hostName)
-	if err != nil {
-		return 0, fmt.Errorf("look up host interface %q: %w", hostName, err)
-	}
-	return uint32(link.Attrs().Index), nil
-}
-
-// registerEgressKind records which redirect helper usid_ingress uses to deliver
-// into this attachment's host-side interface. It is keyed by that interface
-// rather than by VPC because one VPC can hold tap and veth attachments on the
-// same node.
-//
-// A map that is not pinned yet is logged, not returned. The install-cni init
-// container replaces this binary before the run container reloads the datapath
-// that pins the map, so an ADD can land in between. Failing it would block
-// Instances from starting during every upgrade, while the datapath's fallback
-// for a missing entry, a plain redirect, still delivers to both kinds.
-func registerEgressKind(pinDir string, hostIfindex, egressKind uint32) error {
-	table, closer, err := ifindexvrfmap.OpenPinnedEgressKind(pinDir)
-	if errors.Is(err, os.ErrNotExist) {
-		slog.Warn("ADD: eBPF ifindex_egress_kind_table is not pinned yet; "+
-			"delivery to this attachment uses the plain-redirect fallback until its next ADD",
-			"hostIfindex", hostIfindex, "err", err)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("open pinned eBPF ifindex_egress_kind_table: %w", err)
-	}
-	defer func() { _ = closer.Close() }()
-	if err := table.Register(hostIfindex, egressKind); err != nil {
-		return fmt.Errorf("register eBPF ifindex_egress_kind_table entry: %w", err)
-	}
-	return nil
+	return attachreg.RegisterDatapath(pinDir, attachreg.Registration{
+		Node:          attachreg.Node{Locator: bgp.srv6Locator, NodeID: bgp.nodeID},
+		VPC:           vpc,
+		VPCAttachment: vpcAttachment,
+		InterfaceType: ifaceType,
+		Argument:      argument,
+		LocalPrefixes: prefixes,
+		Egress:        egressConfig(),
+	})
 }
 
 // registerTenantGateway records this attachment's IPAM gateways in
-// tenant_gw_table, the addresses usid_egress sends an ICMP Packet Too Big or
-// Fragmentation Needed from when the tenant sends a packet too big for the
-// fabric. An attachment with no IPAM result, such as a tap workload managing
-// its own addressing, has its entry removed instead, so a reused ifindex never
-// keeps another attachment's gateway.
-//
-// Every failure is logged, not returned. Without an entry the datapath drops
-// an oversized packet with no error and counts it, which is how it behaved
-// before this map existed, and not worth failing the attach over. That covers
-// the window where this binary is newer than the datapath that pins the map,
-// as for registerEgressKind.
+// tenant_gw_table through attachreg.RegisterTenantGateway. A nil ipamResult
+// removes the entry instead. Every failure is logged, not returned.
 func registerTenantGateway(pinDir, vpc, vpcAttachment string, ipamResult *cniipam.IPAMResult) {
-	hostIfindex, err := hostInterfaceIndex(vpc, vpcAttachment)
-	if err != nil {
-		slog.Warn("ADD: could not resolve host interface for eBPF tenant_gw_table; "+
-			"packets too big for the fabric get no ICMP error until the next ADD", "err", err)
-		return
+	var gw *attachreg.Gateways
+	if ipamResult != nil {
+		gw = &attachreg.Gateways{IPv6: ipamResult.IPv6Gateway, IPv4: ipamResult.IPv4Gateway}
 	}
-	table, closer, err := ifindexvrfmap.OpenPinnedGateway(pinDir)
-	if err != nil {
-		slog.Warn("ADD: could not open eBPF tenant_gw_table; "+
-			"packets too big for the fabric get no ICMP error until the next ADD",
-			"hostIfindex", hostIfindex, "err", err)
-		return
-	}
-	defer func() { _ = closer.Close() }()
-
-	if ipamResult == nil {
-		if err := table.Unregister(hostIfindex); err != nil {
-			slog.Warn("ADD: could not clear eBPF tenant_gw_table entry", "hostIfindex", hostIfindex, "err", err)
-		}
-		return
-	}
-	gw6, _ := netip.AddrFromSlice(ipamResult.IPv6Gateway)
-	gw4, _ := netip.AddrFromSlice(ipamResult.IPv4Gateway)
-	if err := table.Register(hostIfindex, gw6, gw4.Unmap()); err != nil {
-		slog.Warn("ADD: could not register eBPF tenant_gw_table entry; "+
-			"packets too big for the fabric get no ICMP error until the next ADD",
-			"hostIfindex", hostIfindex, "err", err)
-	}
-}
-
-// egressKindForInterfaceType maps a "veth" or "tap" interface type to the
-// egress kind the datapath uses to choose between bpf_redirect_peer, which
-// crosses into the container's netns, and plain bpf_redirect, which does not.
-func egressKindForInterfaceType(ifaceType string) (uint32, error) {
-	switch ifaceType {
-	case ifaceTypeVeth:
-		return usidmap.EgressKindVeth, nil
-	case ifaceTypeTap:
-		return usidmap.EgressKindTap, nil
-	default:
-		return 0, fmt.Errorf("unknown interface type %q", ifaceType)
-	}
+	attachreg.RegisterTenantGateway(pinDir, vpc, vpcAttachment, gw)
 }

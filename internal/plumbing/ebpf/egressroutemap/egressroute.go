@@ -321,11 +321,11 @@ func (t *EgressRouteTable) RegisterPassThrough(tableID uint32, prefix *net.IPNet
 	return nil
 }
 
-// Lookup reads egress_route_table's entry for (tableID, prefix) and reports
-// whether it exists. This is an exact-match lookup on the key Register and
-// Unregister use, not the longest-prefix match usid_egress performs against a
-// packet destination, so it serves tests and observability rather than
-// answering what a given destination would resolve to.
+// Lookup reads the entry egress_route_table resolves (tableID, prefix) to and
+// reports whether there is one. Against the kernel map this is a
+// longest-prefix match bounded by prefix's own length, so a shorter entry
+// covering prefix, such as ::/0, answers for it. Prefixes reports which
+// prefixes have an entry of their own.
 func (t *EgressRouteTable) Lookup(tableID uint32, prefix *net.IPNet) (sid net.IP, ok bool, err error) {
 	key, err := buildKey(tableID, prefix)
 	if err != nil {
@@ -342,6 +342,34 @@ func (t *EgressRouteTable) Lookup(tableID uint32, prefix *net.IPNet) (sid net.IP
 	sid = make(net.IP, 16)
 	copy(sid, value.Sid[:])
 	return sid, true, nil
+}
+
+// Prefixes returns every prefix egress_route_table holds an entry of its own
+// for, in CIDR string form, keyed by Linux VRF table ID. It walks the whole
+// map once. Unlike Lookup it never answers for one prefix with a shorter one.
+func (t *EgressRouteTable) Prefixes() (map[uint32]map[string]struct{}, error) {
+	byTable := map[uint32]map[string]struct{}{}
+	var (
+		key   prog.UsidEgressRouteKey
+		value prog.UsidEgressRouteValue
+	)
+	iter := t.table.Iterate()
+	for iter.Next(&key, &value) {
+		ones := int(key.Prefixlen) - egressRouteKeyFixedBits
+		prefix := &net.IPNet{IP: net.IP(append([]byte(nil), key.Addr[:]...)), Mask: net.CIDRMask(ones, 128)}
+		if key.Family == egressRouteFamilyINET4 {
+			prefix = &net.IPNet{IP: net.IP(append([]byte(nil), key.Addr[:4]...)), Mask: net.CIDRMask(ones, 32)}
+		}
+		prefix.IP = prefix.IP.Mask(prefix.Mask)
+		if byTable[key.TableId] == nil {
+			byTable[key.TableId] = map[string]struct{}{}
+		}
+		byTable[key.TableId][prefix.String()] = struct{}{}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("egressroutemap: egress_route_table: list prefixes: %w", err)
+	}
+	return byTable, nil
 }
 
 // Unregister removes egress_route_table's entry for (tableID, prefix). An entry
@@ -366,6 +394,12 @@ func (t *EgressRouteTable) Unregister(tableID uint32, prefix *net.IPNet) error {
 // header it pushes.
 type NodeSourceAddress struct {
 	table usidmap.Table
+}
+
+// NewNodeSourceAddress wraps table as a NodeSourceAddress. Production callers
+// use OpenPinnedNodeSourceAddress; tests pass a fake.
+func NewNodeSourceAddress(table usidmap.Table) *NodeSourceAddress {
+	return &NodeSourceAddress{table: table}
 }
 
 // nodeSourceAddressKey is node_src_addr_table's only valid key --
@@ -415,6 +449,12 @@ func (n *NodeSourceAddress) Get() (addr net.IP, ok bool, err error) {
 // re-translated through a shard and the client discards it.
 type PublicUplink struct {
 	table usidmap.Table
+}
+
+// NewPublicUplink wraps table as a PublicUplink. Production callers use
+// OpenPinnedPublicUplink; tests pass a fake.
+func NewPublicUplink(table usidmap.Table) *PublicUplink {
+	return &PublicUplink{table: table}
 }
 
 // publicUplinkKey is public_uplink_table's only valid key. The map is a
@@ -625,7 +665,7 @@ type nextHop struct {
 //
 // Shards are compared on everything but the Argument: Block, Node-ID and
 // Function name a shard, and the Argument is the tenant's VRFID that ADD wrote
-// into its copy of the shard's SID. See internal/cnibgp's shardSIDsForTenant.
+// into its copy of the shard's SID. See attachreg.ShardSIDsForTenant.
 //
 // A shard's resolution is cached for the sweep by its locator, Block plus
 // Node-ID, rather than per SID. Every VRF's copy of a shard differs only below

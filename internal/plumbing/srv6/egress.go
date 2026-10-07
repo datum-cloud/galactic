@@ -15,6 +15,11 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 )
 
+// ErrNoShardResolvable is wrapped by EgressPrefixRouteAdd and
+// EgressPrefixRouteAddTo when not one configured shard SID has a resolvable
+// route and neighbor.
+var ErrNoShardResolvable = errors.New("no egress shard SID is resolvable")
+
 // pinDir is the bpffs directory the egress route helpers open
 // egress_route_table from. A package var so tests can redirect it and avoid
 // needing a real bpffs mount or root.
@@ -108,10 +113,25 @@ func EgressPrefixRouteAdd(tableID uint32, prefix *net.IPNet, shardSIDs []net.IP)
 		return fmt.Errorf("srv6: EgressPrefixRouteAdd: %w", err)
 	}
 	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+	return EgressPrefixRouteAddTo(table, tableID, prefix, shardSIDs)
+}
+
+// EgressPrefixRouteAddTo is EgressPrefixRouteAdd against an egress_route_table
+// the caller has already opened. Shard selection and error behavior are
+// identical; an empty shardSIDs installs nothing and returns nil.
+func EgressPrefixRouteAddTo(
+	table *egressroutemap.EgressRouteTable, tableID uint32, prefix *net.IPNet, shardSIDs []net.IP,
+) error {
+	if len(shardSIDs) == 0 {
+		return nil
+	}
+	if prefix == nil {
+		return errors.New("srv6: EgressPrefixRouteAddTo: prefix is nil")
+	}
 
 	var unresolved []error
 	for _, sid := range shardSIDs {
-		// Checked before touching bpffs, as in RouteEgressAdd.
+		// Checked before writing the entry, as in RouteEgressAdd.
 		if sid == nil || sid.IsUnspecified() {
 			return fmt.Errorf("refusing to install egress route for %s: shard SID %s is not a usable SRv6 SID",
 				prefix, sid)
@@ -122,8 +142,8 @@ func EgressPrefixRouteAdd(tableID uint32, prefix *net.IPNet, shardSIDs []net.IP)
 		}
 		return nil
 	}
-	return fmt.Errorf("no egress shard SID is resolvable yet for %s, out of %d configured: %w",
-		prefix, len(shardSIDs), errors.Join(unresolved...))
+	return fmt.Errorf("%w yet for %s, out of %d configured: %w",
+		ErrNoShardResolvable, prefix, len(shardSIDs), errors.Join(unresolved...))
 }
 
 // EgressDefaultRouteDel removes egress_route_table's default (::/0) entry for

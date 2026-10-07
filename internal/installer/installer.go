@@ -34,6 +34,7 @@ import (
 	"go.datum.net/galactic/internal/hostconf"
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -504,6 +505,11 @@ type ebpfDatapathState struct {
 	// order, from the same host conflist CNI ADD reads it from. The egress
 	// route sweep uses it to keep each VRF on the first reachable shard.
 	egressShardSIDs []net.IP
+
+	// egress is the same host conflist's raw egress configuration, which the
+	// datapath repair rebuilds a VRF's shard routes from exactly as CNI ADD
+	// installs them.
+	egress attachreg.EgressConfig
 }
 
 // startEBPFDatapath loads and attaches the eBPF datapath and returns the state
@@ -548,6 +554,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 		return state, datapath, nil
 	}
 	state.egressShardSIDs = loadEgressShardSIDs(hostConf.EgressShardSIDs)
+	state.egress = attachreg.EgressConfig{ShardSIDs: hostConf.EgressShardSIDs, NAT64Prefix: hostConf.NAT64Prefix}
 	if k8sClient, err := newK8sClientFn(); err != nil {
 		slog.Warn("eBPF vrf_table GC sweep disabled: failed to create k8s client", "err", err)
 	} else {
@@ -962,9 +969,13 @@ func radvActorFailed(actors *radvActorSet, failure radvActorFailure) {
 //     reports SERVING once the process is up, since credential refresh and log
 //     rotation have no meaningful unhealthy state; a separate
 //     ebpfHealthServiceName service reports the polled result of attach.Health.
-//  7. Sweeps stale vrf_table and vpc_attribution_table entries (reconciled
-//     together against the same live set) and reconciles nptv6_table
-//     entries on a ticker. All three run here rather than in
+//  7. Rebuilds the attachment and per-node rows only CNI ADD otherwise
+//     writes, once the datapath loads and again on the GC ticker, so a map
+//     recreated empty does not stay empty until every workload re-attaches.
+//     Each pass runs off this goroutine. The same ticker also sweeps stale
+//     vrf_table and vpc_attribution_table entries (reconciled together
+//     against the same live set) and reconciles nptv6_table entries. All of
+//     this runs here rather than in
 //     galactic-router's GC controller because the pinned maps exist only
 //     inside this container.
 //  8. Runs one radv.RunActor per recorded tap attachment, reconciled on a short
@@ -993,6 +1004,13 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	// SRv6 egress route can be registered. Non-fatal and retried below, since
 	// the BGPRouter carrying the locator may not exist yet.
 	reconcileLocatorLocalRoute(ctx, ebpfState)
+
+	// Rebuild the attachment rows only CNI ADD otherwise writes, which a map
+	// recreated by this load has lost. Off this goroutine and retried while a
+	// pass fails or leaves attachments pending; the GC tick below repeats it.
+	// Size-1 semaphore, so the startup and tick passes never overlap.
+	datapathRepairSem := make(chan struct{}, 1)
+	startDatapathRepair(ctx, datapathRepairSem, ebpfState)
 
 	// Serve Prometheus metrics at the conventional /metrics scrape path.
 	metricsMux := http.NewServeMux()
@@ -1119,6 +1137,10 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			if ebpfState.k8sClient == nil {
 				continue
 			}
+			// Off this goroutine. Ordering against the sweep below does
+			// not matter: the sweep reaps only keys no live CRD names,
+			// and the repair writes keys for live CRDs only.
+			repairDatapathOnTick(ctx, datapathRepairSem, ebpfState)
 			result := gc.SweepEBPFVRFTable(ctx, ebpfState.k8sClient, ebpfState.namespace, ebpfState.nodeName, attach.PinDir)
 			logEBPFVRFSweepResult(result)
 

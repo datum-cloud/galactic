@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"maps"
 	"net"
-	"net/netip"
 	"os"
 	"reflect"
 	"strings"
@@ -32,8 +31,8 @@ import (
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
-	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
@@ -228,40 +227,6 @@ func TestCheckArgumentCollision(t *testing.T) {
 			t.Errorf("checkArgumentCollision() = %v, want nil", err)
 		}
 	})
-}
-
-// ---- egressKindForInterfaceType --------------------------------------------
-
-func TestEgressKindForInterfaceType(t *testing.T) {
-	tests := []struct {
-		name    string
-		iface   string
-		want    uint32
-		wantErr bool
-	}{
-		{name: "veth maps to EgressKindVeth", iface: ifaceTypeVeth, want: usidmap.EgressKindVeth},
-		{name: "tap maps to EgressKindTap", iface: ifaceTypeTap, want: usidmap.EgressKindTap},
-		{name: "empty type errors", iface: "", wantErr: true},
-		{name: "unknown type errors", iface: "bogus", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := egressKindForInterfaceType(tt.iface)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("egressKindForInterfaceType(%q) error = nil, want error", tt.iface)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("egressKindForInterfaceType(%q) unexpected error: %v", tt.iface, err)
-			}
-			if got != tt.want {
-				t.Errorf("egressKindForInterfaceType(%q) = %d, want %d", tt.iface, got, tt.want)
-			}
-		})
-	}
 }
 
 // ---- buildVRFInstanceSpec ---------------------------------------------------
@@ -1150,186 +1115,21 @@ func TestRetryK8sOpsExhaustsDeadline(t *testing.T) {
 	}
 }
 
-// TestInstallNAT66EgressRoute_NilCNIConfigIsANoop is the regression test
-// for a real panic found live: several tests in this package (and, before
-// this guard, installEgressRoutes itself) call registerEBPFDatapath
-// directly without ever calling InitCNIConfig first, leaving the
-// package-level cniConfig nil -- exactly the state ops_del_test.go's own
-// helper already works around for a different call path. Production never
-// hits this (cmd/galactic-bgp's main.go always calls InitCNIConfig before
-// any cmdAdd can run), but a nil cniConfig here must be treated as "no
-// shard configured yet," not a nil pointer dereference.
-func TestInstallNAT66EgressRoute_NilCNIConfigIsANoop(t *testing.T) {
+// TestEgressConfig_NilCNIConfigIsNoShard covers unit tests that call
+// registerEBPFDatapath without InitCNIConfig, leaving cniConfig nil: that must
+// read as no shard configured rather than dereference nil.
+func TestEgressConfig_NilCNIConfigIsNoShard(t *testing.T) {
 	original := cniConfig
 	cniConfig = nil
-	defer func() { cniConfig = original }()
+	t.Cleanup(func() { cniConfig = original })
 
-	if err := installEgressRoutes(1, 0x005); err != nil {
-		t.Errorf("installEgressRoutes(1, 0x005) = %v, want nil with cniConfig == nil", err)
-	}
-}
-
-// TestShardSIDsForTenant_WritesTheArgument is the regression test for #538:
-// every tenant VRF on a node encapsulated toward a byte-identical shard SID, so
-// a shard read one constant Argument for all of them and two same-node tenants
-// with overlapping ULAs shared a connection row.
-func TestShardSIDsForTenant_WritesTheArgument(t *testing.T) {
-	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:e001::,2001:db8:ff02:9:e001::")
-	if err != nil {
-		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
+	if got := egressConfig(); got != (attachreg.EgressConfig{}) {
+		t.Errorf("egressConfig() = %+v with cniConfig == nil, want the zero value", got)
 	}
 
-	got, err := shardSIDsForTenant(sids, 0x2a5)
-	if err != nil {
-		t.Fatalf("shardSIDsForTenant() error = %v, want nil", err)
-	}
-
-	want := []string{"2001:db8:ff01:9:e2a5::", "2001:db8:ff02:9:e2a5::"}
-	if len(got) != len(want) {
-		t.Fatalf("shardSIDsForTenant() = %v, want %v", got, want)
-	}
-	for i, w := range want {
-		if got[i].String() != w {
-			t.Errorf("shardSIDsForTenant()[%d] = %v, want %s", i, got[i], w)
-		}
-	}
-}
-
-// TestShardSIDsForTenant_DistinctPerTenant states the property #538 is about
-// directly: two VRFIDs on one node must not produce the same destination.
-func TestShardSIDsForTenant_DistinctPerTenant(t *testing.T) {
-	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:e001::")
-	if err != nil {
-		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
-	}
-
-	a, err := shardSIDsForTenant(sids, 0x001)
-	if err != nil {
-		t.Fatalf("shardSIDsForTenant(0x001) error = %v, want nil", err)
-	}
-	b, err := shardSIDsForTenant(sids, 0x002)
-	if err != nil {
-		t.Fatalf("shardSIDsForTenant(0x002) error = %v, want nil", err)
-	}
-	if a[0].Equal(b[0]) {
-		t.Errorf("VRFIDs 0x001 and 0x002 both encapsulate toward %v; they must differ", a[0])
-	}
-}
-
-// TestShardSIDsForTenant_OverwritesAConfiguredArgument covers the operator-
-// supplied Argument every deployment bakes into its shard SID today. It
-// identifies no tenant -- one configured value is shared by every VRF on every
-// node -- so it is replaced, not honoured or treated as a conflict.
-func TestShardSIDsForTenant_OverwritesAConfiguredArgument(t *testing.T) {
-	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:efff::")
-	if err != nil {
-		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
-	}
-
-	got, err := shardSIDsForTenant(sids, 0x007)
-	if err != nil {
-		t.Fatalf("shardSIDsForTenant() error = %v, want nil", err)
-	}
-	if want := "2001:db8:ff01:9:e007::"; got[0].String() != want {
-		t.Errorf("shardSIDsForTenant() = %v, want %s", got[0], want)
-	}
-}
-
-// TestShardSIDsForTenant_PreservesBlockNodeIDAndFunction guards the fields the
-// Argument rewrite must leave alone: get any of them wrong and the packet is
-// addressed to a different shard, or to no shard at all.
-func TestShardSIDsForTenant_PreservesBlockNodeIDAndFunction(t *testing.T) {
-	sids, err := config.ParseEgressShardSIDs("2001:db8:ff01:9:e001::")
-	if err != nil {
-		t.Fatalf("config.ParseEgressShardSIDs() error = %v, want nil", err)
-	}
-
-	got, err := shardSIDsForTenant(sids, 0x123)
-	if err != nil {
-		t.Fatalf("shardSIDsForTenant() error = %v, want nil", err)
-	}
-	addr, ok := netip.AddrFromSlice(got[0].To16())
-	if !ok {
-		t.Fatalf("shardSIDsForTenant() returned %v, which is not a 16-byte address", got[0])
-	}
-	fields, err := uformat.Decode(addr)
-	if err != nil {
-		t.Fatalf("uformat.Decode(%v) error = %v, want nil", addr, err)
-	}
-	if fields.Block != 0x2001_0db8_ff01 {
-		t.Errorf("Block = %#x, want %#x", fields.Block, 0x2001_0db8_ff01)
-	}
-	if fields.NodeID != 9 {
-		t.Errorf("NodeID = %d, want 9", fields.NodeID)
-	}
-	if fields.Function != uformat.FunctionEndDT46 {
-		t.Errorf("Function = %#x, want %#x", fields.Function, uformat.FunctionEndDT46)
-	}
-	if fields.Argument != 0x123 {
-		t.Errorf("Argument = %#x, want %#x", fields.Argument, 0x123)
-	}
-}
-
-// TestShardSIDsForTenant_RejectsAMalformedSID covers the entries config.ParseEgressShardSIDs
-// accepts as valid IP addresses but that are not uSIDs. Writing an Argument
-// into one produces a plausible-looking destination that addresses nothing, so
-// it fails the ADD instead of being passed through unchanged.
-func TestShardSIDsForTenant_RejectsAMalformedSID(t *testing.T) {
-	for _, raw := range []string{
-		"2001:db8:ff01:9:e001::1", // non-zero padding: not a uFMT 48+16 address
-		"192.0.2.1",               // IPv4: not an SRv6 SID at all
-	} {
-		sids, err := config.ParseEgressShardSIDs(raw)
-		if err != nil {
-			t.Fatalf("config.ParseEgressShardSIDs(%q) error = %v, want nil", raw, err)
-		}
-		if _, err := shardSIDsForTenant(sids, 0x005); err == nil {
-			t.Errorf("shardSIDsForTenant(%q) error = nil, want an error", raw)
-		}
-	}
-}
-
-func TestInstallNAT64EgressRoute_OneRoutePerPrefixToSameShards(t *testing.T) {
-	originalConfig, originalAdd := cniConfig, egressPrefixRouteAddFn
-	t.Cleanup(func() { cniConfig, egressPrefixRouteAddFn = originalConfig, originalAdd })
-
-	type call struct {
-		table  uint32
-		prefix string
-		sids   []net.IP
-	}
-	var calls []call
-	egressPrefixRouteAddFn = func(table uint32, prefix *net.IPNet, sids []net.IP) error {
-		calls = append(calls, call{table, prefix.String(), sids})
-		return nil
-	}
-	sids := []net.IP{net.ParseIP("2001:db8:ff01:9:e2a5::")}
-
-	cniConfig = &config.CNIConfig{NAT64Prefix: "2001:db8:64::/96, 64:ff9b::/96"}
-	if err := installNAT64EgressRoute(7, sids); err != nil {
-		t.Fatalf("installNAT64EgressRoute() = %v, want nil", err)
-	}
-	want := []string{"2001:db8:64::/96", "64:ff9b::/96"}
-	if len(calls) != len(want) {
-		t.Fatalf("installed %d routes, want %d: %+v", len(calls), len(want), calls)
-	}
-	for i, w := range want {
-		if calls[i].table != 7 || calls[i].prefix != w || !reflect.DeepEqual(calls[i].sids, sids) {
-			t.Errorf("route %d = %+v, want table 7, prefix %s, SIDs %v", i, calls[i], w, sids)
-		}
-	}
-
-	calls = nil
-	cniConfig = &config.CNIConfig{}
-	if err := installNAT64EgressRoute(7, sids); err != nil || len(calls) != 0 {
-		t.Errorf("unset list: err = %v, routes = %+v, want nil and none", err, calls)
-	}
-
-	cniConfig = &config.CNIConfig{NAT64Prefix: "64:ff9b::/96,64:ff9b::/64"}
-	if err := installNAT64EgressRoute(7, sids); err == nil {
-		t.Error("installNAT64EgressRoute() = nil with a non-/96 entry, want an error")
-	}
-	if len(calls) != 0 {
-		t.Errorf("invalid list installed %+v, want nothing", calls)
+	cniConfig = &config.CNIConfig{EgressShardSIDs: "2001:db8:ff01:9:e001::", NAT64Prefix: "64:ff9b::/96"}
+	want := attachreg.EgressConfig{ShardSIDs: "2001:db8:ff01:9:e001::", NAT64Prefix: "64:ff9b::/96"}
+	if got := egressConfig(); got != want {
+		t.Errorf("egressConfig() = %+v, want %+v", got, want)
 	}
 }
