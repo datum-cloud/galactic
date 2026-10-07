@@ -22,6 +22,8 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -79,6 +81,12 @@ const (
 	// have.
 	sidecarReturnTableBase = 0xF000
 	sidecarReturnTableMax  = sidecarReturnTableBase + uformat.ArgumentMax
+
+	// sidecarReturnRouteProtocol marks routes installed into an existing
+	// tenant VRF table. The reserved-table range identifies the legacy case,
+	// but a route shared with a real tenant table needs its own ownership mark
+	// so pruning cannot touch any other route in that table.
+	sidecarReturnRouteProtocol = 242
 )
 
 // sidecarReturnTableID maps an advertised Argument to the routing table holding
@@ -97,8 +105,14 @@ func sidecarReturnTableID(vrfID uint16) (uint32, error) {
 // toward, plus where on this node that pod can be reached.
 type sidecarEndpoint struct {
 	advName string
+	// vpc is the base62 VPC identifier recovered from advName. When this node
+	// already hosts a real attachment for the VPC, its VRF table must also own
+	// the sidecar gateway route; registering a second return table under the
+	// same on-wire (Block, Argument) would overwrite the attachment datapath.
+	vpc     string
 	addr    netip.Addr
 	vrfID   uint16
+	tableID uint32
 	// hostIfindex is the ifindex, in the host namespace, of the peer of the
 	// pod's primary interface, which is what bpf_redirect_peer must target to
 	// enter that pod. hostMAC is the pod-side end's hardware address.
@@ -145,10 +159,15 @@ func ensureSidecarReturnPath(ctx context.Context, k8s client.Client, namespace, 
 	// being routed here even on a node whose identity has gone away, and
 	// pruning is the only step that is correct with an empty endpoint set.
 	live := make(map[uint32]netip.Addr, len(endpoints))
-	for _, e := range endpoints {
-		if table, terr := sidecarReturnTableID(e.vrfID); terr == nil {
-			live[table] = e.addr
+	var resolveErrs []error
+	for i := range endpoints {
+		table, terr := sidecarReturnTableForEndpoint(endpoints[i], vrf.TableID)
+		if terr != nil {
+			resolveErrs = append(resolveErrs, fmt.Errorf("advertisement %s: %w", endpoints[i].advName, terr))
+			continue
 		}
+		endpoints[i].tableID = table
+		live[table] = endpoints[i].addr
 	}
 	if perr := pruneSidecarReturnRoutes(live); perr != nil {
 		slog.Warn("Could not prune stale sidecar return routes", "err", perr)
@@ -185,8 +204,11 @@ func ensureSidecarReturnPath(ctx context.Context, k8s client.Client, namespace, 
 		return fmt.Errorf("register function_table entry for the sidecar return path: %w", err)
 	}
 
-	var errs []error
+	errs := resolveErrs
 	for _, e := range endpoints {
+		if e.tableID == 0 {
+			continue
+		}
 		if err := installSidecarReturn(registry, block, e); err != nil {
 			// Per-endpoint and never fatal to the sweep: one Envoy pod still
 			// starting must not stop another VPC's return path from being
@@ -214,9 +236,9 @@ func installSidecarReturn(registry *usidmap.Registry, block uint64, e sidecarEnd
 			e.hostIfindex, e.addr, err)
 	}
 
-	table, err := sidecarReturnTableID(e.vrfID)
-	if err != nil {
-		return err
+	table := e.tableID
+	if table == 0 {
+		return errors.New("sidecar return path: endpoint has no resolved routing table")
 	}
 
 	if err := ensureSidecarReturnRoute(table, e.addr, e.hostIfindex); err != nil {
@@ -246,6 +268,7 @@ func ensureSidecarReturnRoute(table uint32, addr netip.Addr, hostIfindex int) er
 		Dst:       &net.IPNet{IP: addr.AsSlice(), Mask: net.CIDRMask(addr.BitLen(), addr.BitLen())},
 		LinkIndex: hostIfindex,
 		Table:     int(table),
+		Protocol:  sidecarReturnRouteProtocol,
 	}
 	if err := netlink.RouteReplace(route); err != nil {
 		return fmt.Errorf("install return route %s dev %d table %d: %w", addr, hostIfindex, table, err)
@@ -312,7 +335,8 @@ func pruneSidecarReturnRoutes(live map[uint32]netip.Addr) error {
 // destination, or whose table holds an address live still wants, is left
 // alone.
 func staleSidecarReturnRoute(r netlink.Route, live map[uint32]netip.Addr) bool {
-	if r.Table < sidecarReturnTableBase || r.Table > sidecarReturnTableMax {
+	reservedTable := r.Table >= sidecarReturnTableBase && r.Table <= sidecarReturnTableMax
+	if !reservedTable && r.Protocol != sidecarReturnRouteProtocol {
 		return false
 	}
 	if r.Dst == nil {
@@ -356,6 +380,16 @@ func sidecarGatewayEndpoints(
 		if !isIngressAdvertisementName(a.Name, nodeName, segment) {
 			continue
 		}
+		vpcHex, _, ok := strings.Cut(a.Name, "-")
+		if !ok {
+			continue
+		}
+		vpc, err := intf.HexToBase62(vpcHex)
+		if err != nil || vpc == "" {
+			slog.Debug("Sidecar gateway advertisement has an invalid VPC name segment",
+				"advertisement", a.Name, "segment", vpcHex, "err", err)
+			continue
+		}
 		if a.Spec.VRFID == nil {
 			continue
 		}
@@ -378,6 +412,7 @@ func sidecarGatewayEndpoints(
 			}
 			out = append(out, sidecarEndpoint{
 				advName:     a.Name,
+				vpc:         vpc,
 				addr:        pref.Addr().Unmap(),
 				vrfID:       uint16(*a.Spec.VRFID),
 				hostIfindex: hostIfindex,
@@ -386,6 +421,21 @@ func sidecarGatewayEndpoints(
 		}
 	}
 	return out, nil
+}
+
+// sidecarReturnTableForEndpoint selects the one vrf_table target an arriving
+// SID can name. A real local VPC VRF wins because CNI attachments and an
+// ingress-sidecar gateway for the same VPC share the same on-wire Argument.
+// With no local attachment, the dedicated return table remains the fallback.
+func sidecarReturnTableForEndpoint(
+	e sidecarEndpoint, tableID func(string) (uint32, error),
+) (uint32, error) {
+	if table, err := tableID(e.vpc); err == nil {
+		return table, nil
+	} else if !errors.Is(err, vrf.ErrNotFound) {
+		return 0, fmt.Errorf("resolve local VRF table for vpc %s: %w", e.vpc, err)
+	}
+	return sidecarReturnTableID(e.vrfID)
 }
 
 // isIngressAdvertisementName reports whether name is what

@@ -6,6 +6,7 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"testing"
@@ -210,6 +211,9 @@ func TestStaleSidecarReturnRoute(t *testing.T) {
 	}
 	keep := netip.MustParseAddr(testSidecarAddr)
 	live := map[uint32]netip.Addr{table: keep}
+	markedLive := returnRoute(testSidecarAddr+"/128", 1)
+	markedLive.Protocol = sidecarReturnRouteProtocol
+	live[1] = keep
 
 	for _, tc := range []struct {
 		name  string
@@ -228,6 +232,12 @@ func TestStaleSidecarReturnRoute(t *testing.T) {
 		{"a tenant VRF table", returnRoute(testSidecarAddr+"/128", 1), false},
 		{"just below the range", returnRoute(testSidecarAddr+"/128", sidecarReturnTableBase-1), false},
 		{"just above the range", returnRoute(testSidecarAddr+"/128", sidecarReturnTableMax+1), false},
+		{"the marked route we want to keep in a tenant table", markedLive, false},
+		{"a marked sidecar route in a tenant table", func() netlink.Route {
+			r := returnRoute("fd30:e2e:1::1/128", 1)
+			r.Protocol = sidecarReturnRouteProtocol
+			return r
+		}(), true},
 		// vrf.Add's catch-all, which stops tenant traffic falling through to
 		// the main table. Deleting it would reopen that leak.
 		{"a tenant VRF's unreachable default", netlink.Route{
@@ -269,12 +279,57 @@ func TestSidecarGatewayEndpoints_ReadsAdvertisedArgument(t *testing.T) {
 	byAddr := map[string]uint16{}
 	for _, e := range got {
 		byAddr[e.addr.String()] = e.vrfID
+		if e.vpc != "2" && e.vpc != "4" {
+			t.Errorf("endpoint %s vpc = %q, want decoded identifier 2 or 4", e.addr, e.vpc)
+		}
 	}
 	if byAddr[testSidecarAddr] != 1 {
 		t.Errorf("endpoint %s vrfID = %d, want the advertised 1", testSidecarAddr, byAddr[testSidecarAddr])
 	}
 	if byAddr["fd30:e2e:55d2::1"] != 6 {
 		t.Errorf("endpoint fd30:e2e:55d2::1 vrfID = %d, want the advertised 6", byAddr["fd30:e2e:55d2::1"])
+	}
+}
+
+func TestSidecarReturnTableForEndpointPrefersLocalVRF(t *testing.T) {
+	e := sidecarEndpoint{vpc: "2", vrfID: 6}
+	got, err := sidecarReturnTableForEndpoint(e, func(vpc string) (uint32, error) {
+		if vpc != "2" {
+			t.Fatalf("table lookup vpc = %q, want 2", vpc)
+		}
+		return 17, nil
+	})
+	if err != nil {
+		t.Fatalf("sidecarReturnTableForEndpoint() error = %v", err)
+	}
+	if got != 17 {
+		t.Errorf("sidecarReturnTableForEndpoint() = %d, want local table 17", got)
+	}
+}
+
+func TestSidecarReturnTableForEndpointFallsBackWithoutLocalVRF(t *testing.T) {
+	e := sidecarEndpoint{vpc: "2", vrfID: 6}
+	got, err := sidecarReturnTableForEndpoint(e, func(string) (uint32, error) {
+		return 0, vrf.ErrNotFound
+	})
+	if err != nil {
+		t.Fatalf("sidecarReturnTableForEndpoint() error = %v", err)
+	}
+	want, err := sidecarReturnTableID(e.vrfID)
+	if err != nil {
+		t.Fatalf("sidecarReturnTableID() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("sidecarReturnTableForEndpoint() = %d, want reserved table %d", got, want)
+	}
+}
+
+func TestSidecarReturnTableForEndpointPropagatesLookupFailure(t *testing.T) {
+	want := errors.New("netlink failed")
+	_, err := sidecarReturnTableForEndpoint(sidecarEndpoint{vpc: "2", vrfID: 6},
+		func(string) (uint32, error) { return 0, want })
+	if !errors.Is(err, want) {
+		t.Fatalf("sidecarReturnTableForEndpoint() error = %v, want %v", err, want)
 	}
 }
 
