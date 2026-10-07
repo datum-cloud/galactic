@@ -29,13 +29,8 @@ const (
 	testNodeGWB    = "gw-b"
 	testRouterName = "router-a"
 	testRuleName   = "rule-1"
-	// testRuleAdvV4 is node-qualified by testNodeGWA -- see
-	// NetworkGatewayReconciler.applyBGPAdvertisements's doc comment for why
-	// every gateway node's own BGPAdvertisement name must include its node
-	// name.
-	testRuleAdvV4 = testRuleName + "-" + testNodeGWA + "-v4"
-	testVIP       = "203.0.113.5"
-	testVIPPrefix = testVIP + "/32"
+	testVIP        = "203.0.113.5"
+	testVIPPrefix  = testVIP + "/32"
 
 	// testBackendAddr is the default backend address newTestRule uses.
 	// testBackendRouterName/testBackendPrefix/testBackendVRFID describe the
@@ -61,6 +56,11 @@ const (
 	testBackendRouterID  = "1.1.1.2"
 	testRouteTargetValue = "65000:1"
 )
+
+// testRuleAdvV4 is node-qualified by testNodeGWA -- see
+// NetworkGatewayReconciler.applyBGPAdvertisements's doc comment for why every
+// gateway node's own BGPAdvertisement name must include its node name.
+var testRuleAdvV4 = ruleAdvertisementName(testRuleName, testNodeGWA, "v4")
 
 func newRuleTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -408,7 +408,7 @@ func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode(t *
 	now := metav1.Now()
 	rule.DeletionTimestamp = &now
 
-	departedNodeAdvName := testRuleName + "-" + testNodeGWB + "-v4"
+	departedNodeAdvName := ruleAdvertisementName(testRuleName, testNodeGWB, "v4")
 	adv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNamespace,
@@ -453,7 +453,7 @@ func TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule(t *t
 	rule.DeletionTimestamp = &now
 
 	const otherRuleName = "rule-2"
-	otherAdvName := otherRuleName + "-" + testNodeGWA + "-v4"
+	otherAdvName := ruleAdvertisementName(otherRuleName, testNodeGWA, "v4")
 	otherAdv := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNamespace,
