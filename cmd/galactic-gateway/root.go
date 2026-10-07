@@ -119,8 +119,9 @@ func runCmd(cfg *config.GatewayConfig) error {
 	checkWatchPermissions(mgr)
 
 	// Load and attach the edge eBPF datapath. Always a real datapath, never a
-	// no-op: configuration validation rejects an empty public interface or SRv6
-	// address before this is reached.
+	// no-op: configuration validation rejects an empty public interface before
+	// this is reached, and an empty SRv6 address is derived from this node's
+	// BGPRouter first.
 	//
 	// Readiness, on its own gRPC health service, additionally needs the
 	// datapath on every interface it resolves, which can change after startup
@@ -139,7 +140,11 @@ func runCmd(cfg *config.GatewayConfig) error {
 		if err := sysctl.SetProcSysPath(cfg.ProcSysPath); err != nil {
 			return err
 		}
-		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, cfg.SRv6Address,
+		encapSrc, err := resolveEncapSource(ctx, mgr.GetAPIReader(), nodeName, cfg.SRv6Address)
+		if err != nil {
+			return err
+		}
+		gwDatapath, err = setupGatewayDatapath(ctx, cfg.PublicInterface, cfg.InternalInterfaces, encapSrc,
 			cfg.XDPAttach, ctrlmetrics.Registry, coverage)
 		if err != nil {
 			return fmt.Errorf("setup edge gateway eBPF datapath: %w", err)
@@ -259,7 +264,8 @@ func newRootCommand() *cobra.Command {
 		"Comma-separated compute-facing interfaces whose VIP-sourced return traffic this node "+
 			"forwards before netfilter (optional; empty means this node carries no return traffic)")
 	cmd.Flags().StringP("gateway-srv6-address", "", "",
-		"This gateway node's own SRv6-reachable address, used as the Maglev/DSR encap source (required)")
+		"This gateway node's own SRv6-reachable address, used as the Maglev/DSR encap source "+
+			"(optional; empty derives it from this node's BGPRouter)")
 	cmd.Flags().StringP("gateway-xdp-attach", "", config.GatewayXDPAttachDispatch,
 		"How the datapath reaches its interfaces' XDP hook: \"dispatch\" runs it from the node's shared, "+
 			"pinned XDP dispatcher, \"direct\" attaches it")

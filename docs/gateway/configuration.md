@@ -113,28 +113,30 @@ node is not a supported configuration.
 `config/galactic-gateway/base/` is intentionally excluded from
 `config/galactic-gateway/`'s own kustomization and must never be applied
 directly — doing so produces a crash-looping `galactic-gateway` container. The
-reason is `GALACTIC_GATEWAY_SRV6_ADDRESS`: it is this node's own plain
-SRv6-reachable IPv6 address, used purely as the source address of every outer
-header the node's `edge_lb` XDP program pushes (`edgedsr.c`'s
-`encap_config_table`). It is not an address-translation source and has no
-return-path significance. Because DSR rewrites nothing, there is no reconcile
-step that derives or publishes this value automatically (no analogue of a
-"self-address" status field exists on `NetworkGateway` at all — see that CRD's
-own doc comment). It must be unique per gateway node and is operator-supplied
-today, with no in-cluster derivation mechanism.
-`GALACTIC_GATEWAY_PUBLIC_INTERFACE` is deployment-specific for the same reason
-— every node's public/underlay-facing uplink interface name can differ.
+reason is `GALACTIC_GATEWAY_PUBLIC_INTERFACE`: every node's public,
+underlay-facing uplink interface name can differ, so the base has no default
+for it.
 
-> The authoritative explanation of this constraint is
-> `internal/config/gateway.go`'s `EnvGatewaySRv6Address` doc comment and
+`GALACTIC_GATEWAY_SRV6_ADDRESS` no longer needs a per-node value (#707). It
+is the source address of every outer header the node's `edge_lb` XDP program
+pushes (`edgedsr.c`'s `encap_config_table`), never a translation source and
+with no return-path role. Left unset, the gateway derives it at startup from
+the `BGPRouter` targeting its node: the node's locator address, its
+`srv6Locator` Block followed by its `nodeID` (`2001:db8:ff01::/48` and
+`nodeID: 4098` give `2001:db8:ff01:1002::`). Until that router exists with a
+locator and node ID, the gateway waits and stays not ready. Setting the
+variable overrides the derived value, for a node that needs a different
+source.
+
+> See `internal/config/gateway.go`'s `EnvGatewaySRv6Address` doc comment and
 > ARCHITECTURE-GATEWAY.md's ["SRv6 encap-source address"](../agents/ARCHITECTURE-GATEWAY.md#srv6-encap-source-address)
 > section.
 
 `config/galactic-gateway/base/` is designed to be instantiated **once per
 gateway node** by a further overlay that pins the DaemonSet to one node
 (`kubernetes.io/hostname`) and sets that node's own
-`GALACTIC_GATEWAY_PUBLIC_INTERFACE`/`GALACTIC_GATEWAY_SRV6_ADDRESS` values —
-see the [worked example](#step-3-worked-example-a-per-node-overlay) below.
+`GALACTIC_GATEWAY_PUBLIC_INTERFACE` value. See the
+[worked example](#step-3-worked-example-a-per-node-overlay) below.
 
 ### Configuration reference (`internal/config/gateway.go`)
 
@@ -147,7 +149,7 @@ flags, or a combination of both (CLI flags take precedence), with the
 | ------------------- | -------------------------------------- | ------------------------------- | ----------- | ------------- |
 | Node name           | `GALACTIC_GATEWAY_NODE_NAME`           | `--node-name`, `-n`             | —           | Yes           |
 | Public interface    | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`    | `--gateway-public-interface`    | —           | While enabled |
-| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | —           | While enabled |
+| SRv6 address        | `GALACTIC_GATEWAY_SRV6_ADDRESS`        | `--gateway-srv6-address`        | Derived     | No            |
 | Internal interfaces | `GALACTIC_GATEWAY_INTERNAL_INTERFACES` | `--gateway-internal-interfaces` | —           | No            |
 | XDP attach mode     | `GALACTIC_GATEWAY_XDP_ATTACH`          | `--gateway-xdp-attach`          | `dispatch`  | No            |
 | Datapath enabled    | `GALACTIC_GATEWAY_DATAPATH_ENABLED`    | `--gateway-datapath-enabled`    | `true`      | No            |
@@ -168,7 +170,7 @@ to start while another datapath's slot is live there. See
 ready but loads nothing, empties the gateway's dispatcher slots, and
 withdraws every one of this node's VIP advertisements. The NetworkGateway's
 `Ready` reads `False` with reason `DatapathDisabled`. The public interface
-and SRv6 address are not required while it is off.
+is not required while it is off, and no SRv6 address is derived.
 
 `GALACTIC_GATEWAY_PROC_SYS_PATH` is the procfs root the datapath writes its
 forwarding sysctls under (`net.ipv6.conf.<iface>.forwarding` and
@@ -197,11 +199,13 @@ source a packet from a VIP address and have this program forward it
 unexamined; from the compute side that traffic is this gateway's own by
 construction.
 
-All three required fields are enforced by `GatewayConfig.Validate` at
+Both required fields are enforced by `GatewayConfig.Validate` at
 startup — a node deployed without them crash-loops immediately with an
 actionable message rather than running degraded. `Validate` additionally
-rejects an SRv6 address that isn't a native IPv6 address (an IPv4 or
-4-in-6 value fails validation, per `internal/config/gateway.go`).
+rejects a set SRv6 address that isn't a native IPv6 address (an IPv4 or
+4-in-6 value fails validation, per `internal/config/gateway.go`). An unset
+one is derived from the node's `BGPRouter`; two `BGPRouter`s for the same
+node that derive different addresses stop the gateway at startup.
 
 The `8081`/`5181` metrics/gRPC-health port defaults deliberately differ
 from `galactic-router`'s own `9179`/`5179` defaults, because on a gateway
@@ -256,7 +260,7 @@ deploy/containerlab/resources/galactic-gateway/
 │                         #   plus a lab-only image-tag patch (gateway-lab-patch.yaml)
 ├── dfw-worker2/
 │   ├── kustomization.yaml   # pins to one node, renames the DaemonSet
-│   ├── node-patch.yaml      # sets PUBLIC_INTERFACE/INTERNAL_INTERFACES/SRV6_ADDRESS
+│   ├── node-patch.yaml      # sets PUBLIC_INTERFACE/INTERNAL_INTERFACES
 │   └── networkgateway.yaml  # the NetworkGateway object itself
 ├── dfw-worker3/             # same shape, this node's own values
 ├── sjc-worker2/             #   "
@@ -335,25 +339,20 @@ spec:
             # this node; edge_return runs on its members.
             - name: GALACTIC_GATEWAY_INTERNAL_INTERFACES
               value: bond1
-            # The outer source of every packet edge_lb encapsulates toward a
-            # backend: this node's own uSID, from its BGPRouter's locator and
-            # nodeID (resources/galactic-router/dfw/). Infra sets it the
-            # same way.
-            - name: GALACTIC_GATEWAY_SRV6_ADDRESS
-              value: "2001:db8:ff01:1002::"
+            # GALACTIC_GATEWAY_SRV6_ADDRESS is left unset: the gateway
+            # derives this node's encapsulation source from its BGPRouter
+            # (resources/galactic-router/dfw/).
 ```
 
-`dfw-worker3`'s own overlay repeats this shape with its own hostname and its
-own uSID (`2001:db8:ff01:1003::`), since every gateway node needs its own
-unique `GALACTIC_GATEWAY_SRV6_ADDRESS`.
+`dfw-worker3`'s own overlay repeats this shape with its own hostname.
 
 **To generalize this to a real deployment:** create one overlay directory
 per gateway node, each pinning `kubernetes.io/hostname` to that node and
-setting that node's own public uplink interface name and a unique
-SRv6-reachable IPv6 address. The lab uses the node's own uSID, the
-`<locator>:<nodeID hex>::` address of its `BGPRouter` (`nodeID: 4098` is
-`0x1002`). There is no generic default for either value and nothing in this
-repo computes them for you.
+setting that node's own public uplink interface name. Give each gateway node
+a `BGPRouter` with an `srv6Locator` and `nodeID`, which its co-located
+`galactic-router` needs anyway, and the gateway derives its SRv6
+encapsulation source from it. Set `GALACTIC_GATEWAY_SRV6_ADDRESS` only to
+override that.
 
 ### The node's tenant BGP
 

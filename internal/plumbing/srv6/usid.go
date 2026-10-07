@@ -120,3 +120,25 @@ func NodeSIDBase(locator string, nodeID int32) (netip.Addr, error) {
 		Argument: 0,
 	})
 }
+
+// NodeLocatorAddress derives this node's plain locator address: its Block and
+// Node-ID with the Function and Argument fields left zero. It names the node
+// without naming any endpoint behavior, which is what galactic-gateway writes
+// as the outer source of every packet it encapsulates toward a backend.
+//
+// It differs from NodeSIDBase only in the Function field, and shares
+// nodeIdentity with it, so both name the same node for the same inputs.
+//
+// locator must be an IPv6 /48 and nodeID must fit its field; both are checked
+// the same way ComputeSID checks them.
+func NodeLocatorAddress(locator string, nodeID int32) (netip.Addr, error) {
+	block, err := nodeIdentity(locator, nodeID)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+
+	return uformat.Encode(uformat.Fields{
+		Block:  block,
+		NodeID: uint16(nodeID),
+	})
+}

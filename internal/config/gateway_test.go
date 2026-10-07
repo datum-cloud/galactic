@@ -76,9 +76,11 @@ func TestGatewayConfigValidate(t *testing.T) {
 			wantErr: "public interface is required",
 		},
 		{
-			name:    "missing srv6 address",
+			// #707: left unset, the address is derived from this node's
+			// BGPRouter at startup, so Validate has nothing to reject.
+			name:    "missing srv6 address is derived",
 			envVars: map[string]string{EnvGatewayNodeName: testGatewayNodeName, EnvGatewayPublicInterface: testGatewayIface},
-			wantErr: "SRv6 address is required",
+			wantErr: "",
 		},
 		{
 			name: "unparseable srv6 address",

@@ -114,17 +114,18 @@ spec:
             # "true", turns the datapath off and withdraws this node's VIPs
             # without removing the pod. See internal/config/gateway.go.
             #
-            # GALACTIC_GATEWAY_PUBLIC_INTERFACE/_SRV6_ADDRESS are
-            # intentionally left unset here: the interface name is
-            # deployment-specific and the SRv6 address must be unique per
-            # gateway node (no in-cluster mechanism yet derives it
-            # automatically — see internal/config/gateway.go's
-            # EnvGatewaySRv6Address doc comment).
-            # config.GatewayConfig.Validate requires both —
-            # applying this base as-is produces a crash-looping container.
-            # The deployer's per-node overlay must set both; see
+            # GALACTIC_GATEWAY_PUBLIC_INTERFACE is intentionally left unset
+            # here: the interface name is deployment-specific, and
+            # config.GatewayConfig.Validate requires it, so applying this
+            # base as-is produces a crash-looping container. The deployer's
+            # per-node overlay must set it; see
             # deploy/containerlab/resources/galactic-gateway/ for a worked
             # example (four instances, one per edge node).
+            #
+            # GALACTIC_GATEWAY_SRV6_ADDRESS is left unset too, but needs no
+            # per-node value: the gateway derives this node's SRv6
+            # encapsulation source from its BGPRouter at startup. Set it
+            # only to override that.
           ports:
             - name: metrics
               containerPort: 8081

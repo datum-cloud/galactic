@@ -296,12 +296,12 @@ node running both tenant delivery and an egress shard needs two Node-IDs, not
 one. Sharing one would let `galactic-nat`'s XDP program claim that node's own
 tenant ingress before the TC decap hook ever ran, silently.
 
-| Service     | Node-ID range     | Identity                                                                                                           |
-|-------------|-------------------|--------------------------------------------------------------------------------------------------------------------|
-| `0x1`       | `0x1000`–`0x1FFF` | Tenant delivery — every node's `BGPRouter`                                                                         |
-| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`EgressShard.spec.shardSID`)                                                                     |
-| `0x3`       | `0x3000`–`0x3FFF` | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`); unused in this lab, whose gateways use their node's own `0x1` uSID |
-| `0x4`–`0xD` | —                 | Unallocated                                                                                                        |
+| Service     | Node-ID range     | Identity                                                                                                              |
+|-------------|-------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `0x1`       | `0x1000`–`0x1FFF` | Tenant delivery — every node's `BGPRouter`                                                                            |
+| `0x2`       | `0x2000`–`0x2FFF` | NAT egress shard (`EgressShard.spec.shardSID`)                                                                        |
+| `0x3`       | `0x3000`–`0x3FFF` | Edge gateway (`GALACTIC_GATEWAY_SRV6_ADDRESS`); unused in this lab, whose gateways derive their node's own `0x1` uSID |
+| `0x4`–`0xD` | —                 | Unallocated                                                                                                           |
 
 `0x0` is left reserved (it is the one short range, since Node-ID `0x0000` is
 invalid), and `0xE`–`0xF` are the LIB — Function space, not Node-ID space. See

@@ -53,7 +53,13 @@ const (
 	// EnvGatewaySRv6Address is this node's plain SRv6-reachable address, used
 	// as the outer-header source for every packet this datapath forwards. It is
 	// never a translation source and is never compared against anything on a
-	// receive path. Required.
+	// receive path.
+	//
+	// Optional. Left unset, galactic-gateway derives it at startup from the
+	// BGPRouter targeting this node: the node's locator address, its SRv6
+	// locator's Block and its node ID with nothing after them
+	// (srv6.NodeLocatorAddress). Set, it wins, for a node that needs an
+	// override.
 	EnvGatewaySRv6Address = "GALACTIC_GATEWAY_SRV6_ADDRESS"
 
 	// EnvGatewayXDPAttach selects how the datapath reaches its interfaces' XDP
@@ -73,7 +79,7 @@ const (
 	// attaches nothing, empties its dispatcher slots, and withdraws this
 	// node's VIP advertisements, so no traffic is drawn to a node that will not
 	// load-balance it. Every other datapath on the node keeps running. The
-	// public interface and SRv6 address are not required while it is off.
+	// public interface is not required while it is off.
 	EnvGatewayDatapathEnabled = "GALACTIC_GATEWAY_DATAPATH_ENABLED"
 
 	// EnvGatewayProcSysPath is the procfs sysctl root the datapath writes its
@@ -105,8 +111,9 @@ type GatewayConfig struct {
 	MetricsPort    int
 	GRPCHealthPort int
 
-	// PublicInterface and SRv6Address configure the edge gateway datapath. Both
-	// are required; Validate rejects either being empty.
+	// PublicInterface and SRv6Address configure the edge gateway datapath.
+	// PublicInterface is required. SRv6Address is optional: empty means derive
+	// it from this node's BGPRouter at startup. See EnvGatewaySRv6Address.
 	PublicInterface string
 	SRv6Address     string
 
@@ -230,8 +237,7 @@ func (c *GatewayConfig) Validate() error {
 			EnvGatewayPublicInterface)
 	}
 	if c.SRv6Address == "" {
-		return fmt.Errorf(
-			"SRv6 address is required (use --gateway-srv6-address flag or %s env var)", EnvGatewaySRv6Address)
+		return nil
 	}
 	addr, err := netip.ParseAddr(c.SRv6Address)
 	if err != nil {

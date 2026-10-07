@@ -1,0 +1,122 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/netip"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/plumbing/srv6"
+	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
+)
+
+// Backoff bounds for waiting on this node's BGPRouter at startup.
+const (
+	encapSourceRetryInitial = time.Second
+	encapSourceRetryMax     = 30 * time.Second
+)
+
+// noRouterYetError reports that no BGPRouter targeting this node carries an SRv6
+// locator and node ID yet. resolveEncapSource retries it; every other error
+// is returned.
+type noRouterYetError struct{ nodeName string }
+
+func (e noRouterYetError) Error() string {
+	return "no BGPRouter with an SRv6 locator and node ID targets node " + e.nodeName
+}
+
+// resolveEncapSource returns the outer-header source the edge datapath writes
+// on every packet it encapsulates: configured when it is set, and otherwise
+// this node's locator address, derived from the BGPRouter targeting it (#707).
+// The derived value is what deployments used to set by hand, so leaving the
+// setting unset changes nothing on the wire.
+//
+// It runs before the manager starts, so reader must be uncached
+// (mgr.GetAPIReader()). The lookup spans every namespace: the gateway has no
+// namespace setting of its own, and its ClusterRole already lists BGPRouters
+// cluster-wide.
+//
+// A node whose router is missing or still lacks a locator or node ID is
+// waited on, with backoff, until ctx is done. The gateway cannot advertise a
+// VIP without that router anyway, and readiness stays NOT_SERVING meanwhile.
+// Two routers for this node that disagree on the address are an error, never
+// a guess.
+func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, configured string) (string, error) {
+	if configured != "" {
+		slog.Info("Using the configured edge gateway SRv6 encapsulation source", "address", configured)
+		return configured, nil
+	}
+
+	delay := encapSourceRetryInitial
+	for {
+		addr, err := encapSourceFromRouters(ctx, reader, nodeName)
+		if err == nil {
+			slog.Info("Derived the edge gateway SRv6 encapsulation source from this node's BGPRouter",
+				"address", addr)
+			return addr.String(), nil
+		}
+		if !errors.As(err, &noRouterYetError{}) {
+			return "", err
+		}
+
+		slog.Info("Waiting for this node's BGPRouter to derive the edge gateway SRv6 encapsulation source",
+			"node", nodeName, "retryIn", delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", fmt.Errorf("derive SRv6 encapsulation source: %w (last: %w)", ctx.Err(), err)
+		case <-timer.C:
+		}
+		delay = min(2*delay, encapSourceRetryMax)
+	}
+}
+
+// encapSourceFromRouters derives this node's locator address from every
+// BGPRouter targeting nodeName that carries a locator and node ID. It returns
+// noRouterYetError when there is none.
+func encapSourceFromRouters(ctx context.Context, reader client.Reader, nodeName string) (netip.Addr, error) {
+	list := &bgpv1alpha1.BGPRouterList{}
+	if err := reader.List(ctx, list); err != nil {
+		return netip.Addr{}, fmt.Errorf("list BGPRouters: %w", err)
+	}
+
+	var (
+		found netip.Addr
+		from  string
+	)
+	for i := range list.Items {
+		router := &list.Items[i]
+		if router.Spec.TargetRef.Name != nodeName {
+			continue
+		}
+		if router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {
+			continue
+		}
+		addr, err := srv6.NodeLocatorAddress(router.Spec.SRv6Locator, router.Spec.NodeID)
+		if err != nil {
+			return netip.Addr{}, fmt.Errorf("derive SRv6 encapsulation source from BGPRouter %s/%s: %w",
+				router.Namespace, router.Name, err)
+		}
+		name := router.Namespace + "/" + router.Name
+		if found.IsValid() && found != addr {
+			return netip.Addr{}, fmt.Errorf(
+				"BGPRouters %s and %s both target node %s but derive different SRv6 encapsulation sources "+
+					"(%s, %s); set %s or remove one", from, name, nodeName, found, addr, config.EnvGatewaySRv6Address)
+		}
+		found, from = addr, name
+	}
+	if !found.IsValid() {
+		return netip.Addr{}, noRouterYetError{nodeName: nodeName}
+	}
+	return found, nil
+}

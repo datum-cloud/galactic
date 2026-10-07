@@ -16,9 +16,6 @@ spec:
             # this node; edge_return runs on its members.
             - name: GALACTIC_GATEWAY_INTERNAL_INTERFACES
               value: bond1
-            # The outer source of every packet edge_lb encapsulates toward a
-            # backend: this node's own uSID, from its BGPRouter's locator and
-            # nodeID (resources/galactic-router/sjc/). Infra sets it the
-            # same way.
-            - name: GALACTIC_GATEWAY_SRV6_ADDRESS
-              value: "2001:db8:ff02:1002::"
+            # GALACTIC_GATEWAY_SRV6_ADDRESS is left unset: the gateway derives
+            # the outer source of every packet edge_lb encapsulates from this
+            # node's BGPRouter locator and nodeID (resources/galactic-router/sjc/).
