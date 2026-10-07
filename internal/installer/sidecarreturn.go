@@ -40,10 +40,10 @@ import (
 //
 // This side reads annotations rather than going to look, for the mirror-image
 // reason. Pointing a reply at the right pod needs that pod's host-side veth and
-// MAC, and reading those from here means entering its namespace, which needs
-// CAP_SYS_ADMIN. This container drops ALL and adds only BPF, NET_ADMIN, and
-// NET_RAW. The sidecar reads both from inside with no privilege and publishes
-// them on the advertisement it already writes.
+// MAC, and reading those from here would require entering its namespace. The
+// sidecar already sees both values directly and publishes them on the
+// advertisement it writes, so the node agent does not cross that namespace
+// boundary even though its datapath lifecycle needs CAP_SYS_ADMIN.
 //
 // Per advertised gateway address, a decapsulated reply needs:
 //

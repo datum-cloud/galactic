@@ -27,14 +27,14 @@ router` label and runs on both compute and edge nodes (see
 `config/galactic-cni` applies independently; the namespace
 (`galactic-system`) is created by `config/galactic-system/`.
 
-## Container privileges (BPF / PERFMON / NET_ADMIN / NET_RAW)
+## Container privileges (BPF / PERFMON / SYS_ADMIN / NET_ADMIN / NET_RAW)
 
 Because `credential-refresh` hosts the eBPF datapath's control daemon, its
-securityContext grants `BPF`, `PERFMON`, `NET_ADMIN`, and `NET_RAW` (with
-everything else dropped) plus a `bpf-fs` hostPath mount. The grant is
-required **unconditionally**: the datapath is the only forwarding path, so
-there is no flag to gate it behind, and it takes effect on every node
-running this manifest. The rationale for each capability:
+securityContext grants `BPF`, `PERFMON`, `SYS_ADMIN`, `NET_ADMIN`, and
+`NET_RAW` (with everything else dropped) plus a `bpf-fs` hostPath mount. The
+grant is required **unconditionally**: the datapath is the only forwarding
+path, so there is no flag to gate it behind, and it takes effect on every
+node running this manifest. The rationale for each capability:
 
 - **BPF / NET_ADMIN** — required by the binary's BPF loader dependencies to
   load, attach, and pin the datapath's programs and maps, and to create the
@@ -55,6 +55,14 @@ running this manifest. The rationale for each capability:
   so this container ran without it for as long as the program happened to
   stay inside what unprivileged BPF allows — luck rather than a property
   worth depending on.
+- **SYS_ADMIN** — required to reopen an already-attached TC program with
+  `BPF_PROG_GET_FD_BY_ID` while snapshotting the current chain before a
+  failure-atomic replacement. Some kernels reject that operation with
+  `EPERM` despite `BPF` and `PERFMON`; without this capability, a restart on
+  a node that already has Galactic TC filters cannot reattach the datapath.
+  This is a broad capability, so the container retains `drop: ["ALL"]`, a
+  runtime-default seccomp profile, no privilege escalation, and a read-only
+  root filesystem to limit the surrounding attack surface.
 
 ## The `bpf-fs` hostPath mount
 

@@ -45,9 +45,9 @@ const AnnotationNetNS = "galactic.datum.net/netns"
 // A reply for a sidecar gateway address must be redirected into the pod holding
 // it, so the host needs the ifindex of the host-side end of that pod's veth and
 // the pod-side MAC to address the frame to. Both are trivial to read from
-// inside the pod and unreadable from outside without entering the namespace,
-// which needs CAP_SYS_ADMIN, a privilege the node agent deliberately does not
-// carry.
+// inside the pod and unreadable from outside without entering the namespace.
+// The node agent deliberately does not cross that boundary; its CAP_SYS_ADMIN
+// grant is reserved for the eBPF datapath lifecycle.
 //
 // The side that can see them publishes them, on the advertisement the sidecar
 // already creates for this address, so one object describes one return path.

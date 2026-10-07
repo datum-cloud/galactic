@@ -110,7 +110,7 @@ spec:
             - name: metrics
               containerPort: 9180
               protocol: TCP
-          # The BPF/PERFMON/NET_ADMIN/NET_RAW grant and the bpf-fs
+          # The BPF/PERFMON/SYS_ADMIN/NET_ADMIN/NET_RAW grant and the bpf-fs
           # volumeMount below are required unconditionally by the eBPF
           # uSID datapath's control daemon this container hosts -- see
           # config/galactic-cni/README.md for the per-capability rationale.
@@ -121,6 +121,7 @@ spec:
               add:
                 - BPF
                 - PERFMON
+                - SYS_ADMIN
                 - NET_ADMIN
                 - NET_RAW
             allowPrivilegeEscalation: false
