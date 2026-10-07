@@ -88,9 +88,10 @@ func newVIPXlatRemoveCommand(pinDir *string) *cobra.Command {
 		Short: "Remove the rows one ServiceVIPBinding wrote",
 		Long: `remove deletes the two vip_xlat_table rows a ServiceVIPBinding with these
 spec values wrote, under whatever VRF they were written, and prints them. It
-finds them by the egress row, which rewrites to the VIP. An ingress row whose
-egress row is already gone is left alone, because its key carries no VIP
-address to prove whose it is.`,
+finds them by the egress row, which rewrites to the VIP. Where the ingress row
+beside it points at a different backend, another binding owns both rows and
+neither is removed. An ingress row whose egress row is already gone is left
+alone, because its key carries no VIP address to prove whose it is.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			proto, err := parseXlatProtocol(protocol)

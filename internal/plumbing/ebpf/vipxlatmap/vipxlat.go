@@ -323,14 +323,16 @@ func (t *VipXlatTable) UnregisterEgress(block uint64, argument uint16, proto uin
 // It exists for teardown after the binding's VRF has left the node, when the
 // (block, argument) pair can no longer be derived from the node's BGP objects.
 // The egress row is the anchor: it is keyed on (proto, backendPort) and
-// rewrites to the VIP, and a VIP belongs to exactly one rule, so an egress row
-// with this binding's port, protocol, and VIP rewrite target is this binding's
-// row under whatever argument it was registered.
+// rewrites to the VIP, so an egress row with this binding's port, protocol,
+// and VIP rewrite target marks a candidate location under whatever argument
+// it was registered.
 //
-// For each anchor found, the ingress row at the same (block, argument, proto,
-// vipPort) is removed only if it still rewrites to backendAddr and backendPort.
-// The ingress key carries no VIP address, so a row at that key with a
-// different value belongs to another binding.
+// The egress row alone does not prove ownership: two bindings for different
+// backends of one rule on this node, sharing a backend port, write the same
+// egress row. The ingress row at the same (block, argument, proto, vipPort)
+// decides. If it rewrites to backendAddr and backendPort, both rows are
+// removed. If it rewrites elsewhere, another binding owns the location and
+// neither row is touched. If it is absent, the egress row is removed alone.
 //
 // An ingress row whose egress row is already gone is not found here. Callers
 // that can still resolve the binding's (block, argument) should also remove by
@@ -366,15 +368,22 @@ func (t *VipXlatTable) UnregisterBinding(
 		}
 
 		ingress, found, getErr := t.GetIngress(e.Block, e.Argument, proto, vipPort)
-		switch {
-		case getErr != nil:
+		if getErr != nil {
 			errs = append(errs, getErr)
-		case found && ingress.RewritePort == backendPort && [16]byte(ingress.Addr) == rawBackend:
+			continue
+		}
+		if found {
+			if ingress.RewritePort != backendPort || [16]byte(ingress.Addr) != rawBackend {
+				// Another binding owns this location: its backend shares the
+				// VIP, protocol, and backend port, so the egress row is
+				// identical and it still needs it.
+				continue
+			}
 			if delErr := t.UnregisterIngress(e.Block, e.Argument, proto, vipPort); delErr != nil {
 				errs = append(errs, delErr)
-			} else {
-				removed = append(removed, ingress)
+				continue
 			}
+			removed = append(removed, ingress)
 		}
 
 		if delErr := t.UnregisterEgress(e.Block, e.Argument, proto, backendPort); delErr != nil {
