@@ -5,8 +5,8 @@
 # config.GatewayConfig.Validate, and the uplink name differs per node), so
 # applying it as shipped here would produce a crash-looping container.
 # GALACTIC_GATEWAY_SRV6_ADDRESS needs no per-node value: left unset, the
-# gateway derives it from its node's BGPRouter. config/fabric-router/ has the same exemption for
-# the same reason.
+# gateway derives it from its node's BGPRouter. config/fabric-router/ has
+# the same exemption for the same reason.
 #
 # serviceaccount.yaml/rbac.yaml have no such per-node uniqueness problem —
 # they're safe and idempotent to apply cluster-wide regardless of how many

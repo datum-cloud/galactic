@@ -74,6 +74,35 @@ func TestResolveEncapSource(t *testing.T) {
 			want: testEncapDerived,
 		},
 		{
+			name: "routers targeting a non-Node object with the same name are skipped",
+			routers: []client.Object{
+				&bgpv1alpha1.BGPRouter{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "machine"},
+					Spec: bgpv1alpha1.BGPRouterSpec{
+						TargetRef:   bgpv1alpha1.TargetRef{Kind: "Machine", Name: testEncapNode},
+						SRv6Locator: "2001:db8:aaaa::/48",
+						NodeID:      0x1002,
+					},
+				},
+				testEncapRouter("galactic-system", "r", testEncapNode, testEncapLocator, 0x1002),
+			},
+			want: testEncapDerived,
+		},
+		{
+			name: "a router with no target kind still matches the node",
+			routers: []client.Object{
+				&bgpv1alpha1.BGPRouter{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "galactic-system", Name: "bare-kind"},
+					Spec: bgpv1alpha1.BGPRouterSpec{
+						TargetRef:   bgpv1alpha1.TargetRef{Name: testEncapNode},
+						SRv6Locator: testEncapLocator,
+						NodeID:      0x1002,
+					},
+				},
+			},
+			want: testEncapDerived,
+		},
+		{
 			name: "two routers agreeing on the address",
 			routers: []client.Object{
 				testEncapRouter("a", "r", testEncapNode, testEncapLocator, 0x1002),

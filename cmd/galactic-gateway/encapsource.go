@@ -82,8 +82,9 @@ func resolveEncapSource(ctx context.Context, reader client.Reader, nodeName, con
 }
 
 // encapSourceFromRouters derives this node's locator address from every
-// BGPRouter targeting nodeName that carries a locator and node ID. It returns
-// noRouterYetError when there is none.
+// BGPRouter whose target is the Node nodeName (an empty kind counts as Node)
+// and that carries a locator and node ID. It returns noRouterYetError when
+// there is none.
 func encapSourceFromRouters(ctx context.Context, reader client.Reader, nodeName string) (netip.Addr, error) {
 	list := &bgpv1alpha1.BGPRouterList{}
 	if err := reader.List(ctx, list); err != nil {
@@ -97,6 +98,9 @@ func encapSourceFromRouters(ctx context.Context, reader client.Reader, nodeName 
 	for i := range list.Items {
 		router := &list.Items[i]
 		if router.Spec.TargetRef.Name != nodeName {
+			continue
+		}
+		if kind := router.Spec.TargetRef.Kind; kind != "" && kind != "Node" {
 			continue
 		}
 		if router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {
