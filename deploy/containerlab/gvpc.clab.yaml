@@ -292,7 +292,9 @@ topology:
     # cluster and running no Galactic component at all: it exists to be the
     # far end of traffic that leaves the fabric. nginx serves on its transit
     # addresses (both families), so a tenant pod's egress path through the
-    # NAT66 shard tier has a real destination to reach.
+    # NAT66 shard tier has a real destination to reach, and the host itself
+    # is a real off-fabric client for each site's ingress VIP
+    # (scripts/verify-gateway-ingress.sh).
     # It hangs off tr4, the one transit router with no site attached to it.
     # No BGP: a host doesn't speak it -- tr4 originates the link subnets
     # (node_files/tr4/frr.conf) and the host just keeps a default route
@@ -345,15 +347,16 @@ topology:
     # them. dfw has two, an active-active pair; sjc and iad one each.
     #
     # mtu: 1500 on both ends, unlike containerlab's jumbo-frame veth default
-    # (~9500) -- required, not cosmetic: the egress shard (galactic-nat)
-    # attaches the XDP dispatcher to every member of bond0 in native/driver
-    # mode (xdpattach, XDPDriverMode), and the kernel's veth_xdp_set() rejects native
+    # (~9500) -- required, not cosmetic: the node's XDP dispatcher, which
+    # runs the egress shard (galactic-nat) and galactic-gateway's edge_lb,
+    # attaches to every member of bond0 in native/driver mode, and the
+    # kernel's veth_xdp_set() rejects native
     # XDP with -ERANGE whenever the *peer's* MTU exceeds what fits in one
     # page-sized buffer (SKB_WITH_OVERHEAD(PAGE_SIZE - VETH_XDP_HEADROOM),
     # ~3.5-3.8KB on a 4K-page host) -- 9500 blows well past that regardless
-    # of which end asks. Confirmed live: galactic-gateway, which held these
-    # hooks before the shards did, crash-looped with exactly this ERANGE
-    # until both ends were dropped to 1500.
+    # of which end asks. Confirmed live: galactic-gateway, which once held
+    # these hooks alone, crash-looped with exactly this ERANGE until both
+    # ends were dropped to 1500.
     - endpoints: ["dfw-worker2:eth1", "tr1:eth1"]    # dfw-worker2 bond0 / tr1 bond1
       mtu: 1500
     - endpoints: ["dfw-worker2:eth3", "tr1:eth6"]
@@ -378,11 +381,13 @@ topology:
     # resources/fabric-router/*/frr.conf.*).
     #
     # mtu: 1500 for the same -ERANGE reason as the edge uplinks above. The
-    # edge end runs the egress shard's XDP program on every member of these
-    # bonds, and the compute end runs the lab's pass-through XDP program on
-    # its members (Taskfile.yaml's deploy:lab-xdp-passthrough-compute) so
-    # that the shard's redirects of a reply toward the tenant's node are
-    # received at all. Both native XDP, both subject to the peer-MTU limit.
+    # edge end runs the node's XDP dispatcher on every member of these
+    # bonds (the egress shard, and galactic-gateway's edge_return), and the
+    # compute end runs the lab's pass-through XDP program on its members
+    # (Taskfile.yaml's deploy:lab-xdp-passthrough-compute) so that the
+    # shard's redirects of a reply toward the tenant's node, and edge_lb's
+    # redirects toward a backend, are received at all. Both native XDP, both
+    # subject to the peer-MTU limit.
     # (galactic-nat used to attach
     # here from the compute end, while its shards ran on the compute nodes;
     # it crash-looped with this ERANGE until these links were dropped to
@@ -422,8 +427,9 @@ topology:
 
     # The route reflector sits behind iad's edge node exactly the way a
     # compute node does -- one iBGP session to it, no transit uplink of its
-    # own. It keeps the jumbo default: it does not run galactic-nat, so no
-    # XDP program ever attaches to its eth1. Nor is
+    # own. It keeps the jumbo default: it runs neither galactic-nat nor
+    # galactic-gateway, and iad-worker2's eth3 is in neither one's interface
+    # list, so no XDP program ever attaches to either end. Nor is
     # it bonded -- with no datapath on it, a bond would exercise nothing.
     - endpoints: ["iad-worker3:eth1", "iad-worker2:eth3"]
 

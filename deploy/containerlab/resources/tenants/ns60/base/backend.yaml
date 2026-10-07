@@ -1,0 +1,63 @@
+# ns60's VIP backend, one per site, behind that site's NetworkRules
+# (resources/galactic-gateway/<site>/). It answers TCP and UDP on port 80
+# with its own pod name and the address it saw the client as, which is how
+# scripts/verify-gateway-ingress.sh tells which backend answered and checks
+# that the client's address arrived unchanged.
+#
+# One per site rather than two, though two would give Maglev a choice: each
+# site has one compute node, and a node can bind a VIP's port to only one
+# backend per VPC (#755: usid.c's vip_xlat_key holds no backend address).
+#
+# Its address is fixed in the site's NAD rather than taken from the pool,
+# because the NetworkRule and ServiceVIPBinding name it. Recreate, not
+# RollingUpdate, so a new pod never asks for the address while the old
+# one still holds it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        v1.multus-cni.io/default-network: ns60/backend
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - compute
+      containers:
+        - name: backend
+          image: ghcr.io/datum-cloud/galactic-debug:latest
+          imagePullPolicy: IfNotPresent
+          # The image sets HOSTNAME itself, so the pod's name comes from the
+          # downward API instead.
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # socat sets SOCAT_PEERADDR to the client's address for each
+          # connection or datagram.
+          command:
+            - sh
+            - -c
+            - |
+              reply='echo "$POD_NAME $SOCAT_PEERADDR"'
+              socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply" &
+              exec socat UDP6-RECVFROM:80,reuseaddr,fork SYSTEM:"$reply"

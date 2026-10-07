@@ -3,8 +3,9 @@
 What's here: a per-site containerlab overlay for `galactic-nat`, the
 sharded egress translation datapath control plane (`config/galactic-nat/`).
 Every edge node runs a shard — `dfw-worker2` and `dfw-worker3` in dfw,
-`sjc-worker2` in sjc, `iad-worker2` in iad. Every shard runs from the
-node's shared XDP dispatcher on its uplinks. Compute nodes run none.
+`sjc-worker2` in sjc, `iad-worker2` in iad. Every edge node also runs
+`galactic-gateway`, so every shard runs from its own slot of the node's XDP
+dispatcher, sharing the uplinks with the gateway. Compute nodes run none.
 
 - `base/` — the lab's patch onto `config/galactic-nat/base` (image
   override for Kind's locally-built images; see `base/kustomization.yaml`
@@ -20,7 +21,7 @@ node's shared XDP dispatcher on its uplinks. Compute nodes run none.
   DaemonSet. Each site's `node-patch.yaml` sets only
   `GALACTIC_NAT_UPLINK_INTERFACES=bond0,bond1` — an edge node's transit
   bond (replies arrive there) and its compute-facing bond (tenant egress
-  arrives there), the two the shard runs from the XDP dispatcher on. iad's
+  arrives there), the two the shard's XDP program runs on. iad's
   also sets `GALACTIC_NAT_ECHO_RESPONDER=true`, so `verify:nat-icmp` can
   ping one shard's masquerade addresses and see the others refuse. The shard's identity lives in that site's
   `egressshard.yaml`, one `EgressShard` per edge node (dfw's holds two),
@@ -40,16 +41,14 @@ Every shard translates for the same `nat64Prefix`, `2001:db8:64::/96`. The
 Node-ID is service `0x2` over the edge node's own index, beside its router
 (`0x1NNN`) identity.
 
-## Run from the dispatcher
+## Run from the XDP dispatcher
 
-The lab base sets `GALACTIC_NAT_XDP_ATTACH=dispatch`, overriding the
-binary's default, `direct`: the shard runs from the node's shared, pinned
-XDP dispatcher on every member of `bond0` and `bond1`. No lab node runs
-`galactic-gateway`, so nothing else needs the hook, but dispatch is the
-mode production edges are moving to. The first deploy onto a lab that ran
-`direct` bounces each uplink: the old shard's unpinned program detaches when
-its pod exits, and the dispatcher's first attach bounces it again. After
-that, a shard restart bounces no uplink. See
+The lab base sets `GALACTIC_NAT_XDP_ATTACH=dispatch`: an interface takes
+one native XDP program, and every edge node also runs `galactic-gateway`
+(`resources/galactic-gateway/`), so the shard and the gateway each run from
+their own slot of the node's pinned XDP dispatcher on every member of
+`bond0` and `bond1`. Either can then restart without detaching the other,
+which `task verify:gateway-restart` checks. See
 [docs/nat/configuration.md](../../../../docs/nat/configuration.md) for
 both modes.
 
@@ -69,15 +68,17 @@ yet. The script waits for every shard's `Programmed` condition, not just
 the rollout: a shard reports ready once attached, before its identity is
 programmed.
 
-It also migrates a lab brought up while the shards ran chained behind
-`galactic-gateway`. It deletes every `galactic-gateway` DaemonSet, the
-`NetworkGateway`/`NetworkRule`/`ServiceVIPBinding` objects behind them, and
-the `ns60` backend tenant, waiting for the gateway pods to exit before the
-shard DaemonSet rolls out: the shard cannot attach while a
-gateway still holds an uplink's hook. The gateway's XDP links are not
-pinned, so its exit releases them. Re-run `scripts/deploy-fabric.sh` too,
-so the edge nodes stop originating the anycast VIP aggregate. A fresh lab
-has nothing to delete.
+`task deploy:galactic-gateway` runs later, after `deploy:scenarios`: the
+gateway's `ServiceVIPBinding`s bind the `ns60` backends that step creates.
+Because the shard and the gateway share the uplinks through the dispatcher,
+neither has to be deployed first for the other to attach.
+
+A lab brought up while the shards ran in direct mode moves to dispatch when
+this script re-applies the base. That first deploy bounces each uplink: the
+old shard's unpinned program detaches when its pod exits, and the
+dispatcher's first attach bounces it again. After that, a restart bounces no
+uplink. Re-run `scripts/deploy-fabric.sh` as well, so each edge node
+originates its site's VIP `/64`.
 
 `task build`/`task deploy:images` build and load `galactic-nat:latest`
 onto the edge nodes the same way the other lab images are; RBAC
@@ -137,6 +138,6 @@ Unlike `shardAddressIPv6`, the IPv4 address is not advertised into the
 fabric by anything in this repo — a NAT64 reply arrives over the IPv4
 underlay, which carries no EVPN, so each shard's edge node originates its
 own `/32` in `resources/fabric-router/<site>/frr.conf.<node>`. The reply
-reaches the shard because its XDP program sits directly on `bond0`.
+reaches the shard because its XDP program runs on `bond0`'s members.
 `task verify:nat-datapath` drives both families end to end to the
 off-fabric host.

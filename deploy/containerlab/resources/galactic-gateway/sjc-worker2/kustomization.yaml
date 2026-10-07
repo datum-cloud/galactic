@@ -1,0 +1,27 @@
+# sjc-worker2's galactic-gateway: one DaemonSet pinned to this node, and the
+# NetworkGateway that tells the gateway controller to serve VIPs here.
+namespace: galactic-system
+resources:
+  - ../base
+  - networkgateway.yaml
+patches:
+  - path: node-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-gateway
+  # Pins this instance to sjc-worker2, on top of the base's own edge-node and
+  # opt-in terms.
+  - target:
+      kind: DaemonSet
+      name: galactic-gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions/-
+        value:
+          key: kubernetes.io/hostname
+          operator: In
+          values:
+            - sjc-worker2
+      - op: replace
+        path: /metadata/name
+        value: galactic-gateway-sjc-worker2

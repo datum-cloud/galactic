@@ -177,8 +177,10 @@ docker exec dfw-worker2 curl -sS --max-time 5 http://[2001:db8:1:40::2]/
 ## Egress shards
 
 Four edge nodes across three sites (`dfw-worker2`, `dfw-worker3`, `sjc-worker2`,
-`iad-worker2`), each running its own shard from the node's XDP dispatcher on
-its uplinks.
+`iad-worker2`), each running its own shard. Every one of them also runs
+`galactic-gateway`, so the shard runs from its own slot of the node's XDP
+dispatcher (`GALACTIC_NAT_XDP_ATTACH=dispatch`) rather than attaching its own
+program.
 
 ```bash
 task verify:nat-sharding
@@ -187,9 +189,43 @@ task verify:nat-sharding
 docker exec dfw-control-plane kubectl get pods -n galactic-system -o wide \
   -l app.kubernetes.io/name=galactic-nat
 
-# The XDP dispatcher, on every member of both bonds (eth1-eth4); the shard runs
-# from one of its slots
+# The dispatcher's root program, on every member of both bonds (eth1-eth4);
+# the shard and the gateway run from its slots
 docker exec dfw-worker2 ip -d link show dev eth1 | grep -o 'prog/xdp id [0-9]*'
+```
+
+## Ingress gateway
+
+The same four edge nodes each run `galactic-gateway` (`galactic-gateway-<node>`)
+and a `NetworkGateway` named after the node. Each site has its own VIP
+(`2001:db8:6060:1::1` in dfw, `:2::1` in sjc, `:3::1` in iad), in a `/64` only
+that site's edge nodes originate, and one `ns60` backend on its compute node
+that answers TCP and UDP on port 80 with its pod name and the client address
+it saw.
+
+```bash
+# NetworkGateways Ready, NetworkRules Accepted, ServiceVIPBindings Bound
+task verify:gateway
+
+# TCP and UDP from remote-host to every site's VIP, pinned through each
+# gateway node in turn; checks the replies and the datapath's counters
+task verify:gateway-ingress
+
+# Restart dfw-worker2's gateway, then its shard, while the other carries
+# traffic (#710)
+task verify:gateway-restart
+
+# Turn dfw-worker2's datapath off; the ingress check must fail, then pass
+# again. Disruptive -- not part of `task verify`
+task verify:gateway-detach
+
+# By hand: one TCP request to dfw's VIP, from the off-fabric host
+echo probe | docker exec -i clab-gvpc-remote-host \
+  socat -t2 -T3 - 'TCP6:[2001:db8:6060:1::1]:80'
+
+# The datapath's own account of it, on a gateway node
+docker exec dfw-worker2 curl -s http://localhost:8081/metrics \
+  | grep -E '^galactic_edge_(rule|return)_packets_total'
 ```
 
 ## EVPN route reflector
@@ -384,11 +420,14 @@ XDP program could not do.
 ## Automated checks
 
 ```bash
-task verify           # run all verification (bgp-transit, bgp-fabric, bgp-peers, underlay, srv6, evpn, nat, scenarios)
+task verify           # run all verification (bgp-transit, bgp-fabric, bgp-peers, underlay, srv6, evpn, gateway, nat, scenarios)
 task verify:bgp-transit
 task verify:bgp-fabric
 task verify:bgp-peers
 task verify:underlay
 task verify:srv6
 task verify:evpn
+task verify:gateway
+task verify:gateway-ingress
+task verify:gateway-restart
 ```

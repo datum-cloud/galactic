@@ -245,17 +245,17 @@ Mutually exclusive with `fabric=router` on the same node, the same way
 
 ## Worked example: the containerlab lab
 
-| Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                               |
-|------------------------------------------------------------|-----------|------------|----------|------------------------------------------------------------------------------------|
-| `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-cni`, `galactic-router`, `fabric-router`                                 |
-| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | `edge`    | `router`   | `router` | `galactic-nat` (`nat=enabled`), `galactic-cni`, `galactic-router`, `fabric-router` |
-| `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                              |
+| Node                                                       | `node`    | `galactic` | `fabric` | Runs                                                                                                                       |
+|------------------------------------------------------------|-----------|------------|----------|----------------------------------------------------------------------------------------------------------------------------|
+| `dfw-worker`, `sjc-worker`, `iad-worker`                   | `compute` | `router`   | `router` | `galactic-cni`, `galactic-router`, `fabric-router`                                                                         |
+| `dfw-worker2`, `dfw-worker3`, `sjc-worker2`, `iad-worker2` | `edge`    | `router`   | `router` | `galactic-gateway` (`gateway=enabled`), `galactic-nat` (`nat=enabled`), `galactic-cni`, `galactic-router`, `fabric-router` |
+| `iad-worker3`                                              | —         | `control`  | `router` | `galactic-router-rr`, `fabric-router`                                                                                      |
 
-The lab's edge workers carry `node=edge` plus `nat=enabled`, which together
-place a `galactic-nat` shard on each; the lab deploys no `galactic-vrf`
-yet. No worker carries `gateway=enabled`: the lab deploys no
-`galactic-gateway`; each shard still runs from the node's XDP dispatcher
-(`GALACTIC_NAT_XDP_ATTACH=dispatch`).
+The lab's edge workers carry `node=edge` plus both `gateway=enabled` and
+`nat=enabled`, which place a `galactic-gateway` and a `galactic-nat` shard on
+each; the lab deploys no `galactic-vrf` yet. The shard runs with
+`GALACTIC_NAT_XDP_ATTACH=dispatch`, so it and the gateway share the uplinks
+through the node's XDP dispatcher.
 
 The reflector row is the one that shows why `galactic` is a mode enum rather
 than a boolean: `iad-worker3` carries no `node` value at all. Both `node`

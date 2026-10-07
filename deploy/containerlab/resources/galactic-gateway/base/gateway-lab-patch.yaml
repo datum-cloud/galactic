@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-gateway
+spec:
+  template:
+    spec:
+      # Image override only. GALACTIC_GATEWAY_XDP_ATTACH stays at the
+      # base's default, dispatch: every edge node also runs an egress shard,
+      # and the two share the uplinks through the node's XDP dispatcher.
+      containers:
+        - name: galactic-gateway
+          image: galactic-gateway:latest
+          imagePullPolicy: Never

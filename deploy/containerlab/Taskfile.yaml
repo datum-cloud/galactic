@@ -22,6 +22,7 @@ tasks:
       - "build:galactic-router"
       - "build:galactic-cni"
       - "build:galactic-nat"
+      - "build:galactic-gateway"
       - "build:remote-host"
 
   "build:node":
@@ -37,7 +38,7 @@ tasks:
   # --build-context network=../../../network satisfies go.mod's local
   # `replace go.datum.net/network => ../network` (see that line's own
   # comment) inside each Dockerfile's "network" build stage -- see
-  # containers/galactic-{router,cni,nat}/Dockerfile's own comment on
+  # containers/galactic-{router,cni,nat,gateway}/Dockerfile's own comment on
   # that stage for the full mechanism. ../../../network is this Taskfile's
   # own cwd (deploy/containerlab) relative to the network repo checked out
   # as galactic's sibling; harmless to pass even once that replace
@@ -58,6 +59,11 @@ tasks:
     desc: Build the galactic-nat egress datapath image
     cmds:
       - docker build --network=host --build-context network=../../../network -t galactic-nat:latest -f ../../containers/galactic-nat/Dockerfile ../..
+
+  "build:galactic-gateway":
+    desc: Build the galactic-gateway edge load balancer image
+    cmds:
+      - docker build --network=host --build-context network=../../../network -t galactic-gateway:latest -f ../../containers/galactic-gateway/Dockerfile ../..
 
   "build:remote-host":
     desc: Build the off-fabric remote host image (nginx)
@@ -83,6 +89,9 @@ tasks:
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
       - task: "deploy:scenarios"
+      # After the scenarios: the gateway's ServiceVIPBindings bind ns60's
+      # backends, which deploy:scenarios creates.
+      - task: "deploy:galactic-gateway"
 
   "deploy:clusters":
     desc: Create Kind clusters
@@ -220,8 +229,9 @@ tasks:
         dfw-worker dfw-worker2 dfw-worker3
         sjc-worker sjc-worker2
         iad-worker iad-worker2
-      # Egress shards: one per edge node.
+      # Egress shards and gateways: one each per edge node.
       NAT_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
+      GATEWAY_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
     cmds:
       - |
         set -e
@@ -237,6 +247,7 @@ tasks:
         load galactic-router:latest {{.FABRIC_NODES}}
         load galactic-cni:latest {{.CNI_NODES}}
         load galactic-nat:latest {{.NAT_NODES}}
+        load galactic-gateway:latest {{.GATEWAY_NODES}}
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -291,6 +302,11 @@ tasks:
     cmds:
       - ./scripts/deploy-galactic-nat.sh
 
+  "deploy:galactic-gateway":
+    desc: Install galactic-gateway on every edge node, with each site's VIP rules
+    cmds:
+      - ./scripts/deploy-galactic-gateway.sh
+
   "deploy:scenarios":
     desc: Deploy all VPC test scenarios
     cmds:
@@ -298,6 +314,7 @@ tasks:
       - task: "deploy:ns20"
       - task: "deploy:ns30"
       - task: "deploy:ns40"
+      - task: "deploy:ns60"
       - task: "deploy:ns71"
 
   "deploy:ns10":
@@ -320,6 +337,11 @@ tasks:
     cmds:
       - ./scripts/deploy-ns.sh ns40 iad
 
+  "deploy:ns60":
+    desc: Deploy ns60 test VPC (one VIP backend per site)
+    cmds:
+      - ./scripts/deploy-ns.sh ns60 dfw sjc iad
+
   "deploy:ns71":
     desc: Deploy ns71 test VPCs (overlapping ULA on one node, same-node collision fixture)
     cmds:
@@ -337,6 +359,9 @@ tasks:
       - task: "verify:underlay"
       - task: "verify:srv6"
       - task: "verify:evpn"
+      - task: "verify:gateway"
+      - task: "verify:gateway-ingress"
+      - task: "verify:gateway-restart"
       - task: "verify:nat-sharding"
       - task: "verify:nat-egress"
       - task: "verify:nat-return-route"
@@ -445,6 +470,56 @@ tasks:
       - docker exec iad-control-plane kubectl get bgprouters -A
       - docker exec sjc-control-plane kubectl get bgprouters -A
       - docker exec dfw-control-plane kubectl get bgprouters -A
+
+  "verify:gateway":
+    desc: Verify every edge node's gateway is ready and every site's VIP rules are accepted and bound
+    cmds:
+      - |
+        set -e
+        rc=0
+        for site in dfw sjc iad; do
+          cp=${site}-control-plane
+          echo "--- ${site} ---"
+          docker exec ${cp} kubectl -n galactic-system get networkgateways,networkrules,servicevipbindings
+          # Ready: the engine loaded every rule and advertised it. Accepted:
+          # the rule found a gateway. Bound: the backend's node rewrites the
+          # VIP for it.
+          for check in "networkgateway Ready" "networkrule Accepted" "servicevipbinding Bound"; do
+            set -- ${check}
+            if ! docker exec ${cp} kubectl -n galactic-system wait $1 --all \
+                --for=condition=$2 --timeout=10s >/dev/null; then
+              echo "FAIL ${site}: not every $1 is $2" >&2
+              rc=1
+            fi
+          done
+        done
+        exit ${rc}
+
+  # verify:gateway reads CRDs, so it passes on a datapath where no
+  # connection completes. This sends real TCP and UDP from the off-fabric
+  # host to each site's VIP, through each of the site's gateway nodes in
+  # turn, and checks the replies and the datapath's own counters. See the
+  # script's header for each assertion.
+  "verify:gateway-ingress":
+    desc: TCP and UDP from the off-fabric host to each site's VIP, through every gateway node
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-gateway-ingress.sh
+
+  # #710: the gateway and the egress shard share each edge node's uplinks
+  # through its XDP dispatcher, so restarting either must leave the other's
+  # traffic flowing.
+  "verify:gateway-restart":
+    desc: Restart dfw-worker2's gateway and shard in turn while the other carries traffic
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-gateway-restart.sh
+
+  # Not part of `verify`: dfw-worker2 serves no VIP while it runs. Proves
+  # verify:gateway-ingress fails when a gateway's XDP program is off its
+  # uplinks.
+  "verify:gateway-detach":
+    desc: Turn dfw-worker2's gateway datapath off and confirm the ingress check fails, then passes again
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-gateway-detach.sh
 
   "verify:nat-sharding":
     desc: Verify every edge node's EgressShard is programmed and advertised
@@ -1001,6 +1076,7 @@ tasks:
       - docker rmi kindest/node:galactic || true
       - docker rmi galactic-router:latest || true
       - docker rmi galactic-nat:latest || true
+      - docker rmi galactic-gateway:latest || true
       - docker rmi galactic-cni:latest || true
       - docker rmi {{.FABRIC_ROUTER_IMAGE}} || true
       - docker rmi remote-host:latest || true

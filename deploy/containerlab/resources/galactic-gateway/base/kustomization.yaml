@@ -1,0 +1,11 @@
+# The lab's galactic-gateway base: config/galactic-gateway/base, copied in
+# as gateway/ by scripts/deploy-galactic-gateway.sh, plus the lab image.
+# Each <node>/ overlay pins one instance to one edge node and sets that
+# node's interfaces and SRv6 address.
+resources:
+  - gateway
+patches:
+  - path: gateway-lab-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-gateway

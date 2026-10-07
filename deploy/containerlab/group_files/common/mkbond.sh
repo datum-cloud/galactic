@@ -6,12 +6,11 @@
 # aggregate can never disagree on its LACP parameters.
 #
 # Why these parameters:
-#   mode 802.3ad       what production edge uplinks run, and what
-#                      galactic-gateway's per-slave attach gate waits on (it
-#                      reads each slave's LACP actor state -- see
-#                      internal/plumbing/ebpf/edgeattach/gate.go). The lab
-#                      no longer deploys the gateway; galactic-nat attaches
-#                      to the slaves without such a gate.
+#   mode 802.3ad       what production edge uplinks run, and what the
+#                      per-slave XDP attach gate galactic-gateway and
+#                      galactic-nat share waits on (it reads each slave's
+#                      LACP actor state -- see
+#                      internal/plumbing/ebpf/xdpattach/gate.go).
 #   miimon 100         non-zero is load-bearing: with miimon 0 the bonding
 #                      driver never re-polls carrier, so a slave that bounces
 #                      while a native XDP program attaches stays failed.

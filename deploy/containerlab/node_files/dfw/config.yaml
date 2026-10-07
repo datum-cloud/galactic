@@ -14,16 +14,19 @@ nodes:
       galactic.datumapis.com/node: compute
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
-  # Two edge nodes, each running its own egress shard: dfw's compute node
-  # lists both in its shard list, so this is the only site where a tenant's
-  # egress has a second shard to fall back to. sjc and iad each run a single
-  # edge node. Every shard runs from the node's XDP dispatcher
+  # Two edge nodes, each running its own egress shard and galactic-gateway:
+  # dfw's compute node lists both shards in its shard list, so this is the
+  # only site where a tenant's egress has a second shard to fall back to,
+  # and the only site where a VIP has two gateways to enter through. sjc
+  # and iad each run a single edge node. The shard and the gateway share
+  # the node's uplinks through its XDP dispatcher
   # (GALACTIC_NAT_XDP_ATTACH=dispatch).
   - role: worker
     labels:
       topology.kubernetes.io/region: dfw
       galactic.datumapis.com/node: edge
       galactic.datumapis.com/nat: enabled
+      galactic.datumapis.com/gateway: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:
@@ -39,6 +42,7 @@ nodes:
       topology.kubernetes.io/region: dfw
       galactic.datumapis.com/node: edge
       galactic.datumapis.com/nat: enabled
+      galactic.datumapis.com/gateway: enabled
       galactic.datumapis.com/galactic: router
       galactic.datumapis.com/fabric: router
     kubeadmConfigPatches:

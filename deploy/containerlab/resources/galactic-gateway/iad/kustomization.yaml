@@ -1,0 +1,10 @@
+# iad's ingress tier: a galactic-gateway and NetworkGateway on each of
+# its edge nodes, and the NetworkRules and ServiceVIPBindings for ns60, the
+# site's backend tenant (resources/tenants/ns60/iad/). The VIP is
+# iad's own, and so are its backends: a load balancer belongs to one
+# region (datum-cloud/enhancements#884).
+namespace: galactic-system
+resources:
+  - ../iad-worker2
+  - networkrules.yaml
+  - servicevipbindings.yaml
