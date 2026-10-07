@@ -23,6 +23,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -106,6 +107,8 @@ func runCmd(cfg *config.RouterConfig) error {
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
+	serviceRouteMetrics := serviceroute.NewMetrics()
+	serviceRouteMetrics.MustRegister(ctrlmetrics.Registry)
 
 	// ctx carries a cause so an ordinary signal-triggered shutdown can be told
 	// apart from the health server's own Serve failure below. See the cause
@@ -278,7 +281,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	// controller process before informer reconciliation starts. A missing map is
 	// tolerated because the datapath loader may start after galactic-router;
 	// the first Apply retries initialization.
-	if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace); err != nil {
+	if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace, serviceRouteMetrics); err != nil {
 		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
 	}
 
@@ -346,7 +349,11 @@ func runCmd(cfg *config.RouterConfig) error {
 	return nil
 }
 
-func setupServiceRouteController(mgr ctrl.Manager, nodeName, bgpNamespace string) error {
+func setupServiceRouteController(
+	mgr ctrl.Manager,
+	nodeName, bgpNamespace string,
+	serviceRouteMetrics *serviceroute.Metrics,
+) error {
 	programmer := &serviceroute.EBPFRouteProgrammer{}
 	if err := programmer.Initialize(); err != nil {
 		ctrl.Log.Error(err, "service route eBPF maps are not available yet; initialization will retry on reconcile")
@@ -358,6 +365,7 @@ func setupServiceRouteController(mgr ctrl.Manager, nodeName, bgpNamespace string
 		NodeName:     nodeName,
 		BGPNamespace: bgpNamespace,
 		Programmer:   programmer,
+		Metrics:      serviceRouteMetrics,
 		Applied:      make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
 	}).SetupWithManager(mgr)
 }
