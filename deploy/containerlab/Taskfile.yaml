@@ -5,7 +5,6 @@ vars:
     sh: awk '/^name:/ {print $2; exit}' *.clab.yaml
   TOPO:
     sh: echo *.clab.yaml
-  FRR_VERSION: "10.2.0"
   FABRIC_ROUTER_IMAGE: fabric-router:latest
 
 tasks:
@@ -31,9 +30,11 @@ tasks:
       - docker build --network=host -t kindest/node:galactic -f containers/kindest-node-galactic/Dockerfile ../..
 
   "build:fabric-router":
-    desc: Build the fabric-router image (FRR v{{.FRR_VERSION}})
+    desc: Build the fabric-router image
+    # No --build-arg FRR_VERSION: the lab builds the FRR version the
+    # Dockerfile pins, the same one the published image ships to production.
     cmds:
-      - docker build --network=host --build-context network=../../../network --build-arg FRR_VERSION={{.FRR_VERSION}} -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
+      - docker build --network=host --build-context network=../../../network -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
 
   # --build-context network=../../../network satisfies go.mod's local
   # `replace go.datum.net/network => ../network` (see that line's own
