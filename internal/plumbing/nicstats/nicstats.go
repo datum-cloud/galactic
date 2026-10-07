@@ -15,9 +15,9 @@
 // its own parser. A driver with no parser exports nothing, rather than a guess
 // at which of its counters mean what.
 //
-// For bnxt_en, the driver the stall has been seen on, a queue's other ring
-// counters are exported too, along with every uplink's driver, firmware and
-// kernel versions, as the data needed to find the stall's cause.
+// For bnxt_en, a queue's other ring counters are exported too, along with
+// every uplink's driver, firmware and kernel versions, to correlate per-queue
+// behavior with NIC and software versions.
 package nicstats
 
 import (
@@ -131,13 +131,13 @@ type RingStat struct {
 }
 
 // ringStatParsers maps a driver name to the parser for its other per-queue
-// counters. Only bnxt_en has one: it is the driver the stall has been seen on
-// (#673), and its rings carry the counters that tell its causes apart.
+// counters. Only bnxt_en has one; its rings carry transmit, error, reset and
+// interrupt counters to help diagnose receive queue stalls.
 var ringStatParsers = map[string]*regexp.Regexp{
-	// A bnxt_en ring's receive and transmit share one completion ring, so a
-	// transmit side that stops completing shows here next to its receive
-	// queue's discards. rx_resets, rx_buf_errors and missed_irqs are the
-	// driver's own recovery and interrupt counters.
+	// A bnxt_en ring's receive and transmit share one completion ring, so
+	// the transmit counters reveal transmit-side stalls affecting receive.
+	// rx_resets, rx_buf_errors and missed_irqs are the driver's error and
+	// recovery counters.
 	DriverBnxt: regexp.MustCompile(`^\[(\d+)\]: (tx_ucast_packets|tx_mcast_packets|tx_bcast_packets|tx_discards|` +
 		`tx_errors|rx_errors|rx_buf_errors|rx_resets|missed_irqs)$`),
 }

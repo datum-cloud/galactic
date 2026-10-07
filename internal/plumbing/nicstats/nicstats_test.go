@@ -14,7 +14,7 @@ import (
 	"github.com/safchain/ethtool"
 )
 
-// bnxt_en's counters for ring 2, the stalled queue from #673.
+// bnxt_en's counters for ring 2, used in test fixtures.
 const (
 	bnxtRing2Packets  = "[2]: rx_ucast_packets"
 	bnxtRing2Discards = "[2]: rx_discards"
@@ -28,9 +28,8 @@ func TestParseQueueStats(t *testing.T) {
 		want   map[int]QueueStats
 	}{
 		{
-			// Abridged from a bnxt_en uplink's ethtool -S. Queue 2 is the
-			// stalled one from #673. Per-ring TX and port-wide counters are
-			// ignored.
+			// Abridged from a bnxt_en uplink's ethtool -S. Per-ring TX and
+			// port-wide counters are ignored.
 			name:   "bnxt_en packets and discards",
 			driver: DriverBnxt,
 			stats: map[string]uint64{

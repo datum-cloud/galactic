@@ -94,10 +94,12 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.infoDesc
 }
 
-// Collect implements prometheus.Collector. An interface whose driver or
-// statistics cannot be read is left out of this scrape rather than failing it,
+// Collect implements prometheus.Collector. An interface whose driver
+// information cannot be read is left out of this scrape rather than failing it,
 // since that would also hide every other metric on the endpoint. An uplink
-// that has just disappeared is the usual cause.
+// that has just disappeared is the usual cause. If statistics cannot be read,
+// galactic_nat_uplink_info is still exported; an unsupported driver skips the
+// queue counters but exports the info metric.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for _, iface := range c.interfaces() {
 		info, err := c.reader.DriverInfo(iface)

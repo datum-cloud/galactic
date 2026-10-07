@@ -249,19 +249,6 @@ Caveats for the session table:
 - The table is a self-evicting LRU, so the counts can move without traffic
   changing.
 
-Caveats for the uplink queue counters:
-
-- `galactic_nat_uplink_queue_driver_stat_total` carries `bnxt_en`'s other
-  per-ring counters, the NIC family a single receive queue stalls on
-  ([#673](https://github.com/datum-cloud/galactic/issues/673)): transmit
-  packets, discards and errors, `rx_errors`, `rx_buf_errors`, `rx_resets` and
-  `missed_irqs`. A ring's receive and transmit share one completion ring, so
-  comparing a stalled ring's transmit rate with its siblings' shows whether
-  transmit stopped along with receive.
-- `galactic_nat_uplink_info` is exported for every uplink, whatever its
-  driver, so a stall can be matched against driver, firmware and kernel
-  versions across nodes.
-
 | Reason group        | Values                                                                                                                                                                          | Meaning                                                                                                       |
 |---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | Port exhaustion     | `nat66_pat_exhausted`, `nat64_pat_exhausted`                                                                                                                                    | No free port on the shard's public address; tenants see failed connections                                    |
@@ -271,6 +258,17 @@ Caveats for the uplink queue counters:
 | IPv4 limits (NAT64) | `nat64_v4_fragment`, `nat64_v4_options`, `nat64_non_global_dest`                                                                                                                | Unsupported IPv4 fragments or options, or a non-global destination                                            |
 | Forwarding          | `fib_lookup_failed`, `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`, `adjust_head_failed`, `no_egress_ifindex`, `redirect_failed`, `hop_limit_exceeded`                   | Route, neighbor or redirect failure after translation                                                         |
 | Rate limit          | `icmp_rate_limited`                                                                                                                                                             | ICMP errors suppressed by the rate limiter                                                                    |
+
+Caveats for the uplink queue counters:
+
+- `galactic_nat_uplink_queue_driver_stat_total` carries `bnxt_en`'s other
+  per-ring counters: transmit packets, discards and errors, `rx_errors`,
+  `rx_buf_errors`, `rx_resets` and `missed_irqs`. A ring's receive and transmit
+  share one completion ring, so comparing a stalled ring's transmit rate with
+  its siblings' shows whether transmit stopped along with receive.
+- `galactic_nat_uplink_info` is exported for every uplink, whatever its
+  driver, so per-queue behavior can be matched against driver, firmware and
+  kernel versions across nodes.
 
 ```promql
 # Live sessions per family
