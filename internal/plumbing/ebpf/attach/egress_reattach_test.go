@@ -21,6 +21,10 @@ import (
 // reach it. Unrelated filters are untouched, and a second pass changes nothing.
 func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 	requireRoot(t)
+	const (
+		legacyLink = "legacy0"
+		tenantLink = "tenant0"
+	)
 
 	oldPin := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-reattach-old-%d", os.Getpid()))
 	newPin := filepath.Join("/sys/fs/bpf", fmt.Sprintf("galactic-reattach-new-%d", os.Getpid()))
@@ -37,8 +41,8 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 		// classifier existed, tenant0 for a current attachment, and uplink0
 		// for a shared uplink carrying usid_ingress instead.
 		links := []netlink.Link{
-			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "legacy0"}, PeerName: "legacy0p"},
-			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "tenant0"}, PeerName: "tenant0p"},
+			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: legacyLink}, PeerName: "legacy0p"},
+			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: tenantLink}, PeerName: "tenant0p"},
 			&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "uplink0"}},
 		}
 		for _, l := range links {
@@ -55,10 +59,10 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 			return fmt.Errorf("load previous build: %w", err)
 		}
 		defer func() { _ = previous.Close() }()
-		if err := attachOne(previous.UsidEgress, "legacy0", egressFilterName, netlink.HANDLE_MIN_INGRESS); err != nil {
+		if err := attachOne(previous.UsidEgress, legacyLink, egressFilterName, netlink.HANDLE_MIN_INGRESS); err != nil {
 			return fmt.Errorf("attach legacy-only usid_egress: %w", err)
 		}
-		if err := AttachEgress(previous.UsidServiceEgress, previous.UsidEgress, "tenant0"); err != nil {
+		if err := AttachEgress(previous.UsidServiceEgress, previous.UsidEgress, tenantLink); err != nil {
 			return fmt.Errorf("attach previous egress chain: %w", err)
 		}
 		if err := Attach(previous.UsidIngress, []string{"uplink0"}); err != nil {
@@ -78,7 +82,7 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 		if replaced != 2 {
 			t.Errorf("first pass replaced %d attachment chains, want 2", replaced)
 		}
-		for _, link := range []string{"legacy0", "tenant0"} {
+		for _, link := range []string{legacyLink, tenantLink} {
 			if got, want := filterProgID(t, link, serviceEgressFilterName), progID(t, current.UsidServiceEgress); got != want {
 				t.Errorf("%s's service filter runs program %d, want the current build's %d", link, got, want)
 			}
@@ -97,7 +101,7 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 		if replaced != 0 {
 			t.Errorf("second pass replaced %d filters, want 0", replaced)
 		}
-		for _, link := range []string{"legacy0", "tenant0"} {
+		for _, link := range []string{legacyLink, tenantLink} {
 			if n := countFilters(t, link); n != 2 {
 				t.Errorf("%s has %d ingress filters after two passes, want 2", link, n)
 			}
