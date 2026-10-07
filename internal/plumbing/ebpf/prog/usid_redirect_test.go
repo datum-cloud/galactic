@@ -6,9 +6,11 @@ package prog
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"testing"
@@ -48,6 +50,9 @@ var (
 // belong to the same VPC, that is, the same vrf_table entry.
 type redirectLab struct {
 	objs *UsidObjects
+
+	labNS  int
+	peerNS int
 
 	uplinkFd  int
 	uplinkMAC net.HardwareAddr
@@ -97,7 +102,7 @@ func newRedirectLab(t *testing.T) *redirectLab {
 	t.Cleanup(func() { _ = unix.Close(peerNS) })
 	setNetns(t, labNS)
 
-	lab := &redirectLab{objs: loadObjects(t)}
+	lab := &redirectLab{objs: loadObjects(t), labNS: labNS, peerNS: peerNS}
 
 	var uplink netlink.Link
 	lab.uplinkFd, uplink = openTap(t, "up0")
@@ -130,6 +135,8 @@ func newRedirectLab(t *testing.T) *redirectLab {
 	for _, path := range []string{
 		"/proc/sys/net/ipv4/conf/all/forwarding",
 		"/proc/sys/net/ipv4/conf/up0/forwarding",
+		"/proc/sys/net/ipv6/conf/all/forwarding",
+		"/proc/sys/net/ipv6/conf/up0/forwarding",
 	} {
 		if err := os.WriteFile(path, []byte("1"), 0o644); err != nil {
 			t.Fatalf("enable forwarding via %s: %v", path, err)
@@ -196,7 +203,14 @@ func (lab *redirectLab) assertTapDelivers(t *testing.T, label string) {
 // carried it there: bpf_redirect_peer never transmits on the host-side end.
 func (lab *redirectLab) assertVethDelivers(t *testing.T, label string, wantPeerRedirect bool) {
 	t.Helper()
-	marker := lab.send(t, vethInnerDst, label)
+	lab.assertVethDeliversTo(t, vethInnerDst, label, wantPeerRedirect)
+}
+
+// assertVethDeliversTo is assertVethDelivers for any inner destination routed
+// to the veth attachment, of either family.
+func (lab *redirectLab) assertVethDeliversTo(t *testing.T, innerDst net.IP, label string, wantPeerRedirect bool) {
+	t.Helper()
+	marker := lab.send(t, innerDst, label)
 	if !awaitMarker(t, lab.vethPeerCapture, marker, deliveryWait, readCapture(false)) {
 		t.Errorf("%s: frame for the veth attachment never reached the peer namespace", label)
 		return
@@ -276,27 +290,309 @@ func TestUsidIngress_RemovingOneEgressKindLeavesSiblingIntact(t *testing.T) {
 	})
 }
 
-// send writes one SRv6 frame addressed to baseUSID, carrying an inner IPv4
-// packet to innerDst, into the uplink tap, and returns the payload marker to
-// look for on the far side.
+// The kernel garbage-collects a STALE neighbor entry nothing has used, and the
+// redirect never makes the kernel resolve one. A lookup that finds the route
+// but no neighbor must hand the packet to the kernel to resolve, rather than
+// drop every packet to the attachment until it sends its own solicitation, and
+// the entry that resolution creates must put the next packet back on the
+// bpf_redirect_peer fast path.
+func TestUsidIngress_MissingNeighborResolvesInsteadOfDropping(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		hostAddr string
+		peerAddr string
+	}{
+		{name: "inner IPv4", hostAddr: "10.0.3.1/24", peerAddr: "10.0.3.10/24"},
+		{name: "inner IPv6", hostAddr: "fd00:3::1/64", peerAddr: "fd00:3::10/64"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lab := newRedirectLab(t)
+			lab.registerVeth(t)
+			dst := lab.addUnresolvedVethHost(t, tt.hostAddr, tt.peerAddr)
+
+			lab.assertVethDeliversTo(t, dst, "unresolved", false)
+			if got := sumPerCPU(t, lab.objs.DropReasons, DropReasonFibNoNeigh); got != 0 {
+				t.Errorf("drop_reasons[fib_no_neigh] = %d, want 0: the fallback must take the packet", got)
+			}
+			if !neighborValid(t, lab.vethIfindex, dst) {
+				t.Fatalf("no valid neighbor entry for %s after the first frame, want one resolved by the kernel", dst)
+			}
+			lab.assertVethDeliversTo(t, dst, "resolved", true)
+		})
+	}
+}
+
+// A tap is the attachment this matters most for: CNI ADD primes a permanent
+// neighbor entry for a veth's pod, but a tap's guest has no link in the host
+// namespace to read a MAC from, so its entry is only ever learned dynamically
+// and is always eligible for garbage collection. The kernel solicits the guest
+// through the tap, and this test answers as the guest would.
+func TestUsidIngress_MissingTapNeighborResolvesInsteadOfDropping(t *testing.T) {
+	guestMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x04, 0x10}
+	for _, tt := range []struct {
+		name     string
+		hostAddr string
+		guest    string
+	}{
+		{name: "inner IPv4", hostAddr: "10.0.4.1/24", guest: "10.0.4.10"},
+		{name: "inner IPv6", hostAddr: "fd00:4::1/64", guest: "fd00:4::10"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lab := newRedirectLab(t)
+			lab.registerTap(t)
+			addLinkAddr(t, "dt0", tt.hostAddr)
+			dst := net.ParseIP(tt.guest)
+			if dst.To4() == nil {
+				awaitLinkLocal(t, lab.tapIfindex)
+			}
+			routeUnresolved(t, lab.tapIfindex, dst)
+
+			marker := lab.send(t, dst, "unresolved")
+			if !lab.awaitTapMarkerAnswering(t, marker, dst, guestMAC) {
+				t.Fatalf("frame for the tap attachment never reached the tap")
+			}
+			if got := sumPerCPU(t, lab.objs.DropReasons, DropReasonFibNoNeigh); got != 0 {
+				t.Errorf("drop_reasons[fib_no_neigh] = %d, want 0: the fallback must take the packet", got)
+			}
+			if !neighborValid(t, lab.tapIfindex, dst) {
+				t.Fatalf("no valid neighbor entry for %s after the first frame, want one resolved by the kernel", dst)
+			}
+			marker = lab.send(t, dst, "resolved")
+			if !awaitMarker(t, lab.tapFd, marker, deliveryWait, readTap) {
+				t.Errorf("frame for the resolved tap attachment never reached the tap")
+			}
+		})
+	}
+}
+
+// awaitTapMarkerAnswering reads frames from the tap until one carries marker,
+// answering any ARP request or Neighbor Solicitation for guest with guestMAC
+// on the way, as the guest behind the tap would.
+func (lab *redirectLab) awaitTapMarkerAnswering(
+	t *testing.T, marker []byte, guest net.IP, guestMAC net.HardwareAddr,
+) bool {
+	t.Helper()
+	deadline := time.Now().Add(deliveryWait)
+	buf := make([]byte, 65536)
+	for time.Now().Before(deadline) {
+		fds := []unix.PollFd{{Fd: int32(lab.tapFd), Events: unix.POLLIN}}
+		ready, err := unix.Poll(fds, int(time.Until(deadline).Milliseconds())+1)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("poll tap: %v", err)
+		}
+		if ready == 0 {
+			return false
+		}
+		n, err := unix.Read(lab.tapFd, buf)
+		if err != nil {
+			t.Fatalf("read tap: %v", err)
+		}
+		frame := buf[:n]
+		if bytes.Contains(frame, marker) {
+			return true
+		}
+		if reply := resolutionReply(frame, guest, guestMAC); reply != nil {
+			if _, err := unix.Write(lab.tapFd, reply); err != nil {
+				t.Fatalf("write resolution reply into tap: %v", err)
+			}
+		}
+	}
+	return false
+}
+
+// resolutionReply returns the ARP reply or Neighbor Advertisement answering
+// frame for guest, or nil if frame is not a request for guest.
+func resolutionReply(frame []byte, guest net.IP, guestMAC net.HardwareAddr) []byte {
+	if len(frame) < ethHeaderLen {
+		return nil
+	}
+	requester := frame[6:12]
+	switch binary.BigEndian.Uint16(frame[12:14]) {
+	case unix.ETH_P_ARP:
+		arp := frame[ethHeaderLen:]
+		if len(arp) < 28 || binary.BigEndian.Uint16(arp[6:8]) != 1 || !net.IP(arp[24:28]).Equal(guest) {
+			return nil
+		}
+		reply := make([]byte, 0, ethHeaderLen+28)
+		reply = append(reply, requester...)
+		reply = append(reply, guestMAC...)
+		reply = append(reply, 0x08, 0x06)
+		reply = append(reply, 0x00, 0x01, 0x08, 0x00, 6, 4, 0x00, 0x02) // Ethernet, IPv4, reply
+		reply = append(reply, guestMAC...)
+		reply = append(reply, guest.To4()...)
+		reply = append(reply, arp[8:14]...)  // requester's hardware address
+		reply = append(reply, arp[14:18]...) // requester's protocol address
+		return reply
+	case unix.ETH_P_IPV6:
+		ip6 := frame[ethHeaderLen:]
+		const nsLen = 24 // type, code, checksum, reserved, target
+		if len(ip6) < ip6HeaderLen+nsLen || ip6[6] != ipProtoICMPv6 || ip6[ip6HeaderLen] != 135 ||
+			!net.IP(ip6[ip6HeaderLen+8:ip6HeaderLen+24]).Equal(guest) {
+			return nil
+		}
+		src, _ := netip.AddrFromSlice(guest.To16())
+		dst, _ := netip.AddrFromSlice(ip6[8:24])
+		na := make([]byte, 0, 32)
+		na = append(na, 136, 0, 0, 0, 0x60, 0, 0, 0) // Neighbor Advertisement, solicited and override
+		na = append(na, guest.To16()...)
+		na = append(na, 2, 1) // target link-layer address option, 8 bytes
+		na = append(na, guestMAC...)
+		sum := onesComplementSum(0, src.AsSlice())
+		sum = onesComplementSum(sum, dst.AsSlice())
+		sum += uint32(len(na)) + ipProtoICMPv6
+		binary.BigEndian.PutUint16(na[2:4], ^fold(onesComplementSum(sum, na)))
+
+		reply := make([]byte, 0, ethHeaderLen+ip6HeaderLen+len(na))
+		reply = append(reply, requester...)
+		reply = append(reply, guestMAC...)
+		reply = append(reply, 0x86, 0xDD)
+		reply = append(reply, 0x60, 0, 0, 0, 0, byte(len(na)), ipProtoICMPv6, 255)
+		reply = append(reply, src.AsSlice()...)
+		reply = append(reply, dst.AsSlice()...)
+		return append(reply, na...)
+	}
+	return nil
+}
+
+// addUnresolvedVethHost addresses both ends of the veth and routes the peer's
+// address to the host-side end in the lab's VRF table, with no neighbor entry,
+// which is what the kernel leaves behind once it garbage-collects one. The
+// host-side address gives the kernel a source for its solicitation, and the
+// peer's lets the peer answer it. It returns the peer's address.
+func (lab *redirectLab) addUnresolvedVethHost(t *testing.T, hostCIDR, peerCIDR string) net.IP {
+	t.Helper()
+	setNetns(t, lab.peerNS)
+	dst := addLinkAddr(t, "dv1", peerCIDR)
+	setNetns(t, lab.labNS)
+	addLinkAddr(t, "dv0", hostCIDR)
+	if dst.To4() == nil {
+		awaitLinkLocal(t, lab.vethIfindex)
+	}
+	routeUnresolved(t, lab.vethIfindex, dst)
+	return dst
+}
+
+// addLinkAddr assigns cidr to the named link in the current namespace and
+// returns its address.
+func addLinkAddr(t *testing.T, name, cidr string) net.IP {
+	t.Helper()
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		t.Fatalf("look up %s: %v", name, err)
+	}
+	addr, err := netlink.ParseAddr(cidr)
+	if err != nil {
+		t.Fatalf("parse %s: %v", cidr, err)
+	}
+	// Skip duplicate address detection, so the address can send and answer
+	// solicitations at once rather than after it.
+	addr.Flags = unix.IFA_F_NODAD
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		t.Fatalf("address %s with %s: %v", name, cidr, err)
+	}
+	return addr.IP
+}
+
+// routeUnresolved routes dst to ifindex in the lab's VRF table, with no
+// neighbor entry for it.
+func routeUnresolved(t *testing.T, ifindex uint32, dst net.IP) {
+	t.Helper()
+	bits := 128
+	if dst.To4() != nil {
+		bits = 32
+	}
+	route := &netlink.Route{
+		LinkIndex: int(ifindex),
+		Dst:       &net.IPNet{IP: dst, Mask: net.CIDRMask(bits, bits)},
+		Table:     redirectLabTableID,
+		Scope:     netlink.SCOPE_LINK,
+	}
+	if err := netlink.RouteAdd(route); err != nil {
+		t.Fatalf("add route to %s via ifindex %d: %v", dst, ifindex, err)
+	}
+}
+
+// awaitLinkLocal waits for the link's link-local address to finish duplicate
+// address detection. The kernel sends a Neighbor Solicitation only from a
+// usable link-local address, and a link brought up moments ago still has a
+// tentative one, so resolution would stall here where it never does on a node
+// whose attachment has been up for longer than a second.
+func awaitLinkLocal(t *testing.T, ifindex uint32) {
+	t.Helper()
+	link := &netlink.Device{LinkAttrs: netlink.LinkAttrs{Index: int(ifindex)}}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+		if err != nil {
+			t.Fatalf("list addresses on ifindex %d: %v", ifindex, err)
+		}
+		for _, a := range addrs {
+			if a.IP.IsLinkLocalUnicast() && a.Flags&unix.IFA_F_TENTATIVE == 0 {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("ifindex %d's link-local address was still tentative after 5s", ifindex)
+}
+
+// neighborValid reports whether ifindex has a neighbor entry for dst in a
+// state bpf_fib_lookup accepts.
+func neighborValid(t *testing.T, ifindex uint32, dst net.IP) bool {
+	t.Helper()
+	family := netlink.FAMILY_V6
+	if dst.To4() != nil {
+		family = netlink.FAMILY_V4
+	}
+	neighs, err := netlink.NeighList(int(ifindex), family)
+	if err != nil {
+		t.Fatalf("list neighbors on ifindex %d: %v", ifindex, err)
+	}
+	const valid = netlink.NUD_PERMANENT | netlink.NUD_NOARP | netlink.NUD_REACHABLE |
+		netlink.NUD_STALE | netlink.NUD_DELAY | netlink.NUD_PROBE
+	for _, n := range neighs {
+		if n.IP.Equal(dst) && n.State&valid != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// send writes one SRv6 frame addressed to baseUSID, carrying an inner packet
+// to innerDst, into the uplink tap, and returns the payload marker to look for
+// on the far side. The inner packet is IPv4 or IPv6 to match innerDst.
 func (lab *redirectLab) send(t *testing.T, innerDst net.IP, label string) []byte {
 	t.Helper()
-	marker := []byte(fmt.Sprintf("galactic-egress-kind:%s:%d", label, time.Now().UnixNano()))
+	marker := fmt.Appendf(nil, "galactic-egress-kind:%s:%d", label, time.Now().UnixNano())
 	payload := make([]byte, 64)
 	copy(payload, marker)
 
-	inner := make([]byte, 0, 20+len(payload))
-	totLen := uint16(20 + len(payload))
-	inner = append(inner, 0x45, 0x00, byte(totLen>>8), byte(totLen), 0x00, 0x00, 0x40, 0x00)
-	inner = append(inner, 64, 253, 0x00, 0x00) // ttl, experimental protocol, checksum unchecked here
-	inner = append(inner, 192, 0, 2, 1)
-	inner = append(inner, innerDst...)
+	var inner []byte
+	var outerNextHdr byte
+	if dst4 := innerDst.To4(); dst4 != nil {
+		outerNextHdr = 4 // IPv4-in-IPv6
+		totLen := uint16(20 + len(payload))
+		inner = append(inner, 0x45, 0x00, byte(totLen>>8), byte(totLen), 0x00, 0x00, 0x40, 0x00)
+		inner = append(inner, 64, 253, 0x00, 0x00) // ttl, experimental protocol, checksum unchecked here
+		inner = append(inner, 192, 0, 2, 1)
+		inner = append(inner, dst4...)
+	} else {
+		outerNextHdr = 41 // IPv6-in-IPv6
+		payloadLen := uint16(len(payload))
+		inner = append(inner, 0x60, 0x00, 0x00, 0x00, byte(payloadLen>>8), byte(payloadLen), 253, 64)
+		src := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 15: 0x01}
+		inner = append(inner, src[:]...)
+		inner = append(inner, innerDst.To16()...)
+	}
 	inner = append(inner, payload...)
 
 	frame := make([]byte, 0, ethHeaderLen+ip6HeaderLen+len(inner))
 	frame = append(frame, lab.uplinkMAC...)
 	frame = append(frame, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x86, 0xDD)
-	frame = append(frame, 0x60, 0x00, 0x00, 0x00, byte(len(inner)>>8), byte(len(inner)), 4, 64)
+	frame = append(frame, 0x60, 0x00, 0x00, 0x00, byte(len(inner)>>8), byte(len(inner)), outerNextHdr, 64)
 	src := [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 0x01}
 	frame = append(frame, src[:]...)
 	dst := baseUSID.addr(t).As16()

@@ -214,11 +214,17 @@ sequenceDiagram
   shared VRF device: IPv6 NDP only resolves on the link an address is
   actually configured on) and installs an explicit pod-subnet route into
   the VRF table. For veth, it also primes a permanent ARP/NDP neighbor
-  entry for the pod's address, because the eBPF uSID datapath's
-  `bpf_fib_lookup()` never triggers dynamic neighbor resolution itself —
-  without a pre-existing entry the datapath drops with
-  `BPF_FIB_LKUP_RET_NO_NEIGH`. Tap has no separate guest-side link in this
-  netns to resolve a MAC from, so no neighbor entry is installed there.
+  entry for the pod's address, so the eBPF uSID datapath's
+  `bpf_fib_lookup()` always finds one and every packet takes the
+  `bpf_redirect_peer` fast path. Tap has no separate guest-side link in this
+  netns to resolve a MAC from, so no neighbor entry is installed there: the
+  guest's entry is learned dynamically, and the kernel garbage-collects it
+  once it goes stale. When the lookup finds no valid entry
+  (`BPF_FIB_LKUP_RET_NO_NEIGH`), the datapath hands the packet to
+  `bpf_redirect_neigh`, which makes the kernel resolve the address on that
+  interface and recreates the entry. It used to drop the packet instead,
+  which blacked out a VM's inbound traffic until the guest next sent its own
+  solicitation.
   Once this step returns, `galactic-bgp` has zero kernel-interface
   dependency of its own — everything it advertises comes from `prevResult`.
 - **BGP/SRv6/eBPF publish is retried, not best-effort.** `publishBGPState`

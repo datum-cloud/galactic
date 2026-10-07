@@ -114,9 +114,9 @@ func ConfigureHostGateway(vpc, vpcAttachment string, res *cniipam.IPAMResult, gu
 // egress with bpf_fib_lookup, and redirects straight to the resolved neighbor,
 // never touching the normal forwarding stack. That lookup does not trigger
 // neighbor resolution the way ordinary forwarding does, so without an existing
-// entry it fails and the datapath drops the packet. A permanent entry installed
-// once at CNI ADD, from the guest veth's known MAC, removes that dependency
-// entirely.
+// entry the datapath falls back to bpf_redirect_neigh, the kernel's slower
+// path. A permanent entry installed once at CNI ADD, from the guest veth's
+// known MAC, keeps every packet on the fast path.
 func installGatewayNeighbor(hostLink netlink.Link, podIP net.IP, family int, guestHWAddr net.HardwareAddr) error {
 	neigh := &netlink.Neigh{
 		LinkIndex:    hostLink.Attrs().Index,
