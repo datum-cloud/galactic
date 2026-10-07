@@ -24,9 +24,10 @@ func newVIPCommand() *cobra.Command {
 		Long: `vip is a manual/debug surface directly over internal/plumbing/vip -- the
 same mechanism ServiceVIPBindingReconciler drives automatically for every
 EgressKindVeth ServiceVIPBinding. It does not touch Kubernetes at all: it
-only manipulates this node's own galactic-vip0 dummy interface.`,
+only manipulates this node's own galactic-vip0 dummy interface. The xlat
+subcommands read and edit this node's vip_xlat_table instead.`,
 	}
-	cmd.AddCommand(newVIPBindCommand(), newVIPUnbindCommand(), newVIPVerifyCommand())
+	cmd.AddCommand(newVIPBindCommand(), newVIPUnbindCommand(), newVIPVerifyCommand(), newVIPXlatCommand())
 	return cmd
 }
 

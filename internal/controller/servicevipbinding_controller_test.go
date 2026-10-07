@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -62,12 +63,20 @@ type vipCall struct {
 	port2    uint16
 }
 
-// unregisterCall records one UnregisterIngress/UnregisterEgress invocation.
-type unregisterCall struct {
+// unregisterBindingCall records one UnregisterBinding invocation.
+type unregisterBindingCall struct {
+	proto       uint8
+	vipAddr     net.IP
+	vipPort     uint16
+	backendAddr net.IP
+	backendPort uint16
+}
+
+// unregisterAtCall records one UnregisterBindingAt invocation.
+type unregisterAtCall struct {
 	block    uint64
 	argument uint16
-	proto    uint8
-	port     uint16
+	unregisterBindingCall
 }
 
 // fakeVIPTable is a fake VIPTranslationTable for testing
@@ -75,8 +84,8 @@ type unregisterCall struct {
 type fakeVIPTable struct {
 	ingressCalls  []vipCall
 	egressCalls   []vipCall
-	unregIngress  []unregisterCall
-	unregEgress   []unregisterCall
+	unregBinding  []unregisterBindingCall
+	unregAt       []unregisterAtCall
 	registerErr   error
 	unregisterErr error
 }
@@ -93,14 +102,17 @@ func (f *fakeVIPTable) RegisterEgress(block uint64, argument uint16, proto uint8
 	return f.registerErr
 }
 
-func (f *fakeVIPTable) UnregisterIngress(block uint64, argument uint16, proto uint8, vipPort uint16) error {
-	f.unregIngress = append(f.unregIngress, unregisterCall{block, argument, proto, vipPort})
-	return f.unregisterErr
+func (f *fakeVIPTable) UnregisterBindingAt(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
+	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
+	f.unregAt = append(f.unregAt, unregisterAtCall{
+		block, argument, unregisterBindingCall{proto, vipAddr, vipPort, backendAddr, backendPort}})
+	return nil, f.unregisterErr
 }
 
-func (f *fakeVIPTable) UnregisterEgress(block uint64, argument uint16, proto uint8, backendPort uint16) error {
-	f.unregEgress = append(f.unregEgress, unregisterCall{block, argument, proto, backendPort})
-	return f.unregisterErr
+func (f *fakeVIPTable) UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
+	f.unregBinding = append(f.unregBinding, unregisterBindingCall{proto, vipAddr, vipPort, backendAddr, backendPort})
+	return nil, f.unregisterErr
 }
 
 // stubVIPFns overrides vipBindFn/vipUnbindFn/vipVerifyFn for the duration
@@ -233,7 +245,9 @@ func TestServiceVIPBindingReconciler_VethNilTableFails(t *testing.T) {
 func TestServiceVIPBindingReconciler_VethUnbindOnDelete(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
+	adv.Spec.Prefixes = append(adv.Spec.Prefixes, testIPv6BackendPrefix)
 	binding := newVethTestBinding()
+	binding.Spec.BackendAddress = testVIPBindingBackendAddr
 	controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
 	now := metav1.Now()
 	binding.DeletionTimestamp = &now
@@ -260,9 +274,12 @@ func TestServiceVIPBindingReconciler_VethUnbindOnDelete(t *testing.T) {
 	if unboundAddr == nil || !unboundAddr.Equal(net.ParseIP(testVIPBindingVIPAddr)) {
 		t.Errorf("vip.Unbind called with %v, want %s", unboundAddr, testVIPBindingVIPAddr)
 	}
-	if len(table.unregIngress) != 1 || len(table.unregEgress) != 1 {
-		t.Fatalf("unregIngress=%d unregEgress=%d, want 1 each (veth must unregister vip_xlat_table too)",
-			len(table.unregIngress), len(table.unregEgress))
+	if len(table.unregBinding) != 1 || len(table.unregAt) != 1 {
+		t.Fatalf("unregBinding=%d unregAt=%d, want 1 each (veth must unregister vip_xlat_table too)",
+			len(table.unregBinding), len(table.unregAt))
+	}
+	if table.unregAt[0].argument != uint16(testBackendVRFID) {
+		t.Errorf("UnregisterBindingAt argument = %d, want %d", table.unregAt[0].argument, testBackendVRFID)
 	}
 
 	// Removing the last finalizer from an object that already carries a
@@ -361,8 +378,9 @@ func TestServiceVIPBindingReconciler_TapRegisterSuccess(t *testing.T) {
 func TestServiceVIPBindingReconciler_TapUnregisterOnDelete(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
+	adv.Spec.Prefixes = append(adv.Spec.Prefixes, testIPv6BackendPrefix)
 	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
-	binding.Spec.BackendAddress = testBackendAddr
+	binding.Spec.BackendAddress = testVIPBindingBackendAddr
 	controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
 	now := metav1.Now()
 	binding.DeletionTimestamp = &now
@@ -379,8 +397,11 @@ func TestServiceVIPBindingReconciler_TapUnregisterOnDelete(t *testing.T) {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
 
-	if len(table.unregIngress) != 1 || len(table.unregEgress) != 1 {
-		t.Fatalf("unregIngress=%d unregEgress=%d, want 1 each", len(table.unregIngress), len(table.unregEgress))
+	if len(table.unregBinding) != 1 || len(table.unregAt) != 1 {
+		t.Fatalf("unregBinding=%d unregAt=%d, want 1 each", len(table.unregBinding), len(table.unregAt))
+	}
+	if table.unregAt[0].argument != uint16(testBackendVRFID) {
+		t.Errorf("UnregisterBindingAt argument = %d, want %d", table.unregAt[0].argument, testBackendVRFID)
 	}
 
 	// See the same note in TestServiceVIPBindingReconciler_VethUnbindOnDelete:
@@ -390,6 +411,133 @@ func TestServiceVIPBindingReconciler_TapUnregisterOnDelete(t *testing.T) {
 	err := fakeClient.Get(context.Background(), bindingKey(), got)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("get: got err=%v, want NotFound (finalizer removal should let deletion complete)", err)
+	}
+}
+
+// TestServiceVIPBindingReconciler_DeleteAfterVRFGone covers #750: once the
+// binding's VPC has left the node, its BGPVRFInstance and BGPAdvertisement are
+// gone and the VRF context no longer resolves. Deletion must still remove the
+// vip_xlat_table rows, by value, and release the finalizer.
+func TestServiceVIPBindingReconciler_DeleteAfterVRFGone(t *testing.T) {
+	for _, kind := range []bgpv1alpha1.ServiceVIPBindingEgressKind{
+		bgpv1alpha1.ServiceVIPBindingEgressKindTap,
+		bgpv1alpha1.ServiceVIPBindingEgressKindVeth,
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			scheme := newRuleTestScheme(t)
+			router, _, _ := newBackendFixtures(testVPCRef)                 // the VPC's adv and vrf are gone
+			binding := newTestServiceVIPBinding(kind, testComputeNodeName) // IPv6 VIP and backend
+			controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
+			now := metav1.Now()
+			binding.DeletionTimestamp = &now
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
+				WithObjects(router, binding).
+				Build()
+
+			stubVIPFns(t,
+				func(net.IP) error { return nil },
+				func(net.IP) error { return nil },
+				func(net.IP) error { return nil },
+			)
+
+			table := &fakeVIPTable{}
+			r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err != nil {
+				t.Fatalf("Reconcile: unexpected error: %v", err)
+			}
+
+			if len(table.unregBinding) != 1 {
+				t.Fatalf("UnregisterBinding called %d times, want 1", len(table.unregBinding))
+			}
+			call := table.unregBinding[0]
+			if call.proto != ipProtoTCP || call.vipPort != 8080 || call.backendPort != 30080 ||
+				!call.vipAddr.Equal(net.ParseIP(testVIPBindingVIPAddr)) ||
+				!call.backendAddr.Equal(net.ParseIP(testVIPBindingBackendAddr)) {
+				t.Errorf("UnregisterBinding call = %+v, want the binding's proto, VIP, and backend", call)
+			}
+			if len(table.unregAt) != 0 {
+				t.Errorf("UnregisterBindingAt called %d times, want 0 (no VRF context to check)", len(table.unregAt))
+			}
+
+			got := &bgpv1alpha1.ServiceVIPBinding{}
+			err := fakeClient.Get(context.Background(), bindingKey(), got)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("get: got err=%v, want NotFound (finalizer removal should let deletion complete)", err)
+			}
+		})
+	}
+}
+
+// TestServiceVIPBindingReconciler_FinalizerKeptWhenRowRemovalFails checks that
+// a kernel delete failure still blocks deletion, even with no VRF context.
+func TestServiceVIPBindingReconciler_FinalizerKeptWhenRowRemovalFails(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	router, _, _ := newBackendFixtures(testVPCRef)
+	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
+	now := metav1.Now()
+	binding.DeletionTimestamp = &now
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
+		WithObjects(router, binding).
+		Build()
+
+	table := &fakeVIPTable{unregisterErr: errors.New("intentional delete failure")}
+	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err == nil {
+		t.Fatal("Reconcile: expected an error when removing the rows fails")
+	}
+
+	got := &bgpv1alpha1.ServiceVIPBinding{}
+	if err := fakeClient.Get(context.Background(), bindingKey(), got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(got, serviceVIPBindingFinalizer) {
+		t.Errorf("finalizer was removed despite a failed row removal")
+	}
+}
+
+// TestServiceVIPBindingReconciler_DeleteSkipsAddressesWithNoRows covers
+// bindings registration never wrote rows for: an IPv4 backend, which the CRD
+// accepts and vip_xlat_table does not, or an unset one. With the VRF gone too,
+// deletion must still finish without looking for rows by value.
+func TestServiceVIPBindingReconciler_DeleteSkipsAddressesWithNoRows(t *testing.T) {
+	for name, backend := range map[string]string{"ipv4": testBackendAddr, "unset": ""} {
+		t.Run(name, func(t *testing.T) {
+			scheme := newRuleTestScheme(t)
+			router, _, _ := newBackendFixtures(testVPCRef)
+			binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+			binding.Spec.BackendAddress = backend
+			controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
+			now := metav1.Now()
+			binding.DeletionTimestamp = &now
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
+				WithObjects(router, binding).
+				Build()
+
+			table := &fakeVIPTable{}
+			r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err != nil {
+				t.Fatalf("Reconcile: unexpected error: %v", err)
+			}
+			if len(table.unregBinding) != 0 {
+				t.Errorf("UnregisterBinding called %d times, want 0", len(table.unregBinding))
+			}
+
+			got := &bgpv1alpha1.ServiceVIPBinding{}
+			err := fakeClient.Get(context.Background(), bindingKey(), got)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("get: got err=%v, want NotFound (finalizer removal should let deletion complete)", err)
+			}
+		})
 	}
 }
 

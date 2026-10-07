@@ -18,8 +18,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/vip"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -53,8 +55,10 @@ type VIPTranslationTable interface {
 		vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) error
 	RegisterEgress(block uint64, argument uint16, proto uint8,
 		backendAddr net.IP, backendPort uint16, vipAddr net.IP, vipPort uint16) error
-	UnregisterIngress(block uint64, argument uint16, proto uint8, vipPort uint16) error
-	UnregisterEgress(block uint64, argument uint16, proto uint8, backendPort uint16) error
+	UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
+	UnregisterBindingAt(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
+		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
 }
 
 // ServiceVIPBindingReconciler reconciles ServiceVIPBinding objects targeting
@@ -282,9 +286,26 @@ func (r *ServiceVIPBindingReconciler) applyUnbind(ctx context.Context, binding *
 }
 
 // unregisterVIPTranslation removes both vip_xlat_table rows for binding. Shared
-// by both egress kinds. Both directions are attempted even if resolving the VRF
-// context or the first removal fails, and the errors are joined, so a partial
-// failure never leaves the other row behind.
+// by both egress kinds.
+//
+// Teardown must not depend on the binding's VRF still being on the node: a VPC
+// can leave the node before its bindings are deleted, and a delete that needs
+// it would hold the finalizer forever and leave the rows in the map. Rows are
+// therefore removed in two passes, and failing to resolve the VRF context is
+// not an error:
+//
+//  1. UnregisterBinding finds the rows by value, under whatever block and
+//     argument they were written, with no lookup of BGP objects.
+//  2. If the VRF context still resolves, UnregisterBindingAt checks that
+//     location too. This catches an ingress row whose egress row was never
+//     written, which the first pass cannot find.
+//
+// Both passes read each row before deleting it and leave rows another binding
+// owns, since two backends of one rule on a node can share them. Registration
+// writes rows only for an IPv6 VIP and backend, so an IPv4 or unparseable
+// address means there is nothing to remove, which must not block deletion.
+// Every removal is attempted even if an earlier one fails, and the errors are
+// joined.
 func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	ctx context.Context, binding *bgpv1alpha1.ServiceVIPBinding,
 ) error {
@@ -297,28 +318,45 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 	if err != nil {
 		return err
 	}
+	logger := log.FromContext(ctx).WithValues("binding", client.ObjectKeyFromObject(binding))
 
-	backendAddrIP, err := netip.ParseAddr(binding.Spec.BackendAddress)
-	if err != nil {
-		return fmt.Errorf("parse backendAddress %q: %w", binding.Spec.BackendAddress, err)
-	}
-
-	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
-	if err != nil {
-		return fmt.Errorf("resolve VRF context for VIP unbind: %w", err)
+	vipAddr, vipOK := ipv6Address(binding.Spec.VIPAddress)
+	backendAddr, backendOK := ipv6Address(binding.Spec.BackendAddress)
+	if !vipOK || !backendOK {
+		logger.Info("vipAddress or backendAddress is not an IPv6 address; no vip_xlat_table rows to remove",
+			"vipAddress", binding.Spec.VIPAddress, "backendAddress", binding.Spec.BackendAddress)
+		return nil
 	}
 
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
 	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
 
 	var errs []error
-	if err := r.VIPTranslationTable.UnregisterIngress(block, argument, proto, vipPort); err != nil {
-		errs = append(errs, fmt.Errorf("unregister vip_xlat_table ingress row: %w", err))
+	if _, err := r.VIPTranslationTable.UnregisterBinding(proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
+		errs = append(errs, fmt.Errorf("unregister vip_xlat_table rows by value: %w", err))
 	}
-	if err := r.VIPTranslationTable.UnregisterEgress(block, argument, proto, backendPort); err != nil {
-		errs = append(errs, fmt.Errorf("unregister vip_xlat_table egress row: %w", err))
+
+	backendAddrIP, _ := netip.AddrFromSlice(backendAddr) // a 16-byte slice ipv6Address returned
+	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
+	if err != nil {
+		logger.Info("VRF context no longer resolves; skipped checking its vip_xlat_table location", "reason", err.Error())
+		return errors.Join(errs...)
+	}
+	if _, err := r.VIPTranslationTable.UnregisterBindingAt(
+		block, argument, proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
+		errs = append(errs, fmt.Errorf("unregister vip_xlat_table rows at the resolved VRF: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// ipv6Address parses s and reports whether it is an IPv6 address, the only
+// family vip_xlat_table holds. An IPv4-mapped address counts as IPv4.
+func ipv6Address(s string) (net.IP, bool) {
+	addr, err := netip.ParseAddr(s)
+	if err != nil || !addr.Unmap().Is6() {
+		return nil, false
+	}
+	return net.IP(addr.AsSlice()), true
 }
 
 // ipProtocolNumber maps a NetworkRuleProtocol to the IANA protocol number

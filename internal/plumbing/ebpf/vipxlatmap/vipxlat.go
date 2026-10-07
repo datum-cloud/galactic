@@ -80,6 +80,10 @@ type Key struct {
 type Entry struct {
 	Key
 
+	// Direction is the lookup this row serves, which the kernel key carries
+	// but Key does not.
+	Direction Direction
+
 	// Addr is the rewrite target's address (backend for an ingress-direction
 	// row, VIP for an egress-direction row).
 	Addr net.IP
@@ -98,6 +102,13 @@ type Entry struct {
 type VipXlatTable struct {
 	table usidmap.Table
 	clock func() uint64
+
+	// writeMu serializes every write this process makes to the map, so a
+	// removal that reads a row to decide ownership deletes the row it read
+	// rather than one another binding registered in between. It does not
+	// cover another process writing the same pinned map, such as the
+	// galactic-router vip xlat CLI.
+	writeMu sync.Mutex
 
 	mu          sync.Mutex
 	generations map[prog.UsidVipXlatKey]uint64
@@ -172,6 +183,28 @@ const (
 	directionEgress  = uint8(1)
 )
 
+// Direction reports which lookup a decoded row serves: DirectionIngress for the
+// row RegisterIngress writes, DirectionEgress for the row RegisterEgress writes.
+type Direction uint8
+
+// The two directions an Entry can report, matching the kernel key's byte.
+const (
+	DirectionIngress = Direction(directionIngress)
+	DirectionEgress  = Direction(directionEgress)
+)
+
+// String returns "ingress", "egress", or the raw byte for any other value.
+func (d Direction) String() string {
+	switch d {
+	case DirectionIngress:
+		return "ingress"
+	case DirectionEgress:
+		return "egress"
+	default:
+		return fmt.Sprintf("direction(%d)", uint8(d))
+	}
+}
+
 // register is the shared primitive RegisterIngress and RegisterEgress build
 // their key and value around. keyPort is the port the kernel key is composed
 // with, which is direction-dependent; valAddr and valPort are the rewrite
@@ -179,6 +212,9 @@ const (
 func (t *VipXlatTable) register(
 	direction uint8, block uint64, argument uint16, proto uint8, keyPort uint16, valAddr net.IP, valPort uint16,
 ) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	if err := uformat.ValidateBlock(block); err != nil {
 		return fmt.Errorf("vipxlatmap: vip_xlat_table: register: %w", err)
 	}
@@ -281,13 +317,149 @@ func (t *VipXlatTable) unregister(direction uint8, block uint64, argument uint16
 // UnregisterIngress removes the ingress-direction row RegisterIngress
 // would have written for (block, argument, proto, vipPort).
 func (t *VipXlatTable) UnregisterIngress(block uint64, argument uint16, proto uint8, vipPort uint16) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	return t.unregister(directionIngress, block, argument, proto, vipPort)
 }
 
 // UnregisterEgress removes the egress-direction row RegisterEgress would
 // have written for (block, argument, proto, backendPort).
 func (t *VipXlatTable) UnregisterEgress(block uint64, argument uint16, proto uint8, backendPort uint16) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	return t.unregister(directionEgress, block, argument, proto, backendPort)
+}
+
+// binding identifies the two rows one binding writes, validated and in the
+// raw form the map stores.
+type binding struct {
+	proto       uint8
+	vip         [16]byte
+	vipPort     uint16
+	backend     [16]byte
+	backendPort uint16
+}
+
+// newBinding validates a binding's protocol and addresses.
+func newBinding(proto uint8, vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) (binding, error) {
+	if err := validateProto(proto); err != nil {
+		return binding{}, err
+	}
+	rawVIP, err := addrTo16(vipAddr)
+	if err != nil {
+		return binding{}, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: vip address: %w", err)
+	}
+	rawBackend, err := addrTo16(backendAddr)
+	if err != nil {
+		return binding{}, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: backend address: %w", err)
+	}
+	return binding{proto: proto, vip: rawVIP, vipPort: vipPort, backend: rawBackend, backendPort: backendPort}, nil
+}
+
+// removeAt removes b's rows at (block, argument), checking each row's value
+// before deleting it. Two bindings for different backends of one rule on this
+// node, sharing a backend port, write the same egress row, and the ingress key
+// carries no backend address, so the ingress row decides ownership:
+//
+//   - pointing at b's backend: b owns the location, and both rows go, the
+//     egress row only if it still rewrites to b's VIP.
+//   - pointing at another backend: another binding owns the location, and
+//     neither row is touched.
+//   - absent: the egress row goes alone, if it rewrites to b's VIP.
+//
+// The caller holds writeMu.
+func (t *VipXlatTable) removeAt(block uint64, argument uint16, b binding) ([]Entry, error) {
+	ingress, ingressFound, err := t.get(directionIngress, block, argument, b.proto, b.vipPort)
+	if err != nil {
+		return nil, err
+	}
+	if ingressFound && (ingress.RewritePort != b.backendPort || [16]byte(ingress.Addr) != b.backend) {
+		return nil, nil
+	}
+	egress, egressFound, err := t.get(directionEgress, block, argument, b.proto, b.backendPort)
+	if err != nil {
+		return nil, err
+	}
+
+	var removed []Entry
+	if ingressFound {
+		if err := t.unregister(directionIngress, block, argument, b.proto, b.vipPort); err != nil {
+			return nil, err
+		}
+		removed = append(removed, ingress)
+	}
+	if egressFound && egress.RewritePort == b.vipPort && [16]byte(egress.Addr) == b.vip {
+		if err := t.unregister(directionEgress, block, argument, b.proto, b.backendPort); err != nil {
+			return removed, err
+		}
+		removed = append(removed, egress)
+	}
+	return removed, nil
+}
+
+// UnregisterBinding removes the rows one binding wrote, wherever they sit,
+// without the caller supplying the block or argument. It returns the rows it
+// removed.
+//
+// It exists for teardown after the binding's VRF has left the node, when the
+// (block, argument) pair can no longer be derived from the node's BGP objects.
+// Every egress row keyed on the binding's protocol and backend port that
+// rewrites to its VIP marks a candidate location, and removeAt decides at each
+// one whether the rows there are this binding's.
+//
+// An ingress row whose egress row is already gone is not found here. Callers
+// that can still resolve the binding's (block, argument) should also call
+// UnregisterBindingAt.
+func (t *VipXlatTable) UnregisterBinding(
+	proto uint8, vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16,
+) ([]Entry, error) {
+	b, err := newBinding(proto, vipAddr, vipPort, backendAddr, backendPort)
+	if err != nil {
+		return nil, err
+	}
+
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	entries, err := t.List()
+	if err != nil {
+		return nil, fmt.Errorf("vipxlatmap: vip_xlat_table: unregister binding: %w", err)
+	}
+
+	var (
+		removed []Entry
+		errs    []error
+	)
+	for _, e := range entries {
+		if e.Direction != DirectionEgress || e.Proto != proto || e.Port != backendPort ||
+			e.RewritePort != vipPort || [16]byte(e.Addr) != b.vip {
+			continue
+		}
+		rows, err := t.removeAt(e.Block, e.Argument, b)
+		removed = append(removed, rows...)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return removed, errors.Join(errs...)
+}
+
+// UnregisterBindingAt removes the rows one binding wrote at a known (block,
+// argument), with the same ownership checks as UnregisterBinding. Unlike it,
+// this also finds an ingress row whose egress row was never written. It returns
+// the rows it removed.
+func (t *VipXlatTable) UnregisterBindingAt(
+	block uint64, argument uint16,
+	proto uint8, vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16,
+) ([]Entry, error) {
+	b, err := newBinding(proto, vipAddr, vipPort, backendAddr, backendPort)
+	if err != nil {
+		return nil, err
+	}
+
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	return t.removeAt(block, argument, b)
 }
 
 // decodeEntry converts a raw kernel key and value into an Entry, attaching this
@@ -307,6 +479,7 @@ func (t *VipXlatTable) decodeEntry(key prog.UsidVipXlatKey, value prog.UsidVipXl
 			Proto:    key.Proto,
 			Port:     hostToNetwork16(key.Port), // self-inverse: wire -> host
 		},
+		Direction:   Direction(key.Direction),
 		Addr:        addr,
 		RewritePort: hostToNetwork16(value.Port), // self-inverse: wire -> host
 		Generation:  gen,
@@ -379,6 +552,9 @@ func (t *VipXlatTable) List() ([]Entry, error) {
 // is not treated as too new to judge, so a fresh process should let its
 // reconciler re-register every live binding before calling this.
 func (t *VipXlatTable) Reconcile(live map[Key]struct{}, cutoff uint64) (removed []Entry, err error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	entries, err := t.List()
 	if err != nil {
 		return nil, fmt.Errorf("vipxlatmap: vip_xlat_table: reconcile: %w", err)
