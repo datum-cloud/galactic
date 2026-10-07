@@ -465,6 +465,12 @@ func newPMTUVethPod(t *testing.T) (*UsidObjects, int) {
 	host := setLinkUp(t, "pmtuh0")
 	attachIngress(t, host, objs.UsidEgress)
 
+	// The host side has no carrier until the pod side comes up, so the kernel
+	// leaves its transmit queue on the noop qdisc until linkwatch activates it,
+	// asynchronously. An error sent back out it before then is dropped. The
+	// notification linkwatch sends after activating it is what to wait for.
+	hostUp := subscribeOperUp(t, host.Attrs().Index)
+
 	setNetns(t, podNS)
 	if err := os.WriteFile("/proc/sys/net/ipv6/conf/pmtup0/accept_dad", []byte("0"), 0o644); err != nil {
 		t.Fatalf("disable DAD: %v", err)
@@ -478,6 +484,7 @@ func newPMTUVethPod(t *testing.T) (*UsidObjects, int) {
 	if err := netlink.AddrAdd(pod, addr); err != nil {
 		t.Fatalf("add pod address: %v", err)
 	}
+	waitLocalRoute(t, mssPodV6)
 	if err := netlink.NeighAdd(&netlink.Neigh{
 		LinkIndex: pod.Attrs().Index, Family: netlink.FAMILY_V6, State: netlink.NUD_PERMANENT,
 		IP: pmtuGW6.AsSlice(), HardwareAddr: host.Attrs().HardwareAddr,
@@ -488,7 +495,65 @@ func newPMTUVethPod(t *testing.T) (*UsidObjects, int) {
 		t.Fatalf("add pod default route: %v", err)
 	}
 	setNetns(t, hostNS)
+	hostUp()
 
 	registerPMTUAttachment(t, objs, uint32(host.Attrs().Index), UsidTenantGwValue{Gw6: pmtuGW6.As16()})
 	return objs, podNS
+}
+
+// waitLocalRoute waits for addr to route locally in the calling thread's
+// network namespace. Even without DAD, IPv6 installs an address's local route
+// from its DAD work, asynchronously, and until then a packet to the address
+// is forwarded instead of delivered.
+func waitLocalRoute(t *testing.T, addr netip.Addr) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		routes, err := netlink.RouteGet(addr.AsSlice())
+		if err == nil && len(routes) > 0 && routes[0].Type == unix.RTN_LOCAL {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%v did not route locally within 5s (last lookup: %v, %v)", addr, routes, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// subscribeOperUp subscribes, in the calling thread's network namespace, to
+// updates for the link at ifindex, and returns a function that waits for one
+// reporting it operationally up. Subscribe before the change that brings the
+// link up: linkwatch sends that update only once it has activated the link's
+// transmit queue, which reading the link's state does not prove.
+func subscribeOperUp(t *testing.T, ifindex int) func() {
+	t.Helper()
+	updates := make(chan netlink.LinkUpdate, 16)
+	done := make(chan struct{})
+	if err := netlink.LinkSubscribe(updates, done); err != nil {
+		t.Fatalf("subscribe to link updates: %v", err)
+	}
+	t.Cleanup(func() {
+		close(done)
+		// Unblock the subscriber if it is waiting to deliver an update, so it
+		// can see the closed socket and exit.
+		for range updates {
+		}
+	})
+	return func() {
+		t.Helper()
+		timeout := time.After(5 * time.Second)
+		for {
+			select {
+			case u, ok := <-updates:
+				if !ok {
+					t.Fatalf("link update subscription closed before ifindex %d came up", ifindex)
+				}
+				if int(u.Index) == ifindex && u.Attrs().OperState == netlink.OperUp {
+					return
+				}
+			case <-timeout:
+				t.Fatalf("ifindex %d did not come up within 5s", ifindex)
+			}
+		}
+	}
 }
