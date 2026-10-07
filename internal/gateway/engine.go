@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -18,6 +19,11 @@ import (
 type Engine struct {
 	mu     sync.Mutex
 	active map[string]DesiredRule
+
+	// dirty holds active keys whose last apply or removal failed. Their
+	// datapath and quota state no longer match their active rule, so the
+	// next Reconcile applies them even when the desired rule equals it.
+	dirty map[string]struct{}
 
 	datapath  Datapath
 	quota     QuotaEnforcer
@@ -30,44 +36,71 @@ type Engine struct {
 func NewEngine(datapath Datapath, quota QuotaEnforcer, telemetry TelemetryEmitter) *Engine {
 	return &Engine{
 		active:    make(map[string]DesiredRule),
+		dirty:     make(map[string]struct{}),
 		datapath:  datapath,
 		quota:     quota,
 		telemetry: telemetry,
 	}
 }
 
-// Reconcile converges live state toward desired: every rule in desired is
-// re-applied, and every rule still active but no longer in desired is torn
-// down. The caller must already have withdrawn a rule's BGP route before it
-// disappears from desired.
+// Reconcile converges live state toward desired: every rule in desired that is
+// new or differs from its active version is applied, and every rule still
+// active but no longer in desired is torn down. The caller must already have
+// withdrawn a rule's BGP route before it disappears from desired.
 //
-// It applies everything in desired and removes everything not in it, rather
-// than diffing field by field, so a partial previous failure, such as a crash
-// between two rules, self-heals on the next call instead of requiring the
-// caller to track what succeeded.
+// A rule equal to its active version is skipped: no quota reservation, no
+// datapath write, no telemetry. It still gets an applied status, so the result
+// carries one status per desired rule. A partial previous failure still
+// self-heals on the next call: a new rule only becomes active once applied, and
+// an active rule whose update or removal failed is marked dirty and applied
+// again whatever its desired state.
 func (e *Engine) Reconcile(ctx context.Context, desired EngineState) (EngineStatus, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	toApply, toRemove := diffRuleKeys(e.active, desired.Rules)
+	for key := range e.dirty {
+		if _, ok := desired.Rules[key]; ok && !slices.Contains(toApply, key) {
+			toApply = append(toApply, key)
+		}
+	}
+	slices.Sort(toApply)
 
-	var statuses []RuleStatus
+	applying := make(map[string]struct{}, len(toApply))
+	for _, key := range toApply {
+		applying[key] = struct{}{}
+	}
+	statuses := make([]RuleStatus, 0, len(desired.Rules)+len(toRemove))
+	for key := range desired.Rules {
+		if _, ok := applying[key]; !ok {
+			statuses = append(statuses, RuleStatus{Key: key, Applied: true})
+		}
+	}
 	for _, key := range toApply {
 		rule := desired.Rules[key]
 		if err := e.applyRuleLocked(ctx, rule); err != nil {
+			// A failed apply releases the key's quota and may leave its
+			// datapath entries half-written, so an active rule no longer
+			// matches what is programmed.
+			if _, ok := e.active[key]; ok {
+				e.dirty[key] = struct{}{}
+			}
 			statuses = append(statuses, RuleStatus{Key: key, Applied: false, Error: err.Error()})
 			continue
 		}
 		e.active[key] = rule
+		delete(e.dirty, key)
 		statuses = append(statuses, RuleStatus{Key: key, Applied: true})
 	}
 
 	for _, key := range toRemove {
 		if err := e.removeRuleLocked(ctx, key); err != nil {
+			e.dirty[key] = struct{}{}
 			statuses = append(statuses, RuleStatus{Key: key, Applied: true, Error: err.Error()})
 			continue
 		}
 		delete(e.active, key)
+		delete(e.dirty, key)
 	}
 
 	healthy := true
@@ -107,9 +140,11 @@ func (e *Engine) Stop(ctx context.Context) error {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("stop: remove rule %s: %w", key, err)
 			}
+			e.dirty[key] = struct{}{}
 			continue
 		}
 		delete(e.active, key)
+		delete(e.dirty, key)
 	}
 	return firstErr
 }

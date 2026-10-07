@@ -22,10 +22,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"go.datum.net/galactic/internal/gateway"
@@ -962,23 +965,77 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// reconcile and the rule would stay broken until an unrelated event.
 		// Each broadcasts to every NetworkGateway in the namespace, since any
 		// of them could be the one waiting on this object.
+		//
+		// Backend resolution reads only these objects' specs, so status-only
+		// updates are filtered out, and advertisements that can never locate a
+		// backend (the gateway's own VIP advertisements among them) are
+		// filtered out entirely. Every pod attach still writes one that passes;
+		// the engine then skips every rule whose resolved state is unchanged.
 		Watches(&bgpv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "BGPRouter", obj.GetName())
 			}),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
 		Watches(&bgpv1alpha1.BGPAdvertisement{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "BGPAdvertisement", obj.GetName())
 			}),
+			builder.WithPredicates(backendAdvertisementPredicate()),
 		).
 		Watches(&bgpv1alpha1.BGPVRFInstance{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return broadcastToGatewayRequests(ctx, r.Client, obj.GetNamespace(), "BGPVRFInstance", obj.GetName())
 			}),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
 		Named("networkgateway").
 		Complete(r)
+}
+
+// backendAdvertisementPredicate passes only BGPAdvertisement events a pass can
+// act on.
+//
+// buildBackendSIDIndex ignores an advertisement without both VRFID and
+// Function, so a create or delete of one is dropped. An update passes when its
+// spec changed and either side carries both, so an advertisement gaining or
+// losing them still triggers a pass.
+//
+// The gateway's own VIP advertisements carry networkRuleLabel and neither
+// field. Their creates come from this reconciler and are dropped, but a delete
+// or a spec edit passes, so the next pass restores what was lost.
+func backendAdvertisementPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return locatesBackend(e.Object) },
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return locatesBackend(e.Object) || isRuleAdvertisement(e.Object)
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+			if e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration() {
+				return false
+			}
+			return locatesBackend(e.ObjectOld) || locatesBackend(e.ObjectNew) ||
+				isRuleAdvertisement(e.ObjectOld) || isRuleAdvertisement(e.ObjectNew)
+		},
+		GenericFunc: func(e event.GenericEvent) bool { return locatesBackend(e.Object) },
+	}
+}
+
+// locatesBackend reports whether obj is a BGPAdvertisement buildBackendSIDIndex
+// would consider: one carrying both a VRFID and a Function.
+func locatesBackend(obj client.Object) bool {
+	adv, ok := obj.(*bgpv1alpha1.BGPAdvertisement)
+	return ok && adv.Spec.VRFID != nil && adv.Spec.Function != nil
+}
+
+// isRuleAdvertisement reports whether obj is a gateway VIP advertisement made
+// for a NetworkRule.
+func isRuleAdvertisement(obj client.Object) bool {
+	_, ok := obj.GetLabels()[networkRuleLabel]
+	return ok
 }
 
 // ruleToGatewayRequests maps a NetworkRule change to every NetworkGateway in
