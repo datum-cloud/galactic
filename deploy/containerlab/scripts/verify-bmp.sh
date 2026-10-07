@@ -40,12 +40,57 @@ fi
 # session's address pair is unique to the router holding it. The local address
 # is GoBMP's router_ip, which both Peer Up and Peer Down carry; local_ip is
 # only on a Peer Up.
-states=$(docker exec "$(control_plane iad)" kubectl logs -n galactic-system deploy/bmp-collector |
+#
+# A router sends its Peer Ups once, when its BMP session opens, and GoBMP logs
+# every route-monitoring message after them, so on a lab that has run for a
+# while the kubelet has rotated them out of the current log file. kubectl logs
+# reads only that file, so this reads every file the collector's pod has
+# written on its node instead, rotated and compressed ones included, oldest
+# first. The kubelet names them <restart>.log for the live file and
+# <restart>.log.<YYYYMMDD-HHMMSS>[.gz] for each rotation, so sorting by restart
+# count, then rotation time, with the live file last, puts them in order. Each
+# line carries the CRI prefix "<time> <stream> <P|F> ", and a line the runtime
+# split is a run of P parts ending in an F.
+# The running pod that is not being deleted: the collector's Deployment uses
+# Recreate, so a terminating pod can still be listed while its replacement
+# starts.
+collector=$(docker exec "$(control_plane iad)" kubectl get pods -n galactic-system \
+  -l app.kubernetes.io/name=bmp-collector --field-selector=status.phase=Running \
+  -o jsonpath='{range .items[*]}{.spec.nodeName} {.metadata.name} {.metadata.uid} {.metadata.deletionTimestamp}{"\n"}{end}' |
+  awk 'NF == 3' | head -1)
+read -r collector_node collector_pod collector_uid <<<"${collector}"
+if [[ -z "${collector_uid:-}" ]]; then
+  echo "FAIL bmp-collector: no running collector pod in iad"
+  exit 1
+fi
+log_dir="/var/log/pods/galactic-system_${collector_pod}_${collector_uid}"
+if ! docker exec "${collector_node}" test -d "${log_dir}"; then
+  echo "FAIL bmp-collector: ${collector_node} has no log directory ${log_dir}"
+  exit 1
+fi
+# Listed and read in one exec, so a file the kubelet compresses in between is
+# read under its new .gz name. The kubelet keeps a bounded number of rotated
+# files, so a Peer Up older than all of them is still lost.
+states=$(docker exec -i "${collector_node}" sh -s "${log_dir}" <<'SCRIPT' |
+cd "$1" || exit 1
+ls */* |
+  sed -E 's#^(.*/)([0-9]+)\.log(\.([0-9-]+)(\.gz)?)?$#\2 \4 &#; s#^([0-9]+)  #\1 99999999-999999 #' |
+  sort -k1,1n -k2,2 | awk '{print $3}' |
+  while read -r f; do zcat -f "${f}" 2>/dev/null || zcat -f "${f}.gz"; done
+SCRIPT
   PEER_STATE_MSG="${PEER_STATE_MSG}" python3 -c '
 import json, os, sys
 want = int(os.environ["PEER_STATE_MSG"])
 last = {}
-for line in sys.stdin:
+partial = ""
+for raw in sys.stdin:
+    parts = raw.rstrip("\n").split(" ", 3)
+    if len(parts) < 4 or parts[2] not in ("P", "F"):
+        continue
+    if parts[2] == "P":
+        partial += parts[3]
+        continue
+    line, partial = partial + parts[3], ""
     if not line.startswith("{"):
         continue
     try:

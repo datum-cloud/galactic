@@ -71,7 +71,6 @@ for site in dfw sjc iad; do
   echo "Applying galactic-nat/${site} to ${node}..."
   delete_gateway "${node}"
   delete_stale_shards "${node}"
-  docker exec "${node}" rm -rf /galactic/resources/galactic-nat
   copy_to "${node}" galactic-nat
   copy_nat_config "${node}"
   apply_k "${node}" "/galactic/resources/galactic-nat/${site}/"

@@ -11,12 +11,26 @@ control_plane() {
 
 # copy_to NODE SRC [DEST]
 # SRC is relative to RESOURCES_DIR; DEST defaults to the same path under
-# /galactic/resources/ on the node. docker cp requires DEST's parent to
-# already exist (it won't create intermediate directories), which matters
-# once SRC nests more than one level deep (e.g. "tenants/ns10") — so create
-# it first.
+# /galactic/resources/ on the node. DEST is replaced, not merged into: docker
+# cp copies SRC *into* a DEST that already exists, nesting it one level down,
+# so a rerun against a provisioned node would leave the old copy where
+# kustomize reads it and `kubectl apply` would report it unchanged. docker cp
+# also requires DEST's parent to exist, which matters once SRC nests more
+# than one level deep (e.g. "tenants/ns10"), so that is created first.
 copy_to() {
   local node="$1" src="$2" dest="${3:-/galactic/resources/${2}/}"
+  case "${dest}" in
+    *..*)
+      echo "copy_to: refusing to replace ${dest}: it contains .." >&2
+      return 1
+      ;;
+    /galactic/?*) ;;
+    *)
+      echo "copy_to: refusing to replace ${dest}: not under /galactic/" >&2
+      return 1
+      ;;
+  esac
+  docker exec "${node}" rm -rf "${dest}"
   docker exec "${node}" mkdir -p "$(dirname "${dest}")"
   docker cp "${RESOURCES_DIR}/${src}" "${node}:${dest}"
 }
