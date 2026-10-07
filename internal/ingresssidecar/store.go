@@ -395,6 +395,35 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// PruneForeignDatapath removes the rows an earlier sidecar pod on this node left
+// in the shared eBPF maps, keeping those of every VRF this one tracks.
+//
+// Call it once, after Inventory: by then every VRF in this pod's namespace is
+// tracked, so a row it does not account for belongs to a pod that is gone. It
+// holds the store's lock throughout, so a VRF SetDesired creates concurrently
+// is either already tracked or registers its rows after the prune.
+func (s *Store) PruneForeignDatapath() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	keep := make(map[uint32]struct{}, len(s.vrfs))
+	for _, v := range s.vrfs {
+		if v.tableID != 0 {
+			keep[v.tableID] = struct{}{}
+		}
+	}
+	removed, err := s.backend.PruneDatapath(keep)
+	if removed > 0 {
+		slog.Info("ingresssidecar: removed rows an earlier sidecar pod left in the shared eBPF maps",
+			"removed", removed)
+	}
+	if err != nil {
+		s.countError("prune_datapath")
+		return fmt.Errorf("prune an earlier sidecar pod's eBPF map rows: %w", err)
+	}
+	return nil
+}
+
 // checkDatapathLocked reapplies every live VRF and route when the backend's
 // DatapathGeneration has changed since they were written, or when an earlier
 // reapply pass left something unapplied. Callers must hold s.mu.

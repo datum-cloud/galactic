@@ -37,6 +37,11 @@ type fakeBackend struct {
 	failEnsureRoute error
 	failRemoveVRF   error
 	failRemoveRoute error
+
+	// pruned records the keep set of every PruneDatapath call, and
+	// failPrune, if set, is the error it returns.
+	pruned    []map[uint32]struct{}
+	failPrune error
 }
 
 type routeRecord struct {
@@ -130,6 +135,14 @@ func (f *fakeBackend) DatapathGeneration() (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.generation, f.failGeneration
+}
+
+func (f *fakeBackend) PruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "PruneDatapath")
+	f.pruned = append(f.pruned, keepTableIDs)
+	return 0, f.failPrune
 }
 
 // reloadDatapath simulates the CNI control daemon recreating the shared eBPF

@@ -45,6 +45,11 @@ type Backend interface {
 	// it. Store compares successive values to know when every VRF and route
 	// must be reapplied.
 	DatapathGeneration() (string, error)
+	// PruneDatapath removes every row in the node's shared eBPF maps that an
+	// ingress sidecar wrote for a VRF whose routing table is not in
+	// keepTableIDs, and reports how many it removed. Those rows belong to an
+	// earlier sidecar pod on this node, which never removes its own on exit.
+	PruneDatapath(keepTableIDs map[uint32]struct{}) (removed int, err error)
 }
 
 // VRFInfo describes one kernel VRF device discovered by Backend.ListVRFs.
@@ -129,6 +134,10 @@ func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
 
 func (kernelBackend) DatapathGeneration() (string, error) {
 	return datapathGeneration()
+}
+
+func (kernelBackend) PruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
+	return pruneDatapath(keepTableIDs)
 }
 
 // vrfNameRegex matches the interface name generated for a VPC: a leading

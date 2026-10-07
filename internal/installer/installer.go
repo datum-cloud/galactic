@@ -510,6 +510,10 @@ type ebpfDatapathState struct {
 	// datapath repair rebuilds a VRF's shard routes from exactly as CNI ADD
 	// installs them.
 	egress attachreg.EgressConfig
+
+	// sidecarReap carries the ingress sidecar reaper's state from one sidecar
+	// return sweep to the next. Nil leaves reaping off.
+	sidecarReap *sidecarReaper
 }
 
 // startEBPFDatapath loads and attaches the eBPF datapath and returns the state
@@ -528,7 +532,7 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	}
 	slog.Info("eBPF uSID datapath loaded, pinned, and attached", "interfaces", ifaces, "pinDir", attach.PinDir)
 
-	state := ebpfDatapathState{ifaces: ifaces, watcher: watcher}
+	state := ebpfDatapathState{ifaces: ifaces, watcher: watcher, sidecarReap: &sidecarReaper{}}
 	watcher.OnChange(rewriteEBPFInterfaces)
 
 	// The closer is the loaded objects in production. A test fake stands in a

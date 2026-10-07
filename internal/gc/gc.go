@@ -586,7 +586,10 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	// on the next tick, leaving vrf_table empty for those entries while
 	// ifindex_vrf_table, which this sweep never touches, still holds them, and
 	// silently blackholing the sidecar's outbound connections. Preserve every
-	// entry in that block unconditionally.
+	// entry in that block here. Removing a deleted sidecar pod's rows is the
+	// sidecar's own job at startup and the installer's task once every sidecar
+	// advertisement on the node has looked gone for two sweeps, since only they
+	// can tell a live sidecar from a gone one.
 	existing, err := reg.VRF.List()
 	if err != nil {
 		slog.Error("GC: failed to list eBPF vrf_table for sweep", "err", err)

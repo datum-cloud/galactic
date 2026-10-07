@@ -20,6 +20,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/sidecarmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -439,6 +440,35 @@ func removeEgressDatapath(tableID uint32) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// pruneDatapath removes every row in the shared maps that an ingress sidecar
+// registered for a VRF whose routing table is not in keepTableIDs.
+//
+// This sidecar leaves its rows in place when it exits, so that a restarted
+// container in the same pod finds them still serving. A deleted pod takes its
+// VRFs and veths with it but leaves the rows, and its replacement only
+// overwrites the rows of the VPCs it serves again. This sidecar is the only
+// writer of the sidecar's share of these maps on its node, so whatever its own
+// VRFs do not account for is a predecessor's.
+func pruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
+	keep := make(map[uint16]struct{}, len(keepTableIDs))
+	for tableID := range keepTableIDs {
+		argument, err := argumentForTableID(tableID)
+		if err != nil {
+			continue // not a table this sidecar registers rows for
+		}
+		keep[argument] = struct{}{}
+	}
+
+	maps, closer, err := sidecarmap.OpenPinned(ebpfPinDir)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = closer.Close() }()
+
+	result, err := sidecarmap.Prune(maps, keep)
+	return result.Total(), err
 }
 
 // ensureRedirectRoute installs a plain host route for prefix into this pod's

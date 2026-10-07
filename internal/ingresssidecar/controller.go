@@ -81,7 +81,11 @@ var (
 )
 
 // RunStartup blocks, seeding store from reader, taking its inventory of host
-// state, then sweeping it every interval until ctx is done.
+// state, removing the eBPF map rows an earlier sidecar pod left behind, then
+// sweeping it every interval until ctx is done.
+//
+// The prune runs only after a successful inventory. A failed one can leave a
+// VRF in this pod untracked, and pruning then would remove its live rows.
 //
 // Only a failed EndpointSlice list holds the sweep back, retried with backoff:
 // running Inventory without the seed would reopen the race SeedFromAPI closes.
@@ -104,6 +108,11 @@ func RunStartup(ctx context.Context, reader client.Reader, store *Store, interva
 	}
 	if err := store.Inventory(ctx, time.Now()); err != nil {
 		slog.Error("ingresssidecar: startup inventory", "error", err)
+	} else if err := store.PruneForeignDatapath(); err != nil {
+		// Not retried: the rows it leaves only hold map slots until the next
+		// sidecar pod's startup prune, or until the host's installer judges
+		// every sidecar on this node gone.
+		slog.Error("ingresssidecar: startup prune", "error", err)
 	}
 	RunSweeper(ctx, store, interval)
 }
