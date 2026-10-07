@@ -57,9 +57,10 @@ func TestNextFreeTableID(t *testing.T) {
 	}
 }
 
-// TestNextFreeTableID_HostAndSidecarNeverOverlap covers #716: the host and the
-// ingress sidecar allocate in separate network namespaces, each seeing none of
-// the other's VRFs, but write the same egress_route_table keyed by table ID.
+// TestNextFreeTableID_HostAndSidecarNeverOverlap checks the host and the
+// ingress sidecar never pick the same table ID. They allocate in separate
+// network namespaces, each seeing none of the other's VRFs, but write the same
+// egress_route_table keyed by table ID.
 func TestNextFreeTableID_HostAndSidecarNeverOverlap(t *testing.T) {
 	host, err := nextFreeTableID(map[uint32]struct{}{}, HostTableIDMin, HostTableIDMax)
 	if err != nil {

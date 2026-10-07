@@ -512,8 +512,8 @@ func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
 }
 
 // TestAddInRange_AllocatesInsideTheRange covers the ingress sidecar's use of
-// AddInRange (#716): its VRFs must take table IDs from its own range, never
-// the host's.
+// AddInRange: its VRFs must take table IDs from its own range, never the
+// host's.
 func TestAddInRange_AllocatesInsideTheRange(t *testing.T) {
 	requireRoot(t)
 	const vpc = "vtrng"

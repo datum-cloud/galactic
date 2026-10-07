@@ -104,7 +104,7 @@ func assertMapState(
 
 	// The peer's index is in the range the host never registers, so a host
 	// interface with the same number in its own namespace cannot overwrite
-	// this row (#716).
+	// this row.
 	if want := ifindexvrfmap.SidecarIfindex(argument); uint32(peerLink.Attrs().Index) != want {
 		return fmt.Errorf("veth peer ifindex = %d, want %d", peerLink.Attrs().Index, want)
 	}

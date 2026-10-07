@@ -67,9 +67,9 @@ func TestIfindexVRFTable_RegisterRejectsReservedArgumentZero(t *testing.T) {
 	}
 }
 
-// TestIfindexVRFTable_RegisterKeepsWritersApart covers #716: the host and the
-// ingress sidecar number interfaces in separate namespaces but share this
-// map, so each must stay inside its own index range.
+// TestIfindexVRFTable_RegisterKeepsWritersApart checks that the host and the
+// ingress sidecar, which number interfaces in separate namespaces but share
+// this map, each stay inside their own index range.
 func TestIfindexVRFTable_RegisterKeepsWritersApart(t *testing.T) {
 	const sidecar = uformat.BlockIngressSidecar
 	cases := []struct {
