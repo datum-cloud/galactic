@@ -87,6 +87,11 @@ type NetworkGatewayReconciler struct {
 
 	NodeName string
 
+	// APIReader reads from the API server, bypassing the informer cache.
+	// sweepOrphanedAdvertisements uses it to confirm a rule is really gone
+	// before withdrawing this node's route for it. Required.
+	APIReader client.Reader
+
 	// Disabled is set when this node's datapath is turned off by
 	// configuration. The reconciler then keeps every one of this node's VIP
 	// advertisements withdrawn and reports the node not ready, so the fabric
@@ -308,15 +313,21 @@ func (r *NetworkGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(updateErr, "update NetworkGateway status")
 	}
 
+	sweepErr := r.sweepOrphanedAdvertisements(ctx, gw.Namespace, ruleList.Items)
+	if sweepErr != nil {
+		logger.Error(sweepErr, "withdraw advertisements for deleted NetworkRules")
+	}
+
 	// Crash recovery. A failed sweep leaves orphaned vip_table state behind
 	// until a later pass succeeds, so it is returned for retry, after the
 	// status write above so the failure stays visible on the object.
 	if err := r.Engine.ReconcileOrphans(ctx, desired, cutoff); err != nil {
 		logger.Error(err, "reconcile orphaned vip_table state")
-		return ctrl.Result{}, errors.Join(advErr, ruleStatusErr, fmt.Errorf("reconcile orphaned vip_table state: %w", err))
+		return ctrl.Result{}, errors.Join(advErr, ruleStatusErr, sweepErr,
+			fmt.Errorf("reconcile orphaned vip_table state: %w", err))
 	}
 
-	if err := errors.Join(advErr, ruleStatusErr); err != nil {
+	if err := errors.Join(advErr, ruleStatusErr, sweepErr); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Nothing else is sure to trigger the pass that drops a held rule once
@@ -1103,6 +1114,64 @@ func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) boo
 		}
 	}
 	return false
+}
+
+// sweepOrphanedAdvertisements deletes this node's BGPAdvertisements for rules
+// that no longer exist. rules is every NetworkRule in namespace as this pass
+// listed them.
+//
+// This node can create an advertisement from a cache that has not yet seen its
+// rule's deletion timestamp, after NetworkRuleReconciler's teardown has already
+// removed the finalizer. Teardown never sees that advertisement. Without this
+// sweep it would stay advertised, with no node serving the rule, until
+// Kubernetes garbage collection follows its owner reference. Here it is
+// withdrawn on the pass where this node's cache drops the rule, the same pass
+// that unloads the rule from the datapath.
+//
+// A rule missing from rules is looked up through APIReader first and kept if it
+// still exists, so a cache that has not yet seen a new rule never withdraws a
+// live route.
+func (r *NetworkGatewayReconciler) sweepOrphanedAdvertisements(
+	ctx context.Context, namespace string, rules []bgpv1alpha1.NetworkRule,
+) error {
+	known := make(map[string]bool, len(rules))
+	for i := range rules {
+		known[rules[i].Name] = true
+	}
+
+	advList := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := r.List(ctx, advList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{gatewayNodeLabel: gatewayNodeLabelValue(r.NodeName)},
+	); err != nil {
+		return fmt.Errorf("list BGPAdvertisements for gateway node %s: %w", r.NodeName, err)
+	}
+
+	var errs []error
+	for i := range advList.Items {
+		adv := &advList.Items[i]
+		if !isNodeAdvertisement(adv, r.NodeName) {
+			continue
+		}
+		ruleName := adv.Labels[networkRuleLabel]
+		if known[ruleName] {
+			continue
+		}
+		err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ruleName},
+			&bgpv1alpha1.NetworkRule{})
+		switch {
+		case err == nil:
+			continue
+		case !apierrors.IsNotFound(err):
+			errs = append(errs, fmt.Errorf("check NetworkRule %s for BGPAdvertisement %s: %w", ruleName, adv.Name, err))
+			continue
+		}
+		if err := r.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("withdraw BGPAdvertisement %s for deleted NetworkRule %s: %w",
+				adv.Name, ruleName, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway node

@@ -8,11 +8,13 @@ import (
 	"context"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -165,7 +167,7 @@ func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 		WithObjects(gwA, gwB, rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
@@ -227,7 +229,7 @@ func TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes(t
 		WithObjects(rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	if err := r.updateAcceptedCondition(context.Background(), rule); err != nil {
 		t.Fatalf("updateAcceptedCondition: unexpected error: %v", err)
 	}
@@ -262,7 +264,7 @@ func TestNetworkRuleReconciler_GatewayAppearanceRequeuesParkedRule(t *testing.T)
 		WithObjects(rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 
 	// No NetworkGateway exists yet, so this is the zero-nodes branch (see
 	// TestNetworkRuleReconciler_UpdateAcceptedCondition_FalseWithNoGatewayNodes
@@ -325,7 +327,7 @@ func TestNetworkRuleReconciler_NoOpOnNonGatewayNode(t *testing.T) {
 		Build()
 
 	// compute-node-1 is not a registered NetworkGateway target.
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testComputeNodeName}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testComputeNodeName}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
@@ -370,7 +372,7 @@ func TestNetworkRuleReconciler_TeardownOrder_WithdrawsBGPBeforeRemovingFinalizer
 		WithObjects(gwA, rule, adv).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
@@ -428,7 +430,7 @@ func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementForDepartedNode(t *
 		WithObjects(gwA, rule, adv).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
@@ -473,7 +475,7 @@ func TestNetworkRuleReconciler_TeardownIgnoresAdvertisementForDifferentRule(t *t
 		WithObjects(gwA, rule, otherAdv).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
@@ -499,9 +501,85 @@ func TestNetworkRuleReconciler_TeardownIsIdempotentWhenAdvertisementAlreadyGone(
 		WithObjects(gwA, rule).
 		Build()
 
-	r := &NetworkRuleReconciler{Client: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
 	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: unexpected error when no BGPAdvertisement exists: %v", err)
+	}
+}
+
+// staleListClient hides every object of the wrapped kinds from List, the way
+// an informer cache that has not yet seen another node's writes does. Get and
+// every write go to the wrapped client.
+type staleListClient struct {
+	client.Client
+	hideAdvertisements bool
+	hideRules          bool
+}
+
+func (c staleListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	switch list.(type) {
+	case *bgpv1alpha1.BGPAdvertisementList:
+		if c.hideAdvertisements {
+			return nil
+		}
+	case *bgpv1alpha1.NetworkRuleList:
+		if c.hideRules {
+			return nil
+		}
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementMissingFromCache is
+// the regression test for #763: an advertisement another gateway node created
+// after this node's cache was last updated must be found through APIReader
+// and withdrawn, and the finalizer kept until a pass finds none.
+func TestNetworkRuleReconciler_TeardownWithdrawsAdvertisementMissingFromCache(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Finalizers = []string{networkRuleFinalizer}
+	now := metav1.Now()
+	rule.DeletionTimestamp = &now
+	adv := newNodeAdvertisement(testRuleName, testNodeGWB, "v4")
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), rule, adv).
+		Build()
+
+	r := &NetworkRuleReconciler{
+		Client:    staleListClient{Client: fakeClient, hideAdvertisements: true},
+		APIReader: fakeClient,
+		Scheme:    scheme,
+		NodeName:  testNodeGWA,
+	}
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
+
+	res, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+	if err := fakeClient.Get(ctx, testRuleKey(adv.Name), &bgpv1alpha1.BGPAdvertisement{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("BGPAdvertisement %s still exists (err=%v), want withdrawn", adv.Name, err)
+	}
+	gotRule := &bgpv1alpha1.NetworkRule{}
+	if err := fakeClient.Get(ctx, req.NamespacedName, gotRule); err != nil {
+		t.Fatalf("NetworkRule removed on the pass that found a missed advertisement: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(gotRule, networkRuleFinalizer) {
+		t.Fatal("finalizer removed on the pass that found a missed advertisement")
+	}
+	if res.RequeueAfter == 0 {
+		t.Error("RequeueAfter = 0, want a requeue to check again")
+	}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second Reconcile: unexpected error: %v", err)
+	}
+	if err := fakeClient.Get(ctx, req.NamespacedName, &bgpv1alpha1.NetworkRule{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("NetworkRule still exists after a pass found no advertisements (err=%v)", err)
 	}
 }

@@ -165,11 +165,12 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// rewrites nothing, so a gateway node has no translation source of its own
 	// to publish.
 	if err := (&controller.NetworkGatewayReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Engine:   gwEngine,
-		NodeName: nodeName,
-		Disabled: !cfg.DatapathEnabled,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Engine:    gwEngine,
+		NodeName:  nodeName,
+		APIReader: mgr.GetAPIReader(),
+		Disabled:  !cfg.DatapathEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkGateway controller: %w", err)
 	}
@@ -177,9 +178,10 @@ func runCmd(cfg *config.GatewayConfig) error {
 	// The rule reconciler: finalizer-guarded teardown ordering and the Accepted
 	// condition.
 	if err := (&controller.NetworkRuleReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		NodeName: nodeName,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		NodeName:  nodeName,
+		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkRule controller: %w", err)
 	}

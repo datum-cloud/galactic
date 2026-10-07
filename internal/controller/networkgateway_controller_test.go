@@ -126,7 +126,7 @@ func acceptRule(rule *bgpv1alpha1.NetworkRule) {
 func newGatewayReconciler(
 	c client.Client, scheme *runtime.Scheme, engine GatewayEngine, node string,
 ) *NetworkGatewayReconciler {
-	return &NetworkGatewayReconciler{Client: c, Scheme: scheme, Engine: engine, NodeName: node}
+	return &NetworkGatewayReconciler{Client: c, APIReader: c, Scheme: scheme, Engine: engine, NodeName: node}
 }
 
 // newTestRouter returns the BGPRouter targeting testNodeGWA, resolved
@@ -1492,5 +1492,60 @@ func TestApplyBGPAdvertisements_PrunesOlderAdvertisements(t *testing.T) {
 		if err := fakeClient.Get(ctx, testRuleKey(kept.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
 			t.Errorf("node %s's BGPAdvertisement %s was removed: %v", testNodeGWB, kept.Name, err)
 		}
+	}
+}
+
+// TestNetworkGatewayReconciler_WithdrawsOwnAdvertisementForDeletedRule is the
+// regression test for #763: an advertisement this node created from a stale
+// cache after the rule's teardown finished is withdrawn once the rule is gone.
+// Another node's advertisement is left for that node to withdraw.
+func TestNetworkGatewayReconciler_WithdrawsOwnAdvertisementForDeletedRule(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	own := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
+	other := newNodeAdvertisement(testRuleName, testNodeGWB, "v4")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), own, other).
+		Build()
+
+	r := newGatewayReconciler(fakeClient, scheme, newFakeGatewayEngine(), testNodeGWA)
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	if err := fakeClient.Get(ctx, testRuleKey(own.Name), &bgpv1alpha1.BGPAdvertisement{}); !apierrors.IsNotFound(err) {
+		t.Errorf("BGPAdvertisement %s still exists (err=%v), want withdrawn", own.Name, err)
+	}
+	if err := fakeClient.Get(ctx, testRuleKey(other.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("gw-b's BGPAdvertisement %s was removed: %v", other.Name, err)
+	}
+}
+
+// TestNetworkGatewayReconciler_KeepsAdvertisementForRuleMissingFromCache
+// covers the other side of the #763 sweep: a rule absent from this node's
+// cache but still present in the API keeps its advertisement.
+func TestNetworkGatewayReconciler_KeepsAdvertisementForRuleMissingFromCache(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	acceptRule(rule)
+	own := newNodeAdvertisement(testRuleName, testNodeGWA, "v4")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), rule, own).
+		Build()
+
+	r := newGatewayReconciler(staleListClient{Client: fakeClient, hideRules: true},
+		scheme, newFakeGatewayEngine(), testNodeGWA)
+	r.APIReader = fakeClient
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: testRuleKey(testNodeGWA)}); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	if err := fakeClient.Get(ctx, testRuleKey(own.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("BGPAdvertisement %s for a live rule was removed: %v", own.Name, err)
 	}
 }
