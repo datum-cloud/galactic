@@ -34,7 +34,9 @@
 //     9.
 //  7. Strip the outer IPv6 header, exposing the inner IPv4 or IPv6 packet.
 //  8. bpf_fib_lookup against the resolved Linux VRF table, scoped to that
-//     table exactly as the kernel's own End.DT46 does.
+//     table exactly as the kernel's own End.DT46 does. A route with no valid
+//     neighbor entry goes to bpf_redirect_neigh, so the kernel resolves the
+//     address instead of the packet being dropped.
 //  9. Redirect to the resolved egress interface: bpf_redirect_peer for a veth
 //     host-side end, which crosses straight into the peer's namespace, and
 //     plain bpf_redirect otherwise. Which one comes from
@@ -121,6 +123,11 @@ static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 pl
 // crosses into the peer's namespace, and bpf_redirect for everything else.
 static long (*bpf_redirect_peer)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect_peer;
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
+
+// Step 8's fallback when the FIB lookup resolves the route but finds no valid
+// neighbor entry for the next hop. See its call site.
+static long (*bpf_redirect_neigh)(__u32 ifindex, struct bpf_redir_neigh *params, int plen,
+				  __u64 flags) = (void *) BPF_FUNC_redirect_neigh;
 
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
 
@@ -579,6 +586,9 @@ enum drop_reason {
 	DROP_REASON_STRIP_FAILED = 4,
 	DROP_REASON_FIB_LOOKUP_FAILED = 5,
 	DROP_REASON_REDIRECT_FAILED = 6,
+	// The route resolved without a valid neighbor entry and the
+	// bpf_redirect_neigh fallback refused the packet. Not counted when the
+	// fallback takes it, which is the ordinary case.
 	DROP_REASON_FIB_NO_NEIGH = 7,
 	DROP_REASON_FIB_UNREACHABLE = 8,
 	DROP_REASON_FIB_FRAG_NEEDED = 9,
@@ -2211,6 +2221,44 @@ int usid_ingress(struct __sk_buff *skb)
 	// static per-address route.
 	long fib_rc = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params),
 				      BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID);
+
+	// The route resolved, but the attachment's neighbor entry is missing or
+	// not yet valid, so there is no MAC to write. The kernel garbage-collects
+	// a STALE entry nothing has used, and the redirect below never makes the
+	// kernel resolve one, since it bypasses the neighbor subsystem. Dropping
+	// here would therefore drop every packet to that attachment until it
+	// happens to send its own Neighbor Solicitation or ARP request, which on
+	// a busy node is a blackout of up to half a minute every few minutes.
+	//
+	// bpf_redirect_neigh hands the packet to the kernel's neighbor output on
+	// the interface the VRF lookup already chose: the kernel queues it,
+	// resolves the address on that link, and transmits it, recreating the
+	// entry so the next packet takes the fast path again. The next hop is
+	// passed explicitly, because without one the helper does its own FIB
+	// lookup in the main table rather than the VRF's. A NO_NEIGH lookup has
+	// already filled in the egress ifindex and next hop.
+	//
+	// This sends through the host-side end of a veth, not straight into its
+	// peer the way step 9 does, which works for a veth and a tap alike.
+	if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH && fib_params.ifindex > 0) {
+		struct bpf_redir_neigh nh;
+
+		__builtin_memset(&nh, 0, sizeof(nh));
+		if (inner_version == 6) {
+			nh.nh_family = USID_AF_INET6;
+			__builtin_memcpy(nh.ipv6_nh, fib_params.ipv6_dst, sizeof(nh.ipv6_nh));
+		} else {
+			nh.nh_family = USID_AF_INET;
+			nh.ipv4_nh = fib_params.ipv4_dst;
+		}
+
+		long neigh_rc = bpf_redirect_neigh(fib_params.ifindex, &nh, sizeof(nh), 0);
+
+		if (neigh_rc == TC_ACT_REDIRECT)
+			return neigh_rc;
+		count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf);
+		return TC_ACT_SHOT;
+	}
 
 	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
 		if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH)
