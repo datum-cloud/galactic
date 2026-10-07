@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -17,6 +16,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"go.datum.net/galactic/internal/plumbing/bond"
+	"go.datum.net/galactic/internal/plumbing/ebpf/mappin"
 	"go.datum.net/galactic/internal/plumbing/ebpf/natprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 )
@@ -65,9 +65,10 @@ func Load(pinDir string) (*natprog.NatObjects, error) {
 		// pin from an incompatible layout is safe to recreate. A compatible
 		// restart keeps every session; this one drops them, and each flow's
 		// next packet claims a new one.
-		slog.Warn("natattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
-			"(control-plane state will repopulate at next startup)", "pinDir", pinDir, "err", loadErr)
-		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
+		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, nil)
+		slog.Warn("natattach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them "+
+			"(control-plane state will repopulate at next startup)", "pinDir", pinDir, "maps", unpinned, "err", loadErr)
+		if unpinErr != nil {
 			return nil, fmt.Errorf("natattach: recreate incompatible pinned maps: %w", unpinErr)
 		}
 		loadErr = spec.LoadAndAssign(&loaded, opts)
@@ -80,28 +81,6 @@ func Load(pinDir string) (*natprog.NatObjects, error) {
 		return nil, fmt.Errorf("natattach: load and pin nat66 objects: %w", loadErr)
 	}
 	return &loaded, nil
-}
-
-// unpinIncompatibleMaps mirrors internal/plumbing/ebpf/edgeattach's
-// identical helper -- see that function's doc comment.
-func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
-	var errs []error
-	for name := range spec.Maps {
-		path := filepath.Join(pinDir, name)
-		m, err := ebpf.LoadPinnedMap(path, nil)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			errs = append(errs, fmt.Errorf("load pinned map %q for recreation: %w", name, err))
-			continue
-		}
-		if err := m.Unpin(); err != nil {
-			errs = append(errs, fmt.Errorf("unpin stale map %q: %w", name, err))
-		}
-		_ = m.Close()
-	}
-	return errors.Join(errs...)
 }
 
 // PopulateProgArray fills the nat_progs tail-call array with every

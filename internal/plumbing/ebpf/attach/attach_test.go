@@ -300,8 +300,8 @@ func TestResolveFilterPriority_EnvOverride(t *testing.T) {
 
 // TestLoad_AddedMapKeepsExistingPinnedState covers rolling out a datapath build
 // that adds a map. The previous build's pins lack it, and that alone must not
-// count as incompatible, which would recreate every map empty and drop live
-// routing state until each attachment is re-added.
+// count as incompatible, which would recreate maps empty and drop live routing
+// state until each attachment is re-added.
 func TestLoad_AddedMapKeepsExistingPinnedState(t *testing.T) {
 	requireRoot(t)
 

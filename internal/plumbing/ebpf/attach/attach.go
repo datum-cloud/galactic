@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/plumbing/ebpf/mappin"
 	"go.datum.net/galactic/internal/plumbing/ebpf/preflight"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 )
@@ -135,14 +136,20 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 	loadErr := spec.LoadAndAssign(&loaded, opts)
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
 		// A pin left by a previous version no longer matches the compiled map
-		// spec, after a changed value size or entry count, and cannot be
-		// reused. Every map here is control-plane-owned and reconstructable
-		// from CRD state, with GC sweeping anything stale, so recreating it is
-		// safe. Leaving this fatal would crashloop every node on the first
-		// schema change until an operator deleted the pins by hand.
-		slog.Warn("attach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
-			"(control-plane state will repopulate on the next CNI ADD/GC sweep)", "pinDir", pinDir, "err", loadErr)
-		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
+		// spec, after a changed key size, value size or entry count, and
+		// cannot be reused. Leaving this fatal would crashloop every node on
+		// the first schema change until an operator deleted the pins by hand.
+		//
+		// Only the maps whose layout changed are recreated. Several maps here,
+		// locator_table, function_table, vrf_table, ifindex_vrf_table and
+		// ifindex_egress_kind_table among them, are written by CNI ADD alone.
+		// Recreating them empties them on a compute node until every workload
+		// re-attaches, which blackholes every attachment on the node. An
+		// unchanged map keeps its rows.
+		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, nil)
+		slog.Warn("attach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them",
+			"pinDir", pinDir, "maps", unpinned, "err", loadErr)
+		if unpinErr != nil {
 			err = fmt.Errorf("attach: recreate incompatible pinned maps: %w", unpinErr)
 			return nil, err
 		}
@@ -184,33 +191,6 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 // UsidEgressPinName is the bpffs filename usid_egress is pinned under, distinct
 // from every map name in the same directory so the two can never collide.
 const UsidEgressPinName = "usid_egress_prog"
-
-// unpinIncompatibleMaps removes the on-disk pin for every map spec names, if one
-// exists under pinDir, so the retry that follows an incompatible-map load creates
-// each map fresh instead of failing against the stale pin again.
-//
-// A map with no existing pin is not an error: that one would have loaded fine.
-// Clearing all of them unconditionally is simpler and equally safe, since every
-// one is reconstructable from control-plane state.
-func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
-	var errs []error
-	for name := range spec.Maps {
-		path := filepath.Join(pinDir, name)
-		m, err := ebpf.LoadPinnedMap(path, nil)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			errs = append(errs, fmt.Errorf("load pinned map %q for recreation: %w", name, err))
-			continue
-		}
-		if err := m.Unpin(); err != nil {
-			errs = append(errs, fmt.Errorf("unpin stale map %q: %w", name, err))
-		}
-		_ = m.Close()
-	}
-	return errors.Join(errs...)
-}
 
 // Attach attaches program to the ingress hook of each named interface, through a
 // clsact qdisc and a direct-action BPF filter, creating the qdisc if it does not

@@ -601,8 +601,8 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 		}
 	}
 
-	// Repair entries a live BGPVRFInstance expects but vrf_table lacks. An
-	// incompatible-schema reload wipes every pinned map, and nothing
+	// Repair entries a live BGPVRFInstance expects but vrf_table lacks. A
+	// reload that changes vrf_table's layout recreates it empty, and nothing
 	// repopulates a pre-existing attachment: registerEBPFDatapath runs once,
 	// at CNI ADD, and is never re-invoked for an attachment that already
 	// succeeded. Reconcile above only deletes, so this is vrf_table's only
@@ -649,10 +649,9 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	// vpc_attribution_table shares vrf_table's exact (Block, Argument) key
 	// and lifecycle (see its own doc comment in usid.c), so it reconciles
 	// against the same live set and cutoff captured above. It has no repair
-	// step of its own: unlike vrf_table, an incompatible-schema wipe of this
-	// brand-new map cannot happen on a fresh rollout, and a missing row
-	// simply reports as unattributed (internal/plumbing/ebpf/metrics) until
-	// the next CNI ADD/DEL repopulates it.
+	// step of its own: a missing row only reports as unattributed
+	// (internal/plumbing/ebpf/metrics) until the next CNI ADD/DEL repopulates
+	// it.
 	attrRemoved, attrErr := reg.VPCAttribution.Reconcile(live, cutoff)
 	for _, e := range attrRemoved {
 		slog.Info("GC: removed stale eBPF vpc_attribution_table entry", "block", e.Block, "argument", e.Argument)

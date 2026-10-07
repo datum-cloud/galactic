@@ -19,6 +19,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/bond"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgepreflight"
 	"go.datum.net/galactic/internal/plumbing/ebpf/edgeprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/mappin"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpattach"
 )
 
@@ -103,9 +104,11 @@ func Load(pinDir string, dispatchMaps map[string]*ebpf.Map) (*edgeprog.EdgedsrOb
 		// startup. A stale pin from an incompatible layout is safe to
 		// recreate rather than fatal. The dispatcher's maps are not ours and
 		// are never touched here.
-		slog.Warn("edgeattach: pinned eBPF map incompatible with the newly compiled map spec, recreating "+
-			"(control-plane state will repopulate on the next NetworkRule reconcile)", "pinDir", pinDir, "err", loadErr)
-		if unpinErr := unpinIncompatibleMaps(spec, pinDir); unpinErr != nil {
+		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, func(name string) bool { return dispatchMapNames[name] })
+		slog.Warn("edgeattach: pinned eBPF maps incompatible with the newly compiled map spec, recreating them "+
+			"(control-plane state will repopulate on the next NetworkRule reconcile)",
+			"pinDir", pinDir, "maps", unpinned, "err", loadErr)
+		if unpinErr != nil {
 			return nil, fmt.Errorf("edgeattach: recreate incompatible pinned maps: %w", unpinErr)
 		}
 		loadErr = spec.LoadAndAssign(&loaded, opts)
@@ -118,31 +121,6 @@ func Load(pinDir string, dispatchMaps map[string]*ebpf.Map) (*edgeprog.EdgedsrOb
 		return nil, fmt.Errorf("edgeattach: load and pin edgedsr objects: %w", loadErr)
 	}
 	return &loaded, nil
-}
-
-// unpinIncompatibleMaps mirrors internal/plumbing/ebpf/attach's identical
-// helper -- see that function's doc comment.
-func unpinIncompatibleMaps(spec *ebpf.CollectionSpec, pinDir string) error {
-	var errs []error
-	for name := range spec.Maps {
-		if dispatchMapNames[name] {
-			continue
-		}
-		path := filepath.Join(pinDir, name)
-		m, err := ebpf.LoadPinnedMap(path, nil)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			errs = append(errs, fmt.Errorf("load pinned map %q for recreation: %w", name, err))
-			continue
-		}
-		if err := m.Unpin(); err != nil {
-			errs = append(errs, fmt.Errorf("unpin stale map %q: %w", name, err))
-		}
-		_ = m.Close()
-	}
-	return errors.Join(errs...)
 }
 
 // ResolveTargets resolves ifaceName to the interface names Attach should
