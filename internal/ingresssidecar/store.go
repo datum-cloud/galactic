@@ -395,9 +395,44 @@ func (s *Store) Inventory(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// PruneForeignDatapath removes the rows an earlier sidecar pod on this node left
+// in the shared eBPF maps, keeping those of every VRF this one tracks.
+//
+// Call it once, after Inventory: by then every VRF in this pod's namespace is
+// tracked, so a row it does not account for belongs to a pod that is gone. It
+// holds the store's lock throughout, so a VRF SetDesired creates concurrently
+// is either already tracked or registers its rows after the prune.
+func (s *Store) PruneForeignDatapath() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	keep := make(map[uint32]struct{}, len(s.vrfs))
+	for _, v := range s.vrfs {
+		if v.tableID != 0 {
+			keep[v.tableID] = struct{}{}
+		}
+	}
+	removed, err := s.backend.PruneDatapath(keep)
+	if removed > 0 {
+		slog.Info("ingresssidecar: removed rows an earlier sidecar pod left in the shared eBPF maps",
+			"removed", removed)
+	}
+	if err != nil {
+		s.countError("prune_datapath")
+		return fmt.Errorf("prune an earlier sidecar pod's eBPF map rows: %w", err)
+	}
+	return nil
+}
+
 // checkDatapathLocked reapplies every live VRF and route when the backend's
-// DatapathGeneration has changed since they were written, or when an earlier
+// DatapathGeneration has changed since they were written, when another writer
+// has removed this sidecar's rows from the shared maps, or when an earlier
 // reapply pass left something unapplied. Callers must hold s.mu.
+//
+// Rows go missing without a reload when a sidecar pod starting on the same
+// node, or the host installer's reaper, takes this live sidecar's rows for a
+// deleted pod's (see PruneForeignDatapath and internal/installer/sidecarreap.go).
+// Reading them back each sweep bounds that mistake to one sweep interval.
 //
 // Nothing else would notice. The CNI control daemon reloads the shared eBPF
 // datapath independently of this sidecar, recreating its maps empty on a
@@ -417,7 +452,11 @@ func (s *Store) checkDatapathLocked() {
 		return
 	}
 	if gen == s.generation && !s.reapplyPending {
-		return
+		if s.rowsPresentLocked() {
+			return
+		}
+		slog.Warn("ingresssidecar: this sidecar's rows are missing from the shared eBPF maps, reapplying")
+		s.reapplyPending = true
 	}
 	if s.generation == "" && !s.anyInstalledLocked() {
 		s.generation = gen // nothing written yet, so nothing to reapply
@@ -431,6 +470,25 @@ func (s *Store) checkDatapathLocked() {
 	}
 	s.generation = gen
 	s.reapplyPending = !s.reapplyLocked()
+}
+
+// rowsPresentLocked reports whether the shared eBPF maps still hold the rows of
+// every VRF reapplyLocked would reapply. A failed read counts as present, for
+// the same reason a failed generation read is not acted on. Callers must hold
+// s.mu.
+func (s *Store) rowsPresentLocked() bool {
+	var tableIDs []uint32
+	for _, v := range s.vrfs {
+		if v.installed && v.absentSince.IsZero() && v.tableID != 0 {
+			tableIDs = append(tableIDs, v.tableID)
+		}
+	}
+	present, err := s.backend.DatapathRowsPresent(tableIDs)
+	if err != nil {
+		slog.Debug("ingresssidecar: read back eBPF map rows", "err", err)
+		return true
+	}
+	return present
 }
 
 // reapplyLocked re-runs EnsureVRF for every installed VRF with a live route,

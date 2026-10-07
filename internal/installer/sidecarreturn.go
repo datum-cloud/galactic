@@ -118,6 +118,13 @@ func reconcileSidecarReturnPath(ctx context.Context, st ebpfDatapathState) {
 	if st.k8sClient == nil || st.nodeName == "" {
 		return
 	}
+	// Before the return path, so a deleted pod's advertisements are gone by
+	// the time it lists them, rather than failing to install every tick.
+	if st.sidecarReap != nil {
+		if err := st.sidecarReap.reap(ctx, st.k8sClient, st.namespace, st.nodeName); err != nil {
+			slog.Warn("Could not remove what a deleted ingress sidecar pod left behind", "err", err)
+		}
+	}
 	if err := ensureSidecarReturnPath(ctx, st.k8sClient, st.namespace, st.nodeName); err != nil {
 		slog.Warn("Could not install the ingress sidecar's return path; "+
 			"replies to this node's sidecar gateway addresses will be dropped until this succeeds", "err", err)

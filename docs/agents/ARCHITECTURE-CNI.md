@@ -96,6 +96,29 @@ delivery reads the per-interface `ifindex_egress_kind_table` row, which is
 exact. Once no egress shard resolves, a pass skips the remaining VRFs' shard
 routes rather than wait out each one's neighbor solicitation.
 
+The ingress sidecar (`galactic-vrf`) writes rows into the same maps from its
+pod's network namespace, each in a key range no host writer reaches: `vrf_table`
+under `uformat.BlockIngressSidecar`, `ifindex_vrf_table` at or above
+`ifindexvrfmap.SidecarIfindexBase`, and `egress_route_table` for tables at or
+above `vrf.SidecarTableIDBase`. It leaves them in place when it exits, so a
+restarted container keeps serving, and the host's GC and repair passes never
+touch them. Two things remove a deleted pod's rows
+(`internal/plumbing/ebpf/sidecarmap`, #773). A new sidecar removes, at startup,
+every sidecar row its own VRFs do not account for. The installer's sidecar
+return sweep (`internal/installer/sidecarreap.go`) treats a sidecar gateway
+advertisement whose recorded host-side interface no longer exists, or is no
+longer a veth, as the advertisement of a deleted pod, and deletes it. When every
+sidecar advertisement on the node is in that state on two sweeps in a row, it
+first removes every sidecar row from the maps. The second sweep covers a
+replacement pod that has written its rows but not yet republished its
+advertisements. A node whose sidecar publishes no advertisements gives the
+installer no evidence, so it keeps that node's rows. Either path can still take
+a live sidecar's rows for a deleted pod's: the startup prune when two sidecar
+pods overlap on a node, and the installer when a replacement pod fails to
+publish for two sweeps. So every sidecar reads its own `vrf_table` and
+`ifindex_vrf_table` rows back on each sweep and reapplies its VRFs and routes
+when any are missing, the same reapply a datapath reload triggers.
+
 `galactic-router`'s own reconciler independently derives the *same* SID value
 from the same inputs (`srv6.ComputeSID`, `internal/plumbing/srv6/usid.go`,
 called from `internal/reconcile/reconcile.go`) for the BGP control-plane

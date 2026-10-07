@@ -154,6 +154,38 @@ func TestRunStartupSweepsAfterFailedSeed(t *testing.T) {
 	})
 }
 
+// TestRunStartupPrunesAfterInventory verifies the startup prune runs once,
+// after Inventory, so the VRFs the pod already holds are in its keep set.
+func TestRunStartupPrunesAfterInventory(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+
+	backend := newFakeBackend()
+	backend.seedRoute("existing", 9, mustPrefix(t, "fd00::9"), net.ParseIP("fd00:99::9"))
+	store := NewStore(backend, time.Hour, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunStartup(ctx, c, store, time.Hour)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitFor(t, "startup prune", func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		return len(backend.pruned) == 1
+	})
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if _, ok := backend.pruned[0][9]; !ok {
+		t.Errorf("keep = %v, want it to hold the inventoried VRF's table 9", backend.pruned[0])
+	}
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

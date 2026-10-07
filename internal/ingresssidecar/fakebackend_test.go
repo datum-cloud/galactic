@@ -37,6 +37,19 @@ type fakeBackend struct {
 	failEnsureRoute error
 	failRemoveVRF   error
 	failRemoveRoute error
+
+	// pruned records the keep set of every PruneDatapath call, and
+	// failPrune, if set, is the error it returns.
+	pruned    []map[uint32]struct{}
+	failPrune error
+
+	// rowsMissing, if set, is the set of VRF tables whose rows
+	// DatapathRowsPresent reports absent, standing in for another writer
+	// removing them. EnsureVRF on that table restores them. failRowsRead,
+	// if set, is the error DatapathRowsPresent returns. Reads are not
+	// logged in calls, since Store makes them on every Sweep.
+	rowsMissing  map[uint32]bool
+	failRowsRead error
 }
 
 type routeRecord struct {
@@ -60,6 +73,7 @@ func (f *fakeBackend) EnsureVRF(vpc string) (uint32, error) {
 		return 0, f.failEnsureVRF
 	}
 	if id, ok := f.vrfs[vpc]; ok {
+		delete(f.rowsMissing, id)
 		return id, nil
 	}
 	id := f.nextTableID
@@ -130,6 +144,28 @@ func (f *fakeBackend) DatapathGeneration() (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.generation, f.failGeneration
+}
+
+func (f *fakeBackend) PruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "PruneDatapath")
+	f.pruned = append(f.pruned, keepTableIDs)
+	return 0, f.failPrune
+}
+
+func (f *fakeBackend) DatapathRowsPresent(tableIDs []uint32) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failRowsRead != nil {
+		return false, f.failRowsRead
+	}
+	for _, id := range tableIDs {
+		if f.rowsMissing[id] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // reloadDatapath simulates the CNI control daemon recreating the shared eBPF

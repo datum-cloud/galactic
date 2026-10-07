@@ -20,6 +20,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/sidecarmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/vrf"
@@ -439,6 +440,69 @@ func removeEgressDatapath(tableID uint32) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// pruneDatapath removes every row in the shared maps that an ingress sidecar
+// registered for a VRF whose routing table is not in keepTableIDs.
+//
+// This sidecar leaves its rows in place when it exits, so that a restarted
+// container in the same pod finds them still serving. A deleted pod takes its
+// VRFs and veths with it but leaves the rows, and its replacement only
+// overwrites the rows of the VPCs it serves again. This sidecar is the only
+// writer of the sidecar's share of these maps on its node, so whatever its own
+// VRFs do not account for is a predecessor's.
+func pruneDatapath(keepTableIDs map[uint32]struct{}) (int, error) {
+	keep := make(map[uint16]struct{}, len(keepTableIDs))
+	for tableID := range keepTableIDs {
+		argument, err := argumentForTableID(tableID)
+		if err != nil {
+			continue // not a table this sidecar registers rows for
+		}
+		keep[argument] = struct{}{}
+	}
+
+	maps, closer, err := sidecarmap.OpenPinned(ebpfPinDir)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = closer.Close() }()
+
+	result, err := sidecarmap.Prune(maps, keep)
+	return result.Total(), err
+}
+
+// datapathRowsPresent reports whether vrf_table and ifindex_vrf_table still hold
+// the rows ensureEgressDatapath registered for each VRF in tableIDs.
+//
+// Those two are written together, before any egress_route_table entry, and
+// removed together by every path that removes a sidecar's rows: this
+// sidecar's own startup prune in a later pod, and the host installer's reaper
+// once it judges every sidecar on the node gone. Either can be wrong about a
+// live sidecar, in a pod overlapping its predecessor or one slow to publish
+// its advertisements, and reading the rows back is what lets this one notice.
+func datapathRowsPresent(tableIDs []uint32) (bool, error) {
+	if len(tableIDs) == 0 {
+		return true, nil
+	}
+	maps, closer, err := sidecarmap.OpenPinned(ebpfPinDir)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = closer.Close() }()
+
+	for _, tableID := range tableIDs {
+		argument, err := argumentForTableID(tableID)
+		if err != nil {
+			continue // not a table this sidecar registers rows for
+		}
+		if _, ok, err := maps.VRF.Get(ingressSidecarBlock, argument); err != nil || !ok {
+			return false, err
+		}
+		if _, ok, err := maps.Ifindex.Get(ifindexvrfmap.SidecarIfindex(argument)); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // ensureRedirectRoute installs a plain host route for prefix into this pod's

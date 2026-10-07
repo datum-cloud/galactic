@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -534,5 +535,102 @@ func TestStoreSweepDropsNeverInstalledRoute(t *testing.T) {
 	}
 	if _, ok := store.routes["ns/pod-a"]; ok {
 		t.Error("route still tracked after its grace period")
+	}
+}
+
+// TestStorePruneForeignDatapathKeepsEveryTrackedVRF verifies the startup prune
+// keeps the rows of both a VRF a live EndpointSlice claimed and one Inventory
+// found in the pod, since either may still be serving traffic.
+func TestStorePruneForeignDatapathKeepsEveryTrackedVRF(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.seedRoute("leftover", 9, mustPrefix(t, "fd00::9"), net.ParseIP("fd00:99::9"))
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
+		t.Fatalf("SetDesired: %v", err)
+	}
+	if err := store.Inventory(ctx, time.Now()); err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if err := store.PruneForeignDatapath(); err != nil {
+		t.Fatalf("PruneForeignDatapath: %v", err)
+	}
+
+	if len(backend.pruned) != 1 {
+		t.Fatalf("PruneDatapath calls = %d, want 1", len(backend.pruned))
+	}
+	want := map[uint32]struct{}{backend.vrfs[testVPC1]: {}, 9: {}}
+	if got := backend.pruned[0]; !reflect.DeepEqual(got, want) {
+		t.Errorf("keep = %v, want %v", got, want)
+	}
+}
+
+// TestStorePruneForeignDatapathReportsFailure verifies a failed prune is
+// returned and counted rather than swallowed.
+func TestStorePruneForeignDatapathReportsFailure(t *testing.T) {
+	backend := newFakeBackend()
+	backend.failPrune = errTest
+	store := NewStore(backend, testGrace, nil)
+
+	if err := store.PruneForeignDatapath(); !errors.Is(err, errTest) {
+		t.Errorf("PruneForeignDatapath = %v, want %v", err, errTest)
+	}
+}
+
+// TestStoreSweepReappliesWhenRowsGoMissing covers another writer removing this
+// live sidecar's rows without reloading the datapath, as a sidecar pod starting
+// beside it or the host's reaper can: the next Sweep restores them.
+func TestStoreSweepReappliesWhenRowsGoMissing(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.generation = testGenLoaded
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
+		t.Fatalf("SetDesired: %v", err)
+	}
+	store.Sweep(ctx, time.Now()) // records the generation
+
+	backend.mu.Lock()
+	backend.rowsMissing = map[uint32]bool{backend.vrfs[testVPC1]: true}
+	backend.mu.Unlock()
+
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now())
+	got := backend.callsSince(before)
+	want := []string{"EnsureVRF:" + testVPC1, "EnsureRoute:1/fd00::1/128"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls after rows went missing = %v, want %v", got, want)
+	}
+
+	before = backend.callCount()
+	store.Sweep(ctx, time.Now())
+	if got := backend.callsSince(before); len(got) != 0 {
+		t.Errorf("calls once the rows are back = %v, want none", got)
+	}
+}
+
+// TestStoreSweepRowsReadFailureDoesNothing verifies an unreadable map, as on a
+// node whose datapath is not loaded, is not taken for missing rows.
+func TestStoreSweepRowsReadFailureDoesNothing(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeBackend()
+	backend.generation = testGenLoaded
+	store := NewStore(backend, testGrace, nil)
+
+	desired := &DesiredRoute{VPC: testVPC1, Prefix: mustPrefix(t, "fd00::1"), SID: net.ParseIP("fd00:99::1")}
+	if err := store.SetDesired(ctx, "ns/pod-a", desired); err != nil {
+		t.Fatalf("SetDesired: %v", err)
+	}
+	store.Sweep(ctx, time.Now())
+
+	backend.failRowsRead = errTest
+	before := backend.callCount()
+	store.Sweep(ctx, time.Now())
+	if got := backend.callsSince(before); len(got) != 0 {
+		t.Errorf("calls with unreadable rows = %v, want none", got)
 	}
 }
