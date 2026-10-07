@@ -71,7 +71,6 @@ apply_galactic_router() {
 for site in dfw sjc; do
   node=$(control_plane "${site}")
   echo "Applying galactic-router/${site} to ${node}..."
-  docker exec "${node}" rm -rf /galactic/resources/galactic-router
   copy_to "${node}" galactic-router
   copy_router_config "${node}"
   apply_galactic_router "${node}" "${site}"

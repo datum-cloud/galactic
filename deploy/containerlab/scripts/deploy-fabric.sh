@@ -35,11 +35,10 @@ copy_fabric_config() {
   docker cp "${FABRIC_DIR}" "${node}:/galactic/resources/fabric-router/base/fabric"
 }
 
-# rm -rf first -- see copy_fabric_config's comment; copy_to (lib.sh) doesn't
-# overwrite an already-provisioned node's copy on its own either.
+# copy_to (lib.sh) replaces an already-provisioned node's copy, and
+# copy_fabric_config then fills in base/fabric -- see its comment.
 for site in dfw iad sjc; do
   node=$(control_plane "${site}")
-  docker exec "${node}" rm -rf /galactic/resources/fabric-router
   copy_to "${node}" fabric-router
   copy_fabric_config "${node}"
   apply_k "${node}" "/galactic/resources/fabric-router/${site}/"
@@ -50,7 +49,6 @@ done
 # land in one pass.
 node=$(control_plane iad)
 echo "Copying resources to ${node}..."
-docker exec "${node}" rm -rf /galactic/resources/galactic-router /galactic/resources/galactic-control
 copy_to "${node}" galactic-router
 copy_to "${node}" galactic-control
 

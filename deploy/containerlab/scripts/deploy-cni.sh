@@ -89,16 +89,13 @@ for site in dfw sjc iad; do
 
   # docker cp copies SRC *into* an already-existing DEST directory
   # (nesting SRC's basename underneath it) instead of overwriting it,
-  # which would break kustomize's "../base" resource reference — so
-  # rm -rf first and only docker cp into paths that don't yet exist:
-  # copy_to lands resources/galactic-cni/ fresh, then the config/galactic-cni/
+  # which would break kustomize's "../base" resource reference — so only
+  # docker cp into paths that don't yet exist: copy_to replaces
+  # resources/galactic-cni/ (see lib.sh), then the config/galactic-cni/
   # copy targets "base", a leaf copy_to didn't create. Each site then applies
   # its own overlay directory (galactic-cni/<site>/), which layers onto the
   # shared one -- dfw needs a different GALACTIC_CNI_EBPF_INTERFACES than the
-  # single-homed sites. A rerun without
-  # the rm -rf would otherwise silently keep serving the prior copy from
-  # underneath the new nested directory.
-  docker exec "${node}" rm -rf /galactic/resources/galactic-cni
+  # single-homed sites.
   copy_to "${node}" galactic-cni
   docker cp "${GALACTIC_CNI_DIR}" "${node}:/galactic/resources/galactic-cni/base"
 
