@@ -59,6 +59,11 @@ const UnreachableDefaultMetric = 4278198272
 // either way.
 var ErrNotFound = errors.New("vrf: no VRF interface for this VPC in this network namespace")
 
+// ErrTableOutOfRange is wrapped by AddInRange when this VPC's VRF already exists
+// with a table ID outside the caller's range, for instance one created by an
+// ingress sidecar version that allocated from the host's range.
+var ErrTableOutOfRange = errors.New("vrf: existing VRF's table is outside the caller's range")
+
 // vrfMu serializes VRF creation and deletion within one process. It does not by
 // itself protect two separate CNI invocations racing on the same node, each
 // being its own process, so Add and Delete also take a cross-process lock.
@@ -104,8 +109,8 @@ func AddInRange(vpc string, minID, maxID uint32) error {
 			return fmt.Errorf("interface %q exists but is a %s, not a VRF", name, link.Type())
 		}
 		if existing.Table < minID || existing.Table > maxID {
-			return fmt.Errorf("VRF %q has table %d, outside the range [%d,%d] this caller allocates from",
-				name, existing.Table, minID, maxID)
+			return fmt.Errorf("VRF %q has table %d, not in [%d,%d]: %w",
+				name, existing.Table, minID, maxID, ErrTableOutOfRange)
 		}
 		return ensureUnreachableDefaults(existing.Table)
 	}

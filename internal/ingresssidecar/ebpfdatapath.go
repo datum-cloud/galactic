@@ -127,7 +127,8 @@ func egressVethNames(tableID uint32) (inner, peer string) {
 func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string, peerIndex uint32) (netlink.Link, error) {
 	peerLink, err := netlink.LinkByName(peer)
 	if err == nil && uint32(peerLink.Attrs().Index) != peerIndex {
-		return nil, fmt.Errorf("veth peer %q has index %d, want %d", peer, peerLink.Attrs().Index, peerIndex)
+		return nil, fmt.Errorf("veth peer %q has index %d, want %d; an older sidecar created it in this pod, "+
+			"so replace the pod rather than restarting the container", peer, peerLink.Attrs().Index, peerIndex)
 	}
 	if err != nil {
 		var notFound netlink.LinkNotFoundError

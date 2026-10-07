@@ -533,7 +533,7 @@ func TestAddInRange_AllocatesInsideTheRange(t *testing.T) {
 
 	// The same VPC from a caller with a different range is an error, not a
 	// silent reuse of a table that may belong to the other writer.
-	if err := vrf.Add(vpc); err == nil {
-		t.Fatalf("Add of a VRF whose table %d is outside the host range = nil, want an error", tableID)
+	if err := vrf.Add(vpc); !errors.Is(err, vrf.ErrTableOutOfRange) {
+		t.Fatalf("Add of a VRF whose table %d is outside the host range = %v, want ErrTableOutOfRange", tableID, err)
 	}
 }
