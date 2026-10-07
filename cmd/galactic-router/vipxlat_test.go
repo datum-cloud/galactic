@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -58,15 +59,21 @@ func runXlat(t *testing.T, table *fakeXlatTable, args ...string) (string, error)
 func testXlatEntries() []vipxlatmap.Entry {
 	return []vipxlatmap.Entry{
 		{
-			Key:         vipxlatmap.Key{Block: 0x20010db8ff01, Argument: 70, Proto: vipxlatmap.ProtoTCP, Port: 8080},
+			Key: vipxlatmap.Key{
+				Block: 0x20010db8ff01, Argument: 70, Proto: vipxlatmap.ProtoTCP,
+				Addr: netip.MustParseAddr("2001:db8::1"), Port: 8080,
+			},
 			Direction:   vipxlatmap.DirectionIngress,
-			Addr:        net.ParseIP("fd20:60::1"),
+			RewriteAddr: net.ParseIP("fd20:60::1"),
 			RewritePort: 30080,
 		},
 		{
-			Key:         vipxlatmap.Key{Block: 0x20010db8ff01, Argument: 70, Proto: vipxlatmap.ProtoTCP, Port: 30080},
+			Key: vipxlatmap.Key{
+				Block: 0x20010db8ff01, Argument: 70, Proto: vipxlatmap.ProtoTCP,
+				Addr: netip.MustParseAddr("fd20:60::1"), Port: 30080,
+			},
 			Direction:   vipxlatmap.DirectionEgress,
-			Addr:        net.ParseIP("2001:db8::1"),
+			RewriteAddr: net.ParseIP("2001:db8::1"),
 			RewritePort: 8080,
 		},
 	}
@@ -78,7 +85,7 @@ func TestVIPXlatList(t *testing.T) {
 		t.Fatalf("list: unexpected error: %v", err)
 	}
 	for _, want := range []string{
-		"DIRECTION", "ingress", "egress", "0x20010db8ff01", "[fd20:60::1]:30080", "[2001:db8::1]:8080",
+		"DIRECTION", "MATCH", "ingress", "egress", "0x20010db8ff01", "[fd20:60::1]:30080", "[2001:db8::1]:8080",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list output missing %q:\n%s", want, out)

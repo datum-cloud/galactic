@@ -149,10 +149,10 @@ func TestServiceVIPBindingReconciler_DeleteWithVRFRemovesOwnRows(t *testing.T) {
 }
 
 // TestServiceVIPBindingReconciler_DeleteWithVRFKeepsSharedRows covers two
-// backends of one rule on this node sharing the backend port, so they share
-// the egress row, and the second one's ingress row overwrote the first's.
-// Deleting the first while its VRF is still present must leave both rows to
-// the second.
+// backends of one rule on this node behind the same VIP and port, where the
+// second one's ingress row overwrote the first's. Deleting the first while its
+// VRF is still present removes only its own egress row and leaves both of the
+// second's rows.
 func TestServiceVIPBindingReconciler_DeleteWithVRFKeepsSharedRows(t *testing.T) {
 	const otherBackend = "fd20:60::6:6"
 	table := deleteBindingWithVRFPresent(t, testVIPBindingBackendAddr, otherBackend)
@@ -165,8 +165,8 @@ func TestServiceVIPBindingReconciler_DeleteWithVRFKeepsSharedRows(t *testing.T) 
 		t.Fatalf("table holds %d rows after delete, want 2 (the other binding's)", len(entries))
 	}
 	for _, e := range entries {
-		if e.Direction == vipxlatmap.DirectionIngress && !e.Addr.Equal(net.ParseIP(otherBackend)) {
-			t.Errorf("ingress row rewrites to %s, want the other binding's backend %s", e.Addr, otherBackend)
+		if e.Direction == vipxlatmap.DirectionIngress && !e.RewriteAddr.Equal(net.ParseIP(otherBackend)) {
+			t.Errorf("ingress row rewrites to %s, want the other binding's backend %s", e.RewriteAddr, otherBackend)
 		}
 	}
 }

@@ -1010,7 +1010,10 @@ func TestUsidIngress_VIPXlatRewritesAddrPortAndChecksum(t *testing.T) {
 	backend := netip.MustParseAddr("fd20:60::5:5")
 	const vipPort, backendPort = 8080, 30080
 
-	key := UsidVipXlatKey{Block: usid.block, Argument: usid.argument, Proto: 17 /* UDP */, Port: bswap16(vipPort)}
+	key := UsidVipXlatKey{
+		Block: usid.block, Argument: usid.argument, Proto: 17, /* UDP */
+		Port: bswap16(vipPort), Addr: vip.As16(),
+	}
 	if err := objs.VipXlatTable.Put(key, UsidVipXlatValue{
 		Addr: backend.As16(), Port: bswap16(backendPort),
 	}); err != nil {
@@ -1099,7 +1102,7 @@ func TestUsidIngress_VIPXlatSurvivesIdenticalPortEgressRow(t *testing.T) {
 
 	ingressKey := UsidVipXlatKey{
 		Block: usid.block, Argument: usid.argument, Proto: 17, /* UDP */
-		Direction: usidVIPXlatDirIngress, Port: bswap16(port),
+		Direction: usidVIPXlatDirIngress, Port: bswap16(port), Addr: vip.As16(),
 	}
 	if err := objs.VipXlatTable.Put(ingressKey, UsidVipXlatValue{
 		Addr: backend.As16(), Port: bswap16(port),
@@ -1112,7 +1115,7 @@ func TestUsidIngress_VIPXlatSurvivesIdenticalPortEgressRow(t *testing.T) {
 	// would have overwritten the ingress row above.
 	egressKey := UsidVipXlatKey{
 		Block: usid.block, Argument: usid.argument, Proto: 17,
-		Direction: usidVIPXlatDirEgress, Port: bswap16(port),
+		Direction: usidVIPXlatDirEgress, Port: bswap16(port), Addr: backend.As16(),
 	}
 	if err := objs.VipXlatTable.Put(egressKey, UsidVipXlatValue{
 		Addr: vip.As16(), Port: bswap16(port),
@@ -1839,7 +1842,7 @@ func TestUsidEgress_VIPSourcedReplyRedirectsToPublicUplinkNotNAT66(t *testing.T)
 
 	vipXlatKey := UsidVipXlatKey{
 		Block: block, Argument: argument, Proto: 6, // TCP
-		Direction: usidVIPXlatDirEgress, Port: bswap16(backendPort),
+		Direction: usidVIPXlatDirEgress, Port: bswap16(backendPort), Addr: backendReal.As16(),
 	}
 	if err := objs.VipXlatTable.Put(vipXlatKey, UsidVipXlatValue{
 		Addr: vip.As16(), Port: bswap16(backendPort),

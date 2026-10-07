@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -56,8 +57,8 @@ func newVIPXlatListCommand(pinDir *string) *cobra.Command {
 		Use:   "list",
 		Short: "Print every vip_xlat_table row",
 		Long: `list prints every vip_xlat_table row. An ingress row is keyed on the VIP
-port and rewrites to the backend. An egress row is keyed on the backend port
-and rewrites to the VIP.`,
+and its port and rewrites to the backend. An egress row is keyed on the backend
+and its port and rewrites to the VIP.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			table, closer, err := openVipXlatTable(*pinDir)
@@ -87,11 +88,9 @@ func newVIPXlatRemoveCommand(pinDir *string) *cobra.Command {
 		Use:   "remove",
 		Short: "Remove the rows one ServiceVIPBinding wrote",
 		Long: `remove deletes the two vip_xlat_table rows a ServiceVIPBinding with these
-spec values wrote, under whatever VRF they were written, and prints them. It
-finds them by the egress row, which rewrites to the VIP. Where the ingress row
-beside it points at a different backend, another binding owns both rows and
-neither is removed. An ingress row whose egress row is already gone is left
-alone, because its key carries no VIP address to prove whose it is.`,
+spec values wrote, under whatever VRF they were written, and prints them. A row
+is removed only while it still rewrites to these values. One another binding
+has since written its own values to is left alone.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			proto, err := parseXlatProtocol(protocol)
@@ -169,13 +168,14 @@ func parseXlatProtocol(protocol string) (uint8, error) {
 // writeVipXlatEntries prints entries as an aligned table.
 func writeVipXlatEntries(w io.Writer, entries []vipxlatmap.Entry) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "DIRECTION\tBLOCK\tARGUMENT\tPROTO\tPORT\tREWRITE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "DIRECTION\tBLOCK\tARGUMENT\tPROTO\tMATCH\tREWRITE"); err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if _, err := fmt.Fprintf(tw, "%s\t%#x\t%d\t%s\t%d\t%s\n",
-			e.Direction, e.Block, e.Argument, xlatProtocolName(e.Proto), e.Port,
-			net.JoinHostPort(e.Addr.String(), strconv.Itoa(int(e.RewritePort)))); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%#x\t%d\t%s\t%s\t%s\n",
+			e.Direction, e.Block, e.Argument, xlatProtocolName(e.Proto),
+			netip.AddrPortFrom(e.Addr, e.Port),
+			net.JoinHostPort(e.RewriteAddr.String(), strconv.Itoa(int(e.RewritePort)))); err != nil {
 			return err
 		}
 	}

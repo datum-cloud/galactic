@@ -458,6 +458,12 @@ struct nptv6_value {
 // lookup on its source port, the backend's real port. Each binding writes one
 // row under each key.
 //
+// addr is direction-dependent the same way: the ingress lookup keys on the
+// packet's destination address, the VIP, and the egress lookup on its source
+// address, the backend's real address. Each binding gets its own rows keyed by
+// its address and port. Both lookups run before NPTv6, so addr is always the
+// untranslated address.
+//
 // direction disambiguates those two rows when their ports coincide, which is
 // ordinary rather than rare: a binding keeping port 80 on both sides would
 // otherwise collapse them into one entry, and registering the second would
@@ -465,13 +471,9 @@ struct nptv6_value {
 // and undeliverable at the backend. usid_ingress always builds its key with the
 // ingress direction and usid_egress with the egress one.
 //
-// The trailing pad2 exists only to remove the struct's compiler-inserted
-// padding. block's alignment rounds the struct to 16 bytes while the named
-// members account for 14, and C zero-initializes an omitted named member but
-// says nothing about true padding, which clang's BPF backend does not zero. The
-// lookup then reads all 16 key bytes and the verifier rejects the two never
-// written as an invalid stack read. Naming them as a member makes them an
-// ordinary omitted-member zero.
+// pad2 is an explicit, always-zero field so lookup_vip_xlat can zero it
+// explicitly. The lookup hashes all 32 key bytes, and a stale value there
+// would miss a row the control plane wrote with zeros.
 #define USID_VIP_XLAT_DIR_INGRESS 0
 #define USID_VIP_XLAT_DIR_EGRESS 1
 
@@ -482,6 +484,7 @@ struct vip_xlat_key {
 	__u8 direction;
 	__be16 port;
 	__u16 pad2;
+	__u8 addr[16];
 };
 
 // struct vip_xlat_value is vip_xlat_table's value. Unlike nptv6_value this is a
@@ -811,6 +814,19 @@ struct {
 	__type(key, struct vip_xlat_key);
 	__type(value, struct vip_xlat_value);
 } vip_xlat_table SEC(".maps");
+
+// vip_xlat_key_scratch holds the key lookup_vip_xlat builds, one slot per CPU.
+// The key is 32 bytes, and usid_egress's stack plus send_too_big's leaves no
+// room for it under the verifier's 512-byte limit for a program and the
+// functions it calls. The slot is written and read within one lookup_vip_xlat
+// call, and a TC program runs to completion on its CPU, so no two packets
+// share it.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct vip_xlat_key);
+} vip_xlat_key_scratch SEC(".maps");
 
 // egress_route_table: see struct egress_route_key. The only LPM trie in this
 // file. Everything above is a hash map because uSID decode is always a
@@ -1157,6 +1173,31 @@ static USID_ALWAYS_INLINE void apply_nptv6(__u8 *addr, const struct nptv6_value 
 	if (sum >> 16)
 		sum = (sum & 0xFFFF) + (sum >> 16);
 	*word = __builtin_bswap16((__u16) sum);
+}
+
+// lookup_vip_xlat returns the vip_xlat_table row for (block, argument, proto,
+// direction, port, addr), or a null pointer if there is none. addr and port
+// are the packet's destination for an ingress lookup and its source for an
+// egress lookup, both in wire order. See vip_xlat_key_scratch for why the key
+// is not built on the stack.
+static USID_ALWAYS_INLINE struct vip_xlat_value *lookup_vip_xlat(__u64 block, __u16 argument, __u8 proto,
+								  __u8 direction, __be16 port, const __u8 *addr)
+{
+	__u32 zero = 0;
+	struct vip_xlat_key *key = bpf_map_lookup_elem(&vip_xlat_key_scratch, &zero);
+
+	if (!key)
+		return (void *) 0;
+
+	key->block = block;
+	key->argument = argument;
+	key->proto = proto;
+	key->direction = direction;
+	key->port = port;
+	key->pad2 = 0;
+	__builtin_memcpy(key->addr, addr, sizeof(key->addr));
+
+	return bpf_map_lookup_elem(&vip_xlat_table, key);
 }
 
 // apply_vip_xlat rewrites the 16-byte address at addr_off and the 2-byte port
@@ -2126,32 +2167,32 @@ int usid_ingress(struct __sk_buff *skb)
 		// address rather than the public or VIP address the client addressed.
 		// Both lookups key on (block, argument), already resolved by steps 2
 		// through 6, so no per-packet identity resolution is needed here.
+		//
+		// The VIP lookup runs first, keyed on the destination exactly as the
+		// client addressed it. A VIP hit replaces the destination outright
+		// and skips NPTv6; everything else gets NPTv6 as before.
 		struct nptv6_value *npt = bpf_map_lookup_elem(&nptv6_table, &vrf_key);
+		int vip_hit = 0;
 
-		if (npt)
-			apply_nptv6(inner6->daddr, npt, 0 /* inbound: public -> ULA */);
-
-			// The VIP substitution needs the inner L4 destination port to key
-			// vip_xlat_table, read now, before the strip-relative offsets
-			// below are computed. TCP and UDP only; anything else has no port
-			// to substitute on.
-			//
-			// This is the freshly stripped inner header's next-header field,
-			// not the outer one checked above, which only ever names the encap
-			// format. The outer pointer is invalid here regardless, since the
-			// strip can relocate the buffer.
+		// The VIP substitution needs the inner L4 destination port to key
+		// vip_xlat_table, read now, before the strip-relative offsets below
+		// are computed. TCP and UDP only; anything else has no port to
+		// substitute on.
+		//
+		// This is the freshly stripped inner header's next-header field, not
+		// the outer one checked above, which only ever names the encap format.
+		// The outer pointer is invalid here regardless, since the strip can
+		// relocate the buffer.
 		if (inner6->nexthdr == USID_IPPROTO_TCP || inner6->nexthdr == USID_IPPROTO_UDP) {
 			struct usid_l4ports *ports = (void *) (inner6 + 1);
 
 			if ((void *) (ports + 1) <= data_end) {
-				struct vip_xlat_key vkey = {
-					.block = block, .argument = argument,
-					.proto = inner6->nexthdr, .port = ports->dest,
-					.direction = USID_VIP_XLAT_DIR_INGRESS,
-				};
-				struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
+				struct vip_xlat_value *vv = lookup_vip_xlat(block, argument, inner6->nexthdr,
+									    USID_VIP_XLAT_DIR_INGRESS, ports->dest,
+									    inner6->daddr);
 
 				if (vv) {
+					vip_hit = 1;
 					// USID_L3_OFFSET, not a runtime pointer
 					// subtraction -- see its own comment for why.
 					__u32 csum_off = USID_L3_OFFSET + (inner6->nexthdr == USID_IPPROTO_TCP
@@ -2181,6 +2222,9 @@ int usid_ingress(struct __sk_buff *skb)
 				}
 			}
 		}
+
+		if (npt && !vip_hit)
+			apply_nptv6(inner6->daddr, npt, 0 /* inbound: public -> ULA */);
 
 		fib_params.family = USID_AF_INET6;
 		__builtin_memcpy(fib_params.ipv6_src, inner6->saddr, sizeof(fib_params.ipv6_src));
@@ -2400,23 +2444,23 @@ int usid_egress(struct __sk_buff *skb)
 		if ((void *) (ip6 + 1) > data_end)
 			return TC_ACT_UNSPEC;
 
+		// The VIP lookup runs before NPTv6, keyed on the backend's own source
+		// address, the one its binding registered. A VIP hit replaces the source
+		// outright and skips NPTv6; everything else gets NPTv6 as before.
 		struct nptv6_value *npt = bpf_map_lookup_elem(&nptv6_table, &vrf_key);
-
-		if (npt)
-			apply_nptv6(ip6->saddr, npt, 1 /* outbound: ULA -> public */);
+		int vip_hit = 0;
 
 		if (ip6->nexthdr == USID_IPPROTO_TCP || ip6->nexthdr == USID_IPPROTO_UDP) {
 			struct usid_l4ports *ports = (void *) (ip6 + 1);
 
 			if ((void *) (ports + 1) <= data_end) {
-				struct vip_xlat_key vkey = {
-					.block = iv->block, .argument = iv->argument,
-					.proto = ip6->nexthdr, .port = ports->source,
-					.direction = USID_VIP_XLAT_DIR_EGRESS,
-				};
-				struct vip_xlat_value *vv = bpf_map_lookup_elem(&vip_xlat_table, &vkey);
+				struct vip_xlat_value *vv = lookup_vip_xlat(iv->block, iv->argument, ip6->nexthdr,
+									    USID_VIP_XLAT_DIR_EGRESS, ports->source,
+									    ip6->saddr);
 
 				if (vv) {
+					vip_hit = 1;
+
 					__u32 csum_off = USID_L3_OFFSET + (ip6->nexthdr == USID_IPPROTO_TCP
 									     ? sizeof(struct usid_ip6hdr) + USID_TCP_CSUM_OFFSET
 									     : sizeof(struct usid_ip6hdr) + USID_UDP_CSUM_OFFSET);
@@ -2500,6 +2544,9 @@ int usid_egress(struct __sk_buff *skb)
 				}
 			}
 		}
+
+		if (npt && !vip_hit)
+			apply_nptv6(ip6->saddr, npt, 1 /* outbound: ULA -> public */);
 
 		// Multicast and link-local destinations must never be matched against
 		// egress_route_table, however broad a registered entry is, and in
