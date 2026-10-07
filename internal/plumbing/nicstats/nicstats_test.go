@@ -11,6 +11,13 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/safchain/ethtool"
+)
+
+// bnxt_en's counters for ring 2, the stalled queue from #673.
+const (
+	bnxtRing2Packets  = "[2]: rx_ucast_packets"
+	bnxtRing2Discards = "[2]: rx_discards"
 )
 
 func TestParseQueueStats(t *testing.T) {
@@ -33,8 +40,8 @@ func TestParseQueueStats(t *testing.T) {
 				"[0]: rx_discards":      0,
 				"[0]: rx_errors":        3,
 				"[0]: tx_ucast_packets": 90,
-				"[2]: rx_ucast_packets": 313000,
-				"[2]: rx_discards":      23554,
+				bnxtRing2Packets:        313000,
+				bnxtRing2Discards:       23554,
 				"rx_total_discard_pkts": 23554,
 				"rx_good_frames":        313106,
 			},
@@ -99,17 +106,54 @@ func TestParseQueueStats(t *testing.T) {
 	}
 }
 
+func TestParseRingStats(t *testing.T) {
+	// Abridged from a bnxt_en uplink's ethtool -S. Receive packets and
+	// discards belong to ParseQueueStats, port-wide counters to neither.
+	stats := map[string]uint64{
+		"[0]: rx_ucast_packets": 100,
+		"[0]: rx_discards":      0,
+		"[0]: tx_ucast_packets": 90,
+		"[0]: rx_buf_errors":    0,
+		bnxtRing2Packets:        313000,
+		bnxtRing2Discards:       23554,
+		"[2]: tx_ucast_packets": 4,
+		"[2]: tx_discards":      0,
+		"[2]: tx_errors":        0,
+		"[2]: rx_errors":        0,
+		"[2]: rx_resets":        0,
+		"[2]: missed_irqs":      0,
+		"[2]: rx_ucast_bytes":   1,
+		"tx_total_discard_pkts": 0,
+	}
+	want := []RingStat{
+		{Queue: 0, Stat: "rx_buf_errors", Value: 0},
+		{Queue: 0, Stat: "tx_ucast_packets", Value: 90},
+		{Queue: 2, Stat: "missed_irqs", Value: 0},
+		{Queue: 2, Stat: "rx_errors", Value: 0},
+		{Queue: 2, Stat: "rx_resets", Value: 0},
+		{Queue: 2, Stat: "tx_discards", Value: 0},
+		{Queue: 2, Stat: "tx_errors", Value: 0},
+		{Queue: 2, Stat: "tx_ucast_packets", Value: 4},
+	}
+	if got := ParseRingStats(DriverBnxt, stats); !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseRingStats() = %+v, want %+v", got, want)
+	}
+	if got := ParseRingStats(DriverIxgbe, map[string]uint64{"tx_queue_0_packets": 1}); got != nil {
+		t.Errorf("ParseRingStats(ixgbe) = %+v, want nil", got)
+	}
+}
+
 type fakeReader struct {
 	drivers map[string]string
 	stats   map[string]map[string]uint64
 }
 
-func (f fakeReader) DriverName(intf string) (string, error) {
+func (f fakeReader) DriverInfo(intf string) (ethtool.DrvInfo, error) {
 	d, ok := f.drivers[intf]
 	if !ok {
-		return "", errors.New("no such device")
+		return ethtool.DrvInfo{}, errors.New("no such device")
 	}
-	return d, nil
+	return ethtool.DrvInfo{Driver: d, Version: d + "-ver", FwVersion: d + "-fw"}, nil
 }
 
 func (f fakeReader) Stats(intf string) (map[string]uint64, error) {
@@ -118,6 +162,13 @@ func (f fakeReader) Stats(intf string) (map[string]uint64, error) {
 		return nil, errors.New("no such device")
 	}
 	return s, nil
+}
+
+// info is the galactic_nat_uplink_info sample fakeReader's DriverInfo yields
+// for iface on driver.
+func info(driver, iface string) string {
+	return `galactic_nat_uplink_info{driver="` + driver + `",driver_version="` + driver + `-ver",` +
+		`firmware_version="` + driver + `-fw",interface="` + iface + `",kernel="6.8.0"} 1`
 }
 
 func TestCollector(t *testing.T) {
@@ -129,18 +180,32 @@ func TestCollector(t *testing.T) {
 	reader := fakeReader{
 		drivers: map[string]string{stalled: DriverBnxt, healthy: DriverIxgbe, unknown: "veth"},
 		stats: map[string]map[string]uint64{
-			stalled: {"[2]: rx_ucast_packets": 313000, "[2]: rx_discards": 23554},
+			stalled: {bnxtRing2Packets: 313000, bnxtRing2Discards: 23554, "[2]: tx_ucast_packets": 4},
 			healthy: {"rx_queue_0_packets": 10},
 			unknown: {"rx_queue_0_drops": 1},
 		},
 	}
+	orig := kernelRelease
+	kernelRelease = func() string { return "6.8.0" }
+	t.Cleanup(func() { kernelRelease = orig })
+
 	// gone has disappeared since the uplink set was resolved: it is left
-	// out, and the scrape still succeeds.
+	// out, and the scrape still succeeds. unknown's driver has no parser, so
+	// it exports only its info.
 	c := NewCollector("galactic_nat", reader, func() []string {
 		return []string{stalled, healthy, unknown, "gone"}
 	})
 
 	want := `
+# HELP galactic_nat_uplink_info ` + infoHelp + `
+# TYPE galactic_nat_uplink_info gauge
+` + info("bnxt_en", "ens1f1np1") + `
+` + info("ixgbe", "eth0") + `
+` + info("veth", "veth0") + `
+# HELP galactic_nat_uplink_queue_driver_stat_total ` + ringStatHelp + `
+# TYPE galactic_nat_uplink_queue_driver_stat_total counter
+galactic_nat_uplink_queue_driver_stat_total{driver="bnxt_en",interface="ens1f1np1",queue="2",` +
+		`stat="tx_ucast_packets"} 4
 # HELP galactic_nat_uplink_rx_queue_discards_total ` + discardsHelp + `
 # TYPE galactic_nat_uplink_rx_queue_discards_total counter
 galactic_nat_uplink_rx_queue_discards_total{driver="bnxt_en",interface="ens1f1np1",queue="2"} 23554

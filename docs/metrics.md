@@ -226,15 +226,17 @@ sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~"galact
 
 One `galactic-nat` pod per egress shard; every value is per shard.
 
-| Metric                                           | Type    | Labels                                   | Meaning                                                                                                                              |
-|--------------------------------------------------|---------|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `galactic_nat_conns`                             | gauge   | `family` (`nat66`, `nat64`)              | Rows in the connection table, expired sessions included. A session holds two rows                                                    |
-| `galactic_nat_sessions`                          | gauge   | `family`, `proto` (`tcp`, `udp`, `icmp`) | Live sessions: one per session within its idle timeout                                                                               |
-| `galactic_nat_conn_table_oldest_row_age_seconds` | gauge   | none                                     | Seconds since the least recently seen session, expired ones included, last translated a packet. Meaningful only on a near-full table |
-| `galactic_nat_conn_table_max_entries`            | gauge   | none                                     | Table capacity in rows, shared by both families                                                                                      |
-| `galactic_nat_drops_total`                       | counter | `reason`                                 | Packets dropped by the NAT datapath                                                                                                  |
-| `galactic_nat_uplink_rx_queue_packets_total`     | counter | `interface`, `driver`, `queue`           | Packets one NIC receive queue of an uplink received, from `ethtool -S`. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e`, `mlx5_core`  |
-| `galactic_nat_uplink_rx_queue_discards_total`    | counter | `interface`, `driver`, `queue`           | Packets one receive queue discarded before the datapath saw them. Reported only by drivers that count per queue: `bnxt_en` today     |
+| Metric                                           | Type    | Labels                                                                | Meaning                                                                                                                              |
+|--------------------------------------------------|---------|-----------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `galactic_nat_conns`                             | gauge   | `family` (`nat66`, `nat64`)                                           | Rows in the connection table, expired sessions included. A session holds two rows                                                    |
+| `galactic_nat_sessions`                          | gauge   | `family`, `proto` (`tcp`, `udp`, `icmp`)                              | Live sessions: one per session within its idle timeout                                                                               |
+| `galactic_nat_conn_table_oldest_row_age_seconds` | gauge   | none                                                                  | Seconds since the least recently seen session, expired ones included, last translated a packet. Meaningful only on a near-full table |
+| `galactic_nat_conn_table_max_entries`            | gauge   | none                                                                  | Table capacity in rows, shared by both families                                                                                      |
+| `galactic_nat_drops_total`                       | counter | `reason`                                                              | Packets dropped by the NAT datapath                                                                                                  |
+| `galactic_nat_uplink_rx_queue_packets_total`     | counter | `interface`, `driver`, `queue`                                        | Packets one NIC receive queue of an uplink received, from `ethtool -S`. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e`, `mlx5_core`  |
+| `galactic_nat_uplink_rx_queue_discards_total`    | counter | `interface`, `driver`, `queue`                                        | Packets one receive queue discarded before the datapath saw them. Reported only by drivers that count per queue: `bnxt_en` today     |
+| `galactic_nat_uplink_queue_driver_stat_total`    | counter | `interface`, `driver`, `queue`, `stat`                                | One of a queue's other driver counters, under its `ethtool -S` name. `bnxt_en` only, see below                                       |
+| `galactic_nat_uplink_info`                       | gauge   | `interface`, `driver`, `driver_version`, `firmware_version`, `kernel` | Always 1. Names each uplink's driver and NIC firmware versions and the node's kernel release                                         |
 
 Caveats for the session table:
 
@@ -246,6 +248,19 @@ Caveats for the session table:
   table's LRU evicts in approximate order, so the age is an estimate.
 - The table is a self-evicting LRU, so the counts can move without traffic
   changing.
+
+Caveats for the uplink queue counters:
+
+- `galactic_nat_uplink_queue_driver_stat_total` carries `bnxt_en`'s other
+  per-ring counters, the NIC family a single receive queue stalls on
+  ([#673](https://github.com/datum-cloud/galactic/issues/673)): transmit
+  packets, discards and errors, `rx_errors`, `rx_buf_errors`, `rx_resets` and
+  `missed_irqs`. A ring's receive and transmit share one completion ring, so
+  comparing a stalled ring's transmit rate with its siblings' shows whether
+  transmit stopped along with receive.
+- `galactic_nat_uplink_info` is exported for every uplink, whatever its
+  driver, so a stall can be matched against driver, firmware and kernel
+  versions across nodes.
 
 | Reason group        | Values                                                                                                                                                                          | Meaning                                                                                                       |
 |---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
@@ -275,6 +290,11 @@ sum by (node, reason) (rate(galactic_nat_drops_total[5m])) > 0
 # Discard share per uplink receive queue (#673)
 rate(galactic_nat_uplink_rx_queue_discards_total[5m])
   / (rate(galactic_nat_uplink_rx_queue_discards_total[5m]) + rate(galactic_nat_uplink_rx_queue_packets_total[5m]))
+
+# Transmit rate on each uplink ring, to compare a stalled ring with its siblings (#673)
+sum by (node, interface, queue) (
+  rate(galactic_nat_uplink_queue_driver_stat_total{stat=~"tx_(ucast|mcast|bcast)_packets"}[5m])
+)
 ```
 
 ## Shipped alerts
