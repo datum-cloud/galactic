@@ -499,11 +499,8 @@ func TestCheckNotPreempted_LookupFailuresDoNotFailHealth(t *testing.T) {
 // case, and the one the first two versions of this check got wrong.
 //
 // Naming a program means opening it by id, and BPF_PROG_GET_FD_BY_ID wants
-// CAP_SYS_ADMIN or CAP_PERFMON. The node agent holds neither, so that call
-// returns EPERM on every real node. Measured with a foreign program
-// deliberately attached to an owned tap: the check logged "could not be
-// identified: get program by id: operation not permitted" every ten
-// seconds and never reported the preemption itself.
+// CAP_SYS_ADMIN or kernel-dependent BPF inspection privileges. This path must
+// still report a useful error when the lookup returns EPERM.
 //
 // So the id has to carry the report. It is enough to act on, and unlike a
 // name it needs no privilege at all.

@@ -225,9 +225,9 @@ var programNameFn = func(id ebpf.ProgramID) (string, error) {
 // checkNotPreempted can recognise itself.
 //
 // By ID rather than by name, because reading a name means opening the program
-// by ID, which wants CAP_SYS_ADMIN or CAP_PERFMON. This container carries
-// neither, so that call returns EPERM. An ID needs no such privilege: it comes
-// from an info query on a descriptor this process already holds.
+// by ID, which requires elevated BPF inspection privileges and can return
+// EPERM under a reduced capability set. An ID needs no additional syscall: it
+// comes from an info query on a descriptor this process already holds.
 //
 // Getting this wrong is what made the first version of the check useless. It
 // compared names, could not read them, and treated the failure as nothing to

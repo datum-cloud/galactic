@@ -154,6 +154,21 @@ func TestDaemonsetManifest_RunContainerHasNetRawCapability(t *testing.T) {
 	}
 }
 
+// The run container snapshots the existing TC chain before replacing it so a
+// failed attach can roll back without disrupting traffic. Reopening an already
+// attached program by ID requires CAP_SYS_ADMIN on kernels that do not permit
+// BPF_PROG_GET_FD_BY_ID with CAP_BPF and CAP_PERFMON alone.
+func TestDaemonsetManifest_RunContainerHasSysAdminCapability(t *testing.T) {
+	runContainerName, capabilities := runContainerCapabilities(t)
+
+	const required = "SYS_ADMIN"
+	if !slices.Contains(capabilities, required) {
+		t.Errorf("container %q in %s does not add capability %s (needed to snapshot existing TC "+
+			"programs before failure-atomic replacement); added capabilities: %v",
+			runContainerName, manifestPath, required, capabilities)
+	}
+}
+
 // runContainerMountPaths returns the run container's name and every path in
 // its own volumeMounts.
 func runContainerMountPaths(t *testing.T) (string, []string) {
