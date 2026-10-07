@@ -154,7 +154,7 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 	routerA := &bgpv1alpha1.BGPRouter{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "router-vpc-a"},
 		Spec: bgpv1alpha1.BGPRouterSpec{
-			TargetRef:   bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: "node-a"},
+			TargetRef:   bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: testNAT66NodeA},
 			LocalASN:    65000,
 			RouterID:    "1.1.1.1",
 			SRv6Locator: vpcALocator,
@@ -175,7 +175,7 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 	advA := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNamespace,
-			Name:      crdnames.BGPAdvertisementName(vpcA, "attach-a", "node-a"),
+			Name:      crdnames.BGPAdvertisementName(vpcA, "attach-a", testNAT66NodeA),
 		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: routerA.Name},
@@ -200,7 +200,10 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 	}
 
 	vrfA := &bgpv1alpha1.BGPVRFInstance{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: crdnames.BGPVRFInstanceName(vpcA, "node-a")},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      crdnames.BGPVRFInstanceName(vpcA, testNAT66NodeA),
+		},
 		Spec: bgpv1alpha1.BGPVRFInstanceSpec{
 			RouterTarget:       bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: routerA.Name}},
 			VRFID:              vpcAVRFID,

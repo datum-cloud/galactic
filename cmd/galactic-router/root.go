@@ -18,6 +18,7 @@ import (
 	grpchealth "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -25,6 +26,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/hash"
@@ -35,6 +37,7 @@ import (
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/gobgp"
+	"go.datum.net/galactic/internal/serviceroute"
 	networkwebhook "go.datum.net/galactic/internal/webhook"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -80,6 +83,7 @@ func runCmd(cfg *config.RouterConfig) error {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
 
 	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
@@ -268,6 +272,16 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
 	}
 
+	// Register the node-local platform service route controller. It resolves
+	// ServiceRoutePolicy against Cloud VPCAttachment.status.node and programs
+	// only this node's local eBPF state. Clear any pinned state left by a prior
+	// controller process before informer reconciliation starts. A missing map is
+	// tolerated because the datapath loader may start after galactic-router;
+	// the first Apply retries initialization.
+	if err := setupServiceRouteController(mgr, nodeName, cfg.GCNamespace); err != nil {
+		return fmt.Errorf("setup ServiceRoutePolicy controller: %w", err)
+	}
+
 	// Register GC controller for cleaning up orphaned BGP CRDs and VRFs.
 	gcRec := &controller.GCReconciler{
 		Client:    mgr.GetClient(),
@@ -330,6 +344,22 @@ func runCmd(cfg *config.RouterConfig) error {
 	}
 
 	return nil
+}
+
+func setupServiceRouteController(mgr ctrl.Manager, nodeName, bgpNamespace string) error {
+	programmer := &serviceroute.EBPFRouteProgrammer{}
+	if err := programmer.Initialize(); err != nil {
+		ctrl.Log.Error(err, "service route eBPF maps are not available yet; initialization will retry on reconcile")
+	}
+
+	return (&controller.ServiceRoutePolicyReconciler{
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		NodeName:     nodeName,
+		BGPNamespace: bgpNamespace,
+		Programmer:   programmer,
+		Applied:      make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent),
+	}).SetupWithManager(mgr)
 }
 
 // newRootCommand builds the root cobra command with all flags and the

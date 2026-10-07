@@ -32,6 +32,9 @@ data flow, module reference, known constraints):
 
 - [router/configuration.md](router/configuration.md) — `galactic-router`
   env vars/CLI flags, the webhook options, and DaemonSet examples.
+- [router/private-service-routes.md](router/private-service-routes.md) — the
+  direct-endpoint contract for `ServiceEndpoint`, producer selection, and why
+  consumers receive no guest-visible service route.
 - [gateway/configuration.md](gateway/configuration.md) — `galactic-gateway`
   deployment (node labeling, RBAC, per-node overlay), its config reference,
   and the `NetworkGateway`/`NetworkRule`/`ServiceVIPBinding` CRD fields.

@@ -1138,6 +1138,13 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			ebpfState.mssClamp.reconcile()
 
 		case <-ebpfGCSweepTicker.C:
+			if ebpfState.objs != nil {
+				if removed, err := attach.SweepAttachmentIdentities(ebpfState.objs.AttachmentIdentityTable); err != nil {
+					slog.Error("GC: failed to sweep attachment identity map", "err", err)
+				} else if removed != 0 {
+					slog.Info("GC: removed stale attachment identities", "removed", removed)
+				}
+			}
 			if ebpfState.k8sClient == nil {
 				continue
 			}

@@ -597,16 +597,23 @@ func TestRun_EBPFDatapathEnabled_MetricsAndHealthReflectRealDatapath(t *testing.
 		t.Helper()
 		deadline := time.Now().Add(2 * time.Second)
 		var last grpc_health_v1.HealthCheckResponse_ServingStatus
+		var lastErr error
 		for time.Now().Before(deadline) {
 			resp, err := hc.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: ebpfHealthServiceName})
 			if err != nil {
-				t.Fatalf("Health check for %q failed: %v", ebpfHealthServiceName, err)
+				lastErr = err
+				time.Sleep(20 * time.Millisecond)
+				continue
 			}
+			lastErr = nil
 			last = resp.Status
 			if last == want {
 				return
 			}
 			time.Sleep(20 * time.Millisecond)
+		}
+		if lastErr != nil {
+			t.Fatalf("Health check for %q did not become available: %v", ebpfHealthServiceName, lastErr)
 		}
 		t.Fatalf("Health status for %q = %v, want %v (timed out waiting)", ebpfHealthServiceName, last, want)
 	}

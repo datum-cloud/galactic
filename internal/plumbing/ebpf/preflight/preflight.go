@@ -56,6 +56,10 @@ type Prober interface {
 	// VRF-table-id parameter, not merely that the helper exists. Returns nil
 	// when supported.
 	FIBLookupTBID() error
+
+	// RedirectNeigh reports whether TC programs can invoke bpf_redirect_neigh,
+	// which resolves the destination neighbor while redirecting service traffic.
+	RedirectNeigh() error
 }
 
 // capabilityCheck names one required capability, binds it to its probe, and
@@ -91,6 +95,12 @@ func capabilityChecks(p Prober) []capabilityCheck {
 			fn:   p.FIBLookupTBID,
 			why: "R5 requires FIB lookups scoped to the resolved Argument's Linux VRF table via bpf_fib_lookup's tbid " +
 				"parameter, added to the kernel later than the base helper (design plan §6, §10)",
+		},
+		{
+			name: "bpf_redirect_neigh helper",
+			fn:   p.RedirectNeigh,
+			why: "private-service forwarding redirects directly between attachment interfaces and requires " +
+				"kernel neighbor resolution",
 		},
 	}
 }

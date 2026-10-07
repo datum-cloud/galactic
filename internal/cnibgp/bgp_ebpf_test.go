@@ -207,15 +207,23 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FilterList(ingress) on host interface: %v", err)
 	}
-	var foundEgressFilter bool
+	foundFilters := map[string]bool{
+		"galactic_usid_service_egress": false,
+		"galactic_usid_egress":         false,
+	}
 	for _, f := range filters {
-		if bpfFilter, ok := f.(*netlink.BpfFilter); ok && bpfFilter.Name == "galactic_usid_egress" {
-			foundEgressFilter = true
+		if bpfFilter, ok := f.(*netlink.BpfFilter); ok {
+			if _, expected := foundFilters[bpfFilter.Name]; expected {
+				foundFilters[bpfFilter.Name] = true
+			}
 		}
 	}
-	if !foundEgressFilter {
-		t.Errorf("no galactic_usid_egress tc filter found on host interface %q ingress hook -- "+
-			"registerEBPFDatapath must attach usid_egress there", intf.GenerateInterfaceNameHost(vpc, testAttachment))
+	for name, found := range foundFilters {
+		if !found {
+			t.Errorf("no %s tc filter found on host interface %q ingress hook -- "+
+				"registerEBPFDatapath must attach the service egress chain there",
+				name, intf.GenerateInterfaceNameHost(vpc, testAttachment))
+		}
 	}
 }
 

@@ -76,6 +76,20 @@ func TestDaemonsetManifest_RunContainerMountsHostConflistDirWritable(t *testing.
 	t.Errorf("container %q in %s does not mount %s", c.Name, manifestPath, hostConflistDir)
 }
 
+func TestDaemonsetManifest_RunContainerMountsSharedTCLockDirWritable(t *testing.T) {
+	c := findRunContainer(t)
+	const lockDir = "/run/galactic"
+	for _, vm := range c.VolumeMounts {
+		if vm.MountPath == lockDir {
+			if vm.ReadOnly {
+				t.Fatalf("container %q mounts shared TC lock directory %s read-only", c.Name, lockDir)
+			}
+			return
+		}
+	}
+	t.Fatalf("container %q does not mount host TC lock directory %s", c.Name, lockDir)
+}
+
 // TestDaemonsetManifest_RunContainerMountsRadvStateDir is a regression test
 // for the same class of manifest/code mismatch as
 // TestDaemonsetManifest_RunContainerMountsHostConflistDir above, this time

@@ -21,12 +21,14 @@ type stubProber struct {
 	hashMap       error
 	btf           error
 	fibLookupTBID error
+	redirectNeigh error
 }
 
 func (s stubProber) SchedCLS() error      { return s.schedCLS }
 func (s stubProber) HashMap() error       { return s.hashMap }
 func (s stubProber) BTF() error           { return s.btf }
 func (s stubProber) FIBLookupTBID() error { return s.fibLookupTBID }
+func (s stubProber) RedirectNeigh() error { return s.redirectNeigh }
 
 var _ Prober = stubProber{}
 
@@ -115,13 +117,14 @@ func TestCheckWith_AllMissing(t *testing.T) {
 		hashMap:       errors.New("no hash map"),
 		btf:           errors.New("no btf"),
 		fibLookupTBID: errors.New("no tbid"),
+		redirectNeigh: errors.New("no redirect_neigh"),
 	})
 	if err == nil {
 		t.Fatal("CheckWith() = nil, want an error")
 	}
 	for _, want := range []string{
-		"BPF_PROG_TYPE_SCHED_CLS", "BPF_MAP_TYPE_HASH", "BTF", "tbid",
-		"4/4 required kernel capabilities missing",
+		"BPF_PROG_TYPE_SCHED_CLS", "BPF_MAP_TYPE_HASH", "BTF", "tbid", "bpf_redirect_neigh",
+		"5/5 required kernel capabilities missing",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("CheckWith() = %q, want it to contain %q", err.Error(), want)
@@ -142,6 +145,7 @@ func TestCheckWith_NeverPartialPass(t *testing.T) {
 		{"only btf missing", stubProber{btf: errors.New("x")}},
 		{"only hash map missing", stubProber{hashMap: errors.New("x")}},
 		{"only sched cls missing", stubProber{schedCLS: errors.New("x")}},
+		{"only redirect neigh missing", stubProber{redirectNeigh: errors.New("x")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

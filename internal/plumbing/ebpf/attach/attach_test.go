@@ -178,9 +178,9 @@ func TestLoadAttach_SurvivesRestartWithMapsIntact(t *testing.T) {
 // different shape (e.g. a changed value struct size, as vrf_value grew
 // this cycle) must be recreated from scratch on the next Load, not treated
 // as a fatal error that crashloops the node until an operator manually
-// deletes the stale pin. Every map here is control-plane-owned and
-// reconstructable (usidmap.Register/the GC controller repopulate it), so
-// losing its contents across a schema change is the correct trade-off.
+// deletes the stale pin. That map is reconstructable, but compatible maps
+// must retain their contents and remain connected to long-lived handles held
+// by other processes.
 func TestLoad_RecreatesIncompatiblyPinnedMap(t *testing.T) {
 	requireRoot(t)
 
@@ -189,6 +189,26 @@ func TestLoad_RecreatesIncompatiblyPinnedMap(t *testing.T) {
 	if err := os.MkdirAll(pinDir, 0o755); err != nil {
 		t.Fatalf("create pin dir: %v", err)
 	}
+	const locatorKey uint64 = 0x0102030405060708
+	initial, err := Load(pinDir)
+	if err != nil {
+		t.Fatalf("initial Load(): %v", err)
+	}
+	if err := initial.LocatorTable.Put(locatorKey, prog.UsidLocatorValue{Generation: 7}); err != nil {
+		t.Fatalf("populate compatible locator map: %v", err)
+	}
+	_ = initial.Close()
+
+	// Replace only vrf_table's pin with an old, incompatible shape. All other
+	// pins stand in for live maps owned by the preceding process version.
+	oldVRF, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapVrfTable), nil)
+	if err != nil {
+		t.Fatalf("open current vrf_table pin: %v", err)
+	}
+	if err := oldVRF.Unpin(); err != nil {
+		t.Fatalf("unpin current vrf_table: %v", err)
+	}
+	_ = oldVRF.Close()
 
 	// Pre-pin a vrf_table with a deliberately incompatible shape (wrong
 	// ValueSize) -- standing in for a previous process version's now-stale
@@ -221,6 +241,13 @@ func TestLoad_RecreatesIncompatiblyPinnedMap(t *testing.T) {
 	if info.ValueSize == 4 {
 		t.Errorf("vrf_table ValueSize after recreation = %d, want the real program's value size, not the stale 4-byte one",
 			info.ValueSize)
+	}
+	var locatorValue prog.UsidLocatorValue
+	if err := objs.LocatorTable.Lookup(locatorKey, &locatorValue); err != nil {
+		t.Fatalf("compatible locator map entry was lost during selective recreation: %v", err)
+	}
+	if locatorValue.Generation != 7 {
+		t.Errorf("compatible locator map generation = %d, want 7", locatorValue.Generation)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/config"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachmentidentity"
 	"go.datum.net/galactic/internal/plumbing/ebpf/mappin"
 	"go.datum.net/galactic/internal/plumbing/ebpf/preflight"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -42,6 +44,25 @@ const defaultFilterPriority = 1
 // point so tests can exercise a non-default priority without setting a real
 // environment variable.
 var filterPriorityFn = resolveFilterPriority
+
+var (
+	filterReplaceFn       = netlink.FilterReplace
+	filterDeleteFn        = netlink.FilterDel
+	programFromIDFn       = ebpf.NewProgramFromID
+	snapshotEgressChainFn = snapshotEgressChain
+	restoreEgressChainFn  = func(snapshot *egressChainSnapshot, ifaceName string) error {
+		return snapshot.restore(ifaceName)
+	}
+	attachOneAtPriorityFn = func(program *ebpf.Program, name, ifaceName string, parent uint32,
+		priority uint16, handle uint32) error {
+		return attachOneAtPriority(program, ifaceName, name, parent, priority, handle)
+	}
+	withInterfaceLockFn         = withInterfaceLock
+	withIdentityLockFn          = withIdentityLock
+	validateEgressTargetSlotsFn = validateEgressTargetSlots
+)
+
+var localEgressAttachMu sync.Mutex
 
 // resolveFilterPriority returns the configured tc priority when the environment
 // sets a valid uint16, and defaultFilterPriority otherwise.
@@ -75,6 +96,15 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// Close the service-policy gate before rotating any attachment identity.
+	// The controller reopens it only after its cache-synchronized rebuild and
+	// sweep. Doing this here, rather than waiting for that controller runnable,
+	// prevents unchanged interfaces from continuing against the previous
+	// generation while startup reattach rotates their peers one by one.
+	if err := objs.ServicePolicyStateTable.Put(uint32(0), prog.UsidServicePolicyStateValue{}); err != nil {
+		_ = objs.Close()
+		return nil, nil, fmt.Errorf("attach: disable service policy before startup reattach: %w", err)
+	}
 
 	ifaces, err = ResolveInterfaces()
 	if err != nil {
@@ -87,16 +117,16 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 		return nil, nil, fmt.Errorf("attach: %w", err)
 	}
 
-	// Not fatal: an attachment left on the previous usid_egress still forwards,
-	// only without what changed since. Failing startup would drop the ingress
-	// datapath for the whole node over it.
-	replaced, err := ReattachEgress(objs.UsidEgress)
+	// Reattach is readiness-fatal. After an incompatible policy-map rollout an
+	// old classifier may reference the deliberately drained, unpinned map set;
+	// reporting ready before every owned interface moves to this collection
+	// would leave private services unavailable indefinitely.
+	replaced, err := ReattachEgress(objs.UsidServiceEgress, objs.UsidEgress, objs.AttachmentIdentityTable)
 	if err != nil {
-		slog.Error("attach: could not move every attachment onto the new usid_egress; "+
-			"those keep running the previous program and maps until their next CNI ADD",
-			"replaced", replaced, "err", err)
+		_ = objs.Close()
+		return nil, nil, fmt.Errorf("attach: reattach service egress chain (replaced %d): %w", replaced, err)
 	} else if replaced > 0 {
-		slog.Info("attach: moved existing attachments onto the new usid_egress", "replaced", replaced)
+		slog.Info("attach: moved existing attachments onto the new service egress chain", "replaced", replaced)
 	}
 
 	return objs, ifaces, nil
@@ -158,6 +188,14 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		// Recreating them empties them on a compute node until every workload
 		// re-attaches, which blackholes every attachment on the node. An
 		// unchanged map keeps its rows.
+		// An already-attached old classifier keeps map FDs after their pins
+		// are removed. Revoke its service authorization before replacing any
+		// incompatible pin so it cannot keep forwarding against an orphaned
+		// policy generation if the subsequent reattach fails.
+		if drainErr := drainLegacyServiceAuthorization(pinDir); drainErr != nil {
+			err = fmt.Errorf("attach: revoke legacy service authorization before map replacement: %w", drainErr)
+			return nil, err
+		}
 		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, nil)
 		if unpinErr != nil {
 			err = fmt.Errorf("attach: recreate incompatible pinned maps: %w", unpinErr)
@@ -203,6 +241,15 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 		err = fmt.Errorf("attach: pin usid_egress program: %w", pinErr)
 		return nil, err
 	}
+	serviceEgressPinPath := filepath.Join(pinDir, UsidServiceEgressPinName)
+	if rmErr := os.Remove(serviceEgressPinPath); rmErr != nil && !os.IsNotExist(rmErr) {
+		err = fmt.Errorf("attach: remove stale usid_service_egress pin: %w", rmErr)
+		return nil, err
+	}
+	if pinErr := loaded.UsidServiceEgress.Pin(serviceEgressPinPath); pinErr != nil {
+		err = fmt.Errorf("attach: pin usid_service_egress program: %w", pinErr)
+		return nil, err
+	}
 
 	return &loaded, nil
 }
@@ -210,6 +257,10 @@ func Load(pinDir string) (objs *prog.UsidObjects, err error) {
 // UsidEgressPinName is the bpffs filename usid_egress is pinned under, distinct
 // from every map name in the same directory so the two can never collide.
 const UsidEgressPinName = "usid_egress_prog"
+
+// UsidServiceEgressPinName is the bpffs filename for the private-service
+// classifier that runs immediately before usid_egress in the TC chain.
+const UsidServiceEgressPinName = "usid_service_egress_prog"
 
 // Attach attaches program to the ingress hook of each named interface, through a
 // clsact qdisc and a direct-action BPF filter, creating the qdisc if it does not
@@ -243,6 +294,8 @@ func Attach(program *ebpf.Program, ifaceNames []string) error {
 // or tap.
 const egressFilterName = "galactic_usid_egress"
 
+const serviceEgressFilterName = "galactic_usid_service_egress"
+
 // AttachEgress attaches program, usid_egress loaded from its pin, to ifaceName's
 // ingress hook. That interface is the tenant's own host-side veth or tap, not
 // the shared uplink usid_ingress uses, because that is where the tenant's egress
@@ -250,11 +303,302 @@ const egressFilterName = "galactic_usid_egress"
 //
 // A thin wrapper around the same idempotency Attach provides, for one interface
 // at a time, since each CNI ADD attaches only its own attachment's interface.
-func AttachEgress(program *ebpf.Program, ifaceName string) error {
-	if program == nil {
-		return errors.New("attach: program is nil")
+func AttachEgress(serviceProgram, legacyProgram *ebpf.Program, ifaceName string) error {
+	localEgressAttachMu.Lock()
+	defer localEgressAttachMu.Unlock()
+	return attachEgressLocked(serviceProgram, legacyProgram, ifaceName)
+}
+
+// AttachEgressWithIdentity performs CNI ADD's identity decision and TC update
+// under one cross-process interface lock. A genuinely idempotent ADD keeps its
+// token only when the exact current two-program chain is already present;
+// every new/reused interface incarnation rotates before a classifier can run.
+func AttachEgressWithIdentity(serviceProgram, legacyProgram *ebpf.Program, identityMap *ebpf.Map,
+	ifindex uint32, ifaceName string,
+) error {
+	return withIdentityLockFn(func() error {
+		return withInterfaceLockFn(ifaceName, func() error {
+			current, err := exactEgressChainCurrent(ifaceName, serviceProgram, legacyProgram)
+			if err != nil {
+				return err
+			}
+			var token uint64
+			if err := identityMap.Lookup(ifindex, &token); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("lookup attachment identity: %w", err)
+			}
+			if !current || token == 0 {
+				if _, err := attachmentidentity.RotateMap(identityMap, ifindex); err != nil {
+					return err
+				}
+			}
+			return attachEgressLocked(serviceProgram, legacyProgram, ifaceName)
+		})
+	})
+}
+
+func withIdentityLock(fn func() error) error {
+	return withInterfaceLock("attachment-identity-global", fn)
+}
+
+func exactEgressChainCurrent(ifaceName string, serviceProgram, legacyProgram *ebpf.Program) (bool, error) {
+	serviceID, err := egressProgramID(serviceProgram, "usid_service_egress")
+	if err != nil {
+		return false, err
 	}
-	return attachOne(program, ifaceName, egressFilterName, netlink.HANDLE_MIN_INGRESS)
+	legacyID, err := egressProgramID(legacyProgram, "usid_egress")
+	if err != nil {
+		return false, err
+	}
+	link, err := linkByNameFn(ifaceName)
+	if err != nil {
+		return false, err
+	}
+	filters, err := filterListFn(link, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		return false, err
+	}
+	priority := filterPriorityFn()
+	serviceMatches, legacyMatches, managed := 0, 0, 0
+	for _, filter := range filters {
+		bpfFilter, ok := filter.(*netlink.BpfFilter)
+		if !ok || !isManagedEgressFilter(bpfFilter.Name) {
+			continue
+		}
+		managed++
+		if bpfFilter.Name == serviceEgressFilterName && uint32(bpfFilter.Id) == serviceID &&
+			bpfFilter.Priority == priority && bpfFilter.Handle == netlink.MakeHandle(0, 1) {
+			serviceMatches++
+		}
+		if bpfFilter.Name == egressFilterName && uint32(bpfFilter.Id) == legacyID &&
+			bpfFilter.Priority == priority+1 && bpfFilter.Handle == netlink.MakeHandle(0, 2) {
+			legacyMatches++
+		}
+	}
+	return managed == 2 && serviceMatches == 1 && legacyMatches == 1, nil
+}
+
+func attachEgressLocked(serviceProgram, legacyProgram *ebpf.Program, ifaceName string) error {
+	if serviceProgram == nil || legacyProgram == nil {
+		return errors.New("attach: egress program is nil")
+	}
+	priority := filterPriorityFn()
+	if priority == ^uint16(0) {
+		return errors.New("attach: egress filter priority leaves no room for legacy continuation")
+	}
+	snapshot, err := snapshotEgressChainFn(ifaceName, priority)
+	if err != nil {
+		return fmt.Errorf("snapshot existing egress chain: %w", err)
+	}
+	defer snapshot.close()
+
+	// Install the continuation first. During a legacy-only migration the old
+	// priority slot remains the active program until the final replace, so a
+	// failure here cannot interrupt forwarding.
+	if err := validateEgressTargetSlotsFn(ifaceName, priority); err != nil {
+		return err
+	}
+	if err := attachOneAtPriorityFn(legacyProgram, egressFilterName, ifaceName,
+		netlink.HANDLE_MIN_INGRESS, priority+1, netlink.MakeHandle(0, 2)); err != nil {
+		// A netlink error does not prove the kernel rejected the mutation (for
+		// example, the request may have committed before an acknowledgement was
+		// lost). Restore even this make-before-break step so every failure path
+		// converges on the exact snapshot.
+		restoreErr := restoreEgressChainFn(snapshot, ifaceName)
+		return errors.Join(fmt.Errorf("legacy continuation: %w", err), restoreErr)
+	}
+	if err := validateEgressTargetSlotsFn(ifaceName, priority); err != nil {
+		restoreErr := restoreEgressChainFn(snapshot, ifaceName)
+		return errors.Join(err, restoreErr)
+	}
+	if err := attachOneAtPriorityFn(serviceProgram, serviceEgressFilterName, ifaceName,
+		netlink.HANDLE_MIN_INGRESS, priority, netlink.MakeHandle(0, 1)); err != nil {
+		restoreErr := restoreEgressChainFn(snapshot, ifaceName)
+		return errors.Join(fmt.Errorf("service classifier: %w", err), restoreErr)
+	}
+	if err := removeDuplicateManagedEgressFilters(ifaceName, priority); err != nil {
+		return fmt.Errorf("remove duplicate egress filters: %w", err)
+	}
+	return nil
+}
+
+func withInterfaceLock(ifaceName string, fn func() error) error {
+	const lockDir = "/run/galactic"
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return fmt.Errorf("attach: create interface lock directory: %w", err)
+	}
+	lockPath := filepath.Join(lockDir, "tc-"+filepath.Base(ifaceName)+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("attach: open interface lock: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		return fmt.Errorf("attach: lock interface: %w", err)
+	}
+	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
+	return fn()
+}
+
+func validateEgressTargetSlots(ifaceName string, priority uint16) error {
+	link, err := linkByNameFn(ifaceName)
+	if err != nil {
+		return fmt.Errorf("revalidate target slots: find link: %w", err)
+	}
+	filters, err := filterListFn(link, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		return fmt.Errorf("revalidate target slots: list filters: %w", err)
+	}
+	for _, filter := range filters {
+		if !isEgressTargetSlot(filter.Attrs(), priority) {
+			continue
+		}
+		bpfFilter, ok := filter.(*netlink.BpfFilter)
+		if !ok || !allowedEgressSlotOwner(bpfFilter, priority) {
+			return fmt.Errorf("target priority=%d handle=%#x became occupied by a foreign tc filter",
+				filter.Attrs().Priority, filter.Attrs().Handle)
+		}
+	}
+	return nil
+}
+
+func removeDuplicateManagedEgressFilters(ifaceName string, priority uint16) error {
+	link, err := linkByNameFn(ifaceName)
+	if err != nil {
+		return err
+	}
+	filters, err := filterListFn(link, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, filter := range filters {
+		bpfFilter, ok := filter.(*netlink.BpfFilter)
+		if !ok || !isManagedEgressFilter(bpfFilter.Name) {
+			continue
+		}
+		wanted := bpfFilter.Name == serviceEgressFilterName && bpfFilter.Priority == priority &&
+			bpfFilter.Handle == netlink.MakeHandle(0, 1) ||
+			bpfFilter.Name == egressFilterName && bpfFilter.Priority == priority+1 &&
+				bpfFilter.Handle == netlink.MakeHandle(0, 2)
+		if !wanted {
+			errs = append(errs, filterDeleteFn(filter))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+type egressFilterSnapshot struct {
+	program  *ebpf.Program
+	name     string
+	priority uint16
+	handle   uint32
+}
+
+type egressChainSnapshot struct {
+	filters []egressFilterSnapshot
+}
+
+func snapshotEgressChain(ifaceName string, priority uint16) (*egressChainSnapshot, error) {
+	link, err := linkByNameFn(ifaceName)
+	if err != nil {
+		return nil, fmt.Errorf("find link: %w", err)
+	}
+	filters, err := filterListFn(link, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		return nil, fmt.Errorf("list filters: %w", err)
+	}
+	snapshot := &egressChainSnapshot{}
+	for _, filter := range filters {
+		attrs := filter.Attrs()
+		bpfFilter, ok := filter.(*netlink.BpfFilter)
+		if isEgressTargetSlot(attrs, priority) && (!ok || !allowedEgressSlotOwner(bpfFilter, priority)) {
+			snapshot.close()
+			return nil, fmt.Errorf("target priority=%d handle=%#x is occupied by a foreign tc filter",
+				attrs.Priority, attrs.Handle)
+		}
+		if !ok || (bpfFilter.Name != egressFilterName && bpfFilter.Name != serviceEgressFilterName) {
+			continue
+		}
+		program, err := programFromIDFn(ebpf.ProgramID(bpfFilter.Id))
+		if err != nil {
+			snapshot.close()
+			return nil, fmt.Errorf("open prior program %d for %s: %w", bpfFilter.Id, bpfFilter.Name, err)
+		}
+		snapshot.filters = append(snapshot.filters, egressFilterSnapshot{
+			program: program, name: bpfFilter.Name, priority: bpfFilter.Priority, handle: bpfFilter.Handle,
+		})
+	}
+	return snapshot, nil
+}
+
+func isEgressTargetSlot(attrs *netlink.FilterAttrs, priority uint16) bool {
+	return (attrs.Priority == priority && attrs.Handle == netlink.MakeHandle(0, 1)) ||
+		(attrs.Priority == priority+1 && attrs.Handle == netlink.MakeHandle(0, 2))
+}
+
+func allowedEgressSlotOwner(filter *netlink.BpfFilter, priority uint16) bool {
+	if filter.Priority == priority && filter.Handle == netlink.MakeHandle(0, 1) {
+		return filter.Name == serviceEgressFilterName || filter.Name == egressFilterName
+	}
+	return filter.Priority == priority+1 && filter.Handle == netlink.MakeHandle(0, 2) &&
+		filter.Name == egressFilterName
+}
+
+func (s *egressChainSnapshot) close() {
+	for _, filter := range s.filters {
+		_ = filter.program.Close()
+	}
+}
+
+func (s *egressChainSnapshot) restore(ifaceName string) error {
+	var errs []error
+	// Put the old filters back before removing anything. In the legacy-only
+	// migration this restores the old first-stage filter while the newly added
+	// continuation still exists, so rollback never deliberately creates an
+	// interval with no working egress program.
+	for _, filter := range s.filters {
+		if err := attachOneAtPriorityFn(filter.program, filter.name, ifaceName, netlink.HANDLE_MIN_INGRESS,
+			filter.priority, filter.handle); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", filter.name, err))
+		}
+	}
+
+	link, err := linkByNameFn(ifaceName)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("find link while removing new filters: %w", err))
+	} else {
+		filters, listErr := filterListFn(link, netlink.HANDLE_MIN_INGRESS)
+		if listErr != nil {
+			errs = append(errs, fmt.Errorf("list filters while removing new filters: %w", listErr))
+		} else {
+			for _, current := range filters {
+				bpfFilter, ok := current.(*netlink.BpfFilter)
+				if !ok || !isManagedEgressFilter(bpfFilter.Name) || s.contains(bpfFilter) {
+					continue
+				}
+				if err := filterDeleteFn(current); err != nil {
+					errs = append(errs, fmt.Errorf("remove newly installed %s: %w", bpfFilter.Name, err))
+				}
+			}
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("restore prior egress chain: %w", err)
+	}
+	return nil
+}
+
+func (s *egressChainSnapshot) contains(filter *netlink.BpfFilter) bool {
+	for _, saved := range s.filters {
+		if saved.name == filter.Name && saved.priority == filter.Priority && saved.handle == filter.Handle {
+			return true
+		}
+	}
+	return false
+}
+
+func isManagedEgressFilter(name string) bool {
+	return name == egressFilterName || name == serviceEgressFilterName
 }
 
 // attachOne attaches program to one interface's TC hook, named by
@@ -262,6 +606,11 @@ func AttachEgress(program *ebpf.Program, ifaceName string) error {
 // the choke point every attach path in this package goes through, so
 // instrumenting it here observes every attempt whatever the caller.
 func attachOne(program *ebpf.Program, name, tcFilterName string, parent uint32) (err error) {
+	return attachOneAtPriority(program, name, tcFilterName, parent, filterPriorityFn(), netlink.MakeHandle(0, 1))
+}
+
+func attachOneAtPriority(program *ebpf.Program, name, tcFilterName string, parent uint32,
+	priority uint16, handle uint32) (err error) {
 	defer func() { attachHook(name, err) }()
 
 	link, err := netlink.LinkByName(name)
@@ -279,15 +628,15 @@ func attachOne(program *ebpf.Program, name, tcFilterName string, parent uint32) 
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: link.Attrs().Index,
 			Parent:    parent,
-			Handle:    netlink.MakeHandle(0, 1),
+			Handle:    handle,
 			Protocol:  unix.ETH_P_ALL,
-			Priority:  filterPriorityFn(),
+			Priority:  priority,
 		},
 		Fd:           program.FD(),
 		Name:         tcFilterName,
 		DirectAction: true,
 	}
-	if err = netlink.FilterReplace(filter); err != nil {
+	if err = filterReplaceFn(filter); err != nil {
 		err = fmt.Errorf("attach tc-bpf filter: %w", err)
 		return err
 	}
@@ -341,7 +690,7 @@ func detachOne(name, tcFilterName string, parent uint32) (err error) {
 		if !ok || bpfFilter.Name != tcFilterName {
 			continue
 		}
-		if delErr := netlink.FilterDel(f); delErr != nil {
+		if delErr := filterDeleteFn(f); delErr != nil {
 			err = fmt.Errorf("delete tc-bpf filter: %w", delErr)
 			return err
 		}

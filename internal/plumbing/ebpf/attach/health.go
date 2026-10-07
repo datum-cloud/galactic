@@ -233,8 +233,8 @@ var programNameFn = func(id ebpf.ProgramID) (string, error) {
 // compared names, could not read them, and treated the failure as nothing to
 // report, so it sat inert on a node that genuinely was preempted.
 func ownProgramIDs(objs *prog.UsidObjects) map[ebpf.ProgramID]struct{} {
-	out := make(map[ebpf.ProgramID]struct{}, 2)
-	for _, p := range []*ebpf.Program{objs.UsidIngress, objs.UsidEgress} {
+	out := make(map[ebpf.ProgramID]struct{}, 3)
+	for _, p := range []*ebpf.Program{objs.UsidIngress, objs.UsidServiceEgress, objs.UsidEgress} {
 		if p == nil {
 			continue
 		}
