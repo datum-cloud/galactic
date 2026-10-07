@@ -7,6 +7,8 @@ package ifindexvrfmap
 import (
 	"errors"
 	"testing"
+
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 )
 
 const testBlock uint64 = 0x2001_0DB8_FF01
@@ -62,6 +64,47 @@ func TestIfindexVRFTable_RegisterRejectsReservedArgumentZero(t *testing.T) {
 	}
 	if ft.len() != 0 {
 		t.Errorf("Register(argument=0x000) wrote %d entries, want 0", ft.len())
+	}
+}
+
+// TestIfindexVRFTable_RegisterKeepsWritersApart covers #716: the host and the
+// ingress sidecar number interfaces in separate namespaces but share this
+// map, so each must stay inside its own index range.
+func TestIfindexVRFTable_RegisterKeepsWritersApart(t *testing.T) {
+	const sidecar = uformat.BlockIngressSidecar
+	cases := []struct {
+		name     string
+		ifindex  uint32
+		block    uint64
+		argument uint16
+		wantErr  bool
+	}{
+		{name: "host index below the sidecar range", ifindex: 42, block: testBlock, argument: 0x7},
+		{name: "last host index", ifindex: SidecarIfindexBase - 1, block: testBlock, argument: 0x7},
+		{name: "host index in the sidecar range", ifindex: SidecarIfindex(0x7), block: testBlock, argument: 0x7,
+			wantErr: true},
+		{name: "sidecar index matching its argument", ifindex: SidecarIfindex(0x7), block: sidecar, argument: 0x7},
+		{name: "sidecar index for another argument", ifindex: SidecarIfindex(0x8), block: sidecar, argument: 0x7,
+			wantErr: true},
+		{name: "sidecar with a host-range index", ifindex: 0x7, block: sidecar, argument: 0x7, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			it, ft := newTestIfindexVRFTable(constClock(1))
+			err := it.Register(tc.ifindex, tc.block, tc.argument)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Register(%d, %#x, %#x) = nil, want an error", tc.ifindex, tc.block, tc.argument)
+				}
+				if ft.len() != 0 {
+					t.Errorf("rejected Register wrote %d entries, want 0", ft.len())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Register(%d, %#x, %#x): %v", tc.ifindex, tc.block, tc.argument, err)
+			}
+		})
 	}
 }
 

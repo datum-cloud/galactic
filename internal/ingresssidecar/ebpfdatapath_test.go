@@ -10,21 +10,26 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 func TestArgumentForTableID(t *testing.T) {
+	const base = vrf.SidecarTableIDBase
 	cases := []struct {
 		name    string
 		tableID uint32
 		want    uint16
 		wantErr bool
 	}{
-		{name: "typical small table id", tableID: 1, want: 1},
-		{name: "another typical table id", tableID: 3, want: 3},
-		{name: "argument min boundary", tableID: uint32(uformat.ArgumentMin), want: uint16(uformat.ArgumentMin)},
-		{name: "argument max boundary", tableID: uint32(uformat.ArgumentMax), want: uint16(uformat.ArgumentMax)},
-		{name: "zero table id is out of range (Argument 0 is reserved)", tableID: 0, wantErr: true},
-		{name: "table id past the 12-bit Argument range", tableID: uint32(uformat.ArgumentMax) + 1, wantErr: true},
+		{name: "first sidecar table id", tableID: base + 1, want: 1},
+		{name: "another sidecar table id", tableID: base + 3, want: 3},
+		{name: "argument max boundary", tableID: base + uformat.ArgumentMax, want: uformat.ArgumentMax},
+		{name: "base itself is out of range (Argument 0 is reserved)", tableID: base, wantErr: true},
+		{name: "past the 12-bit Argument range", tableID: base + uformat.ArgumentMax + 1, wantErr: true},
+		// The host allocates these, so a sidecar must never derive an Argument
+		// from one.
+		{name: "host table id 1", tableID: 1, wantErr: true},
+		{name: "last host table id", tableID: vrf.HostTableIDMax, wantErr: true},
 	}
 
 	for _, tc := range cases {
@@ -67,7 +72,8 @@ func TestEgressVethNames(t *testing.T) {
 			inner1, peer1, otherInner, otherPeer)
 	}
 
-	for _, name := range []string{inner1, peer1, otherInner, otherPeer} {
+	maxInner, maxPeer := egressVethNames(sidecarTableIDMax)
+	for _, name := range []string{inner1, peer1, otherInner, otherPeer, maxInner, maxPeer} {
 		if len(name) > unix.IFNAMSIZ-1 {
 			t.Errorf("egressVethNames produced %q, %d bytes -- too long for IFNAMSIZ (%d)", name, len(name), unix.IFNAMSIZ)
 		}

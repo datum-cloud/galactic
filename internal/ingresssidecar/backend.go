@@ -67,7 +67,7 @@ type kernelBackend struct{}
 func NewKernelBackend() Backend { return kernelBackend{} }
 
 func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
-	if err := vrf.Add(vpc); err != nil {
+	if err := vrf.AddInRange(vpc, sidecarTableIDMin, sidecarTableIDMax); err != nil {
 		return 0, fmt.Errorf("create VRF for vpc %s: %w", vpc, err)
 	}
 	tableID, err := vrf.TableID(vpc)

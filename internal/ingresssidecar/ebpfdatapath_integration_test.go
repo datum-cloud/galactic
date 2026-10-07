@@ -16,6 +16,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
 func requireRoot(t *testing.T) {
@@ -99,6 +100,15 @@ func assertMapState(
 	ifindexTable *ifindexvrfmap.IfindexVRFTable, registry *usidmap.Registry,
 	vrfLink *netlink.Vrf, peerLink netlink.Link, tableID uint32,
 ) error {
+	argument := uint16(tableID - vrf.SidecarTableIDBase)
+
+	// The peer's index is in the range the host never registers, so a host
+	// interface with the same number in its own namespace cannot overwrite
+	// this row (#716).
+	if want := ifindexvrfmap.SidecarIfindex(argument); uint32(peerLink.Attrs().Index) != want {
+		return fmt.Errorf("veth peer ifindex = %d, want %d", peerLink.Attrs().Index, want)
+	}
+
 	entry, ok, err := ifindexTable.Get(uint32(peerLink.Attrs().Index))
 	if err != nil {
 		return fmt.Errorf("look up ifindex_vrf_table[peer]: %w", err)
@@ -106,9 +116,9 @@ func assertMapState(
 	if !ok {
 		return errors.New("ifindex_vrf_table has no entry for the veth peer's ifindex")
 	}
-	if entry.Block != ingressSidecarBlock || entry.Argument != uint16(tableID) {
+	if entry.Block != ingressSidecarBlock || entry.Argument != argument {
 		return fmt.Errorf("ifindex_vrf_table[peer] = (block=%#x, argument=%d), want (block=%#x, argument=%d)",
-			entry.Block, entry.Argument, ingressSidecarBlock, tableID)
+			entry.Block, entry.Argument, ingressSidecarBlock, argument)
 	}
 
 	if _, ok, err := ifindexTable.Get(uint32(vrfLink.Attrs().Index)); err != nil {
@@ -117,7 +127,7 @@ func assertMapState(
 		return errors.New("ifindex_vrf_table has an entry keyed by the VRF's own ifindex, want none")
 	}
 
-	vrfEntry, ok, err := registry.VRF.Get(ingressSidecarBlock, uint16(tableID))
+	vrfEntry, ok, err := registry.VRF.Get(ingressSidecarBlock, argument)
 	if err != nil {
 		return fmt.Errorf("look up vrf_table entry: %w", err)
 	}
@@ -141,7 +151,7 @@ func assertTornDown(
 	} else if ok {
 		return errors.New("ifindex_vrf_table[peer] still present after removeEgressDatapath")
 	}
-	if _, ok, err := registry.VRF.Get(ingressSidecarBlock, uint16(tableID)); err != nil {
+	if _, ok, err := registry.VRF.Get(ingressSidecarBlock, uint16(tableID-vrf.SidecarTableIDBase)); err != nil {
 		return fmt.Errorf("look up vrf_table entry after removal: %w", err)
 	} else if ok {
 		return errors.New("vrf_table entry still present after removeEgressDatapath")
@@ -166,7 +176,7 @@ func TestEnsureEgressDatapath_AttachesToVethPeerNotVRF(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = nsObj.Close() })
 
-	const tableID = uint32(7)
+	const tableID = vrf.SidecarTableIDBase + 7
 	const vrfName = "ivstestvrf"
 
 	err = nsObj.Do(func(_ ns.NetNS) error {
