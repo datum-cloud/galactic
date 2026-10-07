@@ -127,8 +127,6 @@ static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 pl
 // crosses into the peer's namespace, and bpf_redirect for everything else.
 static long (*bpf_redirect_peer)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect_peer;
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *) BPF_FUNC_redirect;
-static long (*bpf_redirect_neigh)(__u32 ifindex, struct bpf_redir_neigh *params,
-				  int plen, __u64 flags) = (void *) BPF_FUNC_redirect_neigh;
 
 // Step 8's fallback when the FIB lookup resolves the route but finds no valid
 // neighbor entry for the next hop. See its call site.

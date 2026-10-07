@@ -15,10 +15,10 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// A new load moves an attachment off the previous usid_egress and onto its
-// own. Without that, the attachment keeps running the old program against the
-// old copies of every map, and rows written after the reload never reach it.
-// Only usid_egress filters are touched, and a second pass changes nothing.
+// A new load moves both legacy-only and two-program attachments onto its own
+// service egress chain. Without that, the attachment keeps running old
+// programs against old copies of maps, and rows written after the reload never
+// reach it. Unrelated filters are untouched, and a second pass changes nothing.
 func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 	requireRoot(t)
 
@@ -33,9 +33,11 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 	defer func() { _ = nsObj.Close() }()
 
 	err = nsObj.Do(func(_ ns.NetNS) error {
-		// tenant0 stands in for an attachment's host-side veth, and uplink0
-		// for a shared uplink, which carries usid_ingress instead.
+		// legacy0 stands in for an attachment created before the service
+		// classifier existed, tenant0 for a current attachment, and uplink0
+		// for a shared uplink carrying usid_ingress instead.
 		links := []netlink.Link{
+			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "legacy0"}, PeerName: "legacy0p"},
 			&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "tenant0"}, PeerName: "tenant0p"},
 			&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "uplink0"}},
 		}
@@ -53,8 +55,11 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 			return fmt.Errorf("load previous build: %w", err)
 		}
 		defer func() { _ = previous.Close() }()
-		if err := AttachEgress(previous.UsidEgress, "tenant0"); err != nil {
-			return fmt.Errorf("attach previous usid_egress: %w", err)
+		if err := attachOne(previous.UsidEgress, "legacy0", egressFilterName, netlink.HANDLE_MIN_INGRESS); err != nil {
+			return fmt.Errorf("attach legacy-only usid_egress: %w", err)
+		}
+		if err := AttachEgress(previous.UsidServiceEgress, previous.UsidEgress, "tenant0"); err != nil {
+			return fmt.Errorf("attach previous egress chain: %w", err)
 		}
 		if err := Attach(previous.UsidIngress, []string{"uplink0"}); err != nil {
 			return fmt.Errorf("attach previous usid_ingress: %w", err)
@@ -66,29 +71,36 @@ func TestReattachEgress_MovesAttachmentsToTheNewProgram(t *testing.T) {
 		}
 		defer func() { _ = current.Close() }()
 
-		replaced, err := ReattachEgress(current.UsidEgress)
+		replaced, err := ReattachEgress(current.UsidServiceEgress, current.UsidEgress)
 		if err != nil {
 			return fmt.Errorf("ReattachEgress: %w", err)
 		}
-		if replaced != 1 {
-			t.Errorf("first pass replaced %d filters, want 1", replaced)
+		if replaced != 2 {
+			t.Errorf("first pass replaced %d attachment chains, want 2", replaced)
 		}
-		if got, want := filterProgID(t, "tenant0", egressFilterName), progID(t, current.UsidEgress); got != want {
-			t.Errorf("tenant0's usid_egress filter runs program %d, want the current build's %d", got, want)
+		for _, link := range []string{"legacy0", "tenant0"} {
+			if got, want := filterProgID(t, link, serviceEgressFilterName), progID(t, current.UsidServiceEgress); got != want {
+				t.Errorf("%s's service filter runs program %d, want the current build's %d", link, got, want)
+			}
+			if got, want := filterProgID(t, link, egressFilterName), progID(t, current.UsidEgress); got != want {
+				t.Errorf("%s's usid_egress filter runs program %d, want the current build's %d", link, got, want)
+			}
 		}
 		if got, want := filterProgID(t, "uplink0", filterName), progID(t, previous.UsidIngress); got != want {
 			t.Errorf("uplink0's usid_ingress filter runs program %d, want it untouched at %d", got, want)
 		}
 
-		replaced, err = ReattachEgress(current.UsidEgress)
+		replaced, err = ReattachEgress(current.UsidServiceEgress, current.UsidEgress)
 		if err != nil {
 			return fmt.Errorf("second ReattachEgress: %w", err)
 		}
 		if replaced != 0 {
 			t.Errorf("second pass replaced %d filters, want 0", replaced)
 		}
-		if n := countFilters(t, "tenant0"); n != 1 {
-			t.Errorf("tenant0 has %d ingress filters after two passes, want 1", n)
+		for _, link := range []string{"legacy0", "tenant0"} {
+			if n := countFilters(t, link); n != 2 {
+				t.Errorf("%s has %d ingress filters after two passes, want 2", link, n)
+			}
 		}
 		return nil
 	})

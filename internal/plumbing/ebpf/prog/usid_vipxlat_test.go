@@ -171,7 +171,7 @@ func putVIPEgressRow(
 func runEgressFrom(t *testing.T, objs *UsidObjects, src netip.Addr, port uint16) (uint32, netip.Addr) {
 	t.Helper()
 	client := netip.MustParseAddr("2001:db8:0:13::1")
-	pkt := buildPlainV6PacketWithL4Ports(t, src, client, 6 /* TCP */, port, 43210)
+	pkt := buildPlainV6PacketWithL4Ports(t, src, client, port, 43210)
 	ret, out, err := objs.UsidEgress.Test(pkt)
 	if err != nil {
 		t.Fatalf("program test-run: %v", err)

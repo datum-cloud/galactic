@@ -13,25 +13,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ReattachEgress moves every usid_egress filter on this node's veths and taps
-// onto program, the usid_egress just loaded, and returns how many filters it
-// replaced.
+// ReattachEgress moves every usid_egress attachment on this node's veths and
+// taps onto the service classifier followed by the legacy egress program, and
+// returns how many attachment chains it replaced.
 //
-// A filter is recognized by egressFilterName on a link's ingress hook and is
-// replaced in place, keeping its handle and priority. A filter already running
-// program is left alone, and a link deleted during the scan is skipped. Every
-// link is attempted, and the failures are joined and returned together.
-func ReattachEgress(program *ebpf.Program) (int, error) {
-	if program == nil {
-		return 0, errors.New("attach: program is nil")
-	}
-	info, err := program.Info()
+// An attachment is recognized by egressFilterName on a link's ingress hook.
+// Links already running both programs are left alone, and a link deleted
+// during the scan is skipped. Every link is attempted, and failures are joined
+// and returned together.
+func ReattachEgress(serviceProgram, legacyProgram *ebpf.Program) (int, error) {
+	serviceID, err := egressProgramID(serviceProgram, "usid_service_egress")
 	if err != nil {
-		return 0, fmt.Errorf("attach: read usid_egress program info: %w", err)
+		return 0, err
 	}
-	wantID, ok := info.ID()
-	if !ok {
-		return 0, errors.New("attach: kernel did not report usid_egress's program id")
+	legacyID, err := egressProgramID(legacyProgram, "usid_egress")
+	if err != nil {
+		return 0, err
 	}
 
 	links, err := listLinksFn()
@@ -57,28 +54,50 @@ func ReattachEgress(program *ebpf.Program) (int, error) {
 			errs = append(errs, fmt.Errorf("interface %q: list ingress filters: %w", link.Attrs().Name, err))
 			continue
 		}
+		hasLegacy := false
+		serviceCurrent := false
+		legacyCurrent := false
 		for _, f := range filters {
 			bpf, ok := f.(*netlink.BpfFilter)
-			if !ok || bpf.Name != egressFilterName || uint32(bpf.Id) == uint32(wantID) {
+			if !ok {
 				continue
 			}
-			replacement := &netlink.BpfFilter{
-				FilterAttrs:  bpf.FilterAttrs,
-				Fd:           program.FD(),
-				Name:         egressFilterName,
-				DirectAction: true,
+			switch bpf.Name {
+			case serviceEgressFilterName:
+				serviceCurrent = uint32(bpf.Id) == serviceID
+			case egressFilterName:
+				hasLegacy = true
+				legacyCurrent = uint32(bpf.Id) == legacyID
 			}
-			if err := netlink.FilterReplace(replacement); err != nil {
-				if linkGone(err) {
-					continue
-				}
-				errs = append(errs, fmt.Errorf("interface %q: replace usid_egress filter: %w", link.Attrs().Name, err))
-				continue
-			}
-			replaced++
 		}
+		if !hasLegacy || serviceCurrent && legacyCurrent {
+			continue
+		}
+		if err := AttachEgress(serviceProgram, legacyProgram, link.Attrs().Name); err != nil {
+			if linkGone(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("interface %q: replace egress filter chain: %w", link.Attrs().Name, err))
+			continue
+		}
+		replaced++
 	}
 	return replaced, errors.Join(errs...)
+}
+
+func egressProgramID(program *ebpf.Program, name string) (uint32, error) {
+	if program == nil {
+		return 0, fmt.Errorf("attach: %s program is nil", name)
+	}
+	info, err := program.Info()
+	if err != nil {
+		return 0, fmt.Errorf("attach: read %s program info: %w", name, err)
+	}
+	id, ok := info.ID()
+	if !ok {
+		return 0, fmt.Errorf("attach: kernel did not report %s's program id", name)
+	}
+	return uint32(id), nil
 }
 
 // linkGone reports whether err means the link was deleted after it was

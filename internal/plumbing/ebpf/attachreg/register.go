@@ -283,17 +283,24 @@ func registerPublicUplink(pinDir string) error {
 	return uplink.Set(linkIndex, dmac, smac)
 }
 
-// attachUsidEgress loads usid_egress from its pin and attaches it to
-// ifaceName's TC ingress hook. Without it a reply leaves with its source
-// address untranslated and the client discards it. Idempotent.
+// attachUsidEgress loads the service classifier and usid_egress continuation
+// from their pins and attaches the chain to ifaceName's TC ingress hook.
+// Without it a reply leaves with its source address untranslated and the
+// client discards it. Idempotent.
 func attachUsidEgress(pinDir, ifaceName string) error {
+	serviceProgram, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.UsidServiceEgressPinName), nil)
+	if err != nil {
+		return fmt.Errorf("load pinned usid_service_egress program: %w", err)
+	}
+	defer func() { _ = serviceProgram.Close() }()
+
 	program, err := ebpf.LoadPinnedProgram(filepath.Join(pinDir, attach.UsidEgressPinName), nil)
 	if err != nil {
 		return fmt.Errorf("load pinned usid_egress program: %w", err)
 	}
 	defer func() { _ = program.Close() }()
 
-	return attach.AttachEgress(program, ifaceName)
+	return attach.AttachEgress(serviceProgram, program, ifaceName)
 }
 
 // HostPrefix returns ip as a host prefix, "/32" for IPv4 and "/128" for IPv6,

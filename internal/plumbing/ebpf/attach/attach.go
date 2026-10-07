@@ -75,10 +75,6 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := reattachExistingEgress(objs.UsidServiceEgress, objs.UsidEgress); err != nil {
-		_ = objs.Close()
-		return nil, nil, fmt.Errorf("attach: refresh existing usid_egress filters: %w", err)
-	}
 
 	ifaces, err = ResolveInterfaces()
 	if err != nil {
@@ -91,39 +87,19 @@ func Start(pinDir string) (objs *prog.UsidObjects, ifaces []string, err error) {
 		return nil, nil, fmt.Errorf("attach: %w", err)
 	}
 
-	// Not fatal: an attachment left on the previous usid_egress still forwards,
-	// only without what changed since. Failing startup would drop the ingress
-	// datapath for the whole node over it.
-	replaced, err := ReattachEgress(objs.UsidEgress)
+	// Not fatal: an attachment left on its previous egress programs still
+	// forwards, only without what changed since. Failing startup would drop the
+	// ingress datapath for the whole node over it.
+	replaced, err := ReattachEgress(objs.UsidServiceEgress, objs.UsidEgress)
 	if err != nil {
-		slog.Error("attach: could not move every attachment onto the new usid_egress; "+
-			"those keep running the previous program and maps until their next CNI ADD",
+		slog.Error("attach: could not move every attachment onto the new service egress chain; "+
+			"those keep running their previous egress programs until their next CNI ADD",
 			"replaced", replaced, "err", err)
 	} else if replaced > 0 {
-		slog.Info("attach: moved existing attachments onto the new usid_egress", "replaced", replaced)
+		slog.Info("attach: moved existing attachments onto the new service egress chain", "replaced", replaced)
 	}
 
 	return objs, ifaces, nil
-}
-
-// reattachExistingEgress atomically replaces this package's named TC filter on
-// every existing attachment. Replacing the program pin alone is insufficient:
-// TC retains a reference to the old program until its filter is replaced.
-func reattachExistingEgress(serviceProgram, legacyProgram *ebpf.Program) error {
-	links, err := netlink.LinkList()
-	if err != nil {
-		return fmt.Errorf("list links: %w", err)
-	}
-	var errs []error
-	for _, link := range links {
-		if !hasEgressFilter(link) {
-			continue
-		}
-		if err := AttachEgress(serviceProgram, legacyProgram, link.Attrs().Name); err != nil {
-			errs = append(errs, fmt.Errorf("interface %q: %w", link.Attrs().Name, err))
-		}
-	}
-	return errors.Join(errs...)
 }
 
 // Load runs the kernel preflight check and, only if it passes, loads the
@@ -247,6 +223,7 @@ const UsidEgressPinName = "usid_egress_prog"
 // UsidServiceEgressPinName is the bpffs filename for the private-service
 // classifier that runs immediately before usid_egress in the TC chain.
 const UsidServiceEgressPinName = "usid_service_egress_prog"
+
 // Attach attaches program to the ingress hook of each named interface, through a
 // clsact qdisc and a direct-action BPF filter, creating the qdisc if it does not
 // exist.
