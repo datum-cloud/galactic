@@ -14,10 +14,15 @@
 // ethtool statistic names are driver-specific, so each supported driver has
 // its own parser. A driver with no parser exports nothing, rather than a guess
 // at which of its counters mean what.
+//
+// For bnxt_en, a queue's other ring counters are exported too, along with
+// every uplink's driver, firmware and kernel versions, to correlate per-queue
+// behavior with NIC and software versions.
 package nicstats
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 )
 
@@ -114,4 +119,50 @@ func queue(queues map[int]*QueueStats, index string) *QueueStats {
 		queues[n] = q
 	}
 	return q
+}
+
+// RingStat is one of a queue's other driver counters, exported under its
+// ethtool name so a stalled queue can be compared with its siblings counter by
+// counter.
+type RingStat struct {
+	Queue int
+	Stat  string
+	Value uint64
+}
+
+// ringStatParsers maps a driver name to the parser for its other per-queue
+// counters. Only bnxt_en has one; its rings carry transmit, error, reset and
+// interrupt counters to help diagnose receive queue stalls.
+var ringStatParsers = map[string]*regexp.Regexp{
+	// A bnxt_en ring's receive and transmit share one completion ring, so
+	// the transmit counters reveal transmit-side stalls affecting receive.
+	// rx_resets, rx_buf_errors and missed_irqs are the driver's error and
+	// recovery counters.
+	DriverBnxt: regexp.MustCompile(`^\[(\d+)\]: (tx_ucast_packets|tx_mcast_packets|tx_bcast_packets|tx_discards|` +
+		`tx_errors|rx_errors|rx_buf_errors|rx_resets|missed_irqs)$`),
+}
+
+// ParseRingStats returns stats' other per-queue counters for driver, sorted by
+// queue and then name. It returns nil for a driver with no such parser.
+func ParseRingStats(driver string, stats map[string]uint64) []RingStat {
+	pattern, ok := ringStatParsers[driver]
+	if !ok {
+		return nil
+	}
+	var out []RingStat
+	for name, value := range stats {
+		m := pattern.FindStringSubmatch(name)
+		if m == nil {
+			continue
+		}
+		n, _ := strconv.Atoi(m[1])
+		out = append(out, RingStat{Queue: n, Stat: m[2], Value: value})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Queue != out[j].Queue {
+			return out[i].Queue < out[j].Queue
+		}
+		return out[i].Stat < out[j].Stat
+	})
+	return out
 }

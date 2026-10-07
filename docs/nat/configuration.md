@@ -654,7 +654,10 @@ knowing before you rely on this component in production:
   known. The NIC drops the packets before the datapath runs, so
   `galactic_nat_drops_total` stays flat; the signal is one queue standing out
   in `galactic_nat_uplink_rx_queue_discards_total`, and
-  `GalacticNatUplinkRxQueueStalled` (`config/monitoring/`) alerts on it. To
+  `GalacticNatUplinkRxQueueStalled` (`config/monitoring/`) alerts on it.
+  `galactic_nat_uplink_queue_driver_stat_total` shows the ring's other
+  counters, transmit among them, and `galactic_nat_uplink_info` its driver,
+  firmware and kernel versions, the data needed to find the cause. To
   clear it, confirm the uplink's bond partner is up and carrying traffic, then
   bounce the affected member (`ip link set <member> down; ip link set
   <member> up`). The bond partner carries traffic meanwhile, and the queue's
