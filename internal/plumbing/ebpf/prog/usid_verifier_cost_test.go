@@ -17,14 +17,14 @@ import (
 // either program. The kernel's own limit is 1,000,000, but crossing it is a
 // cliff, not a slope: clamp_tcp_mss's option walk cost about 4,000 at 20 steps
 // and over 1,000,000 at 40, which failed every load on every node. This budget
-// leaves modest headroom above today's largest program (usid_ingress at about
-// 13,600) while remaining more than 60 times below the kernel limit, so a
-// change that starts multiplying verifier states fails here, in a unit test,
-// long before it reaches the cliff.
+// leaves modest headroom above today's largest program: clang 18 reports about
+// 17,800 instructions while newer compilers report about 13,600. It remains
+// 50 times below the kernel limit, so a change that starts multiplying verifier
+// states fails here, in a unit test, long before it reaches the cliff.
 //
 // Raising it is fine when a change genuinely needs the room. Measure first:
 // this test logs each program's cost.
-const verifierCostBudget = 16000
+const verifierCostBudget = 20000
 
 var processedInsns = regexp.MustCompile(`processed (\d+) insns`)
 
