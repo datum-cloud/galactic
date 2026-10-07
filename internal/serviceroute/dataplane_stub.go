@@ -26,3 +26,11 @@ func (*EBPFRouteProgrammer) Apply(RouteIntent) error {
 func (*EBPFRouteProgrammer) Remove(RouteIntent) error {
 	return errors.New("service route dataplane programming requires linux")
 }
+
+func (*EBPFRouteProgrammer) Cleanup(RouteIntent) error {
+	return errors.New("service route dataplane programming requires linux")
+}
+
+func (*EBPFRouteProgrammer) Finalize() error {
+	return errors.New("service route dataplane programming requires linux")
+}

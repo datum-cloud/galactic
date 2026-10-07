@@ -48,7 +48,9 @@ type RouteIntent struct {
 type RouteProgrammer interface {
 	Initialize() error
 	Apply(RouteIntent) error
+	Cleanup(RouteIntent) error
 	Remove(RouteIntent) error
+	Finalize() error
 }
 
 type SIDResolver func(*cloudv1alpha1.VPCAttachment) (net.IP, error)
@@ -87,6 +89,9 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 	}
 	producers, err := producerCandidates(endpoint, attachments)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateProducerTopology(endpoint, producers); err != nil {
 		return nil, err
 	}
 
@@ -151,6 +156,31 @@ func Compile(policy *networkv1alpha1.ServiceRoutePolicy, endpoint *networkv1alph
 		return intents[i].Kind < intents[j].Kind
 	})
 	return intents, nil
+}
+
+func validateProducerTopology(endpoint *networkv1alpha1.ServiceEndpoint,
+	producers []*cloudv1alpha1.VPCAttachment,
+) error {
+	type producerLocation struct {
+		node string
+		vpc  string
+	}
+	seen := make(map[producerLocation]*cloudv1alpha1.VPCAttachment, len(producers))
+	for _, producer := range producers {
+		location := producerLocation{node: producer.Status.Node, vpc: producer.Status.VPC}
+		if first, ok := seen[location]; ok {
+			firstKey := types.NamespacedName{Namespace: first.Namespace, Name: first.Name}
+			producerKey := types.NamespacedName{Namespace: producer.Namespace, Name: producer.Name}
+			endpointKey := types.NamespacedName{Namespace: endpoint.Namespace, Name: endpoint.Name}
+			return fmt.Errorf(
+				"service endpoint %s selects multiple ready producer attachments %s and %s on node %q in VPC %q; "+
+					"the direct endpoint dataplane cannot distinguish them",
+				endpointKey, firstKey, producerKey, location.node, location.vpc,
+			)
+		}
+		seen[location] = producer
+	}
+	return nil
 }
 
 func producerCandidates(endpoint *networkv1alpha1.ServiceEndpoint,

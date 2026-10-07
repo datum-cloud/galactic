@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/config"
@@ -47,13 +50,46 @@ type ServiceRoutePolicyReconciler struct {
 
 const serviceRouteMapResyncInterval = 30 * time.Second
 
+type serviceRouteStartupSyncError struct {
+	err   error
+	retry bool
+}
+
+type serviceRoutePolicyCleanupError struct{ err error }
+
+func (e *serviceRoutePolicyCleanupError) Error() string { return e.err.Error() }
+func (e *serviceRoutePolicyCleanupError) Unwrap() error { return e.err }
+
+func isServiceRoutePolicyCleanupError(err error) bool {
+	var cleanupErr *serviceRoutePolicyCleanupError
+	return errors.As(err, &cleanupErr)
+}
+
+func (e *serviceRouteStartupSyncError) Error() string { return e.err.Error() }
+func (e *serviceRouteStartupSyncError) Unwrap() error { return e.err }
+
+func startupSyncError(err error, retry bool) error {
+	if err == nil {
+		return nil
+	}
+	return &serviceRouteStartupSyncError{err: err, retry: retry}
+}
+
+func startupSyncNeedsRetry(err error) bool {
+	var syncErr *serviceRouteStartupSyncError
+	return !errors.As(err, &syncErr) || syncErr.retry
+}
+
 // Reconcile resolves one policy and replaces the local routes previously
 // programmed for that policy.
 func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	policy := &networkv1alpha1.ServiceRoutePolicy{}
 	if err := r.Get(ctx, req.NamespacedName, policy); err != nil {
 		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, r.removePolicy(req.NamespacedName)
+			return ctrl.Result{}, r.removePolicyLocked(req.NamespacedName)
 		}
 		return ctrl.Result{}, err
 	}
@@ -62,7 +98,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.Get(ctx, endpointKey, endpoint); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, errors.Join(
-				r.replacePolicy(req.NamespacedName, nil),
+				r.replacePolicyLocked(req.NamespacedName, nil),
 				r.setAccepted(ctx, policy, metav1.ConditionFalse, "EndpointNotFound", "referenced ServiceEndpoint does not exist"),
 			)
 		}
@@ -87,13 +123,13 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			// to retry while leaving the policy accepted cluster-wide.
 			return ctrl.Result{}, errors.Join(
 				err,
-				r.removePolicy(req.NamespacedName),
+				r.removePolicyLocked(req.NamespacedName),
 				r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"),
 			)
 		}
 		return ctrl.Result{}, errors.Join(
 			err,
-			r.removePolicy(req.NamespacedName),
+			r.removePolicyLocked(req.NamespacedName),
 			r.setAccepted(ctx, policy, metav1.ConditionFalse, "Invalid", err.Error()),
 		)
 	}
@@ -106,7 +142,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, fmt.Errorf("refresh service route maps: %w", err)
 		}
 	}
-	if err := r.replacePolicy(req.NamespacedName, intents); err != nil {
+	if err := r.replacePolicyLocked(req.NamespacedName, intents); err != nil {
 		return ctrl.Result{}, err
 	}
 	result := ctrl.Result{}
@@ -144,6 +180,14 @@ func (r *ServiceRoutePolicyReconciler) setAccepted(
 // either backing API requeue matching policies so status.node moves and service
 // endpoint changes converge without child resources.
 func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
+			return nil
+		}
+		return r.runStartupSync(ctx)
+	})); err != nil {
+		return fmt.Errorf("add initial service route policy map sync: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1alpha1.ServiceRoutePolicy{}).
 		Watches(&networkv1alpha1.ServiceEndpoint{}, handler.EnqueueRequestsFromMapFunc(r.endpointPolicies)).
@@ -151,6 +195,132 @@ func (r *ServiceRoutePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Watches(&networkv1alpha1.BGPRouter{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
 		Watches(&networkv1alpha1.BGPVRFInstance{}, handler.EnqueueRequestsFromMapFunc(r.routingDependencyPolicies)).
 		Complete(r)
+}
+
+func (r *ServiceRoutePolicyReconciler) runStartupSync(ctx context.Context) error {
+	for {
+		err := r.syncAllPolicies(ctx)
+		if err == nil {
+			return nil
+		}
+		log.FromContext(ctx).Error(err, "initial service route policy map adoption and sweep")
+		if !startupSyncNeedsRetry(err) {
+			// The complete snapshot was finalized and policy forwarding was
+			// enabled. Per-policy errors are retried by their ordinary
+			// reconciles; globally gating the datapath again would disrupt all
+			// successfully established services.
+			return nil
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+// syncAllPolicies adopts a complete cache-synchronized desired set before
+// sweeping stale policy entries. The reconciler mutex spans compilation,
+// programming, and the sweep so an ordinary reconcile cannot reintroduce an
+// object from a snapshot older than the one being finalized.
+func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	policies := &networkv1alpha1.ServiceRoutePolicyList{}
+	if err := r.List(ctx, policies); err != nil {
+		return startupSyncError(fmt.Errorf("list ServiceRoutePolicies for startup sync: %w", err), true)
+	}
+	attachments := &cloudv1alpha1.VPCAttachmentList{}
+	if err := r.List(ctx, attachments); err != nil {
+		return startupSyncError(fmt.Errorf("list VPCAttachments for startup sync: %w", err), true)
+	}
+	allAttachments := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments.Items))
+	for index := range attachments.Items {
+		allAttachments = append(allAttachments, &attachments.Items[index])
+	}
+
+	type compiledPolicy struct {
+		key     types.NamespacedName
+		intents []serviceroute.RouteIntent
+	}
+	compiled := make([]compiledPolicy, 0, len(policies.Items))
+	currentPolicies := make(map[types.NamespacedName]struct{}, len(policies.Items))
+	for index := range policies.Items {
+		policy := &policies.Items[index]
+		key := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}
+		currentPolicies[key] = struct{}{}
+		endpoint := &networkv1alpha1.ServiceEndpoint{}
+		endpointKey := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Spec.ServiceRef.Name}
+		if err := r.Get(ctx, endpointKey, endpoint); err != nil {
+			if apierrors.IsNotFound(err) {
+				compiled = append(compiled, compiledPolicy{key: key})
+				continue
+			}
+			return startupSyncError(fmt.Errorf("get ServiceEndpoint %s for startup sync: %w", endpointKey, err), true)
+		}
+		intents, err := serviceroute.Compile(policy, endpoint, allAttachments, r.NodeName, r.sidResolver(ctx))
+		if err != nil {
+			// Invalid policies and node-local dependencies that are not ready
+			// both fail closed in the startup snapshot. Ordinary reconciliation
+			// publishes their precise status and retries dependency failures.
+			compiled = append(compiled, compiledPolicy{key: key})
+			continue
+		}
+		compiled = append(compiled, compiledPolicy{key: key, intents: intents})
+	}
+	sort.Slice(compiled, func(i, j int) bool { return compiled[i].key.String() < compiled[j].key.String() })
+
+	if err := r.Programmer.Initialize(); err != nil {
+		return startupSyncError(fmt.Errorf("initialize service route maps for startup sync: %w", err), true)
+	}
+	var removed []types.NamespacedName
+	for key := range r.Applied {
+		if _, exists := currentPolicies[key]; !exists {
+			removed = append(removed, key)
+		}
+	}
+	sort.Slice(removed, func(i, j int) bool { return removed[i].String() < removed[j].String() })
+	var syncErrs []error
+	cleanupFailed := false
+	for _, key := range removed {
+		if err := r.removePolicyLocked(key); err != nil {
+			cleanupFailed = cleanupFailed || isServiceRoutePolicyCleanupError(err)
+			syncErrs = append(syncErrs,
+				fmt.Errorf("remove obsolete service route policy %s during startup sync: %w", key, err))
+		}
+	}
+	for _, policy := range compiled {
+		if err := r.replacePolicyLocked(policy.key, policy.intents); err != nil {
+			cleanupFailed = cleanupFailed || isServiceRoutePolicyCleanupError(err)
+			syncErrs = append(syncErrs,
+				fmt.Errorf("apply service route policy %s during startup sync: %w", policy.key, err))
+			// A permanently broken policy must not keep its previous desired
+			// references alive and thereby exempt them from the stale sweep.
+			// Remove any intents established before the failure and continue
+			// adopting independent policies.
+			if removeErr := r.removePolicyLocked(policy.key); removeErr != nil {
+				cleanupFailed = true
+				syncErrs = append(syncErrs,
+					fmt.Errorf("fail closed service route policy %s during startup sync: %w", policy.key, removeErr))
+			}
+		}
+	}
+	if cleanupFailed {
+		// Finalize enables service policy after sweeping against the
+		// programmer's retained desired references. A failed rollback or
+		// removal can leave an authorization reference in that snapshot, so
+		// keep the global gate closed and retry cleanup instead.
+		return startupSyncError(errors.Join(syncErrs...), true)
+	}
+	finalized := true
+	if err := r.Programmer.Finalize(); err != nil {
+		finalized = false
+		syncErrs = append(syncErrs, fmt.Errorf("sweep stale service route policy maps: %w", err))
+	}
+	return startupSyncError(errors.Join(syncErrs...), !finalized)
 }
 
 func (r *ServiceRoutePolicyReconciler) endpointPolicies(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -250,6 +420,13 @@ func (r *ServiceRoutePolicyReconciler) replacePolicy(
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.replacePolicyLocked(key, intents)
+}
+
+func (r *ServiceRoutePolicyReconciler) replacePolicyLocked(
+	key types.NamespacedName,
+	intents []serviceroute.RouteIntent,
+) error {
 	if r.Applied == nil {
 		r.Applied = make(map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent)
 	}
@@ -272,7 +449,7 @@ func (r *ServiceRoutePolicyReconciler) replacePolicy(
 			continue
 		}
 		if err := r.Programmer.Remove(existing); err != nil {
-			return err
+			return &serviceRoutePolicyCleanupError{err: err}
 		}
 		delete(current, attachment)
 	}
@@ -281,6 +458,9 @@ func (r *ServiceRoutePolicyReconciler) replacePolicy(
 			continue
 		}
 		if err := r.Programmer.Apply(intent); err != nil {
+			if cleanupErr := r.Programmer.Cleanup(intent); cleanupErr != nil {
+				return errors.Join(err, &serviceRoutePolicyCleanupError{err: cleanupErr})
+			}
 			return err
 		}
 		current[attachment] = intent
@@ -294,10 +474,14 @@ func (r *ServiceRoutePolicyReconciler) replacePolicy(
 func (r *ServiceRoutePolicyReconciler) removePolicy(key types.NamespacedName) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.removePolicyLocked(key)
+}
+
+func (r *ServiceRoutePolicyReconciler) removePolicyLocked(key types.NamespacedName) error {
 	current := r.Applied[key]
 	for attachment, intent := range current {
 		if err := r.Programmer.Remove(intent); err != nil {
-			return err
+			return &serviceRoutePolicyCleanupError{err: err}
 		}
 		delete(current, attachment)
 	}

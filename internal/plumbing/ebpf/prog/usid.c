@@ -603,6 +603,8 @@ struct service_route_value {
 	__u32 target_ifindex;
 	__u8 mode;
 	__u8 pad[3];
+	__u64 consumer_token;
+	__u64 producer_token;
 	__u8 grant_id[16];
 	__u8 target_sid[16];
 };
@@ -612,6 +614,8 @@ struct service_route_value {
 #define SERVICE_TUNNEL_VERSION 1
 #define SERVICE_TUNNEL_REQUEST 1
 #define SERVICE_TUNNEL_REPLY 2
+#define SERVICE_MARKER_REQUEST 1
+#define SERVICE_MARKER_REPLY 2
 
 struct service_tunnel_header {
 	__u8 version;
@@ -633,6 +637,29 @@ struct service_access_key {
 	__u8 addr[16];
 } __attribute__((packed));
 
+struct service_access_value {
+	__u64 attachment_token;
+	__u8 marker_directions;
+	__u8 pad[7];
+};
+
+// service_deny_table is deliberately a small, stable ABI independent of the
+// forwarding route/access value layouts. It survives an incompatible policy
+// map replacement and keeps known service addresses fail closed until the
+// controller has rebuilt and finalized the new generation.
+struct service_deny_key {
+	__u32 ingress_ifindex;
+	__u8 family;
+	__u8 pad[3];
+	__u8 addr[16];
+} __attribute__((packed));
+
+struct service_deny_value {
+	__u64 attachment_token;
+	__u8 directions;
+	__u8 pad[7];
+};
+
 // service_reverse_key is the exact producer reply tuple. A row is created only
 // after an authorized consumer packet is observed, so producer-originated
 // traffic has no route back into the consumer attachment.
@@ -651,6 +678,8 @@ struct service_reverse_value {
 	__u32 consumer_ifindex;
 	__u8 mode;
 	__u8 pad[3];
+	__u64 consumer_token;
+	__u64 producer_token;
 	__u8 grant_id[16];
 	__u8 return_sid[16];
 	__u64 last_seen_ns;
@@ -667,6 +696,11 @@ struct service_remote_grant_key {
 
 struct service_remote_grant_value {
 	__u8 consumer_sid[16];
+	__u64 producer_token;
+};
+
+struct service_policy_state_value {
+	__u8 enabled;
 };
 
 // Flat byte-for-byte form of bpf_fib_lookup. The kernel UAPI type contains
@@ -696,6 +730,7 @@ struct service_fib_scratch_value {
 	__u8 dest_addr[16];
 	struct service_route_key route;
 	struct service_access_key access;
+	struct service_deny_key deny;
 	struct service_reverse_key reverse;
 	struct service_reverse_value reverse_value;
 	struct service_remote_grant_key remote_grant;
@@ -991,12 +1026,29 @@ struct {
 	__type(value, struct service_route_value);
 } service_route_table SEC(".maps");
 
+// attachment_identity_table binds service authorization to an interface
+// incarnation, not merely its recyclable kernel ifindex. CNI ADD overwrites
+// the token before attaching the service classifier.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 32768);
+	__type(key, __u32);
+	__type(value, __u64);
+} attachment_identity_table SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 65536);
 	__type(key, struct service_access_key);
-	__type(value, __u8);
+	__type(value, struct service_access_value);
 } service_access_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 32768);
+	__type(key, struct service_deny_key);
+	__type(value, struct service_deny_value);
+} service_deny_table SEC(".maps");
 
 // Reverse rows are bounded LRU flow state. Policy is checked again on every
 // reply, so a stale row cannot survive policy revocation as authorization.
@@ -1016,6 +1068,13 @@ struct {
 	__type(key, struct service_remote_grant_key);
 	__type(value, struct service_remote_grant_value);
 } service_remote_grant_table SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct service_policy_state_value);
+} service_policy_state_table SEC(".maps");
 
 // service_fib_scratch keeps the comparatively large bpf_fib_lookup parameter
 // block out of usid_egress's stack. One value per CPU is safe because BPF
@@ -2078,6 +2137,8 @@ __attribute__((noinline)) int send_too_big(struct __sk_buff *skb, __u32 ip_versi
 static USID_ALWAYS_INLINE int parse_service_packet(struct __sk_buff *skb, __be16 h_proto,
 						    struct service_fib_scratch_value *scratch);
 static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_value *s);
+static USID_ALWAYS_INLINE int service_identity_matches(__u32 ifindex, __u64 expected);
+static USID_ALWAYS_INLINE int service_policy_enabled(void);
 static USID_ALWAYS_INLINE int service_id_equal(const __u8 a[16], const __u8 b[16])
 {
 	__u8 diff = 0;
@@ -2229,6 +2290,10 @@ int usid_ingress(struct __sk_buff *skb)
 		    (tunnel->direction != SERVICE_TUNNEL_REQUEST && tunnel->direction != SERVICE_TUNNEL_REPLY) ||
 		    (tunnel->inner_nexthdr != USID_IPPROTO_IPIP && tunnel->inner_nexthdr != USID_IPPROTO_IPV6)) {
 			count_claimed_drop(DROP_REASON_UNEXPECTED_NEXTHDR, vrf);
+			return TC_ACT_SHOT;
+		}
+		if (!service_policy_enabled()) {
+			count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
 			return TC_ACT_SHOT;
 		}
 		__builtin_memcpy(service_scratch->tunnel_grant_id, tunnel->grant_id, 16);
@@ -2499,27 +2564,7 @@ int usid_ingress(struct __sk_buff *skb)
 	//
 	// This sends through the host-side end of a veth, not straight into its
 	// peer the way step 9 does, which works for a veth and a tap alike.
-	if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH && fib_params.ifindex > 0) {
-		struct bpf_redir_neigh nh;
-
-		__builtin_memset(&nh, 0, sizeof(nh));
-		if (inner_version == 6) {
-			nh.nh_family = USID_AF_INET6;
-			__builtin_memcpy(nh.ipv6_nh, fib_params.ipv6_dst, sizeof(nh.ipv6_nh));
-		} else {
-			nh.nh_family = USID_AF_INET;
-			nh.ipv4_nh = fib_params.ipv4_dst;
-		}
-
-		long neigh_rc = bpf_redirect_neigh(fib_params.ifindex, &nh, sizeof(nh), 0);
-
-		if (neigh_rc == TC_ACT_REDIRECT)
-			return neigh_rc;
-		count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf);
-		return TC_ACT_SHOT;
-	}
-
-	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS) {
+	if (fib_rc != BPF_FIB_LKUP_RET_SUCCESS && fib_rc != BPF_FIB_LKUP_RET_NO_NEIGH) {
 		if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH)
 			count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf);
 		else if (fib_rc == BPF_FIB_LKUP_RET_UNREACHABLE || fib_rc == BPF_FIB_LKUP_RET_BLACKHOLE || fib_rc == BPF_FIB_LKUP_RET_PROHIBIT)
@@ -2558,7 +2603,8 @@ int usid_ingress(struct __sk_buff *skb)
 			__builtin_memcpy(service_scratch->remote_grant.grant_id, service_scratch->tunnel_grant_id, 16);
 			__builtin_memcpy(service_scratch->remote_grant.addr, service_scratch->dest_addr, 16);
 			struct service_remote_grant_value *grant = bpf_map_lookup_elem(&service_remote_grant_table, &service_scratch->remote_grant);
-			if (!grant || !service_id_equal(grant->consumer_sid, service_scratch->tunnel_return_sid)) {
+			if (!grant || !service_id_equal(grant->consumer_sid, service_scratch->tunnel_return_sid) ||
+			    !service_identity_matches(fib_params.ifindex, grant->producer_token)) {
 				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
 				return TC_ACT_SHOT;
 			}
@@ -2572,6 +2618,7 @@ int usid_ingress(struct __sk_buff *skb)
 			__builtin_memcpy(service_scratch->reverse.dest_addr, service_scratch->source_addr, 16);
 			__builtin_memset(&service_scratch->reverse_value, 0, sizeof(service_scratch->reverse_value));
 			service_scratch->reverse_value.mode = SERVICE_ROUTE_MODE_REMOTE;
+			service_scratch->reverse_value.producer_token = grant->producer_token;
 			__builtin_memcpy(service_scratch->reverse_value.grant_id, service_scratch->tunnel_grant_id, 16);
 			__builtin_memcpy(service_scratch->reverse_value.return_sid, service_scratch->tunnel_return_sid, 16);
 			if (service_install_reverse(service_scratch)) {
@@ -2593,14 +2640,39 @@ int usid_ingress(struct __sk_buff *skb)
 			service_scratch->access.protocol = service_scratch->protocol;
 			service_scratch->access.port = service_scratch->source_port;
 			__builtin_memcpy(service_scratch->access.addr, service_scratch->source_addr, 16);
+			struct service_access_value *access = bpf_map_lookup_elem(&service_access_table, &service_scratch->access);
 			if (!route || route->mode != SERVICE_ROUTE_MODE_REMOTE ||
 			    !service_id_equal(route->grant_id, service_scratch->tunnel_grant_id) ||
 			    !service_id_equal(route->target_sid, service_scratch->tunnel_return_sid) ||
-			    !bpf_map_lookup_elem(&service_access_table, &service_scratch->access)) {
+			    !access || access->attachment_token != route->consumer_token ||
+			    !service_identity_matches(fib_params.ifindex, route->consumer_token)) {
 				count_claimed_drop(DROP_REASON_SERVICE_ROUTE_DENIED, vrf);
 				return TC_ACT_SHOT;
 			}
 		}
+	}
+
+	// Authorization above must run before cold-neighbor handling. Otherwise a
+	// forged or revoked service tunnel can bypass its grant/route checks simply
+	// by targeting an attachment whose neighbor entry is not warm.
+	if (fib_rc == BPF_FIB_LKUP_RET_NO_NEIGH) {
+		struct bpf_redir_neigh nh;
+
+		__builtin_memset(&nh, 0, sizeof(nh));
+		if (inner_version == 6) {
+			nh.nh_family = USID_AF_INET6;
+			__builtin_memcpy(nh.ipv6_nh, fib_params.ipv6_dst, sizeof(nh.ipv6_nh));
+		} else {
+			nh.nh_family = USID_AF_INET;
+			nh.ipv4_nh = fib_params.ipv4_dst;
+		}
+		long neigh_rc = bpf_redirect_neigh(fib_params.ifindex, &nh, sizeof(nh), 0);
+		if (neigh_rc == TC_ACT_REDIRECT)
+			return neigh_rc;
+		if (service_reverse_installed && service_scratch)
+			bpf_map_delete_elem(&service_reverse_table, &service_scratch->reverse);
+		count_claimed_drop(DROP_REASON_FIB_NO_NEIGH, vrf);
+		return TC_ACT_SHOT;
 	}
 
 	__builtin_memcpy(new_eth->h_dest, fib_params.dmac, sizeof(new_eth->h_dest));
@@ -2668,6 +2740,7 @@ int usid_ingress(struct __sk_buff *skb)
 // pass-through.
 #define SERVICE_FLOW_TIMEOUT_NS (300ULL * 1000000000ULL)
 #define SERVICE_PARSE_NOT_L4 1
+#define SERVICE_PARSE_FRAGMENT 2
 #define SERVICE_PARSE_INVALID (-1)
 
 // parse_service_packet extracts a TCP/UDP tuple before any NPT or VIP rewrite.
@@ -2703,7 +2776,7 @@ static USID_ALWAYS_INLINE int parse_service_packet(struct __sk_buff *skb, __be16
 			if (protocol == USID_IPPROTO_TCP || protocol == USID_IPPROTO_UDP)
 				goto found_l4;
 			if (protocol == USID_IPPROTO_FRAGMENT)
-				return SERVICE_PARSE_INVALID;
+				return SERVICE_PARSE_FRAGMENT;
 			__u8 ext[2];
 			if (bpf_skb_load_bytes(skb, l4_offset, ext, sizeof(ext)))
 				return SERVICE_PARSE_INVALID;
@@ -2726,11 +2799,11 @@ static USID_ALWAYS_INLINE int parse_service_packet(struct __sk_buff *skb, __be16
 
 		if ((void *) (ip4 + 1) > data_end || (ip4->ver_ihl & 0x0F) < 5)
 			return SERVICE_PARSE_INVALID;
-		if (__builtin_bswap16(ip4->frag_off) & (USID_IPV4_FRAG_OFFSET_MASK | USID_IPV4_MORE_FRAGMENTS))
-			return SERVICE_PARSE_INVALID;
 		scratch->meta_family = USID_EGRESS_ROUTE_FAMILY_INET4;
 		__builtin_memcpy(scratch->source_addr, ip4->saddr, 4);
 		__builtin_memcpy(scratch->dest_addr, ip4->daddr, 4);
+		if (__builtin_bswap16(ip4->frag_off) & (USID_IPV4_FRAG_OFFSET_MASK | USID_IPV4_MORE_FRAGMENTS))
+			return SERVICE_PARSE_FRAGMENT;
 		protocol = ip4->protocol;
 		if (protocol != USID_IPPROTO_TCP && protocol != USID_IPPROTO_UDP)
 			return SERVICE_PARSE_NOT_L4;
@@ -2867,8 +2940,28 @@ static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_valu
 	}
 	int same_owner = old->mode == s->reverse_value.mode &&
 		old->consumer_ifindex == s->reverse_value.consumer_ifindex &&
+		old->consumer_token == s->reverse_value.consumer_token &&
+		old->producer_token == s->reverse_value.producer_token &&
 		service_id_equal(old->grant_id, s->reverse_value.grant_id) &&
 		service_id_equal(old->return_sid, s->reverse_value.return_sid);
+	if (!same_owner && old->mode == SERVICE_ROUTE_MODE_LOCAL) {
+		__builtin_memset(&s->route, 0, sizeof(s->route));
+		s->route.ingress_ifindex = old->consumer_ifindex;
+		s->route.family = s->reverse.family;
+		s->route.protocol = s->reverse.protocol;
+		s->route.port = s->reverse.source_port;
+		__builtin_memcpy(s->route.addr, s->reverse.source_addr, 16);
+		struct service_route_value *old_route = bpf_map_lookup_elem(&service_route_table, &s->route);
+		if (!old_route || old_route->mode != SERVICE_ROUTE_MODE_LOCAL ||
+		    old_route->target_ifindex != s->reverse.ingress_ifindex ||
+		    old_route->consumer_token != old->consumer_token ||
+		    old_route->producer_token != old->producer_token ||
+		    !service_identity_matches(old->consumer_ifindex, old->consumer_token) ||
+		    !service_identity_matches(s->reverse.ingress_ifindex, old->producer_token)) {
+			bpf_map_delete_elem(&service_reverse_table, &s->reverse);
+			return bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_NOEXIST);
+		}
+	}
 	if (!same_owner && old->mode == SERVICE_ROUTE_MODE_REMOTE) {
 		__builtin_memset(&s->remote_grant, 0, sizeof(s->remote_grant));
 		s->remote_grant.producer_ifindex = s->reverse.ingress_ifindex;
@@ -2877,7 +2970,11 @@ static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_valu
 		s->remote_grant.port = s->reverse.source_port;
 		__builtin_memcpy(s->remote_grant.grant_id, old->grant_id, 16);
 		__builtin_memcpy(s->remote_grant.addr, s->reverse.source_addr, 16);
-		if (!bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant)) {
+		struct service_remote_grant_value *old_grant =
+			bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant);
+		if (!old_grant || old_grant->producer_token != old->producer_token ||
+		    !service_id_equal(old_grant->consumer_sid, old->return_sid) ||
+		    !service_identity_matches(s->reverse.ingress_ifindex, old_grant->producer_token)) {
 			bpf_map_delete_elem(&service_reverse_table, &s->reverse);
 			return bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_NOEXIST);
 		}
@@ -2885,6 +2982,21 @@ static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_valu
 	if (!same_owner)
 		return -1;
 	return bpf_map_update_elem(&service_reverse_table, &s->reverse, &s->reverse_value, BPF_EXIST);
+}
+
+static USID_ALWAYS_INLINE int service_identity_matches(__u32 ifindex, __u64 expected)
+{
+	if (!expected)
+		return 0;
+	__u64 *current = bpf_map_lookup_elem(&attachment_identity_table, &ifindex);
+	return current && *current == expected;
+}
+
+static USID_ALWAYS_INLINE int service_policy_enabled(void)
+{
+	__u32 zero = 0;
+	struct service_policy_state_value *state = bpf_map_lookup_elem(&service_policy_state_table, &zero);
+	return state && state->enabled;
 }
 
 // service_path is noinline so its transient tuple-building scalars do not
@@ -2898,14 +3010,32 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		return TC_ACT_UNSPEC;
 	int parsed = parse_service_packet(skb, h_proto, s);
 	if (parsed != 0) {
+		// Neighbor discovery and other non-TCP/UDP control traffic must reach
+		// the legacy attachment path. Only fragments are denied by address
+		// markers because their missing transport tuple is intrinsically
+		// unauthorizable.
+		if (parsed != SERVICE_PARSE_FRAGMENT)
+			return TC_ACT_UNSPEC;
 		if (s->meta_family != USID_EGRESS_ROUTE_FAMILY_INET6 &&
 		    s->meta_family != USID_EGRESS_ROUTE_FAMILY_INET4)
 			return TC_ACT_UNSPEC;
-		__builtin_memset(&s->access, 0, sizeof(s->access));
-		s->access.ingress_ifindex = ifindex;
-		s->access.family = s->meta_family;
-		__builtin_memcpy(s->access.addr, s->dest_addr, 16);
-		if (bpf_map_lookup_elem(&service_access_table, &s->access)) {
+		__builtin_memset(&s->deny, 0, sizeof(s->deny));
+		s->deny.ingress_ifindex = ifindex;
+		s->deny.family = s->meta_family;
+		__builtin_memcpy(s->deny.addr, s->dest_addr, 16);
+		struct service_deny_value *deny = bpf_map_lookup_elem(&service_deny_table, &s->deny);
+		if (deny && (deny->directions & SERVICE_MARKER_REQUEST)) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+			return TC_ACT_SHOT;
+		}
+		// A request marker is keyed by its service destination on the
+		// consumer interface. A reply marker is keyed by the same service
+		// address as its source on the producer interface. Checking both keeps
+		// unsupported service fragments fail closed without dropping unrelated
+		// fragmented tenant traffic, which must continue to the legacy path.
+		__builtin_memcpy(s->deny.addr, s->source_addr, 16);
+		deny = bpf_map_lookup_elem(&service_deny_table, &s->deny);
+		if (deny && (deny->directions & SERVICE_MARKER_REPLY)) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
 		}
@@ -2922,9 +3052,19 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	__builtin_memcpy(s->reverse.dest_addr, s->dest_addr, 16);
 	struct service_reverse_value *reverse = bpf_map_lookup_elem(&service_reverse_table, &s->reverse);
 	if (reverse) {
+		if (!service_policy_enabled()) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+			return TC_ACT_SHOT;
+		}
 		__u64 now = bpf_ktime_get_ns();
 		if (now - reverse->last_seen_ns > SERVICE_FLOW_TIMEOUT_NS) {
 			bpf_map_delete_elem(&service_reverse_table, &s->reverse);
+			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+			return TC_ACT_SHOT;
+		}
+		if (!service_identity_matches(ifindex, reverse->producer_token) ||
+		    (reverse->mode == SERVICE_ROUTE_MODE_LOCAL &&
+		     !service_identity_matches(reverse->consumer_ifindex, reverse->consumer_token))) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
 		}
@@ -2937,7 +3077,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 			__builtin_memcpy(s->remote_grant.grant_id, reverse->grant_id, 16);
 			__builtin_memcpy(s->remote_grant.addr, s->source_addr, 16);
 			struct service_remote_grant_value *grant = bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant);
-			if (!grant || !service_id_equal(grant->consumer_sid, reverse->return_sid)) {
+			if (!grant || !service_id_equal(grant->consumer_sid, reverse->return_sid) ||
+			    !service_identity_matches(ifindex, grant->producer_token)) {
 				count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 				return TC_ACT_SHOT;
 			}
@@ -2957,7 +3098,18 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		s->access.protocol = s->protocol;
 		s->access.port = s->source_port;
 		__builtin_memcpy(s->access.addr, s->source_addr, 16);
-		if (!bpf_map_lookup_elem(&service_access_table, &s->access)) {
+		struct service_access_value *access = bpf_map_lookup_elem(&service_access_table, &s->access);
+		__builtin_memset(&s->route, 0, sizeof(s->route));
+		s->route.ingress_ifindex = consumer_ifindex;
+		s->route.family = s->meta_family;
+		s->route.protocol = s->protocol;
+		s->route.port = s->source_port;
+		__builtin_memcpy(s->route.addr, s->source_addr, 16);
+		struct service_route_value *reply_route = bpf_map_lookup_elem(&service_route_table, &s->route);
+		if (!access || access->attachment_token != reverse->consumer_token || !reply_route ||
+		    reply_route->mode != SERVICE_ROUTE_MODE_LOCAL || reply_route->target_ifindex != ifindex ||
+		    reply_route->consumer_token != reverse->consumer_token ||
+		    reply_route->producer_token != reverse->producer_token) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 			return TC_ACT_SHOT;
 		}
@@ -2977,8 +3129,34 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	s->route.port = s->dest_port;
 	__builtin_memcpy(s->route.addr, s->dest_addr, 16);
 	struct service_route_value *route = bpf_map_lookup_elem(&service_route_table, &s->route);
-	if (!route)
+	if (!route) {
+		__builtin_memset(&s->deny, 0, sizeof(s->deny));
+		s->deny.ingress_ifindex = ifindex;
+		s->deny.family = s->meta_family;
+		__builtin_memcpy(s->deny.addr, s->dest_addr, 16);
+		struct service_deny_value *deny = bpf_map_lookup_elem(&service_deny_table, &s->deny);
+		if (deny && (deny->directions & SERVICE_MARKER_REQUEST)) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+			return TC_ACT_SHOT;
+		}
+		__builtin_memcpy(s->deny.addr, s->source_addr, 16);
+		deny = bpf_map_lookup_elem(&service_deny_table, &s->deny);
+		if (deny && (deny->directions & SERVICE_MARKER_REPLY)) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+			return TC_ACT_SHOT;
+		}
 		return TC_ACT_UNSPEC;
+	}
+	if (!service_policy_enabled()) {
+		count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+		return TC_ACT_SHOT;
+	}
+	if (!service_identity_matches(ifindex, route->consumer_token) ||
+	    (route->mode == SERVICE_ROUTE_MODE_LOCAL &&
+	     !service_identity_matches(route->target_ifindex, route->producer_token))) {
+		count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
+		return TC_ACT_SHOT;
+	}
 
 	__builtin_memset(&s->access, 0, sizeof(s->access));
 	s->access.ingress_ifindex = ifindex;
@@ -2986,7 +3164,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	s->access.protocol = s->protocol;
 	s->access.port = s->dest_port;
 	__builtin_memcpy(s->access.addr, s->dest_addr, 16);
-	if (!bpf_map_lookup_elem(&service_access_table, &s->access)) {
+	struct service_access_value *access = bpf_map_lookup_elem(&service_access_table, &s->access);
+	if (!access || access->attachment_token != route->consumer_token) {
 		count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 		return TC_ACT_SHOT;
 	}
@@ -3012,6 +3191,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	__builtin_memset(&s->reverse_value, 0, sizeof(s->reverse_value));
 	s->reverse_value.consumer_ifindex = ifindex;
 	s->reverse_value.mode = SERVICE_ROUTE_MODE_LOCAL;
+	s->reverse_value.consumer_token = route->consumer_token;
+	s->reverse_value.producer_token = route->producer_token;
 	if (service_install_reverse(s)) {
 		count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 		return TC_ACT_SHOT;

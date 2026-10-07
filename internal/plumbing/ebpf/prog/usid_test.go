@@ -1321,6 +1321,39 @@ func buildPlainV6PacketWithL4Ports(t *testing.T, src, dst netip.Addr, srcPort, d
 	return pkt
 }
 
+func buildPlainV4PacketWithL4Ports(t *testing.T, src, dst netip.Addr, srcPort, dstPort uint16) []byte {
+	t.Helper()
+	if !src.Is4() || !dst.Is4() {
+		t.Fatalf("buildPlainV4PacketWithL4Ports: src=%s dst=%s must both be IPv4", src, dst)
+	}
+	const tcpHeaderLen = 20
+	pkt := buildPlainIPv4Packet(t, src, dst)
+	binary.BigEndian.PutUint16(pkt[ethHeaderLen+2:ethHeaderLen+4], ipv4HeaderLen+tcpHeaderLen)
+	pkt[ethHeaderLen+9] = 6
+	tcp := make([]byte, tcpHeaderLen)
+	binary.BigEndian.PutUint16(tcp[0:2], srcPort)
+	binary.BigEndian.PutUint16(tcp[2:4], dstPort)
+	tcp[12] = 5 << 4
+	return append(pkt, tcp...)
+}
+
+func fragmentServicePacket(t *testing.T, family uint8, src, dst netip.Addr, srcPort, dstPort uint16) []byte {
+	t.Helper()
+	if family == egressRouteFamilyINET4 {
+		pkt := buildPlainV4PacketWithL4Ports(t, src, dst, srcPort, dstPort)
+		// MF is enough to make even a first fragment unsupported: later
+		// fragments cannot be tied to the transport authorization.
+		binary.BigEndian.PutUint16(pkt[ethHeaderLen+6:ethHeaderLen+8], 0x2000)
+		return pkt
+	}
+	pkt := buildPlainV6PacketWithL4Ports(t, src, dst, srcPort, dstPort)
+	const fragmentHeaderLen = 8
+	fragment := []byte{6, 0, 0, 1, 0, 0, 0, 1}
+	pkt[ethHeaderLen+6] = 44
+	binary.BigEndian.PutUint16(pkt[ethHeaderLen+4:ethHeaderLen+6], 20+fragmentHeaderLen)
+	return append(pkt[:ethHeaderLen+ip6HeaderLen], append(fragment, pkt[ethHeaderLen+ip6HeaderLen:]...)...)
+}
+
 // egressRouteFamilyINET6/egressRouteFamilyINET4 mirror usid.c's
 // USID_EGRESS_ROUTE_FAMILY_INET6/USID_EGRESS_ROUTE_FAMILY_INET4 -- see
 // usidVIPXlatDirIngress/usidVIPXlatDirEgress's identical comment above for
@@ -1367,6 +1400,29 @@ func serviceRouteKey(addr netip.Addr) UsidServiceRouteKey {
 	return UsidServiceRouteKey{
 		IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
 		Port: bits.ReverseBytes16(8443), Addr: addr.As16(),
+	}
+}
+
+func serviceAddressMarker(ifindex uint32, addr netip.Addr) UsidServiceAccessKey {
+	key := UsidServiceAccessKey{IngressIfindex: ifindex}
+	if addr.Is4() {
+		key.Family = egressRouteFamilyINET4
+		v4 := addr.As4()
+		copy(key.Addr[:4], v4[:])
+	} else {
+		key.Family = egressRouteFamilyINET6
+		key.Addr = addr.As16()
+	}
+	return key
+}
+
+func setServiceIdentity(t *testing.T, objs *UsidObjects, ifindex uint32, token uint64) {
+	t.Helper()
+	if err := objs.ServicePolicyStateTable.Put(uint32(0), UsidServicePolicyStateValue{Enabled: 1}); err != nil {
+		t.Fatalf("enable service policy: %v", err)
+	}
+	if err := objs.AttachmentIdentityTable.Put(ifindex, token); err != nil {
+		t.Fatalf("populate attachment identity: %v", err)
 	}
 }
 
@@ -1463,12 +1519,13 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 		servicePort = uint16(8443)
 	)
 	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, tableID)
+	setServiceIdentity(t, objs, loopback, 1)
 
 	service := netip.MustParseAddr("fd20:70::100")
 	if err := objs.ServiceRouteTable.Put(
 		serviceRouteKey(service),
 		UsidServiceRouteValue{
-			TargetIfindex: loopback,
+			TargetIfindex: loopback, Mode: 1, ConsumerToken: 1, ProducerToken: 1,
 		},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)
@@ -1479,7 +1536,7 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 		Protocol:       6,
 		Port:           bits.ReverseBytes16(servicePort),
 		Addr:           service.As16(),
-	}, uint8(1)); err != nil {
+	}, UsidServiceAccessValue{AttachmentToken: 1}); err != nil {
 		t.Fatalf("populate service_access_table: %v", err)
 	}
 
@@ -1496,8 +1553,21 @@ func TestUsidEgress_ServiceRouteAllowsAuthorizedPort(t *testing.T) {
 	if got, want := out[ipv6HopLimitOffset], pkt[ipv6HopLimitOffset]-1; got != want {
 		t.Errorf("IPv6 hop limit = %d, want %d", got, want)
 	}
+	if got := netip.AddrFrom16([16]byte(out[22:38])); got != netip.MustParseAddr("fd20:70::2") {
+		t.Errorf("source = %s, want original consumer fd20:70::2", got)
+	}
+	if got := netip.AddrFrom16([16]byte(out[38:54])); got != service {
+		t.Errorf("destination = %s, want endpoint %s", got, service)
+	}
 	if got := sumPerCPU(t, objs.DropReasons, 40); got != 0 {
 		t.Errorf("drop_reasons[service_route_denied] = %d, want 0", got)
+	}
+	// Simulate deletion and immediate kernel ifindex reuse. The stale route and
+	// access keys still match ifindex 1, but their old incarnation token must
+	// not authorize the replacement interface.
+	setServiceIdentity(t, objs, loopback, 2)
+	if ret, _, err := objs.UsidServiceEgress.Test(pkt); err != nil || ret != tcActShot {
+		t.Fatalf("request after identity rotation verdict = %d, err = %v; want TC_ACT_SHOT", ret, err)
 	}
 }
 
@@ -1507,11 +1577,12 @@ func TestUsidEgress_ServiceRouteDropsUnauthorizedPort(t *testing.T) {
 
 	const tableID = uint32(7)
 	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, tableID)
+	setServiceIdentity(t, objs, 1, 1)
 
 	service := netip.MustParseAddr("fd20:70::100")
 	if err := objs.ServiceRouteTable.Put(
 		serviceRouteKey(service),
-		UsidServiceRouteValue{TargetIfindex: 1},
+		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)
 	}
@@ -1538,6 +1609,7 @@ func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
 	objs := loadObjects(t)
 	const servicePort = uint16(8443)
 	setUpEgressRouteAttachment(t, objs, 0xABCDEF, 0x100, 7)
+	setServiceIdentity(t, objs, 1, 1)
 	wantOuterSource := setUpNodeSIDBase(t, objs, netip.MustParseAddr("fd00:1:2:3::"), 0x100)
 	service := netip.MustParseAddr("fd20:70::100")
 	consumer := netip.MustParseAddr("fd20:70::2")
@@ -1547,11 +1619,12 @@ func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
 		t.Fatalf("populate public uplink: %v", err)
 	}
 	if err := objs.ServiceRouteTable.Put(serviceRouteKey(service),
-		UsidServiceRouteValue{Mode: 2, GrantId: grantID, TargetSid: targetSID.As16()}); err != nil {
+		UsidServiceRouteValue{Mode: 2, ConsumerToken: 1, GrantId: grantID, TargetSid: targetSID.As16()}); err != nil {
 		t.Fatalf("populate remote service route: %v", err)
 	}
 	if err := objs.ServiceAccessTable.Put(UsidServiceAccessKey{IngressIfindex: 1, Family: egressRouteFamilyINET6,
-		Protocol: 6, Port: bits.ReverseBytes16(servicePort), Addr: service.As16()}, uint8(1)); err != nil {
+		Protocol: 6, Port: bits.ReverseBytes16(servicePort), Addr: service.As16()},
+		UsidServiceAccessValue{AttachmentToken: 1}); err != nil {
 		t.Fatalf("populate service access: %v", err)
 	}
 	pkt := buildPlainV6PacketWithL4Ports(t, consumer, service, 49152, servicePort)
@@ -1574,11 +1647,127 @@ func TestUsidServiceEgress_RemoteRequestPreservesInnerSource(t *testing.T) {
 	if got := netip.AddrFrom16([16]byte(out[82:98])); got != consumer {
 		t.Errorf("inner source = %s, want original consumer %s", got, consumer)
 	}
+	if got := netip.AddrFrom16([16]byte(out[98:114])); got != service {
+		t.Errorf("inner destination = %s, want endpoint %s", got, service)
+	}
+}
+
+func TestUsidServiceEgress_ServiceFragmentsFailClosed(t *testing.T) {
+	requireRoot(t)
+	tests := []struct {
+		name            string
+		family          uint8
+		consumer        netip.Addr
+		service         netip.Addr
+		requestSource   bool
+		configured      bool
+		wrongDirection  bool
+		mismatchedToken bool
+	}{
+		{name: "IPv4 service request", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"), requestSource: true, configured: true},
+		{name: "IPv4 service reply", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"), configured: true},
+		{name: "IPv4 unrelated", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.200"), requestSource: true},
+		{name: "IPv4 request with reply-only marker", family: egressRouteFamilyINET4, consumer: netip.MustParseAddr("10.0.0.2"), service: netip.MustParseAddr("10.0.0.100"), requestSource: true, configured: true, wrongDirection: true},
+		{name: "IPv6 service request", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), requestSource: true, configured: true},
+		{name: "IPv6 service reply", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), configured: true},
+		{name: "IPv6 unrelated", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::200"), requestSource: true},
+		{name: "IPv6 reply with request-only marker", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), configured: true, wrongDirection: true},
+		{name: "IPv6 service request with stale token", family: egressRouteFamilyINET6, consumer: netip.MustParseAddr("fd20:70::2"), service: netip.MustParseAddr("fd20:70::100"), requestSource: true, configured: true, mismatchedToken: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := loadObjects(t)
+			setServiceIdentity(t, objs, 1, 1)
+			if tt.configured {
+				direction := uint8(2)
+				if tt.requestSource {
+					direction = 1
+				}
+				if tt.wrongDirection {
+					direction ^= 3
+				}
+				token := uint64(1)
+				if tt.mismatchedToken {
+					token = 2
+				}
+				marker := serviceAddressMarker(1, tt.service)
+				if err := objs.ServiceDenyTable.Put(UsidServiceDenyKey{
+					IngressIfindex: marker.IngressIfindex, Family: marker.Family, Addr: marker.Addr,
+				}, UsidServiceDenyValue{AttachmentToken: token, Directions: direction}); err != nil {
+					t.Fatalf("populate service address marker: %v", err)
+				}
+			}
+			src, dst := tt.service, tt.consumer
+			srcPort, dstPort := uint16(8443), uint16(49152)
+			if tt.requestSource {
+				src, dst = tt.consumer, tt.service
+				srcPort, dstPort = dstPort, srcPort
+			}
+			pkt := fragmentServicePacket(t, tt.family, src, dst, srcPort, dstPort)
+			ret, out, err := objs.UsidServiceEgress.Test(pkt)
+			if err != nil {
+				t.Fatalf("program test-run: %v", err)
+			}
+			wantVerdict := tcActUnspec
+			wantDrops := uint64(0)
+			if tt.configured && !tt.wrongDirection {
+				wantVerdict = tcActShot
+				wantDrops = 1
+			}
+			if ret != wantVerdict {
+				t.Errorf("verdict = %d, want %d", ret, wantVerdict)
+			}
+			if !bytes.Equal(out, pkt) {
+				t.Errorf("fragment mutated before denial:\n in: % x\nout: % x", pkt, out)
+			}
+			if got := sumPerCPU(t, objs.DropReasons, 40); got != wantDrops {
+				t.Errorf("drop_reasons[service_route_denied] = %d, want %d", got, wantDrops)
+			}
+		})
+	}
+}
+
+func TestUsidServiceEgress_NeighborAdvertisementFromServicePasses(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	service := netip.MustParseAddr("fd20:70::100")
+	consumer := netip.MustParseAddr("fd20:70::2")
+	if err := objs.ServiceAccessTable.Put(serviceAddressMarker(1, service),
+		UsidServiceAccessValue{AttachmentToken: 1, MarkerDirections: 2}); err != nil {
+		t.Fatal(err)
+	}
+	pkt := buildPlainV6PacketWithICMPv6Type(t, service, consumer, 136)
+	ret, out, err := objs.UsidServiceEgress.Test(pkt)
+	if err != nil || ret != tcActUnspec {
+		t.Fatalf("neighbor advertisement verdict=%d err=%v, want TC_ACT_UNSPEC", ret, err)
+	}
+	if !bytes.Equal(out, pkt) {
+		t.Fatal("neighbor advertisement was mutated")
+	}
+}
+
+func TestUsidServiceEgress_DisabledGateDeniesKnownServiceRouteMiss(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	service := netip.MustParseAddr("fd20:70::100")
+	if err := objs.ServiceDenyTable.Put(UsidServiceDenyKey{
+		IngressIfindex: 1, Family: egressRouteFamilyINET6, Addr: service.As16(),
+	}, UsidServiceDenyValue{AttachmentToken: 1, Directions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := objs.ServicePolicyStateTable.Put(uint32(0), UsidServicePolicyStateValue{}); err != nil {
+		t.Fatal(err)
+	}
+	pkt := buildPlainV6PacketWithL4Ports(t, netip.MustParseAddr("fd20:70::2"), service, 49152, 8443)
+	if ret, _, err := objs.UsidServiceEgress.Test(pkt); err != nil || ret != tcActShot {
+		t.Fatalf("known route miss verdict=%d err=%v, want TC_ACT_SHOT", ret, err)
+	}
 }
 
 func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 	requireRoot(t)
 	objs := loadObjects(t)
+	setServiceIdentity(t, objs, 1, 1)
 
 	service := netip.MustParseAddr("fd20:70::100")
 	consumer := netip.MustParseAddr("fd20:70::2")
@@ -1591,17 +1780,22 @@ func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 	}
 	if err := objs.ServiceRouteTable.Put(
 		serviceRouteKey(service),
-		UsidServiceRouteValue{TargetIfindex: 1},
+		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
 	); err != nil {
 		t.Fatalf("populate service_route_table: %v", err)
 	}
-	if err := objs.ServiceAccessTable.Put(accessKey, uint8(1)); err != nil {
+	if err := objs.ServiceAccessTable.Put(accessKey, UsidServiceAccessValue{AttachmentToken: 1}); err != nil {
 		t.Fatalf("populate service_access_table: %v", err)
+	}
+	if err := objs.ServiceDenyTable.Put(UsidServiceDenyKey{
+		IngressIfindex: 1, Family: egressRouteFamilyINET6, Addr: service.As16(),
+	}, UsidServiceDenyValue{AttachmentToken: 1, Directions: 2}); err != nil {
+		t.Fatalf("populate reply deny marker: %v", err)
 	}
 
 	reply := buildPlainV6PacketWithL4Ports(t, service, consumer, 8443, 49152)
-	if ret, _, err := objs.UsidServiceEgress.Test(reply); err != nil || ret != tcActUnspec {
-		t.Fatalf("unsolicited reply verdict = %d, err = %v; want TC_ACT_UNSPEC", ret, err)
+	if ret, _, err := objs.UsidServiceEgress.Test(reply); err != nil || ret != tcActShot {
+		t.Fatalf("unsolicited reply verdict = %d, err = %v; want TC_ACT_SHOT", ret, err)
 	}
 
 	request := buildPlainV6PacketWithL4Ports(t, consumer, service, 49152, 8443)
@@ -1612,11 +1806,118 @@ func TestUsidServiceEgress_ReplyRequiresAuthorizedForwardFlow(t *testing.T) {
 		t.Fatalf("established reply verdict = %d, err = %v; want TC_ACT_REDIRECT", ret, err)
 	}
 
+	if err := objs.ServiceRouteTable.Put(
+		serviceRouteKey(service),
+		UsidServiceRouteValue{TargetIfindex: 2, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
+	); err != nil {
+		t.Fatalf("replace service route target: %v", err)
+	}
+	if ret, _, err := objs.UsidServiceEgress.Test(reply); err != nil || ret != tcActShot {
+		t.Fatalf("reply after route target change verdict = %d, err = %v; want TC_ACT_SHOT", ret, err)
+	}
+	if err := objs.ServiceRouteTable.Put(
+		serviceRouteKey(service),
+		UsidServiceRouteValue{TargetIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1},
+	); err != nil {
+		t.Fatalf("restore service route target: %v", err)
+	}
+
 	if err := objs.ServiceAccessTable.Delete(accessKey); err != nil {
 		t.Fatalf("revoke service access: %v", err)
 	}
 	if ret, _, err := objs.UsidServiceEgress.Test(reply); err != nil || ret != tcActShot {
 		t.Fatalf("reply after revocation verdict = %d, err = %v; want TC_ACT_SHOT", ret, err)
+	}
+}
+
+func TestUsidServiceEgress_ReclaimsCollisionFromStaleRemoteGrant(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	const currentToken = uint64(2)
+	setServiceIdentity(t, objs, 1, currentToken)
+	service := netip.MustParseAddr("fd20:70::100")
+	consumer := netip.MustParseAddr("fd20:70::2")
+	grantID := [16]byte{9}
+
+	if err := objs.ServiceRouteTable.Put(serviceRouteKey(service), UsidServiceRouteValue{
+		TargetIfindex: 1, Mode: 1, ConsumerToken: currentToken, ProducerToken: currentToken,
+	}); err != nil {
+		t.Fatalf("populate service route: %v", err)
+	}
+	if err := objs.ServiceAccessTable.Put(UsidServiceAccessKey{
+		IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
+		Port: bits.ReverseBytes16(8443), Addr: service.As16(),
+	}, UsidServiceAccessValue{AttachmentToken: currentToken}); err != nil {
+		t.Fatalf("populate service access: %v", err)
+	}
+	reverseKey := UsidServiceReverseKey{
+		IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
+		SourcePort: bits.ReverseBytes16(8443), DestPort: bits.ReverseBytes16(49152),
+		SourceAddr: service.As16(), DestAddr: consumer.As16(),
+	}
+	if err := objs.ServiceReverseTable.Put(reverseKey, UsidServiceReverseValue{
+		Mode: 2, ProducerToken: currentToken, GrantId: grantID, ReturnSid: [16]byte{1},
+	}); err != nil {
+		t.Fatalf("seed stale remote reverse: %v", err)
+	}
+	if err := objs.ServiceRemoteGrantTable.Put(UsidServiceRemoteGrantKey{
+		ProducerIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
+		Port: bits.ReverseBytes16(8443), GrantId: grantID, Addr: service.As16(),
+	}, UsidServiceRemoteGrantValue{ProducerToken: currentToken, ConsumerSid: [16]byte{2}}); err != nil {
+		t.Fatalf("seed stale remote grant: %v", err)
+	}
+
+	request := buildPlainV6PacketWithL4Ports(t, consumer, service, 49152, 8443)
+	if ret, _, err := objs.UsidServiceEgress.Test(request); err != nil || ret != tcActRedirect {
+		t.Fatalf("replacement request verdict = %d, err = %v; want TC_ACT_REDIRECT", ret, err)
+	}
+	var reverse UsidServiceReverseValue
+	if err := objs.ServiceReverseTable.Lookup(reverseKey, &reverse); err != nil {
+		t.Fatalf("lookup replacement reverse: %v", err)
+	}
+	if reverse.Mode != 1 || reverse.ConsumerToken != currentToken || reverse.ProducerToken != currentToken {
+		t.Fatalf("replacement reverse = %#v, want current local owner", reverse)
+	}
+}
+
+func TestUsidServiceEgress_ReclaimsCollisionFromStaleLocalRoute(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	const currentToken = uint64(2)
+	setServiceIdentity(t, objs, 1, currentToken)
+	service := netip.MustParseAddr("fd20:70::100")
+	consumer := netip.MustParseAddr("fd20:70::2")
+	if err := objs.ServiceRouteTable.Put(serviceRouteKey(service), UsidServiceRouteValue{
+		TargetIfindex: 1, Mode: 1, ConsumerToken: currentToken, ProducerToken: currentToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := objs.ServiceAccessTable.Put(UsidServiceAccessKey{
+		IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
+		Port: bits.ReverseBytes16(8443), Addr: service.As16(),
+	}, UsidServiceAccessValue{AttachmentToken: currentToken}); err != nil {
+		t.Fatal(err)
+	}
+	reverseKey := UsidServiceReverseKey{
+		IngressIfindex: 1, Family: egressRouteFamilyINET6, Protocol: 6,
+		SourcePort: bits.ReverseBytes16(8443), DestPort: bits.ReverseBytes16(49152),
+		SourceAddr: service.As16(), DestAddr: consumer.As16(),
+	}
+	if err := objs.ServiceReverseTable.Put(reverseKey, UsidServiceReverseValue{
+		ConsumerIfindex: 1, Mode: 1, ConsumerToken: 1, ProducerToken: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := buildPlainV6PacketWithL4Ports(t, consumer, service, 49152, 8443)
+	if ret, _, err := objs.UsidServiceEgress.Test(request); err != nil || ret != tcActRedirect {
+		t.Fatalf("replacement request verdict=%d err=%v, want redirect", ret, err)
+	}
+	var reverse UsidServiceReverseValue
+	if err := objs.ServiceReverseTable.Lookup(reverseKey, &reverse); err != nil {
+		t.Fatal(err)
+	}
+	if reverse.ConsumerToken != currentToken || reverse.ProducerToken != currentToken {
+		t.Fatalf("replacement reverse = %#v, want current tokens", reverse)
 	}
 }
 

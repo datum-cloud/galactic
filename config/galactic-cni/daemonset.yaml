@@ -140,6 +140,10 @@ spec:
               mountPath: /host/var/log/galactic
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+            # Shared with host-executed CNI ADD so both processes take
+            # the same per-interface TC transaction lock.
+            - name: galactic-run
+              mountPath: /run/galactic
             # radv's DefaultStateDir, shared with galactic-tap on the host --
             # see config/galactic-cni/README.md. Writable: the run daemon
             # removes the record of a tap that has gone missing.
@@ -202,3 +206,7 @@ spec:
           hostPath:
             path: /sys/fs/bpf
             type: Directory
+        - name: galactic-run
+          hostPath:
+            path: /run/galactic
+            type: DirectoryOrCreate

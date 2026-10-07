@@ -25,20 +25,35 @@ import (
 const testServiceRouteTenantNamespace = "tenant"
 
 type retryRouteProgrammer struct {
-	applyCalls  int
-	removeCalls int
-	failApply   int
-	failRemove  int
+	initializeCalls    int
+	applyCalls         int
+	cleanupCalls       int
+	removeCalls        int
+	finalizeCalls      int
+	failApply          int
+	failRemove         int
+	finalizeErr        error
+	failAttachment     string
+	cleanupErr         error
+	staleAuthorization bool
 }
 
-func (*retryRouteProgrammer) Initialize() error { return nil }
+func (p *retryRouteProgrammer) Initialize() error {
+	p.initializeCalls++
+	return nil
+}
 
-func (p *retryRouteProgrammer) Apply(serviceroute.RouteIntent) error {
+func (p *retryRouteProgrammer) Apply(intent serviceroute.RouteIntent) error {
 	p.applyCalls++
-	if p.applyCalls == p.failApply {
+	if intent.Attachment.Name == p.failAttachment || p.applyCalls == p.failApply {
 		return errors.New("apply failed")
 	}
 	return nil
+}
+
+func (p *retryRouteProgrammer) Cleanup(serviceroute.RouteIntent) error {
+	p.cleanupCalls++
+	return p.cleanupErr
 }
 
 func (p *retryRouteProgrammer) Remove(serviceroute.RouteIntent) error {
@@ -47,6 +62,12 @@ func (p *retryRouteProgrammer) Remove(serviceroute.RouteIntent) error {
 		return errors.New("remove failed")
 	}
 	return nil
+}
+
+func (p *retryRouteProgrammer) Finalize() error {
+	p.finalizeCalls++
+	p.staleAuthorization = false
+	return p.finalizeErr
 }
 
 func TestServiceRouteReplacePolicyResumesPartialApply(t *testing.T) {
@@ -73,6 +94,22 @@ func TestServiceRouteReplacePolicyResumesPartialApply(t *testing.T) {
 	}
 	if got := len(reconciler.Applied[policy]); got != 2 {
 		t.Fatalf("tracked intents after retry = %d, want 2", got)
+	}
+}
+
+func TestServiceRouteReplacePolicyReportsUnresolvedApplyRollback(t *testing.T) {
+	rollbackFailure := errors.New("rollback failed")
+	programmer := &retryRouteProgrammer{failApply: 1, cleanupErr: rollbackFailure}
+	reconciler := &ServiceRoutePolicyReconciler{Programmer: programmer}
+	err := reconciler.replacePolicy(types.NamespacedName{Namespace: "platform", Name: "dns"},
+		[]serviceroute.RouteIntent{{
+			Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "consumer"},
+		}})
+	if err == nil || !errors.Is(err, rollbackFailure) || !isServiceRoutePolicyCleanupError(err) {
+		t.Fatalf("replacePolicy error = %v, want unresolved cleanup wrapping %v", err, rollbackFailure)
+	}
+	if programmer.cleanupCalls != 1 {
+		t.Fatalf("Cleanup calls = %d, want 1", programmer.cleanupCalls)
 	}
 }
 
@@ -108,6 +145,166 @@ func TestServiceRouteRemovePolicyResumesPartialRemove(t *testing.T) {
 	}
 	if _, ok := reconciler.Applied[policy]; ok {
 		t.Fatal("policy remains tracked after successful retry")
+	}
+}
+
+func TestServiceRouteStartupSyncRemovesOfflineDeletedPolicyBeforeSweep(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := networkv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := cloudv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	programmer := &retryRouteProgrammer{}
+	deletedPolicy := types.NamespacedName{Namespace: "platform", Name: "deleted-while-offline"}
+	reconciler := &ServiceRoutePolicyReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Programmer: programmer,
+		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
+			deletedPolicy: {
+				{Namespace: testServiceRouteTenantNamespace, Name: "consumer"}: {
+					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "consumer"},
+				},
+			},
+		},
+	}
+
+	if err := reconciler.syncAllPolicies(context.Background()); err != nil {
+		t.Fatalf("syncAllPolicies: %v", err)
+	}
+	if programmer.removeCalls != 1 || programmer.finalizeCalls != 1 {
+		t.Fatalf("remove/finalize calls = %d/%d, want 1/1", programmer.removeCalls, programmer.finalizeCalls)
+	}
+	if len(reconciler.Applied) != 0 {
+		t.Fatalf("applied policies after startup sync = %#v, want empty", reconciler.Applied)
+	}
+}
+
+func TestServiceRouteStartupSyncRemovalFailureKeepsGateClosed(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := networkv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := cloudv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	programmer := &retryRouteProgrammer{failRemove: 1, staleAuthorization: true}
+	deletedPolicy := types.NamespacedName{Namespace: "platform", Name: "deleted-while-offline"}
+	reconciler := &ServiceRoutePolicyReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Programmer: programmer,
+		Applied: map[types.NamespacedName]map[types.NamespacedName]serviceroute.RouteIntent{
+			deletedPolicy: {
+				{Namespace: testServiceRouteTenantNamespace, Name: "consumer"}: {
+					Attachment: types.NamespacedName{Namespace: testServiceRouteTenantNamespace, Name: "consumer"},
+				},
+			},
+		},
+	}
+
+	err := reconciler.syncAllPolicies(context.Background())
+	if err == nil {
+		t.Fatal("syncAllPolicies succeeded, want injected removal failure")
+	}
+	if !startupSyncNeedsRetry(err) {
+		t.Fatalf("startup sync error %v is not retryable", err)
+	}
+	if programmer.finalizeCalls != 0 || !programmer.staleAuthorization {
+		t.Fatalf("Finalize calls/stale authorization after removal failure = %d/%t, want 0/true",
+			programmer.finalizeCalls, programmer.staleAuthorization)
+	}
+}
+
+func TestServiceRouteStartupPermanentApplyFailureDoesNotRetryFinalizedGlobalSync(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := networkv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := cloudv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const node = "node-a"
+	policy := &networkv1alpha1.ServiceRoutePolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "a-bad", UID: "bad-policy-uid"},
+		Spec: networkv1alpha1.ServiceRoutePolicySpec{
+			ServiceRef:         networkv1alpha1.ServiceEndpointReference{Name: "dns"},
+			AttachmentSelector: metav1.LabelSelector{MatchLabels: map[string]string{"access": "bad"}},
+		},
+	}
+	goodPolicy := policy.DeepCopy()
+	goodPolicy.Name = "z-good"
+	goodPolicy.UID = "good-policy-uid"
+	goodPolicy.Spec.AttachmentSelector.MatchLabels["access"] = "good"
+	endpoint := &networkv1alpha1.ServiceEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "platform", Name: "dns", UID: "endpoint-uid"},
+		Spec: networkv1alpha1.ServiceEndpointSpec{
+			Address: "10.0.0.53", Protocol: networkv1alpha1.NetworkRuleProtocolUDP, Port: 53,
+			DeliveryMode:       networkv1alpha1.ServiceEndpointDeliveryModeNodeLocal,
+			AttachmentSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"producer": "yes"}},
+		},
+	}
+	readyAttachment := func(namespace, name, host string, labels map[string]string) *cloudv1alpha1.VPCAttachment {
+		return &cloudv1alpha1.VPCAttachment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, UID: types.UID(name + "-uid"), Generation: 1, Labels: labels},
+			Status: cloudv1alpha1.VPCAttachmentStatus{
+				ObservedGeneration: 1, Node: node, VPC: "vpc-a", VPCAttachment: "attachment-" + name,
+				HostInterface: host,
+				Conditions: []metav1.Condition{
+					{Type: cloudv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue},
+					{Type: cloudv1alpha1.ConditionTypeProgrammed, Status: metav1.ConditionTrue},
+				},
+			},
+		}
+	}
+	consumer := readyAttachment("tenant", "consumer", "consumer0", map[string]string{"access": "bad"})
+	goodConsumer := readyAttachment("tenant", "good-consumer", "consumer1", map[string]string{"access": "good"})
+	producer := readyAttachment("service", "producer", "producer0", map[string]string{"producer": "yes"})
+	programmer := &retryRouteProgrammer{failAttachment: consumer.Name, staleAuthorization: true}
+	reconciler := &ServiceRoutePolicyReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+			policy, goodPolicy, endpoint, consumer, goodConsumer, producer,
+		).Build(),
+		NodeName:   node,
+		Programmer: programmer,
+	}
+
+	if err := reconciler.runStartupSync(context.Background()); err != nil {
+		t.Fatalf("runStartupSync: %v", err)
+	}
+	if programmer.applyCalls != 2 {
+		t.Fatalf("Apply calls = %d, want 2 (independent policy was not attempted)", programmer.applyCalls)
+	}
+	if programmer.finalizeCalls != 1 || programmer.staleAuthorization {
+		t.Fatalf("Finalize calls/stale authorization = %d/%t, want 1/false",
+			programmer.finalizeCalls, programmer.staleAuthorization)
+	}
+	if programmer.initializeCalls != 1 {
+		t.Fatalf("Initialize calls = %d, want one global sync attempt", programmer.initializeCalls)
+	}
+	if _, retained := reconciler.Applied[types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}]; retained {
+		t.Fatal("failed policy retained desired refs and would be exempt from sweep")
+	}
+	if _, retained := reconciler.Applied[types.NamespacedName{Namespace: goodPolicy.Namespace, Name: goodPolicy.Name}]; !retained {
+		t.Fatal("independent valid policy was not retained after another policy failed")
+	}
+
+	rollbackFailure := errors.New("rollback cleanup failed")
+	blockedProgrammer := &retryRouteProgrammer{
+		failAttachment: consumer.Name,
+		cleanupErr:     rollbackFailure,
+	}
+	blockedReconciler := &ServiceRoutePolicyReconciler{
+		Client:     reconciler.Client,
+		NodeName:   node,
+		Programmer: blockedProgrammer,
+	}
+	err := blockedReconciler.syncAllPolicies(context.Background())
+	if err == nil || !errors.Is(err, rollbackFailure) || !startupSyncNeedsRetry(err) {
+		t.Fatalf("syncAllPolicies error = %v, want retryable rollback failure", err)
+	}
+	if blockedProgrammer.finalizeCalls != 0 {
+		t.Fatalf("Finalize calls with unresolved rollback = %d, want 0", blockedProgrammer.finalizeCalls)
 	}
 }
 

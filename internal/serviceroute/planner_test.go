@@ -6,6 +6,7 @@ package serviceroute
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,6 +77,112 @@ func TestCompilePreferNodeLocalIgnoresInputOrder(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Kind != RouteIntentLocal || got[0].ServiceDevice != "local0" {
 		t.Fatalf("intents = %+v, want one local intent through local0", got)
+	}
+}
+
+func TestCompileDirectVIPSelectsOneExactLocalProducer(t *testing.T) {
+	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	first := readyAttachment(
+		"service", "a-producer", "first-uid", testNodeName, "producer-a", testLabels(testProducerLabel, "yes"),
+	)
+	last := readyAttachment(
+		"service", "z-producer", "last-uid", testNodeName, "producer-z", testLabels(testProducerLabel, "yes"),
+	)
+	first.Status.VPC = "service-vpc-a"
+	last.Status.VPC = "service-vpc-z"
+
+	got, err := Compile(
+		policy, endpoint, []*cloudv1alpha1.VPCAttachment{last, consumer, first}, testNodeName, nil,
+	)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	wantProducer := types.NamespacedName{Namespace: first.Namespace, Name: first.Name}
+	if len(got) != 1 || got[0].Kind != RouteIntentLocal || got[0].ProducerAttachment != wantProducer ||
+		got[0].ServiceDevice != first.Status.HostInterface {
+		t.Fatalf("intents = %+v, want one local intent through %s on %s", got, wantProducer, first.Status.HostInterface)
+	}
+	if got[0].Service.String() != endpoint.Spec.Address+"/128" {
+		t.Fatalf("service destination = %s, want declared endpoint %s/128 unchanged", got[0].Service, endpoint.Spec.Address)
+	}
+}
+
+func TestCompileRejectsAmbiguousProducerTopology(t *testing.T) {
+	policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+	consumer := readyAttachment(
+		"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+	)
+	first := readyAttachment(
+		"service", "a-producer", "first-uid", testNodeName, "producer-a", testLabels(testProducerLabel, "yes"),
+	)
+	last := readyAttachment(
+		"service", "z-producer", "last-uid", testNodeName, "producer-z", testLabels(testProducerLabel, "yes"),
+	)
+
+	_, err := Compile(
+		policy, endpoint, []*cloudv1alpha1.VPCAttachment{last, consumer, first}, testNodeName, nil,
+	)
+	if err == nil {
+		t.Fatal("Compile succeeded with two ready producers on the same node and VPC")
+	}
+	for _, want := range []string{
+		"service/a-producer", "service/z-producer", `node "node-a"`, `VPC "vpc-node-a"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Compile error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+func TestCompileAllowsDistinguishableProducerTopologies(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(first, last *cloudv1alpha1.VPCAttachment)
+	}{
+		{
+			name: "different nodes",
+			configure: func(_ *cloudv1alpha1.VPCAttachment, last *cloudv1alpha1.VPCAttachment) {
+				last.Status.Node = testRemoteNodeName
+				last.Status.VPC = "vpc-" + testRemoteNodeName
+			},
+		},
+		{
+			name: "different VPCs on one node",
+			configure: func(first, last *cloudv1alpha1.VPCAttachment) {
+				first.Status.VPC = "service-vpc-a"
+				last.Status.VPC = "service-vpc-z"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, endpoint := testPolicyAndEndpoint(networkv1alpha1.ServiceEndpointDeliveryModePreferNodeLocal)
+			consumer := readyAttachment(
+				"tenant", "consumer", "consumer-uid", testNodeName, "consumer0", testLabels(testAccessLabel, "yes"),
+			)
+			first := readyAttachment(
+				"service", "a-producer", "first-uid", testNodeName, "producer-a", testLabels(testProducerLabel, "yes"),
+			)
+			last := readyAttachment(
+				"service", "z-producer", "last-uid", testNodeName, "producer-z", testLabels(testProducerLabel, "yes"),
+			)
+			tt.configure(first, last)
+
+			got, err := Compile(
+				policy, endpoint, []*cloudv1alpha1.VPCAttachment{last, consumer, first}, testNodeName,
+				func(*cloudv1alpha1.VPCAttachment) (net.IP, error) { return net.ParseIP("fd00::b"), nil },
+			)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			wantProducer := types.NamespacedName{Namespace: first.Namespace, Name: first.Name}
+			if len(got) != 1 || got[0].ProducerAttachment != wantProducer {
+				t.Fatalf("intents = %+v, want selected producer %s", got, wantProducer)
+			}
+		})
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
+	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
@@ -177,7 +178,6 @@ func RegisterDatapath(pinDir string, r Registration) (registered bool, err error
 	if err := registerEgressKind(pinDir, hostIfindex, egressKind); err != nil {
 		return false, err
 	}
-
 	// Attach usid_egress to this attachment's host-side interface. This is
 	// what translates a reply's source address on the way back out.
 	hostName := intf.GenerateInterfaceNameHost(r.VPC, r.VPCAttachment)
@@ -299,8 +299,17 @@ func attachUsidEgress(pinDir, ifaceName string) error {
 		return fmt.Errorf("load pinned usid_egress program: %w", err)
 	}
 	defer func() { _ = program.Close() }()
+	identityMap, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapAttachmentIdentityTable), nil)
+	if err != nil {
+		return fmt.Errorf("load pinned attachment identity map: %w", err)
+	}
+	defer func() { _ = identityMap.Close() }()
+	link, err := netlink.LinkByName(ifaceName)
+	if err != nil {
+		return fmt.Errorf("resolve host interface for identity: %w", err)
+	}
 
-	return attach.AttachEgress(serviceProgram, program, ifaceName)
+	return attach.AttachEgressWithIdentity(serviceProgram, program, identityMap, uint32(link.Attrs().Index), ifaceName)
 }
 
 // HostPrefix returns ip as a host prefix, "/32" for IPv4 and "/128" for IPv6,
