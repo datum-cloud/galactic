@@ -259,8 +259,11 @@ spec:
         # 10 minutes: the queue drops over 1% of its packets while no more than
         # half of the interface's queues drop that much (a burst spreads across
         # queues, and a single-queue uplink is all of its own queues so it
-        # cannot fire), and the queue receives over 10 packets a second (so a
-        # handful of drops on an idle queue does not count). Idle queues count
+        # cannot fire), and the queue either delivers over 10 packets a second
+        # (so a handful of drops on an idle queue does not count) or delivers
+        # none while discarding. That second case is a queue that has stopped
+        # entirely, which is unambiguous at any rate; the floor alone measures
+        # delivered packets, which a dead queue has none of. Idle queues count
         # as queues of the interface. Only drivers that count discards per
         # queue report them, bnxt_en among them.
         - alert: GalacticNatUplinkRxQueueStalled
@@ -289,7 +292,15 @@ spec:
               )
             )
             and
-            rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) > 10
+            (
+              rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) > 10
+              or
+              (
+                rate(galactic_nat_uplink_rx_queue_packets_total{job="galactic-nat"}[5m]) == 0
+                and
+                rate(galactic_nat_uplink_rx_queue_discards_total{job="galactic-nat"}[5m]) > 0
+              )
+            )
           for: 10m
           labels:
             severity: critical
