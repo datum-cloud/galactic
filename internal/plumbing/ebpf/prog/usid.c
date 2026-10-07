@@ -782,8 +782,8 @@ struct {
 // cannot describe a VPC mixing tap and veth attachments on one node.
 //
 // A separate map rather than a field on ifindex_vrf_value: changing a pinned
-// map's layout makes the loader recreate every map empty, wiping live routing
-// state on every node until each attachment is re-added.
+// map's layout makes the loader recreate that map empty, and ifindex_vrf_table's
+// rows come back only when each attachment is re-added.
 //
 // A miss uses plain bpf_redirect, which delivers to either kind. Into a veth it
 // transmits on the host-side end, whose xmit forwards into the peer's
@@ -951,7 +951,7 @@ struct mss_clamp_value {
 //
 // Its own map rather than a field on any existing one, so adding it does not
 // change an existing pinned map's layout. That would make the loader recreate
-// every pinned map empty (see attach.Load).
+// that map empty (see attach.Load).
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
@@ -961,7 +961,7 @@ struct {
 
 // enum mss_clamp_stat indexes mss_clamp_stats, which is observability only.
 // Not drop_reasons slots, for the same reason mss_clamp_table is its own map:
-// growing drop_reasons' entry count would recreate every pinned map.
+// growing drop_reasons' entry count would recreate it empty.
 enum mss_clamp_stat {
 	// A SYN's MSS was above the limit and was rewritten to it.
 	MSS_CLAMP_STAT_CLAMPED_IPV4 = 0,
@@ -990,7 +990,7 @@ enum mss_clamp_stat {
 
 // mss_clamp_stats is sized above __MSS_CLAMP_STAT_COUNT on purpose. A new stat
 // then fits in the existing map, rather than changing the pinned map's entry
-// count and recreating every map with it.
+// count and recreating it empty.
 #define USID_MSS_CLAMP_STATS_SLOTS 16
 
 struct {
