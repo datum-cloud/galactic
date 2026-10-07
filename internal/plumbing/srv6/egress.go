@@ -15,6 +15,11 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 )
 
+// ErrNoShardResolvable is wrapped by EgressPrefixRouteAdd and
+// EgressPrefixRouteAddTo when not one configured shard SID has a resolvable
+// route and neighbor.
+var ErrNoShardResolvable = errors.New("no egress shard SID is resolvable")
+
 // pinDir is the bpffs directory the egress route helpers open
 // egress_route_table from. A package var so tests can redirect it and avoid
 // needing a real bpffs mount or root.
@@ -137,8 +142,8 @@ func EgressPrefixRouteAddTo(
 		}
 		return nil
 	}
-	return fmt.Errorf("no egress shard SID is resolvable yet for %s, out of %d configured: %w",
-		prefix, len(shardSIDs), errors.Join(unresolved...))
+	return fmt.Errorf("%w yet for %s, out of %d configured: %w",
+		ErrNoShardResolvable, prefix, len(shardSIDs), errors.Join(unresolved...))
 }
 
 // EgressDefaultRouteDel removes egress_route_table's default (::/0) entry for

@@ -519,7 +519,7 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	}
 	if len(routers) == 0 {
 		// A node with any live eBPF-registered attachment necessarily has a
-		// BGPRouter targeting it, since registerEBPFDatapath requires one.
+		// BGPRouter targeting it, since attachreg.RegisterDatapath requires one.
 		// Finding none is indistinguishable from a transient listing hiccup or
 		// a router just renamed, so it must not read as "genuinely nothing is
 		// live": that would fold every entry into the stale case and wipe the
@@ -602,11 +602,11 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 	}
 
 	// Repair entries a live BGPVRFInstance expects but vrf_table lacks. A
-	// reload that changes vrf_table's layout recreates it empty, and nothing
-	// repopulates a pre-existing attachment: registerEBPFDatapath runs once,
-	// at CNI ADD, and is never re-invoked for an attachment that already
-	// succeeded. Reconcile above only deletes, so this is vrf_table's only
-	// self-healing path.
+	// reload that changes vrf_table's layout recreates it empty, and CNI ADD
+	// never re-registers an attachment that already succeeded.
+	// RepairAttachmentDatapath, started on the same tick, rebuilds them from
+	// each attachment's interface; this covers a VRF it skipped, such as one
+	// whose attachment interface is mid-replacement.
 	for key, instName := range liveCRDNames {
 		if _, ok := existingKeys[key]; ok {
 			continue // already present -- Reconcile above is what handles this one
@@ -648,10 +648,9 @@ func SweepEBPFVRFTable(ctx context.Context, k8s client.Client, namespace, nodeNa
 
 	// vpc_attribution_table shares vrf_table's exact (Block, Argument) key
 	// and lifecycle (see its own doc comment in usid.c), so it reconciles
-	// against the same live set and cutoff captured above. It has no repair
-	// step of its own: a missing row only reports as unattributed
-	// (internal/plumbing/ebpf/metrics) until the next CNI ADD/DEL repopulates
-	// it.
+	// against the same live set and cutoff captured above. A missing row is
+	// rebuilt by RepairAttachmentDatapath, not here; until then it reports as
+	// unattributed (internal/plumbing/ebpf/metrics).
 	attrRemoved, attrErr := reg.VPCAttribution.Reconcile(live, cutoff)
 	for _, e := range attrRemoved {
 		slog.Info("GC: removed stale eBPF vpc_attribution_table entry", "block", e.Block, "argument", e.Argument)

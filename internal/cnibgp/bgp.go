@@ -9,9 +9,10 @@
 // does not own; host-interface gateway configuration lives in internal/hostgw,
 // called directly by the master plugins.
 //
-// The eBPF registration itself lives in internal/plumbing/ebpf/attachreg. Two
-// narrow exceptions there touch kernel state on this plugin's behalf. It
-// resolves the host-side interface's ifindex with a read-only
+// The eBPF registration itself lives in internal/plumbing/ebpf/attachreg,
+// which the galactic-cni daemon also uses to rebuild rows a map recreation has
+// lost. Two narrow exceptions there touch kernel state on this plugin's
+// behalf. It resolves the host-side interface's ifindex with a read-only
 // netlink.LinkByName to key its ifindex_vrf_table row, because the interface
 // name is deterministic. It writes the VRF's shard egress routes, because the
 // optional routing plugin in this chain may be absent from a conflist and the

@@ -7,6 +7,7 @@ package egressroutemap
 import (
 	"net"
 	"net/netip"
+	"reflect"
 	"testing"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
@@ -378,5 +379,33 @@ func TestPublicUplink_SetRejectsWrongLengthMAC(t *testing.T) {
 	}
 	if err := p.Set(7, valid, short); err == nil {
 		t.Error("Set with a 3-byte smac = nil error, want an error")
+	}
+}
+
+// TestEgressRouteTable_PrefixesListsExactEntriesByTable covers the
+// existence check a repair relies on: a prefix covered by ::/0 is not
+// reported unless it has an entry of its own, and each table's entries are
+// kept apart.
+func TestEgressRouteTable_PrefixesListsExactEntriesByTable(t *testing.T) {
+	tbl := NewEgressRouteTable(newFakeTable())
+	for _, p := range []string{"::/0", "fd20:30:ff01::/96", "10.1.0.5/32"} {
+		if err := tbl.RegisterPassThrough(7, mustCIDR(t, p)); err != nil {
+			t.Fatalf("RegisterPassThrough(7, %s): %v", p, err)
+		}
+	}
+	if err := tbl.RegisterPassThrough(8, mustCIDR(t, "fd20:40::/96")); err != nil {
+		t.Fatalf("RegisterPassThrough(8): %v", err)
+	}
+
+	all, err := tbl.Prefixes()
+	if err != nil {
+		t.Fatalf("Prefixes(): %v", err)
+	}
+	want := map[uint32]map[string]struct{}{
+		7: {"::/0": {}, "fd20:30:ff01::/96": {}, "10.1.0.5/32": {}},
+		8: {"fd20:40::/96": {}},
+	}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("Prefixes() = %v, want %v", all, want)
 	}
 }

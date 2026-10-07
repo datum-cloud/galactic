@@ -327,13 +327,13 @@ func registerLocalEgressRoutes(pinDir string, vrfTableID uint32, prefixes []stri
 type routeExistsFn func(prefix *net.IPNet) (bool, error)
 
 // registerLocalEgressRoutesIn registers each of prefixes not skipped by exists
-// as a local pass-through entry in Linux VRF table vrfTableID, and returns how
-// many it wrote. A prefix that does not parse is a hard error rather than a
+// as a local pass-through entry in Linux VRF table vrfTableID, and returns the
+// prefixes it wrote. A prefix that does not parse is a hard error rather than a
 // silent skip: every caller builds them with a CIDR String or HostPrefix.
 func registerLocalEgressRoutesIn(
 	table *egressroutemap.EgressRouteTable, vrfTableID uint32, prefixes []string, exists routeExistsFn,
-) (int, error) {
-	written := 0
+) ([]*net.IPNet, error) {
+	var written []*net.IPNet
 	for _, p := range prefixes {
 		_, prefix, err := net.ParseCIDR(p)
 		if err != nil {
@@ -351,7 +351,7 @@ func registerLocalEgressRoutesIn(
 		if err := table.RegisterPassThrough(vrfTableID, prefix); err != nil {
 			return written, fmt.Errorf("register local pass-through route for %s: %w", p, err)
 		}
-		written++
+		written = append(written, prefix)
 	}
 	return written, nil
 }

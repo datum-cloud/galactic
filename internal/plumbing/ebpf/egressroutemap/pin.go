@@ -40,7 +40,7 @@ func OpenPinnedNodeSourceAddress(pinDir string) (*NodeSourceAddress, io.Closer, 
 		return nil, nil, fmt.Errorf("egressroutemap: open pinned map %q under %q: %w",
 			prog.UsidMapNodeSrcAddrTable, pinDir, err)
 	}
-	return &NodeSourceAddress{table: usidmap.KernelTable{Map: m}}, m, nil
+	return NewNodeSourceAddress(usidmap.KernelTable{Map: m}), m, nil
 }
 
 // OpenPinnedPublicUplink opens public_uplink_table from its pinned path under
@@ -52,5 +52,5 @@ func OpenPinnedPublicUplink(pinDir string) (*PublicUplink, io.Closer, error) {
 		return nil, nil, fmt.Errorf("egressroutemap: open pinned map %q under %q: %w",
 			prog.UsidMapPublicUplinkTable, pinDir, err)
 	}
-	return &PublicUplink{table: usidmap.KernelTable{Map: m}}, m, nil
+	return NewPublicUplink(usidmap.KernelTable{Map: m}), m, nil
 }

@@ -59,7 +59,8 @@ CNI config and acts on them.
 
 Each attachment endpoint is assigned a /128 USID (Unique Local SID, RFC 8986
 Section 3.2). There is no companion-operator-injected `srv6_sid` NAD/config
-field: `galactic-bgp` (`internal/cnibgp/bgp.go`'s `registerEBPFDatapath`)
+field: `galactic-bgp` (`internal/cnibgp/bgp.go`'s `registerEBPFDatapath`,
+which calls `internal/plumbing/ebpf/attachreg`'s `RegisterDatapath`)
 derives the uSID `Block` from the node's `BGPRouter.spec.srv6Locator` via
 `uformat.Block`, and registers `locator_table`/`function_table`/`vrf_table`
 entries keyed on that `Block` plus this attachment's `Argument` (its
@@ -70,6 +71,30 @@ is the only ingress/decap path (see Known Constraints below for the cutover
 history). If the router lacks either `srv6Locator` or `nodeID`, eBPF
 registration is skipped entirely for that attachment (`registerEBPFDatapath`
 returns `registered=false`, not an error).
+
+CNI ADD is the only writer of an attachment's rows, and of this node's own
+`locator_table`, `function_table`, `node_src_addr_table` and
+`public_uplink_table` rows, so a map recreated empty by a layout change or a
+lost pin would otherwise stay empty until every workload re-attaches.
+`galactic-cni run` rebuilds every missing row
+(`internal/gc/datapath_repair.go`'s `RepairAttachmentDatapath`, through the
+same `attachreg` helpers ADD uses), always off the daemon's main loop: once
+right after the datapath loads, retried while a pass fails or finds
+attachments whose `BGPRouter` or `BGPVRFInstance` has not appeared yet (the
+latter for up to ten minutes), and again on every eBPF GC tick. It finds
+attachments by their host interface name and VRF master, takes the routing
+table and egress kind from the kernel, the guest prefixes from the pod-subnet
+routes out that interface and the gateways from its own addresses, and the
+Block and Argument from the `BGPRouter` and `BGPVRFInstance`. It only writes a
+row that is missing, and never one under the ingress sidecar's Block. The
+sidecar return path's tables are excluded by their reserved table ID range,
+since the sidecar's own `vrf_table` rows that also mark them may be among the
+rows lost. A VPC's shared `vrf_table` and `vpc_attribution_table` rows are
+rebuilt from its lowest-ifindex attachment, while ADD leaves whichever
+attachment registered last, so those two may differ from before the loss;
+delivery reads the per-interface `ifindex_egress_kind_table` row, which is
+exact. Once no egress shard resolves, a pass skips the remaining VRFs' shard
+routes rather than wait out each one's neighbor solicitation.
 
 `galactic-router`'s own reconciler independently derives the *same* SID value
 from the same inputs (`srv6.ComputeSID`, `internal/plumbing/srv6/usid.go`,

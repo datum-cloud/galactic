@@ -275,6 +275,12 @@ sequenceDiagram
 
 ### Notes
 
+- **Missing rows are rebuilt alongside.** The same tick starts
+  `RepairAttachmentDatapath` (`internal/gc/datapath_repair.go`) off the main
+  loop, which writes back every row CNI ADD wrote that a recreated map has
+  lost, from kernel state and the CRDs. It also runs when the datapath loads.
+  The two need no ordering: this sweep reaps only keys no live
+  `BGPVRFInstance` names, and the repair writes keys for live ones only.
 - **This is a reconcile against a generation cutoff, not a two-list diff.**
   `Generation()` is captured *before* `BGPVRFInstance`s are listed. A CNI ADD
   that registers a brand-new entry (`registerEBPFDatapath`, see
