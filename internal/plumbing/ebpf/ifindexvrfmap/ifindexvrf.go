@@ -17,6 +17,26 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 )
 
+// SidecarIfindexBase splits the interface index space of ifindex_vrf_table
+// between its two writers. The ingress sidecar creates every interface it
+// registers with an explicit index of SidecarIfindexBase plus that VRF's uSID
+// Argument, and the host registers only indexes below it.
+//
+// Each network namespace numbers its interfaces on its own, from 1 upward,
+// but the sidecar registers indexes from its pod's namespace into the same
+// pinned map the host CNI writes host indexes into. Without disjoint ranges, a
+// sidecar interface and a host interface with the same index overwrite each
+// other's row, and usid_egress routes one's traffic into the other's VRF.
+//
+// A host namespace allocates indexes sequentially and never gets near 2^30.
+const SidecarIfindexBase = uint32(0x40000000)
+
+// SidecarIfindex returns the interface index the ingress sidecar gives the
+// interface it registers for the VRF whose uSID Argument is argument.
+func SidecarIfindex(argument uint16) uint32 {
+	return SidecarIfindexBase + uint32(argument)
+}
+
 // IfindexVRFEntry is one decoded ifindex_vrf_table row, kept separate from the
 // generated kernel layout.
 type IfindexVRFEntry struct {
@@ -75,6 +95,9 @@ func (t *IfindexVRFTable) Register(ifindex uint32, block uint64, argument uint16
 	if err := uformat.ValidateArgument(argument); err != nil {
 		return fmt.Errorf("ifindexvrfmap: ifindex_vrf_table: register ifindex=%d: %w", ifindex, err)
 	}
+	if err := validateIfindexOwner(ifindex, block, argument); err != nil {
+		return fmt.Errorf("ifindexvrfmap: ifindex_vrf_table: register ifindex=%d: %w", ifindex, err)
+	}
 
 	value := prog.UsidIfindexVrfValue{Block: block, Argument: argument}
 	if err := t.table.Put(ifindex, value); err != nil {
@@ -84,6 +107,23 @@ func (t *IfindexVRFTable) Register(ifindex uint32, block uint64, argument uint16
 	t.mu.Lock()
 	t.generation[ifindex] = t.clock()
 	t.mu.Unlock()
+	return nil
+}
+
+// validateIfindexOwner rejects a registration that would cross into the other
+// writer's index range; see SidecarIfindexBase. The ingress sidecar registers
+// only under uformat.BlockIngressSidecar, so the Block identifies the writer.
+func validateIfindexOwner(ifindex uint32, block uint64, argument uint16) error {
+	if block == uformat.BlockIngressSidecar {
+		if want := SidecarIfindex(argument); ifindex != want {
+			return fmt.Errorf("ingress sidecar interface for argument %#x must have index %d", argument, want)
+		}
+		return nil
+	}
+	if ifindex >= SidecarIfindexBase {
+		return fmt.Errorf("host interface index is in the range reserved for the ingress sidecar (>= %d)",
+			SidecarIfindexBase)
+	}
 	return nil
 }
 

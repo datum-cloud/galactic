@@ -71,9 +71,9 @@ import (
 const (
 	// sidecarReturnTableBase and sidecarReturnTableMax bound the Linux routing
 	// table IDs this file allocates from. A dedicated range matters twice:
-	// tenant VRF table IDs are handed out from 1 upward, so anything low would
-	// eventually collide, and pruning deletes whole tables, which must never
-	// reach one this file did not create.
+	// tenant VRF table IDs are handed out up to vrf.HostTableIDMax, so anything
+	// at or below it would collide, and pruning deletes whole tables, which
+	// must never reach one this file did not create.
 	//
 	// Sized to hold one table per Argument, the most sidecar VRFs a node can
 	// have.

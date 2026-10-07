@@ -5,6 +5,7 @@
 package ingresssidecar
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -67,7 +68,11 @@ type kernelBackend struct{}
 func NewKernelBackend() Backend { return kernelBackend{} }
 
 func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
-	if err := vrf.Add(vpc); err != nil {
+	if err := vrf.AddInRange(vpc, sidecarTableIDMin, sidecarTableIDMax); err != nil {
+		if errors.Is(err, vrf.ErrTableOutOfRange) {
+			return 0, fmt.Errorf("create VRF for vpc %s: %w; an older sidecar created it in this pod, "+
+				"so replace the pod rather than restarting the container", vpc, err)
+		}
 		return 0, fmt.Errorf("create VRF for vpc %s: %w", vpc, err)
 	}
 	tableID, err := vrf.TableID(vpc)

@@ -24,9 +24,10 @@ import (
 //
 // Nothing in egress_route_table's own key or value records who wrote an entry,
 // and its key carries only a routing table ID, which each namespace allocates
-// from 1 upward independently. vrf_table does record it: the sidecar registers
-// every VRF it serves under uformat.BlockIngressSidecar, a Block no CNI
-// attachment can reach, and does so before installing any route into that
+// independently, from disjoint ranges (see vrf.SidecarTableIDBase), so a
+// table ID belongs to one writer only. vrf_table records which: the sidecar
+// registers every VRF it serves under uformat.BlockIngressSidecar, a Block no
+// CNI attachment can reach, and does so before installing any route into that
 // table. Reading those rows back is therefore enough to tell the two
 // populations apart without a second copy of the ownership state.
 func SidecarOwnedTableIDs(vrfTable *usidmap.VRFTable) (map[uint32]struct{}, error) {

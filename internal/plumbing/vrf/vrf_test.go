@@ -510,3 +510,30 @@ func TestListVRFLinks_SurvivesLinkChurn(t *testing.T) {
 		}
 	}
 }
+
+// TestAddInRange_AllocatesInsideTheRange covers the ingress sidecar's use of
+// AddInRange: its VRFs must take table IDs from its own range, never the
+// host's.
+func TestAddInRange_AllocatesInsideTheRange(t *testing.T) {
+	requireRoot(t)
+	const vpc = "vtrng"
+	t.Cleanup(func() { _ = vrf.Delete(vpc) })
+
+	minID, maxID := vrf.SidecarTableIDBase+1, vrf.SidecarTableIDBase+0xFFF
+	if err := vrf.AddInRange(vpc, minID, maxID); err != nil {
+		t.Fatalf("AddInRange: %v", err)
+	}
+	tableID, err := vrf.TableID(vpc)
+	if err != nil {
+		t.Fatalf("TableID: %v", err)
+	}
+	if tableID < minID || tableID > maxID {
+		t.Fatalf("table ID %d outside [%d,%d]", tableID, minID, maxID)
+	}
+
+	// The same VPC from a caller with a different range is an error, not a
+	// silent reuse of a table that may belong to the other writer.
+	if err := vrf.Add(vpc); !errors.Is(err, vrf.ErrTableOutOfRange) {
+		t.Fatalf("Add of a VRF whose table %d is outside the host range = %v, want ErrTableOutOfRange", tableID, err)
+	}
+}

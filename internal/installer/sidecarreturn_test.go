@@ -160,6 +160,20 @@ func TestSidecarReturnTableID_StaysInTheReservedRange(t *testing.T) {
 	}
 }
 
+// TestSidecarReturnTableRange_SitsBetweenVRFRanges checks that the return-path
+// tables, which live in the host namespace, overlap neither the host's tenant
+// VRF tables nor the ingress sidecar's.
+func TestSidecarReturnTableRange_SitsBetweenVRFRanges(t *testing.T) {
+	if sidecarReturnTableBase <= vrf.HostTableIDMax {
+		t.Errorf("sidecarReturnTableBase %#x overlaps host VRF tables up to %#x",
+			sidecarReturnTableBase, vrf.HostTableIDMax)
+	}
+	if sidecarReturnTableMax >= vrf.SidecarTableIDBase {
+		t.Errorf("sidecarReturnTableMax %#x reaches the sidecar's VRF tables from %#x",
+			sidecarReturnTableMax, vrf.SidecarTableIDBase)
+	}
+}
+
 // TestSidecarReturnTableID_RejectsOutOfRange guards the other direction. A
 // zero Argument is the reserved value uformat excludes, and anything past
 // ArgumentMax cannot have arrived in a SID at all -- either would compute a

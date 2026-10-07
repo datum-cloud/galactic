@@ -56,22 +56,31 @@ var ebpfPinDir = attach.PinDir
 // real locator the way the CNI path does.
 const ingressSidecarBlock = uformat.BlockIngressSidecar
 
+// Routing table IDs this sidecar allocates its VRFs from: the range just above
+// vrf.SidecarTableIDBase, one per possible uSID Argument. Disjoint from the
+// host's range, because egress_route_table is keyed by table ID alone and both
+// namespaces write it; see vrf.SidecarTableIDBase.
+const (
+	sidecarTableIDMin = vrf.SidecarTableIDBase + uint32(uformat.ArgumentMin)
+	sidecarTableIDMax = vrf.SidecarTableIDBase + uint32(uformat.ArgumentMax)
+)
+
 // argumentForTableID derives the uSID Argument for a VPC's VRF from its Linux
-// routing table ID rather than allocating a separate value. The table ID is
-// already unique per VPC on this node, which is the only property Argument
-// needs here, so reusing it avoids a second allocator.
+// routing table ID rather than allocating a separate value: the table ID's
+// offset from vrf.SidecarTableIDBase. The table ID is already unique per VPC
+// in this pod, which is the only property Argument needs here, so reusing it
+// avoids a second allocator.
 //
-// Fails if tableID does not fit Argument's 12-bit range. Table IDs are
-// allocated from 1 upward, so this needs about 4095 live VPCs on one node, but
-// a silently aliased Argument would be a cross-VPC datapath bug rather than a
+// Fails if tableID is outside [sidecarTableIDMin, sidecarTableIDMax]. A
+// silently aliased Argument would be a cross-VPC datapath bug rather than a
 // safe fallback.
 func argumentForTableID(tableID uint32) (uint16, error) {
-	if tableID < uint32(uformat.ArgumentMin) || tableID > uint32(uformat.ArgumentMax) {
+	if tableID < sidecarTableIDMin || tableID > sidecarTableIDMax {
 		return 0, fmt.Errorf(
-			"ingresssidecar: VRF table id %d does not fit uSID Argument's range [%#x,%#x]",
-			tableID, uint16(uformat.ArgumentMin), uint16(uformat.ArgumentMax))
+			"ingresssidecar: VRF table id %d is outside the sidecar's range [%d,%d]",
+			tableID, sidecarTableIDMin, sidecarTableIDMax)
 	}
-	return uint16(tableID), nil
+	return uint16(tableID - vrf.SidecarTableIDBase), nil
 }
 
 // vrfLinkForTable returns the kernel VRF link whose routing table is tableID,
@@ -93,8 +102,8 @@ func vrfLinkForTable(tableID uint32) (*netlink.Vrf, error) {
 
 // egressVethNames derives a VPC's veth pair names from tableID alone, since the
 // callers carry only a tableID forward. Collision-free because table IDs are
-// already unique per VPC on this node, and comfortably inside IFNAMSIZ, since a
-// table ID that fits Argument's 12-bit range is at most 4 decimal digits.
+// already unique per VPC in this pod, and comfortably inside IFNAMSIZ, since a
+// table ID in the sidecar's range is at most 5 decimal digits.
 func egressVethNames(tableID uint32) (inner, peer string) {
 	return fmt.Sprintf("ivs%d", tableID), fmt.Sprintf("ivp%d", tableID)
 }
@@ -106,19 +115,29 @@ func egressVethNames(tableID uint32) (inner, peer string) {
 // redoes its route lookup inside the VRF. peer stays outside the VRF, in the
 // pod's main namespace, and is where usid_egress actually attaches.
 //
-// Idempotent: an existing name counts as already done, and the route is
-// replaced rather than added, so it is safe on every call that ensures a
-// VRF.
-func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string) (netlink.Link, error) {
+// peer is created with the explicit interface index peerIndex, because its
+// index keys ifindex_vrf_table, which the host writes its own indexes into;
+// see ifindexvrfmap.SidecarIfindexBase. It is therefore the veth's primary
+// link and inner its peer, since netlink only sets the primary's index.
+//
+// Idempotent: an existing name with the right index counts as already done,
+// and the route is replaced rather than added, so it is safe on every call
+// that ensures a VRF. An existing peer with any other index is an error, since
+// registering it would put a row in the host's index range.
+func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string, peerIndex uint32) (netlink.Link, error) {
 	peerLink, err := netlink.LinkByName(peer)
+	if err == nil && uint32(peerLink.Attrs().Index) != peerIndex {
+		return nil, fmt.Errorf("veth peer %q has index %d, want %d; an older sidecar created it in this pod, "+
+			"so replace the pod rather than restarting the container", peer, peerLink.Attrs().Index, peerIndex)
+	}
 	if err != nil {
 		var notFound netlink.LinkNotFoundError
 		if !errors.As(err, &notFound) {
 			return nil, fmt.Errorf("look up veth peer %q: %w", peer, err)
 		}
 		veth := &netlink.Veth{
-			LinkAttrs: netlink.LinkAttrs{Name: inner},
-			PeerName:  peer,
+			LinkAttrs: netlink.LinkAttrs{Name: peer, Index: int(peerIndex)},
+			PeerName:  inner,
 		}
 		if err := netlink.LinkAdd(veth); err != nil {
 			return nil, fmt.Errorf("add veth pair %q/%q: %w", inner, peer, err)
@@ -279,7 +298,7 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	}
 
 	inner, peer := egressVethNames(tableID)
-	peerLink, err := ensureEgressVeth(vrfLink, inner, peer)
+	peerLink, err := ensureEgressVeth(vrfLink, inner, peer, ifindexvrfmap.SidecarIfindex(argument))
 	if err != nil {
 		return fmt.Errorf("ensure egress veth for VRF table %d: %w", tableID, err)
 	}
@@ -313,7 +332,8 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	defer func() { _ = ifindexCloser.Close() }()
 
 	// Keyed by the veth peer's ifindex, not the VRF's, because usid_egress has
-	// to see this traffic arrive on that interface's ingress hook.
+	// to see this traffic arrive on that interface's ingress hook. That index
+	// is ifindexvrfmap.SidecarIfindex(argument), set by ensureEgressVeth.
 	if err := ifindexTable.Register(uint32(peerLink.Attrs().Index), ingressSidecarBlock, argument); err != nil {
 		return fmt.Errorf("register eBPF ifindex_vrf_table entry: %w", err)
 	}

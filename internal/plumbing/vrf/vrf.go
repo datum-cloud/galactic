@@ -11,7 +11,6 @@ package vrf
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"sync"
 	"time"
@@ -23,8 +22,25 @@ import (
 	"go.datum.net/galactic/internal/plumbing/sysctl"
 )
 
-const minVRFID = uint32(1)
-const maxVRFID = uint32(math.MaxUint32 - 1)
+// SidecarTableIDBase splits the routing table ID space between the two
+// writers of the shared pinned eBPF maps. The host's VRFs take IDs below it,
+// and the ingress sidecar's take IDs above it.
+//
+// Each network namespace allocates table IDs on its own, but
+// egress_route_table is keyed by table ID alone and is shared between the
+// host and every sidecar pod on the node. Without disjoint ranges, a sidecar
+// VRF and a host tenant VRF both start at table 1 and overwrite each other's
+// routes.
+const SidecarTableIDBase = uint32(0x10000)
+
+// HostTableIDMin and HostTableIDMax bound the routing table IDs Add allocates.
+// HostTableIDMax stops short of SidecarTableIDBase: the host's installer keeps
+// its sidecar return-path tables in the host namespace in the IDs between the
+// two (internal/installer/sidecarreturn.go).
+const (
+	HostTableIDMin = uint32(1)
+	HostTableIDMax = uint32(0xEFFF)
+)
 
 // UnreachableDefaultMetric is the metric of the unreachable default route Add
 // installs in every VRF table, for each family. It is the value the kernel's
@@ -43,13 +59,19 @@ const UnreachableDefaultMetric = 4278198272
 // either way.
 var ErrNotFound = errors.New("vrf: no VRF interface for this VPC in this network namespace")
 
+// ErrTableOutOfRange is wrapped by AddInRange when this VPC's VRF already exists
+// with a table ID outside the caller's range, for instance one created by an
+// ingress sidecar version that allocated from the host's range.
+var ErrTableOutOfRange = errors.New("vrf: existing VRF's table is outside the caller's range")
+
 // vrfMu serializes VRF creation and deletion within one process. It does not by
 // itself protect two separate CNI invocations racing on the same node, each
 // being its own process, so Add and Delete also take a cross-process lock.
 var vrfMu sync.Mutex
 
 // Add creates the Linux VRF interface for a base62-encoded VPC, allocating the
-// next available routing table ID and applying the required sysctls.
+// next available routing table ID in [HostTableIDMin, HostTableIDMax] and
+// applying the required sysctls.
 //
 // The VRF is shared by every attachment on this VPC on this node, so concurrent
 // calls, from goroutines here or from separate plugin processes attaching
@@ -62,6 +84,14 @@ var vrfMu sync.Mutex
 // before those existed therefore gains them on its next attachment's ADD,
 // with no migration step.
 func Add(vpc string) error {
+	return AddInRange(vpc, HostTableIDMin, HostTableIDMax)
+}
+
+// AddInRange is Add with the routing table ID allocated from [minID, maxID].
+// A VRF that already exists under this VPC's name with a table ID outside that
+// range is an error: its table may collide with the other writer's, and
+// recreating it would strand whatever is already routed through it.
+func AddInRange(vpc string, minID, maxID uint32) error {
 	vrfMu.Lock()
 	defer vrfMu.Unlock()
 
@@ -78,10 +108,14 @@ func Add(vpc string) error {
 		if !ok {
 			return fmt.Errorf("interface %q exists but is a %s, not a VRF", name, link.Type())
 		}
+		if existing.Table < minID || existing.Table > maxID {
+			return fmt.Errorf("VRF %q has table %d, not in [%d,%d]: %w",
+				name, existing.Table, minID, maxID, ErrTableOutOfRange)
+		}
 		return ensureUnreachableDefaults(existing.Table)
 	}
 
-	vrfID, err := findNextAvailableVRFID()
+	vrfID, err := findNextAvailableVRFID(minID, maxID)
 	if err != nil {
 		return err
 	}
@@ -281,7 +315,7 @@ func listVRFLinks() ([]*netlink.Vrf, error) {
 	return ListVRFLinks()
 }
 
-func findNextAvailableVRFID() (uint32, error) {
+func findNextAvailableVRFID(minID, maxID uint32) (uint32, error) {
 	vrfs, err := listVRFLinks()
 	if err != nil {
 		return 0, err
@@ -291,14 +325,24 @@ func findNextAvailableVRFID() (uint32, error) {
 	for _, vrf := range vrfs {
 		used[vrf.Table] = struct{}{}
 	}
+	return nextFreeTableID(used, minID, maxID)
+}
 
-	for vrfID := minVRFID; vrfID <= maxVRFID; vrfID++ {
-		if _, ok := used[vrfID]; !ok {
-			return vrfID, nil
+// nextFreeTableID returns the lowest table ID in [minID, maxID] that is
+// neither in used nor one of the kernel's reserved tables (253 default, 254
+// main, 255 local). A VRF bound to main would route its tenant through the
+// host's own table.
+func nextFreeTableID(used map[uint32]struct{}, minID, maxID uint32) (uint32, error) {
+	for vrfID := uint64(minID); vrfID <= uint64(maxID); vrfID++ {
+		id := uint32(vrfID)
+		if id == unix.RT_TABLE_DEFAULT || id == unix.RT_TABLE_MAIN || id == unix.RT_TABLE_LOCAL {
+			continue
+		}
+		if _, ok := used[id]; !ok {
+			return id, nil
 		}
 	}
-
-	return 0, errors.New("could not find any available VRF id")
+	return 0, fmt.Errorf("no available VRF table id in [%d,%d]", minID, maxID)
 }
 
 func getVRFIDForInterface(name string) (uint32, error) {
