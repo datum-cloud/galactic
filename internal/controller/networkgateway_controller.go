@@ -6,6 +6,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -17,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -655,12 +658,40 @@ func clearNodeRuleConditions(ctx context.Context, c client.Client, namespace, no
 func withdrawRuleAdvertisements(
 	ctx context.Context, c client.Client, rule *bgpv1alpha1.NetworkRule, node string,
 ) error {
+	return pruneRuleAdvertisements(ctx, c, rule, node, nil)
+}
+
+// pruneRuleAdvertisements deletes every BGPAdvertisement node created for rule
+// whose name is not in keep. It selects by networkRuleLabel and deletes those
+// isNodeAdvertisement accepts for node, so it never deletes another rule/node
+// pair's object by rebuilding a name.
+//
+// It also deletes an advertisement with no gatewayNodeLabel that carries
+// node's legacyRuleAdvertisementName. Releases up to v0.5.3 labelled their
+// advertisements with networkRuleLabel alone, so without this the first
+// release with ruleAdvertisementName would leave each one advertised beside
+// its renamed replacement, and withdrawing the rule from the node would miss
+// it.
+func pruneRuleAdvertisements(
+	ctx context.Context, c client.Client, rule *bgpv1alpha1.NetworkRule, node string, keep map[string]bool,
+) error {
+	advList := &bgpv1alpha1.BGPAdvertisementList{}
+	if err := c.List(ctx, advList,
+		client.InNamespace(rule.Namespace),
+		client.MatchingLabels{networkRuleLabel: rule.Name},
+	); err != nil {
+		return fmt.Errorf("list BGPAdvertisements for NetworkRule %s: %w", rule.Name, err)
+	}
+
 	var errs []error
-	for _, suffix := range []string{"v4", "v6"} {
-		adv := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
-			Namespace: rule.Namespace,
-			Name:      rule.Name + "-" + node + "-" + suffix,
-		}}
+	for i := range advList.Items {
+		adv := &advList.Items[i]
+		if keep[adv.Name] {
+			continue
+		}
+		if !isNodeAdvertisement(adv, node) && !isUnlabelledLegacyAdvertisement(adv, rule.Name, node) {
+			continue
+		}
 		if err := c.Delete(ctx, adv); err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("withdraw BGPAdvertisement %s: %w", adv.Name, err))
 		}
@@ -754,7 +785,10 @@ func routerNameForNode(ctx context.Context, c client.Client, namespace, nodeName
 }
 
 // applyBGPAdvertisements reconciles the BGPAdvertisements for a single rule,
-// one per non-empty VIP address family, with names qualified by r.NodeName.
+// one per non-empty VIP address family, named by ruleAdvertisementName. Once
+// every one is applied, it deletes any other advertisement this node made for
+// the rule: one for a family whose VIPs are gone, or one under a name from an
+// earlier naming scheme.
 //
 // The node qualifier is required. This reconciler runs once per gateway node,
 // and under the anycast model every gateway node advertises every accepted
@@ -799,11 +833,13 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	}
 
 	var firstErr error
+	keep := map[string]bool{}
 	for _, g := range groups {
 		if len(g.prefixes) == 0 {
 			continue
 		}
-		name := rule.Name + "-" + r.NodeName + "-" + g.suffix
+		name := ruleAdvertisementName(rule.Name, r.NodeName, g.suffix)
+		keep[name] = true
 		// Built as l2vpn/evpn whatever the VIP's own family, since the runtime
 		// never originates plain unicast advertisements. The per-family split
 		// still matters because one EVPN IP-Prefix route's Prefix field is
@@ -875,7 +911,12 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 			firstErr = fmt.Errorf("update BGPAdvertisement %s: %w", name, updateErr)
 		}
 	}
-	return firstErr
+	if firstErr != nil {
+		// Leave older advertisements in place until their replacements exist,
+		// so a failed create never leaves the rule unadvertised.
+		return firstErr
+	}
+	return pruneRuleAdvertisements(ctx, r.Client, rule, r.NodeName, keep)
 }
 
 // prefixesByFamily splits vips into IPv4 and IPv6 host-prefix strings
@@ -996,11 +1037,57 @@ func isGatewayNode(ctx context.Context, c client.Client, namespace, nodeName str
 	return false, nil
 }
 
+// ruleAdvertisementHashLen is how many hex characters of a rule/node pair's
+// SHA-256 ruleAdvertisementName keeps.
+const ruleAdvertisementHashLen = 10
+
+// ruleAdvertisementName returns the name of the BGPAdvertisement node creates
+// for rule's family ("v4" or "v6"): a readable "<rule>-<node>" prefix, a short
+// hash of the rule and node names, and the family.
+//
+// The hash is what keeps names distinct. Both names may contain dashes, so
+// "<rule>-<node>" alone maps rule "a-b" on node "c" and rule "a" on node "b-c"
+// to the same name, and the two nodes would then fight over one object (issue
+// #762). The hash input joins the names with "/", which neither can contain.
+// The prefix is cut to keep the result within an object name's 253 characters
+// and trimmed to end in an alphanumeric.
+func ruleAdvertisementName(rule, node, family string) string {
+	sum := sha256.Sum256([]byte(rule + "/" + node))
+	suffix := "-" + hex.EncodeToString(sum[:])[:ruleAdvertisementHashLen] + "-" + family
+	prefix := rule + "-" + node
+	if maxPrefix := validation.DNS1123SubdomainMaxLength - len(suffix); len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
+	}
+	prefix = strings.TrimRightFunc(prefix, func(c rune) bool {
+		return (c < 'a' || c > 'z') && (c < '0' || c > '9')
+	})
+	return prefix + suffix
+}
+
+// legacyRuleAdvertisementName is the "<rule>-<node>-<family>" name releases
+// before issue #762 gave a rule's advertisement. isNodeAdvertisement still
+// accepts it so the first apply after an upgrade deletes those objects, and
+// node withdrawal still finds one left by a node that never ran this release.
+func legacyRuleAdvertisementName(rule, node, family string) string {
+	return rule + "-" + node + "-" + family
+}
+
+// isUnlabelledLegacyAdvertisement reports whether adv carries no
+// gatewayNodeLabel and is named legacyRuleAdvertisementName for rule and node:
+// an advertisement a release up to v0.5.3 created for the pair.
+func isUnlabelledLegacyAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, rule, node string) bool {
+	if _, ok := adv.Labels[gatewayNodeLabel]; ok {
+		return false
+	}
+	return adv.Name == legacyRuleAdvertisementName(rule, node, "v4") ||
+		adv.Name == legacyRuleAdvertisementName(rule, node, "v6")
+}
+
 // isNodeAdvertisement reports whether adv is one applyBGPAdvertisements created
 // on node nodeName: it carries gatewayNodeLabel set to
-// gatewayNodeLabelValue(nodeName) and networkRuleLabel, and is named exactly
-// "<rule>-<node>-v4" or "<rule>-<node>-v6". An advertisement missing either
-// label is never claimed, whatever its name.
+// gatewayNodeLabelValue(nodeName) and networkRuleLabel, and is named by
+// ruleAdvertisementName or legacyRuleAdvertisementName for that rule and node.
+// An advertisement missing either label is never claimed, whatever its name.
 func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) bool {
 	if adv.Labels[gatewayNodeLabel] != gatewayNodeLabelValue(nodeName) {
 		return false
@@ -1009,7 +1096,13 @@ func isNodeAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, nodeName string) boo
 	if !ok {
 		return false
 	}
-	return adv.Name == rule+"-"+nodeName+"-v4" || adv.Name == rule+"-"+nodeName+"-v6"
+	for _, family := range []string{"v4", "v6"} {
+		if adv.Name == ruleAdvertisementName(rule, nodeName, family) ||
+			adv.Name == legacyRuleAdvertisementName(rule, nodeName, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // withdrawNodeAdvertisements deletes every BGPAdvertisement that gateway node

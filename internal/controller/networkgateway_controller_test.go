@@ -782,7 +782,7 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsBuilding(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNamespace,
 			Name:      testRuleAdvV4,
-			Labels:    map[string]string{networkRuleLabel: testRuleName},
+			Labels:    map[string]string{networkRuleLabel: testRuleName, gatewayNodeLabel: testNodeGWA},
 		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
 			RouterRef:     bgpv1alpha1.RouterRef{Name: testRouterName},
@@ -853,11 +853,11 @@ func newAdvertisement(name string) *bgpv1alpha1.BGPAdvertisement {
 }
 
 // newNodeAdvertisement returns a BGPAdvertisement fixture shaped like one
-// applyBGPAdvertisements creates on node for rule: named
-// "<rule>-<node>-<family>" and carrying networkRuleLabel and
-// gatewayNodeLabel, which is all withdrawNodeAdvertisements looks at.
+// applyBGPAdvertisements creates on node for rule: named by
+// ruleAdvertisementName and carrying networkRuleLabel and gatewayNodeLabel,
+// which is all withdrawNodeAdvertisements looks at.
 func newNodeAdvertisement(rule, node, family string) *bgpv1alpha1.BGPAdvertisement {
-	adv := newAdvertisement(rule + "-" + node + "-" + family)
+	adv := newAdvertisement(ruleAdvertisementName(rule, node, family))
 	adv.Labels = map[string]string{networkRuleLabel: rule, gatewayNodeLabel: gatewayNodeLabelValue(node)}
 	return adv
 }
@@ -1193,10 +1193,16 @@ func TestIsNodeAdvertisement_LabelledNamesMatchExactly(t *testing.T) {
 		adv  *bgpv1alpha1.BGPAdvertisement
 		want bool
 	}{
-		{"own labelled v4", labelled("rulex-edge-1-v4", "rulex", "edge-1"), true},
-		{"own labelled v6", labelled("rulex-edge-1-v6", "rulex", "edge-1"), true},
+		{"own labelled v4", labelled(ruleAdvertisementName("rulex", "edge-1", "v4"), "rulex", "edge-1"), true},
+		{"own labelled v6", labelled(ruleAdvertisementName("rulex", "edge-1", "v6"), "rulex", "edge-1"), true},
+		{"own labelled legacy v4", labelled("rulex-edge-1-v4", "rulex", "edge-1"), true},
+		{"own labelled legacy v6", labelled("rulex-edge-1-v6", "rulex", "edge-1"), true},
 		{"other node sharing the suffix", labelled("rulex-pop-edge-1-v4", "rulex", "pop-edge-1"), false},
 		{"node label but name for another node", labelled("rulex-pop-edge-1-v4", "rulex", "edge-1"), false},
+		{
+			"node label but hashed name for another pair",
+			labelled(ruleAdvertisementName("rulex-pop", "edge-1", "v4"), "rulex", "edge-1"), false,
+		},
 		{"rule label without node label", ruleLabelOnly, false},
 		{"unlabelled legacy name", newAdvertisement("rulex-edge-1-v6"), false},
 		{"unlabelled other node sharing the suffix", newAdvertisement("rulex-east-edge-1-v4"), false},
@@ -1346,5 +1352,145 @@ func TestNetworkGatewayReconciler_UnchangedProgrammedConditionWritesNothing(t *t
 	}
 	if got := ruleWrites.Load(); got != 1 {
 		t.Errorf("unchanged second pass wrote NetworkRule status %d times in total, want 1", got)
+	}
+}
+
+// TestRuleAdvertisementName covers the per-rule, per-node advertisement name:
+// distinct for rule/node pairs whose "<rule>-<node>" concatenations match
+// (#762), and a valid object name however long the inputs.
+func TestRuleAdvertisementName(t *testing.T) {
+	if a, b := ruleAdvertisementName("a-b", "c", "v4"), ruleAdvertisementName("a", "b-c", "v4"); a == b {
+		t.Errorf("rule a-b on node c and rule a on node b-c both named %q", a)
+	}
+	if v4, v6 := ruleAdvertisementName("a", "b", "v4"), ruleAdvertisementName("a", "b", "v6"); v4 == v6 {
+		t.Errorf("v4 and v6 both named %q", v4)
+	}
+	got := ruleAdvertisementName("rule-1", "gw-a", "v4")
+	if again := ruleAdvertisementName("rule-1", "gw-a", "v4"); got != again {
+		t.Errorf("ruleAdvertisementName is not deterministic: %q then %q", got, again)
+	}
+	if !strings.HasPrefix(got, "rule-1-gw-a-") || !strings.HasSuffix(got, "-v4") {
+		t.Errorf("ruleAdvertisementName(rule-1, gw-a, v4) = %q, want a readable rule-1-gw-a- prefix and -v4 suffix", got)
+	}
+
+	longRule := strings.Repeat("r", validation.DNS1123SubdomainMaxLength)
+	for _, tt := range []struct{ rule, node string }{
+		{"rule-1", "gw-a"},
+		{"rule-1", testLongNodeName("a")},
+		{longRule, testLongNodeName("a")},
+		// Cut lands on the dots of the node name, which must be trimmed.
+		{strings.Repeat("r", 170), testLongNodeName("a")},
+	} {
+		for _, family := range []string{"v4", "v6"} {
+			got := ruleAdvertisementName(tt.rule, tt.node, family)
+			if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
+				t.Errorf("ruleAdvertisementName(%d-char rule, %s, %s) = %q, not a valid object name: %v",
+					len(tt.rule), tt.node, family, got, errs)
+			}
+		}
+	}
+	if a, b := ruleAdvertisementName(longRule+"a", "n", "v4"), ruleAdvertisementName(longRule+"b", "n", "v4"); a == b {
+		t.Errorf("two long rule names sharing a prefix both named %q", a)
+	}
+}
+
+// TestApplyBGPAdvertisements_DashedNamesStaySeparate is the regression test
+// for #762: rule a-b on node c and rule a on node b-c were both named
+// a-b-c-v4, so the two nodes overwrote one object, and withdrawing rule a
+// from node b-c deleted rule a-b's route on node c.
+func TestApplyBGPAdvertisements_DashedNamesStaySeparate(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	ruleAB := newTestRule("a-b", "vpc-1", "192.0.2.1")
+	ruleAB.UID = "uid-a-b"
+	ruleA := newTestRule("a", "vpc-1", "192.0.2.2")
+	ruleA.UID = "uid-a"
+	fakeClient := newIndexedClientBuilder(scheme).WithObjects(ruleAB, ruleA).Build()
+	ctx := context.Background()
+
+	desired := func(vip string) gateway.DesiredRule {
+		return gateway.DesiredRule{VIPAddresses: []netip.Addr{netip.MustParseAddr(vip)}}
+	}
+	nodeC := newGatewayReconciler(fakeClient, scheme, nil, "c")
+	nodeBC := newGatewayReconciler(fakeClient, scheme, nil, "b-c")
+	if err := nodeC.applyBGPAdvertisements(ctx, ruleAB, desired("192.0.2.1"), testRouterName); err != nil {
+		t.Fatalf("apply rule a-b on node c: %v", err)
+	}
+	if err := nodeBC.applyBGPAdvertisements(ctx, ruleA, desired("192.0.2.2"), testRouterName); err != nil {
+		t.Fatalf("apply rule a on node b-c: %v", err)
+	}
+
+	abOnC := &bgpv1alpha1.BGPAdvertisement{}
+	if err := fakeClient.Get(ctx, testRuleKey(ruleAdvertisementName("a-b", "c", "v4")), abOnC); err != nil {
+		t.Fatalf("get rule a-b's advertisement on node c: %v", err)
+	}
+	if got := abOnC.Labels[networkRuleLabel]; got != "a-b" {
+		t.Errorf("rule a-b's advertisement labelled for rule %q", got)
+	}
+	if got := abOnC.Labels[gatewayNodeLabel]; got != "c" {
+		t.Errorf("rule a-b's advertisement labelled for node %q", got)
+	}
+	if len(abOnC.Spec.Prefixes) != 1 || abOnC.Spec.Prefixes[0] != "192.0.2.1/32" {
+		t.Errorf("rule a-b's advertisement Prefixes = %v, want [192.0.2.1/32]", abOnC.Spec.Prefixes)
+	}
+
+	if err := withdrawRuleAdvertisements(ctx, fakeClient, ruleA, "b-c"); err != nil {
+		t.Fatalf("withdraw rule a from node b-c: %v", err)
+	}
+	err := fakeClient.Get(ctx, testRuleKey(ruleAdvertisementName("a", "b-c", "v4")), &bgpv1alpha1.BGPAdvertisement{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("rule a's advertisement on node b-c: err = %v, want NotFound after withdrawal", err)
+	}
+	if err := fakeClient.Get(ctx, testRuleKey(abOnC.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("withdrawing rule a from node b-c removed rule a-b's advertisement on node c: %v", err)
+	}
+}
+
+// TestApplyBGPAdvertisements_PrunesOlderAdvertisements covers the cleanup
+// after the #762 rename: this node's advertisements under the old
+// "<rule>-<node>-<family>" name, whether labelled as now or with
+// networkRuleLabel alone as releases up to v0.5.3 wrote them, and one for a
+// family the rule no longer has. Another node's old-style advertisement for
+// the same rule must stay.
+func TestApplyBGPAdvertisements_PrunesOlderAdvertisements(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.UID = testRuleUID
+
+	ruleLabelOnly := func(name string) *bgpv1alpha1.BGPAdvertisement {
+		adv := newAdvertisement(name)
+		adv.Labels = map[string]string{networkRuleLabel: testRuleName}
+		return adv
+	}
+	legacyV4 := ruleLabelOnly(legacyRuleAdvertisementName(testRuleName, testNodeGWA, "v4"))
+	legacyV6 := newAdvertisement(legacyRuleAdvertisementName(testRuleName, testNodeGWA, "v6"))
+	legacyV6.Labels = map[string]string{networkRuleLabel: testRuleName, gatewayNodeLabel: testNodeGWA}
+	staleV6 := newNodeAdvertisement(testRuleName, testNodeGWA, "v6")
+	otherNodeLegacy := ruleLabelOnly(legacyRuleAdvertisementName(testRuleName, testNodeGWB, "v4"))
+	otherNodeV6 := newNodeAdvertisement(testRuleName, testNodeGWB, "v6")
+
+	fakeClient := newIndexedClientBuilder(scheme).
+		WithObjects(rule, legacyV4, legacyV6, staleV6, otherNodeLegacy, otherNodeV6).
+		Build()
+	ctx := context.Background()
+
+	r := newGatewayReconciler(fakeClient, scheme, nil, testNodeGWA)
+	desired := gateway.DesiredRule{VIPAddresses: []netip.Addr{netip.MustParseAddr(testVIP)}}
+	if err := r.applyBGPAdvertisements(ctx, rule, desired, testRouterName); err != nil {
+		t.Fatalf("applyBGPAdvertisements: %v", err)
+	}
+
+	if err := fakeClient.Get(ctx, testRuleKey(testRuleAdvV4), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+		t.Errorf("get BGPAdvertisement %s: %v", testRuleAdvV4, err)
+	}
+	for _, gone := range []*bgpv1alpha1.BGPAdvertisement{legacyV4, legacyV6, staleV6} {
+		err := fakeClient.Get(ctx, testRuleKey(gone.Name), &bgpv1alpha1.BGPAdvertisement{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("BGPAdvertisement %s: err = %v, want NotFound", gone.Name, err)
+		}
+	}
+	for _, kept := range []*bgpv1alpha1.BGPAdvertisement{otherNodeLegacy, otherNodeV6} {
+		if err := fakeClient.Get(ctx, testRuleKey(kept.Name), &bgpv1alpha1.BGPAdvertisement{}); err != nil {
+			t.Errorf("node %s's BGPAdvertisement %s was removed: %v", testNodeGWB, kept.Name, err)
+		}
 	}
 }
