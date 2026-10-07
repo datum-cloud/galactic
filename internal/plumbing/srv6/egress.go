@@ -108,10 +108,25 @@ func EgressPrefixRouteAdd(tableID uint32, prefix *net.IPNet, shardSIDs []net.IP)
 		return fmt.Errorf("srv6: EgressPrefixRouteAdd: %w", err)
 	}
 	defer closer.Close() //nolint:errcheck // best-effort close of our own fd, immediately after use
+	return EgressPrefixRouteAddTo(table, tableID, prefix, shardSIDs)
+}
+
+// EgressPrefixRouteAddTo is EgressPrefixRouteAdd against an egress_route_table
+// the caller has already opened. Shard selection and error behavior are
+// identical; an empty shardSIDs installs nothing and returns nil.
+func EgressPrefixRouteAddTo(
+	table *egressroutemap.EgressRouteTable, tableID uint32, prefix *net.IPNet, shardSIDs []net.IP,
+) error {
+	if len(shardSIDs) == 0 {
+		return nil
+	}
+	if prefix == nil {
+		return errors.New("srv6: EgressPrefixRouteAddTo: prefix is nil")
+	}
 
 	var unresolved []error
 	for _, sid := range shardSIDs {
-		// Checked before touching bpffs, as in RouteEgressAdd.
+		// Checked before writing the entry, as in RouteEgressAdd.
 		if sid == nil || sid.IsUnspecified() {
 			return fmt.Errorf("refusing to install egress route for %s: shard SID %s is not a usable SRv6 SID",
 				prefix, sid)

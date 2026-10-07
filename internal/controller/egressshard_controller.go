@@ -473,7 +473,7 @@ func shardAdvertisementName(shardName string) string {
 // makes the control plane agree with that.
 //
 // Whatever Argument the operator baked into the configured SID is therefore not
-// advertised and carries no meaning; installEgressRoutes overwrites it per
+// advertised and carries no meaning; attachreg overwrites it per
 // tenant. Reserving the Block and Node-ID for this shard alone is what the /64
 // requires, which was already true -- locator_matches' doc comment spells out
 // what reusing a co-located BGPRouter's Node-ID silently breaks, and program

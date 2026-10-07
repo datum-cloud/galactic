@@ -18,6 +18,7 @@ import (
 	"go.datum.net/galactic/internal/cni/veth"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
@@ -411,9 +412,9 @@ func TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind(t *testing.T)
 				t.Fatalf("OpenPinnedEgressKind: %v", err)
 			}
 			defer func() { _ = closer.Close() }()
-			tapIfindex, err := hostInterfaceIndex(vpc, tapAttachment)
+			tapIfindex, err := attachreg.HostInterfaceIndex(vpc, tapAttachment)
 			if err != nil {
-				t.Fatalf("hostInterfaceIndex(tap): %v", err)
+				t.Fatalf("attachreg.HostInterfaceIndex(tap): %v", err)
 			}
 			if err := kinds.Unregister(tapIfindex); err != nil {
 				t.Fatalf("Unregister(tap): %v", err)
@@ -425,17 +426,6 @@ func TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind(t *testing.T)
 				t.Error("CHECK of the tap attachment after its entry was removed = nil error, want not found")
 			}
 		})
-	}
-}
-
-// TestRegisterEgressKind_UnpinnedMapIsNotFatal covers an ADD that runs after
-// install-cni replaced this binary but before the datapath reloaded and pinned
-// the map. Failing it would block Instances from starting during an upgrade.
-func TestRegisterEgressKind_UnpinnedMapIsNotFatal(t *testing.T) {
-	requireRoot(t)
-	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-bgp-test-unpinned-%d", os.Getpid())
-	if err := registerEgressKind(pinDir, 42, usidmap.EgressKindTap); err != nil {
-		t.Errorf("registerEgressKind with no pinned map = %v, want nil", err)
 	}
 }
 

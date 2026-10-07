@@ -61,7 +61,7 @@ const (
 	// it carries is a placeholder. Every attachment's ADD rewrites that
 	// Argument to its own VRFID before installing the route, which is what
 	// lets a shard tell two tenants on one node apart -- see
-	// internal/cnibgp's shardSIDsForTenant. An entry that is not a well-formed
+	// attachreg.ShardSIDsForTenant. An entry that is not a well-formed
 	// uFMT 48+16 address fails the ADD there rather than being passed through.
 	//
 	// The installer resolves it once at startup, from its real pod environment
