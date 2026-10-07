@@ -13,13 +13,15 @@ FROM alpine:3.24
 # iproute2: the startup script configures addresses and routes itself
 # (containerlab assigns nothing on a p2p link, and the FRR-based nodes get
 # theirs from zebra instead). curl/tcpdump/bind-tools are for driving and
-# observing traffic from this end.
+# observing traffic from this end. socat is the UDP client for the
+# gateway's ingress VIP check (scripts/verify-gateway-ingress.sh).
 RUN apk add --no-cache \
       nginx \
       iproute2 \
       curl \
       tcpdump \
-      bind-tools
+      bind-tools \
+      socat
 
 # Serve something identifiable, so a curl from a tenant pod or another site
 # proves it reached *this* host rather than any other nginx in the lab. The

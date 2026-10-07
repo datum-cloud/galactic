@@ -1,0 +1,33 @@
+# ns60's port 80 over TCP, served by every ns60 backend in iad.
+apiVersion: network.datumapis.com/v1alpha1
+kind: NetworkRule
+metadata:
+  name: ns60-tcp
+  namespace: galactic-system
+spec:
+  vpcRef: "60"
+  vpcAttachmentRef: "60"
+  vipAddresses:
+    - 2001:db8:6060:3::1
+  protocol: tcp
+  port: 80
+  backends:
+    - address: fd20:60:ff03:a::100
+      port: 80
+---
+# ns60's port 80 over UDP, served by every ns60 backend in iad.
+apiVersion: network.datumapis.com/v1alpha1
+kind: NetworkRule
+metadata:
+  name: ns60-udp
+  namespace: galactic-system
+spec:
+  vpcRef: "60"
+  vpcAttachmentRef: "60"
+  vipAddresses:
+    - 2001:db8:6060:3::1
+  protocol: udp
+  port: 80
+  backends:
+    - address: fd20:60:ff03:a::100
+      port: 80

@@ -1,0 +1,9 @@
+apiVersion: network.datumapis.com/v1alpha1
+kind: NetworkGateway
+metadata:
+  name: sjc-worker2
+  namespace: galactic-system
+spec:
+  targetRef:
+    kind: Node
+    name: sjc-worker2

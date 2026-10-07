@@ -1,0 +1,4 @@
+namespace: ns60
+resources:
+  - namespace.yaml
+  - backend.yaml
