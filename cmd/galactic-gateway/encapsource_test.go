@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -184,5 +185,53 @@ func TestResolveEncapSourceStopsWithContext(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), testEncapNode) {
 		t.Errorf("resolveEncapSource() error = %v, want it to name node %s", err, testEncapNode)
+	}
+}
+
+// failingReader fails its first failures List calls, then lists normally: an
+// API server that is briefly unreachable while the gateway starts (#797).
+type failingReader struct {
+	client.Reader
+	failures int
+	calls    int
+}
+
+var errTestAPIDown = errors.New("connection refused")
+
+func (r *failingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	r.calls++
+	if r.calls <= r.failures {
+		return errTestAPIDown
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+func TestResolveEncapSourceRetriesListError(t *testing.T) {
+	reader := &failingReader{
+		Reader:   testEncapReader(t, testEncapRouter("galactic-system", "r", testEncapNode, testEncapLocator, 0x1002)),
+		failures: 1,
+	}
+	got, err := resolveEncapSource(context.Background(), reader, testEncapNode, "")
+	if err != nil {
+		t.Fatalf("resolveEncapSource() error: %v", err)
+	}
+	if got != testEncapDerived {
+		t.Errorf("resolveEncapSource() = %q, want %q", got, testEncapDerived)
+	}
+	if reader.calls != 2 {
+		t.Errorf("List called %d times, want 2", reader.calls)
+	}
+}
+
+func TestResolveEncapSourceListErrorStopsWithContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	reader := &failingReader{Reader: testEncapReader(t), failures: math.MaxInt}
+	_, err := resolveEncapSource(ctx, reader, testEncapNode, "")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("resolveEncapSource() error = %v, want context.DeadlineExceeded", err)
+	}
+	if !errors.Is(err, errTestAPIDown) {
+		t.Errorf("resolveEncapSource() error = %v, want it to wrap the last list error", err)
 	}
 }
