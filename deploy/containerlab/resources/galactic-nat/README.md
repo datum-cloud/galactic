@@ -69,7 +69,7 @@ the rollout: a shard reports ready once attached, before its identity is
 programmed.
 
 `task deploy:galactic-gateway` runs later, after `deploy:scenarios`: the
-gateway's `ServiceVIPBinding`s bind the `ns60` backends that step creates.
+gateway's `NetworkRule`s select the `ns60` backends that step creates.
 Because the shard and the gateway share the uplinks through the dispatcher,
 neither has to be deployed first for the other to attach.
 

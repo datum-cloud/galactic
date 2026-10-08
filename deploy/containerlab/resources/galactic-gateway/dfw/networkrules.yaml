@@ -1,4 +1,4 @@
-# ns60's port 80 over TCP, served by every ns60 backend in dfw.
+# ns60's port 80 over TCP, served by every ns60 backend its selector picks in dfw.
 apiVersion: network.datumapis.com/v1alpha1
 kind: NetworkRule
 metadata:
@@ -11,11 +11,12 @@ spec:
     - 2001:db8:6060:1::1
   protocol: tcp
   port: 80
-  backends:
-    - address: fd20:60:ff01:a::100
-      port: 80
+  backendSelector:
+    matchLabels:
+      app: backend
+  backendPort: 80
 ---
-# ns60's port 80 over UDP, served by every ns60 backend in dfw.
+# ns60's port 80 over UDP, served by every ns60 backend its selector picks in dfw.
 apiVersion: network.datumapis.com/v1alpha1
 kind: NetworkRule
 metadata:
@@ -28,6 +29,7 @@ spec:
     - 2001:db8:6060:1::1
   protocol: udp
   port: 80
-  backends:
-    - address: fd20:60:ff01:a::100
-      port: 80
+  backendSelector:
+    matchLabels:
+      app: backend
+  backendPort: 80

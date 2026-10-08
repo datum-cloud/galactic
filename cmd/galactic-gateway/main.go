@@ -30,6 +30,11 @@ const (
 	resourceNetworkRules      = "networkrules"
 	resourceBGPAdvertisements = "bgpadvertisements"
 	resourceBGPRouters        = "bgprouters"
+	resourceBGPVRFInstances   = "bgpvrfinstances"
+
+	cloudAPIGroup          = "cloud.datumapis.com"
+	cloudAPIVersion        = "v1alpha1"
+	resourceVPCAttachments = "vpcattachments"
 )
 
 func main() {
@@ -68,6 +73,8 @@ func checkWatchPermissions(mgr ctrl.Manager) {
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceNetworkRules},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPAdvertisements},
 		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPRouters},
+		{group: networkAPIGroup, version: networkAPIVersion, resource: resourceBGPVRFInstances},
+		{group: cloudAPIGroup, version: cloudAPIVersion, resource: resourceVPCAttachments},
 	}
 
 	for _, r := range resources {

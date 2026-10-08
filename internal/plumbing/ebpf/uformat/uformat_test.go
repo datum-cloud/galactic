@@ -38,6 +38,14 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 			"NodeIDAboveReservedRangeStillEncodes",
 			Fields{Block: testBlock, NodeID: 0xFFFF, Function: FunctionEndDT46, Argument: 0x001},
 		},
+		{
+			"BackendSlot",
+			Fields{Block: testBlock, NodeID: 0x0001, Function: FunctionEndDT46, Argument: 0x001, Slot: 0xBEEF},
+		},
+		{
+			"MaxSlot",
+			Fields{Block: testBlock, NodeID: 0x0001, Function: FunctionEndDT46, Argument: 0x001, Slot: 0xFFFF},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,6 +93,31 @@ func TestDecodeRejectsNonZeroPadding(t *testing.T) {
 
 	if _, err := Decode(corrupted); err == nil {
 		t.Errorf("Decode(%s) = nil error, want non-zero-padding error", corrupted)
+	}
+}
+
+// TestSlotAtBytes10And11 pins Slot to bytes 10-11 of the address, big-endian,
+// where usid_ingress reads it, with the padding after it left zero.
+func TestSlotAtBytes10And11(t *testing.T) {
+	addr, err := Encode(Fields{Block: testBlock, NodeID: 1, Function: FunctionEndDT46, Argument: 1, Slot: 0x1234})
+	if err != nil {
+		t.Fatalf("Encode: unexpected error: %v", err)
+	}
+	b := addr.As16()
+	if b[10] != 0x12 || b[11] != 0x34 {
+		t.Errorf("bytes 10-11 = %#x %#x, want 0x12 0x34", b[10], b[11])
+	}
+	for i := 12; i < 16; i++ {
+		if b[i] != 0 {
+			t.Errorf("byte %d = %#x, want 0 (padding)", i, b[i])
+		}
+	}
+	slot, err := Slot(addr)
+	if err != nil {
+		t.Fatalf("Slot: unexpected error: %v", err)
+	}
+	if slot != 0x1234 {
+		t.Errorf("Slot = %#x, want 0x1234", slot)
 	}
 }
 

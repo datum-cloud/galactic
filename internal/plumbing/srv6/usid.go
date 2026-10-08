@@ -6,6 +6,7 @@ package srv6
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/netip"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
@@ -35,12 +36,25 @@ func functionNibble(fn bgpv1alpha1.SRv6Function) (uint8, error) {
 //	                           local Linux VRF this SID's decapped traffic
 //	                           resolves to -- allocated per node, not derived
 //	                           from the VPCAttachment identifier)
-//	bits 81-128 Padding       (always zero)
+//	bits 81-96  Slot          (zero here; see ComputeBackendSID)
+//	bits 97-128 Padding       (always zero)
 //
 // locator must be an IPv6 /48; nodeID and argument must fit their fields.
 // Returns the full 128-bit SID, or an error naming the field that is out of
 // range. See internal/plumbing/ebpf/uformat for the encode primitives.
 func ComputeSID(locator string, nodeID, argument int32, function bgpv1alpha1.SRv6Function) (netip.Addr, error) {
+	return ComputeBackendSID(locator, nodeID, argument, function, 0)
+}
+
+// ComputeBackendSID is ComputeSID with slot written into bits 81-96, the uSID
+// galactic-gateway encapsulates toward one specific backend of a load-balanced
+// VIP. The backend node's usid_ingress reads slot back and keys its
+// vip_xlat_table lookup on it, so the backend Maglev chose is the one the VIP
+// is rewritten to even when other backends of the same VIP share that node and
+// VRF. slot comes from BackendSlot; zero yields exactly ComputeSID's result.
+func ComputeBackendSID(
+	locator string, nodeID, argument int32, function bgpv1alpha1.SRv6Function, slot uint16,
+) (netip.Addr, error) {
 	block, err := nodeIdentity(locator, nodeID)
 	if err != nil {
 		return netip.Addr{}, err
@@ -59,7 +73,32 @@ func ComputeSID(locator string, nodeID, argument int32, function bgpv1alpha1.SRv
 		NodeID:   uint16(nodeID),
 		Function: fn,
 		Argument: uint16(argument),
+		Slot:     slot,
 	})
+}
+
+// BackendSlot returns the uSID Slot that names the backend at addr:port. It is
+// a pure function of the backend's own address and port, so galactic-gateway,
+// which writes the slot into the destination it encapsulates toward, and the
+// backend node's galactic-router, which writes the vip_xlat_table row keyed on
+// it, agree without exchanging any state.
+//
+// The hash is 32-bit FNV-1a over the 16-byte address and the big-endian port,
+// folded to 16 bits by XOR of its halves. Zero means "no slot" in the uSID
+// layout, so a hash of zero becomes 1. Two backends of one VIP on one node that
+// hash to the same slot claim the same row; the binding reconciler reports the
+// later one as conflicting rather than delivering both to one backend.
+func BackendSlot(addr netip.Addr, port uint16) uint16 {
+	b := addr.As16()
+	h := fnv.New32a()
+	_, _ = h.Write(b[:])
+	_, _ = h.Write([]byte{byte(port >> 8), byte(port)})
+	sum := h.Sum32()
+	slot := uint16(sum>>16) ^ uint16(sum)
+	if slot == 0 {
+		return 1
+	}
+	return slot
 }
 
 // nodeIdentity validates locator and nodeID as the node-identifying half of a

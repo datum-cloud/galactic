@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
 // fakeXlatTable records UnregisterBinding calls and serves fixed rows.
@@ -24,9 +25,10 @@ type fakeXlatTable struct {
 
 func (f *fakeXlatTable) List() ([]vipxlatmap.Entry, error) { return f.entries, nil }
 
-func (f *fakeXlatTable) UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+func (f *fakeXlatTable) UnregisterBinding(slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
 	f.calls = append(f.calls, strings.Join([]string{
+		"slot=" + itoa(slot),
 		xlatProtocolName(proto),
 		net.JoinHostPort(vipAddr.String(), itoa(vipPort)),
 		net.JoinHostPort(backendAddr.String(), itoa(backendPort)),
@@ -60,7 +62,7 @@ func testXlatEntries() []vipxlatmap.Entry {
 	return []vipxlatmap.Entry{
 		{
 			Key: vipxlatmap.Key{
-				Block: 0x20010db8ff01, Argument: 70, Proto: vipxlatmap.ProtoTCP,
+				Block: 0x20010db8ff01, Argument: 70, Slot: 0xbeef, Proto: vipxlatmap.ProtoTCP,
 				Addr: netip.MustParseAddr("2001:db8::1"), Port: 8080,
 			},
 			Direction:   vipxlatmap.DirectionIngress,
@@ -85,7 +87,8 @@ func TestVIPXlatList(t *testing.T) {
 		t.Fatalf("list: unexpected error: %v", err)
 	}
 	for _, want := range []string{
-		"DIRECTION", "MATCH", "ingress", "egress", "0x20010db8ff01", "[fd20:60::1]:30080", "[2001:db8::1]:8080",
+		"DIRECTION", "SLOT", "0xbeef", "MATCH", "ingress", "egress",
+		"0x20010db8ff01", "[fd20:60::1]:30080", "[2001:db8::1]:8080",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list output missing %q:\n%s", want, out)
@@ -101,12 +104,26 @@ func TestVIPXlatRemove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("remove: unexpected error: %v", err)
 	}
-	want := "tcp [2001:db8::1]:8080 [fd20:60::1]:30080"
+	slot := srv6.BackendSlot(netip.MustParseAddr("fd20:60::1"), 30080)
+	want := "slot=" + itoa(slot) + " tcp [2001:db8::1]:8080 [fd20:60::1]:30080"
 	if len(table.calls) != 1 || table.calls[0] != want {
-		t.Errorf("UnregisterBinding calls = %q, want [%q]", table.calls, want)
+		t.Errorf("UnregisterBinding calls = %q, want [%q] (slot derived from the backend)", table.calls, want)
 	}
 	if !strings.Contains(out, "egress") {
 		t.Errorf("remove output does not list the removed rows:\n%s", out)
+	}
+}
+
+func TestVIPXlatRemoveExplicitSlot(t *testing.T) {
+	table := &fakeXlatTable{entries: testXlatEntries()}
+	if _, err := runXlat(t, table, "remove",
+		"--protocol", "tcp", "--vip", "2001:db8::1", "--port", "8080",
+		"--backend", "fd20:60::1", "--backend-port", "30080", "--slot", "7"); err != nil {
+		t.Fatalf("remove: unexpected error: %v", err)
+	}
+	want := "slot=7 tcp [2001:db8::1]:8080 [fd20:60::1]:30080"
+	if len(table.calls) != 1 || table.calls[0] != want {
+		t.Errorf("UnregisterBinding calls = %q, want [%q]", table.calls, want)
 	}
 }
 

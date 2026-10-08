@@ -1,23 +1,30 @@
-# ns60's VIP backend, one per site, behind that site's NetworkRules
-# (resources/galactic-gateway/<site>/). It answers TCP and UDP on port 80
+# ns60's VIP backends, two per site, behind that site's NetworkRules
+# (resources/galactic-gateway/<site>/). Each answers TCP and UDP on port 80
 # with its own pod name and the address it saw the client as, which is how
 # scripts/verify-gateway-ingress.sh tells which backend answered and checks
 # that the client's address arrived unchanged.
 #
-# One per site rather than two, though two would give Maglev a choice: each
-# site has one compute node, and a node can bind a VIP's port to only one
-# backend per VPC (#755: usid.c's vip_xlat_key holds no backend address).
+# Both land on the site's one compute node, on purpose: the rules select
+# them through their VPCAttachments (vpcattachments.yaml), and the gateway
+# encodes which backend Maglev chose in the SRv6 destination, so two backends
+# of one VIP on one node each get their own flows (#799).
 #
-# Its address is fixed in the site's NAD rather than taken from the pool,
-# because the NetworkRule and ServiceVIPBinding name it. Recreate, not
-# RollingUpdate, so a new pod never asks for the address while the old
-# one still holds it.
+# Each has its own NAD with its own vpcattachment value, because
+# galactic-veth names a pod's veth after (vpc, vpcattachment) alone, and two
+# pods sharing one on a node would collide (docs/tenants.md, ns30/ns40). Each
+# also has its own /96, as each attachment gets its own subnet in production:
+# the VRF holds one route per subnet, so two attachments sharing one would
+# send both backends' traffic down one veth. The address is fixed in the NAD
+# rather than taken from the pool, because the backend's VPCAttachment names
+# it. Recreate, not RollingUpdate, so a new pod never
+# asks for the address while the old one still holds it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: backend
+  name: backend-a
   labels:
     app: backend
+    instance: a
 spec:
   replicas: 1
   strategy:
@@ -25,12 +32,67 @@ spec:
   selector:
     matchLabels:
       app: backend
+      instance: a
   template:
     metadata:
       labels:
         app: backend
+        instance: a
       annotations:
-        v1.multus-cni.io/default-network: ns60/backend
+        v1.multus-cni.io/default-network: ns60/backend-a
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - compute
+      containers:
+        - name: backend
+          image: ghcr.io/datum-cloud/galactic-debug:latest
+          imagePullPolicy: IfNotPresent
+          # The image sets HOSTNAME itself, so the pod's name comes from the
+          # downward API instead.
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # socat sets SOCAT_PEERADDR to the client's address for each
+          # connection or datagram.
+          command:
+            - sh
+            - -c
+            - |
+              reply='echo "$POD_NAME $SOCAT_PEERADDR"'
+              socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply" &
+              exec socat UDP6-RECVFROM:80,reuseaddr,fork SYSTEM:"$reply"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-b
+  labels:
+    app: backend
+    instance: b
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: backend
+      instance: b
+  template:
+    metadata:
+      labels:
+        app: backend
+        instance: b
+      annotations:
+        v1.multus-cni.io/default-network: ns60/backend-b
     spec:
       affinity:
         nodeAffinity:

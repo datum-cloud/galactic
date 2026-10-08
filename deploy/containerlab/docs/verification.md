@@ -199,9 +199,11 @@ docker exec dfw-worker2 ip -d link show dev eth1 | grep -o 'prog/xdp id [0-9]*'
 The same four edge nodes each run `galactic-gateway` (`galactic-gateway-<node>`)
 and a `NetworkGateway` named after the node. Each site has its own VIP
 (`2001:db8:6060:1::1` in dfw, `:2::1` in sjc, `:3::1` in iad), in a `/64` only
-that site's edge nodes originate, and one `ns60` backend on its compute node
-that answers TCP and UDP on port 80 with its pod name and the client address
-it saw.
+that site's edge nodes originate, and two `ns60` backends on its compute node
+that answer TCP and UDP on port 80 with their pod name and the client address
+they saw. The site's `NetworkRule`s select both through their
+`VPCAttachment`s, and the compute node writes one `ServiceVIPBinding` per rule
+per backend. `verify:gateway-ingress` fails unless both backends answer.
 
 ```bash
 # NetworkGateways Ready, NetworkRules Accepted, ServiceVIPBindings Bound

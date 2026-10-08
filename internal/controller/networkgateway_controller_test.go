@@ -25,7 +25,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -291,6 +293,7 @@ func TestNetworkGatewayReconciler_BuildsDesiredStateForAcceptedRules(t *testing.
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
 		WithObjects(gwA, gwB, backendRouter, backendAdv, backendVRF, backendAdv2, backendVRF2,
+			newBackendAttachment("vpc-1"), newBackendAttachment("vpc-2"),
 			ruleA, ruleB, notAccepted, deleting).
 		Build()
 
@@ -363,13 +366,14 @@ func TestNetworkGatewayReconciler_ServesThroughResolvedBackends(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
 	rule := newTestRule(testRuleName, "vpc-1", testVIP)
-	// Outside testBackendPrefix, so it resolves against nothing.
-	rule.Spec.Backends = append(rule.Spec.Backends, bgpv1alpha1.NetworkRuleBackend{Address: "192.0.2.99", Port: 8443})
 	acceptRule(rule)
+	// The attachment's second address is outside testBackendPrefix, so it
+	// resolves against nothing.
+	attachment := newBackendAttachment("vpc-1", testBackendAddr, "fd00:99::1")
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, attachment, rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -394,43 +398,82 @@ func TestNetworkGatewayReconciler_ServesThroughResolvedBackends(t *testing.T) {
 
 	assertRuleProgrammed(t, fakeClient, metav1.ConditionTrue, reasonBackendsUnresolved)
 	cond := ruleProgrammedCondition(t, fakeClient, testRuleName)
-	if !strings.Contains(cond.Message, "1 of 2 backends") || !strings.Contains(cond.Message, "192.0.2.99:8443") {
-		t.Errorf("Programmed message = %q, want it to count 1 of 2 backends and name 192.0.2.99:8443", cond.Message)
+	if !strings.Contains(cond.Message, "1 of 2 backends") || !strings.Contains(cond.Message, "[fd00:99::1]:8443") {
+		t.Errorf("Programmed message = %q, want it to count 1 of 2 backends and name [fd00:99::1]:8443", cond.Message)
 	}
 }
 
-// TestBuildDesiredRule_BackendResolution covers which backend failures leave
-// a backend out and which fail the whole rule.
+// TestBuildDesiredRule_BackendResolution covers which selected attachments
+// become backends, which are left out as unresolved, and which outcomes fail
+// the whole rule.
 func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
-	idx := &backendSIDIndex{
-		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
-		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
-		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
-	}
+
+	pendingNode := newBackendAttachment("vpc-1", "fd00:10::3")
+	pendingNode.Name = "no-node"
+	pendingNode.Status.Node = ""
+	ipv4Only := newBackendAttachment("vpc-1", "10.0.0.9")
+	ipv4Only.Name = "ipv4-only"
+	otherVPC := newBackendAttachment("vpc-2", "fd00:10::4")
+	unlabelled := newBackendAttachment("vpc-1", "fd00:10::5")
+	unlabelled.Name = "unlabelled"
+	unlabelled.Labels = nil
+	otherNode := newBackendAttachment("vpc-1", "fd00:10::6")
+	otherNode.Name = "other-node"
+	otherNode.Status.Node = testOtherNode
 
 	tests := []struct {
 		name           string
-		backends       []string
+		attachments    []*cloudv1alpha1.VPCAttachment
 		wantErr        bool
-		wantBackends   int
+		wantBackends   []string
 		wantUnresolved []string
 	}{
-		{name: "all resolve", backends: []string{testBackendAddr, "10.0.0.2"}, wantBackends: 2},
 		{
-			name: "some unresolved", backends: []string{testBackendAddr, "198.51.100.1", "2001:db8::1"},
-			wantBackends: 1, wantUnresolved: []string{"198.51.100.1:8443", "[2001:db8::1]:8443"},
+			name:         "all resolve",
+			attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")},
+			wantBackends: []string{testBackendAddr, "fd00:10::2"},
 		},
-		{name: "none resolve", backends: []string{"198.51.100.1", "198.51.100.2"}, wantErr: true},
-		{name: "malformed address", backends: []string{testBackendAddr, "not-an-ip"}, wantErr: true},
+		{
+			name:           "some unresolved",
+			attachments:    []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:99::1")},
+			wantBackends:   []string{testBackendAddr},
+			wantUnresolved: []string{"[fd00:99::1]:8443"},
+		},
+		{
+			name:           "attachments not ready are pending",
+			attachments:    []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1"), pendingNode, ipv4Only},
+			wantBackends:   []string{testBackendAddr},
+			wantUnresolved: []string{"tenant-vpc-1/ipv4-only: no IPv6 address", "tenant-vpc-1/no-node: no node"},
+		},
+		{
+			name:         "other VPCs and unmatched labels are not selected",
+			attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1"), otherVPC, unlabelled},
+			wantBackends: []string{testBackendAddr},
+		},
+		{
+			name:           "a backend resolves only on its attachment's node",
+			attachments:    []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1"), otherNode},
+			wantBackends:   []string{testBackendAddr},
+			wantUnresolved: []string{"[fd00:10::6]:8443"},
+		},
+		{
+			name:        "none resolve",
+			attachments: []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", "fd00:99::1")},
+			wantErr:     true,
+		},
+		{name: "selector matches nothing", wantErr: true},
+		{name: "only pending attachments", attachments: []*cloudv1alpha1.VPCAttachment{pendingNode}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rule := newTestRule(testRuleName, "vpc-1", testVIP)
-			rule.Spec.Backends = nil
-			for _, b := range tt.backends {
-				rule.Spec.Backends = append(rule.Spec.Backends, bgpv1alpha1.NetworkRuleBackend{Address: b, Port: 8443})
+			idx := &backendSIDIndex{
+				routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+				advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+				vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
+				attachments:  tt.attachments,
 			}
+			rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
 			dr, unresolved, err := buildDesiredRule(rule, idx)
 			if tt.wantErr {
@@ -442,13 +485,83 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildDesiredRule: %v", err)
 			}
-			if len(dr.Backends) != tt.wantBackends {
-				t.Errorf("backends = %d, want %d", len(dr.Backends), tt.wantBackends)
+			var got []string
+			for _, b := range dr.Backends {
+				got = append(got, b.Address.String())
+			}
+			if !slices.Equal(got, tt.wantBackends) {
+				t.Errorf("backends = %v, want %v", got, tt.wantBackends)
 			}
 			if !slices.Equal(unresolved, tt.wantUnresolved) {
 				t.Errorf("unresolved = %v, want %v", unresolved, tt.wantUnresolved)
 			}
 		})
+	}
+}
+
+// TestBuildDesiredRule_RefusesSecondIPv6VIP covers a rule with two IPv6 VIPs:
+// it fails to build, so it is not loaded with a VIP whose flows no backend
+// could answer.
+func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	idx := &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
+		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")},
+	}
+	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP)
+	if _, _, err := buildDesiredRule(rule, idx); err == nil {
+		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
+	}
+
+	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP}
+	if _, _, err := buildDesiredRule(rule, idx); err != nil {
+		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
+	}
+}
+
+// TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot covers #799's
+// same-node case: two backends of one rule on one node resolve to the same
+// node and VRF, and differ only in the slot the gateway writes into the uSID,
+// which is the hash the backend's node keys its vip_xlat_table row on.
+func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
+	backendRouter, backendAdv, backendVRF := newBackendFixtures("vpc-1")
+	idx := &backendSIDIndex{
+		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
+		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
+		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
+		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")},
+	}
+
+	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), idx)
+	if err != nil {
+		t.Fatalf("buildDesiredRule: %v", err)
+	}
+	if len(dr.Backends) != 2 {
+		t.Fatalf("backends = %+v, want 2", dr.Backends)
+	}
+
+	nodeSID, err := srv6.ComputeSID(
+		testBackendLocator, testBackendNodeID, testBackendVRFID, bgpv1alpha1.SRv6FunctionEndDT46)
+	if err != nil {
+		t.Fatalf("srv6.ComputeSID: %v", err)
+	}
+	for _, b := range dr.Backends {
+		want, err := srv6.ComputeBackendSID(testBackendLocator, testBackendNodeID, testBackendVRFID,
+			bgpv1alpha1.SRv6FunctionEndDT46, srv6.BackendSlot(b.Address, b.Port))
+		if err != nil {
+			t.Fatalf("srv6.ComputeBackendSID: %v", err)
+		}
+		if b.USID != want {
+			t.Errorf("backend %s uSID = %s, want %s (the node's uSID with this backend's slot)", b.Address, b.USID, want)
+		}
+		if b.USID == nodeSID {
+			t.Errorf("backend %s uSID = %s carries no slot", b.Address, b.USID)
+		}
+	}
+	if dr.Backends[0].USID == dr.Backends[1].USID {
+		t.Errorf("both backends share uSID %s; the node could not tell them apart", dr.Backends[0].USID)
 	}
 }
 
@@ -462,7 +575,7 @@ func TestNetworkGatewayReconciler_SkipsBGPAdvertisementWiringWithoutRouter(t *te
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(gwA, backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(gwA, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -500,7 +613,7 @@ func TestNetworkGatewayReconciler_CreatesBGPAdvertisement(t *testing.T) {
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(gwA, gwB, router, backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(gwA, gwB, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -569,7 +682,7 @@ func TestNetworkGatewayReconciler_BackfillsLabelOnExistingAdvertisement(t *testi
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule, preexisting).
+		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule, preexisting).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -609,7 +722,7 @@ func TestNetworkGatewayReconciler_AdvertisementFailureSurfaces(t *testing.T) {
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(
 				ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption,
@@ -660,7 +773,7 @@ func TestNetworkGatewayReconciler_ReportsEngineHealthyOnCleanPass(t *testing.T) 
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(gwA, router, backendRouter, backendAdv, backendVRF, newBackendAttachment("vpc-1"), rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -701,7 +814,8 @@ func TestNetworkGatewayReconciler_DoesNotAdvertiseUnloadedRule(t *testing.T) {
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -744,7 +858,8 @@ func TestNetworkGatewayReconciler_WithdrawsRuleThatStopsLoading(t *testing.T) {
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
 		Build()
 
 	engine := newFakeGatewayEngine()
@@ -1293,7 +1408,8 @@ func TestNetworkGatewayReconciler_RuleDeletedMidPassIsNotAnError(t *testing.T) {
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(
 				ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption,
@@ -1325,7 +1441,8 @@ func TestNetworkGatewayReconciler_UnchangedProgrammedConditionWritesNothing(t *t
 	var ruleWrites atomic.Int32
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(
 				ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption,

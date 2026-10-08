@@ -12,27 +12,35 @@ import (
 )
 
 func TestServiceVIPBindingName(t *testing.T) {
-	tests := []struct {
-		name                 string
-		nodeName, vip, proto string
-		port                 int32
-		want                 string
-	}{
-		{"IPv6", "iad-worker", "2001:db8::1", "tcp", 443, "iad-worker-2001-db8--1-tcp-443"},
-		{"IPv4", "iad-worker", "203.0.113.5", "udp", 53, "iad-worker-203-0-113-5-udp-53"},
+	base := ServiceVIPBindingName("web", "node-a", "2001:db8::1", "fd00:10::1", 8443)
+	if errs := validation.IsDNS1123Subdomain(base); len(errs) > 0 {
+		t.Fatalf("ServiceVIPBindingName = %q is not a valid object name: %v", base, errs)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ServiceVIPBindingName(tt.nodeName, tt.vip, tt.port, tt.proto)
-			if got != tt.want {
-				t.Errorf("ServiceVIPBindingName(%q, %q, %d, %q) = %q, want %q",
-					tt.nodeName, tt.vip, tt.port, tt.proto, got, tt.want)
-			}
-			if strings.HasPrefix(got, "-") {
-				t.Errorf("ServiceVIPBindingName(%q, %q, %d, %q) = %q starts with '-' (invalid k8s name)",
-					tt.nodeName, tt.vip, tt.port, tt.proto, got)
-			}
-		})
+	if !strings.HasPrefix(base, "web-node-a-") {
+		t.Errorf("ServiceVIPBindingName = %q, want prefix %q", base, "web-node-a-")
+	}
+	if again := ServiceVIPBindingName("web", "node-a", "2001:db8::1", "fd00:10::1", 8443); again != base {
+		t.Errorf("ServiceVIPBindingName is not deterministic: %q then %q", base, again)
+	}
+
+	// Every part of the identity changes the name: in particular two backends
+	// of one VIP on one node must never share an object.
+	for name, other := range map[string]string{
+		"rule":    ServiceVIPBindingName("api", "node-a", "2001:db8::1", "fd00:10::1", 8443),
+		"node":    ServiceVIPBindingName("web", "node-b", "2001:db8::1", "fd00:10::1", 8443),
+		"vip":     ServiceVIPBindingName("web", "node-a", "2001:db8::2", "fd00:10::1", 8443),
+		"backend": ServiceVIPBindingName("web", "node-a", "2001:db8::1", "fd00:10::2", 8443),
+		"port":    ServiceVIPBindingName("web", "node-a", "2001:db8::1", "fd00:10::1", 8444),
+	} {
+		if other == base {
+			t.Errorf("changing the %s left the name unchanged: %q", name, base)
+		}
+	}
+
+	longRule, longNode := strings.Repeat("r", 200), strings.Repeat("n", 200)+".example"
+	long := ServiceVIPBindingName(longRule, longNode, "2001:db8::1", "fd00:10::1", 1)
+	if errs := validation.IsDNS1123Subdomain(long); len(errs) > 0 {
+		t.Errorf("ServiceVIPBindingName with long names = %q is not a valid object name: %v", long, errs)
 	}
 }
 

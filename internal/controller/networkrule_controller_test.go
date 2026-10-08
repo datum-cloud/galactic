@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -39,8 +40,8 @@ const (
 	// BGPRouter/BGPAdvertisement newBackendFixtures returns, which resolves
 	// it to a real SRv6 uSID — required for buildDesiredRule to succeed
 	// (design plan decision #5; see usidresolver.go).
-	testBackendAddr       = "10.0.0.1"
-	testBackendPrefix     = "10.0.0.0/24"
+	testBackendAddr       = "fd00:10::1"
+	testBackendPrefix     = "fd00:10::/64"
 	testBackendRouterName = "backend-router"
 	testBackendLocator    = "2001:db8:ff01::/48"
 	testBackendNodeID     = 7
@@ -70,6 +71,9 @@ func newRuleTestScheme(t *testing.T) *runtime.Scheme {
 	if err := bgpv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
+	if err := cloudv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme cloud: %v", err)
+	}
 	return scheme
 }
 
@@ -89,10 +93,51 @@ func newTestRule(name, vpcRef string, vips ...string) *bgpv1alpha1.NetworkRule {
 			VIPAddresses:     vips,
 			Protocol:         bgpv1alpha1.NetworkRuleProtocolTCP,
 			Port:             443,
-			Backends: []bgpv1alpha1.NetworkRuleBackend{
-				{Address: testBackendAddr, Port: 8443},
+			BackendSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{testBackendLabel: testBackendLabelValue},
+			},
+			BackendPort: testBackendPort,
+		},
+	}
+}
+
+// testBackendLabel and testBackendLabelValue are the label newTestRule's
+// selector matches and newBackendAttachment sets; testBackendPort is the
+// rule's backend port.
+const (
+	testBackendLabel      = "app"
+	testOtherNode         = "node-elsewhere"
+	testBackendLabelValue = "backend"
+	testBackendPort       = 8443
+)
+
+// newBackendAttachment returns the VPCAttachment newTestRule's selector picks
+// for vpcRef: addr on testComputeNodeName, the node newBackendFixtures'
+// router targets, so the two together resolve one backend. With no addr it
+// carries testBackendAddr.
+func newBackendAttachment(vpcRef string, addrs ...string) *cloudv1alpha1.VPCAttachment {
+	if len(addrs) == 0 {
+		addrs = []string{testBackendAddr}
+	}
+	interfaceAddrs := make([]cloudv1alpha1.IPAddress, 0, len(addrs))
+	for _, a := range addrs {
+		interfaceAddrs = append(interfaceAddrs, cloudv1alpha1.IPAddress(a+"/64"))
+	}
+	return &cloudv1alpha1.VPCAttachment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "tenant-" + vpcRef,
+			Name:      "backend-" + vpcRef,
+			Labels:    map[string]string{testBackendLabel: testBackendLabelValue},
+		},
+		Spec: cloudv1alpha1.VPCAttachmentSpec{
+			VPC: cloudv1alpha1.VPCRef{Name: vpcRef},
+			Interface: cloudv1alpha1.VPCAttachmentInterface{
+				Name:      "eth0",
+				Mode:      cloudv1alpha1.VPCAttachmentInterfaceModeNetns,
+				Addresses: interfaceAddrs,
 			},
 		},
+		Status: cloudv1alpha1.VPCAttachmentStatus{VPC: vpcRef, Node: testComputeNodeName},
 	}
 }
 
@@ -201,6 +246,42 @@ func TestNetworkRuleReconciler_SetsFinalizerAndAccepted(t *testing.T) {
 	}
 	if !meta.IsStatusConditionTrue(got2.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
 		t.Fatal("Accepted condition did not remain True across a second reconcile")
+	}
+}
+
+// TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration covers a spec edit to
+// an accepted rule: Accepted stays True but records the new generation, so
+// anything waiting on Accepted for the current spec, kubectl wait among them,
+// does not see a stale condition.
+func TestNetworkRuleReconciler_AcceptedFollowsSpecGeneration(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	rule := newTestRule(testRuleName, "vpc-1", testVIP)
+	rule.Generation = 2
+	rule.Finalizers = []string{networkRuleFinalizer}
+	meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
+		Type: bgpv1alpha1.ConditionTypeAccepted, Status: metav1.ConditionTrue,
+		Reason: "GatewayNodesRegistered", ObservedGeneration: 1,
+	})
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}).
+		WithObjects(newTestGateway(testNodeGWA), rule).
+		Build()
+
+	r := &NetworkRuleReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme, NodeName: testNodeGWA}
+	req := ctrl.Request{NamespacedName: testRuleKey(testRuleName)}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+
+	got := &bgpv1alpha1.NetworkRule{}
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, got); err != nil {
+		t.Fatalf("get rule: %v", err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.ObservedGeneration != got.Generation {
+		t.Errorf("Accepted = %+v, want True at generation %d", cond, got.Generation)
 	}
 }
 

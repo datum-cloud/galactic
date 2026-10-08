@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -713,19 +714,23 @@ func pruneRuleAdvertisements(
 	return errors.Join(errs...)
 }
 
-// buildDesiredRule converts rule into a gateway.DesiredRule, resolving each
-// backend's SRv6 uSID through sidIndex. There is no kernel VRF or FIB
-// dependency.
+// buildDesiredRule converts rule into a gateway.DesiredRule. Its backends are
+// the IPv6 addresses of the VPCAttachments rule's BackendSelector picks from
+// sidIndex's attachments (selectRuleBackends), each resolved through sidIndex to the
+// SRv6 uSID of the node its attachment reports, with that backend's own slot
+// (backendSID), so a node hosting several of the rule's backends can tell which
+// one Maglev chose. There is no kernel VRF or FIB dependency.
 //
-// A backend whose uSID does not resolve is left out and returned in
-// unresolved as "address:port", so the rule keeps serving through the rest.
-// A backend pod being recreated is enough to cause this, since its
-// BGPAdvertisement is gone until the new pod is attached. Every gateway node
-// resolves from the same API objects and the Maglev table depends only on the
-// backend set, so nodes that see the same objects build the same table. Only
-// when no backend resolves does the rule fail, so it is withdrawn rather than
-// advertised with nothing behind it. A malformed address fails the rule
-// outright, since that is a spec error rather than a passing state.
+// A selected attachment that is not a backend yet, or a backend whose uSID
+// does not resolve, is left out and returned in unresolved, so the rule keeps
+// serving through the rest. A backend pod being recreated is enough to cause
+// this, since its BGPAdvertisement is gone until the new pod is attached.
+// Every gateway node resolves from the same API objects and the Maglev table
+// depends only on the backend set, so nodes that see the same objects build
+// the same table. Only when nothing resolves does the rule fail, so it is
+// withdrawn rather than advertised with nothing behind it. An invalid VIP or
+// selector fails the rule outright, since that is a spec error rather than a
+// passing state.
 func buildDesiredRule(
 	rule *bgpv1alpha1.NetworkRule, sidIndex *backendSIDIndex,
 ) (dr gateway.DesiredRule, unresolved []string, err error) {
@@ -738,27 +743,42 @@ func buildDesiredRule(
 		vips = append(vips, addr)
 	}
 
-	backends := make([]gateway.DesiredBackend, 0, len(rule.Spec.Backends))
+	if _, _, err := ruleTranslatedVIP(rule); err != nil {
+		return gateway.DesiredRule{}, nil, err
+	}
+
+	selected, unresolved, err := selectRuleBackends(rule, sidIndex.attachments)
+	if err != nil {
+		return gateway.DesiredRule{}, nil, err
+	}
+
+	backends := make([]gateway.DesiredBackend, 0, len(selected))
 	var firstResolveErr error
-	for _, b := range rule.Spec.Backends {
-		addr, err := netip.ParseAddr(b.Address)
-		if err != nil {
-			return gateway.DesiredRule{}, nil, fmt.Errorf("invalid backend address %q: %w", b.Address, err)
+	for _, b := range selected {
+		usid, err := sidIndex.resolveUSID(b.addr, rule.Spec.VPCRef, b.node)
+		if err == nil {
+			usid, err = backendSID(usid, b.addr, b.port)
 		}
-		//nolint:gosec // b.Port is CRD-validated to [1,65535] (Minimum/Maximum markers on NetworkRuleBackend.Port)
-		port := uint16(b.Port)
-		usid, err := sidIndex.resolveUSID(addr, rule.Spec.VPCRef)
 		if err != nil {
 			if firstResolveErr == nil {
-				firstResolveErr = fmt.Errorf("resolve backend %s: %w", addr, err)
+				firstResolveErr = fmt.Errorf("resolve backend %s: %w", b, err)
 			}
-			unresolved = append(unresolved, netip.AddrPortFrom(addr, port).String())
+			unresolved = append(unresolved, b.String())
 			continue
 		}
-		backends = append(backends, gateway.DesiredBackend{Address: addr, Port: port, USID: usid})
+		backends = append(backends, gateway.DesiredBackend{Address: b.addr, Port: b.port, USID: usid})
 	}
-	if len(backends) == 0 && len(unresolved) > 0 {
-		return gateway.DesiredRule{}, nil, fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
+	if len(backends) == 0 {
+		switch {
+		case firstResolveErr != nil:
+			return gateway.DesiredRule{}, nil, fmt.Errorf("none of %d backends resolves: %w", len(unresolved), firstResolveErr)
+		case len(unresolved) > 0:
+			return gateway.DesiredRule{}, nil, fmt.Errorf("no selected attachment is a backend yet: %s",
+				cappedList(unresolved, maxReadyFailures))
+		default:
+			return gateway.DesiredRule{}, nil, fmt.Errorf("backendSelector matches no VPCAttachment in VPC %s",
+				rule.Spec.VPCRef)
+		}
 	}
 
 	return gateway.DesiredRule{
@@ -989,6 +1009,18 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
+		// A rule's backends are the VPCAttachments its selector picks, so an
+		// attachment appearing, moving node, changing address or changing
+		// labels changes some rule's backend set. Attachments live in tenant
+		// namespaces, not the gateway's, so every NetworkGateway is
+		// re-queued. Their address and node come from spec and status alike,
+		// so status updates are not filtered out; the engine skips every rule
+		// whose resolved state is unchanged.
+		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return allGatewayRequests(ctx, r.Client, "VPCAttachment", obj.GetNamespace()+"/"+obj.GetName())
+			}),
+		).
 		Named("networkgateway").
 		Complete(r)
 }
@@ -1072,6 +1104,13 @@ func broadcastToGatewayRequests(
 		})
 	}
 	return reqs
+}
+
+// allGatewayRequests returns a reconcile request for every NetworkGateway in
+// every namespace, for a change to an object that lives outside the gateways'
+// namespace, such as a tenant's VPCAttachment.
+func allGatewayRequests(ctx context.Context, c client.Client, sourceKind, sourceName string) []ctrlreconcile.Request {
+	return broadcastToGatewayRequests(ctx, c, metav1.NamespaceAll, sourceKind, sourceName)
 }
 
 // gatewayNodeNames returns the targetRef.name of every NetworkGateway in

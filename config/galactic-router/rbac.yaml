@@ -23,16 +23,22 @@ rules:
       - bgpadvertisements
       - bgpvrfinstances
     verbs: ["get", "list", "watch", "delete"]
-  # servicevipbindings needs update/patch on the base resource (not just
-  # delete, unlike bgpadvertisements/bgpvrfinstances above):
-  # ServiceVIPBindingReconciler adds/removes its own teardown finalizer via
-  # a Patch call on the object itself (mirroring NetworkRuleReconciler's
-  # identical finalizer pattern on NetworkRule, config/galactic-gateway/
-  # rbac.yaml), not just its /status subresource.
+  # servicevipbindings needs full CRUD on the base resource:
+  # NetworkRuleBindingReconciler creates, updates and deletes this node's
+  # generated bindings, and ServiceVIPBindingReconciler adds and removes its
+  # own teardown finalizer with a Patch on the object itself, not just its
+  # /status subresource.
   - apiGroups: ["network.datumapis.com"]
     resources:
       - servicevipbindings
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # NetworkRuleBindingReconciler reads every NetworkRule to find the backends
+  # on this node, and writes its per-node BackendsBound condition to rule
+  # status. It never writes the rule itself.
+  - apiGroups: ["network.datumapis.com"]
+    resources:
+      - networkrules
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["network.datumapis.com"]
     resources:
       - serviceendpoints
@@ -46,6 +52,7 @@ rules:
       - bgppolicies/status
       - bgpvrfinstances/status
       - servicevipbindings/status
+      - networkrules/status
       - serviceroutepolicies/status
     verbs: ["get", "update", "patch"]
   - apiGroups: ["cloud.datumapis.com"]

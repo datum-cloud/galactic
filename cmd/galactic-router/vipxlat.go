@@ -18,13 +18,14 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
 // vipXlatTable is the part of *vipxlatmap.VipXlatTable the xlat subcommands
 // use, so tests can run them against a fake.
 type vipXlatTable interface {
 	List() ([]vipxlatmap.Entry, error)
-	UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+	UnregisterBinding(slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
 }
 
@@ -56,9 +57,9 @@ func newVIPXlatListCommand(pinDir *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "Print every vip_xlat_table row",
-		Long: `list prints every vip_xlat_table row. An ingress row is keyed on the VIP
-and its port and rewrites to the backend. An egress row is keyed on the backend
-and its port and rewrites to the VIP.`,
+		Long: `list prints every vip_xlat_table row. An ingress row is keyed on the VIP,
+its port and the backend's slot, and rewrites to the backend. An egress row is
+keyed on the backend and its port, with slot 0, and rewrites to the VIP.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			table, closer, err := openVipXlatTable(*pinDir)
@@ -83,6 +84,7 @@ func newVIPXlatRemoveCommand(pinDir *string) *cobra.Command {
 		vipPort     uint16
 		backendAddr string
 		backendPort uint16
+		slot        uint16
 	)
 	cmd := &cobra.Command{
 		Use:   "remove",
@@ -90,7 +92,9 @@ func newVIPXlatRemoveCommand(pinDir *string) *cobra.Command {
 		Long: `remove deletes the two vip_xlat_table rows a ServiceVIPBinding with these
 spec values wrote, under whatever VRF they were written, and prints them. A row
 is removed only while it still rewrites to these values. One another binding
-has since written its own values to is left alone.`,
+has since written its own values to is left alone. The ingress row's slot is
+derived from the backend address and port, as galactic-router derives it, unless
+--slot names another.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			proto, err := parseXlatProtocol(protocol)
@@ -115,7 +119,10 @@ has since written its own values to is left alone.`,
 			}
 			defer closer.Close() //nolint:errcheck // our own fd; the pinned map outlives it
 
-			removed, err := table.UnregisterBinding(proto, vip, vipPort, backend, backendPort)
+			if slot == 0 {
+				slot = srv6.BackendSlot(netip.AddrFrom16([16]byte(backend.To16())), backendPort)
+			}
+			removed, err := table.UnregisterBinding(slot, proto, vip, vipPort, backend, backendPort)
 			if len(removed) > 0 {
 				if werr := writeVipXlatEntries(cmd.OutOrStdout(), removed); werr != nil {
 					err = errors.Join(err, werr)
@@ -131,6 +138,8 @@ has since written its own values to is left alone.`,
 	cmd.Flags().Uint16Var(&vipPort, xlatFlagPort, 0, "binding spec.port")
 	cmd.Flags().StringVar(&backendAddr, xlatFlagBackend, "", "binding spec.backendAddress")
 	cmd.Flags().Uint16Var(&backendPort, xlatFlagBackendPort, 0, "binding spec.backendPort")
+	cmd.Flags().Uint16Var(&slot, xlatFlagSlot, 0,
+		"ingress row's backend slot; 0 derives it from --backend and --backend-port")
 	for _, name := range []string{xlatFlagProtocol, xlatFlagVIP, xlatFlagPort, xlatFlagBackend, xlatFlagBackendPort} {
 		_ = cmd.MarkFlagRequired(name) // only fails for an undefined flag name
 	}
@@ -150,6 +159,7 @@ const (
 	xlatFlagPort        = "port"
 	xlatFlagBackend     = "backend"
 	xlatFlagBackendPort = "backend-port"
+	xlatFlagSlot        = "slot"
 )
 
 // parseXlatProtocol maps a ServiceVIPBinding protocol name to the IANA number
@@ -168,12 +178,12 @@ func parseXlatProtocol(protocol string) (uint8, error) {
 // writeVipXlatEntries prints entries as an aligned table.
 func writeVipXlatEntries(w io.Writer, entries []vipxlatmap.Entry) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "DIRECTION\tBLOCK\tARGUMENT\tPROTO\tMATCH\tREWRITE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "DIRECTION\tBLOCK\tARGUMENT\tSLOT\tPROTO\tMATCH\tREWRITE"); err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if _, err := fmt.Fprintf(tw, "%s\t%#x\t%d\t%s\t%s\t%s\n",
-			e.Direction, e.Block, e.Argument, xlatProtocolName(e.Proto),
+		if _, err := fmt.Fprintf(tw, "%s\t%#x\t%d\t%#04x\t%s\t%s\t%s\n",
+			e.Direction, e.Block, e.Argument, e.Slot, xlatProtocolName(e.Proto),
 			netip.AddrPortFrom(e.Addr, e.Port),
 			net.JoinHostPort(e.RewriteAddr.String(), strconv.Itoa(int(e.RewritePort)))); err != nil {
 			return err

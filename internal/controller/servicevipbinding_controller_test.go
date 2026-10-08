@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"net/netip"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +36,7 @@ func newTestServiceVIPBinding(
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testVIPBindingName},
 		Spec: bgpv1alpha1.ServiceVIPBindingSpec{
 			TargetRef:      bgpv1alpha1.TargetRef{Kind: testTargetRefKind, Name: nodeName},
+			VPCRef:         testVPCRef,
 			VIPAddress:     testVIPBindingVIPAddr,
 			Port:           8080,
 			Protocol:       bgpv1alpha1.NetworkRuleProtocolTCP,
@@ -89,9 +89,10 @@ type unregisterCall struct {
 }
 
 // fakeRowKey is one row of fakeVIPTable's simulated vip_xlat_table, ignoring
-// the VRF, which every test here shares.
+// the VRF, which every test here shares. slot is 0 on an egress row.
 type fakeRowKey struct {
 	egress bool
+	slot   uint16
 	addr   string
 	port   uint16
 }
@@ -125,11 +126,11 @@ func (f *fakeVIPTable) put(k fakeRowKey, addr net.IP, port uint16) {
 	f.rows[k] = fakeRowValue{addr.String(), port}
 }
 
-func (f *fakeVIPTable) RegisterIngress(block uint64, argument uint16, proto uint8,
+func (f *fakeVIPTable) RegisterIngress(block uint64, argument, slot uint16, proto uint8,
 	vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) error {
 	f.ingressCalls = append(f.ingressCalls, vipCall{block, argument, proto, vipAddr, vipPort, backendAddr, backendPort})
 	if f.registerErr == nil {
-		f.put(fakeRowKey{addr: vipAddr.String(), port: vipPort}, backendAddr, backendPort)
+		f.put(fakeRowKey{slot: slot, addr: vipAddr.String(), port: vipPort}, backendAddr, backendPort)
 	}
 	return f.registerErr
 }
@@ -144,11 +145,11 @@ func (f *fakeVIPTable) RegisterEgress(block uint64, argument uint16, proto uint8
 }
 
 func (f *fakeVIPTable) UnregisterIngress(
-	block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
+	block uint64, argument, slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 ) error {
 	f.unregIngress = append(f.unregIngress, unregisterCall{block, argument, proto, vipAddr, vipPort})
 	if f.unregisterErr == nil {
-		delete(f.rows, fakeRowKey{addr: vipAddr.String(), port: vipPort})
+		delete(f.rows, fakeRowKey{slot: slot, addr: vipAddr.String(), port: vipPort})
 	}
 	return f.unregisterErr
 }
@@ -165,8 +166,10 @@ func (f *fakeVIPTable) UnregisterEgress(
 
 // removeOwnRows deletes the binding's two rows where they still hold its
 // values, as vipxlatmap's removal by value does.
-func (f *fakeVIPTable) removeOwnRows(vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) {
-	in := fakeRowKey{addr: vipAddr.String(), port: vipPort}
+func (f *fakeVIPTable) removeOwnRows(
+	slot uint16, vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16,
+) {
+	in := fakeRowKey{slot: slot, addr: vipAddr.String(), port: vipPort}
 	if f.rows[in] == (fakeRowValue{backendAddr.String(), backendPort}) {
 		delete(f.rows, in)
 	}
@@ -176,21 +179,21 @@ func (f *fakeVIPTable) removeOwnRows(vipAddr net.IP, vipPort uint16, backendAddr
 	}
 }
 
-func (f *fakeVIPTable) UnregisterBindingAt(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
-	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
+func (f *fakeVIPTable) UnregisterBindingAt(block uint64, argument, slot uint16, proto uint8,
+	vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
 	f.unregAt = append(f.unregAt, unregisterAtCall{
 		block, argument, unregisterBindingCall{proto, vipAddr, vipPort, backendAddr, backendPort}})
 	if f.unregisterErr == nil {
-		f.removeOwnRows(vipAddr, vipPort, backendAddr, backendPort)
+		f.removeOwnRows(slot, vipAddr, vipPort, backendAddr, backendPort)
 	}
 	return nil, f.unregisterErr
 }
 
-func (f *fakeVIPTable) UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+func (f *fakeVIPTable) UnregisterBinding(slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
 	f.unregBinding = append(f.unregBinding, unregisterBindingCall{proto, vipAddr, vipPort, backendAddr, backendPort})
 	if f.unregisterErr == nil {
-		f.removeOwnRows(vipAddr, vipPort, backendAddr, backendPort)
+		f.removeOwnRows(slot, vipAddr, vipPort, backendAddr, backendPort)
 	}
 	return nil, f.unregisterErr
 }
@@ -587,7 +590,7 @@ func TestServiceVIPBindingReconciler_FinalizerKeptWhenRowRemovalFails(t *testing
 // accepts and vip_xlat_table does not, or an unset one. With the VRF gone too,
 // deletion must still finish without looking for rows by value.
 func TestServiceVIPBindingReconciler_DeleteSkipsAddressesWithNoRows(t *testing.T) {
-	for name, backend := range map[string]string{"ipv4": testBackendAddr, "unset": ""} {
+	for name, backend := range map[string]string{"ipv4": "10.0.0.1", "unset": ""} {
 		t.Run(name, func(t *testing.T) {
 			scheme := newRuleTestScheme(t)
 			router, _, _ := newBackendFixtures(testVPCRef)
@@ -645,7 +648,7 @@ func TestResolveVIPBindingContext_Success(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, adv, vrf).Build()
 
 	block, argument, err := resolveVIPBindingContext(
-		context.Background(), fakeClient, testNamespace, testComputeNodeName, netip.MustParseAddr(testBackendAddr))
+		context.Background(), fakeClient, testNamespace, testComputeNodeName, testVPCRef)
 	if err != nil {
 		t.Fatalf("resolveVIPBindingContext: unexpected error: %v", err)
 	}
@@ -657,52 +660,40 @@ func TestResolveVIPBindingContext_Success(t *testing.T) {
 	}
 }
 
-func TestResolveVIPBindingContext_NoMatchingVRF(t *testing.T) {
+func TestResolveVIPBindingContext_NoVRFForVPC(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, adv, vrf).Build()
 
-	if _, _, err := resolveVIPBindingContext(
-		context.Background(), fakeClient, testNamespace, testComputeNodeName, netip.MustParseAddr("192.0.2.1")); err == nil {
-		t.Fatal("resolveVIPBindingContext: expected an error for an address with no matching advertised prefix")
+	for _, vpcRef := range []string{"vpc-absent", ""} {
+		if _, _, err := resolveVIPBindingContext(
+			context.Background(), fakeClient, testNamespace, testComputeNodeName, vpcRef); err == nil {
+			t.Errorf("resolveVIPBindingContext(vpcRef %q): expected an error for a VPC with no VRF on this node", vpcRef)
+		}
 	}
 }
 
-// TestResolveVIPBindingContext_AmbiguousFailsClosed covers the documented
-// ambiguity: two local BGPVRFInstances on the same node both advertise a
-// prefix containing the same backend address (e.g. two tenants using the
-// same ULA range) -- resolveVIPBindingContext must fail rather than guess.
-func TestResolveVIPBindingContext_AmbiguousFailsClosed(t *testing.T) {
+// TestResolveVIPBindingContext_CollidingTenantsResolveToTheirOwnVRF covers two
+// tenants on one node advertising the same prefix, such as two VPCs choosing
+// the same ULA range. Each binding names its VPC, so each resolves to its own
+// VRF rather than failing as ambiguous or picking the other tenant's.
+func TestResolveVIPBindingContext_CollidingTenantsResolveToTheirOwnVRF(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
-
-	vrfID2 := int32(testBackendVRFID + 1)
-	function := bgpv1alpha1.SRv6FunctionEndDT46
-	adv2 := &bgpv1alpha1.BGPAdvertisement{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "second-adv"},
-		Spec: bgpv1alpha1.BGPAdvertisementSpec{
-			RouterRef:     bgpv1alpha1.RouterRef{Name: testBackendRouterName},
-			AddressFamily: bgpv1alpha1.AddressFamily{AFI: bgpv1alpha1.AFIL2VPN, SAFI: bgpv1alpha1.SAFIEVPN},
-			Prefixes:      []bgpv1alpha1.Prefix{testBackendPrefix}, // same prefix, colliding
-			VRFID:         &vrfID2,
-			Function:      &function,
-		},
-	}
-	vrf2 := &bgpv1alpha1.BGPVRFInstance{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "second-vrf"},
-		Spec: bgpv1alpha1.BGPVRFInstanceSpec{
-			RouterTarget:       bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: testBackendRouterName}},
-			VRFID:              vrfID2,
-			ImportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: testRouteTargetValue}},
-			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: testRouteTargetValue}},
-		},
-	}
+	_, adv2, vrf2 := newBackendFixtures("vpc-2")
+	vrf2.Spec.VRFID = testBackendVRFID + 1
+	adv2.Spec.VRFID = ptr(int32(testBackendVRFID + 1))
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, adv, vrf, adv2, vrf2).Build()
 
-	_, _, err := resolveVIPBindingContext(
-		context.Background(), fakeClient, testNamespace, testComputeNodeName, netip.MustParseAddr(testBackendAddr))
-	if err == nil {
-		t.Fatal("resolveVIPBindingContext: expected a fail-closed error for ambiguous VRF ownership")
+	for vpcRef, want := range map[string]uint16{testVPCRef: testBackendVRFID, "vpc-2": testBackendVRFID + 1} {
+		_, argument, err := resolveVIPBindingContext(
+			context.Background(), fakeClient, testNamespace, testComputeNodeName, vpcRef)
+		if err != nil {
+			t.Fatalf("resolveVIPBindingContext(%s): %v", vpcRef, err)
+		}
+		if argument != want {
+			t.Errorf("resolveVIPBindingContext(%s) argument = %d, want %d", vpcRef, argument, want)
+		}
 	}
 }

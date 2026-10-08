@@ -175,7 +175,12 @@ func (r *NetworkRuleReconciler) updateAcceptedCondition(ctx context.Context, rul
 		return r.Status().Update(ctx, ruleCopy)
 	}
 
-	if meta.IsStatusConditionTrue(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted) {
+	// Already accepted for this generation: nothing to write. A spec edit
+	// bumps the generation, and the condition has to follow it, or anything
+	// waiting on Accepted for the current spec (kubectl wait among them)
+	// treats it as stale.
+	if cond := meta.FindStatusCondition(rule.Status.Conditions, bgpv1alpha1.ConditionTypeAccepted); cond != nil &&
+		cond.Status == metav1.ConditionTrue && cond.ObservedGeneration == rule.Generation {
 		return nil
 	}
 	setRuleCondition(ruleCopy, metav1.Condition{

@@ -222,9 +222,17 @@ that converges this node's whole gateway engine:
 1. **Assemble desired state.** Lists every accepted, non-deleting
    `NetworkRule` in the namespace — under the DSR anycast model every
    gateway node in a PoP serves every accepted rule identically, so there
-   is no primary/secondary subset to filter on — resolves each backend's
-   SRv6 uSID via `usidresolver.go`'s `buildBackendSIDIndex`, and converges
-   `gateway.Engine` toward the result. A deleting rule stays in that state,
+   is no primary/secondary subset to filter on — expands each rule's
+   `backendSelector` into backends, the IPv6 interface addresses of the
+   `VPCAttachment`s it selects in the rule's VPC (`rulebackends.go`'s
+   `selectRuleBackends`), resolves each to the SRv6 uSID of the node its
+   attachment reports via `usidresolver.go`'s `buildBackendSIDIndex`, writes
+   the backend's slot (`srv6.BackendSlot`, a hash of its address and port)
+   into bits 81–96 of that uSID so a node hosting several of the rule's
+   backends can tell which one Maglev chose (#799), and converges
+   `gateway.Engine` toward the result. The reconciler watches
+   `VPCAttachment`s cluster-wide, so a backend appearing, moving node or
+   changing address reconverges every gateway without a rule edit. A deleting rule stays in that state,
    as *draining*, while it still carries the teardown finalizer and any
    `BGPAdvertisement` labelled with its name exists: it is not advertised
    and its `<node>/Programmed` condition is left alone, but the datapath
@@ -450,7 +458,8 @@ in `vip_return_stats_table` and surface as `galactic_edge_return_*`.
 binary's own resource set: `networkgateways`, `networkrules`,
 `bgpadvertisements`, and — even though this binary has no BGP client of its
 own — `bgprouters`, since `usidresolver.go` reads `BGPRouter` CRDs directly
-to resolve backend uSIDs).
+to resolve backend uSIDs). The scheme also registers `cloud.datumapis.com`,
+since a rule's backends are `VPCAttachment`s.
 
 `root.go`'s `runCmd`:
 
@@ -614,7 +623,9 @@ separate pod spec entirely, not part of this manifest.
 `NetworkGatewayReconciler`/`NetworkRuleReconciler` touch:
 `networkgateways`/`networkrules` (+ `/status`) read-write,
 `bgpadvertisements` full CRUD, and read-only `get`/`list`/`watch` on both
-`bgprouters` (for `usidresolver.go` — see above) and `bgpvrfinstances`
+`bgprouters` (for `usidresolver.go` — see above), `vpcattachments` in
+`cloud.datumapis.com` (a rule's backends, selected and watched
+cluster-wide) and `bgpvrfinstances`
 (`NetworkGatewayReconciler.SetupWithManager` also watches `BGPVRFInstance`
 to re-trigger reconciliation once a backend's owning VRF/advertisement data
 actually exists; omitting this rule left the manager's informer cache never
@@ -639,25 +650,25 @@ pod on that node is not a supported configuration.
 
 ## Module / Package Reference
 
-| Package                                                 | Binary           | Responsibility                                                                                                                                                                                                                              | Owns state                           |
-| ------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `internal/config` (`gateway.go`)                        | galactic-gateway | `GatewayConfig`: node name, ports, public interface, SRv6 encap-source address; three-tier CLI/env/default precedence via viper                                                                                                             | No                                   |
-| `internal/controller` (`networkgateway_controller.go`)  | galactic-gateway | `NetworkGatewayReconciler`: desired-state assembly (with the deleted-rule drain in `networkgateway_drain.go`), BGP wiring, orphan-crash recovery                                                                                            | No                                   |
-| `internal/controller` (`networkrule_controller.go`)     | galactic-gateway | `NetworkRuleReconciler`: finalizer-guarded teardown ordering, `Accepted`-condition maintenance (`updateAcceptedCondition`)                                                                                                                  | No                                   |
-| `internal/controller` (`usidresolver.go`)               | galactic-gateway | `backendSIDIndex`: resolves a `NetworkRule` backend address to the worker node's SRv6 uSID by matching against `BGPAdvertisement`/`BGPRouter`/`BGPVRFInstance` CRDs, verifying tenant ownership                                             | No                                   |
-| `internal/gateway` (`engine.go`)                        | galactic-gateway | `Engine`: mutex-guarded convergence loop ("apply everything in desired, remove everything not in desired"), mirroring `GoBGPRuntime`'s shape                                                                                                | Yes (active-rule map)                |
-| `internal/gateway` (`types.go`)                         | galactic-gateway | `DesiredRule`/`DesiredBackend`/`EngineState`/`EngineStatus`/`RuleStatus` — the engine's own representation, assembled by the controllers above; `DesiredBackend` implements `internal/maglev.Backend`                                       | No                                   |
-| `internal/gateway` (`datapath.go`, `kerneldatapath.go`) | galactic-gateway | `Datapath`/`QuotaEnforcer`/`TelemetryEmitter` interfaces; `KernelDatapath`, the real `Datapath` backed by `edgemap.VIPTable` over a loaded `edgeprog.EdgedsrObjects`, building a `internal/maglev.Table` per rule; `NoopDatapath` for tests | Yes (`vipKeysByName` bookkeeping)    |
-| `internal/gateway` (`quota.go`)                         | galactic-gateway | `NodeQuotaEnforcer` — real, coarse node-level admission caps (max rules/tenant, max total `vip_table` entries); `NoopQuotaEnforcer` for tests                                                                                               | Yes (in-memory reservation counters) |
-| `internal/gateway` (`telemetry.go`)                     | galactic-gateway | `PrometheusTelemetryEmitter` — control-plane-drop counter only; `NoopTelemetryEmitter` for tests                                                                                                                                            | Yes (Prometheus metric state)        |
-| `internal/gateway` (`recovery.go`, `diff.go`)           | galactic-gateway | `Engine.ReconcileOrphans` (crash recovery) and `diffRuleKeys` (the pure key-set diff both `Reconcile`/`ReconcileOrphans` build on)                                                                                                          | No                                   |
-| `internal/maglev` (`table.go`)                          | galactic-gateway | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; this binary's only importer today (`galactic-nat` has no analogous shard-placement ring — see Known Constraints)                     | No                                   |
-| `internal/plumbing/ebpf/edgeprog`                       | galactic-gateway | Compiled XDP program (`edgedsr.c`, program `edge_lb`) + bpf2go-generated Go bindings (`EdgedsrObjects`)                                                                                                                                     | No                                   |
-| `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table`/`vip_addr_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                                                                  | Yes (via `KernelTable`)              |
-| `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + native-XDP-only attach of the compiled program to one interface                                                                                                                                                                      | Yes (pinned maps, held link)         |
-| `internal/plumbing/ebpf/edgemetrics`                    | galactic-gateway | Pull-based `prometheus.Collector` reading `vip_table`/`vip_stats_table`/`drop_reasons` live at every scrape                                                                                                                                 | No                                   |
-| `internal/plumbing/ebpf/edgepreflight`                  | galactic-gateway | Startup kernel-capability check (`BPF_PROG_TYPE_XDP`, `BPF_MAP_TYPE_HASH`, kernel BTF, `bpf_xdp_adjust_head`) — no partial pass, no degraded fallback                                                                                       | No                                   |
-| `internal/plumbing/ebpf/xdpattach`                      | gateway, nat     | Native-XDP attach across a target list, shared with `natattach`: per-NIC support check before any attach, each bond slave waited back into its aggregate before the next                                                                    | No                                   |
+| Package                                                 | Binary           | Responsibility                                                                                                                                                                                                                                                  | Owns state                           |
+| ------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `internal/config` (`gateway.go`)                        | galactic-gateway | `GatewayConfig`: node name, ports, public interface, SRv6 encap-source address; three-tier CLI/env/default precedence via viper                                                                                                                                 | No                                   |
+| `internal/controller` (`networkgateway_controller.go`)  | galactic-gateway | `NetworkGatewayReconciler`: desired-state assembly (with the deleted-rule drain in `networkgateway_drain.go`), BGP wiring, orphan-crash recovery                                                                                                                | No                                   |
+| `internal/controller` (`networkrule_controller.go`)     | galactic-gateway | `NetworkRuleReconciler`: finalizer-guarded teardown ordering, `Accepted`-condition maintenance (`updateAcceptedCondition`)                                                                                                                                      | No                                   |
+| `internal/controller` (`usidresolver.go`)               | galactic-gateway | `backendSIDIndex`: resolves a `NetworkRule` backend address to the SRv6 uSID of the node its `VPCAttachment` reports by matching against `BGPAdvertisement`/`BGPRouter`/`BGPVRFInstance` CRDs, verifying tenant ownership; `backendSID` adds the backend's slot | No                                   |
+| `internal/gateway` (`engine.go`)                        | galactic-gateway | `Engine`: mutex-guarded convergence loop ("apply everything in desired, remove everything not in desired"), mirroring `GoBGPRuntime`'s shape                                                                                                                    | Yes (active-rule map)                |
+| `internal/gateway` (`types.go`)                         | galactic-gateway | `DesiredRule`/`DesiredBackend`/`EngineState`/`EngineStatus`/`RuleStatus` — the engine's own representation, assembled by the controllers above; `DesiredBackend` implements `internal/maglev.Backend`                                                           | No                                   |
+| `internal/gateway` (`datapath.go`, `kerneldatapath.go`) | galactic-gateway | `Datapath`/`QuotaEnforcer`/`TelemetryEmitter` interfaces; `KernelDatapath`, the real `Datapath` backed by `edgemap.VIPTable` over a loaded `edgeprog.EdgedsrObjects`, building a `internal/maglev.Table` per rule; `NoopDatapath` for tests                     | Yes (`vipKeysByName` bookkeeping)    |
+| `internal/gateway` (`quota.go`)                         | galactic-gateway | `NodeQuotaEnforcer` — real, coarse node-level admission caps (max rules/tenant, max total `vip_table` entries); `NoopQuotaEnforcer` for tests                                                                                                                   | Yes (in-memory reservation counters) |
+| `internal/gateway` (`telemetry.go`)                     | galactic-gateway | `PrometheusTelemetryEmitter` — control-plane-drop counter only; `NoopTelemetryEmitter` for tests                                                                                                                                                                | Yes (Prometheus metric state)        |
+| `internal/gateway` (`recovery.go`, `diff.go`)           | galactic-gateway | `Engine.ReconcileOrphans` (crash recovery) and `diffRuleKeys` (the pure key-set diff both `Reconcile`/`ReconcileOrphans` build on)                                                                                                                              | No                                   |
+| `internal/maglev` (`table.go`)                          | galactic-gateway | Pure-Go Maglev consistent-hash lookup table (`New`/`Lookup`/`Backends`) — one `*Table` built per ring; this binary's only importer today (`galactic-nat` has no analogous shard-placement ring — see Known Constraints)                                         | No                                   |
+| `internal/plumbing/ebpf/edgeprog`                       | galactic-gateway | Compiled XDP program (`edgedsr.c`, program `edge_lb`) + bpf2go-generated Go bindings (`EdgedsrObjects`)                                                                                                                                                         | No                                   |
+| `internal/plumbing/ebpf/edgemap`                        | galactic-gateway | `VIPTable`: `vip_table`/`vip_stats_table`/`vip_addr_table` read/write API, `Generation`/`Reconcile` crash-safety mechanism                                                                                                                                      | Yes (via `KernelTable`)              |
+| `internal/plumbing/ebpf/edgeattach`                     | galactic-gateway | Load + native-XDP-only attach of the compiled program to one interface                                                                                                                                                                                          | Yes (pinned maps, held link)         |
+| `internal/plumbing/ebpf/edgemetrics`                    | galactic-gateway | Pull-based `prometheus.Collector` reading `vip_table`/`vip_stats_table`/`drop_reasons` live at every scrape                                                                                                                                                     | No                                   |
+| `internal/plumbing/ebpf/edgepreflight`                  | galactic-gateway | Startup kernel-capability check (`BPF_PROG_TYPE_XDP`, `BPF_MAP_TYPE_HASH`, kernel BTF, `bpf_xdp_adjust_head`) — no partial pass, no degraded fallback                                                                                                           | No                                   |
+| `internal/plumbing/ebpf/xdpattach`                      | gateway, nat     | Native-XDP attach across a target list, shared with `natattach`: per-NIC support check before any attach, each bond slave waited back into its aggregate before the next                                                                                        | No                                   |
 
 ---
 
@@ -856,6 +867,8 @@ that tag into `config/galactic-gateway/base`.
 | Node-scoped aggregate reconcile (desired-state assembly, BGP wiring, crash recovery) | `internal/controller/networkgateway_controller.go:Reconcile`                                            |
 | Per-object lifecycle (finalizer teardown ordering, `Accepted`-condition maintenance) | `internal/controller/networkrule_controller.go:Reconcile`, `updateAcceptedCondition`, `reconcileDelete` |
 | Backend address → SRv6 uSID resolution (with tenant-ownership verification)          | `internal/controller/usidresolver.go:buildBackendSIDIndex`, `resolveUSID`, `verifyTenantOwnership`      |
+| Backend selection from `backendSelector` (shared with the binding writer)            | `internal/controller/rulebackends.go:selectRuleBackends`                                                |
+| Backend-side `ServiceVIPBinding`s, generated per node                                | `internal/controller/networkrule_binding_controller.go` (runs in `galactic-router`)                     |
 | SRv6 encap source (configured, or derived from this node's `BGPRouter`)              | `cmd/galactic-gateway/encapsource.go:resolveEncapSource`, `srv6.NodeLocatorAddress`                     |
 | Engine convergence loop                                                              | `internal/gateway/engine.go:Reconcile`, `applyRuleLocked`, `removeRuleLocked`                           |
 | Real datapath implementation (vip_table read/write, Maglev table construction)       | `internal/gateway/kerneldatapath.go:ApplyRule`, `RemoveRule`, `buildMaglevTable`                        |

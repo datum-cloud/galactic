@@ -1,0 +1,39 @@
+# The VPCAttachments for ns60's two backends in dfw, which the site's
+# NetworkRules select by label (resources/galactic-gateway/dfw/).
+# In production the attachment controller writes these and their status. The
+# lab has no such controller, so deploy:ns60 applies them here and then
+# writes each one's status from where its pod actually runs
+# (scripts/publish-ns60-attachments.sh).
+apiVersion: cloud.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: backend-a
+  namespace: ns60
+  labels:
+    app: backend
+    instance: a
+spec:
+  vpc:
+    name: "60"
+  interface:
+    name: eth0
+    mode: Netns
+    addresses:
+      - fd20:60:ff01:a::100/96
+---
+apiVersion: cloud.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: backend-b
+  namespace: ns60
+  labels:
+    app: backend
+    instance: b
+spec:
+  vpc:
+    name: "60"
+  interface:
+    name: eth0
+    mode: Netns
+    addresses:
+      - fd20:60:ff01:b::100/96

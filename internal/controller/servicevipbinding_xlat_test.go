@@ -20,6 +20,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -108,7 +109,7 @@ func deleteBindingWithVRFPresent(t *testing.T, backends ...string) *vipxlatmap.V
 		Build()
 
 	block, argument, err := resolveVIPBindingContext(context.Background(), fakeClient, testNamespace,
-		testComputeNodeName, netip.MustParseAddr(testVIPBindingBackendAddr))
+		testComputeNodeName, testVPCRef)
 	if err != nil {
 		t.Fatalf("resolveVIPBindingContext: %v", err)
 	}
@@ -117,7 +118,8 @@ func deleteBindingWithVRFPresent(t *testing.T, backends ...string) *vipxlatmap.V
 	vip := net.ParseIP(testVIPBindingVIPAddr)
 	for _, b := range backends {
 		backend := net.ParseIP(b)
-		if err := table.RegisterIngress(block, argument, ipProtoTCP, vip, 8080, backend, 30080); err != nil {
+		slot := srv6.BackendSlot(netip.MustParseAddr(b), 30080)
+		if err := table.RegisterIngress(block, argument, slot, ipProtoTCP, vip, 8080, backend, 30080); err != nil {
 			t.Fatalf("RegisterIngress: %v", err)
 		}
 		if err := table.RegisterEgress(block, argument, ipProtoTCP, backend, 30080, vip, 8080); err != nil {

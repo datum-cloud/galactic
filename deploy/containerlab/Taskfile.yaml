@@ -100,7 +100,7 @@ tasks:
       - task: "deploy:galactic-router"
       - task: "deploy:galactic-nat"
       - task: "deploy:scenarios"
-      # After the scenarios: the gateway's ServiceVIPBindings bind ns60's
+      # After the scenarios: the gateway's NetworkRules select ns60's
       # backends, which deploy:scenarios creates.
       - task: "deploy:galactic-gateway"
       - task: "deploy:fabric-api"
@@ -363,9 +363,10 @@ tasks:
       - ./scripts/deploy-ns.sh ns40 iad
 
   "deploy:ns60":
-    desc: Deploy ns60 test VPC (one VIP backend per site)
+    desc: Deploy ns60 test VPC (two VIP backends per site, on one node)
     cmds:
       - ./scripts/deploy-ns.sh ns60 dfw sjc iad
+      - ./scripts/publish-ns60-attachments.sh dfw sjc iad
 
   "deploy:ns71":
     desc: Deploy ns71 test VPCs (overlapping ULA on one node, same-node collision fixture)
@@ -519,7 +520,13 @@ tasks:
           docker exec ${cp} kubectl -n galactic-system get networkgateways,networkrules,servicevipbindings
           # Ready: the engine loaded every rule and advertised it. Accepted:
           # the rule found a gateway. Bound: the backend's node rewrites the
-          # VIP for it.
+          # VIP for it. Each backend's node writes one binding per rule per
+          # ns60 backend: two rules, two backends.
+          bindings=$(docker exec ${cp} kubectl -n galactic-system get servicevipbindings -o name | wc -l)
+          if [ "${bindings}" -ne 4 ]; then
+            echo "FAIL ${site}: ${bindings} ServiceVIPBindings, want 4" >&2
+            rc=1
+          fi
           for check in "networkgateway Ready" "networkrule Accepted" "servicevipbinding Bound"; do
             set -- ${check}
             if ! docker exec ${cp} kubectl -n galactic-system wait $1 --all \

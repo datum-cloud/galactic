@@ -341,3 +341,64 @@ func TestNodeLocatorAddressNamesSameNodeAsSIDBase(t *testing.T) {
 		t.Errorf("NodeLocatorAddress() %s and NodeSIDBase() %s differ in bits 1-64", addr, base)
 	}
 }
+
+// TestBackendSlot checks BackendSlot is deterministic, never zero, and tells
+// apart a handful of backends sharing a node, including two that differ only by
+// port.
+func TestBackendSlot(t *testing.T) {
+	backends := []netip.AddrPort{
+		netip.MustParseAddrPort("[fd20:60:ff03:a::100]:80"),
+		netip.MustParseAddrPort("[fd20:60:ff03:a::101]:80"),
+		netip.MustParseAddrPort("[fd20:60:ff03:a::102]:80"),
+		netip.MustParseAddrPort("[fd20:60:ff03:a::100]:8080"),
+		netip.MustParseAddrPort("[fd00:10:1::1]:8443"),
+	}
+	seen := make(map[uint16]netip.AddrPort, len(backends))
+	for _, b := range backends {
+		slot := BackendSlot(b.Addr(), b.Port())
+		if slot == 0 {
+			t.Errorf("BackendSlot(%s) = 0, want nonzero", b)
+		}
+		if again := BackendSlot(b.Addr(), b.Port()); again != slot {
+			t.Errorf("BackendSlot(%s) not deterministic: %#x then %#x", b, slot, again)
+		}
+		if prev, dup := seen[slot]; dup {
+			t.Errorf("BackendSlot(%s) = %#x, same as %s", b, slot, prev)
+		}
+		seen[slot] = b
+	}
+}
+
+// TestComputeBackendSID checks the slot lands in the SID's Slot field, leaves
+// every other field equal to ComputeSID's, and that slot zero is ComputeSID.
+func TestComputeBackendSID(t *testing.T) {
+	plain, err := ComputeSID(testUSIDLocator, 7, 0x123, bgpv1alpha1.SRv6FunctionEndDT46)
+	if err != nil {
+		t.Fatalf("ComputeSID: %v", err)
+	}
+	zero, err := ComputeBackendSID(testUSIDLocator, 7, 0x123, bgpv1alpha1.SRv6FunctionEndDT46, 0)
+	if err != nil {
+		t.Fatalf("ComputeBackendSID(slot 0): %v", err)
+	}
+	if zero != plain {
+		t.Errorf("ComputeBackendSID(slot 0) = %s, want ComputeSID's %s", zero, plain)
+	}
+
+	slot := BackendSlot(netip.MustParseAddr("fd20:60:ff03:a::100"), 80)
+	sid, err := ComputeBackendSID(testUSIDLocator, 7, 0x123, bgpv1alpha1.SRv6FunctionEndDT46, slot)
+	if err != nil {
+		t.Fatalf("ComputeBackendSID: %v", err)
+	}
+	got, err := uformat.Decode(sid)
+	if err != nil {
+		t.Fatalf("uformat.Decode(%s): %v", sid, err)
+	}
+	want, err := uformat.Decode(plain)
+	if err != nil {
+		t.Fatalf("uformat.Decode(%s): %v", plain, err)
+	}
+	want.Slot = slot
+	if got != want {
+		t.Errorf("Decode(ComputeBackendSID) = %+v, want %+v", got, want)
+	}
+}
