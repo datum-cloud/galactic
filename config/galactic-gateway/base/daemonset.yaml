@@ -138,9 +138,8 @@ spec:
           # startupProbe comment. Startup also covers the wait for this
           # node's BGPRouter, when GALACTIC_GATEWAY_SRV6_ADDRESS is unset
           # (#707), so the threshold allows 10 minutes rather than the
-          # loader's few seconds: a router created shortly after the node
-          # must not turn into restarts and back-off (#796). Past that, the
-          # container restarts and waits again.
+          # loader's few seconds. Past that, the container restarts and
+          # waits again.
           startupProbe:
             grpc:
               port: 5181
