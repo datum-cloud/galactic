@@ -112,6 +112,15 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.Error(err, "get ServiceRoutePolicy")
 		return ctrl.Result{}, err
 	}
+	inputDigest := ""
+	programmed := false
+	if policy.Spec.Frontend != nil {
+		defer func() {
+			if err := r.setNodeProgramming(ctx, policy, inputDigest, programmed); err != nil {
+				logger.Error(err, "publish node programming acknowledgment")
+			}
+		}()
+	}
 	if policy.DeletionTimestamp != nil {
 		return ctrl.Result{}, r.removePolicyLocked(req.NamespacedName)
 	}
@@ -162,6 +171,9 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	all := make([]*cloudv1alpha1.VPCAttachment, 0, len(attachments.Items))
 	for i := range attachments.Items {
 		all = append(all, &attachments.Items[i])
+	}
+	if policy.Spec.Frontend != nil {
+		inputDigest = serviceProgrammingDigest(policy, endpoint, all, vpcIdentity)
 	}
 	conflicts, conflictErr := r.conflictingPolicies(ctx, all)
 	if conflictErr != nil {
@@ -220,6 +232,7 @@ func (r *ServiceRoutePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.Error(err, "program service eBPF policy", "endpoint", endpoint.Name)
 		return ctrl.Result{}, err
 	}
+	programmed = len(intents) != 0 && inputDigest != ""
 	if err := r.setAccepted(ctx, policy, metav1.ConditionTrue, "Accepted", "policy is valid"); err != nil {
 		resultLabel = reconcileResultError
 		logger.Error(err, "update ServiceRoutePolicy acceptance status")
@@ -339,6 +352,12 @@ func (r *ServiceRoutePolicyReconciler) syncAllPolicies(ctx context.Context) erro
 		policy := &policies.Items[index]
 		key := types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}
 		currentPolicies[key] = struct{}{}
+		if policy.Spec.Frontend != nil {
+			if err := r.setNodeProgramming(ctx, policy, "", false); err != nil {
+				return startupSyncError(err, true)
+			}
+		}
+
 		if (policy.Spec.Frontend != nil && !r.FrontendEnabled) || r.validateAuthorization(policy) != nil || conflicts[key] {
 			compiled = append(compiled, compiledPolicy{key: key})
 			continue

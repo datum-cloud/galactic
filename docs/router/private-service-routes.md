@@ -80,3 +80,17 @@ Policies claiming the same frontend address, protocol, and port on one consumer
 attachment are rejected together. Separate VPC attachments can reuse that tuple.
 The publisher owns authorization renewal and service health; Galactic enforces
 network access and forwards packets. It does not interpret DNS records or zones.
+
+## Node programming reports
+
+`ServiceRoutePolicy.status.nodes` reports whether each participating node
+programmed the current path. A report identifies the policy UID, generation,
+and input digest. It expires within 60 seconds or when authorization expires,
+whichever comes first. Consumer and producer nodes report independently for
+remote delivery.
+
+Controllers using these reports must require the current topology digest and
+all required nodes. `Accepted=True` means the policy is valid; it does not prove
+that forwarding is installed. Reports cover network programming, not the
+health of the producer application. Startup withdraws previous local readiness
+before rebuilding the node's state.
