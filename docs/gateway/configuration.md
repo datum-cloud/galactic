@@ -616,6 +616,16 @@ slot-0 ingress rows a `galactic-router` built before #799 wrote, so upgrade
 bindings' rows with slots when it starts, and its periodic `vip_xlat_table`
 sweep removes the old slot-0 rows.
 
+A binding is programmed only once its VPC's VRF on the node advertises a
+prefix containing `backendAddress`, through a `BGPAdvertisement` on that
+node's `BGPRouter` with the VRF's ID. Until then it reports `Bound=False`
+with reason `BindFailed`, naming the VPC, VRF, node and address, and claims
+no row. This catches a hand-written binding for an address the node does not
+serve, an attachment whose interface is not up yet, and a stale attachment
+address. A new or changed advertisement on the node requeues its bindings,
+so one written first binds as soon as the address is advertised. Deleting a
+binding never needs the advertisement.
+
 Each node summarizes its bindings on the rule as
 `<backend-node>/BackendsBound`: `True` with reason `Bound` once every one
 reports `Bound`, `False` with reason `BindingsNotBound` naming each that

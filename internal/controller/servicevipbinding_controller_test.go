@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -694,6 +696,147 @@ func TestResolveVIPBindingContext_CollidingTenantsResolveToTheirOwnVRF(t *testin
 		}
 		if argument != want {
 			t.Errorf("resolveVIPBindingContext(%s) argument = %d, want %d", vpcRef, argument, want)
+		}
+	}
+}
+
+// TestServiceVIPBindingReconciler_BackendMustBeAdvertised checks that a
+// binding is programmed only for a backend address its own VRF advertises on
+// this node. The VRF resolves by vpcRef in every case.
+func TestServiceVIPBindingReconciler_BackendMustBeAdvertised(t *testing.T) {
+	tests := []struct {
+		name      string
+		backend   string
+		otherVRF  bool // vpc-2 has a VRF on this node advertising testIPv6BackendPrefix
+		wantBound bool
+	}{
+		{name: "address in an advertised prefix", backend: testBackendAddr, wantBound: true},
+		{name: "address in no advertised prefix", backend: testVIPBindingBackendAddr},
+		{name: "prefix advertised by another VRF on the node", backend: testVIPBindingBackendAddr, otherVRF: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newRuleTestScheme(t)
+			router, adv, vrf := newBackendFixtures(testVPCRef) // advertises testBackendPrefix only
+			binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+			binding.Spec.BackendAddress = tt.backend
+
+			objs := []client.Object{router, adv, vrf, binding}
+			if tt.otherVRF {
+				_, adv2, vrf2 := newBackendFixtures("vpc-2")
+				vrf2.Spec.VRFID = testBackendVRFID + 1
+				adv2.Spec.VRFID = ptr(int32(testBackendVRFID + 1))
+				adv2.Spec.Prefixes = []bgpv1alpha1.Prefix{testIPv6BackendPrefix}
+				objs = append(objs, adv2, vrf2)
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
+				WithObjects(objs...).
+				Build()
+
+			table := &fakeVIPTable{}
+			r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()})
+			if tt.wantBound != (err == nil) {
+				t.Fatalf("Reconcile error = %v, want error %t", err, !tt.wantBound)
+			}
+
+			wantCalls, wantReason := 0, "BindFailed"
+			if tt.wantBound {
+				wantCalls, wantReason = 1, reasonBindingsBound
+			}
+			if len(table.ingressCalls) != wantCalls || len(table.egressCalls) != wantCalls {
+				t.Errorf("ingressCalls=%d egressCalls=%d, want %d each",
+					len(table.ingressCalls), len(table.egressCalls), wantCalls)
+			}
+
+			got := &bgpv1alpha1.ServiceVIPBinding{}
+			if err := fakeClient.Get(context.Background(), bindingKey(), got); err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			cond := meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeBound)
+			if cond == nil {
+				t.Fatal("Bound condition not set")
+			}
+			if cond.Reason != wantReason {
+				t.Errorf("Bound reason = %q (%s), want %q", cond.Reason, cond.Message, wantReason)
+			}
+			if !tt.wantBound && !strings.Contains(cond.Message, tt.backend) {
+				t.Errorf("Bound message = %q, want it to name backend address %s", cond.Message, tt.backend)
+			}
+		})
+	}
+}
+
+// TestServiceVIPBindingReconciler_DeleteAfterAdvertisementGone checks that
+// teardown does not require the backend's advertisement: with the VRF still
+// on the node but its advertisement gone, both removal passes run and the
+// finalizer is released.
+func TestServiceVIPBindingReconciler_DeleteAfterAdvertisementGone(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	router, _, vrf := newBackendFixtures(testVPCRef) // no advertisement
+	binding := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	controllerutil.AddFinalizer(binding, serviceVIPBindingFinalizer)
+	now := metav1.Now()
+	binding.DeletionTimestamp = &now
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&bgpv1alpha1.ServiceVIPBinding{}).
+		WithObjects(router, vrf, binding).
+		Build()
+
+	table := &fakeVIPTable{}
+	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName, VIPTranslationTable: table}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: bindingKey()}); err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+	if len(table.unregBinding) != 1 || len(table.unregAt) != 1 {
+		t.Fatalf("unregBinding=%d unregAt=%d, want 1 each", len(table.unregBinding), len(table.unregAt))
+	}
+	if table.unregAt[0].argument != uint16(testBackendVRFID) {
+		t.Errorf("UnregisterBindingAt argument = %d, want %d", table.unregAt[0].argument, testBackendVRFID)
+	}
+	err := fakeClient.Get(context.Background(), bindingKey(), &bgpv1alpha1.ServiceVIPBinding{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("get: got err=%v, want NotFound (finalizer removal should let deletion complete)", err)
+	}
+}
+
+// TestServiceVIPBinding_AdvertisementRequests: an advertisement on this node's
+// router requeues this node's bindings only, and one on another node's router
+// or naming no known router requeues nothing.
+func TestServiceVIPBinding_AdvertisementRequests(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	router, adv, _ := newBackendFixtures(testVPCRef)
+	otherRouter := router.DeepCopy()
+	otherRouter.Name = "other-router"
+	otherRouter.Spec.TargetRef.Name = "unserved-node"
+	otherAdv := adv.DeepCopy()
+	otherAdv.Name = "other-adv"
+	otherAdv.Spec.RouterRef.Name = otherRouter.Name
+	orphanAdv := adv.DeepCopy()
+	orphanAdv.Name = "orphan-adv"
+	orphanAdv.Spec.RouterRef.Name = "absent-router"
+
+	mine := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, testComputeNodeName)
+	elsewhere := newTestServiceVIPBinding(bgpv1alpha1.ServiceVIPBindingEgressKindTap, "unserved-node")
+	elsewhere.Name = "binding-elsewhere"
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(router, otherRouter, mine, elsewhere).
+		Build()
+	r := &ServiceVIPBindingReconciler{Client: fakeClient, NodeName: testComputeNodeName}
+
+	reqs := r.advertisementRequests(context.Background(), adv)
+	if len(reqs) != 1 || reqs[0].NamespacedName != bindingKey() {
+		t.Errorf("advertisementRequests(this node's adv) = %v, want [%s]", reqs, bindingKey())
+	}
+	for _, a := range []*bgpv1alpha1.BGPAdvertisement{otherAdv, orphanAdv} {
+		if reqs := r.advertisementRequests(context.Background(), a); len(reqs) != 0 {
+			t.Errorf("advertisementRequests(%s) = %v, want none", a.Name, reqs)
 		}
 	}
 }
