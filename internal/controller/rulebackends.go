@@ -8,13 +8,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
+	"slices"
 	"sort"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/srv6"
@@ -54,6 +58,35 @@ func listVPCAttachments(ctx context.Context, c client.Client) ([]*cloudv1alpha1.
 		out = append(out, &list.Items[i])
 	}
 	return out, nil
+}
+
+// vpcAttachmentBackendChanged passes VPCAttachment events that can change some
+// rule's backend set: every create, delete and generic event, and an update
+// only when a field selectRuleBackends reads changed. Status writes that touch
+// only conditions, observedGeneration, the container ID and the like are
+// dropped, so an attachment controller refreshing its conditions does not
+// trigger a pass on every gateway and router.
+//
+// The fields compared here are exactly those selectRuleBackends,
+// attachmentIPv6Addresses and attachmentEgressKind read: labels (the
+// selector), status.vpc, status.node, spec.interface.addresses and
+// spec.interface.mode. Namespace and name are immutable. Keep this list in
+// sync with those functions whenever one of them reads another field.
+func vpcAttachmentBackendChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldAtt, okOld := e.ObjectOld.(*cloudv1alpha1.VPCAttachment)
+			newAtt, okNew := e.ObjectNew.(*cloudv1alpha1.VPCAttachment)
+			if !okOld || !okNew {
+				return true
+			}
+			return !maps.Equal(oldAtt.Labels, newAtt.Labels) ||
+				oldAtt.Status.VPC != newAtt.Status.VPC ||
+				oldAtt.Status.Node != newAtt.Status.Node ||
+				oldAtt.Spec.Interface.Mode != newAtt.Spec.Interface.Mode ||
+				!slices.Equal(oldAtt.Spec.Interface.Addresses, newAtt.Spec.Interface.Addresses)
+		},
+	}
 }
 
 // selectRuleBackends returns the backends rule's BackendSelector picks from

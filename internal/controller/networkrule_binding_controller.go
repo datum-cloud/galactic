@@ -400,13 +400,17 @@ func (r *NetworkRuleBindingReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		// Accepted. Other status writes, including this reconciler's own
 		// conditions and the gateways' Programmed conditions, change neither.
 		For(&bgpv1alpha1.NetworkRule{}, builder.WithPredicates(ruleBindingInputsChanged())).
-		// Any attachment can enter or leave a rule's selection, or move to
-		// or from this node, so every rule is re-queued. A rule with no
-		// backend on this node and none before costs one list.
+		// An attachment can enter or leave the selection only of rules in
+		// its VPC, or move to or from this node, so only the rules whose
+		// VPC is its observed VPC are re-queued. An update maps both the old
+		// and the new object, so an attachment moving between VPCs
+		// re-queues the rules of both. Updates that change nothing
+		// selectRuleBackends reads are dropped.
 		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(
-			func(ctx context.Context, _ client.Object) []ctrlreconcile.Request {
-				return allRuleRequests(ctx, r.Client)
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return vpcRuleRequests(ctx, r.Client, obj)
 			}),
+			builder.WithPredicates(vpcAttachmentBackendChanged()),
 		).
 		// A binding's Bound condition feeds the rule's BackendsBound
 		// condition, and a deleted binding must be rewritten.
@@ -439,15 +443,24 @@ func ruleBindingInputsChanged() predicate.Predicate {
 	}
 }
 
-// allRuleRequests returns a reconcile request for every NetworkRule.
-func allRuleRequests(ctx context.Context, c client.Client) []ctrlreconcile.Request {
+// vpcRuleRequests returns a reconcile request for every NetworkRule whose VPC
+// is obj's observed VPC, the only rules whose backends obj can be. An
+// attachment with no observed VPC is no rule's candidate and maps to nothing.
+func vpcRuleRequests(ctx context.Context, c client.Client, obj client.Object) []ctrlreconcile.Request {
+	attachment, ok := obj.(*cloudv1alpha1.VPCAttachment)
+	if !ok || attachment.Status.VPC == "" {
+		return nil
+	}
 	list := &bgpv1alpha1.NetworkRuleList{}
 	if err := c.List(ctx, list); err != nil {
 		log.FromContext(ctx).Error(err, "list NetworkRules for VPCAttachment change")
 		return nil
 	}
-	reqs := make([]ctrlreconcile.Request, 0, len(list.Items))
+	var reqs []ctrlreconcile.Request
 	for i := range list.Items {
+		if list.Items[i].Spec.VPCRef != attachment.Status.VPC {
+			continue
+		}
 		reqs = append(reqs, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 	}
 	return reqs

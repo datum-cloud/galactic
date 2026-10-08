@@ -445,6 +445,39 @@ func TestNetworkRuleBindingReconciler_InvalidRuleRemovesStaleCondition(t *testin
 	}
 }
 
+// TestVPCRuleRequests covers the VPCAttachment watch mapping: an attachment
+// re-queues only the rules in its observed VPC.
+func TestVPCRuleRequests(t *testing.T) {
+	inVPC := newBindingTestRule()
+	otherVPC := newTestRule("rule-other", "other-vpc", testBindingVIP)
+	_, c := newBindingWriter(t, inVPC, otherVPC)
+
+	tests := []struct {
+		name string
+		vpc  string
+		want []string
+	}{
+		{"rule's VPC", testVPCRef, []string{testRuleName}},
+		{"other VPC", "other-vpc", []string{"rule-other"}},
+		{"VPC with no rules", "no-rules", nil},
+		{"no observed VPC", "", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			att := newBackendAttachment(testVPCRef)
+			att.Status.VPC = tt.vpc
+			reqs := vpcRuleRequests(context.Background(), c, att)
+			got := make([]string, 0, len(reqs))
+			for _, req := range reqs {
+				got = append(got, req.Name)
+			}
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("requests = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestNetworkRuleBindingReconciler_BindingRuleRequests covers the watch
 // mapping: only this node's generated bindings requeue their rule.
 func TestNetworkRuleBindingReconciler_BindingRuleRequests(t *testing.T) {

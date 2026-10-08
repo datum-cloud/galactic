@@ -1014,12 +1014,15 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// labels changes some rule's backend set. Attachments live in tenant
 		// namespaces, not the gateway's, so every NetworkGateway is
 		// re-queued. Their address and node come from spec and status alike,
-		// so status updates are not filtered out; the engine skips every rule
-		// whose resolved state is unchanged.
+		// so the predicate compares the fields selectRuleBackends reads on
+		// both rather than the generation, and drops updates that change
+		// only conditions or other status; the engine skips every rule whose
+		// resolved state is unchanged.
 		Watches(&cloudv1alpha1.VPCAttachment{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 				return allGatewayRequests(ctx, r.Client, "VPCAttachment", obj.GetNamespace()+"/"+obj.GetName())
 			}),
+			builder.WithPredicates(vpcAttachmentBackendChanged()),
 		).
 		Named("networkgateway").
 		Complete(r)
