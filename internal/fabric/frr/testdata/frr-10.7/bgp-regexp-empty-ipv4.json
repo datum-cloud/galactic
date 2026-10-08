@@ -1,0 +1,10 @@
+{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 23,
+ "routerId": "10.255.0.1",
+ "defaultLocPrf": 100,
+ "localAS": 65000,
+ "routes": { "10.200.0.0/16": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","prefix":"10.200.0.0","prefixLen":16,"network":"10.200.0.0/16","version":1,"metric":0,"weight":32768,"peerId":"(unspec)","path":"","origin":"incomplete","nexthops":[{"ip":"0.0.0.0","hostname":"d9d7aa48836f","afi":"ipv4","used":true}]}]
+ } , "totalRoutes": 1, "totalPaths": 10,"numRoutes":1
+ } 

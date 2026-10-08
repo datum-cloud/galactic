@@ -1,0 +1,348 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The fabric-api gRPC contract between a cell's fabric-api gateway and the
+// fabric-api node sidecars in its fabric-router pods, and the gateway's
+// operator debug service. It is internal to galactic: the public interface is
+// the LookingGlassQuery CRD, and nothing outside a cell calls these services.
+//
+// Every RPC is unary with a bounded result, since the end consumer is a
+// Kubernetes status object. A successful Execute returns an Observation;
+// every failure is a gRPC status carrying a google.rpc.ErrorInfo whose reason
+// is the typed error code (domain fabric-api.datumapis.com).
+
+syntax = "proto3";
+
+package fabric.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "go.datum.net/galactic/api/fabric/v1;fabricv1";
+
+// FabricService runs on each fabric-api node sidecar.
+service FabricService {
+  // Execute runs one query on this node. Calls with the same
+  // (request_id, node, query) are deduplicated while the request lives.
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  // Info reports this node's identity and whether diagnostics are available.
+  rpc Info(InfoRequest) returns (InfoResponse);
+}
+
+// FabricGatewayService is the gateway's operator debug service. It applies
+// the same validation and limits as federated execution.
+service FabricGatewayService {
+  // Query runs a query on the cell's eligible nodes, or a subset of them.
+  rpc Query(QueryRequest) returns (QueryResponse);
+  // ListNodes lists the nodes the gateway would execute on.
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+}
+
+enum QueryType {
+  QUERY_TYPE_UNSPECIFIED = 0;
+  QUERY_TYPE_ROUTE_LOOKUP = 1;
+  QUERY_TYPE_AS_PATH = 2;
+  QUERY_TYPE_COMMUNITY = 3;
+  QUERY_TYPE_LARGE_COMMUNITY = 4;
+  QUERY_TYPE_BGP_SUMMARY = 5;
+  QUERY_TYPE_PING = 6;
+  QUERY_TYPE_TRACEROUTE = 7;
+}
+
+enum AddressFamily {
+  ADDRESS_FAMILY_UNSPECIFIED = 0;
+  ADDRESS_FAMILY_IPV4 = 1;
+  ADDRESS_FAMILY_IPV6 = 2;
+}
+
+// Query is a canonical looking-glass query. A probe target is always a
+// numeric address by the time it reaches a node.
+message Query {
+  QueryType type = 1;
+  string target = 2;
+  AddressFamily address_family = 3;
+}
+
+// Budgets bounds one node's result. Zero fields take the node's ceilings.
+message Budgets {
+  uint32 max_response_bytes = 1;
+  uint32 max_prefixes = 2;
+  uint32 max_paths_per_prefix = 3;
+  uint32 max_communities_per_path = 4;
+}
+
+message ExecuteRequest {
+  // request_id identifies the request across retries; with node and query it
+  // is the duplicate-suppression key.
+  string request_id = 1;
+  // node is the node the caller expects to reach. A node rejects a request
+  // naming another node.
+  string node = 2;
+  Query query = 3;
+  // expires_at is the absolute request expiration. A node rejects an expired
+  // request and clamps its own deadline to it.
+  google.protobuf.Timestamp expires_at = 4;
+  Budgets budgets = 5;
+}
+
+message ExecuteResponse {
+  Observation observation = 1;
+}
+
+// Observation is one node's answer to one query.
+message Observation {
+  string node = 1;
+  string router_id = 2;
+  uint32 asn = 3;
+  string frr_version = 4;
+  // sample_time is when the node read FRR or started the probe.
+  google.protobuf.Timestamp sample_time = 5;
+  google.protobuf.Duration duration = 6;
+  // matched counts matching prefixes for a route lookup or search. It is set
+  // only when matched_is_exact, i.e. a complete FRR response was parsed.
+  optional uint32 matched = 7;
+  bool matched_is_exact = 8;
+  // truncated is true when the result was shaped down to budget.
+  bool truncated = 9;
+  oneof result {
+    RouteResult routes = 10;
+    SummaryResult summary = 11;
+    PingResult ping = 12;
+    TracerouteResult traceroute = 13;
+  }
+}
+
+enum LookupKind {
+  LOOKUP_KIND_UNSPECIFIED = 0;
+  // LOOKUP_KIND_EXACT matched the exact prefix asked for.
+  LOOKUP_KIND_EXACT = 1;
+  // LOOKUP_KIND_LONGEST_MATCH matched the most specific prefix covering an
+  // address, which may be a default route.
+  LOOKUP_KIND_LONGEST_MATCH = 2;
+  // LOOKUP_KIND_SEARCH is an AS-path or community table search.
+  LOOKUP_KIND_SEARCH = 3;
+}
+
+message RouteResult {
+  LookupKind lookup_kind = 1;
+  repeated PrefixObservation prefixes = 2;
+  // index is set when a search was answered from the node's search index
+  // instead of by FRR: each prefix then carries its selected path only.
+  IndexState index = 3;
+}
+
+// IndexState is the freshness of the node's search index, which follows
+// bgpd's Loc-RIB over BMP.
+message IndexState {
+  // synced_at is when the current BMP session's initial table completed.
+  google.protobuf.Timestamp synced_at = 1;
+  // last_update is when the last route change was applied.
+  google.protobuf.Timestamp last_update = 2;
+  // version counts route changes applied; it only grows.
+  uint64 version = 3;
+  // routes is the number of prefixes the index holds.
+  uint64 routes = 4;
+}
+
+// PrefixObservation is one prefix as one router holds it.
+message PrefixObservation {
+  string prefix = 1;
+  // paths is the router's own paths. best describes that router's BGP choice
+  // only.
+  repeated Path paths = 2;
+  uint32 total_paths = 3;
+  // installation is zebra's RIB entry for the prefix, sampled separately.
+  // Unset for searches.
+  Installation installation = 4;
+}
+
+message Path {
+  bool best = 1;
+  bool multipath = 2;
+  bool valid = 3;
+  string selection_reason = 4;
+  string as_path = 5;
+  repeated ASSegment as_path_segments = 6;
+  // origin is the BGP ORIGIN attribute (IGP, EGP, incomplete).
+  string origin = 7;
+  // origin_asn is the AS that originated the prefix; 0 when local or
+  // ambiguous (a trailing AS_SET).
+  uint32 origin_asn = 8;
+  optional uint32 local_pref = 9;
+  optional uint32 med = 10;
+  uint32 weight = 11;
+  bool local = 12;
+  bool aggregated = 13;
+  repeated string communities = 14;
+  uint32 total_communities = 15;
+  repeated string large_communities = 16;
+  uint32 total_large_communities = 17;
+  repeated NextHop next_hops = 18;
+  string peer_address = 19;
+  string peer_router_id = 20;
+  string peer_hostname = 21;
+  string peer_type = 22;
+  google.protobuf.Timestamp last_update = 23;
+}
+
+message ASSegment {
+  // type is as-sequence, as-set, as-confed-sequence or as-confed-set.
+  string type = 1;
+  repeated uint32 asns = 2;
+}
+
+message NextHop {
+  string address = 1;
+  string hostname = 2;
+  string scope = 3;
+  bool accessible = 4;
+  bool used = 5;
+}
+
+// Installation is zebra's evidence for one prefix, with its own sample time.
+// It says nothing about reachability beyond this router or about XDP
+// forwarding.
+message Installation {
+  google.protobuf.Timestamp sample_time = 1;
+  bool present = 2;
+  repeated ZebraRoute routes = 3;
+  // error_code is set when zebra could not be read; the BGP answer stands.
+  string error_code = 4;
+  string error_message = 5;
+}
+
+message ZebraRoute {
+  string protocol = 1;
+  bool selected = 2;
+  bool installed = 3;
+  uint32 distance = 4;
+  uint32 metric = 5;
+  repeated ZebraNextHop next_hops = 6;
+}
+
+message ZebraNextHop {
+  string address = 1;
+  string interface = 2;
+  bool active = 3;
+  bool fib = 4;
+  bool blackhole = 5;
+}
+
+message SummaryResult {
+  string router_id = 1;
+  uint32 asn = 2;
+  repeated Peer peers = 3;
+  uint32 total_peers = 4;
+  uint32 established_peers = 5;
+}
+
+// Peer is one BGP session. A session that is down is data, not a failure.
+message Peer {
+  string address = 1;
+  string hostname = 2;
+  string description = 3;
+  uint32 remote_as = 4;
+  uint32 local_as = 5;
+  string state = 6;
+  bool established = 7;
+  google.protobuf.Duration uptime = 8;
+  uint32 prefixes_received = 9;
+  uint32 prefixes_sent = 10;
+  uint64 messages_received = 11;
+  uint64 messages_sent = 12;
+  uint32 connections_established = 13;
+  uint32 connections_dropped = 14;
+}
+
+message PingResult {
+  string source = 1;
+  string destination = 2;
+  uint32 sent = 3;
+  uint32 received = 4;
+  repeated ProbeReply replies = 5;
+  google.protobuf.Duration rtt_min = 6;
+  google.protobuf.Duration rtt_avg = 7;
+  google.protobuf.Duration rtt_max = 8;
+}
+
+message TracerouteResult {
+  string source = 1;
+  string destination = 2;
+  // reached is true when the destination answered.
+  bool reached = 3;
+  repeated Hop hops = 4;
+}
+
+message Hop {
+  uint32 ttl = 1;
+  repeated ProbeReply probes = 2;
+}
+
+// ProbeReply is the outcome of one probe packet. A probe with no reply is
+// diagnostic data.
+message ProbeReply {
+  uint32 sequence = 1;
+  // address is the replying router or host; empty on timeout.
+  string address = 2;
+  google.protobuf.Duration rtt = 3;
+  bool timeout = 4;
+  // icmp_type is the reply's type: echo-reply, time-exceeded,
+  // destination-unreachable, packet-too-big or parameter-problem.
+  string icmp_type = 5;
+  uint32 icmp_code = 6;
+}
+
+message InfoRequest {}
+
+message InfoResponse {
+  string node = 1;
+  string site = 2;
+  string router_id = 3;
+  uint32 asn = 4;
+  string frr_version = 5;
+  // diagnostics_available is false while FRR is unreachable, its version is
+  // unsupported, or credentials are missing; unavailable_reason says which.
+  bool diagnostics_available = 6;
+  string unavailable_reason = 7;
+  repeated QueryType enabled_query_types = 8;
+  // probe_sources lists the per-family probe source addresses that are
+  // available.
+  repeated string probe_sources = 9;
+}
+
+message QueryRequest {
+  Query query = 1;
+  // nodes restricts execution to these node names; empty means every
+  // eligible node.
+  repeated string nodes = 2;
+  Budgets budgets = 3;
+  // timeout bounds the whole query; it is clamped to the gateway's ceiling.
+  google.protobuf.Duration timeout = 4;
+}
+
+message QueryResponse {
+  string request_id = 1;
+  repeated NodeResult results = 2;
+}
+
+message NodeResult {
+  string node = 1;
+  Observation observation = 2;
+  string error_code = 3;
+  string error_message = 4;
+}
+
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated NodeEndpoint nodes = 1;
+}
+
+message NodeEndpoint {
+  string node = 1;
+  string pod = 2;
+  string pod_uid = 3;
+  string host_ip = 4;
+  bool ready = 5;
+}

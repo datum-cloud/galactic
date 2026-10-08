@@ -1,0 +1,11 @@
+{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 5,
+ "routerId": "10.255.0.1",
+ "defaultLocPrf": 100,
+ "localAS": 65000,
+ "routes": { "2001:db8:11::/48": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","prefix":"2001:db8:11::","prefixLen":48,"network":"2001:db8:11::/48","version":2,"metric":0,"weight":0,"peerId":"fd30::11","path":"65001 65001","origin":"incomplete","nexthops":[{"ip":"fd30::11","hostname":"a0b2e299160d","afi":"ipv6","scope":"global","linkLocalOnly":false,"length":32},{"ip":"fe80::5417:16ff:fecf:b519","hostname":"a0b2e299160d","afi":"ipv6","scope":"link-local","used":true}]}]
+,"2001:db8:100::/48": [{"valid":true,"bestpath":true,"selectionReason":"Older Path","multipath":true,"pathFrom":"external","prefix":"2001:db8:100::","prefixLen":48,"network":"2001:db8:100::/48","version":5,"metric":0,"weight":0,"peerId":"fd30::11","path":"65001 65001","origin":"incomplete","nexthops":[{"ip":"fd30::11","hostname":"a0b2e299160d","afi":"ipv6","scope":"global","linkLocalOnly":false,"length":32},{"ip":"fe80::5417:16ff:fecf:b519","hostname":"a0b2e299160d","afi":"ipv6","scope":"link-local","used":true}]}]
+ } , "totalRoutes": 2, "totalPaths": 5,"numRoutes":2
+ } 

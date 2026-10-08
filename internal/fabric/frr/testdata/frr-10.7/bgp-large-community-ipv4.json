@@ -1,0 +1,13 @@
+{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 8,
+ "routerId": "10.255.0.1",
+ "defaultLocPrf": 100,
+ "localAS": 65000,
+ "routes": { "192.0.2.11/32": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","prefix":"192.0.2.11","prefixLen":32,"network":"192.0.2.11/32","version":2,"metric":0,"weight":0,"peerId":"172.30.0.11","path":"65001 65001","origin":"incomplete","nexthops":[{"ip":"172.30.0.11","hostname":"a0b2e299160d","afi":"ipv4","used":true}]}]
+,"198.0.0.0/8": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","prefix":"198.0.0.0","prefixLen":8,"network":"198.0.0.0/8","version":8,"metric":0,"weight":32768,"peerId":"(unspec)","path":"{65001,65002}","origin":"incomplete","nexthops":[{"ip":"0.0.0.0","hostname":"d9d7aa48836f","afi":"ipv4","used":true}]}]
+,"198.51.100.0/24": [{"valid":true,"bestpath":true,"selectionReason":"Older Path","multipath":true,"pathFrom":"external","prefix":"198.51.100.0","prefixLen":24,"network":"198.51.100.0/24","version":6,"metric":0,"weight":0,"peerId":"172.30.0.11","path":"65001 65001","origin":"incomplete","nexthops":[{"ip":"172.30.0.11","hostname":"a0b2e299160d","afi":"ipv4","used":true}]}]
+,"203.0.113.0/24": [{"valid":true,"bestpath":true,"selectionReason":"Older Path","multipath":true,"pathFrom":"external","prefix":"203.0.113.0","prefixLen":24,"network":"203.0.113.0/24","version":7,"metric":0,"weight":0,"peerId":"172.30.0.11","path":"65001 65001","origin":"incomplete","nexthops":[{"ip":"172.30.0.11","hostname":"a0b2e299160d","afi":"ipv4","used":true}]}]
+ } , "totalRoutes": 4, "totalPaths": 8,"numRoutes":4
+ } 

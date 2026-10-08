@@ -1,0 +1,83 @@
+
+{
+  "prefix":"198.0.0.0/8",
+  "version":21,
+  "pathCount":1,
+  "paths":[
+    {
+      "aspath":{
+        "string":"{65001,65002}",
+        "segments":[
+          {
+            "type":"as-set",
+            "list":[
+              65001,
+              65002
+            ]
+          }
+        ],
+        "length":1
+      },
+      "aggregatorAs":65000,
+      "aggregatorId":"10.255.0.1",
+      "origin":"incomplete",
+      "metric":0,
+      "weight":32768,
+      "valid":true,
+      "version":21,
+      "aggregated":true,
+      "local":true,
+      "aggregateCount":2,
+      "bestpath":{
+        "bestpathFromAs":65001,
+        "overall":true,
+        "selectionReason":"First path received"
+      },
+      "community":{
+        "string":"65001:100 65002:100 blackhole no-export",
+        "list":[
+          "65001:100",
+          "65002:100",
+          "blackhole",
+          "noExport"
+        ]
+      },
+      "largeCommunity":{
+        "string":"65001:1:1 65001:2:11 65002:1:1 65002:2:12",
+        "list":[
+          "65001:1:1",
+          "65001:2:11",
+          "65002:1:1",
+          "65002:2:12"
+        ]
+      },
+      "lastUpdate":{
+        "epoch":1791407802,
+        "string":"Wed Oct  7 21:16:42 2026"
+      },
+      "lastUpdateStr":"0:00:00:02",
+      "nexthops":[
+        {
+          "ip":"0.0.0.0",
+          "hostname":"d9d7aa48836f",
+          "afi":"ipv4",
+          "metric":0,
+          "accessible":true,
+          "used":true
+        }
+      ],
+      "peer":{
+        "peerId":"0.0.0.0",
+        "routerId":"10.255.0.1"
+      }
+    }
+  ],
+  "multiPathCount":1,
+  "flags":{
+    "bestPathExists":true,
+    "fibInstalled":false,
+    "fibWaitForInstall":false,
+    "fibSuppress":false,
+    "fibInstallFailed":false
+  }
+}
