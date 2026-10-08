@@ -208,30 +208,34 @@ apiVersion: network.datumapis.com/v1alpha1
 kind: ServiceEndpoint
 metadata:
   name: context-a-dns-udp
+  # Local descriptor beside consumer policies; producers can be elsewhere.
   namespace: consumer-a
 spec:
+  # Identifies the capability for integration; does not grant access.
   serviceClass: internal-dns
-  # Exact destination accepted by the producer, after frontend translation.
+  # Exact service-side destination after frontend translation.
+  # The service owner makes it routable and accepted by each producer listener.
   address: "fd70:100::10"
+  # One service port, from 1 through 65535.
   port: 53
+  # One transport per endpoint; use a separate descriptor for TCP.
+  # Supported protocol values are lowercase udp and tcp.
   protocol: udp
+  # PreferNodeLocal selects a local producer, or a ready remote producer.
+  # NodeLocal requires a producer on the consumer's node.
   deliveryMode: PreferNodeLocal
+  # Optional placement boundary; empty imposes no region restriction.
+  # Trusted placement and selectors establish actual location membership.
   region: us-central-1
+  # Select shared replicas using protected, platform-managed labels.
+  # Every selected producer must serve this tuple and service context.
+  # Alternatively, use attachmentRef with namespace and name for one producer.
+  # Exactly one of attachmentSelector or attachmentRef must be set.
   attachmentSelector:
     matchLabels:
       networking.datumapis.com/service: internal-dns
       topology.kubernetes.io/region: us-central-1
 ```
-
-| Field                | Design                                                                                                                     |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `serviceClass`       | Identifies the capability; it does not grant access.                                                                       |
-| `address`            | Exact service-side destination. The service owner makes it routable and accepted by its listener.                          |
-| `port`, `protocol`   | One transport tuple. Protocol values are lowercase `udp` or `tcp`.                                                         |
-| `deliveryMode`       | `NodeLocal` requires a local producer; `PreferNodeLocal` permits a ready remote producer.                                  |
-| `attachmentSelector` | Selects replicas through platform-managed labels. Each selected producer must serve the declared tuple.                    |
-| `attachmentRef`      | Alternative to a selector: identifies one producer attachment by `namespace` and `name`. Use exactly one selection method. |
-| `region`             | Optional selection boundary. An empty value does not impose a region restriction.                                          |
 
 The address is not a Kubernetes Service frontend or an address from which
 Galactic discovers backends. An endpoint has one transport tuple; DNS requires
@@ -255,35 +259,38 @@ apiVersion: network.datumapis.com/v1alpha1
 kind: ServiceRoutePolicy
 metadata:
   name: application-vpc-dns-udp
+  # Policy, referenced endpoint, and consumer VPC share this edge namespace.
   namespace: consumer-a
 spec:
+  # References the service contract in this policy's namespace.
   serviceRef:
     name: context-a-dns-udp
-  # Proposed: name and API-assigned UID of the VPC in this namespace.
+  # Proposed: pins authorization to one live edge VPC lifetime.
   consumerVPCRef:
+    # Resolved against the VPC in the policy namespace.
     name: application-vpc
+    # API-assigned edge VPC UID; recreation requires new authorization.
+    # A project or propagated source UID cannot replace this identity.
     uid: "22222222-2222-4222-8222-222222222222"
+  # Select consumers through protected labels.
+  # Galactic also verifies membership in the live, pinned VPC.
   attachmentSelector:
     matchLabels:
       networking.datumapis.com/vpc-uid: "22222222-2222-4222-8222-222222222222"
+  # Allowed tuples must match the endpoint's declared protocol and port.
+  # Omit this list to use the endpoint's tuple.
   protocolPorts:
     - protocol: udp
       port: 53
+  # Optional consumer placement boundary; must agree with a scoped endpoint.
+  # This field does not authorize cross-region fallback.
   region: us-central-1
-  # Proposed: consumer-facing address; restored as the reply source.
+  # Proposed: consumer-facing address translated to the endpoint destination.
   frontend:
+    # Same address family as the endpoint; restored as the reply source.
+    # Different VPCs can use this address with different service destinations.
     address: "fd53::53"
 ```
-
-| Field                 | Design                                                                                                         |
-| --------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `serviceRef.name`     | References a `ServiceEndpoint` in the policy namespace.                                                        |
-| `consumerVPCRef.name` | Proposed. Resolves the consumer VPC in the policy namespace.                                                   |
-| `consumerVPCRef.uid`  | Proposed. Pins the live VPC lifetime; a recreated VPC requires new authorization.                              |
-| `attachmentSelector`  | Selects consumer attachments through protected labels. Galactic also verifies their VPC membership.            |
-| `protocolPorts`       | Permitted tuples, each within the endpoint's declared tuple. Empty uses that endpoint's protocol and port.     |
-| `region`              | Optional consumer placement boundary; it does not authorize cross-region fallback.                             |
-| `frontend.address`    | Proposed. Matches consumer requests, translates to `ServiceEndpoint.spec.address`, and is restored on replies. |
 
 Create a matching TCP policy referencing `context-a-dns-tcp` and permitting
 `tcp/53`, with the same VPC reference, selector, region, and frontend. UDP and TCP
