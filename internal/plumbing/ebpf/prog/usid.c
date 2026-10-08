@@ -134,6 +134,7 @@ static long (*bpf_redirect_neigh)(__u32 ifindex, struct bpf_redir_neigh *params,
 				  __u64 flags) = (void *) BPF_FUNC_redirect_neigh;
 
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
+static __u64 (*bpf_ktime_get_boot_ns)(void) = (void *) BPF_FUNC_ktime_get_boot_ns;
 
 // vip_xlat_table's rewrite is a genuine address and port substitution with no
 // checksum-neutral shortcut, so it needs the incremental L4 checksum update any
@@ -607,6 +608,9 @@ struct service_route_value {
 	__u64 producer_token;
 	__u8 grant_id[16];
 	__u8 target_sid[16];
+	__u8 backend_addr[16];
+	__u64 authorization_deadline_ns;
+	__s64 authorization_valid_until_ns;
 };
 
 #define SERVICE_ROUTE_MODE_LOCAL 1
@@ -623,6 +627,7 @@ struct service_tunnel_header {
 	__u8 direction;
 	__u8 reserved;
 	__u8 grant_id[16];
+	__u8 frontend_addr[16];
 } __attribute__((packed));
 
 // service_access_key authorizes one transport endpoint on one consumer
@@ -682,6 +687,7 @@ struct service_reverse_value {
 	__u64 producer_token;
 	__u8 grant_id[16];
 	__u8 return_sid[16];
+	__u8 frontend_addr[16];
 	__u64 last_seen_ns;
 };
 
@@ -696,7 +702,10 @@ struct service_remote_grant_key {
 
 struct service_remote_grant_value {
 	__u8 consumer_sid[16];
+	__u8 frontend_addr[16];
 	__u64 producer_token;
+	__u64 authorization_deadline_ns;
+	__s64 authorization_valid_until_ns;
 };
 
 struct service_policy_state_value {
@@ -737,6 +746,7 @@ struct service_fib_scratch_value {
 	__u8 tunnel_grant_id[16];
 	__u8 tunnel_return_sid[16];
 	__u8 tunnel_target_sid[16];
+	__u8 tunnel_frontend_addr[16];
 	__u8 tunnel_direction;
 	struct bpf_redir_neigh neigh;
 };
@@ -2167,7 +2177,9 @@ static USID_NOINLINE int service_ingress_authorize(struct __sk_buff *skb, __be16
 		__builtin_memcpy(s->remote_grant.addr, s->dest_addr, 16);
 		struct service_remote_grant_value *grant =
 			bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant);
-		if (!grant || !service_id_equal(grant->consumer_sid, s->tunnel_return_sid) ||
+		if (!grant || (grant->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= grant->authorization_deadline_ns) ||
+            !service_id_equal(grant->consumer_sid, s->tunnel_return_sid) ||
+		    !service_id_equal(grant->frontend_addr, s->tunnel_frontend_addr) ||
 		    !service_identity_matches(ifindex, grant->producer_token))
 			return -1;
 		__builtin_memset(&s->reverse, 0, sizeof(s->reverse));
@@ -2183,6 +2195,7 @@ static USID_NOINLINE int service_ingress_authorize(struct __sk_buff *skb, __be16
 		s->reverse_value.producer_token = grant->producer_token;
 		__builtin_memcpy(s->reverse_value.grant_id, s->tunnel_grant_id, 16);
 		__builtin_memcpy(s->reverse_value.return_sid, s->tunnel_return_sid, 16);
+		__builtin_memcpy(s->reverse_value.frontend_addr, s->tunnel_frontend_addr, 16);
 		return service_install_reverse(s) ? -1 : 1;
 	}
 
@@ -2200,7 +2213,8 @@ static USID_NOINLINE int service_ingress_authorize(struct __sk_buff *skb, __be16
 	s->access.port = s->source_port;
 	__builtin_memcpy(s->access.addr, s->source_addr, 16);
 	struct service_access_value *access = bpf_map_lookup_elem(&service_access_table, &s->access);
-	if (!route || route->mode != SERVICE_ROUTE_MODE_REMOTE ||
+	if (!route || (route->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= route->authorization_deadline_ns) ||
+            route->mode != SERVICE_ROUTE_MODE_REMOTE ||
 	    !service_id_equal(route->grant_id, s->tunnel_grant_id) ||
 	    !service_id_equal(route->target_sid, s->tunnel_return_sid) ||
 	    !access || access->attachment_token != route->consumer_token ||
@@ -2358,6 +2372,7 @@ int usid_ingress(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		}
 		__builtin_memcpy(service_scratch->tunnel_grant_id, tunnel->grant_id, 16);
+		__builtin_memcpy(service_scratch->tunnel_frontend_addr, tunnel->frontend_addr, 16);
 		__builtin_memcpy(service_scratch->tunnel_return_sid, ip6->saddr, 16);
 		service_scratch->tunnel_direction = tunnel->direction;
 	}
@@ -2927,6 +2942,7 @@ static USID_NOINLINE long service_remote_encap(struct __sk_buff *skb,
 	tunnel->inner_nexthdr = scratch->meta_family == USID_EGRESS_ROUTE_FAMILY_INET6 ? USID_IPPROTO_IPV6 : USID_IPPROTO_IPIP;
 	tunnel->direction = scratch->tunnel_direction;
 	__builtin_memcpy(tunnel->grant_id, scratch->tunnel_grant_id, 16);
+	__builtin_memcpy(tunnel->frontend_addr, scratch->tunnel_frontend_addr, 16);
 	eth->h_proto = __builtin_bswap16(USID_ETH_P_IPV6);
 	__builtin_memcpy(eth->h_dest, uplink->dmac, 6);
 	__builtin_memcpy(eth->h_source, uplink->smac, 6);
@@ -2958,9 +2974,10 @@ static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_valu
 		s->route.family = s->reverse.family;
 		s->route.protocol = s->reverse.protocol;
 		s->route.port = s->reverse.source_port;
-		__builtin_memcpy(s->route.addr, s->reverse.source_addr, 16);
+		__builtin_memcpy(s->route.addr, old->frontend_addr, 16);
 		struct service_route_value *old_route = bpf_map_lookup_elem(&service_route_table, &s->route);
-		if (!old_route || old_route->mode != SERVICE_ROUTE_MODE_LOCAL ||
+		if (!old_route || (old_route->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= old_route->authorization_deadline_ns) ||
+            old_route->mode != SERVICE_ROUTE_MODE_LOCAL ||
 		    old_route->target_ifindex != s->reverse.ingress_ifindex ||
 		    old_route->consumer_token != old->consumer_token ||
 		    old_route->producer_token != old->producer_token ||
@@ -2980,7 +2997,8 @@ static USID_NOINLINE int service_install_reverse(struct service_fib_scratch_valu
 		__builtin_memcpy(s->remote_grant.addr, s->reverse.source_addr, 16);
 		struct service_remote_grant_value *old_grant =
 			bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant);
-		if (!old_grant || old_grant->producer_token != old->producer_token ||
+		if (!old_grant || (old_grant->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= old_grant->authorization_deadline_ns) ||
+            old_grant->producer_token != old->producer_token ||
 		    !service_id_equal(old_grant->consumer_sid, old->return_sid) ||
 		    !service_identity_matches(s->reverse.ingress_ifindex, old_grant->producer_token)) {
 			bpf_map_delete_elem(&service_reverse_table, &s->reverse);
@@ -3005,6 +3023,45 @@ static USID_ALWAYS_INLINE int service_policy_enabled(void)
 	__u32 zero = 0;
 	struct service_policy_state_value *state = bpf_map_lookup_elem(&service_policy_state_table, &zero);
 	return state && state->enabled;
+}
+
+static USID_ALWAYS_INLINE int service_rewrite_address(struct __sk_buff *skb,
+		struct service_fib_scratch_value *s, int source, const __u8 replacement[16])
+{
+	__u8 *current = source ? s->source_addr : s->dest_addr;
+	__u32 addr_off;
+	__u32 csum_off = s->l4_offset + (s->protocol == USID_IPPROTO_TCP ?
+		USID_TCP_CSUM_OFFSET : USID_UDP_CSUM_OFFSET);
+	__u64 flags = USID_BPF_F_PSEUDO_HDR | 4;
+	if (s->protocol == USID_IPPROTO_UDP)
+		flags |= USID_BPF_F_MARK_MANGLED_0;
+	if (s->meta_family == USID_EGRESS_ROUTE_FAMILY_INET6) {
+		addr_off = USID_L3_OFFSET + (source ? USID_OFFSETOF(struct usid_ip6hdr, saddr) :
+			USID_OFFSETOF(struct usid_ip6hdr, daddr));
+#pragma unroll
+		for (int i = 0; i < 4; i++) {
+			__u32 from, to;
+			__builtin_memcpy(&from, current + i * 4, 4);
+			__builtin_memcpy(&to, replacement + i * 4, 4);
+			if (bpf_l4_csum_replace(skb, csum_off, from, to, flags))
+				return -1;
+		}
+		if (bpf_skb_store_bytes(skb, addr_off, replacement, 16, 0))
+			return -1;
+		__builtin_memcpy(current, replacement, 16);
+		return 0;
+	}
+	addr_off = USID_L3_OFFSET + (source ? USID_OFFSETOF(struct usid_iphdr, saddr) :
+		USID_OFFSETOF(struct usid_iphdr, daddr));
+	__u32 from, to;
+	__builtin_memcpy(&from, current, 4);
+	__builtin_memcpy(&to, replacement, 4);
+	if (bpf_l4_csum_replace(skb, csum_off, from, to, flags) ||
+	    bpf_l3_csum_replace(skb, USID_L3_OFFSET + USID_OFFSETOF(struct usid_iphdr, check), from, to, 4) ||
+	    bpf_skb_store_bytes(skb, addr_off, replacement, 4, 0))
+		return -1;
+	__builtin_memcpy(current, replacement, 4);
+	return 0;
 }
 
 // service_path is noinline so its transient tuple-building scalars do not
@@ -3085,18 +3142,28 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 			__builtin_memcpy(s->remote_grant.grant_id, reverse->grant_id, 16);
 			__builtin_memcpy(s->remote_grant.addr, s->source_addr, 16);
 			struct service_remote_grant_value *grant = bpf_map_lookup_elem(&service_remote_grant_table, &s->remote_grant);
-			if (!grant || !service_id_equal(grant->consumer_sid, reverse->return_sid) ||
+			if (!grant || (grant->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= grant->authorization_deadline_ns) ||
+            !service_id_equal(grant->consumer_sid, reverse->return_sid) ||
 			    !service_identity_matches(ifindex, grant->producer_token)) {
 				count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 				return TC_ACT_SHOT;
 			}
+			if (service_rewrite_address(skb, s, 1, reverse->frontend_addr)) {
+				count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+				return TC_ACT_SHOT;
+			}
 			__builtin_memcpy(s->tunnel_target_sid, reverse->return_sid, 16);
 			__builtin_memcpy(s->tunnel_grant_id, reverse->grant_id, 16);
+			__builtin_memcpy(s->tunnel_frontend_addr, reverse->frontend_addr, 16);
 			s->tunnel_direction = SERVICE_TUNNEL_REPLY;
 			reverse->last_seen_ns = now;
 			long rc = service_remote_encap(skb, s);
 			if (rc != TC_ACT_REDIRECT) count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 			return rc == TC_ACT_REDIRECT ? rc : TC_ACT_SHOT;
+		}
+		if (service_rewrite_address(skb, s, 1, reverse->frontend_addr)) {
+			count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+			return TC_ACT_SHOT;
 		}
 		__u32 consumer_ifindex = reverse->consumer_ifindex;
 		USID_BARRIER_VAR(consumer_ifindex);
@@ -3115,7 +3182,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		__builtin_memcpy(s->route.addr, s->source_addr, 16);
 		struct service_route_value *reply_route = bpf_map_lookup_elem(&service_route_table, &s->route);
 		if (!access || access->attachment_token != reverse->consumer_token || !reply_route ||
-		    reply_route->mode != SERVICE_ROUTE_MODE_LOCAL || reply_route->target_ifindex != ifindex ||
+		    (reply_route->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= reply_route->authorization_deadline_ns) ||
+            reply_route->mode != SERVICE_ROUTE_MODE_LOCAL || reply_route->target_ifindex != ifindex ||
 		    reply_route->consumer_token != reverse->consumer_token ||
 		    reply_route->producer_token != reverse->producer_token) {
 			count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
@@ -3159,7 +3227,8 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 		return TC_ACT_SHOT;
 	}
-	if (!service_identity_matches(ifindex, route->consumer_token) ||
+	if ((route->authorization_deadline_ns && bpf_ktime_get_boot_ns() >= route->authorization_deadline_ns) ||
+            !service_identity_matches(ifindex, route->consumer_token) ||
 	    (route->mode == SERVICE_ROUTE_MODE_LOCAL &&
 	     !service_identity_matches(route->target_ifindex, route->producer_token))) {
 		count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
@@ -3177,11 +3246,18 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 		count_drop(DROP_REASON_SERVICE_ROUTE_DENIED);
 		return TC_ACT_SHOT;
 	}
+	__u8 frontend_addr[16];
+	__builtin_memcpy(frontend_addr, s->dest_addr, 16);
+	if (service_rewrite_address(skb, s, 0, route->backend_addr)) {
+		count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
+		return TC_ACT_SHOT;
+	}
 
 	if (route->mode == SERVICE_ROUTE_MODE_REMOTE) {
 		__builtin_memcpy(s->tunnel_target_sid, route->target_sid, 16);
 		__builtin_memcpy(s->tunnel_grant_id, route->grant_id, 16);
 		s->tunnel_direction = SERVICE_TUNNEL_REQUEST;
+		__builtin_memcpy(s->tunnel_frontend_addr, frontend_addr, 16);
 		long rc = service_remote_encap(skb, s);
 		if (rc != TC_ACT_REDIRECT) count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 		return rc == TC_ACT_REDIRECT ? rc : TC_ACT_SHOT;
@@ -3201,6 +3277,7 @@ static USID_NOINLINE long service_path(struct __sk_buff *skb, __be16 h_proto, __
 	s->reverse_value.mode = SERVICE_ROUTE_MODE_LOCAL;
 	s->reverse_value.consumer_token = route->consumer_token;
 	s->reverse_value.producer_token = route->producer_token;
+	__builtin_memcpy(s->reverse_value.frontend_addr, frontend_addr, 16);
 	if (service_install_reverse(s)) {
 		count_drop(DROP_REASON_SERVICE_ROUTE_REDIRECT_FAILED);
 		return TC_ACT_SHOT;

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,16 +34,18 @@ type ServiceGrantID [16]byte
 
 // RouteIntent is one node's half of an attachment-scoped service path.
 type RouteIntent struct {
-	Attachment         types.NamespacedName
-	ProducerAttachment types.NamespacedName
-	Kind               RouteIntentKind
-	Service            *net.IPNet
-	ConsumerDevice     string
-	ServiceDevice      string
-	ServiceSID         net.IP
-	ConsumerSID        net.IP
-	GrantID            ServiceGrantID
-	Ports              []networkv1alpha1.ServiceRouteProtocolPort
+	Attachment              types.NamespacedName
+	ProducerAttachment      types.NamespacedName
+	Kind                    RouteIntentKind
+	Service                 *net.IPNet
+	Frontend                *net.IPNet
+	ConsumerDevice          string
+	ServiceDevice           string
+	ServiceSID              net.IP
+	ConsumerSID             net.IP
+	GrantID                 ServiceGrantID
+	AuthorizationValidUntil time.Time
+	Ports                   []networkv1alpha1.ServiceRouteProtocolPort
 }
 
 type RouteProgrammer interface {
