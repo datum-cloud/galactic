@@ -42,15 +42,20 @@ copy_gateway_config() {
 # writes: one per rule (TCP and UDP) per ns60 backend.
 NS60_BINDINGS=4
 
-# wait_bindings NODE COUNT TIMEOUT waits up to TIMEOUT seconds for COUNT
-# ServiceVIPBindings to exist in galactic-system.
+# GENERATED_BINDINGS selects the ServiceVIPBindings galactic-router writes
+# from the NetworkRules. Any other binding in galactic-system is stale.
+GENERATED_BINDINGS=app.kubernetes.io/managed-by=galactic-router
+
+# wait_bindings NODE COUNT TIMEOUT waits up to TIMEOUT seconds for exactly
+# COUNT generated ServiceVIPBindings to exist in galactic-system.
 wait_bindings() {
   local node="$1" want="$2" deadline=$((SECONDS + $3)) have
   while :; do
-    have=$(docker exec "${node}" kubectl -n galactic-system get servicevipbindings -o name | wc -l)
-    [ "${have}" -ge "${want}" ] && return 0
+    have=$(docker exec "${node}" kubectl -n galactic-system get servicevipbindings \
+      -l "${GENERATED_BINDINGS}" -o name | wc -l)
+    [ "${have}" -eq "${want}" ] && return 0
     if [ "${SECONDS}" -ge "${deadline}" ]; then
-      echo "error: ${node}: ${have} of ${want} ServiceVIPBindings after $3s" >&2
+      echo "error: ${node}: ${have} of ${want} generated ServiceVIPBindings after $3s" >&2
       return 1
     fi
     sleep 2
@@ -63,6 +68,14 @@ for site in dfw sjc iad; do
   copy_to "${node}" galactic-gateway
   copy_gateway_config "${node}"
   apply_k "${node}" "/galactic/resources/galactic-gateway/${site}/"
+  # The lab once hand-wrote each site's bindings (ns60-tcp-backend,
+  # ns60-udp-backend). kubectl apply -k does not prune, so on a lab deployed
+  # before that changed they survive without the spec.vpcRef a binding now
+  # needs, report BindFailed, and would count toward the wait below. Delete
+  # every binding galactic-router did not write; it writes its own from the
+  # rules.
+  docker exec "${node}" kubectl -n galactic-system delete servicevipbindings \
+    -l "app.kubernetes.io/managed-by!=galactic-router" --ignore-not-found
   for gw in ${GATEWAY_NODES[${site}]}; do
     docker exec "${node}" kubectl -n galactic-system rollout status daemonset "galactic-gateway-${gw}" --timeout=180s
   done
@@ -75,8 +88,8 @@ for site in dfw sjc iad; do
   docker exec "${node}" kubectl -n galactic-system wait networkrule --all \
     --for=condition=Accepted --timeout=60s
   wait_bindings "${node}" "${NS60_BINDINGS}" 60
-  docker exec "${node}" kubectl -n galactic-system wait servicevipbinding --all \
-    --for=condition=Bound --timeout=60s
+  docker exec "${node}" kubectl -n galactic-system wait servicevipbinding \
+    -l "${GENERATED_BINDINGS}" --for=condition=Bound --timeout=60s
 done
 
 echo "Done."

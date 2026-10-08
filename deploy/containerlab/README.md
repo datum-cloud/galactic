@@ -505,7 +505,7 @@ task deploy
 | `verify:fabric-metrics`   | Scrape every fabric-router's frr-exporter; fail on a failed collector or a session not Established          |
 | `verify:bmp`              | Check the route reflector and every fabric-router stream to the BMP collector, and that it agrees with each on every session's state |
 | `verify:underlay`         | Ping every underlay loopback from tr1 over both IPv4 and IPv6                                               |
-| `verify:gateway`          | Check every NetworkGateway is Ready, every NetworkRule Accepted, every ServiceVIPBinding Bound              |
+| `verify:gateway`          | Check every NetworkGateway is Ready, every NetworkRule Accepted, every generated ServiceVIPBinding Bound    |
 | `verify:gateway-ingress`  | TCP and UDP from the off-fabric host to each site's VIP, through every gateway node in turn                 |
 | `verify:gateway-restart`  | Restart dfw-worker2's gateway and shard in turn while the other carries traffic (#710)                      |
 | `verify:gateway-detach`   | Turn dfw-worker2's gateway datapath off: the ingress check must fail, then pass (not in `verify`)           |
