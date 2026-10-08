@@ -232,7 +232,13 @@ that converges this node's whole gateway engine:
    backends can tell which one Maglev chose (#799), and converges
    `gateway.Engine` toward the result. The reconciler watches
    `VPCAttachment`s cluster-wide, so a backend appearing, moving node or
-   changing address reconverges every gateway without a rule edit. A deleting rule stays in that state,
+   changing address reconverges every gateway without a rule edit. Its
+   predicate (`vpcAttachmentBackendChanged`) drops updates that change
+   none of the fields `selectRuleBackends` reads (labels, `status.vpc`,
+   `status.node`, `spec.interface.addresses`, `spec.interface.mode`), so a
+   conditions-only status write triggers no pass. The router's
+   `NetworkRuleBindingReconciler` uses the same predicate and re-queues
+   only the rules in the attachment's VPC. A deleting rule stays in that state,
    as *draining*, while it still carries the teardown finalizer and any
    `BGPAdvertisement` labelled with its name exists: it is not advertised
    and its `<node>/Programmed` condition is left alone, but the datapath
