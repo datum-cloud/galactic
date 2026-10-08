@@ -481,9 +481,13 @@ struct nptv6_value {
 // and undeliverable at the backend. usid_ingress always builds its key with the
 // ingress direction and usid_egress with the egress one.
 //
-// pad2 is an explicit, always-zero field so lookup_vip_xlat can zero it
-// explicitly. The lookup hashes all 32 key bytes, and a stale value there
-// would miss a row the control plane wrote with zeros.
+// slot names which backend of a VIP the row belongs to, so several backends of
+// one VIP can share a node and VRF. galactic-gateway's Maglev picks a backend
+// and writes that backend's slot into bits 81-96 of the uSID it encapsulates
+// toward, and usid_ingress reads it back from the outer destination for the
+// ingress lookup. Egress rows always carry slot 0: a reply's source address and
+// port already identify its backend. slot sits where an always-zero pad field
+// used to, so the key keeps its 32-byte size and layout.
 #define USID_VIP_XLAT_DIR_INGRESS 0
 #define USID_VIP_XLAT_DIR_EGRESS 1
 
@@ -493,7 +497,7 @@ struct vip_xlat_key {
 	__u8 proto;
 	__u8 direction;
 	__be16 port;
-	__u16 pad2;
+	__u16 slot;
 	__u8 addr[16];
 };
 
@@ -1426,13 +1430,16 @@ static USID_ALWAYS_INLINE void apply_nptv6(__u8 *addr, const struct nptv6_value 
 	*word = __builtin_bswap16((__u16) sum);
 }
 
-// lookup_vip_xlat returns the vip_xlat_table row for (block, argument, proto,
-// direction, port, addr), or a null pointer if there is none. addr and port
+// lookup_vip_xlat returns the vip_xlat_table row for (block, argument, slot,
+// proto, direction, port, addr), or a null pointer if there is none. slot is
+// the outer destination's backend slot for an ingress lookup and 0 for an
+// egress lookup. addr and port
 // are the packet's destination for an ingress lookup and its source for an
 // egress lookup, both in wire order. See vip_xlat_key_scratch for why the key
 // is not built on the stack.
-static USID_ALWAYS_INLINE struct vip_xlat_value *lookup_vip_xlat(__u64 block, __u16 argument, __u8 proto,
-								  __u8 direction, __be16 port, const __u8 *addr)
+static USID_ALWAYS_INLINE struct vip_xlat_value *lookup_vip_xlat(__u64 block, __u16 argument, __u16 slot,
+								  __u8 proto, __u8 direction, __be16 port,
+								  const __u8 *addr)
 {
 	__u32 zero = 0;
 	struct vip_xlat_key *key = bpf_map_lookup_elem(&vip_xlat_key_scratch, &zero);
@@ -1445,7 +1452,7 @@ static USID_ALWAYS_INLINE struct vip_xlat_value *lookup_vip_xlat(__u64 block, __
 	key->proto = proto;
 	key->direction = direction;
 	key->port = port;
-	key->pad2 = 0;
+	key->slot = slot;
 	__builtin_memcpy(key->addr, addr, sizeof(key->addr));
 
 	return bpf_map_lookup_elem(&vip_xlat_table, key);
@@ -2325,6 +2332,11 @@ int usid_ingress(struct __sk_buff *skb)
 	// low nibble of destination byte 8 plus byte 9.
 	__u16 argument = ((__u16) (fn_arg_byte & 0x0F) << 8) | ip6->daddr[9];
 
+	// The backend slot, bytes 10-11, read now for the same reason: the outer
+	// header is gone by the time the VIP lookup below needs it. Zero on every
+	// destination except galactic-gateway's, which names one backend of a VIP.
+	__u16 backend_slot = ((__u16) ip6->daddr[10] << 8) | ip6->daddr[11];
+
 	// Step 6: exact-match (Block, Argument) against vrf_table. Argument 0x000
 	// is reserved and never registered, so it always misses here and needs no
 	// special case.
@@ -2543,9 +2555,9 @@ int usid_ingress(struct __sk_buff *skb)
 			struct usid_l4ports *ports = (void *) (inner6 + 1);
 
 			if ((void *) (ports + 1) <= data_end) {
-				struct vip_xlat_value *vv = lookup_vip_xlat(block, argument, inner6->nexthdr,
-									    USID_VIP_XLAT_DIR_INGRESS, ports->dest,
-									    inner6->daddr);
+				struct vip_xlat_value *vv = lookup_vip_xlat(block, argument, backend_slot,
+									    inner6->nexthdr, USID_VIP_XLAT_DIR_INGRESS,
+									    ports->dest, inner6->daddr);
 
 				if (vv) {
 					vip_hit = 1;
@@ -3362,9 +3374,9 @@ int usid_egress(struct __sk_buff *skb)
 			struct usid_l4ports *ports = (void *) (ip6 + 1);
 
 			if ((void *) (ports + 1) <= data_end) {
-				struct vip_xlat_value *vv = lookup_vip_xlat(iv->block, iv->argument, ip6->nexthdr,
-									    USID_VIP_XLAT_DIR_EGRESS, ports->source,
-									    ip6->saddr);
+				struct vip_xlat_value *vv = lookup_vip_xlat(iv->block, iv->argument, 0,
+									    ip6->nexthdr, USID_VIP_XLAT_DIR_EGRESS,
+									    ports->source, ip6->saddr);
 
 				if (vv) {
 					vip_hit = 1;

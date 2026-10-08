@@ -25,6 +25,7 @@ import (
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	"go.datum.net/galactic/internal/plumbing/vip"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -54,15 +55,15 @@ var (
 // both egress kinds, satisfied by *vipxlatmap.VipXlatTable in production and a
 // fake in tests.
 type VIPTranslationTable interface {
-	RegisterIngress(block uint64, argument uint16, proto uint8,
+	RegisterIngress(block uint64, argument, slot uint16, proto uint8,
 		vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) error
 	RegisterEgress(block uint64, argument uint16, proto uint8,
 		backendAddr net.IP, backendPort uint16, vipAddr net.IP, vipPort uint16) error
-	UnregisterIngress(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16) error
+	UnregisterIngress(block uint64, argument, slot uint16, proto uint8, vipAddr net.IP, vipPort uint16) error
 	UnregisterEgress(block uint64, argument uint16, proto uint8, backendAddr net.IP, backendPort uint16) error
-	UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+	UnregisterBinding(slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
-	UnregisterBindingAt(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
+	UnregisterBindingAt(block uint64, argument, slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 		backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error)
 }
 
@@ -264,7 +265,7 @@ func (r *ServiceVIPBindingReconciler) registerVIPTranslation(
 	}
 
 	if err := r.VIPTranslationTable.RegisterIngress(
-		self.ingress.block, self.ingress.argument, self.ingress.proto,
+		self.ingress.block, self.ingress.argument, self.ingress.slot, self.ingress.proto,
 		self.vipAddr, self.vipPort, self.backendAddr, self.backendPort); err != nil {
 		return fmt.Errorf("register vip_xlat_table ingress row: %w", err)
 	}
@@ -389,19 +390,22 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 		return nil
 	}
 
+	backendAddrIP, _ := netip.AddrFromSlice(backendAddr) // a 16-byte slice ipv6Address returned
+	slot := srv6.BackendSlot(backendAddrIP.Unmap(), backendPort)
+
 	var errs []error
-	if _, err := r.VIPTranslationTable.UnregisterBinding(proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
+	if _, err := r.VIPTranslationTable.UnregisterBinding(
+		slot, proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
 		errs = append(errs, fmt.Errorf("unregister vip_xlat_table rows by value: %w", err))
 	}
 
-	backendAddrIP, _ := netip.AddrFromSlice(backendAddr) // a 16-byte slice ipv6Address returned
 	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
 	if err != nil {
 		logger.Info("VRF context no longer resolves; skipped checking its vip_xlat_table location", "reason", err.Error())
 		return errors.Join(errs...)
 	}
 	if _, err := r.VIPTranslationTable.UnregisterBindingAt(
-		block, argument, proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
+		block, argument, slot, proto, vipAddr, vipPort, backendAddr, backendPort); err != nil {
 		errs = append(errs, fmt.Errorf("unregister vip_xlat_table rows at the resolved VRF: %w", err))
 	}
 	return errors.Join(errs...)
@@ -451,29 +455,32 @@ func (r *ServiceVIPBindingReconciler) unregisterRow(row vipRow) error {
 		}
 		return nil
 	}
-	if err := r.VIPTranslationTable.UnregisterIngress(row.block, row.argument, row.proto, addr, row.port); err != nil {
+	if err := r.VIPTranslationTable.UnregisterIngress(
+		row.block, row.argument, row.slot, row.proto, addr, row.port); err != nil {
 		return fmt.Errorf("unregister vip_xlat_table ingress row: %w", err)
 	}
 	return nil
 }
 
 // vipRow identifies one vip_xlat_table row. addr and port are the VIP's for an
-// ingress row and the backend's for an egress row.
+// ingress row and the backend's for an egress row. slot is the backend slot an
+// ingress row is keyed on, so two backends of one VIP claim different ingress
+// rows; it is always 0 on an egress row.
 type vipRow struct {
 	egress   bool
 	block    uint64
 	argument uint16
+	slot     uint16
 	proto    uint8
 	addr     netip.Addr
 	port     uint16
 }
 
 func (r vipRow) String() string {
-	dir := "ingress"
 	if r.egress {
-		dir = "egress"
+		return fmt.Sprintf("egress row for VRF %d %s", r.argument, netip.AddrPortFrom(r.addr, r.port))
 	}
-	return fmt.Sprintf("%s row for VRF %d %s", dir, r.argument, netip.AddrPortFrom(r.addr, r.port))
+	return fmt.Sprintf("ingress row for VRF %d slot %#04x %s", r.argument, r.slot, netip.AddrPortFrom(r.addr, r.port))
 }
 
 // vipBindingRows is one binding's claim on vip_xlat_table, with the addresses
@@ -513,8 +520,10 @@ func resolveVIPBindingRows(
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
 	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
 
+	slot := srv6.BackendSlot(backendIP, backendPort)
+
 	return vipBindingRows{
-		ingress:     vipRow{block: block, argument: argument, proto: proto, addr: vipIP, port: vipPort},
+		ingress:     vipRow{block: block, argument: argument, slot: slot, proto: proto, addr: vipIP, port: vipPort},
 		egress:      vipRow{egress: true, block: block, argument: argument, proto: proto, addr: backendIP, port: backendPort},
 		vipAddr:     net.IP(vipIP.AsSlice()),
 		backendAddr: net.IP(backendIP.AsSlice()),

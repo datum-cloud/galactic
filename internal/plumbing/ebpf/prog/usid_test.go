@@ -79,12 +79,13 @@ type testUSID struct {
 	nodeID   uint16
 	function uint8
 	argument uint16
+	slot     uint16
 }
 
 func (u testUSID) addr(t *testing.T) netip.Addr {
 	t.Helper()
 	addr, err := uformat.Encode(uformat.Fields{
-		Block: u.block, NodeID: u.nodeID, Function: u.function, Argument: u.argument,
+		Block: u.block, NodeID: u.nodeID, Function: u.function, Argument: u.argument, Slot: u.slot,
 	})
 	if err != nil {
 		t.Fatalf("uformat.Encode(%+v): %v", u, err)

@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -86,8 +88,11 @@ func boundCondition(t *testing.T, c client.Client, name string) *metav1.Conditio
 	return meta.FindStatusCondition(got.Status.Conditions, bgpv1alpha1.ConditionTypeBound)
 }
 
-func ingressRow(vip string) fakeRowKey {
-	return fakeRowKey{addr: net.ParseIP(vip).String(), port: 443}
+// ingressRow is the ingress row a conflict-test binding for vip and backend
+// claims, keyed on the backend's slot.
+func ingressRow(vip, backend string) fakeRowKey {
+	slot := srv6.BackendSlot(netip.MustParseAddr(backend), 8443)
+	return fakeRowKey{slot: slot, addr: net.ParseIP(vip).String(), port: 443}
 }
 
 func egressRow(backend string) fakeRowKey {
@@ -111,10 +116,10 @@ func TestServiceVIPBinding_SharedPortDistinctVIPsBothBind(t *testing.T) {
 		}
 	}
 	want := map[fakeRowKey]string{
-		ingressRow(testConflictVIPA):    net.ParseIP(testConflictBackendA).String(),
-		ingressRow(testConflictVIPB):    net.ParseIP(testConflictBackendB).String(),
-		egressRow(testConflictBackendA): net.ParseIP(testConflictVIPA).String(),
-		egressRow(testConflictBackendB): net.ParseIP(testConflictVIPB).String(),
+		ingressRow(testConflictVIPA, testConflictBackendA): net.ParseIP(testConflictBackendA).String(),
+		ingressRow(testConflictVIPB, testConflictBackendB): net.ParseIP(testConflictBackendB).String(),
+		egressRow(testConflictBackendA):                    net.ParseIP(testConflictVIPA).String(),
+		egressRow(testConflictBackendB):                    net.ParseIP(testConflictVIPB).String(),
 	}
 	if len(table.rows) != len(want) {
 		t.Fatalf("rows = %v, want %v", table.rows, want)
@@ -126,14 +131,40 @@ func TestServiceVIPBinding_SharedPortDistinctVIPsBothBind(t *testing.T) {
 	}
 }
 
-// TestServiceVIPBinding_SameVIPPortConflicts: a younger binding claiming an
-// older binding's VIP and port is not programmed and reports Conflict, and the
-// older binding's rows are untouched, whichever reconciles first.
-func TestServiceVIPBinding_SameVIPPortConflicts(t *testing.T) {
+// TestServiceVIPBinding_SameVIPDistinctBackendsBothBind: two backends of one
+// VIP and port in the same VRF on one node each get their own ingress row,
+// keyed on their own slot, so neither conflicts with the other.
+func TestServiceVIPBinding_SameVIPDistinctBackendsBothBind(t *testing.T) {
+	a := newConflictBinding("a", testConflictVIPA, testConflictBackendA, 20)
+	b := newConflictBinding("b", testConflictVIPA, testConflictBackendB, 10)
+	table := &fakeVIPTable{}
+	r, c := newConflictReconciler(t, table, a, b)
+
+	reconcileBinding(t, r, "a")
+	reconcileBinding(t, r, "b")
+
+	for _, name := range []string{"a", "b"} {
+		if cond := boundCondition(t, c, name); cond == nil || cond.Status != metav1.ConditionTrue {
+			t.Errorf("binding %s Bound = %+v, want True", name, cond)
+		}
+	}
+	assertRowRewrite(t, table, ingressRow(testConflictVIPA, testConflictBackendA), testConflictBackendA,
+		"backend A's ingress row")
+	assertRowRewrite(t, table, ingressRow(testConflictVIPA, testConflictBackendB), testConflictBackendB,
+		"backend B's ingress row")
+	assertRowRewrite(t, table, egressRow(testConflictBackendA), testConflictVIPA, "backend A's egress row")
+	assertRowRewrite(t, table, egressRow(testConflictBackendB), testConflictVIPA, "backend B's egress row")
+}
+
+// TestServiceVIPBinding_SameBackendConflicts: a younger binding claiming an
+// older binding's backend address and port, for another VIP, is not programmed
+// and reports Conflict, and the older binding's rows are untouched, whichever
+// reconciles first. The backend's reply can be rewritten to only one VIP.
+func TestServiceVIPBinding_SameBackendConflicts(t *testing.T) {
 	for _, order := range [][]string{{testConflictOld, testConflictYoung}, {testConflictYoung, testConflictOld}} {
 		t.Run(order[0]+"-first", func(t *testing.T) {
 			old := newConflictBinding(testConflictOld, testConflictVIPA, testConflictBackendA, 20)
-			young := newConflictBinding(testConflictYoung, testConflictVIPA, testConflictBackendB, 10)
+			young := newConflictBinding(testConflictYoung, testConflictVIPB, testConflictBackendA, 10)
 			table := &fakeVIPTable{}
 			r, c := newConflictReconciler(t, table, old, young)
 
@@ -148,12 +179,12 @@ func TestServiceVIPBinding_SameVIPPortConflicts(t *testing.T) {
 			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "Conflict" {
 				t.Fatalf("young Bound = %+v, want False/Conflict", cond)
 			}
-			assertRowRewrite(t, table, ingressRow(testConflictVIPA), testConflictBackendA, "VIP A ingress row")
-			if _, ok := table.rows[egressRow(testConflictBackendB)]; ok {
-				t.Errorf("young's egress row is present, want absent: a binding in conflict writes neither row")
+			assertRowRewrite(t, table, egressRow(testConflictBackendA), testConflictVIPA, "backend A egress row")
+			if _, ok := table.rows[ingressRow(testConflictVIPB, testConflictBackendA)]; ok {
+				t.Errorf("young's ingress row is present, want absent: a binding in conflict writes neither row")
 			}
 			for _, call := range table.ingressCalls {
-				if call.addr2.Equal(net.ParseIP(testConflictBackendB)) {
+				if call.addr1.Equal(net.ParseIP(testConflictVIPB)) {
 					t.Errorf("young registered an ingress row: %+v", call)
 				}
 			}
@@ -165,7 +196,7 @@ func TestServiceVIPBinding_SameVIPPortConflicts(t *testing.T) {
 // binding in conflict leaves the owner's shared row in place.
 func TestServiceVIPBinding_DeletingConflictedBindingKeepsOwnerRow(t *testing.T) {
 	old := newConflictBinding(testConflictOld, testConflictVIPA, testConflictBackendA, 20)
-	young := newConflictBinding(testConflictYoung, testConflictVIPA, testConflictBackendB, 10)
+	young := newConflictBinding(testConflictYoung, testConflictVIPB, testConflictBackendA, 10)
 	table := &fakeVIPTable{}
 	r, c := newConflictReconciler(t, table, old, young)
 	reconcileBinding(t, r, testConflictOld)
@@ -180,9 +211,9 @@ func TestServiceVIPBinding_DeletingConflictedBindingKeepsOwnerRow(t *testing.T) 
 	}
 	reconcileBinding(t, r, testConflictYoung)
 
-	assertRowRewrite(t, table, ingressRow(testConflictVIPA), testConflictBackendA, "VIP A ingress row")
-	if _, ok := table.rows[egressRow(testConflictBackendA)]; !ok {
-		t.Errorf("old's egress row is gone after deleting young")
+	assertRowRewrite(t, table, egressRow(testConflictBackendA), testConflictVIPA, "backend A egress row")
+	if _, ok := table.rows[ingressRow(testConflictVIPA, testConflictBackendA)]; !ok {
+		t.Errorf("old's ingress row is gone after deleting young")
 	}
 	err := c.Get(context.Background(), conflictKey(testConflictYoung), got)
 	if !apierrors.IsNotFound(err) {
@@ -194,7 +225,7 @@ func TestServiceVIPBinding_DeletingConflictedBindingKeepsOwnerRow(t *testing.T) 
 // its rows, and the binding in conflict then takes the shared row over.
 func TestServiceVIPBinding_DeletingOwnerHandsRowOver(t *testing.T) {
 	old := newConflictBinding(testConflictOld, testConflictVIPA, testConflictBackendA, 20)
-	young := newConflictBinding(testConflictYoung, testConflictVIPA, testConflictBackendB, 10)
+	young := newConflictBinding(testConflictYoung, testConflictVIPB, testConflictBackendA, 10)
 	table := &fakeVIPTable{}
 	r, c := newConflictReconciler(t, table, old, young)
 	reconcileBinding(t, r, testConflictOld)
@@ -209,16 +240,17 @@ func TestServiceVIPBinding_DeletingOwnerHandsRowOver(t *testing.T) {
 	}
 	reconcileBinding(t, r, testConflictOld)
 
-	if _, ok := table.rows[egressRow(testConflictBackendA)]; ok {
-		t.Errorf("old's own egress row survived its deletion")
+	if _, ok := table.rows[ingressRow(testConflictVIPA, testConflictBackendA)]; ok {
+		t.Errorf("old's own ingress row survived its deletion")
 	}
 
 	reconcileBinding(t, r, testConflictYoung)
 	if cond := boundCondition(t, c, testConflictYoung); cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Errorf("young Bound = %+v after old's deletion, want True", cond)
 	}
-	assertRowRewrite(t, table, ingressRow(testConflictVIPA), testConflictBackendB, "VIP A ingress row")
-	assertRowRewrite(t, table, egressRow(testConflictBackendB), testConflictVIPA, "young's egress row")
+	assertRowRewrite(t, table, egressRow(testConflictBackendA), testConflictVIPB, "backend A egress row")
+	assertRowRewrite(t, table, ingressRow(testConflictVIPB, testConflictBackendA), testConflictBackendA,
+		"young's ingress row")
 }
 
 // TestServiceVIPBinding_VethUnbindKeepsSharedVIP: deleting a veth binding
@@ -298,7 +330,7 @@ func TestServiceVIPBinding_DeletingTwinKeepsRows(t *testing.T) {
 		t.Errorf("unregBinding=%d unregAt=%d, want 0: the twin still needs the rows",
 			len(table.unregBinding), len(table.unregAt))
 	}
-	if _, ok := table.rows[ingressRow(testConflictVIPA)]; !ok {
+	if _, ok := table.rows[ingressRow(testConflictVIPA, testConflictBackendA)]; !ok {
 		t.Errorf("VIP A ingress row is gone after deleting one of two identical bindings")
 	}
 	if _, ok := table.rows[egressRow(testConflictBackendA)]; !ok {

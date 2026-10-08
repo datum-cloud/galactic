@@ -35,11 +35,12 @@ func setUpVIPIngress(t *testing.T, objs *UsidObjects, usid testUSID) {
 }
 
 // putVIPIngressRow writes the ingress row RegisterIngress would for a UDP
-// binding of vip:port to backend:port.
-func putVIPIngressRow(t *testing.T, objs *UsidObjects, usid testUSID, vip, backend netip.Addr, port uint16) {
+// binding of vip:vipTestPort to backend:vipTestPort, keyed on usid's slot.
+func putVIPIngressRow(t *testing.T, objs *UsidObjects, usid testUSID, vip, backend netip.Addr) {
 	t.Helper()
+	const port = vipTestPort
 	key := UsidVipXlatKey{
-		Block: usid.block, Argument: usid.argument, Proto: ipProtoUDP,
+		Block: usid.block, Argument: usid.argument, Slot: usid.slot, Proto: ipProtoUDP,
 		Direction: usidVIPXlatDirIngress, Port: bswap16(port), Addr: vip.As16(),
 	}
 	if err := objs.VipXlatTable.Put(key, UsidVipXlatValue{Addr: backend.As16(), Port: bswap16(port)}); err != nil {
@@ -104,11 +105,10 @@ func TestUsidIngress_VIPXlatSelectsRowByVIPAddress(t *testing.T) {
 	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x764}
 	setUpVIPIngress(t, objs, usid)
 
-	const port = vipTestPort
 	vipA, backendA := netip.MustParseAddr("2001:db8:6060::a"), netip.MustParseAddr("fd20:60::a")
 	vipB, backendB := netip.MustParseAddr("2001:db8:6060::b"), netip.MustParseAddr("fd20:60::b")
-	putVIPIngressRow(t, objs, usid, vipA, backendA, port)
-	putVIPIngressRow(t, objs, usid, vipB, backendB, port)
+	putVIPIngressRow(t, objs, usid, vipA, backendA)
+	putVIPIngressRow(t, objs, usid, vipB, backendB)
 
 	if got := runIngressToDaddr(t, objs, usid, vipA); got != backendA {
 		t.Errorf("packet to %s left for %s, want %s", vipA, got, backendA)
@@ -124,6 +124,41 @@ func TestUsidIngress_VIPXlatSelectsRowByVIPAddress(t *testing.T) {
 	}
 }
 
+// TestUsidIngress_VIPXlatSelectsRowBySlot: two backends of one VIP and port in
+// one VRF each have their own row, and the slot in the outer destination picks
+// which one a packet is rewritten to. A slot with no row leaves the packet
+// alone.
+func TestUsidIngress_VIPXlatSelectsRowBySlot(t *testing.T) {
+	requireRoot(t)
+	objs := loadObjects(t)
+	usid := testUSID{block: baseUSID.block, nodeID: baseUSID.nodeID, function: uformat.FunctionEndDT46, argument: 0x799}
+	setUpVIPIngress(t, objs, usid)
+
+	vip := netip.MustParseAddr("2001:db8:6060::a")
+	backendA, backendB := netip.MustParseAddr("fd20:60::a"), netip.MustParseAddr("fd20:60::b")
+	toA, toB := usid, usid
+	toA.slot, toB.slot = 0x1111, 0x2222
+	putVIPIngressRow(t, objs, toA, vip, backendA)
+	putVIPIngressRow(t, objs, toB, vip, backendB)
+
+	if got := runIngressToDaddr(t, objs, toA, vip); got != backendA {
+		t.Errorf("packet with slot %#x left for %s, want %s", toA.slot, got, backendA)
+	}
+	if got := runIngressToDaddr(t, objs, toB, vip); got != backendB {
+		t.Errorf("packet with slot %#x left for %s, want %s", toB.slot, got, backendB)
+	}
+
+	unbound := usid
+	unbound.slot = 0x3333
+	if got := runIngressToDaddr(t, objs, unbound, vip); got != vip {
+		t.Errorf("packet with unbound slot %#x left for %s, want it unchanged", unbound.slot, got)
+	}
+	// Slot 0, a destination that names no backend, has no fallback row either.
+	if got := runIngressToDaddr(t, objs, usid, vip); got != vip {
+		t.Errorf("packet with slot 0 left for %s, want it unchanged", got)
+	}
+}
+
 // TestUsidIngress_VIPXlatRunsBeforeNPTv6: in a VRF with NPTv6, a packet to a
 // VIP is rewritten to its backend rather than having its prefix translated
 // first, and a packet to any other address still gets NPTv6.
@@ -134,9 +169,8 @@ func TestUsidIngress_VIPXlatRunsBeforeNPTv6(t *testing.T) {
 	setUpVIPIngress(t, objs, usid)
 	putNPTv6(t, objs, usid.block, usid.argument)
 
-	const port = vipTestPort
 	vip, backend := netip.MustParseAddr("2001:db8:6060::a"), netip.MustParseAddr("fd01:203:405:1::a")
-	putVIPIngressRow(t, objs, usid, vip, backend, port)
+	putVIPIngressRow(t, objs, usid, vip, backend)
 
 	if got := runIngressToDaddr(t, objs, usid, vip); got != backend {
 		t.Errorf("packet to VIP %s left for %s, want %s", vip, got, backend)

@@ -9,8 +9,8 @@
 //
 // Bit layout, in the RFC 9800 REPLACE-CSID flavor:
 //
-//	bit  1                  48 49              64 65   68 69          80 81                  128
-//	     |------ uSID Block (48) ------|-- Node-ID (16) --|-Fn(4)-|-- Argument (12) --|------ Padding (48, zero) ------|
+//	| uSID Block (48) | Node-ID (16) | Fn (4) | Argument (12) | Slot (16) | Padding (32, zero) |
+//	  bits 1-48         bits 49-64     65-68    69-80           81-96       97-128
 //
 // Byte layout of the 16-byte address, bit 1 being the most significant bit of
 // byte 0:
@@ -19,7 +19,13 @@
 //	bytes 6-7   (16 bits) Node-ID
 //	byte  8 hi  ( 4 bits) Function
 //	byte 8 lo + byte 9 (12 bits) Argument
-//	bytes 10-15 (48 bits) Padding (must be zero)
+//	bytes 10-11 (16 bits) Slot
+//	bytes 12-15 (32 bits) Padding (must be zero)
+//
+// Slot is zero on every SID a node advertises. Only a gateway-to-backend
+// destination sets it: it names which backend of a load-balanced VIP the
+// gateway chose, so several backends of one VIP can share a node, and the
+// backend node's vip_xlat_table lookup keys on it.
 //
 // Every accessor reads or writes its field at that field's fixed offset only.
 // Nothing here shifts one field's bits into another field's frame: all four
@@ -41,7 +47,8 @@ const (
 	NodeIDBits   = 16
 	FunctionBits = 4
 	ArgumentBits = 12
-	PaddingBits  = 48
+	SlotBits     = 16
+	PaddingBits  = 32
 
 	// LocatorBits is the width of the locator itself: Block and Node-ID
 	// together, the leading run every uSID on one node shares whatever its
@@ -91,12 +98,14 @@ const (
 // Fields is the decoded set of uFMT 48+16 fields carried by one uSID address.
 // Block and NodeID occupy their full width; Function and Argument are stored
 // right-justified in wider types with only their low 4 and 12 bits
-// significant.
+// significant. Slot is zero except on a gateway-to-backend destination; see the
+// package doc comment.
 type Fields struct {
 	Block    uint64
 	NodeID   uint16
 	Function uint8
 	Argument uint16
+	Slot     uint16
 }
 
 // Validate returns an error if any field is out of range: Block above BlockMax,
@@ -207,8 +216,18 @@ func Argument(addr netip.Addr) (uint16, error) {
 	return uint16(b[8]&0x0F)<<8 | uint16(b[9]), nil
 }
 
+// Slot returns the 16-bit backend Slot at bits 81-96 of addr, bytes 10-11 read
+// from the unmutated address. Zero means the address names no backend slot.
+func Slot(addr netip.Addr) (uint16, error) {
+	b, err := as16(addr)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint16(b[10:12]), nil
+}
+
 // Decode extracts every uFMT 48+16 field from addr at its fixed offset. It
-// returns an error if addr is not a 16-byte IPv6 address, or if the 48-bit
+// returns an error if addr is not a 16-byte IPv6 address, or if the 32-bit
 // padding tail is non-zero. That is a structural check, distinct from the
 // semantic range checks Validate performs and Decode does not.
 func Decode(addr netip.Addr) (Fields, error) {
@@ -216,9 +235,9 @@ func Decode(addr netip.Addr) (Fields, error) {
 	if err != nil {
 		return Fields{}, err
 	}
-	for i := 10; i < 16; i++ {
+	for i := 12; i < 16; i++ {
 		if b[i] != 0 {
-			return Fields{}, fmt.Errorf("uformat: %s has non-zero padding at byte %d (bits 81-128 must be zero)", addr, i)
+			return Fields{}, fmt.Errorf("uformat: %s has non-zero padding at byte %d (bits 97-128 must be zero)", addr, i)
 		}
 	}
 	return Fields{
@@ -226,6 +245,7 @@ func Decode(addr netip.Addr) (Fields, error) {
 		NodeID:   binary.BigEndian.Uint16(b[6:8]),
 		Function: b[8] >> 4,
 		Argument: uint16(b[8]&0x0F)<<8 | uint16(b[9]),
+		Slot:     binary.BigEndian.Uint16(b[10:12]),
 	}, nil
 }
 
@@ -250,7 +270,8 @@ func Encode(f Fields) (netip.Addr, error) {
 	binary.BigEndian.PutUint64(b[:8], f.Block<<NodeIDBits|uint64(f.NodeID))
 	b[8] = (f.Function << 4) | (byte(f.Argument>>8) & 0x0F)
 	b[9] = byte(f.Argument)
-	// bytes 10-15 remain zero (padding).
+	binary.BigEndian.PutUint16(b[10:12], f.Slot)
+	// bytes 12-15 remain zero (padding).
 	return netip.AddrFrom16(b), nil
 }
 

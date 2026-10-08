@@ -89,9 +89,10 @@ type unregisterCall struct {
 }
 
 // fakeRowKey is one row of fakeVIPTable's simulated vip_xlat_table, ignoring
-// the VRF, which every test here shares.
+// the VRF, which every test here shares. slot is 0 on an egress row.
 type fakeRowKey struct {
 	egress bool
+	slot   uint16
 	addr   string
 	port   uint16
 }
@@ -125,11 +126,11 @@ func (f *fakeVIPTable) put(k fakeRowKey, addr net.IP, port uint16) {
 	f.rows[k] = fakeRowValue{addr.String(), port}
 }
 
-func (f *fakeVIPTable) RegisterIngress(block uint64, argument uint16, proto uint8,
+func (f *fakeVIPTable) RegisterIngress(block uint64, argument, slot uint16, proto uint8,
 	vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) error {
 	f.ingressCalls = append(f.ingressCalls, vipCall{block, argument, proto, vipAddr, vipPort, backendAddr, backendPort})
 	if f.registerErr == nil {
-		f.put(fakeRowKey{addr: vipAddr.String(), port: vipPort}, backendAddr, backendPort)
+		f.put(fakeRowKey{slot: slot, addr: vipAddr.String(), port: vipPort}, backendAddr, backendPort)
 	}
 	return f.registerErr
 }
@@ -144,11 +145,11 @@ func (f *fakeVIPTable) RegisterEgress(block uint64, argument uint16, proto uint8
 }
 
 func (f *fakeVIPTable) UnregisterIngress(
-	block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
+	block uint64, argument, slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 ) error {
 	f.unregIngress = append(f.unregIngress, unregisterCall{block, argument, proto, vipAddr, vipPort})
 	if f.unregisterErr == nil {
-		delete(f.rows, fakeRowKey{addr: vipAddr.String(), port: vipPort})
+		delete(f.rows, fakeRowKey{slot: slot, addr: vipAddr.String(), port: vipPort})
 	}
 	return f.unregisterErr
 }
@@ -165,8 +166,10 @@ func (f *fakeVIPTable) UnregisterEgress(
 
 // removeOwnRows deletes the binding's two rows where they still hold its
 // values, as vipxlatmap's removal by value does.
-func (f *fakeVIPTable) removeOwnRows(vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) {
-	in := fakeRowKey{addr: vipAddr.String(), port: vipPort}
+func (f *fakeVIPTable) removeOwnRows(
+	slot uint16, vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16,
+) {
+	in := fakeRowKey{slot: slot, addr: vipAddr.String(), port: vipPort}
 	if f.rows[in] == (fakeRowValue{backendAddr.String(), backendPort}) {
 		delete(f.rows, in)
 	}
@@ -176,21 +179,21 @@ func (f *fakeVIPTable) removeOwnRows(vipAddr net.IP, vipPort uint16, backendAddr
 	}
 }
 
-func (f *fakeVIPTable) UnregisterBindingAt(block uint64, argument uint16, proto uint8, vipAddr net.IP, vipPort uint16,
-	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
+func (f *fakeVIPTable) UnregisterBindingAt(block uint64, argument, slot uint16, proto uint8,
+	vipAddr net.IP, vipPort uint16, backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
 	f.unregAt = append(f.unregAt, unregisterAtCall{
 		block, argument, unregisterBindingCall{proto, vipAddr, vipPort, backendAddr, backendPort}})
 	if f.unregisterErr == nil {
-		f.removeOwnRows(vipAddr, vipPort, backendAddr, backendPort)
+		f.removeOwnRows(slot, vipAddr, vipPort, backendAddr, backendPort)
 	}
 	return nil, f.unregisterErr
 }
 
-func (f *fakeVIPTable) UnregisterBinding(proto uint8, vipAddr net.IP, vipPort uint16,
+func (f *fakeVIPTable) UnregisterBinding(slot uint16, proto uint8, vipAddr net.IP, vipPort uint16,
 	backendAddr net.IP, backendPort uint16) ([]vipxlatmap.Entry, error) {
 	f.unregBinding = append(f.unregBinding, unregisterBindingCall{proto, vipAddr, vipPort, backendAddr, backendPort})
 	if f.unregisterErr == nil {
-		f.removeOwnRows(vipAddr, vipPort, backendAddr, backendPort)
+		f.removeOwnRows(slot, vipAddr, vipPort, backendAddr, backendPort)
 	}
 	return nil, f.unregisterErr
 }
