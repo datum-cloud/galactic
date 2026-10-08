@@ -497,6 +497,20 @@ type vipBindingRows struct {
 func resolveVIPBindingRows(
 	idx *backendSIDIndex, nodeName string, binding *bgpv1alpha1.ServiceVIPBinding,
 ) (vipBindingRows, error) {
+	rows, err := parseVIPBindingRows(binding)
+	if err != nil {
+		return vipBindingRows{}, err
+	}
+	block, argument, err := resolveVIPBindingContextFromIndex(idx, nodeName, binding.Spec.VPCRef)
+	if err != nil {
+		return vipBindingRows{}, fmt.Errorf("resolve VRF context for VIP binding: %w", err)
+	}
+	return rows.at(block, argument), nil
+}
+
+// parseVIPBindingRows derives the two rows binding claims from its spec alone,
+// with their block and argument left zero for the caller to fill in with at.
+func parseVIPBindingRows(binding *bgpv1alpha1.ServiceVIPBinding) (vipBindingRows, error) {
 	vipIP, err := netip.ParseAddr(binding.Spec.VIPAddress)
 	if err != nil {
 		return vipBindingRows{}, fmt.Errorf("invalid vipAddress %q: %w", binding.Spec.VIPAddress, err)
@@ -513,24 +527,26 @@ func resolveVIPBindingRows(
 		return vipBindingRows{}, err
 	}
 
-	block, argument, err := resolveVIPBindingContextFromIndex(idx, nodeName, binding.Spec.VPCRef)
-	if err != nil {
-		return vipBindingRows{}, fmt.Errorf("resolve VRF context for VIP binding: %w", err)
-	}
-
 	vipPort := uint16(binding.Spec.Port)            //nolint:gosec // kubebuilder-validated 1-65535
 	backendPort := uint16(binding.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
 
 	slot := srv6.BackendSlot(backendIP, backendPort)
 
 	return vipBindingRows{
-		ingress:     vipRow{block: block, argument: argument, slot: slot, proto: proto, addr: vipIP, port: vipPort},
-		egress:      vipRow{egress: true, block: block, argument: argument, proto: proto, addr: backendIP, port: backendPort},
+		ingress:     vipRow{slot: slot, proto: proto, addr: vipIP, port: vipPort},
+		egress:      vipRow{egress: true, proto: proto, addr: backendIP, port: backendPort},
 		vipAddr:     net.IP(vipIP.AsSlice()),
 		backendAddr: net.IP(backendIP.AsSlice()),
 		vipPort:     vipPort,
 		backendPort: backendPort,
 	}, nil
+}
+
+// at returns rows placed in the VRF identified by (block, argument).
+func (rows vipBindingRows) at(block uint64, argument uint16) vipBindingRows {
+	rows.ingress.block, rows.ingress.argument = block, argument
+	rows.egress.block, rows.egress.argument = block, argument
+	return rows
 }
 
 // vipPeer is another live binding on this node and the rows it claims.

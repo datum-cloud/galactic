@@ -584,6 +584,12 @@ and protocol, in the same VPC. The older binding keeps serving. The newer
 one is not programmed and reports `Bound=False` with reason `Conflict`,
 naming the binding that holds the row.
 
+`usid.c` matches only the slot the gateway sent, with no fallback to the
+slot-0 ingress rows a `galactic-router` built before #799 wrote, so upgrade
+`galactic-gateway` and `galactic-router` together. Each router rewrites its
+bindings' rows with slots when it starts, and its periodic `vip_xlat_table`
+sweep removes the old slot-0 rows.
+
 Each node summarizes its bindings on the rule as
 `<backend-node>/BackendsBound`: `True` with reason `Bound` once every one
 reports `Bound`, `False` with reason `BindingsNotBound` naming each that
