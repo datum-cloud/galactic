@@ -27,7 +27,9 @@ rules:
   # NetworkRuleBindingReconciler creates, updates and deletes this node's
   # generated bindings, and ServiceVIPBindingReconciler adds and removes its
   # own teardown finalizer with a Patch on the object itself, not just its
-  # /status subresource.
+  # /status subresource. NodeDepartureReconciler deletes a departed node's
+  # generated bindings and patches the finalizer off every binding that
+  # targets it.
   - apiGroups: ["network.datumapis.com"]
     resources:
       - servicevipbindings

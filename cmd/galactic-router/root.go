@@ -267,7 +267,7 @@ func runCmd(cfg *config.RouterConfig) error {
 
 	// Register the ServiceVIPBinding controller and the NetworkRule binding
 	// writer that generates its bindings.
-	if err := setupVIPBindingControllers(mgr, nodeName, vipTranslationTable); err != nil {
+	if err := setupVIPBindingControllers(mgr, nodeName, vipTranslationTable, cfg.GCInterval); err != nil {
 		return err
 	}
 
@@ -350,8 +350,12 @@ func runCmd(cfg *config.RouterConfig) error {
 // backend side: NetworkRuleBindingReconciler, which writes a ServiceVIPBinding
 // for every NetworkRule backend whose VPCAttachment is on this node, and
 // ServiceVIPBindingReconciler, which programs vip_xlat_table from those
-// bindings.
-func setupVIPBindingControllers(mgr ctrl.Manager, nodeName string, table controller.VIPTranslationTable) error {
+// bindings. It also registers NodeDepartureReconciler, which every sweepInterval
+// and on every Node deletion clears the conditions and bindings of nodes that
+// no longer exist.
+func setupVIPBindingControllers(
+	mgr ctrl.Manager, nodeName string, table controller.VIPTranslationTable, sweepInterval time.Duration,
+) error {
 	if err := (&controller.ServiceVIPBindingReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
@@ -366,6 +370,13 @@ func setupVIPBindingControllers(mgr ctrl.Manager, nodeName string, table control
 		NodeName: nodeName,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NetworkRule binding controller: %w", err)
+	}
+	if err := (&controller.NodeDepartureReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Interval:  sweepInterval,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup node departure controller: %w", err)
 	}
 	return nil
 }
