@@ -62,9 +62,10 @@ const (
 	// why it cannot be.
 	reasonBindingsPending = "BindingsNotBound"
 
-	// reasonBindingsInvalid: the rule is invalid (an unparseable selector, or
-	// more than one IPv6 VIP), so no backend could be selected. Only nodes
-	// that served the rule report it.
+	// reasonBindingsInvalid: the rule's spec cannot be built into bindings,
+	// either a second IPv6 VIP or a selector that does not parse. Only nodes
+	// that serve the rule report it, and they keep their bindings until the
+	// spec is fixed.
 	reasonBindingsInvalid = "InvalidRule"
 )
 
@@ -78,7 +79,8 @@ const (
 // it, and the binding's own finalizer still lets ServiceVIPBindingReconciler
 // remove its vip_xlat_table rows first. A backend that moves to another node,
 // changes address, or stops matching the selector has its binding deleted
-// here and a new one written by whichever node now hosts it.
+// here and a new one written by whichever node now hosts it. A rule whose
+// spec cannot be built into bindings keeps the ones it has.
 //
 // The binding's egressKind comes from the attachment's interface mode, which
 // is known before the backend's interface exists, and its vpcRef from the
@@ -128,24 +130,30 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	desired, buildErr := r.desiredBindings(rule, attachments)
-
-	// An invalid rule selects no backends, so desired cannot say whether this
-	// node serves it. The bindings the node holds can, but applyBindings
-	// deletes them when desired is empty, so they are counted before it runs.
-	// Counting them here stays correct if a build error ever keeps them.
-	served := false
 	if buildErr != nil {
+		// The spec cannot be built into bindings: a second IPv6 VIP, or a
+		// selector that does not parse. Deleting the bindings then would
+		// remove every backend node's vip_xlat_table rows at once, while the
+		// gateways still drain the rule's established flows toward them, so
+		// an edit that is reverted minutes later would still have dropped
+		// every connection. Existing bindings stay untouched until a valid
+		// spec says otherwise, and the rule says why. A spec error does not
+		// heal on retry, so none is requested: the fix bumps the generation,
+		// which the predicate passes.
 		existing, err := r.nodeBindings(ctx, rule)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		served = len(existing) > 0
+		if err := r.publishCondition(ctx, rule, nil, buildErr, len(existing) > 0); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	if err := r.applyBindings(ctx, rule, desired); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.publishCondition(ctx, rule, desired, buildErr, served); err != nil {
+	if err := r.publishCondition(ctx, rule, desired, nil, false); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -271,10 +279,9 @@ func (r *NetworkRuleBindingReconciler) nodeBindings(
 // it when the node hosts none of the rule's backends, so a rule's status names
 // only the nodes that serve it.
 //
-// An invalid rule is reported only by the nodes that served it: those that
-// held bindings for it going in (served), or already report InvalidRule, which
-// on a later pass is all that is left of the bindings the first pass deleted.
-// Every other node stays silent. The gateways already report the error on the
+// An invalid rule is reported only by the nodes that serve it: those that
+// hold bindings for it (served), which a build error leaves in place. Every
+// other node stays silent. The gateways already report the error on the
 // rule, and a condition from every router node would cost a status write per
 // node per edit, each conflicting with the others.
 func (r *NetworkRuleBindingReconciler) publishCondition(
@@ -282,10 +289,9 @@ func (r *NetworkRuleBindingReconciler) publishCondition(
 	buildErr error, served bool,
 ) error {
 	condType := backendsBoundConditionType(r.NodeName)
-	own := meta.FindStatusCondition(rule.Status.Conditions, condType)
 	stake := len(desired) > 0
 	if buildErr != nil {
-		stake = served || (own != nil && own.Reason == reasonBindingsInvalid)
+		stake = served
 	}
 	if !stake {
 		// A node with no condition writes nothing: updateRuleCondition
