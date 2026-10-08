@@ -10,10 +10,10 @@ Build after generating the eBPF objects:
 ```sh
 task build:ebpf
 go build -o bin/psc-fixture ./tests/psc/fixture
-python3 -m unittest discover -s tests/psc/fixture -p '*_test.py'
+go test -race ./tests/psc/internal/traffic
 ```
 
-Run in a disposable privileged Linux environment with IPv6, `ip`, Python 3,
+Run in a disposable privileged Linux environment with IPv6, `ip`,
 bpffs, and an edge kubeconfig. Supply two existing consumer VPCs and attachments,
 a shared producer attachment, and the service endpoints and policies from the
 [example manifest](example.yaml). Apply the Cloud and Network CRDs first.
@@ -65,9 +65,14 @@ Start `bin/psc-fixture --config /runtime/psc.json`. The state file identifies
 consumer namespaces. Query each namespace using its expected producer address:
 
 ```sh
-ip netns exec CONSUMER_A python3 /runtime/psc-query.py udp fd70:100::10 request-a
-ip netns exec CONSUMER_B python3 /runtime/psc-query.py tcp fd70:100::11 request-b
+ip netns exec CONSUMER_A "$(pwd)/bin/psc-fixture" query \
+  --transport udp --expected fd70:100::10 --payload request-a
+ip netns exec CONSUMER_B "$(pwd)/bin/psc-fixture" query \
+  --transport tcp --expected fd70:100::11 --payload request-b
 ```
+
+The same binary supplies the service relays and consumer queries.
+Use `--timeout 15s` for delayed reply checks.
 
 A successful result identifies the expected producer and the frontend
 `fd70:ffff::10`. A denied or expired request exits with status 3. Repeat both

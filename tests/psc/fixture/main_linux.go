@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -35,11 +34,9 @@ import (
 	"go.datum.net/galactic/internal/controller"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
 	"go.datum.net/galactic/internal/serviceroute"
+	"go.datum.net/galactic/tests/psc/internal/traffic"
 	networkapi "go.datum.net/network/api/v1alpha1"
 )
-
-//go:embed relay.py query.py
-var scripts embed.FS
 
 type fixtureConfig struct {
 	Role        string `json:"role"`
@@ -89,6 +86,16 @@ type fixture struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "query" || os.Args[1] == "relay") {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		code, err := traffic.Run(ctx, os.Args[1:], os.Stdout)
+		if err != nil {
+			log.Print(err)
+		}
+		os.Exit(code)
+	}
+
 	configPath := flag.String("config", "/runtime/psc-fixture.json", "fixture configuration JSON")
 	flag.Parse()
 	if err := run(*configPath); err != nil {
@@ -113,15 +120,6 @@ func run(path string) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(f.cfg.State), 0755); err != nil {
 		return err
-	}
-	for _, name := range []string{"relay.py", "query.py"} {
-		data, err := scripts.ReadFile(name)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(filepath.Dir(f.cfg.State), "psc-"+name), data, 0600); err != nil {
-			return err
-		}
 	}
 	f.scheme = runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, cloudapi.AddToScheme, networkapi.AddToScheme} {

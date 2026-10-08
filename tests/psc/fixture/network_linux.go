@@ -97,14 +97,21 @@ func (f *fixture) addDestination(address string) error {
 		}
 	}
 	port := strconv.Itoa(12000 + len(f.destinations))
-	script := filepath.Join(filepath.Dir(f.cfg.State), "psc-relay.py")
+	binary, err := os.Executable()
+	if err != nil {
+		return err
+	}
 	for _, transport := range []string{"udp", "tcp"} {
 		for _, mode := range []string{"root", roleProducer} {
-			args := []string{script, mode, transport, producerGateway, port, address, servicePort, f.rootSource}
-			command := "python3"
+			listen, target := net.JoinHostPort(producerGateway, port), net.JoinHostPort(address, servicePort)
 			if mode == roleProducer {
-				args = []string{ipNetNS, ipExec, f.producerNS, "python3", script, mode, transport,
-					address, servicePort, producerGateway, port, "-"}
+				listen, target = target, listen
+			}
+			args := []string{"relay", "--mode", mode, "--transport", transport,
+				"--listen", listen, "--target", target, "--state-dir", filepath.Dir(f.cfg.State)}
+			command := binary
+			if mode == roleProducer {
+				args = append([]string{ipNetNS, ipExec, f.producerNS, binary}, args...)
 				command = "ip"
 			}
 			process := exec.CommandContext(context.Background(), command, args...)
