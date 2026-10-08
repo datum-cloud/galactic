@@ -1,11 +1,10 @@
 # dfw's ingress tier: a galactic-gateway and NetworkGateway on each of
-# its edge nodes, and the NetworkRules and ServiceVIPBindings for ns60, the
-# site's backend tenant (resources/tenants/ns60/dfw/). The VIP is
-# dfw's own, and so are its backends: a load balancer belongs to one
-# region (datum-cloud/enhancements#884).
+# its edge nodes, and the NetworkRules for ns60, the site's backend tenant
+# (resources/tenants/ns60/dfw/). The VIP is dfw's own, and so are its
+# backends: a load balancer belongs to one region
+# (datum-cloud/enhancements#884).
 namespace: galactic-system
 resources:
   - ../dfw-worker2
   - ../dfw-worker3
   - networkrules.yaml
-  - servicevipbindings.yaml

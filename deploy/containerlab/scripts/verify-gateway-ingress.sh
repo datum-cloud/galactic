@@ -15,6 +15,11 @@
 #     DSR's defining property: the gateway encapsulates the client's packet
 #     and changes nothing in it.
 #
+# Across every flow to a site's VIP, each of the site's ns60 backends answers
+# at least one. Both run on the site's one compute node, so this is what
+# proves the gateway's per-backend slot reaches that node and selects the
+# backend Maglev chose (#799); without it every flow lands on one backend.
+#
 # Across the flows through each node:
 #
 #   - the node's own galactic_edge_rule_packets_total for the VIP rises. A
@@ -158,6 +163,7 @@ for site in "${SITES[@]}"; do
     fail "${site}: no ns60 backend pod (run deploy:ns60)"
     continue
   fi
+  declare -A served=()
 
   for gw in ${GATEWAYS[${site}]}; do
     [ -z "${only}" ] || [ "${only}" = "${gw}" ] || continue
@@ -189,6 +195,7 @@ for site in "${SITES[@]}"; do
           fail "${proto} from port ${sport}: ${pod} saw the client as '${peer}', want ${CLIENT}"
         else
           answered=$((answered + 1))
+          served[${pod}]=1
         fi
       done
       echo "  ${proto}: ${answered}/${FLOWS} flows answered by ${site}'s backends, client address intact"
@@ -224,6 +231,15 @@ for site in "${SITES[@]}"; do
 
     transit "${tr}" ip -6 route del "${vip}/128"
   done
+
+  for pod in ${backends}; do
+    if [ -n "${served[${pod}]:-}" ]; then
+      echo "  ok   ${pod} answered flows to ${vip}"
+    else
+      fail "${pod} answered none of the flows to ${vip}: the VIP is not spread across ${site}'s backends"
+    fi
+  done
+  unset served
 done
 
 if [ "${checked}" -eq 0 ]; then

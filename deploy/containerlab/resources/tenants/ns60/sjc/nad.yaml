@@ -1,18 +1,18 @@
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
-  name: backend
+  name: backend-a
   namespace: ns60
 spec:
   config: |-
     {
       "cniVersion": "1.0.0",
-      "name": "backend",
+      "name": "backend-a",
       "plugins": [
         {
           "type": "galactic-veth",
           "vpc": "60",
-          "vpcattachment": "60",
+          "vpcattachment": "60a",
           "namespace": "galactic-system",
           "ipam": {
             "type": "galactic-ipam",
@@ -24,7 +24,39 @@ spec:
         {
           "type": "galactic-bgp",
           "vpc": "60",
-          "vpcattachment": "60",
+          "vpcattachment": "60a",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: backend-b
+  namespace: ns60
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "backend-b",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "60",
+          "vpcattachment": "60b",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              { "address": "fd20:60:ff02:b::100/96", "gateway": "fd20:60:ff02:b::1" }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "60",
+          "vpcattachment": "60b",
           "namespace": "galactic-system"
         }
       ]

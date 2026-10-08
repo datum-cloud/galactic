@@ -1,10 +1,9 @@
 # sjc's ingress tier: a galactic-gateway and NetworkGateway on each of
-# its edge nodes, and the NetworkRules and ServiceVIPBindings for ns60, the
-# site's backend tenant (resources/tenants/ns60/sjc/). The VIP is
-# sjc's own, and so are its backends: a load balancer belongs to one
-# region (datum-cloud/enhancements#884).
+# its edge nodes, and the NetworkRules for ns60, the site's backend tenant
+# (resources/tenants/ns60/sjc/). The VIP is sjc's own, and so are its
+# backends: a load balancer belongs to one region
+# (datum-cloud/enhancements#884).
 namespace: galactic-system
 resources:
   - ../sjc-worker2
   - networkrules.yaml
-  - servicevipbindings.yaml

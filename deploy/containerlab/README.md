@@ -132,7 +132,8 @@ nodes, plus `galactic-nat`, the egress shard, and `galactic-gateway`, the VIP lo
 (`GALACTIC_NAT_XDP_ATTACH=dispatch`; the gateway's default), each in its own slot, so either
 can restart without detaching the other. Each site has its own VIP `/64`
 (`2001:db8:6060:1::/64` for dfw, `:2::` for sjc, `:3::` for iad), originated only by that
-site's edge nodes and served by one `ns60` backend on the site's compute node.
+site's edge nodes and served by two `ns60` backends on the site's compute node, which the
+site's `NetworkRule`s select by label through their `VPCAttachment`s.
 Compute nodes run no shard: each egresses through its own site's edge shards only. The
 reflector runs neither `galactic-cni` nor a shard — its
 `galactic=control` label is mutually exclusive with the `galactic=router` value that pulls
@@ -416,7 +417,7 @@ deploy/containerlab/
 │   ├── bmp-collector/iad/       # the lab's one BMP collector, on the reflector's host network
 │   ├── galactic-nat/            # egress shards per site, one per edge node (dfw has two)
 │   ├── galactic-gateway/        # one gateway overlay per edge node, plus each site's
-│   │                            #   ns60 NetworkRules and ServiceVIPBindings
+│   │                            #   ns60 NetworkRules (backends picked by selector)
 │   └── tenants/                 # test VPCs — one shared base/ (Namespace + netshoot
 │       ├── base/                 # Deployment), each tenant patching its namespace and
 │       ├── ns10/                 # default-network annotation; per-site dirs hold each
@@ -427,8 +428,9 @@ deploy/containerlab/
 │       │                          # their own NAD+Deployment (distinct vpcattachment,
 │       │                          # same vpc), not one NAD scaled to replicas: 2 — see
 │       │                          # docs/tenants.md for why.
-│       └── ns60/                 # the gateway's VIP backend, one per site at a fixed
-│                                  # address, answering TCP and UDP on port 80
+│       └── ns60/                 # the gateway's VIP backends, two per site on one node,
+│                                  # each with a fixed address and a VPCAttachment,
+│                                  # answering TCP and UDP on port 80
 ├── node_files/
 │   ├── dfw/          config.yaml
 │   ├── iad/          config.yaml
@@ -499,7 +501,7 @@ task deploy
 | `deploy:ns20`             | Deploy ns20 test VPC (dual-stack, fd20 ULA + IPv4)                                                          |
 | `deploy:ns30`             | Deploy ns30 test VPC (dfw only, 2 pods)                                                                     |
 | `deploy:ns40`             | Deploy ns40 test VPC (iad only, 2 pods)                                                                     |
-| `deploy:ns60`             | Deploy ns60 test VPC (one VIP backend per site)                                                             |
+| `deploy:ns60`             | Deploy ns60 test VPC (two VIP backends per site, on one node)                                               |
 | `verify:fabric-metrics`   | Scrape every fabric-router's frr-exporter; fail on a failed collector or a session not Established          |
 | `verify:bmp`              | Check the route reflector and every fabric-router stream to the BMP collector, and that it agrees with each on every session's state |
 | `verify:underlay`         | Ping every underlay loopback from tr1 over both IPv4 and IPv6                                               |

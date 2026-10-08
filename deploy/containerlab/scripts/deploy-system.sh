@@ -29,11 +29,10 @@ echo "Using datum-cloud/network CRDs at ${NETWORK_SHA} (${NETWORK_REF})"
 NETWORK_CRD_URL="https://raw.githubusercontent.com/datum-cloud/network/${NETWORK_SHA}/config/crd"
 
 # VPC/VPCAttachment CRDs come from the separate companion VPC operator,
-# datum-cloud/cloud. Nothing in this repo's Go code imports it (the CNI
-# plugin only reads VPC/VPCAttachment identifiers as plain JSON fields off
-# the NAD), so there's no go.mod pseudo-version to derive a SHA from — pin
-# one explicitly here and bump it by hand when the VPC CRD schema changes.
-CLOUD_SHA="71a4f0f9c12166a758da4e2b90c80a17709804f2"
+# datum-cloud/cloud. galactic-router and galactic-gateway read VPCAttachments
+# through go.datum.net/cloud, so pin the same commit go.mod's pseudo-version
+# names, and bump both together.
+CLOUD_SHA="260f797bbc5c3f7b2ae323f041c185b544f79dbd"
 CLOUD_CRD_URL="https://raw.githubusercontent.com/datum-cloud/cloud/${CLOUD_SHA}/config/crd"
 
 # Install whatever network's own config/crd/kustomization.yaml lists at
