@@ -96,7 +96,8 @@ func TestNetworkGatewayReconciler_DrainsDeletedRuleUntilWithdrawn(t *testing.T) 
 	var writes advWriteCounter
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
 		WithInterceptorFuncs(writes.funcs()).
 		Build()
 
@@ -201,7 +202,8 @@ func TestNetworkGatewayReconciler_DrainingRuleKeepsLastLoadedState(t *testing.T)
 
 	fakeClient := newIndexedClientBuilder(scheme).
 		WithStatusSubresource(&bgpv1alpha1.NetworkGateway{}, &bgpv1alpha1.NetworkRule{}).
-		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF, rule).
+		WithObjects(newTestGateway(testNodeGWA), newTestRouter(), backendRouter, backendAdv, backendVRF,
+			newBackendAttachment("vpc-1"), rule).
 		Build()
 
 	engine := newFakeGatewayEngine()

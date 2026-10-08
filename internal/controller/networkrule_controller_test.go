@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -39,8 +40,8 @@ const (
 	// BGPRouter/BGPAdvertisement newBackendFixtures returns, which resolves
 	// it to a real SRv6 uSID — required for buildDesiredRule to succeed
 	// (design plan decision #5; see usidresolver.go).
-	testBackendAddr       = "10.0.0.1"
-	testBackendPrefix     = "10.0.0.0/24"
+	testBackendAddr       = "fd00:10::1"
+	testBackendPrefix     = "fd00:10::/64"
 	testBackendRouterName = "backend-router"
 	testBackendLocator    = "2001:db8:ff01::/48"
 	testBackendNodeID     = 7
@@ -70,6 +71,9 @@ func newRuleTestScheme(t *testing.T) *runtime.Scheme {
 	if err := bgpv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
+	if err := cloudv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme cloud: %v", err)
+	}
 	return scheme
 }
 
@@ -89,10 +93,51 @@ func newTestRule(name, vpcRef string, vips ...string) *bgpv1alpha1.NetworkRule {
 			VIPAddresses:     vips,
 			Protocol:         bgpv1alpha1.NetworkRuleProtocolTCP,
 			Port:             443,
-			Backends: []bgpv1alpha1.NetworkRuleBackend{
-				{Address: testBackendAddr, Port: 8443},
+			BackendSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{testBackendLabel: testBackendLabelValue},
+			},
+			BackendPort: testBackendPort,
+		},
+	}
+}
+
+// testBackendLabel and testBackendLabelValue are the label newTestRule's
+// selector matches and newBackendAttachment sets; testBackendPort is the
+// rule's backend port.
+const (
+	testBackendLabel      = "app"
+	testOtherNode         = "node-elsewhere"
+	testBackendLabelValue = "backend"
+	testBackendPort       = 8443
+)
+
+// newBackendAttachment returns the VPCAttachment newTestRule's selector picks
+// for vpcRef: addr on testComputeNodeName, the node newBackendFixtures'
+// router targets, so the two together resolve one backend. With no addr it
+// carries testBackendAddr.
+func newBackendAttachment(vpcRef string, addrs ...string) *cloudv1alpha1.VPCAttachment {
+	if len(addrs) == 0 {
+		addrs = []string{testBackendAddr}
+	}
+	interfaceAddrs := make([]cloudv1alpha1.IPAddress, 0, len(addrs))
+	for _, a := range addrs {
+		interfaceAddrs = append(interfaceAddrs, cloudv1alpha1.IPAddress(a+"/64"))
+	}
+	return &cloudv1alpha1.VPCAttachment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "tenant-" + vpcRef,
+			Name:      "backend-" + vpcRef,
+			Labels:    map[string]string{testBackendLabel: testBackendLabelValue},
+		},
+		Spec: cloudv1alpha1.VPCAttachmentSpec{
+			VPC: cloudv1alpha1.VPCRef{Name: vpcRef},
+			Interface: cloudv1alpha1.VPCAttachmentInterface{
+				Name:      "eth0",
+				Mode:      cloudv1alpha1.VPCAttachmentInterfaceModeNetns,
+				Addresses: interfaceAddrs,
 			},
 		},
+		Status: cloudv1alpha1.VPCAttachmentStatus{VPC: vpcRef, Node: testComputeNodeName},
 	}
 }
 

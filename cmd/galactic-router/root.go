@@ -265,14 +265,10 @@ func runCmd(cfg *config.RouterConfig) error {
 		return fmt.Errorf("setup Node controller: %w", err)
 	}
 
-	// Register ServiceVIPBinding controller.
-	if err := (&controller.ServiceVIPBindingReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		NodeName:            nodeName,
-		VIPTranslationTable: vipTranslationTable,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
+	// Register the ServiceVIPBinding controller and the NetworkRule binding
+	// writer that generates its bindings.
+	if err := setupVIPBindingControllers(mgr, nodeName, vipTranslationTable); err != nil {
+		return err
 	}
 
 	// Register the node-local platform service route controller. It resolves
@@ -347,6 +343,30 @@ func runCmd(cfg *config.RouterConfig) error {
 		return cause
 	}
 
+	return nil
+}
+
+// setupVIPBindingControllers registers the two halves of this node's DSR
+// backend side: NetworkRuleBindingReconciler, which writes a ServiceVIPBinding
+// for every NetworkRule backend whose VPCAttachment is on this node, and
+// ServiceVIPBindingReconciler, which programs vip_xlat_table from those
+// bindings.
+func setupVIPBindingControllers(mgr ctrl.Manager, nodeName string, table controller.VIPTranslationTable) error {
+	if err := (&controller.ServiceVIPBindingReconciler{
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		NodeName:            nodeName,
+		VIPTranslationTable: table,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup ServiceVIPBinding controller: %w", err)
+	}
+	if err := (&controller.NetworkRuleBindingReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		NodeName: nodeName,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup NetworkRule binding controller: %w", err)
+	}
 	return nil
 }
 

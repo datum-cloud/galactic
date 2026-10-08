@@ -194,17 +194,27 @@ func BGPAdvertisementName(vpc, vpcAttachment, nodeName string) string {
 	return fmt.Sprintf("%s-%s-%s", VPCSegment(vpc), nameSegment(vpcAttachment), nodeName)
 }
 
-// vipNameReplacer sanitizes an IP address for use inside a Kubernetes object
-// name, which must be an RFC 1123 DNS subdomain. Neither ':' nor '.' is valid
-// there.
-var vipNameReplacer = strings.NewReplacer(":", "-", ".", "-")
+// serviceVIPBindingHashLen is how many hex characters of the binding identity's
+// SHA-256 ServiceVIPBindingName keeps.
+const serviceVIPBindingHashLen = 16
 
-// ServiceVIPBindingName returns the deterministic name for a ServiceVIPBinding,
-// one per (node, VIP, protocol, port). It leads with nodeName, which is always
-// alphanumeric, so an IPv6 address's leading "::" never produces a name
-// starting with '-'.
-func ServiceVIPBindingName(nodeName, vip string, port int32, proto string) string {
-	return fmt.Sprintf("%s-%s-%s-%d", nodeName, vipNameReplacer.Replace(vip), proto, port)
+// ServiceVIPBindingName returns the deterministic name of the ServiceVIPBinding
+// galactic-router writes for one backend of one NetworkRule VIP on nodeName:
+// "<rule>-<node>-<hash>", where the hash covers every part of the identity, so
+// two backends of one VIP on one node, the case a selector makes routine, get
+// distinct names. The readable prefix is cut to keep the result within an
+// object name's 253 characters and trimmed to end in an alphanumeric.
+func ServiceVIPBindingName(rule, nodeName, vip, backend string, backendPort int32) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%s/%d", rule, nodeName, vip, backend, backendPort)))
+	suffix := "-" + hex.EncodeToString(sum[:])[:serviceVIPBindingHashLen]
+	prefix := rule + "-" + nodeName
+	if maxPrefix := 253 - len(suffix); len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
+	}
+	prefix = strings.TrimRightFunc(prefix, func(c rune) bool {
+		return (c < 'a' || c > 'z') && (c < '0' || c > '9')
+	})
+	return prefix + suffix
 }
 
 // TenantIdentifier returns the value identifying a VPC attachment across the

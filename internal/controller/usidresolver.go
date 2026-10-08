@@ -11,7 +11,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
@@ -42,10 +44,11 @@ type backendSIDIndex struct {
 	routers      map[string]*bgpv1alpha1.BGPRouter
 	advs         []*bgpv1alpha1.BGPAdvertisement
 	vrfInstances map[string]*bgpv1alpha1.BGPVRFInstance // keyed by name: crdnames.BGPVRFInstanceName(vpc, nodeName)
+	attachments  []*cloudv1alpha1.VPCAttachment         // every VPCAttachment in the cluster; see selectRuleBackends
 }
 
 // buildBackendSIDIndex lists every BGPRouter, BGPAdvertisement, and
-// BGPVRFInstance in namespace once, so resolving many backends across a
+// BGPVRFInstance in namespace, and every VPCAttachment in the cluster, once, so resolving many backends across a
 // reconcile costs one set of list calls rather than one per backend.
 //
 // Advertisements with no VRFID or function set are excluded up front: those
@@ -81,7 +84,12 @@ func buildBackendSIDIndex(ctx context.Context, c client.Client, namespace string
 		vrfInstances[vrfList.Items[i].Name] = &vrfList.Items[i]
 	}
 
-	return &backendSIDIndex{routers: routers, advs: advs, vrfInstances: vrfInstances}, nil
+	attachments, err := listVPCAttachments(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+
+	return &backendSIDIndex{routers: routers, advs: advs, vrfInstances: vrfInstances, attachments: attachments}, nil
 }
 
 // verifyTenantOwnership reports whether adv, matched against an address by
@@ -100,15 +108,17 @@ func (idx *backendSIDIndex) verifyTenantOwnership(vpcRef string, router *bgpv1al
 	return ok && vrf.Spec.VRFID == vrfID
 }
 
-// resolveUSID returns the SRv6 uSID of the worker node the backend address addr,
-// belonging to vpcRef, is reachable through. vpcRef scopes the match to
-// advertisements that tenant's own BGPVRFInstance owns: a prefix-containment hit
-// alone is never sufficient, so two tenants with colliding address space cannot
-// resolve into each other's VRF.
-func (idx *backendSIDIndex) resolveUSID(addr netip.Addr, vpcRef string) (netip.Addr, error) {
+// resolveUSID returns the SRv6 uSID of node for the backend address addr,
+// belonging to vpcRef. vpcRef scopes the match to advertisements that tenant's
+// own BGPVRFInstance owns: a prefix-containment hit alone is never sufficient,
+// so two tenants with colliding address space cannot resolve into each other's
+// VRF. node is the node the backend's VPCAttachment reports, and only that
+// node's routers are candidates, so the gateway never sends a backend's flows
+// to a node other than the one galactic-router writes its ServiceVIPBinding on.
+func (idx *backendSIDIndex) resolveUSID(addr netip.Addr, vpcRef, node string) (netip.Addr, error) {
 	for _, adv := range idx.advs {
 		router, ok := idx.routers[adv.Spec.RouterRef.Name]
-		if !ok || router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 {
+		if !ok || router.Spec.SRv6Locator == "" || router.Spec.NodeID == 0 || router.Spec.TargetRef.Name != node {
 			continue
 		}
 		if !idx.verifyTenantOwnership(vpcRef, router, *adv.Spec.VRFID) {
@@ -132,6 +142,22 @@ func (idx *backendSIDIndex) resolveUSID(addr netip.Addr, vpcRef string) (netip.A
 		}
 	}
 	return netip.Addr{}, fmt.Errorf(
-		"no BGPAdvertisement owned by VPC %s with a matching prefix and SRv6 VRFID/Function found for backend address %s",
-		vpcRef, addr)
+		"no BGPAdvertisement owned by VPC %s on node %s with a matching prefix and SRv6 VRFID/Function "+
+			"found for backend address %s",
+		vpcRef, node, addr)
+}
+
+// backendSID returns nodeSID, a node's End.DT46 uSID for the backend's VRF,
+// with the backend's slot (srv6.BackendSlot) set. The gateway encapsulates a
+// flow to this address, and the backend's node reads the slot back to pick
+// the vip_xlat_table row for the backend Maglev chose, so several backends of
+// one VIP can share a node. The node's ServiceVIPBinding reconciler derives
+// the same slot from the binding's backend address and port.
+func backendSID(nodeSID netip.Addr, addr netip.Addr, port uint16) (netip.Addr, error) {
+	fields, err := uformat.Decode(nodeSID)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("decode node uSID %s: %w", nodeSID, err)
+	}
+	fields.Slot = srv6.BackendSlot(addr, port)
+	return uformat.Encode(fields)
 }

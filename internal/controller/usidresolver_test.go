@@ -32,7 +32,7 @@ func TestBackendSIDIndex_ResolvesMatchingPrefix(t *testing.T) {
 		t.Fatalf("buildBackendSIDIndex: %v", err)
 	}
 
-	got, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef)
+	got, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef, testComputeNodeName)
 	if err != nil {
 		t.Fatalf("resolveUSID: %v", err)
 	}
@@ -46,6 +46,24 @@ func TestBackendSIDIndex_ResolvesMatchingPrefix(t *testing.T) {
 	}
 }
 
+// TestBackendSIDIndex_OtherNodeIsError verifies that a backend resolves only
+// on the node its attachment reports: an advertisement from another node's
+// router is never a candidate, even with a matching prefix and VPC.
+func TestBackendSIDIndex_OtherNodeIsError(t *testing.T) {
+	scheme := newRuleTestScheme(t)
+	router, adv, vrf := newBackendFixtures(testVPCRef)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router, adv, vrf).Build()
+
+	idx, err := buildBackendSIDIndex(context.Background(), fakeClient, testNamespace)
+	if err != nil {
+		t.Fatalf("buildBackendSIDIndex: %v", err)
+	}
+
+	if _, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef, testOtherNode); err == nil {
+		t.Fatal("resolveUSID: expected error for a node whose router does not advertise the backend")
+	}
+}
+
 func TestBackendSIDIndex_NoMatchingPrefixIsError(t *testing.T) {
 	scheme := newRuleTestScheme(t)
 	router, adv, vrf := newBackendFixtures(testVPCRef)
@@ -56,7 +74,7 @@ func TestBackendSIDIndex_NoMatchingPrefixIsError(t *testing.T) {
 		t.Fatalf("buildBackendSIDIndex: %v", err)
 	}
 
-	if _, err := idx.resolveUSID(netip.MustParseAddr("192.0.2.1"), testVPCRef); err == nil {
+	if _, err := idx.resolveUSID(netip.MustParseAddr("192.0.2.1"), testVPCRef, testComputeNodeName); err == nil {
 		t.Fatal("resolveUSID: expected error for an address with no matching BGPAdvertisement prefix")
 	}
 }
@@ -88,7 +106,7 @@ func TestBackendSIDIndex_ExcludesAdvertisementsWithoutVRFIDOrFunction(t *testing
 		t.Fatalf("advs = %d, want 0 (VRFID/Function-less advertisement must be excluded)", len(idx.advs))
 	}
 
-	if _, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef); err == nil {
+	if _, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef, testComputeNodeName); err == nil {
 		t.Fatal("resolveUSID: expected error since the only matching advertisement has no VRFID/Function")
 	}
 }
@@ -126,7 +144,7 @@ func TestBackendSIDIndex_SkipsRouterWithoutSRv6Config(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildBackendSIDIndex: %v", err)
 	}
-	if _, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef); err == nil {
+	if _, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef, testComputeNodeName); err == nil {
 		t.Fatal("resolveUSID: expected error since the matching router has no SRv6Locator/NodeID")
 	}
 }
@@ -231,7 +249,7 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 
 	addr := netip.MustParseAddr(testBackendAddr) // falls within both advA's and advB's prefix
 
-	gotA, err := idx.resolveUSID(addr, vpcA)
+	gotA, err := idx.resolveUSID(addr, vpcA, testNAT66NodeA)
 	if err != nil {
 		t.Fatalf("resolveUSID(vpc-1): %v", err)
 	}
@@ -243,7 +261,7 @@ func TestBackendSIDIndex_TenantOwnershipDisambiguatesCollidingPrefixes(t *testin
 		t.Errorf("resolveUSID(vpc-1) = %s, want %s (vpc-1's own SID, not vpc-2's)", gotA, wantA)
 	}
 
-	gotB, err := idx.resolveUSID(addr, vpcB)
+	gotB, err := idx.resolveUSID(addr, vpcB, "node-b")
 	if err != nil {
 		t.Fatalf("resolveUSID(vpc-2): %v", err)
 	}
@@ -283,7 +301,7 @@ func TestBackendSIDIndex_UnrelatedTenantVRFIsNotTrusted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildBackendSIDIndex: %v", err)
 	}
-	if _, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef); err == nil {
+	if _, err := idx.resolveUSID(netip.MustParseAddr(testBackendAddr), testVPCRef, testComputeNodeName); err == nil {
 		t.Fatal("resolveUSID: expected error -- no BGPVRFInstance named for testVPCRef exists, " +
 			"a same-node VRF instance belonging to a different VPC must not be trusted")
 	}

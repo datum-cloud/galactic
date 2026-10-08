@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/vipxlatmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
@@ -399,7 +400,7 @@ func (r *ServiceVIPBindingReconciler) unregisterVIPTranslation(
 		errs = append(errs, fmt.Errorf("unregister vip_xlat_table rows by value: %w", err))
 	}
 
-	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, backendAddrIP.Unmap())
+	block, argument, err := resolveVIPBindingContext(ctx, r.Client, binding.Namespace, r.NodeName, binding.Spec.VPCRef)
 	if err != nil {
 		logger.Info("VRF context no longer resolves; skipped checking its vip_xlat_table location", "reason", err.Error())
 		return errors.Join(errs...)
@@ -512,7 +513,7 @@ func resolveVIPBindingRows(
 		return vipBindingRows{}, err
 	}
 
-	block, argument, err := resolveVIPBindingContextFromIndex(idx, nodeName, backendIP)
+	block, argument, err := resolveVIPBindingContextFromIndex(idx, nodeName, binding.Spec.VPCRef)
 	if err != nil {
 		return vipBindingRows{}, fmt.Errorf("resolve VRF context for VIP binding: %w", err)
 	}
@@ -662,45 +663,31 @@ func ipProtocolNumber(proto bgpv1alpha1.NetworkRuleProtocol) (uint8, error) {
 
 // resolveVIPBindingContext resolves the (block, argument) pair vip_xlat_table's
 // key needs for a binding on this node: the Block from this node's BGPRouter
-// locator, and the Argument from the BGPVRFInstance whose advertised prefix
-// contains backendAddr.
+// locator, and the Argument from vpcRef's BGPVRFInstance on this node, named
+// crdnames.BGPVRFInstanceName(vpcRef, nodeName).
 //
-// # A documented ambiguity
-//
-// ServiceVIPBinding carries no VPC or VRF reference of its own. The writer that
-// creates these objects has the owning rule's VPC reference at creation time,
-// but does not record it here. Absent that field, ownership is resolved by
-// matching backendAddr against the advertised prefixes of BGPVRFInstances
-// targeting this node's own BGPRouter, since a binding's VRF context is always
-// local to the node it was written for.
-//
-// That is unambiguous only while no two VRFs on this node advertise overlapping
-// prefixes containing backendAddr, such as two tenants choosing the same ULA
-// range. The ownership guard used elsewhere needs a known VPC reference to check
-// against, which this function does not have, so when more than one candidate
-// matches it fails with an explicit error rather than guessing: picking one
-// would translate a backend's traffic into the wrong tenant's VRF.
-//
-// TODO(dsr-maglev): once ServiceVIPBinding carries a VPC or VRF reference, or
-// the writer records the resolved (block, argument) on the object, replace this
-// address-containment heuristic with a direct lookup by
-// crdnames.BGPVRFInstanceName.
+// The binding names its VPC, so this is a direct lookup. Two tenants on one
+// node using the same backend address resolve to their own VRFs, and a VPC
+// with no VRF on this node yet fails rather than borrowing another's.
 func resolveVIPBindingContext(
-	ctx context.Context, c client.Client, namespace, nodeName string, backendAddr netip.Addr,
+	ctx context.Context, c client.Client, namespace, nodeName, vpcRef string,
 ) (block uint64, argument uint16, err error) {
 	idx, err := buildBackendSIDIndex(ctx, c, namespace)
 	if err != nil {
 		return 0, 0, fmt.Errorf("build backend SID index: %w", err)
 	}
-	return resolveVIPBindingContextFromIndex(idx, nodeName, backendAddr)
+	return resolveVIPBindingContextFromIndex(idx, nodeName, vpcRef)
 }
 
 // resolveVIPBindingContextFromIndex is resolveVIPBindingContext over an index
 // the caller already built, so resolving every binding on a node lists each
 // resource once.
 func resolveVIPBindingContextFromIndex(
-	idx *backendSIDIndex, nodeName string, backendAddr netip.Addr,
+	idx *backendSIDIndex, nodeName, vpcRef string,
 ) (block uint64, argument uint16, err error) {
+	if vpcRef == "" {
+		return 0, 0, errors.New("binding has no vpcRef")
+	}
 	var router *bgpv1alpha1.BGPRouter
 	for _, rt := range idx.routers {
 		if rt.Spec.TargetRef.Name == nodeName {
@@ -724,53 +711,15 @@ func resolveVIPBindingContextFromIndex(
 		return 0, 0, fmt.Errorf("derive uSID Block from BGPRouter %s's SRv6Locator: %w", router.Name, err)
 	}
 
-	localVRFIDs := make(map[int32]struct{})
-	for _, instance := range idx.vrfInstances {
-		if vrfInstanceTargetsRouter(instance, router) {
-			localVRFIDs[instance.Spec.VRFID] = struct{}{}
-		}
+	name := crdnames.BGPVRFInstanceName(vpcRef, nodeName)
+	instance, ok := idx.vrfInstances[name]
+	if !ok {
+		return 0, 0, fmt.Errorf("VPC %s has no BGPVRFInstance %s on node %q", vpcRef, name, nodeName)
 	}
-
-	seen := make(map[int32]struct{})
-	var matches []int32
-	for _, adv := range idx.advs {
-		if adv.Spec.RouterRef.Name != router.Name || adv.Spec.VRFID == nil {
-			continue
-		}
-		vrfID := *adv.Spec.VRFID
-		if _, ok := localVRFIDs[vrfID]; !ok {
-			continue // not one of this node's own local VRFs
-		}
-		if _, already := seen[vrfID]; already {
-			continue
-		}
-		for _, p := range adv.Spec.Prefixes {
-			pfx, perr := netip.ParsePrefix(string(p))
-			if perr != nil {
-				continue
-			}
-			if pfx.Contains(backendAddr) {
-				seen[vrfID] = struct{}{}
-				matches = append(matches, vrfID)
-				break
-			}
-		}
+	if !vrfInstanceTargetsRouter(instance, router) {
+		return 0, 0, fmt.Errorf("BGPVRFInstance %s does not target node %q's BGPRouter %s", name, nodeName, router.Name)
 	}
-
-	switch len(matches) {
-	case 0:
-		return 0, 0, fmt.Errorf(
-			"no local BGPVRFInstance on node %q has an advertised BGPAdvertisement prefix containing backend address %s",
-			nodeName, backendAddr)
-	case 1:
-		return block, uint16(matches[0]), nil //nolint:gosec // VRFID is kubebuilder-validated 1-65535
-	default:
-		return 0, 0, fmt.Errorf(
-			"ambiguous VRF ownership for backend address %s on node %q: %d candidate VRFIDs %v all advertise a "+
-				"containing prefix, and ServiceVIPBinding carries no VPCRef/VRFRef to disambiguate "+
-				"(see resolveVIPBindingContext's doc comment); refusing to guess",
-			backendAddr, nodeName, len(matches), matches)
-	}
+	return block, uint16(instance.Spec.VRFID), nil //nolint:gosec // VRFID is kubebuilder-validated 1-65535
 }
 
 // vrfInstanceTargetsRouter reports whether vrf's router target, by reference or

@@ -109,7 +109,7 @@ func deleteBindingWithVRFPresent(t *testing.T, backends ...string) *vipxlatmap.V
 		Build()
 
 	block, argument, err := resolveVIPBindingContext(context.Background(), fakeClient, testNamespace,
-		testComputeNodeName, netip.MustParseAddr(testVIPBindingBackendAddr))
+		testComputeNodeName, testVPCRef)
 	if err != nil {
 		t.Fatalf("resolveVIPBindingContext: %v", err)
 	}
