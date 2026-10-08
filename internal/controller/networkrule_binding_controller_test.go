@@ -257,27 +257,6 @@ func TestNetworkRuleBindingReconciler_NeverAcceptedRuleHasNoBindings(t *testing.
 	}
 }
 
-// TestNetworkRuleBindingReconciler_RefusesSecondIPv6VIP covers a rule with two
-// IPv6 VIPs: a backend's reply can be rewritten to only one VIP, so the rule
-// gets no bindings and says why, rather than a binding per VIP of which all
-// but one could only report Conflict.
-func TestNetworkRuleBindingReconciler_RefusesSecondIPv6VIP(t *testing.T) {
-	rule := newBindingTestRule()
-	rule.Spec.VIPAddresses = append(rule.Spec.VIPAddresses, "2001:db8:100::33")
-	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef))
-
-	reconcileBindings(t, r)
-
-	if got := listBindings(t, c); len(got) != 0 {
-		t.Errorf("bindings = %d, want 0 for a rule with two IPv6 VIPs", len(got))
-	}
-	condType := backendsBoundConditionType(testComputeNodeName)
-	cond := meta.FindStatusCondition(getBindingRule(t, c).Status.Conditions, condType)
-	if cond == nil || cond.Reason != reasonBindingsInvalid || !strings.Contains(cond.Message, "2 IPv6 VIPs") {
-		t.Errorf("BackendsBound = %+v, want False/%s naming the 2 IPv6 VIPs", cond, reasonBindingsInvalid)
-	}
-}
-
 // TestNetworkRuleBindingReconciler_LeavesOtherBindingsAlone covers bindings
 // this node did not write: one written by hand, and one another node
 // generated for the same rule. Neither is deleted.
@@ -352,24 +331,117 @@ func TestNetworkRuleBindingReconciler_BackendsBoundCondition(t *testing.T) {
 	}
 }
 
-// TestNetworkRuleBindingReconciler_InvalidSelector covers a selector the
-// writer cannot parse: no bindings, and the rule says why.
-func TestNetworkRuleBindingReconciler_InvalidSelector(t *testing.T) {
-	rule := newBindingTestRule()
-	rule.Spec.BackendSelector = metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-		{Key: testBackendLabel, Operator: "Bogus"},
-	}}
-	r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef))
+// invalidRuleEdits are the edits that make newBindingTestRule invalid for the
+// binding writer, each with the text its InvalidRule message must contain.
+var invalidRuleEdits = []struct {
+	name    string
+	edit    func(*bgpv1alpha1.NetworkRule)
+	message string
+}{
+	{
+		// A backend's reply can be rewritten to only one VIP, so a rule
+		// with two IPv6 VIPs gets no bindings rather than one per VIP of
+		// which all but one could only report Conflict.
+		name: "second IPv6 VIP",
+		edit: func(rule *bgpv1alpha1.NetworkRule) {
+			rule.Spec.VIPAddresses = append(rule.Spec.VIPAddresses, "2001:db8:100::33")
+		},
+		message: "2 IPv6 VIPs",
+	},
+	{
+		name: "invalid selector",
+		edit: func(rule *bgpv1alpha1.NetworkRule) {
+			rule.Spec.BackendSelector = metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: testBackendLabel, Operator: "Bogus"},
+			}}
+		},
+		message: "Bogus",
+	},
+}
 
-	reconcileBindings(t, r)
+// TestNetworkRuleBindingReconciler_InvalidRuleOnServingNode covers a rule
+// made invalid while this node holds bindings for it: the bindings go, and
+// the node reports InvalidRule, and keeps reporting it on later passes once
+// it holds none.
+func TestNetworkRuleBindingReconciler_InvalidRuleOnServingNode(t *testing.T) {
+	for _, tt := range invalidRuleEdits {
+		t.Run(tt.name, func(t *testing.T) {
+			r, c := newBindingWriter(t, newBindingTestRule(), newBackendAttachment(testVPCRef))
+			reconcileBindings(t, r)
+			if got := listBindings(t, c); len(got) != 1 {
+				t.Fatalf("bindings while valid = %d, want 1", len(got))
+			}
 
-	if got := listBindings(t, c); len(got) != 0 {
-		t.Errorf("bindings = %d, want 0 for an invalid selector", len(got))
+			current := getBindingRule(t, c)
+			tt.edit(current)
+			if err := c.Update(context.Background(), current); err != nil {
+				t.Fatalf("update rule: %v", err)
+			}
+			condType := backendsBoundConditionType(testComputeNodeName)
+			for pass := 1; pass <= 2; pass++ {
+				reconcileBindings(t, r)
+
+				if got := listBindings(t, c); len(got) != 0 {
+					t.Errorf("pass %d: bindings = %d, want 0 for an invalid rule", pass, len(got))
+				}
+				cond := meta.FindStatusCondition(getBindingRule(t, c).Status.Conditions, condType)
+				if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonBindingsInvalid ||
+					!strings.Contains(cond.Message, tt.message) {
+					t.Errorf("pass %d: BackendsBound = %+v, want False/%s naming %q",
+						pass, cond, reasonBindingsInvalid, tt.message)
+				}
+			}
+		})
 	}
-	condType := backendsBoundConditionType(testComputeNodeName)
-	cond := meta.FindStatusCondition(getBindingRule(t, c).Status.Conditions, condType)
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonBindingsInvalid {
-		t.Errorf("BackendsBound = %+v, want False/%s", cond, reasonBindingsInvalid)
+}
+
+// TestNetworkRuleBindingReconciler_InvalidRuleOnIdleNode covers an invalid
+// rule on a node that holds no bindings for it and reports no condition: the
+// gateways report the error, so this node writes no status at all, rather
+// than every router node in the cell writing its own copy.
+func TestNetworkRuleBindingReconciler_InvalidRuleOnIdleNode(t *testing.T) {
+	for _, tt := range invalidRuleEdits {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := newBindingTestRule()
+			tt.edit(rule)
+			r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef))
+			before := getBindingRule(t, c).ResourceVersion
+
+			reconcileBindings(t, r)
+
+			after := getBindingRule(t, c)
+			if after.ResourceVersion != before {
+				t.Errorf("rule resourceVersion = %s, want %s: an idle node wrote status", after.ResourceVersion, before)
+			}
+			condType := backendsBoundConditionType(testComputeNodeName)
+			if cond := meta.FindStatusCondition(after.Status.Conditions, condType); cond != nil {
+				t.Errorf("BackendsBound = %+v, want none on a node that never served the rule", cond)
+			}
+		})
+	}
+}
+
+// TestNetworkRuleBindingReconciler_InvalidRuleRemovesStaleCondition covers an
+// invalid rule on a node that holds no bindings for it but still carries a
+// condition from when it did: the node no longer serves the rule, so the
+// condition goes.
+func TestNetworkRuleBindingReconciler_InvalidRuleRemovesStaleCondition(t *testing.T) {
+	for _, tt := range invalidRuleEdits {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := newBindingTestRule()
+			tt.edit(rule)
+			condType := backendsBoundConditionType(testComputeNodeName)
+			meta.SetStatusCondition(&rule.Status.Conditions, metav1.Condition{
+				Type: condType, Status: metav1.ConditionTrue, Reason: reasonBindingsBound,
+			})
+			r, c := newBindingWriter(t, rule, newBackendAttachment(testVPCRef))
+
+			reconcileBindings(t, r)
+
+			if cond := meta.FindStatusCondition(getBindingRule(t, c).Status.Conditions, condType); cond != nil {
+				t.Errorf("BackendsBound = %+v, want the stale condition removed", cond)
+			}
+		})
 	}
 }
 
