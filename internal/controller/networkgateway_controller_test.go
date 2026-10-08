@@ -475,11 +475,10 @@ func TestBuildDesiredRule_BackendResolution(t *testing.T) {
 				routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
 				advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
 				vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
-				attachments:  tt.attachments,
 			}
 			rule := newTestRule(testRuleName, "vpc-1", testVIP)
 
-			dr, unresolved, err := buildDesiredRule(rule, idx, nil)
+			dr, unresolved, err := buildDesiredRule(rule, tt.attachments, idx, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("buildDesiredRule: err = nil, want an error; got %+v", dr)
@@ -512,15 +511,15 @@ func TestBuildDesiredRule_RefusesSecondIPv6VIP(t *testing.T) {
 		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
 		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
 		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
-		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")},
 	}
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 	rule := newTestRule(testRuleName, "vpc-1", "2001:db8:100::32", "2001:db8:100::33", testVIP)
-	if _, _, err := buildDesiredRule(rule, idx, nil); err == nil {
+	if _, _, err := buildDesiredRule(rule, attachments, idx, nil); err == nil {
 		t.Fatal("buildDesiredRule: err = nil, want an error for two IPv6 VIPs")
 	}
 
 	rule.Spec.VIPAddresses = []string{"2001:db8:100::32", testVIP}
-	if _, _, err := buildDesiredRule(rule, idx, nil); err != nil {
+	if _, _, err := buildDesiredRule(rule, attachments, idx, nil); err != nil {
 		t.Fatalf("buildDesiredRule with one IPv6 and one IPv4 VIP: %v", err)
 	}
 }
@@ -536,8 +535,8 @@ func TestGatherRules_SharedBackendServesOldestRule(t *testing.T) {
 		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
 		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
 		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
-		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")},
 	}
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1")}
 	rule := func(name, vip string, created int64, backendPort int32) bgpv1alpha1.NetworkRule {
 		r := newTestRule(name, "vpc-1", vip)
 		r.CreationTimestamp = metav1.NewTime(time.Unix(created, 0))
@@ -552,7 +551,7 @@ func TestGatherRules_SharedBackendServesOldestRule(t *testing.T) {
 	}
 	r := &NetworkGatewayReconciler{NodeName: testNodeGWA}
 
-	desired, outcomes, _, err := r.gatherRules(context.Background(), testNamespace, rules, idx)
+	desired, outcomes, _, err := r.gatherRules(context.Background(), testNamespace, rules, attachments, idx)
 	if err != nil {
 		t.Fatalf("gatherRules: %v", err)
 	}
@@ -587,10 +586,10 @@ func TestBuildDesiredRule_SameNodeBackendsGetTheirOwnSlot(t *testing.T) {
 		routers:      map[string]*bgpv1alpha1.BGPRouter{backendRouter.Name: backendRouter},
 		advs:         []*bgpv1alpha1.BGPAdvertisement{backendAdv},
 		vrfInstances: map[string]*bgpv1alpha1.BGPVRFInstance{backendVRF.Name: backendVRF},
-		attachments:  []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")},
 	}
+	attachments := []*cloudv1alpha1.VPCAttachment{newBackendAttachment("vpc-1", testBackendAddr, "fd00:10::2")}
 
-	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), idx, nil)
+	dr, _, err := buildDesiredRule(newTestRule(testRuleName, "vpc-1", testVIP), attachments, idx, nil)
 	if err != nil {
 		t.Fatalf("buildDesiredRule: %v", err)
 	}

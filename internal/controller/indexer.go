@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	cloudv1alpha1 "go.datum.net/cloud/api/v1alpha1"
 	bgpv1alpha1 "go.datum.net/network/api/v1alpha1"
 )
 
@@ -34,6 +35,10 @@ const (
 
 	// BGPRouterByTargetName indexes BGPRouters by their targetRef.name (the Node name).
 	BGPRouterByTargetName = ".spec.targetRef.name"
+
+	// VPCAttachmentByVPC indexes VPCAttachments by their observed status.vpc.
+	// An attachment with no observed VPC is not indexed.
+	VPCAttachmentByVPC = ".status.vpc"
 )
 
 // RegisterIndexes registers every field index galactic-router's and
@@ -63,6 +68,9 @@ func RegisterIndexes(ctx context.Context, mgr ctrl.Manager) error {
 		return err
 	}
 	if err := registerBGPVRFInstanceByRouterNameIndex(ctx, c); err != nil {
+		return err
+	}
+	if err := registerVPCAttachmentByVPCIndex(ctx, c); err != nil {
 		return err
 	}
 	return RegisterBGPRouterTargetIndex(ctx, mgr)
@@ -166,6 +174,23 @@ func registerBGPVRFInstanceByRouterNameIndex(ctx context.Context, c cache.Cache)
 			return []string{vrf.Spec.RouterRef.Name}
 		}); err != nil {
 		return fmt.Errorf("index BGPVRFInstance by routerRef.name: %w", err)
+	}
+	return nil
+}
+
+// vpcAttachmentVPC is the VPCAttachmentByVPC index function. Tests register it
+// on the fake client so the indexed list behaves as it does against the cache.
+func vpcAttachmentVPC(obj client.Object) []string {
+	attachment, ok := obj.(*cloudv1alpha1.VPCAttachment)
+	if !ok || attachment.Status.VPC == "" {
+		return nil
+	}
+	return []string{attachment.Status.VPC}
+}
+
+func registerVPCAttachmentByVPCIndex(ctx context.Context, c cache.Cache) error {
+	if err := c.IndexField(ctx, &cloudv1alpha1.VPCAttachment{}, VPCAttachmentByVPC, vpcAttachmentVPC); err != nil {
+		return fmt.Errorf("index VPCAttachment by status.vpc: %w", err)
 	}
 	return nil
 }

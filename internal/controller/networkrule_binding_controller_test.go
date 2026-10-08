@@ -38,12 +38,14 @@ func newBindingTestRule() *bgpv1alpha1.NetworkRule {
 }
 
 // newBindingWriter returns a NetworkRuleBindingReconciler for
-// testComputeNodeName over a fake client holding objs.
+// testComputeNodeName over a fake client holding objs, with the
+// VPCAttachmentByVPC index galactic-router's cache registers.
 func newBindingWriter(t *testing.T, objs ...client.Object) (*NetworkRuleBindingReconciler, client.Client) {
 	t.Helper()
 	scheme := newRuleTestScheme(t)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&cloudv1alpha1.VPCAttachment{}, VPCAttachmentByVPC, vpcAttachmentVPC).
 		WithStatusSubresource(&bgpv1alpha1.NetworkRule{}, &bgpv1alpha1.ServiceVIPBinding{}, &cloudv1alpha1.VPCAttachment{}).
 		WithObjects(objs...).
 		Build()
@@ -178,8 +180,9 @@ func TestNetworkRuleBindingReconciler_OnlyThisNodesBackends(t *testing.T) {
 }
 
 // TestNetworkRuleBindingReconciler_FollowsBackend covers a backend moving to
-// another node, changing address, and leaving the selector: each time the
-// stale binding goes and, where the backend is still local, a new one comes.
+// another node, changing address, leaving the selector, and moving to another
+// VPC: each time the stale binding goes and, where the backend is still local,
+// a new one comes.
 func TestNetworkRuleBindingReconciler_FollowsBackend(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -200,6 +203,12 @@ func TestNetworkRuleBindingReconciler_FollowsBackend(t *testing.T) {
 		{
 			name:   "leaves the selector",
 			change: func(a *cloudv1alpha1.VPCAttachment) { a.Labels = map[string]string{testBackendLabel: "other"} },
+		},
+		{
+			// The rule's attachments come from the VPCAttachmentByVPC
+			// index, so this also covers the index following the change.
+			name:   "moves to another VPC",
+			change: func(a *cloudv1alpha1.VPCAttachment) { a.Status.VPC = "vpc-moved" },
 		},
 	}
 	for _, tt := range tests {
@@ -233,6 +242,34 @@ func TestNetworkRuleBindingReconciler_FollowsBackend(t *testing.T) {
 				t.Errorf("binding backends after the change = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNetworkRuleBindingReconciler_WaitsForObservedVPC covers an attachment
+// whose VPC is not observed yet: it is in no VPC's index entry, so it gets no
+// binding until its status names the rule's VPC.
+func TestNetworkRuleBindingReconciler_WaitsForObservedVPC(t *testing.T) {
+	attachment := newBackendAttachment(testVPCRef)
+	attachment.Status.VPC = ""
+	r, c := newBindingWriter(t, newBindingTestRule(), attachment)
+
+	reconcileBindings(t, r)
+	if got := listBindings(t, c); len(got) != 0 {
+		t.Fatalf("bindings before the VPC is observed = %d, want 0", len(got))
+	}
+
+	current := &cloudv1alpha1.VPCAttachment{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(attachment), current); err != nil {
+		t.Fatalf("get attachment: %v", err)
+	}
+	current.Status.VPC = testVPCRef
+	if err := c.Status().Update(context.Background(), current); err != nil {
+		t.Fatalf("update attachment status: %v", err)
+	}
+	reconcileBindings(t, r)
+
+	if got := backendAddresses(listBindings(t, c)); len(got) != 1 || got[0] != testBackendAddr {
+		t.Errorf("binding backends once the VPC is observed = %v, want only %s", got, testBackendAddr)
 	}
 }
 

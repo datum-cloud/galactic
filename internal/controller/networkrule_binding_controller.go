@@ -136,7 +136,7 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	attachments, err := listVPCAttachments(ctx, r.Client)
+	attachments, err := listVPCAttachmentsInVPC(ctx, r.Client, rule.Spec.VPCRef)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

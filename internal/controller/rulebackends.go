@@ -45,12 +45,20 @@ func (b ruleBackend) String() string {
 	return netip.AddrPortFrom(b.addr, b.port).String()
 }
 
-// listVPCAttachments lists every VPCAttachment in the cluster. Attachments live
-// in tenant namespaces while NetworkRules live in galactic-system, so the list
-// is cluster-wide; selectRuleBackends scopes it to one rule's VPC.
-func listVPCAttachments(ctx context.Context, c client.Client) ([]*cloudv1alpha1.VPCAttachment, error) {
+// listVPCAttachments lists the VPCAttachments opts select, cluster-wide.
+// Attachments live in tenant namespaces while NetworkRules live in
+// galactic-system, so the list is never namespaced; selectRuleBackends scopes
+// it to one rule's VPC.
+//
+// The list skips the cache's deep copy: the returned attachments share their
+// maps and slices with the informer's store, so callers must treat them as
+// read-only. selectRuleBackends and everything it calls only read them, and
+// nothing they return points back into an attachment.
+func listVPCAttachments(
+	ctx context.Context, c client.Client, opts ...client.ListOption,
+) ([]*cloudv1alpha1.VPCAttachment, error) {
 	list := &cloudv1alpha1.VPCAttachmentList{}
-	if err := c.List(ctx, list); err != nil {
+	if err := c.List(ctx, list, append(opts, client.UnsafeDisableDeepCopy)...); err != nil {
 		return nil, fmt.Errorf("list VPCAttachments: %w", err)
 	}
 	out := make([]*cloudv1alpha1.VPCAttachment, 0, len(list.Items))
@@ -112,6 +120,27 @@ type claimedBackend struct {
 // String returns the backend and its owner, the form status messages use.
 func (c claimedBackend) String() string {
 	return fmt.Sprintf("%s: backend %s is served by NetworkRule %s", c.attachment, c.ruleBackend, c.owner)
+}
+
+// listVPCAttachmentsInVPC lists the VPCAttachments whose observed VPC is vpc,
+// through the VPCAttachmentByVPC field index. selectRuleBackends drops every
+// other attachment anyway, so for a rule in vpc this returns the same backends
+// as the full list without visiting other tenants' attachments.
+func listVPCAttachmentsInVPC(ctx context.Context, c client.Client, vpc string) ([]*cloudv1alpha1.VPCAttachment, error) {
+	return listVPCAttachments(ctx, c, client.MatchingFields{VPCAttachmentByVPC: vpc})
+}
+
+// groupAttachmentsByVPC groups attachments by their observed VPC, for a caller
+// that selects backends for many rules from one list. An attachment with no
+// observed VPC is in no rule's VPC, so it is left out.
+func groupAttachmentsByVPC(attachments []*cloudv1alpha1.VPCAttachment) map[string][]*cloudv1alpha1.VPCAttachment {
+	byVPC := make(map[string][]*cloudv1alpha1.VPCAttachment)
+	for _, a := range attachments {
+		if a.Status.VPC != "" {
+			byVPC[a.Status.VPC] = append(byVPC[a.Status.VPC], a)
+		}
+	}
+	return byVPC
 }
 
 // selectRuleBackends returns the backends rule's BackendSelector picks from

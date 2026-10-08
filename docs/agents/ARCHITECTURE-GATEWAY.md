@@ -225,7 +225,8 @@ that converges this node's whole gateway engine:
    is no primary/secondary subset to filter on — expands each rule's
    `backendSelector` into backends, the IPv6 interface addresses of the
    `VPCAttachment`s it selects in the rule's VPC (`rulebackends.go`'s
-   `selectRuleBackends`), leaves out each backend an older rule serves on
+   `selectRuleBackends`, over one cluster-wide attachment list per pass
+   grouped by VPC), leaves out each backend an older rule serves on
    the same backend port and protocol (`ruleBackendOwners`: a backend node
    translates a backend's replies back to only one VIP, so the newer rule's
    flows would be dropped there), resolves each to the SRv6 uSID of the node its
