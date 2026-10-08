@@ -109,6 +109,14 @@ router bgp 65000
   bmp monitor ipv6 unicast loc-rib
   bmp stats interval 60000
  exit
+ # The fabric-api sidecar's search index, on this node's loopback: bgpd
+ # streams its selected routes (Loc-RIB) to it, and AS-path and community
+ # searches run against that copy instead of scanning bgpd's table.
+ bmp targets fabric-api
+  bmp connect 127.0.0.1 port 9348 min-retry 1000 max-retry 10000
+  bmp monitor ipv4 unicast loc-rib
+  bmp monitor ipv6 unicast loc-rib
+ exit
 !
 
 ip forwarding

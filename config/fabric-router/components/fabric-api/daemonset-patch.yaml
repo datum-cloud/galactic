@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-router
+  namespace: galactic-system
+spec:
+  template:
+    spec:
+      # Only frr-init and config-agent call the Kubernetes API, so the token
+      # is mounted into those two containers alone (the projected volume
+      # below), not into every container as automounting would. The
+      # fabric-api sidecar needs no API access.
+      automountServiceAccountToken: false
+      initContainers:
+        - name: frr-init
+          volumeMounts:
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      containers:
+        - name: config-agent
+          volumeMounts:
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        # Answers bounded diagnostics over mTLS gRPC on the node's own
+        # address (hostIP) only: FRR state read directly from the vty
+        # sockets in /run/frr, and ICMP probes from the node's fabric
+        # loopback. It has no readiness, liveness or startup probe on
+        # purpose: its availability (FRR version, certificates) is reported
+        # through gRPC health and metrics, never through this pod's
+        # readiness, so diagnostics can never hold FRR out of service.
+        - name: fabric-api
+          image: ghcr.io/datum-cloud/fabric-api:latest
+          args:
+            - node
+          ports:
+            - name: fabric-api
+              containerPort: 9344
+              protocol: TCP
+            - name: api-metrics
+              containerPort: 9345
+              protocol: TCP
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: GOMEMLIMIT
+              value: 640MiB
+            - name: SITE
+              valueFrom:
+                configMapKeyRef:
+                  name: fabric-api
+                  key: site
+                  optional: true
+            - name: CELL
+              valueFrom:
+                configMapKeyRef:
+                  name: fabric-api
+                  key: cell
+                  optional: true
+          # Raw ICMP sockets need CAP_NET_RAW in the effective set, which a
+          # non-root container cannot get (Kubernetes grants added
+          # capabilities to the bounding set only), so the sidecar runs as
+          # UID 0 with every other capability dropped. Without
+          # CAP_DAC_OVERRIDE it reaches FRR's 0770 frr:frrvty sockets only
+          # through group 102 (frrvty), like frr-exporter.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 102
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_RAW
+          # The search index holds a copy of bgpd's selected routes: about
+          # 450Mi for a full IPv4 and IPv6 Internet table (1.13M + 264k
+          # prefixes, docs/fabric-api/load-test.md), a few Mi for a fabric
+          # that carries only default routes. GOMEMLIMIT keeps the Go
+          # runtime's collector inside the limit.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 768Mi
+          volumeMounts:
+            - name: frr-run
+              mountPath: /run/frr
+              readOnly: true
+            - name: fabric-api-tls
+              mountPath: /var/run/fabric-api/tls
+              readOnly: true
+      volumes:
+        - name: kube-api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        # The sidecar's certificate, key and trust bundle, which the
+        # fabric-api-certs pod on this node (certs-daemonset.yaml) copies
+        # here from its csi-driver volume. A hostPath of type
+        # DirectoryOrCreate never blocks this pod from starting; a
+        # csi-driver volume here would hold FRR in ContainerCreating
+        # whenever the issuer could not issue. /run is tmpfs, so the key
+        # never reaches the node's disk.
+        - name: fabric-api-tls
+          hostPath:
+            path: /run/fabric-api/tls
+            type: DirectoryOrCreate

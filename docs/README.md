@@ -17,8 +17,11 @@ data flow, module reference, known constraints):
   BGP/EVPN control plane (`galactic-router`, embedded GoBGP, GC).
 - [agents/ARCHITECTURE-GATEWAY.md](agents/ARCHITECTURE-GATEWAY.md) — the edge
   XDP DSR load balancer (`galactic-gateway`, `NetworkGateway`/`NetworkRule`).
-- [agents/ARCHITECTURE.md](agents/ARCHITECTURE.md) — superseded by the three
-  documents above; kept only as a redirect for old links.
+- [agents/ARCHITECTURE-FABRIC-API.md](agents/ARCHITECTURE-FABRIC-API.md) — the
+  fabric looking glass (`fabric-api`: the `fabric-router` sidecar, the cell
+  gateway, `FabricQuery` execution, mTLS identities).
+- [agents/ARCHITECTURE.md](agents/ARCHITECTURE.md) — superseded by the first
+  three documents above; kept only as a redirect for old links.
 - [agents/CONVENTIONS.md](agents/CONVENTIONS.md) — Go naming, error
   handling, testing patterns, linting, and commit-message conventions
   enforced across every binary.
@@ -42,6 +45,18 @@ data flow, module reference, known constraints):
   (edge nodes, sharing the uplinks' XDP hook with the gateway), config
   reference, the `EgressShard` CRD, and the `galactic-cni`-side shard
   membership settings that point tenant nodes at it.
+- [fabric-api/configuration.md](fabric-api/configuration.md) — `fabric-api`
+  deployment: prerequisites (cert-manager csi-driver, the per-cell `Issuer`),
+  flags and env vars for `node`/`gateway`/`janitor`/`query`, ports, mTLS
+  identities and rotation, limits, probe source and destination rules, cleanup,
+  alerts, and sidecar rollout.
+- [fabric-api/api.md](fabric-api/api.md) — the internal `FabricQuery` contract
+  (`network.datumapis.com/v1alpha1`): spec, target rules, lookup and
+  observation semantics, conditions, and typed error codes.
+- [fabric-api/load-test.md](fabric-api/load-test.md) — the full-table load test
+  that gates AS-path and community searches: method, how to run it
+  (`task test:fabric-api-load`), and the results for direct FRR scans versus the
+  BMP-fed search index.
 - [cni/README.md](cni/README.md) — entry point for the `galactic-cni` docs
   subtree; from there:
   - [cni/environment-variables.md](cni/environment-variables.md) — every

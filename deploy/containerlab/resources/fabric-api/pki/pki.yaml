@@ -1,0 +1,60 @@
+# Lab stand-in for the per-cell fabric-api issuer that infra owns in
+# production: a self-signed root issues this cell's fabric-api CA, which
+# backs the fabric-api Issuer csi-driver requests node and gateway
+# certificates from. It also issues the lab's operator certificate, used by
+# verify:fabric-api to call nodes and the gateway directly. CELL_NAME is
+# replaced with the site name by deploy-fabric-api.sh.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: fabric-api-selfsigned
+  namespace: galactic-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fabric-api-ca
+  namespace: galactic-system
+spec:
+  isCA: true
+  commonName: fabric-api CELL_NAME
+  secretName: fabric-api-ca
+  duration: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: fabric-api-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: fabric-api
+  namespace: galactic-system
+spec:
+  ca:
+    secretName: fabric-api-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fabric-api-operator
+  namespace: galactic-system
+spec:
+  secretName: fabric-api-operator
+  duration: 24h
+  renewBefore: 8h
+  uris:
+    - spiffe://fabric-api.datumapis.com/cell/CELL_NAME/operator/lab-verify
+  usages:
+    - digital signature
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: fabric-api
+    kind: Issuer

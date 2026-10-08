@@ -1,6 +1,11 @@
 namespace: galactic-system
 resources:
   - ../base
+patches:
+  - path: fabric-api-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fabric-api-certs
 
 # One fabric-router.<nodename> ConfigMap per fabric-carrying node (iad: compute, edge, route reflector),
 # each carrying that node's frr.conf. Names must match exactly what

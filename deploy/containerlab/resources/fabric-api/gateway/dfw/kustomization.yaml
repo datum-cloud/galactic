@@ -1,0 +1,21 @@
+# dfw's fabric-api gateway. The lab's cell, site and member cluster name are
+# all the site name; NSO pins a FabricQuery to cluster dfw for this cell.
+namespace: galactic-system
+resources:
+  - ../base
+configMapGenerator:
+  - name: fabric-api
+    literals:
+      - site=dfw
+      - cell=dfw
+      - cluster-name=dfw
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+  - target:
+      kind: Deployment
+      name: fabric-api-gateway
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes/0/csi/volumeAttributes/csi.cert-manager.io~1uri-sans
+        value: spiffe://fabric-api.datumapis.com/cell/dfw/gateway

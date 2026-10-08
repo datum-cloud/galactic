@@ -18,6 +18,7 @@ tasks:
     deps:
       - "build:node"
       - "build:fabric-router"
+      - "build:fabric-api"
       - "build:galactic-router"
       - "build:galactic-cni"
       - "build:galactic-nat"
@@ -35,6 +36,11 @@ tasks:
     # Dockerfile pins, the same one the published image ships to production.
     cmds:
       - docker build --network=host --build-context network=../../../network -t {{.FABRIC_ROUTER_IMAGE}} -f ../../containers/fabric-router/Dockerfile ../..
+
+  "build:fabric-api":
+    desc: Build the fabric-api image (node sidecar, cell gateway, janitor)
+    cmds:
+      - docker build --network=host --build-context network=../../../network -t fabric-api:latest -f ../../containers/fabric-api/Dockerfile ../..
 
   # --build-context network=../../../network satisfies go.mod's local
   # `replace go.datum.net/network => ../network` (see that line's own
@@ -85,6 +91,10 @@ tasks:
       - task: "deploy:system"
       - task: "deploy:cni"
       - task: "deploy:lab-xdp-passthrough-compute"
+      # Before deploy:fabric: the fabric-router pods' fabric-api sidecar
+      # mounts a csi-driver volume, and without the driver the pod (FRR
+      # included) cannot start.
+      - task: "deploy:cert-manager"
       - task: "deploy:fabric"
       - task: "deploy:bmp-collector"
       - task: "deploy:galactic-router"
@@ -93,6 +103,7 @@ tasks:
       # After the scenarios: the gateway's ServiceVIPBindings bind ns60's
       # backends, which deploy:scenarios creates.
       - task: "deploy:galactic-gateway"
+      - task: "deploy:fabric-api"
 
   "deploy:clusters":
     desc: Create Kind clusters
@@ -245,6 +256,9 @@ tasks:
           done
         }
         load {{.FABRIC_ROUTER_IMAGE}} {{.FABRIC_NODES}}
+        # The fabric-api sidecar rides in every fabric-router pod, and the
+        # cell gateway and janitor schedule on any worker.
+        load fabric-api:latest {{.FABRIC_NODES}}
         load galactic-router:latest {{.FABRIC_NODES}}
         load galactic-cni:latest {{.CNI_NODES}}
         load galactic-nat:latest {{.NAT_NODES}}
@@ -287,6 +301,16 @@ tasks:
     desc: Install the FRR fabric DaemonSet
     cmds:
       - ./scripts/deploy-fabric.sh
+
+  "deploy:cert-manager":
+    desc: Install cert-manager and its csi-driver (fabric-api certificates)
+    cmds:
+      - ./scripts/deploy-cert-manager.sh
+
+  "deploy:fabric-api":
+    desc: Install the fabric-api PKI, CRD, gateway and janitor in every cluster
+    cmds:
+      - ./scripts/deploy-fabric-api.sh
 
   "deploy:bmp-collector":
     desc: Install the lab's BMP collector on iad-worker3
@@ -355,6 +379,7 @@ tasks:
       - task: "verify:bgp-transit"
       - task: "verify:bgp-fabric"
       - task: "verify:fabric-metrics"
+      - task: "verify:fabric-api"
       - task: "verify:bgp-peers"
       - task: "verify:bmp"
       - task: "verify:underlay"
@@ -417,6 +442,16 @@ tasks:
     desc: Verify every fabric-router's frr-exporter reports all underlay sessions Established
     cmds:
       - ./scripts/verify-fabric-metrics.sh
+
+  "verify:fabric-api":
+    desc: Verify the fabric-api looking glass on every fabric node, directly and through FabricQuery
+    cmds:
+      - ./scripts/verify-fabric-api.sh
+
+  "verify:fabric-api-bootstrap":
+    desc: Verify a fabric-router pod starts and FRR converges while fabric-api has no certificate
+    cmds:
+      - ./scripts/verify-fabric-api-bootstrap.sh
 
   "verify:bmp":
     desc: Verify the route reflector streams every EVPN peer to the BMP collector

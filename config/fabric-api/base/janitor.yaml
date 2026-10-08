@@ -1,0 +1,52 @@
+# Deletes FabricQuery copies in this cell the federation failed to delete:
+# any query whose expiration or completion is more than retention plus grace
+# in the past. Karmada deletes propagated copies normally; this only bounds
+# what an outage leaves behind. Expired queries are never executed, so a copy
+# Karmada recreates after this deletes it cannot run again.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fabric-api-janitor
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: fabric-api-janitor
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: fabric-api-janitor
+        spec:
+          serviceAccountName: fabric-api-janitor
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: janitor
+              image: ghcr.io/datum-cloud/fabric-api:latest
+              args:
+                - janitor
+                - --retention=1h
+                - --grace=15m
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi

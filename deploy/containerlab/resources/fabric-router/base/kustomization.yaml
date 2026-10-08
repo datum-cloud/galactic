@@ -1,7 +1,24 @@
 resources:
   - fabric
+# The fabric-api looking glass's node sidecar, as production enables it.
+# Its fabric-api-certs DaemonSet mounts a csi-driver volume, so
+# deploy:cert-manager installs cert-manager and the driver first. The
+# fabric-router pods themselves mount only a hostPath, so FRR never waits on
+# certificate issuance.
+components:
+  - fabric/components/fabric-api
 patches:
   - path: fabric-lab-patch.yaml
     target:
       kind: DaemonSet
       name: fabric-router
+  - target:
+      kind: DaemonSet
+      name: fabric-api-certs
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: fabric-api:latest
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

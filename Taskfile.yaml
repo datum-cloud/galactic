@@ -180,6 +180,21 @@ tasks:
     cmds:
       - bash scripts/ci.sh unittest-root
 
+  test:fabric-api-load:
+    desc: Measure fabric-api queries against FRR with full Internet tables (MRT=<rib files, comma-separated>, needs Docker)
+    # The release gate for enabling AS-path and community searches: bgpd
+    # CPU and memory, session stability and convergence under query load.
+    # MRT is an uncompressed TABLE_DUMP_V2 RIB, e.g. a RouteViews
+    # rib.YYYYMMDD.HHMM; gobgpd/gobgp are built at the module's own version.
+    requires:
+      vars: [MRT]
+    vars:
+      GOBGP_BIN: '{{.LOCALBIN}}/gobgp-tools'
+    cmds:
+      - mkdir -p {{.GOBGP_BIN}}
+      - CGO_ENABLED=0 GOBIN={{.GOBGP_BIN}} go install github.com/osrg/gobgp/v4/cmd/gobgpd@v4.10.0 github.com/osrg/gobgp/v4/cmd/gobgp@v4.10.0
+      - go run ./hack/fabric-api-loadtest --mrt {{.MRT}} --gobgp-bin {{.GOBGP_BIN}} {{.CLI_ARGS}}
+
   test:alerts:
     desc: Unit-test the alert rules in config/monitoring/ with promtool
     # promtool reads plain rule files, so the PrometheusRule's spec is

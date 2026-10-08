@@ -552,3 +552,258 @@ tests:
               description: >-
                 Prometheus cannot reach galactic-nat's metrics port on dfw-worker2 (9182), so
                 GalacticNatSessionTableEvictingLive and GalacticNatUplinkRxQueueStalled cannot fire for it.
+
+  # fabric-api: a gateway with executions in flight and no completions for
+  # 10m fires; one that keeps completing queries, and one that is idle, do
+  # not.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_gateway_executions_in_flight{job="fabric-api-gateway",namespace="galactic-system",pod="gw-stuck"}'
+        values: "1x60"
+      - series: 'fabric_api_gateway_queries_total{job="fabric-api-gateway",namespace="galactic-system",pod="gw-stuck",type="RouteLookup",reason="Succeeded"}'
+        values: "5x60"
+      - series: 'fabric_api_gateway_executions_in_flight{job="fabric-api-gateway",namespace="galactic-system",pod="gw-busy"}'
+        values: "1x60"
+      - series: 'fabric_api_gateway_queries_total{job="fabric-api-gateway",namespace="galactic-system",pod="gw-busy",type="RouteLookup",reason="Succeeded"}'
+        values: "0+1x60"
+      - series: 'fabric_api_gateway_executions_in_flight{job="fabric-api-gateway",namespace="galactic-system",pod="gw-idle"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FabricAPIExecutionStalled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: FabricAPIExecutionStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              pod: gw-stuck
+            exp_annotations:
+              summary: "fabric-api gateway gw-stuck has executions in flight but completes none"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapiexecutionstalled"
+              description: >-
+                gw-stuck has had fabric queries executing for 20 minutes without finishing any, although each
+                is bounded by a 120 second lifetime. Looking-glass queries in this cell will end DeadlineExceeded at
+                NSO. Check the gateway's logs and its status-write metrics.
+
+  # Diagnostics unavailable for 15m fires; a brief outage does not.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_node_diagnostics_available{job="fabric-api-node",node="dfw-worker",pod="fabric-router-a"}'
+        values: "1x10 0x40"
+      - series: 'fabric_api_node_diagnostics_available{job="fabric-api-node",node="dfw-worker2",pod="fabric-router-b"}'
+        values: "1x10 0x10 1x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: FabricAPINodeDiagnosticsUnavailable
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: FabricAPINodeDiagnosticsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-api-node
+              node: dfw-worker
+              pod: fabric-router-a
+            exp_annotations:
+              summary: "fabric-api diagnostics are unavailable on dfw-worker"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapinodediagnosticsunavailable"
+              description: >-
+                The fabric-api sidecar on dfw-worker has reported diagnostics unavailable for 15 minutes:
+                FRR's vty sockets are unreachable, FRR runs a release the sidecar has no parsers for, or its mTLS
+                certificate is missing. Queries record this node as failed. Its Info RPC and logs give the reason.
+
+  # Most node calls failing fires; a gateway whose calls mostly succeed,
+  # and one that made no calls at all, do not.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway",namespace="galactic-system",pod="gw-a",outcome="NodeUnreachable"}'
+        values: "0+1x60"
+      - series: 'fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway",namespace="galactic-system",pod="gw-a",outcome="OK"}'
+        values: "0x60"
+      - series: 'fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway",namespace="galactic-system",pod="gw-b",outcome="Timeout"}'
+        values: "0+1x60"
+      - series: 'fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway",namespace="galactic-system",pod="gw-b",outcome="OK"}'
+        values: "0+4x60"
+      - series: 'fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway",namespace="galactic-system",pod="gw-c",outcome="OK"}'
+        values: "7x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: FabricAPINodeUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+              pod: gw-a
+            exp_annotations:
+              summary: "fabric-api gateway gw-a cannot reach most node sidecars"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapinodeunreachable"
+              description: >-
+                100% of gw-a's node calls in the last 30 minutes failed to
+                connect or timed out. Check the sidecars' hostIP listener on port 9344, host firewall rules between
+                the gateway and the nodes, and certificate identities.
+
+  # Repeated ResponseTooLarge fires.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_node_requests_total{job="fabric-api-node",node="dfw-worker",type="QUERY_TYPE_AS_PATH",outcome="ResponseTooLarge"}'
+        values: "0+1x60"
+      - series: 'fabric_api_node_requests_total{job="fabric-api-node",node="dfw-worker2",type="QUERY_TYPE_AS_PATH",outcome="OK"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: FabricAPIResultsOversized
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              node: dfw-worker
+            exp_annotations:
+              summary: "fabric-api on dfw-worker keeps refusing results as too large"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapiresultsoversized"
+              description: >-
+                60 queries on dfw-worker in the last hour failed with ResponseTooLarge:
+                FRR's answer exceeded the 4 MiB read cap or could not be shaped into the node's response budget.
+                Usually a routing table that grew past what the budgets were sized for.
+
+  # A stale-object backlog for an hour fires; a small one does not.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_gateway_stale_objects{job="fabric-api-gateway",namespace="galactic-system",pod="gw-a"}'
+        values: "60x150"
+      - series: 'fabric_api_gateway_stale_objects{job="fabric-api-gateway",namespace="other",pod="gw-x"}'
+        values: "10x150"
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: FabricAPICleanupBacklog
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: FabricAPICleanupBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              namespace: galactic-system
+            exp_annotations:
+              summary: "60 expired FabricQuery objects are not being cleaned up"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapicleanupbacklog"
+              description: >-
+                More than 50 FabricQuery objects in this cell have been past their expiration plus retention and
+                cleanup grace for an hour. Neither Karmada nor the fabric-api-janitor CronJob is deleting them;
+                check the CronJob's recent jobs and the federation's deletion propagation.
+
+  # A certificate within 4h of expiry fires; a fresh one does not. Times are
+  # seconds since promtool's epoch.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_certificate_expiry_timestamp_seconds{job="fabric-api-node",node="dfw-worker",pod="fabric-router-a"}'
+        values: "7200x60"
+      - series: 'fabric_api_certificate_expiry_timestamp_seconds{job="fabric-api-gateway",namespace="galactic-system",pod="gw-a"}'
+        values: "86400x60"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: FabricAPICertificateRenewalFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-api-node
+              node: dfw-worker
+              pod: fabric-router-a
+            exp_annotations:
+              summary: "fabric-api certificate on fabric-router-a expires in under 4 hours"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapicertificaterenewalfailing"
+              description: >-
+                The mTLS certificate fabric-router-a has loaded expires in 1h 44m 0s and has not
+                been renewed. When it expires the looking glass fails closed for this pod; routing is unaffected.
+                Check cert-manager csi-driver and the cell's fabric-api Issuer.
+
+  # Missing credentials for 15m fire.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_credentials_loaded{job="fabric-api-gateway",namespace="galactic-system",pod="gw-a"}'
+        values: "0x40"
+      - series: 'fabric_api_credentials_loaded{job="fabric-api-node",node="dfw-worker",pod="fabric-router-a"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: FabricAPICredentialsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-api-gateway
+              namespace: galactic-system
+              pod: gw-a
+            exp_annotations:
+              summary: "fabric-api on gw-a has no valid mTLS credentials"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapicredentialsmissing"
+              description: >-
+                gw-a has had no loadable certificate, key and trust bundle for 15 minutes, so every
+                fabric-api call to or from it fails. Check the csi-driver volume, the Issuer and the pod's logs.
+
+  - interval: 30s
+    input_series:
+      - series: 'up{job="fabric-api-node",node="dfw-worker",pod="fabric-router-a"}'
+        values: "0x30"
+      - series: 'up{job="fabric-api-gateway",namespace="galactic-system",pod="gw-a"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: FabricAPIMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-api-node
+              node: dfw-worker
+              pod: fabric-router-a
+            exp_annotations:
+              summary: "fabric-api-node metrics on fabric-router-a cannot be scraped"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapimetricsdown"
+              description: >-
+                Prometheus cannot scrape fabric-api-node on fabric-router-a, so the other fabric-api alerts cannot
+                fire for it.
+
+  # An index that held routes and lost sync for 15m fires; one that never
+  # had a BMP session (no routes) does not.
+  - interval: 30s
+    input_series:
+      - series: 'fabric_api_node_search_index_synced{job="fabric-api-node",node="dfw-worker",pod="fabric-router-a"}'
+        values: "1x10 0x40"
+      - series: 'fabric_api_node_search_index_routes{job="fabric-api-node",node="dfw-worker",pod="fabric-router-a",afi="ipv4"}'
+        values: "100x50"
+      - series: 'fabric_api_node_search_index_synced{job="fabric-api-node",node="dfw-worker2",pod="fabric-router-b"}'
+        values: "0x50"
+      - series: 'fabric_api_node_search_index_routes{job="fabric-api-node",node="dfw-worker2",pod="fabric-router-b",afi="ipv4"}'
+        values: "0x50"
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: FabricAPISearchIndexUnsynced
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: galactic
+              team: connect
+              job: fabric-api-node
+              node: dfw-worker
+              pod: fabric-router-a
+            exp_annotations:
+              summary: "fabric-api search index on dfw-worker is not following bgpd"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapisearchindexunsynced"
+              description: >-
+                The fabric-api sidecar on dfw-worker holds routes but has not been in sync with bgpd's
+                Loc-RIB for 15 minutes, so its AS-path and community searches are refused. bgpd's BMP session to
+                the sidecar (bmp targets fabric-api, 127.0.0.1:9348) is down or has not completed its initial table.

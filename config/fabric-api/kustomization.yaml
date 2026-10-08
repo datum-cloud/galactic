@@ -1,0 +1,18 @@
+# fabric-api's cell-wide prerequisites: the gateway's and janitor's
+# ServiceAccounts and RBAC, safe and idempotent to apply in any cell.
+#
+# Deliberately NOT included:
+#   - base/, the gateway Deployment, its Service and the janitor CronJob:
+#     the gateway needs per-cell values (site, cell, cluster name) from a
+#     fabric-api ConfigMap and a CELL_NAME in its certificate SAN, so it is
+#     instantiated by a per-cell overlay, like config/galactic-nat/base;
+#   - crd/, the FabricQuery CRD: infra owns its lifecycle in every cell (and
+#     NSO on the federation hub). This copy is for the containerlab lab and
+#     tests until the kind ships in the network repository.
+#
+# Not part of the root config/kustomization.yaml either: fabric-api is
+# opt-in. The node sidecar is the config/fabric-router/components/fabric-api
+# Component.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml

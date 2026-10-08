@@ -16,3 +16,18 @@ spec:
         - name: config-agent
           image: fabric-router:latest
           imagePullPolicy: Never
+        # Lab only: the locally built image, operator-only probe exceptions
+        # for the fabric loopbacks (10.255.255.0/24 and fc00:0::/32), so
+        # verify:fabric-api can check cross-site reachability (the public
+        # policy never gets these), and searches enabled.
+        - name: fabric-api
+          image: fabric-api:latest
+          imagePullPolicy: Never
+          args:
+            - node
+            - --operator-allow-prefixes=10.255.255.0/24,fc00:0::/32
+            # Searches are answered from the BMP-fed index (each node's
+            # frr.conf streams its Loc-RIB to the sidecar), so the lab runs
+            # them; verify:fabric-api checks them against FRR's own answer.
+            - --enable-expensive-queries
+            - --log-level=debug
