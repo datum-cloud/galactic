@@ -62,8 +62,9 @@ const (
 	// why it cannot be.
 	reasonBindingsPending = "BindingsNotBound"
 
-	// reasonBindingsInvalid: the rule's selector is invalid, so no backend
-	// could be selected.
+	// reasonBindingsInvalid: the rule is invalid (an unparseable selector, or
+	// more than one IPv6 VIP), so no backend could be selected. Only nodes
+	// that served the rule report it.
 	reasonBindingsInvalid = "InvalidRule"
 )
 
@@ -128,10 +129,23 @@ func (r *NetworkRuleBindingReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	desired, buildErr := r.desiredBindings(rule, attachments)
 
+	// An invalid rule selects no backends, so desired cannot say whether this
+	// node serves it. The bindings the node holds can, but applyBindings
+	// deletes them when desired is empty, so they are counted before it runs.
+	// Counting them here stays correct if a build error ever keeps them.
+	served := false
+	if buildErr != nil {
+		existing, err := r.nodeBindings(ctx, rule)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		served = len(existing) > 0
+	}
+
 	if err := r.applyBindings(ctx, rule, desired); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.publishCondition(ctx, rule, desired, buildErr); err != nil {
+	if err := r.publishCondition(ctx, rule, desired, buildErr, served); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -254,13 +268,28 @@ func (r *NetworkRuleBindingReconciler) nodeBindings(
 }
 
 // publishCondition sets this node's BackendsBound condition on rule, or removes
-// it when the node hosts none of the rule's backends and the rule is valid,
-// so a rule's status names only the nodes that serve it.
+// it when the node hosts none of the rule's backends, so a rule's status names
+// only the nodes that serve it.
+//
+// An invalid rule is reported only by the nodes that served it: those that
+// held bindings for it going in (served), or already report InvalidRule, which
+// on a later pass is all that is left of the bindings the first pass deleted.
+// Every other node stays silent. The gateways already report the error on the
+// rule, and a condition from every router node would cost a status write per
+// node per edit, each conflicting with the others.
 func (r *NetworkRuleBindingReconciler) publishCondition(
-	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired []*bgpv1alpha1.ServiceVIPBinding, buildErr error,
+	ctx context.Context, rule *bgpv1alpha1.NetworkRule, desired []*bgpv1alpha1.ServiceVIPBinding,
+	buildErr error, served bool,
 ) error {
 	condType := backendsBoundConditionType(r.NodeName)
-	if buildErr == nil && len(desired) == 0 {
+	own := meta.FindStatusCondition(rule.Status.Conditions, condType)
+	stake := len(desired) > 0
+	if buildErr != nil {
+		stake = served || (own != nil && own.Reason == reasonBindingsInvalid)
+	}
+	if !stake {
+		// A node with no condition writes nothing: updateRuleCondition
+		// writes only a change.
 		return r.updateRuleCondition(ctx, rule, func(conds *[]metav1.Condition) bool {
 			return meta.RemoveStatusCondition(conds, condType)
 		})

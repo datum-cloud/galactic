@@ -589,7 +589,12 @@ naming the binding that holds the row.
 Each node summarizes its bindings on the rule as
 `<backend-node>/BackendsBound`: `True` with reason `Bound` once every one
 reports `Bound`, `False` with reason `BindingsNotBound` naming each that
-does not, or `InvalidRule` if the selector cannot be parsed. A rule can be
+does not, or `InvalidRule` if the selector cannot be parsed or the rule
+has more than one IPv6 VIP. Only a node that served the rule reports
+`InvalidRule`: one that held bindings for it, or already reports
+`InvalidRule`. Every other node writes nothing and removes a condition
+left from when it served the rule, since the gateways already report the
+error in their `Programmed` conditions. A rule can be
 `Programmed` on every gateway and still fail to reach a backend; this
 condition is where that shows.
 
