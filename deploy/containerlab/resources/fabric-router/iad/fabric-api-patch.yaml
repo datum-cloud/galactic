@@ -1,0 +1,14 @@
+# iad's cell name in each node's fabric-api certificate URI SAN.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-api-certs
+spec:
+  template:
+    spec:
+      volumes:
+        - name: fabric-api-csi
+          csi:
+            driver: csi.cert-manager.io
+            volumeAttributes:
+              csi.cert-manager.io/uri-sans: spiffe://fabric-api.datumapis.com/cell/iad/ns/${POD_NAMESPACE}/pod/${POD_NAME}

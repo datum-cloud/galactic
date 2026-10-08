@@ -1,0 +1,18 @@
+# The per-cell fabric-api gateway and janitor. Instantiate it from an overlay
+# that supplies, in galactic-system:
+#   - a ConfigMap named fabric-api with keys site, cell and cluster-name
+#     (the Karmada member cluster name NSO pins this cell's FabricQuery
+#     objects to); the node sidecars read site and cell from the same
+#     ConfigMap;
+#   - a patch replacing CELL_NAME in the gateway certificate's URI SAN.
+# It also needs the FabricQuery CRD, cert-manager with csi-driver and the
+# cell's fabric-api Issuer, and ../ (ServiceAccounts and RBAC) applied
+# first. See docs/fabric-api/configuration.md.
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+  - janitor.yaml
+images:
+  - name: ghcr.io/datum-cloud/fabric-api
+    newTag: latest

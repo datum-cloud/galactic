@@ -1,0 +1,18 @@
+# Scrapes the fabric-api cell gateway (port metrics, 9347) as
+# job="fabric-api-gateway": query outcomes, node RPC outcomes and latency, the
+# cell queue, status writes and sizes, stale FabricQuery objects, and its
+# client certificate's expiry.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: fabric-api-gateway
+  labels:
+    app.kubernetes.io/name: fabric-api-gateway
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabric-api-gateway
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s

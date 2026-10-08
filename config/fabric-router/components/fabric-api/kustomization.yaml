@@ -1,0 +1,42 @@
+# Opt-in fabric-api node sidecar for the fabric-router DaemonSet. Include it
+# from an overlay of config/fabric-router:
+#
+#   resources:
+#     - ../../config/fabric-router
+#   components:
+#     - ../../config/fabric-router/components/fabric-api
+#
+# The base DaemonSet and `kubectl apply -k config/` are unchanged without it.
+#
+# It adds the sidecar to the fabric-router pods, and the fabric-api-certs
+# DaemonSet that obtains each node's certificate (see certs-daemonset.yaml
+# for why that is a separate pod).
+#
+# Prerequisites in the cell, none of which this Component creates:
+#   - cert-manager and its csi-driver, and an Issuer named fabric-api in
+#     galactic-system backed by the cell's dedicated fabric-api CA (infra
+#     owns the issuer and its renewal; see docs/fabric-api/configuration.md).
+#     A broken issuer stalls only the fabric-api-certs pods, never FRR;
+#   - a ConfigMap named fabric-api in galactic-system with keys site and cell
+#     (the node sidecar stays up but reports diagnostics unavailable without
+#     it);
+#   - the overlay replacing CELL_NAME in fabric-api-certs' certificate URI
+#     SAN with the same cell name, since csi-driver can template the pod's
+#     name but not a ConfigMap value.
+#
+# Adding the sidecar changes the pod template, so applying this Component,
+# and every later fabric-api image change, recreates each fabric-router pod
+# and restarts FRR with it: roll it out as a routing change (one canary node,
+# check underlay sessions and convergence, then paced expansion).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - certs-daemonset.yaml
+patches:
+  - path: daemonset-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fabric-router
+images:
+  - name: ghcr.io/datum-cloud/fabric-api
+    newTag: latest

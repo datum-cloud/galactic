@@ -1,0 +1,88 @@
+# The gateway reads FabricQuery in every namespace (NSO writes them into each
+# project's mapped namespace) and writes only their status; it cannot edit a
+# spec, create or delete a query, or touch FRR's ConfigMaps. Nodes are read
+# only to evaluate an operator-set spec.nodeSelector.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fabric-api-gateway
+rules:
+  - apiGroups: ["network.datumapis.com"]
+    resources: ["fabricqueries"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["network.datumapis.com"]
+    resources: ["fabricqueries/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fabric-api-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fabric-api-gateway
+subjects:
+  - kind: ServiceAccount
+    name: fabric-api-gateway
+    namespace: galactic-system
+---
+# In galactic-system: the fabric-router pods it discovers, the leader
+# election lease (whose holder also tells a follower where to forward debug
+# calls, through the leader pod's IP), and the election's events.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fabric-api-gateway
+  namespace: galactic-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-api-gateway
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fabric-api-gateway
+subjects:
+  - kind: ServiceAccount
+    name: fabric-api-gateway
+    namespace: galactic-system
+---
+# The janitor lists FabricQuery everywhere and deletes expired copies the
+# federation failed to delete. It never creates or updates one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fabric-api-janitor
+rules:
+  - apiGroups: ["network.datumapis.com"]
+    resources: ["fabricqueries"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fabric-api-janitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fabric-api-janitor
+subjects:
+  - kind: ServiceAccount
+    name: fabric-api-janitor
+    namespace: galactic-system

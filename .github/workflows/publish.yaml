@@ -58,6 +58,19 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
+  publish-fabric-api-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.22.0
+    with:
+      image-name: fabric-api
+      dockerfile-path: containers/fabric-api/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
   publish-galactic-nat-image:
     permissions:
       id-token: write
@@ -113,6 +126,7 @@ jobs:
         publish-galactic-router-image,
         publish-galactic-gateway-image,
         publish-fabric-router-image,
+        publish-fabric-api-image,
         publish-galactic-nat-image,
       ]
     permissions:
@@ -136,4 +150,9 @@ jobs:
         # ghcr.io/datum-cloud/galactic-nat, and a component whose manifest names
         # an image nothing publishes cannot be applied at all.
         - { path: config/galactic-nat/base, name: ghcr.io/datum-cloud/galactic-nat, tag: "${{ needs.publish-galactic-nat-image.outputs.tag }}" }
+        # fabric-api is opt-in (a Component of config/fabric-router and its
+        # own config/fabric-api gateway base), but both reference the image,
+        # so its tag is stamped into each.
+        - { path: config/fabric-router/components/fabric-api, name: ghcr.io/datum-cloud/fabric-api, tag: "${{ needs.publish-fabric-api-image.outputs.tag }}" }
+        - { path: config/fabric-api/base, name: ghcr.io/datum-cloud/fabric-api, tag: "${{ needs.publish-fabric-api-image.outputs.tag }}" }
     secrets: inherit

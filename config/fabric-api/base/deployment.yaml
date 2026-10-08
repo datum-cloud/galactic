@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fabric-api-gateway
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: fabric-api-gateway
+spec:
+  # Two replicas with leader election: only the leader executes; a follower
+  # forwards operator debug calls to it, so the Service can balance across
+  # both.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabric-api-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fabric-api-gateway
+    spec:
+      serviceAccountName: fabric-api-gateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: fabric-api-gateway
+      containers:
+        - name: gateway
+          image: ghcr.io/datum-cloud/fabric-api:latest
+          args:
+            - gateway
+          env:
+            - name: SITE
+              valueFrom:
+                configMapKeyRef:
+                  name: fabric-api
+                  key: site
+            - name: CELL
+              valueFrom:
+                configMapKeyRef:
+                  name: fabric-api
+                  key: cell
+            - name: CLUSTER_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: fabric-api
+                  key: cluster-name
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: debug
+              containerPort: 9346
+              protocol: TCP
+            - name: metrics
+              containerPort: 9347
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: fabric-api-tls
+              mountPath: /var/run/fabric-api/tls
+              readOnly: true
+      volumes:
+        # The gateway's identity: a client of every node sidecar and the
+        # server of the debug service, shared by both replicas.
+        - name: fabric-api-tls
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: fabric-api
+              csi.cert-manager.io/issuer-kind: Issuer
+              csi.cert-manager.io/uri-sans: spiffe://fabric-api.datumapis.com/cell/CELL_NAME/gateway
+              csi.cert-manager.io/key-usages: client auth,server auth
+              csi.cert-manager.io/duration: 24h
+              csi.cert-manager.io/renew-before: 8h
+              csi.cert-manager.io/fs-group: "65532"

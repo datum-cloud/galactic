@@ -113,3 +113,14 @@ ping_pod() {
   local node="$1" ns="$2" pod="$3" family="$4" ip="$5"
   docker exec "${node}" kubectl exec -n "${ns}" "${pod}" -- ping "${family}" -c 3 -W 2 "${ip}"
 }
+
+# site_kubeconfig SITE writes a current kubeconfig for SITE's Kind cluster to
+# a temporary file and prints its path, for host-side tools (helm, kubectl)
+# that cannot run inside a node. The kubeconfigs `deploy:clusters` exports go
+# stale whenever Kind restarts a cluster on a new API port.
+site_kubeconfig() {
+  local f
+  f=$(mktemp "${TMPDIR:-/tmp}/${1}.kubeconfig.XXXXXX")
+  kind get kubeconfig --name "$1" > "${f}"
+  echo "${f}"
+}

@@ -1,0 +1,93 @@
+# Obtains each fabric node's fabric-api certificate and hands it to the
+# sidecar in that node's fabric-router pod through /run/fabric-api/tls on
+# the node. It exists so the certificate's csi-driver volume lives here: a
+# csi-driver volume blocks its pod until the certificate is issued, and that
+# must never hold the fabric-router pod, and FRR with it, from starting. If
+# the issuer is broken this pod waits in ContainerCreating, the sidecar
+# reports no credentials, and routing is unaffected.
+#
+# The certificate's URI SAN names this pod, which is how the gateway
+# addresses the node's sidecar: it maps each node to its fabric-api-certs pod
+# through the API. The overlay replaces CELL_NAME with the cell's name.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabric-api-certs
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: fabric-api-certs
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabric-api-certs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fabric-api-certs
+    spec:
+      # Exactly the fabric-router DaemonSet's placement, so every fabric
+      # node has one.
+      tolerations:
+        - operator: Exists
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/fabric
+                    operator: In
+                    values:
+                      - router
+                      - control
+      # csi-driver issues the certificate under its own identity; this pod
+      # needs no API access.
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: certs
+          image: ghcr.io/datum-cloud/fabric-api:latest
+          args:
+            - certsync
+            - --source=/var/run/fabric-api/csi
+            - --dest=/var/run/fabric-api/node
+          # Root, to write the root-owned node directory; no capabilities.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: fabric-api-csi
+              mountPath: /var/run/fabric-api/csi
+              readOnly: true
+            - name: fabric-api-tls
+              mountPath: /var/run/fabric-api/node
+      volumes:
+        - name: fabric-api-csi
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: fabric-api
+              csi.cert-manager.io/issuer-kind: Issuer
+              csi.cert-manager.io/uri-sans: spiffe://fabric-api.datumapis.com/cell/CELL_NAME/ns/${POD_NAMESPACE}/pod/${POD_NAME}
+              csi.cert-manager.io/key-usages: server auth
+              csi.cert-manager.io/duration: 24h
+              csi.cert-manager.io/renew-before: 8h
+        - name: fabric-api-tls
+          hostPath:
+            path: /run/fabric-api/tls
+            type: DirectoryOrCreate

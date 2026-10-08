@@ -1,0 +1,25 @@
+# Lab overlay of config/fabric-api/base: the locally built image, never
+# pulled. Each site's overlay adds its ConfigMap and certificate SAN.
+resources:
+  - ../../../../../../config/fabric-api/base
+patches:
+  - target:
+      kind: Deployment
+      name: fabric-api-gateway
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: fabric-api:latest
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target:
+      kind: CronJob
+      name: fabric-api-janitor
+    patch: |-
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/containers/0/image
+        value: fabric-api:latest
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
+        value: Never

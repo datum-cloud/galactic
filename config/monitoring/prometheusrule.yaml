@@ -1,6 +1,7 @@
 # Alerts on the underlay (fabric-router's FRR, via frr-exporter and
 # fabric-config-agent), on galactic-router's BMP export and route installs,
-# and on the galactic-nat egress shards' session tables and uplink NICs. A BGP
+# on the galactic-nat egress shards' session tables and uplink NICs, and on
+# the fabric-api looking glass's gateway and node sidecars. A BGP
 # session that drops is also streamed to the BMP collector as a Peer Down carrying
 # the reason and any NOTIFICATION;
 # these rules are the Prometheus-side signal for the same events, so an alert
@@ -327,3 +328,160 @@ spec:
             description: >-
               Prometheus cannot reach galactic-nat's metrics port on {{ $labels.node }} (9182), so
               GalacticNatSessionTableEvictingLive and GalacticNatUplinkRxQueueStalled cannot fire for it.
+    # fabric-api: the looking glass's cell gateway and node sidecars. None of
+    # these fire merely because nobody ran a query: each is either a state
+    # the components report continuously (availability, credentials,
+    # certificate expiry, stale objects, scrapes) or a ratio over executions
+    # that actually happened.
+    - name: fabric-api
+      rules:
+        # A gateway with executions in flight that finished none for 10
+        # minutes is stuck: every execution is bounded by its 120s lifetime.
+        - alert: FabricAPIExecutionStalled
+          expr: >-
+            max by (namespace, pod) (fabric_api_gateway_executions_in_flight{job="fabric-api-gateway"}) > 0
+            unless on (namespace, pod)
+            sum by (namespace, pod) (increase(fabric_api_gateway_queries_total{job="fabric-api-gateway"}[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api gateway {{ $labels.pod }} has executions in flight but completes none"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapiexecutionstalled"
+            description: >-
+              {{ $labels.pod }} has had fabric queries executing for 20 minutes without finishing any, although each
+              is bounded by a 120 second lifetime. Looking-glass queries in this cell will end DeadlineExceeded at
+              NSO. Check the gateway's logs and its status-write metrics.
+        # The sidecar reports diagnostics unavailable while FRR is
+        # unreachable or at an unsupported version, or its certificate is
+        # missing. FRR itself may be fine; this is about the looking glass.
+        - alert: FabricAPINodeDiagnosticsUnavailable
+          expr: fabric_api_node_diagnostics_available{job="fabric-api-node"} == 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api diagnostics are unavailable on {{ $labels.node }}"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapinodediagnosticsunavailable"
+            description: >-
+              The fabric-api sidecar on {{ $labels.node }} has reported diagnostics unavailable for 15 minutes:
+              FRR's vty sockets are unreachable, FRR runs a release the sidecar has no parsers for, or its mTLS
+              certificate is missing. Queries record this node as failed. Its Info RPC and logs give the reason.
+        # Over at least five node calls in 30 minutes, more than half could
+        # not reach the node or timed out.
+        - alert: FabricAPINodeUnreachable
+          expr: >-
+            (
+              sum by (namespace, pod) (increase(fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway",outcome=~"NodeUnreachable|Timeout"}[30m]))
+              /
+              sum by (namespace, pod) (increase(fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway"}[30m]))
+            ) > 0.5
+            and on (namespace, pod)
+            sum by (namespace, pod) (increase(fabric_api_gateway_node_outcomes_total{job="fabric-api-gateway"}[30m])) >= 5
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api gateway {{ $labels.pod }} cannot reach most node sidecars"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapinodeunreachable"
+            description: >-
+              {{ $value | humanizePercentage }} of {{ $labels.pod }}'s node calls in the last 30 minutes failed to
+              connect or timed out. Check the sidecars' hostIP listener on port 9344, host firewall rules between
+              the gateway and the nodes, and certificate identities.
+        - alert: FabricAPIResultsOversized
+          expr: sum by (node) (increase(fabric_api_node_requests_total{job="fabric-api-node",outcome="ResponseTooLarge"}[1h])) >= 10
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api on {{ $labels.node }} keeps refusing results as too large"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapiresultsoversized"
+            description: >-
+              {{ $value | humanize }} queries on {{ $labels.node }} in the last hour failed with ResponseTooLarge:
+              FRR's answer exceeded the 4 MiB read cap or could not be shaped into the node's response budget.
+              Usually a routing table that grew past what the budgets were sized for.
+        - alert: FabricAPICleanupBacklog
+          expr: max by (namespace) (fabric_api_gateway_stale_objects{job="fabric-api-gateway"}) > 50
+          for: 1h
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $value }} expired FabricQuery objects are not being cleaned up"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapicleanupbacklog"
+            description: >-
+              More than 50 FabricQuery objects in this cell have been past their expiration plus retention and
+              cleanup grace for an hour. Neither Karmada nor the fabric-api-janitor CronJob is deleting them;
+              check the CronJob's recent jobs and the federation's deletion propagation.
+        # Certificates last 24h and renew 8h before expiry, so less than 4h
+        # left means renewal has been failing for over 4h.
+        - alert: FabricAPICertificateRenewalFailing
+          expr: (fabric_api_certificate_expiry_timestamp_seconds{job=~"fabric-api-node|fabric-api-gateway"} - time()) < 4 * 3600
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api certificate on {{ $labels.pod }} expires in under 4 hours"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapicertificaterenewalfailing"
+            description: >-
+              The mTLS certificate {{ $labels.pod }} has loaded expires in {{ $value | humanizeDuration }} and has not
+              been renewed. When it expires the looking glass fails closed for this pod; routing is unaffected.
+              Check cert-manager csi-driver and the cell's fabric-api Issuer.
+        - alert: FabricAPICredentialsMissing
+          expr: fabric_api_credentials_loaded{job=~"fabric-api-node|fabric-api-gateway"} == 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api on {{ $labels.pod }} has no valid mTLS credentials"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapicredentialsmissing"
+            description: >-
+              {{ $labels.pod }} has had no loadable certificate, key and trust bundle for 15 minutes, so every
+              fabric-api call to or from it fails. Check the csi-driver volume, the Issuer and the pod's logs.
+        # The sidecar's search index follows bgpd's Loc-RIB over BMP; while
+        # it is unsynced, AS-path and community searches are refused. Only a
+        # node whose index has held routes can fire, so a node whose frr.conf
+        # has no fabric-api BMP target never does.
+        - alert: FabricAPISearchIndexUnsynced
+          expr: >-
+            fabric_api_node_search_index_synced{job="fabric-api-node"} == 0
+            and on (node)
+            max by (node) (fabric_api_node_search_index_routes{job="fabric-api-node"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "fabric-api search index on {{ $labels.node }} is not following bgpd"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapisearchindexunsynced"
+            description: >-
+              The fabric-api sidecar on {{ $labels.node }} holds routes but has not been in sync with bgpd's
+              Loc-RIB for 15 minutes, so its AS-path and community searches are refused. bgpd's BMP session to
+              the sidecar (bmp targets fabric-api, 127.0.0.1:9348) is down or has not completed its initial table.
+        - alert: FabricAPIMetricsDown
+          expr: up{job=~"fabric-api-node|fabric-api-gateway"} == 0
+          for: 10m
+          labels:
+            severity: warning
+            service: galactic
+            team: connect
+          annotations:
+            summary: "{{ $labels.job }} metrics on {{ $labels.pod }} cannot be scraped"
+            runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricapimetricsdown"
+            description: >-
+              Prometheus cannot scrape {{ $labels.job }} on {{ $labels.pod }}, so the other fabric-api alerts cannot
+              fire for it.
